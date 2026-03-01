@@ -36,12 +36,109 @@ from horizon_scanner._utils import (
     status_from_error,
 )
 from horizon_scanner.llm_logging import log_hs_llm_call
+<<<<<<< Updated upstream
 from horizon_scanner.prompts import build_triage_prompt
+=======
+from horizon_scanner.hs_triage_prompts import build_triage_prompt
+from horizon_scanner.hs_triage_grounding_prompts import (
+    build_triage_grounding_prompt,
+    get_recency_days,
+)
+from horizon_scanner.seasonal_filter import get_active_hazards
+from pythia.db.schema import connect as pythia_connect
+>>>>>>> Stashed changes
 
 logger = logging.getLogger(__name__)
 
 HS_TEMPERATURE = float(os.getenv("HS_TEMPERATURE", "0.0"))
 
+<<<<<<< Updated upstream
+=======
+# All triage-eligible hazard codes (DI excluded).
+_TRIAGE_HAZARDS = {"ACE", "DR", "FL", "HW", "TC"}
+
+# Default triage values for hazards that are seasonally inactive.
+_TRIAGE_DEFAULTS: Dict[str, Any] = {
+    "triage_score": 0.0,
+    "tier": "quiet",
+    "drivers": [],
+    "regime_shifts": [],
+    "data_quality": {"status": "seasonal_skip"},
+    "scenario_stub": "",
+    "confidence_note": "",
+    "valid": True,
+    "status": "seasonal_skip",
+}
+
+# Default triage values for DI (silenced — no resolution source yet).
+_DI_TRIAGE_DEFAULTS: Dict[str, Any] = {
+    "triage_score": 0.0,
+    "tier": "quiet",
+    "drivers": [],
+    "regime_shifts": [],
+    "data_quality": {"status": "silenced"},
+    "scenario_stub": "",
+    "confidence_note": "",
+    "valid": True,
+    "status": "silenced",
+}
+
+# Default triage values for ACE when ACLED shows low conflict activity.
+_ACE_LOW_ACTIVITY_DEFAULTS: Dict[str, Any] = {
+    "triage_score": 0.0,
+    "tier": "quiet",
+    "drivers": [],
+    "regime_shifts": [],
+    "data_quality": {"status": "acled_low_activity"},
+    "scenario_stub": "",
+    "confidence_note": "",
+    "valid": True,
+    "status": "acled_low_activity",
+}
+
+
+# ---------------------------------------------------------------------------
+# ACLED low-activity filter for ACE
+# ---------------------------------------------------------------------------
+
+def _is_ace_low_activity(iso3: str) -> bool:
+    """Return True if ACLED data shows negligible conflict activity.
+
+    Criteria (both must hold):
+      - 0 fatalities in the 2 most recent months of data
+      - <25 total fatalities in the last 12 months of data
+
+    If no ACLED data exists for the country, returns True (no data =
+    no known conflict = low activity).  On DB errors, returns False
+    (fail open — run triage rather than silently skip it).
+    """
+    try:
+        con = pythia_connect(read_only=True)
+        rows = con.execute(
+            """
+            SELECT month, fatalities
+            FROM acled_monthly_fatalities
+            WHERE iso3 = ?
+            ORDER BY month DESC
+            LIMIT 12
+            """,
+            [iso3],
+        ).fetchall()
+        con.close()
+    except Exception:  # noqa: BLE001
+        logger.warning("ACLED low-activity check failed for %s — defaulting to active", iso3)
+        return False
+
+    if not rows:
+        return True
+
+    fatalities = [int(r[1]) for r in rows]  # Ordered most-recent-first
+    last_2m = sum(fatalities[:min(2, len(fatalities))])
+    last_12m = sum(fatalities)
+
+    return last_2m == 0 and last_12m < 25
+
+>>>>>>> Stashed changes
 
 # ---------------------------------------------------------------------------
 # Model call
@@ -254,6 +351,7 @@ def run_triage_for_country(
 
     logger.info("Running triage scoring for %s (%s)", country_name, iso3_up)
 
+<<<<<<< Updated upstream
     prompt = build_triage_prompt(
         country_name=country_name,
         iso3=iso3_up,
@@ -269,6 +367,81 @@ def run_triage_for_country(
         call_start = time.time()
         text, usage, error, model_spec = asyncio.run(
             _call_triage_model(prompt, run_id=run_id, fallback_specs=fallback_specs)
+=======
+    # Determine which hazards are seasonally active for this country.
+    active: Set[str] = get_active_hazards(iso3_up, run_date)
+
+    # ACLED low-activity check: skip ACE triage for countries with negligible conflict.
+    ace_low_activity = _is_ace_low_activity(iso3_up)
+    if ace_low_activity:
+        logger.info("ACE triage will be skipped for %s (ACLED low activity)", iso3_up)
+
+    logger.info(
+        "Running triage scoring for %s (%s): active=%s ace_low_activity=%s run_date=%s",
+        country_name, iso3_up, sorted(active), ace_low_activity, run_date,
+    )
+
+    # Phase 1: Parallel triage grounding calls for active hazards.
+    # Exclude ACE from grounding if ACLED shows low activity.
+    hazards_to_ground = [
+        hz for hz in expected_hazards
+        if hz in active and hz in _TRIAGE_HAZARDS
+        and not (hz == "ACE" and ace_low_activity)
+    ]
+    grounding_results: Dict[str, dict[str, Any] | None] = {}
+
+    if hazards_to_ground:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(5, len(hazards_to_ground))) as executor:
+            futures = {
+                executor.submit(
+                    _run_triage_grounding_for_hazard,
+                    hz,
+                    country_name,
+                    iso3_up,
+                    rc_hazards.get(hz),
+                    run_id=run_id,
+                ): hz
+                for hz in hazards_to_ground
+            }
+            for future in concurrent.futures.as_completed(futures):
+                hz = futures[future]
+                try:
+                    grounding_results[hz] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Triage grounding future failed for %s %s: %s", iso3_up, hz, exc)
+                    grounding_results[hz] = None
+
+    # Phase 2: Sequential triage calls per active hazard (2-pass each).
+    merged_hazards: Dict[str, Dict[str, Any]] = {}
+    triage_start = time.time()
+
+    for hz_code in expected_hazards:
+        if hz_code == "DI":
+            merged_hazards[hz_code] = dict(_DI_TRIAGE_DEFAULTS)
+            continue
+
+        if hz_code == "ACE" and ace_low_activity:
+            merged_hazards[hz_code] = dict(_ACE_LOW_ACTIVITY_DEFAULTS)
+            logger.info("Triage skip for %s ACE (ACLED low activity)", iso3_up)
+            continue
+
+        if hz_code not in active or hz_code not in _TRIAGE_HAZARDS:
+            merged_hazards[hz_code] = dict(_TRIAGE_DEFAULTS)
+            logger.info("Triage skip for %s %s (seasonal or unknown)", iso3_up, hz_code)
+            continue
+
+        hazard_evidence = grounding_results.get(hz_code)
+        hazard_rc = rc_hazards.get(hz_code)
+        hazard_triage = _run_triage_for_single_hazard(
+            hz_code,
+            country_name,
+            iso3_up,
+            resolver_features,
+            hazard_evidence,
+            hazard_rc,
+            run_id=run_id,
+            fallback_specs=fallback_specs,
+>>>>>>> Stashed changes
         )
         usage = usage or {}
         usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
