@@ -102,8 +102,14 @@ def fetch_via_gemini(
     timeout_sec: int,
     max_results: int,
     model_id: str | None = None,
+    custom_prompt: str | None = None,
 ) -> EvidencePack:
-    """Fetch web research evidence via Gemini with Google Search grounding."""
+    """Fetch web research evidence via Gemini with Google Search grounding.
+
+    When *custom_prompt* is provided it is sent directly to Gemini instead
+    of the default prompt template.  This is used by per-hazard RC grounding
+    prompts that already contain full instructions and schema.
+    """
 
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     env_model_id = (model_id or os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or "").strip()
@@ -119,15 +125,18 @@ def fetch_via_gemini(
         return pack
 
     # --- PROMPT_EXCERPT: web_search_start ---
-    prompt = (
-        "You are a research assistant using Google Search grounding. "
-        "Return strictly JSON with this shape:\n"
-        "{\n  \"structural_context\": \"max 8 lines\",\n"
-        "  \"recent_signals\": [\"<=8 bullets, last 120 days\"],\n  \"notes\": \"optional\"\n}"
-        "\n- Focus on authoritative, recent sources (last "
-        f"{recency_days} days).\n- Do not include URLs in the JSON text.\n"
-        f"Query: {query}"
-    )
+    if custom_prompt:
+        prompt = custom_prompt
+    else:
+        prompt = (
+            "You are a research assistant using Google Search grounding. "
+            "Return strictly JSON with this shape:\n"
+            "{\n  \"structural_context\": \"max 8 lines\",\n"
+            "  \"recent_signals\": [\"<=8 bullets, last 120 days\"],\n  \"notes\": \"optional\"\n}"
+            "\n- Focus on authoritative, recent sources (last "
+            f"{recency_days} days).\n- Do not include URLs in the JSON text.\n"
+            f"Query: {query}"
+        )
     # --- PROMPT_EXCERPT: web_search_end ---
 
     force_search_prompt = (

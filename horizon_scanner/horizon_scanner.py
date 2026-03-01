@@ -1124,7 +1124,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
     expected_hazards = sorted(hazard_catalog.keys())
     fallback_specs = _HS_FALLBACK_SPECS or _resolve_hs_fallback_specs()
 
-    # 2. Run REGIME CHANGE first
+    # 2. Run REGIME CHANGE first (per-hazard with seasonal filtering)
     rc_result = run_rc_for_country(
         run_id=run_id,
         iso3=iso3_up,
@@ -1134,9 +1134,10 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
         evidence_pack=evidence_pack,
         fallback_specs=fallback_specs,
         expected_hazards=expected_hazards,
+        run_date=datetime.now().date(),
     )
 
-    # 3. Run TRIAGE second, feeding RC results as context
+    # 3. Run TRIAGE second, feeding RC results as context (per-hazard with seasonal filtering)
     triage_result = run_triage_for_country(
         run_id=run_id,
         iso3=iso3_up,
@@ -1147,6 +1148,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
         fallback_specs=fallback_specs,
         rc_results=rc_result,
         expected_hazards=expected_hazards,
+        run_date=datetime.now().date(),
     )
 
     # 4. Combine into unified triage dict for DB write
