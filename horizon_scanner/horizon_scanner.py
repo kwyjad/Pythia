@@ -51,6 +51,8 @@ from horizon_scanner.regime_change import (
 )
 from horizon_scanner.prompts import build_hs_triage_prompt
 from horizon_scanner.llm_logging import log_hs_llm_call
+from horizon_scanner.regime_change_llm import run_rc_for_country
+from horizon_scanner.triage import run_triage_for_country
 from pythia.db.schema import connect as pythia_connect, ensure_schema
 from pythia.web_research import fetch_evidence_pack
 
@@ -1033,6 +1035,10 @@ class _TriageCallResult(TypedDict):
     primary_model_id: str
     fallback_model_id: str | None
     error_text: str | None
+    triage_status: str
+    rc_status: str
+    triage_result: dict[str, Any]
+    rc_result: dict[str, Any]
 
 
 async def _call_hs_model(
@@ -1102,430 +1108,222 @@ async def _call_hs_model(
 
 
 def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCallResult:
-    con = pythia_connect(read_only=False)
-    try:
-        iso3_up = (iso3 or "").upper()
-        logger.info("Running HS triage for %s (%s)", country_name, iso3_up)
-        resolver_features = _build_resolver_features_for_country(iso3)
-        hazard_catalog = _build_hazard_catalog()
-        evidence_pack = _maybe_build_country_evidence_pack(run_id, iso3_up, country_name)
-        prompt = build_hs_triage_prompt(
-            country_name=country_name,
-            iso3=iso3_up,
-            hazard_catalog=hazard_catalog,
-            resolver_features=resolver_features,
-            model_info={},
-            evidence_pack=evidence_pack,
-        )
+    """Run HS triage for a single country using separate RC and triage modules.
 
-        pass_results: list[dict[str, Any]] = []
-        fallback_specs = _HS_FALLBACK_SPECS or _resolve_hs_fallback_specs()
-        for pass_idx in (1, 2):
-            call_start = time.time()
-            text, usage, error, model_spec = asyncio.run(
-                _call_hs_model(prompt, run_id=run_id, fallback_specs=fallback_specs)
-            )
-            usage = usage or {}
-            usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
+    Execution order: RC first → triage second (RC output fed as context).
+    Each module performs 2 passes internally for reliability.
+    """
 
-            log_error_text: str | None = None
-            triage: Dict[str, Any] = {}
-            hazards_dict: Dict[str, Any] = {}
-            parse_ok = True
-            json_repair_used = False
-            repair_error: str | None = None
-            repair_model_selected: str | None = None
+    iso3_up = (iso3 or "").upper()
+    logger.info("Running HS pipeline for %s (%s): RC → Triage", country_name, iso3_up)
 
-            if error:
-                log_error_text = str(error)
-                parse_ok = False
-            else:
-                raw = (text or "").strip()
-                if not raw:
-                    log_error_text = "empty response"
-                    parse_ok = False
-                else:
-                    try:
-                        triage = _parse_hs_triage_json(raw)
-                        hazards_dict = triage.get("hazards") or {}
-                    except Exception as exc:  # noqa: BLE001
-                        debug_dir = Path("debug/hs_triage_raw")
-                        debug_dir.mkdir(parents=True, exist_ok=True)
-                        raw_path = debug_dir / f"{run_id}__{iso3}__pass{pass_idx}.txt"
-                        raw_path.write_text(text or "", encoding="utf-8")
-                        log_error_text = f"triage parse failed: {type(exc).__name__}: {exc}"
-                        parse_ok = False
-                        logger.error(
-                            "HS triage parse failed for %s pass %s: %s (raw saved to %s)",
-                            iso3_up,
-                            pass_idx,
-                            exc,
-                            raw_path,
-                        )
-                        repair_obj, repair_usage, repair_error, repair_spec = asyncio.run(
-                            _repair_hs_triage_json(raw, run_id=run_id, fallback_specs=fallback_specs)
-                        )
-                        if not repair_error:
-                            triage = repair_obj
-                            hazards_dict = triage.get("hazards") or {}
-                            parse_ok = True
-                            json_repair_used = True
-                            log_error_text = None
-                            if repair_spec:
-                                repair_model_selected = f"{repair_spec.provider}:{repair_spec.model_id}"
-                            if repair_usage:
-                                usage.setdefault("repair_usage", repair_usage)
-                        else:
-                            repair_model_selected = (
-                                f"{repair_spec.provider}:{repair_spec.model_id}" if repair_spec else None
-                            )
+    # 1. Build shared inputs (once per country)
+    resolver_features = _build_resolver_features_for_country(iso3)
+    hazard_catalog = _build_hazard_catalog()
+    evidence_pack = _maybe_build_country_evidence_pack(run_id, iso3_up, country_name)
+    expected_hazards = sorted(hazard_catalog.keys())
+    fallback_specs = _HS_FALLBACK_SPECS or _resolve_hs_fallback_specs()
 
-            hazards_dict = hazards_dict if isinstance(hazards_dict, dict) else {}
-            hazard_codes = sorted({(hz_code or "").upper().strip() for hz_code in hazards_dict.keys()})
-            logger.info(
-                "HS triage hazards for %s pass %s: %d returned [%s]",
-                iso3_up,
-                pass_idx,
-                len(hazard_codes),
-                ", ".join(hazard_codes) if hazard_codes else "",
-            )
+    # 2. Run REGIME CHANGE first
+    rc_result = run_rc_for_country(
+        run_id=run_id,
+        iso3=iso3_up,
+        country_name=country_name,
+        hazard_catalog=hazard_catalog,
+        resolver_features=resolver_features,
+        evidence_pack=evidence_pack,
+        fallback_specs=fallback_specs,
+        expected_hazards=expected_hazards,
+    )
 
-            usage_for_log = dict(usage or {})
-            if json_repair_used:
-                usage_for_log["json_repair_used"] = True
-                if repair_model_selected:
-                    usage_for_log["repair_model_selected"] = repair_model_selected
-            if repair_error:
-                usage_for_log["repair_error"] = _short_error(repair_error)
-            if (usage_for_log.get("cost_usd") in (None, 0, 0.0)) and (usage_for_log.get("total_tokens") or 0):
-                model_id_for_cost = getattr(model_spec, "model_id", None) or _resolve_hs_model()
-                if model_id_for_cost:
-                    usage_for_log["cost_usd"] = estimate_cost_usd(str(model_id_for_cost), usage_for_log)
+    # 3. Run TRIAGE second, feeding RC results as context
+    triage_result = run_triage_for_country(
+        run_id=run_id,
+        iso3=iso3_up,
+        country_name=country_name,
+        hazard_catalog=hazard_catalog,
+        resolver_features=resolver_features,
+        evidence_pack=evidence_pack,
+        fallback_specs=fallback_specs,
+        rc_results=rc_result,
+        expected_hazards=expected_hazards,
+    )
 
-            log_hs_llm_call(
-                hs_run_id=run_id,
-                iso3=iso3_up,
-                hazard_code=f"pass_{pass_idx}",
-                model_spec=model_spec,
-                prompt_text=prompt,
-                response_text=text or "",
-                usage=usage_for_log,
-                error_text=log_error_text,
-            )
-            logger.info(
-                "HS logged triage call: hs_run_id=%s iso3=%s hazard=pass_%s",
+    # 4. Combine into unified triage dict for DB write
+    combined_hazards: Dict[str, Any] = {}
+    for hz_code in expected_hazards:
+        triage_hz = triage_result.get("hazards", {}).get(hz_code, {})
+        rc_hz = rc_result.get("hazards", {}).get(hz_code, {})
+        combined_hazards[hz_code] = {
+            **triage_hz,
+            "regime_change": rc_hz,
+        }
+
+    triage = {"country": iso3_up, "hazards": combined_hazards}
+    _write_hs_triage(run_id, iso3_up, triage)
+
+    # 5. Tail packs (unchanged — triggered by RC levels)
+    if HS_TAIL_PACKS_ENABLED:
+        retriever_enabled = os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
+        web_search_enabled = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") == "1"
+        if not retriever_enabled and not web_search_enabled:
+            logger.debug(
+                "HS tail packs skipped (web research disabled) for run_id=%s iso3=%s",
                 run_id,
                 iso3_up,
-                pass_idx,
             )
-
-            pass_results.append(
-                {
-                    "text": text or "",
-                    "usage": usage_for_log,
-                    "triage": triage,
-                    "hazards": hazards_dict,
-                    "error_text": log_error_text,
-                    "parse_ok": parse_ok,
-                    "fallback_used": bool(usage_for_log.get("fallback_used")),
-                    "primary_error": usage_for_log.get("primary_error"),
-                    "json_repair_used": json_repair_used,
-                    "repair_error": repair_error,
-                    "model_selected": usage_for_log.get("model_selected"),
-                }
-            )
-
-        expected_hazards = list(hazard_catalog.keys())
-        pass_one = _build_pass_hazards(pass_results[0]["hazards"], expected_hazards)
-        pass_two = _build_pass_hazards(pass_results[1]["hazards"], expected_hazards)
-
-        combined_hazards: Dict[str, Any] = {}
-        for hz_code in expected_hazards:
-            score1 = pass_one[hz_code]["score"]
-            score2 = pass_two[hz_code]["score"]
-            score1_valid = bool(pass_one[hz_code].get("score_valid"))
-            score2_valid = bool(pass_two[hz_code].get("score_valid"))
-            if score1_valid and score2_valid:
-                avg_score = (float(score1) + float(score2)) / 2
-                combined_status = "ok"
-            elif score1_valid:
-                avg_score = float(score1)
-                combined_status = "degraded"
-            elif score2_valid:
-                avg_score = float(score2)
-                combined_status = "degraded"
-            else:
-                avg_score = 0.0
-                combined_status = "error"
-            rc1_valid = bool(pass_one[hz_code].get("rc_valid"))
-            rc2_valid = bool(pass_two[hz_code].get("rc_valid"))
-            rc1_likelihood = pass_one[hz_code].get("rc_likelihood")
-            rc2_likelihood = pass_two[hz_code].get("rc_likelihood")
-            rc1_magnitude = pass_one[hz_code].get("rc_magnitude")
-            rc2_magnitude = pass_two[hz_code].get("rc_magnitude")
-            rc1_direction = pass_one[hz_code].get("rc_direction") or "unclear"
-            rc2_direction = pass_two[hz_code].get("rc_direction") or "unclear"
-            rc1_window = pass_one[hz_code].get("rc_window") or ""
-            rc2_window = pass_two[hz_code].get("rc_window") or ""
-
-            if rc1_valid and rc2_valid:
-                rc_likelihood = (float(rc1_likelihood) + float(rc2_likelihood)) / 2
-                rc_magnitude = (float(rc1_magnitude) + float(rc2_magnitude)) / 2
-                rc_valid = True
-                rc_status = "ok"
-                if rc1_direction == "unclear" or rc2_direction == "unclear":
-                    rc_direction = "unclear"
-                elif rc1_direction == rc2_direction:
-                    rc_direction = rc1_direction
-                else:
-                    rc_direction = "mixed"
-                if rc1_window == rc2_window:
-                    rc_window = rc1_window
-                elif rc1_window and not rc2_window:
-                    rc_window = rc1_window
-                elif rc2_window and not rc1_window:
-                    rc_window = rc2_window
-                else:
-                    rc_window = ""
-            elif rc1_valid:
-                rc_likelihood = float(rc1_likelihood)
-                rc_magnitude = float(rc1_magnitude)
-                rc_valid = True
-                rc_status = "degraded"
-                rc_direction = rc1_direction
-                rc_window = rc1_window
-            elif rc2_valid:
-                rc_likelihood = float(rc2_likelihood)
-                rc_magnitude = float(rc2_magnitude)
-                rc_valid = True
-                rc_status = "degraded"
-                rc_direction = rc2_direction
-                rc_window = rc2_window
-            else:
-                rc_likelihood = 0.0
-                rc_magnitude = 0.0
-                rc_valid = False
-                rc_status = "error"
-                rc_direction = "unclear"
-                rc_window = ""
-
-            rc1_json = pass_one[hz_code].get("rc_json") or {}
-            rc2_json = pass_two[hz_code].get("rc_json") or {}
-            rc_bullets = _merge_unique(
-                rc1_json.get("rationale_bullets") or [],
-                rc2_json.get("rationale_bullets") or [],
-            )
-            rc_signals = _merge_unique_signals(
-                rc1_json.get("trigger_signals") or [],
-                rc2_json.get("trigger_signals") or [],
-            )
-
-            combined_hazards[hz_code] = {
-                "triage_score": avg_score,
-                "drivers": _merge_unique(pass_one[hz_code]["drivers"], pass_two[hz_code]["drivers"]),
-                "regime_shifts": _merge_unique(
-                    pass_one[hz_code]["regime_shifts"],
-                    pass_two[hz_code]["regime_shifts"],
-                ),
-                "regime_change": {
-                    "likelihood": rc_likelihood,
-                    "direction": rc_direction,
-                    "magnitude": rc_magnitude,
-                    "window": rc_window,
-                    "rationale_bullets": rc_bullets,
-                    "trigger_signals": rc_signals,
-                    "valid": rc_valid,
-                    "status": rc_status,
-                },
-                "data_quality": {
-                    "status": combined_status,
-                    "score_pass1": score1,
-                    "score_pass2": score2,
-                    "parse_ok1": bool(pass_results[0]["parse_ok"]),
-                    "parse_ok2": bool(pass_results[1]["parse_ok"]),
-                    "error1": _short_error(pass_results[0]["error_text"]),
-                    "error2": _short_error(pass_results[1]["error_text"]),
-                    "pass1": pass_one[hz_code]["data_quality"],
-                    "pass2": pass_two[hz_code]["data_quality"],
-                },
-                "scenario_stub": pass_one[hz_code]["scenario_stub"] or pass_two[hz_code]["scenario_stub"],
-            }
-
-        triage = {"country": iso3_up, "hazards": combined_hazards}
-        _write_hs_triage(run_id, iso3_up, triage)
-
-        if HS_TAIL_PACKS_ENABLED:
-            retriever_enabled = os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
-            web_search_enabled = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") == "1"
-            if not retriever_enabled and not web_search_enabled:
-                logger.debug(
-                    "HS tail packs skipped (web research disabled) for run_id=%s iso3=%s",
-                    run_id,
-                    iso3_up,
-                )
-            else:
-                tail_candidates = _select_tail_pack_hazards(triage, get_expected_hs_hazards())
-                for candidate in tail_candidates:
-                    hazard_code = candidate.get("hazard_code") or ""
-                    rc_level = candidate.get("rc_level")
-                    rc_score = candidate.get("rc_score")
-                    rc_direction = candidate.get("rc_direction") or "unclear"
-                    rc_window = candidate.get("rc_window") or ""
-
-                    if _tail_pack_exists(run_id, iso3_up, hazard_code):
-                        continue
-
-                    try:
-                        query = _build_hazard_tail_query(
-                            country_name,
-                            iso3_up,
-                            hazard_code,
-                            rc_direction,
-                            rc_window,
-                        )
-                        logger.debug(
-                            "HS hazard tail query for %s %s: %s",
-                            iso3_up,
-                            hazard_code,
-                            query,
-                        )
-                        model_id = (
-                            (os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "").strip()
-                            if retriever_enabled
-                            else None
-                        )
-                        pack = dict(
-                            fetch_evidence_pack(
-                                query,
-                                purpose="hs_hazard_tail_pack",
-                                run_id=run_id,
-                                hs_run_id=run_id,
-                                model_id=model_id or None,
-                            )
-                            or {}
-                        )
-                        sources_raw = pack.get("sources") or []
-                        sources_list = [src for src in sources_raw if isinstance(src, dict)]
-                        signals_raw = pack.get("recent_signals") or []
-                        signals_list = [str(sig) for sig in signals_raw if str(sig).strip()]
-
-                        sources_before = len(sources_list)
-                        signals_before = len(signals_list)
-                        sources_list = _sort_sources_by_url(sources_list)[:HS_TAIL_PACKS_MAX_SOURCES]
-                        signals_list = signals_list[:HS_TAIL_PACKS_MAX_SIGNALS]
-                        pack["sources"] = sources_list
-                        pack["recent_signals"] = signals_list
-                        pack["grounded"] = bool(pack.get("grounded"))
-                        pack.setdefault("structural_context", "")
-
-                        debug = pack.get("debug") or {}
-                        grounding_debug = {
-                            "groundingSupports_count": debug.get("groundingSupports_count", 0),
-                            "groundingChunks_count": debug.get("groundingChunks_count", 0),
-                            "webSearchQueries_len": len(debug.get("webSearchQueries") or []),
-                            "n_sources_before": sources_before,
-                            "n_sources_after": len(sources_list),
-                            "n_signals_before": signals_before,
-                            "n_signals_after": len(signals_list),
-                            "reason_code": debug.get("reason_code"),
-                        }
-
-                        markdown_body = _render_evidence_markdown(
-                            {
-                                **pack,
-                                "query": query,
-                            }
-                        )
-                        rc_score_val = float(rc_score or 0.0)
-                        header = f"# Hazard tail pack — {iso3_up} {hazard_code}"
-                        rc_line = (
-                            "RC: level "
-                            f"{rc_level} score {rc_score_val:.3f} "
-                            f"direction {rc_direction} window {rc_window}"
-                        )
-                        markdown = "\n".join([header, rc_line, "", markdown_body])
-
-                        log_hs_hazard_tail_packs_to_db(
-                            run_id,
-                            [
-                                {
-                                    "iso3": iso3_up,
-                                    "hazard_code": hazard_code,
-                                    "rc_level": rc_level,
-                                    "rc_score": rc_score_val,
-                                    "rc_direction": rc_direction,
-                                    "rc_window": rc_window,
-                                    "query": query,
-                                    "markdown": markdown,
-                                    "sources": sources_list,
-                                    "grounded": pack.get("grounded", False),
-                                    "grounding_debug": grounding_debug,
-                                    "structural_context": pack.get("structural_context") or "",
-                                    "recent_signals": signals_list,
-                                }
-                            ],
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "HS hazard tail pack failed for %s %s: %s",
-                            iso3_up,
-                            hazard_code,
-                            exc,
-                        )
-
-        overall_error = None
-        if not pass_results[0]["parse_ok"] and not pass_results[1]["parse_ok"]:
-            overall_error = "triage parse failed for both passes"
-            logger.error("HS triage error for %s: %s", iso3_up, overall_error)
-
-        total_tokens = sum(result["usage"].get("total_tokens") or 0 for result in pass_results)
-        total_cost = sum(result["usage"].get("cost_usd") or 0.0 for result in pass_results)
-        logger.info(
-            "HS triage completed for %s (%s): tokens=%s cost_usd=%.4f",
-            country_name,
-            iso3,
-            total_tokens,
-            total_cost,
-        )
-
-        response_text = "\n\n".join([result["text"] for result in pass_results if result["text"]])
-        pass1_status = _status_from_error(pass_results[0]["error_text"])
-        pass2_status = _status_from_error(pass_results[1]["error_text"])
-        if pass1_status == "ok" and pass_results[0].get("fallback_used"):
-            pass1_status = "fallback_used"
-        if pass2_status == "ok" and pass_results[1].get("fallback_used"):
-            pass2_status = "fallback_used"
-        if pass1_status == "ok" and pass_results[0].get("json_repair_used"):
-            pass1_status = "fallback_used"
-        if pass2_status == "ok" and pass_results[1].get("json_repair_used"):
-            pass2_status = "fallback_used"
-        pass1_valid = any(pass_one[hz].get("score_valid") for hz in expected_hazards)
-        pass2_valid = any(pass_two[hz].get("score_valid") for hz in expected_hazards)
-        if pass1_valid and pass2_valid:
-            final_status = "ok"
-        elif pass1_valid or pass2_valid:
-            final_status = "degraded"
         else:
-            final_status = "failed"
-        fallback_model_id = None
-        if pass_results[0].get("fallback_used") or pass_results[1].get("fallback_used"):
-            if fallback_specs:
-                fallback_model_id = fallback_specs[0].model_id
-        return {
-            "iso3": iso3_up,
-            "error_text": overall_error,
-            "response_text": response_text,
-            "pass_results": pass_results,
-            "final_status": final_status,
-            "pass1_status": pass1_status,
-            "pass2_status": pass2_status,
-            "pass1_valid": pass1_valid,
-            "pass2_valid": pass2_valid,
-            "primary_model_id": _resolve_hs_model(),
-            "fallback_model_id": fallback_model_id,
-        }
-    finally:
-        con.close()
+            tail_candidates = _select_tail_pack_hazards(triage, get_expected_hs_hazards())
+            for candidate in tail_candidates:
+                hazard_code = candidate.get("hazard_code") or ""
+                rc_level = candidate.get("rc_level")
+                rc_score_val = candidate.get("rc_score")
+                rc_direction = candidate.get("rc_direction") or "unclear"
+                rc_window = candidate.get("rc_window") or ""
+
+                if _tail_pack_exists(run_id, iso3_up, hazard_code):
+                    continue
+
+                try:
+                    query = _build_hazard_tail_query(
+                        country_name,
+                        iso3_up,
+                        hazard_code,
+                        rc_direction,
+                        rc_window,
+                    )
+                    logger.debug(
+                        "HS hazard tail query for %s %s: %s",
+                        iso3_up,
+                        hazard_code,
+                        query,
+                    )
+                    model_id = (
+                        (os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "").strip()
+                        if retriever_enabled
+                        else None
+                    )
+                    pack = dict(
+                        fetch_evidence_pack(
+                            query,
+                            purpose="hs_hazard_tail_pack",
+                            run_id=run_id,
+                            hs_run_id=run_id,
+                            model_id=model_id or None,
+                        )
+                        or {}
+                    )
+                    sources_raw = pack.get("sources") or []
+                    sources_list = [src for src in sources_raw if isinstance(src, dict)]
+                    signals_raw = pack.get("recent_signals") or []
+                    signals_list = [str(sig) for sig in signals_raw if str(sig).strip()]
+
+                    sources_before = len(sources_list)
+                    signals_before = len(signals_list)
+                    sources_list = _sort_sources_by_url(sources_list)[:HS_TAIL_PACKS_MAX_SOURCES]
+                    signals_list = signals_list[:HS_TAIL_PACKS_MAX_SIGNALS]
+                    pack["sources"] = sources_list
+                    pack["recent_signals"] = signals_list
+                    pack["grounded"] = bool(pack.get("grounded"))
+                    pack.setdefault("structural_context", "")
+
+                    debug = pack.get("debug") or {}
+                    grounding_debug = {
+                        "groundingSupports_count": debug.get("groundingSupports_count", 0),
+                        "groundingChunks_count": debug.get("groundingChunks_count", 0),
+                        "webSearchQueries_len": len(debug.get("webSearchQueries") or []),
+                        "n_sources_before": sources_before,
+                        "n_sources_after": len(sources_list),
+                        "n_signals_before": signals_before,
+                        "n_signals_after": len(signals_list),
+                        "reason_code": debug.get("reason_code"),
+                    }
+
+                    markdown_body = _render_evidence_markdown(
+                        {
+                            **pack,
+                            "query": query,
+                        }
+                    )
+                    rc_score_fmt = float(rc_score_val or 0.0)
+                    header = f"# Hazard tail pack — {iso3_up} {hazard_code}"
+                    rc_line = (
+                        "RC: level "
+                        f"{rc_level} score {rc_score_fmt:.3f} "
+                        f"direction {rc_direction} window {rc_window}"
+                    )
+                    markdown = "\n".join([header, rc_line, "", markdown_body])
+
+                    log_hs_hazard_tail_packs_to_db(
+                        run_id,
+                        [
+                            {
+                                "iso3": iso3_up,
+                                "hazard_code": hazard_code,
+                                "rc_level": rc_level,
+                                "rc_score": rc_score_fmt,
+                                "rc_direction": rc_direction,
+                                "rc_window": rc_window,
+                                "query": query,
+                                "markdown": markdown,
+                                "sources": sources_list,
+                                "grounded": pack.get("grounded", False),
+                                "grounding_debug": grounding_debug,
+                                "structural_context": pack.get("structural_context") or "",
+                                "recent_signals": signals_list,
+                            }
+                        ],
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "HS hazard tail pack failed for %s %s: %s",
+                        iso3_up,
+                        hazard_code,
+                        exc,
+                    )
+
+    # 6. Build result
+    rc_status = rc_result.get("status", "failed")
+    triage_status = triage_result.get("status", "failed")
+    if rc_status == "ok" and triage_status == "ok":
+        final_status = "ok"
+    elif rc_status == "failed" and triage_status == "failed":
+        final_status = "failed"
+    else:
+        final_status = "degraded"
+
+    all_pass_results = (
+        rc_result.get("pass_results", []) + triage_result.get("pass_results", [])
+    )
+    total_tokens = sum(r.get("usage", {}).get("total_tokens") or 0 for r in all_pass_results)
+    total_cost = sum(r.get("usage", {}).get("cost_usd") or 0.0 for r in all_pass_results)
+    logger.info(
+        "HS pipeline completed for %s (%s): rc=%s triage=%s final=%s tokens=%s cost_usd=%.4f",
+        country_name, iso3_up, rc_status, triage_status, final_status,
+        total_tokens, total_cost,
+    )
+
+    overall_error = None
+    if final_status == "failed":
+        overall_error = f"rc={rc_status} triage={triage_status}"
+
+    return {
+        "iso3": iso3_up,
+        "error_text": overall_error,
+        "response_text": "",
+        "pass_results": all_pass_results,
+        "final_status": final_status,
+        "pass1_status": rc_status,
+        "pass2_status": triage_status,
+        "pass1_valid": rc_status != "failed",
+        "pass2_valid": triage_status != "failed",
+        "primary_model_id": _resolve_hs_model(),
+        "fallback_model_id": fallback_specs[0].model_id if fallback_specs else None,
+        "triage_status": triage_status,
+        "rc_status": rc_status,
+        "triage_result": triage_result,
+        "rc_result": rc_result,
+    }
 
 
 def _load_country_list(
@@ -1629,6 +1427,10 @@ def main(countries: list[str] | None = None):
                             "pass2_valid": False,
                             "primary_model_id": _resolve_hs_model(),
                             "fallback_model_id": fallback_specs[0].model_id if fallback_specs else None,
+                            "triage_status": "failed",
+                            "rc_status": "failed",
+                            "triage_result": {},
+                            "rc_result": {},
                         }
                     )
 
