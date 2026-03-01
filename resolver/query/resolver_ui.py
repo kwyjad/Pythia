@@ -12,6 +12,8 @@ import logging
 import math
 from typing import Any
 
+from pythia.db.helpers import table_exists as _table_exists, table_columns as _table_columns
+
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:  # pragma: no cover - silence library default
@@ -40,35 +42,6 @@ HAZARD_LABELS = {
     "VO": "Volcanic Eruption",
 }
 
-
-def _table_exists(conn, table: str) -> bool:
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name) = LOWER(?)",
-            [table],
-        ).fetchone()
-        return bool(row and row[0])
-    except Exception:
-        pass
-
-    try:
-        df = conn.execute("PRAGMA show_tables").fetchdf()
-    except Exception:
-        return False
-    if df.empty:
-        return False
-    first_col = df.columns[0]
-    return df[first_col].astype(str).str.lower().eq(table.lower()).any()
-
-
-def _table_columns(conn, table: str) -> set[str]:
-    try:
-        df = conn.execute(f"PRAGMA table_info('{table}')").fetchdf()
-    except Exception:
-        return set()
-    if df.empty or "name" not in df.columns:
-        return set()
-    return set(df["name"].astype(str).str.lower().tolist())
 
 
 def _format_date(value: Any) -> str | None:

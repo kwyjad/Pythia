@@ -260,34 +260,12 @@ def _startup_sync():
             pass
 
 
-def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
-    try:
-        row = con.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name) = LOWER(?)",
-            [table],
-        ).fetchone()
-        return bool(row and row[0])
-    except Exception:
-        pass
-
-    try:
-        df = con.execute("PRAGMA show_tables").fetchdf()
-    except Exception:
-        return False
-    if df.empty:
-        return False
-    first_col = df.columns[0]
-    return df[first_col].astype(str).str.lower().eq(table.lower()).any()
-
-
-def _table_columns(con: duckdb.DuckDBPyConnection, table: str) -> set[str]:
-    try:
-        df = con.execute(f"PRAGMA table_info('{table}')").fetchdf()
-    except Exception:
-        return set()
-    if df.empty or "name" not in df.columns:
-        return set()
-    return set(df["name"].astype(str).str.lower().tolist())
+from pythia.db.helpers import (
+    table_exists as _table_exists,
+    table_columns as _table_columns,
+    pick_column as _pick_col,
+    pick_timestamp_column as _pick_timestamp_column,
+)
 
 
 def _nonnull_count(con: duckdb.DuckDBPyConnection, table: str, col: str) -> int:
@@ -296,22 +274,6 @@ def _nonnull_count(con: duckdb.DuckDBPyConnection, table: str, col: str) -> int:
         return int(row[0]) if row else 0
     except Exception:
         return 0
-
-
-def _pick_col(cols: set[str], candidates: List[str]) -> Optional[str]:
-    for candidate in candidates:
-        if candidate.lower() in cols:
-            return candidate
-    return None
-
-
-def _pick_timestamp_column(
-    con: duckdb.DuckDBPyConnection, table: str, candidates: List[str]
-) -> Optional[str]:
-    if not _table_exists(con, table):
-        return None
-    cols = _table_columns(con, table)
-    return _pick_col(cols, candidates)
 
 
 def _month_window(year: int, month: int) -> tuple[str, str]:

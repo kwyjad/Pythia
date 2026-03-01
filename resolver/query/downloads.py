@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from pythia.db.helpers import table_exists as _table_exists, table_columns as _table_columns, pick_column as _pick_column
 from resolver.query import eiv_sql
 
 LOGGER = logging.getLogger(__name__)
@@ -47,43 +48,6 @@ def _warn_once(key: str, message: str) -> None:
         return
     _WARNING_FLAGS.add(key)
     LOGGER.warning(message)
-
-
-def _table_exists(conn, table: str) -> bool:
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name) = LOWER(?)",
-            [table],
-        ).fetchone()
-        return bool(row and row[0])
-    except Exception:
-        pass
-
-    try:
-        df = conn.execute("PRAGMA show_tables").fetchdf()
-    except Exception:
-        return False
-    if df.empty:
-        return False
-    first_col = df.columns[0]
-    return df[first_col].astype(str).str.lower().eq(table.lower()).any()
-
-
-def _table_columns(conn, table: str) -> set[str]:
-    try:
-        df = conn.execute(f"PRAGMA table_info('{table}')").fetchdf()
-    except Exception:
-        return set()
-    if df.empty or "name" not in df.columns:
-        return set()
-    return set(df["name"].astype(str).str.lower().tolist())
-
-
-def _pick_column(columns: set[str], candidates: list[str]) -> str | None:
-    for candidate in candidates:
-        if candidate.lower() in columns:
-            return candidate.lower()
-    return None
 
 
 def _load_country_registry() -> dict[str, str]:
