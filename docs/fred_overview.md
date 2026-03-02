@@ -1,6 +1,16 @@
-<!-- Fred / Pythia System Overview — Updated 2026-02-27 -->
-<!-- Single source of truth: rendered on the About page and linked from README -->
-<!-- See code at https://github.com/kwyjad/Pythia -->
+## Changes in this Version
+
+This version includes several significant improvements to the Horizon Scanner, forecasting pipeline, and evaluation system:
+
+- **Regime Change is now assessed separately from triage.** RC assessment runs as a dedicated step before triage, with its own model context. This improves reliability by preventing RC reasoning from competing with triage scoring in a single prompt. RC and triage each run a two-pass pipeline for stability.
+- **Per-hazard evidence and scoring.** Different hazard types now receive tailored evidence queries, prompts, and scoring criteria rather than a single generic prompt. For example, drought evidence retrieval uses different search terms, recency windows, and scoring considerations than conflict or flood. Seasonal awareness has been added: hazard scoring adjusts based on whether a hazard is in- or off-season for a given region, so that cyclone risk (for example) is scored lower during off-season months.
+- **Larger, more diverse forecast ensemble.** The SPD ensemble expanded from 4 models across 3 providers to 7 models across 5 providers, adding Kimi K2.5 and DeepSeek Reasoner alongside upgrades to GPT-5.2, Gemini 3, and Claude Sonnet 4.6.
+- **Track-based question routing.** A new track system differentiates question processing. Track 1 questions (those with elevated Regime Change, level > 0) go through the full multi-model ensemble. Track 2 questions (priority but no RC signal) use a lightweight single-model path, reducing cost while maintaining full analytical depth for the questions that need it most. Scenario generation is reserved for Track 1 questions only.
+- **Simplified tier system.** The previous three-tier system (quiet / watchlist / priority) has been simplified to two tiers: quiet and priority, with a single threshold (default 0.50). The watchlist tier and its associated hysteresis logic were removed to reduce complexity.
+- **Performance page and score exports.** The dashboard Performance page now includes a dropdown to compare different named ensemble methods (e.g., ensemble_mean vs. ensemble_bayesmc), displays median alongside average scores for all metrics, and offers expanded CSV downloads including per-question scored forecasts and model-level summaries.
+- **Prompt and overview versioning.** Prompts and the system overview document are now version-tracked with dated snapshots, viewable on the About page for audit and comparison purposes.
+
+---
 
 ## System at a Glance
 
@@ -15,7 +25,7 @@ A key design tension in forecasting is balancing base rates (what usually happen
 | Horizon Scanner (HS) triage | Scores each country–hazard pair for elevated risk in the next 1–6 months; detects potential regime shifts. | Resolver facts + evidence pack + hazard catalog. | hs_runs, hs_country_reports, hs_triage (incl. RC fields). |
 | Hazard Tail Packs (conditional) | Runs hazard-specific follow-up evidence retrieval for high RC cases to find triggers and counter-signals. | HS RC flags (Level ≥ 2), hazard code, forecast window. | hs_hazard_tail_packs (cached per run/country/hazard). |
 | Research (question-level synthesis) | Produces a sourced research brief per question; audits HS Regime Change flags and assembles the reasoning substrate for forecasting. | HS triage + evidence pack + optional tail pack + question definition. | question_research; merged evidence embedded in prompts. |
-| Forecasting (SPD v2, ensemble) | Produces a discrete probability distribution (SPD) over outcome bins for each question and month; combines multiple models. | Question + research brief + base-rate features + RC guidance + optional tail pack. | forecasts_raw, forecasts_ensemble; llm_calls; scenario artifacts (optional). |
+| Forecasting (SPD v2, ensemble) | Produces a discrete probability distribution (SPD) over outcome bins for each question and month. Track 1 questions (RC-elevated) use a full multi-model ensemble; Track 2 questions (priority, no RC) use a lightweight single-model path. | Question + research brief + base-rate features + RC guidance + optional tail pack + track assignment. | forecasts_raw, forecasts_ensemble; llm_calls; scenario artifacts (Track 1 only). |
 | Scoring + dashboard | Computes horizon-specific resolutions (ground truth per forecast month), evaluations (Brier, Log, CRPS scores), calibration, publishes artifacts and powers the dashboard, performance page, and exports. | Forecasts + resolved facts (per horizon month); weighting/calibration config. | resolutions, scores, calibration tables; performance dashboard; CSV downloads. |
 
 ## 1. Purpose, scope, and forecasting philosophy
@@ -74,9 +84,15 @@ HS takes three major inputs: Resolver features (base-rate signals), the hazard c
 
 HS is typically run on a schedule (for example, monthly) and writes into the canonical DuckDB. Two tables are important for understanding HS outputs. The hs_country_reports table stores the evidence pack used for a country (including sources and markdown renderings). The hs_triage table stores one row per country–hazard, including the triage score and other structured fields.
 
-To reduce run-to-run variance, HS uses a stabilization pattern: it runs the triage model more than once and averages numeric outputs such as triage_score. This is not a deep statistical ensemble; it is a practical technique that improves consistency for dashboard users.
+A key architectural change is that HS now runs as a multi-stage pipeline rather than a single prompt. First, Regime Change assessment runs as a dedicated step with its own model context (see Section 6). The RC results are then passed into the triage step, which scores the country–hazard pair with the RC assessment already available. This separation improves reliability by preventing RC reasoning from competing with triage scoring in a single, overloaded prompt.
 
-HS also computes a tier label — quiet or priority — based on a single configurable threshold (default 0.50). Scores at or above the threshold are "priority"; scores below are "quiet". Tiers are intended for interpretability and prioritization, while the numeric triage_score is the primary signal that downstream code can use.
+Both the RC and triage steps use per-hazard prompts and evidence queries. Rather than a single generic prompt for all hazard types, the system now constructs tailored prompts for each hazard category. For example, drought evidence retrieval emphasizes precipitation anomalies, food security signals, and agricultural indicators, while conflict evidence focuses on armed-group dynamics, ceasefire status, and political escalation. This hazard-specific prompting produces more relevant evidence and more calibrated scores.
+
+Seasonal filtering has also been integrated into the HS pipeline. The system is aware of whether a hazard is in-season or off-season for a given region, and scoring adjusts accordingly. For instance, tropical cyclone risk is scored lower during months outside the historical cyclone season, reducing false positives from evergreen background risk language.
+
+To reduce run-to-run variance, HS uses a stabilization pattern: both RC and triage run a two-pass pipeline and average numeric outputs such as triage_score and RC likelihood. The second triage pass uses a different model (currently GPT-5-mini) to introduce diversity. This is not a deep statistical ensemble; it is a practical technique that improves consistency for dashboard users.
+
+HS computes a tier label — quiet or priority — based on a single configurable threshold (default 0.50). Scores at or above the threshold are "priority"; scores below are "quiet". Tiers are intended for interpretability and prioritization, while the numeric triage_score is the primary signal that downstream code can use.
 
 ## 6. Regime Change (RC): making out-of-pattern risk explicit
 
@@ -84,7 +100,9 @@ Regime Change is Fred's mechanism for flagging when base rates may be misleading
 
 RC is represented with three conceptual dimensions: likelihood, direction, and magnitude. Likelihood captures the chance that a regime shift occurs during the next 1–6 months. Direction indicates whether the shift would push outcomes up (worse), down (improving), mixed, or unclear relative to baseline. Magnitude captures how large the shift could be if it occurs.
 
-Operationally, Fred stores these as numeric and categorical fields in hs_triage. A derived RC score is computed as likelihood multiplied by magnitude. This provides a single 'how much should I care' number that suppresses cases that are high-likelihood but low-impact, or high-impact but highly speculative.
+Operationally, RC is assessed in a dedicated LLM pipeline step that runs before triage (see Section 5). The RC assessment has its own prompt context, which allows the model to focus entirely on detecting structural breaks without simultaneously having to produce triage scores. The RC step also uses per-hazard prompts: each hazard type receives tailored instructions and evidence that reflect its specific escalation dynamics. For example, the RC prompt for armed conflict emphasizes ceasefire breakdowns, new armed-group mobilization, and political crisis triggers, while the RC prompt for flood emphasizes upstream dam status, rainfall anomalies, and infrastructure degradation.
+
+Fred stores RC results as numeric and categorical fields in hs_triage. A derived RC score is computed as likelihood multiplied by magnitude. This provides a single 'how much should I care' number that suppresses cases that are high-likelihood but low-impact, or high-impact but highly speculative.
 
 RC scores are mapped into discrete levels used for UI and downstream gating. Level 0 is base-rate normal, Level 1 is a watch state, Level 2 indicates elevated regime-change plausibility, and Level 3 indicates a strong out-of-pattern hypothesis. In February 2026, the RC scoring was recalibrated to reduce false positives. The Level 1 likelihood threshold was raised from 0.35 to 0.45, and the Level 1 composite-score threshold was raised from 0.20 to 0.25, so that mildly elevated signals no longer trigger a watch flag. The triage prompt now includes explicit calibration guidance: it distinguishes between high triage scores (which capture overall risk, including chronic situations) and regime-change scores (which should only capture departures from established patterns). The prompt provides an expected distribution — roughly 80% of country–hazard pairs should have likelihood ≤ 0.10 — and examples of what is and is not a regime change. A run-level distribution check warns operators when the fraction of elevated flags exceeds configurable thresholds (e.g., more than 15% at Level 2).
 
@@ -110,7 +128,7 @@ After HS triage, the system maintains a question set that defines what gets fore
 
 Questions are intended to be stable and comparable over time. They encode the metric to be forecast (for example, a displacement inflow proxy or conflict impact proxy) and the discrete bins that define the SPD outcomes. This standardization is what enables scoring and calibration. Without it, each run would effectively forecast a different target.
 
-The question set is typically refreshed using HS triage outputs. Priority-tier hazards are included by default, but as described earlier, elevated RC (level > 0) can force inclusion even for otherwise quiet hazards. This ensures the system pays attention to plausible regime breaks. A critical change in February 2026 made the questions table append-only: when a new HS run generates a question with the same ID as an earlier run, the original metadata (window start date, target month, wording) is preserved rather than overwritten. This prevents downstream resolution and scoring from breaking when the HS runs again months later. As an additional safeguard, the system can derive the true forecast window from the LLM call log (which is always append-only) rather than relying solely on the questions table, falling back through a three-tier priority: (1) the earliest LLM call timestamp for that question, (2) the questions table's window_start_date, (3) a derivation from the target_month.
+The question set is typically refreshed using HS triage outputs. Priority-tier hazards are included by default, but as described earlier, elevated RC (level > 0) can force inclusion even for otherwise quiet hazards. This ensures the system pays attention to plausible regime breaks. Each question is assigned a track (see Section 10) based on its RC status: Track 1 for RC-elevated questions, Track 2 for priority questions without RC. The track determines the depth of the forecasting pipeline that the question passes through. A critical change in February 2026 made the questions table append-only: when a new HS run generates a question with the same ID as an earlier run, the original metadata (window start date, target month, wording) is preserved rather than overwritten. This prevents downstream resolution and scoring from breaking when the HS runs again months later. As an additional safeguard, the system can derive the true forecast window from the LLM call log (which is always append-only) rather than relying solely on the questions table, falling back through a three-tier priority: (1) the earliest LLM call timestamp for that question, (2) the questions table's window_start_date, (3) a derivation from the target_month.
 
 ## 9. Research v2: sourced synthesis and RC audit
 
@@ -128,7 +146,14 @@ SPD v2 is designed as a constrained forecasting task with explicit guardrails. I
 
 To prevent hand-waving, SPD v2 requires accountability in the human-facing explanation: the forecaster must include a sentence beginning with "RC:" that states what was flagged, whether it was accepted, and how it affected the forecast. This makes the system's interaction between RC and the distribution explicit.
 
-Forecasting is typically run as an ensemble. Multiple model providers are configured in a centralized ensemble list (in pythia/config.yaml), and the system aggregates their SPDs into named ensemble forecasts. The default named ensembles include ensemble_mean (simple average of member SPDs) and ensemble_bayesmc (a Bayesian Monte Carlo aggregation). Named ensembles are tracked as explicit model names in the database, allowing the dashboard and scoring system to compare ensemble methods against individual models. The ensemble approach is a pragmatic response to model idiosyncrasies: it tends to reduce the chance that a single model's blind spot dominates a forecast.
+Not all questions require the same depth of forecasting. Fred uses a track system to route questions through different pipeline configurations based on their risk profile:
+
+- **Track 1** questions are those where Regime Change is elevated (RC level > 0). These go through the full multi-model ensemble, which currently includes 7 models across 5 providers: GPT-5.2 and GPT-5-mini (OpenAI), Claude Sonnet 4.6 (Anthropic), Gemini 3.1 Pro and Gemini 3 Flash (Google), Kimi K2.5 (Moonshot), and DeepSeek Reasoner (DeepSeek). Track 1 questions also receive scenario narratives (see Section 11). The rationale is that RC-elevated questions represent the highest-uncertainty situations where model diversity matters most.
+- **Track 2** questions are priority-tier questions with no elevated RC signal. These use a lightweight single-model path (currently Gemini Flash) that is faster and cheaper. Scenario generation is skipped. Track 2 reflects a practical judgment: when base rates are expected to hold, a single capable model produces adequate forecasts without the cost of running the full ensemble.
+
+The track field is persisted in the database alongside triage and question records, so downstream analysis can distinguish how each question was processed.
+
+For Track 1 questions, the system aggregates member SPDs into named ensemble forecasts. The default named ensembles include ensemble_mean (simple average of member SPDs) and ensemble_bayesmc (a Bayesian Monte Carlo aggregation). Named ensembles are tracked as explicit model names in the database, allowing the dashboard and scoring system to compare ensemble methods against individual models. The ensemble approach is a pragmatic response to model idiosyncrasies: it tends to reduce the chance that a single model's blind spot dominates a forecast.
 
 In Phase B, if a hazard tail pack is present for an RC-elevated hazard, it is injected into the SPD prompt as a bounded set of bullets (maximum 12). The prompt explains how to interpret TRIGGER, DAMPENER, and BASELINE bullets. This turns tail packs into actionable evidence rather than background noise.
 
@@ -136,7 +161,7 @@ Finally, the system supports a narrow form of self-search: when evidence is insu
 
 ## 11. Scenarios, narratives, and human interpretability
 
-In addition to numeric forecasts, Fred can produce scenario narratives. Scenarios are not treated as forecasts in their own right. They are interpretability artifacts meant to summarize plausible pathways that could lead to different bins of the SPD.
+In addition to numeric forecasts, Fred can produce scenario narratives for Track 1 questions (those with elevated RC). Scenarios are not treated as forecasts in their own right. They are interpretability artifacts meant to summarize plausible pathways that could lead to different bins of the SPD. Scenario generation is skipped for Track 2 questions, where the base rate is expected to hold and the additional interpretive cost is not warranted.
 
 Scenario narratives are particularly useful when RC is elevated, because they help users understand what a regime shift would look like operationally. However, narratives are also easy to misuse. Fred therefore keeps scenarios optional and separates them from the numeric forecasting artifacts used for scoring.
 
@@ -156,7 +181,9 @@ RC is a first-class UI concept. Countries with Level 1–3 RC flags are highligh
 
 The Resolver page exists because the system treats data provenance as a primary concern. Users can inspect the underlying facts feeding the forecasts and see connector status, including last updated timestamps.
 
-The Performance page is a new addition (February 2026) that surfaces forecast evaluation in the dashboard. It displays five KPI cards (scored questions, hazards, models, HS runs, and ensemble Brier score) and supports four views: Total (one row per model), By Hazard (scores broken down by hazard code), By Run (scores per HS run over time), and By Model. Users can filter by metric (People Affected or Fatalities) and select which named ensemble to display via a dropdown. Tables show both average and median values for all three scoring rules (Brier, Log, CRPS).
+The About page includes versioned snapshots of both the system's prompts and this system overview document. Users can select from a dropdown of dated versions to see how the system's documented behavior has evolved over time. This supports auditability: when investigating a historical forecast, operators can review the prompt and system configuration that were active at the time.
+
+The Performance page surfaces forecast evaluation in the dashboard. It displays five KPI cards (scored questions, hazards, models, HS runs, and ensemble Brier score) and supports four views: Total (one row per model), By Hazard (scores broken down by hazard code), By Run (scores per HS run over time), and By Model. Users can filter by metric (People Affected or Fatalities). An ensemble selector dropdown lets users switch between named ensemble methods (e.g., ensemble_mean vs. ensemble_bayesmc) in the By Hazard and By Run views, enabling direct comparison of aggregation strategies. Tables show both average and median values for all three scoring rules (Brier, Log, CRPS); median scores are particularly useful because they are less sensitive to outliers from early-run or data-sparse questions.
 
 The Downloads page was expanded to include performance score exports: per-question CSV files for each named ensemble (including the full 6-month x 5-bin forecast grid, expected impact values, resolution values, and scores), a model-level summary CSV with average, median, min, and max scores per model and hazard, and a rationale export that downloads the human-readable explanations that LLM models provide alongside their probabilistic forecasts, filtered by hazard code.
 
@@ -176,29 +203,6 @@ When RC is elevated, the system is deliberately asking you to think in counterfa
 
 Finally, remember that humanitarian metrics are mediated by reporting. A sharp change in recorded values can reflect a real change, a reporting shift, or both. Use data quality notes and cross-source triangulation to avoid overconfident narratives.
 
-## Appendix: Operational configuration (selected environment variables)
-
-Fred is typically run through GitHub Actions workflows. Most behavior is controlled by environment variables set in those workflows. This appendix lists common variables that govern the end-to-end pipeline. Defaults can vary by workflow; treat this list as a guide and verify values in the workflow YAML when operating a production run.
-
-| Variable | Meaning / effect |
-| --- | --- |
-| PYTHIA_DB_URL / RESOLVER_DB_URL | Path to the canonical DuckDB file used by Resolver, HS, and Forecaster stages. |
-| PYTHIA_WEB_RESEARCH_ENABLED | Master switch for web research evidence packs. |
-| PYTHIA_RETRIEVER_ENABLED | Use the retriever backend (model-assisted grounding) instead of plain web search. |
-| PYTHIA_WEB_RESEARCH_RECENCY_DAYS | Recency window for evidence packs (often 120 days). |
-| HS_MODEL_ID | Model used for Horizon Scanner triage. |
-| HS_MAX_WORKERS | Parallelism for HS country triage. |
-| PYTHIA_HS_PRIORITY_THRESHOLD | Threshold that maps triage_score to tier labels (default 0.50; scores >= threshold are "priority", below are "quiet"). |
-| PYTHIA_SPD_ENSEMBLE_SPECS | Comma-separated list of provider:model specs used for SPD ensemble. |
-| FORECASTER_RESEARCH_MAX_WORKERS / FORECASTER_SPD_MAX_WORKERS | Parallelism for research and forecasting stages. |
-| PYTHIA_SPD_WEB_SEARCH_ENABLED | Whether SPD can request a single follow-up web query (self-search) when evidence is thin. |
-| PYTHIA_FORECASTER_SELF_SEARCH | Whether the forecaster is allowed to issue a follow-up self-search call. |
-| PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED | Enable hazard tail packs generation (typically off by default; enable for elevated-RC runs). |
-| PYTHIA_HS_HAZARD_TAIL_PACKS_MAX_PER_COUNTRY | Cap of tail packs per country (Phase A/B default: 2). |
-| PYTHIA_SPD_TAIL_PACKS_MAX_SIGNALS | Cap of tail pack bullets injected into SPD prompts (Phase B default: 12). |
-| PYTHIA_HS_RC_LEVEL0_LIKELIHOOD / _SCORE | Thresholds for RC Level 0/1 boundary (defaults: 0.45 likelihood, 0.25 score). Raised in Feb 2026 to reduce false positives. |
-| PYTHIA_HS_RC_DIST_WARN_L1_FRAC / L2 / L3 | Maximum expected fraction of country–hazard pairs at each RC level before a distribution warning is logged (defaults: 0.25, 0.15, 0.08). |
-
 ## Appendix: Glossary
 
 - **Base rate**: The typical distribution of outcomes for a metric given historical data and seasonality. In Fred, base-rate information is primarily derived from Resolver facts.
@@ -213,3 +217,6 @@ Fred is typically run through GitHub Actions workflows. Most behavior is control
 - **Named ensemble**: An ensemble method identified by an explicit name (e.g., ensemble_mean, ensemble_bayesmc) rather than the legacy unnamed ensemble. Named ensembles are tracked separately in the database and can be compared on the Performance page.
 - **Brier score**: A proper scoring rule that measures the mean squared error between the predicted probability distribution and the actual outcome. Range 0 (perfect) to 1. Used alongside log score and CRPS in Fred's evaluation pipeline.
 - **Rationale export**: A downloadable CSV of the human-readable explanations that LLM models provide alongside their probabilistic forecasts, filterable by hazard code and model.
+- **Track 1 / Track 2**: The routing classification for questions in the forecasting pipeline. Track 1 questions (RC level > 0) receive the full multi-model ensemble and scenario generation. Track 2 questions (priority tier, no elevated RC) use a lightweight single-model path. The distinction reduces cost while concentrating analytical depth on the highest-uncertainty questions.
+- **Per-hazard prompts**: Tailored evidence queries and scoring instructions constructed for each hazard category (conflict, drought, flood, etc.), replacing the earlier generic prompt approach. Per-hazard prompts improve evidence relevance and scoring calibration by incorporating hazard-specific indicators and escalation dynamics.
+- **Seasonal filtering**: A mechanism that adjusts HS triage and RC scoring based on whether a hazard is in-season or off-season for a given region, reducing false positives from evergreen risk language during periods when a hazard is climatologically unlikely.
