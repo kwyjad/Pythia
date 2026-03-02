@@ -28,6 +28,7 @@ class TriagedHazard:
     tier: str
     triage_score: float
     need_full_spd: bool
+    track: Optional[int] = None
 
 
 SUPPORTED_HAZARD_METRICS: Dict[str, List[str]] = {
@@ -184,9 +185,12 @@ def _compute_target_and_window(today: date) -> Tuple[str, date, date]:
 def _load_triage_rows(
     con: duckdb.DuckDBPyConnection, run_id: str
 ) -> List[TriagedHazard]:
+    # Check if track column exists (backward compat with older DBs)
+    cols = {r[0] for r in con.execute("DESCRIBE hs_triage").fetchall()}
+    track_expr = "track" if "track" in cols else "NULL AS track"
     rows = con.execute(
-        """
-        SELECT iso3, hazard_code, tier, triage_score, need_full_spd
+        f"""
+        SELECT iso3, hazard_code, tier, triage_score, need_full_spd, {track_expr}
         FROM hs_triage
         WHERE run_id = ?
         """,
@@ -194,12 +198,13 @@ def _load_triage_rows(
     ).fetchall()
 
     triaged: List[TriagedHazard] = []
-    for iso3, hz, tier, score, need_full_spd in rows:
+    for iso3, hz, tier, score, need_full_spd, track_val in rows:
         iso3_up = (iso3 or "").upper()
         hz_up = (hz or "").upper()
         tier_str = (tier or "").lower()
-        need = bool(need_full_spd) or tier_str in {"priority", "watchlist"}
+        need = bool(need_full_spd) or tier_str == "priority"
         score_f = float(score or 0.0)
+        track_int = int(track_val) if track_val is not None else None
         if hz_up == "ACO":
             LOG.info(
                 "Skipping ACO triage/question for %s; ACE is the canonical conflict hazard",
@@ -217,6 +222,7 @@ def _load_triage_rows(
                 tier=tier_str,
                 triage_score=score_f,
                 need_full_spd=need,
+                track=track_int,
             )
         )
 
@@ -238,6 +244,7 @@ def _upsert_question(
     target_month: Optional[str],
     window_start_date: date,
     window_end_date: date,
+    track: Optional[int] = None,
 ) -> None:
     meta_json = json.dumps(metadata, ensure_ascii=False)
     con.execute("DELETE FROM questions WHERE question_id = ?", [question_id])
@@ -247,8 +254,8 @@ def _upsert_question(
             question_id, hs_run_id, scenario_ids_json,
             iso3, hazard_code, metric,
             target_month, window_start_date, window_end_date,
-            wording, status, pythia_metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            wording, status, pythia_metadata_json, track
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             question_id,
@@ -263,6 +270,7 @@ def _upsert_question(
             wording,
             status,
             meta_json,
+            track,
         ],
     )
 
@@ -312,6 +320,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     target_month=target_month,
                     window_start_date=opening,
                     window_end_date=closing,
+                    track=th.track,
                 )
                 inserted += 1
 
@@ -331,6 +340,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     target_month=target_month,
                     window_start_date=opening,
                     window_end_date=closing,
+                    track=th.track,
                 )
                 inserted += 1
                 continue
@@ -359,6 +369,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     target_month=target_month,
                     window_start_date=opening,
                     window_end_date=closing,
+                    track=th.track,
                 )
                 inserted += 1
 

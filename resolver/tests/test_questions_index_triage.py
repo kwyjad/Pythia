@@ -41,7 +41,7 @@ def test_compute_questions_triage_summary_selects_latest_row() -> None:
             run_id, iso3, hazard_code, tier, triage_score, need_full_spd, created_at
         )
         VALUES
-            ('run_1', 'USA', 'TC', 'watchlist', 0.41, FALSE, '2024-01-01 00:00:00'),
+            ('run_1', 'USA', 'TC', 'quiet', 0.41, FALSE, '2024-01-01 00:00:00'),
             ('run_1', 'USA', 'TC', 'priority', 0.78, TRUE, '2024-02-01 00:00:00');
         """
     )

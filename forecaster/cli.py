@@ -4205,6 +4205,146 @@ def _first_target_month(target_months: Any) -> str | None:
     return None
 
 
+TRACK2_MODEL_SPEC = ModelSpec(
+    name="track2_flash",
+    provider="google",
+    model_id="gemini-3-flash-preview",
+    weight=1.0,
+    active=True,
+    purpose="track2_spd",
+)
+
+
+async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
+    """Run single-model SPD forecast for Track 2 questions (Gemini Flash only)."""
+    rec = _normalize_question_row_for_spd(question_row)
+    qid = rec.get("question_id")
+    iso3 = (rec.get("iso3") or "").upper()
+    hz = (rec.get("hazard_code") or "").upper()
+    metric = rec.get("metric") or "PA"
+    wording = rec.get("wording") or rec.get("title") or ""
+
+    try:
+        resolution_source = _infer_resolution_source(hz, metric)
+        hs_run_id = rec.get("hs_run_id") or run_id
+        hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
+        history_summary = _build_history_summary(iso3, hz, metric)
+        research_json = _load_research_json(run_id, qid)
+        if not isinstance(research_json, dict):
+            research_json = {
+                "note": "missing_research_v2",
+                "base_rate_hint": "Use Resolver history + HS triage + model prior.",
+                "sources": [],
+                "grounded": False,
+            }
+        else:
+            research_json = dict(research_json)
+
+        target_months = rec.get("target_months") or rec.get("target_month")
+        target_month = _first_target_month(target_months)
+
+        question_evidence_pack = _load_question_evidence_pack(run_id, qid) if qid else None
+        prompt = build_spd_prompt_v2(
+            question={
+                "question_id": qid,
+                "iso3": iso3,
+                "hazard_code": hz,
+                "metric": metric,
+                "resolution_source": resolution_source,
+                "wording": wording,
+                "target_months": target_months,
+            },
+            history_summary=history_summary,
+            hs_triage_entry=hs_entry,
+            research_json=research_json,
+        )
+        if question_evidence_pack:
+            prompt = append_retriever_evidence_to_prompt(prompt, question_evidence_pack)
+
+        # Single model call with Gemini Flash
+        per_model_spds, usage, raw_calls, ensemble_meta = (
+            await _call_spd_members_v2_compat(
+                prompt,
+                [TRACK2_MODEL_SPEC],
+                run_id=run_id,
+                question_id=qid,
+                iso3=iso3,
+                hazard_code=hz,
+                metric=metric,
+                target_month=target_month,
+                wording=wording,
+            )
+        )
+
+        # Log LLM calls
+        for call in raw_calls:
+            ms = call.get("model_spec")
+            if not isinstance(ms, ModelSpec):
+                continue
+            await log_forecaster_llm_call(
+                run_id=run_id,
+                question_id=qid,
+                iso3=iso3,
+                hazard_code=hz,
+                metric=metric,
+                model_spec=ms,
+                prompt_text=prompt,
+                response_text=str(call.get("text") or ""),
+                usage=call.get("usage") or {},
+                error_text=str(call.get("error")) if call.get("error") else None,
+                phase="spd_v2",
+                call_type="spd_v2",
+                hs_run_id=hs_run_id,
+            )
+
+        if not per_model_spds:
+            _record_no_forecast(
+                run_id, qid, iso3, hz, metric,
+                "track2: no SPD from single model",
+                model_name="track2_flash",
+            )
+            return
+
+        # Use mean aggregation (effectively identity for single model)
+        spd_mean = aggregate_spd_v2_mean(per_model_spds)
+        spd_obj = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
+        _attach_ensemble_meta(spd_obj, ensemble_meta)
+
+        if _has_v2_spds(spd_obj):
+            _write_spd_outputs(
+                run_id,
+                question_row,
+                spd_obj,
+                resolution_source=resolution_source,
+                usage=usage or {},
+                model_name="track2_flash",
+            )
+        else:
+            _record_no_forecast(
+                run_id, qid, iso3, hz, metric,
+                "track2: missing spds from single model",
+                model_name="track2_flash",
+            )
+
+        # Also write per-model raw data
+        _write_spd_members_v2_to_db(
+            run_id=run_id,
+            question_row=rec,
+            specs_used=[TRACK2_MODEL_SPEC],
+            per_model_spds=per_model_spds,
+            raw_calls=raw_calls,
+            resolution_source=resolution_source,
+        )
+
+    except Exception:
+        LOG.exception("Track 2 SPD failed for %s", qid)
+        _record_no_forecast(
+            run_id, qid or "", iso3, hz, metric,
+            "track2: exception during SPD",
+            model_name="track2_flash",
+        )
+
+
 async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
     _maybe_log_default_ensemble()
 
@@ -6922,12 +7062,17 @@ def main() -> None:
                 "window_start_date",
                 "window_end_date",
                 "wording",
+                "track",
             ]
             placeholders = ",".join(["?"] * len(allowed_iso3s))
+            # Check if track column exists (backward compat with older DBs)
+            q_cols = {r[0] for r in con.execute("DESCRIBE questions").fetchall()}
+            track_expr = "track" if "track" in q_cols else "NULL AS track"
             sql = f"""
                 SELECT
                     question_id, hs_run_id, iso3, hazard_code, metric,
-                    target_month, window_start_date, window_end_date, wording
+                    target_month, window_start_date, window_end_date, wording,
+                    {track_expr}
                 FROM questions
                 WHERE status = 'active'
                   AND hs_run_id = ?
@@ -6958,6 +7103,7 @@ def main() -> None:
                         "window_start_date",
                         "window_end_date",
                         "wording",
+                        "track",
                     ],
                     row,
                 )
@@ -6972,7 +7118,9 @@ def main() -> None:
         run_id = f"fc_{int(time.time())}"
         os.environ["PYTHIA_FORECASTER_RUN_ID"] = run_id
         reset_provider_failures_for_run(run_id)
-        print(f"[v2] run_id={run_id} | questions={len(questions)}")
+        n_track1 = sum(1 for q in questions if q.get("track") == 1)
+        n_track2 = sum(1 for q in questions if q.get("track") == 2)
+        print(f"[v2] run_id={run_id} | questions={len(questions)} (track1={n_track1}, track2={n_track2})")
 
         async def _run_v2_pipeline_async() -> None:
             research_sem = asyncio.Semaphore(MAX_RESEARCH_WORKERS)
@@ -7068,7 +7216,11 @@ def main() -> None:
                         _record_question_run_metrics(q, start_ms=start_ms)
                     return
                 async with spd_sem:
-                    await _run_spd_for_question(run_id, q)
+                    track_val = q.get("track")
+                    if track_val == 2:
+                        await _run_track2_spd_for_question(run_id, q)
+                    else:
+                        await _run_spd_for_question(run_id, q)
                 if not qid:
                     return
                 start_ms = question_start_ms.get(qid)

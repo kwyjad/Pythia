@@ -76,7 +76,7 @@ HS is typically run on a schedule (for example, monthly) and writes into the can
 
 To reduce run-to-run variance, HS uses a stabilization pattern: it runs the triage model more than once and averages numeric outputs such as triage_score. This is not a deep statistical ensemble; it is a practical technique that improves consistency for dashboard users.
 
-HS also computes a tier label — quiet, watchlist, or priority — based on configurable thresholds. Tiers are intended for interpretability and prioritization, while the numeric triage_score is the primary signal that downstream code can use.
+HS also computes a tier label — quiet or priority — based on a single configurable threshold (default 0.50). Scores at or above the threshold are "priority"; scores below are "quiet". Tiers are intended for interpretability and prioritization, while the numeric triage_score is the primary signal that downstream code can use.
 
 ## 6. Regime Change (RC): making out-of-pattern risk explicit
 
@@ -110,7 +110,7 @@ After HS triage, the system maintains a question set that defines what gets fore
 
 Questions are intended to be stable and comparable over time. They encode the metric to be forecast (for example, a displacement inflow proxy or conflict impact proxy) and the discrete bins that define the SPD outcomes. This standardization is what enables scoring and calibration. Without it, each run would effectively forecast a different target.
 
-The question set is typically refreshed using HS triage outputs. High-priority or watchlist hazards are included by default, but as described earlier, elevated RC can force inclusion even for otherwise quiet hazards. This ensures the system pays attention to plausible regime breaks. A critical change in February 2026 made the questions table append-only: when a new HS run generates a question with the same ID as an earlier run, the original metadata (window start date, target month, wording) is preserved rather than overwritten. This prevents downstream resolution and scoring from breaking when the HS runs again months later. As an additional safeguard, the system can derive the true forecast window from the LLM call log (which is always append-only) rather than relying solely on the questions table, falling back through a three-tier priority: (1) the earliest LLM call timestamp for that question, (2) the questions table's window_start_date, (3) a derivation from the target_month.
+The question set is typically refreshed using HS triage outputs. Priority-tier hazards are included by default, but as described earlier, elevated RC (level > 0) can force inclusion even for otherwise quiet hazards. This ensures the system pays attention to plausible regime breaks. A critical change in February 2026 made the questions table append-only: when a new HS run generates a question with the same ID as an earlier run, the original metadata (window start date, target month, wording) is preserved rather than overwritten. This prevents downstream resolution and scoring from breaking when the HS runs again months later. As an additional safeguard, the system can derive the true forecast window from the LLM call log (which is always append-only) rather than relying solely on the questions table, falling back through a three-tier priority: (1) the earliest LLM call timestamp for that question, (2) the questions table's window_start_date, (3) a derivation from the target_month.
 
 ## 9. Research v2: sourced synthesis and RC audit
 
@@ -188,7 +188,7 @@ Fred is typically run through GitHub Actions workflows. Most behavior is control
 | PYTHIA_WEB_RESEARCH_RECENCY_DAYS | Recency window for evidence packs (often 120 days). |
 | HS_MODEL_ID | Model used for Horizon Scanner triage. |
 | HS_MAX_WORKERS | Parallelism for HS country triage. |
-| PYTHIA_HS_PRIORITY_THRESHOLD / PYTHIA_HS_WATCHLIST_THRESHOLD | Thresholds that map triage_score to tier labels. |
+| PYTHIA_HS_PRIORITY_THRESHOLD | Threshold that maps triage_score to tier labels (default 0.50; scores >= threshold are "priority", below are "quiet"). |
 | PYTHIA_SPD_ENSEMBLE_SPECS | Comma-separated list of provider:model specs used for SPD ensemble. |
 | FORECASTER_RESEARCH_MAX_WORKERS / FORECASTER_SPD_MAX_WORKERS | Parallelism for research and forecasting stages. |
 | PYTHIA_SPD_WEB_SEARCH_ENABLED | Whether SPD can request a single follow-up web query (self-search) when evidence is thin. |

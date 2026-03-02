@@ -160,6 +160,15 @@ async def _run_scenario_for_question(
     metric = question_row["metric"]
     hs_run_id = question_row.get("hs_run_id") or run_id
 
+    # Track 2 questions never get scenarios (single-model forecast only)
+    track = question_row.get("track")
+    if track == 2:
+        LOG.info(
+            "Skipping scenario for %s (%s/%s/%s) because track=2 (no scenarios)",
+            qid, iso3, hz, metric,
+        )
+        return
+
     triage = load_hs_triage_entry(hs_run_id, iso3, hz)
     tier = (triage.get("tier") or "").lower() if triage else ""
     if tier != "priority":
@@ -476,7 +485,8 @@ def run_scenarios_for_run(run_id: str) -> None:
                 q.target_month,
                 q.window_start_date,
                 q.window_end_date,
-                q.wording
+                q.wording,
+                q.track
             FROM questions q
             JOIN forecasts_ensemble fe
               ON fe.question_id = q.question_id
@@ -491,7 +501,8 @@ def run_scenarios_for_run(run_id: str) -> None:
                 q.target_month,
                 q.window_start_date,
                 q.window_end_date,
-                q.wording
+                q.wording,
+                q.track
             """,
             [run_id],
         ).fetchall()
@@ -510,6 +521,7 @@ def run_scenarios_for_run(run_id: str) -> None:
             window_start_date,
             window_end_date,
             wording,
+            track,
         ) = row
         questions.append(
             {
@@ -522,6 +534,7 @@ def run_scenarios_for_run(run_id: str) -> None:
                 "window_start_date": window_start_date,
                 "window_end_date": window_end_date,
                 "wording": wording,
+                "track": track,
             }
         )
 

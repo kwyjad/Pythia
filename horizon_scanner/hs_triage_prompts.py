@@ -41,7 +41,7 @@ from typing import Any, Dict, Optional
 
 _TRIAGE_SCHEMA = {
     "triage_score": 0.0,
-    "tier": "quiet|watchlist|priority",
+    "tier": "quiet|priority",
     "drivers": ["..."],
     "data_quality": {
         "resolution_source": "...",
@@ -84,18 +84,15 @@ SCORING RUBRIC:
 triage_score (0.0 to 1.0) — overall risk of significant humanitarian \
 impact from this hazard in the next 1–6 months:
 
-  0.00–0.15  QUIET: Negligible risk. No active crisis, no emerging signals,
-             low structural exposure. Most hazard-country pairs fall here.
-  0.15–0.40  LOW: Some background risk from structural exposure or seasonal
-             patterns, but no active crisis and no strong emerging signals.
-  0.40–0.65  WATCHLIST: Active concern. Either an ongoing situation with
-             moderate impact, or strong emerging signals from RC, or seasonal
-             peak approaching in a highly exposed country.
-  0.65–0.85  PRIORITY: Significant active crisis or high confidence that
-             severe impact is imminent. Ongoing humanitarian response likely
-             already underway or urgently needed.
-  0.85–1.00  CRITICAL: Severe, large-scale humanitarian emergency. Among
-             the worst-affected countries globally for this hazard.
+  0.00–0.49  QUIET: Low or negligible risk. No active crisis, no strong
+             emerging signals. Background structural exposure or seasonal
+             patterns may exist, but no active concern warranting
+             forecasting resources.
+  0.50–1.00  PRIORITY: Significant active concern. Ongoing situation with
+             moderate-to-severe impact, strong emerging signals, seasonal
+             peak approaching in a highly exposed country, or active
+             humanitarian crisis. Scores above 0.85 indicate the most
+             severe, large-scale emergencies.
 
 SCORING INPUTS (in priority order):
 1. CURRENT SITUATION (from evidence pack): What is happening RIGHT NOW?
@@ -133,15 +130,15 @@ Match this schema exactly:
 
 Field rules:
 - triage_score (0.0–1.0): overall risk score per rubric above.
-- tier: one of "quiet", "watchlist", "priority". Derived from triage_score:
-  quiet < 0.40, watchlist 0.40–0.70, priority > 0.70. Include for
+- tier: one of "quiet", "priority". Derived from triage_score:
+  quiet < 0.50, priority >= 0.50. Include for
   interpretability but score-first — decide triage_score then assign tier.
 - drivers: 2–5 key factors pushing risk up or down, with evidence references.
   For quiet hazards, 1–2 drivers explaining why risk is low is sufficient.
 - data_quality: note the primary resolution data source (ACLED, EM-DAT,
   IDMC, etc.), its reliability for this country, and any known biases or
   gaps.
-- scenario_stub: For watchlist/priority only. 2–4 sentences describing the
+- scenario_stub: For priority only. 2–4 sentences describing the
   plausible scenario over the next 6 months, humanitarian needs, and
   operational constraints. Omit or set to "" for quiet hazards.
 - confidence_note: one sentence on how confident you are and what data

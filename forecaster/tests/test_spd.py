@@ -136,7 +136,7 @@ def test_build_spd_prompt_v2_handles_date_in_history_summary() -> None:
         "data_quality": "high",
         "notes": "test history",
     }
-    hs_triage_entry = {"tier": "watchlist", "triage_score": 0.5}
+    hs_triage_entry = {"tier": "priority", "triage_score": 0.5}
     research_json = {"base_rate": {"qualitative_summary": "test"}}
 
     prompt_text = prompts.build_spd_prompt_v2(

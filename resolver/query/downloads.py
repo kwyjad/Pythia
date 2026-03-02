@@ -290,6 +290,7 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
         "regime_change_magnitude",
         "regime_change_score",
         "hs_run_ID",
+        "track",
     ]
 
     if con is None or not _table_exists(con, "questions"):
@@ -301,12 +302,16 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
         _warn_once("questions_missing", "Questions table missing required columns for export.")
         return pd.DataFrame(columns=columns)
 
+    has_track = "track" in q_cols
+    track_expr = ", track" if has_track else ""
     questions = con.execute(
-        """
-        SELECT question_id, iso3, hazard_code, metric, target_month, hs_run_id
+        f"""
+        SELECT question_id, iso3, hazard_code, metric, target_month, hs_run_id{track_expr}
         FROM questions
         """
     ).fetchdf()
+    if not has_track:
+        questions["track"] = None
 
     forecasts = []
     for table in ("forecasts_ensemble", "forecasts_raw"):
@@ -419,6 +424,7 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
         "model_name",
         "forecast_month",
         "hs_run_id",
+        "track",
         "triage_score",
         "triage_tier",
     ]
@@ -543,6 +549,7 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
             "regime_change_magnitude": pivot.get("regime_change_magnitude"),
             "regime_change_score": pivot.get("regime_change_score"),
             "hs_run_ID": pivot["hs_run_id"],
+            "track": pivot.get("track"),
         }
     )
 
@@ -573,7 +580,7 @@ def build_triage_export(con) -> pd.DataFrame:
     triage_df["triage_score"] = pd.to_numeric(triage_df["triage_score"], errors="coerce")
     triage_df["_created_at"] = pd.to_datetime(triage_df["created_at"], errors="coerce")
 
-    tier_order = {"quiet": 0, "watchlist": 1, "priority": 2}
+    tier_order = {"quiet": 0, "priority": 1}
     triage_df["_tier_sort"] = (
         triage_df["tier"]
         .astype(str)
@@ -668,6 +675,7 @@ def build_ensemble_scores_export(con, model_filter: str) -> pd.DataFrame:
         "triage_class",
         "rc_score",
         "rc_class",
+        "track",
     ]
     for m in range(1, 7):
         for b in range(1, 6):
@@ -701,8 +709,13 @@ def build_ensemble_scores_export(con, model_filter: str) -> pd.DataFrame:
     score_model = str(model_names.iloc[0]["model_name"])
 
     # ── 2. Questions + scores (avg across horizons) ───────────────────
+    q_cols = _table_columns(con, "questions")
+    has_track = "track" in q_cols
+    track_select = "q.track," if has_track else ""
+    track_group = ", q.track" if has_track else ""
+
     base = con.execute(
-        """
+        f"""
         SELECT
             q.question_id,
             q.hs_run_id,
@@ -710,6 +723,7 @@ def build_ensemble_scores_export(con, model_filter: str) -> pd.DataFrame:
             q.hazard_code,
             UPPER(q.metric) AS metric,
             q.target_month,
+            {track_select}
             AVG(CASE WHEN s.score_type = 'brier' THEN s.value END) AS brier,
             AVG(CASE WHEN s.score_type = 'log'   THEN s.value END) AS log_loss,
             AVG(CASE WHEN s.score_type = 'crps'  THEN s.value END) AS crps
@@ -717,10 +731,12 @@ def build_ensemble_scores_export(con, model_filter: str) -> pd.DataFrame:
         JOIN questions q ON s.question_id = q.question_id
         WHERE s.model_name = ?
         GROUP BY q.question_id, q.hs_run_id, q.iso3,
-                 q.hazard_code, UPPER(q.metric), q.target_month
+                 q.hazard_code, UPPER(q.metric), q.target_month{track_group}
         """,
         [score_model],
     ).fetchdf()
+    if not has_track:
+        base["track"] = None
     if base.empty:
         return empty
 
@@ -764,6 +780,7 @@ def build_ensemble_scores_export(con, model_filter: str) -> pd.DataFrame:
             "triage_class": base.get("triage_class"),
             "rc_score": base.get("rc_score"),
             "rc_class": base.get("rc_class"),
+            "track": base.get("track"),
         }
     )
     for m in range(1, 7):
@@ -1041,6 +1058,7 @@ def build_model_scores_export(con) -> pd.DataFrame:
         "forecast_model",
         "hazard",
         "metric",
+        "track",
         "forecasts",
         "average_brier",
         "average_log_loss",
@@ -1064,12 +1082,19 @@ def build_model_scores_export(con) -> pd.DataFrame:
         if not _table_exists(con, tbl):
             return empty
 
+    q_cols = _table_columns(con, "questions")
+    has_track = "track" in q_cols
+    track_select = "q.track AS track," if has_track else ""
+    track_group = ", q.track" if has_track else ""
+    track_order = ", track" if has_track else ""
+
     df = con.execute(
-        """
+        f"""
         SELECT
             COALESCE(s.model_name, 'ensemble') AS forecast_model,
             q.hazard_code                      AS hazard,
             UPPER(q.metric)                    AS metric,
+            {track_select}
             COUNT(DISTINCT s.question_id)      AS forecasts,
             AVG(   CASE WHEN s.score_type = 'brier' THEN s.value END) AS average_brier,
             AVG(   CASE WHEN s.score_type = 'log'   THEN s.value END) AS average_log_loss,
@@ -1085,13 +1110,16 @@ def build_model_scores_export(con) -> pd.DataFrame:
             MAX(   CASE WHEN s.score_type = 'crps'  THEN s.value END) AS max_crps
         FROM scores s
         JOIN questions q ON s.question_id = q.question_id
-        GROUP BY s.model_name, q.hazard_code, UPPER(q.metric)
-        ORDER BY forecast_model, hazard, metric
+        GROUP BY s.model_name, q.hazard_code, UPPER(q.metric){track_group}
+        ORDER BY forecast_model, hazard, metric{track_order}
         """
     ).fetchdf()
 
     if df.empty:
         return empty
+
+    if not has_track:
+        df["track"] = None
 
     return df[columns].reset_index(drop=True)
 

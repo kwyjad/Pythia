@@ -339,6 +339,7 @@ export default function PerformancePanel({
 }: PerformancePanelProps) {
   const [view, setView] = useState<ViewMode>("total");
   const [metric, setMetric] = useState<string | null>(null);
+  const [track, setTrack] = useState<number | null>(null);
   const [data, setData] = useState<PerformanceScoresResponse>(initialData);
   const [loading, setLoading] = useState(false);
 
@@ -367,12 +368,15 @@ export default function PerformancePanel({
 
   // ---- Fetch when metric changes -------------------------------------------
 
-  const handleMetricChange = async (newMetric: string | null) => {
-    setMetric(newMetric);
+  const refetchScores = async (
+    newMetric: string | null,
+    newTrack: number | null,
+  ) => {
     setLoading(true);
     try {
       const params: Record<string, string> = {};
       if (newMetric) params.metric = newMetric;
+      if (newTrack != null) params.track = String(newTrack);
       const response = await apiGet<PerformanceScoresResponse>(
         "/performance/scores",
         params,
@@ -383,6 +387,16 @@ export default function PerformancePanel({
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleMetricChange = async (newMetric: string | null) => {
+    setMetric(newMetric);
+    await refetchScores(newMetric, track);
+  };
+
+  const handleTrackChange = async (newTrack: number | null) => {
+    setTrack(newTrack);
+    await refetchScores(metric, newTrack);
   };
 
   // ---- KPI cards -----------------------------------------------------------
@@ -521,10 +535,14 @@ export default function PerformancePanel({
   return (
     <div className="space-y-6">
       {/* KPI cards */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
         <KpiCard
-          label="Scored Questions"
-          value={formatInt(kpiStats.totalQuestions)}
+          label="Scored Track 1"
+          value={formatInt(data.track_counts?.track1 ?? 0)}
+        />
+        <KpiCard
+          label="Scored Track 2"
+          value={formatInt(data.track_counts?.track2 ?? 0)}
         />
         <KpiCard label="Hazards" value={formatInt(kpiStats.hazards)} />
         <KpiCard label="Models" value={formatInt(kpiStats.models)} />
@@ -569,6 +587,19 @@ export default function PerformancePanel({
           <option value="">All Metrics</option>
           <option value="PA">People Affected (PA)</option>
           <option value="FATALITIES">Fatalities</option>
+        </select>
+
+        {/* Track filter */}
+        <select
+          className="rounded-md border border-fred-secondary bg-fred-surface px-3 py-1.5 text-sm text-fred-text"
+          value={track != null ? String(track) : ""}
+          onChange={(e) =>
+            handleTrackChange(e.target.value ? Number(e.target.value) : null)
+          }
+        >
+          <option value="">All Tracks</option>
+          <option value="1">Track 1</option>
+          <option value="2">Track 2</option>
         </select>
 
         {/* Ensemble selector (shown for By Hazard and By Run views) */}

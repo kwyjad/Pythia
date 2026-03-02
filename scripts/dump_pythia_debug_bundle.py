@@ -1522,10 +1522,7 @@ def _scenario_expected(
     tier = str((hs_entry or {}).get("tier") or "").lower()
 
     enabled_hazards = {"ACE", "DI"}
-    watchlist_hazards = {"DR", "FL"}
 
-    if hz in watchlist_hazards or tier == "watchlist":
-        return False, "watchlist"
     if hz not in enabled_hazards:
         return False, "hazard_not_enabled"
     if tier and tier != "priority":

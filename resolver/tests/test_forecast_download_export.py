@@ -236,6 +236,7 @@ def test_build_forecast_spd_export():
         "regime_change_magnitude",
         "regime_change_score",
         "hs_run_ID",
+        "track",
     ]
     assert list(df.columns) == expected_columns
 

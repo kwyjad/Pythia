@@ -151,6 +151,7 @@ def _ensure_hs_triage_table(con: duckdb.DuckDBPyConnection) -> None:
             regime_change_direction TEXT,
             regime_change_window TEXT,
             regime_change_json TEXT,
+            track INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """,
@@ -172,6 +173,7 @@ def _ensure_hs_triage_table(con: duckdb.DuckDBPyConnection) -> None:
             "regime_change_direction": "TEXT",
             "regime_change_window": "TEXT",
             "regime_change_json": "TEXT",
+            "track": "INTEGER",
             "created_at": "TIMESTAMP",
         },
     )
@@ -592,7 +594,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 window_end_date DATE,
                 wording TEXT,
                 status TEXT,
-                pythia_metadata_json TEXT
+                pythia_metadata_json TEXT,
+                track INTEGER
             );
             """,
             {
@@ -608,6 +611,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "wording": "TEXT",
                 "status": "TEXT",
                 "pythia_metadata_json": "TEXT",
+                "track": "INTEGER",
             },
         )
 
