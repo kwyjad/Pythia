@@ -24,27 +24,28 @@ Pythia connects historical hazard data, web research, and LLM reasoning into a r
 ## System at a glance
 
 ```
-Resolver facts/base rates → Horizon Scanner triage → Questions seeded
+Resolver facts/base rates → Horizon Scanner (RC → triage) → Questions seeded + track assigned
                            → Shared evidence packs → Research v2 briefs
-                           → Forecaster SPD v2 ensemble + scenarios
+                           → Track 1: full ensemble SPD + scenarios
+                           → Track 2: single-model SPD
                            → DuckDB → API → Dashboard + downloads
 ```
 
 - **System of record**: DuckDB (`PYTHIA_DB_URL` / `app.db_url`) holds HS triage, questions, research, forecasts, and diagnostics.
-- **End-to-end flow**: Resolver facts and base rates inform HS triage; HS produces triage + questions; retriever packs evidence; Research v2 drafts structured briefs; Forecaster SPD v2 writes ensembles/scenarios back to DuckDB.
+- **End-to-end flow**: Resolver facts and base rates inform HS (RC assessment, then triage with per-hazard prompts and seasonal filtering); HS produces triage + questions with track assignments; retriever packs evidence; Research v2 drafts structured briefs; Forecaster routes questions by track — Track 1 (RC-elevated) through the full ensemble, Track 2 (priority, no RC) through a single model — and writes results back to DuckDB.
 
 ## Core components
 - **Resolver (facts + base rates)**: Resolver tables in DuckDB (`facts_resolved`, `facts_deltas`, `snapshots`) provide historical context. Schema is defined in [`pythia/db/schema.py`](pythia/db/schema.py).
-- **Horizon Scanner (HS)**: `python -m horizon_scanner.horizon_scanner` triages countries and hazards, writes `hs_runs`/`hs_triage`, seeds `questions`/`question_research`, and generates country evidence packs.
+- **Horizon Scanner (HS)**: `python -m horizon_scanner.horizon_scanner` triages countries and hazards, writes `hs_runs`/`hs_triage`, seeds `questions`/`question_research`, and generates country evidence packs. HS now runs a multi-stage pipeline: RC assessment runs first as a dedicated step, then triage uses the RC results. Both stages use per-hazard prompts (tailored to each hazard type) and seasonal filtering (adjusting scores for in-season vs. off-season hazards).
 - **Retriever web research (shared evidence packs)**: When enabled, the retriever builds evidence packs reused across HS, research, and SPD prompts. The shared retriever defaults to `gemini-3-flash-preview` when `PYTHIA_RETRIEVER_ENABLED=1` and `PYTHIA_RETRIEVER_MODEL_ID` is unset; see [`pythia/web_research/web_research.py`](pythia/web_research/web_research.py).
 - **Research v2**: Prompts generate structured briefs that separate verified vs unverified sources, stored in `question_research`/`llm_calls`.
-- **Forecaster SPD v2 ensemble**: `python -m forecaster.cli --mode pythia` runs SPD v2 prompts across the active ensemble and writes per-model outputs (`forecasts_raw`) and aggregated results (`forecasts_ensemble`).
-- **Scenarios (priority-only)**: When an ensemble SPD is available, scenarios can be generated for priority questions and written back to DuckDB.
+- **Forecaster SPD v2 ensemble**: `python -m forecaster.cli --mode pythia` runs SPD v2 prompts across the active ensemble and writes per-model outputs (`forecasts_raw`) and aggregated results (`forecasts_ensemble`). Questions are routed by track: **Track 1** (RC-elevated, level > 0) uses the full multi-model ensemble; **Track 2** (priority, no RC) uses a lightweight single-model path (Gemini Flash).
+- **Scenarios (Track 1 only)**: When an ensemble SPD is available, scenarios can be generated for Track 1 questions and written back to DuckDB.
 - **Dashboard + API**: FastAPI serves `/v1/*` endpoints for the dashboard, downloads, and diagnostics. The Next.js UI lives in `web/`.
 
 ## Regime Change (RC): out-of-pattern detection
 
-**Definition:** Regime Change (RC) is the likelihood of a generating-process shift within the next 1–6 months that makes historical base rates less reliable. HS captures RC for every hazard and writes it to `hs_triage`.
+**Definition:** Regime Change (RC) is the likelihood of a generating-process shift within the next 1–6 months that makes historical base rates less reliable. RC is now assessed in a dedicated LLM pipeline step that runs before triage, with per-hazard prompts tailored to each hazard type's escalation dynamics. HS captures RC for every hazard and writes it to `hs_triage`.
 
 **Stored fields in `hs_triage`:**
 - `regime_change_likelihood` (probability)
@@ -63,6 +64,7 @@ Resolver facts/base rates → Horizon Scanner triage → Questions seeded
 - Level 3: `likelihood ≥ 0.75` **and** `magnitude ≥ 0.60` (score ≥ 0.45)
 
 **Behavioral implications:**
+- **Track routing**: Questions with RC level > 0 are assigned Track 1 (full multi-model ensemble); priority questions without RC are Track 2 (lightweight single-model).
 - **`need_full_spd` override**: HS forces `need_full_spd = TRUE` when RC is elevated (Level ≥2 or `score ≥ 0.30`) even if the triage tier is quiet. Thresholds are controlled by `PYTHIA_HS_RC_FORCE_LEVEL_MIN`/`PYTHIA_HS_RC_FORCE_SCORE_MIN`.
 - **Research v2**: RC is surfaced in the research prompt, and RC-elevated hazards require at least one `regime_shift_signals` entry (or a rebuttal).
 - **SPD v2**: RC guidance is embedded in the SPD prompt, and the model must include a sentence starting with `RC:` in `human_explanation` describing how RC affected the SPD.
@@ -266,16 +268,19 @@ NEXT_PUBLIC_PYTHIA_API_BASE=http://localhost:8000/v1 npm run dev
 
 ### Pages and RC visibility
 - **Forecast Index (Overview)**: shows the Humanitarian Impact Forecast Index, with RC KPI counts and RC map markers (highest RC level per country).
-- **Forecasts** (`/questions`): latest forecasts table includes RC score and triage fields when `latest_only=true`.
-- **HS Triage** (`/hs-triage`): displays per-run triage with RC likelihood/direction/magnitude/score.
+- **Forecasts** (`/questions`): latest forecasts table includes RC score, triage fields, and track assignment when `latest_only=true`.
+- **HS Triage** (`/hs-triage`): displays per-run triage with RC likelihood/direction/magnitude/score and tier (quiet/priority).
 - **Question detail** (`/questions/[questionId]`): RC fields appear alongside research and SPD outputs.
 - **Countries** (`/countries`): includes highest RC level/score per country from the latest HS run.
-- **Downloads** (`/downloads`): links to forecast/triage exports with RC fields.
+- **Performance** (`/performance`): forecast evaluation with KPI cards, ensemble selector dropdown (compare ensemble_mean vs. ensemble_bayesmc), median and average scores (Brier, Log, CRPS), and views by Total, Hazard, Run, and Model.
+- **Downloads** (`/downloads`): forecast/triage exports with RC fields, plus per-question score CSVs, model-level summary CSVs, and rationale exports.
+- **About** (`/about`): versioned prompt snapshots and system overview history.
 
 ## Downloads / exports
-- **Forecast SPD & EIV export**: `/v1/downloads/forecasts.csv` and `/v1/downloads/forecasts.xlsx` include RC probability/direction/magnitude/score columns per row.
+- **Forecast SPD & EIV export**: `/v1/downloads/forecasts.csv` and `/v1/downloads/forecasts.xlsx` include RC probability/direction/magnitude/score columns and track assignment per row.
+- **Score exports**: per-question CSV for each named ensemble (full 6-month x 5-bin grid, expected impact values, resolutions, and Brier/Log/CRPS scores), model-level summary CSV (avg/median/min/max per model and hazard), and rationale export (human-readable LLM explanations by hazard).
 - **Countries endpoint**: `/v1/countries` includes `highest_rc_level`/`highest_rc_score` (latest HS run).
-- **Questions endpoint**: `/v1/questions?latest_only=true` includes RC fields (`regime_change_*`).
+- **Questions endpoint**: `/v1/questions?latest_only=true` includes RC fields (`regime_change_*`) and `track`.
 
 See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 
@@ -290,7 +295,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 - [`pythia/model_costs.json`](pythia/model_costs.json) contains per-model cost rates.
 
 ### Key env vars
-- **Provider keys**: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `EXA_API_KEY`, `PERPLEXITY_API_KEY`.
+- **Provider keys**: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`, `EXA_API_KEY`, `PERPLEXITY_API_KEY`.
 - **Concurrency**:
   - `PYTHIA_LLM_CONCURRENCY` (global LLM call cap)
   - `HS_MAX_WORKERS`
@@ -323,11 +328,13 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 | `GEMINI_API_KEY` | HS, retriever, forecaster | Gemini models (HS + SPD + retriever) |
 | `ANTHROPIC_API_KEY` | Forecaster SPD ensemble | Anthropic models |
 | `XAI_API_KEY` | Forecaster SPD ensemble | XAI models |
+| `KIMI_API_KEY` | Forecaster SPD ensemble | Kimi models (Moonshot) |
+| `DEEPSEEK_API_KEY` | Forecaster SPD ensemble | DeepSeek models |
 | `EXA_API_KEY` | Web research | Exa backend (optional) |
 | `PERPLEXITY_API_KEY` | Web research | Perplexity backend (optional) |
 | `GITHUB_TOKEN` | Actions | Artifact download + summary updates |
 
-**Minimum set for full pipeline**: `GEMINI_API_KEY` + at least one of (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`). Missing keys disable their providers, and the run proceeds with a partial ensemble.
+**Minimum set for full pipeline**: `GEMINI_API_KEY` + at least one of (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`). Missing keys disable their providers, and the run proceeds with a partial ensemble.
 
 ## Operational notes
 - **Partial ensembles are expected**: providers can timeout; the ensemble uses available members and records `ensemble_meta`.
