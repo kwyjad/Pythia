@@ -134,7 +134,7 @@ def test_hs_triage_json_repair(monkeypatch, tmp_path):
             else:
                 # Flat triage repair result
                 return _json.dumps({
-                    "triage_score": 0.5, "tier": "watchlist",
+                    "triage_score": 0.5, "tier": "priority",
                     "drivers": ["repaired driver"],
                     "data_quality": {"reliability": "low", "notes": "repaired"},
                     "scenario_stub": "", "confidence_note": "repaired",

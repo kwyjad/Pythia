@@ -27,9 +27,9 @@ def test_epoch_loader_prefers_latest_hs_and_scopes_iso3(
             INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, need_full_spd,
                                    drivers_json, regime_shifts_json, data_quality_json, scenario_stub)
             VALUES
-                ('hs_20250101T000000', 'SOM', 'DR', 'watchlist', 0.5, TRUE, '[]', '[]', '{}', ''),
+                ('hs_20250101T000000', 'SOM', 'DR', 'priority', 0.5, TRUE, '[]', '[]', '{}', ''),
                 ('hs_20250201T000000', 'SOM', 'DR', 'priority',  0.8, TRUE, '[]', '[]', '{}', ''),
-                ('hs_20250115T000000', 'ETH', 'DR', 'watchlist', 0.4, TRUE, '[]', '[]', '{}', '')
+                ('hs_20250115T000000', 'ETH', 'DR', 'quiet', 0.4, TRUE, '[]', '[]', '{}', '')
             """
         )
 

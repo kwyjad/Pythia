@@ -31,7 +31,7 @@ def test_build_triage_export_collapses_hazards():
     con.execute(
         """
         INSERT INTO hs_triage VALUES
-            ('hs_20240106T010203', 'KEN', 'DR', 'watchlist', 0.4, '2024-01-05'),
+            ('hs_20240106T010203', 'KEN', 'DR', 'quiet', 0.4, '2024-01-05'),
             ('hs_20240106T010203', 'KEN', 'ACE', 'priority', 0.8, '2024-01-06')
         """
     )

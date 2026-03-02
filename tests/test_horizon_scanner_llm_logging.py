@@ -86,7 +86,7 @@ def test_run_hs_logs_single_llm_call_per_country(monkeypatch: pytest.MonkeyPatch
                 "data_quality": {},
             },
             "DR": {
-                "tier": "watchlist",
+                "tier": "priority",
                 "triage_score": 0.55,
                 "drivers": [],
                 "regime_shifts": [],
@@ -109,18 +109,22 @@ def test_run_hs_logs_single_llm_call_per_country(monkeypatch: pytest.MonkeyPatch
         llm_rows = con.execute(
             "SELECT phase, iso3, hazard_code FROM llm_calls WHERE phase = 'hs_triage'"
         ).fetchall()
+        triage_llm_rows = con.execute(
+            "SELECT phase, iso3, hazard_code FROM llm_calls WHERE phase = 'hs_triage' AND hazard_code LIKE 'TRIAGE_%'"
+        ).fetchall()
         triage_rows = con.execute(
             "SELECT hazard_code FROM hs_triage WHERE run_id = ? ORDER BY hazard_code", ["hs_test"]
         ).fetchall()
     finally:
         con.close()
 
-    assert len(llm_rows) == 2, "Expected two hs_triage llm_calls rows per country (one per pass)"
-    for row in llm_rows:
+    assert len(llm_rows) >= 2, "Expected at least two hs_triage llm_calls rows (RC + triage)"
+    assert len(triage_llm_rows) >= 2, "Expected triage LLM calls to be logged"
+    for row in triage_llm_rows:
         phase, iso3, hazard_code = row
         assert phase == "hs_triage"
         assert iso3 == "ETH"
-        assert hazard_code in ("PASS_1", "PASS_2")
+        assert hazard_code.startswith("TRIAGE_")
 
     hazard_codes = {row[0] for row in triage_rows}
     assert "DR" in hazard_codes

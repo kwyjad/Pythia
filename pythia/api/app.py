@@ -1439,6 +1439,7 @@ def get_calibration_advice(
 @app.get("/v1/performance/scores")
 def performance_scores(
     metric: Optional[str] = Query(None, description="PA or FATALITIES"),
+    track: Optional[int] = Query(None, description="Filter by track (1 or 2)"),
 ):
     """Return aggregated scoring metrics (Brier, Log, CRPS) for the performance page.
 
@@ -1452,13 +1453,40 @@ def performance_scores(
     con = _con()
 
     if not _table_exists(con, "scores") or not _table_exists(con, "questions"):
-        return {"summary_rows": [], "run_rows": []}
+        return {"summary_rows": [], "run_rows": [], "track_counts": {"track1": 0, "track2": 0}}
 
     params: dict = {}
     metric_filter = ""
     if metric:
         metric_filter = "AND UPPER(q.metric) = UPPER(:metric)"
         params["metric"] = metric.upper()
+
+    track_filter = ""
+    q_cols = {r[0] for r in con.execute("DESCRIBE questions").fetchall()}
+    has_track = "track" in q_cols
+    if track and has_track:
+        track_filter = "AND q.track = :track"
+        params["track"] = track
+
+    # Track counts for KPI cards (always unfiltered by track)
+    track_counts = {"track1": 0, "track2": 0}
+    if has_track:
+        try:
+            tc_filter = metric_filter  # respect metric filter but not track filter
+            tc_rows = _execute(con, f"""
+                SELECT q.track, COUNT(DISTINCT s.question_id) AS n
+                FROM scores s
+                JOIN questions q ON q.question_id = s.question_id
+                WHERE q.track IS NOT NULL {tc_filter}
+                GROUP BY q.track
+            """, {k: v for k, v in params.items() if k != "track"}).fetchall()
+            for t, n in tc_rows:
+                if t == 1:
+                    track_counts["track1"] = int(n)
+                elif t == 2:
+                    track_counts["track2"] = int(n)
+        except Exception:
+            logger.debug("Failed to compute track counts for performance")
 
     # Query 1 -- summary rows (all models including ensemble)
     sql_summary = f"""
@@ -1473,7 +1501,7 @@ def performance_scores(
           MEDIAN(s.value) AS median_value
         FROM scores s
         JOIN questions q ON q.question_id = s.question_id
-        WHERE 1=1 {metric_filter}
+        WHERE 1=1 {metric_filter} {track_filter}
         GROUP BY q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
         ORDER BY q.hazard_code, UPPER(q.metric), s.score_type,
                  s.model_name NULLS FIRST
@@ -1498,7 +1526,7 @@ def performance_scores(
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
             LEFT JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
-            WHERE 1=1 {metric_filter}
+            WHERE 1=1 {metric_filter} {track_filter}
             GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
             ORDER BY run_date DESC NULLS LAST, q.hazard_code, s.score_type,
                      s.model_name NULLS FIRST
@@ -1518,7 +1546,7 @@ def performance_scores(
               MEDIAN(s.value) AS median_value
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
-            WHERE 1=1 {metric_filter}
+            WHERE 1=1 {metric_filter} {track_filter}
             GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
             ORDER BY q.hs_run_id DESC, q.hazard_code, s.score_type,
                      s.model_name NULLS FIRST
@@ -1528,6 +1556,7 @@ def performance_scores(
     return {
         "summary_rows": _rows_from_df(df_summary),
         "run_rows": _rows_from_df(df_runs),
+        "track_counts": track_counts,
     }
 
 

@@ -139,6 +139,10 @@ export type PerformanceRunRow = {
 export type PerformanceScoresResponse = {
   summary_rows: PerformanceSummaryRow[];
   run_rows: PerformanceRunRow[];
+  track_counts?: {
+    track1: number;
+    track2: number;
+  };
 };
 
 export type QuestionBundleResponse = {

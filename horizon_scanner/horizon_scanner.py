@@ -67,9 +67,7 @@ logger = logging.getLogger(__name__)
 
 HS_MAX_WORKERS = int(os.getenv("HS_MAX_WORKERS", "6"))
 HS_TEMPERATURE = float(os.getenv("HS_TEMPERATURE", "0.0"))
-HS_PRIORITY_THRESHOLD = float(os.getenv("PYTHIA_HS_PRIORITY_THRESHOLD", "0.70"))
-HS_WATCHLIST_THRESHOLD = float(os.getenv("PYTHIA_HS_WATCHLIST_THRESHOLD", "0.40"))
-HS_HYSTERESIS_BAND = float(os.getenv("PYTHIA_HS_HYSTERESIS_BAND", "0.05"))
+HS_PRIORITY_THRESHOLD = float(os.getenv("PYTHIA_HS_PRIORITY_THRESHOLD", "0.50"))
 HS_EVIDENCE_MAX_SOURCES = int(os.getenv("PYTHIA_HS_EVIDENCE_MAX_SOURCES", "8"))
 HS_EVIDENCE_MAX_SIGNALS = int(os.getenv("PYTHIA_HS_EVIDENCE_MAX_SIGNALS", "8"))
 def _hs_fallback_default() -> str:
@@ -852,14 +850,8 @@ def _build_pass_hazards(
 
 
 def tier_from_score(score: float) -> str:
-    if score >= HS_PRIORITY_THRESHOLD + HS_HYSTERESIS_BAND:
+    if score >= HS_PRIORITY_THRESHOLD:
         return "priority"
-    if score >= HS_PRIORITY_THRESHOLD - HS_HYSTERESIS_BAND:
-        return "watchlist"
-    if score >= HS_WATCHLIST_THRESHOLD + HS_HYSTERESIS_BAND:
-        return "watchlist"
-    if score >= HS_WATCHLIST_THRESHOLD - HS_HYSTERESIS_BAND:
-        return "quiet"
     return "quiet"
 
 
@@ -937,11 +929,19 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                 regime_change.get("magnitude"),
                 regime_change_score,
             )
-            force_full_spd = should_force_full_spd(regime_change_level, regime_change_score)
-            need_full_spd = tier in {"priority", "watchlist"} or force_full_spd
+            # Track assignment: RC > 0 → Track 1, Priority + RC=0 → Track 2
+            track = None
+            if regime_change_level > 0:
+                track = 1
+                need_full_spd = True
+            elif tier == "priority":
+                track = 2
+                need_full_spd = True
+            else:
+                need_full_spd = False
             logger.debug(
                 "HS triage regime change | run_id=%s iso3=%s hazard=%s likelihood=%s magnitude=%s "
-                "direction=%s window=%s score=%.3f level=%s force_full_spd=%s",
+                "direction=%s window=%s score=%.3f level=%s track=%s",
                 run_id,
                 iso3_up,
                 hz_up,
@@ -951,7 +951,7 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                 regime_change.get("window"),
                 regime_change_score,
                 regime_change_level,
-                force_full_spd,
+                track,
             )
 
             insert_payload = [
@@ -972,6 +972,7 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                 regime_change.get("direction"),
                 regime_change.get("window"),
                 json.dumps(regime_change),
+                track,
             ]
             try:
                 con.execute(
@@ -982,9 +983,9 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                         drivers_json, regime_shifts_json, data_quality_json, scenario_stub,
                         regime_change_likelihood, regime_change_magnitude, regime_change_score,
                         regime_change_level, regime_change_direction, regime_change_window,
-                        regime_change_json
+                        regime_change_json, track
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     insert_payload,
                 )

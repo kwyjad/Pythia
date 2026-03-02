@@ -125,11 +125,8 @@ def compute_level(likelihood: float | None, magnitude: float | None, score: floa
 
 
 def should_force_full_spd(level: int | None, score: float | None) -> bool:
-    force_level = _env_int("PYTHIA_HS_RC_FORCE_LEVEL_MIN", 2)
-    force_score = _env_float("PYTHIA_HS_RC_FORCE_SCORE_MIN", 0.30)
     level_val = int(level or 0)
-    score_val = float(score or 0.0)
-    return level_val >= force_level or score_val >= force_score
+    return level_val > 0
 
 
 def _coerce_bullets(raw: Any, limit: int = 6) -> list[str]:

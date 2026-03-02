@@ -24,6 +24,7 @@ type QuestionsRow = {
   triage_tier?: string | null;
   triage_need_full_spd?: boolean | null;
   regime_change_score?: number | null;
+  track?: number | null;
 };
 
 type QuestionsTableProps = {
@@ -74,7 +75,7 @@ const EIV_TOOLTIP =
   "PA uses 6-month EIV as the peak month (not a sum). FATALITIES uses 6-month cumulative expected deaths. Values come from sum over buckets of p(bucket, month) × centroid(bucket).";
 
 const TRIAGE_TOOLTIP =
-  "HS triage_score (0–1) estimates risk of unusually high recorded impact in the next 1–6 months using evidence + base-rate signals. Scores map to tiers (default thresholds: priority ≥ 0.70, watchlist ≥ 0.40; hysteresis ±0.05). Only priority/watchlist hazards are sent to full forecasting; quiet hazards may appear but have no EIV.";
+  "HS triage_score (0–1) estimates risk of unusually high recorded impact in the next 1–6 months using evidence + base-rate signals. Scores map to tiers (priority ≥ 0.50, quiet < 0.50). Priority hazards enter the forecasting pipeline; quiet hazards may appear but have no EIV.";
 const RC_SCORE_TOOLTIP = "Regime change score (probability × magnitude).";
 
 const renderHeaderClamp = (content: ReactNode) => (
@@ -115,6 +116,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
   const [selectedHazards, setSelectedHazards] = useState<string[]>([]);
   const [selectedMetrics, setSelectedMetrics] = useState<string[]>([]);
   const [selectedStatuses, setSelectedStatuses] = useState<string[]>([]);
+  const [selectedTracks, setSelectedTracks] = useState<string[]>([]);
   const [forecastDateFrom, setForecastDateFrom] = useState("");
   const [forecastDateTo, setForecastDateTo] = useState("");
   const [firstMonthFrom, setFirstMonthFrom] = useState("");
@@ -150,12 +152,24 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       Array.from(new Set(rows.map((row) => row.status ?? "").filter(Boolean))).sort(),
     [rows]
   );
+  const trackOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          rows
+            .map((row) => (row.track != null ? `Track ${row.track}` : ""))
+            .filter(Boolean),
+        ),
+      ).sort(),
+    [rows],
+  );
 
   const filteredRows = useMemo(() => {
     const countrySet = new Set(selectedCountries);
     const hazardSet = new Set(selectedHazards);
     const metricSet = new Set(selectedMetrics);
     const statusSet = new Set(selectedStatuses);
+    const trackSet = new Set(selectedTracks);
     const forecastFromValue = forecastDateFrom ? parseMmYYYY(forecastDateFrom) : null;
     const forecastToValue = forecastDateTo ? parseMmYYYY(forecastDateTo) : null;
     const firstMonthFromValue = firstMonthFrom ? parseMmYYYY(firstMonthFrom) : null;
@@ -180,6 +194,10 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       if (hazardSet.size > 0 && !hazardSet.has(row.hazard_code)) return false;
       if (metricSet.size > 0 && !metricSet.has(row.metric)) return false;
       if (statusSet.size > 0 && !statusSet.has(row.status ?? "")) return false;
+      if (trackSet.size > 0) {
+        const trackLabel = row.track != null ? `Track ${row.track}` : "";
+        if (!trackSet.has(trackLabel)) return false;
+      }
 
       if (forecastFromValue != null || forecastToValue != null) {
         if (!row.forecast_date) return false;
@@ -227,6 +245,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
     selectedCountries,
     selectedMetrics,
     selectedStatuses,
+    selectedTracks,
   ]);
 
   const clearFilters = () => {
@@ -235,6 +254,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
     setSelectedHazards([]);
     setSelectedMetrics([]);
     setSelectedStatuses([]);
+    setSelectedTracks([]);
     setForecastDateFrom("");
     setForecastDateTo("");
     setFirstMonthFrom("");
@@ -372,6 +392,16 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         defaultSortDirection: "desc",
       },
       {
+        key: "track",
+        label: "Track",
+        headerClassName: "text-center whitespace-nowrap",
+        cellClassName: "text-center whitespace-nowrap",
+        sortValue: (row) => row.track ?? 0,
+        render: (row) =>
+          row.track != null ? `Track ${row.track}` : "\u2014",
+        defaultSortDirection: "asc",
+      },
+      {
         key: "eiv_total",
         label: renderHeaderClamp(
           renderEivHeader(
@@ -404,6 +434,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
       "10ch",
       "10ch",
       "10ch",
+      "7ch",
       "7ch",
       "7ch",
       "7ch",
@@ -509,6 +540,27 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
                 {statusOptions.map((status) => (
                   <option key={status} value={status}>
                     {status}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-fred-text">
+              Track
+              <select
+                className="rounded border border-fred-secondary bg-fred-surface px-2 py-1 text-xs text-fred-text"
+                multiple
+                value={selectedTracks}
+                onChange={(event) =>
+                  setSelectedTracks(
+                    Array.from(event.target.selectedOptions).map(
+                      (option) => option.value
+                    )
+                  )
+                }
+              >
+                {trackOptions.map((track) => (
+                  <option key={track} value={track}>
+                    {track}
                   </option>
                 ))}
               </select>

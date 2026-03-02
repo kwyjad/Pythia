@@ -97,7 +97,7 @@ def test_assert_hs_outputs_questions_expected_empty(
                 "hs_test",
                 "USA",
                 "FL",
-                "watchlist",
+                "quiet",
                 0.1,
                 False,
                 "[]",
