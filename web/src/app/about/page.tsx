@@ -1,12 +1,14 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { loadAllVersionedOverviews } from "../../lib/overview_loader";
 import {
   extractAllPrompts,
   extractAllVersionedPrompts,
 } from "../../lib/prompt_extractor";
 import { renderSimpleMarkdown } from "../../lib/simple_markdown";
 import AiPromptsSection from "./AiPromptsSection";
+import OverviewSection from "./OverviewSection";
 
 const ABOUT_MD = `## Welcome!
 
@@ -43,11 +45,13 @@ export const metadata = {
 };
 
 export default async function AboutPage() {
-  const [overviewMd, prompts, versionedData] = await Promise.all([
-    loadOverviewMarkdown(),
-    extractAllPrompts(),
-    extractAllVersionedPrompts(),
-  ]);
+  const [overviewMd, prompts, versionedData, versionedOverviewData] =
+    await Promise.all([
+      loadOverviewMarkdown(),
+      extractAllPrompts(),
+      extractAllVersionedPrompts(),
+      loadAllVersionedOverviews(),
+    ]);
 
   return (
     <div className="space-y-6">
@@ -59,7 +63,13 @@ export default async function AboutPage() {
       </header>
       <article className="max-w-none">
         {renderSimpleMarkdown(ABOUT_MD)}
-        {overviewMd && renderSimpleMarkdown(overviewMd)}
+        {overviewMd && (
+          <OverviewSection
+            currentOverview={overviewMd}
+            versions={versionedOverviewData.versions}
+            versionedOverviews={versionedOverviewData.overviews}
+          />
+        )}
         <AiPromptsSection
           currentPrompts={prompts}
           versions={versionedData.versions}
