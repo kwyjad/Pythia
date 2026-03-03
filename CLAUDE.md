@@ -71,6 +71,7 @@ Two DuckDB databases:
 **Pythia DB** (`PYTHIA_DB_URL`): system of record
 - `hs_runs`, `hs_triage` — Horizon Scanner outputs (triage scores, RC fields)
 - `hs_hazard_tail_packs` — RC-triggered hazard evidence packs
+- `seasonal_forecasts` — NMME country-level temp/precip anomalies (monthly from CPC)
 - `questions`, `question_research` — Seeded questions + research briefs
 - `forecasts_raw`, `forecasts_ensemble` — Per-model + aggregated SPDs
 - `resolutions` — Ground truth values per (question_id, horizon_m)
@@ -108,6 +109,9 @@ discover_connectors() -> fetch_and_normalize() per connector
 - Tier 2: EM-DAT (historical read-only, no active connector; replaced by IFRC Montandon)
 
 **Transform adapters** (`resolver/transform/adapters/`): ACLED and IDMC adapters normalize source-specific schemas to the common format used by the precedence engine.
+
+**NMME seasonal forecasts** (`resolver/ingestion/nmme.py` + `resolver/tools/ingest_nmme.py`):
+Separate from the Connector pipeline. Fetches NMME ensemble mean anomalies from CPC FTP, computes area-weighted country averages using xarray + regionmask, and writes to the `seasonal_forecasts` table in Pythia DB. Injected into HS triage/RC prompts via `horizon_scanner/seasonal_context.py` (`climate_data` kwarg) and into forecaster prompts via `research_json["nmme_seasonal_outlook"]`. Run: `python -m resolver.tools.ingest_nmme`.
 
 Run the pipeline: `python -m resolver.tools.run_pipeline [--connectors acled idmc] [--db path/to/resolver.duckdb]`
 
@@ -179,6 +183,10 @@ python3 -c "from pythia.db.schema import ensure_schema; ensure_schema()"
 # Run Resolver pipeline (fetch facts from ACLED + IDMC -> DuckDB)
 python3 -m resolver.tools.run_pipeline
 # Or specific connectors: python3 -m resolver.tools.run_pipeline --connectors acled idmc
+
+# Ingest NMME seasonal forecasts (temp/precip anomalies from CPC FTP)
+python3 -m resolver.tools.ingest_nmme
+# Or specific month: python3 -m resolver.tools.ingest_nmme --year-month 202603
 
 # Run Horizon Scanner
 python3 -m horizon_scanner.horizon_scanner

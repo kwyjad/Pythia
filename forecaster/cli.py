@@ -897,6 +897,7 @@ from .prompts import (
     merge_evidence_packs,
 )
 from .scenario_writer import run_scenarios_for_run
+from horizon_scanner.seasonal_context import CLIMATE_HAZARDS, load_seasonal_forecasts
 from .providers import (
     DEFAULT_ENSEMBLE,
     GEMINI_MODEL_ID,
@@ -3962,6 +3963,17 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
             )
             merged_evidence_pack["hs_hazard_tail_pack"] = hazard_tail_pack
 
+        # Inject NMME seasonal outlook for climate hazards.
+        if hz in CLIMATE_HAZARDS:
+            try:
+                _seasonal = load_seasonal_forecasts(iso3)
+                if _seasonal:
+                    if merged_evidence_pack is None:
+                        merged_evidence_pack = {}
+                    merged_evidence_pack["nmme_seasonal_outlook"] = _seasonal
+            except Exception as _exc:
+                logging.debug("Seasonal forecast load failed for %s: %s", iso3, _exc)
+
         prompt = build_research_prompt_v2(
             question={
                 "question_id": qid,
@@ -4243,6 +4255,15 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
         target_months = rec.get("target_months") or rec.get("target_month")
         target_month = _first_target_month(target_months)
 
+        # Inject NMME seasonal outlook for climate hazards.
+        if hz in CLIMATE_HAZARDS and "nmme_seasonal_outlook" not in research_json:
+            try:
+                _seasonal = load_seasonal_forecasts(iso3)
+                if _seasonal:
+                    research_json["nmme_seasonal_outlook"] = _seasonal
+            except Exception as _exc:
+                logging.debug("Seasonal forecast load failed for %s: %s", iso3, _exc)
+
         question_evidence_pack = _load_question_evidence_pack(run_id, qid) if qid else None
         prompt = build_spd_prompt_v2(
             question={
@@ -4428,6 +4449,15 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     len(tail_pack.get("recent_signals") or []),
                     len(merged_sources),
                 )
+
+        # Inject NMME seasonal outlook for climate hazards.
+        if hz in CLIMATE_HAZARDS and "nmme_seasonal_outlook" not in research_json:
+            try:
+                _seasonal = load_seasonal_forecasts(iso3)
+                if _seasonal:
+                    research_json["nmme_seasonal_outlook"] = _seasonal
+            except Exception as _exc:
+                logging.debug("Seasonal forecast load failed for %s: %s", iso3, _exc)
 
         target_months = rec.get("target_months") or rec.get("target_month")
         target_month = _first_target_month(target_months)

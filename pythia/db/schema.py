@@ -991,6 +991,33 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
             },
         )
 
+        _ensure_table_and_columns(
+            con,
+            "seasonal_forecasts",
+            """
+            CREATE TABLE IF NOT EXISTS seasonal_forecasts (
+                iso3              TEXT NOT NULL,
+                variable          TEXT NOT NULL,
+                lead_months       INTEGER NOT NULL,
+                anomaly_value     DOUBLE,
+                tercile_category  TEXT,
+                forecast_issue_date DATE NOT NULL,
+                created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT seasonal_forecasts_unique
+                    UNIQUE (iso3, variable, lead_months, forecast_issue_date)
+            );
+            """,
+            {
+                "iso3": "TEXT",
+                "variable": "TEXT",
+                "lead_months": "INTEGER",
+                "anomaly_value": "DOUBLE",
+                "tercile_category": "TEXT",
+                "forecast_issue_date": "DATE",
+                "created_at": "TIMESTAMP",
+            },
+        )
+
         _ensure_hs_triage_table(con)
         _ensure_question_research_table(con)
         _ensure_scenarios_table(con)

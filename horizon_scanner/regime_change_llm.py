@@ -57,6 +57,7 @@ from horizon_scanner.rc_grounding_prompts import (
 )
 from horizon_scanner.rc_prompts import build_rc_prompt
 from horizon_scanner.regime_change import coerce_regime_change
+from horizon_scanner.seasonal_context import CLIMATE_HAZARDS, load_seasonal_forecasts
 from horizon_scanner.seasonal_filter import get_active_hazards
 
 logger = logging.getLogger(__name__)
@@ -358,12 +359,23 @@ def _run_rc_for_single_hazard(
     rationale_bullets, trigger_signals, valid, status}``.
     """
 
+    # Inject NMME seasonal climate data for climate-sensitive hazards.
+    climate_kwargs: dict[str, Any] = {}
+    if hazard_code in CLIMATE_HAZARDS:
+        try:
+            seasonal = load_seasonal_forecasts(iso3)
+            if seasonal:
+                climate_kwargs["climate_data"] = seasonal
+        except Exception as exc:
+            logger.debug("Seasonal forecast load failed for %s: %s", iso3, exc)
+
     prompt = build_rc_prompt(
         hazard_code,
         country_name=country_name,
         iso3=iso3,
         resolver_features=resolver_features,
         evidence_pack=evidence_pack,
+        **climate_kwargs,
     )
 
     pass_rcs: list[Dict[str, Any]] = []

@@ -61,6 +61,7 @@ from horizon_scanner.hs_triage_grounding_prompts import (
     build_triage_grounding_prompt,
     get_recency_days,
 )
+from horizon_scanner.seasonal_context import CLIMATE_HAZARDS, load_seasonal_forecasts
 from horizon_scanner.seasonal_filter import get_active_hazards
 from pythia.db.schema import connect as pythia_connect
 
@@ -454,6 +455,16 @@ def _run_triage_for_single_hazard(
     data_quality, scenario_stub, confidence_note, valid, status}``.
     """
 
+    # Inject NMME seasonal climate data for climate-sensitive hazards.
+    climate_kwargs: dict[str, Any] = {}
+    if hazard_code in CLIMATE_HAZARDS:
+        try:
+            seasonal = load_seasonal_forecasts(iso3)
+            if seasonal:
+                climate_kwargs["climate_data"] = seasonal
+        except Exception as exc:
+            logger.debug("Seasonal forecast load failed for %s: %s", iso3, exc)
+
     prompt = build_triage_prompt(
         hazard_code,
         country_name=country_name,
@@ -461,6 +472,7 @@ def _run_triage_for_single_hazard(
         resolver_features=resolver_features,
         rc_result=rc_result_for_hazard,
         evidence_pack=evidence_pack,
+        **climate_kwargs,
     )
 
     pass_extracts: list[Dict[str, Any]] = []
