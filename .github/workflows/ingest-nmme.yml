@@ -1,0 +1,75 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+name: Ingest NMME Seasonal Forecasts
+
+concurrency:
+  group: pythia-nmme-ingest
+  cancel-in-progress: false
+
+"on":
+  workflow_dispatch:
+    inputs:
+      year_month:
+        description: "Issue month as YYYYMM (auto-detects if empty)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Fetch and process but do not write to DuckDB"
+        required: false
+        default: "false"
+        type: boolean
+  schedule:
+    # Run at 06:00 UTC on the 10th of each month (CPC publishes ~9th).
+    - cron: "0 6 10 * *"
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  ingest:
+    name: Fetch & ingest NMME seasonal forecasts
+    runs-on: ubuntu-latest
+    env:
+      PYTHIA_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+
+      - name: Run NMME ingestion
+        run: |
+          set -- python -m resolver.tools.ingest_nmme
+          if [ -n "${{ inputs.year_month }}" ]; then
+            set -- "$@" --year-month "${{ inputs.year_month }}"
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            set -- "$@" --dry-run
+          fi
+          "$@"
+
+      - name: Upload DuckDB artifact
+        if: inputs.dry_run != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nmme-ingest-${{ github.run_id }}
+          path: data/resolver.duckdb
+          retention-days: 30

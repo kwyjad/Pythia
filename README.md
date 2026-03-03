@@ -109,11 +109,23 @@ See [docs/hs_hazard_tail_packs.md](docs/hs_hazard_tail_packs.md) for full detail
 - Tail packs are a **second-stage, hazard-scoped follow-up**: HS first builds a country evidence pack, then requests a hazard-specific tail pack when RC is elevated.
 - Web research is controlled by `PYTHIA_WEB_RESEARCH_ENABLED=1` plus either `PYTHIA_RETRIEVER_ENABLED=1` (shared retriever) or `PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED=1` (HS/Research web search).
 
+## NMME seasonal climate forecasts
+
+Pythia ingests NMME (North American Multi-Model Ensemble) seasonal temperature and precipitation anomaly forecasts from the CPC FTP server. These provide structured climate context for drought, flood, heatwave, and tropical cyclone assessments.
+
+- **Source**: `ftp://ftp.cpc.ncep.noaa.gov/NMME/realtime_anom/ENSMEAN/` — ensemble mean anomalies at 1° resolution, updated ~9th of each month with 7 lead months.
+- **Processing**: Country-level area-weighted averages using `xarray` + `regionmask` (Natural Earth admin-0 boundaries). Anomalies expressed in σ (standard deviations from climatology) with derived tercile categories (above/below/near normal).
+- **Storage**: `seasonal_forecasts` table in Pythia DuckDB (~2,700 rows per monthly update: 195 countries × 2 variables × 7 leads).
+- **Injection**: Automatically loaded into HS triage and RC prompts via the existing `climate_data` parameter for DR, FL, HW, TC hazards. Also injected into forecaster research and SPD prompts via `research_json`.
+- **Run manually**: `python -m resolver.tools.ingest_nmme` (or `--year-month YYYYMM` for a specific month, `--dry-run` to preview).
+- **Automation**: `.github/workflows/ingest-nmme.yml` runs on the 10th of each month.
+
 ## Data model / DuckDB tables
 
 Key tables (see [`pythia/db/schema.py`](pythia/db/schema.py) and [`SCHEMAS.md`](SCHEMAS.md) for canonical fields):
 
 - **HS**: `hs_runs`, `hs_triage` (includes RC columns), `hs_country_reports`, `hs_hazard_tail_packs`
+- **Seasonal climate**: `seasonal_forecasts` (NMME country-level temp/precip anomalies)
 - **Questions + research**: `questions`, `question_research`
 - **Forecasts**: `forecasts_raw`, `forecasts_ensemble`
 - **Diagnostics**: `llm_calls`, `question_run_metrics`
