@@ -57,14 +57,14 @@ jobs:
 
       - name: Run NMME ingestion
         run: |
-          ARGS=""
+          set -- python -m resolver.tools.ingest_nmme
           if [ -n "${{ inputs.year_month }}" ]; then
-            ARGS="$ARGS --year-month ${{ inputs.year_month }}"
+            set -- "$@" --year-month "${{ inputs.year_month }}"
           fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
+            set -- "$@" --dry-run
           fi
-          python -m resolver.tools.ingest_nmme $ARGS
+          "$@"
 
       - name: Upload DuckDB artifact
         if: inputs.dry_run != 'true'
