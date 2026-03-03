@@ -34,6 +34,33 @@ researcher:
     budget_usd_per_run: null       # hard cap; null = unlimited
     max_calls_per_question: null   # hard cap; null = unlimited
 
+prediction_markets:
+  enabled: false                    # Master switch (off by default); override with PYTHIA_PREDICTION_MARKETS_ENABLED=1
+  platforms:
+    metaculus:
+      enabled: true
+      api_url: "https://www.metaculus.com/api2/questions/"
+      cache_ttl_hours: 24
+      min_forecasters: 10
+    polymarket:
+      enabled: true
+      api_url: "https://gamma-api.polymarket.com"
+      min_volume_usd: 10000
+      min_liquidity_usd: 5000
+    manifold:
+      enabled: true
+      api_url: "https://api.manifold.markets/v0"
+      min_unique_bettors: 10
+      min_liquidity_mana: 500
+  query_generation:
+    model: "gemini-3-flash-preview"  # Cheap/fast model for query generation
+    max_queries: 5
+  relevance_filter:
+    model: "gemini-3-flash-preview"
+    min_relevance_score: 6
+    max_results: 5
+  timeout_sec: 30
+
 llm:
   # Active profile: "test" (cheap) or "prod" (frontier).
   # Override via PYTHIA_LLM_PROFILE env var.
