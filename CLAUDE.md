@@ -72,6 +72,7 @@ Two DuckDB databases:
 - `hs_runs`, `hs_triage` — Horizon Scanner outputs (triage scores, RC fields)
 - `hs_hazard_tail_packs` — RC-triggered hazard evidence packs
 - `seasonal_forecasts` — NMME country-level temp/precip anomalies (monthly from CPC)
+- `conflict_forecasts` — VIEWS + conflictforecast.org conflict predictions (PK: source, iso3, hazard_code, metric, lead_months, forecast_issue_date)
 - `questions`, `question_research` — Seeded questions + research briefs
 - `forecasts_raw`, `forecasts_ensemble` — Per-model + aggregated SPDs
 - `resolutions` — Ground truth values per (question_id, horizon_m)
@@ -112,6 +113,12 @@ discover_connectors() -> fetch_and_normalize() per connector
 
 **NMME seasonal forecasts** (`resolver/ingestion/nmme.py` + `resolver/tools/ingest_nmme.py`):
 Separate from the Connector pipeline. Fetches NMME ensemble mean anomalies from CPC FTP, computes area-weighted country averages using xarray + regionmask, and writes to the `seasonal_forecasts` table in Pythia DB. Injected into HS triage/RC prompts via `horizon_scanner/seasonal_context.py` (`climate_data` kwarg) and into forecaster prompts via `research_json["nmme_seasonal_outlook"]`. Run: `python -m resolver.tools.ingest_nmme`.
+
+**Conflict forecast connectors** (`resolver/connectors/views.py`, `resolver/connectors/conflictforecast.py`):
+Separate from the Connector pipeline (use `FORECAST_REGISTRY`, not `REGISTRY`). VIEWS connector fetches ML-based fatality predictions from the VIEWS API (`views_predicted_fatalities`, `views_p_gte25_brd`, leads 1–6). conflictforecast.org connector fetches news-based risk scores from Backendless API (`cf_armed_conflict_risk_3m`, `cf_armed_conflict_risk_12m`, `cf_violence_intensity_3m`). Both write to `conflict_forecasts` table. Loaded into ACE prompts via `horizon_scanner/conflict_forecasts.py`. Run: `python -m resolver.tools.fetch_conflict_forecasts`.
+
+**ICG CrisisWatch "On the Horizon"** (`horizon_scanner/crisiswatch_horizon.py`):
+Monthly fetch of ICG's forward-looking conflict risk/resolution flags via Gemini grounding search. Called once per HS run, cached in-memory, injected into RC prompts for flagged countries.
 
 Run the pipeline: `python -m resolver.tools.run_pipeline [--connectors acled idmc] [--db path/to/resolver.duckdb]`
 
@@ -187,6 +194,11 @@ python3 -m resolver.tools.run_pipeline
 # Ingest NMME seasonal forecasts (temp/precip anomalies from CPC FTP)
 python3 -m resolver.tools.ingest_nmme
 # Or specific month: python3 -m resolver.tools.ingest_nmme --year-month 202603
+
+# Fetch conflict forecasts (VIEWS + conflictforecast.org -> conflict_forecasts table)
+python3 -m resolver.tools.fetch_conflict_forecasts
+# Or specific sources: python3 -m resolver.tools.fetch_conflict_forecasts --sources views conflictforecast_org
+# Dry run: python3 -m resolver.tools.fetch_conflict_forecasts --dry-run
 
 # Run Horizon Scanner
 python3 -m horizon_scanner.horizon_scanner

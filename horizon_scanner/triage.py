@@ -465,6 +465,17 @@ def _run_triage_for_single_hazard(
         except Exception as exc:
             logger.debug("Seasonal forecast load failed for %s: %s", iso3, exc)
 
+    # Inject conflict forecasts for ACE hazard.
+    conflict_kwargs: dict[str, Any] = {}
+    if hazard_code == "ACE":
+        try:
+            from horizon_scanner.conflict_forecasts import load_conflict_forecasts
+            forecasts = load_conflict_forecasts(iso3)
+            if forecasts:
+                conflict_kwargs["conflict_forecasts"] = forecasts
+        except Exception as exc:
+            logger.debug("Conflict forecast load failed for %s: %s", iso3, exc)
+
     prompt = build_triage_prompt(
         hazard_code,
         country_name=country_name,
@@ -473,6 +484,7 @@ def _run_triage_for_single_hazard(
         rc_result=rc_result_for_hazard,
         evidence_pack=evidence_pack,
         **climate_kwargs,
+        **conflict_kwargs,
     )
 
     pass_extracts: list[Dict[str, Any]] = []

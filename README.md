@@ -120,12 +120,33 @@ Pythia ingests NMME (North American Multi-Model Ensemble) seasonal temperature a
 - **Run manually**: `python -m resolver.tools.ingest_nmme` (or `--year-month YYYYMM` for a specific month, `--dry-run` to preview).
 - **Automation**: `.github/workflows/ingest-nmme.yml` runs on the 10th of each month.
 
+## Conflict forecasts
+
+Pythia ingests external conflict forecasts from two independent sources and incorporates qualitative expert assessments from a third, providing forward-looking quantitative and qualitative signals for the Armed Conflict (ACE) hazard.
+
+### Quantitative sources (stored in DuckDB)
+
+- **VIEWS (Uppsala/PRIO)**: ML-based country-month state-based conflict forecasts from the [VIEWS Forecasting](https://viewsforecasting.org/) project. Provides predicted fatalities (`views_predicted_fatalities`) and probability of ≥25 battle-related deaths (`views_p_gte25_brd`) at 1–6 month lead times. Good at trends and baseline levels; weaker at sudden onset.
+- **conflictforecast.org (Mueller/Rauh)**: News-based armed conflict risk scores from the [Conflict Forecast](https://conflictforecast.org/) project. Provides armed conflict risk at 3-month and 12-month horizons (`cf_armed_conflict_risk_3m`, `cf_armed_conflict_risk_12m`) and violence intensity outlook (`cf_violence_intensity_3m`). Better at detecting shifts and escalation signals from media coverage patterns.
+
+### Qualitative source (prompt-time web research)
+
+- **ICG CrisisWatch**: International Crisis Group's monthly [CrisisWatch](https://www.crisisgroup.org/crisiswatch) bulletin. Per-country directional assessments (Deteriorated/Improved/Unchanged) and forward-looking "On the Horizon" flags (~3 conflict risks + ~1 resolution opportunity per month) are fetched via web research at prompt time and injected into RC and triage evidence for ACE hazards.
+
+### Storage and injection
+
+- **Table**: `conflict_forecasts` in Pythia DuckDB (keyed on source, iso3, hazard_code, metric, lead_months, forecast_issue_date).
+- **HS integration**: Automatically loaded into RC and triage prompts for ACE hazards via `horizon_scanner/conflict_forecasts.py`. Includes staleness warnings for data >45 days old.
+- **Forecaster integration**: Injected into research prompts for ACE questions as structured quantitative anchors.
+- **Run manually**: `python -m resolver.tools.fetch_conflict_forecasts` (or `--sources views conflictforecast_org`, `--dry-run` to preview).
+
 ## Data model / DuckDB tables
 
 Key tables (see [`pythia/db/schema.py`](pythia/db/schema.py) and [`SCHEMAS.md`](SCHEMAS.md) for canonical fields):
 
 - **HS**: `hs_runs`, `hs_triage` (includes RC columns), `hs_country_reports`, `hs_hazard_tail_packs`
 - **Seasonal climate**: `seasonal_forecasts` (NMME country-level temp/precip anomalies)
+- **Conflict forecasts**: `conflict_forecasts` (VIEWS + conflictforecast.org predicted fatalities and risk scores)
 - **Questions + research**: `questions`, `question_research`
 - **Forecasts**: `forecasts_raw`, `forecasts_ensemble`
 - **Diagnostics**: `llm_calls`, `question_run_metrics`

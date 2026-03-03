@@ -161,6 +161,13 @@ Focus on authoritative sources: OCHA (ReliefWeb, situation reports),
 UNHCR, ICRC, Crisis Group, Security Council reports, ACLED analysis
 pieces, humanitarian dashboards.
 
+ICG CRISISWATCH: Also search for the latest ICG CrisisWatch entry for this
+country (site:crisisgroup.org/crisiswatch). If found, note the directional
+assessment (Deteriorated / Improved / Unchanged) and the narrative summary
+of the past month's developments. CrisisWatch covers ~70 active conflicts
+and ~50 standby situations. If there is no CrisisWatch entry for this
+country, note "No ICG CrisisWatch entry for this country."
+
 {_OUTPUT_SCHEMA_BLOCK}"""
 
 
