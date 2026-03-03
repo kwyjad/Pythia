@@ -157,6 +157,7 @@ def build_triage_prompt_ace(
     rc_result: Optional[Dict[str, Any]] = None,
     evidence_pack: Optional[Dict[str, Any]] = None,
     acled_summary: Optional[Dict[str, Any]] = None,
+    conflict_forecasts: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build triage prompt for Armed Conflict Events (ACE).
 
@@ -168,11 +169,15 @@ def build_triage_prompt_ace(
     ----------
     rc_result : dict from the prior RC assessment for this hazard-country
     acled_summary : dict with trailing fatalities, events, trend data
+    conflict_forecasts : optional dict from load_conflict_forecasts()
     """
+
+    from horizon_scanner.conflict_forecasts import format_conflict_forecasts_for_prompt
 
     evidence_text = _format_evidence(evidence_pack)
     rc_text = _format_rc_context(rc_result)
     acled_text = _format_acled_summary(acled_summary)
+    conflict_forecast_text = format_conflict_forecasts_for_prompt(conflict_forecasts)
     resolver_text = json.dumps(resolver_features, indent=2, default=str)
     schema_text = json.dumps(_TRIAGE_SCHEMA, indent=2)
 
@@ -184,13 +189,20 @@ def build_triage_prompt_ace(
         rc_context=rc_text,
     )
 
+    # Build optional conflict forecasts section
+    forecast_section = ""
+    if conflict_forecast_text:
+        forecast_section = f"""
+{conflict_forecast_text}
+"""
+
     return f"""{preamble}
 
 === ACE-SPECIFIC TRIAGE GUIDANCE ===
 
 ACLED BASE RATE DATA:
 {acled_text}
-
+{forecast_section}
 RESOLVER FEATURES (historical context):
 {resolver_text}
 

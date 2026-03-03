@@ -117,6 +117,7 @@ def get_rc_search_queries(
             f"{country_name} political violence military tensions {year}",
             f"{country_name} ceasefire peace talks breakdown {year}",
             f"{country_name} armed groups militia clashes {year}",
+            f"site:crisisgroup.org/crisiswatch {country_name} {year}",
         ],
         "DR": [
             f"{country_name} drought rainfall deficit {year}",
@@ -150,6 +151,8 @@ def build_rc_prompt_ace(
     resolver_features: Dict[str, Any],
     evidence_pack: Optional[Dict[str, Any]] = None,
     acled_summary: Optional[Dict[str, Any]] = None,
+    conflict_forecasts: Optional[Dict[str, Any]] = None,
+    icg_on_the_horizon: Optional[str] = None,
 ) -> str:
     """Build RC prompt for Armed Conflict Events (ACE).
 
@@ -168,10 +171,15 @@ def build_rc_prompt_ace(
         - trend_pct_change: float (3m vs prior 3m)
         - top_event_types: list of (event_type, count) tuples
         - recent_spikes: list of (week, event_count) for anomalous weeks
+    conflict_forecasts : optional dict from load_conflict_forecasts()
+    icg_on_the_horizon : optional string with ICG "On the Horizon" flag
     """
+
+    from horizon_scanner.conflict_forecasts import format_conflict_forecasts_for_prompt
 
     evidence_text = _format_evidence(evidence_pack)
     acled_text = _format_acled_summary(acled_summary)
+    conflict_forecast_text = format_conflict_forecasts_for_prompt(conflict_forecasts)
     resolver_text = json.dumps(resolver_features, indent=2, default=str)
     schema_text = json.dumps(_RC_SCHEMA, indent=2)
 
@@ -181,6 +189,28 @@ def build_rc_prompt_ace(
         hazard_name="Armed Conflict Events",
         hazard_code="ACE",
     )
+
+    # Build optional ICG "On the Horizon" section
+    icg_section = ""
+    if icg_on_the_horizon:
+        icg_section = f"""
+ICG "ON THE HORIZON" FLAG:
+{icg_on_the_horizon}
+"""
+
+    # Build optional conflict forecasts section
+    forecast_section = ""
+    if conflict_forecast_text:
+        forecast_section = f"""
+{conflict_forecast_text}
+
+Compare these forward-looking estimates against the ACLED base rates above.
+If the forecasts suggest a significant departure from the historical pattern
+(e.g., VIEWS predicts a sharp increase in fatalities relative to the trailing
+12-month average, or conflictforecast.org flags escalation), this supports a
+higher RC likelihood. If forecasts are consistent with base rates, this
+supports stability.
+"""
 
     return f"""{preamble}
 
@@ -192,7 +222,8 @@ meaningfully different from the last 12 months?"
 
 ACLED BASE RATE DATA:
 {acled_text}
-
+{forecast_section}
+{icg_section}
 RESOLVER FEATURES (historical context):
 {resolver_text}
 

@@ -1018,6 +1018,38 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
             },
         )
 
+        _ensure_table_and_columns(
+            con,
+            "conflict_forecasts",
+            """
+            CREATE TABLE IF NOT EXISTS conflict_forecasts (
+                source              VARCHAR NOT NULL,
+                iso3                VARCHAR NOT NULL,
+                hazard_code         VARCHAR NOT NULL,
+                metric              VARCHAR NOT NULL,
+                lead_months         INTEGER NOT NULL,
+                value               DOUBLE NOT NULL,
+                forecast_issue_date DATE NOT NULL,
+                target_month        DATE NOT NULL,
+                model_version       VARCHAR,
+                created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (source, iso3, hazard_code, metric, lead_months, forecast_issue_date)
+            );
+            """,
+            {
+                "source": "VARCHAR",
+                "iso3": "VARCHAR",
+                "hazard_code": "VARCHAR",
+                "metric": "VARCHAR",
+                "lead_months": "INTEGER",
+                "value": "DOUBLE",
+                "forecast_issue_date": "DATE",
+                "target_month": "DATE",
+                "model_version": "VARCHAR",
+                "created_at": "TIMESTAMP",
+            },
+        )
+
         _ensure_hs_triage_table(con)
         _ensure_question_research_table(con)
         _ensure_scenarios_table(con)

@@ -1028,6 +1028,21 @@ def build_research_prompt_v2(
         _seasonal_lines.append("Note: Anomalies are in σ (standard deviations from climatology).")
         parts.append("\n".join(_seasonal_lines))
 
+    # Render conflict forecasts for ACE hazard.
+    if hazard == "ACE":
+        try:
+            from horizon_scanner.conflict_forecasts import (
+                load_conflict_forecasts,
+                format_conflict_forecasts_for_research,
+            )
+            _cf_data = load_conflict_forecasts(iso3)
+            if _cf_data:
+                _cf_text = format_conflict_forecasts_for_research(_cf_data)
+                if _cf_text:
+                    parts.append(_cf_text)
+        except Exception:
+            pass
+
     parts.append("Model/data notes:\n```json\n" + _json_dumps_for_prompt(model_info, indent=2) + "\n```")
 
     tasks_block = (

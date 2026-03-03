@@ -13,6 +13,8 @@ from .protocol import CANONICAL_COLUMNS, Connector
 from .acled import AcledConnector
 from .idmc import IdmcConnector
 from .ifrc_montandon import IfrcMontandonConnector
+from .views import ViewsConnector
+from .conflictforecast import ConflictForecastOrgConnector
 
 # Add new connectors here.  The orchestrator (run_pipeline.py) iterates
 # this registry to discover which sources to pull.
@@ -20,6 +22,14 @@ REGISTRY: dict[str, type] = {
     "acled": AcledConnector,
     "idmc": IdmcConnector,
     "ifrc_montandon": IfrcMontandonConnector,
+}
+
+# Forecast connectors write to ``conflict_forecasts`` (not facts_resolved).
+# They follow a different interface: fetch_forecasts() → DataFrame.
+# Use ``fetch_conflict_forecasts.py`` to run these.
+FORECAST_REGISTRY: dict[str, type] = {
+    "views": ViewsConnector,
+    "conflictforecast_org": ConflictForecastOrgConnector,
 }
 
 
@@ -37,5 +47,6 @@ __all__ = [
     "CANONICAL_COLUMNS",
     "Connector",
     "REGISTRY",
+    "FORECAST_REGISTRY",
     "discover_connectors",
 ]

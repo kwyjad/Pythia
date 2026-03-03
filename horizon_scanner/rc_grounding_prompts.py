@@ -166,6 +166,12 @@ Focus on authoritative sources: ACLED, Crisis Group, UN OCHA, Armed
 Conflict Location & Event Data, UNHCR, local conflict monitoring
 organizations, major wire services (Reuters, AP, AFP).
 
+ICG CRISISWATCH: Also search for the latest ICG CrisisWatch entry for this
+country (site:crisisgroup.org/crisiswatch). Note any directional arrows
+(Deteriorated / Improved / Unchanged) and any forward-looking alerts
+(Conflict Risk / Resolution Opportunity). CrisisWatch provides expert
+qualitative assessment and is updated monthly.
+
 {_OUTPUT_SCHEMA_BLOCK}"""
 
 
