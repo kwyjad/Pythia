@@ -876,6 +876,7 @@ def build_research_prompt_v2(
     evidence_pack: Dict[str, Any] | None = None,
     question_evidence_pack: Dict[str, Any] | None = None,
     merged_evidence: Dict[str, Any] | None = None,
+    prediction_market_bundle: Any | None = None,
 ) -> str:
     """Structured research prompt for Researcher v2."""
 
@@ -1040,6 +1041,20 @@ def build_research_prompt_v2(
                 _cf_text = format_conflict_forecasts_for_research(_cf_data)
                 if _cf_text:
                     parts.append(_cf_text)
+        except Exception:
+            pass
+
+    # Render prediction market signals (if available).
+    if prediction_market_bundle is not None:
+        try:
+            pm_text = prediction_market_bundle.to_prompt_text()
+            if pm_text:
+                parts.append(
+                    "PREDICTION MARKET SIGNALS (crowd/market consensus — treat as contextual evidence, not authoritative):\n"
+                    "CAVEATS: Markets can be illiquid or manipulated. Manifold uses play money. "
+                    "Questions may not directly address this forecast. Absence of markets ≠ absence of risk.\n"
+                    + pm_text
+                )
         except Exception:
             pass
 
@@ -1298,6 +1313,16 @@ def build_spd_prompt_v2(
             f"NEED_WEB_EVIDENCE: {iso3} {hazard} leading indicators next 3 months escalation trigger OR de-escalation trigger humanitarian\n\n"
         )
 
+    pm_signals_section = ""
+    _pm_signals = research_json.get("prediction_market_signals")
+    if isinstance(_pm_signals, dict) and _pm_signals.get("questions"):
+        pm_signals_section = (
+            "PREDICTION MARKET SIGNALS:\n"
+            "The research brief includes prediction market signals. "
+            "If relevant, consider them as additional base-rate anchors. "
+            "Weight by platform (Metaculus > Polymarket > Manifold) and liquidity.\n\n"
+        )
+
     seasonal_outlook_section = ""
     _seasonal_data = research_json.get("nmme_seasonal_outlook")
     if isinstance(_seasonal_data, dict) and _seasonal_data:
@@ -1332,6 +1357,7 @@ def build_spd_prompt_v2(
         "```\n\n"
         f"{rc_guidance}"
         f"{tail_pack_guidance}"
+        f"{pm_signals_section}"
         f"{seasonal_outlook_section}"
         "Buckets:\n"
         f"- These buckets represent {unit_phrase} at the country level.\n"

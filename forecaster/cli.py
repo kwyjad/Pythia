@@ -3974,6 +3974,29 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
             except Exception as _exc:
                 logging.debug("Seasonal forecast load failed for %s: %s", iso3, _exc)
 
+        # Prediction market signals (if enabled).
+        _pm_bundle = None
+        try:
+            from pythia.prediction_markets.config import is_enabled as _pm_enabled
+
+            if _pm_enabled():
+                from pythia.prediction_markets.retriever import get_prediction_market_signals
+
+                _country_name = _load_country_names().get(iso3, iso3)
+                _hz_name = HZ_QUERY_MAP.get(hz, hz).replace("_", " ").lower()
+                _pm_bundle = await get_prediction_market_signals(
+                    question_text=wording,
+                    country_name=_country_name,
+                    iso3=iso3,
+                    hazard_code=hz,
+                    hazard_name=_hz_name,
+                    forecast_start=str(question_row.get("window_start_date", "")),
+                    forecast_end=str(question_row.get("window_end_date", "")),
+                    run_id=run_id,
+                )
+        except Exception as _pm_exc:
+            logging.warning("Prediction market retrieval failed for %s: %s", qid, _pm_exc)
+
         prompt = build_research_prompt_v2(
             question={
                 "question_id": qid,
@@ -3989,6 +4012,7 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
             evidence_pack=hs_evidence_pack,
             question_evidence_pack=question_evidence_pack,
             merged_evidence=merged_evidence_pack,
+            prediction_market_bundle=_pm_bundle,
         )
 
         text, usage, error, ms = await _call_research_model(prompt, run_id=run_id)
@@ -4034,6 +4058,11 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
         research["sources"] = sources_list
         research["grounded"] = bool(sources_list)
         research = _normalize_and_enforce_grounding(research, merged_evidence_pack or {})
+
+        # Inject prediction market signals into research_json for SPD prompt.
+        if _pm_bundle is not None and _pm_bundle.questions:
+            research["prediction_market_signals"] = _pm_bundle.to_research_dict()
+
         con = connect(read_only=False)
         try:
             ensure_schema(con)

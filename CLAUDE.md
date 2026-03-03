@@ -37,6 +37,7 @@ Pythia/
     db/                # DuckDB schema definitions + migrations (schema.py is authoritative)
     tools/             # Post-forecast compute scripts (resolutions, scores, calibration)
     web_research/      # Shared retriever backends (Gemini, OpenAI, Claude, Exa, Perplexity)
+    prediction_markets/  # Prediction market signal retriever (Metaculus, Polymarket, Manifold)
     tests/             # Pythia-specific tests
   web/                 # Next.js 14 dashboard (TypeScript, Tailwind)
   tests/               # Cross-module integration tests
@@ -63,6 +64,7 @@ Pythia/
 - `resolver/tools/run_pipeline.py` — Pipeline orchestrator (fetch -> validate -> enrich -> precedence -> deltas -> DuckDB)
 - `resolver/tools/enrich.py` — Enrichment (registry lookups, ym derivation, defaults)
 - `resolver/tools/precedence_config.yml` — Precedence tier policy
+- `pythia/prediction_markets/retriever.py` — Prediction market signal retriever (runs at research time, queries Metaculus/Polymarket/Manifold)
 
 ## Databases
 
@@ -175,6 +177,7 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `FORECASTER_SPD_MAX_WORKERS` | SPD phase concurrency |
 | `PYTHIA_HS_RC_LEVEL*_*` | RC threshold overrides |
 | `PYTHIA_HS_RC_DIST_WARN_*` | RC distribution warning thresholds |
+| `PYTHIA_PREDICTION_MARKETS_ENABLED` | Enable prediction market retriever (0/1) |
 
 Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`.
 
