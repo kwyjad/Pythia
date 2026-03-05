@@ -38,6 +38,7 @@ from horizon_scanner.db_writer import (
     BLOCKED_HAZARDS,
     HAZARD_CONFIG,
     get_expected_hs_hazards,
+    log_hs_adversarial_checks_to_db,
     log_hs_country_reports_to_db,
     log_hs_hazard_tail_packs_to_db,
     log_hs_run_to_db,
@@ -53,6 +54,7 @@ from horizon_scanner.prompts import build_hs_triage_prompt
 from horizon_scanner.llm_logging import log_hs_llm_call
 from horizon_scanner.regime_change_llm import run_rc_for_country
 from horizon_scanner.triage import run_triage_for_country
+from pythia.adversarial_check import run_adversarial_check
 from pythia.db.schema import connect as pythia_connect, ensure_schema
 from pythia.web_research import fetch_evidence_pack
 
@@ -395,6 +397,31 @@ def _tail_pack_exists(run_id: str, iso3: str, hazard_code: str) -> bool:
             hazard_up,
         )
         return hit
+    finally:
+        con.close()
+
+
+def _adversarial_check_exists(run_id: str, iso3: str, hazard_code: str) -> bool:
+    con = pythia_connect(read_only=True)
+    iso3_up = (iso3 or "").upper()
+    hazard_up = (hazard_code or "").upper()
+    try:
+        try:
+            table_info = con.execute("PRAGMA table_info('hs_adversarial_checks')").fetchall()
+        except Exception:  # noqa: BLE001
+            return False
+        if not table_info:
+            return False
+        row = con.execute(
+            """
+            SELECT 1
+            FROM hs_adversarial_checks
+            WHERE hs_run_id = ? AND iso3 = ? AND hazard_code = ?
+            LIMIT 1
+            """,
+            [run_id, iso3_up, hazard_up],
+        ).fetchone()
+        return row is not None
     finally:
         con.close()
 
@@ -1284,6 +1311,54 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
                         hazard_code,
                         exc,
                     )
+
+    # 5b. Adversarial checks (counter-evidence for RC L2+ hazards)
+    adversarial_enabled = os.getenv("PYTHIA_ADVERSARIAL_CHECK_ENABLED", "1") == "1"
+    if adversarial_enabled and (
+        os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
+        or os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") == "1"
+    ):
+        adv_candidates = _select_tail_pack_hazards(triage, get_expected_hs_hazards())
+        for candidate in adv_candidates:
+            hazard_code = candidate.get("hazard_code") or ""
+            if _adversarial_check_exists(run_id, iso3_up, hazard_code):
+                continue
+            rc_full = combined_hazards.get(hazard_code, {}).get("regime_change", {})
+            try:
+                adv_result = run_adversarial_check(
+                    iso3=iso3_up,
+                    country_name=country_name,
+                    hazard_code=hazard_code,
+                    rc_result=rc_full,
+                    run_id=run_id,
+                    evidence_pack=evidence_pack,
+                )
+                if adv_result:
+                    log_hs_adversarial_checks_to_db(
+                        run_id,
+                        [
+                            {
+                                "iso3": iso3_up,
+                                "hazard_code": hazard_code,
+                                "rc_level": candidate.get("rc_level"),
+                                "net_assessment": adv_result.get("net_assessment"),
+                                "summary": adv_result.get("summary"),
+                                "payload_json": json.dumps(adv_result, ensure_ascii=False),
+                                "sources_json": json.dumps(
+                                    adv_result.get("sources", []), ensure_ascii=False
+                                ),
+                                "grounded": adv_result.get("grounded", False),
+                                "model_id": adv_result.get("model_id", ""),
+                            }
+                        ],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "HS adversarial check failed for %s %s: %s",
+                    iso3_up,
+                    hazard_code,
+                    exc,
+                )
 
     # 6. Build result
     rc_status = rc_result.get("status", "failed")

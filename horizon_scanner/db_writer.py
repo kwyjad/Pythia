@@ -612,6 +612,44 @@ def log_hs_hazard_tail_packs_to_db(hs_run_id: str, packs: list[dict]) -> None:
     con.close()
 
 
+def log_hs_adversarial_checks_to_db(hs_run_id: str, checks: list[dict]) -> None:
+    """Persist adversarial evidence checks to ``hs_adversarial_checks``."""
+    con = connect(read_only=False)
+    ensure_schema(con)
+
+    for check in checks:
+        iso3 = (check.get("iso3") or "").upper()
+        hazard_code = (check.get("hazard_code") or "").upper()
+
+        con.execute(
+            "DELETE FROM hs_adversarial_checks WHERE hs_run_id = ? AND iso3 = ? AND hazard_code = ?;",
+            [hs_run_id, iso3, hazard_code],
+        )
+        con.execute(
+            """
+            INSERT INTO hs_adversarial_checks (
+                hs_run_id, iso3, hazard_code, rc_level,
+                net_assessment, summary, payload_json,
+                sources_json, grounded, model_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            [
+                hs_run_id,
+                iso3,
+                hazard_code,
+                check.get("rc_level"),
+                check.get("net_assessment") or "",
+                check.get("summary") or "",
+                check.get("payload_json") or "{}",
+                check.get("sources_json") or "[]",
+                bool(check.get("grounded")),
+                check.get("model_id") or "",
+            ],
+        )
+
+    con.close()
+
+
 def log_hs_questions_to_db(hs_run_id: str, question_rows: Iterable[dict]) -> None:
     """Persist Horizon Scanner questions to the ``questions`` table.
 

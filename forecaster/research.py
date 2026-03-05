@@ -6,6 +6,17 @@
 # forecaster/research.py
 from __future__ import annotations
 """
+DEPRECATED: This module is no longer called in the main forecasting pipeline.
+The Researcher component was removed in favor of:
+- Direct structured data injection (ReliefWeb, ACLED, IPC, ACAPS)
+- Adversarial evidence checks for RC L2+
+- Market snapshots moved to pythia/market_snapshot.py
+
+Retained for backward compatibility and reference.
+
+---
+
+Original description:
 research.py — External research pipeline **without Serper/AskNews**.
 This version uses **Gemini 2.5 Pro** with **Grounding by Google (Google Search tool)**
 for retrieval, and Gemini again for writing the research brief.

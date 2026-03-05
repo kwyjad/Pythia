@@ -147,6 +147,88 @@ Field rules:
 
 
 # ---------------------------------------------------------------------------
+# Helper: format new data connector sections for triage prompts
+# ---------------------------------------------------------------------------
+
+def _format_new_data_sections(
+    reliefweb_reports: Any = None,
+    acled_political_events: Any = None,
+    ipc_phases: Any = None,
+    inform_severity: Any = None,
+    acaps_risk_radar: Any = None,
+    acaps_monitoring: Any = None,
+    humanitarian_access: Any = None,
+) -> str:
+    """Format all new data sources into a combined text block for triage prompts."""
+    sections: list[str] = []
+
+    if reliefweb_reports:
+        try:
+            from horizon_scanner.reliefweb import format_reliefweb_for_prompt
+            t = format_reliefweb_for_prompt(reliefweb_reports)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if acled_political_events:
+        try:
+            from pythia.acled_political import format_political_events_for_prompt
+            t = format_political_events_for_prompt(acled_political_events)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if ipc_phases:
+        try:
+            from pythia.ipc_phases import format_ipc_for_prompt
+            t = format_ipc_for_prompt(ipc_phases)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if inform_severity:
+        try:
+            from pythia.acaps import format_inform_severity_for_prompt
+            t = format_inform_severity_for_prompt(inform_severity)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if acaps_risk_radar:
+        try:
+            from pythia.acaps import format_risk_radar_for_prompt
+            t = format_risk_radar_for_prompt(acaps_risk_radar)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if acaps_monitoring:
+        try:
+            from pythia.acaps import format_daily_monitoring_for_prompt
+            t = format_daily_monitoring_for_prompt(acaps_monitoring)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if humanitarian_access:
+        try:
+            from pythia.acaps import format_humanitarian_access_for_prompt
+            t = format_humanitarian_access_for_prompt(humanitarian_access)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    return "\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
 # ACE — Armed Conflict Events
 # ---------------------------------------------------------------------------
 
@@ -158,6 +240,14 @@ def build_triage_prompt_ace(
     evidence_pack: Optional[Dict[str, Any]] = None,
     acled_summary: Optional[Dict[str, Any]] = None,
     conflict_forecasts: Optional[Dict[str, Any]] = None,
+    reliefweb_reports: Optional[Any] = None,
+    acled_political_events: Optional[Any] = None,
+    ipc_phases: Optional[Any] = None,
+    inform_severity: Optional[Any] = None,
+    acaps_risk_radar: Optional[Any] = None,
+    acaps_monitoring: Optional[Any] = None,
+    humanitarian_access: Optional[Any] = None,
+    **kwargs: Any,
 ) -> str:
     """Build triage prompt for Armed Conflict Events (ACE).
 
@@ -188,6 +278,18 @@ def build_triage_prompt_ace(
         hazard_code="ACE",
         rc_context=rc_text,
     )
+
+    # NEW: Format additional data sources
+    additional_context = _format_new_data_sections(
+        reliefweb_reports=reliefweb_reports,
+        acled_political_events=acled_political_events,
+        ipc_phases=ipc_phases,
+        inform_severity=inform_severity,
+        acaps_risk_radar=acaps_risk_radar,
+        acaps_monitoring=acaps_monitoring,
+        humanitarian_access=humanitarian_access,
+    )
+    additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
     # Build optional conflict forecasts section
     forecast_section = ""
@@ -247,7 +349,7 @@ in data_quality — some countries have systematically lower reporting.
 EM-DAT may capture large discrete events that ACLED misses.
 
 === END ACE-SPECIFIC GUIDANCE ===
-
+{additional_section}
 {_TRIAGE_SCORING_RUBRIC}
 {_TRIAGE_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
 
@@ -264,6 +366,13 @@ def build_triage_prompt_dr(
     evidence_pack: Optional[Dict[str, Any]] = None,
     climate_data: Optional[Dict[str, Any]] = None,
     season_context: Optional[str] = None,
+    reliefweb_reports: Optional[Any] = None,
+    ipc_phases: Optional[Any] = None,
+    inform_severity: Optional[Any] = None,
+    acaps_risk_radar: Optional[Any] = None,
+    acaps_monitoring: Optional[Any] = None,
+    humanitarian_access: Optional[Any] = None,
+    **kwargs: Any,
 ) -> str:
     """Build triage prompt for Drought (DR).
 
@@ -278,6 +387,17 @@ def build_triage_prompt_dr(
     resolver_text = json.dumps(resolver_features, indent=2, default=str)
     schema_text = json.dumps(_TRIAGE_SCHEMA, indent=2)
     season_block = f"\nCurrent season context: {season_context}\n" if season_context else ""
+
+    # NEW: Format additional data sources
+    additional_context = _format_new_data_sections(
+        reliefweb_reports=reliefweb_reports,
+        ipc_phases=ipc_phases,
+        inform_severity=inform_severity,
+        acaps_risk_radar=acaps_risk_radar,
+        acaps_monitoring=acaps_monitoring,
+        humanitarian_access=humanitarian_access,
+    )
+    additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
     preamble = _TRIAGE_PREAMBLE.format(
         country_name=country_name,
@@ -340,7 +460,7 @@ are the gold standard for food security status. Note in data_quality
 if IPC/FEWS NET coverage is absent for this country.
 
 === END DR-SPECIFIC GUIDANCE ===
-
+{additional_section}
 {_TRIAGE_SCORING_RUBRIC}
 {_TRIAGE_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
 
@@ -357,6 +477,13 @@ def build_triage_prompt_fl(
     evidence_pack: Optional[Dict[str, Any]] = None,
     climate_data: Optional[Dict[str, Any]] = None,
     season_context: Optional[str] = None,
+    reliefweb_reports: Optional[Any] = None,
+    ipc_phases: Optional[Any] = None,
+    inform_severity: Optional[Any] = None,
+    acaps_risk_radar: Optional[Any] = None,
+    acaps_monitoring: Optional[Any] = None,
+    humanitarian_access: Optional[Any] = None,
+    **kwargs: Any,
 ) -> str:
     """Build triage prompt for Flood (FL)."""
 
@@ -366,6 +493,17 @@ def build_triage_prompt_fl(
     resolver_text = json.dumps(resolver_features, indent=2, default=str)
     schema_text = json.dumps(_TRIAGE_SCHEMA, indent=2)
     season_block = f"\nCurrent season context: {season_context}\n" if season_context else ""
+
+    # NEW: Format additional data sources
+    additional_context = _format_new_data_sections(
+        reliefweb_reports=reliefweb_reports,
+        ipc_phases=ipc_phases,
+        inform_severity=inform_severity,
+        acaps_risk_radar=acaps_risk_radar,
+        acaps_monitoring=acaps_monitoring,
+        humanitarian_access=humanitarian_access,
+    )
+    additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
     preamble = _TRIAGE_PREAMBLE.format(
         country_name=country_name,
@@ -429,7 +567,7 @@ events. GloFAS provides real-time and forecast flood signals. Note in
 data_quality if the country has limited hydrological monitoring.
 
 === END FL-SPECIFIC GUIDANCE ===
-
+{additional_section}
 {_TRIAGE_SCORING_RUBRIC}
 {_TRIAGE_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
 
@@ -446,6 +584,12 @@ def build_triage_prompt_hw(
     evidence_pack: Optional[Dict[str, Any]] = None,
     climate_data: Optional[Dict[str, Any]] = None,
     season_context: Optional[str] = None,
+    reliefweb_reports: Optional[Any] = None,
+    inform_severity: Optional[Any] = None,
+    acaps_risk_radar: Optional[Any] = None,
+    acaps_monitoring: Optional[Any] = None,
+    humanitarian_access: Optional[Any] = None,
+    **kwargs: Any,
 ) -> str:
     """Build triage prompt for Heatwave (HW)."""
 
@@ -455,6 +599,16 @@ def build_triage_prompt_hw(
     resolver_text = json.dumps(resolver_features, indent=2, default=str)
     schema_text = json.dumps(_TRIAGE_SCHEMA, indent=2)
     season_block = f"\nCurrent season context: {season_context}\n" if season_context else ""
+
+    # NEW: Format additional data sources
+    additional_context = _format_new_data_sections(
+        reliefweb_reports=reliefweb_reports,
+        inform_severity=inform_severity,
+        acaps_risk_radar=acaps_risk_radar,
+        acaps_monitoring=acaps_monitoring,
+        humanitarian_access=humanitarian_access,
+    )
+    additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
     preamble = _TRIAGE_PREAMBLE.format(
         country_name=country_name,
@@ -523,7 +677,7 @@ vulnerability context to assess risk independently of historical event
 records. State this data gap clearly in data_quality.
 
 === END HW-SPECIFIC GUIDANCE ===
-
+{additional_section}
 {_TRIAGE_SCORING_RUBRIC}
 {_TRIAGE_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
 
@@ -540,6 +694,12 @@ def build_triage_prompt_tc(
     evidence_pack: Optional[Dict[str, Any]] = None,
     climate_data: Optional[Dict[str, Any]] = None,
     season_context: Optional[str] = None,
+    reliefweb_reports: Optional[Any] = None,
+    inform_severity: Optional[Any] = None,
+    acaps_risk_radar: Optional[Any] = None,
+    acaps_monitoring: Optional[Any] = None,
+    humanitarian_access: Optional[Any] = None,
+    **kwargs: Any,
 ) -> str:
     """Build triage prompt for Tropical Cyclone (TC)."""
 
@@ -549,6 +709,16 @@ def build_triage_prompt_tc(
     resolver_text = json.dumps(resolver_features, indent=2, default=str)
     schema_text = json.dumps(_TRIAGE_SCHEMA, indent=2)
     season_block = f"\nCurrent season context: {season_context}\n" if season_context else ""
+
+    # NEW: Format additional data sources
+    additional_context = _format_new_data_sections(
+        reliefweb_reports=reliefweb_reports,
+        inform_severity=inform_severity,
+        acaps_risk_radar=acaps_risk_radar,
+        acaps_monitoring=acaps_monitoring,
+        humanitarian_access=humanitarian_access,
+    )
+    additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
     preamble = _TRIAGE_PREAMBLE.format(
         country_name=country_name,
@@ -619,7 +789,7 @@ TC tracks and frequency. Note if the country has limited historical TC
 records in EM-DAT (small island states may have sparse data).
 
 === END TC-SPECIFIC GUIDANCE ===
-
+{additional_section}
 {_TRIAGE_SCORING_RUBRIC}
 {_TRIAGE_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
 

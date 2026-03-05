@@ -295,6 +295,281 @@ def _ensure_scenarios_table(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _ensure_acled_political_events_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the acled_political_events table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "acled_political_events",
+        """
+        CREATE TABLE IF NOT EXISTS acled_political_events (
+            iso3             VARCHAR NOT NULL,
+            event_id         VARCHAR NOT NULL,
+            event_date       VARCHAR,
+            event_type       VARCHAR,
+            sub_event_type   VARCHAR,
+            actor1           VARCHAR,
+            actor2           VARCHAR,
+            admin1           VARCHAR,
+            location         VARCHAR,
+            notes_excerpt    VARCHAR,
+            fatalities       INTEGER,
+            fetched_at       VARCHAR,
+            PRIMARY KEY (iso3, event_id)
+        );
+        """,
+        {
+            "iso3": "VARCHAR",
+            "event_id": "VARCHAR",
+            "event_date": "VARCHAR",
+            "event_type": "VARCHAR",
+            "sub_event_type": "VARCHAR",
+            "actor1": "VARCHAR",
+            "actor2": "VARCHAR",
+            "admin1": "VARCHAR",
+            "location": "VARCHAR",
+            "notes_excerpt": "VARCHAR",
+            "fatalities": "INTEGER",
+            "fetched_at": "VARCHAR",
+        },
+    )
+
+
+def _ensure_ipc_phases_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the ipc_phases table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "ipc_phases",
+        """
+        CREATE TABLE IF NOT EXISTS ipc_phases (
+            iso3                     VARCHAR NOT NULL,
+            analysis_id              VARCHAR NOT NULL,
+            analysis_date            VARCHAR,
+            analysis_period          VARCHAR,
+            projection_period        VARCHAR,
+            total_population         BIGINT,
+            current_phase1           BIGINT,
+            current_phase2           BIGINT,
+            current_phase3           BIGINT,
+            current_phase4           BIGINT,
+            current_phase5           BIGINT,
+            current_phase3plus       BIGINT,
+            current_phase3plus_pct   DOUBLE,
+            projected_phase3         BIGINT,
+            projected_phase4         BIGINT,
+            projected_phase5         BIGINT,
+            projected_phase3plus     BIGINT,
+            projected_phase3plus_pct DOUBLE,
+            projected_period         VARCHAR,
+            trend                    VARCHAR,
+            areas_in_phase5          VARCHAR,
+            fetched_at               VARCHAR,
+            PRIMARY KEY (iso3, analysis_id)
+        );
+        """,
+        {
+            "iso3": "VARCHAR",
+            "analysis_id": "VARCHAR",
+            "analysis_date": "VARCHAR",
+            "analysis_period": "VARCHAR",
+            "projection_period": "VARCHAR",
+            "total_population": "BIGINT",
+            "current_phase1": "BIGINT",
+            "current_phase2": "BIGINT",
+            "current_phase3": "BIGINT",
+            "current_phase4": "BIGINT",
+            "current_phase5": "BIGINT",
+            "current_phase3plus": "BIGINT",
+            "current_phase3plus_pct": "DOUBLE",
+            "projected_phase3": "BIGINT",
+            "projected_phase4": "BIGINT",
+            "projected_phase5": "BIGINT",
+            "projected_phase3plus": "BIGINT",
+            "projected_phase3plus_pct": "DOUBLE",
+            "projected_period": "VARCHAR",
+            "trend": "VARCHAR",
+            "areas_in_phase5": "VARCHAR",
+            "fetched_at": "VARCHAR",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# ACAPS tables
+# ---------------------------------------------------------------------------
+
+
+def _ensure_acaps_inform_severity_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the acaps_inform_severity table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "acaps_inform_severity",
+        """
+        CREATE TABLE IF NOT EXISTS acaps_inform_severity (
+            iso3                VARCHAR NOT NULL,
+            crisis_id           VARCHAR NOT NULL,
+            snapshot_date       VARCHAR NOT NULL,
+            severity_score      DOUBLE,
+            severity_category   VARCHAR,
+            impact_score        DOUBLE,
+            conditions_score    DOUBLE,
+            complexity_score    DOUBLE,
+            crisis_name         VARCHAR,
+            top_indicators_json VARCHAR,
+            fetched_at          VARCHAR,
+            PRIMARY KEY (iso3, crisis_id, snapshot_date)
+        );
+        """,
+        {
+            "iso3": "VARCHAR",
+            "crisis_id": "VARCHAR",
+            "snapshot_date": "VARCHAR",
+            "severity_score": "DOUBLE",
+            "severity_category": "VARCHAR",
+            "impact_score": "DOUBLE",
+            "conditions_score": "DOUBLE",
+            "complexity_score": "DOUBLE",
+            "crisis_name": "VARCHAR",
+            "top_indicators_json": "VARCHAR",
+            "fetched_at": "VARCHAR",
+        },
+    )
+
+
+def _ensure_acaps_inform_severity_trend_table(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    """Ensure the acaps_inform_severity_trend table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "acaps_inform_severity_trend",
+        """
+        CREATE TABLE IF NOT EXISTS acaps_inform_severity_trend (
+            iso3           VARCHAR NOT NULL,
+            snapshot_date  VARCHAR NOT NULL,
+            score          DOUBLE,
+            fetched_at     VARCHAR,
+            PRIMARY KEY (iso3, snapshot_date)
+        );
+        """,
+        {
+            "iso3": "VARCHAR",
+            "snapshot_date": "VARCHAR",
+            "score": "DOUBLE",
+            "fetched_at": "VARCHAR",
+        },
+    )
+
+
+def _ensure_acaps_risk_radar_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the acaps_risk_radar table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "acaps_risk_radar",
+        """
+        CREATE TABLE IF NOT EXISTS acaps_risk_radar (
+            iso3              VARCHAR NOT NULL,
+            risk_id           VARCHAR NOT NULL,
+            risk_title        VARCHAR,
+            risk_type         VARCHAR,
+            risk_level        VARCHAR,
+            probability       VARCHAR,
+            impact            INTEGER,
+            risk_trend        VARCHAR,
+            expected_exposure VARCHAR,
+            triggers_summary  VARCHAR,
+            rationale_excerpt VARCHAR,
+            triggers_json     VARCHAR,
+            status            VARCHAR,
+            fetched_at        VARCHAR,
+            PRIMARY KEY (iso3, risk_id)
+        );
+        """,
+        {
+            "iso3": "VARCHAR",
+            "risk_id": "VARCHAR",
+            "risk_title": "VARCHAR",
+            "risk_type": "VARCHAR",
+            "risk_level": "VARCHAR",
+            "probability": "VARCHAR",
+            "impact": "INTEGER",
+            "risk_trend": "VARCHAR",
+            "expected_exposure": "VARCHAR",
+            "triggers_summary": "VARCHAR",
+            "rationale_excerpt": "VARCHAR",
+            "triggers_json": "VARCHAR",
+            "status": "VARCHAR",
+            "fetched_at": "VARCHAR",
+        },
+    )
+
+
+def _ensure_acaps_daily_monitoring_table(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    """Ensure the acaps_daily_monitoring table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "acaps_daily_monitoring",
+        """
+        CREATE TABLE IF NOT EXISTS acaps_daily_monitoring (
+            iso3                VARCHAR NOT NULL,
+            entry_id            VARCHAR NOT NULL,
+            entry_date          VARCHAR,
+            latest_developments VARCHAR,
+            source              VARCHAR,
+            weekly_pick         BOOLEAN,
+            fetched_at          VARCHAR,
+            PRIMARY KEY (iso3, entry_id)
+        );
+        """,
+        {
+            "iso3": "VARCHAR",
+            "entry_id": "VARCHAR",
+            "entry_date": "VARCHAR",
+            "latest_developments": "VARCHAR",
+            "source": "VARCHAR",
+            "weekly_pick": "BOOLEAN",
+            "fetched_at": "VARCHAR",
+        },
+    )
+
+
+def _ensure_acaps_humanitarian_access_table(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    """Ensure the acaps_humanitarian_access table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "acaps_humanitarian_access",
+        """
+        CREATE TABLE IF NOT EXISTS acaps_humanitarian_access (
+            iso3              VARCHAR NOT NULL,
+            crisis_id         VARCHAR NOT NULL,
+            snapshot_date     VARCHAR,
+            access_score      DOUBLE,
+            access_category   VARCHAR,
+            fetched_at        VARCHAR,
+            PRIMARY KEY (iso3, crisis_id, snapshot_date)
+        );
+        """,
+        {
+            "iso3": "VARCHAR",
+            "crisis_id": "VARCHAR",
+            "snapshot_date": "VARCHAR",
+            "access_score": "DOUBLE",
+            "access_category": "VARCHAR",
+            "fetched_at": "VARCHAR",
+        },
+    )
+
+
 def _seed_bucket_definitions(
     con: duckdb.DuckDBPyConnection,
     metric: str,
@@ -515,6 +790,39 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "grounding_debug_json": "TEXT",
                 "structural_context": "TEXT",
                 "recent_signals_json": "TEXT",
+                "created_at": "TIMESTAMP",
+            },
+        )
+
+        _ensure_table_and_columns(
+            con,
+            "hs_adversarial_checks",
+            """
+            CREATE TABLE IF NOT EXISTS hs_adversarial_checks (
+                hs_run_id       TEXT,
+                iso3            TEXT,
+                hazard_code     TEXT,
+                rc_level        INTEGER,
+                net_assessment  TEXT,
+                summary         TEXT,
+                payload_json    TEXT,
+                sources_json    TEXT,
+                grounded        BOOLEAN,
+                model_id        TEXT,
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            {
+                "hs_run_id": "TEXT",
+                "iso3": "TEXT",
+                "hazard_code": "TEXT",
+                "rc_level": "INTEGER",
+                "net_assessment": "TEXT",
+                "summary": "TEXT",
+                "payload_json": "TEXT",
+                "sources_json": "TEXT",
+                "grounded": "BOOLEAN",
+                "model_id": "TEXT",
                 "created_at": "TIMESTAMP",
             },
         )
@@ -1053,6 +1361,13 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         _ensure_hs_triage_table(con)
         _ensure_question_research_table(con)
         _ensure_scenarios_table(con)
+        _ensure_acled_political_events_table(con)
+        _ensure_ipc_phases_table(con)
+        _ensure_acaps_inform_severity_table(con)
+        _ensure_acaps_inform_severity_trend_table(con)
+        _ensure_acaps_risk_radar_table(con)
+        _ensure_acaps_daily_monitoring_table(con)
+        _ensure_acaps_humanitarian_access_table(con)
     finally:
         if own_con and con is not None:
             con.close()
