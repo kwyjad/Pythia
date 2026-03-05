@@ -96,6 +96,88 @@ and what data gaps limit your confidence.
 
 
 # ---------------------------------------------------------------------------
+# Helper: format new data connector sections for RC prompts
+# ---------------------------------------------------------------------------
+
+def _format_new_data_sections(
+    reliefweb_reports: Any = None,
+    acled_political_events: Any = None,
+    ipc_phases: Any = None,
+    inform_severity: Any = None,
+    acaps_risk_radar: Any = None,
+    acaps_monitoring: Any = None,
+    humanitarian_access: Any = None,
+) -> str:
+    """Format all new data sources into a combined text block for RC prompts."""
+    sections: list[str] = []
+
+    if reliefweb_reports:
+        try:
+            from horizon_scanner.reliefweb import format_reliefweb_for_prompt
+            t = format_reliefweb_for_prompt(reliefweb_reports)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if acled_political_events:
+        try:
+            from pythia.acled_political import format_political_events_for_prompt
+            t = format_political_events_for_prompt(acled_political_events)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if ipc_phases:
+        try:
+            from pythia.ipc_phases import format_ipc_for_prompt
+            t = format_ipc_for_prompt(ipc_phases)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if inform_severity:
+        try:
+            from pythia.acaps import format_inform_severity_for_prompt
+            t = format_inform_severity_for_prompt(inform_severity)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if acaps_risk_radar:
+        try:
+            from pythia.acaps import format_risk_radar_for_prompt
+            t = format_risk_radar_for_prompt(acaps_risk_radar)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if acaps_monitoring:
+        try:
+            from pythia.acaps import format_daily_monitoring_for_prompt
+            t = format_daily_monitoring_for_prompt(acaps_monitoring)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if humanitarian_access:
+        try:
+            from pythia.acaps import format_humanitarian_access_for_prompt
+            t = format_humanitarian_access_for_prompt(humanitarian_access)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    return "\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
 # Suggested search queries per hazard (for web research step)
 # ---------------------------------------------------------------------------
 
@@ -153,6 +235,12 @@ def build_rc_prompt_ace(
     acled_summary: Optional[Dict[str, Any]] = None,
     conflict_forecasts: Optional[Dict[str, Any]] = None,
     icg_on_the_horizon: Optional[str] = None,
+    reliefweb_reports: Optional[Any] = None,
+    acled_political_events: Optional[Any] = None,
+    inform_severity: Optional[Any] = None,
+    acaps_risk_radar: Optional[Any] = None,
+    acaps_monitoring: Optional[Any] = None,
+    **kwargs: Any,
 ) -> str:
     """Build RC prompt for Armed Conflict Events (ACE).
 
@@ -189,6 +277,16 @@ def build_rc_prompt_ace(
         hazard_name="Armed Conflict Events",
         hazard_code="ACE",
     )
+
+    # NEW: Format additional data sources
+    additional_context = _format_new_data_sections(
+        reliefweb_reports=reliefweb_reports,
+        acled_political_events=acled_political_events,
+        inform_severity=inform_severity,
+        acaps_risk_radar=acaps_risk_radar,
+        acaps_monitoring=acaps_monitoring,
+    )
+    additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
     # Build optional ICG "On the Horizon" section
     icg_section = ""
@@ -294,7 +392,7 @@ MAGNITUDE CALIBRATION:
   peaceful country, genocide/mass atrocity risk, state collapse).
 
 === END ACE-SPECIFIC GUIDANCE ===
-
+{additional_section}
 {_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
 
 
@@ -308,6 +406,9 @@ def build_rc_prompt_dr(
     resolver_features: Dict[str, Any],
     evidence_pack: Optional[Dict[str, Any]] = None,
     climate_data: Optional[Dict[str, Any]] = None,
+    reliefweb_reports: Optional[Any] = None,
+    ipc_phases: Optional[Any] = None,
+    **kwargs: Any,
 ) -> str:
     """Build RC prompt for Drought (DR).
 
@@ -326,6 +427,13 @@ def build_rc_prompt_dr(
     climate_text = _format_climate_data(climate_data)
     resolver_text = json.dumps(resolver_features, indent=2, default=str)
     schema_text = json.dumps(_RC_SCHEMA, indent=2)
+
+    # NEW: Format additional data sources
+    additional_context = _format_new_data_sections(
+        reliefweb_reports=reliefweb_reports,
+        ipc_phases=ipc_phases,
+    )
+    additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
     preamble = _RC_CALIBRATION_PREAMBLE.format(
         country_name=country_name,
@@ -395,7 +503,7 @@ MAGNITUDE CALIBRATION:
   potential famine conditions, mass displacement from agricultural areas.
 
 === END DR-SPECIFIC GUIDANCE ===
-
+{additional_section}
 {_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
 
 
@@ -409,6 +517,8 @@ def build_rc_prompt_fl(
     resolver_features: Dict[str, Any],
     evidence_pack: Optional[Dict[str, Any]] = None,
     climate_data: Optional[Dict[str, Any]] = None,
+    reliefweb_reports: Optional[Any] = None,
+    **kwargs: Any,
 ) -> str:
     """Build RC prompt for Flood (FL).
 
@@ -426,6 +536,12 @@ def build_rc_prompt_fl(
     climate_text = _format_climate_data(climate_data)
     resolver_text = json.dumps(resolver_features, indent=2, default=str)
     schema_text = json.dumps(_RC_SCHEMA, indent=2)
+
+    # NEW: Format additional data sources
+    additional_context = _format_new_data_sections(
+        reliefweb_reports=reliefweb_reports,
+    )
+    additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
     preamble = _RC_CALIBRATION_PREAMBLE.format(
         country_name=country_name,
@@ -494,7 +610,7 @@ MAGNITUDE CALIBRATION:
   novel pattern.
 
 === END FL-SPECIFIC GUIDANCE ===
-
+{additional_section}
 {_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
 
 
@@ -508,6 +624,8 @@ def build_rc_prompt_hw(
     resolver_features: Dict[str, Any],
     evidence_pack: Optional[Dict[str, Any]] = None,
     climate_data: Optional[Dict[str, Any]] = None,
+    reliefweb_reports: Optional[Any] = None,
+    **kwargs: Any,
 ) -> str:
     """Build RC prompt for Heatwave (HW).
 
@@ -523,6 +641,12 @@ def build_rc_prompt_hw(
     climate_text = _format_climate_data(climate_data)
     resolver_text = json.dumps(resolver_features, indent=2, default=str)
     schema_text = json.dumps(_RC_SCHEMA, indent=2)
+
+    # NEW: Format additional data sources
+    additional_context = _format_new_data_sections(
+        reliefweb_reports=reliefweb_reports,
+    )
+    additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
     preamble = _RC_CALIBRATION_PREAMBLE.format(
         country_name=country_name,
@@ -585,7 +709,7 @@ MAGNITUDE CALIBRATION:
   health emergency, critical infrastructure failure.
 
 === END HW-SPECIFIC GUIDANCE ===
-
+{additional_section}
 {_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
 
 
@@ -599,6 +723,8 @@ def build_rc_prompt_tc(
     resolver_features: Dict[str, Any],
     evidence_pack: Optional[Dict[str, Any]] = None,
     climate_data: Optional[Dict[str, Any]] = None,
+    reliefweb_reports: Optional[Any] = None,
+    **kwargs: Any,
 ) -> str:
     """Build RC prompt for Tropical Cyclone (TC).
 
@@ -616,6 +742,12 @@ def build_rc_prompt_tc(
     climate_text = _format_climate_data(climate_data)
     resolver_text = json.dumps(resolver_features, indent=2, default=str)
     schema_text = json.dumps(_RC_SCHEMA, indent=2)
+
+    # NEW: Format additional data sources
+    additional_context = _format_new_data_sections(
+        reliefweb_reports=reliefweb_reports,
+    )
+    additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
     preamble = _RC_CALIBRATION_PREAMBLE.format(
         country_name=country_name,
@@ -684,7 +816,7 @@ MAGNITUDE CALIBRATION:
   it is more typical of a near-real-time assessment with an active storm.)
 
 === END TC-SPECIFIC GUIDANCE ===
-
+{additional_section}
 {_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
 
 

@@ -476,6 +476,73 @@ def _run_triage_for_single_hazard(
         except Exception as exc:
             logger.debug("Conflict forecast load failed for %s: %s", iso3, exc)
 
+    # --- NEW: Load additional structured data sources ---
+    new_data_kwargs: dict[str, Any] = {}
+
+    # ReliefWeb reports (all hazards)
+    try:
+        from horizon_scanner.reliefweb import load_reliefweb_reports
+        rw_reports = load_reliefweb_reports(iso3)
+        if rw_reports:
+            new_data_kwargs["reliefweb_reports"] = rw_reports
+    except Exception as exc:
+        logger.debug("ReliefWeb load failed for %s: %s", iso3, exc)
+
+    # ACLED political events (ACE and DI only)
+    if hazard_code in ("ACE", "DI"):
+        try:
+            from pythia.acled_political import load_acled_political_events
+            pol_events = load_acled_political_events(iso3)
+            if pol_events:
+                new_data_kwargs["acled_political_events"] = pol_events
+        except Exception as exc:
+            logger.debug("ACLED political load failed for %s: %s", iso3, exc)
+
+    # IPC food security phases (all hazards)
+    try:
+        from pythia.ipc_phases import load_ipc_phases
+        ipc = load_ipc_phases(iso3)
+        if ipc:
+            new_data_kwargs["ipc_phases"] = ipc
+    except Exception as exc:
+        logger.debug("IPC phases load failed for %s: %s", iso3, exc)
+
+    # ACAPS INFORM Severity (all hazards)
+    try:
+        from pythia.acaps import load_inform_severity
+        inform = load_inform_severity(iso3)
+        if inform:
+            new_data_kwargs["inform_severity"] = inform
+    except Exception as exc:
+        logger.debug("INFORM Severity load failed for %s: %s", iso3, exc)
+
+    # ACAPS Risk Radar (all hazards)
+    try:
+        from pythia.acaps import load_risk_radar
+        risks = load_risk_radar(iso3)
+        if risks:
+            new_data_kwargs["acaps_risk_radar"] = risks
+    except Exception as exc:
+        logger.debug("ACAPS Risk Radar load failed for %s: %s", iso3, exc)
+
+    # ACAPS Daily Monitoring (all hazards)
+    try:
+        from pythia.acaps import load_daily_monitoring
+        monitoring = load_daily_monitoring(iso3)
+        if monitoring:
+            new_data_kwargs["acaps_monitoring"] = monitoring
+    except Exception as exc:
+        logger.debug("ACAPS Daily Monitoring load failed for %s: %s", iso3, exc)
+
+    # ACAPS Humanitarian Access (all hazards)
+    try:
+        from pythia.acaps import load_humanitarian_access
+        access = load_humanitarian_access(iso3)
+        if access:
+            new_data_kwargs["humanitarian_access"] = access
+    except Exception as exc:
+        logger.debug("Humanitarian Access load failed for %s: %s", iso3, exc)
+
     prompt = build_triage_prompt(
         hazard_code,
         country_name=country_name,
@@ -485,6 +552,7 @@ def _run_triage_for_single_hazard(
         evidence_pack=evidence_pack,
         **climate_kwargs,
         **conflict_kwargs,
+        **new_data_kwargs,
     )
 
     pass_extracts: list[Dict[str, Any]] = []
