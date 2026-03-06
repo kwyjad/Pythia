@@ -16,9 +16,12 @@ MANIFEST="$REPO_ROOT/docs/prompts/versions.json"
 SRC_FORECASTER="$REPO_ROOT/forecaster/prompts.py"
 SRC_HS="$REPO_ROOT/horizon_scanner/prompts.py"
 SRC_GEMINI="$REPO_ROOT/pythia/web_research/backends/gemini_grounding.py"
+SRC_RC_PROMPTS="$REPO_ROOT/horizon_scanner/rc_prompts.py"
+SRC_RC_GROUNDING="$REPO_ROOT/horizon_scanner/rc_grounding_prompts.py"
+SRC_TRIAGE_GROUNDING="$REPO_ROOT/horizon_scanner/hs_triage_grounding_prompts.py"
 
 # Check source files exist
-for f in "$SRC_FORECASTER" "$SRC_HS" "$SRC_GEMINI"; do
+for f in "$SRC_FORECASTER" "$SRC_HS" "$SRC_GEMINI" "$SRC_RC_PROMPTS" "$SRC_RC_GROUNDING" "$SRC_TRIAGE_GROUNDING"; do
   if [ ! -f "$f" ]; then
     echo "ERROR: Source file not found: $f"
     exit 1
@@ -29,9 +32,12 @@ done
 mkdir -p "$DIR"
 
 # Copy source files
-cp "$SRC_FORECASTER" "$DIR/forecaster_prompts.py"
-cp "$SRC_HS"         "$DIR/hs_prompts.py"
-cp "$SRC_GEMINI"     "$DIR/gemini_grounding.py"
+cp "$SRC_FORECASTER"        "$DIR/forecaster_prompts.py"
+cp "$SRC_HS"                "$DIR/hs_prompts.py"
+cp "$SRC_GEMINI"            "$DIR/gemini_grounding.py"
+cp "$SRC_RC_PROMPTS"        "$DIR/rc_prompts.py"
+cp "$SRC_RC_GROUNDING"      "$DIR/rc_grounding_prompts.py"
+cp "$SRC_TRIAGE_GROUNDING"  "$DIR/hs_triage_grounding_prompts.py"
 
 # Update versions.json manifest
 if [ ! -f "$MANIFEST" ]; then
