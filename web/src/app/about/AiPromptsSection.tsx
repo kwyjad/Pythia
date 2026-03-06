@@ -78,6 +78,7 @@ const PANELS: PanelConfig[] = [
     title: "Research brief",
     description: (
       <p>
+<<<<<<< Updated upstream
         The Researcher prompt produces a concise brief with explicit headings so
         forecasters can update their priors quickly. In production, a v2 builder
         wraps this template with structured context blocks (question metadata,
@@ -85,15 +86,35 @@ const PANELS: PanelConfig[] = [
       </p>
     ),
     promptKeys: ["researcher", "research_v2_schema"],
+=======
+        The v2 forecaster prompt produces a six-month SPD (Subjective
+        Probability Distribution) over five impact buckets using a structured
+        7-step Bayesian updating method. It injects calibration guidance,
+        regime change signals, hazard tail pack data, prediction market
+        signals, seasonal outlook, and structured data connectors
+        (ReliefWeb, ACLED political events, IPC, ACAPS) at runtime.
+      </p>
+    ),
+    promptKeys: ["spd_template", "spd_buckets"],
+    promptLabels: {
+      spd_template: "SPD v2 prompt (build_spd_prompt_v2)",
+      spd_buckets: "Bucket definitions (PA + fatalities)",
+    },
+>>>>>>> Stashed changes
     sourceLinks: [
       {
         href: `${GITHUB_BASE}/forecaster/prompts.py`,
         label: "Source: forecaster/prompts.py",
       },
+      {
+        href: `${GITHUB_BASE}/forecaster/hazard_prompts.py`,
+        label: "Hazard reasoning blocks",
+      },
     ],
     notes: (
       <div className="mt-3 text-sm">
         <p className="font-medium text-fred-secondary">
+<<<<<<< Updated upstream
           Research v2 output schema
         </p>
         <p className="mt-1 text-xs text-fred-text/70">
@@ -108,32 +129,48 @@ const PANELS: PanelConfig[] = [
     title: "Forecast (SPD)",
     description: (
       <p>
-        The forecaster produces a six-month SPD (Subjective Probability
-        Distribution) over five impact buckets. Output must be JSON only. In
-        production, the v2 builder adds regime change guidance, tail pack
-        guidance, and horizon-specific month keys around this template.
+        The v2 forecaster prompt produces a six-month SPD (Subjective
+        Probability Distribution) over five impact buckets using a structured
+        7-step Bayesian updating method. It injects calibration guidance,
+        regime change signals, hazard tail pack data, prediction market
+        signals, seasonal outlook, and structured data connectors
+        (ReliefWeb, ACLED political events, IPC, ACAPS) at runtime.
       </p>
     ),
     promptKeys: ["spd_template", "spd_buckets"],
+    promptLabels: {
+      spd_template: "SPD v2 prompt (build_spd_prompt_v2)",
+      spd_buckets: "Bucket definitions (PA + fatalities)",
+    },
     sourceLinks: [
       {
         href: `${GITHUB_BASE}/forecaster/prompts.py`,
         label: "Source: forecaster/prompts.py",
       },
+      {
+        href: `${GITHUB_BASE}/forecaster/hazard_prompts.py`,
+        label: "Hazard reasoning blocks",
+      },
     ],
     notes: (
       <div className="mt-3 text-sm">
         <p className="font-medium text-fred-secondary">
-          Hazard-specific notes
+=======
+>>>>>>> Stashed changes
+          Runtime context injected per question
         </p>
         <ul className="mt-2 list-disc space-y-1 pl-5">
+          <li>
+            Calibration guidance auto-loaded from scoring history (per-hazard
+            when available).
+          </li>
           <li>
             Bucket set depends on metric: PA uses PA buckets; fatalities uses
             fatalities buckets.
           </li>
           <li>
-            The system injects scoring + time-horizon blocks and calibration
-            guidance ahead of the template for each question.
+            Regime change guidance, tail pack signals, and self-search escape
+            hatch injected based on HS triage output.
           </li>
         </ul>
       </div>

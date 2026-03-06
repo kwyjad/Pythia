@@ -77,8 +77,14 @@ function sanitizeForDisplay(text: string): string {
 
   // Join Python string concatenation:
   // end-of-string + start-of-next-string on next line
-  // e.g.: '...\n"\n        "...'  or  '...\n"\n        f"...'
+  // Handles both double-quoted and single-quoted Python strings:
+  //   '...\n"\n        "...'  or  '...\n"\n        f"...'
+  //   "...\n'\n        '..."  or  "...\n'\n        f'..."
   s = s.replace(/"\s*\n\s*f?"/g, "");
+  s = s.replace(/'\s*\n\s*f?'/g, "");
+  // Cross-quote joins (double→single and single→double)
+  s = s.replace(/"\s*\n\s*f?'/g, "");
+  s = s.replace(/'\s*\n\s*f?"/g, "");
 
   // Replace json.dumps / _json_dumps_for_prompt calls with [data]
   s = s.replace(/\{json\.dumps\([^)]+\)\}/g, "[data]");
@@ -101,8 +107,8 @@ function sanitizeForDisplay(text: string): string {
   s = s.replace(/\\"/g, '"');
 
   // Remove stray leading/trailing quotes from concatenation artifacts
-  s = s.replace(/^"\s*/gm, "");
-  s = s.replace(/\s*"$/gm, "");
+  s = s.replace(/^["']\s*/gm, "");
+  s = s.replace(/\s*["']$/gm, "");
 
   // Collapse 3+ consecutive blank lines to 2
   s = s.replace(/\n{4,}/g, "\n\n\n");
@@ -144,6 +150,8 @@ function extractPromptsFromSources(
     result.hs_triage = null;
   }
 
+<<<<<<< Updated upstream
+<<<<<<< Updated upstream
   // --- Researcher (named constant from forecaster/prompts.py) ---
   if (forecasterSrc) {
     const raw = extractNamedConstant(forecasterSrc, "RESEARCHER_PROMPT");
@@ -164,8 +172,19 @@ function extractPromptsFromSources(
   }
 
   // --- SPD template (named constant) ---
+=======
+  // --- SPD v2 prompt (marker extraction from build_spd_prompt_v2) ---
+>>>>>>> Stashed changes
   if (forecasterSrc) {
-    const raw = extractNamedConstant(forecasterSrc, "SPD_PROMPT_TEMPLATE");
+=======
+  // --- SPD v2 prompt (marker extraction from build_spd_prompt_v2) ---
+  if (forecasterSrc) {
+>>>>>>> Stashed changes
+    const raw = extractBetweenMarkers(
+      forecasterSrc,
+      "spd_v2_start",
+      "spd_v2_end",
+    );
     result.spd_template = raw ? sanitizeForDisplay(raw) : null;
   } else {
     result.spd_template = null;
