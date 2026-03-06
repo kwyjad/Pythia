@@ -40,6 +40,8 @@ async function loadOverviewMarkdown(): Promise<string | null> {
   return null;
 }
 
+export const dynamic = "force-dynamic";
+
 export const metadata = {
   title: "About",
 };

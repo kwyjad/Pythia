@@ -120,6 +120,7 @@ def build_triage_grounding_prompt_ace(
             f"specific, look for supporting or contradicting evidence.\n"
         )
 
+    # --- PROMPT_EXCERPT: triage_grounding_ace_start ---
     return f"""\
 You are a humanitarian situation analyst using Google Search grounding.
 Build a CURRENT OPERATIONAL PICTURE of armed conflict and political violence
@@ -169,6 +170,7 @@ and ~50 standby situations. If there is no CrisisWatch entry for this
 country, note "No ICG CrisisWatch entry for this country."
 
 {_OUTPUT_SCHEMA_BLOCK}"""
+    # --- PROMPT_EXCERPT: triage_grounding_ace_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +205,7 @@ def build_triage_grounding_prompt_dr(
             f"Frame your search around the current/upcoming season.\n"
         )
 
+    # --- PROMPT_EXCERPT: triage_grounding_dr_start ---
     return f"""\
 You are a food security and drought situation analyst using Google Search grounding.
 Build a CURRENT OPERATIONAL PICTURE of drought and food security conditions
@@ -247,6 +250,7 @@ Focus on authoritative sources: FEWS NET, WFP (VAM, situation reports),
 FAO GIEWS, IPC, OCHA, Nutrition Cluster, UNICEF.
 
 {_OUTPUT_SCHEMA_BLOCK}"""
+    # --- PROMPT_EXCERPT: triage_grounding_dr_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +280,7 @@ def build_triage_grounding_prompt_fl(
             f"Frame your search around the current/upcoming season.\n"
         )
 
+    # --- PROMPT_EXCERPT: triage_grounding_fl_start ---
     return f"""\
 You are a disaster and flood situation analyst using Google Search grounding.
 Build a CURRENT OPERATIONAL PICTURE of flood conditions and flood risk in
@@ -319,6 +324,7 @@ FloodList, IOM DTM, national disaster management agencies, WFP (food
 security implications), WASH Cluster.
 
 {_OUTPUT_SCHEMA_BLOCK}"""
+    # --- PROMPT_EXCERPT: triage_grounding_fl_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +360,7 @@ def build_triage_grounding_prompt_hw(
             f"Frame your search around the current/upcoming season.\n"
         )
 
+    # --- PROMPT_EXCERPT: triage_grounding_hw_start ---
     return f"""\
 You are a climate and health situation analyst using Google Search grounding.
 Build a CURRENT OPERATIONAL PICTURE of heat conditions and heatwave risk
@@ -401,6 +408,7 @@ WHO, Copernicus C3S, IRI, health ministries, OCHA (when available),
 energy sector reporting.
 
 {_OUTPUT_SCHEMA_BLOCK}"""
+    # --- PROMPT_EXCERPT: triage_grounding_hw_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +438,7 @@ def build_triage_grounding_prompt_tc(
             f"Frame your search around the current season status.\n"
         )
 
+    # --- PROMPT_EXCERPT: triage_grounding_tc_start ---
     return f"""\
 You are a tropical cyclone situation analyst using Google Search grounding.
 Build a CURRENT OPERATIONAL PICTURE of tropical cyclone conditions and risk
@@ -475,6 +484,7 @@ Focus on authoritative sources: NOAA NHC, JTWC, regional RSMCs, OCHA,
 IFRC, national disaster management agencies, WMO, TSR.
 
 {_OUTPUT_SCHEMA_BLOCK}"""
+    # --- PROMPT_EXCERPT: triage_grounding_tc_end ---
 
 
 # ---------------------------------------------------------------------------
