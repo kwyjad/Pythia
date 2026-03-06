@@ -24,7 +24,7 @@ researcher:
   web_search: true
   sources: ["news","metaculus","manifold"]
   web_research:
-    enabled: false                 # mirror of PYTHIA_WEB_RESEARCH_ENABLED
+    enabled: true                  # mirror of PYTHIA_WEB_RESEARCH_ENABLED
     backend: "gemini"              # gemini|exa|perplexity|auto
     max_results: 10
     timeout_sec: 60
@@ -35,7 +35,7 @@ researcher:
     max_calls_per_question: null   # hard cap; null = unlimited
 
 prediction_markets:
-  enabled: false                    # Master switch (off by default); override with PYTHIA_PREDICTION_MARKETS_ENABLED=1
+  enabled: true                     # Master switch; override with PYTHIA_PREDICTION_MARKETS_ENABLED=0 to disable
   platforms:
     metaculus:
       enabled: true

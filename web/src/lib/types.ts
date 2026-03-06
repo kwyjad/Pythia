@@ -25,13 +25,22 @@ export type DiagnosticsKpiScope = {
   forecasts_by_hazard: Record<string, number>;
 };
 
+export type ForecastRun = {
+  run_id: string;
+  started_at: string | null;
+  n_questions: number;
+  is_latest: boolean;
+};
+
 export type DiagnosticsKpiScopesResponse = {
   available_months: Array<{
     year_month: string;
     label: string;
     is_latest: boolean;
   }>;
+  available_runs?: ForecastRun[];
   selected_month: string | null;
+  selected_run_id?: string | null;
   scopes: Record<string, DiagnosticsKpiScope>;
   explanations?: string[] | null;
   diagnostics?: Record<string, unknown> | null;

@@ -1284,8 +1284,9 @@ def _write_spd_ensemble_to_db(
                             hazard_code,
                             horizon_m,
                             class_bin,
-                            p
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                            p,
+                            created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP);
                         """,
                         [
                             run_id,
