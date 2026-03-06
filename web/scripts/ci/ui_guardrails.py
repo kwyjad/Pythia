@@ -305,7 +305,7 @@ def main() -> None:
         "AI Prompts",
         "Web search",
         "Horizon scan",
-        "Researcher",
+        "Regime Change",
         "Forecast (SPD)",
         "Scenario",
         "How forecast questions are constructed",
