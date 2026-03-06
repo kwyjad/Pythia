@@ -18,7 +18,7 @@ def test_run_connectors_passes_extra_args_and_env(monkeypatch, tmp_path: Path) -
 
     captured: Dict[str, List[str]] = {}
 
-    def fake_try_with_optional_debug(cmd: List[str], log_path: Path, env: Dict[str, str]) -> int:
+    def fake_try_with_optional_debug(cmd: List[str], log_path: Path, env: Dict[str, str], **kwargs: object) -> int:
         captured["cmd"] = cmd
         captured["env"] = env
         log_path.parent.mkdir(parents=True, exist_ok=True)

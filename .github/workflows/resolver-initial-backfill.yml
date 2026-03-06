@@ -66,6 +66,7 @@ jobs:
   ingest:
     name: Ingest connectors
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     outputs:
       months: ${{ steps.window.outputs.months }}
       start_iso: ${{ steps.window.outputs.start_iso }}
@@ -429,6 +430,7 @@ jobs:
   acled-backfill:
     name: ACLED monthly fatalities → DuckDB
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: ingest
     env:
       ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
@@ -505,6 +507,7 @@ jobs:
   export-duckdb:
     name: Export canonical facts to DuckDB
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs:
       - ingest
       - acled-backfill
