@@ -248,7 +248,7 @@ def try_with_optional_debug(cmd: List[str], log_path: Path, env: Dict[str, str])
 def _resolve_connectors(env: Dict[str, str]) -> List[str]:
     only = env.get("ONLY_CONNECTOR", "").strip()
     if only:
-        return [only]
+        return [item.strip() for item in only.split(",") if item.strip()]
     raw_list = [item.strip() for item in env.get("CONNECTOR_LIST", "").split(",") if item.strip()]
     return raw_list or list(DEFAULT_CONNECTORS)
 
