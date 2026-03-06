@@ -74,15 +74,42 @@ llm:
 
     prod:
       # SPD forecast ensemble — add/remove models by editing this list.
-      # Format: provider:model_id  (one per line)
+      # String format ("provider:model_id") or dict format with per-model params.
       ensemble:
-        - openai:gpt-5.2
+        # GPT-5.2: reasoning model — temperature not supported (API rejects it).
+        - provider: openai
+          model_id: gpt-5.2
+          thinking: high            # maps to reasoning_effort=high
+
+        # Claude Sonnet 4.6: standard model — low temperature for calibrated output.
         - anthropic:claude-sonnet-4-6
-        - google:gemini-3.1-pro-preview
-        - google:gemini-3-flash-preview
-        - kimi:kimi-k2.5
-        - deepseek:deepseek-reasoner
-        - openai:gpt-5-mini
+
+        # Gemini 3.1 Pro: thinking model — medium thinking for analytical depth.
+        - provider: google
+          model_id: gemini-3.1-pro-preview
+          temperature: 0.2
+          thinking: medium           # maps to thinkingConfig.thinkingLevel
+
+        # Gemini 3 Flash: thinking model — low thinking for speed/cost balance.
+        - provider: google
+          model_id: gemini-3-flash-preview
+          temperature: 0.2
+          thinking: low
+
+        # Kimi K2.5: reasoning model — Moonshot recommends temperature=1.0 for thinking mode.
+        - provider: kimi
+          model_id: kimi-k2.5
+          temperature: 1.0
+
+        # DeepSeek Reasoner: native reasoning model — temperature ignored by API.
+        - provider: deepseek
+          model_id: deepseek-reasoner
+          temperature: 1.0
+
+        # GPT-5-mini: reasoning model (smaller) — medium reasoning effort.
+        - provider: openai
+          model_id: gpt-5-mini
+          thinking: medium           # maps to reasoning_effort=medium
 
       # Purpose-specific model overrides (optional, defaults to ensemble members)
       hs_fallback: openai:gpt-5.2

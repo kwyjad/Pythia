@@ -654,6 +654,34 @@ def _seed_bucket_centroids(
         )
 
 
+def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the calibration_advice table exists with all columns."""
+
+    _ensure_table_and_columns(
+        con,
+        "calibration_advice",
+        """
+        CREATE TABLE IF NOT EXISTS calibration_advice (
+            as_of_month TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            advice TEXT,
+            findings_json TEXT,
+            created_at TIMESTAMP DEFAULT now(),
+            PRIMARY KEY (as_of_month, hazard_code, metric)
+        )
+        """,
+        {
+            "as_of_month": "TEXT",
+            "hazard_code": "TEXT",
+            "metric": "TEXT",
+            "advice": "TEXT",
+            "findings_json": "TEXT",
+            "created_at": "TIMESTAMP",
+        },
+    )
+
+
 def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
     """
     Ensure all Pythia-related tables exist in DuckDB.
@@ -1368,6 +1396,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         _ensure_acaps_risk_radar_table(con)
         _ensure_acaps_daily_monitoring_table(con)
         _ensure_acaps_humanitarian_access_table(con)
+        _ensure_calibration_advice_table(con)
     finally:
         if own_con and con is not None:
             con.close()

@@ -15,5 +15,6 @@ __all__ = [
     "cli",
     "bayes_mc",
     "GTMC1",
-    "seen_guard"
+    "seen_guard",
+    "hazard_prompts"
 ]
