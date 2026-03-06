@@ -96,3 +96,25 @@ def test_run_connectors_propagates_failure(monkeypatch: pytest.MonkeyPatch, tmp_
     statuses = {entry["connector_id"]: entry["status"] for entry in entries}
     assert statuses["alpha_client"] == "error"
     assert statuses["beta_client"] == "ok"
+
+
+def test_only_connector_comma_separated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ONLY_CONNECTOR", "acled_client, ifrc_go_client")
+    monkeypatch.delenv("CONNECTOR_LIST", raising=False)
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+
+    calls: list[list[str]] = []
+
+    def fake_popen(cmd, stdout=None, stderr=None, env=None, text=None, bufsize=None):
+        calls.append(list(cmd))
+        return StubProcess(0, "ok\n")
+
+    _set_fake_popen(monkeypatch, fake_popen)
+
+    rc = run_connectors.main()
+    assert rc == 0
+    assert [cmd[2] for cmd in calls] == [
+        "resolver.ingestion.acled_client",
+        "resolver.ingestion.ifrc_go_client",
+    ]
