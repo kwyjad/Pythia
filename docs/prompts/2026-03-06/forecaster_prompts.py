@@ -1493,6 +1493,7 @@ def build_spd_prompt_v2(
             "```\n\n"
         )
 
+    # --- PROMPT_EXCERPT: spd_v2_start ---
     return (
         "You are a careful probabilistic forecaster on a humanitarian early warning panel.\n\n"
         f"{calibration_section}"
@@ -1612,6 +1613,7 @@ def build_spd_prompt_v2(
         "Each `probs` array must contain exactly five numbers between 0 and 1 that sum to ~1.0.\n"
         "Do not include any text outside the JSON.\n"
     )
+    # --- PROMPT_EXCERPT: spd_v2_end ---
 
 
 def build_scenario_prompt(
