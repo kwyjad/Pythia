@@ -29,9 +29,27 @@ interface PanelConfig {
   title: string;
   description: React.ReactNode;
   promptKeys: string[];
+  /** Optional labels for each promptKey (keyed by promptKey). */
+  promptLabels?: Record<string, string>;
   sourceLinks: SourceLink[];
   staticFallback?: string;
   notes?: React.ReactNode;
+}
+
+const HAZARD_LABELS: Record<string, string> = {
+  ace: "ACE — Armed Conflict Events",
+  dr: "DR — Drought",
+  fl: "FL — Flood",
+  hw: "HW — Heatwave",
+  tc: "TC — Tropical Cyclone",
+};
+
+function hazardPromptLabels(prefix: string): Record<string, string> {
+  const labels: Record<string, string> = {};
+  for (const [code, label] of Object.entries(HAZARD_LABELS)) {
+    labels[`${prefix}_${code}`] = label;
+  }
+  return labels;
 }
 
 const PANELS: PanelConfig[] = [
@@ -58,6 +76,89 @@ const PANELS: PanelConfig[] = [
     ],
   },
   {
+    id: "rc_grounding",
+    title: "RC grounding prompts (per-hazard)",
+    description: (
+      <p>
+        Per-hazard Google Grounding queries for Regime Change evidence gathering.
+        Each hazard gets a dedicated grounding call that surfaces the right
+        signals for its RC assessment. RC grounding asks: &ldquo;What is{" "}
+        <strong>changing</strong>?&rdquo;
+      </p>
+    ),
+    promptKeys: [
+      "rc_grounding_ace",
+      "rc_grounding_dr",
+      "rc_grounding_fl",
+      "rc_grounding_hw",
+      "rc_grounding_tc",
+    ],
+    promptLabels: hazardPromptLabels("rc_grounding"),
+    sourceLinks: [
+      {
+        href: `${GITHUB_BASE}/horizon_scanner/rc_grounding_prompts.py`,
+        label: "Source",
+      },
+    ],
+  },
+  {
+    id: "rc",
+    title: "Regime Change assessment (per-hazard)",
+    description: (
+      <p>
+        Per-hazard RC prompt builders. RC is the <strong>first step</strong> in
+        the HS pipeline, answering: &ldquo;Is this hazard breaking from its
+        historical base rate in this country?&rdquo; Each hazard gets tailored
+        calibration anchors, examples, and guidance. The shared preamble is shown
+        first, followed by each hazard variant.
+      </p>
+    ),
+    promptKeys: [
+      "rc_preamble",
+      "rc_ace",
+      "rc_dr",
+      "rc_fl",
+      "rc_hw",
+      "rc_tc",
+    ],
+    promptLabels: {
+      rc_preamble: "Shared calibration preamble",
+      ...hazardPromptLabels("rc"),
+    },
+    sourceLinks: [
+      {
+        href: `${GITHUB_BASE}/horizon_scanner/rc_prompts.py`,
+        label: "Source",
+      },
+    ],
+  },
+  {
+    id: "triage_grounding",
+    title: "Triage grounding prompts (per-hazard)",
+    description: (
+      <p>
+        Per-hazard Google Grounding queries for triage evidence gathering.
+        Separate from RC grounding. Triage grounding asks: &ldquo;What is the{" "}
+        <strong>current situation</strong>?&rdquo; It builds the operational
+        picture: severity, response coverage, and seasonal outlook.
+      </p>
+    ),
+    promptKeys: [
+      "triage_grounding_ace",
+      "triage_grounding_dr",
+      "triage_grounding_fl",
+      "triage_grounding_hw",
+      "triage_grounding_tc",
+    ],
+    promptLabels: hazardPromptLabels("triage_grounding"),
+    sourceLinks: [
+      {
+        href: `${GITHUB_BASE}/horizon_scanner/hs_triage_grounding_prompts.py`,
+        label: "Source",
+      },
+    ],
+  },
+  {
     id: "hs_triage",
     title: "Horizon scan triage (HS v2)",
     description: (
@@ -72,57 +173,6 @@ const PANELS: PanelConfig[] = [
     sourceLinks: [
       { href: `${GITHUB_BASE}/horizon_scanner/prompts.py`, label: "Source" },
     ],
-  },
-  {
-    id: "researcher",
-    title: "Research brief",
-    description: (
-      <p>
-<<<<<<< Updated upstream
-        The Researcher prompt produces a concise brief with explicit headings so
-        forecasters can update their priors quickly. In production, a v2 builder
-        wraps this template with structured context blocks (question metadata,
-        resolver history, HS triage, merged evidence, regime change flags).
-      </p>
-    ),
-    promptKeys: ["researcher", "research_v2_schema"],
-=======
-        The v2 forecaster prompt produces a six-month SPD (Subjective
-        Probability Distribution) over five impact buckets using a structured
-        7-step Bayesian updating method. It injects calibration guidance,
-        regime change signals, hazard tail pack data, prediction market
-        signals, seasonal outlook, and structured data connectors
-        (ReliefWeb, ACLED political events, IPC, ACAPS) at runtime.
-      </p>
-    ),
-    promptKeys: ["spd_template", "spd_buckets"],
-    promptLabels: {
-      spd_template: "SPD v2 prompt (build_spd_prompt_v2)",
-      spd_buckets: "Bucket definitions (PA + fatalities)",
-    },
->>>>>>> Stashed changes
-    sourceLinks: [
-      {
-        href: `${GITHUB_BASE}/forecaster/prompts.py`,
-        label: "Source: forecaster/prompts.py",
-      },
-      {
-        href: `${GITHUB_BASE}/forecaster/hazard_prompts.py`,
-        label: "Hazard reasoning blocks",
-      },
-    ],
-    notes: (
-      <div className="mt-3 text-sm">
-        <p className="font-medium text-fred-secondary">
-<<<<<<< Updated upstream
-          Research v2 output schema
-        </p>
-        <p className="mt-1 text-xs text-fred-text/70">
-          The v2 builder outputs structured JSON matching this schema. The
-          schema excerpt below is also extracted live from the source code.
-        </p>
-      </div>
-    ),
   },
   {
     id: "spd",
@@ -155,8 +205,6 @@ const PANELS: PanelConfig[] = [
     notes: (
       <div className="mt-3 text-sm">
         <p className="font-medium text-fred-secondary">
-=======
->>>>>>> Stashed changes
           Runtime context injected per question
         </p>
         <ul className="mt-2 list-disc space-y-1 pl-5">
@@ -315,17 +363,28 @@ export default function AiPromptsSection({
             {panel.promptKeys.length > 0
               ? panel.promptKeys.map((key) => {
                   const content = activePrompts[key];
+                  const label = panel.promptLabels?.[key];
                   if (!content) {
                     return (
                       <p
                         key={key}
                         className="mt-3 text-xs italic text-fred-text/60"
                       >
-                        Prompt excerpt unavailable — see source link below.
+                        {label ? `${label}: ` : ""}Prompt excerpt unavailable
+                        — see source link below.
                       </p>
                     );
                   }
-                  return <pre key={key} className={preClass}>{content}</pre>;
+                  return (
+                    <React.Fragment key={key}>
+                      {label && (
+                        <p className="mt-4 mb-1 text-sm font-medium text-fred-secondary">
+                          {label}
+                        </p>
+                      )}
+                      <pre className={preClass}>{content}</pre>
+                    </React.Fragment>
+                  );
                 })
               : panel.staticFallback && (
                   <pre className={preClass}>{panel.staticFallback}</pre>

@@ -58,6 +58,7 @@ function extractBetweenMarkers(
  * - Strips Python string syntax (return, f""", triple quotes, parens)
  * - Replaces json.dumps() calls with [data]
  * - Replaces f-string {variable_name} with [variable name]
+ * - Replaces f-string {expr.method(args)} with [expr]
  * - Unescapes doubled braces and \n literals
  * - Collapses excess blank lines
  */
@@ -67,7 +68,7 @@ function sanitizeForDisplay(text: string): string {
   // Strip leading Python syntax:
   //   'return f"""...'  or  'return """...'
   //   'return (\n  ...'  or  'variable = (\n  ...'
-  s = s.replace(/^\s*return\s+f?"""/, "");
+  s = s.replace(/^\s*return\s+f?"""\s*\\?\s*\n?/, "");
   s = s.replace(/^\s*return\s*\(\s*\n?/, "");
   s = s.replace(/^\s*\w+\s*=\s*\(\s*\n?/, "");
 
@@ -89,6 +90,12 @@ function sanitizeForDisplay(text: string): string {
   // Replace json.dumps / _json_dumps_for_prompt calls with [data]
   s = s.replace(/\{json\.dumps\([^)]+\)\}/g, "[data]");
   s = s.replace(/\{_json_dumps_for_prompt\([^)]+\)\}/g, "[data]");
+
+  // Replace f-string expressions with method calls: {expr.method(args)} -> [expr]
+  s = s.replace(
+    /\{([a-z_][a-z0-9_]*)\.[a-z_][a-z0-9_]*\([^)]*\)\}/gi,
+    (_match, varName: string) => `[${varName.replace(/_/g, " ")}]`,
+  );
 
   // Replace remaining f-string variables {var_name} with [var name]
   // But skip JSON-like patterns {{ and }}
@@ -117,12 +124,41 @@ function sanitizeForDisplay(text: string): string {
 }
 
 /**
+ * Helper: extract multiple marker-based prompts from one source file.
+ */
+function extractMarkerSet(
+  source: string | null,
+  prefix: string,
+  hazards: string[],
+  result: Record<string, string | null>,
+): void {
+  for (const h of hazards) {
+    const key = `${prefix}_${h}`;
+    if (source) {
+      const raw = extractBetweenMarkers(
+        source,
+        `${prefix}_${h}_start`,
+        `${prefix}_${h}_end`,
+      );
+      result[key] = raw ? sanitizeForDisplay(raw) : null;
+    } else {
+      result[key] = null;
+    }
+  }
+}
+
+const HAZARDS = ["ace", "dr", "fl", "hw", "tc"];
+
+/**
  * Core extraction logic shared between live and versioned prompts.
  */
 function extractPromptsFromSources(
   forecasterSrc: string | null,
   hsSrc: string | null,
   geminiSrc: string | null,
+  rcPromptsSrc: string | null,
+  rcGroundingSrc: string | null,
+  triageGroundingSrc: string | null,
 ): Record<string, string | null> {
   const result: Record<string, string | null> = {};
 
@@ -150,36 +186,8 @@ function extractPromptsFromSources(
     result.hs_triage = null;
   }
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-  // --- Researcher (named constant from forecaster/prompts.py) ---
-  if (forecasterSrc) {
-    const raw = extractNamedConstant(forecasterSrc, "RESEARCHER_PROMPT");
-    result.researcher = raw ? sanitizeForDisplay(raw) : null;
-  } else {
-    result.researcher = null;
-  }
-
-  // --- Research v2 output schema ---
-  if (forecasterSrc) {
-    const raw = extractNamedConstant(
-      forecasterSrc,
-      "RESEARCH_V2_REQUIRED_OUTPUT_SCHEMA",
-    );
-    result.research_v2_schema = raw ? raw.trim() : null;
-  } else {
-    result.research_v2_schema = null;
-  }
-
-  // --- SPD template (named constant) ---
-=======
-  // --- SPD v2 prompt (marker extraction from build_spd_prompt_v2) ---
->>>>>>> Stashed changes
-  if (forecasterSrc) {
-=======
   // --- SPD v2 prompt (marker extraction from build_spd_prompt_v2) ---
   if (forecasterSrc) {
->>>>>>> Stashed changes
     const raw = extractBetweenMarkers(
       forecasterSrc,
       "spd_v2_start",
@@ -215,6 +223,21 @@ function extractPromptsFromSources(
     result.scenario = null;
   }
 
+  // --- RC prompts (per-hazard, from horizon_scanner/rc_prompts.py) ---
+  if (rcPromptsSrc) {
+    const raw = extractNamedConstant(rcPromptsSrc, "_RC_CALIBRATION_PREAMBLE");
+    result.rc_preamble = raw ? sanitizeForDisplay(raw) : null;
+  } else {
+    result.rc_preamble = null;
+  }
+  extractMarkerSet(rcPromptsSrc, "rc", HAZARDS, result);
+
+  // --- RC grounding prompts (per-hazard) ---
+  extractMarkerSet(rcGroundingSrc, "rc_grounding", HAZARDS, result);
+
+  // --- Triage grounding prompts (per-hazard) ---
+  extractMarkerSet(triageGroundingSrc, "triage_grounding", HAZARDS, result);
+
   return result;
 }
 
@@ -225,12 +248,19 @@ function extractPromptsFromSources(
 export async function extractAllPrompts(): Promise<
   Record<string, string | null>
 > {
-  const [forecasterSrc, hsSrc, geminiSrc] = await Promise.all([
-    readSourceFile("forecaster/prompts.py"),
-    readSourceFile("horizon_scanner/prompts.py"),
-    readSourceFile("pythia/web_research/backends/gemini_grounding.py"),
-  ]);
-  return extractPromptsFromSources(forecasterSrc, hsSrc, geminiSrc);
+  const [forecasterSrc, hsSrc, geminiSrc, rcPromptsSrc, rcGroundingSrc, triageGroundingSrc] =
+    await Promise.all([
+      readSourceFile("forecaster/prompts.py"),
+      readSourceFile("horizon_scanner/prompts.py"),
+      readSourceFile("pythia/web_research/backends/gemini_grounding.py"),
+      readSourceFile("horizon_scanner/rc_prompts.py"),
+      readSourceFile("horizon_scanner/rc_grounding_prompts.py"),
+      readSourceFile("horizon_scanner/hs_triage_grounding_prompts.py"),
+    ]);
+  return extractPromptsFromSources(
+    forecasterSrc, hsSrc, geminiSrc,
+    rcPromptsSrc, rcGroundingSrc, triageGroundingSrc,
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -267,19 +297,26 @@ async function listPromptVersions(): Promise<VersionEntry[]> {
 }
 
 /**
- * Read the 3 archived Python files for a specific version date,
+ * Read archived Python files for a specific version date,
  * then extract prompts using the same logic as live extraction.
  */
 async function extractPromptsForVersion(
   date: string,
 ): Promise<Record<string, string | null>> {
   const relBase = path.join("docs", "prompts", date);
-  const [forecasterSrc, hsSrc, geminiSrc] = await Promise.all([
-    readSourceFile(path.join(relBase, "forecaster_prompts.py")),
-    readSourceFile(path.join(relBase, "hs_prompts.py")),
-    readSourceFile(path.join(relBase, "gemini_grounding.py")),
-  ]);
-  return extractPromptsFromSources(forecasterSrc, hsSrc, geminiSrc);
+  const [forecasterSrc, hsSrc, geminiSrc, rcPromptsSrc, rcGroundingSrc, triageGroundingSrc] =
+    await Promise.all([
+      readSourceFile(path.join(relBase, "forecaster_prompts.py")),
+      readSourceFile(path.join(relBase, "hs_prompts.py")),
+      readSourceFile(path.join(relBase, "gemini_grounding.py")),
+      readSourceFile(path.join(relBase, "rc_prompts.py")),
+      readSourceFile(path.join(relBase, "rc_grounding_prompts.py")),
+      readSourceFile(path.join(relBase, "hs_triage_grounding_prompts.py")),
+    ]);
+  return extractPromptsFromSources(
+    forecasterSrc, hsSrc, geminiSrc,
+    rcPromptsSrc, rcGroundingSrc, triageGroundingSrc,
+  );
 }
 
 /**

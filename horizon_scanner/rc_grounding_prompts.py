@@ -112,6 +112,7 @@ def build_grounding_prompt_ace(
             f"Search for evidence that EXPLAINS or CONTRADICTS this trend.\n"
         )
 
+    # --- PROMPT_EXCERPT: rc_grounding_ace_start ---
     return f"""\
 You are a conflict early warning research assistant using Google Search grounding.
 Search for recent evidence of CHANGING conflict dynamics in {country_name} ({iso3})
@@ -173,6 +174,7 @@ country (site:crisisgroup.org/crisiswatch). Note any directional arrows
 qualitative assessment and is updated monthly.
 
 {_OUTPUT_SCHEMA_BLOCK}"""
+    # --- PROMPT_EXCERPT: rc_grounding_ace_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +211,7 @@ def build_grounding_prompt_dr(
             f"Focus your search on conditions during THIS season.\n"
         )
 
+    # --- PROMPT_EXCERPT: rc_grounding_dr_start ---
     return f"""\
 You are a food security and drought research assistant using Google Search grounding.
 Search for recent evidence of DROUGHT CONDITIONS or EMERGING DROUGHT RISK in
@@ -256,6 +259,7 @@ Focus on authoritative sources: FEWS NET, FAO GIEWS, WFP VAM, IPC,
 IRI, national meteorological services, OCHA situation reports.
 
 {_OUTPUT_SCHEMA_BLOCK}"""
+    # --- PROMPT_EXCERPT: rc_grounding_dr_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +293,7 @@ def build_grounding_prompt_fl(
             f"Frame your search around conditions for THIS season.\n"
         )
 
+    # --- PROMPT_EXCERPT: rc_grounding_fl_start ---
     return f"""\
 You are a flood risk research assistant using Google Search grounding.
 Search for recent evidence of FLOOD EVENTS, FLOOD RISK, or CHANGING FLOOD
@@ -331,6 +336,7 @@ Focus on authoritative sources: OCHA, IFRC, FloodList, GloFAS bulletins,
 national disaster management agencies, ReliefWeb, WMO.
 
 {_OUTPUT_SCHEMA_BLOCK}"""
+    # --- PROMPT_EXCERPT: rc_grounding_fl_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +369,7 @@ def build_grounding_prompt_hw(
             f"Focus your search on conditions for THIS season.\n"
         )
 
+    # --- PROMPT_EXCERPT: rc_grounding_hw_start ---
     return f"""\
 You are a climate and health research assistant using Google Search grounding.
 Search for recent evidence of EXTREME HEAT EVENTS or EMERGING HEATWAVE RISK
@@ -410,6 +417,7 @@ WHO heat-health warnings, IRI, CPC, ECMWF, Copernicus Climate Change
 Service, ReliefWeb.
 
 {_OUTPUT_SCHEMA_BLOCK}"""
+    # --- PROMPT_EXCERPT: rc_grounding_hw_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +452,7 @@ def build_grounding_prompt_tc(
             f"This determines whether to focus on seasonal outlooks or active storms.\n"
         )
 
+    # --- PROMPT_EXCERPT: rc_grounding_tc_start ---
     return f"""\
 You are a tropical cyclone research assistant using Google Search grounding.
 Search for recent evidence of TROPICAL CYCLONE RISK or ACTIVE STORMS
@@ -497,6 +506,7 @@ Focus on authoritative sources: NOAA NHC, JTWC, regional RSMCs, WMO,
 Tropical Storm Risk (UCL), OCHA, IFRC, national meteorological services.
 
 {_OUTPUT_SCHEMA_BLOCK}"""
+    # --- PROMPT_EXCERPT: rc_grounding_tc_end ---
 
 
 # ---------------------------------------------------------------------------

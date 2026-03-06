@@ -310,6 +310,7 @@ higher RC likelihood. If forecasts are consistent with base rates, this
 supports stability.
 """
 
+    # --- PROMPT_EXCERPT: rc_ace_start ---
     return f"""{preamble}
 
 === ACE-SPECIFIC GUIDANCE ===
@@ -394,6 +395,7 @@ MAGNITUDE CALIBRATION:
 === END ACE-SPECIFIC GUIDANCE ===
 {additional_section}
 {_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
+    # --- PROMPT_EXCERPT: rc_ace_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +444,7 @@ def build_rc_prompt_dr(
         hazard_code="DR",
     )
 
+    # --- PROMPT_EXCERPT: rc_dr_start ---
     return f"""{preamble}
 
 === DR-SPECIFIC GUIDANCE ===
@@ -505,6 +508,7 @@ MAGNITUDE CALIBRATION:
 === END DR-SPECIFIC GUIDANCE ===
 {additional_section}
 {_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
+    # --- PROMPT_EXCERPT: rc_dr_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +554,7 @@ def build_rc_prompt_fl(
         hazard_code="FL",
     )
 
+    # --- PROMPT_EXCERPT: rc_fl_start ---
     return f"""{preamble}
 
 === FL-SPECIFIC GUIDANCE ===
@@ -612,6 +617,7 @@ MAGNITUDE CALIBRATION:
 === END FL-SPECIFIC GUIDANCE ===
 {additional_section}
 {_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
+    # --- PROMPT_EXCERPT: rc_fl_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -655,6 +661,7 @@ def build_rc_prompt_hw(
         hazard_code="HW",
     )
 
+    # --- PROMPT_EXCERPT: rc_hw_start ---
     return f"""{preamble}
 
 === HW-SPECIFIC GUIDANCE ===
@@ -711,6 +718,7 @@ MAGNITUDE CALIBRATION:
 === END HW-SPECIFIC GUIDANCE ===
 {additional_section}
 {_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
+    # --- PROMPT_EXCERPT: rc_hw_end ---
 
 
 # ---------------------------------------------------------------------------
@@ -756,6 +764,7 @@ def build_rc_prompt_tc(
         hazard_code="TC",
     )
 
+    # --- PROMPT_EXCERPT: rc_tc_start ---
     return f"""{preamble}
 
 === TC-SPECIFIC GUIDANCE ===
@@ -818,6 +827,7 @@ MAGNITUDE CALIBRATION:
 === END TC-SPECIFIC GUIDANCE ===
 {additional_section}
 {_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
+    # --- PROMPT_EXCERPT: rc_tc_end ---
 
 
 # ---------------------------------------------------------------------------
