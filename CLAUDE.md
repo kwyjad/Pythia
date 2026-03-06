@@ -9,7 +9,8 @@ Pythia is an end-to-end AI forecasting system for humanitarian crises. It scans 
 **Core pipeline:**
 ```
 Resolver facts/base rates -> Horizon Scanner triage -> Questions seeded
-  -> Shared evidence packs -> Research v2 briefs -> Forecaster SPD ensemble
+  -> Structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political)
+  -> Adversarial checks (RC L2+) -> Forecaster SPD ensemble
   -> DuckDB -> FastAPI API -> Next.js Dashboard + CSV/Excel exports
 ```
 
@@ -17,15 +18,16 @@ Resolver facts/base rates -> Horizon Scanner triage -> Questions seeded
 ```
 compute_resolutions (ground truth from Resolver) -> resolutions table
   -> compute_scores (Brier, log loss, CRPS per horizon) -> scores table
-  -> compute_calibration (weights + advice per hazard/metric) -> calibration_weights + calibration_advice
+  -> compute_calibration (weights per hazard/metric) -> calibration_weights
+  -> generate_calibration_advice (per-hazard/metric prompt guidance) -> calibration_advice
 ```
 
 ## Repository layout
 
 ```
 Pythia/
-  horizon_scanner/     # Country/hazard triage via LLM (regime change, tail packs)
-  forecaster/          # LLM ensemble for SPD forecasts (research + SPD phases)
+  horizon_scanner/     # Country/hazard triage via LLM (regime change, tail packs, reliefweb)
+  forecaster/          # LLM ensemble for SPD forecasts (structured data + SPD phases)
   resolver/            # Fact ingestion, resolution, and ground truth DB
     connectors/        #   Connector protocol + registry (ACLED, IDMC)
     ingestion/         #   Source-specific fetch/normalise clients (acled_client, idmc/)
@@ -35,9 +37,14 @@ Pythia/
   pythia/
     api/               # FastAPI service (50+ endpoints)
     db/                # DuckDB schema definitions + migrations (schema.py is authoritative)
-    tools/             # Post-forecast compute scripts (resolutions, scores, calibration)
+    tools/             # Post-forecast compute scripts (resolutions, scores, calibration, calibration advice)
     web_research/      # Shared retriever backends (Gemini, OpenAI, Claude, Exa, Perplexity)
     prediction_markets/  # Prediction market signal retriever (Metaculus, Polymarket, Manifold)
+    acaps.py           # ACAPS unified connector (INFORM, Risk Radar, Daily Monitoring, Access)
+    acled_political.py # ACLED event-level political data connector
+    adversarial_check.py # Counter-evidence checks for RC Level 2+ cases
+    ipc_phases.py      # IPC food security phase connector
+    market_snapshot.py # Manifold prediction market snapshot utility
     tests/             # Pythia-specific tests
   web/                 # Next.js 14 dashboard (TypeScript, Tailwind)
   tests/               # Cross-module integration tests
@@ -65,6 +72,13 @@ Pythia/
 - `resolver/tools/enrich.py` — Enrichment (registry lookups, ym derivation, defaults)
 - `resolver/tools/precedence_config.yml` — Precedence tier policy
 - `pythia/prediction_markets/retriever.py` — Prediction market signal retriever (runs at research time, queries Metaculus/Polymarket/Manifold)
+- `pythia/acaps.py` — ACAPS unified connector (4 datasets: INFORM Severity, Risk Radar, Daily Monitoring, Humanitarian Access)
+- `pythia/ipc_phases.py` — IPC food security phase classification connector
+- `pythia/acled_political.py` — ACLED event-level political data (protests, riots, strategic developments)
+- `pythia/adversarial_check.py` — Counter-evidence searches for RC Level 2+ (devil's advocate)
+- `horizon_scanner/reliefweb.py` — ReliefWeb humanitarian reports connector
+- `forecaster/hazard_prompts.py` — Hazard-specific reasoning guidance for SPD prompts
+- `pythia/tools/generate_calibration_advice.py` — Per-hazard/metric calibration advice generation
 
 ## Databases
 
@@ -73,13 +87,21 @@ Two DuckDB databases:
 **Pythia DB** (`PYTHIA_DB_URL`): system of record
 - `hs_runs`, `hs_triage` — Horizon Scanner outputs (triage scores, RC fields)
 - `hs_hazard_tail_packs` — RC-triggered hazard evidence packs
+- `hs_adversarial_checks` — Counter-evidence for RC Level 2+ (devil's advocate)
 - `seasonal_forecasts` — NMME country-level temp/precip anomalies (monthly from CPC)
 - `conflict_forecasts` — VIEWS + conflictforecast.org conflict predictions (PK: source, iso3, hazard_code, metric, lead_months, forecast_issue_date)
 - `questions`, `question_research` — Seeded questions + research briefs
 - `forecasts_raw`, `forecasts_ensemble` — Per-model + aggregated SPDs
 - `resolutions` — Ground truth values per (question_id, horizon_m)
 - `scores` — Brier/log/CRPS per (question, horizon, model)
-- `calibration_weights`, `calibration_advice` — Per hazard/metric weights
+- `calibration_weights`, `calibration_advice` — Per hazard/metric weights + LLM advice
+- `reliefweb_reports` — ReliefWeb humanitarian situation reports
+- `acled_political_events` — ACLED event-level political data
+- `ipc_phases` — IPC food security phase populations
+- `acaps_inform_severity`, `acaps_inform_severity_trend` — ACAPS INFORM severity scores
+- `acaps_risk_radar` — ACAPS forward-looking risk assessments
+- `acaps_daily_monitoring` — ACAPS analyst-curated daily updates
+- `acaps_humanitarian_access` — ACAPS humanitarian access scores
 - `llm_calls` — Full telemetry (cost, tokens, latency, errors)
 
 **Resolver DB** (`resolver/db/schema.sql`): fact ingestion
@@ -178,8 +200,9 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `PYTHIA_HS_RC_LEVEL*_*` | RC threshold overrides |
 | `PYTHIA_HS_RC_DIST_WARN_*` | RC distribution warning thresholds |
 | `PYTHIA_PREDICTION_MARKETS_ENABLED` | Enable prediction market retriever (0/1) |
+| `ACAPS_EMAIL` / `ACAPS_PASSWORD` | ACAPS API credentials |
 
-Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`.
+Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`.
 
 ## Build and run
 
@@ -213,6 +236,7 @@ python3 -m forecaster.cli --mode pythia
 python3 -m pythia.tools.compute_resolutions
 python3 -m pythia.tools.compute_scores
 python3 -m pythia.tools.compute_calibration_pythia
+python3 -m pythia.tools.generate_calibration_advice
 
 # API server
 uvicorn pythia.api.app:app --reload --port 8000
@@ -232,15 +256,17 @@ Before editing any of the 3 prompt source files (`forecaster/prompts.py`, `horiz
 - DuckDB is the only database backend (no Postgres/SQLite)
 - `pythia/db/schema.py` is authoritative for Pythia tables; `resolver/db/schema.sql` for Resolver tables
 - Config loaded via `pythia.config.load()` which reads `pythia/config.yaml`
-- LLM providers abstracted through `forecaster/providers.py` (OpenAI, Google, Anthropic, XAI)
+- LLM providers abstracted through `forecaster/providers.py` (OpenAI, Google, Anthropic, XAI, Kimi, DeepSeek)
 - All LLM calls logged to `llm_calls` table with cost, tokens, latency, error tracking
 - Env vars override config defaults; threshold env vars use `_env_float()` pattern
+- Structured data connectors follow a standard pattern: `fetch_*()` → `store_*()` → `load_*()` → `format_*_for_prompt()` / `format_*_for_spd()`
+- Research LLM stage is deprecated; evidence now flows from structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political, NMME, VIEWS, conflictforecast.org, ICG CrisisWatch) into HS and SPD prompts
 
 ## Post-Edit Documentation Requirements
 
 After making any code changes, evaluate whether the following files need updating and update them if so:
 
-- **README.txt** – Update if you've changed setup steps, dependencies, usage instructions, file structure, or how to run the project.
-- **docs/Fred_overview.md** – This is a plain-English description of the system for non-technical readers. Update it if you've changed what the system does, how it behaves, its inputs/outputs, or its overall logic. Avoid technical jargon; explain changes in terms of what the system now does differently from a user perspective. Assume readers understand forecasting and humanitarian data, but not code.
+- **README.md** – Update if you've changed setup steps, dependencies, usage instructions, file structure, or how to run the project.
+- **docs/fred_overview.md** – This is a plain-English description of the system for non-technical readers. Update it if you've changed what the system does, how it behaves, its inputs/outputs, or its overall logic. Avoid technical jargon; explain changes in terms of what the system now does differently from a user perspective. Assume readers understand forecasting and humanitarian data, but not code.
 
 Do not update these files for trivial changes (e.g. formatting, minor refactors with no behavioral change). Use your judgment.

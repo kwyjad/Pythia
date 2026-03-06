@@ -25,20 +25,24 @@ Pythia connects historical hazard data, web research, and LLM reasoning into a r
 
 ```
 Resolver facts/base rates → Horizon Scanner (RC → triage) → Questions seeded + track assigned
-                           → Shared evidence packs → Research v2 briefs
+                           → Structured data connectors (ReliefWeb, ACAPS, IPC, ACLED)
+                           → Adversarial checks (RC L2+) → Calibration advice
                            → Track 1: full ensemble SPD + scenarios
                            → Track 2: single-model SPD
                            → DuckDB → API → Dashboard + downloads
 ```
 
-- **System of record**: DuckDB (`PYTHIA_DB_URL` / `app.db_url`) holds HS triage, questions, research, forecasts, and diagnostics.
-- **End-to-end flow**: Resolver facts and base rates inform HS (RC assessment, then triage with per-hazard prompts and seasonal filtering); HS produces triage + questions with track assignments; retriever packs evidence; Research v2 drafts structured briefs; Forecaster routes questions by track — Track 1 (RC-elevated) through the full ensemble, Track 2 (priority, no RC) through a single model — and writes results back to DuckDB.
+- **System of record**: DuckDB (`PYTHIA_DB_URL` / `app.db_url`) holds HS triage, questions, structured data, forecasts, and diagnostics.
+- **End-to-end flow**: Resolver facts and base rates inform HS (RC assessment, then triage with per-hazard prompts and seasonal filtering); HS produces triage + questions with track assignments; structured data connectors pull evidence from humanitarian APIs; adversarial checks run for RC L2+ cases; Forecaster routes questions by track — Track 1 (RC-elevated) through the full ensemble, Track 2 (priority, no RC) through a single model — and writes results back to DuckDB.
 
 ## Core components
 - **Resolver (facts + base rates)**: Resolver tables in DuckDB (`facts_resolved`, `facts_deltas`, `snapshots`) provide historical context. Schema is defined in [`pythia/db/schema.py`](pythia/db/schema.py).
 - **Horizon Scanner (HS)**: `python -m horizon_scanner.horizon_scanner` triages countries and hazards, writes `hs_runs`/`hs_triage`, seeds `questions`/`question_research`, and generates country evidence packs. HS now runs a multi-stage pipeline: RC assessment runs first as a dedicated step, then triage uses the RC results. Both stages use per-hazard prompts (tailored to each hazard type) and seasonal filtering (adjusting scores for in-season vs. off-season hazards).
 - **Retriever web research (shared evidence packs)**: When enabled, the retriever builds evidence packs reused across HS, research, and SPD prompts. The shared retriever defaults to `gemini-3-flash-preview` when `PYTHIA_RETRIEVER_ENABLED=1` and `PYTHIA_RETRIEVER_MODEL_ID` is unset; see [`pythia/web_research/web_research.py`](pythia/web_research/web_research.py).
-- **Research v2**: Prompts generate structured briefs that separate verified vs unverified sources, stored in `question_research`/`llm_calls`.
+- **Structured data connectors**: Authoritative humanitarian data pulled from specialist APIs (ReliefWeb, ACAPS, IPC, ACLED political events) and stored in DuckDB for direct prompt injection. Replaced the former Research LLM stage. See [`pythia/acaps.py`](pythia/acaps.py), [`pythia/ipc_phases.py`](pythia/ipc_phases.py), [`horizon_scanner/reliefweb.py`](horizon_scanner/reliefweb.py), [`pythia/acled_political.py`](pythia/acled_political.py).
+- **Adversarial evidence checks**: Counter-evidence searches for RC Level 2+ cases, stored in `hs_adversarial_checks`. See [`pythia/adversarial_check.py`](pythia/adversarial_check.py).
+- **Hazard-specific reasoning**: Per-hazard forecasting instructions injected into SPD prompts. See [`forecaster/hazard_prompts.py`](forecaster/hazard_prompts.py).
+- **Calibration advice**: Per-hazard/metric calibration guidance generated from historical performance, injected into forecasting prompts. See [`pythia/tools/generate_calibration_advice.py`](pythia/tools/generate_calibration_advice.py).
 - **Forecaster SPD v2 ensemble**: `python -m forecaster.cli --mode pythia` runs SPD v2 prompts across the active ensemble and writes per-model outputs (`forecasts_raw`) and aggregated results (`forecasts_ensemble`). Questions are routed by track: **Track 1** (RC-elevated, level > 0) uses the full multi-model ensemble; **Track 2** (priority, no RC) uses a lightweight single-model path (Gemini Flash).
 - **Scenarios (Track 1 only)**: When an ensemble SPD is available, scenarios can be generated for Track 1 questions and written back to DuckDB.
 - **Dashboard + API**: FastAPI serves `/v1/*` endpoints for the dashboard, downloads, and diagnostics. The Next.js UI lives in `web/`.
@@ -58,8 +62,8 @@ Resolver facts/base rates → Horizon Scanner (RC → triage) → Questions seed
 
 **Scoring + levels (defaults; env-overridable):**
 - `score = likelihood × magnitude`
-- Level 0: `likelihood < 0.35` **or** `score < 0.20`
-- Level 1: `likelihood ≥ 0.35` **and** `score ≥ 0.20`
+- Level 0: `likelihood < 0.45` **or** `score < 0.25`
+- Level 1: `likelihood ≥ 0.45` **and** `score ≥ 0.25`
 - Level 2: `likelihood ≥ 0.60` **and** `magnitude ≥ 0.50` (score ≥ 0.30)
 - Level 3: `likelihood ≥ 0.75` **and** `magnitude ≥ 0.60` (score ≥ 0.45)
 
@@ -140,15 +144,50 @@ Pythia ingests external conflict forecasts from two independent sources and inco
 - **Forecaster integration**: Injected into research prompts for ACE questions as structured quantitative anchors.
 - **Run manually**: `python -m resolver.tools.fetch_conflict_forecasts` (or `--sources views conflictforecast_org`, `--dry-run` to preview).
 
+## Structured data connectors
+
+Pythia pulls structured humanitarian, climate, and conflict-forecast data from authoritative APIs, stores it in DuckDB, and injects it into pipeline prompts (HS triage, RC assessment, and/or forecaster SPD). This replaced the former Research LLM stage with deterministic, reproducible evidence injection.
+
+### Data sources
+
+| Source | Module | What it provides | DuckDB table(s) |
+| --- | --- | --- | --- |
+| **ReliefWeb** | `horizon_scanner/reliefweb.py` | Humanitarian situation reports (45-day window, up to 15/country) | `reliefweb_reports` |
+| **ACAPS INFORM Severity** | `pythia/acaps.py` | Crisis severity scores + trend | `acaps_inform_severity`, `acaps_inform_severity_trend` |
+| **ACAPS Risk Radar** | `pythia/acaps.py` | Forward-looking risk with triggers | `acaps_risk_radar` |
+| **ACAPS Daily Monitoring** | `pythia/acaps.py` | Analyst-curated daily updates | `acaps_daily_monitoring` |
+| **ACAPS Humanitarian Access** | `pythia/acaps.py` | Access constraint scores (HS triage only) | `acaps_humanitarian_access` |
+| **IPC Phases** | `pythia/ipc_phases.py` | Food security phase populations (Phase 3+ = Crisis) | `ipc_phases` |
+| **ACLED Political Events** | `pythia/acled_political.py` | Event-level political data (ACE/DI hazards only) | `acled_political_events` |
+| **NMME Seasonal Forecasts** | `resolver/tools/ingest_nmme.py` | Temp/precip anomalies, 7-month lead (DR/FL/HW/TC) | `seasonal_forecasts` |
+| **VIEWS** | `resolver/connectors/views.py` | ML-based conflict fatality predictions (ACE, 1–6 month leads) | `conflict_forecasts` |
+| **conflictforecast.org** | `resolver/connectors/conflictforecast.py` | News-based conflict risk scores (ACE, 3m/12m) | `conflict_forecasts` |
+| **ICG CrisisWatch** | `horizon_scanner/crisiswatch_horizon.py` | Expert conflict flags + "On the Horizon" (ACE RC only) | fetched at prompt time |
+
+### Adversarial evidence checks
+
+For RC Level 2+ cases, `pythia/adversarial_check.py` runs counter-evidence web searches and synthesizes results into structured output (counter-evidence, historical analogs, stabilizing factors, net assessment). Stored in `hs_adversarial_checks`.
+
+### Calibration advice
+
+`pythia/tools/generate_calibration_advice.py` generates per-hazard/metric calibration guidance from historical scores. Stored in `calibration_advice` and injected into forecasting prompts.
+
+### Env vars
+
+- `ACAPS_EMAIL`, `ACAPS_PASSWORD`: ACAPS API credentials (required for ACAPS feeds).
+- `PYTHIA_DB_URL`: DuckDB path (shared with all connectors).
+
 ## Data model / DuckDB tables
 
 Key tables (see [`pythia/db/schema.py`](pythia/db/schema.py) and [`SCHEMAS.md`](SCHEMAS.md) for canonical fields):
 
-- **HS**: `hs_runs`, `hs_triage` (includes RC columns), `hs_country_reports`, `hs_hazard_tail_packs`
+- **HS**: `hs_runs`, `hs_triage` (includes RC columns), `hs_country_reports`, `hs_hazard_tail_packs`, `hs_adversarial_checks`
 - **Seasonal climate**: `seasonal_forecasts` (NMME country-level temp/precip anomalies)
 - **Conflict forecasts**: `conflict_forecasts` (VIEWS + conflictforecast.org predicted fatalities and risk scores)
+- **Structured data**: `reliefweb_reports`, `acled_political_events`, `ipc_phases`, `acaps_inform_severity`, `acaps_inform_severity_trend`, `acaps_risk_radar`, `acaps_daily_monitoring`, `acaps_humanitarian_access`
 - **Questions + research**: `questions`, `question_research`
 - **Forecasts**: `forecasts_raw`, `forecasts_ensemble`
+- **Calibration**: `calibration_weights`, `calibration_advice`
 - **Diagnostics**: `llm_calls`, `question_run_metrics`
 
 ## Model management
@@ -329,6 +368,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 
 ### Key env vars
 - **Provider keys**: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`, `EXA_API_KEY`, `PERPLEXITY_API_KEY`.
+- **Structured data**: `ACAPS_EMAIL`, `ACAPS_PASSWORD` (ACAPS API auth).
 - **Concurrency**:
   - `PYTHIA_LLM_CONCURRENCY` (global LLM call cap)
   - `HS_MAX_WORKERS`
@@ -365,6 +405,8 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 | `DEEPSEEK_API_KEY` | Forecaster SPD ensemble | DeepSeek models |
 | `EXA_API_KEY` | Web research | Exa backend (optional) |
 | `PERPLEXITY_API_KEY` | Web research | Perplexity backend (optional) |
+| `ACAPS_EMAIL` | Structured data | ACAPS API auth (INFORM, Risk Radar, etc.) |
+| `ACAPS_PASSWORD` | Structured data | ACAPS API auth |
 | `GITHUB_TOKEN` | Actions | Artifact download + summary updates |
 
 **Minimum set for full pipeline**: `GEMINI_API_KEY` + at least one of (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`). Missing keys disable their providers, and the run proceeds with a partial ensemble.
@@ -400,6 +442,10 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 - Hazard Tail Packs docs: [`docs/hs_hazard_tail_packs.md`](docs/hs_hazard_tail_packs.md)
 - HS country list: [`horizon_scanner/hs_country_list.txt`](horizon_scanner/hs_country_list.txt)
 - Forecaster CLI: [`forecaster/cli.py`](forecaster/cli.py)
+- Hazard-specific prompts: [`forecaster/hazard_prompts.py`](forecaster/hazard_prompts.py)
+- Structured data: [`pythia/acaps.py`](pythia/acaps.py), [`pythia/ipc_phases.py`](pythia/ipc_phases.py), [`horizon_scanner/reliefweb.py`](horizon_scanner/reliefweb.py), [`pythia/acled_political.py`](pythia/acled_political.py)
+- Adversarial checks: [`pythia/adversarial_check.py`](pythia/adversarial_check.py)
+- Calibration advice: [`pythia/tools/generate_calibration_advice.py`](pythia/tools/generate_calibration_advice.py)
 - Schema: [`pythia/db/schema.py`](pythia/db/schema.py)
 - Debug bundle script: [`scripts/dump_pythia_debug_bundle.py`](scripts/dump_pythia_debug_bundle.py)
 - Workflows: [`run_horizon_scanner.yml`](.github/workflows/run_horizon_scanner.yml), [`forecaster-ci.yml`](.github/workflows/forecaster-ci.yml)
