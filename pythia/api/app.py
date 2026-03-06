@@ -542,7 +542,7 @@ def _resolve_forecaster_run_id(
         SELECT run_id
         FROM forecasts_ensemble
         WHERE question_id = ?
-        ORDER BY created_at DESC NULLS LAST
+        ORDER BY COALESCE(created_at, '1970-01-01'::TIMESTAMP) DESC, run_id DESC
         LIMIT 1
         """,
         [question_id],
@@ -550,6 +550,41 @@ def _resolve_forecaster_run_id(
     if df.empty:
         return None
     return df["run_id"].iloc[0]
+
+
+def _run_filter_cte(
+    con: duckdb.DuckDBPyConnection,
+    forecaster_run_id: Optional[str] = None,
+) -> tuple[str, str]:
+    """Return (cte_sql, join_sql) to filter forecasts_ensemble to one run per question.
+
+    If *forecaster_run_id* is given, filter to that exact run.
+    Otherwise, pick the latest run per question via MAX(run_id).
+    Returns ("", "") if the table lacks a run_id column (backward compat).
+    """
+    if not _table_has_columns(con, "forecasts_ensemble", ["run_id"]):
+        return ("", "")
+    if forecaster_run_id:
+        cte = (
+            "fc_run_filter AS (\n"
+            "            SELECT question_id, run_id\n"
+            "            FROM forecasts_ensemble\n"
+            f"            WHERE run_id = '{forecaster_run_id}'\n"
+            "            GROUP BY question_id, run_id\n"
+            "        )"
+        )
+        join = "JOIN fc_run_filter fr ON fr.question_id = fe.question_id AND fr.run_id = fe.run_id"
+    else:
+        cte = (
+            "fc_run_filter AS (\n"
+            "            SELECT question_id, MAX(run_id) AS run_id\n"
+            "            FROM forecasts_ensemble\n"
+            "            WHERE run_id IS NOT NULL\n"
+            "            GROUP BY question_id\n"
+            "        )"
+        )
+        join = "JOIN fc_run_filter fr ON fr.question_id = fe.question_id AND fr.run_id = fe.run_id"
+    return (cte, join)
 
 
 def _build_llm_calls_bundle(
@@ -1724,6 +1759,7 @@ def get_risk_index(
     normalize: bool = Query(True, description="If true, include per-capita ranking"),
     agg: str = Query("surge", description="Aggregation mode: surge (default) or burden (legacy)"),
     alpha: float = Query(0.1, ge=0, le=1, description="Surge blending weight"),
+    forecaster_run_id: Optional[str] = Query(None, description="Forecaster run ID to scope results"),
 ):
     con = _con()
     metric_upper = (metric or "").strip().upper() or "PA"
@@ -1906,6 +1942,9 @@ def get_risk_index(
         )
         centroid_expr = eiv_sql.fallback_centroid_expr(":metric", bucket_index_expr)
 
+    run_cte, run_join = _run_filter_cte(con, forecaster_run_id)
+    run_cte_sql = f", {run_cte}" if run_cte else ""
+
     model_name_available = _table_has_columns(con, "forecasts_ensemble", ["model_name"])
     base_cte = ""
     per_row_cte = f"""
@@ -1920,6 +1959,7 @@ def get_risk_index(
             COALESCE({centroid_expr}, 0) AS centroid
           FROM forecasts_ensemble fe
           JOIN q ON q.question_id = fe.question_id
+          {run_join}
           {centroid_join}
       WHERE fe.{horizon_col} BETWEEN 1 AND 6
         AND fe.{bucket_col} IS NOT NULL
@@ -1940,6 +1980,7 @@ def get_risk_index(
             COALESCE(fe.model_name, '') AS model_name
           FROM forecasts_ensemble fe
           JOIN q ON q.question_id = fe.question_id
+          {run_join}
           WHERE fe.{horizon_col} BETWEEN 1 AND 6
             AND fe.{bucket_col} IS NOT NULL
             AND fe.{prob_col} IS NOT NULL
@@ -2003,6 +2044,7 @@ def get_risk_index(
         AND target_month = :target_month
         AND (:hazard_code IS NULL OR UPPER(hazard_code) = UPPER(:hazard_code))
     )
+    {run_cte_sql}
     {pop_cte}
     {base_cte}
     {per_row_cte},
@@ -2152,15 +2194,24 @@ def get_risk_index(
         "horizon_m": 6,
         "duration_m": duration_m,
         "normalize": normalize,
+        "forecaster_run_id": forecaster_run_id,
         "rows": rows,
     }
 
 
 @app.get("/v1/rankings")
-def rankings(month: str, metric: str = "PIN", normalize: bool = True):
+def rankings(
+    month: str,
+    metric: str = "PIN",
+    normalize: bool = True,
+    forecaster_run_id: Optional[str] = Query(None, description="Forecaster run ID to scope results"),
+):
     con = _con()
-    sql = """
-    WITH ev AS (
+    run_cte, run_join = _run_filter_cte(con, forecaster_run_id)
+    run_cte_sql = f"{run_cte}," if run_cte else ""
+    sql = f"""
+    WITH {run_cte_sql}
+    ev AS (
       SELECT q.iso3, fe.horizon_m,
              SUM(
                fe.p * COALESCE(
@@ -2176,6 +2227,7 @@ def rankings(month: str, metric: str = "PIN", normalize: bool = True):
              ) AS ev_pin
       FROM forecasts_ensemble fe
       JOIN questions q ON q.question_id=fe.question_id
+      {run_join}
       LEFT JOIN bucket_centroids bc
         ON bc.metric = q.metric
        AND bc.class_bin = fe.class_bin
@@ -2844,13 +2896,51 @@ def diagnostics_kpi_scopes(
         else:
             notes.append("selected_month_invalid")
 
+    # ── Available forecast runs for the selected month ──
+    available_runs: List[Dict[str, Any]] = []
+    selected_run_id: Optional[str] = None
+    if selected_month and _table_has_columns(con, "forecasts_ensemble", ["run_id"]):
+        parsed_sel = _parse_year_month(selected_month)
+        fe_ts = _pick_timestamp_column(
+            con, "forecasts_ensemble", ["created_at", "timestamp", "started_at"]
+        )
+        if parsed_sel and fe_ts:
+            sel_start, sel_end = _month_window(parsed_sel[0], parsed_sel[1])
+            try:
+                runs_rows = con.execute(
+                    f"""
+                    SELECT fe.run_id,
+                           MIN(fe.{fe_ts}) AS started_at,
+                           COUNT(DISTINCT fe.question_id) AS n_questions
+                    FROM forecasts_ensemble fe
+                    WHERE fe.{fe_ts} >= ? AND fe.{fe_ts} < ?
+                      AND fe.run_id IS NOT NULL
+                    GROUP BY fe.run_id
+                    ORDER BY fe.run_id DESC
+                    """,
+                    [sel_start, sel_end],
+                ).fetchall()
+                for idx, rr in enumerate(runs_rows):
+                    available_runs.append({
+                        "run_id": rr[0],
+                        "started_at": str(rr[1]) if rr[1] else None,
+                        "n_questions": int(rr[2]) if rr[2] else 0,
+                        "is_latest": idx == 0,
+                    })
+                if available_runs:
+                    selected_run_id = available_runs[0]["run_id"]
+            except Exception:
+                notes.append("available_runs_failed")
+
     explanations = [
         "Questions can exceed forecasts because runs include triaged or researched questions that did not receive forecasts.",
     ]
 
     return {
         "available_months": available_month_rows,
+        "available_runs": available_runs,
         "selected_month": selected_month,
+        "selected_run_id": selected_run_id,
         "scopes": {
             "selected_run": selected_scope,
             "total_active": {

@@ -16,6 +16,7 @@ import KpiCard from "./KpiCard";
 import RiskIndexMap from "./RiskIndexMap";
 import RiskIndexTable from "./RiskIndexTable";
 import RunMonthSelector from "./RunMonthSelector";
+import RunSelector from "./RunSelector";
 
 const VIEW_OPTIONS: Array<{ value: RiskView; label: string }> = [
   { value: "PA_EIV", label: "People Affected (PA) EIV" },
@@ -108,6 +109,9 @@ export default function RiskIndexPanel({
   );
   const [kpiError, setKpiError] = useState<string | null>(null);
   const [runMonthFallback, setRunMonthFallback] = useState(false);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(
+    kpiScopes.selected_run_id ?? null
+  );
   const searchParams = useSearchParams();
   const showKpiDebug = searchParams?.get("debug_kpi") === "1";
 
@@ -131,7 +135,7 @@ export default function RiskIndexPanel({
   const fetchKpiScopes = async (
     metricScope: string,
     runMonth: string | null
-  ) => {
+  ): Promise<DiagnosticsKpiScopesResponse | null> => {
     setKpiError(null);
     try {
       const response = await apiGet<DiagnosticsKpiScopesResponse>(
@@ -143,10 +147,39 @@ export default function RiskIndexPanel({
       );
       setKpiData(response);
       setSelectedRunMonth(response.selected_month);
+      return response;
     } catch (fetchError) {
       console.warn("KPI scopes unavailable:", fetchError);
       setKpiError("KPI scopes unavailable (API error).");
+      return null;
     }
+  };
+
+  const fetchRiskIndex = async (
+    nextView: RiskView,
+    runMonth: string | null,
+    runId: string | null
+  ) => {
+    const forecastTargetMonthForRun = runMonth
+      ? addMonthsYYYYMM(runMonth, 1)
+      : null;
+    const response = await apiGet<RiskIndexResponse>("/risk_index", {
+      ...buildParams(nextView),
+      ...(forecastTargetMonthForRun
+        ? { target_month: forecastTargetMonthForRun }
+        : {}),
+      ...(runId ? { forecaster_run_id: runId } : {}),
+    });
+    setRows(response.rows ?? []);
+    setTargetMonth(response.target_month ?? null);
+    setMetric(response.metric);
+    setRunMonthFallback(
+      Boolean(
+        forecastTargetMonthForRun &&
+          response.target_month &&
+          response.target_month !== forecastTargetMonthForRun
+      )
+    );
   };
 
   const handleViewChange = async (nextView: RiskView) => {
@@ -154,28 +187,7 @@ export default function RiskIndexPanel({
     setIsLoading(true);
     setError(null);
     try {
-      const forecastTargetMonthForRun = selectedRunMonth
-        ? addMonthsYYYYMM(selectedRunMonth, 1)
-        : null;
-      const response = await apiGet<RiskIndexResponse>(
-        "/risk_index",
-        {
-          ...buildParams(nextView),
-          ...(forecastTargetMonthForRun
-            ? { target_month: forecastTargetMonthForRun }
-            : {}),
-        }
-      );
-      setRows(response.rows ?? []);
-      setTargetMonth(response.target_month ?? null);
-      setMetric(response.metric);
-      setRunMonthFallback(
-        Boolean(
-          forecastTargetMonthForRun &&
-            response.target_month &&
-            response.target_month !== forecastTargetMonthForRun
-        )
-      );
+      await fetchRiskIndex(nextView, selectedRunMonth, selectedRunId);
       const nextMetricScope = metricScopeForView(nextView);
       void fetchKpiScopes(nextMetricScope, selectedRunMonth);
       void fetchCountries(nextMetricScope, selectedRunMonth);
@@ -190,29 +202,31 @@ export default function RiskIndexPanel({
 
   const handleRunMonthChange = async (yearMonth: string) => {
     setSelectedRunMonth(yearMonth);
+    setSelectedRunId(null);
     setIsLoading(true);
     setError(null);
     try {
       const currentMetricScope = metricScopeForView(view);
-      await fetchKpiScopes(currentMetricScope, yearMonth);
+      const kpiResponse = await fetchKpiScopes(currentMetricScope, yearMonth);
       void fetchCountries(currentMetricScope, yearMonth);
-      const forecastTargetMonthForRun = addMonthsYYYYMM(yearMonth, 1);
-      const response = await apiGet<RiskIndexResponse>("/risk_index", {
-        ...buildParams(view),
-        ...(forecastTargetMonthForRun
-          ? { target_month: forecastTargetMonthForRun }
-          : {}),
-      });
-      setRows(response.rows ?? []);
-      setTargetMonth(response.target_month ?? null);
-      setMetric(response.metric);
-      setRunMonthFallback(
-        Boolean(
-          forecastTargetMonthForRun &&
-            response.target_month &&
-            response.target_month !== forecastTargetMonthForRun
-        )
-      );
+      const newRunId = kpiResponse?.selected_run_id ?? null;
+      setSelectedRunId(newRunId);
+      await fetchRiskIndex(view, yearMonth, newRunId);
+    } catch (fetchError) {
+      console.warn("Risk index unavailable:", fetchError);
+      setError("Risk index unavailable (API error).");
+      setRunMonthFallback(false);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleRunChange = async (runId: string) => {
+    setSelectedRunId(runId);
+    setIsLoading(true);
+    setError(null);
+    try {
+      await fetchRiskIndex(view, selectedRunMonth, runId);
     } catch (fetchError) {
       console.warn("Risk index unavailable:", fetchError);
       setError("Risk index unavailable (API error).");
@@ -274,6 +288,11 @@ export default function RiskIndexPanel({
               availableMonths={kpiData.available_months ?? []}
               onChange={handleRunMonthChange}
               selectedMonth={selectedRunMonth}
+            />
+            <RunSelector
+              availableRuns={kpiData.available_runs ?? []}
+              selectedRunId={selectedRunId}
+              onChange={handleRunChange}
             />
           </div>
           <div className="space-y-1 text-xs text-fred-muted">
