@@ -61,6 +61,8 @@ class ModelSpec:
     weight: float = 1.0
     active: bool = True
     purpose: Optional[str] = None
+    temperature: Optional[float] = None  # None = use caller default (0.2)
+    thinking: Optional[str] = None       # None = don't send; "off"|"low"|"medium"|"high"
 
 
 _MAX_LLM_CONCURRENCY = int(os.getenv("PYTHIA_LLM_CONCURRENCY", os.getenv("LLM_MAX_CONCURRENCY", "18")))
@@ -366,6 +368,10 @@ def parse_ensemble_specs(spec_str: str | None) -> List[ModelSpec]:
 def _load_ensemble_from_config() -> List[ModelSpec]:
     """Read the active profile's ``ensemble`` list from config.yaml.
 
+    Supports two entry formats in the ensemble list:
+    - String: ``"provider:model_id"`` (backward compatible)
+    - Dict:  ``{provider, model_id, temperature?, thinking?}``
+
     Falls back to the legacy ``forecaster.providers`` format or an empty list.
     """
 
@@ -376,8 +382,40 @@ def _load_ensemble_from_config() -> List[ModelSpec]:
         ensemble_list = []
 
     if ensemble_list:
-        spec_str = ",".join(str(e) for e in ensemble_list)
-        return parse_ensemble_specs(spec_str)
+        specs: List[ModelSpec] = []
+        for entry in ensemble_list:
+            if isinstance(entry, str):
+                entry_str = entry.strip()
+                if not entry_str or ":" not in entry_str:
+                    continue
+                provider, model_id = entry_str.split(":", 1)
+                provider = provider.strip().lower()
+                model_id = model_id.strip()
+                if not provider or not model_id:
+                    continue
+                specs.append(_make_model_spec(provider, model_id))
+
+            elif isinstance(entry, dict):
+                provider = str(entry.get("provider", "")).strip().lower()
+                model_id = str(entry.get("model_id", "")).strip()
+                if not provider or not model_id:
+                    continue
+                ms = _make_model_spec(provider, model_id)
+
+                temp_val = entry.get("temperature")
+                if temp_val is not None:
+                    try:
+                        ms.temperature = float(temp_val)
+                    except (ValueError, TypeError):
+                        pass
+
+                thinking_val = entry.get("thinking")
+                if isinstance(thinking_val, str) and thinking_val.strip():
+                    ms.thinking = thinking_val.strip().lower()
+
+                specs.append(ms)
+
+        return _apply_provider_block(specs)
 
     # Legacy fallback: read from forecaster.providers (if present)
     legacy_providers = _forecaster_cfg.get("providers", {}) if isinstance(_forecaster_cfg, dict) else {}
@@ -623,18 +661,28 @@ def estimate_cost_usd(model_id: str, usage: Dict[str, int]) -> float:
 # ---------------------------------------------------------------------------
 
 
-def call_openai(prompt: str, model: str, temperature: float) -> ProviderResult:
+def call_openai(
+    prompt: str,
+    model: str,
+    temperature: float,
+    *,
+    reasoning_effort: Optional[str] = None,
+) -> ProviderResult:
     if not _OPENAI_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing OPENAI_API_KEY")
+    body: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if reasoning_effort and reasoning_effort not in ("none", "off"):
+        body["reasoning_effort"] = reasoning_effort
+    else:
+        body["temperature"] = float(temperature)
     try:
         resp = requests.post(
             f"{_OPENAI_BASE_URL.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {_OPENAI_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": float(temperature),
-            },
+            json=body,
             timeout=_OPENAI_TIMEOUT,
         )
     except Exception as exc:
@@ -971,7 +1019,7 @@ def _call_provider_sync(
 ) -> ProviderResult:
     p = (provider or "").lower()
     if p == "openai":
-        return call_openai(prompt, model, temperature)
+        return call_openai(prompt, model, temperature, reasoning_effort=thinking_level)
     if p == "anthropic":
         return call_anthropic(prompt, model, temperature)
     if p in {"google", "gemini"}:
@@ -1177,17 +1225,30 @@ async def call_chat_ms(
     hs_max_attempts: Optional[int] = None
     hs_usage: Dict[str, Any] = {}
     backoffs_sec: list[float] = []
-    if spd_google:
+
+    # --- Per-model thinking level ---
+    # 1) ModelSpec.thinking from config.yaml takes precedence
+    if ms.thinking and ms.thinking not in ("off", "none"):
+        thinking_level = ms.thinking
+    # 2) Env var fallback for Google SPD models (backward compat)
+    elif spd_google:
         model_id_lower = ms.model_id.lower()
         if "gemini-3-flash" in model_id_lower:
             thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH", "low") or "").strip()
-            if not thinking_level:
-                thinking_level = None
-            timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC", None, 90.0)
         elif "gemini-3-pro" in model_id_lower:
             thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO", "") or "").strip()
-            if not thinking_level:
-                thinking_level = None
+    # 3) Normalize empty/off/none to None
+    if thinking_level in ("", "off", "none"):
+        thinking_level = None
+
+    # --- Per-model temperature override ---
+    effective_temperature = ms.temperature if ms.temperature is not None else temperature
+
+    if spd_google:
+        model_id_lower = ms.model_id.lower()
+        if "gemini-3-flash" in model_id_lower:
+            timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC", None, 90.0)
+        elif "gemini-3-pro" in model_id_lower:
             timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC", None, 120.0)
         try:
             max_attempts = max(1, int(os.getenv("PYTHIA_GOOGLE_SPD_RETRIES", "1") or 1))
@@ -1227,7 +1288,7 @@ async def call_chat_ms(
                     ms.provider,
                     prompt,
                     ms.model_id,
-                    temperature,
+                    effective_temperature,
                     timeout_sec=timeout_sec,
                     thinking_level=thinking_level,
                 )

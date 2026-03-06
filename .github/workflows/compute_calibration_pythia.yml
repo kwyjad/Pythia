@@ -82,6 +82,14 @@ jobs:
           python -m pythia.tools.compute_calibration_pythia --db-url "${RESOLVER_DB_URL}"
           echo "=== compute_calibration_pythia completed ==="
 
+      - name: Generate concrete calibration advice
+        env:
+          PYTHIA_CONFIG_YAML: "pythia/config.yaml"
+        run: |
+          echo "=== Running pythia.tools.generate_calibration_advice ==="
+          python -m pythia.tools.generate_calibration_advice --db-url "${RESOLVER_DB_URL}"
+          echo "=== generate_calibration_advice completed ==="
+
       - name: Upload canonical resolver DB
         if: success()
         uses: actions/upload-artifact@v4

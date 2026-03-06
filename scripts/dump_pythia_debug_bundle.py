@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import gzip
 import hashlib
 import json
 import math
 import os
 import re
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
@@ -1593,6 +1596,12 @@ def _parse_args() -> argparse.Namespace:
         default=os.getenv("CANONICAL_DB_ARTIFACT_NAME", ""),
         help="Artifact name used to download the DB (for provenance).",
     )
+    parser.add_argument(
+        "--legacy",
+        action="store_true",
+        default=False,
+        help="Generate legacy monolithic markdown bundle instead of split artifacts.",
+    )
     return parser.parse_args()
 
 
@@ -2278,6 +2287,1017 @@ def _append_stage_block(lines: List[str], phase: str, call: Dict[str, Any] | Non
         lines.append(error_text.strip())
     else:
         lines.append("_No error reported for this call._")
+
+
+@dataclass
+class BundleData:
+    """Shared container for all data loaded from the DB, used by all emitters."""
+
+    # Identity
+    hs_run_id: str | None = None
+    forecaster_run_id: str | None = None
+    out_run_id: str = ""
+    db_url: str = ""
+    now: str = ""
+
+    # Provenance
+    provenance_entry: dict[str, Any] = field(default_factory=dict)
+    provenance_lines: list[str] = field(default_factory=list)
+    counts_before: dict[str, int | None] = field(default_factory=dict)
+    counts_after: dict[str, int | None] = field(default_factory=dict)
+    db_stats: dict[str, Any] = field(default_factory=dict)
+
+    # HS manifest
+    hs_manifest: dict[str, Any] | None = None
+    resolved_countries_sorted: list[str] = field(default_factory=list)
+    requested_countries: list[Any] = field(default_factory=list)
+    skipped_entries: list[Any] = field(default_factory=list)
+
+    # Triage
+    hs_triage_rows: list[dict[str, Any]] = field(default_factory=list)
+    n_hazards_triaged_total: int = 0
+    missing_hs_triage: list[dict[str, str]] = field(default_factory=list)
+
+    # Questions (forecaster only)
+    questions: list[dict[str, Any]] = field(default_factory=list)
+    question_ids: list[str] = field(default_factory=list)
+    n_questions_by_hazard: dict[str, int] = field(default_factory=dict)
+    n_questions_by_iso3: dict[str, int] = field(default_factory=dict)
+    lifecycle_counts: dict[str, int] = field(default_factory=dict)
+    researched_not_forecasted: list[str] = field(default_factory=list)
+
+    # Question run metrics (forecaster only)
+    question_run_metrics: list[dict[str, Any]] = field(default_factory=list)
+    question_run_metrics_warning: str | None = None
+
+    # Scenario status (forecaster only)
+    scenario_status_rows: list[dict[str, Any]] = field(default_factory=list)
+
+    # Web research
+    hs_web_rows: list[dict[str, Any]] = field(default_factory=list)
+    question_web_rows: list[dict[str, Any]] = field(default_factory=list)
+    web_research_enabled: bool = False
+    retriever_enabled: bool = False
+    hs_research_web_search: str = "0"
+    spd_web_search: str = "0"
+    hs_web_research_active: bool = False
+    research_web_research_active: bool = False
+    web_research_accounting: dict[str, Any] = field(default_factory=dict)
+    hs_web_research_rows: list[dict[str, Any]] = field(default_factory=list)
+    hs_web_research_failures: list[dict[str, Any]] = field(default_factory=list)
+    research_web_research_rows: list[dict[str, Any]] = field(default_factory=list)
+    research_web_research_failures: list[dict[str, Any]] = field(default_factory=list)
+    self_search_rows: list[dict[str, Any]] = field(default_factory=list)
+    self_search_failures: list[dict[str, Any]] = field(default_factory=list)
+    self_search_call_total: int = 0
+
+    # LLM call counts
+    llm_call_counts: list[dict[str, Any]] = field(default_factory=list)
+    llm_error_rows: list[dict[str, Any]] = field(default_factory=list)
+    llm_calls_skip_note: str | None = None
+    self_search_stats: dict[str, int] = field(default_factory=dict)
+    latency_block: str = ""
+
+    # Filter predicates (for latency queries etc.)
+    predicate: str | None = None
+    predicate_params: list[Any] = field(default_factory=list)
+    predicate_strategy: str = ""
+
+    # Usage/cost
+    usage_by_phase: dict[str, dict[str, float]] = field(default_factory=dict)
+    usage_by_phase_warning: str | None = None
+
+    # Ensemble
+    forecasts_raw_counts: list[dict[str, Any]] = field(default_factory=list)
+    forecasts_ensemble_counts: list[dict[str, Any]] = field(default_factory=list)
+    spd_model_ids: list[str] = field(default_factory=list)
+
+
+def _load_bundle_data(
+    con: duckdb.DuckDBPyConnection,
+    hs_run_id: str | None,
+    forecaster_run_id: str | None,
+    db_url: str,
+    provenance_entry: dict[str, Any],
+    provenance_lines: list[str],
+    counts_before: dict[str, int | None],
+    counts_after: dict[str, int | None],
+    db_stats: dict[str, Any],
+    questions: list[dict[str, Any]] | None = None,
+) -> BundleData:
+    """Load all data needed by all emitters into a shared BundleData container."""
+    data = BundleData()
+    data.hs_run_id = hs_run_id
+    data.forecaster_run_id = forecaster_run_id
+    data.out_run_id = forecaster_run_id or hs_run_id or ""
+    data.db_url = db_url
+    data.now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    data.provenance_entry = provenance_entry
+    data.provenance_lines = provenance_lines
+    data.counts_before = counts_before
+    data.counts_after = counts_after
+    data.db_stats = db_stats
+    data.questions = questions or []
+
+    # HS manifest
+    hs_run_id_for_costs = hs_run_id
+    if forecaster_run_id and not hs_run_id:
+        hs_run_id_for_costs = _resolve_hs_run_id_for_forecast(con, forecaster_run_id)
+    manifest_hs_run_id = hs_run_id_for_costs
+    if not manifest_hs_run_id and data.questions:
+        hs_run_ids = sorted({q.get("hs_run_id") for q in data.questions if q.get("hs_run_id")})
+        manifest_hs_run_id = hs_run_ids[0] if hs_run_ids else None
+
+    data.hs_manifest = _load_hs_run_metadata(con, manifest_hs_run_id)
+    data.requested_countries = (
+        (data.hs_manifest or {}).get("requested_countries") if data.hs_manifest else []
+    ) or []
+    resolved_countries = (
+        (data.hs_manifest or {}).get("countries") if data.hs_manifest else []
+    ) or []
+    iso3s = sorted({(q.get("iso3") or "").upper() for q in data.questions if q.get("iso3")})
+    if not resolved_countries:
+        resolved_countries = list(iso3s)
+    data.resolved_countries_sorted = sorted({str(c) for c in resolved_countries if c})
+    data.skipped_entries = (
+        (data.hs_manifest or {}).get("skipped_entries") if data.hs_manifest else []
+    ) or []
+
+    # Triage
+    data.hs_triage_rows, data.n_hazards_triaged_total = _load_hs_triage_summary(
+        con, manifest_hs_run_id
+    )
+    data.missing_hs_triage = _load_missing_hs_triage_combos(
+        con, manifest_hs_run_id, data.resolved_countries_sorted
+    )
+
+    # Questions
+    data.question_ids = sorted(
+        [str(q.get("question_id")) for q in data.questions if q.get("question_id")]
+    )
+    for q in data.questions:
+        hz = (q.get("hazard_code") or "").upper()
+        iso_val = (q.get("iso3") or "").upper()
+        if hz:
+            data.n_questions_by_hazard[hz] = data.n_questions_by_hazard.get(hz, 0) + 1
+        if iso_val:
+            data.n_questions_by_iso3[iso_val] = data.n_questions_by_iso3.get(iso_val, 0) + 1
+
+    # Web research
+    data.hs_web_rows, data.question_web_rows = _load_web_research_summaries(
+        con, manifest_hs_run_id, forecaster_run_id, data.resolved_countries_sorted, data.question_ids
+    )
+    data.web_research_enabled = os.getenv("PYTHIA_WEB_RESEARCH_ENABLED", "0") == "1"
+    data.retriever_enabled = os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
+    data.hs_research_web_search = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0")
+    data.spd_web_search = os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0")
+    data.hs_web_research_active = data.retriever_enabled or data.hs_research_web_search == "1"
+    data.research_web_research_active = data.retriever_enabled or data.hs_research_web_search == "1"
+    data.web_research_accounting = _web_research_accounting(con, forecaster_run_id, manifest_hs_run_id)
+    data.hs_web_research_rows, data.hs_web_research_failures = _load_web_research_summary(
+        con, "hs_web_research", forecaster_run_id, manifest_hs_run_id
+    )
+    data.research_web_research_rows, data.research_web_research_failures = _load_web_research_summary(
+        con, "research_web_research", forecaster_run_id, manifest_hs_run_id
+    )
+    data.self_search_rows, data.self_search_failures = _load_web_research_summary(
+        con, "forecast_web_research", forecaster_run_id, manifest_hs_run_id
+    )
+    data.self_search_call_total = sum(
+        int(row.get("n_calls") or 0) for row in (data.self_search_rows or [])
+    )
+
+    # LLM call counts and latency
+    llm_columns = _llm_calls_columns(con)
+    if forecaster_run_id:
+        data.predicate, data.predicate_params, data.predicate_strategy = _combined_llm_filter(
+            llm_columns, forecaster_run_id, manifest_hs_run_id, data.question_ids,
+            data.resolved_countries_sorted,
+        )
+    else:
+        pred, pred_params, pred_strategy = _hs_llm_filter(
+            llm_columns, hs_run_id, data.resolved_countries_sorted
+        )
+        if not pred:
+            pred = "phase = 'hs_triage'"
+            pred_params = []
+            pred_strategy = "phase_only"
+        data.predicate = pred
+        data.predicate_params = pred_params
+        data.predicate_strategy = pred_strategy
+
+    try:
+        data.llm_call_counts = _load_llm_call_counts(con, data.predicate, data.predicate_params)
+        data.llm_error_rows = [
+            row for row in data.llm_call_counts if int(row.get("n_errors") or 0) > 0
+        ]
+        data.self_search_stats = _load_self_search_stats(con, data.predicate, data.predicate_params)
+    except Exception as exc:
+        data.llm_calls_skip_note = f"Error loading llm_calls: {exc}"
+    data.latency_block = render_latency_markdown(
+        con, data.predicate, data.predicate_params, data.predicate_strategy
+    )
+
+    # Forecaster-specific data
+    if forecaster_run_id:
+        try:
+            data.usage_by_phase = _aggregate_usage_by_phase(con, forecaster_run_id, hs_run_id_for_costs)
+        except Exception as exc:
+            data.usage_by_phase_warning = f"Error aggregating llm_calls usage: {exc}"
+
+        data.lifecycle_counts = _question_lifecycle_counts(con, forecaster_run_id)
+        data.researched_not_forecasted = _question_ids_researched_not_forecasted(con, forecaster_run_id)
+        data.forecasts_raw_counts = _load_forecasts_raw_counts(con, forecaster_run_id)
+        data.forecasts_ensemble_counts = _load_forecasts_ensemble_counts(con, forecaster_run_id)
+        data.spd_model_ids = _load_spd_llm_model_ids(con, forecaster_run_id)
+
+        try:
+            _compute_question_run_metrics(con, forecaster_run_id, data.questions)
+        except Exception as exc:
+            data.question_run_metrics_warning = f"Error computing question_run_metrics: {exc}"
+        data.question_run_metrics = _load_question_run_metrics(con, forecaster_run_id)
+
+        # Scenario status
+        triage_cache: dict[tuple[str, str, str], dict[str, Any] | None] = {}
+        for q in data.questions:
+            qid = q.get("question_id")
+            q_iso3 = q.get("iso3") or ""
+            q_hz = q.get("hazard_code") or ""
+            q_metric = q.get("metric") or ""
+            q_hs_run_id = q.get("hs_run_id") or hs_run_id_for_costs
+            triage_entry = _load_triage_entry(con, q_hs_run_id, q_iso3, q_hz, cache=triage_cache)
+            triage_tier = (triage_entry or {}).get("tier")
+            expected, reason = _scenario_expected(q_hz, q_metric, triage_entry)
+            call_count = _load_scenario_call_count(con, forecaster_run_id, str(qid))
+            if call_count > 0:
+                status = "generated"
+            elif not expected:
+                status = f"skipped_by_design: {reason or 'not_expected'}"
+            else:
+                status = "missing_unexpected"
+            data.scenario_status_rows.append(
+                {
+                    "question_id": qid,
+                    "iso3": q_iso3,
+                    "hazard_code": q_hz,
+                    "metric": q_metric,
+                    "hs_run_id": q_hs_run_id,
+                    "triage_tier": triage_tier,
+                    "status": status,
+                    "expected": expected,
+                    "call_count": call_count,
+                }
+            )
+
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Error categorisation helpers
+# ---------------------------------------------------------------------------
+
+_AUTH_PATTERNS = re.compile(r"401|403|Unauthorized|Forbidden|AuthenticationError", re.I)
+_TIMEOUT_PATTERNS = re.compile(r"timeout|timed.out|DeadlineExceeded|DEADLINE_EXCEEDED", re.I)
+_RATE_LIMIT_PATTERNS = re.compile(r"429|rate.limit|RateLimitError|ResourceExhausted|quota", re.I)
+
+
+def _categorise_error(error_text: str) -> str:
+    """Classify an error_text string into auth/timeout/rate_limit/data_quality."""
+    if not error_text:
+        return ""
+    if _AUTH_PATTERNS.search(error_text):
+        return "auth"
+    if _TIMEOUT_PATTERNS.search(error_text):
+        return "timeout"
+    if _RATE_LIMIT_PATTERNS.search(error_text):
+        return "rate_limit"
+    return "data_quality"
+
+
+# ---------------------------------------------------------------------------
+# Traffic-light health evaluator
+# ---------------------------------------------------------------------------
+
+def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
+    """Return list of {subsystem, status, detail} dicts for the executive summary."""
+    checks: list[dict[str, Any]] = []
+
+    # DB Provenance
+    sha = data.provenance_entry.get("db_sha256")
+    checks.append({
+        "subsystem": "DB Provenance",
+        "status": "OK" if sha else "FAIL",
+        "detail": f"sha256={sha[:16]}..." if sha else "missing",
+    })
+
+    # HS Triage completeness
+    expected_hs = len(data.resolved_countries_sorted) * len(EXPECTED_HS_HAZARDS)
+    missing_count = len(data.missing_hs_triage)
+    if expected_hs == 0:
+        hs_status = "OK"
+        hs_detail = "no countries"
+    elif missing_count == 0:
+        hs_status = "OK"
+        hs_detail = f"{data.n_hazards_triaged_total}/{expected_hs} rows"
+    elif missing_count < expected_hs * 0.05:
+        hs_status = "WARN"
+        hs_detail = f"{data.n_hazards_triaged_total}/{expected_hs} rows, {missing_count} missing"
+    else:
+        hs_status = "FAIL"
+        hs_detail = f"{data.n_hazards_triaged_total}/{expected_hs} rows, {missing_count} missing"
+    checks.append({"subsystem": "HS Triage", "status": hs_status, "detail": hs_detail})
+
+    # Grounding health — HS
+    hs_grounded = sum(1 for r in data.hs_web_rows if r.get("grounded"))
+    hs_total = len(data.hs_web_rows)
+    if hs_total == 0:
+        g_status = "WARN" if data.hs_web_research_active else "OK"
+        g_detail = "no grounding calls" if data.hs_web_research_active else "disabled"
+    elif hs_grounded == hs_total:
+        g_status = "OK"
+        g_detail = f"{hs_grounded}/{hs_total} countries grounded"
+    elif hs_grounded >= hs_total * 0.9:
+        g_status = "WARN"
+        g_detail = f"{hs_grounded}/{hs_total} countries grounded"
+    else:
+        g_status = "FAIL"
+        g_detail = f"{hs_grounded}/{hs_total} countries grounded"
+    checks.append({"subsystem": "HS Grounding", "status": g_status, "detail": g_detail})
+
+    # Grounding health — Research
+    q_grounded = sum(1 for r in data.question_web_rows if r.get("grounded"))
+    q_total = len(data.question_web_rows)
+    if q_total == 0:
+        rg_status = "OK" if not data.forecaster_run_id else "WARN"
+        rg_detail = "no research grounding" if not data.forecaster_run_id else "0 questions grounded"
+    elif q_grounded == q_total:
+        rg_status = "OK"
+        rg_detail = f"{q_grounded}/{q_total} questions grounded"
+    elif q_grounded >= q_total * 0.85:
+        rg_status = "WARN"
+        rg_detail = f"{q_grounded}/{q_total} questions grounded"
+    else:
+        rg_status = "FAIL"
+        rg_detail = f"{q_grounded}/{q_total} questions grounded"
+    checks.append({"subsystem": "Research Grounding", "status": rg_status, "detail": rg_detail})
+
+    # LLM call health
+    total_errors = sum(int(r.get("n_errors") or 0) for r in data.llm_call_counts)
+    total_calls = sum(int(r.get("n_calls") or 0) for r in data.llm_call_counts)
+    if total_calls == 0:
+        llm_status = "WARN"
+        llm_detail = "no LLM calls"
+    else:
+        error_rate = total_errors / total_calls
+        if error_rate == 0:
+            llm_status = "OK"
+            llm_detail = f"{total_calls} calls, 0 errors"
+        elif error_rate < 0.05:
+            llm_status = "WARN"
+            llm_detail = f"{total_calls} calls, {total_errors} errors ({error_rate:.1%})"
+        else:
+            llm_status = "FAIL"
+            llm_detail = f"{total_calls} calls, {total_errors} errors ({error_rate:.1%})"
+    checks.append({"subsystem": "LLM Calls", "status": llm_status, "detail": llm_detail})
+
+    # Ensemble completeness (forecaster only)
+    if data.forecaster_run_id:
+        expected_models = _expected_spd_model_ids()
+        present_models = set(data.spd_model_ids)
+        missing_models = sorted(set(expected_models) - present_models)
+        if not expected_models:
+            e_status = "WARN"
+            e_detail = "no ensemble configured"
+        elif not missing_models:
+            e_status = "OK"
+            e_detail = f"{len(expected_models)}/{len(expected_models)} models"
+        else:
+            e_status = "FAIL"
+            e_detail = f"{len(present_models)}/{len(expected_models)} models, missing: {', '.join(missing_models)}"
+        checks.append({"subsystem": "SPD Ensemble", "status": e_status, "detail": e_detail})
+
+        # Scenarios
+        generated = sum(1 for r in data.scenario_status_rows if r.get("status") == "generated")
+        missing_unexp = sum(
+            1 for r in data.scenario_status_rows if r.get("status") == "missing_unexpected"
+        )
+        skipped = sum(
+            1 for r in data.scenario_status_rows
+            if str(r.get("status") or "").startswith("skipped_by_design")
+        )
+        if missing_unexp == 0:
+            s_status = "OK"
+        else:
+            s_status = "FAIL"
+        s_detail = f"{generated} generated, {skipped} skipped, {missing_unexp} missing"
+        checks.append({"subsystem": "Scenarios", "status": s_status, "detail": s_detail})
+
+    return checks
+
+
+# ---------------------------------------------------------------------------
+# Grounding spot-check sampler
+# ---------------------------------------------------------------------------
+
+def _sample_grounding_spot_checks(
+    hs_rows: list[dict[str, Any]],
+    question_rows: list[dict[str, Any]],
+    n_hs: int = 3,
+    n_q: int = 5,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Select representative samples for the executive summary."""
+    import random
+
+    def _pick_samples(rows: list[dict[str, Any]], n: int, id_key: str) -> list[dict[str, Any]]:
+        if not rows or n <= 0:
+            return []
+        # Sort by n_verified desc to find extremes
+        by_verified = sorted(rows, key=lambda r: int(r.get("n_verified") or 0), reverse=True)
+        selected: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        # Pick one with most sources
+        if by_verified:
+            selected.append(by_verified[0])
+            seen_ids.add(str(by_verified[0].get(id_key) or ""))
+
+        # Pick one with zero/fewest sources
+        zero_rows = [r for r in by_verified if int(r.get("n_verified") or 0) == 0]
+        if zero_rows:
+            candidate = zero_rows[0]
+        else:
+            candidate = by_verified[-1] if len(by_verified) > 1 else None
+        if candidate and str(candidate.get(id_key) or "") not in seen_ids:
+            selected.append(candidate)
+            seen_ids.add(str(candidate.get(id_key) or ""))
+
+        # Fill remaining with random picks
+        remaining = [r for r in rows if str(r.get(id_key) or "") not in seen_ids]
+        if remaining and len(selected) < n:
+            random.shuffle(remaining)
+            for r in remaining[: n - len(selected)]:
+                selected.append(r)
+
+        return selected[:n]
+
+    hs_samples = _pick_samples(hs_rows, n_hs, "iso3")
+    q_samples = _pick_samples(question_rows, n_q, "question_id")
+    return hs_samples, q_samples
+
+
+# ---------------------------------------------------------------------------
+# Emitter: Executive Summary (for GITHUB_STEP_SUMMARY)
+# ---------------------------------------------------------------------------
+
+def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
+    """Generate concise executive summary markdown. Returns the markdown string."""
+    lines: list[str] = []
+
+    lines.append(f"# Pythia Pipeline Health — {data.out_run_id}")
+    lines.append("")
+    lines.append(f"_Generated at {data.now}_")
+    lines.append("")
+
+    # Run identity
+    lines.append("## Run Identity")
+    lines.append("")
+    lines.append(f"- HS run ID: `{data.hs_run_id or 'N/A'}`")
+    lines.append(f"- Forecaster run ID: `{data.forecaster_run_id or 'N/A'}`")
+    lines.append(f"- DB: `{data.db_url}`")
+    lines.append(f"- DB SHA256: `{data.provenance_entry.get('db_sha256') or 'unknown'}`")
+    lines.append("")
+
+    # Traffic light table
+    health_checks = _evaluate_pipeline_health(data)
+    lines.append("## Pipeline Status")
+    lines.append("")
+    lines.append("| Subsystem | Status | Detail |")
+    lines.append("|-----------|--------|--------|")
+    for check in health_checks:
+        lines.append(f"| {check['subsystem']} | {check['status']} | {check['detail']} |")
+    lines.append("")
+
+    # DB provenance (compact)
+    lines.append("## DB Provenance")
+    lines.append("")
+    lines.append("| Table | Before | After | Delta |")
+    lines.append("|-------|--------|-------|-------|")
+    for tbl in KEY_TABLES:
+        before = data.counts_before.get(tbl)
+        after = data.counts_after.get(tbl)
+        delta = ""
+        if before is not None and after is not None:
+            d = after - before
+            delta = f"+{d}" if d >= 0 else str(d)
+        lines.append(
+            f"| {tbl} | {before if before is not None else 'n/a'} "
+            f"| {after if after is not None else 'n/a'} | {delta} |"
+        )
+    lines.append("")
+
+    # Coverage funnel
+    lines.append("## Coverage")
+    lines.append("")
+    lines.append(f"- Countries: {len(data.resolved_countries_sorted)}")
+    lines.append(f"- HS hazard rows: {data.n_hazards_triaged_total}")
+    lines.append(f"- Questions seeded: {len(data.question_ids)}")
+    if data.forecaster_run_id:
+        lines.append(f"- Researched: {data.lifecycle_counts.get('research', 0)}")
+        lines.append(f"- Forecasted: {data.lifecycle_counts.get('forecast', 0)}")
+        lines.append(f"- Scenarios: {data.lifecycle_counts.get('scenario', 0)}")
+        if data.researched_not_forecasted:
+            lines.append(
+                f"- Drop-offs (researched not forecasted): {len(data.researched_not_forecasted)}"
+            )
+    lines.append("")
+
+    # Cost & Latency summary
+    if data.usage_by_phase or data.forecaster_run_id:
+        lines.append("## Cost & Latency")
+        lines.append("")
+        lines.append("| Phase | Tokens | Cost (USD) |")
+        lines.append("|-------|--------|------------|")
+        total_tokens = 0.0
+        total_cost = 0.0
+        for phase in sorted(data.usage_by_phase.keys()):
+            vals = data.usage_by_phase[phase]
+            tokens = vals.get("total_tokens", 0.0)
+            cost = vals.get("total_cost_usd", 0.0)
+            total_tokens += tokens
+            total_cost += cost
+            lines.append(
+                f"| {phase} | {int(tokens):,} | ${cost:.2f} |"
+            )
+        lines.append(f"| **Total** | **{int(total_tokens):,}** | **${total_cost:.2f}** |")
+        lines.append("")
+
+    # Latency table (reuse existing render_latency_markdown)
+    if data.latency_block:
+        lines.append(data.latency_block)
+        lines.append("")
+
+    # LLM error summary
+    if data.llm_error_rows:
+        lines.append("## LLM Errors")
+        lines.append("")
+        lines.append("| Phase | Provider | Model | Errors | Error Categories |")
+        lines.append("|-------|----------|-------|--------|-----------------|")
+        for row in data.llm_error_rows:
+            # Categorise errors for this phase/provider/model
+            lines.append(
+                f"| {row.get('phase')} | {row.get('provider')} | {row.get('model_id')} "
+                f"| {row.get('n_errors')} | |"
+            )
+        lines.append("")
+
+    # Ensemble participation
+    if data.forecaster_run_id:
+        lines.append("## Ensemble")
+        lines.append("")
+        ensemble_lines = _ensemble_participation_summary(
+            data.forecasts_raw_counts, data.spd_model_ids
+        )
+        lines.extend(ensemble_lines)
+        lines.append("")
+
+    # Top anomalies
+    if data.question_run_metrics:
+        lines.append("## Top Anomalies")
+        lines.append("")
+        lines.append("### Slowest Questions (wall time)")
+        lines.append("")
+        lines.append("| Question | Wall (s) | ISO3 | Hazard |")
+        lines.append("|----------|----------|------|--------|")
+        for row in sorted(
+            data.question_run_metrics,
+            key=lambda r: -(float(r.get("wall_ms") or 0.0)),
+        )[:10]:
+            wall_s = float(row.get("wall_ms") or 0) / 1000.0
+            lines.append(
+                f"| {row.get('question_id')} | {wall_s:.1f} | {row.get('iso3') or ''} "
+                f"| {row.get('hazard_code') or ''} |"
+            )
+        lines.append("")
+
+        # Questions with missing SPD models
+        missing_model_questions = [
+            r for r in data.question_run_metrics
+            if r.get("missing_model_ids_json") and r.get("missing_model_ids_json") != "[]"
+        ]
+        if missing_model_questions:
+            lines.append("### Questions with Missing SPD Models")
+            lines.append("")
+            lines.append("| Question | ISO3 | Missing Models |")
+            lines.append("|----------|------|---------------|")
+            for row in missing_model_questions[:10]:
+                lines.append(
+                    f"| {row.get('question_id')} | {row.get('iso3') or ''} "
+                    f"| {row.get('missing_model_ids_json') or ''} |"
+                )
+            lines.append("")
+
+    # Grounding spot-checks
+    hs_samples, q_samples = _sample_grounding_spot_checks(
+        data.hs_web_rows, data.question_web_rows, n_hs=3, n_q=5
+    )
+    if hs_samples or q_samples:
+        lines.append("## Grounding Spot-Checks")
+        lines.append("")
+
+    if hs_samples:
+        lines.append("### HS Country Packs (sample)")
+        lines.append("")
+        lines.append("| ISO3 | Grounded | Sources | Backend | Sample URL |")
+        lines.append("|------|----------|---------|---------|------------|")
+        for row in hs_samples:
+            urls = row.get("top_verified_urls") or []
+            sample_url = urls[0][:80] if urls else "(none)"
+            lines.append(
+                f"| {row.get('iso3')} | {row.get('grounded')} | {row.get('n_verified', 0)} "
+                f"| {row.get('selected_backend') or ''} | {sample_url} |"
+            )
+        lines.append("")
+
+    if q_samples:
+        lines.append("### Question Evidence (sample)")
+        lines.append("")
+        lines.append("| Question | Grounded | Sources | Backend | Sample URL |")
+        lines.append("|----------|----------|---------|---------|------------|")
+        for row in q_samples:
+            urls = row.get("top_verified_urls") or []
+            sample_url = urls[0][:80] if urls else "(none)"
+            lines.append(
+                f"| {row.get('question_id')} | {row.get('grounded')} | {row.get('n_verified', 0)} "
+                f"| {row.get('selected_backend') or ''} | {sample_url} |"
+            )
+        lines.append("")
+
+    lines.append("---")
+    lines.append(
+        "_Detailed artifacts: pythia-health-report, pythia-question-metrics, "
+        "pythia-evidence-packs, pythia-llm-calls-detail, pythia-spd-tables_"
+    )
+
+    md = "\n".join(lines)
+    out_path = out_dir / f"executive_summary__{data.out_run_id}.md"
+    out_path.write_text(md, encoding="utf-8")
+    print(f"Wrote executive summary to {out_path}")
+    return md
+
+
+# ---------------------------------------------------------------------------
+# Emitter: Health Report JSON
+# ---------------------------------------------------------------------------
+
+def emit_health_report_json(data: BundleData, out_dir: Path) -> None:
+    """Write machine-parseable health data to JSON."""
+
+    # Error categorisation across all LLM errors
+    error_categories: dict[str, dict[str, int]] = {}
+    for row in data.llm_error_rows:
+        phase = row.get("phase") or "unknown"
+        # We only have aggregate counts here, not individual error texts.
+        # For detailed categorisation, we'd need the raw error texts.
+        key = f"{phase}/{row.get('provider')}/{row.get('model_id')}"
+        error_categories[key] = {
+            "phase": phase,
+            "provider": row.get("provider") or "",
+            "model_id": row.get("model_id") or "",
+            "n_errors": int(row.get("n_errors") or 0),
+        }
+
+    # Grounding health
+    grounding_health: dict[str, Any] = {}
+    for label, rows, failures in [
+        ("hs_web_research", data.hs_web_research_rows, data.hs_web_research_failures),
+        ("research_web_research", data.research_web_research_rows, data.research_web_research_failures),
+        ("forecast_web_research", data.self_search_rows, data.self_search_failures),
+    ]:
+        total_calls = sum(int(r.get("n_calls") or 0) for r in (rows or []))
+        total_errors = sum(int(r.get("n_errors") or 0) for r in (rows or []))
+        total_verified = sum(int(r.get("n_verified_sources") or 0) for r in (rows or []))
+        grounding_health[label] = {
+            "n_calls": total_calls,
+            "n_errors": total_errors,
+            "n_verified_sources": total_verified,
+            "failures": [
+                {
+                    "provider": f.get("provider"),
+                    "model_id": f.get("model_id"),
+                    "error_code": f.get("error_code"),
+                    "error_category": _categorise_error(f.get("error_message") or ""),
+                    "error_message": (f.get("error_message") or "")[:200],
+                }
+                for f in (failures or [])
+            ],
+        }
+
+    # LLM health
+    llm_health = {
+        "by_phase_provider_model": [
+            {
+                "phase": row.get("phase"),
+                "provider": row.get("provider"),
+                "model_id": row.get("model_id"),
+                "n_calls": int(row.get("n_calls") or 0),
+                "n_errors": int(row.get("n_errors") or 0),
+                "error_rate": round(
+                    int(row.get("n_errors") or 0) / max(int(row.get("n_calls") or 0), 1), 4
+                ),
+            }
+            for row in data.llm_call_counts
+        ],
+    }
+
+    # Cost summary
+    cost_summary = {
+        "by_phase": {
+            phase: {
+                "total_tokens": int(vals.get("total_tokens", 0)),
+                "total_cost_usd": round(vals.get("total_cost_usd", 0.0), 4),
+            }
+            for phase, vals in data.usage_by_phase.items()
+        },
+        "total_tokens": int(sum(v.get("total_tokens", 0) for v in data.usage_by_phase.values())),
+        "total_cost_usd": round(
+            sum(v.get("total_cost_usd", 0.0) for v in data.usage_by_phase.values()), 4
+        ),
+    }
+
+    # Coverage funnel
+    coverage = {
+        "countries": len(data.resolved_countries_sorted),
+        "questions_seeded": len(data.question_ids),
+        "researched": data.lifecycle_counts.get("research", 0),
+        "forecasted": data.lifecycle_counts.get("forecast", 0),
+        "scenarios": data.lifecycle_counts.get("scenario", 0),
+        "researched_not_forecasted": data.researched_not_forecasted,
+    }
+
+    # Spot checks
+    hs_samples, q_samples = _sample_grounding_spot_checks(
+        data.hs_web_rows, data.question_web_rows
+    )
+
+    report: dict[str, Any] = {
+        "run_identity": {
+            "hs_run_id": data.hs_run_id,
+            "forecaster_run_id": data.forecaster_run_id,
+            "db_url": data.db_url,
+            "generated_at": data.now,
+        },
+        "db_provenance": {
+            "sha256": data.provenance_entry.get("db_sha256"),
+            "size_bytes": data.provenance_entry.get("db_size_bytes"),
+            "row_counts_before": data.counts_before,
+            "row_counts_after": {k: v for k, v in data.counts_after.items()},
+        },
+        "health_checks": [
+            {"subsystem": c["subsystem"], "status": c["status"], "detail": c["detail"]}
+            for c in _evaluate_pipeline_health(data)
+        ],
+        "grounding_health": grounding_health,
+        "llm_health": llm_health,
+        "cost_summary": cost_summary,
+        "coverage_funnel": coverage,
+        "grounding_spot_checks": {
+            "hs_countries": [
+                {
+                    "iso3": r.get("iso3"),
+                    "grounded": r.get("grounded"),
+                    "n_verified": r.get("n_verified"),
+                    "backend": r.get("selected_backend"),
+                    "sample_urls": (r.get("top_verified_urls") or [])[:3],
+                }
+                for r in hs_samples
+            ],
+            "questions": [
+                {
+                    "question_id": r.get("question_id"),
+                    "grounded": r.get("grounded"),
+                    "n_verified": r.get("n_verified"),
+                    "backend": r.get("selected_backend"),
+                    "sample_urls": (r.get("top_verified_urls") or [])[:3],
+                }
+                for r in q_samples
+            ],
+        },
+    }
+
+    out_path = out_dir / f"health_report__{data.out_run_id}.json"
+    out_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+    print(f"Wrote health report to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Emitter: Question Metrics CSV
+# ---------------------------------------------------------------------------
+
+def emit_question_metrics_csv(data: BundleData, out_dir: Path) -> None:
+    """Write per-question metrics to CSV."""
+    if not data.questions:
+        return
+
+    scenario_by_qid = {str(r["question_id"]): r for r in data.scenario_status_rows}
+    metrics_by_qid = {str(r["question_id"]): r for r in data.question_run_metrics}
+    web_by_qid = {str(r.get("question_id")): r for r in data.question_web_rows}
+
+    fieldnames = [
+        "question_id", "iso3", "hazard_code", "metric", "target_month",
+        "triage_tier", "spd_status", "scenario_status",
+        "wall_ms", "compute_ms", "queue_ms", "cost_usd",
+        "n_spd_models_expected", "n_spd_models_ok", "missing_model_ids",
+        "research_grounded", "n_verified_sources", "n_unverified_sources",
+    ]
+
+    out_path = out_dir / f"question_metrics__{data.out_run_id}.csv"
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for q in sorted(
+            data.questions,
+            key=lambda r: (r.get("iso3") or "", r.get("hazard_code") or "", r.get("question_id") or ""),
+        ):
+            qid = str(q.get("question_id") or "")
+            scenario = scenario_by_qid.get(qid, {})
+            metrics = metrics_by_qid.get(qid, {})
+            web = web_by_qid.get(qid, {})
+            writer.writerow({
+                "question_id": qid,
+                "iso3": q.get("iso3") or "",
+                "hazard_code": q.get("hazard_code") or "",
+                "metric": q.get("metric") or "",
+                "target_month": q.get("target_month") or "",
+                "triage_tier": scenario.get("triage_tier") or "",
+                "spd_status": "",  # Filled later if available
+                "scenario_status": scenario.get("status") or "",
+                "wall_ms": metrics.get("wall_ms") or "",
+                "compute_ms": metrics.get("compute_ms") or "",
+                "queue_ms": metrics.get("queue_ms") or "",
+                "cost_usd": metrics.get("cost_usd") or "",
+                "n_spd_models_expected": metrics.get("n_spd_models_expected") or "",
+                "n_spd_models_ok": metrics.get("n_spd_models_ok") or "",
+                "missing_model_ids": metrics.get("missing_model_ids_json") or "",
+                "research_grounded": web.get("grounded", ""),
+                "n_verified_sources": web.get("n_verified", ""),
+                "n_unverified_sources": web.get("n_unverified", ""),
+            })
+    print(f"Wrote question metrics to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Emitter: Evidence Packs CSV
+# ---------------------------------------------------------------------------
+
+def emit_evidence_packs_csv(data: BundleData, out_dir: Path) -> None:
+    """Write HS country + question evidence to CSV files."""
+
+    # HS country evidence
+    if data.hs_web_rows:
+        hs_fieldnames = [
+            "iso3", "grounded", "n_verified", "n_unverified",
+            "backend", "top_3_urls", "error_code",
+            "groundingSupports_count", "groundingChunks_count",
+        ]
+        hs_path = out_dir / f"hs_country_evidence__{data.out_run_id}.csv"
+        with open(hs_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=hs_fieldnames)
+            writer.writeheader()
+            for row in sorted(data.hs_web_rows, key=lambda r: r.get("iso3") or ""):
+                urls = (row.get("top_verified_urls") or [])[:3]
+                errors = row.get("last_errors") or []
+                writer.writerow({
+                    "iso3": row.get("iso3") or "",
+                    "grounded": row.get("grounded", False),
+                    "n_verified": row.get("n_verified", 0),
+                    "n_unverified": row.get("n_unverified", 0),
+                    "backend": row.get("selected_backend") or "",
+                    "top_3_urls": ";".join(urls),
+                    "error_code": row.get("reason_code") or "",
+                    "groundingSupports_count": row.get("groundingSupports_count", 0),
+                    "groundingChunks_count": row.get("groundingChunks_count", 0),
+                })
+        print(f"Wrote HS country evidence to {hs_path}")
+
+    # Question evidence
+    if data.question_web_rows:
+        q_fieldnames = [
+            "question_id", "grounded", "n_verified", "n_unverified",
+            "backend", "top_3_urls", "error_code",
+            "groundingSupports_count", "groundingChunks_count",
+        ]
+        q_path = out_dir / f"question_evidence__{data.out_run_id}.csv"
+        with open(q_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=q_fieldnames)
+            writer.writeheader()
+            for row in sorted(data.question_web_rows, key=lambda r: r.get("question_id") or ""):
+                urls = (row.get("top_verified_urls") or [])[:3]
+                errors = row.get("last_errors") or []
+                writer.writerow({
+                    "question_id": row.get("question_id") or "",
+                    "grounded": row.get("grounded", False),
+                    "n_verified": row.get("n_verified", 0),
+                    "n_unverified": row.get("n_unverified", 0),
+                    "backend": row.get("selected_backend") or "",
+                    "top_3_urls": ";".join(urls),
+                    "error_code": "",
+                    "groundingSupports_count": row.get("groundingSupports_count", 0),
+                    "groundingChunks_count": row.get("groundingChunks_count", 0),
+                })
+        print(f"Wrote question evidence to {q_path}")
+
+
+# ---------------------------------------------------------------------------
+# Emitter: LLM Calls Detail JSONL (gzipped)
+# ---------------------------------------------------------------------------
+
+def emit_llm_calls_detail_jsonl(
+    data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
+) -> None:
+    """Write per-call LLM detail to gzipped JSONL."""
+    out_path = out_dir / f"llm_calls_detail__{data.out_run_id}.jsonl.gz"
+
+    # Build a query that gets all calls for this run
+    if data.predicate:
+        query = f"SELECT * FROM llm_calls WHERE {data.predicate}"
+        params = data.predicate_params
+    else:
+        return  # No predicate means no calls to export
+
+    try:
+        rows = _fetch_llm_rows(con, query, params)
+    except Exception:
+        return
+
+    with gzip.open(out_path, "wt", encoding="utf-8") as f:
+        for row in rows:
+            record = {
+                "call_id": row.get("call_id"),
+                "question_id": row.get("question_id"),
+                "iso3": row.get("iso3"),
+                "hazard_code": row.get("hazard_code"),
+                "phase": row.get("phase"),
+                "call_type": row.get("call_type"),
+                "provider": row.get("provider"),
+                "model_id": row.get("model_id"),
+                "prompt_text": row.get("prompt_text") or "",
+                "response_text": row.get("response_text") or "",
+                "error_text": row.get("error_text") or "",
+                "elapsed_ms": row.get("elapsed_ms"),
+                "cost_usd": row.get("cost_usd"),
+                "usage_json": row.get("usage_json"),
+                "timestamp": str(row.get("timestamp") or ""),
+                "run_id": row.get("run_id"),
+                "hs_run_id": row.get("hs_run_id"),
+            }
+            f.write(json.dumps(record, default=str) + "\n")
+
+    print(f"Wrote LLM calls detail to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Emitter: SPD Tables CSV
+# ---------------------------------------------------------------------------
+
+def emit_spd_tables_csv(data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path) -> None:
+    """Write ensemble SPD probability tables to CSV."""
+    if not data.forecaster_run_id:
+        return
+
+    out_path = out_dir / f"spd_tables__{data.out_run_id}.csv"
+
+    try:
+        rows = con.execute(
+            """
+            SELECT
+                fe.question_id, q.iso3, q.hazard_code, q.metric,
+                fe.model_name, fe.month_index, fe.bucket_index, fe.probability,
+                fe.ev_value, fe.status
+            FROM forecasts_ensemble fe
+            LEFT JOIN questions q ON q.question_id = fe.question_id
+            WHERE fe.run_id = ?
+            ORDER BY fe.question_id, fe.month_index, fe.bucket_index
+            """,
+            [data.forecaster_run_id],
+        ).fetchall()
+    except Exception:
+        return
+
+    if not rows:
+        return
+
+    fieldnames = [
+        "question_id", "iso3", "hazard_code", "metric",
+        "model_name", "month_index", "bucket_index", "probability",
+        "ev_value", "status",
+    ]
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(dict(zip(fieldnames, row)))
+
+    print(f"Wrote SPD tables to {out_path}")
 
 
 def build_triage_only_bundle_markdown(
@@ -3263,29 +4283,63 @@ def main() -> None:
             counts_after=counts_after,
         )
         provenance_lines = _provenance_markdown(provenance_entry, counts_before, counts_after, db_stats)
-        if forecaster_run_id:
-            if not _forecast_run_exists(con, forecaster_run_id):
-                raise SystemExit(
-                    f"Forecaster run_id {forecaster_run_id} not found in forecasts_ensemble; cannot build debug bundle."
+
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if args.legacy:
+            # Legacy path: monolithic markdown bundle
+            if forecaster_run_id:
+                if not _forecast_run_exists(con, forecaster_run_id):
+                    raise SystemExit(
+                        f"Forecaster run_id {forecaster_run_id} not found in forecasts_ensemble; cannot build debug bundle."
+                    )
+                questions = _load_questions_for_run(con, forecaster_run_id)
+                if not questions:
+                    raise SystemExit(f"No active questions found for run_id={forecaster_run_id}.")
+                markdown = build_debug_bundle_markdown(
+                    con, db_url, forecaster_run_id, hs_run_id, questions, provenance_lines
                 )
-            questions = _load_questions_for_run(con, forecaster_run_id)
-            if not questions:
-                raise SystemExit(f"No active questions found for run_id={forecaster_run_id}.")
-            markdown = build_debug_bundle_markdown(
-                con, db_url, forecaster_run_id, hs_run_id, questions, provenance_lines
-            )
-            out_run_id = forecaster_run_id
+                out_run_id = forecaster_run_id
+            else:
+                markdown = build_triage_only_bundle_markdown(con, db_url, hs_run_id, provenance_lines)
+                out_run_id = hs_run_id
+            out_path = out_dir / f"pytia_debug_bundle__{out_run_id}.md"
+            out_path.write_text(markdown, encoding="utf-8")
+            print(f"Wrote Pythia debug bundle to {out_path}")
         else:
-            markdown = build_triage_only_bundle_markdown(con, db_url, hs_run_id, provenance_lines)
-            out_run_id = hs_run_id
+            # New path: split artifacts
+            questions: list[dict[str, Any]] = []
+            if forecaster_run_id:
+                if not _forecast_run_exists(con, forecaster_run_id):
+                    raise SystemExit(
+                        f"Forecaster run_id {forecaster_run_id} not found in forecasts_ensemble; cannot build debug bundle."
+                    )
+                questions = _load_questions_for_run(con, forecaster_run_id)
+                if not questions:
+                    raise SystemExit(f"No active questions found for run_id={forecaster_run_id}.")
+
+            data = _load_bundle_data(
+                con,
+                hs_run_id=hs_run_id,
+                forecaster_run_id=forecaster_run_id,
+                db_url=db_url,
+                provenance_entry=provenance_entry,
+                provenance_lines=provenance_lines,
+                counts_before=counts_before,
+                counts_after=counts_after,
+                db_stats=db_stats,
+                questions=questions,
+            )
+
+            emit_executive_summary(data, out_dir)
+            emit_health_report_json(data, out_dir)
+            emit_question_metrics_csv(data, out_dir)
+            emit_evidence_packs_csv(data, out_dir)
+            emit_llm_calls_detail_jsonl(data, con, out_dir)
+            emit_spd_tables_csv(data, con, out_dir)
     finally:
         duckdb_io.close_db(con)
-
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"pytia_debug_bundle__{out_run_id}.md"
-    out_path.write_text(markdown, encoding="utf-8")
-    print(f"Wrote Pythia debug bundle to {out_path}")
 
 
 if __name__ == "__main__":
