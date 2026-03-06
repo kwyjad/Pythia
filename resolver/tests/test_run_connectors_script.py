@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+import queue
 from pathlib import Path
 
 import pytest
@@ -118,3 +119,41 @@ def test_only_connector_comma_separated(monkeypatch: pytest.MonkeyPatch, tmp_pat
         "resolver.ingestion.acled_client",
         "resolver.ingestion.ifrc_go_client",
     ]
+
+
+def test_connector_timeout_kills_hung_process(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ONLY_CONNECTOR", "stuck_client")
+    monkeypatch.delenv("CONNECTOR_LIST", raising=False)
+    monkeypatch.setenv("CONNECTOR_TIMEOUT", "1")
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+
+    class HangingStub:
+        def __init__(self) -> None:
+            self._q: queue.Queue[str | None] = queue.Queue()
+            self.stdout = iter(self._q.get, None)
+            self.returncode = -9
+
+        def wait(self) -> None:
+            pass
+
+        def kill(self) -> None:
+            self._q.put(None)
+
+    stubs: list[HangingStub] = []
+
+    def fake_popen(cmd, stdout=None, stderr=None, env=None, text=None, bufsize=None):
+        stub = HangingStub()
+        stubs.append(stub)
+        return stub
+
+    _set_fake_popen(monkeypatch, fake_popen)
+
+    rc = run_connectors.main()
+    assert rc == run_connectors.TIMEOUT_RC
+    assert len(stubs) == 1
+
+    log_path = tmp_path / "diagnostics" / "ingestion" / "logs" / "stuck_client.log"
+    assert log_path.exists()
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "TIMEOUT" in log_text

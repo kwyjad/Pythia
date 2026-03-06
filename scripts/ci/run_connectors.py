@@ -15,6 +15,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
@@ -142,6 +143,9 @@ def _parse_extra_env(values: Sequence[str]) -> Dict[str, Dict[str, str]]:
     return mapping
 
 
+TIMEOUT_RC = 124  # matches GNU ``timeout`` convention
+
+
 class TeeProcess:
     """Wrapper around ``subprocess.Popen`` exposing stdout iteration."""
 
@@ -165,6 +169,9 @@ class TeeProcess:
 
     def wait(self) -> None:
         self._proc.wait()
+
+    def kill(self) -> None:
+        self._proc.kill()
 
 
 def _quoted(cmd: Iterable[str]) -> str:
@@ -210,7 +217,14 @@ def _write_report(path: Path, entries: Iterable[Mapping[str, Any]]) -> None:
             handle.write("\n")
 
 
-def tee_run(cmd: List[str], log_path: Path, env: Dict[str, str], *, append: bool = False) -> int:
+def tee_run(
+    cmd: List[str],
+    log_path: Path,
+    env: Dict[str, str],
+    *,
+    append: bool = False,
+    timeout: int | None = None,
+) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if append and log_path.exists() else "w"
     with log_path.open(mode, encoding="utf-8") as handle:
@@ -221,14 +235,40 @@ def tee_run(cmd: List[str], log_path: Path, env: Dict[str, str], *, append: bool
         proc = TeeProcess(cmd, env)
         stdout = proc.stdout
         assert stdout is not None
-        for line in stdout:
-            sys.stdout.write(line)
-            handle.write(line)
-        proc.wait()
+        timed_out = False
+        timer: threading.Timer | None = None
+        if timeout and timeout > 0:
+
+            def _kill() -> None:
+                nonlocal timed_out
+                timed_out = True
+                proc.kill()
+
+            timer = threading.Timer(timeout, _kill)
+            timer.start()
+        try:
+            for line in stdout:
+                sys.stdout.write(line)
+                handle.write(line)
+            proc.wait()
+        finally:
+            if timer is not None:
+                timer.cancel()
+        if timed_out:
+            timeout_msg = f"TIMEOUT after {timeout}s — process killed\n"
+            sys.stdout.write(timeout_msg)
+            handle.write(timeout_msg)
+            return TIMEOUT_RC
         return proc.returncode or 0
 
 
-def try_with_optional_debug(cmd: List[str], log_path: Path, env: Dict[str, str]) -> int:
+def try_with_optional_debug(
+    cmd: List[str],
+    log_path: Path,
+    env: Dict[str, str],
+    *,
+    timeout: int | None = None,
+) -> int:
     log_level = env.get("LOG_LEVEL", "INFO").upper()
     if log_path.exists():
         try:
@@ -237,12 +277,12 @@ def try_with_optional_debug(cmd: List[str], log_path: Path, env: Dict[str, str])
             pass
     if log_level == "DEBUG":
         debug_cmd = list(cmd) + ["--debug"]
-        rc = tee_run(debug_cmd, log_path, env)
+        rc = tee_run(debug_cmd, log_path, env, timeout=timeout)
         if rc == 2:
             print(f"retrying {cmd[-1]} without --debug (rc=2)")
-            rc = tee_run(cmd, log_path, env, append=True)
+            rc = tee_run(cmd, log_path, env, append=True, timeout=timeout)
         return rc
-    return tee_run(cmd, log_path, env)
+    return tee_run(cmd, log_path, env, timeout=timeout)
 
 
 def _resolve_connectors(env: Dict[str, str]) -> List[str]:
@@ -288,6 +328,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"{reset_message} connectors report at {report_path}")
 
     env = os.environ.copy()
+    raw_timeout = env.get("CONNECTOR_TIMEOUT", "900").strip()
+    connector_timeout: int | None = int(raw_timeout) if raw_timeout else None
+
     if env.get("LOG_LEVEL", "INFO").upper() == "DEBUG":
         env.setdefault("PYTHONDEVMODE", "1")
         env.setdefault("PYTHONWARNINGS", "default")
@@ -385,7 +428,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if auto_soft_timeout:
             print(f"auto-soft-timeouts[{name}]: EMPTY_POLICY={policy_for_log}")
         print(f"argv[{name}]: {_quoted(cmd)}")
-        rc = try_with_optional_debug(cmd, log_path, connector_env)
+        rc = try_with_optional_debug(cmd, log_path, connector_env, timeout=connector_timeout)
+        if rc == TIMEOUT_RC:
+            print(f"=== TIMEOUT {name} after {connector_timeout}s ===")
         status = "ok" if rc == 0 else "error"
         reason = None if rc == 0 else f"exit code {rc}"
         written_rows = 0
