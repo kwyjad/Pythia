@@ -30,6 +30,7 @@ _REQUIRED_GROUP_COLS: Sequence[str] = (
     "metric",
     "unit",
     "as_of_date",
+    "series_semantics",
 )
 
 
