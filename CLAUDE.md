@@ -8,8 +8,8 @@ Pythia is an end-to-end AI forecasting system for humanitarian crises. It scans 
 
 **Core pipeline:**
 ```
-Resolver facts/base rates -> Horizon Scanner triage -> Questions seeded
-  -> Structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political)
+Resolver facts/base rates -> Horizon Scanner per-hazard pipeline (RC grounding → RC → triage grounding → triage)
+  -> Structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political, ENSO, seasonal TC, HDX Signals, ACLED CAST)
   -> Adversarial checks (RC L2+) -> Forecaster SPD ensemble
   -> DuckDB -> FastAPI API -> Next.js Dashboard + CSV/Excel exports
 ```
@@ -26,10 +26,18 @@ compute_resolutions (ground truth from Resolver) -> resolutions table
 
 ```
 Pythia/
-  horizon_scanner/     # Country/hazard triage via LLM (regime change, tail packs, reliefweb)
+  horizon_scanner/     # Country/hazard triage via LLM (per-hazard RC + triage, tail packs, reliefweb)
+    enso/              #   ENSO state/forecast scraper (IRI/CPC Quick Look)
+    seasonal_tc/       #   Seasonal TC forecast scrapers (TSR, NOAA CPC, BoM) + country-basin mapping
+    rc_prompts.py      #   Per-hazard RC prompt builders (ACE, DR, FL, HW, TC)
+    hs_triage_prompts.py  # Per-hazard triage prompt builders
+    rc_grounding_prompts.py  # RC-specific grounding queries
+    hs_triage_grounding_prompts.py  # Triage-specific grounding queries
+    hdx_signals.py     #   HDX Signals (OCHA automated crisis monitoring) connector
+    conflict_forecasts.py  # Unified conflict forecast loader (VIEWS + CF.org + ACLED CAST)
   forecaster/          # LLM ensemble for SPD forecasts (structured data + SPD phases)
   resolver/            # Fact ingestion, resolution, and ground truth DB
-    connectors/        #   Connector protocol + registry (ACLED, IDMC)
+    connectors/        #   Connector protocol + registry (ACLED, IDMC) + forecast registry (VIEWS, CF.org, ACLED CAST)
     ingestion/         #   Source-specific fetch/normalise clients (acled_client, idmc/)
     transform/         #   Adapters, normalisation, source resolution
     tools/             #   Pipeline orchestrator (run_pipeline.py), precedence, deltas, enrichment
@@ -60,14 +68,25 @@ Pythia/
 - `pythia/config.yaml` — Central configuration (LLM profiles, hazards, bucket specs)
 - `horizon_scanner/horizon_scanner.py` — HS main entrypoint (~1700 LOC)
 - `horizon_scanner/regime_change.py` — RC scoring (score = likelihood x magnitude, 4 levels)
-- `horizon_scanner/prompts.py` — HS triage prompt builder (includes RC calibration anchors)
+- `horizon_scanner/regime_change_llm.py` — Per-hazard RC LLM pipeline (2-pass: Gemini Flash + GPT-5-mini)
+- `horizon_scanner/triage.py` — Per-hazard triage LLM pipeline (2-pass, ACLED low-activity filter)
+- `horizon_scanner/rc_prompts.py` — Per-hazard RC prompt builders (ACE, DR, FL, HW, TC with calibration anchors)
+- `horizon_scanner/hs_triage_prompts.py` — Per-hazard triage prompt builders (scoring anchors, RC context injection)
+- `horizon_scanner/rc_grounding_prompts.py` — RC-specific grounding queries (TRIGGER/DAMPENER/BASELINE signals)
+- `horizon_scanner/hs_triage_grounding_prompts.py` — Triage-specific grounding queries (SITUATION/RESPONSE/FORECAST/VULNERABILITY)
+- `horizon_scanner/enso/enso_module.py` — ENSO state/forecast scraper (IRI/CPC, 7-day cache)
+- `horizon_scanner/seasonal_tc/seasonal_tc_runner.py` — Seasonal TC forecast orchestrator (TSR + NOAA CPC + BoM)
+- `horizon_scanner/seasonal_tc/__init__.py` — Country-to-basin mapping + cached TC context reader
+- `horizon_scanner/hdx_signals.py` — HDX Signals connector (OCHA automated crisis monitoring, indicator-to-hazard mapping)
+- `horizon_scanner/conflict_forecasts.py` — Unified conflict forecast loader (VIEWS + conflictforecast.org + ACLED CAST)
 - `forecaster/cli.py` — Forecaster main runner (~7100 LOC)
 - `pythia/api/app.py` — FastAPI application (~3200 LOC)
 - `pythia/tools/compute_resolutions.py` — Resolves forecasts against Resolver ground truth
 - `pythia/tools/compute_scores.py` — Brier/log/CRPS scoring per horizon
 - `pythia/tools/compute_calibration_pythia.py` — Calibration weights + LLM advice
 - `resolver/connectors/protocol.py` — Connector protocol (21-column canonical schema contract)
-- `resolver/connectors/__init__.py` — Connector registry (discover_connectors)
+- `resolver/connectors/__init__.py` — Connector registry (discover_connectors) + FORECAST_REGISTRY (VIEWS, CF.org, ACLED CAST)
+- `resolver/connectors/acled_cast.py` — ACLED CAST connector (event-count forecasts by type: total/battles/ERV/VAC)
 - `resolver/tools/run_pipeline.py` — Pipeline orchestrator (fetch -> validate -> enrich -> precedence -> deltas -> DuckDB)
 - `resolver/tools/enrich.py` — Enrichment (registry lookups, ym derivation, defaults)
 - `resolver/tools/precedence_config.yml` — Precedence tier policy
@@ -78,6 +97,7 @@ Pythia/
 - `pythia/adversarial_check.py` — Counter-evidence searches for RC Level 2+ (devil's advocate)
 - `horizon_scanner/reliefweb.py` — ReliefWeb humanitarian reports connector
 - `forecaster/hazard_prompts.py` — Hazard-specific reasoning guidance for SPD prompts
+- `scripts/ci/snapshot_prompt_artifact.py` — Prompt version snapshot script
 - `pythia/tools/generate_calibration_advice.py` — Per-hazard/metric calibration advice generation
 
 ## Databases
@@ -89,7 +109,7 @@ Two DuckDB databases:
 - `hs_hazard_tail_packs` — RC-triggered hazard evidence packs
 - `hs_adversarial_checks` — Counter-evidence for RC Level 2+ (devil's advocate)
 - `seasonal_forecasts` — NMME country-level temp/precip anomalies (monthly from CPC)
-- `conflict_forecasts` — VIEWS + conflictforecast.org conflict predictions (PK: source, iso3, hazard_code, metric, lead_months, forecast_issue_date)
+- `conflict_forecasts` — VIEWS + conflictforecast.org + ACLED CAST conflict predictions (PK: source, iso3, hazard_code, metric, lead_months, forecast_issue_date)
 - `questions`, `question_research` — Seeded questions + research briefs
 - `forecasts_raw`, `forecasts_ensemble` — Per-model + aggregated SPDs
 - `resolutions` — Ground truth values per (question_id, horizon_m)
@@ -138,8 +158,17 @@ discover_connectors() -> fetch_and_normalize() per connector
 **NMME seasonal forecasts** (`resolver/ingestion/nmme.py` + `resolver/tools/ingest_nmme.py`):
 Separate from the Connector pipeline. Fetches NMME ensemble mean anomalies from CPC FTP, computes area-weighted country averages using xarray + regionmask, and writes to the `seasonal_forecasts` table in Pythia DB. Injected into HS triage/RC prompts via `horizon_scanner/seasonal_context.py` (`climate_data` kwarg) and into forecaster prompts via `research_json["nmme_seasonal_outlook"]`. Run: `python -m resolver.tools.ingest_nmme`.
 
-**Conflict forecast connectors** (`resolver/connectors/views.py`, `resolver/connectors/conflictforecast.py`):
-Separate from the Connector pipeline (use `FORECAST_REGISTRY`, not `REGISTRY`). VIEWS connector fetches ML-based fatality predictions from the VIEWS API (`views_predicted_fatalities`, `views_p_gte25_brd`, leads 1–6). conflictforecast.org connector fetches news-based risk scores from Backendless API (`cf_armed_conflict_risk_3m`, `cf_armed_conflict_risk_12m`, `cf_violence_intensity_3m`). Both write to `conflict_forecasts` table. Loaded into ACE prompts via `horizon_scanner/conflict_forecasts.py`. Run: `python -m resolver.tools.fetch_conflict_forecasts`.
+**Conflict forecast connectors** (`resolver/connectors/views.py`, `resolver/connectors/conflictforecast.py`, `resolver/connectors/acled_cast.py`):
+Separate from the Connector pipeline (use `FORECAST_REGISTRY`, not `REGISTRY`). VIEWS connector fetches ML-based fatality predictions from the VIEWS API (`views_predicted_fatalities`, `views_p_gte25_brd`, leads 1–6). conflictforecast.org connector fetches news-based risk scores from Backendless API (`cf_armed_conflict_risk_3m`, `cf_armed_conflict_risk_12m`, `cf_violence_intensity_3m`). ACLED CAST connector fetches event-count forecasts via OAuth2 API (`cast_total_events`, `cast_battles_events`, `cast_erv_events`, `cast_vac_events`, 6-month lead), aggregated from admin1 to country level. All three write to `conflict_forecasts` table. Loaded into ACE prompts via `horizon_scanner/conflict_forecasts.py`. Run: `python -m resolver.tools.fetch_conflict_forecasts`.
+
+**ENSO state and forecast** (`horizon_scanner/enso/enso_module.py`):
+Scrapes IRI/CPC ENSO Quick Look page for current ENSO state, Niño 3.4 anomaly, 9-season probabilistic forecast, multi-model plume averages, and IOD state. Cached as JSON with 7-day expiry. Injected into RC and triage prompts for DR, FL, HW, TC hazards via `get_enso_prompt_context()`. Refreshed by `.github/workflows/refresh-enso.yml`.
+
+**Seasonal TC forecasts** (`horizon_scanner/seasonal_tc/`):
+Aggregates basin-level seasonal TC forecasts from TSR (PDF extraction), NOAA CPC (press release scraping), and BoM (outlook scraping) across 8 basins. Country-to-basin mapping in `__init__.py`. Cached as JSON; `get_seasonal_tc_context_for_country(iso3)` returns prompt-ready text. Refreshed by `.github/workflows/refresh-seasonal-tc.yml`.
+
+**HDX Signals** (`horizon_scanner/hdx_signals.py`):
+Downloads OCHA's HDX Signals CSV from CKAN API. Indicator-to-hazard mapping (acled_conflict→ACE, ipc_food_insecurity→DR, etc.). Filtered by country, hazard, recency (180 days). Injected into RC and triage prompts for all hazards via `format_hdx_signals_for_prompt()`.
 
 **ICG CrisisWatch "On the Horizon"** (`horizon_scanner/crisiswatch_horizon.py`):
 Monthly fetch of ICG's forward-looking conflict risk/resolution flags via Gemini grounding search. Called once per HS run, cached in-memory, injected into RC prompts for flagged countries.
@@ -221,9 +250,9 @@ python3 -m resolver.tools.run_pipeline
 python3 -m resolver.tools.ingest_nmme
 # Or specific month: python3 -m resolver.tools.ingest_nmme --year-month 202603
 
-# Fetch conflict forecasts (VIEWS + conflictforecast.org -> conflict_forecasts table)
+# Fetch conflict forecasts (VIEWS + conflictforecast.org + ACLED CAST -> conflict_forecasts table)
 python3 -m resolver.tools.fetch_conflict_forecasts
-# Or specific sources: python3 -m resolver.tools.fetch_conflict_forecasts --sources views conflictforecast_org
+# Or specific sources: python3 -m resolver.tools.fetch_conflict_forecasts --sources views conflictforecast_org acled_cast
 # Dry run: python3 -m resolver.tools.fetch_conflict_forecasts --dry-run
 
 # Run Horizon Scanner
@@ -247,7 +276,15 @@ cd web && npm install && npm run dev
 
 ## Prompt editing
 
-Before editing any of the 3 prompt source files (`forecaster/prompts.py`, `horizon_scanner/prompts.py`, `pythia/web_research/backends/gemini_grounding.py`), always run `bash scripts/snapshot_prompts.sh` first. This archives the current prompts before changes so the About page can show historical versions. Commit the snapshot alongside the prompt edits.
+Before editing any prompt source files, always run `bash scripts/snapshot_prompts.sh` first. This archives the current prompts before changes so the About page can show historical versions. Commit the snapshot alongside the prompt edits.
+
+Key prompt files:
+- `forecaster/prompts.py` — Forecaster SPD prompt builder
+- `horizon_scanner/rc_prompts.py` — Per-hazard RC prompt builders (ACE, DR, FL, HW, TC)
+- `horizon_scanner/hs_triage_prompts.py` — Per-hazard triage prompt builders
+- `horizon_scanner/rc_grounding_prompts.py` — RC-specific grounding queries (per-hazard)
+- `horizon_scanner/hs_triage_grounding_prompts.py` — Triage-specific grounding queries (per-hazard)
+- `pythia/web_research/backends/gemini_grounding.py` — Gemini grounding backend
 
 ## Code conventions
 
@@ -260,7 +297,9 @@ Before editing any of the 3 prompt source files (`forecaster/prompts.py`, `horiz
 - All LLM calls logged to `llm_calls` table with cost, tokens, latency, error tracking
 - Env vars override config defaults; threshold env vars use `_env_float()` pattern
 - Structured data connectors follow a standard pattern: `fetch_*()` → `store_*()` → `load_*()` → `format_*_for_prompt()` / `format_*_for_spd()`
-- Research LLM stage is deprecated; evidence now flows from structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political, NMME, VIEWS, conflictforecast.org, ICG CrisisWatch) into HS and SPD prompts
+- Research LLM stage is deprecated; evidence now flows from structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political, NMME, ENSO, seasonal TC, HDX Signals, VIEWS, conflictforecast.org, ACLED CAST, ICG CrisisWatch) into HS and SPD prompts
+- HS pipeline is per-hazard: each hazard gets its own RC grounding, RC call, triage grounding, and triage call (2-pass each: Gemini Flash + GPT-5-mini)
+- RC and triage grounding use different signal categories and recency windows (RC: TRIGGER/DAMPENER/BASELINE; triage: SITUATION/RESPONSE/FORECAST/VULNERABILITY)
 
 ## Post-Edit Documentation Requirements
 
