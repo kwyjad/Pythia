@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 
 from pythia.db.schema import connect, ensure_schema
 from pythia.web_research.budget import BudgetGuard, BudgetExceededError
-from pythia.web_research.cache import get as cache_get, set as cache_set
+from pythia.web_research.cache import cache_get, cache_set
 from pythia.web_research.types import EvidencePack, EvidenceSource
 from pythia.db.util import log_web_research_call
 from forecaster.providers import estimate_cost_usd

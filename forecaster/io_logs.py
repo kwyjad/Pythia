@@ -124,11 +124,21 @@ def get_log_paths() -> LogPaths:
 # ------------------------------
 
 def _write_csv_header_if_needed(csv_path: Path, fieldnames: Sequence[str]) -> None:
-    """Create CSV with header row if file does not exist or is empty."""
-    if not csv_path.exists() or csv_path.stat().st_size == 0:
-        with csv_path.open("w", encoding="utf-8", newline="") as f:
+    """Create CSV with header row if file does not exist or is empty.
+
+    Uses exclusive-create mode ('x') to avoid a TOCTOU race where two
+    concurrent processes could both see "file missing" and both write a header.
+    """
+    try:
+        with csv_path.open("x", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
+    except FileExistsError:
+        # Another process already created the file — check if it's empty.
+        if csv_path.stat().st_size == 0:
+            with csv_path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
 
 
 def append_forecast_row(row: Dict[str, object], field_order: Optional[Sequence[str]] = None) -> Path:
@@ -443,7 +453,7 @@ def finalize_and_commit(*args, **kwargs) -> None:
         default_rid = ist_stamp()
     except Exception:
         import datetime as _dt
-        default_rid = _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        default_rid = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     rid = run_id or default_rid
 
     # Collect files to commit
@@ -537,7 +547,7 @@ def write_human_markdown(*args, **kwargs) -> str:
         default_rid = ist_stamp()
     except Exception:
         import datetime as _dt
-        default_rid = _dt.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        default_rid = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     rid = run_id or default_rid
 
     # Write under forecast_logs/runs/<run_id>/human/

@@ -39,7 +39,7 @@ on:
         default: ""
         type: string
   schedule:
-    # Run at 03:00 Europe/Istanbul on the 1st of each month (00:00 UTC)
+    # Run at 00:00 UTC on the 1st of each month (= 03:00 Europe/Istanbul)
     - cron: "0 0 1 * *"
 
 permissions:
@@ -108,10 +108,10 @@ jobs:
         run: gh auth status
 
       # Step 2: Set up Python
-      - name: Set up Python 3.10
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       # Step 3: Diagnostics – workspace layout and key files
       - name: Diagnostics — workspace layout and key files
@@ -398,6 +398,36 @@ jobs:
             echo "OPENAI_API_KEY is set (value hidden)."
           fi
 
+      - name: Diagnostics — ANTHROPIC_API_KEY presence
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "WARNING: ANTHROPIC_API_KEY is NOT set. Anthropic models will be skipped in the ensemble."
+          else
+            echo "ANTHROPIC_API_KEY is set (value hidden)."
+          fi
+
+      - name: Diagnostics — KIMI_API_KEY presence
+        env:
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+        run: |
+          if [ -z "${KIMI_API_KEY:-}" ]; then
+            echo "WARNING: KIMI_API_KEY is NOT set. Kimi models will be skipped in the ensemble."
+          else
+            echo "KIMI_API_KEY is set (value hidden)."
+          fi
+
+      - name: Diagnostics — DEEPSEEK_API_KEY presence
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+            echo "WARNING: DEEPSEEK_API_KEY is NOT set. DeepSeek models will be skipped in the ensemble."
+          else
+            echo "DEEPSEEK_API_KEY is set (value hidden)."
+          fi
+
       # Step 6: Run the main Python script (as a module)
       - name: Run Horizon Scanner
         env:
@@ -621,7 +651,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          # XAI_API_KEY: ${{ secrets.XAI_API_KEY }}  # blocked via PYTHIA_BLOCK_PROVIDERS
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           MODEL_COSTS_JSON: ${{ secrets.MODEL_COSTS_JSON }}
@@ -643,7 +673,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          # XAI_API_KEY: ${{ secrets.XAI_API_KEY }}  # blocked via PYTHIA_BLOCK_PROVIDERS
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           MODEL_COSTS_JSON: ${{ secrets.MODEL_COSTS_JSON }}
@@ -684,6 +714,8 @@ jobs:
         continue-on-error: true
         env:
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
+          # PYTHONPATH needed here because this script is invoked directly
+          # (not via `python -m`), so the repo root is not on sys.path.
           PYTHONPATH: ${{ github.workspace }}
         run: |
           set -e

@@ -4,8 +4,8 @@
 # See the LICENSE file in the project root for details.
 
 from __future__ import annotations
-from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime
+from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import date, datetime, timezone
 import logging
 import os
 import subprocess
@@ -112,7 +112,7 @@ def _update_ui_run(
         try:
             con.close()
         except Exception:
-            pass
+            logging.debug("ui_runs: con.close() failed", exc_info=True)
 
 
 def _pipeline(ui_run_id: str, countries: list[str]):
@@ -143,7 +143,7 @@ def _pipeline(ui_run_id: str, countries: list[str]):
         _update_ui_run(
             db_url,
             ui_run_id,
-            started_at=datetime.utcnow(),
+            started_at=datetime.now(timezone.utc),
             countries=countries or [],
             status="running",
             error=None,
@@ -166,7 +166,7 @@ def _pipeline(ui_run_id: str, countries: list[str]):
                 _update_ui_run(
                     db_url,
                     ui_run_id,
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc),
                     status="failed",
                     error=f"ensure_schema_failed:{e!r}",
                 )
@@ -187,7 +187,7 @@ def _pipeline(ui_run_id: str, countries: list[str]):
                 _update_ui_run(
                     db_url,
                     ui_run_id,
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc),
                     status="failed",
                     error=f"horizon_scanner_failed:{e!r}",
                 )
@@ -227,7 +227,7 @@ def _pipeline(ui_run_id: str, countries: list[str]):
                 _update_ui_run(
                     db_url,
                     ui_run_id,
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc),
                     status="ok",
                     error=None,
                 )
@@ -251,7 +251,7 @@ def _pipeline(ui_run_id: str, countries: list[str]):
                 _update_ui_run(
                     db_url,
                     ui_run_id,
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc),
                     status="failed",
                     error=f"forecaster_failed:{e!r}",
                 )
@@ -263,7 +263,7 @@ def _pipeline(ui_run_id: str, countries: list[str]):
                 _update_ui_run(
                     db_url,
                     ui_run_id,
-                    finished_at=datetime.utcnow(),
+                    finished_at=datetime.now(timezone.utc),
                     status="failed",
                     error=f"forecaster_unexpected_error:{e!r}",
                 )
@@ -276,8 +276,20 @@ def _pipeline(ui_run_id: str, countries: list[str]):
             os.environ["PYTHIA_UI_RUN_ID"] = prev_ui
 
 
+def _on_pipeline_done(future: Future, ui_run_id: str) -> None:
+    """Callback to log any unhandled exception from the pipeline thread."""
+    exc = future.exception()
+    if exc is not None:
+        logging.error(
+            "Pipeline thread for ui_run_id=%s raised an unhandled exception: %r",
+            ui_run_id,
+            exc,
+        )
+
+
 def enqueue_run(countries: list[str]) -> str:
     ui_run_id = f"ui_run_{date.today().isoformat()}_{uuid.uuid4().hex[:8]}"
     logging.info("enqueue_run: scheduling ui_run_id=%s for countries=%r", ui_run_id, countries)
-    _pool.submit(_pipeline, ui_run_id, countries)
+    future = _pool.submit(_pipeline, ui_run_id, countries)
+    future.add_done_callback(lambda f: _on_pipeline_done(f, ui_run_id))
     return ui_run_id
