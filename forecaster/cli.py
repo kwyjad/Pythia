@@ -881,8 +881,16 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
         result.setdefault("source", "IFRC")
         return result
 
-    # Conflict hazards — trajectory
-    if hz == "ACE" and m in {"FATALITIES", "PA"}:
+    # Conflict hazards — PA uses IDMC displacement history
+    if hz == "ACE" and m == "PA":
+        con = connect(read_only=True)
+        try:
+            return _load_idmc_conflict_flow_history_summary(con, iso3, hz)
+        finally:
+            con.close()
+
+    # Conflict hazards — FATALITIES uses trajectory
+    if hz == "ACE" and m == "FATALITIES":
         result = _build_conflict_base_rate(iso3, hz)
         result.setdefault("source", "ACLED")
         return result

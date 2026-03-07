@@ -1042,6 +1042,9 @@ def get_hs_triage_all(
                 "regime_change_direction": row.get("regime_change_direction"),
                 "regime_change_magnitude": row.get("regime_change_magnitude"),
                 "regime_change_score": row.get("regime_change_score"),
+                "call_1_status": call_1_status,
+                "call_2_status": call_2_status,
+                "why_null": why_null,
                 "track": row.get("track"),
             }
         )
