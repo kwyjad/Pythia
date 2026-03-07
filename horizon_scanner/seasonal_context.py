@@ -116,7 +116,7 @@ def load_seasonal_forecasts(
         nmme_issue_date     – forecast issue date
     """
     try:
-        from resolver.db.duckdb_io import get_db, close_db
+        from resolver.db.duckdb_io import get_db
     except Exception:
         log.debug("DuckDB helpers unavailable — skipping seasonal load.")
         return None
@@ -173,7 +173,7 @@ def load_seasonal_forecasts(
         log.warning("Failed to load seasonal forecasts for %s: %s", iso3, exc)
         return None
     finally:
-        close_db(con)
+        pass  # Let the resolver connection cache manage lifecycle.
 
     # Group by variable.
     by_var: dict[str, list[dict]] = {}

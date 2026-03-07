@@ -436,10 +436,10 @@ jobs:
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
-          set -e
+          set -eo pipefail
           mkdir -p diagnostics
           echo "=== Running horizon_scanner.horizon_scanner as a module ==="
-          python -m horizon_scanner.horizon_scanner | tee diagnostics/hs_stdout.txt
+          python -m horizon_scanner.horizon_scanner 2>&1 | tee diagnostics/hs_stdout.txt
           HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
           HS_RESOLVED_ISO3S=$(grep -E '^HS_RESOLVED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
           HS_TRIAGE_OK_ISO3S=$(grep -E '^HS_TRIAGE_OK_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)

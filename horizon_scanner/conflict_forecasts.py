@@ -74,7 +74,7 @@ def load_conflict_forecasts(
         cast_stale        – True if data is >45 days old
     """
     try:
-        from resolver.db.duckdb_io import get_db, close_db
+        from resolver.db.duckdb_io import get_db
     except Exception:
         log.debug("DuckDB helpers unavailable — skipping conflict forecast load.")
         return None
@@ -112,7 +112,7 @@ def load_conflict_forecasts(
         log.warning("Failed to load conflict forecasts for %s: %s", iso3, exc)
         return None
     finally:
-        close_db(con)
+        pass  # Let the resolver connection cache manage lifecycle.
 
     if not views_data and not cf_data and not cast_data:
         return None
