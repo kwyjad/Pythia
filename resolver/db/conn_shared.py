@@ -116,7 +116,7 @@ class ConnectionWrapper:
     def __init__(self, path: str, url: str, raw: "duckdb.DuckDBPyConnection") -> None:
         self._path = path
         self._url = url
-        self._cache_key = url if path != ":memory:" else ":memory:"
+        self._cache_key = path
         self._raw = raw
         self._closed = False
         self._last_event = "miss"
@@ -160,7 +160,7 @@ def get_shared_duckdb_conn(
     """Return a shared DuckDB connection wrapper and its canonical path."""
 
     path, url = canonicalize_duckdb_target(db_url)
-    cache_key = url if path != ":memory:" else ":memory:"
+    cache_key = path
     cache_disabled = os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1"
     if cache_disabled:
         wrapper = _open_new(path, url)
@@ -203,7 +203,7 @@ def clear_cached_connection(db_url: str) -> None:
     """Evict ``db_url`` from the shared cache."""
 
     path, url = canonicalize_duckdb_target(db_url)
-    cache_key = url if path != ":memory:" else ":memory:"
+    cache_key = path
     with _LOCK:
         cache = _get_cache()
         wrapper = cache.pop(cache_key, None)

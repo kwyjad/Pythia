@@ -1203,21 +1203,21 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
     """Return a DuckDB connection for the given path or URL."""
 
     url, normalized_path = _normalize_duckdb_target(path_or_url)
-    cached = _DB_CACHE.get(url)
+    cached = _DB_CACHE.get(normalized_path)
     cache_disabled = os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1"
 
     force_reopen = False
 
     if cached is not None:
         if getattr(cached, "_closed", False):
-            _DB_CACHE.pop(url, None)
+            _DB_CACHE.pop(normalized_path, None)
             cached = None
             force_reopen = True
         else:
             healthcheck = getattr(cached, "_healthcheck", None)
             if callable(healthcheck) and not healthcheck():
                 cached = None
-                _DB_CACHE.pop(url, None)
+                _DB_CACHE.pop(normalized_path, None)
                 force_reopen = True
             else:
                 resolved_path = (
@@ -1256,7 +1256,7 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
     if cache_disabled:
         cache_event = "miss"
     else:
-        _DB_CACHE[url] = conn
+        _DB_CACHE[normalized_path] = conn
     log_json(
         DIAG_LOGGER,
         "db_open",
