@@ -1,5 +1,17 @@
 [
   {
+    "date": "2026-03-07",
+    "label": "Per-hazard HS, ENSO/TC, ACLED CAST"
+  },
+  {
+    "date": "2026-03-06",
+    "label": "Structured data connectors & RC checks"
+  },
+  {
+    "date": "2026-03-03",
+    "label": "Prediction markets, conflict, NMME additions"
+  },
+  {
     "date": "2026-03-02",
     "label": "Initial snapshot"
   }
