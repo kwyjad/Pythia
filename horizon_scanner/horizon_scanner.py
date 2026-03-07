@@ -1461,6 +1461,13 @@ def main(countries: list[str] | None = None):
     global _HS_FALLBACK_SPECS
     _HS_FALLBACK_SPECS = fallback_specs
 
+    # Pre-fetch/refresh HDX Signals cache (once per run, shared across countries).
+    try:
+        from horizon_scanner.hdx_signals import ensure_cache_fresh
+        ensure_cache_fresh()
+    except Exception as exc:
+        logger.warning("HDX Signals cache init failed: %s", exc)
+
     country_entries, skipped_entries, requested_countries = _load_country_list(countries)
     if not country_entries:
         logger.warning("No countries supplied to Horizon Scanner; exiting.")

@@ -42,7 +42,7 @@ const Nav = () => {
             className="text-fred-primary font-semibold hover:text-fred-secondary"
             href="/hs-triage"
           >
-            HS Triage
+            HS Triage & RC
           </Link>
           <Link
             className="text-fred-primary font-semibold hover:text-fred-secondary"
@@ -139,7 +139,7 @@ const Nav = () => {
               className="text-fred-primary font-semibold hover:text-fred-secondary"
               href="/hs-triage"
             >
-              HS Triage
+              HS Triage & RC
             </Link>
             <Link
               className="text-fred-primary font-semibold hover:text-fred-secondary"

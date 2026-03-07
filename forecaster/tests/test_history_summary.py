@@ -46,17 +46,32 @@ def test_build_history_summary_ifrc_uses_facts_resolved(monkeypatch: pytest.Monk
 
     summary = cli._build_history_summary("ETH", "FL", "PA")
 
+    assert summary["type"] == "seasonal_profile"
     assert summary["source"] == "IFRC"
-    assert summary["history_length_months"] == 2
-    # The most recent value should reflect the last row we inserted.
-    assert summary["recent_max"] == pytest.approx(20.0)
-    assert summary["last_6m_values"][-1]["value"] == pytest.approx(20.0)
+    assert summary["years_of_data"] == 1
+    # January and February should have observations
+    assert summary["months"][1]["n_observations"] == 1
+    assert summary["months"][1]["max"] == pytest.approx(10.0)
+    assert summary["months"][2]["n_observations"] == 1
+    assert summary["months"][2]["max"] == pytest.approx(20.0)
+    # Months without data should be zero-filled
+    assert summary["months"][3]["n_observations"] == 0
 
 
 def test_build_history_summary_idmc_conflict_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     """IDMC history should come from conflict flow metrics with hazard filter."""
 
     con = duckdb.connect(":memory:")
+
+    # Need both tables since _build_conflict_base_rate queries both
+    con.execute(
+        """
+        CREATE TABLE acled_monthly_fatalities (
+            iso3 TEXT, month DATE, fatalities BIGINT,
+            source TEXT, updated_at TIMESTAMP
+        )
+        """
+    )
 
     con.execute(
         """
@@ -66,18 +81,19 @@ def test_build_history_summary_idmc_conflict_flow(monkeypatch: pytest.MonkeyPatc
             hazard_code TEXT,
             metric TEXT,
             value_new DOUBLE,
-            series_semantics TEXT
+            series_semantics TEXT,
+            source_id TEXT
         )
         """
     )
 
     con.execute(
         """
-        INSERT INTO facts_deltas (ym, iso3, hazard_code, metric, value_new, series_semantics) VALUES
-            (DATE '2024-01-01', 'ETH', 'ACE', 'new_displacements', 1000.0, 'new'),
-            (DATE '2024-02-01', 'ETH', 'ACE', 'idp_displacement_new_dtm', 2000.0, 'new'),
-            (DATE '2024-03-01', 'ETH', 'ACE', 'new_displacements', 2000.0, 'new'),
-            (DATE '2024-03-01', 'ETH', 'ACE', 'idp_displacement_flow_idmc', 500.0, 'new')
+        INSERT INTO facts_deltas (ym, iso3, hazard_code, metric, value_new, series_semantics, source_id) VALUES
+            (DATE '2024-01-01', 'ETH', 'ACE', 'new_displacements', 1000.0, 'new', 'idmc'),
+            (DATE '2024-02-01', 'ETH', 'ACE', 'new_displacements', 2000.0, 'new', 'idmc'),
+            (DATE '2024-03-01', 'ETH', 'ACE', 'new_displacements', 2000.0, 'new', 'idmc'),
+            (DATE '2024-03-01', 'ETH', 'ACE', 'new_displacements', 500.0, 'new', 'idmc')
         """
     )
 
@@ -88,10 +104,13 @@ def test_build_history_summary_idmc_conflict_flow(monkeypatch: pytest.MonkeyPatc
 
     summary = cli._build_history_summary("ETH", "ACE", "PA")
 
-    assert summary["source"] == "IDMC"
-    assert summary["history_length_months"] == 3
-    assert summary["recent_max"] == pytest.approx(2500.0)
-    assert summary["last_6m_values"][-1]["value"] == pytest.approx(2500.0)
+    assert summary["type"] == "conflict_trajectory"
+    # Displacements should have data
+    disp = summary["displacements"]
+    assert disp["source"] == "IDMC"
+    assert disp["last_month"] is not None
+    assert len(disp["last_6m"]) == 3
+    assert disp["last_6m"][-1]["value"] == pytest.approx(2500.0)
 
 
 def test_build_history_summary_di_has_no_base_rate() -> None:
@@ -99,6 +118,6 @@ def test_build_history_summary_di_has_no_base_rate() -> None:
 
     summary = cli._build_history_summary("ETH", "DI", "PA")
 
+    assert summary["type"] == "no_base_rate"
     assert summary["source"] == "NONE"
-    assert summary["history_length_months"] == 0
-    assert "no resolver base rate" in summary["notes"].lower()
+    assert "no resolver base rate" in summary["note"].lower()

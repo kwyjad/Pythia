@@ -15,6 +15,7 @@ from .idmc import IdmcConnector
 from .ifrc_montandon import IfrcMontandonConnector
 from .views import ViewsConnector
 from .conflictforecast import ConflictForecastOrgConnector
+from .acled_cast import AcledCastConnector
 
 # Add new connectors here.  The orchestrator (run_pipeline.py) iterates
 # this registry to discover which sources to pull.
@@ -30,6 +31,7 @@ REGISTRY: dict[str, type] = {
 FORECAST_REGISTRY: dict[str, type] = {
     "views": ViewsConnector,
     "conflictforecast_org": ConflictForecastOrgConnector,
+    "acled_cast": AcledCastConnector,
 }
 
 

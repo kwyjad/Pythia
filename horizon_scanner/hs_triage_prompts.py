@@ -158,6 +158,7 @@ def _format_new_data_sections(
     acaps_risk_radar: Any = None,
     acaps_monitoring: Any = None,
     humanitarian_access: Any = None,
+    hdx_signals: Any = None,
 ) -> str:
     """Format all new data sources into a combined text block for triage prompts."""
     sections: list[str] = []
@@ -225,6 +226,10 @@ def _format_new_data_sections(
         except Exception:
             pass
 
+    if hdx_signals:
+        if isinstance(hdx_signals, str) and hdx_signals.strip():
+            sections.append(hdx_signals)
+
     return "\n\n".join(sections)
 
 
@@ -247,6 +252,7 @@ def build_triage_prompt_ace(
     acaps_risk_radar: Optional[Any] = None,
     acaps_monitoring: Optional[Any] = None,
     humanitarian_access: Optional[Any] = None,
+    hdx_signals: Optional[str] = None,
     **kwargs: Any,
 ) -> str:
     """Build triage prompt for Armed Conflict Events (ACE).
@@ -287,6 +293,7 @@ def build_triage_prompt_ace(
         inform_severity=inform_severity,
         acaps_risk_radar=acaps_risk_radar,
         acaps_monitoring=acaps_monitoring,
+        hdx_signals=hdx_signals,
         humanitarian_access=humanitarian_access,
     )
     additional_section = f"\n\n{additional_context}\n" if additional_context else ""
@@ -372,6 +379,8 @@ def build_triage_prompt_dr(
     acaps_risk_radar: Optional[Any] = None,
     acaps_monitoring: Optional[Any] = None,
     humanitarian_access: Optional[Any] = None,
+    enso_context: Optional[str] = None,
+    hdx_signals: Optional[str] = None,
     **kwargs: Any,
 ) -> str:
     """Build triage prompt for Drought (DR).
@@ -388,6 +397,10 @@ def build_triage_prompt_dr(
     schema_text = json.dumps(_TRIAGE_SCHEMA, indent=2)
     season_block = f"\nCurrent season context: {season_context}\n" if season_context else ""
 
+    enso_section = ""
+    if enso_context:
+        enso_section = f"\n{enso_context}\n"
+
     # NEW: Format additional data sources
     additional_context = _format_new_data_sections(
         reliefweb_reports=reliefweb_reports,
@@ -396,6 +409,7 @@ def build_triage_prompt_dr(
         acaps_risk_radar=acaps_risk_radar,
         acaps_monitoring=acaps_monitoring,
         humanitarian_access=humanitarian_access,
+        hdx_signals=hdx_signals,
     )
     additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
@@ -413,7 +427,7 @@ def build_triage_prompt_dr(
 
 CLIMATE DATA (structured observations and forecasts):
 {climate_text}
-{season_block}
+{season_block}{enso_section}
 RESOLVER FEATURES (historical context):
 {resolver_text}
 
@@ -483,6 +497,8 @@ def build_triage_prompt_fl(
     acaps_risk_radar: Optional[Any] = None,
     acaps_monitoring: Optional[Any] = None,
     humanitarian_access: Optional[Any] = None,
+    enso_context: Optional[str] = None,
+    hdx_signals: Optional[str] = None,
     **kwargs: Any,
 ) -> str:
     """Build triage prompt for Flood (FL)."""
@@ -494,6 +510,10 @@ def build_triage_prompt_fl(
     schema_text = json.dumps(_TRIAGE_SCHEMA, indent=2)
     season_block = f"\nCurrent season context: {season_context}\n" if season_context else ""
 
+    enso_section = ""
+    if enso_context:
+        enso_section = f"\n{enso_context}\n"
+
     # NEW: Format additional data sources
     additional_context = _format_new_data_sections(
         reliefweb_reports=reliefweb_reports,
@@ -502,6 +522,7 @@ def build_triage_prompt_fl(
         acaps_risk_radar=acaps_risk_radar,
         acaps_monitoring=acaps_monitoring,
         humanitarian_access=humanitarian_access,
+        hdx_signals=hdx_signals,
     )
     additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
@@ -519,7 +540,7 @@ def build_triage_prompt_fl(
 
 CLIMATE DATA (structured observations and forecasts):
 {climate_text}
-{season_block}
+{season_block}{enso_section}
 RESOLVER FEATURES (historical context):
 {resolver_text}
 
@@ -589,6 +610,8 @@ def build_triage_prompt_hw(
     acaps_risk_radar: Optional[Any] = None,
     acaps_monitoring: Optional[Any] = None,
     humanitarian_access: Optional[Any] = None,
+    enso_context: Optional[str] = None,
+    hdx_signals: Optional[str] = None,
     **kwargs: Any,
 ) -> str:
     """Build triage prompt for Heatwave (HW)."""
@@ -600,6 +623,10 @@ def build_triage_prompt_hw(
     schema_text = json.dumps(_TRIAGE_SCHEMA, indent=2)
     season_block = f"\nCurrent season context: {season_context}\n" if season_context else ""
 
+    enso_section = ""
+    if enso_context:
+        enso_section = f"\n{enso_context}\n"
+
     # NEW: Format additional data sources
     additional_context = _format_new_data_sections(
         reliefweb_reports=reliefweb_reports,
@@ -607,6 +634,7 @@ def build_triage_prompt_hw(
         acaps_risk_radar=acaps_risk_radar,
         acaps_monitoring=acaps_monitoring,
         humanitarian_access=humanitarian_access,
+        hdx_signals=hdx_signals,
     )
     additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
@@ -624,7 +652,7 @@ def build_triage_prompt_hw(
 
 CLIMATE DATA (structured observations and forecasts):
 {climate_text}
-{season_block}
+{season_block}{enso_section}
 RESOLVER FEATURES (historical context):
 {resolver_text}
 
@@ -699,6 +727,9 @@ def build_triage_prompt_tc(
     acaps_risk_radar: Optional[Any] = None,
     acaps_monitoring: Optional[Any] = None,
     humanitarian_access: Optional[Any] = None,
+    seasonal_tc_context: Optional[str] = None,
+    enso_context: Optional[str] = None,
+    hdx_signals: Optional[str] = None,
     **kwargs: Any,
 ) -> str:
     """Build triage prompt for Tropical Cyclone (TC)."""
@@ -710,6 +741,17 @@ def build_triage_prompt_tc(
     schema_text = json.dumps(_TRIAGE_SCHEMA, indent=2)
     season_block = f"\nCurrent season context: {season_context}\n" if season_context else ""
 
+    enso_section = ""
+    if enso_context:
+        enso_section = f"\n{enso_context}\n"
+
+    seasonal_tc_section = ""
+    if seasonal_tc_context:
+        seasonal_tc_section = (
+            "\nSEASONAL TC FORECASTS (pre-scraped from TSR, NOAA CPC, BoM):\n"
+            f"{seasonal_tc_context}\n"
+        )
+
     # NEW: Format additional data sources
     additional_context = _format_new_data_sections(
         reliefweb_reports=reliefweb_reports,
@@ -717,6 +759,7 @@ def build_triage_prompt_tc(
         acaps_risk_radar=acaps_risk_radar,
         acaps_monitoring=acaps_monitoring,
         humanitarian_access=humanitarian_access,
+        hdx_signals=hdx_signals,
     )
     additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 
@@ -734,7 +777,7 @@ def build_triage_prompt_tc(
 
 CLIMATE DATA (structured observations and forecasts):
 {climate_text}
-{season_block}
+{season_block}{enso_section}{seasonal_tc_section}
 RESOLVER FEATURES (historical context):
 {resolver_text}
 

@@ -15,3 +15,5 @@ netCDF4
 regionmask
 geopandas
 shapely
+pdfplumber
+beautifulsoup4

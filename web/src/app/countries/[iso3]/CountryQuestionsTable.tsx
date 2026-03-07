@@ -21,6 +21,7 @@ type CountryQuestionRow = {
   triage_score?: number | null;
   triage_date?: string | null;
   regime_change_score?: number | null;
+  track?: number | null;
 };
 
 type CountryQuestionsTableProps = {
@@ -103,6 +104,18 @@ const buildColumns = (eivLabel: string): Array<SortableColumn<CountryQuestionRow
     sortValue: (row) => row.regime_change_score ?? null,
     defaultSortDirection: "desc",
     render: (row) => formatNumber(row.regime_change_score),
+  },
+  {
+    key: "track",
+    label: (
+      <span className="inline-flex items-center gap-1">
+        Track{" "}
+        <InfoTooltip text="Track 1: full ensemble forecast (RC L1+). Track 2: single-model forecast." />
+      </span>
+    ),
+    sortValue: (row) => row.track ?? null,
+    defaultSortDirection: "asc",
+    render: (row) => (row.track != null ? String(row.track) : "—"),
   },
   {
     key: "triage_score",

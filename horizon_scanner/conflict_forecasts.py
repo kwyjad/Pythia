@@ -65,6 +65,13 @@ def load_conflict_forecasts(
         cf_intensity_3m   – violence intensity 3-month value
         cf_issue_date     – forecast issue date (str)
         cf_stale          – True if data is >45 days old
+
+        cast_total        – list of {lead_months, value} for total predicted events
+        cast_battles      – list of {lead_months, value} for predicted battle events
+        cast_erv          – list of {lead_months, value} for predicted ERV events
+        cast_vac          – list of {lead_months, value} for predicted VAC events
+        cast_issue_date   – forecast issue date (str)
+        cast_stale        – True if data is >45 days old
     """
     try:
         from resolver.db.duckdb_io import get_db, close_db
@@ -98,13 +105,16 @@ def load_conflict_forecasts(
         # Fetch conflictforecast.org forecasts (latest issue date).
         cf_data = _load_conflictforecast_org(con, iso3)
 
+        # Fetch ACLED CAST forecasts (latest issue date).
+        cast_data = _load_acled_cast(con, iso3)
+
     except Exception as exc:
         log.warning("Failed to load conflict forecasts for %s: %s", iso3, exc)
         return None
     finally:
         close_db(con)
 
-    if not views_data and not cf_data:
+    if not views_data and not cf_data and not cast_data:
         return None
 
     result: dict[str, Any] = {}
@@ -112,6 +122,8 @@ def load_conflict_forecasts(
         result.update(views_data)
     if cf_data:
         result.update(cf_data)
+    if cast_data:
+        result.update(cast_data)
 
     return result
 
@@ -211,6 +223,67 @@ def _load_conflictforecast_org(con, iso3: str) -> Optional[dict[str, Any]]:
     }
 
 
+def _load_acled_cast(con, iso3: str) -> Optional[dict[str, Any]]:
+    """Load ACLED CAST forecast data for a country."""
+    row = con.execute(
+        """
+        SELECT MAX(forecast_issue_date)
+        FROM conflict_forecasts
+        WHERE source = 'ACLED_CAST' AND iso3 = ?
+        """,
+        [iso3.upper()],
+    ).fetchone()
+
+    if not row or row[0] is None:
+        return None
+    latest_date = row[0]
+
+    result = con.execute(
+        """
+        SELECT metric, lead_months, value
+        FROM conflict_forecasts
+        WHERE source = 'ACLED_CAST' AND iso3 = ? AND forecast_issue_date = ?
+        ORDER BY metric, lead_months
+        """,
+        [iso3.upper(), latest_date],
+    ).fetchall()
+
+    if not result:
+        return None
+
+    total: list[dict[str, Any]] = []
+    battles: list[dict[str, Any]] = []
+    erv: list[dict[str, Any]] = []
+    vac: list[dict[str, Any]] = []
+
+    for metric, lead, value in result:
+        entry = {"lead_months": lead, "value": float(value)}
+        if metric == "cast_total_events":
+            total.append(entry)
+        elif metric == "cast_battles_events":
+            battles.append(entry)
+        elif metric == "cast_erv_events":
+            erv.append(entry)
+        elif metric == "cast_vac_events":
+            vac.append(entry)
+
+    issue_date = (
+        latest_date
+        if isinstance(latest_date, date)
+        else date.fromisoformat(str(latest_date))
+    )
+    stale = (date.today() - issue_date).days > _STALENESS_DAYS
+
+    return {
+        "cast_total": total,
+        "cast_battles": battles,
+        "cast_erv": erv,
+        "cast_vac": vac,
+        "cast_issue_date": str(latest_date),
+        "cast_stale": stale,
+    }
+
+
 def format_conflict_forecasts_for_prompt(
     forecasts: Optional[dict[str, Any]],
 ) -> str:
@@ -271,6 +344,52 @@ def format_conflict_forecasts_for_prompt(
         if cf_intensity_3m is not None:
             parts.append(f"Violence intensity outlook (3-month): {cf_intensity_3m:.3f}")
 
+    # ACLED CAST section
+    cast_total = forecasts.get("cast_total")
+    cast_battles = forecasts.get("cast_battles")
+    cast_erv = forecasts.get("cast_erv")
+    cast_vac = forecasts.get("cast_vac")
+    has_cast = any(v for v in (cast_total, cast_battles, cast_erv, cast_vac))
+    if has_cast:
+        stale_note = " [WARNING: DATA >45 DAYS OLD]" if forecasts.get("cast_stale") else ""
+        issue = forecasts.get("cast_issue_date", "unknown")
+        parts.append(f"\n### ACLED CAST (Conflict Alert System Tool){stale_note}")
+        parts.append(f"Forecast issued: {issue}")
+        parts.append("Source: ACLED. ML ensemble (random forest + XGBoost) trained on ACLED event data.")
+        parts.append("NOTE: CAST forecasts event *counts* (not fatalities). Event-type breakdown is unique to CAST.")
+
+        if cast_total:
+            line = "Predicted total conflict events, next months:"
+            vals = " | ".join(
+                f"M{e['lead_months']}: {e['value']:.0f}"
+                for e in sorted(cast_total, key=lambda x: x["lead_months"])
+            )
+            parts.append(f"{line}\n  {vals}")
+
+        if cast_battles:
+            line = "Predicted battle events:"
+            vals = " | ".join(
+                f"M{e['lead_months']}: {e['value']:.0f}"
+                for e in sorted(cast_battles, key=lambda x: x["lead_months"])
+            )
+            parts.append(f"{line}\n  {vals}")
+
+        if cast_erv:
+            line = "Predicted explosions/remote violence events:"
+            vals = " | ".join(
+                f"M{e['lead_months']}: {e['value']:.0f}"
+                for e in sorted(cast_erv, key=lambda x: x["lead_months"])
+            )
+            parts.append(f"{line}\n  {vals}")
+
+        if cast_vac:
+            line = "Predicted violence against civilians events:"
+            vals = " | ".join(
+                f"M{e['lead_months']}: {e['value']:.0f}"
+                for e in sorted(cast_vac, key=lambda x: x["lead_months"])
+            )
+            parts.append(f"{line}\n  {vals}")
+
     if len(parts) <= 1:
         return ""
 
@@ -279,7 +398,9 @@ def format_conflict_forecasts_for_prompt(
         "VIEWS provides ML-based fatality predictions (treat as a statistical "
         "baseline — good at trends, weak at sudden onset). conflictforecast.org "
         "provides news-driven risk scores (better at detecting shifts and "
-        "escalation signals). These are inputs to your assessment, not "
+        "escalation signals). ACLED CAST provides event count predictions by "
+        "type (battles, ERV, VAC) based on historical patterns. "
+        "These are inputs to your assessment, not "
         "substitutes for it. Where they disagree, note the disagreement and "
         "reason about why."
     )
@@ -338,5 +459,37 @@ def format_conflict_forecasts_for_research(
             parts.append(f"Armed conflict risk (12m): {cf_risk_12m:.3f}")
         if cf_intensity_3m is not None:
             parts.append(f"Violence intensity outlook (3m): {cf_intensity_3m:.3f}")
+
+    # ACLED CAST
+    cast_total = forecasts.get("cast_total")
+    cast_battles = forecasts.get("cast_battles")
+    cast_erv = forecasts.get("cast_erv")
+    cast_vac = forecasts.get("cast_vac")
+    has_cast = any(v for v in (cast_total, cast_battles, cast_erv, cast_vac))
+    if has_cast:
+        issue = forecasts.get("cast_issue_date", "unknown")
+        stale_note = " [STALE]" if forecasts.get("cast_stale") else ""
+        parts.append(f"\n### ACLED CAST — event count forecasts (issued {issue}){stale_note}")
+
+        header = "| Lead month | Total events | Battles | ERV | VAC |"
+        sep = "|-----------|-------------|---------|-----|-----|"
+        parts.append(header)
+        parts.append(sep)
+
+        total_by_lead = {e["lead_months"]: e["value"] for e in (cast_total or [])}
+        battles_by_lead = {e["lead_months"]: e["value"] for e in (cast_battles or [])}
+        erv_by_lead = {e["lead_months"]: e["value"] for e in (cast_erv or [])}
+        vac_by_lead = {e["lead_months"]: e["value"] for e in (cast_vac or [])}
+        all_leads = sorted(set(
+            list(total_by_lead) + list(battles_by_lead)
+            + list(erv_by_lead) + list(vac_by_lead)
+        ))
+
+        for lead in all_leads:
+            t = f"{total_by_lead[lead]:.0f}" if lead in total_by_lead else "n/a"
+            b = f"{battles_by_lead[lead]:.0f}" if lead in battles_by_lead else "n/a"
+            e = f"{erv_by_lead[lead]:.0f}" if lead in erv_by_lead else "n/a"
+            v = f"{vac_by_lead[lead]:.0f}" if lead in vac_by_lead else "n/a"
+            parts.append(f"| Month {lead}   | {t:>11} | {b:>7} | {e:>3} | {v:>3} |")
 
     return "\n".join(parts) if len(parts) > 1 else ""

@@ -96,7 +96,7 @@ def _normalize_string(series: pd.Series) -> pd.Series:
     return series.map(_clean)
 
 
-def _load_llm_calls(conn) -> pd.DataFrame:
+def _load_llm_calls(conn, track: int | None = None) -> pd.DataFrame:
     if not _table_exists(conn, "llm_calls"):
         return pd.DataFrame()
 
@@ -105,6 +105,7 @@ def _load_llm_calls(conn) -> pd.DataFrame:
     hs_run_id_col = _pick_column(cols, ["hs_run_id"])
     question_id_col = _pick_column(cols, ["question_id"])
     iso3_col = _pick_column(cols, ["iso3"])
+    hazard_code_col = _pick_column(cols, ["hazard_code"])
     phase_col = _pick_column(cols, ["phase"])
     model_id_col = _pick_column(cols, ["model_id"])
     model_name_col = _pick_column(cols, ["model_name"])
@@ -112,30 +113,79 @@ def _load_llm_calls(conn) -> pd.DataFrame:
     elapsed_col = _pick_column(cols, ["elapsed_ms"])
     created_col = _pick_column(cols, ["created_at", "timestamp"])
 
-    run_expr = f"CAST({run_id_col} AS VARCHAR) AS run_id" if run_id_col else "NULL AS run_id"
+    run_expr = f"CAST(lc.{run_id_col} AS VARCHAR) AS run_id" if run_id_col else "NULL AS run_id"
     hs_run_expr = (
-        f"CAST({hs_run_id_col} AS VARCHAR) AS hs_run_id" if hs_run_id_col else "NULL AS hs_run_id"
+        f"CAST(lc.{hs_run_id_col} AS VARCHAR) AS hs_run_id" if hs_run_id_col else "NULL AS hs_run_id"
     )
     question_expr = (
-        f"CAST({question_id_col} AS VARCHAR) AS question_id"
+        f"CAST(lc.{question_id_col} AS VARCHAR) AS question_id"
         if question_id_col
         else "NULL AS question_id"
     )
-    iso3_expr = f"CAST({iso3_col} AS VARCHAR) AS iso3" if iso3_col else "NULL AS iso3"
-    phase_expr = f"CAST({phase_col} AS VARCHAR) AS phase" if phase_col else "NULL AS phase"
+    iso3_expr = f"CAST(lc.{iso3_col} AS VARCHAR) AS iso3" if iso3_col else "NULL AS iso3"
+    phase_expr = f"CAST(lc.{phase_col} AS VARCHAR) AS phase" if phase_col else "NULL AS phase"
     model_id_expr = (
-        f"CAST({model_id_col} AS VARCHAR) AS model_id" if model_id_col else "NULL AS model_id"
+        f"CAST(lc.{model_id_col} AS VARCHAR) AS model_id" if model_id_col else "NULL AS model_id"
     )
     model_name_expr = (
-        f"CAST({model_name_col} AS VARCHAR) AS model_name"
+        f"CAST(lc.{model_name_col} AS VARCHAR) AS model_name"
         if model_name_col
         else "NULL AS model_name"
     )
-    cost_expr = f"CAST({cost_col} AS DOUBLE) AS cost_usd" if cost_col else "0.0 AS cost_usd"
+    cost_expr = f"CAST(lc.{cost_col} AS DOUBLE) AS cost_usd" if cost_col else "0.0 AS cost_usd"
     elapsed_expr = (
-        f"CAST({elapsed_col} AS DOUBLE) AS elapsed_ms" if elapsed_col else "NULL AS elapsed_ms"
+        f"CAST(lc.{elapsed_col} AS DOUBLE) AS elapsed_ms" if elapsed_col else "NULL AS elapsed_ms"
     )
-    created_expr = f"{created_col} AS created_at" if created_col else "NULL AS created_at"
+    created_expr = f"lc.{created_col} AS created_at" if created_col else "NULL AS created_at"
+
+    # Build track resolution via LEFT JOINs to questions and hs_triage
+    has_questions = _table_exists(conn, "questions")
+    has_triage = _table_exists(conn, "hs_triage")
+    q_has_track = has_questions and "track" in _table_columns(conn, "questions")
+    t_has_track = has_triage and "track" in _table_columns(conn, "hs_triage")
+
+    # Deduplicated hs_triage subquery to avoid row multiplication
+    triage_sub = (
+        "(SELECT run_id, iso3, hazard_code, track"
+        " FROM (SELECT *, ROW_NUMBER() OVER ("
+        "   PARTITION BY run_id, UPPER(iso3), UPPER(hazard_code)"
+        "   ORDER BY created_at DESC NULLS LAST"
+        " ) AS _rn FROM hs_triage) WHERE _rn = 1) t"
+    )
+
+    joins = ""
+    track_select = "NULL AS track"
+    if q_has_track and t_has_track and question_id_col and hs_run_id_col and iso3_col and hazard_code_col:
+        joins = (
+            f" LEFT JOIN questions q ON lc.{question_id_col} = q.question_id"
+            f" LEFT JOIN {triage_sub} ON lc.{hs_run_id_col} = t.run_id"
+            f" AND UPPER(lc.{iso3_col}) = UPPER(t.iso3)"
+            f" AND UPPER(lc.{hazard_code_col}) = UPPER(t.hazard_code)"
+        )
+        track_select = "COALESCE(q.track, t.track) AS track"
+    elif q_has_track and question_id_col:
+        joins = f" LEFT JOIN questions q ON lc.{question_id_col} = q.question_id"
+        track_select = "q.track AS track"
+    elif t_has_track and hs_run_id_col and iso3_col and hazard_code_col:
+        joins = (
+            f" LEFT JOIN {triage_sub} ON lc.{hs_run_id_col} = t.run_id"
+            f" AND UPPER(lc.{iso3_col}) = UPPER(t.iso3)"
+            f" AND UPPER(lc.{hazard_code_col}) = UPPER(t.hazard_code)"
+        )
+        track_select = "t.track AS track"
+
+    where = ""
+    params: list[int] = []
+    if track is not None and joins:
+        # Build WHERE using the same track expression as the SELECT
+        if q_has_track and t_has_track and question_id_col and hs_run_id_col and iso3_col and hazard_code_col:
+            where = " WHERE COALESCE(q.track, t.track) = ?"
+        elif q_has_track and question_id_col:
+            where = " WHERE q.track = ?"
+        elif t_has_track and hs_run_id_col and iso3_col and hazard_code_col:
+            where = " WHERE t.track = ?"
+        if where:
+            params = [track]
 
     sql = f"""
         SELECT
@@ -148,11 +198,12 @@ def _load_llm_calls(conn) -> pd.DataFrame:
             {model_name_expr},
             {cost_expr},
             {elapsed_expr},
-            {created_expr}
-        FROM llm_calls
+            {created_expr},
+            {track_select}
+        FROM llm_calls lc{joins}{where}
     """
 
-    df = conn.execute(sql).fetchdf()
+    df = conn.execute(sql, params).fetchdf() if params else conn.execute(sql).fetchdf()
     if df.empty:
         return df
 
@@ -337,18 +388,18 @@ def _build_costs_grain(df: pd.DataFrame, grain: str, group_cols: list[str]) -> d
     }
 
 
-def build_costs_total(conn) -> dict[str, pd.DataFrame]:
-    df = _load_llm_calls(conn)
+def build_costs_total(conn, track: int | None = None) -> dict[str, pd.DataFrame]:
+    df = _load_llm_calls(conn, track=track)
     return _build_costs_grain(df, "total", [])
 
 
-def build_costs_monthly(conn) -> dict[str, pd.DataFrame]:
-    df = _load_llm_calls(conn)
+def build_costs_monthly(conn, track: int | None = None) -> dict[str, pd.DataFrame]:
+    df = _load_llm_calls(conn, track=track)
     return _build_costs_grain(df, "monthly", ["year", "month"])
 
 
-def build_costs_runs(conn) -> dict[str, pd.DataFrame]:
-    df = _load_llm_calls(conn)
+def build_costs_runs(conn, track: int | None = None) -> dict[str, pd.DataFrame]:
+    df = _load_llm_calls(conn, track=track)
     if df.empty:
         empty = pd.DataFrame(columns=COST_COLUMNS)
         return {"summary": empty, "by_model": empty, "by_phase": empty}
@@ -378,8 +429,8 @@ def build_costs_runs(conn) -> dict[str, pd.DataFrame]:
     return tables
 
 
-def build_latencies_runs(conn) -> pd.DataFrame:
-    df = _load_llm_calls(conn)
+def build_latencies_runs(conn, track: int | None = None) -> pd.DataFrame:
+    df = _load_llm_calls(conn, track=track)
     if df.empty or "elapsed_ms" not in df.columns:
         return pd.DataFrame(columns=LATENCY_COLUMNS)
 
@@ -408,8 +459,8 @@ def _empty_run_runtimes_frame(**attrs: int) -> pd.DataFrame:
     return empty
 
 
-def build_run_runtimes(conn) -> pd.DataFrame:
-    df = _load_llm_calls(conn)
+def build_run_runtimes(conn, track: int | None = None) -> pd.DataFrame:
+    df = _load_llm_calls(conn, track=track)
     total_rows = len(df)
     missing_elapsed_ms = int(df["elapsed_ms"].isna().sum()) if "elapsed_ms" in df.columns else total_rows
     missing_created_at = (

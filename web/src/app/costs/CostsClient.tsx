@@ -1,7 +1,9 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
+
+import { apiGet } from "../../lib/api";
 
 import SortableTable, { SortableColumn } from "../../components/SortableTable";
 
@@ -541,15 +543,67 @@ const RunRuntimesTable = ({
   );
 };
 
+type TrackFilter = "all" | "1" | "2";
+
+const TRACK_OPTIONS: { value: TrackFilter; label: string }[] = [
+  { value: "all", label: "Tracks 1 and 2" },
+  { value: "1", label: "Track 1" },
+  { value: "2", label: "Track 2" },
+];
+
+const emptyTables = { summary: [] as CostsRow[], by_model: [] as CostsRow[], by_phase: [] as CostsRow[] };
+
 export default function CostsClient({
-  total,
-  monthly,
-  runs,
-  latencies,
-  runRuntimes,
+  total: initialTotal,
+  monthly: initialMonthly,
+  runs: initialRuns,
+  latencies: initialLatencies,
+  runRuntimes: initialRunRuntimes,
 }: CostsClientProps) {
   const searchParams = useSearchParams();
   const showDebug = searchParams?.get("debug_costs") === "1";
+
+  const [trackFilter, setTrackFilter] = useState<TrackFilter>("all");
+  const [total, setTotal] = useState(initialTotal);
+  const [monthly, setMonthly] = useState(initialMonthly);
+  const [runs, setRuns] = useState(initialRuns);
+  const [latencies, setLatencies] = useState(initialLatencies);
+  const [runRuntimes, setRunRuntimes] = useState(initialRunRuntimes);
+  const [loading, setLoading] = useState(false);
+
+  const fetchCosts = useCallback(async (track: TrackFilter) => {
+    setLoading(true);
+    const params = track !== "all" ? { track: Number(track) } : undefined;
+    try {
+      const [t, m, r, l, rt] = await Promise.all([
+        apiGet<CostsResponse>("/costs/total", params).catch(() => ({ tables: emptyTables })),
+        apiGet<CostsResponse>("/costs/monthly", params).catch(() => ({ tables: emptyTables })),
+        apiGet<CostsResponse>("/costs/runs", params).catch(() => ({ tables: emptyTables })),
+        apiGet<LatenciesResponse>("/costs/latencies", params).catch(() => ({ rows: [] as LatencyRow[] })),
+        apiGet<RunRuntimesResponse>("/costs/run_runtimes", params).catch(() => ({ rows: [] as RunRuntimeRow[] })),
+      ]);
+      setTotal(t.tables);
+      setMonthly(m.tables);
+      setRuns(r.tables);
+      setLatencies(l.rows);
+      setRunRuntimes(rt.rows);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (trackFilter === "all") {
+      setTotal(initialTotal);
+      setMonthly(initialMonthly);
+      setRuns(initialRuns);
+      setLatencies(initialLatencies);
+      setRunRuntimes(initialRunRuntimes);
+      return;
+    }
+    fetchCosts(trackFilter);
+  }, [trackFilter, fetchCosts, initialTotal, initialMonthly, initialRuns, initialLatencies, initialRunRuntimes]);
+
   const debugStats = useMemo(() => {
     const totals = runRuntimes
       .map((row) => row.total_ms)
@@ -574,6 +628,29 @@ export default function CostsClient({
           Review LLM spend and latency across total, monthly, and run-level
           aggregates.
         </p>
+        <div className="flex items-center gap-3">
+          <label className="text-xs font-semibold text-fred-text">Track</label>
+          <div className="flex gap-1">
+            {TRACK_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                className={`rounded-md px-3 py-1 text-xs font-semibold transition-colors ${
+                  trackFilter === opt.value
+                    ? "bg-fred-secondary text-white"
+                    : "bg-fred-surface text-fred-text border border-fred-secondary hover:bg-fred-secondary/10"
+                }`}
+                onClick={() => setTrackFilter(opt.value)}
+                disabled={loading}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {loading ? (
+            <span className="text-xs text-fred-muted">Loading...</span>
+          ) : null}
+        </div>
       </section>
 
       <section className="space-y-4">

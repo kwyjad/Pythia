@@ -427,256 +427,479 @@ def _load_idmc_conflict_flow_history_summary(
     return summary
 
 
+# ---------------------------------------------------------------------------
+# Hazard-specific base-rate builders (replace generic JSON dump in SPD v2)
+# ---------------------------------------------------------------------------
 
-def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str, Any]:
-    """Build Resolver history summary per hazard/metric rules."""
+_HAZARD_DISPLAY_NAMES: Dict[str, str] = {
+    "FL": "Flood",
+    "DR": "Drought",
+    "TC": "Tropical Cyclone",
+    "HW": "Heat Wave",
+    "ACE": "Armed Conflict",
+    "DI": "Displacement Inflow",
+}
 
-    hz = (hazard_code or "").upper()
-    m = (metric or "").upper()
 
-    if hz == "DI":
+def _build_natural_hazard_seasonal_profile(
+    iso3: str,
+    hazard_code: str,
+) -> Dict[str, Any]:
+    """Build a calendar-month seasonal profile from facts_resolved for natural hazards.
+
+    Queries ALL available data for the given iso3 + hazard_code where
+    metric IN ('affected', 'in_need', 'pa'). Groups by calendar month (1-12)
+    and computes min/max/mean/median across all available years.
+    """
+    iso3_up = (iso3 or "").upper().strip()
+    hz_up = (hazard_code or "").upper().strip()
+
+    empty: Dict[str, Any] = {
+        "type": "seasonal_profile",
+        "source": "IFRC",
+        "data_range": "",
+        "years_of_data": 0,
+        "months": {m: {"min": 0, "max": 0, "mean": 0, "median": 0, "n_observations": 0} for m in range(1, 13)},
+    }
+
+    if not iso3_up or not hz_up:
+        return empty
+
+    con = connect(read_only=True)
+    try:
+        try:
+            rows = con.execute(
+                """
+                SELECT ym, value
+                FROM facts_resolved
+                WHERE iso3 = ?
+                  AND hazard_code = ?
+                  AND lower(metric) IN ('affected', 'in_need', 'pa')
+                ORDER BY ym
+                """,
+                [iso3_up, hz_up],
+            ).fetchall()
+        except Exception as exc:
+            logging.warning(
+                "Seasonal profile query failed for %s/%s: %s", iso3_up, hz_up, exc
+            )
+            return empty
+
+        if not rows:
+            return empty
+
+        # Parse rows, filter future months, group by calendar month
+        now_month = datetime.utcnow().strftime("%Y-%m")
+        by_cal_month: Dict[int, list[float]] = {m: [] for m in range(1, 13)}
+        all_yms: list[str] = []
+
+        for ym_raw, value in rows:
+            parsed = _parse_month_key(str(ym_raw))
+            if parsed is None:
+                continue
+            month_key = parsed.strftime("%Y-%m")
+            if month_key > now_month:
+                continue
+            try:
+                v = float(value or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            by_cal_month[parsed.month].append(v)
+            all_yms.append(month_key)
+
+        if not all_yms:
+            return empty
+
+        all_yms_sorted = sorted(all_yms)
+        data_range = f"{all_yms_sorted[0]} to {all_yms_sorted[-1]}"
+
+        # Compute distinct years
+        years_set = {ym[:4] for ym in all_yms_sorted}
+        years_of_data = len(years_set)
+
+        months_result: Dict[int, Dict[str, Any]] = {}
+        for cal_month in range(1, 13):
+            vals = by_cal_month[cal_month]
+            if not vals:
+                months_result[cal_month] = {
+                    "min": 0, "max": 0, "mean": 0, "median": 0, "n_observations": 0,
+                }
+            else:
+                arr = np.array(vals)
+                months_result[cal_month] = {
+                    "min": round(float(np.min(arr))),
+                    "max": round(float(np.max(arr))),
+                    "mean": round(float(np.mean(arr))),
+                    "median": round(float(np.median(arr))),
+                    "n_observations": len(vals),
+                }
+
         return {
-            "source": "NONE",
-            "history_length_months": 0,
-            "recent_mean": None,
-            "recent_max": None,
-            "trend": "uncertain",
-            "last_6m_values": [],
-            "data_quality": "low",
-            "notes": (
+            "type": "seasonal_profile",
+            "source": "IFRC",
+            "data_range": data_range,
+            "years_of_data": years_of_data,
+            "months": months_result,
+        }
+    finally:
+        con.close()
+
+
+def _build_conflict_base_rate(
+    iso3: str,
+    hazard_code: str,
+) -> Dict[str, Any]:
+    """Build a conflict trajectory base rate from ACLED fatalities and IDMC displacements.
+
+    Queries the most recent 6 months of data from each source, computes
+    trailing 3-month averages and trend direction.
+    """
+    iso3_up = (iso3 or "").upper().strip()
+    hz_up = (hazard_code or "").upper().strip()
+
+    if hz_up == "DI":
+        return {
+            "type": "no_base_rate",
+            "note": (
                 "DI (displacement inflow) has no Resolver base rate; rely on HS + research "
                 "and exogenous neighbour shocks."
             ),
         }
 
-    con = connect(read_only=True)
-    try:
-
-        if m == "FATALITIES":
-            try:
-                rows = con.execute(
-                    """
-                    SELECT month, fatalities
-                    FROM acled_monthly_fatalities
-                    WHERE iso3 = ?
-                    ORDER BY month
-                    """,
-                    [iso3],
-                ).fetchall()
-            except Exception as exc:
-                logging.warning(
-                    "ACLED history query failed for %s: %s", iso3, exc
-                )
-                return {
-                    "source": "ACLED",
-                    "history_length_months": 0,
-                    "recent_mean": None,
-                    "recent_max": None,
-                    "trend": "uncertain",
-                    "last_6m_values": [],
-                    "data_quality": "low",
-                    "notes": f"ACLED history unavailable: {type(exc).__name__}",
-                }
-
-            if not rows:
-                return {
-                    "source": "ACLED",
-                    "history_length_months": 0,
-                    "recent_mean": None,
-                    "recent_max": None,
-                    "trend": "uncertain",
-                    "last_6m_values": [],
-                    "data_quality": "low",
-                    "notes": "No ACLED history for this country/hazard.",
-                }
-
-            month_to_value = {str(r[0]): r[1] for r in rows}
-            month_to_value, dropped_future, unparseable_keys = _sanitize_month_series(month_to_value)
-            if not month_to_value:
-                summary_empty: Dict[str, Any] = {
-                    "source": "ACLED",
-                    "history_length_months": 0,
-                    "recent_mean": None,
-                    "recent_max": None,
-                    "trend": "uncertain",
-                    "last_6m_values": [],
-                    "data_quality": "low",
-                    "notes": "ACLED history was filtered out (future or invalid months).",
-                }
-                sanity_empty: Dict[str, Any] = {}
-                if dropped_future:
-                    sanity_empty["dropped_future_months"] = dropped_future
-                if unparseable_keys:
-                    sanity_empty["unparseable_month_keys"] = unparseable_keys
-                if sanity_empty:
-                    summary_empty["_sanity"] = sanity_empty
-                return summary_empty
-
-            ordered_items = sorted(month_to_value.items())
-            vals = [int(v) for _k, v in ordered_items]
-            n = len(vals)
-            recent = vals[-min(n, 6):]
-            trend = "uncertain"
-            if len(recent) >= 2:
-                if recent[-1] > recent[0]:
-                    trend = "up"
-                elif recent[-1] < recent[0]:
-                    trend = "down"
-                else:
-                    trend = "flat"
-
-            summary: Dict[str, Any] = {
-                "source": "ACLED",
-                "history_length_months": n,
-                "recent_mean": sum(recent) / len(recent),
-                "recent_max": max(recent),
-                "trend": trend,
-                "last_6m_values": [
-                    {"ym": ym, "value": int(val)} for ym, val in ordered_items[-min(n, 6) :]
-                ],
-                "data_quality": "high",
-                "notes": "ACLED coverage is relatively strong for this country/hazard.",
+    def _compute_trajectory(
+        rows: list[tuple],
+        source_name: str,
+    ) -> Dict[str, Any]:
+        """Compute trajectory stats from (ym, value) rows sorted by ym desc (most recent first)."""
+        if not rows:
+            return {
+                "source": source_name,
+                "last_month": None,
+                "trailing_3m_avg": None,
+                "prior_3m_avg": None,
+                "trend_pct": None,
+                "trend_direction": None,
+                "last_6m": [],
+                "note": f"No {source_name} data available for this country.",
             }
-            sanity: Dict[str, Any] = {}
-            if dropped_future:
-                sanity["dropped_future_months"] = dropped_future
-            if unparseable_keys:
-                sanity["unparseable_month_keys"] = unparseable_keys
-            if sanity:
-                summary["_sanity"] = sanity
-            return summary
 
-        if m == "PA" and hz in {"ACE"}:
-            try:
-                summary = _load_idmc_conflict_flow_history_summary(con, iso3, hz)
-            except Exception as exc:  # noqa: BLE001
-                logging.warning(
-                    "IDMC conflict PA summary helper failed for %s/%s: %s",
-                    iso3,
-                    hz,
-                    exc,
-                )
-                summary = {
-                    "source": "IDMC",
-                    "history_length_months": 0,
-                    "recent_mean": None,
-                    "recent_max": None,
-                    "trend": "uncertain",
-                    "last_6m_values": [],
-                    "data_quality": "low",
-                    "notes": f"IDMC history helper crashed: {type(exc).__name__}",
-                }
+        # rows should be sorted ascending by ym
+        last_6 = [{"ym": str(ym), "value": round(float(val or 0))} for ym, val in rows]
+        values = [entry["value"] for entry in last_6]
 
-            return summary
+        last_month_entry = last_6[-1]
+        # trailing 3m = last 3 months, prior 3m = months 4-6
+        trailing_3m_vals = values[-3:] if len(values) >= 3 else values
+        prior_3m_vals = values[-6:-3] if len(values) >= 6 else values[:max(0, len(values) - 3)]
 
-        if m == "PA" and hz in {"FL", "DR", "TC", "HW"}:
-            try:
-                rows = con.execute(
-                    """
-                    SELECT ym, value
-                    FROM facts_resolved
-                    WHERE iso3 = ?
-                      AND hazard_code = ?
-                      AND lower(metric) IN ('affected', 'in_need', 'pa')
-                    ORDER BY ym
-                    """,
-                    [iso3, hz],
-                ).fetchall()
-            except Exception as exc:
-                logging.warning(
-                    "IFRC history query failed for %s/%s: %s", iso3, hz, exc
-                )
-                return {
-                    "source": "IFRC",
-                    "history_length_months": 0,
-                    "recent_mean": None,
-                    "recent_max": None,
-                    "trend": "uncertain",
-                    "last_6m_values": [],
-                    "data_quality": "low",
-                    "notes": f"IFRC history unavailable: {type(exc).__name__}",
-                }
+        trailing_3m_avg = round(sum(trailing_3m_vals) / len(trailing_3m_vals)) if trailing_3m_vals else None
+        prior_3m_avg = round(sum(prior_3m_vals) / len(prior_3m_vals)) if prior_3m_vals else None
 
-            if not rows:
-                return {
-                    "source": "IFRC",
-                    "history_length_months": 0,
-                    "recent_mean": None,
-                    "recent_max": None,
-                    "trend": "uncertain",
-                    "last_6m_values": [],
-                    "data_quality": "low",
-                    "notes": "No reliable IFRC Montandon history for this country/hazard; treat base rate as unknown.",
-                }
-
-            month_to_value = {str(r[0]): r[1] for r in rows}
-            month_to_value, dropped_future, unparseable_keys = _sanitize_month_series(month_to_value)
-            if not month_to_value:
-                summary_empty = {
-                    "source": "IFRC",
-                    "history_length_months": 0,
-                    "recent_mean": None,
-                    "recent_max": None,
-                    "trend": "uncertain",
-                    "last_6m_values": [],
-                    "data_quality": "low",
-                    "notes": "IFRC history was filtered out (future or invalid months).",
-                }
-                sanity_empty: Dict[str, Any] = {}
-                if dropped_future:
-                    sanity_empty["dropped_future_months"] = dropped_future
-                if unparseable_keys:
-                    sanity_empty["unparseable_month_keys"] = unparseable_keys
-                if sanity_empty:
-                    summary_empty["_sanity"] = sanity_empty
-                return summary_empty
-
-            ordered_items = sorted(month_to_value.items())
-            vals = [float(v) for _k, v in ordered_items]
-            n = len(vals)
-            recent = vals[-min(n, 6):]
-            trend = "uncertain"
-            if len(recent) >= 2:
-                if recent[-1] > recent[0]:
-                    trend = "up"
-                elif recent[-1] < recent[0]:
-                    trend = "down"
+        trend_pct: Any = None
+        trend_direction: Any = None
+        if trailing_3m_avg is not None and prior_3m_avg is not None:
+            if prior_3m_avg == 0:
+                if trailing_3m_avg > 0:
+                    trend_pct = "new_activity"
+                    trend_direction = "escalating"
                 else:
-                    trend = "flat"
-
-            summary = {
-                "source": "IFRC",
-                "history_length_months": n,
-                "recent_mean": sum(recent) / len(recent),
-                "recent_max": max(recent),
-                "trend": trend,
-                "last_6m_values": [
-                    {"ym": ym, "value": float(val)} for ym, val in ordered_items[-min(n, 6) :]
-                ],
-                "data_quality": "medium",
-                "notes": "IFRC Montandon may be sparse for smaller disasters; treat as a noisy base-rate signal.",
-            }
-            sanity: Dict[str, Any] = {}
-            if dropped_future:
-                sanity["dropped_future_months"] = dropped_future
-            if unparseable_keys:
-                sanity["unparseable_month_keys"] = unparseable_keys
-            if sanity:
-                summary["_sanity"] = sanity
-            return summary
+                    trend_pct = 0.0
+                    trend_direction = "stable"
+            else:
+                pct = ((trailing_3m_avg - prior_3m_avg) / prior_3m_avg) * 100
+                trend_pct = round(pct, 1)
+                if pct > 10:
+                    trend_direction = "escalating"
+                elif pct < -10:
+                    trend_direction = "de-escalating"
+                else:
+                    trend_direction = "stable"
 
         return {
-            "source": "NONE",
-            "history_length_months": 0,
-            "recent_mean": None,
-            "recent_max": None,
-            "trend": "uncertain",
-            "last_6m_values": [],
-            "data_quality": "low",
-            "notes": "No usable Resolver history for this hazard/metric.",
+            "source": source_name,
+            "last_month": last_month_entry,
+            "trailing_3m_avg": trailing_3m_avg,
+            "prior_3m_avg": prior_3m_avg,
+            "trend_pct": trend_pct,
+            "trend_direction": trend_direction,
+            "last_6m": last_6,
+        }
+
+    con = connect(read_only=True)
+    try:
+        # --- Fatalities from ACLED ---
+        fatalities_data: Dict[str, Any]
+        try:
+            fat_rows = con.execute(
+                """
+                SELECT month, fatalities
+                FROM acled_monthly_fatalities
+                WHERE iso3 = ?
+                ORDER BY month DESC
+                LIMIT 6
+                """,
+                [iso3_up],
+            ).fetchall()
+            # Reverse to ascending order
+            fat_rows = list(reversed(fat_rows))
+            # Normalise month keys to YYYY-MM strings
+            fat_rows = [(str(r[0])[:7] if len(str(r[0])) >= 7 else str(r[0]), r[1]) for r in fat_rows]
+            fatalities_data = _compute_trajectory(fat_rows, "ACLED")
+        except Exception as exc:
+            logging.warning("ACLED fatalities query failed for %s: %s", iso3_up, exc)
+            fatalities_data = {
+                "source": "ACLED",
+                "last_month": None, "trailing_3m_avg": None,
+                "prior_3m_avg": None, "trend_pct": None,
+                "trend_direction": None, "last_6m": [],
+                "note": f"ACLED data unavailable: {type(exc).__name__}",
+            }
+
+        # --- Displacements from IDMC via facts_deltas ---
+        displacements_data: Dict[str, Any]
+        try:
+            disp_rows = con.execute(
+                """
+                SELECT ym, SUM(COALESCE(value_new, 0)) AS flow_value
+                FROM facts_deltas
+                WHERE upper(iso3) = ?
+                  AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') = ?
+                  AND lower(series_semantics) = 'new'
+                  AND (
+                      lower(source_id) IN ('idmc', 'idmc_idu')
+                      OR lower(metric) IN (
+                          'new_displacements',
+                          'idp_displacement_new_dtm',
+                          'idp_displacement_flow_idmc'
+                      )
+                  )
+                GROUP BY ym
+                ORDER BY ym DESC
+                LIMIT 6
+                """,
+                [iso3_up, hz_up],
+            ).fetchall()
+            disp_rows = list(reversed(disp_rows))
+            disp_rows = [(str(r[0])[:7] if len(str(r[0])) >= 7 else str(r[0]), r[1]) for r in disp_rows]
+            displacements_data = _compute_trajectory(disp_rows, "IDMC")
+        except Exception as exc:
+            logging.warning("IDMC displacement query failed for %s/%s: %s", iso3_up, hz_up, exc)
+            displacements_data = {
+                "source": "IDMC",
+                "last_month": None, "trailing_3m_avg": None,
+                "prior_3m_avg": None, "trend_pct": None,
+                "trend_direction": None, "last_6m": [],
+                "note": f"IDMC data unavailable: {type(exc).__name__}",
+            }
+
+        return {
+            "type": "conflict_trajectory",
+            "fatalities": fatalities_data,
+            "displacements": displacements_data,
         }
     finally:
         con.close()
+
+
+def _format_base_rate_for_prompt(
+    history_summary: Dict[str, Any],
+    forecast_keys: list[str],
+    iso3: str = "",
+    hazard_code: str = "",
+) -> str:
+    """Format a base-rate dict into a human-readable prompt block.
+
+    Handles seasonal_profile, conflict_trajectory, no_base_rate, and
+    legacy dict formats (falls back to JSON dump).
+    """
+    summary_type = history_summary.get("type", "")
+    iso3_up = (iso3 or "").upper().strip()
+    hz_up = (hazard_code or "").upper().strip()
+
+    country_name = _load_country_names().get(iso3_up, iso3_up)
+    hazard_display = _HAZARD_DISPLAY_NAMES.get(hz_up, hz_up)
+
+    # Determine which calendar months the forecast covers
+    forecast_months: list[int] = []
+    for k in forecast_keys:
+        parsed = _parse_month_key(k)
+        if parsed:
+            forecast_months.append(parsed.month)
+
+    _MONTH_NAMES = {
+        1: "January", 2: "February", 3: "March", 4: "April",
+        5: "May", 6: "June", 7: "July", 8: "August",
+        9: "September", 10: "October", 11: "November", 12: "December",
+    }
+
+    def _fmt(n: Any) -> str:
+        """Format a number with comma separators, or return 'N/A'."""
+        if n is None:
+            return "N/A"
+        try:
+            return f"{int(n):,}"
+        except (TypeError, ValueError):
+            return str(n)
+
+    if summary_type == "seasonal_profile":
+        source = history_summary.get("source", "IFRC")
+        data_range = history_summary.get("data_range", "unknown")
+        years = history_summary.get("years_of_data", 0)
+        months_data = history_summary.get("months", {})
+
+        lines = [
+            f"BASE RATE: {country_name} {hazard_display} ({hz_up}) people affected "
+            f"— {source} data from {data_range} ({years} years)",
+            "",
+            "Seasonal profile for your forecast months:",
+        ]
+
+        # Find the longest month name for alignment
+        month_names_for_forecast = [_MONTH_NAMES.get(m, str(m)) for m in forecast_months]
+        max_name_len = max((len(n) for n in month_names_for_forecast), default=10)
+
+        for cal_month in forecast_months:
+            month_name = _MONTH_NAMES.get(cal_month, str(cal_month))
+            m_data = months_data.get(cal_month) or months_data.get(str(cal_month)) or {}
+            n_obs = m_data.get("n_observations", 0)
+            lines.append(
+                f"  {month_name + ':':<{max_name_len + 1}} "
+                f"min={_fmt(m_data.get('min', 0))}, "
+                f"max={_fmt(m_data.get('max', 0))}, "
+                f"avg={_fmt(m_data.get('mean', 0))}, "
+                f"median={_fmt(m_data.get('median', 0))} "
+                f"({n_obs} obs)"
+            )
+
+        lines.append("")
+        lines.append(
+            "Note: These are historical monthly values across all available years. "
+            "Use as your prior anchor, then update with current signals."
+        )
+        return "\n".join(lines)
+
+    if summary_type == "conflict_trajectory":
+        fat = history_summary.get("fatalities", {})
+        disp = history_summary.get("displacements", {})
+
+        lines = [
+            f"BASE RATE: {country_name} {hazard_display} ({hz_up}) — recent trajectory",
+        ]
+
+        # Fatalities block
+        lines.append("")
+        if fat.get("last_month") is not None:
+            last_f = fat["last_month"]
+            trend_pct = fat.get("trend_pct")
+            trend_dir = fat.get("trend_direction", "unknown")
+
+            if trend_pct == "new_activity":
+                trend_str = "new activity (no prior baseline)"
+            elif trend_pct is not None:
+                trend_str = f"{trend_dir} ({'+' if trend_pct > 0 else ''}{trend_pct}% vs prior 3-month window)"
+            else:
+                trend_str = "insufficient data for trend"
+
+            lines.append(f"Fatalities ({fat.get('source', 'ACLED')}):")
+            lines.append(f"  Last month ({last_f.get('ym', '?')}): {_fmt(last_f.get('value'))}")
+            lines.append(f"  3-month avg: {_fmt(fat.get('trailing_3m_avg'))}/month")
+            lines.append(f"  Trend: {trend_str}")
+        else:
+            note = fat.get("note", "No ACLED fatalities data available.")
+            lines.append(f"Fatalities (ACLED): {note}")
+
+        # Displacements block
+        lines.append("")
+        if disp.get("last_month") is not None:
+            last_d = disp["last_month"]
+            trend_pct = disp.get("trend_pct")
+            trend_dir = disp.get("trend_direction", "unknown")
+
+            if trend_pct == "new_activity":
+                trend_str = "new activity (no prior baseline)"
+            elif trend_pct is not None:
+                trend_str = f"{trend_dir} ({'+' if trend_pct > 0 else ''}{trend_pct}% vs prior 3-month window)"
+            else:
+                trend_str = "insufficient data for trend"
+
+            lines.append(f"Displacement ({disp.get('source', 'IDMC')}):")
+            lines.append(f"  Last month ({last_d.get('ym', '?')}): {_fmt(last_d.get('value'))} new displacements")
+            lines.append(f"  3-month avg: {_fmt(disp.get('trailing_3m_avg'))}/month")
+            lines.append(f"  Trend: {trend_str}")
+        else:
+            note = disp.get("note", "No IDMC displacement data available.")
+            lines.append(f"Displacement (IDMC): {note}")
+
+        lines.append("")
+        lines.append(
+            "Note: Conflict base rates reflect recent trajectory, not seasonal patterns. "
+            "Use as your prior anchor."
+        )
+        return "\n".join(lines)
+
+    if summary_type == "no_base_rate":
+        note = history_summary.get("note", "No base rate available for this hazard.")
+        return (
+            f"BASE RATE: {country_name} {hazard_display} ({hz_up})\n"
+            f"{note}"
+        )
+
+    # Legacy fallback: dump as JSON (backward compat for any unrecognised type)
+    return (
+        "Resolver history summary (Resolver is one imperfect source; "
+        "ACLED strong, IDMC short, IFRC Montandon may be sparse):\n"
+        "```json\n"
+        f"{json.dumps(history_summary, default=str, indent=2)}\n"
+        "```"
+    )
+
+
+def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str, Any]:
+    """Build Resolver history summary per hazard/metric rules.
+
+    Dispatches to hazard-specific builders that return structured dicts
+    with a ``type`` field (seasonal_profile, conflict_trajectory, or
+    no_base_rate).  The ``source`` key is preserved for backward compat.
+    """
+    hz = (hazard_code or "").upper()
+    m = (metric or "").upper()
+
+    if hz == "DI":
+        return {
+            "type": "no_base_rate",
+            "source": "NONE",
+            "note": (
+                "DI (displacement inflow) has no Resolver base rate; rely on HS + research "
+                "and exogenous neighbour shocks."
+            ),
+        }
+
+    # Natural hazards — seasonal profile
+    if m == "PA" and hz in NATURAL_HAZARD_CODES:
+        result = _build_natural_hazard_seasonal_profile(iso3, hz)
+        # Preserve backward-compat "source" key at top level
+        result.setdefault("source", "IFRC")
+        return result
+
+    # Conflict hazards — PA uses IDMC displacement history
+    if hz == "ACE" and m == "PA":
+        con = connect(read_only=True)
+        try:
+            return _load_idmc_conflict_flow_history_summary(con, iso3, hz)
+        finally:
+            con.close()
+
+    # Conflict hazards — FATALITIES uses trajectory
+    if hz == "ACE" and m == "FATALITIES":
+        result = _build_conflict_base_rate(iso3, hz)
+        result.setdefault("source", "ACLED")
+        return result
+
+    return {
+        "type": "no_base_rate",
+        "source": "NONE",
+        "note": "No usable Resolver history for this hazard/metric.",
+    }
 
 
 
@@ -2542,6 +2765,26 @@ def _load_structured_data(
             sd["acaps_monitoring"] = monitoring
     except Exception:
         pass
+
+    # Seasonal TC forecasts (TC only)
+    if hazard_code.upper() == "TC":
+        try:
+            from horizon_scanner.seasonal_tc import get_seasonal_tc_context_for_country
+            stc = get_seasonal_tc_context_for_country(iso3)
+            if stc:
+                sd["seasonal_tc_context"] = stc
+        except Exception:
+            pass
+
+    # ENSO context (all climate hazards)
+    if hazard_code.upper() in {"TC", "FL", "DR", "HW"}:
+        try:
+            from horizon_scanner.enso import get_enso_prompt_context
+            enso_ctx = get_enso_prompt_context()
+            if enso_ctx:
+                sd["enso_context"] = enso_ctx
+        except Exception:
+            pass
 
     # Adversarial check (RC L2+ only) — load from DB if available
     if (rc_level is not None and rc_level >= 2) and hs_run_id:

@@ -407,7 +407,7 @@ export default function RiskIndexPanel({
             </div>
             <p className="mt-3 text-xs text-fred-muted">
               {kpiData.explanations?.[0] ??
-                "Questions can exceed forecasts when some runs stop at triage or research."}
+                "RC L1, L2, and L3 questions are forecasted with the full Fred LLM ensemble. All others, which are expected to stay close to base rates, are forecasted with a single LLM."}
             </p>
             <div className="mt-4">
               <div className="text-xs uppercase tracking-wide text-fred-muted">

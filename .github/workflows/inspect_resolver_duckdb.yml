@@ -9,8 +9,13 @@ on:
   workflow_dispatch:
     inputs:
       backfill_run_id:
-        description: "Run ID of the Resolver backfill workflow (the run that produced pythia-resolver-db/resolver.duckdb)"
+        description: "Run ID of the workflow that produced pythia-resolver-db/resolver.duckdb"
         required: true
+        type: string
+      artifact_name:
+        description: "Artifact name to download (default: pythia-resolver-db)"
+        required: false
+        default: "pythia-resolver-db"
         type: string
 
   workflow_run:
@@ -63,11 +68,12 @@ jobs:
       - name: Download canonical resolver DB from backfill run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_NAME: ${{ inputs.artifact_name || 'pythia-resolver-db' }}
         run: |
           mkdir -p data
 
-          echo "Downloading pythia-resolver-db for run $BACKFILL_RUN_ID ..."
-          gh run download "$BACKFILL_RUN_ID" -n pythia-resolver-db --dir data
+          echo "Downloading ${ARTIFACT_NAME} for run $BACKFILL_RUN_ID ..."
+          gh run download "$BACKFILL_RUN_ID" -n "${ARTIFACT_NAME}" --dir data
 
           echo "Artifacts downloaded under data/:"
           ls -R data
@@ -90,210 +96,1051 @@ jobs:
           fi
 
           if [ ! -f data/resolver.duckdb ]; then
-            echo "ERROR: resolver.duckdb not found in pythia-resolver-db for run $BACKFILL_RUN_ID"
+            echo "ERROR: resolver.duckdb not found in ${ARTIFACT_NAME} for run $BACKFILL_RUN_ID"
             ls -R data
             exit 1
           fi
 
+          DB_SIZE=$(du -h data/resolver.duckdb | cut -f1)
+          echo "Database size: ${DB_SIZE}"
+
       - name: Inspect data/resolver.duckdb
         run: |
-          python - << 'EOF'
+          python - << 'PYEOF'
           import os
+          import json
           from pathlib import Path
+          from datetime import datetime
 
           import duckdb
 
           out_path = Path('resolver_inspect.md')
 
           lines = []
-          lines.append("# Resolver DuckDB Inspection")
-          lines.append("")
 
-          # Resolve DB path from RESOLVER_DB_URL if present, else fall back to data/resolver.duckdb
-          db_url = os.getenv("RESOLVER_DB_URL", "duckdb:///data/resolver.duckdb")
+          def L(text=""):
+              lines.append(text)
 
-          if db_url.startswith("duckdb:///"):
-              db_path = db_url[len("duckdb:///"):]
-          else:
-              db_path = db_url
-
-          db_path = Path(db_path)
-
-          if not db_path.exists():
-              lines.append(f"_Database not found at `{db_path}`_")
-          else:
-              print(f"[inspect] Connecting to {db_path}")
-              con = duckdb.connect(str(db_path), read_only=True)
-
-              lines.append("## Tables")
-              tables = con.execute("""
-                  SELECT table_name
-                  FROM information_schema.tables
-                  WHERE table_schema = 'main'
-                  ORDER BY table_name
-              """).fetchall()
-              lines.append("```")
-              for (tbl,) in tables:
-                  lines.append(tbl)
-              lines.append("```")
-              lines.append("")
-
-              lines.append("# Resolver DB Coverage Summary")
-              lines.append("")
-
-              def summarize(query: str, header: str, columns: list[str]):
-                  lines.append(header)
-                  lines.append("")
-                  lines.append("| " + " | ".join(columns) + " |")
-                  lines.append("|" + "---|" * len(columns))
-                  try:
-                      rows = con.execute(query).fetchall()
-                      for row in rows:
-                          lines.append("| " + " | ".join(str(x) for x in row) + " |")
-                  except Exception as e:
-                      lines.append(f"_Error executing summary: {type(e).__name__}: {e}_")
-                  lines.append("")
-
+          def safe_query(con, query, fallback="(query failed)"):
               try:
-                  rows = con.execute(
-                      """
-                      SELECT
-                          COALESCE(source, '') AS src,
-                          COALESCE(metric, '') AS metric,
-                          COALESCE(hazard_code, '') AS hazard_code,
-                          COALESCE(iso3, '') AS iso3,
-                          COUNT(*) AS n_rows
-                      FROM facts_deltas
-                      GROUP BY 1, 2, 3, 4
-                      ORDER BY 1, 2, 3, 4
-                      """
-                  ).fetchall()
-                  lines.append("## facts_deltas row counts by source / metric / hazard_code / iso3")
-                  lines.append("")
-                  lines.append("| source | metric | hazard_code | iso3 | n_rows |")
-                  lines.append("|--------|--------|-------------|------|--------|")
-                  for src, metric, hz, iso3, n in rows:
-                      lines.append(f"| {src} | {metric} | {hz} | {iso3} | {n} |")
-                  lines.append("")
+                  return con.execute(query).fetchall()
               except Exception as e:
-                  lines.append(f"_Error summarizing facts_deltas: {type(e).__name__}: {e}_")
-                  lines.append("")
+                  L(f"_Error: {type(e).__name__}: {e}_")
+                  return []
 
-              summarize(
-                  """
+          def table_exists(con, name):
+              rows = con.execute(
+                  "SELECT COUNT(*) FROM information_schema.tables "
+                  "WHERE table_schema='main' AND table_name=?",
+                  [name],
+              ).fetchone()
+              return rows and rows[0] > 0
+
+          def row_count(con, name):
+              if not table_exists(con, name):
+                  return None
+              rows = con.execute(f"SELECT COUNT(*) FROM {name}").fetchone()
+              return rows[0] if rows else 0
+
+          def schema_info(con, name):
+              if not table_exists(con, name):
+                  return []
+              return con.execute(f"PRAGMA table_info('{name}')").fetchall()
+
+          def fmt_num(n):
+              if n is None:
+                  return "—"
+              return f"{n:,}"
+
+          # =====================================================================
+          db_path = Path("data/resolver.duckdb")
+          if not db_path.exists():
+              L("# Resolver DuckDB Inspection")
+              L()
+              L(f"_Database not found at `{db_path}`_")
+              out_path.write_text("\n".join(lines), encoding="utf-8")
+              raise SystemExit(0)
+
+          print(f"[inspect] Connecting to {db_path}")
+          con = duckdb.connect(str(db_path), read_only=True)
+
+          db_size = db_path.stat().st_size
+          db_size_mb = db_size / (1024 * 1024)
+
+          L("# Resolver DuckDB — Comprehensive Inspection Report")
+          L()
+          L(f"_Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}_")
+          L(f"_Database size: {db_size_mb:.1f} MB ({db_size:,} bytes)_")
+          L()
+
+          # =====================================================================
+          # 1. TABLE INVENTORY
+          # =====================================================================
+          L("## 1. Table Inventory")
+          L()
+
+          all_tables = con.execute("""
+              SELECT table_name
+              FROM information_schema.tables
+              WHERE table_schema = 'main'
+              ORDER BY table_name
+          """).fetchall()
+
+          L(f"**Total tables: {len(all_tables)}**")
+          L()
+          L("| Table | Rows | Columns |")
+          L("|-------|-----:|--------:|")
+          for (tbl,) in all_tables:
+              n = row_count(con, tbl)
+              cols = len(schema_info(con, tbl))
+              L(f"| `{tbl}` | {fmt_num(n)} | {cols} |")
+          L()
+
+          # =====================================================================
+          # 2. RESOLVER CORE TABLES
+          # =====================================================================
+          L("## 2. Resolver Core Tables")
+          L()
+
+          # --- facts_resolved ---
+          L("### facts_resolved")
+          if table_exists(con, "facts_resolved"):
+              n = row_count(con, "facts_resolved")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+              rows = safe_query(con, """
                   SELECT
-                      COALESCE(iso3, '') AS iso3,
-                      COALESCE(shock_type, '') AS shock_type,
-                      COUNT(*) AS n_rows
+                      COALESCE(hazard_code, '(null)') AS hazard_code,
+                      COALESCE(metric, '(null)') AS metric,
+                      COUNT(*) AS n,
+                      COUNT(DISTINCT iso3) AS n_countries,
+                      MIN(ym) AS min_ym,
+                      MAX(ym) AS max_ym
+                  FROM facts_resolved
+                  GROUP BY 1, 2
+                  ORDER BY 1, 2
+              """)
+              if rows:
+                  L("| hazard_code | metric | rows | countries | min_ym | max_ym |")
+                  L("|-------------|--------|-----:|----------:|--------|--------|")
+                  for hz, m, n, nc, mn, mx in rows:
+                      L(f"| {hz} | {m} | {fmt_num(n)} | {nc} | {mn} | {mx} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- facts_deltas ---
+          L("### facts_deltas")
+          if table_exists(con, "facts_deltas"):
+              n = row_count(con, "facts_deltas")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+              rows = safe_query(con, """
+                  SELECT
+                      COALESCE(hazard_code, '(null)') AS hazard_code,
+                      COALESCE(metric, '(null)') AS metric,
+                      COUNT(*) AS n,
+                      COUNT(DISTINCT iso3) AS n_countries,
+                      MIN(ym) AS min_ym,
+                      MAX(ym) AS max_ym
+                  FROM facts_deltas
+                  GROUP BY 1, 2
+                  ORDER BY 1, 2
+              """)
+              if rows:
+                  L("| hazard_code | metric | rows | countries | min_ym | max_ym |")
+                  L("|-------------|--------|-----:|----------:|--------|--------|")
+                  for hz, m, n, nc, mn, mx in rows:
+                      L(f"| {hz} | {m} | {fmt_num(n)} | {nc} | {mn} | {mx} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- emdat_pa ---
+          L("### emdat_pa")
+          if table_exists(con, "emdat_pa"):
+              n = row_count(con, "emdat_pa")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+              rows = safe_query(con, """
+                  SELECT
+                      COALESCE(shock_type, '(null)') AS shock_type,
+                      COUNT(*) AS n,
+                      COUNT(DISTINCT iso3) AS n_countries,
+                      MIN(year) AS min_year,
+                      MAX(year) AS max_year
                   FROM emdat_pa
-                  GROUP BY iso3, shock_type
-                  ORDER BY iso3, shock_type
-                  """,
-                  "## emdat_pa row counts by iso3 / shock_type",
-                  ["iso3", "shock_type", "n_rows"],
-              )
+                  GROUP BY 1
+                  ORDER BY 1
+              """)
+              if rows:
+                  L("| shock_type | rows | countries | min_year | max_year |")
+                  L("|------------|-----:|----------:|---------:|---------:|")
+                  for st, n, nc, mn, mx in rows:
+                      L(f"| {st} | {fmt_num(n)} | {nc} | {mn} | {mx} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
 
-              summarize(
-                  """
+          # --- acled_monthly_fatalities ---
+          L("### acled_monthly_fatalities")
+          if table_exists(con, "acled_monthly_fatalities"):
+              n = row_count(con, "acled_monthly_fatalities")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+              rows = safe_query(con, """
                   SELECT
-                      COALESCE(iso3, '') AS iso3,
-                      COUNT(*) AS n_rows
+                      COUNT(DISTINCT iso3) AS n_countries,
+                      MIN(ym) AS min_ym,
+                      MAX(ym) AS max_ym,
+                      SUM(fatalities) AS total_fatalities
+                  FROM acled_monthly_fatalities
+              """)
+              if rows and rows[0]:
+                  nc, mn, mx, tf = rows[0]
+                  L(f"- Countries: {nc}")
+                  L(f"- Date range: {mn} → {mx}")
+                  L(f"- Total fatalities: {fmt_num(tf)}")
+                  L()
+
+              # Top 10 countries by fatalities
+              rows = safe_query(con, """
+                  SELECT iso3, SUM(fatalities) AS total
                   FROM acled_monthly_fatalities
                   GROUP BY iso3
-                  ORDER BY iso3
-                  """,
-                  "## acled_monthly_fatalities row counts by iso3",
-                  ["iso3", "n_rows"],
-              )
+                  ORDER BY total DESC
+                  LIMIT 10
+              """)
+              if rows:
+                  L("Top 10 countries by total fatalities:")
+                  L()
+                  L("| iso3 | total_fatalities |")
+                  L("|------|----------------:|")
+                  for iso3, total in rows:
+                      L(f"| {iso3} | {fmt_num(total)} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
 
-              summarize(
-                  """
+          # =====================================================================
+          # 3. HORIZON SCANNER TABLES
+          # =====================================================================
+          L("## 3. Horizon Scanner Tables")
+          L()
+
+          # --- hs_runs ---
+          L("### hs_runs")
+          if table_exists(con, "hs_runs"):
+              n = row_count(con, "hs_runs")
+              L(f"Total runs: **{fmt_num(n)}**")
+              L()
+              rows = safe_query(con, """
+                  SELECT * FROM hs_runs
+                  ORDER BY generated_at DESC NULLS LAST
+                  LIMIT 5
+              """)
+              if rows:
+                  cols = [d[0] for d in con.description]
+                  L("Recent runs (up to 5):")
+                  L("```")
+                  for row in rows:
+                      L(str(dict(zip(cols, row))))
+                  L("```")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- hs_triage ---
+          L("### hs_triage")
+          if table_exists(con, "hs_triage"):
+              n = row_count(con, "hs_triage")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+
+              # By run_id
+              rows = safe_query(con, """
+                  SELECT run_id, COUNT(*) AS n, COUNT(DISTINCT iso3) AS n_countries
+                  FROM hs_triage
+                  GROUP BY run_id
+                  ORDER BY run_id DESC
+                  LIMIT 5
+              """)
+              if rows:
+                  L("| run_id | rows | countries |")
+                  L("|--------|-----:|----------:|")
+                  for rid, n, nc in rows:
+                      L(f"| {rid} | {fmt_num(n)} | {nc} |")
+                  L()
+
+              # Tier distribution (latest run)
+              rows = safe_query(con, """
+                  SELECT tier, hazard_code, COUNT(*) AS n
+                  FROM hs_triage
+                  WHERE run_id = (SELECT run_id FROM hs_triage ORDER BY created_at DESC LIMIT 1)
+                  GROUP BY tier, hazard_code
+                  ORDER BY tier, hazard_code
+              """)
+              if rows:
+                  L("**Tier distribution (latest run):**")
+                  L()
+                  L("| tier | hazard_code | count |")
+                  L("|------|-------------|------:|")
+                  for tier, hz, n in rows:
+                      L(f"| {tier} | {hz} | {n} |")
+                  L()
+
+              # RC level distribution (latest run)
+              rows = safe_query(con, """
                   SELECT
-                      COALESCE(iso3, '') AS iso3,
-                      COALESCE(hazard_code, '') AS hazard_code,
-                      COALESCE(metric, '') AS metric,
-                      COUNT(*) AS n_questions
+                      regime_change_level,
+                      COUNT(*) AS n,
+                      ROUND(AVG(regime_change_likelihood), 3) AS avg_lk,
+                      ROUND(AVG(regime_change_magnitude), 3) AS avg_mag
+                  FROM hs_triage
+                  WHERE run_id = (SELECT run_id FROM hs_triage ORDER BY created_at DESC LIMIT 1)
+                  GROUP BY regime_change_level
+                  ORDER BY regime_change_level
+              """)
+              if rows:
+                  L("**Regime change level distribution (latest run):**")
+                  L()
+                  L("| RC level | count | avg_likelihood | avg_magnitude |")
+                  L("|:--------:|------:|---------------:|--------------:|")
+                  for lev, n, avg_lk, avg_mag in rows:
+                      L(f"| {lev} | {n} | {avg_lk} | {avg_mag} |")
+                  L()
+
+              # Triage score distribution
+              rows = safe_query(con, """
+                  SELECT
+                      CASE
+                          WHEN triage_score < 0.25 THEN '0.00-0.24'
+                          WHEN triage_score < 0.50 THEN '0.25-0.49'
+                          WHEN triage_score < 0.75 THEN '0.50-0.74'
+                          ELSE '0.75-1.00'
+                      END AS score_band,
+                      COUNT(*) AS n
+                  FROM hs_triage
+                  WHERE run_id = (SELECT run_id FROM hs_triage ORDER BY created_at DESC LIMIT 1)
+                  GROUP BY 1
+                  ORDER BY 1
+              """)
+              if rows:
+                  L("**Triage score distribution (latest run):**")
+                  L()
+                  L("| score_band | count |")
+                  L("|------------|------:|")
+                  for band, n in rows:
+                      L(f"| {band} | {n} |")
+                  L()
+
+              # Track distribution
+              rows = safe_query(con, """
+                  SELECT COALESCE(CAST(track AS TEXT), 'null') AS track, COUNT(*) AS n
+                  FROM hs_triage
+                  WHERE run_id = (SELECT run_id FROM hs_triage ORDER BY created_at DESC LIMIT 1)
+                  GROUP BY 1
+                  ORDER BY 1
+              """)
+              if rows:
+                  L("**Track distribution (latest run):**")
+                  L()
+                  L("| track | count |")
+                  L("|-------|------:|")
+                  for tr, n in rows:
+                      L(f"| {tr} | {n} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- hs_hazard_tail_packs ---
+          L("### hs_hazard_tail_packs")
+          if table_exists(con, "hs_hazard_tail_packs"):
+              n = row_count(con, "hs_hazard_tail_packs")
+              L(f"Total rows: **{fmt_num(n)}**")
+              rows = safe_query(con, """
+                  SELECT hazard_code, rc_level, COUNT(*) AS n
+                  FROM hs_hazard_tail_packs
+                  GROUP BY hazard_code, rc_level
+                  ORDER BY hazard_code, rc_level
+              """)
+              if rows:
+                  L()
+                  L("| hazard_code | rc_level | count |")
+                  L("|-------------|:--------:|------:|")
+                  for hz, lev, n in rows:
+                      L(f"| {hz} | {lev} | {n} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- hs_adversarial_checks ---
+          L("### hs_adversarial_checks")
+          if table_exists(con, "hs_adversarial_checks"):
+              n = row_count(con, "hs_adversarial_checks")
+              L(f"Total rows: **{fmt_num(n)}**")
+              rows = safe_query(con, """
+                  SELECT net_assessment, COUNT(*) AS n
+                  FROM hs_adversarial_checks
+                  GROUP BY net_assessment
+                  ORDER BY net_assessment
+              """)
+              if rows:
+                  L()
+                  L("| net_assessment | count |")
+                  L("|----------------|------:|")
+                  for na, n in rows:
+                      L(f"| {na} | {n} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- hs_country_reports ---
+          L("### hs_country_reports")
+          if table_exists(con, "hs_country_reports"):
+              n = row_count(con, "hs_country_reports")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- hs_scenarios ---
+          L("### hs_scenarios")
+          if table_exists(con, "hs_scenarios"):
+              n = row_count(con, "hs_scenarios")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # =====================================================================
+          # 4. QUESTIONS & FORECASTS
+          # =====================================================================
+          L("## 4. Questions & Forecasts")
+          L()
+
+          # --- questions ---
+          L("### questions")
+          if table_exists(con, "questions"):
+              n = row_count(con, "questions")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+              rows = safe_query(con, """
+                  SELECT
+                      COALESCE(status, '(null)') AS status,
+                      COALESCE(hazard_code, '(null)') AS hazard_code,
+                      COALESCE(metric, '(null)') AS metric,
+                      COUNT(*) AS n,
+                      COUNT(DISTINCT iso3) AS n_countries
                   FROM questions
-                  GROUP BY iso3, hazard_code, metric
-                  ORDER BY iso3, hazard_code, metric
-                  """,
-                  "## questions by iso3 / hazard_code / metric",
-                  ["iso3", "hazard_code", "metric", "n_questions"],
-              )
+                  GROUP BY 1, 2, 3
+                  ORDER BY 1, 2, 3
+              """)
+              if rows:
+                  L("| status | hazard_code | metric | questions | countries |")
+                  L("|--------|-------------|--------|----------:|----------:|")
+                  for st, hz, m, n, nc in rows:
+                      L(f"| {st} | {hz} | {m} | {n} | {nc} |")
+                  L()
 
-              try:
-                  rows = con.execute(
-                      """
-                        SELECT
-                            COALESCE(q.iso3, '') AS iso3,
-                            COALESCE(f.hazard_code, '') AS hazard_code,
-                            COALESCE(f.metric, '') AS metric,
-                            COUNT(DISTINCT f.question_id) AS n_questions,
-                            COUNT(*) AS n_rows
-                        FROM forecasts_ensemble AS f
-                        LEFT JOIN questions AS q
-                          ON q.question_id = f.question_id
-                        GROUP BY q.iso3, f.hazard_code, f.metric
-                        ORDER BY q.iso3, f.hazard_code, f.metric
-                        """
-                    ).fetchall()
-                  lines.append("## forecasts_ensemble by iso3 / hazard_code / metric")
-                  lines.append("")
-                  lines.append("| iso3 | hazard_code | metric | n_questions | n_rows |")
-                  lines.append("|------|-------------|--------|-------------|--------|")
-                  for iso3, hz, metric, n_q, n_rows in rows:
-                      lines.append(f"| {iso3} | {hz} | {metric} | {n_q} | {n_rows} |")
-                  lines.append("")
-              except Exception as e:
-                  lines.append(f"_Error summarizing forecasts_ensemble: {type(e).__name__}: {e}_")
-                  lines.append("")
+              # Track distribution
+              rows = safe_query(con, """
+                  SELECT COALESCE(CAST(track AS TEXT), 'null') AS track,
+                         COUNT(*) AS n
+                  FROM questions
+                  WHERE status = 'active'
+                  GROUP BY 1 ORDER BY 1
+              """)
+              if rows:
+                  L("**Active questions by track:**")
+                  L()
+                  L("| track | count |")
+                  L("|-------|------:|")
+                  for tr, n in rows:
+                      L(f"| {tr} | {n} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
 
-              def dump_table_schema_and_sample(table_name: str, limit: int = 10):
-                  lines.append(f"## {table_name} schema & sample")
-                  lines.append("")
-                  try:
-                      schema = con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
-                      lines.append("Schema (PRAGMA table_info):")
-                      lines.append("```")
+          # --- question_research ---
+          L("### question_research")
+          if table_exists(con, "question_research"):
+              n = row_count(con, "question_research")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+              rows = safe_query(con, """
+                  SELECT run_id, COUNT(*) AS n
+                  FROM question_research
+                  GROUP BY run_id
+                  ORDER BY run_id DESC
+                  LIMIT 5
+              """)
+              if rows:
+                  L("| run_id | rows |")
+                  L("|--------|-----:|")
+                  for rid, n in rows:
+                      L(f"| {rid} | {fmt_num(n)} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- forecasts_raw ---
+          L("### forecasts_raw")
+          if table_exists(con, "forecasts_raw"):
+              n = row_count(con, "forecasts_raw")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+              rows = safe_query(con, """
+                  SELECT
+                      COALESCE(model_name, '(null)') AS model,
+                      COALESCE(status, '(null)') AS status,
+                      COUNT(*) AS n
+                  FROM forecasts_raw
+                  GROUP BY 1, 2
+                  ORDER BY 1, 2
+              """)
+              if rows:
+                  L("| model | status | rows |")
+                  L("|-------|--------|-----:|")
+                  for m, st, n in rows:
+                      L(f"| {m} | {st} | {fmt_num(n)} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- forecasts_ensemble ---
+          L("### forecasts_ensemble")
+          if table_exists(con, "forecasts_ensemble"):
+              n = row_count(con, "forecasts_ensemble")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+              rows = safe_query(con, """
+                  SELECT
+                      COALESCE(model_name, '(null)') AS model_name,
+                      COALESCE(status, '(null)') AS status,
+                      COUNT(DISTINCT question_id) AS n_questions,
+                      COUNT(*) AS n_rows
+                  FROM forecasts_ensemble
+                  GROUP BY 1, 2
+                  ORDER BY 1, 2
+              """)
+              if rows:
+                  L("| model_name | status | questions | rows |")
+                  L("|------------|--------|----------:|-----:|")
+                  for mn, st, nq, nr in rows:
+                      L(f"| {mn} | {st} | {nq} | {fmt_num(nr)} |")
+                  L()
+
+              # By hazard_code
+              rows = safe_query(con, """
+                  SELECT
+                      COALESCE(hazard_code, '(null)') AS hazard_code,
+                      COALESCE(metric, '(null)') AS metric,
+                      COUNT(DISTINCT question_id) AS n_questions,
+                      COUNT(*) AS n_rows
+                  FROM forecasts_ensemble
+                  GROUP BY 1, 2
+                  ORDER BY 1, 2
+              """)
+              if rows:
+                  L("By hazard/metric:")
+                  L()
+                  L("| hazard_code | metric | questions | rows |")
+                  L("|-------------|--------|----------:|-----:|")
+                  for hz, m, nq, nr in rows:
+                      L(f"| {hz} | {m} | {nq} | {fmt_num(nr)} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- scenarios ---
+          L("### scenarios")
+          if table_exists(con, "scenarios"):
+              n = row_count(con, "scenarios")
+              L(f"Total rows: **{fmt_num(n)}**")
+              rows = safe_query(con, """
+                  SELECT scenario_type, COUNT(*) AS n
+                  FROM scenarios
+                  GROUP BY scenario_type
+                  ORDER BY scenario_type
+              """)
+              if rows:
+                  L()
+                  L("| scenario_type | count |")
+                  L("|---------------|------:|")
+                  for st, n in rows:
+                      L(f"| {st} | {n} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # =====================================================================
+          # 5. SCORING & CALIBRATION
+          # =====================================================================
+          L("## 5. Scoring & Calibration")
+          L()
+
+          # --- resolutions ---
+          L("### resolutions")
+          if table_exists(con, "resolutions"):
+              n = row_count(con, "resolutions")
+              L(f"Total rows: **{fmt_num(n)}**")
+              rows = safe_query(con, """
+                  SELECT COUNT(DISTINCT question_id) AS n_questions,
+                         MIN(observed_month) AS min_month,
+                         MAX(observed_month) AS max_month
+                  FROM resolutions
+              """)
+              if rows and rows[0]:
+                  nq, mn, mx = rows[0]
+                  L(f"- Resolved questions: {nq}")
+                  L(f"- Month range: {mn} → {mx}")
+              L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- scores ---
+          L("### scores")
+          if table_exists(con, "scores"):
+              n = row_count(con, "scores")
+              L(f"Total rows: **{fmt_num(n)}**")
+              rows = safe_query(con, """
+                  SELECT
+                      COALESCE(score_type, '(null)') AS score_type,
+                      COALESCE(model_name, 'ensemble') AS model,
+                      COUNT(*) AS n,
+                      ROUND(AVG(value), 4) AS avg_score
+                  FROM scores
+                  GROUP BY 1, 2
+                  ORDER BY 1, 2
+              """)
+              if rows:
+                  L()
+                  L("| score_type | model | rows | avg_score |")
+                  L("|------------|-------|-----:|----------:|")
+                  for st, m, n, avg in rows:
+                      L(f"| {st} | {m} | {fmt_num(n)} | {avg} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- calibration_weights ---
+          L("### calibration_weights")
+          if table_exists(con, "calibration_weights"):
+              n = row_count(con, "calibration_weights")
+              L(f"Total rows: **{fmt_num(n)}**")
+              rows = safe_query(con, """
+                  SELECT as_of_month, hazard_code, metric, model_name,
+                         ROUND(weight, 4) AS weight, n_questions, n_samples,
+                         ROUND(avg_brier, 4) AS avg_brier
+                  FROM calibration_weights
+                  ORDER BY as_of_month DESC, hazard_code, metric, model_name
+                  LIMIT 20
+              """)
+              if rows:
+                  L()
+                  L("| as_of_month | hazard | metric | model | weight | n_q | n_s | avg_brier |")
+                  L("|-------------|--------|--------|-------|-------:|----:|----:|----------:|")
+                  for am, hz, m, mn, w, nq, ns, ab in rows:
+                      L(f"| {am} | {hz} | {m} | {mn} | {w} | {nq} | {ns} | {ab} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- calibration_advice ---
+          L("### calibration_advice")
+          if table_exists(con, "calibration_advice"):
+              n = row_count(con, "calibration_advice")
+              L(f"Total rows: **{fmt_num(n)}**")
+              rows = safe_query(con, """
+                  SELECT as_of_month, hazard_code, metric,
+                         LENGTH(advice) AS advice_len
+                  FROM calibration_advice
+                  ORDER BY as_of_month DESC, hazard_code, metric
+                  LIMIT 15
+              """)
+              if rows:
+                  L()
+                  L("| as_of_month | hazard_code | metric | advice_length |")
+                  L("|-------------|-------------|--------|-------------:|")
+                  for am, hz, m, al in rows:
+                      L(f"| {am} | {hz} | {m} | {fmt_num(al)} chars |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- bucket_definitions ---
+          L("### bucket_definitions")
+          if table_exists(con, "bucket_definitions"):
+              rows = safe_query(con, "SELECT * FROM bucket_definitions ORDER BY metric, bucket_index")
+              if rows:
+                  L(f"Total rows: **{len(rows)}**")
+                  L()
+                  L("| metric | bucket_index | label | lower_bound | upper_bound |")
+                  L("|--------|:------------:|-------|------------:|------------:|")
+                  for row in rows:
+                      # Schema: metric, bucket_index, label, lower_bound, upper_bound
+                      m, bi, lbl, lb, ub = row[0], row[1], row[2], row[3], row[4]
+                      L(f"| {m} | {bi} | {lbl} | {lb} | {ub} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- bucket_centroids ---
+          L("### bucket_centroids")
+          if table_exists(con, "bucket_centroids"):
+              rows = safe_query(con, """
+                  SELECT hazard_code, metric, bucket_index, centroid
+                  FROM bucket_centroids
+                  ORDER BY hazard_code, metric, bucket_index
+              """)
+              if rows:
+                  L(f"Total rows: **{len(rows)}**")
+                  L()
+                  L("| hazard_code | metric | bucket_index | centroid |")
+                  L("|-------------|--------|:------------:|---------:|")
+                  for hz, m, bi, c in rows:
+                      L(f"| {hz} | {m} | {bi} | {c:,.0f} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # =====================================================================
+          # 6. LLM CALLS & TELEMETRY
+          # =====================================================================
+          L("## 6. LLM Calls & Telemetry")
+          L()
+
+          # --- llm_calls ---
+          L("### llm_calls")
+          if table_exists(con, "llm_calls"):
+              n = row_count(con, "llm_calls")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+
+              # By phase
+              rows = safe_query(con, """
+                  SELECT
+                      COALESCE(phase, call_type) AS phase,
+                      COALESCE(status, '(null)') AS status,
+                      COUNT(*) AS n,
+                      ROUND(SUM(COALESCE(cost_usd, 0)), 4) AS total_cost,
+                      SUM(COALESCE(total_tokens, 0)) AS total_tokens
+                  FROM llm_calls
+                  GROUP BY 1, 2
+                  ORDER BY 1, 2
+              """)
+              if rows:
+                  L("| phase | status | calls | cost_usd | tokens |")
+                  L("|-------|--------|------:|---------:|-------:|")
+                  for ph, st, n, cost, tok in rows:
+                      L(f"| {ph} | {st} | {fmt_num(n)} | ${cost:.4f} | {fmt_num(tok)} |")
+                  L()
+
+              # By provider/model
+              rows = safe_query(con, """
+                  SELECT
+                      COALESCE(provider, '(null)') AS provider,
+                      COALESCE(model_id, model_name, '(null)') AS model,
+                      COUNT(*) AS n,
+                      ROUND(SUM(COALESCE(cost_usd, 0)), 4) AS total_cost,
+                      ROUND(AVG(COALESCE(elapsed_ms, 0)), 0) AS avg_ms
+                  FROM llm_calls
+                  GROUP BY 1, 2
+                  ORDER BY total_cost DESC
+                  LIMIT 15
+              """)
+              if rows:
+                  L("**Cost by provider/model (top 15):**")
+                  L()
+                  L("| provider | model | calls | cost_usd | avg_ms |")
+                  L("|----------|-------|------:|---------:|-------:|")
+                  for prov, mod, n, cost, avg_ms in rows:
+                      L(f"| {prov} | {mod} | {fmt_num(n)} | ${cost:.4f} | {avg_ms:.0f} |")
+                  L()
+
+              # Error summary
+              rows = safe_query(con, """
+                  SELECT
+                      COALESCE(error_type, 'none') AS error_type,
+                      COUNT(*) AS n
+                  FROM llm_calls
+                  WHERE status != 'ok' OR error_type IS NOT NULL
+                  GROUP BY 1
+                  ORDER BY n DESC
+                  LIMIT 10
+              """)
+              if rows:
+                  L("**Error summary:**")
+                  L()
+                  L("| error_type | count |")
+                  L("|------------|------:|")
+                  for et, n in rows:
+                      L(f"| {et} | {n} |")
+                  L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # --- question_run_metrics ---
+          L("### question_run_metrics")
+          if table_exists(con, "question_run_metrics"):
+              n = row_count(con, "question_run_metrics")
+              L(f"Total rows: **{fmt_num(n)}**")
+              rows = safe_query(con, """
+                  SELECT
+                      COUNT(*) AS n,
+                      ROUND(AVG(wall_ms), 0) AS avg_wall_ms,
+                      ROUND(SUM(cost_usd), 4) AS total_cost,
+                      ROUND(AVG(cost_usd), 4) AS avg_cost
+                  FROM question_run_metrics
+              """)
+              if rows and rows[0]:
+                  n, avg_wall, total_cost, avg_cost = rows[0]
+                  L(f"- Avg wall time: {avg_wall:.0f}ms")
+                  L(f"- Total cost: ${total_cost:.4f}")
+                  L(f"- Avg cost per question: ${avg_cost:.4f}")
+              L()
+          else:
+              L("_Table does not exist._")
+          L()
+
+          # =====================================================================
+          # 7. STRUCTURED DATA CONNECTORS
+          # =====================================================================
+          L("## 7. Structured Data Connectors")
+          L()
+
+          connector_tables = [
+              ("seasonal_forecasts", """
+                  SELECT variable, COUNT(*) AS n, COUNT(DISTINCT iso3) AS countries,
+                         MIN(forecast_issue_date) AS min_date, MAX(forecast_issue_date) AS max_date
+                  FROM seasonal_forecasts GROUP BY variable ORDER BY variable
+              """, ["variable", "rows", "countries", "min_date", "max_date"]),
+              ("conflict_forecasts", """
+                  SELECT source, COUNT(*) AS n, COUNT(DISTINCT iso3) AS countries,
+                         MIN(forecast_issue_date) AS min_date, MAX(forecast_issue_date) AS max_date
+                  FROM conflict_forecasts GROUP BY source ORDER BY source
+              """, ["source", "rows", "countries", "min_date", "max_date"]),
+              ("reliefweb_reports", """
+                  SELECT COUNT(*) AS n, COUNT(DISTINCT iso3) AS countries
+                  FROM reliefweb_reports
+              """, ["rows", "countries"]),
+              ("acled_political_events", """
+                  SELECT COUNT(*) AS n, COUNT(DISTINCT iso3) AS countries,
+                         MIN(event_date) AS min_date, MAX(event_date) AS max_date
+                  FROM acled_political_events
+              """, ["rows", "countries", "min_date", "max_date"]),
+              ("ipc_phases", """
+                  SELECT COUNT(*) AS n, COUNT(DISTINCT iso3) AS countries,
+                         MIN(analysis_date) AS min_date, MAX(analysis_date) AS max_date
+                  FROM ipc_phases
+              """, ["rows", "countries", "min_date", "max_date"]),
+              ("acaps_inform_severity", """
+                  SELECT COUNT(*) AS n, COUNT(DISTINCT iso3) AS countries,
+                         MIN(snapshot_date) AS min_date, MAX(snapshot_date) AS max_date
+                  FROM acaps_inform_severity
+              """, ["rows", "countries", "min_date", "max_date"]),
+              ("acaps_inform_severity_trend", """
+                  SELECT COUNT(*) AS n, COUNT(DISTINCT iso3) AS countries,
+                         MIN(snapshot_date) AS min_date, MAX(snapshot_date) AS max_date
+                  FROM acaps_inform_severity_trend
+              """, ["rows", "countries", "min_date", "max_date"]),
+              ("acaps_risk_radar", """
+                  SELECT COUNT(*) AS n, COUNT(DISTINCT iso3) AS countries,
+                         COUNT(DISTINCT risk_type) AS risk_types
+                  FROM acaps_risk_radar
+              """, ["rows", "countries", "risk_types"]),
+              ("acaps_daily_monitoring", """
+                  SELECT COUNT(*) AS n, COUNT(DISTINCT iso3) AS countries,
+                         MIN(entry_date) AS min_date, MAX(entry_date) AS max_date
+                  FROM acaps_daily_monitoring
+              """, ["rows", "countries", "min_date", "max_date"]),
+              ("acaps_humanitarian_access", """
+                  SELECT COUNT(*) AS n, COUNT(DISTINCT iso3) AS countries,
+                         MIN(snapshot_date) AS min_date, MAX(snapshot_date) AS max_date
+                  FROM acaps_humanitarian_access
+              """, ["rows", "countries", "min_date", "max_date"]),
+          ]
+
+          for tbl_name, query, col_names in connector_tables:
+              L(f"### {tbl_name}")
+              if table_exists(con, tbl_name):
+                  n = row_count(con, tbl_name)
+                  L(f"Total rows: **{fmt_num(n)}**")
+                  if n and n > 0:
+                      rows = safe_query(con, query)
+                      if rows:
+                          L()
+                          L("| " + " | ".join(col_names) + " |")
+                          L("|" + "---|" * len(col_names))
+                          for row in rows:
+                              L("| " + " | ".join(str(x) for x in row) + " |")
+                  L()
+              else:
+                  L("_Table does not exist._")
+              L()
+
+          # =====================================================================
+          # 8. GAME-THEORETIC & PREDICTION MARKET TABLES
+          # =====================================================================
+          L("## 8. Game-Theoretic & Prediction Market Tables")
+          L()
+
+          for tbl_name in ["gtmc1_runs", "gtmc1_actors", "pm_checks"]:
+              L(f"### {tbl_name}")
+              if table_exists(con, tbl_name):
+                  n = row_count(con, tbl_name)
+                  L(f"Total rows: **{fmt_num(n)}**")
+                  if n and n > 0:
+                      schema = schema_info(con, tbl_name)
+                      L()
+                      L("Schema:")
+                      L("```")
                       for row in schema:
-                          lines.append(str(row))
-                      lines.append("```")
-                      lines.append("")
-                      sample = con.execute(f"SELECT * FROM {table_name} LIMIT {limit}").fetchall()
-                      lines.append(f"Sample rows (up to {limit}):")
-                      lines.append("```")
-                      for row in sample:
-                          lines.append(str(row))
-                      lines.append("```")
-                  except Exception as e:
-                      lines.append(f"_Error reading {table_name}: {type(e).__name__}: {e}_")
-                  lines.append("")
+                          L(f"  {row[1]:30s} {row[2]}")
+                      L("```")
+                      L()
+                      sample = safe_query(con, f"SELECT * FROM {tbl_name} LIMIT 3")
+                      if sample:
+                          col_names = [d[0] for d in con.description]
+                          L("Sample rows:")
+                          L("```")
+                          for row in sample:
+                              L(str(dict(zip(col_names, row))))
+                          L("```")
+                  L()
+              else:
+                  L("_Table does not exist._")
+              L()
 
-              # Key Resolver / Pythia tables of interest
-              for tbl in [
-                  "bucket_centroids",
-                  "facts_resolved",
-                  "emdat_pa",
-                  "acled_monthly_fatalities",
-                  "calibration_weights",
-                  "calibration_advice",
-                  "resolutions",
-                  "scores",
-                  "hs_runs",
-                  "hs_scenarios",
-                  "questions",
-                  "forecasts_ensemble",
-                  "forecasts_raw",
-                  "llm_calls",
-                  "question_context",
-              ]:
-                  dump_table_schema_and_sample(tbl, limit=10)
+          # =====================================================================
+          # 9. PROVENANCE & METADATA
+          # =====================================================================
+          L("## 9. Provenance & Metadata")
+          L()
 
-              con.close()
+          for tbl_name in ["run_provenance", "meta_runs", "manifests", "snapshots"]:
+              L(f"### {tbl_name}")
+              if table_exists(con, tbl_name):
+                  n = row_count(con, tbl_name)
+                  L(f"Total rows: **{fmt_num(n)}**")
+                  if n and n > 0:
+                      sample = safe_query(con, f"SELECT * FROM {tbl_name} ORDER BY ROWID DESC LIMIT 5")
+                      if sample:
+                          col_names = [d[0] for d in con.description]
+                          L()
+                          L("Recent entries:")
+                          L("```")
+                          for row in sample:
+                              L(str(dict(zip(col_names, row))))
+                          L("```")
+                  L()
+              else:
+                  L("_Table does not exist._")
+              L()
+
+          # =====================================================================
+          # 10. SCHEMA DETAIL FOR ALL TABLES
+          # =====================================================================
+          L("## 10. Full Schema Reference")
+          L()
+          L("<details>")
+          L("<summary>Click to expand full column definitions for all tables</summary>")
+          L()
+
+          for (tbl,) in all_tables:
+              L(f"### {tbl}")
+              schema = schema_info(con, tbl)
+              if schema:
+                  L()
+                  L("| # | column | type | notnull | default | pk |")
+                  L("|--:|--------|------|:-------:|---------|:--:|")
+                  for row in schema:
+                      cid, name, ctype, notnull, default, pk = row
+                      L(f"| {cid} | `{name}` | {ctype} | {'Y' if notnull else ''} | {default or ''} | {'Y' if pk else ''} |")
+                  L()
+              else:
+                  L("_(no schema info)_")
+                  L()
+
+          L("</details>")
+          L()
+
+          # =====================================================================
+          # 11. DATABASE-WIDE STATISTICS
+          # =====================================================================
+          L("## 11. Database-Wide Statistics")
+          L()
+
+          total_rows = 0
+          for (tbl,) in all_tables:
+              n = row_count(con, tbl)
+              if n:
+                  total_rows += n
+
+          L(f"- **Total tables:** {len(all_tables)}")
+          L(f"- **Total rows across all tables:** {fmt_num(total_rows)}")
+          L(f"- **Database file size:** {db_size_mb:.1f} MB")
+          L()
+
+          # Country coverage
+          try:
+              rows = con.execute("""
+                  SELECT COUNT(DISTINCT iso3) FROM (
+                      SELECT DISTINCT iso3 FROM facts_deltas
+                      UNION
+                      SELECT DISTINCT iso3 FROM hs_triage
+                      UNION
+                      SELECT DISTINCT iso3 FROM questions
+                  )
+              """).fetchone()
+              if rows:
+                  L(f"- **Unique countries (across facts_deltas + hs_triage + questions):** {rows[0]}")
+          except Exception:
+              pass
+
+          # Hazard coverage
+          try:
+              rows = con.execute("""
+                  SELECT DISTINCT hazard_code
+                  FROM hs_triage
+                  ORDER BY hazard_code
+              """).fetchall()
+              if rows:
+                  hazards = [r[0] for r in rows]
+                  L(f"- **Hazard codes in hs_triage:** {', '.join(hazards)}")
+          except Exception:
+              pass
+
+          L()
+
+          con.close()
 
           out_path.write_text("\n".join(lines), encoding='utf-8')
-          print(f"Wrote {out_path}")
-          EOF
+          print(f"Wrote {out_path} ({len(lines)} lines)")
+          PYEOF
 
       - name: Upload resolver inspection artifact
         uses: actions/upload-artifact@v4

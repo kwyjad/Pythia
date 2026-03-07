@@ -561,6 +561,7 @@ def get_hs_triage_all(
     rc_dir_col = _pick_column(columns, ["regime_change_direction"])
     rc_mag_col = _pick_column(columns, ["regime_change_magnitude"])
     rc_score_col = _pick_column(columns, ["regime_change_score"])
+    track_col = _pick_column(columns, ["track"])
 
     if not run_col:
         diagnostics["notes"] = ["run_id_missing"]
@@ -593,6 +594,7 @@ def get_hs_triage_all(
         if rc_score_col
         else "NULL AS regime_change_score"
     )
+    track_expr = f"{track_col} AS track" if track_col else "NULL AS track"
 
     if not (rc_prob_col and rc_dir_col and rc_mag_col and rc_score_col):
         diagnostics["notes"].append("hs_triage_rc_columns_missing")
@@ -608,6 +610,7 @@ def get_hs_triage_all(
           {rc_dir_expr},
           {rc_mag_expr},
           {rc_score_expr},
+          {track_expr},
           {created_expr}
         FROM hs_triage
         WHERE {run_col} = ?
@@ -1042,6 +1045,7 @@ def get_hs_triage_all(
                 "call_1_status": call_1_status,
                 "call_2_status": call_2_status,
                 "why_null": why_null,
+                "track": row.get("track"),
             }
         )
 
