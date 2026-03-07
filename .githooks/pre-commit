@@ -14,11 +14,58 @@ fi
 # Now we're in bash
 set -euo pipefail
 
+STAGED=$(git diff --cached --name-only)
+
 # Block committing these files unless OVERRIDE=1 is set
-if git diff --cached --name-only | grep -E -q '^(forecasts\.csv|[Dd]ashboard/data/forecasts\.parquet)$'; then
+if echo "$STAGED" | grep -E -q '^(forecasts\.csv|[Dd]ashboard/data/forecasts\.parquet)$'; then
   echo "❌ Blocked: committing forecasts.csv or Dashboard/data/forecasts.parquet"
   echo "   (override with: OVERRIDE=1 git commit ...)"
   if [ "${OVERRIDE:-}" != "1" ]; then
+    exit 1
+  fi
+fi
+
+# --- Prompt snapshot check ---
+PROMPT_FILES=(
+  "forecaster/prompts.py"
+  "horizon_scanner/prompts.py"
+  "horizon_scanner/rc_prompts.py"
+  "horizon_scanner/rc_grounding_prompts.py"
+  "horizon_scanner/hs_triage_grounding_prompts.py"
+  "pythia/web_research/backends/gemini_grounding.py"
+)
+
+PROMPT_CHANGED=false
+for f in "${PROMPT_FILES[@]}"; do
+  if echo "$STAGED" | grep -q "^${f}$"; then
+    PROMPT_CHANGED=true
+    break
+  fi
+done
+
+if $PROMPT_CHANGED; then
+  if ! echo "$STAGED" | grep -q "^docs/prompts/"; then
+    echo ""
+    echo "ERROR: Prompt source files modified without a snapshot."
+    echo ""
+    echo "  Run:  bash scripts/snapshot_prompts.sh"
+    echo ""
+    echo "  Then stage the snapshot files and retry."
+    echo ""
+    exit 1
+  fi
+fi
+
+# --- Overview snapshot check ---
+if echo "$STAGED" | grep -q "^docs/fred_overview\.md$"; then
+  if ! echo "$STAGED" | grep -q "^docs/overview/"; then
+    echo ""
+    echo "ERROR: docs/fred_overview.md modified without a snapshot."
+    echo ""
+    echo "  Run:  bash scripts/snapshot_overview.sh"
+    echo ""
+    echo "  Then stage the snapshot files and retry."
+    echo ""
     exit 1
   fi
 fi

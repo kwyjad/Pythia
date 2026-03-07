@@ -286,6 +286,10 @@ Key prompt files:
 - `horizon_scanner/hs_triage_grounding_prompts.py` — Triage-specific grounding queries (per-hazard)
 - `pythia/web_research/backends/gemini_grounding.py` — Gemini grounding backend
 
+## Overview editing
+
+Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overview.sh` first. This archives the current overview before changes so the About page can show historical versions. Commit the snapshot alongside the overview edits.
+
 ## Code conventions
 
 - Copyright header on every file: `# Pythia / Copyright (c) 2025 Kevin Wyjad`
