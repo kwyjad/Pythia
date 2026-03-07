@@ -73,6 +73,15 @@ Expected distribution (across ~120 countries):
 - ~10%: likelihood 0.10–0.30 (watch — some signals but not compelling)
 - ~7%: likelihood 0.30–0.55 (emerging — specific evidence of potential change)
 - ~3%: likelihood >= 0.55 (strong — clear, concrete evidence of imminent break)
+
+IMPORTANT: This distribution is a calibration reference for full ~120-country runs. \
+When assessing a smaller set of countries, the distribution may not apply — if the \
+evidence shows multiple countries with elevated regime change, that is correct. Do not \
+force results toward the base-rate distribution. Always follow the evidence for each \
+country-hazard pair individually. If the evidence pack shows clear signals of a pattern \
+break (e.g., foreign military intervention, new armed conflict, ceasefire collapse, \
+major escalation), assign the likelihood that the evidence supports regardless of how \
+many other countries in this run are also elevated.
 """
 
 _RC_OUTPUT_INSTRUCTIONS = """

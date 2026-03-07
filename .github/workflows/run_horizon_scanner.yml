@@ -62,8 +62,8 @@ jobs:
       PYTHIA_RETRIEVER_ENABLED: "1"
       PYTHIA_RETRIEVER_MODEL_ID: "gemini-3-flash-preview"
       PYTHIA_MODEL_SELF_SEARCH_ENABLED: "0"
-      # Flip HS/Research to 1 when Gemini 3 grounding is available.
-      PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED: "0"
+      PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED: "1"
+      PYTHIA_PREDICTION_MARKETS_ENABLED: "0"
       PYTHIA_SPD_WEB_SEARCH_ENABLED: "1"
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
@@ -658,7 +658,7 @@ jobs:
         run: |
           set -e
           mkdir -p diagnostics
-          python scripts/print_forecaster_ensemble.py | tee diagnostics/forecaster_ensemble.txt
+          python -m scripts.print_forecaster_ensemble | tee diagnostics/forecaster_ensemble.txt
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/forecaster_ensemble.txt ]; then
             cat diagnostics/forecaster_ensemble.txt >> "$GITHUB_STEP_SUMMARY"
           fi

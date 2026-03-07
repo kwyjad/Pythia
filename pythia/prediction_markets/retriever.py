@@ -190,6 +190,7 @@ async def get_prediction_market_signals(
 
     # Check master switch
     if not pm_config.is_enabled():
+        logger.info("Prediction market retrieval disabled (PYTHIA_PREDICTION_MARKETS_ENABLED=0). Skipping.")
         return MarketBundle()
 
     async def _inner() -> MarketBundle:

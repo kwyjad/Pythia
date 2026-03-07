@@ -103,12 +103,21 @@ def main() -> int:
         if not counts:
             raise SystemExit(f"No forecasts_ensemble rows found for run_id {run_id}.")
 
+        present = {model_name for model_name, _ in counts}
+        track1_models = {m for m in present if m != "track2_flash"}
+        track2_count = sum(c for m, c in counts if m == "track2_flash")
+        track1_count = sum(c for m, c in counts if m != "track2_flash")
+
+        print(f"Track breakdown: track1_models={len(track1_models)} ({track1_count} rows), track2_flash={track2_count} rows")
         print("model_name counts for latest run:")
         for model_name, count in counts:
             print(f"- {model_name}: {count}")
 
+        if not track1_models:
+            print("All questions are track2 — ensemble aggregation not expected. OK.")
+            return 0
+
         expected = ("ensemble_bayesmc_v2", "ensemble_mean_v2")
-        present = {model_name for model_name, _ in counts}
         missing_models = [name for name in expected if name not in present]
         if missing_models:
             missing_list = ", ".join(sorted(missing_models))
