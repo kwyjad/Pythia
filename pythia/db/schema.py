@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -19,6 +21,83 @@ from pythia.config import load as load_config
 PYTHIA_DEFAULT_DB_URL = "duckdb:///data/resolver.duckdb"
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Connection pool — reuse DuckDB connections instead of open/close per call.
+# ---------------------------------------------------------------------------
+_POOL_LOCK = threading.Lock()
+_CONN_POOL: dict[str, list[duckdb.DuckDBPyConnection]] = {}  # db_path → [conn, ...]
+_MAX_POOL_SIZE = 4
+
+
+class _PooledConnection:
+    """Thin proxy that returns the connection to the pool on close()."""
+
+    __slots__ = ("_raw", "_pool_key", "_returned")
+
+    def __init__(self, raw: duckdb.DuckDBPyConnection, pool_key: str) -> None:
+        self._raw = raw
+        self._pool_key = pool_key
+        self._returned = False
+
+    def __getattr__(self, name: str):
+        return getattr(self._raw, name)
+
+    def close(self) -> None:
+        if self._returned:
+            return
+        self._returned = True
+        _return_to_pool(self._pool_key, self._raw)
+
+    def __del__(self) -> None:
+        self.close()
+
+
+def _return_to_pool(pool_key: str, conn: duckdb.DuckDBPyConnection) -> None:
+    with _POOL_LOCK:
+        pool = _CONN_POOL.setdefault(pool_key, [])
+        if len(pool) < _MAX_POOL_SIZE:
+            try:
+                conn.execute("SELECT 1")
+                pool.append(conn)
+                return
+            except Exception:
+                pass
+        # Pool full or unhealthy — actually close.
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _checkout_from_pool(pool_key: str) -> duckdb.DuckDBPyConnection | None:
+    with _POOL_LOCK:
+        pool = _CONN_POOL.get(pool_key, [])
+        while pool:
+            conn = pool.pop()
+            try:
+                conn.execute("SELECT 1")
+                return conn
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    return None
+
+
+def _close_all_pooled() -> None:
+    with _POOL_LOCK:
+        for pool in _CONN_POOL.values():
+            for conn in pool:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        _CONN_POOL.clear()
+
+
+atexit.register(_close_all_pooled)
 
 
 def get_db_url() -> str:
@@ -62,6 +141,10 @@ def connect(read_only: bool = False) -> duckdb.DuckDBPyConnection:
     DuckDB's "different configuration" error when mixing read-only and
     read-write connections in the same process. For in-memory DBs we honour
     the caller's requested read_only flag.
+
+    File-backed connections are drawn from a pool when available.  The
+    returned object is a thin wrapper whose ``close()`` returns the
+    underlying connection to the pool instead of destroying it.
     """
 
     url = get_db_url()
@@ -84,16 +167,24 @@ def connect(read_only: bool = False) -> duckdb.DuckDBPyConnection:
             read_only,
             effective_read_only,
         )
-    else:
-        effective_read_only = False
-        logger.debug(
-            "Connecting to DuckDB at %s (requested read_only=%s, forcing_read_only=%s for file-backed DB)",
-            db_path,
-            read_only,
-            effective_read_only,
-        )
+        return duckdb.connect(db_path, read_only=effective_read_only)
 
-    return duckdb.connect(db_path, read_only=effective_read_only)
+    effective_read_only = False
+
+    # Try to reuse a pooled connection for file-backed databases.
+    pooled = _checkout_from_pool(db_path)
+    if pooled is not None:
+        logger.debug("Reusing pooled DuckDB connection for %s", db_path)
+        return _PooledConnection(pooled, db_path)
+
+    logger.debug(
+        "Opening new DuckDB connection for %s (requested read_only=%s, forcing_read_only=%s for file-backed DB)",
+        db_path,
+        read_only,
+        effective_read_only,
+    )
+    raw = duckdb.connect(db_path, read_only=effective_read_only)
+    return _PooledConnection(raw, db_path)
 
 
 def _existing_columns(con: duckdb.DuckDBPyConnection, table: str) -> set[str]:

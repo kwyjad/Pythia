@@ -246,7 +246,7 @@ def store_reliefweb_reports(
         return
 
     try:
-        from resolver.db.duckdb_io import get_db, close_db
+        from resolver.db.duckdb_io import get_db
     except Exception:
         log.debug("DuckDB helpers unavailable — skipping ReliefWeb store.")
         return
@@ -288,7 +288,7 @@ def store_reliefweb_reports(
     except Exception as exc:
         log.warning("Failed to store ReliefWeb reports for %s: %s", iso3, exc)
     finally:
-        close_db(con)
+        pass  # Let the resolver connection cache manage lifecycle.
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +318,7 @@ def load_reliefweb_reports(
         or *None* if no data is available.
     """
     try:
-        from resolver.db.duckdb_io import get_db, close_db
+        from resolver.db.duckdb_io import get_db
     except Exception:
         log.debug("DuckDB helpers unavailable — skipping ReliefWeb load.")
         return None
@@ -367,7 +367,7 @@ def load_reliefweb_reports(
         log.warning("Failed to load ReliefWeb reports for %s: %s", iso3, exc)
         return None
     finally:
-        close_db(con)
+        pass  # Let the resolver connection cache manage lifecycle.
 
 
 # ---------------------------------------------------------------------------

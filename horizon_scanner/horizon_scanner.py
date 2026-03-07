@@ -1453,191 +1453,216 @@ def main(countries: list[str] | None = None):
     run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
     os.environ["PYTHIA_HS_RUN_ID"] = run_id
     reset_provider_failures_for_run(run_id)
-    fallback_specs = _resolve_hs_fallback_specs()
-    if not fallback_specs:
-        raise SystemExit(
-            "HS fallback model required but not active; check OPENAI_API_KEY / config"
-        )
-    global _HS_FALLBACK_SPECS
-    _HS_FALLBACK_SPECS = fallback_specs
 
-    # Pre-fetch/refresh HDX Signals cache (once per run, shared across countries).
+    _hs_id_emitted = False
     try:
-        from horizon_scanner.hdx_signals import ensure_cache_fresh
-        ensure_cache_fresh()
-    except Exception as exc:
-        logger.warning("HDX Signals cache init failed: %s", exc)
-
-    country_entries, skipped_entries, requested_countries = _load_country_list(countries)
-    if not country_entries:
-        logger.warning("No countries supplied to Horizon Scanner; exiting.")
-        if skipped_entries:
-            logger.warning(
-                "HS country resolver skipped %d unknown/invalid entries; see warnings above for details",
-                len(skipped_entries),
+        fallback_specs = _resolve_hs_fallback_specs()
+        if not fallback_specs:
+            raise SystemExit(
+                "HS fallback model required but not active; check OPENAI_API_KEY / config"
             )
-        print(f"HS_RUN_ID={run_id}")
-        print("HS_RESOLVED_ISO3S=")
-        return
+        global _HS_FALLBACK_SPECS
+        _HS_FALLBACK_SPECS = fallback_specs
 
-    logger.info("Processing %d countries with max %d workers", len(country_entries), HS_MAX_WORKERS)
-
-    triage_results: list[_TriageCallResult] = []
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=HS_MAX_WORKERS) as pool:
-        futures = {
-            pool.submit(_run_hs_for_country, run_id, iso3, name): (iso3, name)
-            for name, iso3 in country_entries
-        }
-
-        for fut in concurrent.futures.as_completed(futures):
-            try:
-                result = fut.result()
-                if result:
-                    triage_results.append(result)
-            except Exception:
-                iso3, _name = futures.get(fut, ("", ""))
-                logger.exception("HS triage failed for one country")
-                if iso3:
-                    triage_results.append(
-                        {
-                            "iso3": iso3.upper(),
-                            "error_text": "triage execution failed",
-                            "response_text": "",
-                            "pass_results": [],
-                            "final_status": "failed",
-                            "pass1_status": "provider_error",
-                            "pass2_status": "provider_error",
-                            "pass1_valid": False,
-                            "pass2_valid": False,
-                            "primary_model_id": _resolve_hs_model(),
-                            "fallback_model_id": fallback_specs[0].model_id if fallback_specs else None,
-                            "triage_status": "failed",
-                            "rc_status": "failed",
-                            "triage_result": {},
-                            "rc_result": {},
-                        }
-                    )
-
-    iso3_list = [iso3 for (_name, iso3) in country_entries]
-    try:
-        git_sha = os.getenv("GITHUB_SHA") or ""
-        config_profile = os.getenv("PYTHIA_CONFIG_PROFILE", "default")
-        log_hs_run_to_db(
-            run_id,
-            iso3_list,
-            git_sha=git_sha,
-            config_profile=config_profile,
-            requested_countries=requested_countries,
-            skipped_entries=skipped_entries,
-        )
-    except Exception as exc:  # pragma: no cover - best-effort logging
-        logger.warning("Failed to log hs_run %s: %s", run_id, exc)
-
-    logger.info(
-        "Horizon Scanner triage run complete for %d countries (skipped %d unknown/invalid entries)",
-        len(country_entries),
-        len(skipped_entries),
-    )
-
-    # --- Run-level RC distribution sanity check ---
-    try:
-        _con = pythia_connect(read_only=True)
+        # Pre-fetch/refresh HDX Signals cache (once per run, shared across countries).
         try:
-            rc_rows = _con.execute(
-                "SELECT regime_change_level FROM hs_triage WHERE run_id = ?",
-                [run_id],
-            ).fetchall()
-            rc_levels = [int(row[0]) for row in rc_rows if row[0] is not None]
-        finally:
-            _con.close()
+            from horizon_scanner.hdx_signals import ensure_cache_fresh
+            ensure_cache_fresh()
+        except Exception as exc:
+            logger.warning("HDX Signals cache init failed: %s", exc)
 
-        if rc_levels:
-            dist_result = check_rc_distribution(rc_levels, run_id=run_id)
-            if dist_result.get("warnings"):
-                for w in dist_result["warnings"]:
-                    logger.warning("HS %s", w)
-    except Exception:  # pragma: no cover - best-effort diagnostics
-        logger.debug("RC distribution check skipped (could not read hs_triage)", exc_info=True)
+        country_entries, skipped_entries, requested_countries = _load_country_list(countries)
+        if not country_entries:
+            logger.warning("No countries supplied to Horizon Scanner; exiting.")
+            if skipped_entries:
+                logger.warning(
+                    "HS country resolver skipped %d unknown/invalid entries; see warnings above for details",
+                    len(skipped_entries),
+                )
+            print(f"HS_RUN_ID={run_id}", flush=True)
+            print("HS_RESOLVED_ISO3S=", flush=True)
+            _hs_id_emitted = True
+            return
 
-    diagnostics_dir = Path("diagnostics")
-    diagnostics_dir.mkdir(parents=True, exist_ok=True)
-    coverage_rows: list[dict[str, Any]] = []
-    failures_payload: list[dict[str, Any]] = []
-    for result in sorted(triage_results, key=lambda r: r.get("iso3", "")):
-        coverage_rows.append(
-            {
-                "iso3": result.get("iso3"),
-                "pass1_status": result.get("pass1_status"),
-                "pass2_status": result.get("pass2_status"),
-                "primary_model_id": result.get("primary_model_id"),
-                "fallback_model_id": result.get("fallback_model_id"),
-                "final_status": result.get("final_status"),
+        logger.info("Processing %d countries with max %d workers", len(country_entries), HS_MAX_WORKERS)
+
+        triage_results: list[_TriageCallResult] = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=HS_MAX_WORKERS) as pool:
+            futures = {
+                pool.submit(_run_hs_for_country, run_id, iso3, name): (iso3, name)
+                for name, iso3 in country_entries
             }
+
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    result = fut.result()
+                    if result:
+                        triage_results.append(result)
+                except Exception:
+                    iso3, _name = futures.get(fut, ("", ""))
+                    logger.exception("HS triage failed for one country")
+                    if iso3:
+                        triage_results.append(
+                            {
+                                "iso3": iso3.upper(),
+                                "error_text": "triage execution failed",
+                                "response_text": "",
+                                "pass_results": [],
+                                "final_status": "failed",
+                                "pass1_status": "provider_error",
+                                "pass2_status": "provider_error",
+                                "pass1_valid": False,
+                                "pass2_valid": False,
+                                "primary_model_id": _resolve_hs_model(),
+                                "fallback_model_id": fallback_specs[0].model_id if fallback_specs else None,
+                                "triage_status": "failed",
+                                "rc_status": "failed",
+                                "triage_result": {},
+                                "rc_result": {},
+                            }
+                        )
+
+        iso3_list = [iso3 for (_name, iso3) in country_entries]
+        try:
+            git_sha = os.getenv("GITHUB_SHA") or ""
+            config_profile = os.getenv("PYTHIA_CONFIG_PROFILE", "default")
+            log_hs_run_to_db(
+                run_id,
+                iso3_list,
+                git_sha=git_sha,
+                config_profile=config_profile,
+                requested_countries=requested_countries,
+                skipped_entries=skipped_entries,
+            )
+        except Exception as exc:  # pragma: no cover - best-effort logging
+            logger.warning("Failed to log hs_run %s: %s", run_id, exc)
+
+        logger.info(
+            "Horizon Scanner triage run complete for %d countries (skipped %d unknown/invalid entries)",
+            len(country_entries),
+            len(skipped_entries),
         )
-        if result.get("final_status") != "ok":
-            failures_payload.append(
+
+        # --- Run-level RC distribution sanity check ---
+        try:
+            _con = pythia_connect(read_only=True)
+            try:
+                rc_rows = _con.execute(
+                    "SELECT regime_change_level FROM hs_triage WHERE run_id = ?",
+                    [run_id],
+                ).fetchall()
+                rc_levels = [int(row[0]) for row in rc_rows if row[0] is not None]
+            finally:
+                _con.close()
+
+            if rc_levels:
+                dist_result = check_rc_distribution(rc_levels, run_id=run_id)
+                if dist_result.get("warnings"):
+                    for w in dist_result["warnings"]:
+                        logger.warning("HS %s", w)
+        except Exception:  # pragma: no cover - best-effort diagnostics
+            logger.debug("RC distribution check skipped (could not read hs_triage)", exc_info=True)
+
+        diagnostics_dir = Path("diagnostics")
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        coverage_rows: list[dict[str, Any]] = []
+        failures_payload: list[dict[str, Any]] = []
+        for result in sorted(triage_results, key=lambda r: r.get("iso3", "")):
+            coverage_rows.append(
                 {
                     "iso3": result.get("iso3"),
-                    "final_status": result.get("final_status"),
                     "pass1_status": result.get("pass1_status"),
                     "pass2_status": result.get("pass2_status"),
-                    "pass1_valid": result.get("pass1_valid"),
-                    "pass2_valid": result.get("pass2_valid"),
                     "primary_model_id": result.get("primary_model_id"),
                     "fallback_model_id": result.get("fallback_model_id"),
-                    "pass_results": result.get("pass_results", []),
+                    "final_status": result.get("final_status"),
                 }
             )
+            if result.get("final_status") != "ok":
+                failures_payload.append(
+                    {
+                        "iso3": result.get("iso3"),
+                        "final_status": result.get("final_status"),
+                        "pass1_status": result.get("pass1_status"),
+                        "pass2_status": result.get("pass2_status"),
+                        "pass1_valid": result.get("pass1_valid"),
+                        "pass2_valid": result.get("pass2_valid"),
+                        "primary_model_id": result.get("primary_model_id"),
+                        "fallback_model_id": result.get("fallback_model_id"),
+                        "pass_results": result.get("pass_results", []),
+                    }
+                )
 
-    coverage_path = diagnostics_dir / f"hs_triage_coverage__{run_id}.csv"
-    try:
-        with open(coverage_path, "w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "iso3",
-                    "pass1_status",
-                    "pass2_status",
-                    "primary_model_id",
-                    "fallback_model_id",
-                    "final_status",
-                ],
+        coverage_path = diagnostics_dir / f"hs_triage_coverage__{run_id}.csv"
+        try:
+            with open(coverage_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=[
+                        "iso3",
+                        "pass1_status",
+                        "pass2_status",
+                        "primary_model_id",
+                        "fallback_model_id",
+                        "final_status",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerows(coverage_rows)
+            logger.info("Wrote HS triage coverage report to %s", coverage_path)
+        except Exception:  # pragma: no cover - best-effort
+            logger.exception("Failed to write HS triage coverage report")
+
+        failures_path = diagnostics_dir / f"hs_triage_failures__{run_id}.json"
+        try:
+            failures_path.write_text(
+                json.dumps(failures_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
             )
-            writer.writeheader()
-            writer.writerows(coverage_rows)
-        logger.info("Wrote HS triage coverage report to %s", coverage_path)
-    except Exception:  # pragma: no cover - best-effort
-        logger.exception("Failed to write HS triage coverage report")
+            logger.info("Wrote HS triage failure diagnostics to %s", failures_path)
+        except Exception:  # pragma: no cover - best-effort
+            logger.exception("Failed to write HS triage failure diagnostics")
 
-    failures_path = diagnostics_dir / f"hs_triage_failures__{run_id}.json"
-    try:
-        failures_path.write_text(
-            json.dumps(failures_payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        resolved_iso3s = sorted({iso3 for iso3 in iso3_list})
+        print(f"HS_RUN_ID={run_id}", flush=True)
+        print(f"HS_RESOLVED_ISO3S={','.join(resolved_iso3s)}", flush=True)
+        ok_iso3s = sorted(
+            [result.get("iso3") for result in triage_results if result.get("final_status") == "ok"]
         )
-        logger.info("Wrote HS triage failure diagnostics to %s", failures_path)
-    except Exception:  # pragma: no cover - best-effort
-        logger.exception("Failed to write HS triage failure diagnostics")
-
-    resolved_iso3s = sorted({iso3 for iso3 in iso3_list})
-    print(f"HS_RUN_ID={run_id}")
-    print(f"HS_RESOLVED_ISO3S={','.join(resolved_iso3s)}")
-    ok_iso3s = sorted(
-        [result.get("iso3") for result in triage_results if result.get("final_status") == "ok"]
-    )
-    degraded_iso3s = sorted(
-        [result.get("iso3") for result in triage_results if result.get("final_status") == "degraded"]
-    )
-    failed_iso3s = sorted(
-        [result.get("iso3") for result in triage_results if result.get("final_status") == "failed"]
-    )
-    rerun_iso3s = sorted({*degraded_iso3s, *failed_iso3s})
-    print(f"HS_TRIAGE_OK_ISO3S={','.join([iso3 for iso3 in ok_iso3s if iso3])}")
-    print(f"HS_TRIAGE_DEGRADED_ISO3S={','.join([iso3 for iso3 in degraded_iso3s if iso3])}")
-    print(f"HS_TRIAGE_FAILED_ISO3S={','.join([iso3 for iso3 in failed_iso3s if iso3])}")
-    print(f"HS_TRIAGE_RERUN_ISO3S={','.join([iso3 for iso3 in rerun_iso3s if iso3])}")
-    print(f"HS_TRIAGE_COVERAGE_CSV={coverage_path}")
+        degraded_iso3s = sorted(
+            [result.get("iso3") for result in triage_results if result.get("final_status") == "degraded"]
+        )
+        failed_iso3s = sorted(
+            [result.get("iso3") for result in triage_results if result.get("final_status") == "failed"]
+        )
+        rerun_iso3s = sorted({*degraded_iso3s, *failed_iso3s})
+        print(f"HS_TRIAGE_OK_ISO3S={','.join([iso3 for iso3 in ok_iso3s if iso3])}", flush=True)
+        print(f"HS_TRIAGE_DEGRADED_ISO3S={','.join([iso3 for iso3 in degraded_iso3s if iso3])}", flush=True)
+        print(f"HS_TRIAGE_FAILED_ISO3S={','.join([iso3 for iso3 in failed_iso3s if iso3])}", flush=True)
+        print(f"HS_TRIAGE_RERUN_ISO3S={','.join([iso3 for iso3 in rerun_iso3s if iso3])}", flush=True)
+        print(f"HS_TRIAGE_COVERAGE_CSV={coverage_path}", flush=True)
+        sys.stdout.flush()
+        _hs_id_emitted = True
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception("Horizon Scanner main() crashed")
+    finally:
+        if not _hs_id_emitted:
+            # Guarantee HS_RUN_ID is always emitted so the workflow can parse it,
+            # even when the process crashes mid-run.
+            try:
+                print(f"HS_RUN_ID={run_id}", flush=True)
+                print("HS_RESOLVED_ISO3S=", flush=True)
+                print("HS_TRIAGE_OK_ISO3S=", flush=True)
+                print("HS_TRIAGE_DEGRADED_ISO3S=", flush=True)
+                print("HS_TRIAGE_FAILED_ISO3S=", flush=True)
+                print("HS_TRIAGE_RERUN_ISO3S=", flush=True)
+                print("HS_TRIAGE_COVERAGE_CSV=", flush=True)
+                sys.stdout.flush()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
