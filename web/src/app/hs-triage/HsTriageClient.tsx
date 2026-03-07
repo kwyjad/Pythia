@@ -28,9 +28,7 @@ type HsTriageRow = {
   regime_change_direction?: string | null;
   regime_change_magnitude?: number | null;
   regime_change_score?: number | null;
-  call_1_status?: string | null;
-  call_2_status?: string | null;
-  why_null?: string | null;
+  track?: number | null;
 };
 
 type HsTriageResponse = {
@@ -354,25 +352,17 @@ export default function HsTriageClient({
         sortValue: (row) => row.regime_change_score,
       },
       {
-        key: "call_1_status",
-        label: "Call 1 Status",
-        headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs text-fred-muted truncate",
-        render: (row) => row.call_1_status ?? "",
-      },
-      {
-        key: "call_2_status",
-        label: "Call 2 Status",
-        headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs text-fred-muted truncate",
-        render: (row) => row.call_2_status ?? "",
-      },
-      {
-        key: "why_null",
-        label: "Why null",
-        headerClassName: "text-xs uppercase tracking-wide",
-        cellClassName: "text-xs text-fred-muted truncate",
-        render: (row) => row.why_null ?? "",
+        key: "track",
+        label: (
+          <span className="inline-flex items-center gap-1">
+            Track{" "}
+            <InfoTooltip text="Track 1: full ensemble forecast (RC L1+). Track 2: single-model forecast." />
+          </span>
+        ),
+        headerClassName: "text-xs uppercase tracking-wide text-right",
+        cellClassName: "text-xs tabular-nums text-right",
+        render: (row) => (row.track != null ? String(row.track) : "—"),
+        sortValue: (row) => row.track,
       },
     ],
     []

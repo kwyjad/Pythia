@@ -1059,6 +1059,7 @@ def build_model_scores_export(con) -> pd.DataFrame:
         "hazard",
         "metric",
         "track",
+        "avg_rc_score",
         "forecasts",
         "average_brier",
         "average_log_loss",
@@ -1120,6 +1121,36 @@ def build_model_scores_export(con) -> pd.DataFrame:
 
     if not has_track:
         df["track"] = None
+
+    # Compute avg_rc_score by joining questions → hs_triage for regime_change_score
+    df["avg_rc_score"] = None
+    if _table_exists(con, "hs_triage"):
+        t_cols = _table_columns(con, "hs_triage")
+        if {"run_id", "iso3", "hazard_code"}.issubset(t_cols) and "regime_change_score" in t_cols:
+            rc_df = con.execute(
+                """
+                SELECT
+                    q.hazard_code AS hazard,
+                    UPPER(q.metric) AS metric,
+                    COALESCE(s.model_name, 'ensemble') AS forecast_model,
+                    AVG(t.regime_change_score) AS avg_rc_score
+                FROM scores s
+                JOIN questions q ON s.question_id = q.question_id
+                LEFT JOIN hs_triage t
+                    ON q.hs_run_id = t.run_id
+                    AND UPPER(q.iso3) = UPPER(t.iso3)
+                    AND UPPER(q.hazard_code) = UPPER(t.hazard_code)
+                GROUP BY s.model_name, q.hazard_code, UPPER(q.metric)
+                """
+            ).fetchdf()
+            if not rc_df.empty:
+                rc_df["hazard"] = rc_df["hazard"].astype(str).str.upper()
+                df["hazard"] = df["hazard"].astype(str).str.upper()
+                df = df.drop(columns=["avg_rc_score"]).merge(
+                    rc_df[["forecast_model", "hazard", "metric", "avg_rc_score"]],
+                    on=["forecast_model", "hazard", "metric"],
+                    how="left",
+                )
 
     return df[columns].reset_index(drop=True)
 

@@ -788,6 +788,33 @@ jobs:
             cat "${SUMMARY_PATH}" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Snapshot LLM prompt artifact
+        if: always()
+        env:
+          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
+        run: |
+          set -e
+          mkdir -p diagnostics
+          echo "=== Generating LLM prompt snapshot artifact ==="
+          python -m scripts.ci.snapshot_prompt_artifact \
+            --db "${PYTHIA_DB_URL}" \
+            --out diagnostics/prompt_artifact.md || {
+            echo "WARNING: prompt artifact generation failed (non-fatal)"
+            exit 0
+          }
+          if [ -f diagnostics/prompt_artifact.md ]; then
+            SIZE=$(wc -c < diagnostics/prompt_artifact.md)
+            echo "Prompt artifact generated: ${SIZE} bytes"
+          fi
+
+      - name: Upload LLM prompt artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-llm-prompts
+          path: diagnostics/prompt_artifact.md
+          if-no-files-found: warn
+
       - name: Upload health report
         if: always()
         uses: actions/upload-artifact@v4

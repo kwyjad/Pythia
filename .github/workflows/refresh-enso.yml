@@ -1,0 +1,59 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+name: Refresh ENSO Forecast
+
+concurrency:
+  group: pythia-enso-refresh
+  cancel-in-progress: false
+
+"on":
+  workflow_dispatch: {}
+  schedule:
+    # IRI publishes updated ENSO forecasts on the 19th of each month.
+    # Run on the 20th to catch the update, well before the 1st-of-month
+    # pipeline run.
+    - cron: "0 0 20 * *"
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  refresh:
+    name: Fetch & cache ENSO forecast from IRI/CPC
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+
+      - name: Run ENSO scraper
+        run: |
+          python -m horizon_scanner.enso.enso_module \
+            --output horizon_scanner/enso/output/enso_forecast.json \
+            --prompt-context
+
+      - name: Upload cached forecast
+        uses: actions/upload-artifact@v4
+        with:
+          name: enso-forecast-${{ github.run_id }}
+          path: horizon_scanner/enso/output/enso_forecast.json
+          retention-days: 60

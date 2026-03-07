@@ -369,6 +369,26 @@ def _run_rc_for_single_hazard(
         except Exception as exc:
             logger.debug("Seasonal forecast load failed for %s: %s", iso3, exc)
 
+    # Inject pre-scraped seasonal TC forecasts for TC hazard.
+    if hazard_code == "TC":
+        try:
+            from horizon_scanner.seasonal_tc import get_seasonal_tc_context_for_country
+            stc = get_seasonal_tc_context_for_country(iso3)
+            if stc:
+                climate_kwargs["seasonal_tc_context"] = stc
+        except Exception as exc:
+            logger.debug("Seasonal TC context load failed for %s: %s", iso3, exc)
+
+    # Inject ENSO forecast context for climate-sensitive hazards.
+    if hazard_code in CLIMATE_HAZARDS:
+        try:
+            from horizon_scanner.enso import get_enso_prompt_context
+            enso_ctx = get_enso_prompt_context()
+            if enso_ctx:
+                climate_kwargs["enso_context"] = enso_ctx
+        except Exception as exc:
+            logger.debug("ENSO context load failed: %s", exc)
+
     # Inject conflict forecasts and ICG "On the Horizon" for ACE hazard.
     conflict_kwargs: dict[str, Any] = {}
     if hazard_code == "ACE":
@@ -396,6 +416,16 @@ def _run_rc_for_single_hazard(
         except Exception as exc:
             logger.debug("ICG On the Horizon load failed for %s: %s", iso3, exc)
 
+    # Inject HDX Signals for all hazards.
+    hdx_kwargs: dict[str, Any] = {}
+    try:
+        from horizon_scanner.hdx_signals import format_hdx_signals_for_prompt
+        hdx_text = format_hdx_signals_for_prompt(iso3, hazard_code)
+        if hdx_text:
+            hdx_kwargs["hdx_signals"] = hdx_text
+    except Exception as exc:
+        logger.debug("HDX Signals load failed for %s %s: %s", iso3, hazard_code, exc)
+
     prompt = build_rc_prompt(
         hazard_code,
         country_name=country_name,
@@ -404,6 +434,7 @@ def _run_rc_for_single_hazard(
         evidence_pack=evidence_pack,
         **climate_kwargs,
         **conflict_kwargs,
+        **hdx_kwargs,
     )
 
     pass_rcs: list[Dict[str, Any]] = []

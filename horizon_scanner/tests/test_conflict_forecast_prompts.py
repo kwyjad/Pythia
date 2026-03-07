@@ -24,7 +24,7 @@ from horizon_scanner.hs_triage_prompts import build_triage_prompt_ace
 # ---------------------------------------------------------------------------
 
 def _full_forecast_data() -> dict:
-    """Return a complete conflict_forecasts dict (VIEWS + cf.org)."""
+    """Return a complete conflict_forecasts dict (VIEWS + cf.org + CAST)."""
     return {
         "views_fatalities": [
             {"lead_months": 1, "value": 12.3},
@@ -43,6 +43,23 @@ def _full_forecast_data() -> dict:
         "cf_intensity_3m": 0.55,
         "cf_issue_date": "2025-06-15",
         "cf_stale": False,
+        "cast_total": [
+            {"lead_months": 1, "value": 45},
+            {"lead_months": 2, "value": 52},
+            {"lead_months": 3, "value": 48},
+        ],
+        "cast_battles": [
+            {"lead_months": 1, "value": 18},
+            {"lead_months": 2, "value": 22},
+        ],
+        "cast_erv": [
+            {"lead_months": 1, "value": 12},
+        ],
+        "cast_vac": [
+            {"lead_months": 1, "value": 15},
+        ],
+        "cast_issue_date": "2025-06-01",
+        "cast_stale": False,
     }
 
 
@@ -74,6 +91,23 @@ def _stale_forecast_data() -> dict:
         "cf_intensity_3m": None,
         "cf_issue_date": "2025-01-10",
         "cf_stale": True,
+    }
+
+
+def _cast_only_forecast_data() -> dict:
+    """Return a forecast dict with only ACLED CAST data."""
+    return {
+        "cast_total": [
+            {"lead_months": 1, "value": 30},
+            {"lead_months": 2, "value": 35},
+        ],
+        "cast_battles": [
+            {"lead_months": 1, "value": 10},
+        ],
+        "cast_erv": [],
+        "cast_vac": [],
+        "cast_issue_date": "2025-07-01",
+        "cast_stale": False,
     }
 
 
@@ -123,6 +157,29 @@ class TestFormatConflictForecastsForPrompt:
         assert "WARNING" in result
         assert ">45 DAYS OLD" in result
 
+    def test_full_data_contains_cast_section(self):
+        result = format_conflict_forecasts_for_prompt(_full_forecast_data())
+        assert "ACLED CAST" in result
+        assert "Conflict Alert System Tool" in result
+        assert "total conflict events" in result
+
+    def test_views_only_no_cast_section(self):
+        result = format_conflict_forecasts_for_prompt(_views_only_forecast_data())
+        # The CAST *section header* should be absent when no CAST data is
+        # provided.  The trailing interpretation guidance may still reference
+        # ACLED CAST by name.
+        assert "Conflict Alert System Tool" not in result
+        assert "total conflict events" not in result
+
+    def test_cast_only_has_section(self):
+        result = format_conflict_forecasts_for_prompt(_cast_only_forecast_data())
+        assert "ACLED CAST" in result
+        assert "Conflict Alert System Tool" in result
+        # No VIEWS *section header* or cf.org section header when only CAST
+        # data is present.  The trailing guidance may mention VIEWS by name.
+        assert "Early Warning System" not in result
+        assert "Mueller/Rauh" not in result
+
     def test_full_data_contains_interpretation_guidance(self):
         result = format_conflict_forecasts_for_prompt(_full_forecast_data())
         assert "independent sources" in result
@@ -151,6 +208,11 @@ class TestFormatConflictForecastsForResearch:
         assert "conflictforecast.org" in result
         assert "Armed conflict risk (3m)" in result
 
+    def test_full_data_includes_cast_table(self):
+        result = format_conflict_forecasts_for_research(_full_forecast_data())
+        assert "ACLED CAST" in result
+        assert "Total events" in result
+
     def test_none_returns_empty_string(self):
         result = format_conflict_forecasts_for_research(None)
         assert result == ""
@@ -176,6 +238,7 @@ class TestBuildRcPromptAceConflictForecasts:
         )
         assert "VIEWS" in prompt
         assert "conflictforecast.org" in prompt
+        assert "ACLED CAST" in prompt
         assert "Compare these forward-looking estimates" in prompt
 
     def test_includes_icg_section(self):
@@ -227,6 +290,7 @@ class TestBuildTriagePromptAceConflictForecasts:
         )
         assert "VIEWS" in prompt
         assert "conflictforecast.org" in prompt
+        assert "ACLED CAST" in prompt
 
     def test_none_conflict_forecasts_no_crash(self):
         prompt = build_triage_prompt_ace(

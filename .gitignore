@@ -166,5 +166,8 @@ ${RESOLVER_DATA_DIR}/
 !resolver/diagnostics/ingestion/summarize_connectors.py
 !resolver/diagnostics/
 
+# ENSO module cached output
+horizon_scanner/enso/output/
+
 # Local dev container / workspace artifacts
 workspaces/

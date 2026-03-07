@@ -3,7 +3,7 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""Fetch conflict forecasts from VIEWS and conflictforecast.org.
+"""Fetch conflict forecasts from VIEWS, conflictforecast.org, and ACLED CAST.
 
 Standalone script (separate from run_pipeline.py) because these
 forecasts write to the dedicated ``conflict_forecasts`` table, not
@@ -13,6 +13,7 @@ Usage:
     python -m resolver.tools.fetch_conflict_forecasts
     python -m resolver.tools.fetch_conflict_forecasts --sources views
     python -m resolver.tools.fetch_conflict_forecasts --sources conflictforecast_org
+    python -m resolver.tools.fetch_conflict_forecasts --sources acled_cast
     python -m resolver.tools.fetch_conflict_forecasts --dry-run
 """
 
@@ -33,6 +34,7 @@ LOG = logging.getLogger(__name__)
 _FORECAST_CONNECTORS = {
     "views": "resolver.connectors.views.ViewsConnector",
     "conflictforecast_org": "resolver.connectors.conflictforecast.ConflictForecastOrgConnector",
+    "acled_cast": "resolver.connectors.acled_cast.AcledCastConnector",
 }
 
 _EXPECTED_COLUMNS = [
@@ -177,7 +179,7 @@ def _write_to_db(df: pd.DataFrame, *, db_url: str | None = None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Fetch conflict forecasts from VIEWS and conflictforecast.org",
+        description="Fetch conflict forecasts from VIEWS, conflictforecast.org, and ACLED CAST",
     )
     parser.add_argument(
         "--sources",

@@ -2,7 +2,7 @@ import { apiGet } from "../../lib/api";
 import HsTriageClient from "./HsTriageClient";
 
 export const metadata = {
-  title: "HS Triage",
+  title: "HS Triage & RC",
 };
 
 type HsRunRow = {
@@ -29,7 +29,7 @@ export default async function HsTriagePage() {
   return (
     <div className="space-y-6">
       <header className="space-y-2">
-        <h1 className="text-3xl font-semibold">HS Triage</h1>
+        <h1 className="text-3xl font-semibold">HS Triage & RC</h1>
         <p className="text-sm text-fred-text">
           Inspect HS triage scores per run, including individual call scores.
         </p>

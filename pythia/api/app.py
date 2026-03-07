@@ -3485,10 +3485,10 @@ def llm_costs_summary(
 
 
 @app.get("/v1/costs/total")
-def costs_total():
+def costs_total(track: Optional[int] = Query(None)):
     con = _con()
     try:
-        tables = build_costs_total(con)
+        tables = build_costs_total(con, track=track)
     except Exception as exc:
         logger.exception("Failed to build total costs")
         raise HTTPException(status_code=500, detail="Failed to build total costs") from exc
@@ -3497,10 +3497,10 @@ def costs_total():
 
 
 @app.get("/v1/costs/monthly")
-def costs_monthly():
+def costs_monthly(track: Optional[int] = Query(None)):
     con = _con()
     try:
-        tables = build_costs_monthly(con)
+        tables = build_costs_monthly(con, track=track)
     except Exception as exc:
         logger.exception("Failed to build monthly costs")
         raise HTTPException(status_code=500, detail="Failed to build monthly costs") from exc
@@ -3509,10 +3509,10 @@ def costs_monthly():
 
 
 @app.get("/v1/costs/runs")
-def costs_runs():
+def costs_runs(track: Optional[int] = Query(None)):
     con = _con()
     try:
-        tables = build_costs_runs(con)
+        tables = build_costs_runs(con, track=track)
     except Exception as exc:
         logger.exception("Failed to build run costs")
         raise HTTPException(status_code=500, detail="Failed to build run costs") from exc
@@ -3521,10 +3521,10 @@ def costs_runs():
 
 
 @app.get("/v1/costs/latencies")
-def costs_latencies():
+def costs_latencies(track: Optional[int] = Query(None)):
     con = _con()
     try:
-        df = build_latencies_runs(con)
+        df = build_latencies_runs(con, track=track)
     except Exception as exc:
         logger.exception("Failed to build run latencies")
         raise HTTPException(status_code=500, detail="Failed to build run latencies") from exc
@@ -3533,10 +3533,10 @@ def costs_latencies():
 
 
 @app.get("/v1/costs/run_runtimes")
-def costs_run_runtimes():
+def costs_run_runtimes(track: Optional[int] = Query(None)):
     con = _con()
     try:
-        df = build_run_runtimes(con)
+        df = build_run_runtimes(con, track=track)
     except Exception as exc:
         logger.exception("Failed to build run runtimes")
         raise HTTPException(status_code=500, detail="Failed to build run runtimes") from exc
