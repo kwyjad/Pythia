@@ -210,7 +210,9 @@ def _load_into_db(
     stock = canonical[canonical["series_semantics"] == "stock"].copy()
     new = canonical[canonical["series_semantics"] == "new"].copy()
 
-    stock_resolved = pd.DataFrame()
+    # ── Build resolved DataFrames for both stock and new series ────────
+    resolved_frames: list[pd.DataFrame] = []
+
     if not stock.empty:
         stock_resolved = pd.DataFrame({
             "ym": stock["ym"],
@@ -233,13 +235,40 @@ def _load_into_db(
             "provenance_source": stock["source"],
             "provenance_rank": None,
         })
+        resolved_frames.append(stock_resolved)
+
+    if not new.empty:
+        new_resolved = pd.DataFrame({
+            "ym": new["ym"],
+            "iso3": new["iso3"],
+            "hazard_code": new["hazard_code"],
+            "hazard_label": new["hazard_label"],
+            "hazard_class": new["hazard_class"],
+            "metric": new["metric"],
+            "series_semantics": "new",
+            "value": new["value"].astype(float),
+            "unit": new["unit"],
+            "as_of": new["as_of_ts"].dt.date.astype(str),
+            "as_of_date": new["as_of_date"],
+            "publication_date": new["as_of_date"],
+            "publisher": new["source"],
+            "source_id": new["source"],
+            "doc_title": new["source"],
+            "event_id": new["event_id"],
+            "confidence": None,
+            "provenance_source": new["source"],
+            "provenance_rank": None,
+        })
+        resolved_frames.append(new_resolved)
+
+    resolved_rows = 0
+    if resolved_frames:
+        combined_resolved = pd.concat(resolved_frames, ignore_index=True)
         delete_months(
-            conn, "facts_resolved", stock_resolved["ym"].unique(),
+            conn, "facts_resolved", combined_resolved["ym"].unique(),
             sources=loaded_sources,
         )
-        resolved_rows = _insert_dataframe(conn, "facts_resolved", stock_resolved)
-    else:
-        resolved_rows = 0
+        resolved_rows = _insert_dataframe(conn, "facts_resolved", combined_resolved)
     LOGGER.info("facts_resolved inserted rows: %s", resolved_rows)
 
     deltas_rows = 0

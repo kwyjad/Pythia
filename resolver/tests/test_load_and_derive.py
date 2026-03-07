@@ -90,7 +90,7 @@ def _write_canonical_fixture(base: Path) -> None:
                 "2025-09-20",
                 25,
                 "new",
-                "Relief Org",
+                "IDMC",
             ],
         ],
         columns=CANONICAL_COLUMNS,
@@ -130,23 +130,31 @@ def test_cli_loads_derives_and_exports(tmp_path: Path, monkeypatch) -> None:
     try:
         raw_count = conn.execute("SELECT COUNT(*) FROM facts_raw").fetchone()[0]
         resolved = conn.execute(
-            "SELECT ym, value, provenance_source, provenance_rank FROM facts_resolved ORDER BY ym"
+            "SELECT ym, value, series_semantics, provenance_source, provenance_rank"
+            " FROM facts_resolved ORDER BY ym"
         ).df()
         deltas = conn.execute(
-            "SELECT ym, value_new, value_stock FROM facts_deltas ORDER BY ym"
+            "SELECT ym, value_new, value_stock, source_id FROM facts_deltas ORDER BY ym"
         ).df()
     finally:
         conn.close()
 
     assert raw_count == 4
-    assert len(resolved) == 3
-    assert len(deltas) == 3
+    assert len(resolved) == 4  # 3 stock (Relief Org) + 1 new (IDMC)
+    assert len(deltas) == 4  # 3 derived from stock + 1 derived from new
 
-    assert set(resolved["provenance_source"]) == {"Relief Org"}
+    stock_resolved = resolved[resolved["series_semantics"] == "stock"]
+    new_resolved = resolved[resolved["series_semantics"] == "new"]
+    assert len(stock_resolved) == 3
+    assert len(new_resolved) == 1
+    assert set(stock_resolved["provenance_source"]) == {"Relief Org"}
     assert (resolved["provenance_rank"] >= 1).all()
 
-    deltas["cumulative"] = deltas["value_new"].cumsum()
-    merged = resolved.merge(deltas, on="ym", how="inner")
+    # Verify stock deltas maintain correct cumulative relationship.
+    stock_deltas = deltas[deltas["source_id"] == "Relief Org"].sort_values("ym")
+    stock_deltas = stock_deltas.copy()
+    stock_deltas["cumulative"] = stock_deltas["value_new"].cumsum()
+    merged = stock_resolved.merge(stock_deltas, on="ym", how="inner")
     assert len(merged) == 3
     assert merged.loc[merged["ym"] == "2025-09", "value_new"].iloc[0] == -30
     assert (merged["value"] == merged["cumulative"]).all()
