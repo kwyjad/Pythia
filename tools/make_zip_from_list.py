@@ -34,11 +34,17 @@ from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
 
 # --- Option 1: Inline list (edit these if you prefer not to use --file-list)
 DEFAULT_FILE_LIST = [
-".github/workflows/run_horizon_scanner.yml",
-".github/workflows/build_dashboard_data.yml",
-"pythia/api/app.py",
-"pythia/api/db_sync.py",
-"pythia/api/auth.py",
+"pythia/tools/compute_scores.py",
+"pythia/tools/compute_bucket_centroids.py",
+"pythia/tools/compute_calibration_pythia.py",
+"pythia/tools/generate_calibration_advice.py",
+"pythia/buckets.py",
+"pythia/db/schema.py",
+"forecaster/ensemble.py",
+"forecaster/aggregate.py",
+"forecaster/scoring.py",
+"pythia/tools/compute_resolutions.py",
+"resolver/query/eiv_sql.py"
 ]
 
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"

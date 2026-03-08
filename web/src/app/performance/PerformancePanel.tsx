@@ -71,12 +71,36 @@ const TOOLTIP_CRPS =
   "Continuous Ranked Probability Score. Lower is better. Measures full distribution accuracy. Range: 0 (perfect) to +\u221E.";
 const TOOLTIP_SAMPLES =
   "Number of individual scored data points (question \u00D7 horizon combinations). Each question can produce multiple samples across different forecast horizons.";
+const TOOLTIP_EXTERNAL_BENCHMARK =
+  "ViEWS (Violence & Impacts Early-Warning System) is an external conflict fatality " +
+  "forecasting model from Uppsala University that produces monthly point forecasts " +
+  "(expected fatality counts) for every country at lead times of 1\u20136 months \u2014 the " +
+  "same horizons Fred uses.\n\n" +
+  "Scoring method: ViEWS point forecasts are converted into synthetic 5-bucket " +
+  "probability distributions using a log-normal model. Given a point forecast of X " +
+  "fatalities, we construct a log-normal distribution with E[X] = point forecast and " +
+  "integrate over Fred\u2019s fatality bucket boundaries (<5, 5\u201325, 25\u2013100, 100\u2013500, \u2265500) " +
+  "to get bucket probabilities. These synthetic SPDs are then scored with the same " +
+  "Brier, Log Loss, and CRPS functions used for Fred\u2019s own models.\n\n" +
+  "The log-normal spread parameter (\u03C3) controls how uncertain the synthetic SPD is " +
+  "around the point forecast. It is periodically optimized to minimize ViEWS\u2019s Brier " +
+  "score against resolved outcomes.\n\n" +
+  "Purpose: This lets us directly compare ViEWS accuracy against Fred\u2019s ensemble and " +
+  "individual models on the same scale. The comparison also feeds back into Fred\u2019s " +
+  "calibration advice \u2014 if ViEWS outperforms the ensemble, forecasting models are " +
+  "told to anchor more strongly on ViEWS conflict forecasts when they are provided as input.";
 
 /** Check if a model_name represents an ensemble method. */
 const isEnsembleModel = (name: string | null): boolean => {
   if (name == null) return true;
   const lower = name.toLowerCase();
   return lower.startsWith("ensemble");
+};
+
+/** Check if a model_name represents an external benchmark (not a Pythia model). */
+const isExternalBenchmark = (name: string | null): boolean => {
+  if (name == null) return false;
+  return name.startsWith("__ext_");
 };
 
 /** Pick the preferred ensemble model name from available model names. */
@@ -92,9 +116,14 @@ const pickDefaultEnsemble = (models: string[]): string | null => {
   return models[0] ?? null;
 };
 
-/** Friendly display name for a model. */
+/** Friendly display name for a model, including external benchmarks. */
 const displayModelName = (name: string | null): string => {
   if (name == null) return "Ensemble";
+  if (name === "__ext_views") return "ViEWS (external benchmark)";
+  if (name.startsWith("__ext_")) {
+    // Future external benchmarks: strip prefix and capitalize
+    return name.replace("__ext_", "").replace(/_/g, " ") + " (external)";
+  }
   return name;
 };
 
@@ -166,9 +195,17 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
     label: "Name",
     sortValue: (row) => row.label,
     defaultSortDirection: "asc",
-    render: (row) => (
-      <span className="font-medium text-fred-text">{row.label}</span>
-    ),
+    render: (row) => {
+      const isExternal = row.key.startsWith("__ext_");
+      return (
+        <span className={`font-medium ${isExternal ? "text-amber-400" : "text-fred-text"}`}>
+          {row.label}
+          {isExternal ? (
+            <InfoTooltip text={TOOLTIP_EXTERNAL_BENCHMARK} />
+          ) : null}
+        </span>
+      );
+    },
   },
   {
     key: "avg_brier",
@@ -403,8 +440,12 @@ export default function PerformancePanel({
 
   const kpiStats = useMemo(() => {
     const ensembleRows = activeEnsemble
-      ? data.summary_rows.filter((r) => r.model_name === activeEnsemble)
-      : data.summary_rows.filter((r) => isEnsembleModel(r.model_name));
+      ? data.summary_rows.filter(
+          (r) => r.model_name === activeEnsemble && !isExternalBenchmark(r.model_name),
+        )
+      : data.summary_rows.filter(
+          (r) => isEnsembleModel(r.model_name) && !isExternalBenchmark(r.model_name),
+        );
     const allHazards = new Set(data.summary_rows.map((r) => r.hazard_code));
     const allModels = new Set(
       data.summary_rows.map((r) => r.model_name).filter(Boolean),
@@ -517,15 +558,20 @@ export default function PerformancePanel({
 
   // ---- By Model view -------------------------------------------------------
 
-  const modelRows = useMemo(
-    (): PivotedRow[] =>
-      buildPivoted(
-        data.summary_rows,
-        (r) => r.model_name ?? "__null__",
-        (k) => displayModelName(k === "__null__" ? null : k),
-      ),
-    [data],
-  );
+  const modelRows = useMemo((): PivotedRow[] => {
+    const pivoted = buildPivoted(
+      data.summary_rows,
+      (r) => r.model_name ?? "__null__",
+      (k) => displayModelName(k === "__null__" ? null : k),
+    );
+    // Sort: ensembles first, then regular models, then external benchmarks last
+    return pivoted.sort((a, b) => {
+      const aExt = a.key.startsWith("__ext_") ? 2 : isEnsembleModel(a.key === "__null__" ? null : a.key) ? 0 : 1;
+      const bExt = b.key.startsWith("__ext_") ? 2 : isEnsembleModel(b.key === "__null__" ? null : b.key) ? 0 : 1;
+      if (aExt !== bExt) return aExt - bExt;
+      return a.label.localeCompare(b.label);
+    });
+  }, [data]);
 
   // ---- Render --------------------------------------------------------------
 
@@ -640,6 +686,11 @@ export default function PerformancePanel({
               initialSortDirection="asc"
               tableLayout="auto"
               emptyMessage="No scores available."
+              rowClassName={(row) =>
+                row.key.startsWith("__ext_")
+                  ? "bg-amber-500/5 border-l-2 border-l-amber-400/40"
+                  : undefined
+              }
             />
           )}
 
@@ -676,6 +727,11 @@ export default function PerformancePanel({
               initialSortDirection="asc"
               tableLayout="auto"
               emptyMessage="No per-model scores available."
+              rowClassName={(row) =>
+                row.key.startsWith("__ext_")
+                  ? "bg-amber-500/5 border-l-2 border-l-amber-400/40"
+                  : undefined
+              }
             />
           )}
         </div>

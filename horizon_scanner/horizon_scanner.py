@@ -230,6 +230,7 @@ def _sort_sources_by_url(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(sources, key=_url_key)
 
 
+# DEPRECATED: No longer called. Per-hazard grounding in regime_change_llm.py and triage.py replaced this.
 def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str) -> dict[str, Any] | None:
     retriever_enabled = os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
     if not retriever_enabled and os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") != "1":
@@ -1148,7 +1149,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
     # 1. Build shared inputs (once per country)
     resolver_features = _build_resolver_features_for_country(iso3)
     hazard_catalog = _build_hazard_catalog()
-    evidence_pack = _maybe_build_country_evidence_pack(run_id, iso3_up, country_name)
+    evidence_pack = None  # Country-level pack retired; per-hazard grounding provides evidence
     expected_hazards = sorted(hazard_catalog.keys())
     fallback_specs = _HS_FALLBACK_SPECS or _resolve_hs_fallback_specs()
 

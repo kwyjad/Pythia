@@ -11,6 +11,7 @@ import math
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence
 
+from pythia.buckets import get_bucket_specs
 from pythia.config import load as load_cfg
 from resolver.db import duckdb_io
 
@@ -183,6 +184,120 @@ def _load_spd(
     return [float(x) / total for x in vec]
 
 
+def _load_centroids(conn, hazard_code: str, metric: str, n_buckets: int) -> list:
+    """Load centroids: hazard-specific -> wildcard -> BucketSpec defaults.
+
+    Prefers the newest as_of_month (EMA-updated), falling back to seed/default
+    rows (as_of_month IS NULL), then to BucketSpec hard-coded defaults.
+    """
+    for hc in [hazard_code.upper(), "*"]:
+        rows = conn.execute(
+            """
+            SELECT bucket_index, centroid, as_of_month
+            FROM bucket_centroids
+            WHERE upper(hazard_code) = ? AND upper(metric) = ?
+            ORDER BY as_of_month DESC NULLS LAST, bucket_index
+            """,
+            [hc, metric.upper()],
+        ).fetchall()
+        if not rows:
+            continue
+        # Pick the newest as_of_month (first row determines it)
+        best_aom = rows[0][2]
+        centroids = [0.0] * n_buckets
+        found = 0
+        for bi, c, aom in rows:
+            if aom != best_aom:
+                continue
+            idx = int(bi) - 1
+            if 0 <= idx < n_buckets:
+                centroids[idx] = float(c)
+                found += 1
+        if found >= n_buckets:
+            return centroids
+
+    # Fall back to BucketSpec defaults
+    specs = list(get_bucket_specs(metric))
+    if len(specs) >= n_buckets:
+        return [float(s.centroid) for s in specs[:n_buckets]]
+    return [0.0] * n_buckets
+
+
+def _get_centroid_version(conn, hazard_code: str, metric: str) -> str:
+    """Return the as_of_month of the newest centroid row, or 'default'."""
+    try:
+        row = conn.execute(
+            "SELECT MAX(as_of_month) FROM bucket_centroids "
+            "WHERE upper(metric) = ? AND as_of_month IS NOT NULL",
+            [metric.upper()],
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except Exception:
+        pass
+    return "default"
+
+
+def _compute_eiv_for_question(
+    conn,
+    question_id: str,
+    horizon_m: int,
+    metric: str,
+    hazard_code: str,
+    resolved_value: float,
+    class_bins: Sequence[str],
+) -> list:
+    """Compute EIV scores for ensemble + per-model for one (question, horizon).
+
+    Returns list of tuples ready for INSERT.
+    """
+    rows_to_insert = []
+    n_buckets = len(class_bins)
+
+    centroids = _load_centroids(conn, hazard_code, metric, n_buckets)
+    centroid_version = _get_centroid_version(conn, hazard_code, metric)
+
+    def _eiv_and_error(spd_vec):
+        eiv = sum(p * c for p, c in zip(spd_vec, centroids))
+        actual = max(resolved_value, 1.0)   # floor at 1.0 to avoid ln(0)
+        eiv_safe = max(eiv, 1.0)             # same floor
+        log_ratio = (math.log(eiv_safe) - math.log(actual)) ** 2
+        within_20 = abs(eiv - resolved_value) / actual <= 0.20
+        return eiv, log_ratio, within_20
+
+    # Ensemble
+    spd_e = _load_spd(
+        conn, question_id=question_id, horizon_m=horizon_m,
+        class_bins=class_bins, table="ensemble",
+    )
+    if spd_e:
+        eiv, log_err, w20 = _eiv_and_error(spd_e)
+        rows_to_insert.append((
+            question_id, horizon_m, metric, "__ensemble__",
+            eiv, resolved_value, log_err, w20, centroid_version,
+        ))
+
+    # Per-model
+    model_rows = conn.execute(
+        "SELECT DISTINCT model_name FROM forecasts_raw "
+        "WHERE question_id = ? AND month_index = ?",
+        [question_id, horizon_m],
+    ).fetchall()
+    for (model_name,) in model_rows:
+        spd_m = _load_spd(
+            conn, question_id=question_id, horizon_m=horizon_m,
+            class_bins=class_bins, table="raw", model_name=model_name,
+        )
+        if spd_m:
+            eiv, log_err, w20 = _eiv_and_error(spd_m)
+            rows_to_insert.append((
+                question_id, horizon_m, metric, model_name,
+                eiv, resolved_value, log_err, w20, centroid_version,
+            ))
+
+    return rows_to_insert
+
+
 def compute_scores(db_url: str) -> None:
     conn = _open_db(db_url)
 
@@ -324,6 +439,36 @@ def compute_scores(db_url: str) -> None:
                 n_written += 3
 
         LOGGER.info("compute_scores: wrote %d score rows.", n_written)
+
+        # --- EIV scoring (Phase 1) ---
+        eiv_rows = []
+        for question_id, iso3, hazard_code, metric, horizon_m, resolved_value in qrows:
+            class_bins = _class_bins(metric, hazard_code)
+            if not class_bins:
+                continue
+            eiv_rows.extend(_compute_eiv_for_question(
+                conn, question_id, horizon_m, metric, hazard_code,
+                resolved_value, class_bins,
+            ))
+
+        if eiv_rows:
+            # Clear stale EIV rows for all resolved questions
+            resolved_qids = list({r[0] for r in qrows})
+            for qid in resolved_qids:
+                conn.execute(
+                    "DELETE FROM eiv_scores WHERE question_id = ?", [qid]
+                )
+            now = datetime.utcnow()
+            conn.executemany(
+                """
+                INSERT INTO eiv_scores (question_id, horizon_m, metric, model_name,
+                                        eiv_forecast, actual_value, log_ratio_err,
+                                        within_20pct, centroid_version, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [(*row, now) for row in eiv_rows],
+            )
+            LOGGER.info("compute_scores: wrote %d EIV score rows.", len(eiv_rows))
     finally:
         _close_db(conn)
 

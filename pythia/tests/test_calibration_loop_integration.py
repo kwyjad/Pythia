@@ -108,6 +108,42 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
             )
             """
         )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bucket_centroids (
+              hazard_code TEXT,
+              metric TEXT,
+              bucket_index INTEGER,
+              centroid DOUBLE,
+              as_of_month TEXT
+            )
+            """
+        )
+        # Seed default PA centroids (matching schema.py _seed_bucket_centroids)
+        for idx, centroid in [
+            (1, 5000.0), (2, 30000.0), (3, 150000.0), (4, 375000.0), (5, 750000.0),
+        ]:
+            con.execute(
+                "INSERT INTO bucket_centroids VALUES (?, ?, ?, ?, NULL)",
+                ["*", "PA", idx, centroid],
+            )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eiv_scores (
+              question_id TEXT,
+              horizon_m INTEGER,
+              metric TEXT,
+              model_name TEXT,
+              eiv_forecast DOUBLE,
+              actual_value DOUBLE,
+              log_ratio_err DOUBLE,
+              within_20pct BOOLEAN,
+              centroid_version TEXT,
+              created_at TIMESTAMP DEFAULT now(),
+              PRIMARY KEY (question_id, horizon_m, metric, model_name)
+            )
+            """
+        )
 
         # Insert one PA question with a 6-month window starting 2024-08
         # target_month is the 6th month = 2025-01

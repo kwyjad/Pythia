@@ -2810,6 +2810,15 @@ def _load_structured_data(
         except Exception:
             pass
 
+    # Load RC/triage grounding evidence if available
+    if hs_run_id:
+        try:
+            tail_pack = _load_hs_hazard_tail_pack(hs_run_id, iso3, hazard_code)
+            if tail_pack:
+                sd["hazard_grounding"] = tail_pack
+        except Exception:
+            pass
+
     return sd
 
 
@@ -4195,6 +4204,7 @@ def _write_spd_compare_artifact(run_id: str, qid: str, payload: dict[str, object
 
 
 async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
+    LOG.warning("DEPRECATED: _run_research_for_question called but researcher pipeline is retired")
     qid = question_row["question_id"]
     iso3 = question_row["iso3"]
     hz = question_row["hazard_code"]
@@ -4574,6 +4584,7 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
             hs_triage_entry=hs_entry,
             research_json=research_json,
             structured_data=structured_data,
+            model_name=TRACK2_MODEL_SPEC.name,
         )
         if question_evidence_pack:
             prompt = append_retriever_evidence_to_prompt(prompt, question_evidence_pack)
@@ -5982,14 +5993,29 @@ def main() -> None:
                 finally:
                     con.close()
 
+            # DEPRECATED: _run_research_for_question is no longer called. Scheduled for removal.
             async def _research_task(q: dict) -> None:
                 qid = str(q.get("question_id") or "")
-                if qid and qid not in question_start_ms:
-                    question_start_ms[qid] = int(time.time() * 1000)
-                if not _should_run_research(run_id, q):
-                    return
-                async with research_sem:
-                    await _run_research_for_question(run_id, q)
+                iso3 = (q.get("iso3") or "").upper()
+                hz = (q.get("hazard_code") or "").upper()
+                metric = q.get("metric") or "PA"
+                # Persist minimal placeholder — no web search calls
+                try:
+                    con = connect(read_only=False)
+                    ensure_schema(con)
+                    con.execute(
+                        """
+                        INSERT INTO question_research
+                          (run_id, question_id, iso3, hazard_code, metric, research_json,
+                           hs_evidence_json, question_evidence_json, merged_evidence_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [run_id, qid, iso3, hz, metric,
+                         '{"note": "researcher_retired"}', '{}', '{}', '{}'],
+                    )
+                    con.close()
+                except Exception:
+                    pass
 
             async def _spd_task(q: dict) -> None:
                 qid = str(q.get("question_id") or "")

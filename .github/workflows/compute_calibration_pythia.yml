@@ -74,6 +74,14 @@ jobs:
             exit 1
           fi
 
+      - name: EMA centroid update
+        env:
+          PYTHIA_CONFIG_YAML: "pythia/config.yaml"
+        run: |
+          echo "=== Running EMA centroid update ==="
+          python -m pythia.tools.compute_bucket_centroids --ema --metric PA --db-url "${RESOLVER_DB_URL}"
+          echo "=== EMA centroid update completed ==="
+
       - name: Compute calibration weights/advice from scores
         env:
           PYTHIA_CONFIG_YAML: "pythia/config.yaml"

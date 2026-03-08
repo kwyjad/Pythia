@@ -55,6 +55,7 @@ from horizon_scanner._utils import (
     short_error,
     status_from_error,
 )
+from horizon_scanner.db_writer import log_hs_hazard_tail_packs_to_db
 from horizon_scanner.llm_logging import log_hs_llm_call
 from horizon_scanner.hs_triage_prompts import build_triage_prompt
 from horizon_scanner.hs_triage_grounding_prompts import (
@@ -167,28 +168,36 @@ async def _call_triage_model(
 ) -> tuple[str, Dict[str, Any], str, ModelSpec]:
     """Call the LLM for triage scoring.
 
-    Pass 1 uses the configured HS model (Gemini Flash).
-    Pass 2 uses GPT-5-mini for model diversity.
+    Pass 1: Primary triage model (default: gemini-3.1-pro-preview)
+    Pass 2: Secondary triage model for diversity (default: gpt-5.2)
+
+    Override via env vars:
+      PYTHIA_TRIAGE_MODEL_PASS1=google:gemini-3.1-pro-preview
+      PYTHIA_TRIAGE_MODEL_PASS2=openai:gpt-5.2
 
     Returns (text, usage, error, model_spec).
     """
 
     if pass_idx == 2:
-        spec = ModelSpec(
-            name="GPT-5-mini",
-            provider="openai",
-            model_id="gpt-5-mini",
-            active=True,
-            purpose="hs_triage",
-        )
+        model_spec_str = os.getenv("PYTHIA_TRIAGE_MODEL_PASS2", "openai:gpt-5.2")
+        default_name = "GPT-5.2"
     else:
-        spec = ModelSpec(
-            name="Gemini",
-            provider="google",
-            model_id=resolve_hs_model(),
-            active=True,
-            purpose="hs_triage",
-        )
+        model_spec_str = os.getenv("PYTHIA_TRIAGE_MODEL_PASS1", f"google:{resolve_hs_model()}")
+        default_name = "Gemini"
+
+    parts = model_spec_str.split(":", 1)
+    if len(parts) == 2:
+        provider, model_id = parts[0].strip(), parts[1].strip()
+    else:
+        provider, model_id = "google", model_spec_str.strip()
+
+    spec = ModelSpec(
+        name=default_name,
+        provider=provider,
+        model_id=model_id,
+        active=True,
+        purpose="hs_triage",
+    )
     start = time.time()
     try:
         text, usage, error = await call_chat_ms(
@@ -770,6 +779,32 @@ def run_triage_for_country(
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Triage grounding future failed for %s %s: %s", iso3_up, hz, exc)
                     grounding_results[hz] = None
+
+    # Persist triage grounding packs so the forecaster can inject them into SPD prompts.
+    for hz, pack in grounding_results.items():
+        if pack is None:
+            continue
+        try:
+            log_hs_hazard_tail_packs_to_db(
+                run_id,
+                [{
+                    "iso3": iso3_up,
+                    "hazard_code": hz,
+                    "rc_level": 0,
+                    "rc_score": 0.0,
+                    "rc_direction": "unknown",
+                    "rc_window": "",
+                    "query": f"triage_grounding: {pack.get('query', '')}",
+                    "markdown": pack.get("markdown", ""),
+                    "sources": pack.get("sources", []),
+                    "grounded": pack.get("grounded", False),
+                    "grounding_debug": pack.get("debug", {}),
+                    "structural_context": pack.get("structural_context", ""),
+                    "recent_signals": pack.get("recent_signals", []),
+                }],
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist triage grounding for %s %s: %s", iso3_up, hz, exc)
 
     # Phase 2: Sequential triage calls per active hazard (2-pass each).
     merged_hazards: Dict[str, Dict[str, Any]] = {}

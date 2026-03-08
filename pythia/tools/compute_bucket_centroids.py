@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from datetime import date
 
 from resolver.db import duckdb_io
 
@@ -164,6 +165,151 @@ def compute_bucket_centroids(db_url: str, metric: str = "PA") -> None:
         _close_db(conn)
 
 
+# --- EMA centroid update (Phase 2) ---
+
+EMA_LEARNING_RATE = 0.1
+MIN_RESOLUTIONS_PER_BUCKET = 10  # auto-activation threshold
+
+
+def update_bucket_centroids_ema(
+    db_url: str,
+    metric: str = "PA",
+    as_of: date | None = None,
+) -> None:
+    """EMA-update bucket centroids from resolution data.
+
+    For each (hazard_code, metric, bucket_index) with >= MIN_RESOLUTIONS_PER_BUCKET
+    resolutions, compute the empirical mean of resolved values in that bucket,
+    then blend with the current centroid using exponential moving average:
+
+        new_centroid = (1 - alpha) * current_centroid + alpha * empirical_mean
+
+    where alpha = EMA_LEARNING_RATE.
+
+    Writes new rows with as_of_month set. Does NOT overwrite default/seed rows.
+    """
+    if as_of is None:
+        as_of = date.today()
+    as_of_month = as_of.strftime("%Y-%m")
+
+    conn = _open_db(db_url)
+    try:
+        # Ensure as_of_month column exists
+        try:
+            conn.execute(
+                "ALTER TABLE bucket_centroids ADD COLUMN as_of_month TEXT"
+            )
+        except Exception:
+            pass
+
+        specs = list(get_bucket_specs(metric))
+        if not specs:
+            LOGGER.warning("No bucket specs for metric=%s; skipping EMA update.", metric)
+            return
+
+        # Build bucket CASE expression
+        case_lines = []
+        for spec in specs:
+            if spec.upper is None:
+                case_lines.append(f"WHEN v >= {float(spec.lower)} THEN {int(spec.idx)}")
+            else:
+                case_lines.append(
+                    f"WHEN v >= {float(spec.lower)} AND v < {float(spec.upper)} THEN {int(spec.idx)}"
+                )
+        case_sql = "\n                ".join(case_lines)
+
+        # Compute empirical mean per (hazard_code, bucket) from resolutions
+        empirical_sql = f"""
+            WITH res_with_bucket AS (
+                SELECT
+                    q.hazard_code,
+                    r.value AS v,
+                    CASE {case_sql} ELSE NULL END AS bucket_index
+                FROM resolutions r
+                JOIN questions q ON q.question_id = r.question_id
+                WHERE upper(q.metric) = ?
+                  AND r.value IS NOT NULL
+            )
+            SELECT
+                COALESCE(UPPER(hazard_code), '*') AS hazard_code,
+                bucket_index,
+                COUNT(*) AS n_resolutions,
+                AVG(v) AS empirical_mean
+            FROM res_with_bucket
+            WHERE bucket_index IS NOT NULL
+            GROUP BY hazard_code, bucket_index
+            HAVING COUNT(*) >= {MIN_RESOLUTIONS_PER_BUCKET}
+        """
+
+        rows = conn.execute(empirical_sql, [metric.upper()]).fetchall()
+
+        if not rows:
+            LOGGER.info(
+                "EMA centroid update: no (hazard, bucket) pairs with >= %d resolutions "
+                "for metric=%s. Phase 2 not yet active.",
+                MIN_RESOLUTIONS_PER_BUCKET, metric,
+            )
+            return
+
+        n_updated = 0
+        for hazard_code, bucket_index, n_res, empirical_mean in rows:
+            # Load current centroid (newest as_of_month, or seed/default)
+            current_row = conn.execute(
+                """
+                SELECT centroid FROM bucket_centroids
+                WHERE upper(hazard_code) = ? AND upper(metric) = ? AND bucket_index = ?
+                ORDER BY as_of_month DESC NULLS LAST
+                LIMIT 1
+                """,
+                [hazard_code.upper(), metric.upper(), int(bucket_index)],
+            ).fetchone()
+
+            if current_row is None:
+                spec = next((s for s in specs if s.idx == bucket_index), None)
+                current_centroid = float(spec.centroid) if spec else float(empirical_mean)
+            else:
+                current_centroid = float(current_row[0])
+
+            new_centroid = (
+                (1.0 - EMA_LEARNING_RATE) * current_centroid
+                + EMA_LEARNING_RATE * float(empirical_mean)
+            )
+
+            # Upsert for this as_of_month
+            conn.execute(
+                """
+                DELETE FROM bucket_centroids
+                WHERE upper(hazard_code) = ? AND upper(metric) = ?
+                  AND bucket_index = ? AND as_of_month = ?
+                """,
+                [hazard_code.upper(), metric.upper(), int(bucket_index), as_of_month],
+            )
+            conn.execute(
+                """
+                INSERT INTO bucket_centroids
+                    (hazard_code, metric, bucket_index, centroid, as_of_month)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [hazard_code.upper(), metric.upper(), int(bucket_index),
+                 new_centroid, as_of_month],
+            )
+
+            LOGGER.info(
+                "EMA centroid update: %s/%s bucket %d: %.1f -> %.1f "
+                "(empirical=%.1f, n=%d)",
+                hazard_code, metric, bucket_index, current_centroid,
+                new_centroid, empirical_mean, n_res,
+            )
+            n_updated += 1
+
+        LOGGER.info(
+            "EMA centroid update: updated %d centroids for metric=%s as_of=%s.",
+            n_updated, metric, as_of_month,
+        )
+    finally:
+        _close_db(conn)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute data-driven SPD bucket centroids from facts_resolved.")
     parser.add_argument(
@@ -176,12 +322,23 @@ def main() -> None:
         default="PA",
         help="Pythia metric name to label centroids with (default: PA).",
     )
+    parser.add_argument(
+        "--ema",
+        action="store_true",
+        help=(
+            "Run EMA centroid update instead of static recompute. "
+            "Auto-activates per bucket when >= 10 resolutions."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 
     db_url = args.db_url or _get_db_url_from_config()
-    compute_bucket_centroids(db_url=db_url, metric=args.metric)
+    if args.ema:
+        update_bucket_centroids_ema(db_url=db_url, metric=args.metric)
+    else:
+        compute_bucket_centroids(db_url=db_url, metric=args.metric)
 
 
 if __name__ == "__main__":

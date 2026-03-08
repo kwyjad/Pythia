@@ -27,6 +27,7 @@ type SortableTableProps<T> = {
   dense?: boolean;
   colGroup?: React.ReactNode;
   stickyHeader?: boolean;
+  rowClassName?: (row: T) => string | undefined;
 };
 
 const compareValues = (
@@ -62,6 +63,7 @@ export default function SortableTable<T>({
   dense = false,
   colGroup,
   stickyHeader = false,
+  rowClassName,
 }: SortableTableProps<T>) {
   const [sortKey, setSortKey] = useState<string | undefined>(initialSortKey);
   const [sortDirection, setSortDirection] =
@@ -146,7 +148,7 @@ export default function SortableTable<T>({
       </thead>
       <tbody className="divide-y divide-fred-border text-fred-text">
         {sortedRows.map((row) => (
-          <tr key={rowKey(row)} className="hover:bg-fred-bg/60">
+          <tr key={rowKey(row)} className={`hover:bg-fred-bg/60 ${rowClassName?.(row) ?? ""}`}>
             {visibleColumns.map((column) => (
               <td
                 key={column.key}
