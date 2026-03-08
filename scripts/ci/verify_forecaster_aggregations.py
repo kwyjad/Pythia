@@ -74,8 +74,8 @@ def get_model_counts(
 
 def find_missing_questions(
     con: duckdb_io.duckdb.DuckDBPyConnection, run_id: str
-) -> Sequence[Tuple[int, int, int]]:
-    rows: Iterable[Tuple[int, int, int]] = con.execute(
+) -> Sequence[Tuple[str, int, int]]:
+    rows: Iterable[Tuple[str, int, int]] = con.execute(
         """
         SELECT question_id,
                SUM(CASE WHEN model_name = 'ensemble_mean_v2' THEN 1 ELSE 0 END) AS n_mean,
@@ -89,7 +89,7 @@ def find_missing_questions(
         """,
         [run_id],
     ).fetchall()
-    return [(int(qid), int(n_mean), int(n_bmc)) for qid, n_mean, n_bmc in rows]
+    return [(str(qid), int(n_mean), int(n_bmc)) for qid, n_mean, n_bmc in rows]
 
 
 def main() -> int:
