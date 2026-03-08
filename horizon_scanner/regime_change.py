@@ -100,28 +100,21 @@ def compute_score(likelihood: float | None, magnitude: float | None) -> float:
 
 
 def compute_level(likelihood: float | None, magnitude: float | None, score: float | None) -> int:
-    lvl0_likelihood = _env_float("PYTHIA_HS_RC_LEVEL0_LIKELIHOOD", 0.45)
-    lvl0_score = _env_float("PYTHIA_HS_RC_LEVEL0_SCORE", 0.25)
-    lvl1_likelihood = _env_float("PYTHIA_HS_RC_LEVEL1_LIKELIHOOD", 0.45)
-    lvl1_score = _env_float("PYTHIA_HS_RC_LEVEL1_SCORE", 0.25)
-    lvl2_likelihood = _env_float("PYTHIA_HS_RC_LEVEL2_LIKELIHOOD", 0.60)
-    lvl2_magnitude = _env_float("PYTHIA_HS_RC_LEVEL2_MAGNITUDE", 0.50)
-    lvl3_likelihood = _env_float("PYTHIA_HS_RC_LEVEL3_LIKELIHOOD", 0.75)
-    lvl3_magnitude = _env_float("PYTHIA_HS_RC_LEVEL3_MAGNITUDE", 0.60)
+    # Likelihood-driven thresholds: likelihood alone determines the level.
+    # Score (likelihood * magnitude) is kept for ranking within levels.
+    lvl1_likelihood = _env_float("PYTHIA_HS_RC_LEVEL1_LIKELIHOOD", 0.15)
+    lvl2_likelihood = _env_float("PYTHIA_HS_RC_LEVEL2_LIKELIHOOD", 0.35)
+    lvl3_likelihood = _env_float("PYTHIA_HS_RC_LEVEL3_LIKELIHOOD", 0.55)
 
     likelihood_val = likelihood if isinstance(likelihood, (int, float)) else 0.0
-    magnitude_val = magnitude if isinstance(magnitude, (int, float)) else 0.0
-    score_val = score if isinstance(score, (int, float)) else 0.0
 
-    if likelihood_val >= lvl3_likelihood and magnitude_val >= lvl3_magnitude:
+    if likelihood_val >= lvl3_likelihood:
         return 3
-    if likelihood_val >= lvl2_likelihood and magnitude_val >= lvl2_magnitude:
+    if likelihood_val >= lvl2_likelihood:
         return 2
-    if likelihood_val >= lvl1_likelihood and score_val >= lvl1_score:
+    if likelihood_val >= lvl1_likelihood:
         return 1
-    if likelihood_val < lvl0_likelihood or score_val < lvl0_score:
-        return 0
-    return 1
+    return 0
 
 
 def should_force_full_spd(level: int | None, score: float | None) -> bool:

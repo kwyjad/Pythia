@@ -55,13 +55,24 @@ def _close(con):
     duckdb_io.close_db(con)
 
 
-def _load_sample_country_for_hazard(con, hazard_code: str) -> Optional[Dict[str, Any]]:
+def _load_sample_country_for_hazard(
+    con, hazard_code: str, run_id: str | None = None,
+) -> Optional[Dict[str, Any]]:
     """Pick the best sample country for a hazard from the latest HS run.
 
     Prefers a priority-tier country with a moderate triage_score so the
     rendered prompt is interesting.
     """
     try:
+        # Resolve run_id: use explicit if provided, otherwise latest
+        if not run_id:
+            latest_row = con.execute(
+                "SELECT run_id FROM hs_triage ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            if not latest_row:
+                return None
+            run_id = latest_row[0]
+
         row = con.execute(
             """
             SELECT iso3, triage_score, tier, run_id,
@@ -71,14 +82,13 @@ def _load_sample_country_for_hazard(con, hazard_code: str) -> Optional[Dict[str,
                    drivers_json, regime_shifts_json, data_quality_json,
                    scenario_stub, regime_change_json
             FROM hs_triage
-            WHERE hazard_code = ?
+            WHERE hazard_code = ? AND run_id = ?
             ORDER BY
                 CASE WHEN tier = 'priority' THEN 0 ELSE 1 END,
-                triage_score DESC,
-                created_at DESC
+                triage_score DESC
             LIMIT 1
             """,
-            [hazard_code],
+            [hazard_code, run_id],
         ).fetchone()
     except Exception:
         return None
@@ -378,7 +388,7 @@ def _render_scenario_prompt(run_id: str, question: Dict[str, Any],
 # Main artifact builder
 # ---------------------------------------------------------------------------
 
-def build_artifact(db_url: str) -> str:
+def build_artifact(db_url: str, run_id: str | None = None) -> str:
     """Build the full markdown artifact."""
 
     con = _connect(db_url)
@@ -399,7 +409,7 @@ def build_artifact(db_url: str) -> str:
             lines.append("")
 
             # Find a sample country
-            sample = _load_sample_country_for_hazard(con, hazard_code)
+            sample = _load_sample_country_for_hazard(con, hazard_code, run_id=run_id)
             if not sample:
                 lines.append(f"_No HS triage data found for {hazard_code}; skipping._")
                 lines.append("")
@@ -542,6 +552,7 @@ def main() -> None:
     parser.add_argument("--db", default=None, help="DuckDB URL (or uses PYTHIA_DB_URL)")
     parser.add_argument("--out", default="diagnostics/prompt_artifact.md",
                         help="Output markdown file path")
+    parser.add_argument("--run-id", default=None, help="HS run ID to use (defaults to latest)")
     args = parser.parse_args()
 
     db_url = args.db or _get_db_url()
@@ -551,7 +562,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     LOG.info("Generating prompt artifact from %s → %s", db_url, out_path)
 
-    md = build_artifact(db_url)
+    md = build_artifact(db_url, run_id=args.run_id)
     out_path.write_text(md, encoding="utf-8")
 
     size_kb = out_path.stat().st_size / 1024

@@ -83,6 +83,14 @@ jobs:
           python -m pythia.tools.compute_scores --db-url "${RESOLVER_DB_URL}"
           echo "=== compute_scores completed ==="
 
+      - name: Score ViEWS conflict forecasts
+        env:
+          PYTHIA_CONFIG_YAML: "pythia/config.yaml"
+        run: |
+          echo "=== Running pythia.tools.score_views ==="
+          python -m pythia.tools.score_views --db-url "${RESOLVER_DB_URL}"
+          echo "=== score_views completed ==="
+
       - name: Upload canonical resolver DB
         if: success()
         uses: actions/upload-artifact@v4

@@ -250,28 +250,23 @@ def _load_bucket_centroids_db(
         return None
 
     try:
-        rows = con.execute(
-            """
-            SELECT bucket_index, centroid
-            FROM bucket_centroids
-            WHERE upper(metric) = ?
-              AND upper(hazard_code) = ?
-            ORDER BY bucket_index
-            """,
-            [mt, hz],
-        ).fetchall()
-
-        if not rows:
+        # Prefer newest as_of_month (EMA-updated), fall back to seed (NULL)
+        for hc in [hz, "*"]:
             rows = con.execute(
                 """
-                SELECT bucket_index, centroid
+                SELECT bucket_index, centroid, as_of_month
                 FROM bucket_centroids
                 WHERE upper(metric) = ?
-                  AND hazard_code = '*'
-                ORDER BY bucket_index
+                  AND upper(hazard_code) = ?
+                ORDER BY as_of_month DESC NULLS LAST, bucket_index
                 """,
-                [mt],
+                [mt, hc],
             ).fetchall()
+            if rows:
+                # Pick centroids from the best (newest) as_of_month
+                best_aom = rows[0][2]
+                rows = [(bi, c) for bi, c, aom in rows if aom == best_aom]
+                break
     except Exception:
         rows = []
     finally:

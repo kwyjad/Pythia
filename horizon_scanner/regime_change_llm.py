@@ -50,6 +50,7 @@ from horizon_scanner._utils import (
     short_error,
     status_from_error,
 )
+from horizon_scanner.db_writer import log_hs_hazard_tail_packs_to_db
 from horizon_scanner.llm_logging import log_hs_llm_call
 from horizon_scanner.rc_grounding_prompts import (
     build_grounding_prompt,
@@ -105,28 +106,36 @@ async def _call_rc_model(
 ) -> tuple[str, Dict[str, Any], str, ModelSpec]:
     """Call the LLM for regime-change assessment.
 
-    Pass 1 uses the configured HS model (Gemini Flash).
-    Pass 2 uses GPT-5-mini for model diversity.
+    Pass 1: Primary RC model (default: gemini-3.1-pro-preview)
+    Pass 2: Secondary RC model for diversity (default: gpt-5.2)
+
+    Override via env vars:
+      PYTHIA_RC_MODEL_PASS1=google:gemini-3.1-pro-preview
+      PYTHIA_RC_MODEL_PASS2=openai:gpt-5.2
 
     Returns (text, usage, error, model_spec).
     """
 
     if pass_idx == 2:
-        spec = ModelSpec(
-            name="GPT-5-mini",
-            provider="openai",
-            model_id="gpt-5-mini",
-            active=True,
-            purpose="hs_regime_change",
-        )
+        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS2", "openai:gpt-5.2")
+        default_name = "GPT-5.2"
     else:
-        spec = ModelSpec(
-            name="Gemini",
-            provider="google",
-            model_id=resolve_hs_model(),
-            active=True,
-            purpose="hs_regime_change",
-        )
+        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS1", f"google:{resolve_hs_model()}")
+        default_name = "Gemini"
+
+    parts = model_spec_str.split(":", 1)
+    if len(parts) == 2:
+        provider, model_id = parts[0].strip(), parts[1].strip()
+    else:
+        provider, model_id = "google", model_spec_str.strip()
+
+    spec = ModelSpec(
+        name=default_name,
+        provider=provider,
+        model_id=model_id,
+        active=True,
+        purpose="hs_regime_change",
+    )
     start = time.time()
     try:
         text, usage, error = await call_chat_ms(
@@ -426,6 +435,59 @@ def _run_rc_for_single_hazard(
     except Exception as exc:
         logger.debug("HDX Signals load failed for %s %s: %s", iso3, hazard_code, exc)
 
+    # --- Load additional structured data sources for RC ---
+    new_data_kwargs: dict[str, Any] = {}
+    # ReliefWeb reports (all hazards)
+    try:
+        from horizon_scanner.reliefweb import load_reliefweb_reports
+        rw_reports = load_reliefweb_reports(iso3)
+        if rw_reports:
+            new_data_kwargs["reliefweb_reports"] = rw_reports
+    except Exception as exc:
+        logger.debug("ReliefWeb load failed for %s: %s", iso3, exc)
+    # ACLED political events (ACE only)
+    if hazard_code == "ACE":
+        try:
+            from pythia.acled_political import load_acled_political_events
+            pol_events = load_acled_political_events(iso3)
+            if pol_events:
+                new_data_kwargs["acled_political_events"] = pol_events
+        except Exception as exc:
+            logger.debug("ACLED political load failed for %s: %s", iso3, exc)
+    # ACAPS INFORM Severity (all hazards)
+    try:
+        from pythia.acaps import load_inform_severity
+        inform = load_inform_severity(iso3)
+        if inform:
+            new_data_kwargs["inform_severity"] = inform
+    except Exception as exc:
+        logger.debug("INFORM Severity load failed for %s: %s", iso3, exc)
+    # ACAPS Risk Radar (all hazards)
+    try:
+        from pythia.acaps import load_risk_radar
+        risks = load_risk_radar(iso3)
+        if risks:
+            new_data_kwargs["acaps_risk_radar"] = risks
+    except Exception as exc:
+        logger.debug("ACAPS Risk Radar load failed for %s: %s", iso3, exc)
+    # ACAPS Daily Monitoring (all hazards)
+    try:
+        from pythia.acaps import load_daily_monitoring
+        monitoring = load_daily_monitoring(iso3)
+        if monitoring:
+            new_data_kwargs["acaps_monitoring"] = monitoring
+    except Exception as exc:
+        logger.debug("ACAPS Daily Monitoring load failed for %s: %s", iso3, exc)
+    # IPC phases (DR and ACE)
+    if hazard_code in ("ACE", "DR"):
+        try:
+            from pythia.ipc_phases import load_ipc_phases
+            ipc = load_ipc_phases(iso3)
+            if ipc:
+                new_data_kwargs["ipc_phases"] = ipc
+        except Exception as exc:
+            logger.debug("IPC phases load failed for %s: %s", iso3, exc)
+
     prompt = build_rc_prompt(
         hazard_code,
         country_name=country_name,
@@ -435,6 +497,7 @@ def _run_rc_for_single_hazard(
         **climate_kwargs,
         **conflict_kwargs,
         **hdx_kwargs,
+        **new_data_kwargs,
     )
 
     pass_rcs: list[Dict[str, Any]] = []
@@ -617,6 +680,32 @@ def run_rc_for_country(
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("RC grounding future failed for %s %s: %s", iso3_up, hz, exc)
                     grounding_results[hz] = None
+
+    # Persist grounding packs so the forecaster can inject them into SPD prompts.
+    for hz, pack in grounding_results.items():
+        if pack is None:
+            continue
+        try:
+            log_hs_hazard_tail_packs_to_db(
+                run_id,
+                [{
+                    "iso3": iso3_up,
+                    "hazard_code": hz,
+                    "rc_level": 0,
+                    "rc_score": 0.0,
+                    "rc_direction": "unknown",
+                    "rc_window": "",
+                    "query": f"rc_grounding: {pack.get('query', '')}",
+                    "markdown": pack.get("markdown", ""),
+                    "sources": pack.get("sources", []),
+                    "grounded": pack.get("grounded", False),
+                    "grounding_debug": pack.get("debug", {}),
+                    "structural_context": pack.get("structural_context", ""),
+                    "recent_signals": pack.get("recent_signals", []),
+                }],
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist RC grounding for %s %s: %s", iso3_up, hz, exc)
 
     # Phase 2: Sequential RC calls per active hazard (2-pass each).
     merged_hazards: Dict[str, Dict[str, Any]] = {}

@@ -1,0 +1,245 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+name: Purge HS Run
+
+concurrency:
+  group: pythia-resolver-db
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      hs_run_id:
+        description: "HS run ID to purge (e.g. hs_20260301T000000)"
+        required: true
+        type: string
+      db_run_id:
+        description: "Optional: force canonical DB from Actions run ID. If blank, uses the latest successful pipeline run."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
+      SIGNATURE_OPTIONAL_TABLES: scenarios
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install gh CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh
+
+      - name: Authenticate gh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh auth status
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+
+      - name: Download canonical resolver DB
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p data
+
+          OVERRIDE_RUN_ID="${{ github.event.inputs.db_run_id }}"
+
+          download_artifact_with_retries() {
+            local run_id="$1"
+            local artifact_name="$2"
+            local out_dir="$3"
+            local max_attempts="${4:-6}"
+            local attempt=1
+
+            while [ "$attempt" -le "$max_attempts" ]; do
+              echo "Downloading artifact '${artifact_name}' from run ${run_id} (attempt ${attempt}/${max_attempts})"
+              rm -rf "${out_dir}/pythia-resolver-db" || true
+
+              if gh run download "$run_id" -n "$artifact_name" --dir "$out_dir"; then
+                echo "Download OK."
+                return 0
+              fi
+
+              sleep_seconds=$(( 5 * attempt * attempt ))
+              echo "Download failed. Sleeping ${sleep_seconds}s before retry..."
+              sleep "${sleep_seconds}"
+              attempt=$((attempt + 1))
+            done
+
+            echo "ERROR: Failed to download after ${max_attempts} attempts."
+            return 1
+          }
+
+          # Determine which run to download from
+          if [ -n "$OVERRIDE_RUN_ID" ]; then
+            if ! echo "$OVERRIDE_RUN_ID" | grep -Eq '^[0-9]+$'; then
+              echo "ERROR: db_run_id must be a numeric Actions run ID. Got: '$OVERRIDE_RUN_ID'"
+              exit 1
+            fi
+            DB_RUN_ID="$OVERRIDE_RUN_ID"
+          else
+            # Find the latest successful run that produced pythia-resolver-db
+            CANDIDATES_FILE=$(mktemp)
+            gh run list \
+              --workflow "Horizon Scanner Triage" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 10 | jq -r '.[] | "\(.createdAt),\(.databaseId)"' >>"${CANDIDATES_FILE}" || true
+            gh run list \
+              --workflow "Resolver — Initial Backfill" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 10 | jq -r '.[] | "\(.createdAt),\(.databaseId)"' >>"${CANDIDATES_FILE}" || true
+            gh run list \
+              --workflow "Purge HS Run" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 10 | jq -r '.[] | "\(.createdAt),\(.databaseId)"' >>"${CANDIDATES_FILE}" || true
+
+            if [ ! -s "${CANDIDATES_FILE}" ]; then
+              echo "ERROR: No successful runs found with a canonical DB artifact."
+              exit 1
+            fi
+
+            sort -r "${CANDIDATES_FILE}" > "${CANDIDATES_FILE}.sorted"
+            DB_RUN_ID=$(head -n 1 "${CANDIDATES_FILE}.sorted" | cut -d, -f2)
+          fi
+
+          echo "Downloading DB from run ${DB_RUN_ID}..."
+          if ! download_artifact_with_retries "$DB_RUN_ID" "pythia-resolver-db" data 6; then
+            exit 1
+          fi
+
+          # Locate resolver.duckdb in the downloaded artifact
+          if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
+            SRC="data/pythia-resolver-db/resolver.duckdb"
+          else
+            SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
+          fi
+
+          if [ -z "${SRC}" ]; then
+            echo "ERROR: resolver.duckdb not found in downloaded artifact."
+            exit 1
+          fi
+
+          if [ "$SRC" != "data/resolver.duckdb" ]; then
+            cp "$SRC" data/resolver.duckdb
+          fi
+
+          echo "DB_RUN_ID=${DB_RUN_ID}" >> "$GITHUB_ENV"
+          echo "Canonical DB ready from run ${DB_RUN_ID}."
+
+      - name: DB signature before purge
+        run: |
+          set -e
+          mkdir -p diagnostics
+          python -m scripts.ci.db_signature write \
+            --db data/resolver.duckdb \
+            --required "${SIGNATURE_REQUIRED_TABLES}" \
+            --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+            --out diagnostics/db_signature_before.json
+
+      - name: "Dry run: preview rows to delete"
+        env:
+          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
+        run: |
+          set -e
+          echo "=== Dry-run purge preview for hs_run_id=${{ github.event.inputs.hs_run_id }} ==="
+          python -m scripts.purge_hs_run \
+            --db "${PYTHIA_DB_URL}" \
+            --hs-run-id "${{ github.event.inputs.hs_run_id }}" | tee diagnostics/purge_dry_run.txt
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### Purge dry-run preview"
+              echo '```'
+              cat diagnostics/purge_dry_run.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: "Execute purge"
+        env:
+          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
+        run: |
+          set -e
+          echo "=== Executing purge for hs_run_id=${{ github.event.inputs.hs_run_id }} ==="
+          python -m scripts.purge_hs_run \
+            --db "${PYTHIA_DB_URL}" \
+            --hs-run-id "${{ github.event.inputs.hs_run_id }}" \
+            --execute | tee diagnostics/purge_execute.txt
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### Purge execution result"
+              echo '```'
+              cat diagnostics/purge_execute.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: DB signature after purge
+        run: |
+          set -e
+          python -m scripts.ci.db_signature write \
+            --db data/resolver.duckdb \
+            --required "${SIGNATURE_REQUIRED_TABLES}" \
+            --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+            --out diagnostics/db_signature_after.json
+
+          if [ -f diagnostics/db_signature_before.json ]; then
+            python -m scripts.ci.db_signature compare \
+              --before diagnostics/db_signature_before.json \
+              --after-db data/resolver.duckdb \
+              --required "${SIGNATURE_REQUIRED_TABLES}" \
+              --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+              --out diagnostics/db_signature_after.json
+          fi
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: purge-diagnostics
+          path: |
+            diagnostics/purge_dry_run.txt
+            diagnostics/purge_execute.txt
+            diagnostics/db_signature_before.json
+            diagnostics/db_signature_after.json
+          if-no-files-found: warn
+
+      - name: Upload purged canonical DB
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb

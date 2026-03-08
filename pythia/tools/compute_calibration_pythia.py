@@ -10,7 +10,7 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from pythia.config import load as load_cfg
@@ -39,7 +39,24 @@ def _row_count(conn, name: str) -> int:
 
 MIN_QUESTIONS = 20
 HALF_LIFE_MONTHS = 12.0
-TEMP_SOFTMAX = 0.1
+
+# Adaptive softmax temperature (replaces fixed TEMP_SOFTMAX = 0.1)
+TEMP_SOFTMAX_BASE = 0.1       # asymptotic temperature at high N
+TEMP_SOFTMAX_HIGH = 0.5       # temperature at low N
+TEMP_SOFTMAX_HALFLIFE_N = 50  # N at which temperature is halfway between HIGH and BASE
+
+
+def _adaptive_softmax_temp(n_questions: int) -> float:
+    """Compute softmax temperature that shrinks toward uniform at low N.
+
+    At n_questions=20 (MIN_QUESTIONS), temperature ~ 0.39 -> mild differentiation.
+    At n_questions=50, temperature ~ 0.30 -> moderate differentiation.
+    At n_questions=200+, temperature ~ 0.12 -> sharp differentiation (close to original).
+
+    Uses exponential decay from HIGH to BASE with half-life at HALFLIFE_N.
+    """
+    decay = math.exp(-math.log(2.0) * n_questions / TEMP_SOFTMAX_HALFLIFE_N)
+    return TEMP_SOFTMAX_BASE + (TEMP_SOFTMAX_HIGH - TEMP_SOFTMAX_BASE) * decay
 
 
 @dataclass
@@ -91,6 +108,7 @@ def _load_samples(conn, as_of_month: str) -> List[Sample]:
        AND r.horizon_m = s.horizon_m
       JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
       WHERE r.observed_month <= ?
+        AND (s.model_name IS NULL OR s.model_name NOT LIKE '__ext_%')
     """
     rows = conn.execute(sql, [as_of_month]).fetchall()
 
@@ -164,13 +182,21 @@ def _compute_weights_for_group(as_of_month: str, samples: List[Sample]) -> Tuple
         return [], "No Brier scores after aggregation."
 
     model_names = list(brier_avgs.keys())
+
+    # Adaptive temperature — milder differentiation at low N
+    temp = _adaptive_softmax_temp(n_questions)
+    LOGGER.info(
+        "Softmax temperature for n=%d: %.3f (base=%.2f, high=%.2f)",
+        n_questions, temp, TEMP_SOFTMAX_BASE, TEMP_SOFTMAX_HIGH,
+    )
+
     raw_vals: Dict[Optional[str], float] = {m: -brier_avgs[m] for m in model_names}
     max_raw = max(raw_vals.values())
 
     weights: Dict[Optional[str], float] = {}
     denom = 0.0
     for m, rv in raw_vals.items():
-        x = math.exp((rv - max_raw) / TEMP_SOFTMAX)
+        x = math.exp((rv - max_raw) / temp)
         weights[m] = x
         denom += x
 
@@ -221,15 +247,19 @@ def _compute_weights_for_group(as_of_month: str, samples: List[Sample]) -> Tuple
             f"Model '{worst}' has the highest (worst) Brier score; its forecasts should be down-weighted."
         )
     advice_lines.append(
-        "Weights are computed via a time-decayed average of scores (half-life "
-        f"{HALF_LIFE_MONTHS:.0f} months) and a softmax over negative Brier scores."
+        f"Weights computed via time-decayed Brier (half-life {HALF_LIFE_MONTHS:.0f}mo) "
+        f"and softmax (adaptive temp={temp:.3f} for n={n_questions})."
     )
 
     advice_text = " ".join(advice_lines)
     return weights_rows, advice_text
 
 
-def compute_calibration_pythia(db_url: str, as_of: Optional[date] = None) -> None:
+def compute_calibration_pythia(
+    db_url: str,
+    as_of: Optional[date] = None,
+    holdout_months: int = 0,
+) -> None:
     if as_of is None:
         as_of = date.today()
     as_of_month = as_of.strftime("%Y-%m")
@@ -253,10 +283,18 @@ def compute_calibration_pythia(db_url: str, as_of: Optional[date] = None) -> Non
               avg_brier DOUBLE,
               avg_log DOUBLE,
               avg_crps DOUBLE,
+              train_cutoff_month TEXT,
               created_at TIMESTAMP DEFAULT now()
             )
             """
         )
+        # Ensure train_cutoff_month column exists on existing tables
+        try:
+            conn.execute(
+                "ALTER TABLE calibration_weights ADD COLUMN train_cutoff_month TEXT"
+            )
+        except Exception:
+            pass
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS calibration_advice (
@@ -280,7 +318,20 @@ def compute_calibration_pythia(db_url: str, as_of: Optional[date] = None) -> Non
             LOGGER.info("compute_calibration_pythia: scores table is empty; nothing to do.")
             return
 
-        samples = _load_samples(conn, as_of_month)
+        # Cross-validation: optionally hold out recent months
+        if holdout_months > 0:
+            cutoff_date = as_of.replace(day=1)
+            for _ in range(holdout_months):
+                cutoff_date = (cutoff_date - timedelta(days=1)).replace(day=1)
+            train_cutoff_month = cutoff_date.strftime("%Y-%m")
+            LOGGER.info(
+                "Holdout mode: training on data up to %s, holding out %d months.",
+                train_cutoff_month, holdout_months,
+            )
+        else:
+            train_cutoff_month = as_of_month
+
+        samples = _load_samples(conn, train_cutoff_month)
         groups = _group_by_hazard_metric(samples)
 
         total_weight_rows = 0
@@ -321,8 +372,9 @@ def compute_calibration_pythia(db_url: str, as_of: Optional[date] = None) -> Non
                 """
                 INSERT INTO calibration_weights (
                   as_of_month, hazard_code, metric, model_name, weight,
-                  n_questions, n_samples, avg_brier, avg_log, avg_crps, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  n_questions, n_samples, avg_brier, avg_log, avg_crps,
+                  train_cutoff_month, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -336,6 +388,7 @@ def compute_calibration_pythia(db_url: str, as_of: Optional[date] = None) -> Non
                         row["avg_brier"],
                         row["avg_log"],
                         row["avg_crps"],
+                        train_cutoff_month,
                         now,
                     )
                     for row in weight_rows
@@ -371,12 +424,18 @@ def main() -> None:
             "/data/resolver.duckdb)"
         ),
     )
+    parser.add_argument(
+        "--holdout-months",
+        type=int,
+        default=0,
+        help="Number of most recent months to hold out for evaluation (0 = use all data).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 
     db_url = args.db_url or _get_db_url_from_config()
-    compute_calibration_pythia(db_url=db_url)
+    compute_calibration_pythia(db_url=db_url, holdout_months=args.holdout_months)
 
 
 if __name__ == "__main__":

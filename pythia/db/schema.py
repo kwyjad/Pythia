@@ -756,8 +756,10 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
             as_of_month TEXT,
             hazard_code TEXT,
             metric TEXT,
+            model_name TEXT DEFAULT '__shared__',
             advice TEXT,
             findings_json TEXT,
+            advice_version TEXT DEFAULT 'v1',
             created_at TIMESTAMP DEFAULT now(),
             PRIMARY KEY (as_of_month, hazard_code, metric)
         )
@@ -766,11 +768,34 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
             "as_of_month": "TEXT",
             "hazard_code": "TEXT",
             "metric": "TEXT",
+            "model_name": "TEXT",
             "advice": "TEXT",
             "findings_json": "TEXT",
+            "advice_version": "TEXT",
             "created_at": "TIMESTAMP",
         },
     )
+
+    # Backfill NULL model_name to sentinel
+    try:
+        con.execute(
+            "UPDATE calibration_advice SET model_name = '__shared__' WHERE model_name IS NULL"
+        )
+    except Exception:
+        pass
+
+    # Recreate PK if it doesn't include model_name
+    try:
+        con.execute("ALTER TABLE calibration_advice DROP CONSTRAINT calibration_advice_pkey")
+    except Exception:
+        pass
+    try:
+        con.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_calibration_advice "
+            "ON calibration_advice (as_of_month, hazard_code, metric, model_name)"
+        )
+    except Exception:
+        pass
 
 
 def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
@@ -1193,7 +1218,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 hazard_code TEXT,
                 metric TEXT,
                 bucket_index INTEGER,
-                centroid DOUBLE
+                centroid DOUBLE,
+                as_of_month TEXT
             );
             """,
             {
@@ -1201,9 +1227,11 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "metric": "TEXT",
                 "bucket_index": "INTEGER",
                 "centroid": "DOUBLE",
+                "as_of_month": "TEXT",
             },
         )
 
+        # Legacy index on (hazard_code, metric, bucket_index) for seed/default rows
         con.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS ux_bucket_centroids
@@ -1214,6 +1242,39 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         for metric, specs in BUCKET_SPECS.items():
             _seed_bucket_definitions(con, metric, specs)
             _seed_bucket_centroids(con, metric, specs)
+
+        # --- eiv_scores table (Phase 1 — EIV scoring) ---
+        _ensure_table_and_columns(
+            con,
+            "eiv_scores",
+            """
+            CREATE TABLE IF NOT EXISTS eiv_scores (
+                question_id TEXT,
+                horizon_m INTEGER,
+                metric TEXT,
+                model_name TEXT,
+                eiv_forecast DOUBLE,
+                actual_value DOUBLE,
+                log_ratio_err DOUBLE,
+                within_20pct BOOLEAN,
+                centroid_version TEXT,
+                created_at TIMESTAMP DEFAULT now(),
+                PRIMARY KEY (question_id, horizon_m, model_name)
+            );
+            """,
+            {
+                "question_id": "TEXT",
+                "horizon_m": "INTEGER",
+                "metric": "TEXT",
+                "model_name": "TEXT",
+                "eiv_forecast": "DOUBLE",
+                "actual_value": "DOUBLE",
+                "log_ratio_err": "DOUBLE",
+                "within_20pct": "BOOLEAN",
+                "centroid_version": "TEXT",
+                "created_at": "TIMESTAMP",
+            },
+        )
 
         _ensure_table_and_columns(
             con,
@@ -1473,6 +1534,44 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "forecast_issue_date": "DATE",
                 "target_month": "DATE",
                 "model_version": "VARCHAR",
+                "created_at": "TIMESTAMP",
+            },
+        )
+
+        _ensure_table_and_columns(
+            con,
+            "views_scored_forecasts",
+            """
+            CREATE TABLE IF NOT EXISTS views_scored_forecasts (
+                question_id     TEXT,
+                horizon_m       INTEGER,
+                views_value     DOUBLE,
+                views_issue_date TEXT,
+                views_model_version TEXT,
+                synthetic_spd   TEXT,
+                sigma_used      DOUBLE,
+                resolved_value  DOUBLE,
+                resolved_bucket INTEGER,
+                brier           DOUBLE,
+                log_score       DOUBLE,
+                crps            DOUBLE,
+                created_at      TIMESTAMP DEFAULT now(),
+                PRIMARY KEY (question_id, horizon_m)
+            )
+            """,
+            {
+                "question_id": "TEXT",
+                "horizon_m": "INTEGER",
+                "views_value": "DOUBLE",
+                "views_issue_date": "TEXT",
+                "views_model_version": "TEXT",
+                "synthetic_spd": "TEXT",
+                "sigma_used": "DOUBLE",
+                "resolved_value": "DOUBLE",
+                "resolved_bucket": "INTEGER",
+                "brier": "DOUBLE",
+                "log_score": "DOUBLE",
+                "crps": "DOUBLE",
                 "created_at": "TIMESTAMP",
             },
         )

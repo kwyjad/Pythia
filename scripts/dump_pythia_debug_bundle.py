@@ -10,9 +10,11 @@ import csv
 import gzip
 import hashlib
 import json
+import logging
 import math
 import os
 import re
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +31,8 @@ try:
     from forecaster.prompts import _bucket_labels_for_question  # type: ignore
 except ImportError:  # pragma: no cover - optional helper
     _bucket_labels_for_question = None
+
+LOG = logging.getLogger(__name__)
 
 
 def _fetch_llm_rows(
@@ -3093,7 +3097,9 @@ def emit_health_report_json(data: BundleData, out_dir: Path) -> None:
 # Emitter: Question Metrics CSV
 # ---------------------------------------------------------------------------
 
-def emit_question_metrics_csv(data: BundleData, out_dir: Path) -> None:
+def emit_question_metrics_csv(
+    data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
+) -> None:
     """Write per-question metrics to CSV."""
     if not data.questions:
         return
@@ -3102,12 +3108,35 @@ def emit_question_metrics_csv(data: BundleData, out_dir: Path) -> None:
     metrics_by_qid = {str(r["question_id"]): r for r in data.question_run_metrics}
     web_by_qid = {str(r.get("question_id")): r for r in data.question_web_rows}
 
+    # Build triage lookup by (iso3, hazard_code) for the new columns
+    triage_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    if data.hs_run_id:
+        try:
+            triage_rows = _fetch_llm_rows(
+                con,
+                """
+                SELECT iso3, hazard_code, triage_score, rc_likelihood, rc_level, rc_direction, track
+                FROM hs_triage
+                WHERE run_id = ?
+                """,
+                [data.hs_run_id],
+            )
+            for tr in triage_rows:
+                key = (
+                    str(tr.get("iso3") or "").upper(),
+                    str(tr.get("hazard_code") or "").upper(),
+                )
+                triage_by_key[key] = tr
+        except Exception:
+            pass
+
     fieldnames = [
         "question_id", "iso3", "hazard_code", "metric", "target_month",
         "triage_tier", "spd_status", "scenario_status",
         "wall_ms", "compute_ms", "queue_ms", "cost_usd",
         "n_spd_models_expected", "n_spd_models_ok", "missing_model_ids",
         "research_grounded", "n_verified_sources", "n_unverified_sources",
+        "triage_score", "rc_likelihood", "rc_level", "rc_direction", "track",
     ]
 
     out_path = out_dir / f"question_metrics__{data.out_run_id}.csv"
@@ -3122,6 +3151,13 @@ def emit_question_metrics_csv(data: BundleData, out_dir: Path) -> None:
             scenario = scenario_by_qid.get(qid, {})
             metrics = metrics_by_qid.get(qid, {})
             web = web_by_qid.get(qid, {})
+
+            triage_key = (
+                str(q.get("iso3") or "").upper(),
+                str(q.get("hazard_code") or "").upper(),
+            )
+            triage = triage_by_key.get(triage_key, {})
+
             writer.writerow({
                 "question_id": qid,
                 "iso3": q.get("iso3") or "",
@@ -3141,6 +3177,11 @@ def emit_question_metrics_csv(data: BundleData, out_dir: Path) -> None:
                 "research_grounded": web.get("grounded", ""),
                 "n_verified_sources": web.get("n_verified", ""),
                 "n_unverified_sources": web.get("n_unverified", ""),
+                "triage_score": triage.get("triage_score") or "",
+                "rc_likelihood": triage.get("rc_likelihood") or "",
+                "rc_level": triage.get("rc_level") or "",
+                "rc_direction": triage.get("rc_direction") or "",
+                "track": triage.get("track") or q.get("track") or "",
             })
     print(f"Wrote question metrics to {out_path}")
 
@@ -3298,6 +3339,675 @@ def emit_spd_tables_csv(data: BundleData, con: duckdb.DuckDBPyConnection, out_di
             writer.writerow(dict(zip(fieldnames, row)))
 
     print(f"Wrote SPD tables to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Emitter: RC Triage Summary CSV
+# ---------------------------------------------------------------------------
+
+def emit_rc_triage_summary_csv(
+    data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
+) -> None:
+    """Export a CSV with one row per (iso3, hazard_code) showing the full RC + triage picture."""
+    if not data.hs_run_id:
+        return
+
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            """
+            SELECT
+                iso3,
+                hazard_code,
+                rc_likelihood,
+                rc_magnitude,
+                rc_score,
+                rc_level,
+                rc_direction,
+                rc_window,
+                triage_score,
+                tier,
+                track,
+                need_full_spd,
+                drivers,
+                confidence_note,
+                status
+            FROM hs_triage
+            WHERE run_id = ?
+            ORDER BY triage_score DESC
+            """,
+            [data.hs_run_id],
+        )
+    except Exception as exc:
+        LOG.warning("emit_rc_triage_summary_csv failed: %s", exc)
+        return
+
+    fieldnames = [
+        "iso3", "hazard_code",
+        "rc_likelihood", "rc_magnitude", "rc_score", "rc_level", "rc_direction", "rc_window",
+        "triage_score", "tier", "track", "need_full_spd",
+        "drivers", "confidence_note", "status",
+    ]
+
+    out_path = out_dir / f"rc_triage_summary__{data.out_run_id}.csv"
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            drivers_raw = row.get("drivers") or ""
+            if isinstance(drivers_raw, str):
+                try:
+                    drivers_list = json.loads(drivers_raw)
+                except Exception:
+                    drivers_list = [d.strip() for d in drivers_raw.split(",") if d.strip()]
+            elif isinstance(drivers_raw, list):
+                drivers_list = drivers_raw
+            else:
+                drivers_list = []
+            drivers_str = "|".join(str(d) for d in drivers_list[:3])
+
+            writer.writerow({
+                "iso3": row.get("iso3") or "",
+                "hazard_code": row.get("hazard_code") or "",
+                "rc_likelihood": row.get("rc_likelihood") or "",
+                "rc_magnitude": row.get("rc_magnitude") or "",
+                "rc_score": row.get("rc_score") or "",
+                "rc_level": row.get("rc_level") or "",
+                "rc_direction": row.get("rc_direction") or "",
+                "rc_window": row.get("rc_window") or "",
+                "triage_score": row.get("triage_score") or "",
+                "tier": row.get("tier") or "",
+                "track": row.get("track") or "",
+                "need_full_spd": row.get("need_full_spd") or "",
+                "drivers": drivers_str,
+                "confidence_note": row.get("confidence_note") or "",
+                "status": row.get("status") or "",
+            })
+
+    print(f"Wrote RC triage summary to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Emitter: RC Pass Detail CSV
+# ---------------------------------------------------------------------------
+
+def emit_rc_pass_detail_csv(
+    data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
+) -> None:
+    """Export a CSV showing Pass 1 vs Pass 2 RC values before merge."""
+    if not data.hs_run_id:
+        return
+
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            """
+            SELECT
+                iso3,
+                hazard_code,
+                model_id,
+                provider,
+                response_text,
+                error_text,
+                elapsed_ms,
+                cost_usd
+            FROM llm_calls
+            WHERE phase = 'hs_triage'
+              AND hazard_code LIKE 'RC_%'
+              AND hs_run_id = ?
+            ORDER BY iso3, hazard_code, timestamp
+            """,
+            [data.hs_run_id],
+        )
+    except Exception as exc:
+        LOG.warning("emit_rc_pass_detail_csv failed: %s", exc)
+        return
+
+    fieldnames = [
+        "iso3", "hazard_code", "pass_number",
+        "model_id", "provider",
+        "likelihood", "magnitude", "direction", "window",
+        "elapsed_ms", "cost_usd",
+        "error_text", "rationale_bullets",
+    ]
+
+    # Track pass numbers per (iso3, hazard_code)
+    pass_counters: dict[tuple[str, str], int] = {}
+
+    out_path = out_dir / f"rc_pass_detail__{data.out_run_id}.csv"
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            iso3 = row.get("iso3") or ""
+            hazard_code = row.get("hazard_code") or ""
+            key = (iso3, hazard_code)
+            pass_counters[key] = pass_counters.get(key, 0) + 1
+            pass_number = min(pass_counters[key], 2)
+
+            # Parse response JSON for RC values
+            likelihood = ""
+            magnitude = ""
+            direction = ""
+            window = ""
+            rationale_bullets: list[str] = []
+            resp_text = row.get("response_text") or ""
+            try:
+                resp = json.loads(resp_text) if resp_text.strip() else {}
+                if isinstance(resp, dict):
+                    likelihood = resp.get("likelihood") or resp.get("rc_likelihood") or ""
+                    magnitude = resp.get("magnitude") or resp.get("rc_magnitude") or ""
+                    direction = resp.get("direction") or resp.get("rc_direction") or ""
+                    window = resp.get("window") or resp.get("rc_window") or ""
+                    rationale = resp.get("rationale") or resp.get("rationale_bullets") or []
+                    if isinstance(rationale, list):
+                        rationale_bullets = [str(r) for r in rationale[:2]]
+                    elif isinstance(rationale, str):
+                        rationale_bullets = [rationale[:200]]
+            except Exception:
+                pass
+
+            error_text = (row.get("error_text") or "")[:200]
+
+            writer.writerow({
+                "iso3": iso3,
+                "hazard_code": hazard_code,
+                "pass_number": pass_number,
+                "model_id": row.get("model_id") or "",
+                "provider": row.get("provider") or "",
+                "likelihood": likelihood,
+                "magnitude": magnitude,
+                "direction": direction,
+                "window": window,
+                "elapsed_ms": row.get("elapsed_ms") or "",
+                "cost_usd": row.get("cost_usd") or "",
+                "error_text": error_text,
+                "rationale_bullets": "|".join(rationale_bullets),
+            })
+
+    print(f"Wrote RC pass detail to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Emitter: Data Inject Inventory CSV
+# ---------------------------------------------------------------------------
+
+def _safe_table_count_where(
+    con: duckdb.DuckDBPyConnection, table: str, where: str, params: list[Any]
+) -> int | None:
+    """Return count from a table with a WHERE clause, or None if table doesn't exist."""
+    try:
+        row = con.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", params).fetchone()
+        return int(row[0]) if row else None
+    except Exception:
+        return None
+
+
+def _safe_table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
+    try:
+        con.execute(f"SELECT 1 FROM {table} LIMIT 0")
+        return True
+    except Exception:
+        return False
+
+
+def emit_data_inject_inventory_csv(
+    data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
+) -> None:
+    """Export a CSV showing which structured data sources were available for each country."""
+    if not data.resolved_countries_sorted:
+        return
+
+    fieldnames = [
+        "iso3", "country_name",
+        "acled_fatalities_months", "idmc_displacement_months",
+        "ifrc_pa_months", "conflict_forecasts_available",
+        "ipc_available", "reliefweb_reports_count",
+        "hdx_signals_count", "enso_loaded",
+        "seasonal_tc_loaded", "nmme_available",
+    ]
+
+    # Check which tables exist once
+    has_acled = _safe_table_exists(con, "acled_monthly_fatalities")
+    has_facts_deltas = _safe_table_exists(con, "facts_deltas")
+    has_facts_resolved = _safe_table_exists(con, "facts_resolved")
+    has_conflict_forecasts = _safe_table_exists(con, "conflict_forecasts")
+    has_ipc_phases = _safe_table_exists(con, "ipc_phases")
+    has_acaps = _safe_table_exists(con, "acaps_inform_severity")
+    has_reliefweb = _safe_table_exists(con, "reliefweb_reports")
+    has_seasonal_forecasts = _safe_table_exists(con, "seasonal_forecasts")
+
+    # Check cache files
+    enso_loaded = any(
+        Path(p).exists()
+        for p in [
+            "data/cache/enso_forecast.json",
+            "data/enso_forecast.json",
+            "cache/enso_forecast.json",
+        ]
+    )
+    seasonal_tc_loaded = any(
+        Path(p).exists()
+        for p in [
+            "data/cache/seasonal_tc_forecast.json",
+            "data/seasonal_tc_forecast.json",
+            "cache/seasonal_tc_forecast.json",
+        ]
+    )
+
+    # Try loading country names from hs_triage
+    country_names: dict[str, str] = {}
+    try:
+        name_rows = con.execute(
+            "SELECT DISTINCT iso3, country_name FROM hs_triage WHERE country_name IS NOT NULL"
+        ).fetchall()
+        for iso3, name in name_rows:
+            if iso3 and name:
+                country_names[str(iso3).upper()] = str(name)
+    except Exception:
+        pass
+
+    out_path = out_dir / f"data_inject_inventory__{data.out_run_id}.csv"
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for iso3 in data.resolved_countries_sorted:
+            acled_months = _safe_table_count_where(
+                con, "acled_monthly_fatalities", "upper(iso3) = ?", [iso3.upper()]
+            ) if has_acled else None
+
+            idmc_months = _safe_table_count_where(
+                con, "facts_deltas",
+                "upper(iso3) = ? AND metric LIKE '%idmc%'",
+                [iso3.upper()],
+            ) if has_facts_deltas else None
+
+            ifrc_months = _safe_table_count_where(
+                con, "facts_resolved",
+                "upper(iso3) = ? AND hazard_code IN ('FL','TC','DR','HW','EQ')",
+                [iso3.upper()],
+            ) if has_facts_resolved else None
+
+            conflict_avail = bool(_safe_table_count_where(
+                con, "conflict_forecasts", "upper(iso3) = ?", [iso3.upper()]
+            )) if has_conflict_forecasts else False
+
+            ipc_avail = False
+            if has_ipc_phases:
+                cnt = _safe_table_count_where(con, "ipc_phases", "upper(iso3) = ?", [iso3.upper()])
+                ipc_avail = bool(cnt)
+            if not ipc_avail and has_acaps:
+                cnt = _safe_table_count_where(con, "acaps_inform_severity", "upper(iso3) = ?", [iso3.upper()])
+                ipc_avail = bool(cnt)
+
+            reliefweb_count = _safe_table_count_where(
+                con, "reliefweb_reports", "upper(iso3) = ?", [iso3.upper()]
+            ) if has_reliefweb else None
+
+            nmme_avail = bool(_safe_table_count_where(
+                con, "seasonal_forecasts", "upper(iso3) = ?", [iso3.upper()]
+            )) if has_seasonal_forecasts else False
+
+            writer.writerow({
+                "iso3": iso3,
+                "country_name": country_names.get(iso3.upper(), ""),
+                "acled_fatalities_months": acled_months if acled_months is not None else "",
+                "idmc_displacement_months": idmc_months if idmc_months is not None else "",
+                "ifrc_pa_months": ifrc_months if ifrc_months is not None else "",
+                "conflict_forecasts_available": conflict_avail,
+                "ipc_available": ipc_avail,
+                "reliefweb_reports_count": reliefweb_count if reliefweb_count is not None else "",
+                "hdx_signals_count": "",  # populated from cached CSV if available
+                "enso_loaded": enso_loaded,
+                "seasonal_tc_loaded": seasonal_tc_loaded,
+                "nmme_available": nmme_avail,
+            })
+
+    print(f"Wrote data inject inventory to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Emitter: Timing Breakdown CSV
+# ---------------------------------------------------------------------------
+
+def emit_timing_breakdown_csv(
+    data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
+) -> None:
+    """Export a CSV with per-country timing breakdown from llm_calls."""
+    if not data.hs_run_id:
+        return
+
+    # Map phases to their column prefixes
+    phase_map = {
+        "rc": ("hs_triage",),
+        "triage": ("hs_triage",),
+        "research": ("research_v2", "research_web_research", "hs_web_research"),
+        "spd": ("spd_v2",),
+    }
+
+    # Build the combined predicate from data
+    predicate_parts: list[str] = []
+    params: list[Any] = []
+    if data.hs_run_id:
+        predicate_parts.append("hs_run_id = ?")
+        params.append(data.hs_run_id)
+    if data.forecaster_run_id:
+        predicate_parts.append("run_id = ?")
+        params.append(data.forecaster_run_id)
+
+    if not predicate_parts:
+        return
+
+    scope = " OR ".join(predicate_parts)
+
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT
+                iso3,
+                phase,
+                call_type,
+                MIN(timestamp) AS min_ts,
+                MAX(timestamp) AS max_ts,
+                CAST(date_diff('millisecond', MIN(timestamp), MAX(timestamp)) AS BIGINT) AS elapsed_ms,
+                COUNT(*) AS n_calls
+            FROM llm_calls
+            WHERE ({scope})
+              AND iso3 IS NOT NULL
+              AND timestamp IS NOT NULL
+            GROUP BY iso3, phase, call_type
+            ORDER BY iso3, phase
+            """,
+            params,
+        )
+    except Exception as exc:
+        LOG.warning("emit_timing_breakdown_csv failed: %s", exc)
+        return
+
+    # Aggregate by iso3
+    iso3_data: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        iso3 = str(row.get("iso3") or "")
+        if not iso3:
+            continue
+        entry = iso3_data.setdefault(iso3, {
+            "iso3": iso3,
+            "rc_start_ts": None, "rc_end_ts": None, "rc_elapsed_ms": 0,
+            "triage_start_ts": None, "triage_end_ts": None, "triage_elapsed_ms": 0,
+            "research_start_ts": None, "research_end_ts": None, "research_elapsed_ms": 0,
+            "spd_start_ts": None, "spd_end_ts": None, "spd_elapsed_ms": 0,
+            "total_elapsed_ms": 0,
+            "n_rc_calls": 0, "n_triage_calls": 0, "n_research_calls": 0, "n_spd_calls": 0,
+        })
+
+        phase = str(row.get("phase") or row.get("call_type") or "")
+        min_ts = row.get("min_ts")
+        max_ts = row.get("max_ts")
+        elapsed = int(row.get("elapsed_ms") or 0)
+        n_calls = int(row.get("n_calls") or 0)
+
+        # Determine which prefix this maps to
+        hazard_like_rc = "RC_" in str(row.get("hazard_code") or "")
+        for prefix, phases in phase_map.items():
+            if phase in phases or (prefix == "rc" and hazard_like_rc):
+                start_key = f"{prefix}_start_ts"
+                end_key = f"{prefix}_end_ts"
+                elapsed_key = f"{prefix}_elapsed_ms"
+                calls_key = f"n_{prefix}_calls"
+
+                if min_ts and (entry[start_key] is None or str(min_ts) < str(entry[start_key])):
+                    entry[start_key] = min_ts
+                if max_ts and (entry[end_key] is None or str(max_ts) > str(entry[end_key])):
+                    entry[end_key] = max_ts
+                entry[elapsed_key] = entry.get(elapsed_key, 0) + elapsed
+                entry[calls_key] = entry.get(calls_key, 0) + n_calls
+
+    # Compute totals
+    for entry in iso3_data.values():
+        entry["total_elapsed_ms"] = (
+            entry.get("rc_elapsed_ms", 0) +
+            entry.get("triage_elapsed_ms", 0) +
+            entry.get("research_elapsed_ms", 0) +
+            entry.get("spd_elapsed_ms", 0)
+        )
+
+    fieldnames = [
+        "iso3",
+        "rc_start_ts", "rc_end_ts", "rc_elapsed_ms",
+        "triage_start_ts", "triage_end_ts", "triage_elapsed_ms",
+        "research_start_ts", "research_end_ts", "research_elapsed_ms",
+        "spd_start_ts", "spd_end_ts", "spd_elapsed_ms",
+        "total_elapsed_ms",
+        "n_rc_calls", "n_triage_calls", "n_research_calls", "n_spd_calls",
+    ]
+
+    out_path = out_dir / f"timing_breakdown__{data.out_run_id}.csv"
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for iso3 in sorted(iso3_data.keys()):
+            entry = iso3_data[iso3]
+            writer.writerow({fn: entry.get(fn, "") for fn in fieldnames})
+
+    print(f"Wrote timing breakdown to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Emitter: Model Config Snapshot
+# ---------------------------------------------------------------------------
+
+def emit_model_config_snapshot(
+    data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
+) -> None:
+    """Export a JSON file capturing the runtime model configuration."""
+    env_var_names = [
+        "PYTHIA_HS_FALLBACK_MODEL_SPECS",
+        "PYTHIA_WEB_RESEARCH_MODEL_ID",
+        "PYTHIA_RETRIEVER_ENABLED",
+        "PYTHIA_SPD_WEB_SEARCH_ENABLED",
+        "PYTHIA_SPD_GOOGLE_WEB_SEARCH_ENABLED",
+        "PYTHIA_SPD_V2_USE_BAYESMC",
+        "PYTHIA_SPD_V2_WRITE_BOTH",
+        "PYTHIA_SPD_V2_DUAL_RUN",
+        "PYTHIA_CONFIG_PROFILE",
+        "PYTHIA_ADVERSARIAL_CHECK_ENABLED",
+        "PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED",
+    ]
+
+    env_vars = {}
+    for name in env_var_names:
+        val = os.getenv(name)
+        env_vars[name] = val if val is not None else "<unset>"
+
+    # Query actual models used from llm_calls
+    actual_models: dict[str, list[dict[str, str]]] = {}
+    predicate_parts: list[str] = []
+    params: list[Any] = []
+    if data.hs_run_id:
+        predicate_parts.append("hs_run_id = ?")
+        params.append(data.hs_run_id)
+    if data.forecaster_run_id:
+        predicate_parts.append("run_id = ?")
+        params.append(data.forecaster_run_id)
+
+    if predicate_parts:
+        scope = " OR ".join(predicate_parts)
+        try:
+            rows = con.execute(
+                f"""
+                SELECT DISTINCT phase, provider, model_id
+                FROM llm_calls
+                WHERE ({scope})
+                  AND provider IS NOT NULL
+                  AND model_id IS NOT NULL
+                ORDER BY phase, provider, model_id
+                """,
+                params,
+            ).fetchall()
+            for phase, provider, model_id in rows:
+                phase_str = str(phase or "")
+                actual_models.setdefault(phase_str, []).append({
+                    "provider": str(provider or ""),
+                    "model_id": str(model_id or ""),
+                })
+        except Exception:
+            pass
+
+    # Build the SPD ensemble models list
+    spd_ensemble_list: list[str] = []
+    try:
+        spec_override = os.getenv("PYTHIA_SPD_ENSEMBLE_SPECS", "").strip()
+        specs = parse_ensemble_specs(spec_override) if spec_override else SPD_ENSEMBLE
+        spd_ensemble_list = [spec.model_id for spec in specs if getattr(spec, "model_id", "")]
+    except Exception:
+        pass
+
+    config = {
+        "hs_run_id": data.hs_run_id or "",
+        "forecaster_run_id": data.forecaster_run_id or "",
+        "generated_at": data.now,
+        "models": {
+            "spd_track1_ensemble": spd_ensemble_list,
+        },
+        "env_vars": env_vars,
+        "actual_models_used": actual_models,
+    }
+
+    out_path = out_dir / f"model_config__{data.out_run_id}.json"
+    out_path.write_text(json.dumps(config, indent=2, default=str), encoding="utf-8")
+    print(f"Wrote model config snapshot to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Emitter: Grounding Detail CSV
+# ---------------------------------------------------------------------------
+
+def emit_grounding_detail_csv(
+    data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
+) -> None:
+    """Export a CSV with per-call grounding results."""
+    predicate_parts: list[str] = []
+    params: list[Any] = []
+    if data.hs_run_id:
+        predicate_parts.append("hs_run_id = ?")
+        params.append(data.hs_run_id)
+    if data.forecaster_run_id:
+        predicate_parts.append("run_id = ?")
+        params.append(data.forecaster_run_id)
+
+    if not predicate_parts:
+        return
+
+    scope = " OR ".join(predicate_parts)
+
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT
+                iso3,
+                hazard_code,
+                phase,
+                model_id,
+                response_text,
+                error_text,
+                prompt_text,
+                elapsed_ms,
+                timestamp
+            FROM llm_calls
+            WHERE ({scope})
+              AND (
+                phase IN ('hs_web_research', 'research_web_research')
+                OR phase LIKE '%web_research%'
+                OR hazard_code LIKE '%grounding%'
+              )
+            ORDER BY iso3, hazard_code, timestamp
+            """,
+            params,
+        )
+    except Exception as exc:
+        LOG.warning("emit_grounding_detail_csv failed: %s", exc)
+        return
+
+    fieldnames = [
+        "iso3", "hazard_code", "phase",
+        "model_id", "grounded", "n_sources",
+        "query", "error_code", "elapsed_ms", "timestamp",
+    ]
+
+    out_path = out_dir / f"grounding_detail__{data.out_run_id}.csv"
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            resp_text = row.get("response_text") or ""
+            grounded = False
+            n_sources = 0
+            try:
+                resp = json.loads(resp_text) if resp_text.strip() else {}
+                if isinstance(resp, dict):
+                    grounded = bool(resp.get("grounded") or resp.get("sources"))
+                    sources = resp.get("sources") or []
+                    n_sources = len(sources) if isinstance(sources, list) else 0
+            except Exception:
+                pass
+
+            error_text = (row.get("error_text") or "")[:200]
+            prompt_text = (row.get("prompt_text") or "")[:200]
+
+            writer.writerow({
+                "iso3": row.get("iso3") or "",
+                "hazard_code": row.get("hazard_code") or "",
+                "phase": row.get("phase") or "",
+                "model_id": row.get("model_id") or "",
+                "grounded": grounded,
+                "n_sources": n_sources,
+                "query": prompt_text,
+                "error_code": error_text,
+                "elapsed_ms": row.get("elapsed_ms") or "",
+                "timestamp": str(row.get("timestamp") or ""),
+            })
+
+    print(f"Wrote grounding detail to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Flat ZIP packaging
+# ---------------------------------------------------------------------------
+
+def build_flat_zip(out_dir: Path, zip_path: Path) -> Path:
+    """Package all artifact files into a single flat zip (no subdirectories).
+
+    Only includes diagnostic/log files, NOT the DuckDB database.
+    Excludes any file ending in .duckdb, .db, or .wal.
+    """
+    EXCLUDE_EXTENSIONS = {".duckdb", ".db", ".wal", ".duckdb.wal"}
+    EXCLUDE_SUFFIXES = {".pyc"}
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file_path in sorted(out_dir.rglob("*")):
+            if not file_path.is_file():
+                continue
+            if file_path.suffix in EXCLUDE_EXTENSIONS:
+                continue
+            if file_path.suffix in EXCLUDE_SUFFIXES:
+                continue
+            if "__pycache__" in str(file_path):
+                continue
+            if ".git" in file_path.parts:
+                continue
+            # Skip the zip file itself
+            if file_path == zip_path:
+                continue
+            # Flatten: use just the filename, no subdirectory structure
+            arcname = file_path.name
+            # Handle name collisions by prefixing with parent dir
+            if arcname in {e.filename for e in zf.filelist}:
+                arcname = f"{file_path.parent.name}__{arcname}"
+            zf.write(file_path, arcname)
+
+    return zip_path
 
 
 def build_triage_only_bundle_markdown(
@@ -4334,10 +5044,40 @@ def main() -> None:
 
             emit_executive_summary(data, out_dir)
             emit_health_report_json(data, out_dir)
-            emit_question_metrics_csv(data, out_dir)
+            emit_question_metrics_csv(data, con, out_dir)
             emit_evidence_packs_csv(data, out_dir)
             emit_llm_calls_detail_jsonl(data, con, out_dir)
             emit_spd_tables_csv(data, con, out_dir)
+
+            # New emitters — each wrapped in try/except so failures are non-fatal
+            for emitter_name, emitter_fn in [
+                ("rc_triage_summary", lambda: emit_rc_triage_summary_csv(data, con, out_dir)),
+                ("rc_pass_detail", lambda: emit_rc_pass_detail_csv(data, con, out_dir)),
+                ("data_inject_inventory", lambda: emit_data_inject_inventory_csv(data, con, out_dir)),
+                ("timing_breakdown", lambda: emit_timing_breakdown_csv(data, con, out_dir)),
+                ("model_config_snapshot", lambda: emit_model_config_snapshot(data, con, out_dir)),
+                ("grounding_detail", lambda: emit_grounding_detail_csv(data, con, out_dir)),
+            ]:
+                try:
+                    emitter_fn()
+                except Exception as exc:
+                    LOG.warning("Emitter %s failed: %s", emitter_name, exc)
+
+            # Package all artifacts into a flat zip
+            run_id = data.out_run_id
+            zip_path = out_dir / f"pythia_debug_bundle__{run_id}.zip"
+            try:
+                build_flat_zip(out_dir, zip_path)
+                LOG.info(
+                    "Debug bundle zip: %s (%.1f KB)",
+                    zip_path,
+                    zip_path.stat().st_size / 1024,
+                )
+                print(
+                    f"Debug bundle zip: {zip_path} ({zip_path.stat().st_size / 1024:.1f} KB)"
+                )
+            except Exception as exc:
+                LOG.warning("Failed to build debug bundle zip: %s", exc)
     finally:
         duckdb_io.close_db(con)
 
