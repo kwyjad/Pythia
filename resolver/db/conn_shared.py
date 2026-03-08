@@ -33,7 +33,7 @@ _DIAG_LOGGER = get_diag_logger(f"{__name__}.diag")
 
 
 def _cache_mode() -> str:
-    mode = os.getenv("RESOLVER_CONN_CACHE_MODE", "process").strip().lower()
+    mode = os.getenv("RESOLVER_CONN_CACHE_MODE", "thread").strip().lower()
     if mode not in {"process", "thread"}:
         return "process"
     return mode

@@ -13,6 +13,7 @@ import os
 import platform
 import re
 import sys
+import threading
 import uuid
 import datetime as dt
 import logging
@@ -136,7 +137,16 @@ DEFAULT_DB_URL = os.environ.get(
     "RESOLVER_DB_URL", f"duckdb:///{ROOT / 'db' / 'resolver.duckdb'}"
 )
 
-_DB_CACHE: dict[str, "duckdb.DuckDBPyConnection"] = {}
+_DB_CACHE_TLS = threading.local()
+
+
+def _get_db_cache() -> dict[str, "duckdb.DuckDBPyConnection"]:
+    """Return a thread-local DuckDB connection cache."""
+    cache = getattr(_DB_CACHE_TLS, "cache", None)
+    if cache is None:
+        cache = {}
+        _DB_CACHE_TLS.cache = cache
+    return cache
 
 
 @dataclass
@@ -1203,21 +1213,22 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
     """Return a DuckDB connection for the given path or URL."""
 
     url, normalized_path = _normalize_duckdb_target(path_or_url)
-    cached = _DB_CACHE.get(normalized_path)
+    db_cache = _get_db_cache()
+    cached = db_cache.get(normalized_path)
     cache_disabled = os.getenv("RESOLVER_DISABLE_CONN_CACHE") == "1"
 
     force_reopen = False
 
     if cached is not None:
         if getattr(cached, "_closed", False):
-            _DB_CACHE.pop(normalized_path, None)
+            db_cache.pop(normalized_path, None)
             cached = None
             force_reopen = True
         else:
             healthcheck = getattr(cached, "_healthcheck", None)
             if callable(healthcheck) and not healthcheck():
                 cached = None
-                _DB_CACHE.pop(normalized_path, None)
+                db_cache.pop(normalized_path, None)
                 force_reopen = True
             else:
                 resolved_path = (
@@ -1256,7 +1267,7 @@ def get_db(path_or_url: str | None = None) -> "duckdb.DuckDBPyConnection":
     if cache_disabled:
         cache_event = "miss"
     else:
-        _DB_CACHE[normalized_path] = conn
+        db_cache[normalized_path] = conn
     log_json(
         DIAG_LOGGER,
         "db_open",
@@ -1291,9 +1302,10 @@ def close_db(conn: "duckdb.DuckDBPyConnection" | None) -> None:
     try:
         conn.close()
     finally:
-        for key, cached in list(_DB_CACHE.items()):
+        db_cache = _get_db_cache()
+        for key, cached in list(db_cache.items()):
             if cached is conn:
-                _DB_CACHE.pop(key, None)
+                db_cache.pop(key, None)
 
 
 def write_facts_tables(
