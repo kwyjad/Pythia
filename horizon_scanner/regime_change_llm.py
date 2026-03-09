@@ -107,18 +107,18 @@ async def _call_rc_model(
     """Call the LLM for regime-change assessment.
 
     Pass 1: Primary RC model (default: gemini-3.1-pro-preview)
-    Pass 2: Secondary RC model for diversity (default: gpt-5.2)
+    Pass 2: Secondary RC model for diversity (default: gemini-3-flash-preview)
 
     Override via env vars:
       PYTHIA_RC_MODEL_PASS1=google:gemini-3.1-pro-preview
-      PYTHIA_RC_MODEL_PASS2=openai:gpt-5.2
+      PYTHIA_RC_MODEL_PASS2=google:gemini-3-flash-preview
 
     Returns (text, usage, error, model_spec).
     """
 
     if pass_idx == 2:
-        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS2", "openai:gpt-5.2")
-        default_name = "GPT-5.2"
+        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS2", "google:gemini-3-flash-preview")
+        default_name = "Gemini Flash"
     else:
         model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS1", f"google:{resolve_hs_model()}")
         default_name = "Gemini"
