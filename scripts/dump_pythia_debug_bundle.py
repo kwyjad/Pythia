@@ -1529,19 +1529,17 @@ def _scenario_expected(
     *,
     track: int | None = None,
 ) -> tuple[bool, str]:
-    hz = (hazard_code or "").upper()
     tier = str((hs_entry or {}).get("tier") or "").lower()
 
     # Track 2 questions intentionally skip scenarios (single Gemini Flash model).
     if track == 2:
         return False, "track_2"
 
-    enabled_hazards = {"ACE", "DI"}
-
-    if hz not in enabled_hazards:
-        return False, "hazard_not_enabled"
+    # Non-priority (e.g. quiet) tier questions are skipped by design.
     if tier and tier != "priority":
-        return False, f"triage_tier:{tier}"
+        return False, "quiet_tier"
+
+    # Track 1 / NULL, priority tier — scenario is expected.
     return True, ""
 
 
@@ -1660,7 +1658,8 @@ def _load_questions_for_run(con: duckdb.DuckDBPyConnection, run_id: str) -> list
             q.target_month,
             q.window_start_date,
             q.window_end_date,
-            q.wording
+            q.wording,
+            q.track
         FROM questions q
         JOIN forecasts_ensemble fe
           ON fe.question_id = q.question_id
@@ -1682,6 +1681,7 @@ def _load_questions_for_run(con: duckdb.DuckDBPyConnection, run_id: str) -> list
             window_start_date,
             window_end_date,
             wording,
+            track,
         ) = row
         out.append(
             {
@@ -1694,6 +1694,7 @@ def _load_questions_for_run(con: duckdb.DuckDBPyConnection, run_id: str) -> list
                 "window_start_date": window_start_date,
                 "window_end_date": window_end_date,
                 "wording": wording,
+                "track": track,
             }
         )
     return out

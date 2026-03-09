@@ -4,7 +4,7 @@
 # See the LICENSE file in the project root for details.
 
 ---
-name: Ingest NMME Seasonal Forecasts
+name: Ingest Structured Data
 
 concurrency:
   group: pythia-resolver-db
@@ -13,18 +13,24 @@ concurrency:
 "on":
   workflow_dispatch:
     inputs:
-      year_month:
-        description: "Issue month as YYYYMM (auto-detects if empty)"
+      iso3:
+        description: "Optional comma-separated ISO3 filter (default: all countries)"
         required: false
         default: ""
+        type: string
+      sources:
+        description: "Optional source filter: acaps ipc reliefweb (default: all)"
+        required: false
+        default: ""
+        type: string
       dry_run:
         description: "Fetch and process but do not write to DuckDB"
         required: false
-        default: "false"
+        default: false
         type: boolean
   schedule:
-    # Run at 06:00 UTC on the 10th of each month (CPC publishes ~9th).
-    - cron: "0 6 10 * *"
+    # Run at 00:00 UTC on the 28th of each month (same day as TC refresh).
+    - cron: "0 0 28 * *"
 
 permissions:
   contents: read
@@ -35,27 +41,32 @@ env:
 
 jobs:
   ingest:
-    name: Fetch & ingest NMME seasonal forecasts
+    name: Ingest conflict forecasts + structured data
     runs-on: ubuntu-latest
     env:
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      ACLED_API_KEY: ${{ secrets.ACLED_API_KEY }}
+      ACAPS_USERNAME: ${{ secrets.ACAPS_USERNAME }}
+      ACAPS_PASSWORD: ${{ secrets.ACAPS_PASSWORD }}
+      IPC_API_KEY: ${{ secrets.IPC_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
       SIGNATURE_OPTIONAL_TABLES: scenarios
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set up Python
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          set -e
+          python -m pip install --upgrade pip
           pip install -r python_library_requirements.txt
 
       - name: Install gh CLI
@@ -69,6 +80,7 @@ jobs:
         run: gh auth status
 
       - name: Download canonical resolver DB
+        id: canonical_download
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -103,6 +115,7 @@ jobs:
             return 1
           }
 
+          # Collect candidate runs from Horizon Scanner Triage and Resolver — Initial Backfill
           CANDIDATES_FILE=$(mktemp)
           gh run list \
             --workflow "Horizon Scanner Triage" \
@@ -150,6 +163,7 @@ jobs:
               cp "$SRC" data/resolver.duckdb
             fi
 
+            # Validate DB signature
             if python -m scripts.ci.db_signature write \
                 --db data/resolver.duckdb \
                 --required "${SIGNATURE_REQUIRED_TABLES}" \
@@ -168,19 +182,39 @@ jobs:
             exit 1
           fi
 
-      - name: Run NMME ingestion
+      - name: Run conflict forecasts
         run: |
-          set -- python -m resolver.tools.ingest_nmme
-          if [ -n "${{ inputs.year_month }}" ]; then
-            set -- "$@" --year-month "${{ inputs.year_month }}"
+          set -e
+          echo "=== Running conflict forecast ingestion ==="
+          python -m resolver.tools.fetch_conflict_forecasts
+          echo "=== Conflict forecast ingestion completed ==="
+
+      - name: Run structured data ingestion
+        run: |
+          set -e
+          echo "=== Running structured data ingestion ==="
+
+          CMD="python -m pythia.tools.ingest_structured_data"
+
+          ISO3_INPUT="${{ inputs.iso3 }}"
+          if [ -n "$ISO3_INPUT" ]; then
+            CMD="$CMD --iso3 $ISO3_INPUT"
           fi
+
+          SOURCES_INPUT="${{ inputs.sources }}"
+          if [ -n "$SOURCES_INPUT" ]; then
+            CMD="$CMD --sources $SOURCES_INPUT"
+          fi
+
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            set -- "$@" --dry-run
+            CMD="$CMD --dry-run"
           fi
-          "$@"
+
+          $CMD
+          echo "=== Structured data ingestion completed ==="
 
       - name: Upload canonical resolver DB
-        if: inputs.dry_run != 'true'
+        if: inputs.dry_run != true
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db

@@ -256,6 +256,29 @@ def _run_grounding_for_hazard(
             custom_prompt=grounding_prompt,
         )
         pack = evidence_pack.to_dict() if hasattr(evidence_pack, "to_dict") else dict(evidence_pack)
+
+        # Fallback to OpenAI web search if Gemini grounding returned no sources
+        if not pack.get("sources") and not pack.get("grounded"):
+            try:
+                from pythia.web_research.backends.openai_web_search import fetch_via_openai_web_search
+                fallback_pack = fetch_via_openai_web_search(
+                    f"{country_name} ({iso3}) {hazard_code} grounding",
+                    recency_days=recency,
+                    include_structural=True,
+                    timeout_sec=60,
+                    max_results=10,
+                )
+                fb = fallback_pack.to_dict() if hasattr(fallback_pack, "to_dict") else dict(fallback_pack)
+                if fb.get("sources") or fb.get("grounded"):
+                    pack = fb
+                    pack.setdefault("debug", {})["grounding_fallback"] = "openai_web_search"
+                    logger.info("RC grounding fallback to OpenAI succeeded for %s %s", iso3, hazard_code)
+                else:
+                    pack.setdefault("debug", {})["grounding_fallback"] = "openai_web_search_also_failed"
+                    logger.debug("RC grounding fallback to OpenAI also failed for %s %s", iso3, hazard_code)
+            except Exception as exc:
+                logger.debug("RC grounding OpenAI fallback error for %s %s: %s", iso3, hazard_code, exc)
+
         pack["markdown"] = _render_grounding_markdown(pack)
         return pack
     except Exception as exc:  # noqa: BLE001
