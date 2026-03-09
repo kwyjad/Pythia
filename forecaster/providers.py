@@ -503,6 +503,7 @@ _XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1").strip()
 _KIMI_BASE_URL = os.getenv("KIMI_BASE_URL", "https://api.moonshot.cn/v1").strip()
 _DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
 
+_OPENAI_NO_CUSTOM_TEMPERATURE = {"gpt-5-mini"}
 _OPENAI_TIMEOUT = _resolve_timeout("OPENAI_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _ANTHROPIC_TIMEOUT = _resolve_timeout("ANTHROPIC_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _GEMINI_TIMEOUT = _resolve_timeout("GEMINI_CALL_TIMEOUT_SEC", GEMINI_CALL_TIMEOUT_SEC, 60.0)
@@ -676,7 +677,7 @@ def call_openai(
     }
     if reasoning_effort and reasoning_effort not in ("none", "off"):
         body["reasoning_effort"] = reasoning_effort
-    else:
+    elif model not in _OPENAI_NO_CUSTOM_TEMPERATURE:
         body["temperature"] = float(temperature)
     try:
         resp = requests.post(
