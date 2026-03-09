@@ -112,6 +112,7 @@ resolver/exports/*_working.parquet
 resolver/exports/cache_*/
 resolver/tmp/
 context/
+make_zip/
 
 # === Pythia run artifacts ===
 .env
