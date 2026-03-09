@@ -3,7 +3,7 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""Adversarial evidence check for RC Level 2+ cases.
+"""Adversarial evidence check for RC Level 1+ cases.
 
 Runs 2-3 targeted web searches for **counter-evidence** — reasons a
 predicted regime change might NOT materialise — then synthesises results
@@ -298,6 +298,15 @@ def _aggregate_evidence_text(packs: list[dict]) -> str:
                     title = src.get("title", "")
                     url = src.get("url", "")
                     section += f"  - {title} ({url})\n"
+        if not signals and not structural and sources:
+            # When signals/structural are empty but sources exist,
+            # include source titles as minimal evidence context
+            section += "Source titles (no structured signals extracted):\n"
+            for src in sources:
+                if isinstance(src, dict):
+                    title = src.get("title", "")
+                    if title:
+                        section += f"  - {title}\n"
         parts.append(section)
     return "\n".join(parts) if parts else "(no search evidence available)"
 
@@ -335,7 +344,7 @@ def run_adversarial_check(
 ) -> dict | None:
     """Run adversarial evidence check for a single country-hazard pair.
 
-    Only executes for RC Level >= 2.  Returns ``None`` for lower levels
+    Only executes for RC Level >= 1.  Returns ``None`` for lower levels
     or on error.
 
     Parameters
@@ -365,7 +374,7 @@ def run_adversarial_check(
     score = compute_score(likelihood, magnitude)
     level = compute_level(likelihood, magnitude, score)
 
-    if level < 2:
+    if level < 1:
         return None
 
     iso3_up = (iso3 or "").upper()
@@ -435,16 +444,20 @@ def run_adversarial_check(
 
     # 5. LLM synthesis
     try:
-        result = asyncio.run(
-            _synthesize_counter_evidence(
-                country_name=country_name,
-                iso3=iso3_up,
-                hazard_code=hz,
-                rc_result=rc,
-                evidence_text=evidence_text,
-                run_id=run_id,
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(
+                _synthesize_counter_evidence(
+                    country_name=country_name,
+                    iso3=iso3_up,
+                    hazard_code=hz,
+                    rc_result=rc,
+                    evidence_text=evidence_text,
+                    run_id=run_id,
+                )
             )
-        )
+        finally:
+            loop.close()
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Adversarial synthesis failed for %s %s: %s", iso3_up, hz, exc,

@@ -331,7 +331,7 @@ def _select_tail_pack_hazards(triage: dict[str, Any], expected_hazards: list[str
             regime_change.get("magnitude"),
             rc_score,
         )
-        if rc_level < 2:
+        if rc_level < 1:
             continue
         candidates.append(
             {
@@ -1313,7 +1313,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
                         exc,
                     )
 
-    # 5b. Adversarial checks (counter-evidence for RC L2+ hazards)
+    # 5b. Adversarial checks (counter-evidence for RC L1+ hazards)
     adversarial_enabled = os.getenv("PYTHIA_ADVERSARIAL_CHECK_ENABLED", "1") == "1"
     if adversarial_enabled and (
         os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"

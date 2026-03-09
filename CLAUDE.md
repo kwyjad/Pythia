@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance for Claude Code when working with the Pythia codebase.
+This file provides guidance for Claude Code when working with the Pythia codebase. CLAUDE.md must be kept as a comprehensive, up-to-date description of the Pythia system. **Update this file at the end of every session where Claude Code changes the repo** — include any new architectural decisions, environment variables, failure modes, workflow changes, or component behavior that future sessions need to know.
 
 ## Project overview
 
@@ -10,7 +10,7 @@ Pythia is an end-to-end AI forecasting system for humanitarian crises. It scans 
 ```
 Resolver facts/base rates -> Horizon Scanner per-hazard pipeline (RC grounding → RC → triage grounding → triage)
   -> Structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political, ENSO, seasonal TC, HDX Signals, ACLED CAST)
-  -> Adversarial checks (RC L2+) -> Forecaster SPD ensemble
+  -> Adversarial checks (RC L1+) -> Forecaster SPD ensemble
   -> DuckDB -> FastAPI API -> Next.js Dashboard + CSV/Excel exports
 ```
 
@@ -50,7 +50,7 @@ Pythia/
     prediction_markets/  # Prediction market signal retriever (Metaculus, Polymarket, Manifold)
     acaps.py           # ACAPS unified connector (INFORM, Risk Radar, Daily Monitoring, Access)
     acled_political.py # ACLED event-level political data connector
-    adversarial_check.py # Counter-evidence checks for RC Level 2+ cases
+    adversarial_check.py # Counter-evidence checks for RC Level 1+ cases
     ipc_phases.py      # IPC food security phase connector
     market_snapshot.py # Manifold prediction market snapshot utility
     tests/             # Pythia-specific tests
@@ -90,11 +90,12 @@ Pythia/
 - `resolver/tools/run_pipeline.py` — Pipeline orchestrator (fetch -> validate -> enrich -> precedence -> deltas -> DuckDB)
 - `resolver/tools/enrich.py` — Enrichment (registry lookups, ym derivation, defaults)
 - `resolver/tools/precedence_config.yml` — Precedence tier policy
-- `pythia/prediction_markets/retriever.py` — Prediction market signal retriever (runs at research time, queries Metaculus/Polymarket/Manifold)
+- `pythia/prediction_markets/retriever.py` — Prediction market signal retriever (currently disabled by default via `PYTHIA_PM_RETRIEVER_ENABLED=0`; Metaculus returns 403, Polymarket returns 422, each times out at 30s)
+- `scripts/print_forecaster_ensemble.py` — Ensemble diagnostic script (must be invoked as `python -m scripts.print_forecaster_ensemble`, not directly)
 - `pythia/acaps.py` — ACAPS unified connector (4 datasets: INFORM Severity, Risk Radar, Daily Monitoring, Humanitarian Access)
 - `pythia/ipc_phases.py` — IPC food security phase classification connector
 - `pythia/acled_political.py` — ACLED event-level political data (protests, riots, strategic developments)
-- `pythia/adversarial_check.py` — Counter-evidence searches for RC Level 2+ (devil's advocate)
+- `pythia/adversarial_check.py` — Counter-evidence searches for RC Level 1+ (devil's advocate)
 - `horizon_scanner/reliefweb.py` — ReliefWeb humanitarian reports connector
 - `forecaster/hazard_prompts.py` — Hazard-specific reasoning guidance for SPD prompts
 - `scripts/ci/snapshot_prompt_artifact.py` — Prompt version snapshot script
@@ -107,7 +108,7 @@ Two DuckDB databases:
 **Pythia DB** (`PYTHIA_DB_URL`): system of record
 - `hs_runs`, `hs_triage` — Horizon Scanner outputs (triage scores, RC fields)
 - `hs_hazard_tail_packs` — RC-triggered hazard evidence packs
-- `hs_adversarial_checks` — Counter-evidence for RC Level 2+ (devil's advocate)
+- `hs_adversarial_checks` — Counter-evidence for RC Level 1+ (devil's advocate)
 - `seasonal_forecasts` — NMME country-level temp/precip anomalies (monthly from CPC)
 - `conflict_forecasts` — VIEWS + conflictforecast.org + ACLED CAST conflict predictions (PK: source, iso3, hazard_code, metric, lead_months, forecast_issue_date)
 - `questions`, `question_research` — Seeded questions + research briefs
@@ -190,9 +191,21 @@ RC detects departures from historical base rates (distinct from triage_score whi
 - `score = likelihood x magnitude`, clamped [0, 1]
 - **Levels** (env-overridable, likelihood-only thresholds): L0 (likelihood < 0.15), L1 (likelihood >= 0.15), L2 (likelihood >= 0.35), L3 (likelihood >= 0.55). Env vars: `PYTHIA_HS_RC_LEVEL1_LIKELIHOOD`, `PYTHIA_HS_RC_LEVEL2_LIKELIHOOD`, `PYTHIA_HS_RC_LEVEL3_LIKELIHOOD`.
 - **Track assignment**: RC level > 0 → Track 1 (full ensemble), RC level 0 + priority tier → Track 2 (single Gemini Flash model), otherwise no SPD.
-- L2+ forces `need_full_spd = TRUE` and triggers hazard tail pack generation
+- L1+ triggers hazard tail pack generation and adversarial evidence checks. L2+ additionally forces `need_full_spd = TRUE`.
+- **CRITICAL sync constraint**: The RC level threshold in `_select_tail_pack_hazards` (horizon_scanner.py) and the re-check threshold inside `adversarial_check.py` must match. If they drift, candidates will be passed to adversarial checks but silently rejected.
+- Tail packs are enabled by default (`HS_TAIL_PACKS_ENABLED` defaults to `"1"`). Override via `PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED=0`.
 - Distribution check warns when too many assessments exceed expected proportions
+- RC prompt templates include a softened distribution anchor paragraph for small-country runs (where few comparative countries are included)
 - See `docs/hs_regime_change.md` for full details
+
+## Track 1 / Track 2 forecast system
+
+The forecaster routes questions into two tracks based on RC level:
+
+- **Track 1** (full ensemble): Multi-model ensemble producing both `ensemble_bayesmc_v2` and `ensemble_mean_v2` aggregation rows. Used for RC level > 0 (higher-RC or higher-complexity questions). Higher cost.
+- **Track 2** (single model): Single `track2_flash` model. Used for RC level 0 questions with priority tier. No ensemble aggregation — produces a single forecast row per question. Lower cost.
+
+Track 2 questions have no `ensemble_bayesmc_v2` or `ensemble_mean_v2` rows in `forecasts_ensemble`. The legacy CI step "Verify Forecaster wrote both aggregation methods" (`verify_forecaster_aggregations.py`) was removed because it hard-exited when all questions routed to Track 2. This is a resolved issue — the step should not be re-added.
 
 ## Testing
 
@@ -229,7 +242,10 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `FORECASTER_SPD_MAX_WORKERS` | SPD phase concurrency |
 | `PYTHIA_HS_RC_LEVEL*_*` | RC threshold overrides |
 | `PYTHIA_HS_RC_DIST_WARN_*` | RC distribution warning thresholds |
-| `PYTHIA_PREDICTION_MARKETS_ENABLED` | Enable prediction market retriever (0/1) |
+| `PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED` | Enable hazard tail packs (0/1, default 1) |
+| `PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED` | Enable web search for RC evidence packs (0/1, default 1) |
+| `PYTHIA_PM_RETRIEVER_ENABLED` | Enable prediction market retriever (0/1, default 0 — see known failure modes) |
+| `PYTHIA_PREDICTION_MARKETS_ENABLED` | Legacy alias; prefer `PYTHIA_PM_RETRIEVER_ENABLED` |
 | `ACAPS_EMAIL` / `ACAPS_PASSWORD` | ACAPS API credentials |
 
 Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`.
@@ -306,10 +322,23 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 - HS pipeline is per-hazard: each hazard gets its own RC grounding, RC call, triage grounding, and triage call (2-pass each: Gemini Flash + GPT-5-mini)
 - RC and triage grounding use different signal categories and recency windows (RC: TRIGGER/DAMPENER/BASELINE; triage: SITUATION/RESPONSE/FORECAST/VULNERABILITY)
 
+## Known failure modes
+
+- **RC degradation without data sources**: RC assessments degrade severely when both `PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED=0` and structured data connectors (ACLED, facts_deltas) are unavailable simultaneously. All country-hazard pairs may return RC Level 0 (baseline), even for active crisis countries. Always ensure at least one of web search or structured data is available for RC grounding.
+- **Prediction market retriever**: Currently disabled (`PYTHIA_PM_RETRIEVER_ENABLED=0`). Metaculus returns 403, Polymarket returns HTTP 422, and each call times out at 30s — adding ~6 minutes of wasted wall time per run. Do not re-enable until upstream APIs are fixed.
+- **DuckDB cache key mismatch** (fixed): The DuckDB connection pool was using raw URL strings rather than resolved paths as cache keys, causing 100+ `cache_event=miss` entries and a new connection per DB access. Fixed by normalizing to resolved paths.
+
+## Run health diagnostics
+
+- `hs_country_evidence` and `question_evidence` CSVs are the primary artifacts for diagnosing structured data connector health post-run.
+- If a connector shows "unavailable" across all countries, it indicates an upstream data gap, a connector bug, or a missing environment secret.
+- After applying fixes, a clean re-run must produce a queryable DuckDB artifact before connector health can be verified.
+
 ## Post-Edit Documentation Requirements
 
 After making any code changes, evaluate whether the following files need updating and update them if so:
 
+- **CLAUDE.md** – Update if you've changed architecture, environment variables, failure modes, component behavior, workflow steps, or database schema. This is the authoritative reference for future Claude Code sessions.
 - **README.md** – Update if you've changed setup steps, dependencies, usage instructions, file structure, or how to run the project.
 - **docs/fred_overview.md** – This is a plain-English description of the system for non-technical readers. Update it if you've changed what the system does, how it behaves, its inputs/outputs, or its overall logic. Avoid technical jargon; explain changes in terms of what the system now does differently from a user perspective. Assume readers understand forecasting and humanitarian data, but not code.
 
