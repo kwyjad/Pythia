@@ -27,11 +27,11 @@ The normalized object is serialized into `regime_change_json` in `hs_triage`.
 HS computes a regime-change score and severity level:
 
 - **Score**: `likelihood * magnitude` (defaults to `0.0` if either value is missing).
-- **Level** (default thresholds):
-  - Level 0: `likelihood < 0.45` **or** `score < 0.25`
-  - Level 1: `likelihood >= 0.45` **and** `score >= 0.25`
-  - Level 2: `likelihood >= 0.60` **and** `magnitude >= 0.50` (score >= 0.30)
-  - Level 3: `likelihood >= 0.75` **and** `magnitude >= 0.60` (score >= 0.45)
+- **Level** (likelihood-only thresholds, env-overridable):
+  - Level 0: `likelihood < 0.15`
+  - Level 1: `likelihood >= 0.15`
+  - Level 2: `likelihood >= 0.35`
+  - Level 3: `likelihood >= 0.55`
 
 ## Expected Distribution
 
@@ -46,24 +46,18 @@ A run-level distribution check logs warnings when too many assessments exceed ex
 
 ## `need_full_spd` Override
 
-By default, HS forces `need_full_spd = TRUE` when regime-change risk is **Level 2+** (roughly `score >= 0.30`), even if the triage tier would otherwise be quiet.
+By default, HS forces `need_full_spd = TRUE` when regime-change risk is **Level 1+** (likelihood >= 0.15), even if the triage tier would otherwise be quiet.
+
+**Track assignment**: RC level > 0 → Track 1 (full ensemble), RC level 0 + priority tier → Track 2 (single Gemini Flash model), otherwise no SPD.
 
 ## Environment Overrides
 
 All thresholds are environment-overridable:
 
-- Level thresholds:
-  - `PYTHIA_HS_RC_LEVEL0_LIKELIHOOD` (default `0.45`)
-  - `PYTHIA_HS_RC_LEVEL0_SCORE` (default `0.25`)
-  - `PYTHIA_HS_RC_LEVEL1_LIKELIHOOD` (default `0.45`)
-  - `PYTHIA_HS_RC_LEVEL1_SCORE` (default `0.25`)
-  - `PYTHIA_HS_RC_LEVEL2_LIKELIHOOD` (default `0.60`)
-  - `PYTHIA_HS_RC_LEVEL2_MAGNITUDE` (default `0.50`)
-  - `PYTHIA_HS_RC_LEVEL3_LIKELIHOOD` (default `0.75`)
-  - `PYTHIA_HS_RC_LEVEL3_MAGNITUDE` (default `0.60`)
-- Force-full-SPD thresholds:
-  - `PYTHIA_HS_RC_FORCE_LEVEL_MIN` (default `2`)
-  - `PYTHIA_HS_RC_FORCE_SCORE_MIN` (default `0.30`)
+- Level thresholds (likelihood-only):
+  - `PYTHIA_HS_RC_LEVEL1_LIKELIHOOD` (default `0.15`)
+  - `PYTHIA_HS_RC_LEVEL2_LIKELIHOOD` (default `0.35`)
+  - `PYTHIA_HS_RC_LEVEL3_LIKELIHOOD` (default `0.55`)
 - Distribution warning thresholds:
   - `PYTHIA_HS_RC_DIST_WARN_L1_FRAC` (default `0.25`) — warn if >25% of assessments are L1+
   - `PYTHIA_HS_RC_DIST_WARN_L2_FRAC` (default `0.15`) — warn if >15% of assessments are L2+

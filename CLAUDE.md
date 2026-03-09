@@ -188,7 +188,8 @@ Forecasts cover a 6-month window. Each question has `window_start_date` and `tar
 RC detects departures from historical base rates (distinct from triage_score which measures overall risk).
 
 - `score = likelihood x magnitude`, clamped [0, 1]
-- **Levels** (env-overridable): L0 (likelihood < 0.45 or score < 0.25), L1, L2 (likelihood >= 0.60, magnitude >= 0.50), L3 (likelihood >= 0.75, magnitude >= 0.60)
+- **Levels** (env-overridable, likelihood-only thresholds): L0 (likelihood < 0.15), L1 (likelihood >= 0.15), L2 (likelihood >= 0.35), L3 (likelihood >= 0.55). Env vars: `PYTHIA_HS_RC_LEVEL1_LIKELIHOOD`, `PYTHIA_HS_RC_LEVEL2_LIKELIHOOD`, `PYTHIA_HS_RC_LEVEL3_LIKELIHOOD`.
+- **Track assignment**: RC level > 0 → Track 1 (full ensemble), RC level 0 + priority tier → Track 2 (single Gemini Flash model), otherwise no SPD.
 - L2+ forces `need_full_spd = TRUE` and triggers hazard tail pack generation
 - Distribution check warns when too many assessments exceed expected proportions
 - See `docs/hs_regime_change.md` for full details
