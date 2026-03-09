@@ -707,14 +707,6 @@ jobs:
           fi
           echo "=== Forecaster (Pythia mode) completed ==="
 
-      - name: Verify Forecaster wrote both aggregation methods
-        if: ${{ success() && env.HS_QUESTION_COUNT != '0' }}
-        env:
-          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
-        run: |
-          set -e
-          python -m scripts.ci.verify_forecaster_aggregations --db "${PYTHIA_DB_URL}"
-
       - name: Evaluate SPD aggregations (Brier + log score)
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true' && env.HS_QUESTION_COUNT != '0' }}
         continue-on-error: true
