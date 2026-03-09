@@ -1523,10 +1523,18 @@ def _load_triage_entry(
 
 
 def _scenario_expected(
-    hazard_code: str | None, metric: str | None, hs_entry: dict[str, Any] | None
+    hazard_code: str | None,
+    metric: str | None,
+    hs_entry: dict[str, Any] | None,
+    *,
+    track: int | None = None,
 ) -> tuple[bool, str]:
     hz = (hazard_code or "").upper()
     tier = str((hs_entry or {}).get("tier") or "").lower()
+
+    # Track 2 questions intentionally skip scenarios (single Gemini Flash model).
+    if track == 2:
+        return False, "track_2"
 
     enabled_hazards = {"ACE", "DI"}
 
@@ -2531,7 +2539,9 @@ def _load_bundle_data(
             q_hs_run_id = q.get("hs_run_id") or hs_run_id_for_costs
             triage_entry = _load_triage_entry(con, q_hs_run_id, q_iso3, q_hz, cache=triage_cache)
             triage_tier = (triage_entry or {}).get("tier")
-            expected, reason = _scenario_expected(q_hz, q_metric, triage_entry)
+            q_track_raw = q.get("track")
+            q_track = int(q_track_raw) if q_track_raw is not None else None
+            expected, reason = _scenario_expected(q_hz, q_metric, triage_entry, track=q_track)
             call_count = _load_scenario_call_count(con, forecaster_run_id, str(qid))
             if call_count > 0:
                 status = "generated"
@@ -4248,7 +4258,9 @@ def build_debug_bundle_markdown(
         hs_run_id = q.get("hs_run_id") or hs_run_id_for_costs
         triage_entry = _load_triage_entry(con, hs_run_id, iso3, hz, cache=triage_cache)
         triage_tier = (triage_entry or {}).get("tier")
-        expected, reason = _scenario_expected(hz, metric, triage_entry)
+        q_track_raw = q.get("track")
+        q_track = int(q_track_raw) if q_track_raw is not None else None
+        expected, reason = _scenario_expected(hz, metric, triage_entry, track=q_track)
         call_count = _load_scenario_call_count(con, forecaster_run_id, str(qid))
         if call_count > 0:
             status = "generated"
