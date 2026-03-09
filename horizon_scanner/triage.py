@@ -169,18 +169,18 @@ async def _call_triage_model(
     """Call the LLM for triage scoring.
 
     Pass 1: Primary triage model (default: gemini-3.1-pro-preview)
-    Pass 2: Secondary triage model for diversity (default: gpt-5.2)
+    Pass 2: Secondary triage model for diversity (default: gemini-3-flash-preview)
 
     Override via env vars:
       PYTHIA_TRIAGE_MODEL_PASS1=google:gemini-3.1-pro-preview
-      PYTHIA_TRIAGE_MODEL_PASS2=openai:gpt-5.2
+      PYTHIA_TRIAGE_MODEL_PASS2=google:gemini-3-flash-preview
 
     Returns (text, usage, error, model_spec).
     """
 
     if pass_idx == 2:
-        model_spec_str = os.getenv("PYTHIA_TRIAGE_MODEL_PASS2", "openai:gpt-5.2")
-        default_name = "GPT-5.2"
+        model_spec_str = os.getenv("PYTHIA_TRIAGE_MODEL_PASS2", "google:gemini-3-flash-preview")
+        default_name = "Gemini Flash"
     else:
         model_spec_str = os.getenv("PYTHIA_TRIAGE_MODEL_PASS1", f"google:{resolve_hs_model()}")
         default_name = "Gemini"

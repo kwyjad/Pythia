@@ -17,6 +17,7 @@ from pythia.web_research.types import EvidencePack, EvidenceSource
 
 # Stable models for Google Search grounding. Preview models (gemini-3-*)
 # have shown intermittent grounding regressions. Use stable release models.
+# Override with PYTHIA_GROUNDING_MODEL_ID env var (inserted before these).
 DEFAULT_GEMINI_CANDIDATES = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
 MAX_SIGNAL_LINES = 8
 
@@ -114,10 +115,18 @@ def fetch_via_gemini(
     """
 
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    env_model_id = (model_id or os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or "").strip()
-    if not env_model_id and os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1":
-        env_model_id = (os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "").strip()
-    model_candidates = [env_model_id] if env_model_id else list(DEFAULT_GEMINI_CANDIDATES)
+    env_model_id = (
+        model_id
+        or os.getenv("PYTHIA_GROUNDING_MODEL_ID", "").strip()
+        or os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID", "").strip()
+        or ""
+    )
+    if env_model_id:
+        model_candidates = [env_model_id] + [
+            m for m in DEFAULT_GEMINI_CANDIDATES if m != env_model_id
+        ]
+    else:
+        model_candidates = list(DEFAULT_GEMINI_CANDIDATES)
 
     pack = EvidencePack(query=query, recency_days=recency_days, backend="gemini")
 
