@@ -400,15 +400,27 @@ def run_adversarial_check(
     packs: list[dict] = []
     for query in queries:
         try:
-            pack = dict(
-                fetch_evidence_pack(
-                    query,
-                    purpose="hs_adversarial_check",
-                    run_id=run_id,
-                    hs_run_id=run_id,
-                    model_id=model_id or None,
-                ) or {}
-            )
+            # Adversarial checks always use web search regardless of the
+            # deprecated PYTHIA_WEB_RESEARCH_ENABLED flag (which controls
+            # the old question-level pipeline).
+            _original_web_research = os.environ.get("PYTHIA_WEB_RESEARCH_ENABLED")
+            os.environ["PYTHIA_WEB_RESEARCH_ENABLED"] = "1"
+            try:
+                pack = dict(
+                    fetch_evidence_pack(
+                        query,
+                        purpose="hs_adversarial_check",
+                        run_id=run_id,
+                        hs_run_id=run_id,
+                        model_id=model_id or None,
+                    ) or {}
+                )
+            finally:
+                # Restore original value
+                if _original_web_research is not None:
+                    os.environ["PYTHIA_WEB_RESEARCH_ENABLED"] = _original_web_research
+                else:
+                    os.environ.pop("PYTHIA_WEB_RESEARCH_ENABLED", None)
             packs.append(pack)
         except Exception as exc:  # noqa: BLE001
             logger.warning(

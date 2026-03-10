@@ -416,6 +416,7 @@ def _run_rc_for_single_hazard(
     *,
     run_id: str,
     fallback_specs: list[ModelSpec],
+    crisiswatch_data: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Run a 2-pass RC assessment for a single hazard.
 
@@ -469,7 +470,8 @@ def _run_rc_for_single_hazard(
                 fetch_on_the_horizon,
                 get_horizon_countries,
             )
-            horizon_data = fetch_on_the_horizon()  # uses in-memory cache
+            # Prefer explicitly passed crisiswatch_data; fall back to cache.
+            horizon_data = crisiswatch_data or fetch_on_the_horizon()
             if horizon_data:
                 flagged = get_horizon_countries(horizon_data)
                 # Match by country name (uppercased) — the flagged dict keys
@@ -680,6 +682,7 @@ def run_rc_for_country(
     fallback_specs: list[ModelSpec],
     expected_hazards: list[str] | None = None,
     run_date: date_type | None = None,
+    crisiswatch_data: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Run per-hazard regime-change assessment for a single country.
 
@@ -786,6 +789,7 @@ def run_rc_for_country(
             hazard_evidence,
             run_id=run_id,
             fallback_specs=fallback_specs,
+            crisiswatch_data=crisiswatch_data,
         )
         merged_hazards[hz_code] = hazard_rc
 
