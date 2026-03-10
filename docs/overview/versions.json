@@ -1,5 +1,9 @@
 [
   {
+    "date": "2026-03-10",
+    "label": "Snapshot"
+  },
+  {
     "date": "2026-03-07",
     "label": "Per-hazard HS, ENSO/TC, ACLED CAST"
   },

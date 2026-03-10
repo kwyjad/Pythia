@@ -2453,6 +2453,7 @@ def debug_hs_country_summary(
 def diagnostics_kpi_scopes(
     metric_scope: str = Query("PA"),
     year_month: Optional[str] = Query(None),
+    forecaster_run_id: Optional[str] = Query(None, description="Forecaster run ID to scope KPIs"),
 ):
     con = _con()
     notes: List[str] = []
@@ -2878,7 +2879,46 @@ def diagnostics_kpi_scopes(
         "forecasts_by_hazard": {},
     }
 
-    if selected_month and month_source_table and month_source_ts:
+    if forecaster_run_id and _table_has_columns(con, "forecasts_ensemble", ["run_id", "question_id"]):
+        # ── Scope KPIs to a specific forecaster run ──
+        question_ids_sql = (
+            "SELECT DISTINCT fe.question_id FROM forecasts_ensemble fe WHERE fe.run_id = ?"
+        )
+        question_ids_params: List[Any] = [forecaster_run_id]
+        forecast_window_ym = None
+        if selected_month:
+            parsed = _parse_year_month(selected_month)
+            if parsed:
+                _fw_start = _shift_ym(parsed[0], parsed[1], 1)
+                _fw_end = _shift_ym(parsed[0], parsed[1], 7)
+                forecast_window_ym = (
+                    f"{_fw_start[0]:04d}-{_fw_start[1]:02d}",
+                    f"{_fw_end[0]:04d}-{_fw_end[1]:02d}",
+                )
+        selected_scope = _scope_from_question_ids(
+            question_ids_sql, question_ids_params,
+            forecast_window_ym=forecast_window_ym,
+        )
+        # Derive countries_triaged from the HS run(s) associated with this forecaster run.
+        try:
+            triaged_row = con.execute(
+                """
+                SELECT COUNT(DISTINCT UPPER(ht.iso3))
+                FROM hs_triage ht
+                JOIN questions q ON q.hs_run_id = ht.run_id AND UPPER(q.iso3) = UPPER(ht.iso3)
+                JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
+                WHERE fe.run_id = ?
+                  AND ht.iso3 IS NOT NULL
+                """,
+                [forecaster_run_id],
+            ).fetchone()
+            selected_scope["countries_triaged"] = int(triaged_row[0]) if triaged_row else 0
+        except Exception:
+            logger.debug("countries_triaged for forecaster_run_id failed", exc_info=True)
+            selected_scope["countries_triaged"] = 0
+        diagnostics["countries_triaged_source"] = "forecaster_run_id"
+        selected_scope.pop("countries_total", None)
+    elif selected_month and month_source_table and month_source_ts:
         parsed = _parse_year_month(selected_month)
         if parsed:
             start_iso, end_iso = _month_window(parsed[0], parsed[1])
@@ -2956,6 +2996,10 @@ def diagnostics_kpi_scopes(
             except Exception:
                 notes.append("available_runs_failed")
 
+    # Override selected_run_id when a specific forecaster run was requested.
+    if forecaster_run_id:
+        selected_run_id = forecaster_run_id
+
     explanations = [
         "Questions can exceed forecasts because runs include triaged or researched questions that did not receive forecasts.",
     ]
@@ -2986,11 +3030,13 @@ def diagnostics_kpi_scopes(
 def get_countries(
     metric_scope: Optional[str] = Query(None),
     year_month: Optional[str] = Query(None),
+    forecaster_run_id: Optional[str] = Query(None, description="Forecaster run ID to scope countries"),
 ):
     con = _con()
     try:
         rows = compute_countries_index(
-            con, metric_scope=metric_scope, year_month=year_month
+            con, metric_scope=metric_scope, year_month=year_month,
+            forecaster_run_id=forecaster_run_id,
         )
         return {"rows": rows}
     except Exception:

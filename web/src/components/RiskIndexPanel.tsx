@@ -88,7 +88,7 @@ const HAZARD_LABELS: Record<string, string> = {
 };
 
 const RC_LEVEL_TOOLTIP =
-  "Highest regime change (RC) level per country in the latest HS run.";
+  "RC means Regime Change, and refers to a score 0-1 that reflects Fred's expectation of a significant change from the base rate";
 
 export default function RiskIndexPanel({
   initialResponse,
@@ -119,12 +119,14 @@ export default function RiskIndexPanel({
 
   const fetchCountries = async (
     metricScope: string,
-    runMonth: string | null
+    runMonth: string | null,
+    runId?: string | null
   ) => {
     try {
       const response = await apiGet<CountriesResponse>("/countries", {
         metric_scope: metricScope,
         ...(runMonth ? { year_month: runMonth } : {}),
+        ...(runId ? { forecaster_run_id: runId } : {}),
       });
       setCountries(response.rows ?? []);
     } catch (fetchError) {
@@ -134,7 +136,8 @@ export default function RiskIndexPanel({
 
   const fetchKpiScopes = async (
     metricScope: string,
-    runMonth: string | null
+    runMonth: string | null,
+    runId?: string | null
   ): Promise<DiagnosticsKpiScopesResponse | null> => {
     setKpiError(null);
     try {
@@ -143,6 +146,7 @@ export default function RiskIndexPanel({
         {
           metric_scope: metricScope,
           ...(runMonth ? { year_month: runMonth } : {}),
+          ...(runId ? { forecaster_run_id: runId } : {}),
         }
       );
       setKpiData(response);
@@ -189,8 +193,8 @@ export default function RiskIndexPanel({
     try {
       await fetchRiskIndex(nextView, selectedRunMonth, selectedRunId);
       const nextMetricScope = metricScopeForView(nextView);
-      void fetchKpiScopes(nextMetricScope, selectedRunMonth);
-      void fetchCountries(nextMetricScope, selectedRunMonth);
+      void fetchKpiScopes(nextMetricScope, selectedRunMonth, selectedRunId);
+      void fetchCountries(nextMetricScope, selectedRunMonth, selectedRunId);
     } catch (fetchError) {
       console.warn("Risk index unavailable:", fetchError);
       setError("Risk index unavailable (API error).");
@@ -208,8 +212,8 @@ export default function RiskIndexPanel({
     try {
       const currentMetricScope = metricScopeForView(view);
       const kpiResponse = await fetchKpiScopes(currentMetricScope, yearMonth);
-      void fetchCountries(currentMetricScope, yearMonth);
       const newRunId = kpiResponse?.selected_run_id ?? null;
+      void fetchCountries(currentMetricScope, yearMonth, newRunId);
       setSelectedRunId(newRunId);
       await fetchRiskIndex(view, yearMonth, newRunId);
     } catch (fetchError) {
@@ -226,7 +230,10 @@ export default function RiskIndexPanel({
     setIsLoading(true);
     setError(null);
     try {
+      const currentMetricScope = metricScopeForView(view);
       await fetchRiskIndex(view, selectedRunMonth, runId);
+      void fetchKpiScopes(currentMetricScope, selectedRunMonth, runId);
+      void fetchCountries(currentMetricScope, selectedRunMonth, runId);
     } catch (fetchError) {
       console.warn("Risk index unavailable:", fetchError);
       setError("Risk index unavailable (API error).");
