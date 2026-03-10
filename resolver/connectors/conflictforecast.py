@@ -43,9 +43,9 @@ _TIMEOUT = 60
 # File name patterns to match (case-insensitive).
 # These map to (metric_name, lead_months).
 _FILE_PATTERNS: List[Tuple[str, str, int]] = [
-    (r"armed.?conflict.*3", "cf_armed_conflict_risk_3m", 3),
-    (r"armed.?conflict.*12", "cf_armed_conflict_risk_12m", 12),
-    (r"violence.?intensity.*3", "cf_violence_intensity_3m", 3),
+    (r"ons_armedconf_03", "cf_armed_conflict_risk_3m", 3),
+    (r"ons_armedconf_12", "cf_armed_conflict_risk_12m", 12),
+    (r"int_lnbest_03", "cf_violence_intensity_3m", 3),
 ]
 
 

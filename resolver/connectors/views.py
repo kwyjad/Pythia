@@ -52,7 +52,8 @@ class ViewsConnector:
         forecast_issue_date, target_month, model_version.
         """
         try:
-            records = self._fetch_all_pages()
+            run_id = self._detect_run_id()
+            records = self._fetch_all_pages(run_id)
         except Exception as exc:
             LOG.warning("[views] fetch failed: %s", exc)
             return pd.DataFrame()
@@ -61,7 +62,6 @@ class ViewsConnector:
             LOG.info("[views] no records returned from API")
             return pd.DataFrame()
 
-        run_id = self._detect_run_id()
         model_version = self._extract_model_version(run_id)
         issue_date = self._derive_issue_date(records)
 
@@ -79,10 +79,10 @@ class ViewsConnector:
     # API interaction
     # ------------------------------------------------------------------
 
-    def _fetch_all_pages(self) -> List[Dict[str, Any]]:
+    def _fetch_all_pages(self, run_id: str = "current") -> List[Dict[str, Any]]:
         """Paginate through the VIEWS cm/sb endpoint."""
         all_records: List[Dict[str, Any]] = []
-        url: Optional[str] = f"{_API_BASE}/current/cm/sb"
+        url: Optional[str] = f"{_API_BASE}/{run_id}/cm/sb"
         page = 1
 
         while url:
@@ -145,19 +145,16 @@ class ViewsConnector:
             resp = requests.get(_API_BASE, timeout=_TIMEOUT)
             resp.raise_for_status()
             body = resp.json()
-            # The root lists available runs; find the latest fatalities003
-            if isinstance(body, list):
-                for entry in reversed(body):
-                    name = entry if isinstance(entry, str) else (entry.get("name", "") if isinstance(entry, dict) else "")
-                    if "fatalities003" in str(name):
-                        return str(name)
-            elif isinstance(body, dict):
-                for key in body:
-                    if "fatalities003" in str(key):
-                        return str(key)
+            runs = body.get("runs", []) if isinstance(body, dict) else body
+            if isinstance(runs, list):
+                # Pick the latest fatalities003 run, falling back to older models
+                for prefix in ("fatalities003", "fatalities002", "fatalities001"):
+                    matches = [r for r in runs if isinstance(r, str) and r.startswith(prefix)]
+                    if matches:
+                        return sorted(matches)[-1]
         except Exception as exc:
             LOG.debug("[views] could not detect run_id: %s", exc)
-        return "fatalities003"
+        return "current"
 
     @staticmethod
     def _extract_model_version(run_id: str) -> str:

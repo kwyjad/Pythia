@@ -47,6 +47,10 @@ jobs:
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       ACLED_API_KEY: ${{ secrets.ACLED_API_KEY }}
+      ACLED_ACCESS_TOKEN: ${{ secrets.ACLED_ACCESS_TOKEN }}
+      ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
+      ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
+      ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
       ACAPS_USERNAME: ${{ secrets.ACAPS_USERNAME }}
       ACAPS_PASSWORD: ${{ secrets.ACAPS_PASSWORD }}
       IPC_API_KEY: ${{ secrets.IPC_API_KEY }}
