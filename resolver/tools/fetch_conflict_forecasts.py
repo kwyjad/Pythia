@@ -164,6 +164,11 @@ def _write_to_db(df: pd.DataFrame, *, db_url: str | None = None) -> None:
                 [row["source"], row["forecast_issue_date"]],
             )
 
+        # Deduplicate: keep last row per unique key to avoid constraint violations
+        # (some upstream CSVs contain multiple rows per country, e.g. time-series)
+        key_cols = ["source", "iso3", "hazard_code", "metric", "lead_months", "forecast_issue_date"]
+        df = df.drop_duplicates(subset=key_cols, keep="last")
+
         # Insert new rows
         con.execute(
             "INSERT INTO conflict_forecasts "
