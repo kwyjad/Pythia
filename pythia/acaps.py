@@ -304,7 +304,9 @@ def fetch_inform_severity(
     if token is None:
         return None
 
-    iso3 = iso3.upper()
+    if isinstance(iso3, list):
+        iso3 = iso3[0] if iso3 else ""
+    iso3 = str(iso3).strip().upper()
 
     # --- Fetch current snapshot (try current month, then fall back) ---
     snapshot = None
@@ -753,7 +755,9 @@ def fetch_risk_radar(
     if token is None:
         return None
 
-    iso3 = iso3.upper()
+    if isinstance(iso3, list):
+        iso3 = iso3[0] if iso3 else ""
+    iso3 = str(iso3).strip().upper()
     used_fallback = False
 
     # Try Risk Radar endpoint first
@@ -1155,7 +1159,9 @@ def fetch_daily_monitoring(
     if token is None:
         return None
 
-    iso3 = iso3.upper()
+    if isinstance(iso3, list):
+        iso3 = iso3[0] if iso3 else ""
+    iso3 = str(iso3).strip().upper()
     end_date = date.today()
     start_date = end_date - timedelta(days=days_back)
 
@@ -1433,7 +1439,9 @@ def fetch_humanitarian_access(
     if token is None:
         return None
 
-    iso3 = iso3.upper()
+    if isinstance(iso3, list):
+        iso3 = iso3[0] if iso3 else ""
+    iso3 = str(iso3).strip().upper()
 
     # Try month by month going back up to 12 months
     for label in _month_labels_back(12):

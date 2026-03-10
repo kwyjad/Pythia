@@ -133,9 +133,15 @@ jobs:
             --status success \
             --json databaseId,createdAt \
             --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
+          gh run list \
+            --workflow "Ingest Structured Data" \
+            --branch main \
+            --status success \
+            --json databaseId,createdAt \
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
 
           if [ ! -s "${CANDIDATES_FILE}" ]; then
-            echo "ERROR: No successful Horizon Scanner or Resolver — Initial Backfill runs found."
+            echo "ERROR: No successful Horizon Scanner, Resolver — Initial Backfill, or Ingest Structured Data runs found."
             exit 1
           fi
 
@@ -182,7 +188,7 @@ jobs:
           done < "${CANDIDATES_FILE}.sorted"
 
           if [ "${FOUND}" -ne 1 ]; then
-            echo "ERROR: No valid canonical DB found."
+            echo "ERROR: No valid canonical DB found after checking Horizon Scanner, Resolver — Initial Backfill, and Ingest Structured Data runs."
             exit 1
           fi
 

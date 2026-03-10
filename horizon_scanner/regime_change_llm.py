@@ -120,8 +120,8 @@ async def _call_rc_model(
         model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS2", "google:gemini-3-flash-preview")
         default_name = "Gemini Flash"
     else:
-        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS1", f"google:{resolve_hs_model()}")
-        default_name = "Gemini"
+        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS1", "google:gemini-3-flash-preview")
+        default_name = "Gemini Flash"
 
     parts = model_spec_str.split(":", 1)
     if len(parts) == 2:
@@ -244,11 +244,20 @@ def _run_grounding_for_hazard(
     """
     from pythia.web_research.backends.gemini_grounding import fetch_via_gemini
 
+    _HAZARD_QUERY_LABELS = {
+        "ACE": "armed conflict escalation signals recent developments",
+        "DR": "drought food security conditions recent developments",
+        "FL": "flood risk river levels recent developments",
+        "HW": "heatwave temperature anomaly recent developments",
+        "TC": "tropical cyclone storm activity recent developments",
+    }
+
     try:
         grounding_prompt = build_grounding_prompt(hazard_code, country_name, iso3)
         recency = get_recency_days(hazard_code)
+        query_label = f"{country_name} ({iso3}) {_HAZARD_QUERY_LABELS.get(hazard_code, f'{hazard_code} recent developments')}"
         evidence_pack = fetch_via_gemini(
-            query=f"{country_name} ({iso3}) {hazard_code} grounding",
+            query=query_label,
             recency_days=recency,
             include_structural=True,
             timeout_sec=60,
@@ -262,7 +271,7 @@ def _run_grounding_for_hazard(
             try:
                 from pythia.web_research.backends.openai_web_search import fetch_via_openai_web_search
                 fallback_pack = fetch_via_openai_web_search(
-                    f"{country_name} ({iso3}) {hazard_code} grounding",
+                    query_label,
                     recency_days=recency,
                     include_structural=True,
                     timeout_sec=60,
@@ -280,6 +289,29 @@ def _run_grounding_for_hazard(
                 logger.debug("RC grounding OpenAI fallback error for %s %s: %s", iso3, hazard_code, exc)
 
         pack["markdown"] = _render_grounding_markdown(pack)
+
+        # Log grounding call to llm_calls for cost tracking
+        try:
+            usage_info = dict(pack.get("debug", {}).get("usage", {}))
+            model_id = pack.get("debug", {}).get("model_id", "gemini-2.5-flash-lite")
+            if not usage_info.get("cost_usd") and usage_info.get("total_tokens"):
+                usage_info["cost_usd"] = estimate_cost_usd(str(model_id), usage_info)
+            log_hs_llm_call(
+                hs_run_id=run_id,
+                iso3=iso3,
+                hazard_code=f"grounding_{hazard_code}",
+                model_spec=ModelSpec(
+                    name="Grounding", provider="google",
+                    model_id=str(model_id), active=True, purpose="hs_grounding",
+                ),
+                prompt_text=query_label,
+                response_text=(pack.get("markdown") or "")[:2000],
+                usage=usage_info,
+                error_text=str(pack["error"]["message"]) if pack.get("error") and isinstance(pack["error"], dict) else None,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to log grounding call for %s %s", iso3, hazard_code, exc_info=True)
+
         return pack
     except Exception as exc:  # noqa: BLE001
         logger.warning("RC grounding failed for %s %s: %s", iso3, hazard_code, exc)

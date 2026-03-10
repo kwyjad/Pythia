@@ -504,6 +504,7 @@ _KIMI_BASE_URL = os.getenv("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip(
 _DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
 
 _OPENAI_NO_CUSTOM_TEMPERATURE = {"gpt-5-mini"}
+_KIMI_FIXED_TEMPERATURE_MODELS = {"kimi-k2.5"}
 _OPENAI_TIMEOUT = _resolve_timeout("OPENAI_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _ANTHROPIC_TIMEOUT = _resolve_timeout("ANTHROPIC_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _GEMINI_TIMEOUT = _resolve_timeout("GEMINI_CALL_TIMEOUT_SEC", GEMINI_CALL_TIMEOUT_SEC, 60.0)
@@ -946,7 +947,7 @@ def _call_openai_compatible(
             json={
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": float(temperature),
+                "temperature": 1.0 if model in _KIMI_FIXED_TEMPERATURE_MODELS else float(temperature),
             },
             timeout=timeout,
         )

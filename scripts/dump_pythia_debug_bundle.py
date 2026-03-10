@@ -3588,23 +3588,14 @@ def emit_data_inject_inventory_csv(
     has_reliefweb = _safe_table_exists(con, "reliefweb_reports")
     has_seasonal_forecasts = _safe_table_exists(con, "seasonal_forecasts")
 
-    # Check cache files
-    enso_loaded = any(
-        Path(p).exists()
-        for p in [
-            "data/cache/enso_forecast.json",
-            "data/enso_forecast.json",
-            "cache/enso_forecast.json",
-        ]
-    )
-    seasonal_tc_loaded = any(
-        Path(p).exists()
-        for p in [
-            "data/cache/seasonal_tc_forecast.json",
-            "data/seasonal_tc_forecast.json",
-            "cache/seasonal_tc_forecast.json",
-        ]
-    )
+    # Check ENSO and seasonal TC by calling the actual loaders
+    try:
+        from horizon_scanner.enso import get_enso_prompt_context
+        enso_loaded = bool(get_enso_prompt_context())
+    except Exception:
+        enso_loaded = False
+
+    # seasonal_tc_loaded is checked per-country below (varies by basin exposure)
 
     # Try loading country names from hs_triage
     country_names: dict[str, str] = {}
@@ -3658,6 +3649,13 @@ def emit_data_inject_inventory_csv(
             nmme_avail = bool(_safe_table_count_where(
                 con, "seasonal_forecasts", "upper(iso3) = ?", [iso3.upper()]
             )) if has_seasonal_forecasts else False
+
+            # Per-country seasonal TC check (varies by basin exposure)
+            try:
+                from horizon_scanner.seasonal_tc import get_seasonal_tc_context_for_country
+                seasonal_tc_loaded = bool(get_seasonal_tc_context_for_country(iso3))
+            except Exception:
+                seasonal_tc_loaded = False
 
             writer.writerow({
                 "iso3": iso3,

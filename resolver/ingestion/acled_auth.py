@@ -56,6 +56,19 @@ def _jwt_is_valid(token: str, *, min_ttl: int = _MIN_TTL) -> bool:
     return (exp - int(time.time())) > min_ttl
 
 
+def _jwt_is_usable(token: str, *, min_ttl: int = _MIN_TTL) -> bool:
+    """Return True unless the token is a JWT with an expired ``exp`` claim.
+
+    Opaque tokens (non-JWT) are assumed usable — the caller set them
+    explicitly.  Only JWTs whose exp is within *min_ttl* of now are rejected.
+    """
+    exp = _jwt_exp(token)
+    if exp is None:
+        # Not a JWT or no exp claim — trust the caller
+        return True
+    return (exp - int(time.time())) > min_ttl
+
+
 def _describe_token(token: Optional[str], expiry: Optional[int]) -> Dict[str, Optional[str]]:
     return {
         "token_length": len(token) if token else 0,
@@ -173,7 +186,7 @@ def get_access_token() -> str:
         return cached_token
 
     existing = _resolve_existing_token()
-    if existing:
+    if existing and _jwt_is_usable(existing):
         expiry = _jwt_exp(existing)
         _LOG.debug(
             "Using environment-provided ACLED token",
@@ -181,6 +194,8 @@ def get_access_token() -> str:
         )
         _set_cache(existing, os.environ.get("ACLED_REFRESH_TOKEN"))
         return existing
+    elif existing:
+        _LOG.debug("Environment-provided ACLED token is an expired JWT; falling through to refresh/password grant")
 
     refresh_token = _resolve_refresh_token()
     if refresh_token:
