@@ -207,7 +207,7 @@ def test_hs_triage_rerun_lists(monkeypatch, capsys, tmp_path):
         lambda *_: ([("Foo", "AAA"), ("Bar", "BBB"), ("Baz", "CCC")], [], ["AAA", "BBB", "CCC"]),
     )
 
-    def fake_run(run_id: str, iso3: str, country_name: str):
+    def fake_run(run_id: str, iso3: str, country_name: str, crisiswatch_data=None):
         status_map = {"AAA": "ok", "BBB": "degraded", "CCC": "failed"}
         status = status_map[iso3]
         return {

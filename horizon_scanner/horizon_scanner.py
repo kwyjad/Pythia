@@ -1136,7 +1136,7 @@ async def _call_hs_model(
     return "", usage, error, spec
 
 
-def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCallResult:
+def _run_hs_for_country(run_id: str, iso3: str, country_name: str, crisiswatch_data: dict[str, Any] | None = None) -> _TriageCallResult:
     """Run HS triage for a single country using separate RC and triage modules.
 
     Execution order: RC first → triage second (RC output fed as context).
@@ -1164,6 +1164,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
         fallback_specs=fallback_specs,
         expected_hazards=expected_hazards,
         run_date=datetime.now().date(),
+        crisiswatch_data=crisiswatch_data,
     )
 
     # 3. Run TRIAGE second, feeding RC results as context (per-hazard with seasonal filtering)
@@ -1234,16 +1235,27 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str) -> _TriageCal
                         if retriever_enabled
                         else None
                     )
-                    pack = dict(
-                        fetch_evidence_pack(
-                            query,
-                            purpose="hs_hazard_tail_pack",
-                            run_id=run_id,
-                            hs_run_id=run_id,
-                            model_id=model_id or None,
+                    # Tail packs always use web search regardless of the
+                    # deprecated PYTHIA_WEB_RESEARCH_ENABLED flag (which
+                    # controls the old question-level pipeline).
+                    _orig_web_research = os.environ.get("PYTHIA_WEB_RESEARCH_ENABLED")
+                    os.environ["PYTHIA_WEB_RESEARCH_ENABLED"] = "1"
+                    try:
+                        pack = dict(
+                            fetch_evidence_pack(
+                                query,
+                                purpose="hs_hazard_tail_pack",
+                                run_id=run_id,
+                                hs_run_id=run_id,
+                                model_id=model_id or None,
+                            )
+                            or {}
                         )
-                        or {}
-                    )
+                    finally:
+                        if _orig_web_research is not None:
+                            os.environ["PYTHIA_WEB_RESEARCH_ENABLED"] = _orig_web_research
+                        else:
+                            os.environ.pop("PYTHIA_WEB_RESEARCH_ENABLED", None)
                     sources_raw = pack.get("sources") or []
                     sources_list = [src for src in sources_raw if isinstance(src, dict)]
                     signals_raw = pack.get("recent_signals") or []
@@ -1472,7 +1484,8 @@ def main(countries: list[str] | None = None):
         except Exception as exc:
             logger.warning("HDX Signals cache init failed: %s", exc)
 
-        # Fetch ICG CrisisWatch "On the Horizon" data (once per run, cached).
+        # Fetch ICG CrisisWatch "On the Horizon" data (once per run, passed to workers).
+        crisiswatch_data = None
         try:
             from horizon_scanner.crisiswatch_horizon import fetch_on_the_horizon, get_horizon_countries
             crisiswatch_data = fetch_on_the_horizon()
@@ -1503,7 +1516,7 @@ def main(countries: list[str] | None = None):
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=HS_MAX_WORKERS) as pool:
             futures = {
-                pool.submit(_run_hs_for_country, run_id, iso3, name): (iso3, name)
+                pool.submit(_run_hs_for_country, run_id, iso3, name, crisiswatch_data): (iso3, name)
                 for name, iso3 in country_entries
             }
 

@@ -1,3 +1,7 @@
+# DEPRECATED: NMME ingestion is now part of the Ingest Structured Data workflow.
+# This standalone workflow is retained for manual/ad-hoc runs only.
+# Scheduled runs are disabled.
+
 # Pythia
 # Copyright (c) 2025 Kevin Wyjad
 # Licensed under the Pythia Non-Commercial Public License v1.0.
@@ -22,9 +26,9 @@ concurrency:
         required: false
         default: "false"
         type: boolean
-  schedule:
-    # Run at 06:00 UTC on the 10th of each month (CPC publishes ~9th).
-    - cron: "0 6 10 * *"
+  # schedule disabled — NMME ingestion now runs as part of ingest-structured-data.yml
+  # schedule:
+  #   - cron: "0 6 10 * *"
 
 permissions:
   contents: read

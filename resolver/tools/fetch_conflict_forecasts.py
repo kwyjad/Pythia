@@ -123,6 +123,19 @@ def fetch_and_store(
 
     combined = pd.concat(all_dfs, ignore_index=True)
 
+    # --- Dedup: keep only the latest forecast_issue_date per source --------
+    # conflictforecast.org returns historical time-series (~105k rows) but
+    # the HS pipeline only uses the latest issue date per source, so older
+    # vintages are wasted storage.
+    before_dedup = len(combined)
+    latest_dates = combined.groupby("source")["forecast_issue_date"].transform("max")
+    combined = combined[combined["forecast_issue_date"] == latest_dates].copy()
+    if len(combined) < before_dedup:
+        LOG.info(
+            "[fetch_conflict_forecasts] dedup: %d → %d rows (kept latest issue date per source)",
+            before_dedup, len(combined),
+        )
+
     if dry_run:
         LOG.info(
             "[fetch_conflict_forecasts] DRY RUN — would write %d rows",
@@ -168,6 +181,25 @@ def _write_to_db(df: pd.DataFrame, *, db_url: str | None = None) -> None:
         # (some upstream CSVs contain multiple rows per country, e.g. time-series)
         key_cols = ["source", "iso3", "hazard_code", "metric", "lead_months", "forecast_issue_date"]
         df = df.drop_duplicates(subset=key_cols, keep="last")
+
+        # Prune old vintages: keep only the 2 most recent issue dates per source
+        for source_name in df["source"].unique():
+            dates = con.execute(
+                "SELECT DISTINCT forecast_issue_date FROM conflict_forecasts "
+                "WHERE source = ? ORDER BY forecast_issue_date DESC",
+                [source_name],
+            ).fetchall()
+            if len(dates) > 2:
+                cutoff = dates[1][0]  # 2nd newest date
+                con.execute(
+                    "DELETE FROM conflict_forecasts "
+                    "WHERE source = ? AND forecast_issue_date < ?",
+                    [source_name, cutoff],
+                )
+                LOG.info(
+                    "[fetch_conflict_forecasts] pruned %s vintages older than %s",
+                    source_name, cutoff,
+                )
 
         # Insert new rows
         con.execute(
