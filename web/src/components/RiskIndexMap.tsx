@@ -949,17 +949,31 @@ export default function RiskIndexMap({
       <div className="absolute bottom-3 right-3 rounded-md border border-fred-secondary bg-fred-surface/90 px-3 py-2 text-[11px] text-fred-text shadow-fredCard sm:text-xs">
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-1">
           {[
-            { label: "Very low", color: "var(--risk-map-c1)" },
-            { label: "Low", color: "var(--risk-map-c2)" },
-            { label: "Moderate", color: "var(--risk-map-c3)" },
-            { label: "High", color: "var(--risk-map-c4)" },
             { label: "Very high", color: "var(--risk-map-c5)" },
+            { label: "High", color: "var(--risk-map-c4)" },
+            { label: "Moderate", color: "var(--risk-map-c3)" },
+            { label: "Low", color: "var(--risk-map-c2)" },
+            { label: "Very low", color: "var(--risk-map-c1)" },
             { label: "Triaged but no forecast", color: "var(--risk-map-no-eiv)" },
             { label: "Not triaged", color: "var(--risk-map-no-questions)" },
           ].map((item) => (
             <div key={item.label} className="flex items-center gap-2">
               <span
                 className="h-3 w-3 rounded-sm border border-fred-border"
+                style={{ backgroundColor: item.color }}
+              />
+              <span>{item.label}</span>
+            </div>
+          ))}
+          <div className="my-1 border-t border-fred-border/40" />
+          {[
+            { label: "RC L3", color: "#ef4444" },
+            { label: "RC L2", color: "#fb923c" },
+            { label: "RC L1", color: "#facc15" },
+          ].map((item) => (
+            <div key={item.label} className="flex items-center gap-2">
+              <span
+                className="h-3 w-3 rounded-full border border-fred-border"
                 style={{ backgroundColor: item.color }}
               />
               <span>{item.label}</span>

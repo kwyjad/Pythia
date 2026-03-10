@@ -30,30 +30,53 @@ def _base_rows(
     conn,
     metric_scope: str | None = None,
     hs_run_id: str | None = None,
+    forecaster_run_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     base = {}
     try:
-        clauses: list[str] = []
-        params: list[str] = []
-        if metric_scope:
-            clauses.append("UPPER(metric) = ?")
-            params.append(metric_scope.upper())
-        if hs_run_id:
-            clauses.append("hs_run_id = ?")
-            params.append(hs_run_id)
-        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        rows = conn.execute(
-            f"""
-            SELECT
-              UPPER(iso3) AS iso3,
-              COUNT(DISTINCT question_id) AS n_questions
-            FROM questions
-            {where}
-            GROUP BY 1
-            ORDER BY 1
-            """,
-            params,
-        ).fetchall()
+        if forecaster_run_id:
+            # Scope to questions that have forecasts in the specified run.
+            clauses: list[str] = []
+            params: list[str] = []
+            if metric_scope:
+                clauses.append("UPPER(q.metric) = ?")
+                params.append(metric_scope.upper())
+            where = (" AND " + " AND ".join(clauses)) if clauses else ""
+            rows = conn.execute(
+                f"""
+                SELECT
+                  UPPER(q.iso3) AS iso3,
+                  COUNT(DISTINCT q.question_id) AS n_questions
+                FROM questions q
+                JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
+                WHERE fe.run_id = ?{where}
+                GROUP BY 1
+                ORDER BY 1
+                """,
+                [forecaster_run_id] + params,
+            ).fetchall()
+        else:
+            clauses = []
+            params = []
+            if metric_scope:
+                clauses.append("UPPER(metric) = ?")
+                params.append(metric_scope.upper())
+            if hs_run_id:
+                clauses.append("hs_run_id = ?")
+                params.append(hs_run_id)
+            where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            rows = conn.execute(
+                f"""
+                SELECT
+                  UPPER(iso3) AS iso3,
+                  COUNT(DISTINCT question_id) AS n_questions
+                FROM questions
+                {where}
+                GROUP BY 1
+                ORDER BY 1
+                """,
+                params,
+            ).fetchall()
     except Exception:
         LOGGER.exception("Failed to query base country rows")
         return base
@@ -118,7 +141,11 @@ def _update_last_triaged(conn, base: dict[str, dict[str, Any]]) -> None:
             base[key]["last_triaged"] = last_triaged
 
 
-def _update_forecasts(conn, base: dict[str, dict[str, Any]]) -> None:
+def _update_forecasts(
+    conn,
+    base: dict[str, dict[str, Any]],
+    forecaster_run_id: str | None = None,
+) -> None:
     if not base:
         return
     if not _table_exists(conn, "forecasts_ensemble"):
@@ -150,6 +177,12 @@ def _update_forecasts(conn, base: dict[str, dict[str, Any]]) -> None:
         else "NULL AS last_forecasted"
     )
 
+    run_filter = ""
+    run_params: list[str] = []
+    if forecaster_run_id and "run_id" in fe_cols:
+        run_filter = " AND fe.run_id = ?"
+        run_params = [forecaster_run_id]
+
     try:
         rows = conn.execute(
             f"""
@@ -158,10 +191,11 @@ def _update_forecasts(conn, base: dict[str, dict[str, Any]]) -> None:
               COUNT(DISTINCT CASE WHEN {filter_expr} THEN fe.question_id END) AS n_forecasted,
               {last_expr}
             FROM questions q
-            LEFT JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
+            LEFT JOIN forecasts_ensemble fe ON fe.question_id = q.question_id{run_filter}
             GROUP BY 1
             ORDER BY 1
-            """
+            """,
+            run_params,
         ).fetchall()
     except Exception:
         LOGGER.exception("Failed to compute forecast stats")
@@ -279,11 +313,14 @@ def _update_highest_rc(
     conn,
     base: dict[str, dict[str, Any]],
     hs_run_id: str | None = None,
+    forecaster_run_id: str | None = None,
 ) -> None:
     """Populate ``highest_rc_level`` / ``highest_rc_score`` in *base*.
 
+    When *forecaster_run_id* is given, RC data is scoped to the HS run(s)
+    associated with questions in that forecaster run.
     When *hs_run_id* is given, RC data is taken from that single run (used when
-    the caller has a specific run-month context).  When it is ``None``, RC data
+    the caller has a specific run-month context).  When both are ``None``, RC data
     is joined through the ``questions`` table so each country gets RC values
     only from the run(s) that produced its questions.
     """
@@ -306,7 +343,28 @@ def _update_highest_rc(
         return
 
     try:
-        if hs_run_id:
+        if forecaster_run_id:
+            # Forecaster-run mode: scope RC data to the HS run(s) associated
+            # with questions in this specific forecaster run.
+            rows = conn.execute(
+                f"""
+                SELECT
+                  UPPER(ht.{iso_col}) AS iso3,
+                  MAX(ht.{level_col}) AS highest_rc_level,
+                  MAX(ht.{score_col}) AS highest_rc_score
+                FROM hs_triage ht
+                JOIN questions q
+                  ON q.hs_run_id = ht.{run_col}
+                 AND UPPER(q.iso3) = UPPER(ht.{iso_col})
+                JOIN forecasts_ensemble fe
+                  ON fe.question_id = q.question_id
+                WHERE fe.run_id = ?
+                GROUP BY 1
+                ORDER BY 1
+                """,
+                [forecaster_run_id],
+            ).fetchall()
+        elif hs_run_id:
             # Single-run mode: take RC from the specified run only.
             rows = conn.execute(
                 f"""
@@ -359,6 +417,7 @@ def compute_countries_index(
     conn,
     metric_scope: str | None = None,
     year_month: str | None = None,
+    forecaster_run_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if conn is None:
         return []
@@ -369,6 +428,16 @@ def compute_countries_index(
     if "iso3" not in q_cols or "question_id" not in q_cols:
         LOGGER.warning("questions table missing iso3/question_id columns.")
         return []
+
+    # When a specific forecaster run is provided, scope everything to that run.
+    if forecaster_run_id:
+        base = _base_rows(conn, metric_scope=metric_scope, forecaster_run_id=forecaster_run_id)
+        if not base:
+            return []
+        _update_last_triaged(conn, base)
+        _update_forecasts(conn, base, forecaster_run_id=forecaster_run_id)
+        _update_highest_rc(conn, base, forecaster_run_id=forecaster_run_id)
+        return [base[key] for key in sorted(base)]
 
     # Resolve the HS run for the requested month (or latest).
     hs_run_id: str | None = None
