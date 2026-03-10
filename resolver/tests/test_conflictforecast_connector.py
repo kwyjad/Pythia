@@ -532,9 +532,9 @@ class TestFetchForecastsErrorHandling:
         self, mock_listing: MagicMock, mock_download: MagicMock
     ) -> None:
         mock_listing.return_value = _make_listing(
-            "Armed_Conflict_3m_01-2025.csv",
-            "Armed_Conflict_12m_01-2025.csv",
-            "Violence_Intensity_3m_01-2025.csv",
+            "conflictforecast_ons_armedconf_03_01-2025.csv",
+            "conflictforecast_ons_armedconf_12_01-2025.csv",
+            "conflictforecast_int_lnbest_03_01-2025.csv",
         )
         # First download fails, rest succeed
         good_df = pd.DataFrame({
@@ -561,9 +561,9 @@ class TestFetchForecastsErrorHandling:
         self, mock_listing: MagicMock, mock_download: MagicMock
     ) -> None:
         mock_listing.return_value = _make_listing(
-            "Armed_Conflict_3m_01-2025.csv",
-            "Armed_Conflict_12m_01-2025.csv",
-            "Violence_Intensity_3m_01-2025.csv",
+            "conflictforecast_ons_armedconf_03_01-2025.csv",
+            "conflictforecast_ons_armedconf_12_01-2025.csv",
+            "conflictforecast_int_lnbest_03_01-2025.csv",
         )
         mock_download.side_effect = Exception("always fails")
 
@@ -586,9 +586,9 @@ class TestFetchForecastsIntegration:
         self, mock_get: MagicMock
     ) -> None:
         listing = _make_listing(
-            "Armed_Conflict_3m_03-2025.csv",
-            "Armed_Conflict_12m_03-2025.csv",
-            "Violence_Intensity_3m_03-2025.csv",
+            "conflictforecast_ons_armedconf_03_03-2025.csv",
+            "conflictforecast_ons_armedconf_12_03-2025.csv",
+            "conflictforecast_int_lnbest_03_03-2025.csv",
         )
 
         csv_ac3 = _csv_text([
@@ -611,11 +611,11 @@ class TestFetchForecastsIntegration:
 
             if "get-latest-file-listing" in url:
                 resp.json.return_value = listing
-            elif "Armed_Conflict_3m" in url:
+            elif "ons_armedconf_03" in url:
                 resp.text = csv_ac3
-            elif "Armed_Conflict_12m" in url:
+            elif "ons_armedconf_12" in url:
                 resp.text = csv_ac12
-            elif "Violence_Intensity_3m" in url:
+            elif "int_lnbest_03" in url:
                 resp.text = csv_vi3
             else:
                 resp.raise_for_status.side_effect = Exception("unexpected URL")
