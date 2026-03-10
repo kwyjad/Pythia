@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+import threading
 from datetime import datetime
 from importlib.util import find_spec
 from io import BytesIO, StringIO
@@ -217,19 +218,42 @@ def _concat_cost_tables(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def _con():
-    db_url = load_cfg()["app"]["db_url"].replace("duckdb:///", "")
-    db_path = Path(db_url)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        maybe_sync_latest_db()
-    except DbSyncError as exc:
+_READ_CON: Optional[duckdb.DuckDBPyConnection] = None
+_READ_CON_LOCK = threading.Lock()
+
+
+def _ensure_read_connection() -> duckdb.DuckDBPyConnection:
+    """Return a singleton DuckDB connection (created on first call).
+
+    Uses ``read_only=False`` to match the configuration used by
+    ``_startup_sync()`` (which opens a write connection for schema
+    migrations).  DuckDB rejects opening the same file with a different
+    ``read_only`` flag within one process, so both must agree.  All
+    request handlers only issue SELECT queries, so this is safe.
+    """
+    global _READ_CON  # noqa: PLW0603
+    if _READ_CON is not None:
+        return _READ_CON
+    with _READ_CON_LOCK:
+        if _READ_CON is not None:
+            return _READ_CON
+        db_url = load_cfg()["app"]["db_url"].replace("duckdb:///", "")
+        db_path = Path(db_url)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            maybe_sync_latest_db()
+        except DbSyncError as exc:
+            if not db_path.exists():
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            logger.warning("DB sync failed: %s", exc)
         if not db_path.exists():
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        logger.warning("DB sync failed: %s", exc)
-    if not db_path.exists():
-        raise HTTPException(status_code=503, detail="DB not available yet")
-    return duckdb.connect(db_url, read_only=True)
+            raise HTTPException(status_code=503, detail="DB not available yet")
+        _READ_CON = duckdb.connect(db_url, read_only=False)
+        return _READ_CON
+
+
+def _con():
+    return _ensure_read_connection().cursor()
 
 
 def _require_debug_token(token: Optional[str]) -> None:
