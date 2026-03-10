@@ -58,23 +58,19 @@ jobs:
       HS_TEMPERATURE: "0.0"
       FORECASTER_RESEARCH_MAX_WORKERS: "8"
       FORECASTER_SPD_MAX_WORKERS: "8"
-      PYTHIA_WEB_RESEARCH_ENABLED: "1"
-      PYTHIA_RETRIEVER_ENABLED: "1"
-      PYTHIA_RETRIEVER_MODEL_ID: "gemini-3-flash-preview"
-      PYTHIA_MODEL_SELF_SEARCH_ENABLED: "0"
+      # Deprecated: question-level web research replaced by structured data injection.
+      # Kept at "0" so code that checks these vars doesn't break.
+      PYTHIA_WEB_RESEARCH_ENABLED: "0"       # deprecated — structured data replaces web research
+      PYTHIA_RETRIEVER_ENABLED: "0"          # deprecated — structured data replaces retriever
+      PYTHIA_MODEL_SELF_SEARCH_ENABLED: "0"  # deprecated
+      PYTHIA_SPD_WEB_SEARCH_ENABLED: "0"     # deprecated — SPD evidence now from structured data
+      PYTHIA_FORECASTER_SELF_SEARCH: "0"     # deprecated — replaced by structured data injection
       PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED: "1"
       PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED: "1"
       PYTHIA_PREDICTION_MARKETS_ENABLED: "0"
-      PYTHIA_SPD_WEB_SEARCH_ENABLED: "1"
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      PYTHIA_WEB_RESEARCH_BACKEND: auto
-      PYTHIA_WEB_RESEARCH_RECENCY_DAYS: "120"
-      PYTHIA_WEB_RESEARCH_INCLUDE_STRUCTURAL: "1"
-      PYTHIA_FORECASTER_SELF_SEARCH: "1"
-      PYTHIA_FORECASTER_SELF_SEARCH_MAX_CALLS_PER_MODEL: "1"
-      PYTHIA_FORECASTER_SELF_SEARCH_MAX_SOURCES: "6"
       HS_MODEL_ID: gemini-3-flash-preview
       PYTHIA_HS_ONLY_COUNTRIES: ${{ github.event.inputs.hs_only_countries }}
       PYTHIA_BLOCK_PROVIDERS: xai
@@ -238,9 +234,15 @@ jobs:
               --status success \
               --json databaseId,createdAt \
               --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
+            gh run list \
+              --workflow "Ingest Structured Data" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
 
             if [ ! -s "${CANDIDATES_FILE}" ]; then
-              echo "ERROR: No successful Horizon Scanner or Resolver — Initial Backfill runs found; refusing to start without canonical DB."
+              echo "ERROR: No successful Horizon Scanner, Resolver — Initial Backfill, or Ingest Structured Data runs found; refusing to start without canonical DB."
               exit 1
             fi
 
@@ -253,6 +255,8 @@ jobs:
               DB_CREATED_AT="$CREATED"
               if [ "$LABEL" = "Horizon Scanner Triage" ]; then
                 DB_SOURCE="pipeline"
+              elif [ "$LABEL" = "Ingest Structured Data" ]; then
+                DB_SOURCE="ingest"
               else
                 DB_SOURCE="backfill"
               fi
@@ -297,13 +301,13 @@ jobs:
             done < "${CANDIDATES_FILE}.sorted"
 
             if [ "${FOUND}" -ne 1 ]; then
-              echo "ERROR: No valid canonical DB found after checking Horizon Scanner and Resolver — Initial Backfill runs."
+              echo "ERROR: No valid canonical DB found after checking Horizon Scanner, Resolver — Initial Backfill, and Ingest Structured Data runs."
               exit 1
             fi
           fi
 
           if [ -z "${DB_RUN_ID:-}" ]; then
-            echo "ERROR: No successful Horizon Scanner or Resolver — Initial Backfill runs found; refusing to start without canonical DB."
+            echo "ERROR: No successful Horizon Scanner, Resolver — Initial Backfill, or Ingest Structured Data runs found; refusing to start without canonical DB."
             exit 1
           fi
 

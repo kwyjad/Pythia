@@ -173,7 +173,7 @@ def get_access_token() -> str:
         return cached_token
 
     existing = _resolve_existing_token()
-    if existing:
+    if existing and _jwt_is_valid(existing):
         expiry = _jwt_exp(existing)
         _LOG.debug(
             "Using environment-provided ACLED token",
@@ -181,6 +181,8 @@ def get_access_token() -> str:
         )
         _set_cache(existing, os.environ.get("ACLED_REFRESH_TOKEN"))
         return existing
+    elif existing:
+        _LOG.debug("Environment-provided ACLED token is expired; falling through to refresh/password grant")
 
     refresh_token = _resolve_refresh_token()
     if refresh_token:

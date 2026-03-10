@@ -2766,6 +2766,25 @@ def _load_structured_data(
     except Exception:
         pass
 
+    # Conflict forecasts (ACE only)
+    if hazard_code.upper() == "ACE":
+        try:
+            from horizon_scanner.conflict_forecasts import load_conflict_forecasts, format_conflict_forecasts_for_research
+            forecasts = load_conflict_forecasts(iso3)
+            if forecasts:
+                sd["conflict_forecasts"] = format_conflict_forecasts_for_research(forecasts)
+        except Exception:
+            pass
+
+    # HDX Signals (all hazards)
+    try:
+        from horizon_scanner.hdx_signals import format_hdx_signals_for_prompt
+        hdx_text = format_hdx_signals_for_prompt(iso3, hazard_code)
+        if hdx_text:
+            sd["hdx_signals"] = hdx_text
+    except Exception:
+        pass
+
     # Seasonal TC forecasts (TC only)
     if hazard_code.upper() == "TC":
         try:
@@ -4204,7 +4223,8 @@ def _write_spd_compare_artifact(run_id: str, qid: str, payload: dict[str, object
 
 
 async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> None:
-    LOG.warning("DEPRECATED: _run_research_for_question called but researcher pipeline is retired")
+    """DEPRECATED: question-level web research replaced by structured data injection."""
+    LOG.info("Skipping deprecated question-level web research (replaced by structured data injection)")
     qid = question_row["question_id"]
     iso3 = question_row["iso3"]
     hz = question_row["hazard_code"]
@@ -4221,7 +4241,9 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
         hs_evidence_pack: dict[str, Any] | None = None
         question_evidence_pack: dict[str, Any] | None = None
         hazard_tail_pack: dict[str, Any] | None = None
-        retriever_enabled = _retriever_enabled()
+        # DEPRECATED: web research via fetch_evidence_pack is replaced by structured
+        # data injection. The retriever code below is kept for reference but bypassed.
+        retriever_enabled = False  # was: _retriever_enabled()
         if retriever_enabled or os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") == "1":
             try:
                 hs_evidence_pack = _load_hs_country_evidence_pack(hs_run_id, iso3)
@@ -4770,7 +4792,11 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         target_month = _first_target_month(target_months)
 
         question_evidence_pack = _load_question_evidence_pack(run_id, qid) if qid else None
-        if question_evidence_pack is None and _retriever_enabled():
+        # DEPRECATED: question-level web research via fetch_evidence_pack is replaced
+        # by structured data injection (conflict forecasts, ReliefWeb, HDX Signals,
+        # HS grounding evidence). The retriever code below is kept for reference but
+        # bypassed — structured data now flows via _load_structured_data().
+        if False and question_evidence_pack is None and _retriever_enabled():  # noqa: SIM223
             try:
                 question_queries = _build_question_evidence_queries(rec, wording, hs_entry)
                 retriever_model_id = _retriever_model_id()

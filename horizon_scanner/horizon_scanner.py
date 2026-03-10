@@ -1472,6 +1472,18 @@ def main(countries: list[str] | None = None):
         except Exception as exc:
             logger.warning("HDX Signals cache init failed: %s", exc)
 
+        # Fetch ICG CrisisWatch "On the Horizon" data (once per run, cached).
+        try:
+            from horizon_scanner.crisiswatch_horizon import fetch_on_the_horizon, get_horizon_countries
+            crisiswatch_data = fetch_on_the_horizon()
+            if crisiswatch_data:
+                flagged = get_horizon_countries(crisiswatch_data)
+                logger.info("CrisisWatch: fetched %d flagged countries: %s", len(flagged), sorted(flagged.keys()))
+            else:
+                logger.info("CrisisWatch: no data returned")
+        except Exception as exc:
+            logger.warning("CrisisWatch fetch failed (non-fatal): %s", exc)
+
         country_entries, skipped_entries, requested_countries = _load_country_list(countries)
         if not country_entries:
             logger.warning("No countries supplied to Horizon Scanner; exiting.")

@@ -6,6 +6,16 @@ This file provides guidance for Claude Code when working with the Pythia codebas
 
 Pythia is an end-to-end AI forecasting system for humanitarian crises. It scans countries for emerging hazards, produces triage signals, generates research briefs, runs LLM ensembles for probabilistic forecasts (SPDs), scores and calibrates them, and serves outputs via a FastAPI API and Next.js dashboard.
 
+## Post-Edit Documentation Requirements
+
+After making any code changes, evaluate whether the following files need updating and update them if so:
+
+- **CLAUDE.md** – Update if you've changed architecture, environment variables, failure modes, component behavior, workflow steps, or database schema. This is the authoritative reference for future Claude Code sessions.
+- **README.md** – Update if you've changed setup steps, dependencies, usage instructions, file structure, or how to run the project.
+- **docs/fred_overview.md** – This is a plain-English description of the system for non-technical readers. Update it if you've changed what the system does, how it behaves, its inputs/outputs, or its overall logic. Avoid technical jargon; explain changes in terms of what the system now does differently from a user perspective. Assume readers understand forecasting and humanitarian data, but not code.
+
+Do not update these files for trivial changes (e.g. formatting, minor refactors with no behavioral change). Use your judgment.
+
 **Core pipeline:**
 ```
 Resolver facts/base rates -> Horizon Scanner per-hazard pipeline (RC grounding → RC → triage grounding → triage)
@@ -196,6 +206,9 @@ RC detects departures from historical base rates (distinct from triage_score whi
 - Tail packs are enabled by default (`HS_TAIL_PACKS_ENABLED` defaults to `"1"`). Override via `PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED=0`.
 - Distribution check warns when too many assessments exceed expected proportions
 - RC prompt templates include a softened distribution anchor paragraph for small-country runs (where few comparative countries are included)
+- **RC model**: Both passes default to `gemini-3-flash-preview` (overridable via `PYTHIA_RC_MODEL_PASS1` / `PYTHIA_RC_MODEL_PASS2`)
+- **RC data sources for ACE**: Conflict forecasts (VIEWS, conflictforecast.org, ACLED CAST) and ICG CrisisWatch "On the Horizon" flags are injected into ACE RC prompts. CrisisWatch is fetched once per run and cached.
+- **RC grounding queries**: Use hazard-specific search labels (e.g. "armed conflict escalation signals" for ACE, "flood risk river levels" for FL) instead of generic terms, to improve Gemini Google Search result relevance
 - See `docs/hs_regime_change.md` for full details
 
 ## Track 1 / Track 2 forecast system
@@ -315,31 +328,36 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 - `pythia/db/schema.py` is authoritative for Pythia tables; `resolver/db/schema.sql` for Resolver tables
 - Config loaded via `pythia.config.load()` which reads `pythia/config.yaml`
 - LLM providers abstracted through `forecaster/providers.py` (OpenAI, Google, Anthropic, XAI, Kimi, DeepSeek)
-- All LLM calls logged to `llm_calls` table with cost, tokens, latency, error tracking
+- All LLM calls logged to `llm_calls` table with cost, tokens, latency, error tracking. This includes RC/triage LLM passes (logged by providers module), grounding calls (logged explicitly in `_run_grounding_for_hazard` via `log_hs_llm_call` with `hazard_code=grounding_{hazard}`), and adversarial checks (logged by `web_research` module for evidence fetches and by providers module for synthesis calls).
 - Env vars override config defaults; threshold env vars use `_env_float()` pattern
 - Structured data connectors follow a standard pattern: `fetch_*()` → `store_*()` → `load_*()` → `format_*_for_prompt()` / `format_*_for_spd()`
-- Research LLM stage is deprecated; evidence now flows from structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political, NMME, ENSO, seasonal TC, HDX Signals, VIEWS, conflictforecast.org, ACLED CAST, ICG CrisisWatch) into HS and SPD prompts
+- **Question-level web research pipeline is deprecated**: The `fetch_evidence_pack` / `_build_question_evidence_queries` / `_merge_question_evidence_packs` flow is bypassed. SPD prompts now receive structured data directly via `_load_structured_data()`: conflict forecasts, ReliefWeb, HDX Signals, HS grounding evidence, ACAPS, IPC, ACLED political, NMME, ENSO, seasonal TC, adversarial checks. The `question_research` table is no longer populated by the pipeline (only placeholder rows). Env vars `PYTHIA_RETRIEVER_ENABLED`, `PYTHIA_WEB_RESEARCH_ENABLED`, `PYTHIA_SPD_WEB_SEARCH_ENABLED`, `PYTHIA_FORECASTER_SELF_SEARCH` are set to "0" in the workflow.
 - HS pipeline is per-hazard: each hazard gets its own RC grounding, RC call, triage grounding, and triage call (2-pass each: Gemini Flash + GPT-5-mini)
 - RC and triage grounding use different signal categories and recency windows (RC: TRIGGER/DAMPENER/BASELINE; triage: SITUATION/RESPONSE/FORECAST/VULNERABILITY)
+- **Grounding recency windows**: RC grounding uses tight windows (ACE=14d, DR=30d, FL=14d, HW=14d, TC=30d) because it hunts for change signals. Triage grounding uses wider windows (ACE=60d, DR=90d, FL=60d, HW=60d, TC=60d) for the operational picture. Both are defined in their respective `RECENCY_DAYS` dicts.
+- **Grounding source steering**: All 10 grounding prompts (5 RC + 5 triage) include a `PRIORITIZE THESE SOURCES` section with hazard-specific source priority lists and a `RECENCY FILTER` instruction. RC prompts prioritize wire services and specialist sources for novelty; triage prompts elevate OCHA/humanitarian sources for the operational picture.
 
 ## Known failure modes
 
 - **RC degradation without data sources**: RC assessments degrade severely when both `PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED=0` and structured data connectors (ACLED, facts_deltas) are unavailable simultaneously. All country-hazard pairs may return RC Level 0 (baseline), even for active crisis countries. Always ensure at least one of web search or structured data is available for RC grounding.
 - **Prediction market retriever**: Currently disabled (`PYTHIA_PM_RETRIEVER_ENABLED=0`). Metaculus returns 403, Polymarket returns HTTP 422, and each call times out at 30s — adding ~6 minutes of wasted wall time per run. Do not re-enable until upstream APIs are fixed.
 - **DuckDB cache key mismatch** (fixed): The DuckDB connection pool was using raw URL strings rather than resolved paths as cache keys, causing 100+ `cache_event=miss` entries and a new connection per DB access. Fixed by normalizing to resolved paths.
+- **ACAPS iso3 list values** (fixed): The ACAPS API sometimes returns `iso3` as a list instead of a string. All four ACAPS fetch functions (`fetch_inform_severity`, `fetch_risk_radar`, `fetch_daily_monitoring`, `fetch_humanitarian_access`) now defensively coerce list values to strings before calling `.upper()`.
+- **Kimi kimi-k2.5 temperature constraint** (fixed): The kimi-k2.5 model only accepts `temperature=1`. The `_call_openai_compatible` function in `forecaster/providers.py` now clamps temperature to 1.0 for models in `_KIMI_FIXED_TEMPERATURE_MODELS`.
+- **ACLED CAST expired token passthrough** (fixed): `get_access_token()` in `resolver/ingestion/acled_auth.py` now validates JWT expiry via `_jwt_is_valid()` before using environment-provided tokens. Expired tokens fall through to the refresh/password grant flow instead of being returned as-is.
+
+## Canonical DB artifact discovery
+
+The `pythia-resolver-db` DuckDB artifact is shared across three workflows. Each workflow's "Download canonical resolver DB" step searches for the most recent successful run from **all three** workflow types:
+
+1. **Horizon Scanner Triage** (`run_horizon_scanner.yml`) — DB_SOURCE=`pipeline`
+2. **Resolver — Initial Backfill** — DB_SOURCE=`backfill`
+3. **Ingest Structured Data** (`ingest-structured-data.yml`) — DB_SOURCE=`ingest`
+
+Candidates are sorted by `createdAt` descending; the first one that downloads successfully and passes the DB signature check is used. If a new workflow is added that produces `pythia-resolver-db`, it must be added as a candidate source in all workflows that consume the artifact.
 
 ## Run health diagnostics
 
 - `hs_country_evidence` and `question_evidence` CSVs are the primary artifacts for diagnosing structured data connector health post-run.
 - If a connector shows "unavailable" across all countries, it indicates an upstream data gap, a connector bug, or a missing environment secret.
 - After applying fixes, a clean re-run must produce a queryable DuckDB artifact before connector health can be verified.
-
-## Post-Edit Documentation Requirements
-
-After making any code changes, evaluate whether the following files need updating and update them if so:
-
-- **CLAUDE.md** – Update if you've changed architecture, environment variables, failure modes, component behavior, workflow steps, or database schema. This is the authoritative reference for future Claude Code sessions.
-- **README.md** – Update if you've changed setup steps, dependencies, usage instructions, file structure, or how to run the project.
-- **docs/fred_overview.md** – This is a plain-English description of the system for non-technical readers. Update it if you've changed what the system does, how it behaves, its inputs/outputs, or its overall logic. Avoid technical jargon; explain changes in terms of what the system now does differently from a user perspective. Assume readers understand forecasting and humanitarian data, but not code.
-
-Do not update these files for trivial changes (e.g. formatting, minor refactors with no behavioral change). Use your judgment.
