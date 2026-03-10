@@ -199,6 +199,17 @@ jobs:
           python -m resolver.tools.fetch_conflict_forecasts
           echo "=== Conflict forecast ingestion completed ==="
 
+      - name: Run NMME seasonal forecast ingestion
+        continue-on-error: true  # NMME FTP files may not be available yet for the current month
+        run: |
+          set -e
+          echo "=== Running NMME seasonal forecast ingestion ==="
+          python -m resolver.tools.ingest_nmme || {
+            echo "WARNING: NMME ingestion failed (FTP files may not be published yet — non-fatal)"
+            exit 0
+          }
+          echo "=== NMME seasonal forecast ingestion completed ==="
+
       - name: Run structured data ingestion
         run: |
           set -e

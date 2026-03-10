@@ -282,7 +282,10 @@ def _bulk_fetch_inform_severity(
     # Group snapshot by iso3
     by_country: dict[str, list[dict]] = defaultdict(list)
     for rec in snapshot_data:
-        iso3 = (rec.get("iso3") or "").upper()
+        iso3_raw = rec.get("iso3") or ""
+        if isinstance(iso3_raw, list):
+            iso3_raw = iso3_raw[0] if iso3_raw else ""
+        iso3 = str(iso3_raw).strip().upper()
         if iso3 and iso3 in countries:
             by_country[iso3].append(rec)
 
@@ -294,7 +297,10 @@ def _bulk_fetch_inform_severity(
     )
     trend_by_country: dict[str, list[dict]] = defaultdict(list)
     for entry in log_data:
-        iso3 = (entry.get("iso3") or "").upper()
+        iso3_raw = entry.get("iso3") or ""
+        if isinstance(iso3_raw, list):
+            iso3_raw = iso3_raw[0] if iso3_raw else ""
+        iso3 = str(iso3_raw).strip().upper()
         entry_date = entry.get("date", "")
         entry_score = _safe_float(entry.get("value"))
         if iso3 and iso3 in countries and entry_date and entry_score is not None:
@@ -313,7 +319,10 @@ def _bulk_fetch_inform_severity(
             token=token,
         )
         for ind in dim_data:
-            iso3 = (ind.get("iso3") or "").upper()
+            iso3_raw = ind.get("iso3") or ""
+            if isinstance(iso3_raw, list):
+                iso3_raw = iso3_raw[0] if iso3_raw else ""
+            iso3 = str(iso3_raw).strip().upper()
             fig = _safe_float(ind.get("figure"))
             if iso3 and iso3 in countries and fig is not None and fig >= 4.0:
                 top_indicators_by_country[iso3].append({
@@ -423,7 +432,10 @@ def _bulk_fetch_risk_radar(
     risk_ids_to_fetch: list[str] = []
 
     for r in all_risks:
-        iso3 = (r.get("iso3") or "").upper()
+        iso3_raw = r.get("iso3") or ""
+        if isinstance(iso3_raw, list):
+            iso3_raw = iso3_raw[0] if iso3_raw else ""
+        iso3 = str(iso3_raw).strip().upper()
         if not iso3 or iso3 not in countries:
             continue
 
@@ -528,7 +540,10 @@ def _bulk_fetch_daily_monitoring(
 
     by_country: dict[str, list[dict]] = defaultdict(list)
     for r in all_entries:
-        iso3 = (r.get("iso3") or "").upper()
+        iso3_raw = r.get("iso3") or ""
+        if isinstance(iso3_raw, list):
+            iso3_raw = iso3_raw[0] if iso3_raw else ""
+        iso3 = str(iso3_raw).strip().upper()
         if not iso3 or iso3 not in countries:
             continue
 
@@ -598,7 +613,10 @@ def _bulk_fetch_humanitarian_access(
         # Group by iso3
         by_country: dict[str, list[dict]] = defaultdict(list)
         for rec in data:
-            iso3 = (rec.get("iso3") or "").upper()
+            iso3_raw = rec.get("iso3") or ""
+            if isinstance(iso3_raw, list):
+                iso3_raw = iso3_raw[0] if iso3_raw else ""
+            iso3 = str(iso3_raw).strip().upper()
             if iso3 and iso3 in remaining:
                 by_country[iso3].append(rec)
 
@@ -746,9 +764,15 @@ def _bulk_fetch_reliefweb(
         pc = fields.get("primary_country") or {}
         iso3 = ""
         if isinstance(pc, dict):
-            iso3 = (pc.get("iso3") or "").upper()
+            iso3_raw = pc.get("iso3") or ""
+            if isinstance(iso3_raw, list):
+                iso3_raw = iso3_raw[0] if iso3_raw else ""
+            iso3 = str(iso3_raw).strip().upper()
         elif isinstance(pc, list) and pc:
-            iso3 = (pc[0].get("iso3") or "").upper()
+            iso3_raw = pc[0].get("iso3") or ""
+            if isinstance(iso3_raw, list):
+                iso3_raw = iso3_raw[0] if iso3_raw else ""
+            iso3 = str(iso3_raw).strip().upper()
 
         if not iso3 or iso3 not in countries:
             continue
