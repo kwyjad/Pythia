@@ -300,7 +300,7 @@ class TestFetchForecastsSuccess:
         root_response.json.return_value = ["fatalities003_2026_01_t01"]
         root_response.raise_for_status = MagicMock()
 
-        mock_get.side_effect = [page_response, root_response]
+        mock_get.side_effect = [root_response, page_response]
 
         connector = ViewsConnector()
         df = connector.fetch_forecasts()
@@ -327,7 +327,7 @@ class TestFetchForecastsSuccess:
         root_resp.json.return_value = ["fatalities003_2026_01_t01"]
         root_resp.raise_for_status = MagicMock()
 
-        mock_get.side_effect = [page_resp, root_resp]
+        mock_get.side_effect = [root_resp, page_resp]
 
         df = ViewsConnector().fetch_forecasts()
         assert (df["source"] == "VIEWS").all()
@@ -348,7 +348,7 @@ class TestFetchForecastsSuccess:
         root_resp.json.return_value = ["fatalities003_2026_01_t01"]
         root_resp.raise_for_status = MagicMock()
 
-        mock_get.side_effect = [page_resp, root_resp]
+        mock_get.side_effect = [root_resp, page_resp]
 
         df = ViewsConnector().fetch_forecasts()
         # 3 countries x 2 metrics each = 6 rows
@@ -543,12 +543,12 @@ class TestPaginationHandling:
         )
         page2_resp.raise_for_status = MagicMock()
 
-        # Third call: _detect_run_id
+        # First call: _detect_run_id
         root_resp = MagicMock()
-        root_resp.json.return_value = {"fatalities003_2026_01_t01": {}}
+        root_resp.json.return_value = ["fatalities003_2026_01_t01"]
         root_resp.raise_for_status = MagicMock()
 
-        mock_get.side_effect = [page1_resp, page2_resp, root_resp]
+        mock_get.side_effect = [root_resp, page1_resp, page2_resp]
 
         df = ViewsConnector().fetch_forecasts()
 
