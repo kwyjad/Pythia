@@ -223,7 +223,14 @@ _READ_CON_LOCK = threading.Lock()
 
 
 def _ensure_read_connection() -> duckdb.DuckDBPyConnection:
-    """Return a singleton read-only DuckDB connection (created on first call)."""
+    """Return a singleton DuckDB connection (created on first call).
+
+    Uses ``read_only=False`` to match the configuration used by
+    ``_startup_sync()`` (which opens a write connection for schema
+    migrations).  DuckDB rejects opening the same file with a different
+    ``read_only`` flag within one process, so both must agree.  All
+    request handlers only issue SELECT queries via cursors, so this is safe.
+    """
     global _READ_CON  # noqa: PLW0603
     if _READ_CON is not None:
         return _READ_CON
@@ -241,7 +248,7 @@ def _ensure_read_connection() -> duckdb.DuckDBPyConnection:
             logger.warning("DB sync failed: %s", exc)
         if not db_path.exists():
             raise HTTPException(status_code=503, detail="DB not available yet")
-        _READ_CON = duckdb.connect(db_url, read_only=True)
+        _READ_CON = duckdb.connect(db_url, read_only=False)
         return _READ_CON
 
 
