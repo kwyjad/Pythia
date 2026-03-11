@@ -167,10 +167,10 @@ discover_connectors() -> fetch_and_normalize() per connector
 **Transform adapters** (`resolver/transform/adapters/`): ACLED and IDMC adapters normalize source-specific schemas to the common format used by the precedence engine.
 
 **NMME seasonal forecasts** (`resolver/ingestion/nmme.py` + `resolver/tools/ingest_nmme.py`):
-Separate from the Connector pipeline. Fetches NMME ensemble mean anomalies from CPC FTP, computes area-weighted country averages using xarray + regionmask, and writes to the `seasonal_forecasts` table in Pythia DB. Injected into HS triage/RC prompts via `horizon_scanner/seasonal_context.py` (`climate_data` kwarg) and into forecaster prompts via `research_json["nmme_seasonal_outlook"]`. Run: `python -m resolver.tools.ingest_nmme`. **Now runs as a step in the Ingest Structured Data workflow** (`ingest-structured-data.yml`) with `continue-on-error: true` since NMME FTP files are published ~9th-10th of each month. The standalone `ingest-nmme.yml` workflow is deprecated (schedule disabled, manual dispatch retained).
+Separate from the Connector pipeline. Fetches NMME ensemble mean anomalies from CPC FTP, computes area-weighted country averages using xarray + regionmask, and writes to the `seasonal_forecasts` table in Pythia DB. Injected into HS triage/RC prompts via `horizon_scanner/seasonal_context.py` (`climate_data` kwarg) and into forecaster prompts via `research_json["nmme_seasonal_outlook"]`. **Now integrated into `pythia/tools/ingest_structured_data.py`** as the `nmme` source (NMME failures are caught as warnings, non-fatal, since FTP files are published ~9th-10th of each month). The standalone `python -m resolver.tools.ingest_nmme` entry point still works independently. The standalone `ingest-nmme.yml` workflow is deprecated (schedule disabled, manual dispatch retained). Uses `decode_times=False` in `xr.open_dataset()` calls because the new CPC multi-lead files use `months since 1960-01-02 21:00:00` as time units, which xarray cannot decode.
 
 **Conflict forecast connectors** (`resolver/connectors/views.py`, `resolver/connectors/conflictforecast.py`, `resolver/connectors/acled_cast.py`):
-Separate from the Connector pipeline (use `FORECAST_REGISTRY`, not `REGISTRY`). VIEWS connector fetches ML-based fatality predictions from the VIEWS API (`views_predicted_fatalities`, `views_p_gte25_brd`, leads 1–6). conflictforecast.org connector fetches news-based risk scores from Backendless API (`cf_armed_conflict_risk_3m`, `cf_armed_conflict_risk_12m`, `cf_violence_intensity_3m`). ACLED CAST connector fetches event-count forecasts via OAuth2 API (`cast_total_events`, `cast_battles_events`, `cast_erv_events`, `cast_vac_events`, 6-month lead), aggregated from admin1 to country level. All three write to `conflict_forecasts` table. `fetch_and_store` deduplicates before writing (keeps only the latest `forecast_issue_date` per source), and `_write_to_db` prunes old vintages (keeps only the 2 most recent issue dates per source). Loaded into ACE prompts via `horizon_scanner/conflict_forecasts.py`. Run: `python -m resolver.tools.fetch_conflict_forecasts`.
+Separate from the Connector pipeline (use `FORECAST_REGISTRY`, not `REGISTRY`). VIEWS connector fetches ML-based fatality predictions from the VIEWS API (`views_predicted_fatalities`, `views_p_gte25_brd`, leads 1–6). conflictforecast.org connector fetches news-based risk scores from Backendless API (`cf_armed_conflict_risk_3m`, `cf_armed_conflict_risk_12m`, `cf_violence_intensity_3m`). ACLED CAST connector fetches event-count forecasts via OAuth2 API (`cast_total_events`, `cast_battles_events`, `cast_erv_events`, `cast_vac_events`, 6-month lead), aggregated from admin1 to country level. All three write to `conflict_forecasts` table. `fetch_and_store` deduplicates before writing (keeps only the latest `forecast_issue_date` per source), and `_write_to_db` prunes old vintages (keeps only the 2 most recent issue dates per source). Loaded into ACE prompts via `horizon_scanner/conflict_forecasts.py`. **Now integrated into `pythia/tools/ingest_structured_data.py`** as sources `views`, `conflictforecast`, `acledcast` (with `conflict` as a convenience alias for all three). The standalone `python -m resolver.tools.fetch_conflict_forecasts` entry point still works independently.
 
 **ENSO state and forecast** (`horizon_scanner/enso/enso_module.py`):
 Scrapes IRI/CPC ENSO Quick Look page for current ENSO state, Niño 3.4 anomaly, 9-season probabilistic forecast, multi-model plume averages, and IOD state. Cached as JSON with 7-day expiry. Injected into RC and triage prompts for DR, FL, HW, TC hazards via `get_enso_prompt_context()`. Refreshed by `.github/workflows/refresh-enso.yml`.
@@ -276,14 +276,17 @@ python3 -c "from pythia.db.schema import ensure_schema; ensure_schema()"
 python3 -m resolver.tools.run_pipeline
 # Or specific connectors: python3 -m resolver.tools.run_pipeline --connectors acled idmc
 
-# Ingest NMME seasonal forecasts (temp/precip anomalies from CPC FTP)
-python3 -m resolver.tools.ingest_nmme
-# Or specific month: python3 -m resolver.tools.ingest_nmme --year-month 202603
+# Ingest ALL structured data (conflict forecasts, ACAPS, IPC, ReliefWeb, NMME)
+python3 -m pythia.tools.ingest_structured_data
+# Filter by source: python3 -m pythia.tools.ingest_structured_data --sources conflict acaps ipc
+# Valid sources: views, conflictforecast, acledcast, acaps_inform_severity,
+#   acaps_risk_radar, acaps_daily_monitoring, acaps_humanitarian_access, ipc, reliefweb, nmme
+# Aliases: acaps (all 4 ACAPS sources), conflict (views+conflictforecast+acledcast)
 
-# Fetch conflict forecasts (VIEWS + conflictforecast.org + ACLED CAST -> conflict_forecasts table)
-python3 -m resolver.tools.fetch_conflict_forecasts
-# Or specific sources: python3 -m resolver.tools.fetch_conflict_forecasts --sources views conflictforecast_org acled_cast
-# Dry run: python3 -m resolver.tools.fetch_conflict_forecasts --dry-run
+# Standalone entry points (still work independently):
+python3 -m resolver.tools.ingest_nmme                        # NMME only
+python3 -m resolver.tools.fetch_conflict_forecasts            # conflict forecasts only
+python3 -m resolver.tools.fetch_conflict_forecasts --sources views conflictforecast_org acled_cast
 
 # Run Horizon Scanner
 python3 -m horizon_scanner.horizon_scanner

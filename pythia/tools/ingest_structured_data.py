@@ -18,6 +18,8 @@ Expected runtime: ~5-10 minutes (down from 6+ hours).
 Usage:
     python -m pythia.tools.ingest_structured_data
     python -m pythia.tools.ingest_structured_data --sources acaps reliefweb nmme
+    python -m pythia.tools.ingest_structured_data --sources conflict ipc
+    python -m pythia.tools.ingest_structured_data --sources views acledcast
     python -m pythia.tools.ingest_structured_data --iso3 AFG,SYR,YEM
     python -m pythia.tools.ingest_structured_data --dry-run
 """
@@ -47,24 +49,31 @@ LOG = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _SOURCE_GROUPS: dict[str, list[str]] = {
+    "views": ["views_forecasts"],
+    "conflictforecast": ["conflictforecast_forecasts"],
+    "acledcast": ["acledcast_forecasts"],
+    "acaps_inform_severity": ["acaps_inform_severity"],
+    "acaps_risk_radar": ["acaps_risk_radar"],
+    "acaps_daily_monitoring": ["acaps_daily_monitoring"],
+    "acaps_humanitarian_access": ["acaps_humanitarian_access"],
+    "ipc": ["ipc_phases"],
+    "reliefweb": ["reliefweb_reports"],
+    "nmme": ["nmme_seasonal_forecasts"],
+}
+
+# Convenience aliases that expand to multiple source groups.
+_SOURCE_ALIASES: dict[str, list[str]] = {
     "acaps": [
         "acaps_inform_severity",
         "acaps_risk_radar",
         "acaps_daily_monitoring",
         "acaps_humanitarian_access",
     ],
-    "ipc": [
-        "ipc_phases",
-    ],
-    "reliefweb": [
-        "reliefweb_reports",
-    ],
-    "nmme": [
-        "nmme_seasonal_forecasts",
-    ],
+    "conflict": ["views", "conflictforecast", "acledcast"],
 }
 
 ALL_SOURCE_NAMES = sorted(_SOURCE_GROUPS.keys())
+ALL_ALIAS_NAMES = sorted(_SOURCE_ALIASES.keys())
 
 # ---------------------------------------------------------------------------
 # Country list loader
@@ -912,15 +921,64 @@ def _bulk_fetch_nmme(dry_run: bool = False) -> dict[str, Any]:
     NMME is a global dataset (not per-country), so we delegate entirely
     to ``resolver.tools.ingest_nmme.main`` which handles its own DB writes.
     Returns a sentinel dict so the orchestrator sees non-empty data.
+
+    Failures are caught and logged as warnings (non-fatal) because NMME
+    FTP files are published ~9th-10th of each month and may not yet be
+    available.
     """
     from resolver.tools.ingest_nmme import main as nmme_main
 
     argv: list[str] = []
     if dry_run:
         argv.append("--dry-run")
-    nmme_main(argv)
+    try:
+        nmme_main(argv)
+    except Exception as exc:
+        LOG.warning(
+            "NMME ingestion failed (FTP files may not be published yet — non-fatal): %s",
+            exc,
+        )
+        return {}
     # Return a sentinel so the orchestrator treats this as "has data".
     return {"__nmme_done__": True}
+
+
+# ===================================================================
+# Conflict forecasts — delegate to resolver.tools.fetch_conflict_forecasts
+# ===================================================================
+
+# Labels that handle their own DB writes and return sentinel dicts.
+_SELF_STORING_LABELS = frozenset([
+    "nmme_seasonal_forecasts",
+    "views_forecasts",
+    "conflictforecast_forecasts",
+    "acledcast_forecasts",
+])
+
+# Map from our internal labels to the source names used by
+# resolver.tools.fetch_conflict_forecasts.
+_CONFLICT_SOURCE_MAP = {
+    "views_forecasts": "views",
+    "conflictforecast_forecasts": "conflictforecast_org",
+    "acledcast_forecasts": "acled_cast",
+}
+
+
+def _bulk_fetch_conflict(label: str, dry_run: bool = False) -> dict[str, Any]:
+    """Run a single conflict forecast source (fetch + store).
+
+    Delegates to ``resolver.tools.fetch_conflict_forecasts.fetch_and_store``
+    which handles its own DB writes.  Returns a sentinel dict on success.
+    """
+    from resolver.tools.fetch_conflict_forecasts import fetch_and_store
+
+    source_name = _CONFLICT_SOURCE_MAP[label]
+    counts = fetch_and_store(sources=[source_name], dry_run=dry_run)
+    total = sum(counts.values())
+    if total == 0:
+        LOG.warning("[ingest] conflict source %s returned 0 rows", source_name)
+        return {}
+    return {f"__{label}_done__": True}
 
 
 # ===================================================================
@@ -966,8 +1024,9 @@ def _store_all(
             elif label == "reliefweb_reports":
                 from horizon_scanner.reliefweb import store_reliefweb_reports
                 store_reliefweb_reports(iso3, data)
-            elif label == "nmme_seasonal_forecasts":
-                # NMME handles its own storage in _bulk_fetch_nmme.
+            elif label in _SELF_STORING_LABELS:
+                # These sources handle their own DB writes in their
+                # bulk-fetch functions (_bulk_fetch_nmme, _bulk_fetch_conflict).
                 stats["success"] += 1
                 continue
             else:
@@ -1004,6 +1063,14 @@ def ingest(
 
     if sources is None:
         sources = ALL_SOURCE_NAMES
+    # Expand aliases (acaps -> 4 ACAPS sources, conflict -> 3 conflict sources)
+    expanded: list[str] = []
+    for s in sources:
+        if s in _SOURCE_ALIASES:
+            expanded.extend(_SOURCE_ALIASES[s])
+        else:
+            expanded.append(s)
+    sources = list(dict.fromkeys(expanded))  # dedupe, preserve order
     unknown = [s for s in sources if s not in _SOURCE_GROUPS]
     if unknown:
         raise ValueError(f"Unknown source group(s): {unknown}")
@@ -1042,6 +1109,8 @@ def ingest(
                 result = _bulk_fetch_reliefweb(countries)
             elif label == "nmme_seasonal_forecasts":
                 result = _bulk_fetch_nmme(dry_run)
+            elif label in _CONFLICT_SOURCE_MAP:
+                result = _bulk_fetch_conflict(label, dry_run)
             else:
                 LOG.error("Unknown label: %s", label)
                 result = {}
@@ -1057,11 +1126,11 @@ def ingest(
         return label, result
 
     # Run ACAPS sources sequentially (shared auth token, rate limits)
-    # but run ReliefWeb and IPC concurrently with ACAPS
+    # but run everything else concurrently (conflict forecasts, IPC, ReliefWeb, NMME)
     acaps_labels = [l for l in labels if l.startswith("acaps_")]
     other_labels = [l for l in labels if not l.startswith("acaps_")]
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=max(3, len(other_labels))) as pool:
         futures = []
 
         # Submit a single future that runs all ACAPS sources sequentially
@@ -1133,8 +1202,8 @@ def ingest(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Bulk-ingest structured data (ACAPS, IPC, ReliefWeb, NMME) "
-            "into DuckDB for the Horizon Scanner pipeline."
+            "Bulk-ingest structured data (conflict forecasts, ACAPS, IPC, "
+            "ReliefWeb, NMME) into DuckDB for the Horizon Scanner pipeline."
         ),
     )
     parser.add_argument(
@@ -1148,9 +1217,11 @@ def main() -> None:
         default=None,
         help=(
             "Which source groups to ingest (default: all). "
-            f"Choices: {', '.join(ALL_SOURCE_NAMES)}. "
-            "Accepts space-separated (acaps ipc), comma-separated "
-            "(acaps,ipc), or comma-space-separated (acaps, ipc)."
+            "Sources: " + ", ".join(ALL_SOURCE_NAMES) + ". "
+            "Aliases: " + ", ".join(
+                f"{k} (={'+'.join(v)})" for k, v in sorted(_SOURCE_ALIASES.items())
+            ) + ". "
+            "Accepts space-separated, comma-separated, or mixed."
         ),
     )
     parser.add_argument(
@@ -1178,13 +1249,20 @@ def main() -> None:
         normalised: list[str] = []
         for token in args.sources:
             normalised.extend(part.strip() for part in token.split(",") if part.strip())
-        unknown = [s for s in normalised if s not in ALL_SOURCE_NAMES]
-        if unknown:
-            parser.error(
-                f"invalid source(s): {', '.join(unknown)}. "
-                f"Choose from: {', '.join(ALL_SOURCE_NAMES)}"
-            )
-        args.sources = normalised
+        # Expand aliases at the CLI level so validation works.
+        expanded: list[str] = []
+        for s in normalised:
+            if s in _SOURCE_ALIASES:
+                expanded.extend(_SOURCE_ALIASES[s])
+            elif s in _SOURCE_GROUPS:
+                expanded.append(s)
+            else:
+                parser.error(
+                    f"invalid source: {s}. "
+                    f"Choose from: {', '.join(ALL_SOURCE_NAMES)} "
+                    f"(aliases: {', '.join(ALL_ALIAS_NAMES)})"
+                )
+        args.sources = list(dict.fromkeys(expanded))  # dedupe
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

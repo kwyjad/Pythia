@@ -19,7 +19,12 @@ concurrency:
         default: ""
         type: string
       sources:
-        description: "Optional source filter: acaps ipc reliefweb (default: all)"
+        description: >-
+          Optional source filter (default: all). Options: views, conflictforecast,
+          acledcast, acaps (alias for all 4 ACAPS sources), acaps_inform_severity,
+          acaps_risk_radar, acaps_daily_monitoring, acaps_humanitarian_access, ipc,
+          reliefweb, nmme. Also accepts: conflict (alias for
+          views+conflictforecast+acledcast). Comma or space separated.
         required: false
         default: ""
         type: string
@@ -41,7 +46,7 @@ env:
 
 jobs:
   ingest:
-    name: Ingest conflict forecasts + structured data
+    name: Ingest all structured data sources
     runs-on: ubuntu-latest
     env:
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -191,24 +196,6 @@ jobs:
             echo "ERROR: No valid canonical DB found after checking Horizon Scanner, Resolver — Initial Backfill, and Ingest Structured Data runs."
             exit 1
           fi
-
-      - name: Run conflict forecasts
-        run: |
-          set -e
-          echo "=== Running conflict forecast ingestion ==="
-          python -m resolver.tools.fetch_conflict_forecasts
-          echo "=== Conflict forecast ingestion completed ==="
-
-      - name: Run NMME seasonal forecast ingestion
-        continue-on-error: true  # NMME FTP files may not be available yet for the current month
-        run: |
-          set -e
-          echo "=== Running NMME seasonal forecast ingestion ==="
-          python -m resolver.tools.ingest_nmme || {
-            echo "WARNING: NMME ingestion failed (FTP files may not be published yet — non-fatal)"
-            exit 0
-          }
-          echo "=== NMME seasonal forecast ingestion completed ==="
 
       - name: Run structured data ingestion
         run: |
