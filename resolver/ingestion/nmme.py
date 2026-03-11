@@ -120,6 +120,7 @@ def _download_nc_files(
         ftp.cwd(remote_dir)
         remote_files = set(ftp.nlst())
 
+        logged_vars: set = set()
         for var_key, fname_prefix in variables.items():
             for lead in range(1, max_leads + 1):
                 # CPC naming: e.g.  tmp2m_anom.ENSMEAN.202603.mon1.nc
@@ -127,8 +128,27 @@ def _download_nc_files(
                 fname = f"{fname_prefix}.ENSMEAN.{ym_part}.mon{lead}.nc"
 
                 if fname not in remote_files:
-                    log.warning("File not found on FTP: %s/%s", remote_dir, fname)
-                    continue
+                    if var_key not in logged_vars:
+                        log.warning(
+                            "NMME filename miss for %s — remote files: %s",
+                            var_key, sorted(remote_files),
+                        )
+                        logged_vars.add(var_key)
+
+                    # Fuzzy fallback: match on prefix + lead indicator
+                    prefix_lower = fname_prefix.lower()
+                    lead_patterns = [f"mon{lead}", f"lead{lead}"]
+                    candidates = [
+                        f for f in remote_files
+                        if prefix_lower in f.lower()
+                        and any(lp in f.lower() for lp in lead_patterns)
+                    ]
+                    if len(candidates) == 1:
+                        fname = candidates[0]
+                        log.info("Fuzzy-matched NMME file: %s", fname)
+                    else:
+                        log.warning("File not found on FTP: %s/%s", remote_dir, fname)
+                        continue
 
                 local_path = dest / fname
                 with open(local_path, "wb") as fh:

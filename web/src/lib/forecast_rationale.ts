@@ -5,6 +5,7 @@ const TARGET_KEYS = [
   "analysis_summary",
   "summary",
   "explanation",
+  "human_explanation",
 ];
 
 const isUsefulRationale = (value: string): boolean => {

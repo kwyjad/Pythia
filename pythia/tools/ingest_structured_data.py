@@ -599,6 +599,7 @@ def _bulk_fetch_humanitarian_access(
 
     results: dict[str, dict] = {}
     remaining = set(countries)
+    _logged_ha_keys = False
 
     for label in _month_labels_back(12):
         if not remaining:
@@ -613,7 +614,20 @@ def _bulk_fetch_humanitarian_access(
         # Group by iso3
         by_country: dict[str, list[dict]] = defaultdict(list)
         for rec in data:
-            iso3_raw = rec.get("iso3") or ""
+            if not _logged_ha_keys:
+                LOG.info("ACAPS Humanitarian Access sample record keys: %s", list(rec.keys())[:20])
+                _logged_ha_keys = True
+
+            iso3_raw = (
+                rec.get("iso3")
+                or rec.get("iso")
+                or rec.get("country_iso3")
+                or rec.get("country_code")
+                or rec.get("country_iso")
+                or ""
+            )
+            if not iso3_raw and isinstance(rec.get("country"), dict):
+                iso3_raw = rec["country"].get("iso3") or ""
             if isinstance(iso3_raw, list):
                 iso3_raw = iso3_raw[0] if iso3_raw else ""
             iso3 = str(iso3_raw).strip().upper()
