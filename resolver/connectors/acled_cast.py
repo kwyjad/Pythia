@@ -82,6 +82,7 @@ _CAST_ALIASES: Dict[str, str] = {
     "North Korea": "PRK",
     "Korea, South": "KOR",
     "Korea, North": "PRK",
+    "Guinea": "GIN",
 }
 
 _METRIC_MAP: Dict[str, str] = {

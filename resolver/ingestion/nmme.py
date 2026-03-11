@@ -106,10 +106,15 @@ def _download_nc_files(
     variables: dict[str, str] | None = None,
     max_leads: int = MAX_LEAD_MONTHS,
 ) -> list[dict]:
-    """Download ENSMEAN NetCDF files for all variables × leads.
+    """Download ENSMEAN NetCDF files — one multi-lead file per variable.
 
-    Returns a list of dicts ``{path, variable, lead}`` for each
-    successfully downloaded file.
+    CPC now publishes a single file per variable containing all lead
+    months as a dimension:
+        ``NMME.tmp2m.{ym}.ENSMEAN.anom.nc``
+        ``NMME.prate.{ym}.ENSMEAN.anom.nc``
+
+    Returns a list of dicts ``{path, variable}`` for each successfully
+    downloaded file.  (Lead months are inside the file, not separate.)
     """
     variables = variables or VARIABLES
     downloaded: list[dict] = []
@@ -120,44 +125,39 @@ def _download_nc_files(
         ftp.cwd(remote_dir)
         remote_files = set(ftp.nlst())
 
-        logged_vars: set = set()
-        for var_key, fname_prefix in variables.items():
-            for lead in range(1, max_leads + 1):
-                # CPC naming: e.g.  tmp2m_anom.ENSMEAN.202603.mon1.nc
-                ym_part = issue_dir[:6]  # "202603" from "2026030800"
-                fname = f"{fname_prefix}.ENSMEAN.{ym_part}.mon{lead}.nc"
+        ym_part = issue_dir[:6]  # "202603" from "2026030800"
 
-                if fname not in remote_files:
-                    if var_key not in logged_vars:
-                        log.warning(
-                            "NMME filename miss for %s — remote files: %s",
-                            var_key, sorted(remote_files),
-                        )
-                        logged_vars.add(var_key)
+        for var_key in variables:
+            # New CPC naming: NMME.tmp2m.202603.ENSMEAN.anom.nc
+            fname = f"NMME.{var_key}.{ym_part}.ENSMEAN.anom.nc"
 
-                    # Fuzzy fallback: match on prefix + lead indicator
-                    prefix_lower = fname_prefix.lower()
-                    lead_patterns = [f"mon{lead}", f"lead{lead}"]
-                    candidates = [
-                        f for f in remote_files
-                        if prefix_lower in f.lower()
-                        and any(lp in f.lower() for lp in lead_patterns)
-                    ]
-                    if len(candidates) == 1:
-                        fname = candidates[0]
-                        log.info("Fuzzy-matched NMME file: %s", fname)
-                    else:
-                        log.warning("File not found on FTP: %s/%s", remote_dir, fname)
-                        continue
-
-                local_path = dest / fname
-                with open(local_path, "wb") as fh:
-                    ftp.retrbinary(f"RETR {fname}", fh.write)
-
-                downloaded.append(
-                    {"path": local_path, "variable": var_key, "lead": lead}
+            if fname not in remote_files:
+                log.warning(
+                    "NMME filename miss for %s (expected %s) — remote files: %s",
+                    var_key, fname, sorted(remote_files),
                 )
-                log.debug("Downloaded %s → %s", fname, local_path)
+
+                # Fuzzy fallback: match on var_key + ENSMEAN + anom
+                var_lower = var_key.lower()
+                candidates = [
+                    f for f in remote_files
+                    if var_lower in f.lower()
+                    and "ensmean" in f.lower()
+                    and "anom" in f.lower()
+                ]
+                if len(candidates) == 1:
+                    fname = candidates[0]
+                    log.info("Fuzzy-matched NMME file: %s", fname)
+                else:
+                    log.warning("File not found on FTP: %s/%s", remote_dir, fname)
+                    continue
+
+            local_path = dest / fname
+            with open(local_path, "wb") as fh:
+                ftp.retrbinary(f"RETR {fname}", fh.write)
+
+            downloaded.append({"path": local_path, "variable": var_key})
+            log.debug("Downloaded %s → %s", fname, local_path)
 
     log.info(
         "Downloaded %d NMME files from %s/%s",
@@ -170,41 +170,59 @@ def _download_nc_files(
 # Spatial aggregation
 # ------------------------------------------------------------------
 
-def _aggregate_nc_to_countries(
-    nc_path: Path,
-    variable: str,
-) -> pd.DataFrame:
-    """Compute area-weighted country averages from a single NetCDF file.
+def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
+    """Compute area-weighted country averages from a 2-D (lat × lon) field.
 
     Parameters
     ----------
-    nc_path : path to the downloaded ``.nc`` file
-    variable : variable key (``"tmp2m"`` or ``"prate"``)
+    da : xarray.DataArray with only ``lat`` and ``lon`` dimensions
+    countries : regionmask region object
+    mask : pre-computed regionmask mask array
 
     Returns
     -------
     DataFrame with columns ``[iso3, anomaly_value]``
     """
-    import regionmask
-    import xarray as xr
+    weights = np.cos(np.deg2rad(da.lat))
 
-    ds = xr.open_dataset(nc_path)
+    rows: list[dict] = []
+    for region_number in np.unique(mask.values[~np.isnan(mask.values)]):
+        region_number = int(region_number)
+        region_mask = mask == region_number
+        region_data = da.where(region_mask)
 
-    # The anomaly field name inside the file varies; pick the first
-    # non-coordinate data variable.
+        # Weighted mean: sum(data * weight) / sum(weight)
+        weighted_sum = (region_data * weights).sum(skipna=True)
+        weight_sum = (weights * region_mask.astype(float)).sum(skipna=True)
+
+        if float(weight_sum) == 0:
+            continue
+
+        mean_val = float(weighted_sum / weight_sum)
+
+        try:
+            region_obj = countries[region_number]
+            iso3 = region_obj.abbrev
+        except (KeyError, IndexError):
+            continue
+
+        if not iso3 or len(iso3) != 3:
+            continue
+
+        rows.append({"iso3": iso3.upper(), "anomaly_value": round(mean_val, 4)})
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["iso3", "anomaly_value"])
+
+
+def _prepare_data_array(ds):
+    """Extract the data variable and normalise coordinates.
+
+    Returns the prepared DataArray (may have a lead dimension).
+    """
     data_vars = list(ds.data_vars)
     if not data_vars:
-        log.warning("No data variables in %s", nc_path)
-        return pd.DataFrame(columns=["iso3", "anomaly_value"])
-    field = data_vars[0]
-
-    da = ds[field]
-
-    # Squeeze out any singleton dimensions (time, lead, etc.)
-    for dim in list(da.dims):
-        if dim not in ("lat", "latitude", "lon", "longitude", "Y", "X"):
-            if da.sizes[dim] == 1:
-                da = da.squeeze(dim, drop=True)
+        return None
+    da = ds[data_vars[0]]
 
     # Normalise coordinate names to lat/lon.
     rename = {}
@@ -222,42 +240,117 @@ def _aggregate_nc_to_countries(
         da = da.assign_coords(lon=(((da.lon + 180) % 360) - 180))
         da = da.sortby("lon")
 
+    return da
+
+
+def _find_lead_dim(da):
+    """Identify the lead-time dimension name, if present."""
+    spatial = {"lat", "lon"}
+    for dim in da.dims:
+        if dim not in spatial:
+            return dim
+    return None
+
+
+def _aggregate_nc_to_countries(
+    nc_path: Path,
+    variable: str,
+) -> pd.DataFrame:
+    """Compute area-weighted country averages from a single NetCDF file.
+
+    Handles both legacy single-lead files and new multi-lead files
+    (squeezes singleton non-spatial dims).
+
+    Returns DataFrame with columns ``[iso3, anomaly_value]``.
+    """
+    import regionmask
+    import xarray as xr
+
+    ds = xr.open_dataset(nc_path)
+    da = _prepare_data_array(ds)
+    if da is None:
+        log.warning("No data variables in %s", nc_path)
+        ds.close()
+        return pd.DataFrame(columns=["iso3", "anomaly_value"])
+
+    # Squeeze out any singleton non-spatial dimensions.
+    for dim in list(da.dims):
+        if dim not in ("lat", "lon") and da.sizes[dim] == 1:
+            da = da.squeeze(dim, drop=True)
+
     countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_110
     mask = countries.mask(da)
+    result = _aggregate_2d_field_to_countries(da, countries, mask)
+    ds.close()
+    return result
 
-    # Area weights based on latitude (cosine weighting).
-    weights = np.cos(np.deg2rad(da.lat))
 
-    rows: list[dict] = []
-    for region_number in np.unique(mask.values[~np.isnan(mask.values)]):
-        region_number = int(region_number)
-        region_mask = mask == region_number
-        region_data = da.where(region_mask)
-        region_weights = weights.where(region_mask.any(dim="lon"))
+def _aggregate_multi_lead_nc(
+    nc_path: Path,
+    variable: str,
+    max_leads: int = MAX_LEAD_MONTHS,
+) -> list[tuple[int, pd.DataFrame]]:
+    """Aggregate a multi-lead NetCDF file to per-country, per-lead DataFrames.
 
-        # Weighted mean: sum(data * weight) / sum(weight)
-        weighted_sum = (region_data * weights).sum(skipna=True)
-        weight_sum = (weights * region_mask.astype(float)).sum(skipna=True)
+    Parameters
+    ----------
+    nc_path : path to the multi-lead ``.nc`` file
+    variable : variable key (``"tmp2m"`` or ``"prate"``)
+    max_leads : maximum number of lead months to extract
 
-        if float(weight_sum) == 0:
-            continue
+    Returns
+    -------
+    List of ``(lead_month, DataFrame)`` tuples where each DataFrame has
+    columns ``[iso3, anomaly_value]``.  ``lead_month`` is 1-based.
+    """
+    import regionmask
+    import xarray as xr
 
-        mean_val = float(weighted_sum / weight_sum)
+    ds = xr.open_dataset(nc_path)
+    da = _prepare_data_array(ds)
+    if da is None:
+        log.warning("No data variables in %s", nc_path)
+        ds.close()
+        return []
 
-        # Map region number → ISO3 via regionmask's abbreviation.
-        try:
-            region_obj = countries[region_number]
-            iso3 = region_obj.abbrev
-        except (KeyError, IndexError):
-            continue
+    # Squeeze out singleton time dimensions but keep the lead dimension.
+    lead_dim = _find_lead_dim(da)
+    for dim in list(da.dims):
+        if dim not in ("lat", "lon") and dim != lead_dim and da.sizes[dim] == 1:
+            da = da.squeeze(dim, drop=True)
 
-        if not iso3 or len(iso3) != 3:
-            continue
+    # Re-check for lead dim after squeezing.
+    lead_dim = _find_lead_dim(da)
 
-        rows.append({"iso3": iso3.upper(), "anomaly_value": round(mean_val, 4)})
+    if lead_dim is None:
+        # Fallback: file has no lead dimension (single-lead legacy file).
+        countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_110
+        mask = countries.mask(da)
+        df = _aggregate_2d_field_to_countries(da, countries, mask)
+        ds.close()
+        return [(1, df)] if not df.empty else []
+
+    n_leads = min(da.sizes[lead_dim], max_leads)
+    log.info(
+        "NMME multi-lead file %s: %d leads on dim '%s'",
+        nc_path.name, da.sizes[lead_dim], lead_dim,
+    )
+
+    countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_110
+
+    # Build regionmask once from a single 2-D slice.
+    da_slice0 = da.isel({lead_dim: 0})
+    mask = countries.mask(da_slice0)
+
+    results: list[tuple[int, pd.DataFrame]] = []
+    for i in range(n_leads):
+        da_slice = da.isel({lead_dim: i})
+        df = _aggregate_2d_field_to_countries(da_slice, countries, mask)
+        if not df.empty:
+            results.append((i + 1, df))  # 1-based lead month
 
     ds.close()
-    return pd.DataFrame(rows)
+    return results
 
 
 def _classify_tercile(anomaly: float) -> str:
@@ -322,14 +415,18 @@ def fetch_and_process(
         )
 
     # 3. Aggregate each file to country-level averages.
+    #    Each file may contain multiple lead months as a dimension.
     all_rows: list[pd.DataFrame] = []
     for entry in files:
-        df = _aggregate_nc_to_countries(entry["path"], entry["variable"])
-        if df.empty:
-            continue
-        df["variable"] = entry["variable"]
-        df["lead_months"] = entry["lead"]
-        all_rows.append(df)
+        lead_results = _aggregate_multi_lead_nc(
+            entry["path"], entry["variable"], max_leads=max_leads,
+        )
+        for lead_month, df in lead_results:
+            if df.empty:
+                continue
+            df["variable"] = entry["variable"]
+            df["lead_months"] = lead_month
+            all_rows.append(df)
 
     if not all_rows:
         log.warning("No country-level data produced from NMME files.")

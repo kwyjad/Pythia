@@ -29,6 +29,7 @@ import csv
 import json
 import logging
 import os
+import re
 import sys
 import time
 from collections import defaultdict
@@ -209,6 +210,35 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _compute_access_score(record: dict) -> float | None:
+    """Compute overall humanitarian access score from a record.
+
+    Tries ``overall_score``, ``access_score``, ``score`` first.  Falls
+    back to computing the mean of indicator values (I1–I9, P1–P2, etc.)
+    which is how ACAPS derives the overall score on their website.
+    """
+    direct = _safe_float(
+        record.get("overall_score")
+        or record.get("access_score")
+        or record.get("score")
+    )
+    if direct is not None:
+        return direct
+
+    # Collect numeric indicator values matching I\d+ or P\d+ keys.
+    indicator_vals: list[float] = []
+    for key, val in record.items():
+        if re.fullmatch(r"[IP]\d+", key):
+            v = _safe_float(val)
+            if v is not None:
+                indicator_vals.append(v)
+
+    if not indicator_vals:
+        return None
+
+    return round(sum(indicator_vals) / len(indicator_vals), 4)
 
 
 def _safe_int(value: Any) -> int:
@@ -616,6 +646,13 @@ def _bulk_fetch_humanitarian_access(
         for rec in data:
             if not _logged_ha_keys:
                 LOG.info("ACAPS Humanitarian Access sample record keys: %s", list(rec.keys())[:20])
+                indicator_keys = [k for k in rec if re.fullmatch(r"[IP]\d+", k)]
+                indicator_vals = {k: rec[k] for k in indicator_keys}
+                sample_score = _compute_access_score(rec)
+                LOG.info(
+                    "ACAPS Humanitarian Access sample indicators: %s, computed score: %s",
+                    indicator_vals, sample_score,
+                )
                 _logged_ha_keys = True
 
             iso3_raw = (
@@ -636,11 +673,7 @@ def _bulk_fetch_humanitarian_access(
 
         for iso3, records in by_country.items():
             record = _pick_country_crisis(records)
-            score = _safe_float(
-                record.get("overall_score")
-                or record.get("access_score")
-                or record.get("score")
-            )
+            score = _compute_access_score(record)
             if score is None:
                 continue
 
