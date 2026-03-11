@@ -17,7 +17,7 @@ Expected runtime: ~5-10 minutes (down from 6+ hours).
 
 Usage:
     python -m pythia.tools.ingest_structured_data
-    python -m pythia.tools.ingest_structured_data --sources acaps reliefweb
+    python -m pythia.tools.ingest_structured_data --sources acaps reliefweb nmme
     python -m pythia.tools.ingest_structured_data --iso3 AFG,SYR,YEM
     python -m pythia.tools.ingest_structured_data --dry-run
 """
@@ -58,6 +58,9 @@ _SOURCE_GROUPS: dict[str, list[str]] = {
     ],
     "reliefweb": [
         "reliefweb_reports",
+    ],
+    "nmme": [
+        "nmme_seasonal_forecasts",
     ],
 }
 
@@ -899,6 +902,28 @@ def _bulk_fetch_ipc(
 
 
 # ===================================================================
+# NMME — delegates to resolver.tools.ingest_nmme (global, not per-country)
+# ===================================================================
+
+
+def _bulk_fetch_nmme(dry_run: bool = False) -> dict[str, Any]:
+    """Run the NMME seasonal-forecast pipeline (fetch + store).
+
+    NMME is a global dataset (not per-country), so we delegate entirely
+    to ``resolver.tools.ingest_nmme.main`` which handles its own DB writes.
+    Returns a sentinel dict so the orchestrator sees non-empty data.
+    """
+    from resolver.tools.ingest_nmme import main as nmme_main
+
+    argv: list[str] = []
+    if dry_run:
+        argv.append("--dry-run")
+    nmme_main(argv)
+    # Return a sentinel so the orchestrator treats this as "has data".
+    return {"__nmme_done__": True}
+
+
+# ===================================================================
 # Storage helpers — call the existing store functions
 # ===================================================================
 
@@ -941,6 +966,10 @@ def _store_all(
             elif label == "reliefweb_reports":
                 from horizon_scanner.reliefweb import store_reliefweb_reports
                 store_reliefweb_reports(iso3, data)
+            elif label == "nmme_seasonal_forecasts":
+                # NMME handles its own storage in _bulk_fetch_nmme.
+                stats["success"] += 1
+                continue
             else:
                 LOG.error("Unknown label for storage: %s", label)
                 stats["fail"] += 1
@@ -1011,6 +1040,8 @@ def ingest(
                 result = _bulk_fetch_ipc(countries)
             elif label == "reliefweb_reports":
                 result = _bulk_fetch_reliefweb(countries)
+            elif label == "nmme_seasonal_forecasts":
+                result = _bulk_fetch_nmme(dry_run)
             else:
                 LOG.error("Unknown label: %s", label)
                 result = {}
@@ -1102,7 +1133,7 @@ def ingest(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Bulk-ingest structured data (ACAPS, IPC, ReliefWeb) "
+            "Bulk-ingest structured data (ACAPS, IPC, ReliefWeb, NMME) "
             "into DuckDB for the Horizon Scanner pipeline."
         ),
     )
@@ -1114,9 +1145,13 @@ def main() -> None:
     parser.add_argument(
         "--sources",
         nargs="+",
-        choices=ALL_SOURCE_NAMES,
         default=None,
-        help="Which source groups to ingest (default: all)",
+        help=(
+            "Which source groups to ingest (default: all). "
+            f"Choices: {', '.join(ALL_SOURCE_NAMES)}. "
+            "Accepts space-separated (acaps ipc), comma-separated "
+            "(acaps,ipc), or comma-space-separated (acaps, ipc)."
+        ),
     )
     parser.add_argument(
         "--db",
@@ -1136,6 +1171,20 @@ def main() -> None:
         help="Enable debug logging",
     )
     args = parser.parse_args()
+
+    # Normalise --sources: accept comma-separated, space-separated, or mixed.
+    # e.g. "acaps,ipc,reliefweb" or "acaps, ipc" or "acaps ipc reliefweb"
+    if args.sources:
+        normalised: list[str] = []
+        for token in args.sources:
+            normalised.extend(part.strip() for part in token.split(",") if part.strip())
+        unknown = [s for s in normalised if s not in ALL_SOURCE_NAMES]
+        if unknown:
+            parser.error(
+                f"invalid source(s): {', '.join(unknown)}. "
+                f"Choose from: {', '.join(ALL_SOURCE_NAMES)}"
+            )
+        args.sources = normalised
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
