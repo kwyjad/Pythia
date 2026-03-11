@@ -228,6 +228,13 @@ class ConflictForecastOrgConnector:
             )
             return []
 
+        original_len = len(df)
+        df = df.drop_duplicates(subset=[iso3_col], keep="last")
+        LOG.info(
+            "[conflictforecast_org] deduped CSV: kept %d of %d rows (by %s)",
+            len(df), original_len, iso3_col,
+        )
+
         # Compute target month
         target_year = issue_date.year + (issue_date.month + lead_months - 1) // 12
         target_month_num = (issue_date.month + lead_months - 1) % 12 + 1

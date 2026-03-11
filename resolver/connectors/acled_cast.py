@@ -142,6 +142,7 @@ class AcledCastConnector:
         from resolver.ingestion.acled_auth import get_auth_header
 
         headers = get_auth_header()
+        headers["Accept"] = "application/json"
         all_records: List[Dict[str, Any]] = []
 
         for page in range(1, _MAX_PAGES + 1):
