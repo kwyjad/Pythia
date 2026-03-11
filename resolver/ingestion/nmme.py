@@ -266,7 +266,7 @@ def _aggregate_nc_to_countries(
     import regionmask
     import xarray as xr
 
-    ds = xr.open_dataset(nc_path)
+    ds = xr.open_dataset(nc_path, decode_times=False)
     da = _prepare_data_array(ds)
     if da is None:
         log.warning("No data variables in %s", nc_path)
@@ -306,7 +306,7 @@ def _aggregate_multi_lead_nc(
     import regionmask
     import xarray as xr
 
-    ds = xr.open_dataset(nc_path)
+    ds = xr.open_dataset(nc_path, decode_times=False)
     da = _prepare_data_array(ds)
     if da is None:
         log.warning("No data variables in %s", nc_path)
