@@ -46,6 +46,69 @@ MAX_LEAD_MONTHS = 7
 TERCILE_UPPER = 0.43
 TERCILE_LOWER = -0.43
 
+# Natural Earth ADM0_A3 → ISO 3166-1 alpha-3 corrections.
+# regionmask .abbrev uses Natural Earth abbreviations which differ from
+# ISO3 for several countries.
+_NE_TO_ISO3: dict[str, str] = {
+    # Natural Earth ADM0_A3 mismatches
+    "DRC": "COD",  # DR Congo
+    "PAL": "PSE",  # Palestine
+    "SLO": "SVN",  # Slovenia
+    "BOS": "BIH",  # Bosnia (sometimes)
+    "CIS": "CIV",  # Côte d'Ivoire (sometimes)
+    "KOS": "XKX",  # Kosovo
+    "SDS": "SSD",  # South Sudan
+    "SOL": "SOM",  # Somaliland -> Somalia
+    "CYN": "CYP",  # Northern Cyprus -> Cyprus
+    "SAH": "ESH",  # Western Sahara
+    "TAI": "TWN",  # Taiwan (sometimes TWN, sometimes TAI in NE)
+    # regionmask short / non-standard abbreviations
+    "INDO": "IDN",  # Indonesia
+    "MY": "MYS",    # Malaysia
+    "CL": "CHL",    # Chile
+    "BO": "BOL",    # Bolivia
+    "PE": "PER",    # Peru
+    "AR": "ARG",    # Argentina
+    "CY": "CYP",    # Cyprus
+    "CN": "CHN",    # China
+    "IS": "ISL",    # Iceland
+    "LB": "LBN",    # Lebanon
+    "ET": "ETH",    # Ethiopia
+    "SS": "SSD",    # South Sudan
+    "SO": "SOM",    # Somalia
+    "KE": "KEN",    # Kenya
+    "MW": "MWI",    # Malawi
+    "TZ": "TZA",    # Tanzania
+    "SL": "SLE",    # Sierra Leone
+    "F": "FRA",     # France
+    "SR": "SUR",    # Suriname
+    "GY": "GUY",    # Guyana
+}
+
+
+@functools.lru_cache(maxsize=1)
+def _load_name_to_iso3() -> dict[str, str]:
+    """Load country name -> ISO3 mapping from countries.csv."""
+    csv_path = Path(__file__).resolve().parents[1] / "data" / "countries.csv"
+    mapping: dict[str, str] = {}
+    try:
+        with csv_path.open("r", encoding="utf-8-sig") as fh:
+            for row in _csv.DictReader(fh):
+                name = (row.get("country_name") or "").strip()
+                iso3 = (row.get("iso3") or "").strip().upper()
+                if name and iso3:
+                    mapping[name.lower()] = iso3
+    except Exception:
+        log.warning("Failed to load countries.csv from %s", csv_path)
+    return mapping
+
+
+def _country_name_to_iso3(name: str) -> str:
+    """Resolve a country name to ISO3 using countries.csv."""
+    if not name:
+        return ""
+    mapping = _load_name_to_iso3()
+    return mapping.get(name.lower().strip(), "")
 
 # ------------------------------------------------------------------
 # FTP helpers
