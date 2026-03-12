@@ -51,85 +51,27 @@ TERCILE_LOWER = -0.43
 # One-time diagnostic flag — logs a complete region dump on the first call.
 _NMME_FULL_DUMP_DONE = False
 
-# Natural Earth ADM0_A3 → ISO 3166-1 alpha-3 corrections.
-# regionmask .abbrev uses Natural Earth abbreviations which differ from
-# ISO3 for several countries.
+# Manual overrides for regionmask abbreviations that pycountry cannot resolve.
+# Kept minimal — only entries where the abbreviation is not a valid ISO alpha-2
+# code, not a valid ISO alpha-3 code, and the country name won't match via
+# pycountry.countries.lookup().
 _NE_TO_ISO3: dict[str, str] = {
-    # Natural Earth ADM0_A3 mismatches
-    "DRC": "COD",  # DR Congo
-    "PAL": "PSE",  # Palestine
-    "SLO": "SVN",  # Slovenia
-    "BOS": "BIH",  # Bosnia (sometimes)
-    "CIS": "CIV",  # Côte d'Ivoire (sometimes)
-    "KOS": "XKX",  # Kosovo
-    "SDS": "SSD",  # South Sudan
-    "SOL": "SOM",  # Somaliland -> Somalia
-    "CYN": "CYP",  # Northern Cyprus -> Cyprus
-    "SAH": "ESH",  # Western Sahara
-    "TAI": "TWN",  # Taiwan (sometimes TWN, sometimes TAI in NE)
-    # regionmask short / non-standard abbreviations
-    "INDO": "IDN",  # Indonesia
-    "MY": "MYS",    # Malaysia
-    "CL": "CHL",    # Chile
-    "BO": "BOL",    # Bolivia
-    "PE": "PER",    # Peru
-    "AR": "ARG",    # Argentina
-    "CY": "CYP",    # Cyprus
-    "CN": "CHN",    # China
-    "IS": "ISL",    # Iceland
-    "LB": "LBN",    # Lebanon
-    "ET": "ETH",    # Ethiopia
-    "SS": "SSD",    # South Sudan
-    "SO": "SOM",    # Somalia
-    "KE": "KEN",    # Kenya
-    "MW": "MWI",    # Malawi
-    "TZ": "TZA",    # Tanzania
-    "SL": "SLE",    # Sierra Leone
-    "F": "FRA",     # France
-    "SR": "SUR",    # Suriname
-    "GY": "GUY",    # Guyana
-    # Batch 3: remaining regionmask short-code mismatches
-    "KR": "KOR",    # South Korea
-    "KP": "PRK",    # North Korea
-    "MA": "MAR",    # Morocco
-    "WS": "ESH",    # W. Sahara (Western Sahara)
-    "CR": "CRI",    # Costa Rica
-    "NI": "NIC",    # Nicaragua
-    "CG": "COG",    # Congo (Republic of)
-    "BT": "BTN",    # Bhutan
-    "UA": "UKR",    # Ukraine
-    "BY": "BLR",    # Belarus
-    "NA": "NAM",    # Namibia
-    "ZA": "ZAF",    # South Africa
-    "OM": "OMN",    # Oman
-    "UZ": "UZB",    # Uzbekistan
-    "KZ": "KAZ",    # Kazakhstan
-    "TJ": "TJK",    # Tajikistan
-    "LT": "LTU",    # Lithuania
-    "BR": "BRA",    # Brazil
-    "UY": "URY",    # Uruguay
-    "MN": "MNG",    # Mongolia
-    # Batch 4: remaining short-code mismatches from full region dump
-    "CZ": "CZE",    # Czechia
-    "D": "DEU",     # Germany
-    "LV": "LVA",    # Latvia
-    "N": "NOR",     # Norway
-    "S": "SWE",     # Sweden
-    "VN": "VNM",    # Vietnam
-    "KH": "KHM",    # Cambodia
-    "L": "LUX",     # Luxembourg
-    "AE": "ARE",    # United Arab Emirates
-    "B": "BEL",     # Belgium
-    "GE": "GEO",    # Georgia
-    "NM": "MKD",    # North Macedonia
-    "AL": "ALB",    # Albania
-    "AZ": "AZE",    # Azerbaijan
-    "KO": "XKX",    # Kosovo
-    "TR": "TUR",    # Turkey
-    "E": "ESP",     # Spain
-    "LA": "LAO",    # Laos
-    "KG": "KGZ",    # Kyrgyzstan
-    "DK": "DNK",    # Denmark
+    # Natural Earth non-standard ADM0_A3 codes
+    "DRC": "COD",   # DR Congo
+    "PAL": "PSE",   # Palestine
+    "SLO": "SVN",   # Slovenia
+    "BOS": "BIH",   # Bosnia
+    "CIS": "CIV",   # Côte d'Ivoire
+    "KOS": "XKX",   # Kosovo (not in pycountry)
+    "KO": "XKX",    # Kosovo alternate
+    "SDS": "SSD",   # South Sudan alternate
+    "SOL": "SOM",   # Somaliland -> Somalia
+    "CYN": "CYP",   # Northern Cyprus -> Cyprus
+    "SAH": "ESH",   # Western Sahara
+    "WS": "ESH",    # W. Sahara alternate
+    "TAI": "TWN",   # Taiwan
+    "INDO": "IDN",  # Indonesia (4-char, won't match alpha_2)
+    "NM": "MKD",    # North Macedonia (alpha_2 is MK, not NM)
 }
 
 
@@ -156,6 +98,53 @@ def _country_name_to_iso3(name: str) -> str:
         return ""
     mapping = _load_name_to_iso3()
     return mapping.get(name.lower().strip(), "")
+
+
+def _resolve_iso3(raw_abbrev: str, country_name: str) -> str:
+    """Resolve a regionmask abbreviation to ISO 3166-1 alpha-3.
+
+    Resolution chain:
+    1. Manual overrides (_NE_TO_ISO3) for non-standard codes
+    2. Already a valid 3-char code → pass through
+    3. ISO alpha-2 → alpha-3 via pycountry
+    4. Country name lookup via pycountry
+    5. Fallback to countries.csv name lookup
+    """
+    abbrev = (raw_abbrev or "").strip()
+    if not abbrev:
+        return ""
+
+    # 1. Check manual overrides first (non-standard codes).
+    mapped = _NE_TO_ISO3.get(abbrev) or _NE_TO_ISO3.get(abbrev.upper())
+    if mapped and len(mapped) == 3:
+        return mapped.upper()
+
+    # 2. Already a valid 3-char code.
+    if len(abbrev) == 3:
+        return abbrev.upper()
+
+    # 3. Try ISO alpha-2 → alpha-3 via pycountry.
+    try:
+        import pycountry
+        c = pycountry.countries.get(alpha_2=abbrev.upper())
+        if c:
+            return c.alpha_3
+    except Exception:
+        pass
+
+    # 4. Try country name lookup via pycountry.
+    if country_name:
+        try:
+            import pycountry
+            c = pycountry.countries.lookup(country_name)
+            if c:
+                return c.alpha_3
+        except (LookupError, Exception):
+            pass
+
+    # 5. Fall back to countries.csv name lookup.
+    return _country_name_to_iso3(country_name)
+
 
 # ------------------------------------------------------------------
 # FTP helpers
@@ -322,11 +311,12 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
             try:
                 ro = countries[rn]
                 raw = (ro.abbrev or "").strip()
-                mapped = _NE_TO_ISO3.get(raw) or _NE_TO_ISO3.get(raw.upper()) or raw
+                name = getattr(ro, "name", "")
+                mapped = _resolve_iso3(raw, name)
                 all_mappings[raw] = {
                     "mapped": mapped,
-                    "name": getattr(ro, "name", ""),
-                    "len_ok": len(mapped) == 3,
+                    "name": name,
+                    "len_ok": len(mapped) == 3 if mapped else False,
                 }
             except (KeyError, IndexError):
                 all_mappings[f"region_{rn}"] = {"mapped": "", "name": "", "len_ok": False}
@@ -368,21 +358,17 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
 
         abbrevs_seen[region_number] = raw_abbrev
 
-        # Map Natural Earth abbreviation to ISO3, correcting known mismatches.
-        # Try raw value first, then uppercased, to handle casing differences.
-        iso3 = _NE_TO_ISO3.get(raw_abbrev) or _NE_TO_ISO3.get(raw_abbrev.upper()) or raw_abbrev
+        # Resolve regionmask abbreviation to ISO3 via the full chain.
+        country_name = getattr(region_obj, "name", "")
+        iso3 = _resolve_iso3(raw_abbrev, country_name)
 
-        # If we still don't have a valid 3-char code, try country name lookup.
         if not iso3 or len(iso3) != 3:
-            country_name = getattr(region_obj, "name", "")
-            iso3 = _country_name_to_iso3(country_name)
-            if not iso3:
-                log.debug(
-                    "NMME skipping region %d: raw_abbrev=%r, after_mapping=%r, country_name=%r",
-                    region_number, raw_abbrev, iso3, country_name,
-                )
-                skipped_length += 1
-                continue
+            log.debug(
+                "NMME skipping region %d: raw_abbrev=%r, resolved=%r, country_name=%r",
+                region_number, raw_abbrev, iso3, country_name,
+            )
+            skipped_length += 1
+            continue
 
         rows.append({"iso3": iso3.upper(), "anomaly_value": round(mean_val, 4)})
 
@@ -397,12 +383,12 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
     if skipped_length > 0:
         failed_details: dict[str, str] = {}
         for rgn, abbr in abbrevs_seen.items():
-            mapped = _NE_TO_ISO3.get(abbr) or _NE_TO_ISO3.get(abbr.upper()) or abbr
-            if not mapped or len(mapped) != 3:
-                try:
-                    rgn_name = countries[rgn].name
-                except Exception:
-                    rgn_name = ""
+            try:
+                rgn_name = countries[rgn].name
+            except Exception:
+                rgn_name = ""
+            resolved = _resolve_iso3(abbr, rgn_name)
+            if not resolved or len(resolved) != 3:
                 failed_details[abbr] = rgn_name
         if failed_details:
             log.info(

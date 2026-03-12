@@ -29,3 +29,4 @@ netCDF4>=1.6,<2
 regionmask>=0.12,<1
 geopandas>=1.0,<2
 shapely>=2.0,<3
+pycountry>=24.6,<25
