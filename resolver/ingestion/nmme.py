@@ -16,6 +16,8 @@ precipitation anomalies at 1° × 1° resolution.
 
 from __future__ import annotations
 
+import csv as _csv
+import functools
 import logging
 import tempfile
 from datetime import date, datetime
@@ -255,10 +257,25 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
     -------
     DataFrame with columns ``[iso3, anomaly_value]``
     """
+    # --- Diagnostic: mask statistics ---
+    unique_regions = np.unique(mask.values[~np.isnan(mask.values)])
+    total_cells = mask.size
+    nan_cells = int(np.isnan(mask.values).sum())
+    log.info(
+        "NMME mask stats: %d unique regions, %d total cells, %d NaN cells (%.1f%% coverage)",
+        len(unique_regions), total_cells, nan_cells,
+        100.0 * (1 - nan_cells / total_cells) if total_cells else 0,
+    )
+
     weights = np.cos(np.deg2rad(da.lat))
 
     rows: list[dict] = []
-    for region_number in np.unique(mask.values[~np.isnan(mask.values)]):
+    skipped_keyerror = 0
+    skipped_length = 0
+    skipped_weight = 0
+    abbrevs_seen: dict[int, str] = {}  # region_number -> raw abbrev
+
+    for region_number in unique_regions:
         region_number = int(region_number)
         region_mask = mask == region_number
         region_data = da.where(region_mask)
@@ -268,22 +285,51 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
         weight_sum = (weights * region_mask.astype(float)).sum(skipna=True)
 
         if float(weight_sum) == 0:
+            skipped_weight += 1
             continue
 
         mean_val = float(weighted_sum / weight_sum)
 
         try:
             region_obj = countries[region_number]
-            iso3 = region_obj.abbrev
+            raw_abbrev = region_obj.abbrev
         except (KeyError, IndexError):
+            skipped_keyerror += 1
             continue
 
+        abbrevs_seen[region_number] = raw_abbrev
+
+        # Map Natural Earth abbreviation to ISO3, correcting known mismatches.
+        iso3 = _NE_TO_ISO3.get(raw_abbrev, raw_abbrev)
+
+        # If we still don't have a valid 3-char code, try country name lookup.
         if not iso3 or len(iso3) != 3:
-            continue
+            country_name = getattr(region_obj, "name", "")
+            iso3 = _country_name_to_iso3(country_name)
+            if not iso3:
+                skipped_length += 1
+                continue
 
         rows.append({"iso3": iso3.upper(), "anomaly_value": round(mean_val, 4)})
 
-    log.debug("[nmme] resolved %d countries from mask", len(rows))
+    # --- Diagnostic: aggregation summary ---
+    total_skipped = skipped_keyerror + skipped_length + skipped_weight
+    log.info(
+        "NMME aggregation: %d countries produced, %d skipped "
+        "(KeyError=%d, length_filter=%d, zero_weight=%d)",
+        len(rows), total_skipped,
+        skipped_keyerror, skipped_length, skipped_weight,
+    )
+    if skipped_length > 0:
+        bad_abbrevs = {k: v for k, v in abbrevs_seen.items() if len(v) != 3}
+        log.info(
+            "NMME abbreviations filtered by length: %s",
+            dict(list(bad_abbrevs.items())[:20]),
+        )
+    if rows:
+        iso3s = sorted(set(r["iso3"] for r in rows))
+        log.info("NMME resolved %d countries: %s", len(iso3s), iso3s[:30])
+
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["iso3", "anomaly_value"])
 
 
