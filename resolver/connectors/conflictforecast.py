@@ -214,22 +214,44 @@ class ConflictForecastOrgConnector:
         } | _BACKENDLESS_META
 
         # 1) Try to match the file_pattern against column names.
+        #    Prefer _all (combined forecast), then _text, then _hist.
+        #    Skip _target (ground truth, NaN for future) and _naive (baseline).
         if file_pattern:
-            for col in df.columns:
-                if col.lower() in skip_cols:
-                    continue
-                if re.search(file_pattern, col, re.IGNORECASE):
-                    if pd.api.types.is_numeric_dtype(df[col]):
+            candidates = [
+                col for col in df.columns
+                if col.lower() not in skip_cols
+                and re.search(file_pattern, col, re.IGNORECASE)
+            ]
+            candidates_before_filter = list(candidates)
+            # Remove ground-truth and naive baseline columns
+            candidates = [
+                c for c in candidates
+                if not c.endswith("_target") and not c.endswith("_naive")
+            ]
+            # Prefer _all, then _text, then _hist, then anything else
+            _suffix_priority = {"_all": 0, "_text": 1, "_hist": 2}
+            candidates.sort(
+                key=lambda c: next(
+                    (v for k, v in _suffix_priority.items() if c.endswith(k)), 99
+                )
+            )
+            for col in candidates:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    value_col = col
+                    break
+                # Try coercing
+                try:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                    if df[col].notna().any():
                         value_col = col
                         break
-                    # Try coercing
-                    try:
-                        df[col] = pd.to_numeric(df[col], errors="coerce")
-                        if df[col].notna().any():
-                            value_col = col
-                            break
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
+            if value_col is not None:
+                LOG.info(
+                    "[conflictforecast_org] pattern '%s' matched columns: %s → selected '%s'",
+                    file_pattern, candidates_before_filter, value_col,
+                )
 
         # 2) Fallback: last numeric column that isn't in skip_cols.
         if value_col is None:
@@ -265,9 +287,11 @@ class ConflictForecastOrgConnector:
             value_col, metric,
         )
 
-        # Sanity check: conflictforecast.org values should be in [0, 1].
+        # Sanity check: onset metrics should be in [0, 1]; intensity
+        # metrics (int_lnbest_*) use log-scale fatalities, so skip them.
+        is_onset = "armed_conflict_risk" in metric
         median_val = df[value_col].median()
-        if median_val > 10:
+        if is_onset and median_val > 10:
             LOG.warning(
                 "[conflictforecast_org] value column '%s' has median %.1f "
                 "— expected 0-1 range for %s. Possible wrong column.",

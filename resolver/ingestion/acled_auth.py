@@ -102,6 +102,7 @@ def _password_grant(username: str, password: str) -> Dict[str, str]:
         "grant_type": "password",
         "client_id": OAUTH_CLIENT_ID,
     }
+    _LOG.debug("ACLED password grant for username=%s", data["username"])
     resp = requests.post(
         OAUTH_TOKEN_URL,
         data=data,
@@ -143,7 +144,7 @@ def _resolve_refresh_token() -> Optional[str]:
     cached = _CACHE.get("refresh_token")
     if cached:
         return cached
-    refresh_from_env = os.environ.get("ACLED_REFRESH_TOKEN")
+    refresh_from_env = (os.environ.get("ACLED_REFRESH_TOKEN") or "").strip()
     if refresh_from_env:
         _CACHE["refresh_token"] = refresh_from_env
         return refresh_from_env
@@ -151,8 +152,8 @@ def _resolve_refresh_token() -> Optional[str]:
 
 
 def _resolve_password_creds() -> Optional[Dict[str, str]]:
-    username = os.environ.get("ACLED_USERNAME")
-    password = os.environ.get("ACLED_PASSWORD")
+    username = (os.environ.get("ACLED_USERNAME") or "").strip()
+    password = (os.environ.get("ACLED_PASSWORD") or "").strip()
     if username and password:
         return {"username": username, "password": password}
     return None

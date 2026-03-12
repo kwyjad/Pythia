@@ -58,6 +58,7 @@ _SOURCE_GROUPS: dict[str, list[str]] = {
     "acaps_humanitarian_access": ["acaps_humanitarian_access"],
     "ipc": ["ipc_phases"],
     "reliefweb": ["reliefweb_reports"],
+    "acled_political": ["acled_political_events"],
     "nmme": ["nmme_seasonal_forecasts"],
 }
 
@@ -70,12 +71,6 @@ _SOURCE_ALIASES: dict[str, list[str]] = {
         "acaps_humanitarian_access",
     ],
     "conflict": ["views", "conflictforecast", "acledcast"],
-    "acled_political": [
-        "acled_political_events",
-    ],
-    "acled_political": [
-        "acled_political_events",
-    ],
 }
 
 ALL_SOURCE_NAMES = sorted(_SOURCE_GROUPS.keys())
