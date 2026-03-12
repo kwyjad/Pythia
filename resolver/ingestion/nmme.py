@@ -48,6 +48,9 @@ MAX_LEAD_MONTHS = 7
 TERCILE_UPPER = 0.43
 TERCILE_LOWER = -0.43
 
+# One-time diagnostic flag — logs a complete region dump on the first call.
+_NMME_FULL_DUMP_DONE = False
+
 # Natural Earth ADM0_A3 → ISO 3166-1 alpha-3 corrections.
 # regionmask .abbrev uses Natural Earth abbreviations which differ from
 # ISO3 for several countries.
@@ -106,6 +109,27 @@ _NE_TO_ISO3: dict[str, str] = {
     "BR": "BRA",    # Brazil
     "UY": "URY",    # Uruguay
     "MN": "MNG",    # Mongolia
+    # Batch 4: remaining short-code mismatches from full region dump
+    "CZ": "CZE",    # Czechia
+    "D": "DEU",     # Germany
+    "LV": "LVA",    # Latvia
+    "N": "NOR",     # Norway
+    "S": "SWE",     # Sweden
+    "VN": "VNM",    # Vietnam
+    "KH": "KHM",    # Cambodia
+    "L": "LUX",     # Luxembourg
+    "AE": "ARE",    # United Arab Emirates
+    "B": "BEL",     # Belgium
+    "GE": "GEO",    # Georgia
+    "NM": "MKD",    # North Macedonia
+    "AL": "ALB",    # Albania
+    "AZ": "AZE",    # Azerbaijan
+    "KO": "XKX",    # Kosovo
+    "TR": "TUR",    # Turkey
+    "E": "ESP",     # Spain
+    "LA": "LAO",    # Laos
+    "KG": "KGZ",    # Kyrgyzstan
+    "DK": "DNK",    # Denmark
 }
 
 
@@ -287,6 +311,30 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
         len(unique_regions), total_cells, nan_cells,
         100.0 * (1 - nan_cells / total_cells) if total_cells else 0,
     )
+
+    # --- One-time full region dump (first call only) ---
+    global _NMME_FULL_DUMP_DONE  # noqa: PLW0603
+    if not _NMME_FULL_DUMP_DONE:
+        _NMME_FULL_DUMP_DONE = True
+        all_mappings: dict[str, dict] = {}
+        for rn in unique_regions:
+            rn = int(rn)
+            try:
+                ro = countries[rn]
+                raw = (ro.abbrev or "").strip()
+                mapped = _NE_TO_ISO3.get(raw) or _NE_TO_ISO3.get(raw.upper()) or raw
+                all_mappings[raw] = {
+                    "mapped": mapped,
+                    "name": getattr(ro, "name", ""),
+                    "len_ok": len(mapped) == 3,
+                }
+            except (KeyError, IndexError):
+                all_mappings[f"region_{rn}"] = {"mapped": "", "name": "", "len_ok": False}
+        failed = {k: v for k, v in all_mappings.items() if not v["len_ok"]}
+        log.info(
+            "NMME complete region dump: %d regions, %d mapped OK, %d failed: %s",
+            len(all_mappings), len(all_mappings) - len(failed), len(failed), failed,
+        )
 
     weights = np.cos(np.deg2rad(da.lat))
 
