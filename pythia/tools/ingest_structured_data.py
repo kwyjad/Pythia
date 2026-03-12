@@ -73,6 +73,9 @@ _SOURCE_ALIASES: dict[str, list[str]] = {
     "acled_political": [
         "acled_political_events",
     ],
+    "acled_political": [
+        "acled_political_events",
+    ],
 }
 
 ALL_SOURCE_NAMES = sorted(_SOURCE_GROUPS.keys())
