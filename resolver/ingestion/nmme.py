@@ -170,6 +170,15 @@ def _download_nc_files(
 # Spatial aggregation
 # ------------------------------------------------------------------
 
+def _get_country_regions():
+    """Return the highest-resolution regionmask country regions available."""
+    import regionmask
+    try:
+        return regionmask.defined_regions.natural_earth_v5_1_2.countries_10
+    except AttributeError:
+        return regionmask.defined_regions.natural_earth_v5_0_0.countries_10
+
+
 def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
     """Compute area-weighted country averages from a 2-D (lat × lon) field.
 
@@ -264,7 +273,6 @@ def _aggregate_nc_to_countries(
 
     Returns DataFrame with columns ``[iso3, anomaly_value]``.
     """
-    import regionmask
     import xarray as xr
 
     ds = xr.open_dataset(nc_path, decode_times=False)
@@ -279,7 +287,7 @@ def _aggregate_nc_to_countries(
         if dim not in ("lat", "lon") and da.sizes[dim] == 1:
             da = da.squeeze(dim, drop=True)
 
-    countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_50
+    countries = _get_country_regions()
     mask = countries.mask(da)
     result = _aggregate_2d_field_to_countries(da, countries, mask)
     ds.close()
@@ -304,7 +312,6 @@ def _aggregate_multi_lead_nc(
     List of ``(lead_month, DataFrame)`` tuples where each DataFrame has
     columns ``[iso3, anomaly_value]``.  ``lead_month`` is 1-based.
     """
-    import regionmask
     import xarray as xr
 
     ds = xr.open_dataset(nc_path, decode_times=False)
@@ -325,7 +332,7 @@ def _aggregate_multi_lead_nc(
 
     if lead_dim is None:
         # Fallback: file has no lead dimension (single-lead legacy file).
-        countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_50
+        countries = _get_country_regions()
         mask = countries.mask(da)
         df = _aggregate_2d_field_to_countries(da, countries, mask)
         ds.close()
@@ -337,7 +344,7 @@ def _aggregate_multi_lead_nc(
         nc_path.name, da.sizes[lead_dim], lead_dim,
     )
 
-    countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_50
+    countries = _get_country_regions()
 
     # Build regionmask once from a single 2-D slice.
     da_slice0 = da.isel({lead_dim: 0})
