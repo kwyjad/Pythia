@@ -85,6 +85,27 @@ _NE_TO_ISO3: dict[str, str] = {
     "F": "FRA",     # France
     "SR": "SUR",    # Suriname
     "GY": "GUY",    # Guyana
+    # Batch 3: remaining regionmask short-code mismatches
+    "KR": "KOR",    # South Korea
+    "KP": "PRK",    # North Korea
+    "MA": "MAR",    # Morocco
+    "WS": "ESH",    # W. Sahara (Western Sahara)
+    "CR": "CRI",    # Costa Rica
+    "NI": "NIC",    # Nicaragua
+    "CG": "COG",    # Congo (Republic of)
+    "BT": "BTN",    # Bhutan
+    "UA": "UKR",    # Ukraine
+    "BY": "BLR",    # Belarus
+    "NA": "NAM",    # Namibia
+    "ZA": "ZAF",    # South Africa
+    "OM": "OMN",    # Oman
+    "UZ": "UZB",    # Uzbekistan
+    "KZ": "KAZ",    # Kazakhstan
+    "TJ": "TJK",    # Tajikistan
+    "LT": "LTU",    # Lithuania
+    "BR": "BRA",    # Brazil
+    "UY": "URY",    # Uruguay
+    "MN": "MNG",    # Mongolia
 }
 
 
