@@ -69,7 +69,22 @@ _SOURCE_ALIASES: dict[str, list[str]] = {
         "acaps_daily_monitoring",
         "acaps_humanitarian_access",
     ],
+<<<<<<< Updated upstream
     "conflict": ["views", "conflictforecast", "acledcast"],
+=======
+    "ipc": [
+        "ipc_phases",
+    ],
+    "reliefweb": [
+        "reliefweb_reports",
+    ],
+    "nmme": [
+        "nmme_seasonal_forecasts",
+    ],
+    "acled_political": [
+        "acled_political_events",
+    ],
+>>>>>>> Stashed changes
 }
 
 ALL_SOURCE_NAMES = sorted(_SOURCE_GROUPS.keys())
@@ -911,6 +926,38 @@ def _bulk_fetch_ipc(
 
 
 # ===================================================================
+# ACLED Political — per-country via pythia.acled_political
+# ===================================================================
+
+
+def _bulk_fetch_acled_political(
+    countries: set[str],
+    max_workers: int = 4,
+) -> dict[str, list[dict]]:
+    """Fetch ACLED political events — per-country, concurrent."""
+    from pythia.acled_political import fetch_acled_political_events
+
+    results: dict[str, list[dict]] = {}
+
+    def _fetch_one(iso3: str) -> tuple[str, list[dict]]:
+        try:
+            return iso3, fetch_acled_political_events(iso3)
+        except Exception as exc:
+            LOG.warning("ACLED political fetch failed for %s: %s", iso3, exc)
+            return iso3, []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_fetch_one, c): c for c in countries}
+        for future in as_completed(futures):
+            iso3, data = future.result()
+            if data:
+                results[iso3] = data
+
+    LOG.info("ACLED political: data for %d countries", len(results))
+    return results
+
+
+# ===================================================================
 # NMME — delegates to resolver.tools.ingest_nmme (global, not per-country)
 # ===================================================================
 
@@ -1024,9 +1071,17 @@ def _store_all(
             elif label == "reliefweb_reports":
                 from horizon_scanner.reliefweb import store_reliefweb_reports
                 store_reliefweb_reports(iso3, data)
+<<<<<<< Updated upstream
             elif label in _SELF_STORING_LABELS:
                 # These sources handle their own DB writes in their
                 # bulk-fetch functions (_bulk_fetch_nmme, _bulk_fetch_conflict).
+=======
+            elif label == "acled_political_events":
+                from pythia.acled_political import store_acled_political_events
+                store_acled_political_events(iso3, data)
+            elif label == "nmme_seasonal_forecasts":
+                # NMME handles its own storage in _bulk_fetch_nmme.
+>>>>>>> Stashed changes
                 stats["success"] += 1
                 continue
             else:
@@ -1109,8 +1164,13 @@ def ingest(
                 result = _bulk_fetch_reliefweb(countries)
             elif label == "nmme_seasonal_forecasts":
                 result = _bulk_fetch_nmme(dry_run)
+<<<<<<< Updated upstream
             elif label in _CONFLICT_SOURCE_MAP:
                 result = _bulk_fetch_conflict(label, dry_run)
+=======
+            elif label == "acled_political_events":
+                result = _bulk_fetch_acled_political(countries)
+>>>>>>> Stashed changes
             else:
                 LOG.error("Unknown label: %s", label)
                 result = {}

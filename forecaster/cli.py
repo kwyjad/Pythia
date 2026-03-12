@@ -315,7 +315,7 @@ def _load_idmc_conflict_flow_history_summary(
                 ) AS flow_value
             FROM facts_deltas
             WHERE upper(iso3) = ?
-              AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') = ?
+              AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') IN (?, 'IDU')
               AND lower(series_semantics) = 'new'
               AND lower(metric) IN (
                 'new_displacements',
@@ -344,6 +344,8 @@ def _load_idmc_conflict_flow_history_summary(
             "data_quality": "low",
             "notes": f"IDMC history unavailable due to query error: {type(exc).__name__}",
         }
+
+    logging.debug("IDMC displacement query for %s/%s: %d rows", iso3_up, hz_up, len(rows))
 
     if not rows:
         return {
@@ -663,7 +665,7 @@ def _build_conflict_base_rate(
                 SELECT ym, SUM(COALESCE(value_new, 0)) AS flow_value
                 FROM facts_deltas
                 WHERE upper(iso3) = ?
-                  AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') = ?
+                  AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') IN (?, 'IDU')
                   AND lower(series_semantics) = 'new'
                   AND (
                       lower(source_id) IN ('idmc', 'idmc_idu')
@@ -679,6 +681,7 @@ def _build_conflict_base_rate(
                 """,
                 [iso3_up, hz_up],
             ).fetchall()
+            logging.debug("IDMC displacement query for %s/%s: %d rows", iso3_up, hz_up, len(disp_rows))
             disp_rows = list(reversed(disp_rows))
             disp_rows = [(str(r[0])[:7] if len(str(r[0])) >= 7 else str(r[0]), r[1]) for r in disp_rows]
             displacements_data = _compute_trajectory(disp_rows, "IDMC")

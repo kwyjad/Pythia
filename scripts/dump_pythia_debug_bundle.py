@@ -2623,26 +2623,40 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     checks.append({"subsystem": "HS Triage", "status": hs_status, "detail": hs_detail})
 
     # Grounding health — HS
-    hs_grounded = sum(1 for r in data.hs_web_rows if r.get("grounded"))
-    hs_total = len(data.hs_web_rows)
-    if hs_total == 0:
-        g_status = "WARN" if data.hs_web_research_active else "OK"
-        g_detail = "no grounding calls" if data.hs_web_research_active else "disabled"
-    elif hs_grounded == hs_total:
+    # Use the actual grounding call stats from hs_web_research_rows (which track
+    # calls logged under hs_web_research), not hs_web_rows (which may be empty
+    # when grounding calls are logged under a different phase label).
+    _hs_g_calls = sum(int(r.get("n_calls") or 0) for r in (data.hs_web_research_rows or []))
+    _hs_g_errors = sum(int(r.get("n_errors") or 0) for r in (data.hs_web_research_rows or []))
+    _hs_g_verified = sum(int(r.get("n_verified_sources") or 0) for r in (data.hs_web_research_rows or []))
+    if _hs_g_calls > 0 and _hs_g_errors == 0:
         g_status = "OK"
-        g_detail = f"{hs_grounded}/{hs_total} countries grounded"
-    elif hs_grounded >= hs_total * 0.9:
+        g_detail = f"{_hs_g_calls} calls, {_hs_g_verified} verified sources"
+    elif _hs_g_calls > 0:
         g_status = "WARN"
-        g_detail = f"{hs_grounded}/{hs_total} countries grounded"
+        g_detail = f"{_hs_g_calls} calls, {_hs_g_errors} errors, {_hs_g_verified} verified sources"
+    elif data.hs_web_research_active:
+        g_status = "WARN"
+        g_detail = "no grounding calls"
     else:
-        g_status = "FAIL"
-        g_detail = f"{hs_grounded}/{hs_total} countries grounded"
+        g_status = "OK"
+        g_detail = "disabled"
     checks.append({"subsystem": "HS Grounding", "status": g_status, "detail": g_detail})
 
     # Grounding health — Research
+    # The question-level web research pipeline is deprecated; when the retriever
+    # is disabled (PYTHIA_RETRIEVER_ENABLED=0), 0 grounded questions is expected
+    # because structured data injection replaces the old retriever pipeline.
     q_grounded = sum(1 for r in data.question_web_rows if r.get("grounded"))
     q_total = len(data.question_web_rows)
-    if q_total == 0:
+    if not data.retriever_enabled:
+        rg_status = "OK"
+        rg_detail = (
+            f"retriever disabled — using structured data injection"
+            f" ({q_grounded}/{q_total} legacy grounded)" if q_total else
+            "retriever disabled — using structured data injection"
+        )
+    elif q_total == 0:
         rg_status = "OK" if not data.forecaster_run_id else "WARN"
         rg_detail = "no research grounding" if not data.forecaster_run_id else "0 questions grounded"
     elif q_grounded == q_total:

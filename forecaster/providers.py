@@ -1249,9 +1249,9 @@ async def call_chat_ms(
     if spd_google:
         model_id_lower = ms.model_id.lower()
         if "gemini-3-flash" in model_id_lower:
-            timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC", None, 90.0)
+            timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC", None, 300.0)
         elif "gemini-3-pro" in model_id_lower:
-            timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC", None, 120.0)
+            timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC", None, 300.0)
         try:
             max_attempts = max(1, int(os.getenv("PYTHIA_GOOGLE_SPD_RETRIES", "1") or 1))
         except Exception:

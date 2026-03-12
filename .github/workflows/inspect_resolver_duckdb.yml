@@ -984,6 +984,8 @@ jobs:
               """, ["rows", "countries", "min_date", "max_date"]),
           ]
 
+          empty_connector_tables = []
+
           for tbl_name, query, col_names in connector_tables:
               L(f"### {tbl_name}")
               if table_exists(con, tbl_name):
@@ -997,10 +999,141 @@ jobs:
                           L("|" + "---|" * len(col_names))
                           for row in rows:
                               L("| " + " | ".join(str(x) for x in row) + " |")
+                  else:
+                      empty_connector_tables.append(tbl_name)
                   L()
               else:
                   L("_Table does not exist._")
               L()
+
+          # --- Check 1: Conflict forecast value range ---
+          if table_exists(con, "conflict_forecasts") and row_count(con, "conflict_forecasts"):
+              L("### Conflict Forecast Value Range Check")
+              cf_stats = safe_query(con, """
+                  SELECT source, metric,
+                         COUNT(*) AS n,
+                         ROUND(MIN(value), 3) AS min_val,
+                         ROUND(MAX(value), 3) AS max_val,
+                         ROUND(AVG(value), 3) AS avg_val,
+                         ROUND(STDDEV(value), 3) AS stddev_val
+                  FROM conflict_forecasts
+                  GROUP BY source, metric
+                  ORDER BY source, metric
+              """)
+              if cf_stats:
+                  cf_cols = ["source", "metric", "n", "min", "max", "avg", "stddev"]
+                  L("| " + " | ".join(cf_cols) + " |")
+                  L("|" + "---|" * len(cf_cols))
+                  for row in cf_stats:
+                      L("| " + " | ".join(str(x) for x in row) + " |")
+                  L()
+                  prob_metrics = {
+                      "cf_armed_conflict_risk_3m",
+                      "cf_armed_conflict_risk_12m",
+                      "cf_violence_intensity_3m",
+                  }
+                  for row in cf_stats:
+                      src, metric, n_rows, min_v, max_v, avg_v, std_v = row
+                      if metric in prob_metrics and max_v is not None and float(max_v) > 10:
+                          L(f"> **WARNING:** {src} `{metric}` values appear non-probability "
+                            f"(max={max_v}). Possible wrong column selection in connector.")
+                          L()
+              L()
+
+          # --- Check 7: Conflict forecast per-country sample ---
+          if table_exists(con, "conflict_forecasts") and row_count(con, "conflict_forecasts"):
+              L("### Conflict Forecast Country Sample")
+              cf_sample = safe_query(con, """
+                  SELECT source, iso3, metric, ROUND(value, 4) AS value
+                  FROM conflict_forecasts
+                  WHERE iso3 IN ('IRN','SOM','ETH','SDN','UKR')
+                  ORDER BY source, iso3, metric
+              """)
+              if cf_sample:
+                  sample_cols = ["source", "iso3", "metric", "value"]
+                  L("| " + " | ".join(sample_cols) + " |")
+                  L("|" + "---|" * len(sample_cols))
+                  for row in cf_sample:
+                      L("| " + " | ".join(str(x) for x in row) + " |")
+              else:
+                  L("_No data for sample countries (IRN, SOM, ETH, SDN, UKR)._")
+              L()
+
+          # --- Check 5: Conflict forecast staleness ---
+          if table_exists(con, "conflict_forecasts") and row_count(con, "conflict_forecasts"):
+              L("### Conflict Forecast Staleness Check")
+              cf_stale = safe_query(con, """
+                  SELECT source, MAX(forecast_issue_date) AS latest,
+                         CURRENT_DATE - MAX(forecast_issue_date) AS days_old
+                  FROM conflict_forecasts GROUP BY source
+              """)
+              if cf_stale:
+                  stale_cols = ["source", "latest_issue_date", "days_old"]
+                  L("| " + " | ".join(stale_cols) + " |")
+                  L("|" + "---|" * len(stale_cols))
+                  for row in cf_stale:
+                      L("| " + " | ".join(str(x) for x in row) + " |")
+                  L()
+                  for row in cf_stale:
+                      src, latest, days_old = row
+                      if days_old is not None and int(days_old) > 45:
+                          L(f"> **WARNING:** `{src}` last forecast is {days_old} days old (>{45} day threshold).")
+                          L()
+              L()
+
+          # --- Check 2: Seasonal forecasts country list ---
+          if table_exists(con, "seasonal_forecasts") and row_count(con, "seasonal_forecasts"):
+              sf_countries = safe_query(con, "SELECT DISTINCT iso3 FROM seasonal_forecasts ORDER BY iso3")
+              n_sf_countries = len(sf_countries)
+              if n_sf_countries < 50:
+                  L("### Seasonal Forecasts Country Coverage")
+                  L(f"> **WARNING:** Only **{n_sf_countries}** countries have seasonal forecast data (expected 170+).")
+                  L()
+                  iso_list = ", ".join(r[0] for r in sf_countries)
+                  L(f"Countries with data: `{iso_list}`")
+                  L()
+
+          # --- Check 3: Empty connector table warnings ---
+          if empty_connector_tables:
+              L("### Empty Connector Table Warnings")
+              parts = ", ".join(f"{t} (0 rows)" for t in empty_connector_tables)
+              L(f"> **WARNING: EMPTY CONNECTOR TABLES:** {parts}")
+              L()
+
+          # --- Check 4: IDMC/IDU hazard code check ---
+          if table_exists(con, "facts_deltas"):
+              L("### IDMC Displacement Hazard Code Check")
+              idu_rows = safe_query(con, """
+                  SELECT hazard_code, metric, COUNT(*) AS n, COUNT(DISTINCT iso3) AS countries
+                  FROM facts_deltas
+                  WHERE lower(metric) = 'new_displacements'
+                  GROUP BY hazard_code, metric
+                  ORDER BY hazard_code
+              """)
+              if idu_rows:
+                  idu_cols = ["hazard_code", "metric", "rows", "countries"]
+                  L("| " + " | ".join(idu_cols) + " |")
+                  L("|" + "---|" * len(idu_cols))
+                  for row in idu_rows:
+                      L("| " + " | ".join(str(x) for x in row) + " |")
+                  L()
+                  hz_codes = {str(r[0]).upper().strip() for r in idu_rows}
+                  has_idu = "IDU" in hz_codes
+                  has_ace = "ACE" in hz_codes
+                  if has_idu and not has_ace:
+                      L("> **WARNING:** IDMC data uses hazard_code=IDU but no ACE new_displacements exist. "
+                        "Forecaster queries filtering on ACE will miss this data.")
+                      L()
+              else:
+                  L("_No new_displacements rows in facts_deltas._")
+              L()
+
+          # --- Check 6: HDX Signals note ---
+          L("### HDX Signals")
+          L("_Note: HDX Signals data is cached as a local CSV file, not stored in DuckDB. "
+            "HDX Signals health cannot be checked from the DB alone. "
+            "Check the `hs_country_evidence` artifact for HDX Signals availability._")
+          L()
 
           # =====================================================================
           # 8. GAME-THEORETIC & PREDICTION MARKET TABLES

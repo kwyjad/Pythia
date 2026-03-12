@@ -104,7 +104,7 @@ Pythia/
 - `scripts/print_forecaster_ensemble.py` — Ensemble diagnostic script (must be invoked as `python -m scripts.print_forecaster_ensemble`, not directly)
 - `pythia/acaps.py` — ACAPS unified connector (4 datasets: INFORM Severity, Risk Radar, Daily Monitoring, Humanitarian Access)
 - `pythia/ipc_phases.py` — IPC food security phase classification connector
-- `pythia/acled_political.py` — ACLED event-level political data (protests, riots, strategic developments)
+- `pythia/acled_political.py` — ACLED event-level political data (protests, riots, strategic developments); wired into bulk ingest via `_bulk_fetch_acled_political` in `ingest_structured_data.py`
 - `pythia/adversarial_check.py` — Counter-evidence searches for RC Level 1+ (devil's advocate)
 - `horizon_scanner/reliefweb.py` — ReliefWeb humanitarian reports connector
 - `forecaster/hazard_prompts.py` — Hazard-specific reasoning guidance for SPD prompts
@@ -167,10 +167,17 @@ discover_connectors() -> fetch_and_normalize() per connector
 **Transform adapters** (`resolver/transform/adapters/`): ACLED and IDMC adapters normalize source-specific schemas to the common format used by the precedence engine.
 
 **NMME seasonal forecasts** (`resolver/ingestion/nmme.py` + `resolver/tools/ingest_nmme.py`):
+<<<<<<< Updated upstream
 Separate from the Connector pipeline. Fetches NMME ensemble mean anomalies from CPC FTP, computes area-weighted country averages using xarray + regionmask, and writes to the `seasonal_forecasts` table in Pythia DB. Injected into HS triage/RC prompts via `horizon_scanner/seasonal_context.py` (`climate_data` kwarg) and into forecaster prompts via `research_json["nmme_seasonal_outlook"]`. **Now integrated into `pythia/tools/ingest_structured_data.py`** as the `nmme` source (NMME failures are caught as warnings, non-fatal, since FTP files are published ~9th-10th of each month). The standalone `python -m resolver.tools.ingest_nmme` entry point still works independently. The standalone `ingest-nmme.yml` workflow is deprecated (schedule disabled, manual dispatch retained). Uses `decode_times=False` in `xr.open_dataset()` calls because the new CPC multi-lead files use `months since 1960-01-02 21:00:00` as time units, which xarray cannot decode.
 
 **Conflict forecast connectors** (`resolver/connectors/views.py`, `resolver/connectors/conflictforecast.py`, `resolver/connectors/acled_cast.py`):
 Separate from the Connector pipeline (use `FORECAST_REGISTRY`, not `REGISTRY`). VIEWS connector fetches ML-based fatality predictions from the VIEWS API (`views_predicted_fatalities`, `views_p_gte25_brd`, leads 1–6). conflictforecast.org connector fetches news-based risk scores from Backendless API (`cf_armed_conflict_risk_3m`, `cf_armed_conflict_risk_12m`, `cf_violence_intensity_3m`). ACLED CAST connector fetches event-count forecasts via OAuth2 API (`cast_total_events`, `cast_battles_events`, `cast_erv_events`, `cast_vac_events`, 6-month lead), aggregated from admin1 to country level. All three write to `conflict_forecasts` table. `fetch_and_store` deduplicates before writing (keeps only the latest `forecast_issue_date` per source), and `_write_to_db` prunes old vintages (keeps only the 2 most recent issue dates per source). Loaded into ACE prompts via `horizon_scanner/conflict_forecasts.py`. **Now integrated into `pythia/tools/ingest_structured_data.py`** as sources `views`, `conflictforecast`, `acledcast` (with `conflict` as a convenience alias for all three). The standalone `python -m resolver.tools.fetch_conflict_forecasts` entry point still works independently.
+=======
+Separate from the Connector pipeline. Fetches NMME ensemble mean anomalies from CPC FTP, computes area-weighted country averages using xarray + regionmask (`countries_50` resolution for 170+ countries), and writes to the `seasonal_forecasts` table in Pythia DB. Injected into HS triage/RC prompts via `horizon_scanner/seasonal_context.py` (`climate_data` kwarg) and into forecaster prompts via `research_json["nmme_seasonal_outlook"]`. Run: `python -m resolver.tools.ingest_nmme`. **Now runs as a step in the Ingest Structured Data workflow** (`ingest-structured-data.yml`) with `continue-on-error: true` since NMME FTP files are published ~9th-10th of each month. The standalone `ingest-nmme.yml` workflow is deprecated (schedule disabled, manual dispatch retained).
+
+**Conflict forecast connectors** (`resolver/connectors/views.py`, `resolver/connectors/conflictforecast.py`, `resolver/connectors/acled_cast.py`):
+Separate from the Connector pipeline (use `FORECAST_REGISTRY`, not `REGISTRY`). VIEWS connector fetches ML-based fatality predictions from the VIEWS API (`views_predicted_fatalities`, `views_p_gte25_brd`, leads 1–6). conflictforecast.org connector fetches news-based risk scores from Backendless API (`cf_armed_conflict_risk_3m`, `cf_armed_conflict_risk_12m`, `cf_violence_intensity_3m`). ACLED CAST connector fetches event-count forecasts via OAuth2 API (`cast_total_events`, `cast_battles_events`, `cast_erv_events`, `cast_vac_events`, 6-month lead), aggregated from admin1 to country level. All three write to `conflict_forecasts` table. `fetch_and_store` deduplicates before writing (keeps only the latest `forecast_issue_date` per source), and `_write_to_db` prunes old vintages (keeps only the 2 most recent issue dates per source). Loaded into ACE prompts via `horizon_scanner/conflict_forecasts.py`. The conflictforecast.org connector uses pattern-based value column detection (`file_pattern` matching against column names) with a Backendless metadata skip set to avoid selecting API metadata columns (objectId, ownerId, etc.) as values, plus a median-value sanity check warning when values exceed the expected [0,1] range. Run: `python -m resolver.tools.fetch_conflict_forecasts`.
+>>>>>>> Stashed changes
 
 **ENSO state and forecast** (`horizon_scanner/enso/enso_module.py`):
 Scrapes IRI/CPC ENSO Quick Look page for current ENSO state, Niño 3.4 anomaly, 9-season probabilistic forecast, multi-model plume averages, and IOD state. Cached as JSON with 7-day expiry. Injected into RC and triage prompts for DR, FL, HW, TC hazards via `get_enso_prompt_context()`. Refreshed by `.github/workflows/refresh-enso.yml`.
@@ -259,6 +266,8 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED` | Enable web search for RC evidence packs (0/1, default 1) |
 | `PYTHIA_PM_RETRIEVER_ENABLED` | Enable prediction market retriever (0/1, default 0 — see known failure modes) |
 | `PYTHIA_PREDICTION_MARKETS_ENABLED` | Legacy alias; prefer `PYTHIA_PM_RETRIEVER_ENABLED` |
+| `PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC` | Gemini Flash SPD timeout (default 300s) |
+| `PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC` | Gemini Pro SPD timeout (default 300s) |
 | `ACAPS_EMAIL` / `ACAPS_PASSWORD` | ACAPS API credentials |
 
 Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`.
@@ -350,6 +359,11 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 - **Kimi kimi-k2.5 temperature constraint** (fixed): The kimi-k2.5 model only accepts `temperature=1`. The `_call_openai_compatible` function in `forecaster/providers.py` now clamps temperature to 1.0 for models in `_KIMI_FIXED_TEMPERATURE_MODELS`.
 - **ACLED CAST expired token passthrough** (fixed): `get_access_token()` in `resolver/ingestion/acled_auth.py` now validates JWT expiry via `_jwt_is_valid()` before using environment-provided tokens. Expired tokens fall through to the refresh/password grant flow instead of being returned as-is.
 - **ACAPS Humanitarian Access field names** (fixed): The ACAPS Humanitarian Access API does not return an `iso3` field in its response records (unlike INFORM Severity, Risk Radar, etc.). The bulk fetcher in `pythia/tools/ingest_structured_data.py` tries multiple field names (`iso3`, `iso`, `country_iso3`, `country_code`, `country_iso`) and falls back to a nested `country.iso3` dict lookup. A sample-record-keys log line is emitted on first record to aid debugging if the schema changes again.
+- **conflictforecast.org wrong value column** (fixed): `_transform_csv()` in `resolver/connectors/conflictforecast.py` was selecting Backendless metadata columns (e.g. `objectId` with values ~257,642) instead of probability scores (0–1). Fixed by adding a `_BACKENDLESS_META` skip set, pattern-based column matching against the file name regex, and a median-value sanity check.
+- **NMME regionmask low country count** (fixed): `resolver/ingestion/nmme.py` used `countries_110` (coarsest Natural Earth resolution), which resolved only ~12 countries. Changed to `countries_50` for 170+ country coverage.
+- **IDMC displacement hazard code mismatch** (fixed): `_load_idmc_conflict_flow_history_summary` and `_build_conflict_base_rate` in `forecaster/cli.py` filtered by `hazard_code = ?` (passing `'ACE'`), but IDMC writes data with `hazard_code='IDU'`. Fixed to use `IN (?, 'IDU')` to match both.
+- **Gemini SPD timeouts** (fixed): Gemini Flash and Pro SPD calls timed out at 90s/120s respectively. Raised both to 300s in `forecaster/providers.py` (env-overridable via `PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC` / `PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC`). HS triage timeout remains at 120s.
+- **Debug bundle health check false statuses** (fixed): In `scripts/dump_pythia_debug_bundle.py`, HS Grounding check was reading wrong data source (now uses `hs_web_research_rows`), and Research Grounding reported FAIL when the retriever was intentionally disabled (now checks `retriever_enabled` flag).
 
 ## Canonical DB artifact discovery
 
@@ -366,3 +380,8 @@ Candidates are sorted by `createdAt` descending; the first one that downloads su
 - `hs_country_evidence` and `question_evidence` CSVs are the primary artifacts for diagnosing structured data connector health post-run.
 - If a connector shows "unavailable" across all countries, it indicates an upstream data gap, a connector bug, or a missing environment secret.
 - After applying fixes, a clean re-run must produce a queryable DuckDB artifact before connector health can be verified.
+- The `inspect_resolver_duckdb.yml` workflow includes 7 data quality checks: conflict forecast value range validation (warns if probability values > 10), seasonal forecast country count, empty connector table warnings, IDMC/IDU hazard code consistency, conflict forecast staleness (> 45 days), HDX Signals note (cached as CSV, not in DB), and per-country conflict forecast sampling (IRN, SOM, ETH, SDN, UKR).
+
+## Structured data bulk ingest
+
+`pythia/tools/ingest_structured_data.py` orchestrates bulk fetch/store for all structured data connectors. The `_SOURCE_GROUPS` dict maps group names to table names. Currently registered groups: `reliefweb`, `acled_political`, `ipc`, `acaps_inform`, `acaps_risk_radar`, `acaps_daily_monitoring`, `acaps_humanitarian_access`. Each group has a `_bulk_fetch_*` function that parallelizes API calls across countries via `ThreadPoolExecutor`. The `acled_political` group fetches event-level political data (protests, riots, strategic developments) from the ACLED API via `pythia.acled_political.fetch_acled_political_events` and stores via `store_acled_political_events`.

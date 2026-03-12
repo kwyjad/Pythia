@@ -211,6 +211,7 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
 
         rows.append({"iso3": iso3.upper(), "anomaly_value": round(mean_val, 4)})
 
+    log.debug("[nmme] resolved %d countries from mask", len(rows))
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["iso3", "anomaly_value"])
 
 
@@ -278,7 +279,7 @@ def _aggregate_nc_to_countries(
         if dim not in ("lat", "lon") and da.sizes[dim] == 1:
             da = da.squeeze(dim, drop=True)
 
-    countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_110
+    countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_50
     mask = countries.mask(da)
     result = _aggregate_2d_field_to_countries(da, countries, mask)
     ds.close()
@@ -324,7 +325,7 @@ def _aggregate_multi_lead_nc(
 
     if lead_dim is None:
         # Fallback: file has no lead dimension (single-lead legacy file).
-        countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_110
+        countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_50
         mask = countries.mask(da)
         df = _aggregate_2d_field_to_countries(da, countries, mask)
         ds.close()
@@ -336,7 +337,7 @@ def _aggregate_multi_lead_nc(
         nc_path.name, da.sizes[lead_dim], lead_dim,
     )
 
-    countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_110
+    countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_50
 
     # Build regionmask once from a single 2-D slice.
     da_slice0 = da.isel({lead_dim: 0})

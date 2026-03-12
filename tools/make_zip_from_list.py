@@ -34,23 +34,21 @@ from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
 
 # --- Option 1: Inline list (edit these if you prefer not to use --file-list)
 DEFAULT_FILE_LIST = [
-"horizon_scanner/rc_grounding_prompts.py",
-"horizon_scanner/hs_triage_grounding_prompts.py",
-"horizon_scanner/horizon_scanner.py",
-"horizon_scanner/regime_change_llm.py",
-"horizon_scanner/triage.py",
+"resolver/connectors/conflictforecast.py",
+"resolver/connectors/acled_cast.py",
+"resolver/connectors/views.py",
+"resolver/tools/fetch_conflict_forecasts.py",
 "horizon_scanner/conflict_forecasts.py",
-"horizon_scanner/reliefweb.py",
+"horizon_scanner/crisiswatch_horizon.py",
 "horizon_scanner/hdx_signals.py",
-"pythia/adversarial_check.py",
-"pythia/acaps.py",
-"pythia/ipc_phases.py",
-"pythia/tools/ingest_structured_data.py",
+"resolver/connectors/init.py",
+"resolver/ingestion/acled_auth.py",
 "forecaster/cli.py",
-"forecaster/prompts.py",
-"pythia/web_research/backends/gemini_grounding.py",
-"pythia/config.yaml",
-"forecaster/providers.py",
+"pythia/tools/ingest_structured_data.py",
+"resolver/tools/ingest_nmme.py",
+"resolver/ingestion/nmme.py",
+"resolver/connectors/protocol.py",
+"pythia/db/schema.py"
 ]
 
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"

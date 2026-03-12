@@ -92,7 +92,11 @@ class ConflictForecastOrgConnector:
                 )
                 continue
 
-            rows = self._transform_csv(df_csv, metric, lead_months, issue_date)
+            LOG.info("[conflictforecast_org] CSV columns for %s: %s", metric, list(df_csv.columns))
+            if not df_csv.empty:
+                LOG.info("[conflictforecast_org] sample row: %s", df_csv.iloc[0].to_dict())
+
+            rows = self._transform_csv(df_csv, metric, lead_months, issue_date, pattern)
             all_rows.extend(rows)
 
         if not all_rows:
@@ -175,6 +179,7 @@ class ConflictForecastOrgConnector:
         metric: str,
         lead_months: int,
         issue_date: date,
+        file_pattern: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Transform a downloaded CSV into conflict_forecasts rows.
 
@@ -197,16 +202,43 @@ class ConflictForecastOrgConnector:
             )
             return []
 
-        # Detect value column: use the last numeric column that isn't the
-        # ISO column or a country-name column.
+        # Detect value column.
+        # Known Backendless metadata columns to always skip.
+        _BACKENDLESS_META = {
+            "objectid", "ownerid", "created", "updated",
+            "___class", "__meta", "bluserprofileinfo",
+        }
         value_col = None
-        skip_cols = {iso3_col.lower(), "country", "name", "country_name", "region"}
-        for col in reversed(list(df.columns)):
-            if col.lower() in skip_cols:
-                continue
-            if pd.api.types.is_numeric_dtype(df[col]):
-                value_col = col
-                break
+        skip_cols = {
+            iso3_col.lower(), "country", "name", "country_name", "region",
+        } | _BACKENDLESS_META
+
+        # 1) Try to match the file_pattern against column names.
+        if file_pattern:
+            for col in df.columns:
+                if col.lower() in skip_cols:
+                    continue
+                if re.search(file_pattern, col, re.IGNORECASE):
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        value_col = col
+                        break
+                    # Try coercing
+                    try:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                        if df[col].notna().any():
+                            value_col = col
+                            break
+                    except Exception:
+                        pass
+
+        # 2) Fallback: last numeric column that isn't in skip_cols.
+        if value_col is None:
+            for col in reversed(list(df.columns)):
+                if col.lower() in skip_cols:
+                    continue
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    value_col = col
+                    break
 
         if value_col is None:
             # Try coercing columns to numeric
@@ -227,6 +259,20 @@ class ConflictForecastOrgConnector:
                 "(columns: %s)", list(df.columns),
             )
             return []
+
+        LOG.info(
+            "[conflictforecast_org] selected value column: '%s' for metric '%s'",
+            value_col, metric,
+        )
+
+        # Sanity check: conflictforecast.org values should be in [0, 1].
+        median_val = df[value_col].median()
+        if median_val > 10:
+            LOG.warning(
+                "[conflictforecast_org] value column '%s' has median %.1f "
+                "— expected 0-1 range for %s. Possible wrong column.",
+                value_col, median_val, metric,
+            )
 
         original_len = len(df)
         df = df.drop_duplicates(subset=[iso3_col], keep="last")
