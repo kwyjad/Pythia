@@ -52,6 +52,7 @@ TERCILE_LOWER = -0.43
 # regionmask .abbrev uses Natural Earth abbreviations which differ from
 # ISO3 for several countries.
 _NE_TO_ISO3: dict[str, str] = {
+    # Natural Earth ADM0_A3 mismatches
     "DRC": "COD",  # DR Congo
     "PAL": "PSE",  # Palestine
     "SLO": "SVN",  # Slovenia
@@ -63,6 +64,27 @@ _NE_TO_ISO3: dict[str, str] = {
     "CYN": "CYP",  # Northern Cyprus -> Cyprus
     "SAH": "ESH",  # Western Sahara
     "TAI": "TWN",  # Taiwan (sometimes TWN, sometimes TAI in NE)
+    # regionmask short / non-standard abbreviations
+    "INDO": "IDN",  # Indonesia
+    "MY": "MYS",    # Malaysia
+    "CL": "CHL",    # Chile
+    "BO": "BOL",    # Bolivia
+    "PE": "PER",    # Peru
+    "AR": "ARG",    # Argentina
+    "CY": "CYP",    # Cyprus
+    "CN": "CHN",    # China
+    "IS": "ISL",    # Iceland
+    "LB": "LBN",    # Lebanon
+    "ET": "ETH",    # Ethiopia
+    "SS": "SSD",    # South Sudan
+    "SO": "SOM",    # Somalia
+    "KE": "KEN",    # Kenya
+    "MW": "MWI",    # Malawi
+    "TZ": "TZA",    # Tanzania
+    "SL": "SLE",    # Sierra Leone
+    "F": "FRA",     # France
+    "SR": "SUR",    # Suriname
+    "GY": "GUY",    # Guyana
 }
 
 
@@ -89,7 +111,6 @@ def _country_name_to_iso3(name: str) -> str:
         return ""
     mapping = _load_name_to_iso3()
     return mapping.get(name.lower().strip(), "")
-
 
 # ------------------------------------------------------------------
 # FTP helpers
