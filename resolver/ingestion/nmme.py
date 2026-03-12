@@ -292,7 +292,7 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
 
         try:
             region_obj = countries[region_number]
-            raw_abbrev = region_obj.abbrev
+            raw_abbrev = (region_obj.abbrev or "").strip()
         except (KeyError, IndexError):
             skipped_keyerror += 1
             continue
@@ -300,7 +300,8 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
         abbrevs_seen[region_number] = raw_abbrev
 
         # Map Natural Earth abbreviation to ISO3, correcting known mismatches.
-        iso3 = _NE_TO_ISO3.get(raw_abbrev, raw_abbrev)
+        # Try raw value first, then uppercased, to handle casing differences.
+        iso3 = _NE_TO_ISO3.get(raw_abbrev) or _NE_TO_ISO3.get(raw_abbrev.upper()) or raw_abbrev
 
         # If we still don't have a valid 3-char code, try country name lookup.
         if not iso3 or len(iso3) != 3:
