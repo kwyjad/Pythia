@@ -308,6 +308,10 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
             country_name = getattr(region_obj, "name", "")
             iso3 = _country_name_to_iso3(country_name)
             if not iso3:
+                log.debug(
+                    "NMME skipping region %d: raw_abbrev=%r, after_mapping=%r, country_name=%r",
+                    region_number, raw_abbrev, iso3, country_name,
+                )
                 skipped_length += 1
                 continue
 
@@ -322,11 +326,20 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
         skipped_keyerror, skipped_length, skipped_weight,
     )
     if skipped_length > 0:
-        bad_abbrevs = {k: v for k, v in abbrevs_seen.items() if len(v) != 3}
-        log.info(
-            "NMME abbreviations filtered by length: %s",
-            dict(list(bad_abbrevs.items())[:20]),
-        )
+        failed_details: dict[str, str] = {}
+        for rgn, abbr in abbrevs_seen.items():
+            mapped = _NE_TO_ISO3.get(abbr) or _NE_TO_ISO3.get(abbr.upper()) or abbr
+            if not mapped or len(mapped) != 3:
+                try:
+                    rgn_name = countries[rgn].name
+                except Exception:
+                    rgn_name = ""
+                failed_details[abbr] = rgn_name
+        if failed_details:
+            log.info(
+                "NMME actually-failed abbreviations (abbrev -> country_name): %s",
+                dict(list(failed_details.items())[:20]),
+            )
     if rows:
         iso3s = sorted(set(r["iso3"] for r in rows))
         log.info("NMME resolved %d countries: %s", len(iso3s), iso3s[:30])
