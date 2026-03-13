@@ -138,7 +138,7 @@ Pythia ingests external conflict forecasts from three independent quantitative s
 
 ### Qualitative source (prompt-time web research)
 
-- **ICG CrisisWatch**: International Crisis Group's monthly [CrisisWatch](https://www.crisisgroup.org/crisiswatch) bulletin. Per-country directional assessments (Deteriorated/Improved/Unchanged) and forward-looking "On the Horizon" flags (~3 conflict risks + ~1 resolution opportunity per month) are fetched via web research at prompt time and injected into RC and triage evidence for ACE hazards.
+- **ICG CrisisWatch**: International Crisis Group's monthly [CrisisWatch](https://www.crisisgroup.org/crisiswatch) bulletin. Per-country directional assessments (Deteriorated/Improved/Unchanged) and forward-looking "On the Horizon" flags (~3 conflict risks + ~1 resolution opportunity per month). Primary data source: Playwright-based scraper (`scripts/refresh_crisiswatch.py`) runs monthly via `refresh-crisiswatch.yml`, loading the main CrisisWatch page in headless Chromium and parsing with BeautifulSoup. Secondary: Gemini grounding calls during HS runs. Data injected into RC and triage evidence for ACE hazards.
 
 ### Storage and injection
 
@@ -169,7 +169,7 @@ Pythia pulls structured humanitarian, climate, and conflict-forecast data from a
 | **VIEWS** | `resolver/connectors/views.py` | ML-based conflict fatality predictions (ACE, 1–6 month leads) | `conflict_forecasts` |
 | **conflictforecast.org** | `resolver/connectors/conflictforecast.py` | News-based conflict risk scores (ACE, 3m/12m) | `conflict_forecasts` |
 | **ACLED CAST** | `resolver/connectors/acled_cast.py` | Event-count forecasts by type: total/battles/ERV/VAC (ACE, 6-month lead) | `conflict_forecasts` |
-| **ICG CrisisWatch** | `horizon_scanner/crisiswatch.py` | Expert conflict arrows + "On the Horizon" flags (ACE RC + triage + SPD) | `crisiswatch_entries` |
+| **ICG CrisisWatch** | `horizon_scanner/crisiswatch.py` + `scripts/refresh_crisiswatch.py` | Expert conflict arrows + "On the Horizon" flags (ACE RC + triage + SPD). Playwright scraper (monthly) + Gemini grounding (runtime fallback) | `crisiswatch_entries` |
 
 ### Adversarial evidence checks
 
@@ -308,6 +308,7 @@ python -m scripts.dump_pythia_debug_bundle \
 - **Forecaster CI**: [`forecaster-ci.yml`](.github/workflows/forecaster-ci.yml) covers SPD unit tests and optional compare artifacts.
 - **ENSO refresh**: [`refresh-enso.yml`](.github/workflows/refresh-enso.yml) refreshes the ENSO state/forecast cache (scrapes IRI/CPC).
 - **Seasonal TC refresh**: [`refresh-seasonal-tc.yml`](.github/workflows/refresh-seasonal-tc.yml) refreshes the seasonal TC forecast cache (TSR, NOAA CPC, BoM scrapers).
+- **CrisisWatch refresh**: [`refresh-crisiswatch.yml`](.github/workflows/refresh-crisiswatch.yml) fetches ICG CrisisWatch data via Playwright (headless Chromium) on the 3rd of each month, parses with BeautifulSoup, and commits updated JSON to `horizon_scanner/data/crisiswatch_latest.json`.
 
 ### Canonical DB artifacts + signature guardrails
 - Workflow downloads the canonical DB artifact (`pythia-resolver-db` by default), appends new HS + forecaster rows, and uploads the updated DB as a new artifact.
@@ -463,12 +464,13 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 - HDX Signals: [`horizon_scanner/hdx_signals.py`](horizon_scanner/hdx_signals.py)
 - ACLED CAST connector: [`resolver/connectors/acled_cast.py`](resolver/connectors/acled_cast.py)
 - Conflict forecasts loader: [`horizon_scanner/conflict_forecasts.py`](horizon_scanner/conflict_forecasts.py)
+- CrisisWatch: [`horizon_scanner/crisiswatch.py`](horizon_scanner/crisiswatch.py), [`scripts/refresh_crisiswatch.py`](scripts/refresh_crisiswatch.py)
 - Structured data: [`pythia/acaps.py`](pythia/acaps.py), [`pythia/ipc_phases.py`](pythia/ipc_phases.py), [`horizon_scanner/reliefweb.py`](horizon_scanner/reliefweb.py), [`pythia/acled_political.py`](pythia/acled_political.py)
 - Adversarial checks: [`pythia/adversarial_check.py`](pythia/adversarial_check.py)
 - Calibration advice: [`pythia/tools/generate_calibration_advice.py`](pythia/tools/generate_calibration_advice.py)
 - Schema: [`pythia/db/schema.py`](pythia/db/schema.py)
 - Debug bundle script: [`scripts/dump_pythia_debug_bundle.py`](scripts/dump_pythia_debug_bundle.py)
-- Workflows: [`run_horizon_scanner.yml`](.github/workflows/run_horizon_scanner.yml), [`forecaster-ci.yml`](.github/workflows/forecaster-ci.yml), [`refresh-enso.yml`](.github/workflows/refresh-enso.yml), [`refresh-seasonal-tc.yml`](.github/workflows/refresh-seasonal-tc.yml)
+- Workflows: [`run_horizon_scanner.yml`](.github/workflows/run_horizon_scanner.yml), [`forecaster-ci.yml`](.github/workflows/forecaster-ci.yml), [`refresh-enso.yml`](.github/workflows/refresh-enso.yml), [`refresh-seasonal-tc.yml`](.github/workflows/refresh-seasonal-tc.yml), [`refresh-crisiswatch.yml`](.github/workflows/refresh-crisiswatch.yml)
 - Public API contracts: [`PUBLIC_APIS.md`](PUBLIC_APIS.md)
 
 ## Contributing
