@@ -1,0 +1,74 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+name: Refresh CrisisWatch Data
+
+concurrency:
+  group: pythia-crisiswatch-refresh
+  cancel-in-progress: false
+
+"on":
+  workflow_dispatch: {}
+  schedule:
+    # ICG publishes CrisisWatch updates in the first days of each month.
+    # Run on the 3rd at 06:00 UTC to catch the update before the
+    # pipeline run.
+    - cron: "0 6 3 * *"
+
+permissions:
+  contents: write  # required to commit the JSON back to the repo
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  refresh:
+    name: Fetch & parse ICG CrisisWatch via Playwright
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system deps + Python packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm2 \
+            libxkbcommon0 libgbm1 libpango-1.0-0 libcairo2 libasound2
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+          pip install playwright playwright-stealth
+          playwright install chromium --with-deps
+
+      - name: Run CrisisWatch scraper
+        run: |
+          python -m scripts.refresh_crisiswatch --verbose --timeout 90
+
+      - name: Upload CrisisWatch JSON
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crisiswatch-data-${{ github.run_id }}
+          path: |
+            horizon_scanner/data/crisiswatch_latest.json
+            horizon_scanner/data/crisiswatch_debug.html
+            horizon_scanner/data/crisiswatch_debug.png
+            horizon_scanner/data/crisiswatch_cf_block_attempt*.html
+          retention-days: 90
+
+      - name: Commit updated JSON
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f horizon_scanner/data/crisiswatch_latest.json
+          git diff --cached --quiet || git commit -m "chore(crisiswatch): refresh monthly data"
+          git push
