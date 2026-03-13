@@ -109,6 +109,7 @@ Pythia/
 - `horizon_scanner/reliefweb.py` — ReliefWeb humanitarian reports connector
 - `forecaster/hazard_prompts.py` — Hazard-specific reasoning guidance for SPD prompts
 - `scripts/ci/snapshot_prompt_artifact.py` — Prompt version snapshot script
+- `scripts/refresh_crisiswatch.py` — Playwright-based CrisisWatch scraper (monthly, writes `crisiswatch_latest.json`)
 - `pythia/tools/generate_calibration_advice.py` — Per-hazard/metric calibration advice generation
 
 ## Databases
@@ -182,8 +183,8 @@ Aggregates basin-level seasonal TC forecasts from TSR (PDF extraction), NOAA CPC
 **HDX Signals** (`horizon_scanner/hdx_signals.py`):
 Downloads OCHA's HDX Signals CSV from CKAN API. Indicator-to-hazard mapping (acled_conflict→ACE, ipc_food_insecurity→DR, etc.). Filtered by country, hazard, recency (180 days). Injected into RC and triage prompts for all hazards via `format_hdx_signals_for_prompt()`.
 
-**ICG CrisisWatch** (`horizon_scanner/crisiswatch.py`):
-Monthly fetch of ICG CrisisWatch data via two direct Gemini grounding calls (without `site:` operator, since crisisgroup.org is behind Cloudflare): (1) "On the Horizon" conflict risk/resolution opportunity flags, (2) Global Overview arrows (deteriorated/improved/unchanged) for ~70 countries. Uses a direct Gemini API call (`_call_gemini_grounding`) instead of `fetch_via_gemini` to avoid EvidencePack JSON re-parsing (which expects `recent_signals`/`structural_context` keys incompatible with CrisisWatch's `conflict_risks`/`countries` schema). Falls back to `horizon_scanner/data/crisiswatch_latest.json` if Gemini returns nothing. Called once per HS run, cached in-memory, persisted to `crisiswatch_entries` DuckDB table. Injected into ACE RC prompts (via `crisiswatch_context` + deprecated `icg_on_the_horizon`), ACE triage prompts, and ACE SPD prompts. Country name → ISO3 mapping via hardcoded `_ICG_COUNTRY_ISO3` dict.
+**ICG CrisisWatch** (`horizon_scanner/crisiswatch.py` + `scripts/refresh_crisiswatch.py`):
+Monthly fetch of ICG CrisisWatch data via two paths: (1) **Playwright scraper** (`scripts/refresh_crisiswatch.py`) runs monthly via `refresh-crisiswatch.yml` workflow, loading `https://www.crisisgroup.org/crisiswatch` in headless Chromium, parsing with BeautifulSoup, and committing structured JSON to `horizon_scanner/data/crisiswatch_latest.json`. The `/crisiswatch/print` endpoint is broken (stale Oct 2019 data); the main page renders correctly. (2) **Gemini grounding calls** (`_call_gemini_grounding` in `crisiswatch.py`) as a secondary path during HS runs — "On the Horizon" conflict risk/resolution opportunity flags + Global Overview arrows (deteriorated/improved/unchanged). Falls back to `crisiswatch_latest.json` if Gemini returns nothing. Called once per HS run, cached in-memory, persisted to `crisiswatch_entries` DuckDB table. Injected into ACE RC prompts (via `crisiswatch_context` + deprecated `icg_on_the_horizon`), ACE triage prompts, and ACE SPD prompts. Country name → ISO3 mapping via hardcoded `_ICG_COUNTRY_ISO3` dict.
 
 Run the pipeline: `python -m resolver.tools.run_pipeline [--connectors acled idmc] [--db path/to/resolver.duckdb]`
 
@@ -290,6 +291,9 @@ python3 -m pythia.tools.ingest_structured_data
 python3 -m resolver.tools.ingest_nmme                        # NMME only
 python3 -m resolver.tools.fetch_conflict_forecasts            # conflict forecasts only
 python3 -m resolver.tools.fetch_conflict_forecasts --sources views conflictforecast_org acled_cast
+
+# Refresh CrisisWatch data (requires Playwright: pip install playwright && playwright install chromium)
+python3 -m scripts.refresh_crisiswatch [--output PATH] [--verbose]
 
 # Run Horizon Scanner
 python3 -m horizon_scanner.horizon_scanner
