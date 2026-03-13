@@ -2779,6 +2779,16 @@ def _load_structured_data(
         except Exception:
             pass
 
+    # ICG CrisisWatch (ACE only)
+    if hazard_code.upper() == "ACE":
+        try:
+            from horizon_scanner.crisiswatch import format_crisiswatch_for_prompt
+            cw_text = format_crisiswatch_for_prompt(iso3)
+            if cw_text:
+                sd["crisiswatch"] = cw_text
+        except Exception:
+            pass
+
     # HDX Signals (all hazards)
     try:
         from horizon_scanner.hdx_signals import format_hdx_signals_for_prompt

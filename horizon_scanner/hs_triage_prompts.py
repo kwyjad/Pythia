@@ -253,6 +253,7 @@ def build_triage_prompt_ace(
     acaps_monitoring: Optional[Any] = None,
     humanitarian_access: Optional[Any] = None,
     hdx_signals: Optional[str] = None,
+    crisiswatch_context: Optional[str] = None,
     **kwargs: Any,
 ) -> str:
     """Build triage prompt for Armed Conflict Events (ACE).
@@ -266,6 +267,7 @@ def build_triage_prompt_ace(
     rc_result : dict from the prior RC assessment for this hazard-country
     acled_summary : dict with trailing fatalities, events, trend data
     conflict_forecasts : optional dict from load_conflict_forecasts()
+    crisiswatch_context : optional string with ICG CrisisWatch arrow + summary
     """
 
     from horizon_scanner.conflict_forecasts import format_conflict_forecasts_for_prompt
@@ -305,13 +307,20 @@ def build_triage_prompt_ace(
 {conflict_forecast_text}
 """
 
+    # Build optional ICG CrisisWatch section
+    crisiswatch_section = ""
+    if crisiswatch_context:
+        crisiswatch_section = f"""
+{crisiswatch_context}
+"""
+
     return f"""{preamble}
 
 === ACE-SPECIFIC TRIAGE GUIDANCE ===
 
 ACLED BASE RATE DATA:
 {acled_text}
-{forecast_section}
+{forecast_section}{crisiswatch_section}
 RESOLVER FEATURES (historical context):
 {resolver_text}
 

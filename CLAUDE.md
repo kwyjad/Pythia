@@ -133,6 +133,7 @@ Two DuckDB databases:
 - `acaps_risk_radar` — ACAPS forward-looking risk assessments
 - `acaps_daily_monitoring` — ACAPS analyst-curated daily updates
 - `acaps_humanitarian_access` — ACAPS humanitarian access scores
+- `crisiswatch_entries` — ICG CrisisWatch monthly arrows + alerts (PK: iso3, year, month)
 - `llm_calls` — Full telemetry (cost, tokens, latency, errors)
 
 **Resolver DB** (`resolver/db/schema.sql`): fact ingestion
@@ -181,8 +182,8 @@ Aggregates basin-level seasonal TC forecasts from TSR (PDF extraction), NOAA CPC
 **HDX Signals** (`horizon_scanner/hdx_signals.py`):
 Downloads OCHA's HDX Signals CSV from CKAN API. Indicator-to-hazard mapping (acled_conflict→ACE, ipc_food_insecurity→DR, etc.). Filtered by country, hazard, recency (180 days). Injected into RC and triage prompts for all hazards via `format_hdx_signals_for_prompt()`.
 
-**ICG CrisisWatch "On the Horizon"** (`horizon_scanner/crisiswatch_horizon.py`):
-Monthly fetch of ICG's forward-looking conflict risk/resolution flags via Gemini grounding search. Called once per HS run, cached in-memory, injected into RC prompts for flagged countries.
+**ICG CrisisWatch** (`horizon_scanner/crisiswatch.py`):
+Monthly fetch of ICG CrisisWatch data via two Gemini grounding calls (without `site:` operator, since crisisgroup.org is behind Cloudflare): (1) "On the Horizon" conflict risk/resolution opportunity flags, (2) Global Overview arrows (deteriorated/improved/unchanged) for ~70 countries. Falls back to `horizon_scanner/data/crisiswatch_latest.json` if Gemini returns nothing. Called once per HS run, cached in-memory, persisted to `crisiswatch_entries` DuckDB table. Injected into ACE RC prompts (via `crisiswatch_context` + deprecated `icg_on_the_horizon`), ACE triage prompts, and ACE SPD prompts. Country name → ISO3 mapping via hardcoded `_ICG_COUNTRY_ISO3` dict.
 
 Run the pipeline: `python -m resolver.tools.run_pipeline [--connectors acled idmc] [--db path/to/resolver.duckdb]`
 
@@ -359,6 +360,7 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 - **ACLED OAuth credential whitespace** (fixed): `_resolve_password_creds()` and `_resolve_refresh_token()` in `resolver/ingestion/acled_auth.py` read env vars without `.strip()`, so trailing whitespace/newlines from GitHub Secrets caused HTTP 415/400 on the OAuth password grant. Fixed by adding `.strip()` to all credential env var reads (`ACLED_USERNAME`, `ACLED_PASSWORD`, `ACLED_REFRESH_TOKEN`). Also added debug logging of the username in `_password_grant()`.
 - **acled_political missing from default ingest** (fixed): `acled_political` was placed in `_SOURCE_ALIASES` (with a duplicate entry) instead of `_SOURCE_GROUPS` in `pythia/tools/ingest_structured_data.py`, so it never ran in default (all-sources) mode. Moved to `_SOURCE_GROUPS` and removed duplicates.
 - **Debug bundle health check false statuses** (fixed): In `scripts/dump_pythia_debug_bundle.py`, HS Grounding check was reading wrong data source (now uses `hs_web_research_rows`), and Research Grounding reported FAIL when the retriever was intentionally disabled (now checks `retriever_enabled` flag).
+- **CrisisWatch Cloudflare block** (fixed): crisisgroup.org is behind Cloudflare, returning 403 to programmatic fetches including Gemini grounding's internal fetcher. The old `site:crisisgroup.org` query in `crisiswatch_horizon.py` produced no results. Redesigned as `crisiswatch.py`: removed the `site:` operator so Gemini synthesizes from Google's cached snippets, added a second Gemini call for the Global Overview arrows (deteriorated/improved/unchanged), added a fallback JSON file (`horizon_scanner/data/crisiswatch_latest.json`), and expanded injection from ACE-RC-only to ACE RC + triage + SPD prompts. Data persisted in the `crisiswatch_entries` DuckDB table.
 
 ## Canonical DB artifact discovery
 
@@ -376,6 +378,7 @@ Candidates are sorted by `createdAt` descending; the first one that downloads su
 - If a connector shows "unavailable" across all countries, it indicates an upstream data gap, a connector bug, or a missing environment secret.
 - After applying fixes, a clean re-run must produce a queryable DuckDB artifact before connector health can be verified.
 - The `inspect_resolver_duckdb.yml` workflow includes 7 data quality checks: conflict forecast value range validation (warns if probability values > 10), seasonal forecast country count, empty connector table warnings, IDMC/IDU hazard code consistency, conflict forecast staleness (> 45 days), HDX Signals note (cached as CSV, not in DB), and per-country conflict forecast sampling (IRN, SOM, ETH, SDN, UKR).
+- **CrisisWatch diagnostics** in the debug bundle (`scripts/dump_pythia_debug_bundle.py`): (1) Traffic-light health check in `_evaluate_pipeline_health` — reports OK/WARN/FAIL with country counts, arrow breakdown, and alerts; WARN if 0 entries, <10 countries, or no arrow data; (2) Per-country `crisiswatch_arrow` column in the data inject inventory CSV showing arrow direction and alert type; (3) `crisiswatch_health` section in health report JSON with arrow counts, alert counts, notable (deteriorated/alert) entries, and countries missing CrisisWatch data.
 
 ## Structured data bulk ingest
 

@@ -169,7 +169,7 @@ Pythia pulls structured humanitarian, climate, and conflict-forecast data from a
 | **VIEWS** | `resolver/connectors/views.py` | ML-based conflict fatality predictions (ACE, 1–6 month leads) | `conflict_forecasts` |
 | **conflictforecast.org** | `resolver/connectors/conflictforecast.py` | News-based conflict risk scores (ACE, 3m/12m) | `conflict_forecasts` |
 | **ACLED CAST** | `resolver/connectors/acled_cast.py` | Event-count forecasts by type: total/battles/ERV/VAC (ACE, 6-month lead) | `conflict_forecasts` |
-| **ICG CrisisWatch** | `horizon_scanner/crisiswatch_horizon.py` | Expert conflict flags + "On the Horizon" (ACE RC only) | fetched at prompt time |
+| **ICG CrisisWatch** | `horizon_scanner/crisiswatch.py` | Expert conflict arrows + "On the Horizon" flags (ACE RC + triage + SPD) | `crisiswatch_entries` |
 
 ### Adversarial evidence checks
 

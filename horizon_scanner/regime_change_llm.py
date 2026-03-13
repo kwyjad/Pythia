@@ -466,21 +466,14 @@ def _run_rc_for_single_hazard(
             logger.debug("Conflict forecast load failed for %s: %s", iso3, exc)
 
         try:
-            from horizon_scanner.crisiswatch_horizon import (
-                fetch_on_the_horizon,
-                get_horizon_countries,
-            )
-            # Prefer explicitly passed crisiswatch_data; fall back to cache.
-            horizon_data = crisiswatch_data or fetch_on_the_horizon()
-            if horizon_data:
-                flagged = get_horizon_countries(horizon_data)
-                # Match by country name (uppercased) — the flagged dict keys
-                # are uppercased country names from ICG.
-                horizon_note = flagged.get(country_name.upper())
-                if horizon_note:
-                    conflict_kwargs["icg_on_the_horizon"] = horizon_note
+            from horizon_scanner.crisiswatch import format_crisiswatch_for_prompt
+            cw_note = format_crisiswatch_for_prompt(iso3, crisiswatch_data)
+            if cw_note:
+                conflict_kwargs["crisiswatch_context"] = cw_note
+                # Backwards compat: also set icg_on_the_horizon
+                conflict_kwargs["icg_on_the_horizon"] = cw_note
         except Exception as exc:
-            logger.debug("ICG On the Horizon load failed for %s: %s", iso3, exc)
+            logger.debug("CrisisWatch load failed for %s: %s", iso3, exc)
 
     # Inject HDX Signals for all hazards.
     hdx_kwargs: dict[str, Any] = {}
