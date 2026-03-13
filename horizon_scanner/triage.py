@@ -517,7 +517,7 @@ def _run_triage_for_single_hazard(
         except Exception as exc:
             logger.debug("ENSO context load failed: %s", exc)
 
-    # Inject conflict forecasts for ACE hazard.
+    # Inject conflict forecasts and CrisisWatch for ACE hazard.
     conflict_kwargs: dict[str, Any] = {}
     if hazard_code == "ACE":
         try:
@@ -527,6 +527,14 @@ def _run_triage_for_single_hazard(
                 conflict_kwargs["conflict_forecasts"] = forecasts
         except Exception as exc:
             logger.debug("Conflict forecast load failed for %s: %s", iso3, exc)
+
+        try:
+            from horizon_scanner.crisiswatch import format_crisiswatch_for_prompt
+            cw_text = format_crisiswatch_for_prompt(iso3)
+            if cw_text:
+                conflict_kwargs["crisiswatch_context"] = cw_text
+        except Exception as exc:
+            logger.debug("CrisisWatch load failed for %s: %s", iso3, exc)
 
     # --- NEW: Load additional structured data sources ---
     new_data_kwargs: dict[str, Any] = {}

@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import csv
 import gzip
+import io
 import hashlib
 import json
 import logging
@@ -2385,6 +2386,11 @@ class BundleData:
     forecasts_ensemble_counts: list[dict[str, Any]] = field(default_factory=list)
     spd_model_ids: list[str] = field(default_factory=list)
 
+    # CrisisWatch
+    crisiswatch_entries: list[dict[str, Any]] = field(default_factory=list)
+    crisiswatch_table_exists: bool = False
+    crisiswatch_load_error: str | None = None
+
 
 def _load_bundle_data(
     con: duckdb.DuckDBPyConnection,
@@ -2564,6 +2570,21 @@ def _load_bundle_data(
                 }
             )
 
+    # CrisisWatch
+    try:
+        data.crisiswatch_table_exists = _safe_table_exists(con, "crisiswatch_entries")
+        if data.crisiswatch_table_exists:
+            data.crisiswatch_entries = _fetch_llm_rows(
+                con,
+                """SELECT iso3, country_name, arrow, alert_type, summary,
+                          month, year, fetched_at
+                   FROM crisiswatch_entries
+                   ORDER BY year DESC, month DESC, iso3""",
+                [],
+            )
+    except Exception as exc:
+        data.crisiswatch_load_error = str(exc)
+
     return data
 
 
@@ -2621,6 +2642,45 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         hs_status = "FAIL"
         hs_detail = f"{data.n_hazards_triaged_total}/{expected_hs} rows, {missing_count} missing"
     checks.append({"subsystem": "HS Triage", "status": hs_status, "detail": hs_detail})
+
+    # CrisisWatch (ICG conflict arrows — ACE data source)
+    if data.crisiswatch_load_error:
+        cw_status = "FAIL"
+        cw_detail = f"load error: {data.crisiswatch_load_error}"
+    elif not data.crisiswatch_table_exists:
+        cw_status = "WARN"
+        cw_detail = "crisiswatch_entries table missing — schema migration needed"
+    elif not data.crisiswatch_entries:
+        cw_status = "WARN"
+        cw_detail = "table exists but 0 entries — Gemini grounding and fallback JSON both returned nothing"
+    else:
+        n_entries = len(data.crisiswatch_entries)
+        arrows = [e.get("arrow") or "" for e in data.crisiswatch_entries]
+        n_deteriorated = sum(1 for a in arrows if a == "deteriorated")
+        n_improved = sum(1 for a in arrows if a == "improved")
+        n_with_arrow = sum(1 for a in arrows if a)
+        n_alerts = sum(1 for e in data.crisiswatch_entries if e.get("alert_type"))
+        months = sorted({(e.get("year"), e.get("month")) for e in data.crisiswatch_entries})
+        latest = months[-1] if months else (None, None)
+        parts = [f"{n_entries} countries"]
+        if n_with_arrow:
+            parts.append(f"{n_deteriorated} deteriorated, {n_improved} improved")
+        else:
+            parts.append("no arrows (Global Overview call may have failed)")
+        if n_alerts:
+            parts.append(f"{n_alerts} alerts")
+        if latest[0]:
+            parts.append(f"latest: {latest[0]}-{latest[1]:02d}" if latest[1] else f"latest: {latest[0]}")
+        if n_entries < 10:
+            cw_status = "WARN"
+            cw_detail = f"low coverage — {'; '.join(parts)}"
+        elif n_with_arrow == 0:
+            cw_status = "WARN"
+            cw_detail = f"no arrow data — {'; '.join(parts)}"
+        else:
+            cw_status = "OK"
+            cw_detail = "; ".join(parts)
+    checks.append({"subsystem": "CrisisWatch", "status": cw_status, "detail": cw_detail})
 
     # Grounding health — HS
     # Use the actual grounding call stats from hs_web_research_rows (which track
@@ -3063,6 +3123,64 @@ def emit_health_report_json(data: BundleData, out_dir: Path) -> None:
         "researched_not_forecasted": data.researched_not_forecasted,
     }
 
+    # CrisisWatch health detail
+    cw_health: dict[str, Any] = {"table_exists": data.crisiswatch_table_exists}
+    if data.crisiswatch_load_error:
+        cw_health["error"] = data.crisiswatch_load_error
+    elif data.crisiswatch_entries:
+        entries = data.crisiswatch_entries
+        arrows = [e.get("arrow") or "" for e in entries]
+        cw_health["total_countries"] = len(entries)
+        cw_health["arrow_counts"] = {
+            "deteriorated": sum(1 for a in arrows if a == "deteriorated"),
+            "improved": sum(1 for a in arrows if a == "improved"),
+            "unchanged": sum(1 for a in arrows if a == "unchanged"),
+            "missing": sum(1 for a in arrows if not a),
+        }
+        cw_health["alert_counts"] = {
+            "conflict_risk": sum(
+                1 for e in entries if e.get("alert_type") == "conflict_risk"
+            ),
+            "resolution_opportunity": sum(
+                1 for e in entries if e.get("alert_type") == "resolution_opportunity"
+            ),
+        }
+        months = sorted({(e.get("year"), e.get("month")) for e in entries})
+        cw_health["months_covered"] = [
+            f"{y}-{m:02d}" if m else str(y) for y, m in months
+        ]
+        # Per-country detail for deteriorated and alert countries (most actionable)
+        notable = [
+            {
+                "iso3": e.get("iso3"),
+                "country": e.get("country_name"),
+                "arrow": e.get("arrow"),
+                "alert_type": e.get("alert_type"),
+                "summary": (e.get("summary") or "")[:200],
+            }
+            for e in entries
+            if e.get("arrow") == "deteriorated" or e.get("alert_type")
+        ]
+        cw_health["notable_entries"] = notable
+        # Countries in the run that have NO CrisisWatch data (potential coverage gaps)
+        cw_iso3s = {(e.get("iso3") or "").upper() for e in entries}
+        missing_cw = sorted(
+            iso3 for iso3 in data.resolved_countries_sorted
+            if iso3.upper() not in cw_iso3s
+        )
+        cw_health["countries_without_crisiswatch"] = missing_cw
+        cw_health["n_countries_without_crisiswatch"] = len(missing_cw)
+    else:
+        cw_health["total_countries"] = 0
+        cw_health["detail"] = (
+            "No CrisisWatch entries found. Possible causes: "
+            "(1) Gemini grounding returned no results for both On the Horizon "
+            "and Global Overview queries; "
+            "(2) fallback JSON at horizon_scanner/data/crisiswatch_latest.json "
+            "is empty or missing; "
+            "(3) crisiswatch.fetch_crisiswatch() was not called in this run"
+        )
+
     # Spot checks
     hs_samples, q_samples = _sample_grounding_spot_checks(
         data.hs_web_rows, data.question_web_rows
@@ -3089,6 +3207,7 @@ def emit_health_report_json(data: BundleData, out_dir: Path) -> None:
         "llm_health": llm_health,
         "cost_summary": cost_summary,
         "coverage_funnel": coverage,
+        "crisiswatch_health": cw_health,
         "grounding_spot_checks": {
             "hs_countries": [
                 {
@@ -3590,6 +3709,7 @@ def emit_data_inject_inventory_csv(
         "ipc_available", "reliefweb_reports_count",
         "hdx_signals_count", "enso_loaded",
         "seasonal_tc_loaded", "nmme_available",
+        "crisiswatch_arrow",
     ]
 
     # Check which tables exist once
@@ -3610,6 +3730,27 @@ def emit_data_inject_inventory_csv(
         enso_loaded = False
 
     # seasonal_tc_loaded is checked per-country below (varies by basin exposure)
+
+    # Load HDX Signals cached CSV to count signals per country
+    hdx_signals_by_iso3: dict[str, int] = {}
+    try:
+        from horizon_scanner.hdx_signals import CACHE_FILE as _hdx_cache_file
+        if _hdx_cache_file.exists():
+            import csv as _csv
+            text = _hdx_cache_file.read_text(encoding="utf-8")
+            for row in _csv.DictReader(io.StringIO(text)):
+                iso = (row.get("iso3") or "").upper()
+                if iso:
+                    hdx_signals_by_iso3[iso] = hdx_signals_by_iso3.get(iso, 0) + 1
+    except Exception:
+        pass  # HDX Signals cache unavailable — leave counts empty
+
+    # Build CrisisWatch per-country lookup from already-loaded data
+    cw_by_iso3: dict[str, dict[str, Any]] = {}
+    for entry in data.crisiswatch_entries:
+        iso = (entry.get("iso3") or "").upper()
+        if iso and iso not in cw_by_iso3:
+            cw_by_iso3[iso] = entry  # most recent first (ORDER BY year DESC, month DESC)
 
     # Try loading country names from hs_triage
     country_names: dict[str, str] = {}
@@ -3634,9 +3775,16 @@ def emit_data_inject_inventory_csv(
 
             idmc_months = _safe_table_count_where(
                 con, "facts_deltas",
-                "upper(iso3) = ? AND metric LIKE '%idmc%'",
+                "upper(iso3) = ? AND metric = 'new_displacements'",
                 [iso3.upper()],
             ) if has_facts_deltas else None
+            # Also check facts_resolved if facts_deltas had nothing
+            if not idmc_months and has_facts_resolved:
+                idmc_months = _safe_table_count_where(
+                    con, "facts_resolved",
+                    "upper(iso3) = ? AND metric = 'new_displacements'",
+                    [iso3.upper()],
+                )
 
             ifrc_months = _safe_table_count_where(
                 con, "facts_resolved",
@@ -3651,9 +3799,6 @@ def emit_data_inject_inventory_csv(
             ipc_avail = False
             if has_ipc_phases:
                 cnt = _safe_table_count_where(con, "ipc_phases", "upper(iso3) = ?", [iso3.upper()])
-                ipc_avail = bool(cnt)
-            if not ipc_avail and has_acaps:
-                cnt = _safe_table_count_where(con, "acaps_inform_severity", "upper(iso3) = ?", [iso3.upper()])
                 ipc_avail = bool(cnt)
 
             reliefweb_count = _safe_table_count_where(
@@ -3671,6 +3816,15 @@ def emit_data_inject_inventory_csv(
             except Exception:
                 seasonal_tc_loaded = False
 
+            # CrisisWatch arrow for this country (ACE-only data source)
+            cw_entry = cw_by_iso3.get(iso3.upper())
+            if cw_entry:
+                cw_arrow = cw_entry.get("arrow") or "present"
+                if cw_entry.get("alert_type"):
+                    cw_arrow += f" [{cw_entry['alert_type']}]"
+            else:
+                cw_arrow = ""
+
             writer.writerow({
                 "iso3": iso3,
                 "country_name": country_names.get(iso3.upper(), ""),
@@ -3680,10 +3834,11 @@ def emit_data_inject_inventory_csv(
                 "conflict_forecasts_available": conflict_avail,
                 "ipc_available": ipc_avail,
                 "reliefweb_reports_count": reliefweb_count if reliefweb_count is not None else "",
-                "hdx_signals_count": "",  # populated from cached CSV if available
+                "hdx_signals_count": hdx_signals_by_iso3.get(iso3.upper(), "N/A" if not hdx_signals_by_iso3 else 0),
                 "enso_loaded": enso_loaded,
                 "seasonal_tc_loaded": seasonal_tc_loaded,
                 "nmme_available": nmme_avail,
+                "crisiswatch_arrow": cw_arrow,
             })
 
     print(f"Wrote data inject inventory to {out_path}")

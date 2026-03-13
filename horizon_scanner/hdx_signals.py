@@ -124,6 +124,17 @@ def fetch_and_cache() -> Path | None:
             log.error("HDX Signals CSV download failed: %s", exc2)
             return None
 
+    log.info(
+        "HDX Signals: download complete — status %d, content length %d bytes",
+        resp.status_code,
+        len(resp.content),
+    )
+    if len(resp.content) < 100:
+        log.warning(
+            "HDX Signals: downloaded file is suspiciously small (%d bytes)",
+            len(resp.content),
+        )
+
     CACHE_FILE.write_bytes(resp.content)
     log.info(
         "HDX Signals: cached %d KB to %s",
@@ -143,12 +154,18 @@ def ensure_cache_fresh(max_age_hours: int = 168) -> bool:
 
     Returns True if the cache is fresh after the operation.
     """
+    log.info("HDX Signals: checking cache freshness...")
     if CACHE_FILE.exists():
         age = datetime.now() - datetime.fromtimestamp(CACHE_FILE.stat().st_mtime)
         if age.total_seconds() < max_age_hours * 3600:
+            rows = _load_csv()
+            log.info("HDX Signals: cache is fresh, %d rows", len(rows))
             return True
 
     result = fetch_and_cache()
+    if result is not None:
+        rows = _load_csv()
+        log.info("HDX Signals: cache refreshed, %d rows", len(rows))
     return result is not None
 
 
@@ -240,6 +257,11 @@ def format_hdx_signals_for_prompt(
     """
     signals = get_signals_for_country(iso3, hazard_code, max_age_days=max_age_days)
     if not signals:
+        log.debug(
+            "HDX Signals: no signals for %s/%s (this is normal for most countries)",
+            iso3,
+            hazard_code,
+        )
         return ""
 
     signals = signals[:max_signals]
@@ -315,7 +337,12 @@ def _load_csv() -> list[dict[str, str]]:
         text = CACHE_FILE.read_text(encoding="utf-8")
         reader = csv.DictReader(io.StringIO(text))
         _SIGNALS_CACHE = list(reader)
-        log.debug("HDX Signals: loaded %d rows from cache", len(_SIGNALS_CACHE))
+        unique_countries = len({r.get("iso3") for r in _SIGNALS_CACHE if r.get("iso3")})
+        log.info(
+            "HDX Signals: loaded %d rows from cache, %d unique countries",
+            len(_SIGNALS_CACHE),
+            unique_countries,
+        )
         return _SIGNALS_CACHE
     except Exception as exc:
         log.warning("HDX Signals CSV parse failed: %s", exc)

@@ -1482,16 +1482,19 @@ def main(countries: list[str] | None = None):
             from horizon_scanner.hdx_signals import ensure_cache_fresh
             ensure_cache_fresh()
         except Exception as exc:
-            logger.warning("HDX Signals cache init failed: %s", exc)
+            logger.error("HDX Signals cache init failed: %s", exc, exc_info=True)
 
-        # Fetch ICG CrisisWatch "On the Horizon" data (once per run, passed to workers).
+        # Fetch ICG CrisisWatch data (once per run, passed to workers).
         crisiswatch_data = None
         try:
-            from horizon_scanner.crisiswatch_horizon import fetch_on_the_horizon, get_horizon_countries
-            crisiswatch_data = fetch_on_the_horizon()
+            from horizon_scanner.crisiswatch import fetch_crisiswatch, get_horizon_countries
+            crisiswatch_data = fetch_crisiswatch()
             if crisiswatch_data:
                 flagged = get_horizon_countries(crisiswatch_data)
-                logger.info("CrisisWatch: fetched %d flagged countries: %s", len(flagged), sorted(flagged.keys()))
+                logger.info(
+                    "CrisisWatch: %d countries total, %d flagged (On the Horizon): %s",
+                    len(crisiswatch_data), len(flagged), sorted(flagged.keys()),
+                )
             else:
                 logger.info("CrisisWatch: no data returned")
         except Exception as exc:

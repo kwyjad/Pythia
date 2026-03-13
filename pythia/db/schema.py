@@ -798,6 +798,38 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
         pass
 
 
+def _ensure_crisiswatch_entries_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the crisiswatch_entries table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "crisiswatch_entries",
+        """
+        CREATE TABLE IF NOT EXISTS crisiswatch_entries (
+            iso3 VARCHAR NOT NULL,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            arrow VARCHAR,
+            alert_type VARCHAR,
+            summary VARCHAR,
+            country_name VARCHAR,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (iso3, year, month)
+        );
+        """,
+        {
+            "iso3": "VARCHAR",
+            "month": "INTEGER",
+            "year": "INTEGER",
+            "arrow": "VARCHAR",
+            "alert_type": "VARCHAR",
+            "summary": "VARCHAR",
+            "country_name": "VARCHAR",
+            "fetched_at": "TIMESTAMP",
+        },
+    )
+
+
 def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
     """
     Ensure all Pythia-related tables exist in DuckDB.
@@ -1587,6 +1619,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         _ensure_acaps_daily_monitoring_table(con)
         _ensure_acaps_humanitarian_access_table(con)
         _ensure_calibration_advice_table(con)
+        _ensure_crisiswatch_entries_table(con)
     finally:
         if own_con and con is not None:
             con.close()
