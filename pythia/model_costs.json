@@ -10,8 +10,8 @@
   "gpt-5-mini":                    [0.00025, 0.00200],
   "openai/gpt-5-mini":             [0.00025, 0.00200],
 
-  "gemini-2.5-flash-lite":         [0.00010, 0.00040],
-  "google/gemini-2.5-flash-lite":  [0.00010, 0.00040],
+  "gemini-2.5-flash":              [0.00015, 0.00060],
+  "google/gemini-2.5-flash":       [0.00015, 0.00060],
   "gemini-3-flash-preview":        [0.00050, 0.00300],
   "google/gemini-3-flash-preview": [0.00050, 0.00300],
   "gemini-3-pro-preview":          [0.00200, 0.01200],

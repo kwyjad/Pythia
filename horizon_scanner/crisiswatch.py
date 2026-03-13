@@ -38,7 +38,9 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List
+
+import requests
 
 log = logging.getLogger(__name__)
 
@@ -217,6 +219,97 @@ def _resolve_iso3(country_name: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Direct Gemini grounding call (bypasses EvidencePack JSON re-parsing)
+# ---------------------------------------------------------------------------
+
+_GEMINI_MODEL_CANDIDATES = ["gemini-2.5-flash"]
+
+
+def _call_gemini_grounding(prompt: str, *, timeout_sec: int = 30) -> str:
+    """Make a direct Gemini grounding call and return the raw text response.
+
+    Unlike ``fetch_via_gemini`` (which parses the response into an
+    EvidencePack expecting ``recent_signals``/``structural_context`` keys),
+    this returns the raw text blob so CrisisWatch can parse its own
+    JSON schema (``conflict_risks``, ``countries``, etc.).
+    """
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        log.warning("CrisisWatch: GEMINI_API_KEY / GOOGLE_API_KEY not set")
+        return ""
+
+    env_model = os.getenv("PYTHIA_GROUNDING_MODEL_ID", "").strip()
+    if env_model:
+        model_candidates = [env_model] + [
+            m for m in _GEMINI_MODEL_CANDIDATES if m != env_model
+        ]
+    else:
+        model_candidates = list(_GEMINI_MODEL_CANDIDATES)
+
+    gen_cfg = {"temperature": 0.2, "maxOutputTokens": 768}
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {}}],
+        "generationConfig": gen_cfg,
+    }
+
+    last_errors: List[str] = []
+
+    for model_id in model_candidates:
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model_id}:generateContent"
+        )
+        try:
+            resp = requests.post(
+                url, params={"key": api_key}, json=body, timeout=timeout_sec,
+            )
+            status_code = resp.status_code
+            try:
+                response_data: Dict[str, Any] = resp.json()
+            except Exception:
+                response_data = {"error_text": (resp.text or "")[:800]}
+        except Exception as exc:
+            last_errors.append(f"{model_id}: exception {exc!r}")
+            continue
+
+        if status_code != 200:
+            msg = ""
+            err_obj = response_data.get("error")
+            if isinstance(err_obj, dict):
+                msg = err_obj.get("message", "")
+            if not msg:
+                msg = response_data.get("error_text", f"status={status_code}")
+            last_errors.append(f"{model_id}: {msg[:200]}")
+            continue
+
+        # Extract raw text from response
+        raw_text = ""
+        for cand in response_data.get("candidates") or []:
+            content = cand.get("content") or {}
+            for part in content.get("parts") or []:
+                t = part.get("text")
+                if t:
+                    raw_text = str(t).strip()
+                    break
+            if raw_text:
+                break
+
+        if raw_text:
+            log.debug(
+                "CrisisWatch: Gemini response from %s, length=%d",
+                model_id, len(raw_text),
+            )
+            return raw_text
+
+        last_errors.append(f"{model_id}: empty response text")
+
+    if last_errors:
+        log.warning("CrisisWatch: all Gemini models failed: %s", last_errors)
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Gemini grounding fetch
 # ---------------------------------------------------------------------------
 
@@ -225,14 +318,7 @@ def _fetch_on_the_horizon(
     year: int, month_name: str
 ) -> list[dict[str, Any]]:
     """Gemini call #1: fetch ICG "On the Horizon" flags."""
-    try:
-        from pythia.web_research.backends.gemini_grounding import fetch_via_gemini
-    except ImportError:
-        log.debug("Gemini grounding unavailable — skipping On the Horizon fetch.")
-        return []
-
-    query = f'ICG CrisisWatch "on the horizon" conflict risks {month_name} {year} countries'
-    custom_prompt = f"""\
+    prompt = f"""\
 You are a research assistant. Search for the latest ICG CrisisWatch \
 "On the Horizon" section for {month_name} {year}.
 
@@ -261,20 +347,7 @@ If you cannot find any "On the Horizon" content, return: \
 """
 
     try:
-        evidence = fetch_via_gemini(
-            query=query,
-            recency_days=45,
-            include_structural=False,
-            timeout_sec=30,
-            max_results=5,
-            custom_prompt=custom_prompt,
-        )
-        if hasattr(evidence, "to_dict"):
-            pack = evidence.to_dict()
-        else:
-            pack = dict(evidence)
-
-        raw_text = pack.get("markdown") or pack.get("raw_text") or ""
+        raw_text = _call_gemini_grounding(prompt, timeout_sec=30)
         log.info(
             "CrisisWatch On-the-Horizon: raw response length=%d",
             len(raw_text),
@@ -289,17 +362,7 @@ def _fetch_global_overview(
     year: int, month_name: str
 ) -> list[dict[str, Any]]:
     """Gemini call #2: fetch ICG CrisisWatch Global Overview arrows."""
-    try:
-        from pythia.web_research.backends.gemini_grounding import fetch_via_gemini
-    except ImportError:
-        log.debug("Gemini grounding unavailable — skipping Global Overview fetch.")
-        return []
-
-    query = (
-        f"ICG CrisisWatch {month_name} {year} "
-        f"deteriorated improved countries global overview"
-    )
-    custom_prompt = f"""\
+    prompt = f"""\
 You are a research assistant. Search for the latest ICG CrisisWatch \
 Global Overview for {month_name} {year} (or the most recent month available).
 
@@ -328,20 +391,7 @@ If you cannot find the Global Overview, return: \
 """
 
     try:
-        evidence = fetch_via_gemini(
-            query=query,
-            recency_days=45,
-            include_structural=False,
-            timeout_sec=30,
-            max_results=5,
-            custom_prompt=custom_prompt,
-        )
-        if hasattr(evidence, "to_dict"):
-            pack = evidence.to_dict()
-        else:
-            pack = dict(evidence)
-
-        raw_text = pack.get("markdown") or pack.get("raw_text") or ""
+        raw_text = _call_gemini_grounding(prompt, timeout_sec=30)
         log.info(
             "CrisisWatch Global Overview: raw response length=%d",
             len(raw_text),

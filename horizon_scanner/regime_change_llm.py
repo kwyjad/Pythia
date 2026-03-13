@@ -293,7 +293,7 @@ def _run_grounding_for_hazard(
         # Log grounding call to llm_calls for cost tracking
         try:
             usage_info = dict(pack.get("debug", {}).get("usage", {}))
-            model_id = pack.get("debug", {}).get("model_id", "gemini-2.5-flash-lite")
+            model_id = pack.get("debug", {}).get("model_id", "gemini-2.5-flash")
             if not usage_info.get("cost_usd") and usage_info.get("total_tokens"):
                 usage_info["cost_usd"] = estimate_cost_usd(str(model_id), usage_info)
             log_hs_llm_call(

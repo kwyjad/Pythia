@@ -18,7 +18,7 @@ from pythia.web_research.types import EvidencePack, EvidenceSource
 # Stable models for Google Search grounding. Preview models (gemini-3-*)
 # have shown intermittent grounding regressions. Use stable release models.
 # Override with PYTHIA_GROUNDING_MODEL_ID env var (inserted before these).
-DEFAULT_GEMINI_CANDIDATES = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
+DEFAULT_GEMINI_CANDIDATES = ["gemini-2.5-flash"]
 MAX_SIGNAL_LINES = 8
 
 
