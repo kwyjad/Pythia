@@ -16,15 +16,10 @@ long page with all country entries in the DOM.
 Output is written to ``horizon_scanner/data/crisiswatch_latest.json`` in
 a format compatible with ``crisiswatch._load_fallback_json()``.
 
-Cloudflare protection: the scraper uses ``playwright-stealth`` and
-realistic browser fingerprinting to bypass Cloudflare's JS challenge.
-If the challenge is not resolved after 3 attempts, the scraper exits
-with an error.
-
 Usage::
 
     # Install Playwright first (one-time)
-    pip install playwright playwright-stealth && playwright install chromium
+    pip install playwright && playwright install chromium
 
     # Run the scraper
     python -m scripts.refresh_crisiswatch [--output PATH] [--verbose]
