@@ -39,11 +39,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install system deps + Python packages
         run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm2 \
+            libxkbcommon0 libgbm1 libpango-1.0-0 libcairo2 libasound2
           python -m pip install --upgrade pip
           pip install -r python_library_requirements.txt
-          pip install playwright
+          pip install playwright playwright-stealth
           playwright install chromium --with-deps
 
       - name: Run CrisisWatch scraper
@@ -59,6 +62,7 @@ jobs:
             horizon_scanner/data/crisiswatch_latest.json
             horizon_scanner/data/crisiswatch_debug.html
             horizon_scanner/data/crisiswatch_debug.png
+            horizon_scanner/data/crisiswatch_cf_block_attempt*.html
           retention-days: 90
 
       - name: Commit updated JSON
