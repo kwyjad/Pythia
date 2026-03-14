@@ -96,12 +96,21 @@ _STATUS_MAP: dict[str, tuple[str, str]] = {
 # ---------------------------------------------------------------------------
 
 
-def _fetch_page_html(*, timeout_sec: int = 90, verbose: bool = False) -> str:
+def _fetch_page_html(
+    *,
+    timeout_sec: int = 90,
+    verbose: bool = False,
+    channel: str | None = None,
+) -> str:
     """Launch headless Chromium, load CrisisWatch, and return page HTML.
 
-    Uses ``playwright-stealth`` and realistic browser fingerprinting to
-    bypass Cloudflare's JS challenge.  Retries up to ``_MAX_ATTEMPTS``
-    times if the page returns a Cloudflare challenge (< 20 KB HTML).
+    When *channel* is provided (e.g. ``"chrome"`` or ``"msedge"``), the
+    system browser is used directly — no stealth patches or retry loop,
+    since system Chrome passes Cloudflare on the first try.
+
+    When *channel* is ``None`` (default, for GitHub Actions), uses
+    ``playwright-stealth`` (or manual init-script fallback) and retries
+    up to ``_MAX_ATTEMPTS`` times against the Cloudflare JS challenge.
 
     Scrolls to the bottom repeatedly to trigger any lazy-loaded content.
     """
@@ -114,6 +123,20 @@ def _fetch_page_html(*, timeout_sec: int = 90, verbose: bool = False) -> str:
         )
         sys.exit(1)
 
+    debug_dir = Path("horizon_scanner/data")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- System Chrome path (--channel): no stealth, single attempt ----
+    if channel is not None:
+        log.info("Using system browser channel=%s (no stealth)", channel)
+        return _fetch_with_system_chrome(
+            channel=channel,
+            timeout_sec=timeout_sec,
+            verbose=verbose,
+            debug_dir=debug_dir,
+        )
+
+    # ---- Bundled Chromium path (GitHub Actions): stealth + retries ----
     try:
         from playwright_stealth import stealth_sync
         _has_stealth = True
@@ -124,9 +147,6 @@ def _fetch_page_html(*, timeout_sec: int = 90, verbose: bool = False) -> str:
         )
         stealth_sync = None  # type: ignore[assignment]
         _has_stealth = False
-
-    debug_dir = Path("horizon_scanner/data")
-    debug_dir.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -221,30 +241,7 @@ def _fetch_page_html(*, timeout_sec: int = 90, verbose: bool = False) -> str:
                     )
 
             if cf_passed:
-                # Wait for network to settle before scrolling.
-                try:
-                    page.wait_for_load_state(
-                        "networkidle", timeout=30_000,
-                    )
-                except Exception:
-                    log.debug("networkidle timed out, proceeding anyway")
-
-                # Scroll to bottom repeatedly to trigger lazy-loaded content.
-                prev_height = 0
-                scroll_rounds = 0
-                max_rounds = 30
-                while scroll_rounds < max_rounds:
-                    height = page.evaluate("document.body.scrollHeight")
-                    if height == prev_height:
-                        break
-                    page.evaluate(
-                        "window.scrollTo(0, document.body.scrollHeight)"
-                    )
-                    page.wait_for_timeout(2500)
-                    prev_height = height
-                    scroll_rounds += 1
-
-                log.info("Scroll complete after %d rounds.", scroll_rounds)
+                _scroll_to_bottom(page)
 
             # Extract HTML and page title.
             html = page.content()
@@ -294,13 +291,106 @@ def _fetch_page_html(*, timeout_sec: int = 90, verbose: bool = False) -> str:
         log.error(
             "Cloudflare blocked all %d attempts (final HTML=%d chars).  "
             "The page structure or Cloudflare rules may have changed.  "
-            "Consider running locally or updating stealth settings.",
+            "Consider running locally with --channel chrome.",
             _MAX_ATTEMPTS, len(html),
         )
         # Save the final blocked HTML for debugging.
         debug_html_path = debug_dir / "crisiswatch_debug.html"
         debug_html_path.write_text(html, encoding="utf-8")
         log.info("Final blocked HTML saved to %s", debug_html_path)
+        sys.exit(1)
+
+    log.info("Extracted HTML: %d chars", len(html))
+    return html
+
+
+def _scroll_to_bottom(page: Any) -> None:
+    """Scroll to page bottom repeatedly to trigger lazy-loaded content."""
+    # Wait for network to settle before scrolling.
+    try:
+        page.wait_for_load_state("networkidle", timeout=30_000)
+    except Exception:
+        log.debug("networkidle timed out, proceeding anyway")
+
+    prev_height = 0
+    scroll_rounds = 0
+    max_rounds = 30
+    while scroll_rounds < max_rounds:
+        height = page.evaluate("document.body.scrollHeight")
+        if height == prev_height:
+            break
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(2500)
+        prev_height = height
+        scroll_rounds += 1
+
+    log.info("Scroll complete after %d rounds.", scroll_rounds)
+
+
+def _fetch_with_system_chrome(
+    *,
+    channel: str,
+    timeout_sec: int,
+    verbose: bool,
+    debug_dir: Path,
+) -> str:
+    """Fetch CrisisWatch using a system browser (Chrome/Edge).
+
+    System browsers pass Cloudflare without stealth patches, so this
+    path uses a single attempt with no retry loop.
+    """
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, channel=channel)
+        page = browser.new_page()
+
+        log.info("Navigating to %s via %s ...", _CRISISWATCH_URL, channel)
+        page.goto(
+            _CRISISWATCH_URL,
+            wait_until="domcontentloaded",
+            timeout=timeout_sec * 1000,
+        )
+
+        # Wait for real content selectors.
+        try:
+            page.wait_for_selector(
+                "text=Conflict Risk Alert", timeout=30_000,
+            )
+            log.info("Content detected (Conflict Risk Alert)")
+        except Exception:
+            try:
+                page.wait_for_selector("h3", timeout=15_000)
+                log.info("Content detected (<h3>)")
+            except Exception:
+                log.warning("Content selectors not found after 45s")
+
+        _scroll_to_bottom(page)
+
+        html = page.content()
+        title = page.title()
+        log.info(
+            "Page title='%s', HTML length=%d chars", title, len(html),
+        )
+
+        if verbose:
+            screenshot_path = debug_dir / "crisiswatch_debug.png"
+            try:
+                page.screenshot(path=str(screenshot_path), full_page=True)
+                log.info("Debug screenshot saved to %s", screenshot_path)
+            except Exception as exc:
+                log.debug("Screenshot failed: %s", exc)
+
+        browser.close()
+
+    if len(html) < _MIN_HTML_LENGTH:
+        log.error(
+            "Page too small (%d chars < %d threshold).  "
+            "The page structure may have changed.",
+            len(html), _MIN_HTML_LENGTH,
+        )
+        debug_html_path = debug_dir / "crisiswatch_debug.html"
+        debug_html_path.write_text(html, encoding="utf-8")
         sys.exit(1)
 
     log.info("Extracted HTML: %d chars", len(html))
@@ -547,10 +637,14 @@ def run(
     output_path: Path = _DEFAULT_OUTPUT,
     timeout_sec: int = 90,
     verbose: bool = False,
+    channel: str | None = None,
+    auto_push: bool = False,
 ) -> dict[str, Any]:
     """Fetch and parse CrisisWatch, write JSON, return the data dict."""
 
-    html = _fetch_page_html(timeout_sec=timeout_sec, verbose=verbose)
+    html = _fetch_page_html(
+        timeout_sec=timeout_sec, verbose=verbose, channel=channel,
+    )
 
     if verbose:
         debug_html_path = Path("horizon_scanner/data/crisiswatch_debug.html")
@@ -636,6 +730,22 @@ def run(
         n_alerts, n_resolved,
     )
 
+    # Auto-push: git add, commit, push the output JSON.
+    if auto_push:
+        import subprocess
+
+        subprocess.run(["git", "add", "-f", str(output_path)], check=True)
+        result = subprocess.run(["git", "diff", "--cached", "--quiet"])
+        if result.returncode != 0:
+            subprocess.run([
+                "git", "commit", "-m",
+                "chore(crisiswatch): refresh monthly data",
+            ], check=True)
+            subprocess.run(["git", "push"], check=True)
+            log.info("Committed and pushed updated JSON")
+        else:
+            log.info("No changes to commit")
+
     return data
 
 
@@ -656,6 +766,14 @@ def main() -> None:
         "-v", "--verbose", action="store_true",
         help="Enable DEBUG logging and save debug artifacts",
     )
+    parser.add_argument(
+        "--channel", type=str, default=None,
+        help="Use system browser: 'chrome' or 'msedge' (bypasses Cloudflare)",
+    )
+    parser.add_argument(
+        "--auto-push", action="store_true",
+        help="Git add, commit and push the output JSON after success",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -668,6 +786,8 @@ def main() -> None:
         output_path=Path(args.output),
         timeout_sec=args.timeout,
         verbose=args.verbose,
+        channel=args.channel,
+        auto_push=args.auto_push,
     )
 
 
