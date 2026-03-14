@@ -32,6 +32,7 @@ import json
 import logging
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -57,9 +58,26 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 _CRISISWATCH_URL = "https://www.crisisgroup.org/crisiswatch"
-_USER_AGENT = "PythiaBot/1.0 (humanitarian forecasting research)"
+
+# Realistic Chrome user-agent (must match a real browser to pass CF).
+_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 _DEFAULT_OUTPUT = Path("horizon_scanner/data/crisiswatch_latest.json")
+
+# Minimum HTML length to consider a successful page load.
+# Cloudflare challenge pages are typically ~6-8 KB; the real CrisisWatch
+# page is ~400-600 KB.
+_MIN_HTML_LENGTH = 20_000
+
+# Max retry attempts when Cloudflare blocks the page.
+_MAX_ATTEMPTS = 3
+
+# Seconds to wait between retry attempts (allows CF challenge cookie to
+# settle in the reused browser context).
+_RETRY_DELAY_SEC = 15
 
 # Status label text → (arrow, alert_type) mapping.
 # The CrisisWatch page uses plain-text labels inside timeline <span>
@@ -74,12 +92,16 @@ _STATUS_MAP: dict[str, tuple[str, str]] = {
 
 
 # ---------------------------------------------------------------------------
-# Playwright page fetch
+# Playwright page fetch (with Cloudflare bypass)
 # ---------------------------------------------------------------------------
 
 
-def _fetch_page_html(*, timeout_sec: int = 60, verbose: bool = False) -> str:
+def _fetch_page_html(*, timeout_sec: int = 90, verbose: bool = False) -> str:
     """Launch headless Chromium, load CrisisWatch, and return page HTML.
+
+    Uses ``playwright-stealth`` and realistic browser fingerprinting to
+    bypass Cloudflare's JS challenge.  Retries up to ``_MAX_ATTEMPTS``
+    times if the page returns a Cloudflare challenge (< 20 KB HTML).
 
     Scrolls to the bottom repeatedly to trigger any lazy-loaded content.
     """
@@ -92,41 +114,170 @@ def _fetch_page_html(*, timeout_sec: int = 60, verbose: bool = False) -> str:
         )
         sys.exit(1)
 
+    try:
+        from playwright_stealth import stealth_sync
+    except ImportError:
+        log.error(
+            "playwright-stealth is not installed.  "
+            "Run: pip install playwright-stealth"
+        )
+        sys.exit(1)
+
+    debug_dir = Path("horizon_scanner/data")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=_USER_AGENT)
-        page = context.new_page()
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-web-security",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=_USER_AGENT,
+            viewport={"width": 1920, "height": 1080},
+            locale="en-US",
+            timezone_id="America/New_York",
+            color_scheme="light",
+        )
 
-        log.info("Navigating to %s ...", _CRISISWATCH_URL)
-        page.goto(_CRISISWATCH_URL, timeout=timeout_sec * 1000)
-        page.wait_for_load_state("networkidle", timeout=timeout_sec * 1000)
-        log.info("Page loaded, scrolling to trigger lazy content ...")
+        html = ""
 
-        # Scroll to bottom repeatedly until page height stabilises.
-        prev_height = 0
-        scroll_rounds = 0
-        max_rounds = 30
-        while scroll_rounds < max_rounds:
-            height = page.evaluate("document.body.scrollHeight")
-            if height == prev_height:
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            # Reuse the same context across retries so the Cloudflare
+            # challenge cookie persists.
+            page = context.new_page()
+
+            # Apply stealth patches BEFORE any navigation.
+            stealth_sync(page)
+
+            log.info(
+                "Attempt %d/%d: navigating to %s ...",
+                attempt, _MAX_ATTEMPTS, _CRISISWATCH_URL,
+            )
+
+            try:
+                page.goto(
+                    _CRISISWATCH_URL,
+                    wait_until="domcontentloaded",
+                    timeout=timeout_sec * 1000,
+                )
+            except Exception as exc:
+                log.warning("Navigation failed on attempt %d: %s", attempt, exc)
+                page.close()
+                if attempt < _MAX_ATTEMPTS:
+                    log.info("Waiting %ds before retry ...", _RETRY_DELAY_SEC)
+                    time.sleep(_RETRY_DELAY_SEC)
+                continue
+
+            # Wait for Cloudflare's JS challenge to resolve.
+            # CF typically takes 3-8 seconds to verify the browser.
+            # Try multiple selectors — whichever appears first means CF
+            # passed and real content is loading.
+            cf_passed = False
+            try:
+                page.wait_for_selector(
+                    "text=Conflict Risk Alert", timeout=30_000,
+                )
+                cf_passed = True
+                log.info("Cloudflare challenge passed, content detected")
+            except Exception:
+                # Fallback: try any <h3> (country entry headings).
+                try:
+                    page.wait_for_selector("h3", timeout=15_000)
+                    cf_passed = True
+                    log.info("Cloudflare challenge passed (<h3> detected)")
+                except Exception:
+                    log.warning(
+                        "Content selectors not found after 45s on attempt %d",
+                        attempt,
+                    )
+
+            if cf_passed:
+                # Wait for network to settle before scrolling.
+                try:
+                    page.wait_for_load_state(
+                        "networkidle", timeout=30_000,
+                    )
+                except Exception:
+                    log.debug("networkidle timed out, proceeding anyway")
+
+                # Scroll to bottom repeatedly to trigger lazy-loaded content.
+                prev_height = 0
+                scroll_rounds = 0
+                max_rounds = 30
+                while scroll_rounds < max_rounds:
+                    height = page.evaluate("document.body.scrollHeight")
+                    if height == prev_height:
+                        break
+                    page.evaluate(
+                        "window.scrollTo(0, document.body.scrollHeight)"
+                    )
+                    page.wait_for_timeout(2500)
+                    prev_height = height
+                    scroll_rounds += 1
+
+                log.info("Scroll complete after %d rounds.", scroll_rounds)
+
+            # Extract HTML and page title.
+            html = page.content()
+            title = page.title()
+            log.info(
+                "Attempt %d: page title='%s', HTML length=%d chars",
+                attempt, title, len(html),
+            )
+
+            if verbose or len(html) < _MIN_HTML_LENGTH:
+                screenshot_path = debug_dir / "crisiswatch_debug.png"
+                try:
+                    page.screenshot(
+                        path=str(screenshot_path), full_page=True,
+                    )
+                    log.info("Debug screenshot saved to %s", screenshot_path)
+                except Exception as exc:
+                    log.debug("Screenshot failed: %s", exc)
+
+            page.close()
+
+            if len(html) >= _MIN_HTML_LENGTH:
+                log.info("Success on attempt %d", attempt)
                 break
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(2000)
-            prev_height = height
-            scroll_rounds += 1
 
-        log.info("Scroll complete after %d rounds.", scroll_rounds)
+            # Cloudflare blocked — HTML is too small.
+            log.warning(
+                "Cloudflare block detected on attempt %d "
+                "(HTML=%d chars < %d threshold)",
+                attempt, len(html), _MIN_HTML_LENGTH,
+            )
+            if verbose:
+                debug_html_path = (
+                    debug_dir / f"crisiswatch_cf_block_attempt{attempt}.html"
+                )
+                debug_html_path.write_text(html, encoding="utf-8")
+                log.info("Blocked HTML saved to %s", debug_html_path)
 
-        if verbose:
-            # Save a debug screenshot.
-            debug_dir = Path("horizon_scanner/data")
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            screenshot_path = debug_dir / "crisiswatch_debug.png"
-            page.screenshot(path=str(screenshot_path), full_page=True)
-            log.info("Debug screenshot saved to %s", screenshot_path)
+            if attempt < _MAX_ATTEMPTS:
+                log.info("Waiting %ds before retry ...", _RETRY_DELAY_SEC)
+                time.sleep(_RETRY_DELAY_SEC)
 
-        html = page.content()
         browser.close()
+
+    # Final check after all attempts.
+    if len(html) < _MIN_HTML_LENGTH:
+        log.error(
+            "Cloudflare blocked all %d attempts (final HTML=%d chars).  "
+            "The page structure or Cloudflare rules may have changed.  "
+            "Consider running locally or updating stealth settings.",
+            _MAX_ATTEMPTS, len(html),
+        )
+        # Save the final blocked HTML for debugging.
+        debug_html_path = debug_dir / "crisiswatch_debug.html"
+        debug_html_path.write_text(html, encoding="utf-8")
+        log.info("Final blocked HTML saved to %s", debug_html_path)
+        sys.exit(1)
 
     log.info("Extracted HTML: %d chars", len(html))
     return html
@@ -370,7 +521,7 @@ def _parse_country_entries(
 def run(
     *,
     output_path: Path = _DEFAULT_OUTPUT,
-    timeout_sec: int = 60,
+    timeout_sec: int = 90,
     verbose: bool = False,
 ) -> dict[str, Any]:
     """Fetch and parse CrisisWatch, write JSON, return the data dict."""
@@ -474,7 +625,7 @@ def main() -> None:
         help="Output JSON path (default: %(default)s)",
     )
     parser.add_argument(
-        "--timeout", type=int, default=60,
+        "--timeout", type=int, default=90,
         help="Page load timeout in seconds (default: %(default)s)",
     )
     parser.add_argument(
