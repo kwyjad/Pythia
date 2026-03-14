@@ -116,12 +116,14 @@ def _fetch_page_html(*, timeout_sec: int = 90, verbose: bool = False) -> str:
 
     try:
         from playwright_stealth import stealth_sync
-    except ImportError:
-        log.error(
-            "playwright-stealth is not installed.  "
-            "Run: pip install playwright-stealth"
+        _has_stealth = True
+    except (ImportError, Exception) as exc:
+        log.warning(
+            "playwright-stealth not available (%s); using manual stealth patches",
+            exc,
         )
-        sys.exit(1)
+        stealth_sync = None  # type: ignore[assignment]
+        _has_stealth = False
 
     debug_dir = Path("horizon_scanner/data")
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -152,7 +154,29 @@ def _fetch_page_html(*, timeout_sec: int = 90, verbose: bool = False) -> str:
             page = context.new_page()
 
             # Apply stealth patches BEFORE any navigation.
-            stealth_sync(page)
+            if _has_stealth and stealth_sync is not None:
+                stealth_sync(page)
+            else:
+                # Manual stealth: hide automation signals that Cloudflare
+                # checks for.
+                page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => false,
+                    });
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en'],
+                    });
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5],
+                    });
+                    window.chrome = { runtime: {} };
+                    const originalQuery = window.navigator.permissions.query;
+                    window.navigator.permissions.query = (parameters) => (
+                        parameters.name === 'notifications' ?
+                        Promise.resolve({ state: Notification.permission }) :
+                        originalQuery(parameters)
+                    );
+                """)
 
             log.info(
                 "Attempt %d/%d: navigating to %s ...",
