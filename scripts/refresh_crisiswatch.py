@@ -79,15 +79,34 @@ _MAX_ATTEMPTS = 3
 # settle in the reused browser context).
 _RETRY_DELAY_SEC = 15
 
-# Status label text → (arrow, alert_type) mapping.
-# The CrisisWatch page uses plain-text labels inside timeline <span>
-# elements, not icons.
-_STATUS_MAP: dict[str, tuple[str, str]] = {
-    "deteriorated situation": ("deteriorated", ""),
-    "improved situation": ("improved", ""),
-    "unchanged situation": ("unchanged", ""),
-    "conflict risk alert": ("unchanged", "conflict_risk"),
-    "resolution opportunity": ("unchanged", "resolution_opportunity"),
+# SVG xlink:href value → (arrow, alert_type) mapping.
+# The CrisisWatch page encodes status via SVG <use xlink:href="#...">
+# icons inside the <h3> heading of each country entry.
+_SVG_STATUS_MAP: dict[str, tuple[str, str]] = {
+    "#deteriorated": ("deteriorated", ""),
+    "#improved": ("improved", ""),
+    "#unchanged": ("unchanged", ""),
+    "#risk-alert": ("", "conflict_risk"),
+    "#resolution": ("", "resolution_opportunity"),
+}
+
+# Regional CrisisWatch entries that map to multiple countries.
+# Each entry is expanded into one output row per ISO3 code.
+_REGIONAL_ENTRY_MAP: dict[str, list[tuple[str, str]]] = {
+    "Amazon": [
+        ("Brazil", "BRA"),
+        ("Ecuador", "ECU"),
+        ("Colombia", "COL"),
+    ],
+    "Nile Waters": [
+        ("Ethiopia", "ETH"),
+        ("Sudan", "SDN"),
+        ("Egypt", "EGY"),
+    ],
+    "Korean Peninsula": [
+        ("South Korea", "KOR"),
+        ("North Korea", "PRK"),
+    ],
 }
 
 
@@ -376,7 +395,9 @@ def _fetch_with_system_chrome(
         if verbose:
             screenshot_path = debug_dir / "crisiswatch_debug.png"
             try:
-                page.screenshot(path=str(screenshot_path), full_page=True)
+                # Viewport-only screenshot (full_page crashes Chrome on
+                # large pages like CrisisWatch ~3 MB HTML).
+                page.screenshot(path=str(screenshot_path), full_page=False)
                 log.info("Debug screenshot saved to %s", screenshot_path)
             except Exception as exc:
                 log.debug("Screenshot failed: %s", exc)
@@ -410,6 +431,14 @@ def _parse_overview_section(
     Returns a dict with keys:
         outlook_month, conflict_risk_alerts, resolution_opportunities,
         deteriorated, improved, report_month
+
+    The overview lives inside ``<div class="c-in-focus">``.  It has two
+    ``<section class="c-in-focus__state">`` blocks, each headed by an
+    ``<h3>`` ("Outlook for This Month" / "Trends for Last Month") with
+    the month in a child ``<span>``.  Category ``<h4>`` headings
+    (Conflict Risk Alerts, etc.) are inside
+    ``<div class="c-crisiswatch--regional__trend">`` blocks; country
+    links sit in ``<p>`` siblings of the ``<h4>``.
     """
     result: dict[str, Any] = {
         "outlook_month": "",
@@ -420,28 +449,35 @@ def _parse_overview_section(
         "improved": [],
     }
 
-    # The overview has two <h2> headings:
-    #   "Outlook for This Month March 2026"
-    #   "Trends for Last Month February 2026"
-    # Under each, <h4> sub-headings label the categories.
+    # --- Extract report month from <h1> → <time> as primary source ---
+    h1 = soup.find("h1")
+    if h1:
+        time_tag = h1.find("time")
+        if time_tag:
+            result["report_month"] = time_tag.get_text(strip=True)
 
-    all_h2 = soup.find_all("h2")
-    for h2 in all_h2:
-        text = h2.get_text(strip=True)
-        text_lower = text.lower()
+    # --- Extract outlook/trends months from <h3> headings ---
+    # The overview uses <h3> (not <h2>) for "Outlook for This Month" /
+    # "Trends for Last Month".  The month is in a child <span>.
+    in_focus = soup.find("div", class_="c-in-focus")
+    if in_focus:
+        for h3 in in_focus.find_all("h3"):
+            text = h3.get_text(strip=True)
+            text_lower = text.lower()
 
-        if "outlook for this month" in text_lower:
-            # Extract month: everything after "Outlook for This Month "
-            m = re.search(r"(?i)outlook for this month\s+(.+)", text)
-            if m:
-                result["outlook_month"] = m.group(1).strip()
+            # Month is in a child <span> of the <h3>.
+            month_span = h3.find("span")
+            month_text = month_span.get_text(strip=True) if month_span else ""
 
-        elif "trends for last month" in text_lower:
-            m = re.search(r"(?i)trends for last month\s+(.+)", text)
-            if m:
-                result["report_month"] = m.group(1).strip()
+            if "outlook for this month" in text_lower:
+                result["outlook_month"] = month_text or text.replace(
+                    "Outlook for This Month", ""
+                ).strip()
+            elif "trends for last month" in text_lower:
+                if month_text:
+                    result["report_month"] = month_text
 
-    # Parse <h4> category headings and collect country links that follow.
+    # --- Parse <h4> category headings and collect country links ---
     category_map = {
         "conflict risk alert": "conflict_risk_alerts",
         "resolution opportunit": "resolution_opportunities",
@@ -449,7 +485,9 @@ def _parse_overview_section(
         "improved situation": "improved",
     }
 
-    all_h4 = soup.find_all("h4")
+    # Scope to the overview container to avoid picking up stray <h4>s.
+    search_root = in_focus or soup
+    all_h4 = search_root.find_all("h4")
     for h4 in all_h4:
         h4_text = h4.get_text(strip=True).lower()
         target_key = None
@@ -460,12 +498,11 @@ def _parse_overview_section(
         if not target_key:
             continue
 
-        # Collect <a> tags between this <h4> and the next <h4>/<h2>.
+        # Country links are in <p> or <div> siblings within the same
+        # <div class="c-crisiswatch--regional__trend"> parent.
         countries: list[str] = []
-        # Look inside the h4's parent container for links
         parent = h4.parent
         if parent:
-            # Find all links after this h4 within the same parent
             for link in parent.find_all("a"):
                 country_name = link.get_text(strip=True)
                 if country_name:
@@ -501,113 +538,96 @@ def _parse_country_entries(
     """Parse per-country entries from the Latest Updates section.
 
     Returns (entries, month_name, year).
+
+    Each entry is a ``<div class="c-crisiswatch-entry"
+    data-entry-country="..." id="...">`` containing:
+    - ``<h3>`` with SVG status icons and country name text
+    - ``<time>`` with the edition month (e.g. "February 2026")
+    - ``<div class="o-crisis-states__detail">`` with narrative ``<p>`` tags
     """
     entries: list[dict[str, Any]] = []
     detected_month = ""
     detected_year = 0
 
-    # Country entries use <h3 id="country-slug"> tags.
-    country_headings = soup.find_all("h3", id=True)
-    log.info("Found %d country <h3> headings", len(country_headings))
+    # Country entries use <div class="c-crisiswatch-entry" data-entry-country="...">.
+    entry_divs = soup.find_all("div", class_="c-crisiswatch-entry")
+    log.info("Found %d c-crisiswatch-entry divs", len(entry_divs))
 
-    for h3 in country_headings:
+    for entry_div in entry_divs:
+        country_slug = entry_div.get("data-entry-country", "")
+        if not country_slug:
+            continue
+
+        # Country name is the text content of the <h3> (stripping SVG icons).
+        h3 = entry_div.find("h3")
+        if not h3:
+            continue
         country_name = h3.get_text(strip=True)
         if not country_name:
             continue
 
-        # Skip non-country headings (e.g. section titles)
-        country_id = h3.get("id", "")
-        if not country_id or country_id.startswith("block-"):
-            continue
-
         iso3 = _resolve_iso3(country_name)
         if not iso3:
-            # Try cleaning up: sometimes names have extra text
-            # e.g. "Israel/Palestine" or "India (Jammu and Kashmir)"
+            # Try cleaning up: "Israel/Palestine", "India (Jammu and Kashmir)"
             clean_name = re.sub(r"\s*\(.*?\)\s*", "", country_name).strip()
             iso3 = _resolve_iso3(clean_name)
             if not iso3:
-                log.warning("Unmatched country: '%s' (id=%s)", country_name, country_id)
+                log.warning(
+                    "Unmatched country: '%s' (slug=%s)",
+                    country_name, country_slug,
+                )
 
-        # Collect all siblings until the next <h3> or <h2>.
-        siblings: list[Tag] = []
-        for sib in h3.find_next_siblings():
-            if not isinstance(sib, Tag):
-                continue
-            if sib.name in ("h3", "h2"):
-                break
-            siblings.append(sib)
-
-        # --- Extract arrow/status from the most recent timeline entry ---
+        # --- Extract arrow/status from SVG icons in the <h3> ---
+        # Icons: <span class="o-icon ..."><svg><use xlink:href="#deteriorated"></use></svg></span>
         arrow = "unchanged"
         alert_type = ""
-        entry_month = ""
 
-        for sib in siblings:
-            if sib.name != "a":
-                continue
-            href = sib.get("href", "")
-            if "/crisiswatch" not in href:
-                continue
+        for use_tag in h3.find_all("use"):
+            href = (
+                use_tag.get("xlink:href")
+                or use_tag.get("href")
+                or ""
+            )
+            if href in _SVG_STATUS_MAP:
+                a, at = _SVG_STATUS_MAP[href]
+                if a:
+                    arrow = a
+                if at:
+                    alert_type = at
 
-            # Timeline <a> tags have two <span> children:
-            #   <span>Deteriorated Situation</span>
-            #   <span>February 2026</span>
-            spans = sib.find_all("span")
-            if len(spans) >= 2:
-                status_text = spans[0].get_text(strip=True).lower()
-                month_text = spans[1].get_text(strip=True)
+        # --- Extract month from <time> tag ---
+        time_tag = entry_div.find("time")
+        if time_tag:
+            time_text = time_tag.get_text(strip=True)
+            if time_text and not detected_month:
+                m = re.match(r"(\w+)\s+(\d{4})", time_text)
+                if m:
+                    detected_month = f"{m.group(1)} {m.group(2)}"
+                    try:
+                        detected_year = int(m.group(2))
+                    except ValueError:
+                        pass
 
-                # We want the LAST (most recent) timeline entry.
-                # The timeline goes chronologically, so keep overwriting.
-                for pattern, (a, at) in _STATUS_MAP.items():
-                    if pattern in status_text:
-                        arrow = a
-                        if at:
-                            alert_type = at
-                        entry_month = month_text
-                        break
-            elif len(spans) == 1:
-                # Single span — try to parse status text
-                status_text = spans[0].get_text(strip=True).lower()
-                for pattern, (a, at) in _STATUS_MAP.items():
-                    if pattern in status_text:
-                        arrow = a
-                        if at:
-                            alert_type = at
-                        break
-
-        # Try to detect month/year from the most recent timeline entry.
-        if entry_month and not detected_month:
-            m = re.match(r"(\w+)\s+(\d{4})", entry_month)
-            if m:
-                detected_month = f"{m.group(1)} {m.group(2)}"
-                try:
-                    detected_year = int(m.group(2))
-                except ValueError:
-                    pass
-
-        # --- Extract summary from narrative paragraphs ---
+        # --- Extract summary from narrative div ---
+        detail_div = entry_div.find(
+            "div", class_=re.compile(r"o-crisis-states__detail"),
+        )
         summary_parts: list[str] = []
-        for sib in siblings:
-            if sib.name != "p":
-                continue
-            # Skip paragraphs that are just archive links
-            if sib.find("a", href=re.compile(r"/crisiswatch/database")):
-                continue
-            text = sib.get_text(strip=True)
-            if text:
-                summary_parts.append(text)
-
-        # The first <strong> in the first <p> is typically the headline.
         headline = ""
-        for sib in siblings:
-            if sib.name != "p":
-                continue
-            strong = sib.find("strong")
+
+        if detail_div:
+            for p_tag in detail_div.find_all("p"):
+                # Skip "Click here for past entries" links
+                if p_tag.find("a", href=re.compile(r"/crisiswatch/database")):
+                    continue
+                text = p_tag.get_text(strip=True)
+                if text:
+                    summary_parts.append(text)
+
+            # The first <strong> is typically the headline.
+            strong = detail_div.find("strong")
             if strong:
                 headline = strong.get_text(strip=True)
-                break
 
         # Build summary: prefer headline, fall back to first paragraph.
         summary = headline or (summary_parts[0] if summary_parts else "")
@@ -615,14 +635,28 @@ def _parse_country_entries(
         if len(summary) > 500:
             summary = summary[:497] + "..."
 
-        entry: dict[str, Any] = {
-            "country": country_name,
-            "iso3": iso3 or "",
-            "arrow": arrow,
-            "alert_type": alert_type,
-            "summary": summary,
-        }
-        entries.append(entry)
+        # --- Expand regional entries into per-country rows ---
+        if country_name in _REGIONAL_ENTRY_MAP:
+            for sub_country, sub_iso3 in _REGIONAL_ENTRY_MAP[country_name]:
+                entries.append({
+                    "country": sub_country,
+                    "iso3": sub_iso3,
+                    "arrow": arrow,
+                    "alert_type": alert_type,
+                    "summary": summary,
+                })
+            log.info(
+                "Expanded regional entry '%s' into %d countries",
+                country_name, len(_REGIONAL_ENTRY_MAP[country_name]),
+            )
+        else:
+            entries.append({
+                "country": country_name,
+                "iso3": iso3 or "",
+                "arrow": arrow,
+                "alert_type": alert_type,
+                "summary": summary,
+            })
 
     return entries, detected_month, detected_year
 
