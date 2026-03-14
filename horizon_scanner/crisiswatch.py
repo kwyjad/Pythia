@@ -5,16 +5,15 @@
 
 """ICG CrisisWatch connector — monthly conflict monitoring data.
 
-Fetches the latest ICG CrisisWatch data via Gemini grounding search:
-  1. "On the Horizon" flags (conflict risks + resolution opportunities)
-  2. Global Overview arrows (deteriorated/improved/unchanged for ~70 countries)
+Loads the latest ICG CrisisWatch data from two sources, in priority order:
 
-Since crisisgroup.org is behind Cloudflare (returns 403 to programmatic
-fetches), the Gemini queries avoid ``site:`` operators and rely on Google's
-cached snippets instead.
-
-Fallback: if Gemini returns no data, loads from a local JSON cache file
-at ``horizon_scanner/data/crisiswatch_latest.json``.
+  1. **Local JSON file** (``horizon_scanner/data/crisiswatch_latest.json``)
+     produced by the Playwright scraper (``scripts/refresh_crisiswatch.py``,
+     run monthly via ``.github/workflows/refresh-crisiswatch.yml``).
+     Used even if stale (>45 days — a warning is logged).
+  2. **Gemini grounding calls** (fallback) — "On the Horizon" flags +
+     Global Overview arrows.  Only attempted when the JSON file is missing
+     or empty.
 
 Called ONCE per HS run (not per-country). Results are cached in-memory
 for the run duration and persisted to the ``crisiswatch_entries`` DuckDB
@@ -463,25 +462,51 @@ def _parse_overview_response(text: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Fallback JSON cache
+# JSON file loader (primary source)
 # ---------------------------------------------------------------------------
 
+_STALENESS_DAYS = 45
 
-def _load_fallback_json() -> Dict[str, Any] | None:
-    """Load CrisisWatch data from local fallback JSON file."""
+
+def _load_from_json() -> Dict[str, Any] | None:
+    """Load CrisisWatch data from the scraped JSON file (primary source).
+
+    Reads ``horizon_scanner/data/crisiswatch_latest.json`` produced by the
+    Playwright scraper (``scripts/refresh_crisiswatch.py``).  If the file's
+    ``fetched_at`` timestamp is older than ``_STALENESS_DAYS``, a warning is
+    logged but the data is still returned (stale data is better than none).
+
+    Returns an ISO3-keyed dict matching the schema consumed by
+    ``get_horizon_countries()`` and ``format_crisiswatch_for_prompt()``, or
+    ``None`` if the file is missing / unparseable / empty.
+    """
     if not _FALLBACK_PATH.exists():
-        log.debug("CrisisWatch fallback file not found at %s", _FALLBACK_PATH)
+        log.debug("CrisisWatch JSON file not found at %s", _FALLBACK_PATH)
         return None
     try:
         data = json.loads(_FALLBACK_PATH.read_text(encoding="utf-8"))
         entries = data.get("entries", [])
         if not entries:
-            log.debug("CrisisWatch fallback file is empty or has no entries.")
+            log.debug("CrisisWatch JSON file has no entries.")
             return None
-        log.info(
-            "CrisisWatch: loaded %d entries from fallback JSON (month=%s)",
-            len(entries), data.get("month", "unknown"),
-        )
+
+        # --- staleness check on fetched_at ---
+        fetched_at_str = data.get("fetched_at", "")
+        if fetched_at_str:
+            try:
+                fetched_at = datetime.fromisoformat(fetched_at_str)
+                age_days = (datetime.now(timezone.utc) - fetched_at).days
+                if age_days > _STALENESS_DAYS:
+                    log.warning(
+                        "CrisisWatch JSON is %d days old (fetched %s) — "
+                        "exceeds %d-day staleness threshold.  Using anyway.",
+                        age_days, fetched_at_str, _STALENESS_DAYS,
+                    )
+            except (ValueError, TypeError):
+                log.debug("CrisisWatch JSON: could not parse fetched_at=%r",
+                          fetched_at_str)
+
+        # --- build ISO3-keyed result dict ---
         result: Dict[str, Any] = {}
         for entry in entries:
             iso3 = (entry.get("iso3") or "").strip().upper()
@@ -498,10 +523,40 @@ def _load_fallback_json() -> Dict[str, Any] | None:
                     "month": data.get("month", ""),
                     "year": data.get("year", 0),
                 }
-        return result if result else None
+
+        if not result:
+            return None
+
+        # --- summary log ---
+        n_deteriorated = sum(
+            1 for e in result.values() if e.get("arrow") == "deteriorated"
+        )
+        n_improved = sum(
+            1 for e in result.values() if e.get("arrow") == "improved"
+        )
+        n_conflict_risk = sum(
+            1 for e in result.values()
+            if e.get("alert_type") == "conflict_risk"
+        )
+        n_resolution = sum(
+            1 for e in result.values()
+            if e.get("alert_type") == "resolution_opportunity"
+        )
+        log.info(
+            "CrisisWatch: loaded %d entries from JSON (month=%s), "
+            "deteriorated=%d, improved=%d, conflict_risk=%d, "
+            "resolution_opportunity=%d",
+            len(result), data.get("month", "unknown"),
+            n_deteriorated, n_improved, n_conflict_risk, n_resolution,
+        )
+        return result
     except Exception as exc:
-        log.warning("CrisisWatch fallback load failed: %s", exc)
+        log.warning("CrisisWatch JSON load failed: %s", exc)
         return None
+
+
+# Keep legacy alias for any external callers.
+_load_fallback_json = _load_from_json
 
 
 # ---------------------------------------------------------------------------
@@ -717,11 +772,19 @@ def fetch_crisiswatch(
     year: int | None = None,
     month: int | None = None,
 ) -> Dict[str, Any] | None:
-    """Fetch CrisisWatch data via Gemini grounding, with fallback to JSON.
+    """Fetch CrisisWatch data — JSON file first, Gemini grounding fallback.
 
     Returns a dict keyed by ISO3 (uppercased), where each value is a
     CrisisWatch entry dict with keys: country, iso3, arrow, alert_type,
     summary, month, year.
+
+    **Priority order:**
+      1. Local JSON file (``crisiswatch_latest.json``) produced by the
+         monthly Playwright scraper.  Used even if stale (>45 days — a
+         warning is logged but data is still consumed).
+      2. Gemini grounding calls (``_fetch_on_the_horizon`` +
+         ``_fetch_global_overview``).  Only attempted when JSON is missing
+         or empty.
 
     Called ONCE per HS run; result is cached in-memory.
     """
@@ -736,17 +799,54 @@ def fetch_crisiswatch(
 
     month_name = calendar.month_name[month]
 
-    # --- Phase 1: Two Gemini grounding calls ---
+    # --- Phase 1: Try JSON file (primary source) ---
+    merged = _load_from_json()
+
+    # --- Phase 2: Gemini grounding fallback ---
+    if not merged:
+        log.info(
+            "CrisisWatch: JSON file unavailable, "
+            "falling back to Gemini grounding."
+        )
+        merged = _fetch_via_gemini(year, month_name)
+
+    # --- Final summary ---
+    if merged:
+        log.info(
+            "CrisisWatch: %d countries resolved. "
+            "Deteriorated=%d, Improved=%d, Unchanged=%d, Alerts=%d",
+            len(merged),
+            sum(1 for e in merged.values()
+                if e.get("arrow") == "deteriorated"),
+            sum(1 for e in merged.values()
+                if e.get("arrow") == "improved"),
+            sum(1 for e in merged.values()
+                if e.get("arrow") == "unchanged"),
+            sum(1 for e in merged.values() if e.get("alert_type")),
+        )
+        # Persist to DuckDB for triage/SPD phases.
+        store_crisiswatch_entries(merged)
+    else:
+        log.warning("CrisisWatch: no data available from any source.")
+
+    _CACHE = merged if merged else None
+    return _CACHE
+
+
+def _fetch_via_gemini(year: int, month_name: str) -> Dict[str, Any] | None:
+    """Fetch CrisisWatch via Gemini grounding (secondary / fallback path).
+
+    Makes two Gemini grounding calls — "On the Horizon" flags and Global
+    Overview arrows — then merges the results.
+    """
     horizon_entries = _fetch_on_the_horizon(year, month_name)
     overview_entries = _fetch_global_overview(year, month_name)
 
     log.info(
-        "CrisisWatch fetch: horizon=%d entries, overview=%d entries",
+        "CrisisWatch Gemini fetch: horizon=%d entries, overview=%d entries",
         len(horizon_entries), len(overview_entries),
     )
 
-    # Merge results. Overview entries are the base; horizon entries add
-    # alert_type flags on top.
     merged: Dict[str, Any] = {}
     unmatched: list[str] = []
 
@@ -776,7 +876,6 @@ def fetch_crisiswatch(
             continue
         if iso3 in merged:
             merged[iso3]["alert_type"] = entry.get("alert_type", "")
-            # Keep horizon summary if the overview one is empty.
             horizon_summary = entry.get("summary", "")
             if horizon_summary and not merged[iso3]["summary"]:
                 merged[iso3]["summary"] = horizon_summary
@@ -793,32 +892,11 @@ def fetch_crisiswatch(
 
     if unmatched:
         log.warning(
-            "CrisisWatch: %d unmatched country names: %s",
+            "CrisisWatch Gemini: %d unmatched country names: %s",
             len(unmatched), sorted(set(unmatched)),
         )
 
-    # --- Phase 2: Fallback to JSON if Gemini returned nothing ---
-    if not merged:
-        log.info("CrisisWatch: Gemini returned no data, trying fallback JSON.")
-        merged = _load_fallback_json() or {}
-
-    if merged:
-        log.info(
-            "CrisisWatch: %d countries resolved. "
-            "Deteriorated=%d, Improved=%d, Unchanged=%d, Alerts=%d",
-            len(merged),
-            sum(1 for e in merged.values() if e.get("arrow") == "deteriorated"),
-            sum(1 for e in merged.values() if e.get("arrow") == "improved"),
-            sum(1 for e in merged.values() if e.get("arrow") == "unchanged"),
-            sum(1 for e in merged.values() if e.get("alert_type")),
-        )
-        # Persist to DuckDB for triage/SPD phases.
-        store_crisiswatch_entries(merged)
-    else:
-        log.warning("CrisisWatch: no data available from any source.")
-
-    _CACHE = merged if merged else None
-    return _CACHE
+    return merged if merged else None
 
 
 # ---------------------------------------------------------------------------
