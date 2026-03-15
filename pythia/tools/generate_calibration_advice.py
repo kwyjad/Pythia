@@ -1375,7 +1375,131 @@ def _format_per_model_advice(
 # Upsert
 # ---------------------------------------------------------------------------
 
-_PK_DROPPED = False  # module-level flag so we only attempt once per process
+_PK_MIGRATED = False  # module-level flag so we only attempt once per process
+
+
+def _migrate_calibration_advice_pk(conn: Any) -> None:
+    """Ensure calibration_advice has NO legacy 3-column PK.
+
+    DuckDB does not support ``ALTER TABLE DROP CONSTRAINT`` for PRIMARY KEY
+    constraints, so we must **recreate the table** if a PK exists.  The data
+    is copied through a temp table and the 4-column unique index is created
+    afterwards.
+    """
+    global _PK_MIGRATED  # noqa: PLW0603
+    if _PK_MIGRATED:
+        return
+    _PK_MIGRATED = True
+
+    # ── 1. Check whether a PRIMARY KEY constraint exists ────────────
+    has_pk = False
+    try:
+        pk_rows = conn.execute(
+            """
+            SELECT constraint_name
+            FROM information_schema.table_constraints
+            WHERE table_name = 'calibration_advice'
+              AND constraint_type = 'PRIMARY KEY'
+            """
+        ).fetchall()
+        has_pk = len(pk_rows) > 0
+        if has_pk:
+            LOGGER.info(
+                "calibration_advice has legacy PK %s — recreating table.",
+                [r[0] for r in pk_rows],
+            )
+    except Exception as exc:
+        LOGGER.warning("Could not query calibration_advice constraints: %s", exc)
+
+    if not has_pk:
+        # No PK to worry about; just ensure the unique index exists.
+        try:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_calibration_advice "
+                "ON calibration_advice (as_of_month, hazard_code, metric, model_name)"
+            )
+        except Exception as exc:
+            LOGGER.warning("Failed to create ux_calibration_advice: %s", exc)
+        return
+
+    # ── 2. Discover existing columns so the CTAS is safe ────────────
+    existing_cols: set = set()
+    try:
+        for row in conn.execute(
+            "PRAGMA table_info('calibration_advice')"
+        ).fetchall():
+            existing_cols.add(str(row[1]).lower())
+    except Exception:
+        pass
+
+    # ── 3. Recreate the table without a PK ──────────────────────────
+    try:
+        conn.execute(
+            "ALTER TABLE calibration_advice "
+            "RENAME TO _calibration_advice_old"
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE calibration_advice (
+                as_of_month    TEXT,
+                hazard_code    TEXT,
+                metric         TEXT,
+                model_name     TEXT DEFAULT '__shared__',
+                advice         TEXT,
+                findings_json  TEXT,
+                advice_version TEXT DEFAULT 'v1',
+                created_at     TIMESTAMP DEFAULT now()
+            )
+            """
+        )
+
+        # Build a column-safe SELECT that handles missing columns.
+        col_exprs: list = []
+        for col, fallback in (
+            ("as_of_month", None),
+            ("hazard_code", None),
+            ("metric", None),
+            ("model_name", "COALESCE(model_name, '__shared__')"),
+            ("advice", None),
+            ("findings_json", "NULL"),
+            ("advice_version", "'v1'"),
+            ("created_at", "now()"),
+        ):
+            if col in existing_cols:
+                col_exprs.append(fallback if fallback and col == "model_name" else col)
+            else:
+                col_exprs.append(fallback or "NULL")
+
+        conn.execute(
+            f"INSERT INTO calibration_advice "
+            f"SELECT {', '.join(col_exprs)} FROM _calibration_advice_old"
+        )
+
+        conn.execute("DROP TABLE _calibration_advice_old")
+
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_calibration_advice "
+            "ON calibration_advice (as_of_month, hazard_code, metric, model_name)"
+        )
+        LOGGER.info("Recreated calibration_advice table without legacy PK.")
+
+    except Exception as exc:
+        LOGGER.warning(
+            "Failed to recreate calibration_advice table: %s — "
+            "attempting to restore old table.",
+            exc,
+        )
+        # Best-effort rollback: if rename succeeded but create/insert/drop
+        # failed, try to rename back.
+        try:
+            conn.execute(
+                "ALTER TABLE _calibration_advice_old "
+                "RENAME TO calibration_advice"
+            )
+        except Exception:
+            pass
+        raise
 
 
 def _upsert_advice(

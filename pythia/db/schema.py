@@ -784,17 +784,77 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
     except Exception:
         pass
 
-    # Recreate PK if it doesn't include model_name.
-    # Drop the old 3-column PK so only one unique constraint remains;
-    # DuckDB errors on INSERT … ON CONFLICT when multiple unique constraints exist.
-    for pk_name in (
-        "calibration_advice_pkey",
-        "calibration_advice_as_of_month_hazard_code_metric_key",
-    ):
+    # DuckDB does not support ALTER TABLE DROP CONSTRAINT for PRIMARY KEY.
+    # If the legacy 3-column PK exists, recreate the table without it.
+    try:
+        pk_rows = con.execute(
+            """
+            SELECT constraint_name
+            FROM information_schema.table_constraints
+            WHERE table_name = 'calibration_advice'
+              AND constraint_type = 'PRIMARY KEY'
+            """
+        ).fetchall()
+        if pk_rows:
+            con.execute(
+                "ALTER TABLE calibration_advice "
+                "RENAME TO _calibration_advice_old"
+            )
+            con.execute(
+                """
+                CREATE TABLE calibration_advice (
+                    as_of_month    TEXT,
+                    hazard_code    TEXT,
+                    metric         TEXT,
+                    model_name     TEXT DEFAULT '__shared__',
+                    advice         TEXT,
+                    findings_json  TEXT,
+                    advice_version TEXT DEFAULT 'v1',
+                    created_at     TIMESTAMP DEFAULT now()
+                )
+                """
+            )
+            # Copy data; COALESCE model_name to sentinel.
+            old_cols = {
+                str(r[1]).lower()
+                for r in con.execute(
+                    "PRAGMA table_info('_calibration_advice_old')"
+                ).fetchall()
+            }
+            col_exprs = []
+            for col, fb in (
+                ("as_of_month", None),
+                ("hazard_code", None),
+                ("metric", None),
+                ("model_name", "COALESCE(model_name, '__shared__')"),
+                ("advice", None),
+                ("findings_json", "NULL"),
+                ("advice_version", "'v1'"),
+                ("created_at", "now()"),
+            ):
+                if col in old_cols:
+                    col_exprs.append(
+                        fb if fb and col == "model_name" else col
+                    )
+                else:
+                    col_exprs.append(fb or "NULL")
+
+            con.execute(
+                f"INSERT INTO calibration_advice "
+                f"SELECT {', '.join(col_exprs)} "
+                f"FROM _calibration_advice_old"
+            )
+            con.execute("DROP TABLE _calibration_advice_old")
+    except Exception:
+        # Best-effort rollback.
         try:
-            con.execute(f"ALTER TABLE calibration_advice DROP CONSTRAINT {pk_name}")
+            con.execute(
+                "ALTER TABLE _calibration_advice_old "
+                "RENAME TO calibration_advice"
+            )
         except Exception:
             pass
+
     try:
         con.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_calibration_advice "
