@@ -761,7 +761,7 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
             findings_json TEXT,
             advice_version TEXT DEFAULT 'v1',
             created_at TIMESTAMP DEFAULT now(),
-            PRIMARY KEY (as_of_month, hazard_code, metric)
+            PRIMARY KEY (as_of_month, hazard_code, metric, model_name)
         )
         """,
         {
@@ -787,6 +787,27 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
     # Recreate PK if it doesn't include model_name.
     # Drop the old 3-column PK so only one unique constraint remains;
     # DuckDB errors on INSERT … ON CONFLICT when multiple unique constraints exist.
+    # Query the catalog for the real constraint name (DuckDB auto-names vary).
+    try:
+        pk_rows = con.execute(
+            """
+            SELECT constraint_name
+            FROM information_schema.table_constraints
+            WHERE table_name = 'calibration_advice'
+              AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+              AND constraint_name != 'ux_calibration_advice'
+            """
+        ).fetchall()
+        for (cname,) in pk_rows:
+            try:
+                con.execute(
+                    f'ALTER TABLE calibration_advice DROP CONSTRAINT "{cname}"'
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # Hardcoded fallback names (belt-and-suspenders).
     for pk_name in (
         "calibration_advice_pkey",
         "calibration_advice_as_of_month_hazard_code_metric_key",
