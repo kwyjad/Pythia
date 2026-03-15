@@ -377,13 +377,15 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 
 ## Canonical DB artifact discovery
 
-The `pythia-resolver-db` DuckDB artifact is shared across three workflows. Each workflow's "Download canonical resolver DB" step searches for the most recent successful run from **all three** workflow types:
+The `pythia-resolver-db` DuckDB artifact is shared across multiple workflows. Each workflow's "Download canonical resolver DB" step searches for the most recent successful run from candidate workflow types:
 
 1. **Horizon Scanner Triage** (`run_horizon_scanner.yml`) — DB_SOURCE=`pipeline`
 2. **Resolver — Initial Backfill** — DB_SOURCE=`backfill`
 3. **Ingest Structured Data** (`ingest-structured-data.yml`) — DB_SOURCE=`ingest`
+4. **Compute SPD Scores** (`compute_scores.yml`) — upstream of calibration
+5. **Compute Calibration Weights & Advice** (`compute_calibration_pythia.yml`) — calibration pipeline
 
-Candidates are sorted by `createdAt` descending; the first one that downloads successfully and passes the DB signature check is used. If a new workflow is added that produces `pythia-resolver-db`, it must be added as a candidate source in all workflows that consume the artifact.
+Candidates are sorted by `createdAt` descending; the first one that downloads successfully and passes the DB signature check is used. If a new workflow is added that produces `pythia-resolver-db`, it must be added as a candidate source in all workflows that consume the artifact. The `compute_scores.yml` and `compute_calibration_pythia.yml` workflows use the triggering `workflow_run.id` as the primary source, falling back to canonical discovery on manual `workflow_dispatch`.
 
 ## Run health diagnostics
 

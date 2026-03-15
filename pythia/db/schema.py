@@ -761,7 +761,7 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
             findings_json TEXT,
             advice_version TEXT DEFAULT 'v1',
             created_at TIMESTAMP DEFAULT now(),
-            PRIMARY KEY (as_of_month, hazard_code, metric)
+            PRIMARY KEY (as_of_month, hazard_code, metric, model_name)
         )
         """,
         {

@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -26,7 +26,6 @@ from pythia.tools.compute_scores import (
     FATAL_THRESHOLDS,
     SPD_CLASS_BINS_PA,
     SPD_CLASS_BINS_FATALITIES,
-    _bucket_index,
 )
 from resolver.db import duckdb_io
 
@@ -95,14 +94,16 @@ def _table_exists(conn: Any, name: str) -> bool:
     try:
         conn.execute(f"PRAGMA table_info('{name}')").fetchall()
         return True
-    except Exception:
+    except Exception as exc:
+        LOGGER.debug("_table_exists(%s) returned False: %s", name, exc)
         return False
 
 
 def _row_count(conn: Any, name: str) -> int:
     try:
         return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("_row_count(%s) failed, returning 0: %s", name, exc)
         return 0
 
 
@@ -124,7 +125,8 @@ def _ensure_findings_json_column(conn: Any) -> None:
     try:
         for row in conn.execute("PRAGMA table_info('calibration_advice')").fetchall():
             existing.add(str(row[1]).lower())
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning("Cannot inspect calibration_advice columns: %s", exc)
         return
 
     for col, col_type in [
@@ -137,17 +139,16 @@ def _ensure_findings_json_column(conn: Any) -> None:
                 conn.execute(
                     f"ALTER TABLE calibration_advice ADD COLUMN {col} {col_type}"
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                LOGGER.warning("Failed to add column %s to calibration_advice: %s", col, exc)
 
     # Backfill NULL model_name to sentinel
-    if "model_name" in existing or "model_name" not in existing:
-        try:
-            conn.execute(
-                "UPDATE calibration_advice SET model_name = '__shared__' WHERE model_name IS NULL"
-            )
-        except Exception:
-            pass
+    try:
+        conn.execute(
+            "UPDATE calibration_advice SET model_name = '__shared__' WHERE model_name IS NULL"
+        )
+    except Exception as exc:
+        LOGGER.debug("model_name backfill skipped: %s", exc)
 
 
 def _class_bins_for_metric(metric: str) -> List[str]:
@@ -167,27 +168,24 @@ def _tail_bins(metric: str) -> Tuple[str, str]:
 
 
 def _bucket_case_sql(metric: str) -> str:
-    """Generate a SQL CASE expression to bucketify resolutions.value."""
+    """Generate a SQL CASE expression to bucketify resolutions.value.
+
+    Thresholds are derived from the canonical ``PA_THRESHOLDS`` /
+    ``FATAL_THRESHOLDS`` lists in ``compute_scores`` so they stay in sync.
+    """
     m = (metric or "").upper()
-    if m == "FATALITIES":
-        return """
+    thresholds = FATAL_THRESHOLDS if m == "FATALITIES" else PA_THRESHOLDS
+    # thresholds = [0.0, t1, t2, t3, t4, inf] → bucket boundaries are t1..t4
+    when_clauses = "\n".join(
+        f"                WHEN r.value < {t:g} THEN {i + 1}"
+        for i, t in enumerate(thresholds[1:-1])
+    )
+    return f"""
             CASE
-                WHEN r.value < 5 THEN 1
-                WHEN r.value < 25 THEN 2
-                WHEN r.value < 100 THEN 3
-                WHEN r.value < 500 THEN 4
-                ELSE 5
+{when_clauses}
+                ELSE {len(thresholds) - 1}
             END
         """
-    return """
-        CASE
-            WHEN r.value < 10000 THEN 1
-            WHEN r.value < 50000 THEN 2
-            WHEN r.value < 250000 THEN 3
-            WHEN r.value < 500000 THEN 4
-            ELSE 5
-        END
-    """
 
 
 def _bin_to_bucket_num(class_bin: str, metric: str) -> Optional[int]:
@@ -1513,34 +1511,7 @@ def _upsert_advice(
     advice_version: str = "v1",
 ) -> None:
     """Write (or replace) a calibration_advice row."""
-    # Drop the legacy 3-column PK if it still exists — it blocks multi-model rows.
-    global _PK_DROPPED  # noqa: PLW0603
-    if not _PK_DROPPED:
-        for pk_name in (
-            "calibration_advice_pkey",
-            "calibration_advice_as_of_month_hazard_code_metric_key",
-        ):
-            try:
-                conn.execute(
-                    f"ALTER TABLE calibration_advice DROP CONSTRAINT {pk_name}"
-                )
-            except Exception:
-                pass
-        # Ensure the 4-column unique index exists (idempotent).
-        try:
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS ux_calibration_advice "
-                "ON calibration_advice (as_of_month, hazard_code, metric, model_name)"
-            )
-        except Exception:
-            pass
-        _PK_DROPPED = True
-
-    conn.execute(
-        "DELETE FROM calibration_advice "
-        "WHERE as_of_month = ? AND hazard_code = ? AND metric = ? AND model_name = ?",
-        [as_of_month, hazard_code, metric, model_name],
-    )
+    _migrate_calibration_advice_pk(conn)
 
     findings_safe = {}
     for k, v in findings.items():
@@ -1571,7 +1542,7 @@ def _upsert_advice(
             advice_text,
             json.dumps(findings_safe),
             advice_version,
-            datetime.utcnow(),
+            datetime.now(timezone.utc),
         ],
     )
 
@@ -1818,6 +1789,7 @@ def _compute_global_findings(
 
 def _seed_default_advice(conn: Any) -> None:
     """Insert hand-written seed advice with sentinel date (superseded by real data)."""
+    _migrate_calibration_advice_pk(conn)
     seed_month = "2000-01"
 
     for (hz, m), advice_text in SEED_ADVICE.items():
@@ -1836,8 +1808,10 @@ def _seed_default_advice(conn: Any) -> None:
                 INSERT INTO calibration_advice
                     (as_of_month, hazard_code, metric, advice, created_at)
                 VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (as_of_month, hazard_code, metric, model_name)
+                DO NOTHING
                 """,
-                [seed_month, hz, m, advice_text, datetime.utcnow()],
+                [seed_month, hz, m, advice_text, datetime.now(timezone.utc)],
             )
             LOGGER.info("Seeded default advice for %s/%s.", hz, m)
         except Exception as exc:

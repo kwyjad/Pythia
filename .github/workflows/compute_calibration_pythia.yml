@@ -44,33 +44,95 @@ jobs:
           pip install -r python_library_requirements.txt
           pip install duckdb
 
-      - name: Download canonical resolver DB for this backfill
+      - name: Download canonical resolver DB
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           mkdir -p data
-          RUN_ID=${{ github.event.workflow_run.id }}
-          echo "Downloading pythia-resolver-db from backfill run $RUN_ID"
-          gh run download "$RUN_ID" -n pythia-resolver-db --dir data
+          rm -rf data/pythia-resolver-db
+          rm -f data/resolver.duckdb
 
-          echo "Artifacts under data/:"
-          ls -R data
-
-          if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
-            SRC="data/pythia-resolver-db/resolver.duckdb"
-          else
-            SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
-          fi
-
-          if [ -n "$SRC" ]; then
-            echo "Found resolver DB at $SRC"
+          # ── Helper: locate resolver.duckdb inside downloaded artifact ──
+          locate_and_copy_db() {
+            if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
+              SRC="data/pythia-resolver-db/resolver.duckdb"
+            else
+              SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
+            fi
+            if [ -z "${SRC}" ]; then
+              return 1
+            fi
             if [ "$SRC" != "data/resolver.duckdb" ]; then
               cp "$SRC" data/resolver.duckdb
-            else
-              echo "DB already at canonical path data/resolver.duckdb; no copy needed."
             fi
-          else
-            echo "ERROR: resolver.duckdb not found in pythia-resolver-db for run $RUN_ID"
+            return 0
+          }
+
+          # ── Path A: triggered by workflow_run — download from triggering run ──
+          RUN_ID="${{ github.event.workflow_run.id }}"
+          if [ -n "$RUN_ID" ]; then
+            echo "Downloading pythia-resolver-db from triggering run $RUN_ID"
+            if gh run download "$RUN_ID" -n pythia-resolver-db --dir data && locate_and_copy_db; then
+              echo "Found resolver DB from triggering run $RUN_ID"
+              ls -lh data/resolver.duckdb
+              exit 0
+            fi
+            echo "WARNING: Could not download from triggering run $RUN_ID; falling back to canonical discovery."
+            rm -rf data/pythia-resolver-db
+          fi
+
+          # ── Path B: manual dispatch or fallback — canonical discovery ──
+          echo "Searching for most recent pythia-resolver-db artifact..."
+          CANDIDATES_FILE=$(mktemp)
+
+          gh run list \
+            --workflow "Pythia — Compute SPD Scores" \
+            --branch main --status success \
+            --json databaseId,createdAt --limit 10 \
+            | jq -r '.[] | "\(.createdAt),\(.databaseId),Compute SPD Scores"' >>"${CANDIDATES_FILE}" || true
+
+          gh run list \
+            --workflow "Pythia — Compute Calibration Weights & Advice" \
+            --branch main --status success \
+            --json databaseId,createdAt --limit 10 \
+            | jq -r '.[] | "\(.createdAt),\(.databaseId),Compute Calibration"' >>"${CANDIDATES_FILE}" || true
+
+          gh run list \
+            --workflow "Horizon Scanner Triage" \
+            --branch main --status success \
+            --json databaseId,createdAt --limit 10 \
+            | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
+
+          gh run list \
+            --workflow "Ingest Structured Data" \
+            --branch main --status success \
+            --json databaseId,createdAt --limit 10 \
+            | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
+
+          if [ ! -s "${CANDIDATES_FILE}" ]; then
+            echo "ERROR: No successful workflow runs found with pythia-resolver-db artifact."
+            exit 1
+          fi
+
+          sort -r "${CANDIDATES_FILE}" > "${CANDIDATES_FILE}.sorted"
+
+          FOUND=0
+          while IFS=',' read -r CREATED CAND_RUN_ID LABEL; do
+            echo "Trying ${LABEL} run ${CAND_RUN_ID} (${CREATED})..."
+            rm -rf data/pythia-resolver-db
+            rm -f data/resolver.duckdb
+
+            if gh run download "$CAND_RUN_ID" -n pythia-resolver-db --dir data && locate_and_copy_db; then
+              echo "Found resolver DB from ${LABEL} run ${CAND_RUN_ID}"
+              ls -lh data/resolver.duckdb
+              FOUND=1
+              break
+            fi
+          done < "${CANDIDATES_FILE}.sorted"
+
+          if [ "${FOUND}" -ne 1 ]; then
+            echo "ERROR: No valid pythia-resolver-db artifact found."
             exit 1
           fi
 
