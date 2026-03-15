@@ -1375,6 +1375,9 @@ def _format_per_model_advice(
 # Upsert
 # ---------------------------------------------------------------------------
 
+_PK_DROPPED = False  # module-level flag so we only attempt once per process
+
+
 def _upsert_advice(
     conn: Any,
     as_of_month: str,
@@ -1386,6 +1389,29 @@ def _upsert_advice(
     advice_version: str = "v1",
 ) -> None:
     """Write (or replace) a calibration_advice row."""
+    # Drop the legacy 3-column PK if it still exists — it blocks multi-model rows.
+    global _PK_DROPPED  # noqa: PLW0603
+    if not _PK_DROPPED:
+        for pk_name in (
+            "calibration_advice_pkey",
+            "calibration_advice_as_of_month_hazard_code_metric_key",
+        ):
+            try:
+                conn.execute(
+                    f"ALTER TABLE calibration_advice DROP CONSTRAINT {pk_name}"
+                )
+            except Exception:
+                pass
+        # Ensure the 4-column unique index exists (idempotent).
+        try:
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_calibration_advice "
+                "ON calibration_advice (as_of_month, hazard_code, metric, model_name)"
+            )
+        except Exception:
+            pass
+        _PK_DROPPED = True
+
     conn.execute(
         "DELETE FROM calibration_advice "
         "WHERE as_of_month = ? AND hazard_code = ? AND metric = ? AND model_name = ?",
