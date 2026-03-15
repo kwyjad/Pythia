@@ -2445,7 +2445,8 @@ def build_markdown(
     lines.append("")
 
     export_error = export_info.get("error")
-    if export_info or export_error or mapping_debug_records:
+    has_export_rows = export_info.get("rows", 0) > 0
+    if export_error or has_export_rows:
         lines.append("## Export Facts")
         lines.append("")
         if export_error:
@@ -2484,8 +2485,6 @@ def build_markdown(
                         if joined:
                             summary_line += f" — warnings: {joined}"
                     lines.append(summary_line)
-        else:
-            lines.append("- **Status:** export summary unavailable")
 
     acled_section = _render_acled_http_section(sorted_entries)
     if acled_section:

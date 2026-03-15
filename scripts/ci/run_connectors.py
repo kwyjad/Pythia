@@ -441,6 +441,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 written_rows = int(m.group(1))
         except Exception:
             pass
+        if written_rows == 0:
+            run_json_path = diag_base / name / f"{name}_run.json"
+            if run_json_path.exists():
+                try:
+                    run_data = json.loads(run_json_path.read_text())
+                    written_rows = int(run_data.get("rows_written", 0))
+                except Exception:
+                    pass
         result = diagnostics_finalize_run(
             diagnostics_ctx,
             status,
