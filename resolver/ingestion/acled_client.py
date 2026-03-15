@@ -1067,13 +1067,11 @@ def collect_rows() -> List[Dict[str, Any]]:
     try:
         records, source_url, diagnostics_meta = fetch_events(config)
     except RuntimeError as exc:
-        message = f"ACLED auth failed: {exc}"
+        LOG.warning("ACLED fetch_events failed: %s", exc)
         if ingestion_mode == "real":
-            print(message)
             if os.getenv("RESOLVER_FAIL_ON_STUB_ERROR") == "1":
                 raise
             return []
-        dbg(message)
         return []
     publication_date = date.today().isoformat()
     ingested_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
@@ -1081,6 +1079,9 @@ def collect_rows() -> List[Dict[str, Any]]:
     if records:
         rows = _build_rows(records, config, countries, shocks, source_url, publication_date, ingested_at)
     else:
+        start = diagnostics_meta.get("start", "?")
+        end = diagnostics_meta.get("end", "?")
+        LOG.warning("ACLED API returned zero events for window %s\u2192%s", start, end)
         rows = []
 
     if not rows and records:
@@ -1445,6 +1446,7 @@ def main() -> bool:
     if os.getenv("RESOLVER_SKIP_ACLED") == "1":
         dbg("RESOLVER_SKIP_ACLED=1 — skipping ACLED pull")
         _write_header_only(OUT_PATH)
+        print(f"wrote {OUT_PATH} rows=0 (skipped via RESOLVER_SKIP_ACLED)")
         return False
 
     try:
@@ -1452,14 +1454,22 @@ def main() -> bool:
     except Exception as exc:  # fail-soft
         dbg(f"collect_rows failed: {exc}")
         _write_header_only(OUT_PATH)
+        print(f"wrote {OUT_PATH} rows=0 (error: {exc})")
+        _write_run_summary(
+            {"http_status": None, "base_url": None, "source_url": None,
+             "start": None, "end": None, "params_keys": []},
+            rows_fetched=0, rows_normalized=0, rows_written=0,
+        )
         return False
 
     if not rows:
         dbg("no ACLED rows collected; writing header only")
         _write_header_only(OUT_PATH)
+        print(f"wrote {OUT_PATH} rows=0 (no data collected)")
         return False
 
     _write_rows(rows, OUT_PATH)
+    print(f"wrote {OUT_PATH} rows={len(rows)}")
     dbg(f"wrote {len(rows)} ACLED rows")
     return True
 

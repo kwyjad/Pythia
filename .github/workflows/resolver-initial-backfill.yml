@@ -334,6 +334,7 @@ jobs:
           ONLY_CONNECTOR: ${{ inputs.only_connector }}
           LOG_LEVEL: ${{ inputs.log_level }}
           EMPTY_POLICY: ${{ inputs.empty_policy }}
+          RESOLVER_SKIP_IDMC: "1"
           IDMC_HTTP_VERIFY: "true"
           IDMC_HTTP_TIMEOUT_CONNECT: "5"
           IDMC_HTTP_TIMEOUT_READ: "20"

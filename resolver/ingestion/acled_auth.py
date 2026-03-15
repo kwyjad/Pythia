@@ -193,6 +193,7 @@ def get_access_token() -> str:
             "Using environment-provided ACLED token",
             extra=_describe_token(existing, expiry),
         )
+        print("[acled_auth] Using existing environment token")
         _set_cache(existing, os.environ.get("ACLED_REFRESH_TOKEN"))
         return existing
     elif existing:
@@ -204,10 +205,12 @@ def get_access_token() -> str:
             "Attempting ACLED refresh grant",
             extra={"token_length": len(refresh_token)},
         )
+        print("[acled_auth] Attempting refresh grant...")
         try:
             tokens = _refresh_grant(refresh_token)
         except Exception as exc:  # pragma: no cover - network stack errors
             _LOG.debug("ACLED refresh grant failed", extra={"error": str(exc)})
+            print(f"[acled_auth] Refresh grant failed: {exc}; trying password grant")
         else:
             access_token = tokens.get("access_token")
             if not access_token:
@@ -221,11 +224,13 @@ def get_access_token() -> str:
                 "Obtained ACLED access token via refresh",
                 extra=_describe_token(access_token, expiry if isinstance(expiry, int) else None),
             )
+            print("[acled_auth] Refresh grant succeeded")
             return access_token
 
     password_creds = _resolve_password_creds()
     if password_creds:
         _LOG.debug("Attempting ACLED password grant")
+        print("[acled_auth] Attempting password grant...")
         tokens = _password_grant(password_creds["username"], password_creds["password"])
         access_token = tokens.get("access_token")
         if not access_token:
@@ -240,8 +245,10 @@ def get_access_token() -> str:
             "Obtained ACLED access token via password grant",
             extra=_describe_token(access_token, expiry if isinstance(expiry, int) else None),
         )
+        print("[acled_auth] Password grant succeeded")
         return access_token
 
+    print("[acled_auth] All auth methods exhausted — no valid credentials found")
     raise RuntimeError(
         "ACLED authentication failed: set ACLED_ACCESS_TOKEN/ACLED_TOKEN or "
         "ACLED_REFRESH_TOKEN or ACLED_USERNAME/ACLED_PASSWORD."
