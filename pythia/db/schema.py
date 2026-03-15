@@ -784,11 +784,17 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
     except Exception:
         pass
 
-    # Recreate PK if it doesn't include model_name
-    try:
-        con.execute("ALTER TABLE calibration_advice DROP CONSTRAINT calibration_advice_pkey")
-    except Exception:
-        pass
+    # Recreate PK if it doesn't include model_name.
+    # Drop the old 3-column PK so only one unique constraint remains;
+    # DuckDB errors on INSERT … ON CONFLICT when multiple unique constraints exist.
+    for pk_name in (
+        "calibration_advice_pkey",
+        "calibration_advice_as_of_month_hazard_code_metric_key",
+    ):
+        try:
+            con.execute(f"ALTER TABLE calibration_advice DROP CONSTRAINT {pk_name}")
+        except Exception:
+            pass
     try:
         con.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_calibration_advice "

@@ -1402,10 +1402,16 @@ def _upsert_advice(
 
     conn.execute(
         """
-        INSERT OR REPLACE INTO calibration_advice
+        INSERT INTO calibration_advice
             (as_of_month, hazard_code, metric, model_name, advice, findings_json,
              advice_version, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (as_of_month, hazard_code, metric, model_name)
+        DO UPDATE SET
+            advice = EXCLUDED.advice,
+            findings_json = EXCLUDED.findings_json,
+            advice_version = EXCLUDED.advice_version,
+            created_at = EXCLUDED.created_at
         """,
         [
             as_of_month,
