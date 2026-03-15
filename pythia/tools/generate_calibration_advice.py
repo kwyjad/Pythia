@@ -1402,7 +1402,7 @@ def _upsert_advice(
 
     conn.execute(
         """
-        INSERT INTO calibration_advice
+        INSERT OR REPLACE INTO calibration_advice
             (as_of_month, hazard_code, metric, model_name, advice, findings_json,
              advice_version, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
