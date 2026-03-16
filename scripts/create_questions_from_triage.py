@@ -163,7 +163,15 @@ def _build_question_wording(
     )
 
 
-def _compute_target_and_window(today: date) -> Tuple[str, date, date]:
+def _compute_target_and_window(today: date) -> Tuple[str, str, date, date]:
+    """Return (epoch_label, target_month, opening, closing).
+
+    epoch_label  — opening month (e.g. "2026-04"), used in question_id to
+                   make each forecast epoch distinct.
+    target_month — 6th horizon month (e.g. "2026-09"), the last month covered.
+    opening      — first day of the first forecast month.
+    closing      — last day of the 6th forecast month.
+    """
     start_month = today.month + 1
     start_year = today.year + (start_month - 1) // 12
     start_month = ((start_month - 1) % 12) + 1
@@ -178,8 +186,9 @@ def _compute_target_and_window(today: date) -> Tuple[str, date, date]:
         next_year, next_month = end_year, end_month + 1
     closing = date(next_year, next_month, 1) - timedelta(days=1)
 
-    target_month_label = f"{opening.year:04d}-{opening.month:02d}"
-    return target_month_label, opening, closing
+    epoch_label = f"{opening.year:04d}-{opening.month:02d}"
+    target_month_label = f"{end_year:04d}-{end_month:02d}"
+    return epoch_label, target_month_label, opening, closing
 
 
 def _load_triage_rows(
@@ -246,8 +255,12 @@ def _upsert_question(
     window_end_date: date,
     track: Optional[int] = None,
 ) -> None:
+    existing = con.execute(
+        "SELECT 1 FROM questions WHERE question_id = ?", [question_id]
+    ).fetchone()
+    if existing:
+        return  # preserve original metadata — never overwrite
     meta_json = json.dumps(metadata, ensure_ascii=False)
-    con.execute("DELETE FROM questions WHERE question_id = ?", [question_id])
     con.execute(
         """
         INSERT INTO questions (
@@ -292,7 +305,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
 
         inserted = 0
         today = date.today()
-        target_month, opening, closing = _compute_target_and_window(today)
+        epoch_label, target_month, opening, closing = _compute_target_and_window(today)
 
         for th in triaged:
             metrics = _metrics_for_hazard(th.hazard_code)
@@ -306,7 +319,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                 }
                 _upsert_question(
                     con,
-                    question_id=f"{th.iso3}_ACE_FATALITIES",
+                    question_id=f"{th.iso3}_ACE_FATALITIES_{epoch_label}",
                     hs_run_id=run_id,
                     iso3=th.iso3,
                     hazard_code="ACE",
@@ -326,7 +339,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
 
                 _upsert_question(
                     con,
-                    question_id=f"{th.iso3}_ACE_PA",
+                    question_id=f"{th.iso3}_ACE_PA_{epoch_label}",
                     hs_run_id=run_id,
                     iso3=th.iso3,
                     hazard_code="ACE",
@@ -358,7 +371,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
 
                 _upsert_question(
                     con,
-                    question_id=f"{th.iso3}_{th.hazard_code}_{mt}",
+                    question_id=f"{th.iso3}_{th.hazard_code}_{mt}_{epoch_label}",
                     hs_run_id=run_id,
                     iso3=th.iso3,
                     hazard_code=th.hazard_code,
