@@ -1431,27 +1431,11 @@ def _migrate_calibration_advice_pk(conn: Any) -> None:
         pass
 
     # ── 3. Recreate the table without a PK ──────────────────────────
+    # Strategy: CTAS into temp table → DROP original (cascades PK &
+    # indexes) → CREATE fresh → INSERT back → DROP temp.
+    # ALTER TABLE RENAME is blocked by DuckDB's DependencyException when
+    # a PK constraint exists, so we avoid RENAME entirely.
     try:
-        conn.execute(
-            "ALTER TABLE calibration_advice "
-            "RENAME TO _calibration_advice_old"
-        )
-
-        conn.execute(
-            """
-            CREATE TABLE calibration_advice (
-                as_of_month    TEXT,
-                hazard_code    TEXT,
-                metric         TEXT,
-                model_name     TEXT DEFAULT '__shared__',
-                advice         TEXT,
-                findings_json  TEXT,
-                advice_version TEXT DEFAULT 'v1',
-                created_at     TIMESTAMP DEFAULT now()
-            )
-            """
-        )
-
         # Build a column-safe SELECT that handles missing columns.
         col_exprs: list = []
         for col, fallback in (
@@ -1469,32 +1453,66 @@ def _migrate_calibration_advice_pk(conn: Any) -> None:
             else:
                 col_exprs.append(fallback or "NULL")
 
+        select_expr = ", ".join(col_exprs)
+
+        # 3a. Copy data into a temp table (CTAS — no constraints).
+        conn.execute("DROP TABLE IF EXISTS _calibration_advice_tmp")
         conn.execute(
-            f"INSERT INTO calibration_advice "
-            f"SELECT {', '.join(col_exprs)} FROM _calibration_advice_old"
+            f"CREATE TABLE _calibration_advice_tmp AS "
+            f"SELECT {select_expr} FROM calibration_advice"
+        )
+        row_count = conn.execute(
+            "SELECT count(*) FROM _calibration_advice_tmp"
+        ).fetchone()[0]
+        LOGGER.info("Backed up %d rows to _calibration_advice_tmp.", row_count)
+
+        # 3b. DROP original — cascades PK, indexes, everything.
+        conn.execute("DROP TABLE calibration_advice")
+
+        # 3c. CREATE fresh table with no PK.
+        conn.execute(
+            """
+            CREATE TABLE calibration_advice (
+                as_of_month    TEXT,
+                hazard_code    TEXT,
+                metric         TEXT,
+                model_name     TEXT DEFAULT '__shared__',
+                advice         TEXT,
+                findings_json  TEXT,
+                advice_version TEXT DEFAULT 'v1',
+                created_at     TIMESTAMP DEFAULT now()
+            )
+            """
         )
 
-        conn.execute("DROP TABLE _calibration_advice_old")
+        # 3d. Copy data back.
+        conn.execute(
+            "INSERT INTO calibration_advice "
+            "SELECT * FROM _calibration_advice_tmp"
+        )
 
+        # 3e. Clean up temp table.
+        conn.execute("DROP TABLE _calibration_advice_tmp")
+
+        # 3f. Create the 4-column unique index.
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_calibration_advice "
             "ON calibration_advice (as_of_month, hazard_code, metric, model_name)"
         )
-        LOGGER.info("Recreated calibration_advice table without legacy PK.")
+        LOGGER.info("Recreated calibration_advice table without legacy PK (%d rows preserved).", row_count)
 
     except Exception as exc:
         LOGGER.warning(
-            "Failed to recreate calibration_advice table: %s — "
-            "attempting to restore old table.",
-            exc,
+            "Failed to recreate calibration_advice table: %s", exc,
         )
-        # Best-effort rollback: if rename succeeded but create/insert/drop
-        # failed, try to rename back.
+        # Best-effort: if original was already dropped but new table
+        # creation failed, try to recover from temp table.
         try:
             conn.execute(
-                "ALTER TABLE _calibration_advice_old "
-                "RENAME TO calibration_advice"
+                "CREATE TABLE IF NOT EXISTS calibration_advice AS "
+                "SELECT * FROM _calibration_advice_tmp"
             )
+            conn.execute("DROP TABLE IF EXISTS _calibration_advice_tmp")
         except Exception:
             pass
         raise
