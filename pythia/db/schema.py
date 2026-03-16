@@ -784,8 +784,9 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
     except Exception:
         pass
 
-    # DuckDB does not support ALTER TABLE DROP CONSTRAINT for PRIMARY KEY.
-    # If the legacy 3-column PK exists, recreate the table without it.
+    # DuckDB does not support ALTER TABLE DROP CONSTRAINT for PRIMARY KEY,
+    # and ALTER TABLE RENAME is blocked by DependencyException when a PK exists.
+    # Strategy: CTAS into temp → DROP original (cascades) → CREATE fresh → INSERT back.
     try:
         pk_rows = con.execute(
             """
@@ -796,29 +797,10 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
             """
         ).fetchall()
         if pk_rows:
-            con.execute(
-                "ALTER TABLE calibration_advice "
-                "RENAME TO _calibration_advice_old"
-            )
-            con.execute(
-                """
-                CREATE TABLE calibration_advice (
-                    as_of_month    TEXT,
-                    hazard_code    TEXT,
-                    metric         TEXT,
-                    model_name     TEXT DEFAULT '__shared__',
-                    advice         TEXT,
-                    findings_json  TEXT,
-                    advice_version TEXT DEFAULT 'v1',
-                    created_at     TIMESTAMP DEFAULT now()
-                )
-                """
-            )
-            # Copy data; COALESCE model_name to sentinel.
             old_cols = {
                 str(r[1]).lower()
                 for r in con.execute(
-                    "PRAGMA table_info('_calibration_advice_old')"
+                    "PRAGMA table_info('calibration_advice')"
                 ).fetchall()
             }
             col_exprs = []
@@ -839,19 +821,40 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
                 else:
                     col_exprs.append(fb or "NULL")
 
+            select_expr = ", ".join(col_exprs)
+            con.execute("DROP TABLE IF EXISTS _calibration_advice_tmp")
             con.execute(
-                f"INSERT INTO calibration_advice "
-                f"SELECT {', '.join(col_exprs)} "
-                f"FROM _calibration_advice_old"
+                f"CREATE TABLE _calibration_advice_tmp AS "
+                f"SELECT {select_expr} FROM calibration_advice"
             )
-            con.execute("DROP TABLE _calibration_advice_old")
+            con.execute("DROP TABLE calibration_advice")
+            con.execute(
+                """
+                CREATE TABLE calibration_advice (
+                    as_of_month    TEXT,
+                    hazard_code    TEXT,
+                    metric         TEXT,
+                    model_name     TEXT DEFAULT '__shared__',
+                    advice         TEXT,
+                    findings_json  TEXT,
+                    advice_version TEXT DEFAULT 'v1',
+                    created_at     TIMESTAMP DEFAULT now()
+                )
+                """
+            )
+            con.execute(
+                "INSERT INTO calibration_advice "
+                "SELECT * FROM _calibration_advice_tmp"
+            )
+            con.execute("DROP TABLE _calibration_advice_tmp")
     except Exception:
-        # Best-effort rollback.
+        # Best-effort recovery from temp table.
         try:
             con.execute(
-                "ALTER TABLE _calibration_advice_old "
-                "RENAME TO calibration_advice"
+                "CREATE TABLE IF NOT EXISTS calibration_advice AS "
+                "SELECT * FROM _calibration_advice_tmp"
             )
+            con.execute("DROP TABLE IF EXISTS _calibration_advice_tmp")
         except Exception:
             pass
 
