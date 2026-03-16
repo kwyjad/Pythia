@@ -282,12 +282,13 @@ def score_views(db_url: str, sigma: float = LOGNORMAL_SIGMA) -> None:
             log_s = _log_score(spd, j)
             crps = _crps_like(spd, j)
 
-            # Write scores (same table as Pythia models, distinguished by model_name)
+            # Write scores (same table as Pythia models, distinguished by model_name).
+            # ViEWS scores have no forecaster run_id — use run_id IS NULL.
             conn.execute(
                 """
                 DELETE FROM scores
                 WHERE question_id = ? AND horizon_m = ? AND metric = ?
-                  AND model_name = ?
+                  AND model_name = ? AND run_id IS NULL
                 """,
                 [qid, hm, metric, VIEWS_MODEL_NAME],
             )
@@ -295,13 +296,13 @@ def score_views(db_url: str, sigma: float = LOGNORMAL_SIGMA) -> None:
             conn.executemany(
                 """
                 INSERT INTO scores
-                    (question_id, horizon_m, metric, score_type, model_name, value, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (question_id, horizon_m, metric, score_type, model_name, value, run_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    (qid, hm, metric, "brier", VIEWS_MODEL_NAME, brier, now),
-                    (qid, hm, metric, "log", VIEWS_MODEL_NAME, log_s, now),
-                    (qid, hm, metric, "crps", VIEWS_MODEL_NAME, crps, now),
+                    (qid, hm, metric, "brier", VIEWS_MODEL_NAME, brier, None, now),
+                    (qid, hm, metric, "log", VIEWS_MODEL_NAME, log_s, None, now),
+                    (qid, hm, metric, "crps", VIEWS_MODEL_NAME, crps, None, now),
                 ],
             )
 

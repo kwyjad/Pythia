@@ -1345,6 +1345,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
             _seed_bucket_centroids(con, metric, specs)
 
         # --- eiv_scores table (Phase 1 — EIV scoring) ---
+        # NOTE: PK removed; idempotency is handled by DELETE-before-INSERT in
+        # compute_scores.py. The run_id column allows per-run scoring.
         _ensure_table_and_columns(
             con,
             "eiv_scores",
@@ -1360,7 +1362,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 within_20pct BOOLEAN,
                 centroid_version TEXT,
                 created_at TIMESTAMP DEFAULT now(),
-                PRIMARY KEY (question_id, horizon_m, model_name)
+                run_id TEXT
             );
             """,
             {
@@ -1374,6 +1376,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "within_20pct": "BOOLEAN",
                 "centroid_version": "TEXT",
                 "created_at": "TIMESTAMP",
+                "run_id": "TEXT",
             },
         )
 

@@ -93,7 +93,7 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
         CREATE TABLE resolutions (question_id TEXT, observed_month TEXT, value DOUBLE);
         INSERT INTO resolutions VALUES ('Q1', '2025-01', 12.0);
         CREATE TABLE scores (
-            question_id TEXT, horizon_m INTEGER, model_name TEXT, score_type TEXT, value DOUBLE, created_at TIMESTAMP
+            question_id TEXT, horizon_m INTEGER, model_name TEXT, score_type TEXT, value DOUBLE, run_id TEXT, created_at TIMESTAMP
         );
         INSERT INTO scores VALUES ('Q1', 1, 'model-a', 'brier', 0.12, TIMESTAMP '2025-02-01');
         CREATE TABLE llm_calls (
