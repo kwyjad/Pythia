@@ -1,0 +1,19 @@
+# .github/workflows/upload-repaired-db.yml
+name: Upload Repaired DB
+on: 
+    workflow_dispatch:
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download repaired DB from release asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data
+          gh release download repaired-db -p resolver.duckdb -D data
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb

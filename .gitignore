@@ -172,3 +172,5 @@ horizon_scanner/enso/output/
 
 # Local dev container / workspace artifacts
 workspaces/
+data/resolver.duckdb.local.dev
+data/resolver.duckdb.local.dev

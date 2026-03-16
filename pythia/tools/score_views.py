@@ -218,6 +218,7 @@ def score_views(db_url: str, sigma: float = LOGNORMAL_SIGMA) -> None:
               score_type TEXT,
               model_name TEXT,
               value DOUBLE,
+              run_id TEXT,
               created_at TIMESTAMP DEFAULT now()
             )
             """
