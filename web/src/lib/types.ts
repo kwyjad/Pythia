@@ -133,6 +133,7 @@ export type PerformanceSummaryRow = {
 };
 
 export type PerformanceRunRow = {
+  forecaster_run_id: string | null;
   hs_run_id: string;
   run_date: string | null;
   hazard_code: string;

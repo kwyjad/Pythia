@@ -39,6 +39,7 @@ type PivotedRow = {
 // Aggregated row used by the By Run view after pivoting.
 type RunPivotedRow = {
   key: string;
+  forecaster_run_id: string | null;
   hs_run_id: string;
   run_date: string | null;
   avg_brier: number | null;
@@ -450,7 +451,7 @@ export default function PerformancePanel({
     const allModels = new Set(
       data.summary_rows.map((r) => r.model_name).filter(Boolean),
     );
-    const allRuns = new Set(data.run_rows.map((r) => r.hs_run_id));
+    const allRuns = new Set(data.run_rows.map((r) => r.forecaster_run_id ?? r.hs_run_id));
     const brier = aggregateScore(ensembleRows, "brier");
     return {
       hazards: allHazards.size,
@@ -529,9 +530,12 @@ export default function PerformancePanel({
       : data.run_rows;
     const groups = new Map<string, PerformanceRunRow[]>();
     for (const row of filtered) {
-      const existing = groups.get(row.hs_run_id) ?? [];
+      // Group by forecaster_run_id (the run that produced forecasts), falling
+      // back to hs_run_id for backward compat / external benchmark scores.
+      const groupKey = row.forecaster_run_id ?? row.hs_run_id;
+      const existing = groups.get(groupKey) ?? [];
       existing.push(row);
-      groups.set(row.hs_run_id, existing);
+      groups.set(groupKey, existing);
     }
     const result: RunPivotedRow[] = [];
     for (const [runId, gRows] of groups) {
@@ -539,9 +543,12 @@ export default function PerformancePanel({
       const log = aggregateScore(gRows, "log");
       const crps = aggregateScore(gRows, "crps");
       const runDate = gRows[0]?.run_date ?? null;
+      const forecasterRunId = gRows[0]?.forecaster_run_id ?? null;
+      const hsRunId = gRows[0]?.hs_run_id ?? runId;
       result.push({
         key: runId,
-        hs_run_id: runId,
+        forecaster_run_id: forecasterRunId,
+        hs_run_id: hsRunId,
         run_date: runDate,
         avg_brier: brier.avg,
         median_brier: brier.median,

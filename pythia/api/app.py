@@ -1568,10 +1568,44 @@ def performance_scores(
     df_summary = _execute(con, sql_summary, params).fetchdf()
 
     # Query 2 -- per-run rows (all models, including named ensembles)
+    # Group by forecaster run (scores.run_id) when available so that scores
+    # are attributed to the run that *produced* the forecasts, not the HS run
+    # that created the questions (which may belong to a different epoch).
     has_hs_runs = _table_exists(con, "hs_runs")
-    if has_hs_runs:
+    has_scores_run_id = _table_has_columns(con, "scores", ["run_id"])
+    has_run_provenance = _table_exists(con, "run_provenance")
+
+    if has_scores_run_id and has_hs_runs and has_run_provenance:
         sql_runs = f"""
             SELECT
+              s.run_id AS forecaster_run_id,
+              COALESCE(rp.hs_run_id, q.hs_run_id) AS hs_run_id,
+              STRFTIME(MAX(h.generated_at), '%Y-%m-%d') AS run_date,
+              q.hazard_code,
+              UPPER(q.metric) AS metric,
+              s.score_type,
+              s.model_name,
+              COUNT(*) AS n_samples,
+              COUNT(DISTINCT s.question_id) AS n_questions,
+              AVG(s.value) AS avg_value,
+              MEDIAN(s.value) AS median_value
+            FROM scores s
+            JOIN questions q ON q.question_id = s.question_id
+            LEFT JOIN run_provenance rp ON s.run_id = rp.forecaster_run_id
+            LEFT JOIN hs_runs h
+              ON COALESCE(rp.hs_run_id, q.hs_run_id) = h.hs_run_id
+            WHERE 1=1 {metric_filter} {track_filter}
+            GROUP BY s.run_id,
+                     COALESCE(rp.hs_run_id, q.hs_run_id),
+                     q.hazard_code, UPPER(q.metric),
+                     s.score_type, s.model_name
+            ORDER BY run_date DESC NULLS LAST, q.hazard_code, s.score_type,
+                     s.model_name NULLS FIRST
+        """
+    elif has_hs_runs:
+        sql_runs = f"""
+            SELECT
+              NULL AS forecaster_run_id,
               q.hs_run_id,
               STRFTIME(MAX(h.generated_at), '%Y-%m-%d') AS run_date,
               q.hazard_code,
@@ -1593,6 +1627,7 @@ def performance_scores(
     else:
         sql_runs = f"""
             SELECT
+              NULL AS forecaster_run_id,
               q.hs_run_id,
               NULL AS run_date,
               q.hazard_code,
