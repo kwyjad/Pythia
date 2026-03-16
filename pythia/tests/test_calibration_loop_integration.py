@@ -140,7 +140,7 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
               within_20pct BOOLEAN,
               centroid_version TEXT,
               created_at TIMESTAMP DEFAULT now(),
-              PRIMARY KEY (question_id, horizon_m, metric, model_name)
+              run_id TEXT
             )
             """
         )

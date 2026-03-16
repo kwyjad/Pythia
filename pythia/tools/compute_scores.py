@@ -9,7 +9,8 @@ import argparse
 import logging
 import math
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence
+from collections import defaultdict
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from pythia.buckets import get_bucket_specs
 from pythia.config import load as load_cfg
@@ -125,6 +126,113 @@ def _crps_like(p: List[float], j: int) -> float:
     return sq / float(K)
 
 
+def _run_id_clause(run_id: Optional[str]) -> Tuple[str, List[object]]:
+    """Return (SQL fragment, params) for run_id filtering."""
+    if run_id is not None:
+        return "AND run_id = ?", [run_id]
+    return "AND run_id IS NULL", []
+
+
+def _table_columns(conn, name: str) -> set:
+    """Return the set of column names for a table."""
+    try:
+        rows = conn.execute(f"PRAGMA table_info('{name}')").fetchall()
+        return {r[1] for r in rows}
+    except Exception:
+        return set()
+
+
+def _migrate_scores_add_run_id(conn) -> None:
+    """Add run_id column to scores table if missing."""
+    cols = _table_columns(conn, "scores")
+    if "run_id" not in cols:
+        try:
+            conn.execute("ALTER TABLE scores ADD COLUMN run_id TEXT")
+            LOGGER.info("scores: added run_id column.")
+        except Exception as exc:
+            LOGGER.warning("scores: failed to add run_id column: %r", exc)
+
+
+def _migrate_eiv_scores_add_run_id(conn) -> None:
+    """Add run_id column to eiv_scores, removing PK if necessary (DuckDB limitation)."""
+    if not _table_exists(conn, "eiv_scores"):
+        return
+    cols = _table_columns(conn, "eiv_scores")
+    if "run_id" in cols:
+        return
+
+    # Check if a PK constraint exists (DuckDB cannot DROP CONSTRAINT for PK)
+    has_pk = False
+    try:
+        pk_rows = conn.execute(
+            "SELECT constraint_name FROM information_schema.table_constraints "
+            "WHERE table_name = 'eiv_scores' AND constraint_type = 'PRIMARY KEY'"
+        ).fetchall()
+        has_pk = len(pk_rows) > 0
+    except Exception:
+        pass
+
+    if has_pk:
+        # CTAS migration: copy data -> drop original (cascades PK) -> recreate -> insert back
+        LOGGER.info("eiv_scores: migrating via CTAS to remove PK and add run_id.")
+        try:
+            conn.execute(
+                "CREATE TABLE _eiv_scores_tmp AS "
+                "SELECT question_id, horizon_m, metric, model_name, "
+                "       eiv_forecast, actual_value, log_ratio_err, "
+                "       within_20pct, centroid_version, created_at "
+                "FROM eiv_scores"
+            )
+            conn.execute("DROP TABLE eiv_scores")
+            conn.execute("""
+                CREATE TABLE eiv_scores (
+                    question_id TEXT,
+                    horizon_m INTEGER,
+                    metric TEXT,
+                    model_name TEXT,
+                    eiv_forecast DOUBLE,
+                    actual_value DOUBLE,
+                    log_ratio_err DOUBLE,
+                    within_20pct BOOLEAN,
+                    centroid_version TEXT,
+                    created_at TIMESTAMP DEFAULT now(),
+                    run_id TEXT
+                )
+            """)
+            conn.execute(
+                "INSERT INTO eiv_scores "
+                "(question_id, horizon_m, metric, model_name, eiv_forecast, "
+                " actual_value, log_ratio_err, within_20pct, centroid_version, created_at) "
+                "SELECT question_id, horizon_m, metric, model_name, eiv_forecast, "
+                "       actual_value, log_ratio_err, within_20pct, centroid_version, created_at "
+                "FROM _eiv_scores_tmp"
+            )
+            conn.execute("DROP TABLE _eiv_scores_tmp")
+            LOGGER.info("eiv_scores: CTAS migration complete.")
+        except Exception as exc:
+            LOGGER.warning("eiv_scores: CTAS migration failed: %r", exc)
+            # Try to recover temp table if it exists
+            try:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS eiv_scores AS SELECT * FROM _eiv_scores_tmp"
+                )
+                conn.execute("DROP TABLE IF EXISTS _eiv_scores_tmp")
+            except Exception:
+                pass
+    else:
+        # No PK — simple ALTER TABLE
+        try:
+            conn.execute("ALTER TABLE eiv_scores ADD COLUMN run_id TEXT")
+            LOGGER.info("eiv_scores: added run_id column.")
+        except Exception as exc:
+            LOGGER.warning("eiv_scores: failed to add run_id column: %r", exc)
+
+
+def _forecast_tables_have_run_id(conn) -> bool:
+    """Check if forecasts_ensemble has a run_id column (backward compat for old DBs)."""
+    return "run_id" in _table_columns(conn, "forecasts_ensemble")
+
+
 def _load_spd(
     conn,
     *,
@@ -133,14 +241,22 @@ def _load_spd(
     class_bins: Sequence[str],
     table: str,
     model_name: Optional[str] = None,
+    run_id: Optional[str] = None,
+    _has_run_id: bool = True,
 ) -> Optional[List[float]]:
+    # Only apply run_id filtering if the forecast table actually has the column.
+    if _has_run_id:
+        rid_clause, rid_params = _run_id_clause(run_id)
+    else:
+        rid_clause, rid_params = "", []
+
     if table == "ensemble":
-        sql = """
+        sql = f"""
           SELECT class_bin, p
           FROM forecasts_ensemble
-          WHERE question_id = ? AND horizon_m = ?
+          WHERE question_id = ? AND horizon_m = ? {rid_clause}
         """
-        params: List[object] = [question_id, horizon_m]
+        params: List[object] = [question_id, horizon_m] + rid_params
 
         try:
             rows = conn.execute(sql, params).fetchall()
@@ -156,12 +272,12 @@ def _load_spd(
     else:
         # forecasts_raw stores data using month_index / bucket_index / probability.
         # Map bucket_index (1-based) back to class_bins positions.
-        sql = """
+        sql = f"""
           SELECT COALESCE(bucket_index, 0), COALESCE(probability, 0.0)
           FROM forecasts_raw
-          WHERE question_id = ? AND month_index = ? AND model_name = ?
+          WHERE question_id = ? AND month_index = ? AND model_name = ? {rid_clause}
         """
-        params = [question_id, horizon_m, model_name]
+        params = [question_id, horizon_m, model_name] + rid_params
 
         try:
             rows = conn.execute(sql, params).fetchall()
@@ -246,10 +362,12 @@ def _compute_eiv_for_question(
     hazard_code: str,
     resolved_value: float,
     class_bins: Sequence[str],
+    run_id: Optional[str] = None,
+    _has_run_id: bool = True,
 ) -> list:
-    """Compute EIV scores for ensemble + per-model for one (question, horizon).
+    """Compute EIV scores for ensemble + per-model for one (question, horizon, run_id).
 
-    Returns list of tuples ready for INSERT.
+    Returns list of tuples ready for INSERT (includes run_id as last element).
     """
     rows_to_insert = []
     n_buckets = len(class_bins)
@@ -265,34 +383,41 @@ def _compute_eiv_for_question(
         within_20 = abs(eiv - resolved_value) / actual <= 0.20
         return eiv, log_ratio, within_20
 
+    if _has_run_id:
+        rid_clause, rid_params = _run_id_clause(run_id)
+    else:
+        rid_clause, rid_params = "", []
+
     # Ensemble
     spd_e = _load_spd(
         conn, question_id=question_id, horizon_m=horizon_m,
-        class_bins=class_bins, table="ensemble",
+        class_bins=class_bins, table="ensemble", run_id=run_id,
+        _has_run_id=_has_run_id,
     )
     if spd_e:
         eiv, log_err, w20 = _eiv_and_error(spd_e)
         rows_to_insert.append((
             question_id, horizon_m, metric, "__ensemble__",
-            eiv, resolved_value, log_err, w20, centroid_version,
+            eiv, resolved_value, log_err, w20, centroid_version, run_id,
         ))
 
     # Per-model
     model_rows = conn.execute(
-        "SELECT DISTINCT model_name FROM forecasts_raw "
-        "WHERE question_id = ? AND month_index = ?",
-        [question_id, horizon_m],
+        f"SELECT DISTINCT model_name FROM forecasts_raw "
+        f"WHERE question_id = ? AND month_index = ? {rid_clause}",
+        [question_id, horizon_m] + rid_params,
     ).fetchall()
     for (model_name,) in model_rows:
         spd_m = _load_spd(
             conn, question_id=question_id, horizon_m=horizon_m,
             class_bins=class_bins, table="raw", model_name=model_name,
+            run_id=run_id, _has_run_id=_has_run_id,
         )
         if spd_m:
             eiv, log_err, w20 = _eiv_and_error(spd_m)
             rows_to_insert.append((
                 question_id, horizon_m, metric, model_name,
-                eiv, resolved_value, log_err, w20, centroid_version,
+                eiv, resolved_value, log_err, w20, centroid_version, run_id,
             ))
 
     return rows_to_insert
@@ -311,10 +436,18 @@ def compute_scores(db_url: str) -> None:
               score_type TEXT,
               model_name TEXT,
               value DOUBLE,
+              run_id TEXT,
               created_at TIMESTAMP DEFAULT now()
             )
             """
         )
+        # Migration: add run_id to existing scores tables that lack it.
+        _migrate_scores_add_run_id(conn)
+        # Migration: add run_id to eiv_scores (CTAS if PK exists).
+        _migrate_eiv_scores_add_run_id(conn)
+
+        # Detect if forecast tables have run_id (backward compat for old DBs/tests).
+        has_run_id = _forecast_tables_have_run_id(conn)
 
         # Early exit if resolutions table doesn't exist or is empty
         if not _table_exists(conn, "resolutions"):
@@ -346,6 +479,29 @@ def compute_scores(db_url: str) -> None:
         qrows = conn.execute(q_sql).fetchall()
         LOGGER.info("Found %d (question, horizon) pairs with resolutions for scoring.", len(qrows))
 
+        # Discover all distinct run_ids per (question_id, horizon_m) from
+        # forecasts_ensemble so each run's forecasts are scored independently.
+        run_ids_map: Dict[Tuple[str, int], List[Optional[str]]] = defaultdict(list)
+        if has_run_id:
+            try:
+                rid_rows = conn.execute(
+                    """
+                    SELECT DISTINCT fe.question_id, fe.horizon_m, fe.run_id
+                    FROM forecasts_ensemble fe
+                    WHERE (fe.question_id, fe.horizon_m) IN (
+                        SELECT q.question_id, r.horizon_m
+                        FROM questions q
+                        JOIN resolutions r ON q.question_id = r.question_id
+                        JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
+                        WHERE upper(q.metric) IN ('PA','FATALITIES')
+                    )
+                    """
+                ).fetchall()
+                for qid, hm, rid in rid_rows:
+                    run_ids_map[(qid, hm)].append(rid)
+            except Exception as exc:
+                LOGGER.warning("run_id discovery failed: %r; scoring without run_id.", exc)
+
         n_written = 0
 
         for question_id, iso3, hazard_code, metric, horizon_m, resolved_value in qrows:
@@ -357,86 +513,105 @@ def compute_scores(db_url: str) -> None:
             if j is None:
                 continue
 
-            # Score ensemble for this specific horizon
-            spd_e = _load_spd(
-                conn,
-                question_id=question_id,
-                horizon_m=horizon_m,
-                class_bins=class_bins,
-                table="ensemble",
-            )
-            if spd_e:
-                brier_e = _brier(spd_e, j)
-                log_e = _log_score(spd_e, j)
-                crps_e = _crps_like(spd_e, j)
+            # Score each run_id independently; default to [None] for unknown/old data.
+            rid_list = run_ids_map.get((question_id, horizon_m)) or [None]
 
-                conn.execute(
-                    """
-                    DELETE FROM scores
-                    WHERE question_id = ? AND horizon_m = ? AND metric = ? AND model_name IS NULL
-                    """,
-                    [question_id, horizon_m, metric],
-                )
-                now = datetime.utcnow()
-                conn.executemany(
-                    """
-                    INSERT INTO scores (question_id, horizon_m, metric, score_type, model_name, value, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (question_id, horizon_m, metric, "brier", None, brier_e, now),
-                        (question_id, horizon_m, metric, "log", None, log_e, now),
-                        (question_id, horizon_m, metric, "crps", None, crps_e, now),
-                    ],
-                )
-                n_written += 3
+            for run_id in rid_list:
+                rid_clause, rid_params = _run_id_clause(run_id)
+                # For forecast table queries, only apply run_id filter if columns exist.
+                if has_run_id:
+                    fe_rid_clause, fe_rid_params = rid_clause, rid_params
+                else:
+                    fe_rid_clause, fe_rid_params = "", []
 
-            # Score individual models for this specific horizon
-            model_rows = conn.execute(
-                """
-                  SELECT DISTINCT model_name
-                  FROM forecasts_raw
-                  WHERE question_id = ? AND month_index = ?
-                  ORDER BY model_name
-                """,
-                [question_id, horizon_m],
-            ).fetchall()
-            for (model_name,) in model_rows:
-                spd_m = _load_spd(
+                # Score ensemble for this specific (horizon, run_id)
+                spd_e = _load_spd(
                     conn,
                     question_id=question_id,
                     horizon_m=horizon_m,
                     class_bins=class_bins,
-                    table="raw",
-                    model_name=model_name,
+                    table="ensemble",
+                    run_id=run_id,
+                    _has_run_id=has_run_id,
                 )
-                if not spd_m:
-                    continue
+                if spd_e:
+                    brier_e = _brier(spd_e, j)
+                    log_e = _log_score(spd_e, j)
+                    crps_e = _crps_like(spd_e, j)
 
-                brier_m = _brier(spd_m, j)
-                log_m = _log_score(spd_m, j)
-                crps_m = _crps_like(spd_m, j)
+                    conn.execute(
+                        f"""
+                        DELETE FROM scores
+                        WHERE question_id = ? AND horizon_m = ? AND metric = ?
+                          AND model_name IS NULL {rid_clause}
+                        """,
+                        [question_id, horizon_m, metric] + rid_params,
+                    )
+                    now = datetime.utcnow()
+                    conn.executemany(
+                        """
+                        INSERT INTO scores (question_id, horizon_m, metric, score_type,
+                                            model_name, value, run_id, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            (question_id, horizon_m, metric, "brier", None, brier_e, run_id, now),
+                            (question_id, horizon_m, metric, "log", None, log_e, run_id, now),
+                            (question_id, horizon_m, metric, "crps", None, crps_e, run_id, now),
+                        ],
+                    )
+                    n_written += 3
 
-                conn.execute(
-                    """
-                    DELETE FROM scores
-                    WHERE question_id = ? AND horizon_m = ? AND metric = ? AND model_name = ?
+                # Score individual models for this specific (horizon, run_id)
+                model_rows = conn.execute(
+                    f"""
+                      SELECT DISTINCT model_name
+                      FROM forecasts_raw
+                      WHERE question_id = ? AND month_index = ? {fe_rid_clause}
+                      ORDER BY model_name
                     """,
-                    [question_id, horizon_m, metric, model_name],
-                )
-                now = datetime.utcnow()
-                conn.executemany(
-                    """
-                    INSERT INTO scores (question_id, horizon_m, metric, score_type, model_name, value, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (question_id, horizon_m, metric, "brier", model_name, brier_m, now),
-                        (question_id, horizon_m, metric, "log", model_name, log_m, now),
-                        (question_id, horizon_m, metric, "crps", model_name, crps_m, now),
-                    ],
-                )
-                n_written += 3
+                    [question_id, horizon_m] + fe_rid_params,
+                ).fetchall()
+                for (model_name,) in model_rows:
+                    spd_m = _load_spd(
+                        conn,
+                        question_id=question_id,
+                        horizon_m=horizon_m,
+                        class_bins=class_bins,
+                        table="raw",
+                        model_name=model_name,
+                        run_id=run_id,
+                        _has_run_id=has_run_id,
+                    )
+                    if not spd_m:
+                        continue
+
+                    brier_m = _brier(spd_m, j)
+                    log_m = _log_score(spd_m, j)
+                    crps_m = _crps_like(spd_m, j)
+
+                    conn.execute(
+                        f"""
+                        DELETE FROM scores
+                        WHERE question_id = ? AND horizon_m = ? AND metric = ?
+                          AND model_name = ? {rid_clause}
+                        """,
+                        [question_id, horizon_m, metric, model_name] + rid_params,
+                    )
+                    now = datetime.utcnow()
+                    conn.executemany(
+                        """
+                        INSERT INTO scores (question_id, horizon_m, metric, score_type,
+                                            model_name, value, run_id, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            (question_id, horizon_m, metric, "brier", model_name, brier_m, run_id, now),
+                            (question_id, horizon_m, metric, "log", model_name, log_m, run_id, now),
+                            (question_id, horizon_m, metric, "crps", model_name, crps_m, run_id, now),
+                        ],
+                    )
+                    n_written += 3
 
         LOGGER.info("compute_scores: wrote %d score rows.", n_written)
 
@@ -446,25 +621,36 @@ def compute_scores(db_url: str) -> None:
             class_bins = _class_bins(metric, hazard_code)
             if not class_bins:
                 continue
-            eiv_rows.extend(_compute_eiv_for_question(
-                conn, question_id, horizon_m, metric, hazard_code,
-                resolved_value, class_bins,
-            ))
+            rid_list = run_ids_map.get((question_id, horizon_m)) or [None]
+            for run_id in rid_list:
+                eiv_rows.extend(_compute_eiv_for_question(
+                    conn, question_id, horizon_m, metric, hazard_code,
+                    resolved_value, class_bins, run_id=run_id,
+                    _has_run_id=has_run_id,
+                ))
 
         if eiv_rows:
-            # Clear stale EIV rows for all resolved questions
-            resolved_qids = list({r[0] for r in qrows})
-            for qid in resolved_qids:
-                conn.execute(
-                    "DELETE FROM eiv_scores WHERE question_id = ?", [qid]
-                )
+            # Clear stale EIV rows for all resolved (question, run_id) combos.
+            deleted_combos: set = set()
+            for row in eiv_rows:
+                # row tuple: (qid, horizon_m, metric, model, eiv, actual, log_err, w20, cv, run_id)
+                qid = row[0]
+                rid = row[9]
+                combo = (qid, rid)
+                if combo not in deleted_combos:
+                    rid_clause, rid_params = _run_id_clause(rid)
+                    conn.execute(
+                        f"DELETE FROM eiv_scores WHERE question_id = ? {rid_clause}",
+                        [qid] + rid_params,
+                    )
+                    deleted_combos.add(combo)
             now = datetime.utcnow()
             conn.executemany(
                 """
                 INSERT INTO eiv_scores (question_id, horizon_m, metric, model_name,
                                         eiv_forecast, actual_value, log_ratio_err,
-                                        within_20pct, centroid_version, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        within_20pct, centroid_version, run_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [(*row, now) for row in eiv_rows],
             )
