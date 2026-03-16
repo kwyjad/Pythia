@@ -1610,6 +1610,7 @@ def test_stale_purge_cascades_to_scores(tmp_path, monkeypatch):
                 score_type TEXT,
                 model_name TEXT,
                 value DOUBLE,
+                run_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
