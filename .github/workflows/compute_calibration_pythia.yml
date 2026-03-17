@@ -71,7 +71,7 @@ jobs:
 
           # ── Path A: triggered by workflow_run — download from triggering run ──
           RUN_ID="${{ github.event.workflow_run.id }}"
-          FORCE_RUN_ID="<23197624903>"
+          FORCE_RUN_ID="23197624903"
           if gh run download "$FORCE_RUN_ID" -n pythia-resolver-db --dir data && locate_and_copy_db; then
             echo "Found repaired DB from forced run $FORCE_RUN_ID"
             ls -lh data/resolver.duckdb
