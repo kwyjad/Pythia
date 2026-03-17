@@ -77,7 +77,6 @@ jobs:
             ls -lh data/resolver.duckdb
             exit 0
           fi
-          
           if [ -n "$RUN_ID" ]; then
             echo "Downloading pythia-resolver-db from triggering run $RUN_ID"
             if gh run download "$RUN_ID" -n pythia-resolver-db --dir data && locate_and_copy_db; then
