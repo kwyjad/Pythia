@@ -1,6 +1,6 @@
 ---
 # .github/workflows/upload-repaired-db.yml
-name: Upload Repaired DB
+name: Ingest Structured Data
 on:
   workflow_dispatch:
 jobs:
