@@ -11,8 +11,8 @@ from typing import Sequence
 
 from .protocol import CANONICAL_COLUMNS, Connector
 from .acled import AcledConnector
-from .idmc import IdmcConnector
 from .gdacs import GdacsConnector
+from .idmc import IdmcConnector
 from .ifrc_montandon import IfrcMontandonConnector
 from .views import ViewsConnector
 from .conflictforecast import ConflictForecastOrgConnector
@@ -22,9 +22,9 @@ from .acled_cast import AcledCastConnector
 # this registry to discover which sources to pull.
 REGISTRY: dict[str, type] = {
     "acled": AcledConnector,
+    "gdacs": GdacsConnector,
     "idmc": IdmcConnector,
     "ifrc_montandon": IfrcMontandonConnector,
-    "gdacs": GdacsConnector,
 }
 
 # Forecast connectors write to ``conflict_forecasts`` (not facts_resolved).

@@ -152,7 +152,7 @@ The Resolver was refactored in PR #610 to a connector-based architecture. Defunc
 - `acled` — ACLED conflict/fatalities data (wraps `resolver/ingestion/acled_client`)
 - `idmc` — IDMC internal displacement data (wraps `resolver/ingestion/idmc/`)
 - `ifrc_montandon` — IFRC Go connector (stubbed, not yet active)
-- `gdacs` — GDACS disaster population exposure (FL, DR, TC) from RSS archive. No auth required. Fetches month-by-month; depth controlled by `GDACS_MONTHS` (default 3; use 135 for full backfill to 2015). Multi-country events use population-weighted allocation. TC zero-fills no-event months; FL/DR do not. Integrated into `pythia/tools/ingest_structured_data.py` as the `gdacs` source. Env vars: `GDACS_MONTHS` (default 3), `GDACS_REQUEST_DELAY` (default 1.0s).
+- `gdacs` — GDACS disaster population exposure (FL, DR, TC). No auth required. **Two data sources**: (1) static RSS feeds (`xml/rss_fl_3m.xml`, `xml/rss_tc_3m.xml`) for ≤3-month window (fast, has population data); (2) JSON search API (`gdacsapi/api/events/geteventlist/SEARCH`) + per-event RSS enrichment for >3-month backfill. The original `rss.aspx?profile=ARCHIVE` endpoint is broken (returns only a generic info item). DR RSS feed (`rss_dr_3m.xml`) returns 404. Depth controlled by `GDACS_MONTHS` (default 3; use 135 for full backfill to 2015). Multi-country events use population-weighted allocation. TC zero-fills no-event months; FL/DR do not. Entry point: `resolver/ingestion/gdacs.py` (for `run_connectors.py`); also integrated into `pythia/tools/ingest_structured_data.py`. Env vars: `GDACS_MONTHS` (default 3), `GDACS_REQUEST_DELAY` (default 1.0s), `GDACS_FORCE_RSS`/`GDACS_FORCE_JSON` (override auto-detection).
 
 **Pipeline orchestrator** (`resolver/tools/run_pipeline.py`):
 ```
@@ -266,7 +266,9 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC` | Gemini Pro SPD timeout (default 300s) |
 | `ACAPS_EMAIL` / `ACAPS_PASSWORD` | ACAPS API credentials |
 | `GDACS_MONTHS` | Number of months of GDACS history to fetch (default 3; 135 for full backfill to 2015) |
-| `GDACS_REQUEST_DELAY` | Seconds between GDACS RSS requests (default 1.0) |
+| `GDACS_REQUEST_DELAY` | Seconds between GDACS API requests (default 1.0) |
+| `GDACS_FORCE_RSS` | Force static RSS feed path ("1" to enable; overrides auto-detection) |
+| `GDACS_FORCE_JSON` | Force JSON search API path ("1" to enable; overrides auto-detection) |
 
 Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`.
 

@@ -464,6 +464,7 @@ class TestCanonicalOutput:
     def test_output_passes_validate_canonical(self, mock_session_fn, mock_sleep, monkeypatch):
         """Full fetch_and_normalize with mocked HTTP returns valid canonical df."""
         monkeypatch.setenv("GDACS_MONTHS", "4")  # Oct 2024 - 4 = Jul 2024
+        monkeypatch.setenv("GDACS_FORCE_RSS", "1")  # Force RSS path for mock data
 
         mock_session = MagicMock()
         mock_session.get.return_value = self._make_mock_response(_SAMPLE_RSS)
@@ -498,6 +499,7 @@ class TestCanonicalOutput:
     def test_tc_zero_fill_in_full_pipeline(self, mock_session_fn, mock_sleep, monkeypatch):
         """TC zero-fill rows appear in final output."""
         monkeypatch.setenv("GDACS_MONTHS", "2")  # Oct 2024 - 2 = Sep 2024
+        monkeypatch.setenv("GDACS_FORCE_RSS", "1")  # Force RSS path for mock data
 
         # RSS with only a TC event in September
         tc_only_rss = b"""\
@@ -539,6 +541,7 @@ class TestCanonicalOutput:
     def test_empty_response_returns_empty_canonical(self, mock_session_fn, mock_sleep, monkeypatch):
         """HTTP returning no items produces empty canonical DataFrame."""
         monkeypatch.setenv("GDACS_MONTHS", "2")  # Oct 2024 - 2 = Sep 2024
+        monkeypatch.setenv("GDACS_FORCE_RSS", "1")  # Force RSS path for mock data
 
         empty_rss = b"""\
 <?xml version="1.0" encoding="utf-8"?>
