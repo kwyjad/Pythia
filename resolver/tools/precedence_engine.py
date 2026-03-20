@@ -232,6 +232,23 @@ def resolve_facts_frame(
             "selected_tier": tier_name,
         }
 
+        # Carry through metadata fields from the chosen row so they
+        # survive into facts_resolved when called from run_pipeline.
+        _PASSTHROUGH_FIELDS = (
+            "publisher", "source_type", "source_url", "confidence",
+            "definition_text", "doc_title", "hazard_label", "hazard_class",
+            "unit", "series_semantics", "publication_date", "event_id",
+            "proxy_for",
+        )
+        for _field in _PASSTHROUGH_FIELDS:
+            if _field in chosen.index:
+                record[_field] = chosen[_field]
+
+        # Map selected_* to DB column names for the run_pipeline path.
+        record["as_of_date"] = record["selected_as_of"]
+        record["precedence_tier"] = record["selected_tier"]
+        record["provenance_source"] = record["selected_source"]
+
         if debug_enabled:
             record["tie_break_path"] = ">".join(tie_path)
 
