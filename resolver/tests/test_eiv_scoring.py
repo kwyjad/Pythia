@@ -134,6 +134,7 @@ def test_eiv_basic():
         hazard_code="ACE",
         resolved_value=180_000.0,
         class_bins=class_bins,
+        _has_run_id=False,
     )
 
     assert len(rows) >= 1  # at least ensemble row
@@ -204,6 +205,7 @@ def test_eiv_floor():
         hazard_code="ACE",
         resolved_value=0.0,
         class_bins=class_bins,
+        _has_run_id=False,
     )
 
     ensemble = [r for r in rows if r[3] == "__ensemble__"]

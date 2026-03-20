@@ -19,7 +19,7 @@ Do not update these files for trivial changes (e.g. formatting, minor refactors 
 **Core pipeline:**
 ```
 Resolver facts/base rates -> Horizon Scanner per-hazard pipeline (RC grounding → RC → triage grounding → triage)
-  -> Structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political, ENSO, seasonal TC, HDX Signals, ACLED CAST)
+  -> Structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political, ENSO, seasonal TC, HDX Signals, ACLED CAST, GDACS)
   -> Adversarial checks (RC L1+) -> Forecaster SPD ensemble
   -> DuckDB -> FastAPI API -> Next.js Dashboard + CSV/Excel exports
 ```
@@ -95,7 +95,7 @@ Pythia/
 - `pythia/tools/compute_scores.py` — Brier/log/CRPS scoring per horizon
 - `pythia/tools/compute_calibration_pythia.py` — Calibration weights + LLM advice
 - `resolver/connectors/protocol.py` — Connector protocol (21-column canonical schema contract)
-- `resolver/connectors/__init__.py` — Connector registry (discover_connectors) + FORECAST_REGISTRY (VIEWS, CF.org, ACLED CAST)
+- `resolver/connectors/__init__.py` — Connector registry (discover_connectors: ACLED, IDMC, IFRC Montandon, GDACS) + FORECAST_REGISTRY (VIEWS, CF.org, ACLED CAST)
 - `resolver/connectors/acled_cast.py` — ACLED CAST connector (event-count forecasts by type: total/battles/ERV/VAC)
 - `resolver/tools/run_pipeline.py` — Pipeline orchestrator (fetch -> validate -> enrich -> precedence -> deltas -> DuckDB)
 - `resolver/tools/enrich.py` — Enrichment (registry lookups, ym derivation, defaults)
@@ -144,7 +144,7 @@ Two DuckDB databases:
 
 ## Resolver architecture
 
-The Resolver was refactored in PR #610 to a connector-based architecture. Defunct legacy connectors (DTM, EM-DAT ingestion, GDACS, HDX, IPC, ODP, ReliefWeb, UNHCR, WFP, WHO, WorldPop) were removed.
+The Resolver was refactored in PR #610 to a connector-based architecture. Defunct legacy connectors (DTM, EM-DAT ingestion, HDX, IPC, ODP, ReliefWeb, UNHCR, WFP, WHO, WorldPop) were removed. The GDACS connector was re-implemented as a new Connector protocol source.
 
 **Connector protocol** (`resolver/connectors/protocol.py`): Every data source implements a `Connector` protocol with a `name` attribute and a `fetch_and_normalize()` method that returns a DataFrame with exactly 21 canonical columns (event_id, iso3, hazard_code, metric, value, as_of_date, publisher, etc.).
 
@@ -152,10 +152,7 @@ The Resolver was refactored in PR #610 to a connector-based architecture. Defunc
 - `acled` — ACLED conflict/fatalities data (wraps `resolver/ingestion/acled_client`)
 - `idmc` — IDMC internal displacement data (wraps `resolver/ingestion/idmc/`)
 - `ifrc_montandon` — IFRC Go connector (stubbed, not yet active)
-<<<<<<< Updated upstream
-=======
-- `gdacs` — GDACS disaster population exposure (FL, DR, TC) from RSS archive. No auth required. Fetches month-by-month; depth controlled by `GDACS_MONTHS` (default 3; use 135 for full backfill to 2015). Multi-country events use population-weighted allocation. TC zero-fills no-event months; FL/DR do not. Entry point: `resolver/ingestion/gdacs.py` (for `run_connectors.py`); also integrated into `pythia/tools/ingest_structured_data.py` as the `gdacs` source. Both paths delegate to `run_pipeline(connectors=["gdacs"])`. Env vars: `GDACS_MONTHS` (default 3), `GDACS_REQUEST_DELAY` (default 1.0s).
->>>>>>> Stashed changes
+- `gdacs` — GDACS disaster population exposure (FL, DR, TC) from RSS archive. No auth required. Fetches month-by-month; depth controlled by `GDACS_MONTHS` (default 3; use 135 for full backfill to 2015). Multi-country events use population-weighted allocation. TC zero-fills no-event months; FL/DR do not. Integrated into `pythia/tools/ingest_structured_data.py` as the `gdacs` source. Env vars: `GDACS_MONTHS` (default 3), `GDACS_REQUEST_DELAY` (default 1.0s).
 
 **Pipeline orchestrator** (`resolver/tools/run_pipeline.py`):
 ```
@@ -268,6 +265,8 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC` | Gemini Flash SPD timeout (default 300s) |
 | `PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC` | Gemini Pro SPD timeout (default 300s) |
 | `ACAPS_EMAIL` / `ACAPS_PASSWORD` | ACAPS API credentials |
+| `GDACS_MONTHS` | Number of months of GDACS history to fetch (default 3; 135 for full backfill to 2015) |
+| `GDACS_REQUEST_DELAY` | Seconds between GDACS RSS requests (default 1.0) |
 
 Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`.
 
@@ -402,4 +401,4 @@ Candidates are sorted by `createdAt` descending; the first one that downloads su
 
 ## Structured data bulk ingest
 
-`pythia/tools/ingest_structured_data.py` orchestrates bulk fetch/store for all structured data connectors. The `_SOURCE_GROUPS` dict maps group names to table names. Currently registered groups: `views`, `conflictforecast`, `acledcast`, `acaps_inform_severity`, `acaps_risk_radar`, `acaps_daily_monitoring`, `acaps_humanitarian_access`, `ipc`, `reliefweb`, `acled_political`, `nmme`. Each group has a `_bulk_fetch_*` function that parallelizes API calls across countries via `ThreadPoolExecutor`. The `acled_political` group fetches event-level political data (protests, riots, strategic developments) from the ACLED API via `pythia.acled_political.fetch_acled_political_events` and stores via `store_acled_political_events`.
+`pythia/tools/ingest_structured_data.py` orchestrates bulk fetch/store for all structured data connectors. The `_SOURCE_GROUPS` dict maps group names to table names. Currently registered groups: `views`, `conflictforecast`, `acledcast`, `acaps_inform_severity`, `acaps_risk_radar`, `acaps_daily_monitoring`, `acaps_humanitarian_access`, `ipc`, `reliefweb`, `acled_political`, `nmme`, `gdacs`. Each group has a `_bulk_fetch_*` function that parallelizes API calls across countries via `ThreadPoolExecutor`. The `acled_political` group fetches event-level political data (protests, riots, strategic developments) from the ACLED API via `pythia.acled_political.fetch_acled_political_events` and stores via `store_acled_political_events`. The `gdacs` group delegates to `resolver.tools.run_pipeline` with `--connectors gdacs`, which writes to `facts_resolved` and `facts_deltas` via the standard Resolver pipeline. GDACS is a self-storing source (no per-country store function). The `ingest-structured-data.yml` workflow runs weekly (Sunday 03:00 UTC) in incremental mode (last 3 months) and monthly (28th) with all sources; GDACS backfill depth is controlled via the `gdacs_months` workflow input (default 3; set to 135 for full backfill to 2015).
