@@ -996,7 +996,8 @@ def _bulk_fetch_gdacs(dry_run: bool = False) -> dict[str, Any]:
     try:
         from resolver.tools.run_pipeline import run_pipeline
 
-        result = run_pipeline(connectors=["gdacs"])
+        db_url = os.getenv("RESOLVER_DB_URL") or None
+        result = run_pipeline(connectors=["gdacs"], db_url=db_url)
         LOG.info(
             "[gdacs] pipeline complete: %d facts, %d resolved, %d deltas",
             result.total_facts,

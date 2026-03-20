@@ -21,8 +21,9 @@ generic info item — it does NOT return event data):
    available for any event, includes ``gdacs:population`` data.
 
 Strategy:
-- For the default 3-month window: fetch static RSS feeds (fast, 1 request
-  per hazard type, includes population data).
+- For the default 3-month window: fetch static RSS feeds for FL/TC (fast,
+  1 request per hazard type, includes population data).  DR always uses
+  the JSON search API because the DR RSS feed returns 404.
 - For historical backfill (>3 months): use JSON search API for event
   discovery, then fetch per-event RSS for population data.
 """
@@ -351,7 +352,13 @@ class GdacsConnector:
         delay: float,
         name_to_iso3: dict[str, str],
     ) -> list[dict[str, Any]]:
-        """Fetch events using the best available data source."""
+        """Fetch events using the best available data source.
+
+        DR (drought) always uses the JSON search API because the static
+        DR RSS feed (``rss_dr_3m.xml``) returns 404.  FL and TC use
+        static RSS feeds when the window is ≤3 months (fast, includes
+        population data) and the JSON API otherwise.
+        """
         use_rss = os.getenv("GDACS_FORCE_RSS", "").strip().lower() in ("1", "true")
         use_json = os.getenv("GDACS_FORCE_JSON", "").strip().lower() in ("1", "true")
 
@@ -365,7 +372,7 @@ class GdacsConnector:
         # Auto-detect: use RSS for <=3 months, JSON API for longer
         months_span = (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month)
         if months_span <= 3:
-            LOG.info("[gdacs] using static RSS feeds (<=3 month window)")
+            LOG.info("[gdacs] using static RSS feeds for FL/TC (<=3 month window)")
             events = self._fetch_via_static_rss(session, name_to_iso3)
             if events:
                 # Filter to date range (RSS feeds cover exactly 3 months)
@@ -373,10 +380,19 @@ class GdacsConnector:
                     e for e in events
                     if e["todate"] >= start_date and e["fromdate"] <= end_date
                 ]
-                return events
-            LOG.warning("[gdacs] static RSS returned 0 events, falling back to JSON API")
+            else:
+                LOG.warning("[gdacs] static RSS returned 0 FL/TC events")
 
-        LOG.info("[gdacs] using JSON search API (>3 month window or RSS fallback)")
+            # DR always via JSON API (DR RSS feed returns 404)
+            LOG.info("[gdacs] fetching DR events via JSON search API")
+            dr_events = self._fetch_via_json_api(
+                session, start_date, end_date, delay, name_to_iso3,
+                event_types=["DR"],
+            )
+            LOG.info("[gdacs] JSON API returned %d DR events", len(dr_events))
+            return (events or []) + dr_events
+
+        LOG.info("[gdacs] using JSON search API (>3 month window)")
         return self._fetch_via_json_api(
             session, start_date, end_date, delay, name_to_iso3,
         )
@@ -500,10 +516,20 @@ class GdacsConnector:
         end_date: date,
         delay: float,
         name_to_iso3: dict[str, str],
+        event_types: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Fetch events via the JSON search API, then enrich with per-event RSS."""
+        """Fetch events via the JSON search API, then enrich with per-event RSS.
+
+        Parameters
+        ----------
+        event_types:
+            Optional subset of event types to query (e.g. ``["DR"]``).
+            Defaults to all wanted types (FL, TC, DR).
+        """
         # Step 1: Discover events via JSON search API (chunked by quarter)
-        json_events = self._search_events(session, start_date, end_date, delay)
+        json_events = self._search_events(
+            session, start_date, end_date, delay, event_types=event_types,
+        )
         LOG.info("[gdacs] JSON API returned %d events", len(json_events))
         if not json_events:
             return []
@@ -520,6 +546,7 @@ class GdacsConnector:
         start_date: date,
         end_date: date,
         delay: float,
+        event_types: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Query the GDACS JSON search API in quarterly chunks."""
         all_events: list[dict[str, Any]] = []
@@ -537,7 +564,9 @@ class GdacsConnector:
             chunk_end = min(date(cy, cm, 1), end_date)
 
             try:
-                events = self._search_chunk(session, chunk_start, chunk_end)
+                events = self._search_chunk(
+                    session, chunk_start, chunk_end, event_types=event_types,
+                )
                 for ev in events:
                     key = (ev["eventtype"], ev["eventid"])
                     if key not in seen_keys:
@@ -561,10 +590,11 @@ class GdacsConnector:
         session: requests.Session,
         from_date: date,
         to_date: date,
+        event_types: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Query the JSON search API for a single date chunk."""
         params = {
-            "eventlist": "FL,TC,DR",
+            "eventlist": ";".join(event_types or sorted(_WANTED_TYPES)),
             "fromDate": from_date.isoformat(),
             "toDate": to_date.isoformat(),
             "alertlevel": "Green;Orange;Red",
