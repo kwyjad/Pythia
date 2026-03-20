@@ -3,11 +3,28 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""GDACS RSS archive connector.
+"""GDACS connector — fetches disaster events via the GDACS JSON search API
+and static RSS feeds.
 
-Fetches disaster events (drought, flood, tropical cyclone) from the GDACS
-RSS archive endpoint, extracts population-exposed figures, and returns a
-canonical DataFrame for the Resolver pipeline.
+Data sources (the ``rss.aspx?profile=ARCHIVE`` endpoint returns only a
+generic info item — it does NOT return event data):
+
+1. **JSON search API** (``gdacsapi/api/events/geteventlist/SEARCH``) —
+   works for any date range, returns event metadata including
+   ``affectedcountries`` with ISO3 codes, ``alertlevel``, dates.
+
+2. **Static RSS feeds** (``xml/rss_fl_3m.xml``, ``xml/rss_tc_3m.xml``) —
+   cover the last 3 months and include ``gdacs:population`` data.
+   The drought feed (``rss_dr_3m.xml``) returns 404.
+
+3. **Per-event RSS** (``datareport/resources/{TYPE}/{ID}/rss_{ID}.xml``) —
+   available for any event, includes ``gdacs:population`` data.
+
+Strategy:
+- For the default 3-month window: fetch static RSS feeds (fast, 1 request
+  per hazard type, includes population data).
+- For historical backfill (>3 months): use JSON search API for event
+  discovery, then fetch per-event RSS for population data.
 """
 
 from __future__ import annotations
@@ -35,7 +52,20 @@ LOG = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_BASE_URL = "http://gdacs.org/rss.aspx"
+# JSON search API — works for any date range
+_SEARCH_API = "https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH"
+
+# Static RSS feeds — 3-month window, include population data
+_STATIC_RSS: dict[str, str] = {
+    "FL": "https://www.gdacs.org/xml/rss_fl_3m.xml",
+    "TC": "https://www.gdacs.org/xml/rss_tc_3m.xml",
+    # DR feed (rss_dr_3m.xml) returns 404 as of 2026-03
+}
+
+# Per-event RSS pattern — available for any event, has population data
+_EVENT_RSS_PATTERN = (
+    "https://www.gdacs.org/datareport/resources/{type}/{eventid}/rss_{eventid}.xml"
+)
 
 # GDACS event types we care about
 _WANTED_TYPES = {"DR", "FL", "TC"}
@@ -66,7 +96,7 @@ _CONFIDENCE_MAP: dict[str, str] = {
     "Green": "low",
 }
 
-# XML namespaces used in the GDACS RSS feed
+# XML namespaces used in the GDACS RSS feeds
 _NS: dict[str, str] = {
     "gdacs": "http://www.gdacs.org",
     "geo": "http://www.w3.org/2003/01/geo/wgs84_pos#",
@@ -210,7 +240,7 @@ def _overlapping_months(from_date: date, to_date: date) -> list[tuple[int, int]]
 
 
 def _parse_date(text: str | None) -> date | None:
-    """Parse a date string from GDACS XML."""
+    """Parse a date string from GDACS XML or JSON."""
     if not text:
         return None
     text = text.strip()
@@ -263,7 +293,7 @@ class GdacsConnector:
         return date.today()
 
     def fetch_and_normalize(self) -> pd.DataFrame:
-        """Fetch GDACS RSS archive and return canonical rows."""
+        """Fetch GDACS events and return canonical rows."""
         delay = float(os.getenv("GDACS_REQUEST_DELAY", "1.0"))
         months_back = int(os.getenv("GDACS_MONTHS", "3"))
 
@@ -310,7 +340,7 @@ class GdacsConnector:
         return validate_canonical(df, source="gdacs")
 
     # -----------------------------------------------------------------------
-    # Fetching
+    # Fetching — two strategies based on window size
     # -----------------------------------------------------------------------
 
     def _fetch_all_events(
@@ -321,47 +351,60 @@ class GdacsConnector:
         delay: float,
         name_to_iso3: dict[str, str],
     ) -> list[dict[str, Any]]:
-        """Fetch RSS archive month-by-month and extract events."""
-        events: list[dict[str, Any]] = []
-        for y, m in _month_range(start_date, end_date):
-            chunk_start = date(y, m, 1)
-            chunk_end = _last_day(y, m)
-            # Clamp to actual range
-            if chunk_start < start_date:
-                chunk_start = start_date
-            if chunk_end > end_date:
-                chunk_end = end_date
+        """Fetch events using the best available data source."""
+        use_rss = os.getenv("GDACS_FORCE_RSS", "").strip().lower() in ("1", "true")
+        use_json = os.getenv("GDACS_FORCE_JSON", "").strip().lower() in ("1", "true")
 
-            try:
-                chunk_events = self._fetch_month(
-                    session, chunk_start, chunk_end, name_to_iso3,
-                )
-                events.extend(chunk_events)
-            except Exception as exc:
-                LOG.warning("[gdacs] error fetching %04d-%02d: %s", y, m, exc)
+        if use_json:
+            return self._fetch_via_json_api(
+                session, start_date, end_date, delay, name_to_iso3,
+            )
+        if use_rss:
+            return self._fetch_via_static_rss(session, name_to_iso3)
 
-            if delay > 0:
-                time.sleep(delay)
+        # Auto-detect: use RSS for <=3 months, JSON API for longer
+        months_span = (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month)
+        if months_span <= 3:
+            LOG.info("[gdacs] using static RSS feeds (<=3 month window)")
+            events = self._fetch_via_static_rss(session, name_to_iso3)
+            if events:
+                # Filter to date range (RSS feeds cover exactly 3 months)
+                events = [
+                    e for e in events
+                    if e["todate"] >= start_date and e["fromdate"] <= end_date
+                ]
+                return events
+            LOG.warning("[gdacs] static RSS returned 0 events, falling back to JSON API")
 
-        return events
+        LOG.info("[gdacs] using JSON search API (>3 month window or RSS fallback)")
+        return self._fetch_via_json_api(
+            session, start_date, end_date, delay, name_to_iso3,
+        )
 
-    def _fetch_month(
+    # -----------------------------------------------------------------------
+    # Strategy 1: Static RSS feeds (fast, 3-month window, has population)
+    # -----------------------------------------------------------------------
+
+    def _fetch_via_static_rss(
         self,
         session: requests.Session,
-        from_date: date,
-        to_date: date,
         name_to_iso3: dict[str, str],
     ) -> list[dict[str, Any]]:
-        """Fetch a single month chunk from the GDACS RSS archive."""
-        params = {
-            "profile": "ARCHIVE",
-            "fromarchive": "true",
-            "from": from_date.isoformat(),
-            "to": to_date.isoformat(),
-        }
-        resp = session.get(_BASE_URL, params=params, timeout=30)
-        resp.raise_for_status()
-        return self._parse_rss(resp.content, name_to_iso3)
+        """Fetch from static RSS feeds (FL 3m, TC 3m)."""
+        all_events: list[dict[str, Any]] = []
+        for etype, url in _STATIC_RSS.items():
+            try:
+                resp = session.get(url, timeout=30)
+                if resp.status_code == 404:
+                    LOG.warning("[gdacs] static RSS 404 for %s: %s", etype, url)
+                    continue
+                resp.raise_for_status()
+                events = self._parse_rss(resp.content, name_to_iso3)
+                LOG.info("[gdacs] static RSS %s: %d events", etype, len(events))
+                all_events.extend(events)
+            except Exception as exc:
+                LOG.warning("[gdacs] error fetching static RSS %s: %s", etype, exc)
+        return all_events
 
     def _parse_rss(
         self,
@@ -447,6 +490,181 @@ class GdacsConnector:
         }
 
     # -----------------------------------------------------------------------
+    # Strategy 2: JSON search API (any date range) + per-event RSS
+    # -----------------------------------------------------------------------
+
+    def _fetch_via_json_api(
+        self,
+        session: requests.Session,
+        start_date: date,
+        end_date: date,
+        delay: float,
+        name_to_iso3: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Fetch events via the JSON search API, then enrich with per-event RSS."""
+        # Step 1: Discover events via JSON search API (chunked by quarter)
+        json_events = self._search_events(session, start_date, end_date, delay)
+        LOG.info("[gdacs] JSON API returned %d events", len(json_events))
+        if not json_events:
+            return []
+
+        # Step 2: Fetch per-event RSS for population data
+        events = self._enrich_with_population(
+            session, json_events, delay, name_to_iso3,
+        )
+        return events
+
+    def _search_events(
+        self,
+        session: requests.Session,
+        start_date: date,
+        end_date: date,
+        delay: float,
+    ) -> list[dict[str, Any]]:
+        """Query the GDACS JSON search API in quarterly chunks."""
+        all_events: list[dict[str, Any]] = []
+        seen_keys: set[tuple[str, int]] = set()
+
+        # Chunk into quarters to avoid hitting response limits
+        chunk_start = start_date
+        while chunk_start <= end_date:
+            # End of quarter (3 months from start)
+            cy, cm = chunk_start.year, chunk_start.month
+            cm += 3
+            while cm > 12:
+                cm -= 12
+                cy += 1
+            chunk_end = min(date(cy, cm, 1), end_date)
+
+            try:
+                events = self._search_chunk(session, chunk_start, chunk_end)
+                for ev in events:
+                    key = (ev["eventtype"], ev["eventid"])
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        all_events.append(ev)
+            except Exception as exc:
+                LOG.warning(
+                    "[gdacs] JSON API error for %s to %s: %s",
+                    chunk_start, chunk_end, exc,
+                )
+
+            # Advance to next chunk
+            chunk_start = chunk_end
+            if chunk_start < end_date and delay > 0:
+                time.sleep(delay)
+
+        return all_events
+
+    def _search_chunk(
+        self,
+        session: requests.Session,
+        from_date: date,
+        to_date: date,
+    ) -> list[dict[str, Any]]:
+        """Query the JSON search API for a single date chunk."""
+        params = {
+            "eventlist": "FL,TC,DR",
+            "fromDate": from_date.isoformat(),
+            "toDate": to_date.isoformat(),
+            "alertlevel": "Green;Orange;Red",
+        }
+        resp = session.get(_SEARCH_API, params=params, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+
+        events: list[dict[str, Any]] = []
+        features = data.get("features", [])
+        for feat in features:
+            props = feat.get("properties", {})
+            eventtype = props.get("eventtype", "")
+            if eventtype not in _WANTED_TYPES:
+                continue
+
+            # Extract affected countries with ISO3 codes
+            affected = props.get("affectedcountries", [])
+            iso3_list = [
+                c.get("iso3", "").strip().upper()
+                for c in affected
+                if c.get("iso3", "").strip()
+            ]
+            # Fallback to primary iso3 field
+            primary_iso3 = (props.get("iso3") or "").strip().upper()
+            if not iso3_list and primary_iso3:
+                iso3_list = [primary_iso3]
+
+            fromdate = _parse_date(props.get("fromdate"))
+            todate = _parse_date(props.get("todate"))
+            if not fromdate:
+                continue
+            if not todate:
+                todate = fromdate
+
+            events.append({
+                "eventtype": eventtype,
+                "eventid": props.get("eventid"),
+                "iso3": primary_iso3 or (iso3_list[0] if iso3_list else ""),
+                "iso3_list": iso3_list,
+                "country": props.get("country", ""),
+                "fromdate": fromdate,
+                "todate": todate,
+                "alertlevel": props.get("alertlevel", "Green"),
+                "alertscore": props.get("alertscore"),
+                "population": 0.0,  # Will be enriched from per-event RSS
+                "pub_date": _parse_date(props.get("datemodified")) or todate,
+            })
+
+        return events
+
+    def _enrich_with_population(
+        self,
+        session: requests.Session,
+        events: list[dict[str, Any]],
+        delay: float,
+        name_to_iso3: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Fetch per-event RSS to get population data for each event."""
+        enriched: list[dict[str, Any]] = []
+        total = len(events)
+
+        for i, ev in enumerate(events):
+            etype = ev["eventtype"]
+            eid = ev["eventid"]
+            url = _EVENT_RSS_PATTERN.format(type=etype, eventid=eid)
+
+            try:
+                resp = session.get(url, timeout=30)
+                if resp.status_code == 404:
+                    LOG.debug("[gdacs] per-event RSS 404 for %s/%s", etype, eid)
+                    enriched.append(ev)
+                    continue
+                resp.raise_for_status()
+
+                # Parse the per-event RSS to get population
+                rss_events = self._parse_rss(resp.content, name_to_iso3)
+                if rss_events:
+                    # Take the latest episode (highest todate)
+                    best = max(rss_events, key=lambda e: (e["todate"], e.get("pub_date") or e["todate"]))
+                    ev["population"] = best["population"]
+                    # Also update iso3/country if the RSS has better data
+                    if best.get("iso3") and not ev.get("iso3"):
+                        ev["iso3"] = best["iso3"]
+                    if best.get("country") and not ev.get("country"):
+                        ev["country"] = best["country"]
+            except Exception as exc:
+                LOG.debug("[gdacs] error fetching RSS for %s/%s: %s", etype, eid, exc)
+
+            enriched.append(ev)
+
+            if (i + 1) % 50 == 0:
+                LOG.info("[gdacs] enriched %d/%d events", i + 1, total)
+
+            if delay > 0:
+                time.sleep(delay)
+
+        return enriched
+
+    # -----------------------------------------------------------------------
     # Deduplication
     # -----------------------------------------------------------------------
 
@@ -454,7 +672,7 @@ class GdacsConnector:
         """Keep only the latest episode per (eventtype, eventid)."""
         best: dict[tuple[str, str], dict[str, Any]] = {}
         for ev in events:
-            key = (ev["eventtype"], ev["eventid"])
+            key = (ev["eventtype"], str(ev["eventid"]))
             existing = best.get(key)
             if existing is None:
                 best[key] = ev
@@ -508,6 +726,11 @@ class GdacsConnector:
         name_to_iso3: dict[str, str],
     ) -> list[str]:
         """Resolve an event to a list of ISO3 codes."""
+        # JSON API events may carry a pre-extracted iso3_list
+        iso3_list = event.get("iso3_list")
+        if iso3_list and all(len(c) == 3 for c in iso3_list):
+            return iso3_list
+
         iso3 = event.get("iso3")
         if iso3 and len(iso3) == 3:
             # Could be comma-separated for multi-country events
