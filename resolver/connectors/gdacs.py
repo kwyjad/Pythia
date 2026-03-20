@@ -578,9 +578,11 @@ class GdacsConnector:
                     chunk_start, chunk_end, exc,
                 )
 
-            # Advance to next chunk
+            # Advance to next chunk — if chunk_end reached end_date, stop.
+            if chunk_end >= end_date:
+                break
             chunk_start = chunk_end
-            if chunk_start < end_date and delay > 0:
+            if delay > 0:
                 time.sleep(delay)
 
         return all_events
@@ -601,6 +603,9 @@ class GdacsConnector:
         }
         resp = session.get(_SEARCH_API, params=params, timeout=60)
         resp.raise_for_status()
+        if not resp.text.strip():
+            LOG.debug("[gdacs] empty response for %s to %s", from_date, to_date)
+            return []
         data = resp.json()
 
         events: list[dict[str, Any]] = []
