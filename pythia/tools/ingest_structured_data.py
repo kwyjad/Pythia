@@ -60,6 +60,7 @@ _SOURCE_GROUPS: dict[str, list[str]] = {
     "reliefweb": ["reliefweb_reports"],
     "acled_political": ["acled_political_events"],
     "nmme": ["nmme_seasonal_forecasts"],
+    "gdacs": ["gdacs_population_exposed"],
 }
 
 # Convenience aliases that expand to multiple source groups.
@@ -977,6 +978,42 @@ def _bulk_fetch_nmme(dry_run: bool = False) -> dict[str, Any]:
 
 
 # ===================================================================
+# GDACS — delegate to resolver.connectors.gdacs / resolver.tools.run_pipeline
+# ===================================================================
+
+
+def _bulk_fetch_gdacs(dry_run: bool = False) -> dict[str, Any]:
+    """Run the GDACS connector via the Resolver pipeline.
+
+    The GDACS connector fetches disaster population-exposure data (FL, DR,
+    TC) from the GDACS RSS archive.  It writes to ``facts_resolved`` and
+    ``facts_deltas`` through the standard Resolver pipeline.
+    """
+    if dry_run:
+        LOG.info("[gdacs] dry-run — skipping GDACS fetch")
+        return {"__gdacs_done__": True}
+
+    try:
+        from resolver.tools.run_pipeline import run_pipeline
+
+        result = run_pipeline(connectors=["gdacs"])
+        LOG.info(
+            "[gdacs] pipeline complete: %d facts, %d resolved, %d deltas",
+            result.total_facts,
+            result.resolved_rows,
+            result.delta_rows,
+        )
+        if result.total_facts == 0:
+            LOG.warning("[gdacs] no data returned from GDACS connector")
+            return {}
+    except Exception as exc:
+        LOG.error("[gdacs] pipeline failed: %s", exc, exc_info=True)
+        return {}
+
+    return {"__gdacs_done__": True}
+
+
+# ===================================================================
 # Conflict forecasts — delegate to resolver.tools.fetch_conflict_forecasts
 # ===================================================================
 
@@ -985,6 +1022,7 @@ _SELF_STORING_LABELS = frozenset([
     "nmme_seasonal_forecasts",
     "views_forecasts",
     "conflictforecast_forecasts",
+    "gdacs_population_exposed",
     "acledcast_forecasts",
 ])
 
@@ -1147,6 +1185,8 @@ def ingest(
                 result = _bulk_fetch_nmme(dry_run)
             elif label == "acled_political_events":
                 result = _bulk_fetch_acled_political(countries)
+            elif label == "gdacs_population_exposed":
+                result = _bulk_fetch_gdacs(dry_run)
             elif label in _CONFLICT_SOURCE_MAP:
                 result = _bulk_fetch_conflict(label, dry_run)
             else:

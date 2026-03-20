@@ -23,10 +23,15 @@ concurrency:
           Optional source filter (default: all). Options: views, conflictforecast,
           acledcast, acaps (alias for all 4 ACAPS sources), acaps_inform_severity,
           acaps_risk_radar, acaps_daily_monitoring, acaps_humanitarian_access, ipc,
-          reliefweb, nmme. Also accepts: conflict (alias for
+          reliefweb, nmme, gdacs. Also accepts: conflict (alias for
           views+conflictforecast+acledcast). Comma or space separated.
         required: false
         default: ""
+        type: string
+      gdacs_months:
+        description: "Number of months to fetch for GDACS (default 3; use 135 for full backfill to 2015)"
+        required: false
+        default: "3"
         type: string
       dry_run:
         description: "Fetch and process but do not write to DuckDB"
@@ -36,6 +41,8 @@ concurrency:
   schedule:
     # Run at 00:00 UTC on the 28th of each month (same day as TC refresh).
     - cron: "0 0 28 * *"
+    # Weekly GDACS update: Sunday 03:00 UTC.
+    - cron: "0 3 * * 0"
 
 permissions:
   contents: read
@@ -198,6 +205,8 @@ jobs:
           fi
 
       - name: Run structured data ingestion
+        env:
+          GDACS_MONTHS: ${{ inputs.gdacs_months || '3' }}
         run: |
           set -e
           echo "=== Running structured data ingestion ==="
