@@ -19,6 +19,7 @@ ENV:
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 LOG = logging.getLogger(__name__)
@@ -27,10 +28,16 @@ LOG = logging.getLogger(__name__)
 def main() -> None:
     from resolver.tools.run_pipeline import run_pipeline
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+
     LOG.info("[gdacs] starting GDACS ingestion via Resolver pipeline")
 
     try:
-        result = run_pipeline(connectors=["gdacs"])
+        db_url = os.getenv("RESOLVER_DB_URL") or None
+        result = run_pipeline(connectors=["gdacs"], db_url=db_url)
     except Exception as exc:
         LOG.error("[gdacs] pipeline failed: %s", exc, exc_info=True)
         print(f"[gdacs] ERROR: {exc}")
@@ -45,11 +52,12 @@ def main() -> None:
     )
     # Print rows= line so run_connectors.py can parse the row count.
     print(f"[gdacs] wrote rows={total}")
+    if not result.db_written:
+        LOG.warning(
+            "[gdacs] DB not written (RESOLVER_DB_URL=%s)",
+            os.getenv("RESOLVER_DB_URL", "(unset)"),
+        )
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
     main()
