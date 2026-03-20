@@ -152,6 +152,10 @@ The Resolver was refactored in PR #610 to a connector-based architecture. Defunc
 - `acled` — ACLED conflict/fatalities data (wraps `resolver/ingestion/acled_client`)
 - `idmc` — IDMC internal displacement data (wraps `resolver/ingestion/idmc/`)
 - `ifrc_montandon` — IFRC Go connector (stubbed, not yet active)
+<<<<<<< Updated upstream
+=======
+- `gdacs` — GDACS disaster population exposure (FL, DR, TC) from RSS archive. No auth required. Fetches month-by-month; depth controlled by `GDACS_MONTHS` (default 3; use 135 for full backfill to 2015). Multi-country events use population-weighted allocation. TC zero-fills no-event months; FL/DR do not. Entry point: `resolver/ingestion/gdacs.py` (for `run_connectors.py`); also integrated into `pythia/tools/ingest_structured_data.py` as the `gdacs` source. Both paths delegate to `run_pipeline(connectors=["gdacs"])`. Env vars: `GDACS_MONTHS` (default 3), `GDACS_REQUEST_DELAY` (default 1.0s).
+>>>>>>> Stashed changes
 
 **Pipeline orchestrator** (`resolver/tools/run_pipeline.py`):
 ```
