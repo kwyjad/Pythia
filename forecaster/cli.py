@@ -1677,7 +1677,8 @@ def _write_spd_ensemble_to_db(
                 probability DOUBLE,
                 ev_value DOUBLE,
                 weights_profile TEXT,
-                created_at TIMESTAMP
+                created_at TIMESTAMP,
+                is_test BOOLEAN DEFAULT FALSE
             );
             """
         )

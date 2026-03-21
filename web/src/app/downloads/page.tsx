@@ -1,5 +1,6 @@
 "use client";
 
+import { Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 
 const API_BASE =
@@ -14,7 +15,7 @@ const SCORES_ENSEMBLE_MEAN_URL = `${API_BASE}/downloads/scores_ensemble_mean.csv
 const SCORES_ENSEMBLE_BAYESMC_URL = `${API_BASE}/downloads/scores_ensemble_bayesmc.csv`;
 const SCORES_MODEL_URL = `${API_BASE}/downloads/scores_model.csv`;
 
-const DownloadsPage = () => {
+const DownloadsContent = () => {
   const searchParams = useSearchParams();
   const includeTest = searchParams.get("include_test") === "true";
 
@@ -122,5 +123,11 @@ const DownloadsPage = () => {
     </div>
   );
 };
+
+const DownloadsPage = () => (
+  <Suspense>
+    <DownloadsContent />
+  </Suspense>
+);
 
 export default DownloadsPage;
