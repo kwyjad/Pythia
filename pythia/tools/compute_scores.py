@@ -537,6 +537,105 @@ def compute_scores(db_url: str) -> None:
             # source-aware null handling, but defend against edge cases).
             if resolved_value is None:
                 continue
+
+            # Binary EVENT_OCCURRENCE questions use Brier score directly
+            is_binary = (metric or "").upper() == "EVENT_OCCURRENCE"
+            if is_binary:
+                outcome = float(resolved_value)
+                rid_list = run_ids_map.get((question_id, horizon_m)) or [None]
+                for run_id in rid_list:
+                    rid_clause, rid_params = _run_id_clause(run_id)
+                    if has_run_id:
+                        fe_rid_clause, fe_rid_params = rid_clause, rid_params
+                    else:
+                        fe_rid_clause, fe_rid_params = "", []
+
+                    # Score ensemble (bucket_1 = P(yes) in binary convention)
+                    try:
+                        ens_row = conn.execute(
+                            f"""
+                            SELECT probability FROM forecasts_ensemble
+                            WHERE question_id = ? AND month_index = ? AND bucket_index = 1
+                            {fe_rid_clause}
+                            ORDER BY created_at DESC LIMIT 1
+                            """,
+                            [question_id, horizon_m] + fe_rid_params,
+                        ).fetchone()
+                    except Exception:
+                        ens_row = None
+
+                    if ens_row and ens_row[0] is not None:
+                        p_yes = float(ens_row[0])
+                        brier_val = (p_yes - outcome) ** 2
+                        conn.execute(
+                            f"""
+                            DELETE FROM scores
+                            WHERE question_id = ? AND horizon_m = ? AND metric = ?
+                              AND model_name IS NULL {rid_clause}
+                            """,
+                            [question_id, horizon_m, metric] + rid_params,
+                        )
+                        now = datetime.utcnow()
+                        conn.execute(
+                            """
+                            INSERT INTO scores (question_id, horizon_m, metric, score_type,
+                                                model_name, value, run_id, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            [question_id, horizon_m, metric, "brier", None, brier_val, run_id, now],
+                        )
+                        n_written += 1
+
+                    # Score individual models
+                    try:
+                        model_rows = conn.execute(
+                            f"""
+                            SELECT DISTINCT model_name FROM forecasts_raw
+                            WHERE question_id = ? AND month_index = ? {fe_rid_clause}
+                            ORDER BY model_name
+                            """,
+                            [question_id, horizon_m] + fe_rid_params,
+                        ).fetchall()
+                    except Exception:
+                        model_rows = []
+
+                    for (model_name,) in model_rows:
+                        try:
+                            raw_row = conn.execute(
+                                f"""
+                                SELECT probability FROM forecasts_raw
+                                WHERE question_id = ? AND month_index = ? AND bucket_index = 1
+                                  AND model_name = ? {fe_rid_clause}
+                                ORDER BY rowid DESC LIMIT 1
+                                """,
+                                [question_id, horizon_m, model_name] + fe_rid_params,
+                            ).fetchone()
+                        except Exception:
+                            raw_row = None
+
+                        if raw_row and raw_row[0] is not None:
+                            p_yes_m = float(raw_row[0])
+                            brier_m = (p_yes_m - outcome) ** 2
+                            conn.execute(
+                                f"""
+                                DELETE FROM scores
+                                WHERE question_id = ? AND horizon_m = ? AND metric = ?
+                                  AND model_name = ? {rid_clause}
+                                """,
+                                [question_id, horizon_m, metric, model_name] + rid_params,
+                            )
+                            now = datetime.utcnow()
+                            conn.execute(
+                                """
+                                INSERT INTO scores (question_id, horizon_m, metric, score_type,
+                                                    model_name, value, run_id, created_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                [question_id, horizon_m, metric, "brier", model_name, brier_m, run_id, now],
+                            )
+                            n_written += 1
+                continue  # skip SPD scoring for binary questions
+
             class_bins = _class_bins(metric, hazard_code)
             if not class_bins:
                 LOGGER.debug("Unsupported metric %s for question %s; skipping.", metric, question_id)

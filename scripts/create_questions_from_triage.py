@@ -10,6 +10,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import duckdb
@@ -34,9 +35,9 @@ class TriagedHazard:
 SUPPORTED_HAZARD_METRICS: Dict[str, List[str]] = {
     "ACE": ["FATALITIES", "PA"],
     "CU": ["PA"],
-    "DR": ["PA"],
-    "FL": ["PA"],
-    "TC": ["PA"],
+    "DR": ["PA", "EVENT_OCCURRENCE"],
+    "FL": ["PA", "EVENT_OCCURRENCE"],
+    "TC": ["PA", "EVENT_OCCURRENCE"],
     "DI": ["PA"],
 }
 
@@ -50,6 +51,20 @@ COUNTRY_NAMES = {
     "ETH": "Ethiopia",
     "SOM": "Somalia",
 }
+
+_FEWSNET_COUNTRIES_FILE = Path(__file__).resolve().parent.parent / "resolver" / "data" / "fewsnet_countries.json"
+
+
+def _is_fewsnet_country(iso3: str) -> bool:
+    """Check if a country is in the FEWS NET monitoring list."""
+    if not _FEWSNET_COUNTRIES_FILE.exists():
+        return True  # fail-open: if file missing, generate questions
+    try:
+        with open(_FEWSNET_COUNTRIES_FILE) as f:
+            countries = json.load(f)
+        return iso3.upper() in {c.upper() for c in countries}
+    except Exception:
+        return True  # fail-open
 
 
 def _parse_args() -> argparse.Namespace:
@@ -157,6 +172,24 @@ def _build_question_wording(
 
     return (
         f"How many people will be affected each month in {country} by hazard {hz} "
+        f"between {start_str} and {end_str}?"
+    )
+
+
+def _build_binary_question_wording(
+    iso3: str,
+    hazard_code: str,
+    window_start_date: date,
+    window_end_date: date,
+) -> str:
+    country = _country_label(iso3)
+    hz = (hazard_code or "").upper()
+    hazard_name = HAZARD_HUMAN_NAMES.get(hz, hz)
+    start_str = window_start_date.isoformat()
+    end_str = window_end_date.isoformat()
+    return (
+        f"Will GDACS report a significant {hazard_name} event "
+        f"(Orange or Red alert level) affecting {country} during each month "
         f"between {start_str} and {end_str}?"
     )
 
@@ -363,9 +396,18 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                 continue
 
             for mt in metrics:
-                wording = _build_question_wording(
-                    th.iso3, th.hazard_code, mt, opening, closing
-                )
+                if th.hazard_code == "DR" and mt == "PA" and not _is_fewsnet_country(th.iso3):
+                    LOG.info("Skipping DR/PA for %s (not a FEWS NET country)", th.iso3)
+                    continue
+
+                if mt == "EVENT_OCCURRENCE":
+                    wording = _build_binary_question_wording(
+                        th.iso3, th.hazard_code, opening, closing
+                    )
+                else:
+                    wording = _build_question_wording(
+                        th.iso3, th.hazard_code, mt, opening, closing
+                    )
                 meta = {
                     "source": "hs_triage",
                     "hs_run_id": run_id,

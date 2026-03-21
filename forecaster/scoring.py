@@ -54,3 +54,16 @@ def log_score(probs: Iterable[float], true_idx_1based: int, eps: float = 1e-12) 
     p_true = probs_norm[true_index] if 0 <= true_index < len(probs_norm) else 0.0
     p_clipped = max(p_true, eps)
     return -math.log(p_clipped)
+
+
+def binary_brier(forecast_p: float, outcome: float) -> float:
+    """Compute Brier score for a binary forecast.
+
+    Args:
+        forecast_p: Predicted probability of event (0 to 1)
+        outcome: Actual outcome (0 or 1)
+
+    Returns:
+        Brier score (0 = perfect, 1 = worst)
+    """
+    return (float(forecast_p) - float(outcome)) ** 2
