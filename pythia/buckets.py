@@ -34,9 +34,18 @@ FATALITIES_BUCKETS: tuple[BucketSpec, ...] = (
     BucketSpec(idx=5, label=">=500", centroid=700.0, lower=500.0, upper=None),
 )
 
+DR_PHASE3_BUCKETS: tuple[BucketSpec, ...] = (
+    BucketSpec(idx=1, label="<100k", centroid=50_000.0, lower=0.0, upper=100_000.0),
+    BucketSpec(idx=2, label="100k-<1M", centroid=500_000.0, lower=100_000.0, upper=1_000_000.0),
+    BucketSpec(idx=3, label="1M-<5M", centroid=2_500_000.0, lower=1_000_000.0, upper=5_000_000.0),
+    BucketSpec(idx=4, label="5M-<15M", centroid=10_000_000.0, lower=5_000_000.0, upper=15_000_000.0),
+    BucketSpec(idx=5, label=">=15M", centroid=20_000_000.0, lower=15_000_000.0, upper=None),
+)
+
 BUCKET_SPECS: Mapping[str, Sequence[BucketSpec]] = {
     "PA": PA_BUCKETS,
     "FATALITIES": FATALITIES_BUCKETS,
+    "PHASE3PLUS_IN_NEED": DR_PHASE3_BUCKETS,
 }
 
 

@@ -493,7 +493,7 @@ def compute_scores(db_url: str) -> None:
           JOIN resolutions r
             ON q.question_id = r.question_id
           JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
-          WHERE upper(q.metric) IN ('PA','FATALITIES')
+          WHERE upper(q.metric) IN ('PA','FATALITIES','EVENT_OCCURRENCE','PHASE3PLUS_IN_NEED')
           ORDER BY q.question_id, r.horizon_m
         """
         qrows = conn.execute(q_sql).fetchall()
@@ -521,7 +521,7 @@ def compute_scores(db_url: str) -> None:
                         FROM questions q
                         JOIN resolutions r ON q.question_id = r.question_id
                         JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
-                        WHERE upper(q.metric) IN ('PA','FATALITIES')
+                        WHERE upper(q.metric) IN ('PA','FATALITIES','EVENT_OCCURRENCE','PHASE3PLUS_IN_NEED')
                     )
                     """
                 ).fetchall()
@@ -533,6 +533,10 @@ def compute_scores(db_url: str) -> None:
         n_written = 0
 
         for question_id, iso3, hazard_code, metric, horizon_m, resolved_value in qrows:
+            # Guard against NULL resolution values (should not happen with
+            # source-aware null handling, but defend against edge cases).
+            if resolved_value is None:
+                continue
             class_bins = _class_bins(metric, hazard_code)
             if not class_bins:
                 LOGGER.debug("Unsupported metric %s for question %s; skipping.", metric, question_id)

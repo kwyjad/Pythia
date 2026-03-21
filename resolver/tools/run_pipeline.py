@@ -93,7 +93,12 @@ def run_pipeline(
         cr = ConnectorResult(name=connector.name, rows=0, status="ok")
         try:
             df = connector.fetch_and_normalize()
-            validate_canonical(df, source=connector.name)
+            # Connectors may include supplementary columns beyond the
+            # canonical set (e.g. alertlevel for GDACS).  Detect them so
+            # validation doesn't reject them.
+            from resolver.connectors.protocol import CANONICAL_COLUMNS as _CC
+            _extra = [c for c in df.columns if c not in _CC]
+            validate_canonical(df, source=connector.name, extra_columns=_extra or None)
             cr.rows = len(df)
             if df.empty:
                 cr.status = "empty"
@@ -196,7 +201,11 @@ def _run_precedence(combined: pd.DataFrame) -> pd.DataFrame | None:
 
     # The engine needs a "source" column (connector name / publisher).
     if "source" not in work.columns:
-        work["source"] = ""
+        # Use publisher as the source identifier for precedence resolution.
+        if "publisher" in work.columns:
+            work["source"] = work["publisher"].fillna("")
+        else:
+            work["source"] = ""
 
     # The engine sorts by run_id as a final tiebreaker.
     if "run_id" not in work.columns:

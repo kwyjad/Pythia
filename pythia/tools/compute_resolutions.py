@@ -23,7 +23,16 @@ NUM_HORIZONS = 6
 
 # Hazards without a resolution data source.  Remove entries once a source
 # is available (e.g. when a DI resolution connector is added).
-UNRESOLVABLE_HAZARDS: set[str] = {"DI"}
+UNRESOLVABLE_HAZARDS: set[str] = {"DI", "HW"}
+
+# Metrics where absence of source data genuinely means zero impact.
+# All other metrics: absence = unknown (do NOT resolve).
+_ZERO_DEFAULT_RULES: dict[str, set[str]] = {
+    # ACLED covers all countries continuously — no record = zero fatalities
+    "FATALITIES": {"ACE", "ACO"},
+    # GDACS binary event occurrence: no event = 0
+    "EVENT_OCCURRENCE": {"FL", "DR", "TC"},
+}
 
 
 def _table_exists(conn, name: str) -> bool:
@@ -209,6 +218,30 @@ def _data_freshness_cutoff(conn, metric: str) -> Optional[str]:
             except Exception:
                 pass
 
+    elif metric == "EVENT_OCCURRENCE":
+        if _table_exists(conn, "facts_resolved"):
+            try:
+                row = conn.execute(
+                    "SELECT MAX(ym) FROM facts_resolved "
+                    "WHERE lower(metric) = 'event_occurrence'"
+                ).fetchone()
+                if row and row[0]:
+                    max_yms.append(str(row[0]))
+            except Exception:
+                pass
+
+    elif metric == "PHASE3PLUS_IN_NEED":
+        if _table_exists(conn, "facts_resolved"):
+            try:
+                row = conn.execute(
+                    "SELECT MAX(ym) FROM facts_resolved "
+                    "WHERE lower(metric) = 'phase3plus_in_need'"
+                ).fetchone()
+                if row and row[0]:
+                    max_yms.append(str(row[0]))
+            except Exception:
+                pass
+
     return max(max_yms) if max_yms else None
 
 
@@ -323,6 +356,54 @@ def _try_acled_fatalities(
     return float(row[0]), (str(row[1]) if row[1] is not None else None)
 
 
+def _try_gdacs_binary(
+    conn, iso3: str, hazard_code: str, calendar_month: str,
+) -> Optional[tuple[float, Optional[str]]]:
+    """Look up GDACS binary event occurrence in ``facts_resolved``."""
+    if not _table_exists(conn, "facts_resolved"):
+        return None
+    sql = """
+        SELECT value, created_at
+        FROM facts_resolved
+        WHERE iso3 = ? AND hazard_code = ?
+          AND ym = ?
+          AND lower(metric) = 'event_occurrence'
+        ORDER BY created_at DESC LIMIT 1
+    """
+    try:
+        row = conn.execute(sql, [iso3, hazard_code, calendar_month]).fetchone()
+    except Exception:
+        return None
+    if not row or row[0] is None:
+        return None
+    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+
+
+def _try_fewsnet_ipc(
+    conn, iso3: str, hazard_code: str, calendar_month: str,
+) -> Optional[tuple[float, Optional[str]]]:
+    """Look up Phase 3+ population in ``facts_resolved`` (FEWS NET IPC)."""
+    if hazard_code != "DR":
+        return None
+    if not _table_exists(conn, "facts_resolved"):
+        return None
+    sql = """
+        SELECT value, created_at
+        FROM facts_resolved
+        WHERE iso3 = ? AND hazard_code = 'DR'
+          AND ym = ?
+          AND lower(metric) = 'phase3plus_in_need'
+        ORDER BY created_at DESC LIMIT 1
+    """
+    try:
+        row = conn.execute(sql, [iso3, calendar_month]).fetchone()
+    except Exception:
+        return None
+    if not row or row[0] is None:
+        return None
+    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+
+
 def _resolve_value(
     conn,
     iso3: str,
@@ -332,13 +413,30 @@ def _resolve_value(
 ) -> Optional[tuple[float, Optional[str]]]:
     """Resolve a single metric for (iso3, hazard_code, calendar_month).
 
-    Checks multiple Resolver tables in priority order:
+    Checks multiple Resolver tables in priority order.  The dispatch
+    depends on the metric type:
+
+    PA:
       1. ``facts_resolved`` — IFRC stock data (highest source priority)
       2. ``facts_deltas``   — IDMC flow data and derived deltas
-      3. ``emdat_pa``       — EM-DAT people-affected (PA metric only)
-      4. ``acled_monthly_fatalities`` — ACLED fatalities (FATALITIES only)
+      3. ``emdat_pa``       — EM-DAT people-affected
+    FATALITIES:
+      1. ``facts_resolved``
+      2. ``facts_deltas``
+      3. ``acled_monthly_fatalities`` — ACLED fatalities
+    EVENT_OCCURRENCE:
+      1. ``facts_resolved`` (GDACS binary event rows)
+    PHASE3PLUS_IN_NEED:
+      1. ``facts_resolved`` (FEWS NET IPC Phase 3+ data)
     """
 
+    if metric == "EVENT_OCCURRENCE":
+        return _try_gdacs_binary(conn, iso3, hazard_code, calendar_month)
+
+    if metric == "PHASE3PLUS_IN_NEED":
+        return _try_fewsnet_ipc(conn, iso3, hazard_code, calendar_month)
+
+    # PA and FATALITIES: existing priority cascade
     # 1. facts_resolved (IFRC stock rows, highest priority)
     result = _try_facts_resolved(conn, iso3, hazard_code, calendar_month, metric)
     if result is not None:
@@ -362,6 +460,15 @@ def _resolve_value(
             return result
 
     return None
+
+
+def _should_default_to_zero(metric_norm: str, hazard_norm: str) -> bool:
+    """Return True if absence of source data means zero impact for this
+    metric/hazard combination."""
+    allowed_hazards = _ZERO_DEFAULT_RULES.get(metric_norm)
+    if allowed_hazards is not None and hazard_norm in allowed_hazards:
+        return True
+    return False
 
 
 
@@ -405,15 +512,18 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
     question's ``window_start_date``.
 
     Rules:
-      - Only metrics PA and FATALITIES are processed.
+      - Metrics PA, FATALITIES, EVENT_OCCURRENCE, and PHASE3PLUS_IN_NEED
+        are processed.
       - Hazards in ``UNRESOLVABLE_HAZARDS`` are skipped (no data source).
       - Eligibility is **data-driven**: a calendar month is eligible when
         at least one source table has data covering that month (determined
         via ``_data_freshness_cutoff``).
-      - When an eligible month has no matching row in any source table the
-        resolution defaults to ``0.0`` (no humanitarian impact reported).
-      - Checks facts_resolved, facts_deltas, emdat_pa, and
-        acled_monthly_fatalities.
+      - Source-aware null handling: when no matching row exists in any
+        source table, the behavior depends on the metric and hazard:
+          * FATALITIES + ACE/ACO: default to 0.0 (ACLED continuous coverage)
+          * EVENT_OCCURRENCE: default to 0.0 (no event = no occurrence)
+          * All others (PA, PHASE3PLUS_IN_NEED, etc.): skip the horizon
+            (no resolution row written — unresolvable, not zero).
     """
 
     if today is None:
@@ -442,22 +552,21 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         _purge_stale_resolutions(conn, cal_cutoff)
 
         # Data-driven guard: don't resolve beyond what sources actually cover.
-        pa_data_cutoff = _data_freshness_cutoff(conn, "PA")
-        fat_data_cutoff = _data_freshness_cutoff(conn, "FATALITIES")
+        _SUPPORTED_METRICS = ("PA", "FATALITIES", "EVENT_OCCURRENCE", "PHASE3PLUS_IN_NEED")
+        metric_cutoffs: dict[str, Optional[str]] = {}
+        for m in _SUPPORTED_METRICS:
+            data_cut = _data_freshness_cutoff(conn, m)
+            metric_cutoffs[m] = min(cal_cutoff, data_cut) if data_cut else cal_cutoff
 
-        # Effective cutoff: min(calendar, data) per metric.
-        # Calendar prevents partial-month resolution; data guard prevents
-        # resolving months for which no source data has been loaded yet.
-        pa_cutoff = min(cal_cutoff, pa_data_cutoff) if pa_data_cutoff else cal_cutoff
-        fat_cutoff = min(cal_cutoff, fat_data_cutoff) if fat_data_cutoff else cal_cutoff
-        LOGGER.info(
-            "Effective cutoffs: PA=%s (calendar=%s, data=%s), "
-            "FATALITIES=%s (calendar=%s, data=%s)",
-            pa_cutoff, cal_cutoff, pa_data_cutoff or "<none>",
-            fat_cutoff, cal_cutoff, fat_data_cutoff or "<none>",
+        cutoff_summary = ", ".join(
+            f"{m}={metric_cutoffs[m]} (data={_data_freshness_cutoff(conn, m) or '<none>'})"
+            for m in _SUPPORTED_METRICS
         )
+        LOGGER.info("Effective cutoffs (calendar=%s): %s", cal_cutoff, cutoff_summary)
 
-        query_sql = """
+        # Supported metrics filter for SQL
+        metric_in = "','".join(_SUPPORTED_METRICS)
+        query_sql = f"""
             SELECT
               q.question_id,
               q.iso3,
@@ -468,7 +577,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             FROM questions q
             JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
             WHERE q.status IN ('active','resolved')
-              AND upper(q.metric) IN ('PA','FATALITIES')
+              AND upper(q.metric) IN ('{metric_in}')
             ORDER BY q.question_id
         """
         rows = conn.execute(query_sql).fetchall()
@@ -481,6 +590,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         resolved_from_source = 0
         resolved_as_zero = 0
         skipped_no_data_coverage = 0
+        skipped_null_resolution = 0
         skipped_unresolvable_hazard = 0
 
         for question_id, iso3, hazard_code, metric, target_month, window_start_date in rows:
@@ -488,7 +598,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             hazard_norm = (hazard_code or "").upper()
             metric_norm = (metric or "").upper()
 
-            if metric_norm not in ("PA", "FATALITIES"):
+            if metric_norm not in _SUPPORTED_METRICS:
                 continue
 
             # Skip hazards without a resolution data source.
@@ -539,9 +649,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                 continue
 
             # Select the per-metric effective cutoff.
-            data_cutoff = (
-                pa_cutoff if metric_norm == "PA" else fat_cutoff
-            )
+            data_cutoff = metric_cutoffs.get(metric_norm)
 
             for horizon_m in range(1, NUM_HORIZONS + 1):
                 cal_month = horizon_to_calendar_month(ws_date, horizon_m)
@@ -555,11 +663,18 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                     conn, iso3_norm, hazard_norm, cal_month, metric_norm,
                 )
                 if resolved is None:
-                    # No impact data found — default to zero (no reported
-                    # humanitarian impact for this hazard/country/month).
-                    value: float = 0.0
-                    source_ts: Optional[str] = None
-                    resolved_as_zero += 1
+                    # Source-aware null handling: only default to zero for
+                    # sources where absence genuinely means zero impact.
+                    if _should_default_to_zero(metric_norm, hazard_norm):
+                        value: float = 0.0
+                        source_ts: Optional[str] = None
+                        resolved_as_zero += 1
+                    else:
+                        # All other sources: no record = unresolvable.
+                        # Do NOT write a resolution row — leave this
+                        # horizon unresolved so scoring skips it.
+                        skipped_null_resolution += 1
+                        continue
                 else:
                     value, source_ts = resolved
                     resolved_from_source += 1
@@ -598,6 +713,9 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                 )
 
         # Update question status for fully-resolved questions.
+        # A question moves to "resolved" when all 6 horizons have resolution
+        # rows.  Horizons skipped due to null data intentionally remain
+        # unresolved — they may become resolvable when new data arrives.
         try:
             conn.execute(
                 """
@@ -616,12 +734,14 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         LOGGER.info(
             "compute_resolutions: %d questions processed, %d resolution rows "
             "written (%d from source data, %d defaulted to 0.0), "
+            "%d horizon-months skipped (no resolution data), "
             "%d horizon-months skipped (no data coverage yet), "
             "%d questions skipped (unresolvable hazard).",
             len(rows),
             written,
             resolved_from_source,
             resolved_as_zero,
+            skipped_null_resolution,
             skipped_no_data_coverage,
             skipped_unresolvable_hazard,
         )

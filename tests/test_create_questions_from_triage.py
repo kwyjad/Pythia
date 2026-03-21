@@ -13,7 +13,10 @@ import pytest
 duckdb = pytest.importorskip("duckdb")
 
 from pythia.db.schema import ensure_schema
-from scripts.create_questions_from_triage import create_questions_from_triage
+from scripts.create_questions_from_triage import (
+    SUPPORTED_HAZARD_METRICS,
+    create_questions_from_triage,
+)
 
 
 def test_create_questions_from_triage_skips_aco(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -105,3 +108,51 @@ def test_create_questions_from_triage_creates_ace_questions(tmp_path: Path) -> N
     metas = [json.loads(r[5]) for r in rows]
     assert all(meta.get("source") == "hs_triage" for meta in metas)
     assert all(meta.get("hazard_family") == "conflict" for meta in metas)
+
+
+def test_hw_not_in_supported_hazard_metrics() -> None:
+    """HW (heatwave) should not be in SUPPORTED_HAZARD_METRICS."""
+    assert "HW" not in SUPPORTED_HAZARD_METRICS
+
+
+def test_create_questions_from_triage_skips_hw(tmp_path: Path) -> None:
+    """HW triage rows should be skipped — no question created."""
+    db_path = tmp_path / "triage_hw.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    con = duckdb.connect(str(db_path))
+    try:
+        ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO hs_triage (
+                run_id, iso3, hazard_code, tier, triage_score, need_full_spd,
+                drivers_json, regime_shifts_json, data_quality_json, scenario_stub
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "hs_run_hw",
+                "IND",
+                "HW",
+                "priority",
+                0.9,
+                True,
+                "[]",
+                "[]",
+                "{}",
+                "",
+            ],
+        )
+    finally:
+        con.close()
+
+    created = create_questions_from_triage(db_url)
+    assert created == 0
+
+    con = duckdb.connect(str(db_path))
+    try:
+        count = con.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+    finally:
+        con.close()
+
+    assert count == 0, f"HW questions should not be created, got {count}"

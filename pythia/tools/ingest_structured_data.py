@@ -61,6 +61,7 @@ _SOURCE_GROUPS: dict[str, list[str]] = {
     "acled_political": ["acled_political_events"],
     "nmme": ["nmme_seasonal_forecasts"],
     "gdacs": ["gdacs_population_exposed"],
+    "fewsnet_ipc": ["fewsnet_ipc_population"],
 }
 
 # Convenience aliases that expand to multiple source groups.
@@ -978,6 +979,44 @@ def _bulk_fetch_nmme(dry_run: bool = False) -> dict[str, Any]:
 
 
 # ===================================================================
+# FEWS NET IPC — delegate to resolver.connectors.fewsnet_ipc / resolver.tools.run_pipeline
+# ===================================================================
+
+
+def _bulk_fetch_fewsnet_ipc(dry_run: bool = False) -> dict[str, Any]:
+    """Run the FEWS NET IPC connector via the Resolver pipeline.
+
+    Fetches IPC Phase 3+ population estimates (Current Situation and Most
+    Likely scenarios) from the FEWS NET Data Warehouse.  Writes to
+    ``facts_resolved`` and ``facts_deltas`` through the standard Resolver
+    pipeline.
+    """
+    if dry_run:
+        LOG.info("[fewsnet_ipc] dry-run — skipping FEWS NET IPC fetch")
+        return {"__fewsnet_ipc_done__": True}
+
+    try:
+        from resolver.tools.run_pipeline import run_pipeline
+
+        db_url = os.getenv("RESOLVER_DB_URL") or None
+        result = run_pipeline(connectors=["fewsnet_ipc"], db_url=db_url)
+        LOG.info(
+            "[fewsnet_ipc] pipeline complete: %d facts, %d resolved, %d deltas",
+            result.total_facts,
+            result.resolved_rows,
+            result.delta_rows,
+        )
+        if result.total_facts == 0:
+            LOG.warning("[fewsnet_ipc] no data returned from FEWS NET IPC connector")
+            return {}
+    except Exception as exc:
+        LOG.error("[fewsnet_ipc] pipeline failed: %s", exc, exc_info=True)
+        return {}
+
+    return {"__fewsnet_ipc_done__": True}
+
+
+# ===================================================================
 # GDACS — delegate to resolver.connectors.gdacs / resolver.tools.run_pipeline
 # ===================================================================
 
@@ -1025,6 +1064,7 @@ _SELF_STORING_LABELS = frozenset([
     "conflictforecast_forecasts",
     "gdacs_population_exposed",
     "acledcast_forecasts",
+    "fewsnet_ipc_population",
 ])
 
 # Map from our internal labels to the source names used by
@@ -1186,6 +1226,8 @@ def ingest(
                 result = _bulk_fetch_nmme(dry_run)
             elif label == "acled_political_events":
                 result = _bulk_fetch_acled_political(countries)
+            elif label == "fewsnet_ipc_population":
+                result = _bulk_fetch_fewsnet_ipc(dry_run)
             elif label == "gdacs_population_exposed":
                 result = _bulk_fetch_gdacs(dry_run)
             elif label in _CONFLICT_SOURCE_MAP:

@@ -23,7 +23,7 @@ concurrency:
           Optional source filter (default: all). Options: views, conflictforecast,
           acledcast, acaps (alias for all 4 ACAPS sources), acaps_inform_severity,
           acaps_risk_radar, acaps_daily_monitoring, acaps_humanitarian_access, ipc,
-          reliefweb, nmme, gdacs. Also accepts: conflict (alias for
+          reliefweb, nmme, gdacs, fewsnet_ipc. Also accepts: conflict (alias for
           views+conflictforecast+acledcast). Comma or space separated.
         required: false
         default: ""
@@ -32,6 +32,11 @@ concurrency:
         description: "Number of months to fetch for GDACS (default 3; use 135 for full backfill to 2015)"
         required: false
         default: "3"
+        type: string
+      fewsnet_months:
+        description: "Number of months to fetch for FEWS NET IPC (default 12; use 120 for backfill to 2016)"
+        required: false
+        default: "12"
         type: string
       dry_run:
         description: "Fetch and process but do not write to DuckDB"
@@ -207,6 +212,7 @@ jobs:
       - name: Run structured data ingestion
         env:
           GDACS_MONTHS: ${{ inputs.gdacs_months || '3' }}
+          FEWSNET_MONTHS: ${{ inputs.fewsnet_months || '12' }}
         run: |
           set -e
           echo "=== Running structured data ingestion ==="

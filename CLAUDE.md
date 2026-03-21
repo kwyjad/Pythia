@@ -19,7 +19,7 @@ Do not update these files for trivial changes (e.g. formatting, minor refactors 
 **Core pipeline:**
 ```
 Resolver facts/base rates -> Horizon Scanner per-hazard pipeline (RC grounding → RC → triage grounding → triage)
-  -> Structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political, ENSO, seasonal TC, HDX Signals, ACLED CAST, GDACS)
+  -> Structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political, ENSO, seasonal TC, HDX Signals, ACLED CAST, GDACS, FEWS NET IPC)
   -> Adversarial checks (RC L1+) -> Forecaster SPD ensemble
   -> DuckDB -> FastAPI API -> Next.js Dashboard + CSV/Excel exports
 ```
@@ -47,7 +47,7 @@ Pythia/
     conflict_forecasts.py  # Unified conflict forecast loader (VIEWS + CF.org + ACLED CAST)
   forecaster/          # LLM ensemble for SPD forecasts (structured data + SPD phases)
   resolver/            # Fact ingestion, resolution, and ground truth DB
-    connectors/        #   Connector protocol + registry (ACLED, IDMC) + forecast registry (VIEWS, CF.org, ACLED CAST)
+    connectors/        #   Connector protocol + registry (ACLED, IDMC, IFRC Montandon, GDACS, FEWS NET IPC) + forecast registry (VIEWS, CF.org, ACLED CAST)
     ingestion/         #   Source-specific fetch/normalise clients (acled_client, idmc/)
     transform/         #   Adapters, normalisation, source resolution
     tools/             #   Pipeline orchestrator (run_pipeline.py), precedence, deltas, enrichment
@@ -75,6 +75,7 @@ Pythia/
 
 - `pythia/db/schema.py` — Authoritative Pythia DuckDB schema (tables, migrations, bucket defs)
 - `resolver/db/schema.sql` — Resolver DuckDB schema (facts_resolved, facts_deltas, snapshots)
+- `pythia/buckets.py` — SPD bucket definitions (PA, FATALITIES, PHASE3PLUS_IN_NEED). `BUCKET_SPECS` maps metric names to `BucketSpec` tuples. DR_PHASE3_BUCKETS has 5 buckets for IPC Phase 3+ population (<100k, 100k-1M, 1M-5M, 5M-15M, >=15M).
 - `pythia/config.yaml` — Central configuration (LLM profiles, hazards, bucket specs)
 - `horizon_scanner/horizon_scanner.py` — HS main entrypoint (~1700 LOC)
 - `horizon_scanner/regime_change.py` — RC scoring (score = likelihood x magnitude, 4 levels)
@@ -91,11 +92,12 @@ Pythia/
 - `horizon_scanner/conflict_forecasts.py` — Unified conflict forecast loader (VIEWS + conflictforecast.org + ACLED CAST)
 - `forecaster/cli.py` — Forecaster main runner (~7100 LOC)
 - `pythia/api/app.py` — FastAPI application (~3200 LOC)
-- `pythia/tools/compute_resolutions.py` — Resolves forecasts against Resolver ground truth
+- `pythia/tools/compute_resolutions.py` — Resolves forecasts against Resolver ground truth. Supports PA, FATALITIES, EVENT_OCCURRENCE, and PHASE3PLUS_IN_NEED metrics. Source-aware null handling: FATALITIES+ACE/ACO and EVENT_OCCURRENCE default to 0 when no data; PA and PHASE3PLUS_IN_NEED leave horizons unresolved (null) when no data exists.
 - `pythia/tools/compute_scores.py` — Brier/log/CRPS scoring per horizon
 - `pythia/tools/compute_calibration_pythia.py` — Calibration weights + LLM advice
 - `resolver/connectors/protocol.py` — Connector protocol (21-column canonical schema contract)
-- `resolver/connectors/__init__.py` — Connector registry (discover_connectors: ACLED, IDMC, IFRC Montandon, GDACS) + FORECAST_REGISTRY (VIEWS, CF.org, ACLED CAST)
+- `resolver/connectors/__init__.py` — Connector registry (discover_connectors: ACLED, IDMC, IFRC Montandon, GDACS, FEWS NET IPC) + FORECAST_REGISTRY (VIEWS, CF.org, ACLED CAST)
+- `resolver/connectors/fewsnet_ipc.py` — FEWS NET IPC Phase 3+ population connector (DR hazard; Current Situation + Most Likely scenarios)
 - `resolver/connectors/acled_cast.py` — ACLED CAST connector (event-count forecasts by type: total/battles/ERV/VAC)
 - `resolver/tools/run_pipeline.py` — Pipeline orchestrator (fetch -> validate -> enrich -> precedence -> deltas -> DuckDB)
 - `resolver/tools/enrich.py` — Enrichment (registry lookups, ym derivation, defaults)
@@ -112,6 +114,8 @@ Pythia/
 - `scripts/refresh_crisiswatch.py` — Playwright-based CrisisWatch scraper (monthly, writes `crisiswatch_latest.json`)
 - `pythia/tools/generate_calibration_advice.py` — Per-hazard/metric calibration advice generation
 - `tools/compare_gdacs_ifrc.py` — GDACS vs IFRC Montandon PA comparison diagnostic (side-by-side coverage, ratios, blind spots)
+- `scripts/create_questions_from_triage.py` — Creates forecast questions from HS triage output. Supported hazards: ACE (FATALITIES+PA), CU, DR, FL, TC, DI (PA). HW excluded (no resolution source). Epoch-specific question_ids with `_{epoch_label}` suffix.
+- `scripts/db/update_bucket_centroids.py` — Seeds bucket definitions and centroids into DuckDB from `pythia/buckets.py` BUCKET_SPECS. Iterates all metrics (PA, FATALITIES, PHASE3PLUS_IN_NEED).
 
 ## Databases
 
@@ -125,9 +129,11 @@ Two DuckDB databases:
 - `conflict_forecasts` — VIEWS + conflictforecast.org + ACLED CAST conflict predictions (PK: source, iso3, hazard_code, metric, lead_months, forecast_issue_date)
 - `questions`, `question_research` — Seeded questions + research briefs
 - `forecasts_raw`, `forecasts_ensemble` — Per-model + aggregated SPDs
-- `resolutions` — Ground truth values per (question_id, horizon_m)
+- `resolutions` — Ground truth values per (question_id, horizon_m). Not all 6 horizons may have rows — source-aware null handling skips unresolvable horizons.
 - `scores` — Brier/log/CRPS per (question, horizon, model)
 - `calibration_weights`, `calibration_advice` — Per hazard/metric weights + LLM advice
+- `bucket_centroids` — SPD bucket centroids per (hazard_code, metric, bucket_index); seeded from `pythia/buckets.py`, updated via EMA from resolution data
+- `bucket_definitions` — SPD bucket boundary definitions per (metric, bucket_index)
 - `reliefweb_reports` — ReliefWeb humanitarian situation reports
 - `acled_political_events` — ACLED event-level political data
 - `ipc_phases` — IPC food security phase populations
@@ -139,7 +145,7 @@ Two DuckDB databases:
 - `llm_calls` — Full telemetry (cost, tokens, latency, errors)
 
 **Resolver DB** (`resolver/db/schema.sql`): fact ingestion
-- `facts_resolved` — Precedence-resolved facts (unique on ym, iso3, hazard_code, metric, series_semantics)
+- `facts_resolved` — Precedence-resolved facts (unique on ym, iso3, hazard_code, metric, series_semantics). Includes `alertlevel` column (GDACS-specific, NULL for other sources).
 - `facts_deltas` — Monthly flow changes
 - `snapshots`, `manifests`, `meta_runs` — Pipeline metadata
 
@@ -147,24 +153,25 @@ Two DuckDB databases:
 
 The Resolver was refactored in PR #610 to a connector-based architecture. Defunct legacy connectors (DTM, EM-DAT ingestion, HDX, IPC, ODP, ReliefWeb, UNHCR, WFP, WHO, WorldPop) were removed. The GDACS connector was re-implemented as a new Connector protocol source.
 
-**Connector protocol** (`resolver/connectors/protocol.py`): Every data source implements a `Connector` protocol with a `name` attribute and a `fetch_and_normalize()` method that returns a DataFrame with exactly 21 canonical columns (event_id, iso3, hazard_code, metric, value, as_of_date, publisher, etc.).
+**Connector protocol** (`resolver/connectors/protocol.py`): Every data source implements a `Connector` protocol with a `name` attribute and a `fetch_and_normalize()` method that returns a DataFrame with exactly 21 canonical columns (event_id, iso3, hazard_code, metric, value, as_of_date, publisher, etc.). Connectors may include supplementary columns beyond the canonical set (e.g. `alertlevel` for GDACS) by passing `extra_columns` to `validate_canonical`; `run_pipeline` auto-detects and passes these through.
 
 **Active connectors** (`resolver/connectors/__init__.py` REGISTRY):
 - `acled` — ACLED conflict/fatalities data (wraps `resolver/ingestion/acled_client`)
 - `idmc` — IDMC internal displacement data (wraps `resolver/ingestion/idmc/`)
 - `ifrc_montandon` — IFRC Go connector (stubbed, not yet active)
-- `gdacs` — GDACS disaster population exposure (FL, DR, TC). No auth required. **Two data sources**: (1) static RSS feeds (`xml/rss_fl_3m.xml`, `xml/rss_tc_3m.xml`) for FL/TC in ≤3-month window (fast, has population data); (2) JSON search API (`gdacsapi/api/events/geteventlist/SEARCH`) + per-event RSS enrichment for >3-month backfill and **always for DR** (DR RSS feed returns 404). The original `rss.aspx?profile=ARCHIVE` endpoint is broken. Depth controlled by `GDACS_MONTHS` (default 3; use 135 for full backfill to 2015). Multi-country events use population-weighted allocation. TC zero-fills no-event months; FL/DR do not. Entry point: `resolver/ingestion/gdacs.py` (for `run_connectors.py`); also integrated into `pythia/tools/ingest_structured_data.py`. Env vars: `GDACS_MONTHS` (default 3), `GDACS_REQUEST_DELAY` (default 1.0s), `GDACS_FORCE_RSS`/`GDACS_FORCE_JSON` (override auto-detection).
+- `gdacs` — GDACS disaster population exposure (FL, DR, TC). No auth required. **Two data sources**: (1) static RSS feeds (`xml/rss_fl_3m.xml`, `xml/rss_tc_3m.xml`) for FL/TC in ≤3-month window (fast, has population data); (2) JSON search API (`gdacsapi/api/events/geteventlist/SEARCH`) + per-event RSS enrichment for >3-month backfill and **always for DR** (DR RSS feed returns 404). The original `rss.aspx?profile=ARCHIVE` endpoint is broken. Depth controlled by `GDACS_MONTHS` (default 3; use 135 for full backfill to 2015). Multi-country events use population-weighted allocation. TC zero-fills no-event months; FL/DR do not. **Two metrics per country-month-hazard**: `in_need` (population exposed, existing) and `event_occurrence` (binary 1/0 based on alertlevel: Orange/Red=1, Green=0). The `alertlevel` column (Green/Orange/Red) is stored as a supplementary column in `facts_resolved` (NULL for non-GDACS sources). Entry point: `resolver/ingestion/gdacs.py` (for `run_connectors.py`); also integrated into `pythia/tools/ingest_structured_data.py`. Env vars: `GDACS_MONTHS` (default 3), `GDACS_REQUEST_DELAY` (default 1.0s), `GDACS_FORCE_RSS`/`GDACS_FORCE_JSON` (override auto-detection).
+- `fewsnet_ipc` — FEWS NET IPC Phase 3+ population estimates (DR hazard). No auth required. Fetches from `https://fdw.fews.net/api/ipcpopulationsize.csv`. Two metrics: `phase3plus_in_need` (Current Situation, used for resolution) and `phase3plus_projection` (Most Likely, context for prompts). ISO2→ISO3 conversion via pycountry. Deduplicates by latest `reporting_date` per (iso3, scenario, month). Writes discovered country list to `resolver/data/fewsnet_countries.json` for question generator consumption. Entry point: `resolver/ingestion/fewsnet_ipc.py`; also integrated into `pythia/tools/ingest_structured_data.py`. Env vars: `FEWSNET_MONTHS` (default 12; 120 for backfill to 2016), `FEWSNET_REQUEST_DELAY` (default 1.0s).
 
 **Pipeline orchestrator** (`resolver/tools/run_pipeline.py`):
 ```
 discover_connectors() -> fetch_and_normalize() per connector
-  -> validate_canonical() -> enrich() + derive_ym()
-  -> precedence_engine (tiered source resolution) -> make_deltas()
-  -> write to DuckDB (facts_resolved + facts_deltas)
+  -> validate_canonical(extra_columns auto-detected) -> enrich() + derive_ym()
+  -> precedence_engine (tiered source resolution, publisher used as source) -> make_deltas()
+  -> write to DuckDB (facts_resolved + facts_deltas, supplementary columns preserved)
 ```
 
 **Precedence policy** (`resolver/tools/precedence_config.yml`):
-- Tier 0: IFRC Montandon/ACLED (highest priority; IFRC Montandon is the active source for natural hazard PA: FL, DR, TC, HW)
+- Tier 0: IFRC Montandon/ACLED (highest priority; IFRC Montandon is the active source for natural hazard PA: FL, DR, TC)
 - Tier 1: IDMC
 - Tier 2: EM-DAT (historical read-only, no active connector; replaced by IFRC Montandon)
 
@@ -194,8 +201,8 @@ Run the pipeline: `python -m resolver.tools.run_pipeline [--connectors acled idm
 
 Forecasts cover a 6-month window. Each question has `window_start_date` and `target_month` (= month 6).
 
-- **Resolutions**: `compute_resolutions` resolves each horizon independently against Resolver's `facts_resolved.created_at` for ordering.
-- **Scoring**: `compute_scores` scores each (question, horizon_m) pair separately using Brier, log loss, and CRPS.
+- **Resolutions**: `compute_resolutions` resolves each horizon independently against Resolver's `facts_resolved.created_at` for ordering. Source-aware null handling: FATALITIES+ACE/ACO defaults to 0 (ACLED continuous coverage), EVENT_OCCURRENCE defaults to 0 (GDACS binary), PA and PHASE3PLUS_IN_NEED leave horizons unresolved when no data exists. Unresolvable hazards: DI, HW.
+- **Scoring**: `compute_scores` scores each (question, horizon_m) pair separately using Brier, log loss, and CRPS. Supports PA, FATALITIES, EVENT_OCCURRENCE, PHASE3PLUS_IN_NEED metrics. Missing resolution horizons are naturally excluded via JOIN.
 - **Calibration**: `compute_calibration_pythia` aggregates scores across horizons to produce per-model weights.
 
 ## Regime Change (RC) scoring
@@ -270,6 +277,8 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `GDACS_REQUEST_DELAY` | Seconds between GDACS API requests (default 1.0) |
 | `GDACS_FORCE_RSS` | Force static RSS feed path ("1" to enable; overrides auto-detection) |
 | `GDACS_FORCE_JSON` | Force JSON search API path ("1" to enable; overrides auto-detection) |
+| `FEWSNET_MONTHS` | Number of months of FEWS NET IPC history to fetch (default 12; 120 for backfill to 2016) |
+| `FEWSNET_REQUEST_DELAY` | Seconds between FEWS NET API retries (default 1.0) |
 
 Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`.
 
@@ -290,7 +299,7 @@ python3 -m resolver.tools.run_pipeline
 python3 -m pythia.tools.ingest_structured_data
 # Filter by source: python3 -m pythia.tools.ingest_structured_data --sources conflict acaps ipc
 # Valid sources: views, conflictforecast, acledcast, acaps_inform_severity,
-#   acaps_risk_radar, acaps_daily_monitoring, acaps_humanitarian_access, ipc, reliefweb, acled_political, nmme
+#   acaps_risk_radar, acaps_daily_monitoring, acaps_humanitarian_access, ipc, reliefweb, acled_political, nmme, gdacs, fewsnet_ipc
 # Aliases: acaps (all 4 ACAPS sources), conflict (views+conflictforecast+acledcast)
 
 # Standalone entry points (still work independently):
@@ -381,6 +390,8 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 - **Calibration workflow manual dispatch broken** (fixed): `compute_calibration_pythia.yml` used `github.event.workflow_run.id` to download the DB artifact, which is empty on `workflow_dispatch` (manual trigger). Replaced with a two-path strategy: (A) if triggered by `workflow_run`, download from the triggering run; (B) on manual dispatch or fallback, use canonical DB discovery (searches recent successful runs from Compute SPD Scores, Compute Calibration, Horizon Scanner Triage, and Ingest Structured Data workflows).
 - **Vestigial "Export Facts: facts.csv rows: 0" in summary** (fixed): `summarize_connectors.py` always rendered the "## Export Facts" section because `_collect_export_summary()` was gutted in PR #610 (always returns empty dict with rows=0), but the condition `if export_info or export_error or mapping_debug_records` was always truthy. Fixed by gating on `export_error or has_export_rows` (where `has_export_rows = export_info.get("rows", 0) > 0`). The `mapping_debug_records` section renders independently.
 - **Precedence engine dropping connector metadata** (fixed): `resolve_facts_frame()` in `resolver/tools/precedence_engine.py` (used by `run_pipeline.py`) built a new record dict with only key columns (`country_iso3`, `hazard_type`, `month`, `metric`, `value`, `selected_*`), discarding all metadata fields from the chosen row. This caused `publisher`, `source_type`, `source_url`, `confidence`, `definition_text`, `doc_title`, and other fields to be NULL in `facts_resolved` after pipeline writes. The CLI path (`_main_impl`) already carried these through but the programmatic `resolve_facts_frame` path did not. Fixed by adding passthrough of 13 metadata fields from the chosen row and mapping `selected_as_of`→`as_of_date`, `selected_tier`→`precedence_tier`, `selected_source`→`provenance_source` so the DB upsert can match column names. The comparison tool `tools/compare_gdacs_ifrc.py` also has a fallback classifier that identifies GDACS rows by `metric='in_need'` + DR/FL/TC hazard when publisher is NULL (for pre-fix data).
+- **False-zero resolution contamination** (fixed): `compute_resolutions` defaulted all unresolved horizons to `value=0.0`, treating "no data" as "no impact". This was correct for ACLED fatalities (continuous coverage) but wrong for IFRC (PA), IDMC, FEWS NET IPC, and EM-DAT where absence means "unknown/not monitored". Fixed by implementing source-aware null handling: FATALITIES+ACE/ACO and EVENT_OCCURRENCE still default to 0; PA and PHASE3PLUS_IN_NEED horizons with no data are now left unresolved (no row written) so scoring skips them. Also added HW to UNRESOLVABLE_HAZARDS set.
+- **HW (heatwave) removed from question generation**: `scripts/create_questions_from_triage.py` no longer creates questions for HW hazard (no resolution data source). HW triage rows are explicitly skipped with a log message. HW remains in `resolver/data/shocks.csv` as a recognized hazard type and in `UNRESOLVABLE_HAZARDS` in `compute_resolutions.py`.
 - **Question overwrite bug destroying run provenance** (fixed): `scripts/create_questions_from_triage.py` used stable question_ids (e.g. `ETH_ACE_FATALITIES`) with a DELETE+INSERT pattern in `_upsert_question`. Each HS run destroyed the previous question's `hs_run_id`, `window_start_date`, and `target_month`. After the March 2026 run, all 524 questions pointed to the March HS run with `window_start_date=2026-04-01`, making December/January forecasts unresolvable while March forecasts were incorrectly scored. Additionally, `_llm_derived_window_starts` in `compute_resolutions.py` used `MIN(timestamp)` from `llm_calls` across all runs for shared question_ids, causing cross-run contamination. Fixed by: (1) making question_ids epoch-specific with `_{epoch_label}` suffix (e.g. `ETH_ACE_FATALITIES_2026-04`), (2) replacing DELETE+INSERT with INSERT-only (skip if exists), (3) fixing `target_month` to represent the 6th horizon month instead of the opening month, (4) removing the LLM-derived window override from `compute_resolutions.py` so the question's own `window_start_date` is authoritative. Recovery script: `scripts/recover_historical_questions.py`.
 
 ## Canonical DB artifact discovery
@@ -405,4 +416,4 @@ Candidates are sorted by `createdAt` descending; the first one that downloads su
 
 ## Structured data bulk ingest
 
-`pythia/tools/ingest_structured_data.py` orchestrates bulk fetch/store for all structured data connectors. The `_SOURCE_GROUPS` dict maps group names to table names. Currently registered groups: `views`, `conflictforecast`, `acledcast`, `acaps_inform_severity`, `acaps_risk_radar`, `acaps_daily_monitoring`, `acaps_humanitarian_access`, `ipc`, `reliefweb`, `acled_political`, `nmme`, `gdacs`. Each group has a `_bulk_fetch_*` function that parallelizes API calls across countries via `ThreadPoolExecutor`. The `acled_political` group fetches event-level political data (protests, riots, strategic developments) from the ACLED API via `pythia.acled_political.fetch_acled_political_events` and stores via `store_acled_political_events`. The `gdacs` group delegates to `resolver.tools.run_pipeline` with `--connectors gdacs`, which writes to `facts_resolved` and `facts_deltas` via the standard Resolver pipeline. GDACS is a self-storing source (no per-country store function). The `ingest-structured-data.yml` workflow runs weekly (Sunday 03:00 UTC) in incremental mode (last 3 months) and monthly (28th) with all sources; GDACS backfill depth is controlled via the `gdacs_months` workflow input (default 3; set to 135 for full backfill to 2015).
+`pythia/tools/ingest_structured_data.py` orchestrates bulk fetch/store for all structured data connectors. The `_SOURCE_GROUPS` dict maps group names to table names. Currently registered groups: `views`, `conflictforecast`, `acledcast`, `acaps_inform_severity`, `acaps_risk_radar`, `acaps_daily_monitoring`, `acaps_humanitarian_access`, `ipc`, `reliefweb`, `acled_political`, `nmme`, `gdacs`, `fewsnet_ipc`. Each group has a `_bulk_fetch_*` function that parallelizes API calls across countries via `ThreadPoolExecutor`. The `acled_political` group fetches event-level political data (protests, riots, strategic developments) from the ACLED API via `pythia.acled_political.fetch_acled_political_events` and stores via `store_acled_political_events`. The `gdacs` group delegates to `resolver.tools.run_pipeline` with `--connectors gdacs`, which writes to `facts_resolved` and `facts_deltas` via the standard Resolver pipeline. GDACS and FEWS NET IPC are self-storing sources (no per-country store function). The `fewsnet_ipc` group delegates to `resolver.tools.run_pipeline` with `--connectors fewsnet_ipc`, fetching IPC Phase 3+ population estimates from the FEWS NET Data Warehouse; backfill depth controlled via `FEWSNET_MONTHS` (default 12; 120 for backfill to 2016). The `ingest-structured-data.yml` workflow runs weekly (Sunday 03:00 UTC) in incremental mode (last 3 months) and monthly (28th) with all sources; GDACS backfill depth is controlled via the `gdacs_months` workflow input (default 3; set to 135 for full backfill to 2015).

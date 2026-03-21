@@ -1494,6 +1494,7 @@ def init_schema(
                     provenance_source TEXT,
                     provenance_rank INTEGER,
                     series TEXT,
+                    alertlevel TEXT,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
@@ -1625,6 +1626,16 @@ def init_schema(
         LOGGER.debug(
             "duckdb.schema.named_unique_index_failed | error=%s", exc, exc_info=False
         )
+
+    # --- Migration: add alertlevel column (GDACS-specific, NULL for other sources) ---
+    try:
+        _run_ddl_batch(
+            conn,
+            ["ALTER TABLE facts_resolved ADD COLUMN IF NOT EXISTS alertlevel VARCHAR"],
+            label="schema:add_alertlevel",
+        )
+    except _SCHEMA_EXC_TUPLE:
+        pass  # Column already exists or table doesn't exist yet
 
     if diag_enabled():
         try:

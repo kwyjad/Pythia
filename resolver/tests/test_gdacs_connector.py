@@ -475,7 +475,9 @@ class TestCanonicalOutput:
             df = connector.fetch_and_normalize()
 
         assert not df.empty
-        assert list(df.columns) == CANONICAL_COLUMNS
+        # Canonical columns plus alertlevel
+        assert all(c in df.columns for c in CANONICAL_COLUMNS)
+        assert "alertlevel" in df.columns
 
         # Should have FL, DR, TC rows (no EQ)
         hazards = set(df["hazard_code"].unique())
@@ -491,8 +493,109 @@ class TestCanonicalOutput:
         # Publisher should be GDACS / JRC
         assert (df["publisher"] == "GDACS / JRC").all()
 
-        # validate_canonical should not raise
-        validate_canonical(df, source="gdacs")
+        # validate_canonical should not raise (with extra_columns)
+        validate_canonical(df, source="gdacs", extra_columns=["alertlevel"])
+
+    @patch("resolver.connectors.gdacs.time.sleep")
+    @patch("resolver.connectors.gdacs._build_session")
+    def test_includes_both_in_need_and_event_occurrence(self, mock_session_fn, mock_sleep, monkeypatch):
+        """Output includes both in_need and event_occurrence metric rows."""
+        monkeypatch.setenv("GDACS_MONTHS", "4")
+        monkeypatch.setenv("GDACS_FORCE_RSS", "1")
+
+        mock_session = MagicMock()
+        mock_session.get.return_value = self._make_mock_response(_SAMPLE_RSS)
+        mock_session_fn.return_value = mock_session
+
+        connector = GdacsConnector()
+        with patch.object(connector, "_today", return_value=date(2024, 10, 31)):
+            df = connector.fetch_and_normalize()
+
+        metrics = set(df["metric"].unique())
+        assert "in_need" in metrics
+        assert "event_occurrence" in metrics
+
+        # For each in_need row there should be a matching event_occurrence row
+        in_need = df[df["metric"] == "in_need"]
+        event_occ = df[df["metric"] == "event_occurrence"]
+        assert len(in_need) == len(event_occ)
+
+    @patch("resolver.connectors.gdacs.time.sleep")
+    @patch("resolver.connectors.gdacs._build_session")
+    def test_event_occurrence_values(self, mock_session_fn, mock_sleep, monkeypatch):
+        """event_occurrence is 1 for Orange/Red, 0 for Green."""
+        monkeypatch.setenv("GDACS_MONTHS", "4")
+        monkeypatch.setenv("GDACS_FORCE_RSS", "1")
+
+        mock_session = MagicMock()
+        mock_session.get.return_value = self._make_mock_response(_SAMPLE_RSS)
+        mock_session_fn.return_value = mock_session
+
+        connector = GdacsConnector()
+        with patch.object(connector, "_today", return_value=date(2024, 10, 31)):
+            df = connector.fetch_and_normalize()
+
+        event_occ = df[df["metric"] == "event_occurrence"]
+
+        # FL event (Bangladesh) has alertlevel Orange → event_occurrence=1
+        fl_occ = event_occ[
+            (event_occ["iso3"] == "BGD") & (event_occ["hazard_code"] == "FL")
+        ]
+        assert len(fl_occ) >= 1
+        assert int(float(fl_occ.iloc[0]["value"])) == 1
+
+        # DR event (Kenya) has alertlevel Red → event_occurrence=1
+        dr_occ = event_occ[
+            (event_occ["iso3"] == "KEN") & (event_occ["hazard_code"] == "DR")
+        ]
+        assert len(dr_occ) >= 1
+        assert int(float(dr_occ.iloc[0]["value"])) == 1
+
+        # TC event (Philippines) has alertlevel Red → event_occurrence=1
+        tc_occ = event_occ[
+            (event_occ["iso3"] == "PHL")
+            & (event_occ["hazard_code"] == "TC")
+            & (event_occ["value"].astype(float) == 1.0)
+        ]
+        assert len(tc_occ) >= 1
+
+    @patch("resolver.connectors.gdacs.time.sleep")
+    @patch("resolver.connectors.gdacs._build_session")
+    def test_alertlevel_populated(self, mock_session_fn, mock_sleep, monkeypatch):
+        """alertlevel column is populated in output."""
+        monkeypatch.setenv("GDACS_MONTHS", "4")
+        monkeypatch.setenv("GDACS_FORCE_RSS", "1")
+
+        mock_session = MagicMock()
+        mock_session.get.return_value = self._make_mock_response(_SAMPLE_RSS)
+        mock_session_fn.return_value = mock_session
+
+        connector = GdacsConnector()
+        with patch.object(connector, "_today", return_value=date(2024, 10, 31)):
+            df = connector.fetch_and_normalize()
+
+        assert "alertlevel" in df.columns
+        assert set(df["alertlevel"].unique()) <= {"Green", "Orange", "Red"}
+        # The sample has Orange (FL), Red (DR, TC) events
+        assert "Orange" in df["alertlevel"].values
+        assert "Red" in df["alertlevel"].values
+
+    @patch("resolver.connectors.gdacs.time.sleep")
+    @patch("resolver.connectors.gdacs._build_session")
+    def test_publisher_is_gdacs_jrc(self, mock_session_fn, mock_sleep, monkeypatch):
+        """publisher field is 'GDACS / JRC' for all rows."""
+        monkeypatch.setenv("GDACS_MONTHS", "4")
+        monkeypatch.setenv("GDACS_FORCE_RSS", "1")
+
+        mock_session = MagicMock()
+        mock_session.get.return_value = self._make_mock_response(_SAMPLE_RSS)
+        mock_session_fn.return_value = mock_session
+
+        connector = GdacsConnector()
+        with patch.object(connector, "_today", return_value=date(2024, 10, 31)):
+            df = connector.fetch_and_normalize()
+
+        assert (df["publisher"] == "GDACS / JRC").all()
 
     @patch("resolver.connectors.gdacs.time.sleep")
     @patch("resolver.connectors.gdacs._build_session")
@@ -532,9 +635,19 @@ class TestCanonicalOutput:
         tc_rows = df[df["hazard_code"] == "TC"]
         # GDACS_MONTHS=2 from Oct 2024 → start Aug 2024
         # Aug (zero-fill) + Sep (event) + Oct (zero-fill) = 3 months
-        assert len(tc_rows) == 3
-        zero_rows = tc_rows[tc_rows["value"].astype(float) == 0.0]
+        # Each month has 2 rows (in_need + event_occurrence) = 6 total
+        tc_in_need = tc_rows[tc_rows["metric"] == "in_need"]
+        assert len(tc_in_need) == 3
+        zero_rows = tc_in_need[tc_in_need["value"].astype(float) == 0.0]
         assert len(zero_rows) == 2
+
+        # event_occurrence: zero-fill months have value=0, event month has value=1
+        tc_occ = tc_rows[tc_rows["metric"] == "event_occurrence"]
+        assert len(tc_occ) == 3
+        occ_zero = tc_occ[tc_occ["value"].astype(float) == 0.0]
+        assert len(occ_zero) == 2
+        occ_one = tc_occ[tc_occ["value"].astype(float) == 1.0]
+        assert len(occ_one) == 1
 
     @patch("resolver.connectors.gdacs.time.sleep")
     @patch("resolver.connectors.gdacs._build_session")

@@ -338,7 +338,7 @@ class GdacsConnector:
         df = self._to_canonical(agg_df, iso3_to_name)
 
         LOG.info("[gdacs] produced %d canonical rows", len(df))
-        return validate_canonical(df, source="gdacs")
+        return validate_canonical(df, source="gdacs", extra_columns=["alertlevel"])
 
     # -----------------------------------------------------------------------
     # Fetching — two strategies based on window size
@@ -877,10 +877,20 @@ class GdacsConnector:
         agg_df: pd.DataFrame,
         iso3_to_name: dict[str, str],
     ) -> pd.DataFrame:
-        """Map aggregated rows to the 21-column canonical format."""
+        """Map aggregated rows to canonical format plus event_occurrence rows.
+
+        Produces TWO rows per (iso3, hazard_code, year, month):
+        1. metric="in_need" — population exposed (existing behaviour)
+        2. metric="event_occurrence" — binary 1/0 based on alertlevel
+
+        Also carries ``alertlevel`` as a supplementary column (not part of
+        CANONICAL_COLUMNS) so it can flow into facts_resolved.
+        """
         now_utc = datetime.now(timezone.utc).isoformat()
 
         records: list[dict[str, str]] = []
+        alertlevels: list[str] = []
+
         for _, row in agg_df.iterrows():
             iso3 = row["iso3"]
             hazard_code = row["hazard_code"]
@@ -895,7 +905,9 @@ class GdacsConnector:
             confidence = _CONFIDENCE_MAP.get(alertlevel, "low")
             country_name = iso3_to_name.get(iso3, "")
             hazard_label = _HAZARD_LABEL.get(hazard_code, "")
+            pub_date_str = pub_date.isoformat() if isinstance(pub_date, date) else str(pub_date)
 
+            # --- Row 1: population exposed (metric="in_need") ---
             records.append({
                 "event_id": "",
                 "country_name": country_name,
@@ -908,7 +920,7 @@ class GdacsConnector:
                 "value": str(value),
                 "unit": "persons",
                 "as_of_date": as_of.isoformat(),
-                "publication_date": pub_date.isoformat() if isinstance(pub_date, date) else str(pub_date),
+                "publication_date": pub_date_str,
                 "publisher": "GDACS / JRC",
                 "source_type": "satellite_derived",
                 "source_url": "https://www.gdacs.org",
@@ -922,5 +934,42 @@ class GdacsConnector:
                 "revision": "",
                 "ingested_at": now_utc,
             })
+            alertlevels.append(alertlevel)
 
-        return pd.DataFrame(records, columns=CANONICAL_COLUMNS)
+            # --- Row 2: binary event occurrence ---
+            event_value = 1 if alertlevel in ("Orange", "Red") else 0
+            records.append({
+                "event_id": "",
+                "country_name": country_name,
+                "iso3": iso3,
+                "hazard_code": hazard_code,
+                "hazard_label": hazard_label,
+                "hazard_class": _HAZARD_CLASS.get(hazard_code, "natural"),
+                "metric": "event_occurrence",
+                "series_semantics": "stock",
+                "value": str(event_value),
+                "unit": "binary",
+                "as_of_date": as_of.isoformat(),
+                "publication_date": pub_date_str,
+                "publisher": "GDACS / JRC",
+                "source_type": "satellite_derived",
+                "source_url": "https://www.gdacs.org",
+                "doc_title": "",
+                "definition_text": (
+                    f"Binary indicator of {hazard_label.lower()} event occurrence "
+                    f"based on GDACS alert level (1=Orange/Red, 0=Green/none)"
+                ),
+                "method": "gdacs_alertlevel_threshold",
+                "confidence": confidence,
+                "revision": "",
+                "ingested_at": now_utc,
+            })
+            alertlevels.append(alertlevel)
+
+        df = pd.DataFrame(records, columns=CANONICAL_COLUMNS)
+
+        # Add alertlevel as a supplementary column (not part of canonical
+        # schema, but will be written to facts_resolved if the column exists).
+        df["alertlevel"] = alertlevels
+
+        return df

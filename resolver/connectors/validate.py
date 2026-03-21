@@ -12,8 +12,19 @@ import pandas as pd
 from .protocol import CANONICAL_COLUMNS
 
 
-def validate_canonical(df: pd.DataFrame, *, source: str = "unknown") -> pd.DataFrame:
+def validate_canonical(
+    df: pd.DataFrame,
+    *,
+    source: str = "unknown",
+    extra_columns: list[str] | None = None,
+) -> pd.DataFrame:
     """Assert that *df* conforms to the canonical connector schema.
+
+    Parameters
+    ----------
+    extra_columns:
+        Optional list of additional columns that are allowed beyond
+        CANONICAL_COLUMNS (e.g. ``["alertlevel"]`` for GDACS).
 
     Raises ``ValueError`` with a clear message on any violation.
     Returns *df* unchanged (for chaining).
@@ -24,7 +35,8 @@ def validate_canonical(df: pd.DataFrame, *, source: str = "unknown") -> pd.DataF
             f"[{source}] canonical DataFrame missing columns: {missing}"
         )
 
-    extra = [c for c in df.columns if c not in CANONICAL_COLUMNS]
+    allowed = set(CANONICAL_COLUMNS) | set(extra_columns or [])
+    extra = [c for c in df.columns if c not in allowed]
     if extra:
         raise ValueError(
             f"[{source}] canonical DataFrame has unexpected columns: {extra}"

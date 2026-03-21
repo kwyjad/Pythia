@@ -37,14 +37,12 @@ SUPPORTED_HAZARD_METRICS: Dict[str, List[str]] = {
     "DR": ["PA"],
     "FL": ["PA"],
     "TC": ["PA"],
-    "HW": ["PA"],
     "DI": ["PA"],
 }
 
 HAZARD_HUMAN_NAMES = {
     "DR": "drought",
     "FL": "flooding",
-    "HW": "heatwave",
     "TC": "tropical cyclone",
 }
 
@@ -150,7 +148,7 @@ def _build_question_wording(
             f"between {start_str} and {end_str}?"
         )
 
-    if hz in {"DR", "FL", "HW", "TC"} and m == "PA":
+    if hz in {"DR", "FL", "TC"} and m == "PA":
         hazard_name = HAZARD_HUMAN_NAMES.get(hz, hz)
         return (
             f"How many people will be affected each month by {hazard_name} in {country} "
@@ -217,6 +215,12 @@ def _load_triage_rows(
         if hz_up == "ACO":
             LOG.info(
                 "Skipping ACO triage/question for %s; ACE is the canonical conflict hazard",
+                iso3_up,
+            )
+            continue
+        if hz_up == "HW":
+            LOG.info(
+                "Skipping HW triage/question for %s; heatwave dropped (no resolution source)",
                 iso3_up,
             )
             continue
