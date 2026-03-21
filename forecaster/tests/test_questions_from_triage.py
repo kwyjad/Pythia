@@ -56,8 +56,9 @@ def test_create_questions_from_triage_creates_expected_questions(tmp_path: Path)
 
     assert rows
     qids = {r[0] for r in rows}
-    assert "ETH_ACE_FATALITIES" in qids
-    assert "ETH_ACE_PA" in qids
+    # Question IDs now include epoch suffix (e.g. ETH_ACE_FATALITIES_2026-04)
+    assert any(qid.startswith("ETH_ACE_FATALITIES_") for qid in qids)
+    assert any(qid.startswith("ETH_ACE_PA_") for qid in qids)
     assert all(r[2] == "ACE" for r in rows)
     assert all(r[5] == "hs_test" for r in rows)
     assert all(r[4] == "active" for r in rows)

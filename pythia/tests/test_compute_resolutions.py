@@ -1353,3 +1353,58 @@ def test_partial_resolution_some_horizons_null(tmp_path: Path, monkeypatch: pyte
         assert rows[1] == (3, 25000.0)
     finally:
         con.close()
+
+
+@pytest.mark.db
+def test_event_occurrence_with_gdacs_data_resolves_to_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """EVENT_OCCURRENCE with GDACS event data should resolve to 1.0."""
+    db_path = tmp_path / "e2e_eo_event.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_EO_EVENT', 'run1', 'BGD', 'FL', 'EVENT_OCCURRENCE', '2025-12', '2025-07-01', 'active')
+            """
+        )
+        # GDACS data: event occurred in months 1 and 2 of the window
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2025-07', 'BGD', 'FL', 'event_occurrence', 1.0)
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2025-08', 'BGD', 'FL', 'event_occurrence', 0.0)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT horizon_m, value FROM resolutions WHERE question_id = 'Q_EO_EVENT' ORDER BY horizon_m"
+        ).fetchall()
+        assert len(rows) >= 2, f"Expected >=2 resolution rows, got {len(rows)}: {rows}"
+        # h1 (2025-07) should be 1.0 (event occurred)
+        h1 = [r for r in rows if r[0] == 1]
+        assert len(h1) == 1 and h1[0][1] == 1.0, f"h1 should be 1.0, got {h1}"
+        # h2 (2025-08) should be 0.0 (no event)
+        h2 = [r for r in rows if r[0] == 2]
+        assert len(h2) == 1 and h2[0][1] == 0.0, f"h2 should be 0.0, got {h2}"
+    finally:
+        con.close()

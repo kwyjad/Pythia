@@ -937,6 +937,8 @@ def _infer_resolution_source(hazard_code: str, metric: str) -> str:
         return "IFRC"
     if mt == "PA" and hz == "DI":
         return "NONE"
+    if mt == "EVENT_OCCURRENCE" and hz in {"FL", "DR", "TC"}:
+        return "GDACS"
     return "NONE"
 
 
@@ -1114,6 +1116,11 @@ from .config import ist_iso
 from .prompts import (
     build_spd_prompt_v2,
     merge_evidence_packs,
+)
+from .binary_prompts import (
+    build_binary_event_prompt,
+    build_binary_base_rate,
+    parse_binary_response,
 )
 from .scenario_writer import run_scenarios_for_run
 from horizon_scanner.seasonal_context import CLIMATE_HAZARDS, load_seasonal_forecasts
@@ -4556,6 +4563,300 @@ def _first_target_month(target_months: Any) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Binary event forecast support (EVENT_OCCURRENCE questions)
+# ---------------------------------------------------------------------------
+
+def _write_binary_outputs(
+    run_id: str,
+    question_row: Any,
+    month_probs: dict[str, float],
+    *,
+    resolution_source: str,
+    usage: dict[str, Any],
+    model_name: str = "ensemble",
+) -> None:
+    """Write binary forecasts using SPD storage convention.
+
+    Convention: bucket_1 = P(yes), bucket_2 = P(no) = 1 - P(yes),
+    buckets 3-5 = 0.  This avoids schema changes while keeping binary
+    forecasts readable by the scoring pipeline.
+    """
+    rec = _normalize_question_row_for_spd(question_row)
+    qid = rec["question_id"]
+    iso3 = rec["iso3"]
+    hz = rec["hazard_code"]
+    metric = rec["metric"]
+
+    # Binary bucket labels (informational only)
+    bucket_labels = ["P(event)", "P(no_event)", "unused_3", "unused_4", "unused_5"]
+
+    con = connect(read_only=False)
+    try:
+        con.execute(
+            "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+            [run_id, qid, model_name],
+        )
+        con.execute(
+            "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+            [run_id, qid, model_name],
+        )
+        for month_idx, month_label in enumerate(sorted(month_probs.keys()), start=1):
+            p_yes = float(month_probs[month_label])
+            # bucket_1 = P(yes), bucket_2 = P(no), buckets 3-5 = 0
+            probs = [p_yes, 1.0 - p_yes, 0.0, 0.0, 0.0]
+            for bucket_index, prob in enumerate(probs, start=1):
+                cb = bucket_labels[bucket_index - 1]
+                con.execute(
+                    """
+                    INSERT INTO forecasts_raw (
+                        run_id, question_id, model_name, month_index, bucket_index,
+                        probability, ok, elapsed_ms, cost_usd, prompt_tokens, completion_tokens,
+                        total_tokens, status, spd_json, human_explanation,
+                        horizon_m, class_bin, p
+                    ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        run_id, qid, model_name, month_idx, bucket_index,
+                        float(prob),
+                        usage.get("elapsed_ms"),
+                        usage.get("cost_usd"),
+                        usage.get("prompt_tokens"),
+                        usage.get("completion_tokens"),
+                        usage.get("total_tokens"),
+                        _json_dumps_for_db({"binary": True, "p_yes": p_yes, "resolution_source": resolution_source}),
+                        "",
+                        month_idx,
+                        cb,
+                        float(prob),
+                    ],
+                )
+                con.execute(
+                    """
+                    INSERT INTO forecasts_ensemble (
+                        run_id, question_id, iso3, hazard_code, metric, model_name,
+                        month_index, bucket_index, probability, ev_value, weights_profile, created_at,
+                        status, human_explanation
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ensemble', CURRENT_TIMESTAMP, 'ok', ?)
+                    """,
+                    [
+                        run_id, qid, iso3, hz, metric, model_name,
+                        month_idx, bucket_index, float(prob), "",
+                    ],
+                )
+    finally:
+        con.close()
+
+
+async def _run_binary_forecast_for_question(
+    run_id: str,
+    question_row: Any,
+    *,
+    track: int = 1,
+) -> None:
+    """Run binary event forecast for an EVENT_OCCURRENCE question.
+
+    Uses the binary prompt builder, calls the same LLM models, parses
+    the response as per-month probabilities, aggregates via weighted
+    average, and stores using the bucket convention.
+    """
+    rec = _normalize_question_row_for_spd(question_row)
+    qid = rec.get("question_id")
+    iso3 = (rec.get("iso3") or "").upper()
+    hz = (rec.get("hazard_code") or "").upper()
+    metric = rec.get("metric") or "EVENT_OCCURRENCE"
+    wording = rec.get("wording") or ""
+
+    try:
+        resolution_source = _infer_resolution_source(hz, metric)
+        hs_run_id = rec.get("hs_run_id") or run_id
+        hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
+        structured_data = _load_structured_data(iso3, hz, hs_run_id=hs_run_id)
+
+        # Build binary base rate from facts_resolved
+        base_rate = build_binary_base_rate(iso3, hz)
+
+        # Load current GDACS alerts
+        current_alerts: list[dict] = []
+        try:
+            alert_con = connect(read_only=True)
+            alert_rows = alert_con.execute(
+                """
+                SELECT ym, value, alertlevel
+                FROM facts_resolved
+                WHERE upper(iso3) = ? AND upper(hazard_code) = ?
+                  AND lower(metric) = 'event_occurrence'
+                ORDER BY ym DESC LIMIT 6
+                """,
+                [iso3, hz],
+            ).fetchall()
+            alert_con.close()
+            for arow in alert_rows:
+                current_alerts.append({
+                    "ym": str(arow[0]),
+                    "value": float(arow[1] or 0),
+                    "alertlevel": str(arow[2] or ""),
+                })
+        except Exception:
+            pass
+
+        target_months = rec.get("target_months") or rec.get("target_month")
+        window_start = rec.get("window_start_date")
+
+        prompt = build_binary_event_prompt(
+            question={
+                "question_id": qid,
+                "iso3": iso3,
+                "hazard_code": hz,
+                "metric": metric,
+                "country_name": iso3,
+                "window_start_date": window_start,
+                "wording": wording,
+            },
+            base_rate=base_rate,
+            current_alerts=current_alerts,
+            structured_data=structured_data,
+            hs_triage_entry=hs_entry,
+            today=date.today().isoformat() if date else str(datetime.now().date()),
+        )
+
+        # Select model specs based on track
+        if track == 2:
+            specs = [TRACK2_MODEL_SPEC]
+            model_name = "track2_flash"
+        else:
+            specs_active, _ = _select_spd_specs_for_run()
+            if not specs_active:
+                _record_no_forecast(
+                    run_id, qid or "", iso3, hz, metric,
+                    "binary: no active model specs",
+                    model_name="ensemble_mean_v2",
+                )
+                return
+            specs = specs_active
+            model_name = "ensemble_mean_v2"
+
+        target_month = _first_target_month(target_months)
+
+        # Call models — reuse the same model calling infrastructure
+        per_model_spds, usage, raw_calls, ensemble_meta = (
+            await _call_spd_members_v2_compat(
+                prompt,
+                specs,
+                run_id=run_id,
+                question_id=qid,
+                iso3=iso3,
+                hazard_code=hz,
+                metric=metric,
+                target_month=target_month,
+                wording=wording,
+            )
+        )
+
+        # Log LLM calls
+        for call in raw_calls:
+            ms = call.get("model_spec")
+            if not isinstance(ms, ModelSpec):
+                continue
+            await log_forecaster_llm_call(
+                run_id=run_id,
+                question_id=qid,
+                iso3=iso3,
+                hazard_code=hz,
+                metric=metric,
+                model_spec=ms,
+                prompt_text=prompt,
+                response_text=str(call.get("text") or ""),
+                usage=call.get("usage") or {},
+                error_text=str(call.get("error")) if call.get("error") else None,
+                phase="binary_v2",
+                call_type="binary_v2",
+                hs_run_id=hs_run_id,
+            )
+
+        # Parse binary responses from raw model outputs
+        all_model_probs: list[dict[str, float]] = []
+        for call in raw_calls:
+            raw_text = str(call.get("text") or "")
+            if not raw_text:
+                continue
+            parsed = parse_binary_response(raw_text)
+            if parsed:
+                all_model_probs.append(parsed)
+
+        if not all_model_probs:
+            _record_no_forecast(
+                run_id, qid or "", iso3, hz, metric,
+                "binary: no valid responses parsed",
+                model_name=model_name,
+            )
+            return
+
+        # Aggregate: simple weighted average across models per month
+        all_months: set[str] = set()
+        for mp in all_model_probs:
+            all_months.update(mp.keys())
+
+        aggregated: dict[str, float] = {}
+        for month in sorted(all_months):
+            probs = [mp[month] for mp in all_model_probs if month in mp]
+            if probs:
+                aggregated[month] = sum(probs) / len(probs)
+
+        if not aggregated:
+            _record_no_forecast(
+                run_id, qid or "", iso3, hz, metric,
+                "binary: no months in aggregated result",
+                model_name=model_name,
+            )
+            return
+
+        # Write binary outputs
+        _write_binary_outputs(
+            run_id,
+            question_row,
+            aggregated,
+            resolution_source=resolution_source,
+            usage=usage or {},
+            model_name=model_name,
+        )
+
+        # Also write BayesMC aggregation for Track 1
+        if track == 1 and len(all_model_probs) > 1:
+            bayesmc_aggregated: dict[str, float] = {}
+            for month in sorted(all_months):
+                probs = [mp[month] for mp in all_model_probs if month in mp]
+                if not probs:
+                    continue
+                # Use aggregate_binary from aggregate.py
+                from .ensemble import EnsembleResult, MemberOutput
+                members = [
+                    MemberOutput(name=f"model_{i}", ok=True, parsed=p, raw="")
+                    for i, p in enumerate(probs)
+                ]
+                ens_res = EnsembleResult(members=members)
+                agg_p, _ = aggregate_binary(ens_res)
+                bayesmc_aggregated[month] = agg_p
+
+            if bayesmc_aggregated:
+                _write_binary_outputs(
+                    run_id,
+                    question_row,
+                    bayesmc_aggregated,
+                    resolution_source=resolution_source,
+                    usage=usage or {},
+                    model_name="ensemble_bayesmc_v2",
+                )
+
+    except Exception:
+        LOG.exception("Binary forecast failed for %s", qid)
+        _record_no_forecast(
+            run_id, qid or "", iso3, hz, metric,
+            "binary: exception during forecast",
+            model_name="ensemble_mean_v2" if track == 1 else "track2_flash",
+        )
+
+
 TRACK2_MODEL_SPEC = ModelSpec(
     name="track2_flash",
     provider="google",
@@ -4574,6 +4875,11 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
     hz = (rec.get("hazard_code") or "").upper()
     metric = rec.get("metric") or "PA"
     wording = rec.get("wording") or rec.get("title") or ""
+
+    # Binary questions use a separate pipeline
+    if metric.upper() == "EVENT_OCCURRENCE":
+        await _run_binary_forecast_for_question(run_id, question_row, track=2)
+        return
 
     try:
         resolution_source = _infer_resolution_source(hz, metric)
@@ -4722,6 +5028,11 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
     hz = (rec.get("hazard_code") or "").upper()
     metric = rec.get("metric") or "PA"
     wording = rec.get("wording") or rec.get("title") or ""
+
+    # Binary questions use a separate pipeline
+    if metric.upper() == "EVENT_OCCURRENCE":
+        await _run_binary_forecast_for_question(run_id, question_row, track=1)
+        return
 
     try:
         resolution_source = _infer_resolution_source(hz, metric)

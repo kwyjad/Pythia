@@ -90,7 +90,7 @@ Pythia/
 - `horizon_scanner/seasonal_tc/__init__.py` — Country-to-basin mapping + cached TC context reader
 - `horizon_scanner/hdx_signals.py` — HDX Signals connector (OCHA automated crisis monitoring, indicator-to-hazard mapping)
 - `horizon_scanner/conflict_forecasts.py` — Unified conflict forecast loader (VIEWS + conflictforecast.org + ACLED CAST)
-- `forecaster/cli.py` — Forecaster main runner (~7100 LOC)
+- `forecaster/cli.py` — Forecaster main runner (~7300 LOC). Supports both SPD (5-bucket × 6-month) and binary (per-month probability) forecast pipelines. Binary questions (metric=EVENT_OCCURRENCE) are detected and routed to `_run_binary_forecast_for_question()`, which uses `build_binary_event_prompt()` for prompting and `parse_binary_response()` for output parsing. Binary storage convention: bucket_1 = P(yes), bucket_2 = P(no) = 1-P(yes), buckets 3-5 = 0.
 - `pythia/api/app.py` — FastAPI application (~3200 LOC)
 - `pythia/tools/compute_resolutions.py` — Resolves forecasts against Resolver ground truth. Supports PA, FATALITIES, EVENT_OCCURRENCE, and PHASE3PLUS_IN_NEED metrics. Source-aware null handling: FATALITIES+ACE/ACO and EVENT_OCCURRENCE default to 0 when no data; PA and PHASE3PLUS_IN_NEED leave horizons unresolved (null) when no data exists.
 - `pythia/tools/compute_scores.py` — Brier/log/CRPS scoring per horizon
@@ -110,11 +110,13 @@ Pythia/
 - `pythia/adversarial_check.py` — Counter-evidence searches for RC Level 1+ (devil's advocate)
 - `horizon_scanner/reliefweb.py` — ReliefWeb humanitarian reports connector
 - `forecaster/hazard_prompts.py` — Hazard-specific reasoning guidance for SPD prompts
+- `forecaster/scoring.py` — Scoring utilities: `multiclass_brier()`, `log_score()`, `binary_brier()` (Brier score for binary forecasts: `(forecast_p - outcome)^2`)
 - `scripts/ci/snapshot_prompt_artifact.py` — Prompt version snapshot script
 - `scripts/refresh_crisiswatch.py` — Playwright-based CrisisWatch scraper (monthly, writes `crisiswatch_latest.json`)
 - `pythia/tools/generate_calibration_advice.py` — Per-hazard/metric calibration advice generation
 - `tools/compare_gdacs_ifrc.py` — GDACS vs IFRC Montandon PA comparison diagnostic (side-by-side coverage, ratios, blind spots)
-- `scripts/create_questions_from_triage.py` — Creates forecast questions from HS triage output. Supported hazards: ACE (FATALITIES+PA), CU, DR, FL, TC, DI (PA). HW excluded (no resolution source). Epoch-specific question_ids with `_{epoch_label}` suffix.
+- `scripts/create_questions_from_triage.py` — Creates forecast questions from HS triage output. Supported hazards: ACE (FATALITIES+PA), CU (PA), DR (PA+EVENT_OCCURRENCE), FL (PA+EVENT_OCCURRENCE), TC (PA+EVENT_OCCURRENCE), DI (PA). HW excluded (no resolution source). DR/PA restricted to FEWS NET-monitored countries (via `resolver/data/fewsnet_countries.json`; fail-open if file missing). EVENT_OCCURRENCE questions generated for ALL countries (GDACS global coverage). Binary question wording references GDACS Orange/Red alerts. Epoch-specific question_ids with `_{epoch_label}` suffix.
+- `forecaster/binary_prompts.py` — Binary event prompt builder for EVENT_OCCURRENCE questions. Contains: `build_binary_event_prompt()` (5-section prompt: role/task, base rate, current situation, hazard reasoning, output instructions), `build_binary_base_rate()` (queries facts_resolved for seasonal event rates), `get_binary_hazard_reasoning_block()` (DR/FL/TC-specific reasoning), `parse_binary_response()` (JSON parser with code fence stripping, probability clamping to [0.01, 0.99]).
 - `scripts/db/update_bucket_centroids.py` — Seeds bucket definitions and centroids into DuckDB from `pythia/buckets.py` BUCKET_SPECS. Iterates all metrics (PA, FATALITIES, PHASE3PLUS_IN_NEED).
 
 ## Databases
@@ -202,8 +204,8 @@ Run the pipeline: `python -m resolver.tools.run_pipeline [--connectors acled idm
 Forecasts cover a 6-month window. Each question has `window_start_date` and `target_month` (= month 6).
 
 - **Resolutions**: `compute_resolutions` resolves each horizon independently against Resolver's `facts_resolved.created_at` for ordering. Source-aware null handling: FATALITIES+ACE/ACO defaults to 0 (ACLED continuous coverage), EVENT_OCCURRENCE defaults to 0 (GDACS binary), PA and PHASE3PLUS_IN_NEED leave horizons unresolved when no data exists. Unresolvable hazards: DI, HW.
-- **Scoring**: `compute_scores` scores each (question, horizon_m) pair separately using Brier, log loss, and CRPS. Supports PA, FATALITIES, EVENT_OCCURRENCE, PHASE3PLUS_IN_NEED metrics. Missing resolution horizons are naturally excluded via JOIN.
-- **Calibration**: `compute_calibration_pythia` aggregates scores across horizons to produce per-model weights.
+- **Scoring**: `compute_scores` scores each (question, horizon_m) pair separately. SPD questions (PA, FATALITIES) get multiclass Brier, log loss, and CRPS. Binary questions (EVENT_OCCURRENCE) get single Brier score: `(forecast_p - outcome)^2` where forecast_p = bucket_1 probability from ensemble. PHASE3PLUS_IN_NEED uses SPD scoring. Missing resolution horizons are naturally excluded via JOIN.
+- **Calibration**: `compute_calibration_pythia` aggregates scores across horizons to produce per-model weights. Groups by (hazard_code, metric), so EVENT_OCCURRENCE questions form their own calibration pool separate from PA/FATALITIES.
 
 ## Regime Change (RC) scoring
 
