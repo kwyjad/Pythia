@@ -1,0 +1,69 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+name: Mark runs as test
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_ids:
+        description: "Run IDs to mark as test (comma or space separated). These can be hs_run_id or forecaster run_id values."
+        required: true
+        type: string
+      db_artifact_run_id:
+        description: "Actions run ID containing the pythia-resolver-db artifact to modify"
+        required: true
+        type: string
+      db_artifact_name:
+        description: "Name of the DB artifact to download"
+        required: false
+        default: "pythia-resolver-db"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  mark-test:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install duckdb
+
+      - name: Download production DB
+        run: |
+          gh run download "${{ inputs.db_artifact_run_id }}" \
+            -n "${{ inputs.db_artifact_name }}" \
+            --dir data
+          SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1)
+          if [ -z "$SRC" ]; then
+            echo "ERROR: resolver.duckdb not found in downloaded artifact"
+            exit 1
+          fi
+          cp "$SRC" data/resolver.duckdb
+          echo "DB downloaded: $(ls -lh data/resolver.duckdb)"
+
+      - name: Run mark script
+        run: |
+          python scripts/mark_test_runs.py \
+            --db "duckdb:///data/resolver.duckdb" \
+            --run-ids "${{ inputs.run_ids }}"
+
+      - name: Upload modified DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb

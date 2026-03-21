@@ -41,6 +41,7 @@ def log_hs_llm_call(
     response_text: str,
     usage: Dict[str, Any],
     error_text: Optional[str],
+    is_test: bool = False,
 ) -> None:
     """
     Log a Horizon Scanner triage LLM call into llm_calls with phase='hs_triage'.
@@ -180,8 +181,9 @@ def log_hs_llm_call(
                 timestamp,
                 iso3,
                 hazard_code,
-                metric
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                metric,
+                is_test
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 call_id,
@@ -213,6 +215,7 @@ def log_hs_llm_call(
                 iso3_up,
                 hz_up,
                 None,  # metric not defined at HS stage
+                is_test,
             ],
         )
 

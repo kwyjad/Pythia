@@ -33,7 +33,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             status TEXT,
             iso3 TEXT,
             target_month TEXT,
-            metric TEXT
+            metric TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )

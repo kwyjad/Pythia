@@ -33,7 +33,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             hs_run_id TEXT,
             iso3 TEXT,
             hazard_code TEXT,
-            metric TEXT
+            metric TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -41,7 +42,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         CREATE TABLE hs_runs (
             hs_run_id TEXT,
-            generated_at TIMESTAMP
+            generated_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )

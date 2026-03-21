@@ -1,3 +1,7 @@
+"use client";
+
+import { useSearchParams } from "next/navigation";
+
 const API_BASE =
   process.env.NEXT_PUBLIC_PYTHIA_API_BASE ?? "http://localhost:8000/v1";
 
@@ -11,6 +15,15 @@ const SCORES_ENSEMBLE_BAYESMC_URL = `${API_BASE}/downloads/scores_ensemble_bayes
 const SCORES_MODEL_URL = `${API_BASE}/downloads/scores_model.csv`;
 
 const DownloadsPage = () => {
+  const searchParams = useSearchParams();
+  const includeTest = searchParams.get("include_test") === "true";
+
+  const withTest = (url: string) => {
+    if (!includeTest) return url;
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}include_test=true`;
+  };
+
   return (
     <div className="space-y-6">
       <section className="space-y-2">
@@ -31,13 +44,13 @@ const DownloadsPage = () => {
           </p>
           <div className="flex flex-wrap items-center gap-3">
             <a
-              href={CSV_DOWNLOAD_URL}
+              href={withTest(CSV_DOWNLOAD_URL)}
               className="inline-flex items-center rounded-md bg-fred-secondary px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
             >
               Download .csv
             </a>
             <a
-              href={XLSX_DOWNLOAD_URL}
+              href={withTest(XLSX_DOWNLOAD_URL)}
               className="text-xs text-fred-primary underline underline-offset-4 hover:text-fred-secondary"
             >
               Excel (if available; otherwise downloads CSV)
@@ -56,20 +69,20 @@ const DownloadsPage = () => {
           </p>
           <div className="flex flex-wrap items-center gap-3 text-sm">
             <a
-              href={SCORES_ENSEMBLE_MEAN_URL}
+              href={withTest(SCORES_ENSEMBLE_MEAN_URL)}
               className="inline-flex items-center rounded-md bg-fred-secondary px-4 py-2 font-semibold text-white hover:opacity-90"
             >
               Ensemble Mean scores (CSV)
             </a>
             <a
               className="text-fred-primary underline underline-offset-4 hover:text-fred-secondary"
-              href={SCORES_ENSEMBLE_BAYESMC_URL}
+              href={withTest(SCORES_ENSEMBLE_BAYESMC_URL)}
             >
               Ensemble BayesMC scores (CSV)
             </a>
             <a
               className="text-fred-primary underline underline-offset-4 hover:text-fred-secondary"
-              href={SCORES_MODEL_URL}
+              href={withTest(SCORES_MODEL_URL)}
             >
               Model summary scores (CSV)
             </a>
@@ -85,20 +98,20 @@ const DownloadsPage = () => {
           </p>
           <div className="flex flex-wrap items-center gap-3 text-sm">
             <a
-              href={TOTAL_COSTS_URL}
+              href={withTest(TOTAL_COSTS_URL)}
               className="inline-flex items-center rounded-md bg-fred-secondary px-4 py-2 font-semibold text-white hover:opacity-90"
             >
               Total costs (CSV)
             </a>
             <a
               className="text-fred-primary underline underline-offset-4 hover:text-fred-secondary"
-              href={MONTHLY_COSTS_URL}
+              href={withTest(MONTHLY_COSTS_URL)}
             >
               Monthly costs (CSV)
             </a>
             <a
               className="text-fred-primary underline underline-offset-4 hover:text-fred-secondary"
-              href={RUN_COSTS_URL}
+              href={withTest(RUN_COSTS_URL)}
             >
               Run costs (CSV)
             </a>

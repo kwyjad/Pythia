@@ -457,7 +457,8 @@ def compute_scores(db_url: str) -> None:
               model_name TEXT,
               value DOUBLE,
               run_id TEXT,
-              created_at TIMESTAMP DEFAULT now()
+              created_at TIMESTAMP DEFAULT now(),
+              is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -465,6 +466,15 @@ def compute_scores(db_url: str) -> None:
         _migrate_scores_add_run_id(conn)
         # Migration: add run_id to eiv_scores (CTAS if PK exists).
         _migrate_eiv_scores_add_run_id(conn)
+
+        # Migration: add is_test column to scores and eiv_scores if missing.
+        for _tbl in ("scores", "eiv_scores"):
+            if _table_exists(conn, _tbl) and "is_test" not in _table_columns(conn, _tbl):
+                try:
+                    conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN is_test BOOLEAN DEFAULT FALSE")
+                    LOGGER.info("%s: added is_test column.", _tbl)
+                except Exception as _exc:
+                    LOGGER.warning("%s: failed to add is_test column: %r", _tbl, _exc)
 
         # Detect if forecast tables have run_id (backward compat for old DBs/tests).
         has_run_id = _forecast_tables_have_run_id(conn)
@@ -532,11 +542,25 @@ def compute_scores(db_url: str) -> None:
 
         n_written = 0
 
+        # Pre-fetch is_test for all questions to avoid repeated lookups.
+        _is_test_cache: Dict[str, bool] = {}
+
         for question_id, iso3, hazard_code, metric, horizon_m, resolved_value in qrows:
             # Guard against NULL resolution values (should not happen with
             # source-aware null handling, but defend against edge cases).
             if resolved_value is None:
                 continue
+
+            if question_id not in _is_test_cache:
+                try:
+                    _qt = conn.execute(
+                        "SELECT COALESCE(is_test, FALSE) FROM questions WHERE question_id = ?",
+                        [question_id],
+                    ).fetchone()
+                    _is_test_cache[question_id] = _qt[0] if _qt else False
+                except Exception:
+                    _is_test_cache[question_id] = False
+            is_test_val = _is_test_cache[question_id]
 
             # Binary EVENT_OCCURRENCE questions use Brier score directly
             is_binary = (metric or "").upper() == "EVENT_OCCURRENCE"
@@ -579,10 +603,10 @@ def compute_scores(db_url: str) -> None:
                         conn.execute(
                             """
                             INSERT INTO scores (question_id, horizon_m, metric, score_type,
-                                                model_name, value, run_id, created_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                                model_name, value, run_id, created_at, is_test)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
-                            [question_id, horizon_m, metric, "brier", None, brier_val, run_id, now],
+                            [question_id, horizon_m, metric, "brier", None, brier_val, run_id, now, is_test_val],
                         )
                         n_written += 1
 
@@ -628,10 +652,10 @@ def compute_scores(db_url: str) -> None:
                             conn.execute(
                                 """
                                 INSERT INTO scores (question_id, horizon_m, metric, score_type,
-                                                    model_name, value, run_id, created_at)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                                    model_name, value, run_id, created_at, is_test)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """,
-                                [question_id, horizon_m, metric, "brier", model_name, brier_m, run_id, now],
+                                [question_id, horizon_m, metric, "brier", model_name, brier_m, run_id, now, is_test_val],
                             )
                             n_written += 1
                 continue  # skip SPD scoring for binary questions
@@ -682,13 +706,13 @@ def compute_scores(db_url: str) -> None:
                     conn.executemany(
                         """
                         INSERT INTO scores (question_id, horizon_m, metric, score_type,
-                                            model_name, value, run_id, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                            model_name, value, run_id, created_at, is_test)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
-                            (question_id, horizon_m, metric, "brier", None, brier_e, run_id, now),
-                            (question_id, horizon_m, metric, "log", None, log_e, run_id, now),
-                            (question_id, horizon_m, metric, "crps", None, crps_e, run_id, now),
+                            (question_id, horizon_m, metric, "brier", None, brier_e, run_id, now, is_test_val),
+                            (question_id, horizon_m, metric, "log", None, log_e, run_id, now, is_test_val),
+                            (question_id, horizon_m, metric, "crps", None, crps_e, run_id, now, is_test_val),
                         ],
                     )
                     n_written += 3
@@ -733,13 +757,13 @@ def compute_scores(db_url: str) -> None:
                     conn.executemany(
                         """
                         INSERT INTO scores (question_id, horizon_m, metric, score_type,
-                                            model_name, value, run_id, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                            model_name, value, run_id, created_at, is_test)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
-                            (question_id, horizon_m, metric, "brier", model_name, brier_m, run_id, now),
-                            (question_id, horizon_m, metric, "log", model_name, log_m, run_id, now),
-                            (question_id, horizon_m, metric, "crps", model_name, crps_m, run_id, now),
+                            (question_id, horizon_m, metric, "brier", model_name, brier_m, run_id, now, is_test_val),
+                            (question_id, horizon_m, metric, "log", model_name, log_m, run_id, now, is_test_val),
+                            (question_id, horizon_m, metric, "crps", model_name, crps_m, run_id, now, is_test_val),
                         ],
                     )
                     n_written += 3
@@ -780,10 +804,11 @@ def compute_scores(db_url: str) -> None:
                 """
                 INSERT INTO eiv_scores (question_id, horizon_m, metric, model_name,
                                         eiv_forecast, actual_value, log_ratio_err,
-                                        within_20pct, centroid_version, run_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        within_20pct, centroid_version, run_id, created_at,
+                                        is_test)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [(*row, now) for row in eiv_rows],
+                [(*row, now, _is_test_cache.get(row[0], False)) for row in eiv_rows],
             )
             LOGGER.info("compute_scores: wrote %d EIV score rows.", len(eiv_rows))
     finally:

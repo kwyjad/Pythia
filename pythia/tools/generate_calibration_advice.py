@@ -210,6 +210,7 @@ def _discover_hazard_metric_pairs(
         FROM questions q
         JOIN resolutions r ON r.question_id = q.question_id
         WHERE upper(q.metric) IN ('PA', 'FATALITIES')
+          AND COALESCE(q.is_test, FALSE) = FALSE
         ORDER BY hc, m
     """
     rows = conn.execute(sql).fetchall()
@@ -223,6 +224,7 @@ def _count_resolved(conn: Any, hazard_code: str, metric: str) -> int:
         FROM resolutions r
         JOIN questions q ON q.question_id = r.question_id
         WHERE upper(q.hazard_code) = ? AND upper(q.metric) = ?
+          AND COALESCE(q.is_test, FALSE) = FALSE
     """
     row = conn.execute(sql, [hazard_code.upper(), metric.upper()]).fetchone()
     return row[0] if row else 0
@@ -247,6 +249,7 @@ def _compute_tail_coverage(
             JOIN questions q ON q.question_id = r.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
+              AND COALESCE(q.is_test, FALSE) = FALSE
         ),
         ensemble_tail_probs AS (
             SELECT
@@ -257,6 +260,7 @@ def _compute_tail_coverage(
             JOIN questions q ON q.question_id = fe.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
+              AND COALESCE(q.is_test, FALSE) = FALSE
               AND fe.class_bin IS NOT NULL
               AND fe.p IS NOT NULL
             GROUP BY fe.question_id, fe.horizon_m
@@ -310,6 +314,7 @@ def _compute_bucket_calibration(
             JOIN questions q ON q.question_id = r.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
+              AND COALESCE(q.is_test, FALSE) = FALSE
         )
         SELECT
             fe.class_bin,
@@ -326,6 +331,7 @@ def _compute_bucket_calibration(
         JOIN questions q ON q.question_id = fe.question_id
         WHERE upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
+          AND COALESCE(q.is_test, FALSE) = FALSE
           AND fe.class_bin IS NOT NULL
           AND fe.p IS NOT NULL
         GROUP BY fe.class_bin
@@ -375,6 +381,7 @@ def _compute_per_model_brier(
         WHERE s.score_type = 'brier'
           AND upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
+          AND COALESCE(q.is_test, FALSE) = FALSE
         GROUP BY mn
         ORDER BY avg_brier ASC
     """
@@ -450,6 +457,7 @@ def _compute_month_position_bias(
         JOIN questions q ON q.question_id = fr.question_id
         WHERE upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
+          AND COALESCE(q.is_test, FALSE) = FALSE
           AND fr.month_index BETWEEN 1 AND 6
           AND fr.bucket_index BETWEEN 1 AND ?
           AND fr.probability IS NOT NULL
@@ -517,6 +525,7 @@ def _compute_per_model_bucket_calibration(
             JOIN questions q ON q.question_id = r.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
+              AND COALESCE(q.is_test, FALSE) = FALSE
         )
         SELECT
             fr.bucket_index,
@@ -530,6 +539,7 @@ def _compute_per_model_bucket_calibration(
         JOIN questions q ON q.question_id = fr.question_id
         WHERE upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
+          AND COALESCE(q.is_test, FALSE) = FALSE
           AND fr.model_name = ?
           AND fr.probability IS NOT NULL
         GROUP BY fr.bucket_index
@@ -582,6 +592,7 @@ def _compute_per_model_tail_coverage(
             JOIN questions q ON q.question_id = r.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
+              AND COALESCE(q.is_test, FALSE) = FALSE
         ),
         model_tail_probs AS (
             SELECT
@@ -592,6 +603,7 @@ def _compute_per_model_tail_coverage(
             JOIN questions q ON q.question_id = fr.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
+              AND COALESCE(q.is_test, FALSE) = FALSE
               AND fr.model_name = ?
               AND fr.probability IS NOT NULL
             GROUP BY fr.question_id, fr.month_index
@@ -644,6 +656,7 @@ def _compute_per_model_horizon_diff(
         JOIN questions q ON q.question_id = fr.question_id
         WHERE upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
+          AND COALESCE(q.is_test, FALSE) = FALSE
           AND fr.model_name = ?
           AND fr.month_index BETWEEN 1 AND 6
           AND fr.bucket_index BETWEEN 1 AND ?
@@ -734,6 +747,7 @@ def _compute_advice_impact(
         FROM resolutions r
         JOIN questions q ON q.question_id = r.question_id
         WHERE upper(q.hazard_code) = ? AND upper(q.metric) = ?
+          AND COALESCE(q.is_test, FALSE) = FALSE
           AND r.observed_month >= ?
     """
     try:
@@ -758,6 +772,7 @@ def _compute_advice_impact(
         WHERE s.score_type = 'brier'
           AND upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
+          AND COALESCE(q.is_test, FALSE) = FALSE
           AND s.model_name IS NOT NULL
         GROUP BY s.model_name
     """
@@ -817,6 +832,7 @@ def _compute_rc_conditional(
             JOIN questions q ON q.question_id = fe.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
+              AND COALESCE(q.is_test, FALSE) = FALSE
               AND fe.class_bin IS NOT NULL
               AND fe.p IS NOT NULL
             GROUP BY fe.question_id, fe.horizon_m
@@ -878,6 +894,7 @@ def _compute_eiv_accuracy(
             JOIN questions q ON q.question_id = e.question_id
             WHERE upper(q.hazard_code) = ?
               AND upper(e.metric) = ?
+              AND COALESCE(q.is_test, FALSE) = FALSE
               AND e.model_name = '__ensemble__'
             """,
             [hz, m],
@@ -986,6 +1003,7 @@ def _compute_views_benchmark(
           AND s.model_name = '__ext_views'
           AND upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
+          AND COALESCE(q.is_test, FALSE) = FALSE
     """
     try:
         row = conn.execute(sql, [hz, m]).fetchone()

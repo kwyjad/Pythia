@@ -9,6 +9,7 @@ import CountryQuestionsTable from "./CountryQuestionsTable";
 
 type CountryPageProps = {
   params: { iso3: string };
+  searchParams: { [key: string]: string | string[] | undefined };
 };
 
 type CountryQuestionRow = QuestionsResponse["rows"][number] & {
@@ -92,13 +93,16 @@ function addMonthsYYYYMM(value: string, months: number): string | null {
   return `${String(outYear).padStart(4, "0")}-${String(outMonth).padStart(2, "0")}`;
 }
 
-const CountryPage = async ({ params }: CountryPageProps) => {
+const CountryPage = async ({ params, searchParams }: CountryPageProps) => {
+  const includeTest = searchParams?.include_test === "true";
+
   let questions: CountryQuestionRow[] = [];
   let loadError: string | null = null;
   const iso3 = params.iso3.toUpperCase();
   try {
     const response = await apiGet<QuestionsResponse>("/questions", {
       iso3,
+      include_test: includeTest || undefined,
     });
     questions = response.rows.map((row) => {
       const firstForecastMonth = row.target_month ?? null;

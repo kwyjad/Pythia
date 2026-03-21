@@ -38,6 +38,11 @@ on:
         required: false
         default: ""
         type: string
+      test_mode:
+        description: "Run in test mode (stamps all outputs as test data, hidden by default on the website)"
+        type: boolean
+        default: false
+        required: false
   schedule:
     # Run at 00:00 UTC on the 1st of each month (= 03:00 Europe/Istanbul)
     - cron: "0 0 1 * *"
@@ -51,6 +56,7 @@ jobs:
   build-report:
     runs-on: ubuntu-latest
     env:
+      PYTHIA_TEST_MODE: ${{ github.event.inputs.test_mode == 'true' && '1' || '0' }}
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       PYTHIA_LLM_CONCURRENCY: "32"

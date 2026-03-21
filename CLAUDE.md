@@ -280,7 +280,8 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | Variable | Purpose |
 |----------|---------|
 | `PYTHIA_DB_URL` | DuckDB connection URL |
-| `PYTHIA_LLM_PROFILE` | LLM profile: `test` or `prod` |
+| `PYTHIA_LLM_PROFILE` | LLM profile: `prod` |
+| `PYTHIA_TEST_MODE` | Pipeline test mode flag (1/true/yes = stamp all output as test data) |
 | `PYTHIA_LLM_CONCURRENCY` | Max concurrent LLM calls |
 | `PYTHIA_API_TOKEN` | Admin API auth token |
 | `PYTHIA_WEB_RESEARCH_ENABLED` | Enable shared retriever (0/1) |
@@ -304,6 +305,24 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `FEWSNET_REQUEST_DELAY` | Seconds between FEWS NET API retries (default 1.0) |
 
 Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`.
+
+## Test mode
+
+Test mode runs the identical pipeline as production. The only difference is that every row written during a test run carries `is_test = TRUE` in a dedicated boolean column. The website hides test data by default; users can opt in via the "Test ON/OFF" toggle in the navigation bar.
+
+**Architecture:**
+- `pythia/test_mode.py` — single source of truth; `is_test_mode()` reads `PYTHIA_TEST_MODE` env var
+- `is_test BOOLEAN DEFAULT FALSE` column on all pipeline tables (hs_runs, hs_scenarios, hs_triage, hs_country_reports, hs_hazard_tail_packs, hs_adversarial_checks, questions, forecasts_ensemble, forecasts_raw, llm_calls, question_research, question_run_metrics, scenarios, question_context, run_provenance, resolutions, scores, eiv_scores)
+- API endpoints accept `?include_test=true` query parameter (default: hidden)
+- Calibration (`compute_calibration_pythia`, `generate_calibration_advice`) excludes test data automatically
+- Downloads include an `is_test` column
+- `scripts/mark_test_runs.py` retroactively marks existing runs as test data
+- `.github/workflows/mark_test_runs.yml` workflow wraps the script for CI use
+
+**Triggering test mode:**
+- Set `PYTHIA_TEST_MODE=1` in environment (or `true`/`yes`)
+- `run_horizon_scanner.yml` has a `test_mode` checkbox input
+- `manual_test.yaml` always sets `PYTHIA_TEST_MODE=1`
 
 ## Build and run
 

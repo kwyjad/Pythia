@@ -485,6 +485,7 @@ def _ensure_resolutions_table(conn) -> None:
           value DOUBLE,
           source_snapshot_ym TEXT,
           created_at TIMESTAMP DEFAULT now(),
+          is_test BOOLEAN DEFAULT FALSE,
           PRIMARY KEY (question_id, horizon_m)
         )
         """
@@ -499,6 +500,11 @@ def _ensure_resolutions_table(conn) -> None:
     if "horizon_m" not in existing:
         try:
             conn.execute("ALTER TABLE resolutions ADD COLUMN horizon_m INTEGER")
+        except Exception:
+            pass
+    if "is_test" not in existing:
+        try:
+            conn.execute("ALTER TABLE resolutions ADD COLUMN is_test BOOLEAN DEFAULT FALSE")
         except Exception:
             pass
 
@@ -679,6 +685,15 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                     value, source_ts = resolved
                     resolved_from_source += 1
 
+                try:
+                    q_test = conn.execute(
+                        "SELECT COALESCE(is_test, FALSE) FROM questions WHERE question_id = ?",
+                        [question_id],
+                    ).fetchone()
+                    is_test_val = q_test[0] if q_test else False
+                except Exception:
+                    is_test_val = False
+
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO resolutions (
@@ -687,8 +702,9 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                       observed_month,
                       value,
                       source_snapshot_ym,
-                      created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                      created_at,
+                      is_test
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         question_id,
@@ -697,6 +713,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                         float(value),
                         source_ts,
                         datetime.utcnow(),
+                        is_test_val,
                     ],
                 )
                 written += 1

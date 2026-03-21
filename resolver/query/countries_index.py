@@ -31,7 +31,10 @@ def _base_rows(
     metric_scope: str | None = None,
     hs_run_id: str | None = None,
     forecaster_run_id: str | None = None,
+    include_test: bool = False,
 ) -> dict[str, dict[str, Any]]:
+    test_clause = "" if include_test else " AND COALESCE(q.is_test, FALSE) = FALSE"
+    test_clause_no_alias = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
     base = {}
     try:
         if forecaster_run_id:
@@ -49,7 +52,7 @@ def _base_rows(
                   COUNT(DISTINCT q.question_id) AS n_questions
                 FROM questions q
                 JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
-                WHERE fe.run_id = ?{where}
+                WHERE fe.run_id = ?{where}{test_clause}
                 GROUP BY 1
                 ORDER BY 1
                 """,
@@ -64,6 +67,8 @@ def _base_rows(
             if hs_run_id:
                 clauses.append("hs_run_id = ?")
                 params.append(hs_run_id)
+            if not include_test:
+                clauses.append("COALESCE(is_test, FALSE) = FALSE")
             where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
             rows = conn.execute(
                 f"""
@@ -418,6 +423,7 @@ def compute_countries_index(
     metric_scope: str | None = None,
     year_month: str | None = None,
     forecaster_run_id: str | None = None,
+    include_test: bool = False,
 ) -> list[dict[str, Any]]:
     if conn is None:
         return []
@@ -431,7 +437,7 @@ def compute_countries_index(
 
     # When a specific forecaster run is provided, scope everything to that run.
     if forecaster_run_id:
-        base = _base_rows(conn, metric_scope=metric_scope, forecaster_run_id=forecaster_run_id)
+        base = _base_rows(conn, metric_scope=metric_scope, forecaster_run_id=forecaster_run_id, include_test=include_test)
         if not base:
             return []
         _update_last_triaged(conn, base)
@@ -448,7 +454,7 @@ def compute_countries_index(
 
     # Filter base rows by metric and run.
     run_filter = hs_run_id if year_month else None
-    base = _base_rows(conn, metric_scope=metric_scope, hs_run_id=run_filter)
+    base = _base_rows(conn, metric_scope=metric_scope, hs_run_id=run_filter, include_test=include_test)
     if not base:
         return []
 

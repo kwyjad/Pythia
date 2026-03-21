@@ -54,6 +54,7 @@ async def log_forecaster_llm_call(
     response_text: Optional[str] = None,
     usage: Optional[Dict[str, Any]] = None,
     error_text: Optional[str] = None,
+    is_test: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Wrap a Forecaster LLM call and log it to the llm_calls table.
@@ -215,6 +216,7 @@ async def log_forecaster_llm_call(
             "iso3",
             "hazard_code",
             "metric",
+            "is_test",
         ]
         params = [
             call_id,
@@ -246,6 +248,7 @@ async def log_forecaster_llm_call(
             iso3,
             hazard_code,
             metric,
+            is_test,
         ]
         placeholders = ", ".join(["?"] * len(cols))
         sql = f"INSERT INTO llm_calls ({', '.join(cols)}) VALUES ({placeholders})"

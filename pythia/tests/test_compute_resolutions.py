@@ -689,7 +689,8 @@ def _setup_e2e_db(con, extra_tables=True):
             metric TEXT,
             target_month TEXT,
             window_start_date DATE,
-            status TEXT
+            status TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )

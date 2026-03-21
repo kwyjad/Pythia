@@ -38,7 +38,7 @@ def _month_window(year: int, month: int) -> tuple[str, str]:
 
 
 def compute_countries_triaged_for_month_with_source(
-    con: duckdb.DuckDBPyConnection, year_month: str
+    con: duckdb.DuckDBPyConnection, year_month: str, include_test: bool = False
 ) -> tuple[int, Optional[str]]:
     parsed = _parse_year_month(year_month)
     if not parsed:
@@ -57,6 +57,7 @@ def compute_countries_triaged_for_month_with_source(
         elif "phase" not in llm_cols or "iso3" not in llm_cols:
             logger.debug("countries_triaged: llm_calls missing phase or iso3 columns")
         else:
+            test_clause = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
             try:
                 row = con.execute(
                     f"""
@@ -65,7 +66,7 @@ def compute_countries_triaged_for_month_with_source(
                     WHERE phase = 'hs_triage'
                       AND {llm_ts} >= ?
                       AND {llm_ts} < ?
-                      AND iso3 IS NOT NULL
+                      AND iso3 IS NOT NULL{test_clause}
                     """,
                     [start_iso, end_iso],
                 ).fetchone()
@@ -86,14 +87,15 @@ def compute_countries_triaged_for_month_with_source(
         logger.debug("countries_triaged: hs_triage missing created_at or iso3 columns")
         return 0, None
 
+    test_clause_hs = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
     try:
         row = con.execute(
-            """
+            f"""
             SELECT COUNT(DISTINCT UPPER(iso3))
             FROM hs_triage
             WHERE created_at >= ?
               AND created_at < ?
-              AND iso3 IS NOT NULL
+              AND iso3 IS NOT NULL{test_clause_hs}
             """,
             [start_iso, end_iso],
         ).fetchone()
@@ -104,7 +106,7 @@ def compute_countries_triaged_for_month_with_source(
 
 
 def compute_countries_triaged_for_month(
-    con: duckdb.DuckDBPyConnection, year_month: str
+    con: duckdb.DuckDBPyConnection, year_month: str, include_test: bool = False
 ) -> int:
-    count, _ = compute_countries_triaged_for_month_with_source(con, year_month)
+    count, _ = compute_countries_triaged_for_month_with_source(con, year_month, include_test=include_test)
     return count

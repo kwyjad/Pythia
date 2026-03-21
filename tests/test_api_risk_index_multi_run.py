@@ -36,7 +36,8 @@ def multi_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[
             iso3 TEXT,
             hazard_code TEXT,
             target_month TEXT,
-            metric TEXT
+            metric TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
     """)
     con.execute("""
@@ -47,7 +48,8 @@ def multi_run_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[
             bucket_index INTEGER,
             probability DOUBLE,
             model_name TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
     """)
     con.execute("""

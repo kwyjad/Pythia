@@ -22,7 +22,13 @@ const formatLastUpdated = (timestamp: string | null | undefined) => {
   return timestamp;
 };
 
-export default async function OverviewPage() {
+export default async function OverviewPage({
+  searchParams,
+}: {
+  searchParams: { [key: string]: string | string[] | undefined };
+}) {
+  const includeTest = searchParams?.include_test === "true";
+
   if (process.env.NODE_ENV !== "production") {
     console.log("[page] dynamic=force-dynamic", { route: "/" });
   }
@@ -30,6 +36,7 @@ export default async function OverviewPage() {
     apiGet<VersionResponse>("/version"),
     apiGet<DiagnosticsKpiScopesResponse>("/diagnostics/kpi_scopes", {
       metric_scope: "PA",
+      include_test: includeTest || undefined,
     }),
   ]);
   let riskIndex: RiskIndexResponse | null = null;
@@ -39,6 +46,7 @@ export default async function OverviewPage() {
       metric: "PA",
       horizon_m: 6,
       normalize: true,
+      include_test: includeTest || undefined,
     });
   } catch (error) {
     console.warn("Risk index unavailable:", error);
@@ -49,6 +57,7 @@ export default async function OverviewPage() {
       ...(kpiScopes.selected_month
         ? { year_month: kpiScopes.selected_month }
         : {}),
+      include_test: includeTest || undefined,
     });
   } catch (error) {
     console.warn("Countries unavailable:", error);

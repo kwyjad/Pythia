@@ -70,13 +70,21 @@ async function loadCountryNameMap(): Promise<Map<string, string>> {
   return map;
 }
 
-const CountriesPage = async () => {
+const CountriesPage = async ({
+  searchParams,
+}: {
+  searchParams: { [key: string]: string | string[] | undefined };
+}) => {
+  const includeTest = searchParams?.include_test === "true";
+
   if (process.env.NODE_ENV !== "production") {
     console.log("[page] dynamic=force-dynamic", { route: "/countries" });
   }
   let rows: CountriesRow[] = [];
   try {
-    const response = await apiGet<CountriesResponse>("/countries");
+    const response = await apiGet<CountriesResponse>("/countries", {
+      include_test: includeTest || undefined,
+    });
     rows = response.rows;
   } catch (error) {
     console.warn("Failed to load countries:", error);

@@ -15,12 +15,21 @@ type HsRunsResponse = {
   rows: HsRunRow[];
 };
 
-export default async function HsTriagePage() {
+export default async function HsTriagePage({
+  searchParams,
+}: {
+  searchParams: { [key: string]: string | string[] | undefined };
+}) {
+  const includeTest = searchParams?.include_test === "true";
+
   let runs: HsRunRow[] = [];
   let loadError: string | null = null;
 
   try {
-    const data = await apiGet<HsRunsResponse>("/hs_runs", { limit: 50 });
+    const data = await apiGet<HsRunsResponse>("/hs_runs", {
+      limit: 50,
+      include_test: includeTest || undefined,
+    });
     runs = data.rows ?? [];
   } catch (error) {
     loadError = error instanceof Error ? error.message : "Failed to load HS runs.";
