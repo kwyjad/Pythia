@@ -36,7 +36,7 @@ from pythia.api.models import (
     LlmCallsBundle,
     QuestionBundleResponse,
 )
-from pythia.db.schema import connect as db_connect
+from pythia.db.schema import connect as db_connect, ensure_schema
 from pythia.db.util import ensure_llm_calls_columns
 from pythia.config import load as load_cfg
 from pythia.pipeline.run import enqueue_run
@@ -281,6 +281,7 @@ def _startup_sync():
     con = None
     try:
         con = db_connect(read_only=False)
+        ensure_schema(con)
         ensure_llm_calls_columns(con)
     except Exception as exc:  # noqa: BLE001
         logger.warning("DB schema sync failed during startup: %s", exc)
@@ -1609,7 +1610,7 @@ def performance_scores(
             LEFT JOIN run_provenance rp ON s.run_id = rp.forecaster_run_id
             LEFT JOIN hs_runs h
               ON COALESCE(rp.hs_run_id, q.hs_run_id) = h.hs_run_id
-            WHERE 1=1 {metric_filter} {track_filter}
+            WHERE 1=1 {metric_filter} {track_filter}{_tf}
             GROUP BY s.run_id,
                      COALESCE(rp.hs_run_id, q.hs_run_id),
                      q.hazard_code, UPPER(q.metric),
@@ -1634,7 +1635,7 @@ def performance_scores(
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
             LEFT JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
-            WHERE 1=1 {metric_filter} {track_filter}
+            WHERE 1=1 {metric_filter} {track_filter}{_tf}
             GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
             ORDER BY run_date DESC NULLS LAST, q.hazard_code, s.score_type,
                      s.model_name NULLS FIRST
@@ -1655,7 +1656,7 @@ def performance_scores(
               MEDIAN(s.value) AS median_value
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
-            WHERE 1=1 {metric_filter} {track_filter}
+            WHERE 1=1 {metric_filter} {track_filter}{_tf}
             GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
             ORDER BY q.hs_run_id DESC, q.hazard_code, s.score_type,
                      s.model_name NULLS FIRST

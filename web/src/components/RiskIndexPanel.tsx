@@ -33,6 +33,7 @@ type RiskIndexPanelProps = {
   countriesRows: CountriesRow[];
   kpiScopes: DiagnosticsKpiScopesResponse;
   mapHeightClassName?: string;
+  includeTest?: boolean;
 };
 
 const buildParams = (view: RiskView) => {
@@ -118,6 +119,7 @@ export default function RiskIndexPanel({
   countriesRows,
   kpiScopes,
   mapHeightClassName,
+  includeTest,
 }: RiskIndexPanelProps) {
   const [view, setView] = useState<RiskView>("PA_EIV");
   const [rows, setRows] = useState(initialResponse.rows ?? []);
@@ -154,6 +156,7 @@ export default function RiskIndexPanel({
         metric_scope: metricScope,
         ...(runMonth ? { year_month: runMonth } : {}),
         ...(runId ? { forecaster_run_id: runId } : {}),
+        include_test: includeTest || undefined,
       });
       setCountries(response.rows ?? []);
     } catch (fetchError) {
@@ -174,6 +177,7 @@ export default function RiskIndexPanel({
           metric_scope: metricScope,
           ...(runMonth ? { year_month: runMonth } : {}),
           ...(runId ? { forecaster_run_id: runId } : {}),
+          include_test: includeTest || undefined,
         }
       );
       setKpiData(response);
@@ -200,6 +204,7 @@ export default function RiskIndexPanel({
         ? { target_month: forecastTargetMonthForRun }
         : {}),
       ...(runId ? { forecaster_run_id: runId } : {}),
+      include_test: includeTest || undefined,
     });
     setRows(response.rows ?? []);
     setTargetMonth(response.target_month ?? null);

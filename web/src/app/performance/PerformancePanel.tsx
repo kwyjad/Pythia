@@ -22,6 +22,7 @@ type ViewMode = "total" | "by_hazard" | "by_run" | "by_model";
 
 type PerformancePanelProps = {
   initialData: PerformanceScoresResponse;
+  includeTest?: boolean;
 };
 
 // Aggregated row used by Total, By Hazard, and By Model views after pivoting.
@@ -376,6 +377,7 @@ const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
 
 export default function PerformancePanel({
   initialData,
+  includeTest,
 }: PerformancePanelProps) {
   const [view, setView] = useState<ViewMode>("total");
   const [metric, setMetric] = useState<string | null>(null);
@@ -388,10 +390,12 @@ export default function PerformancePanel({
 
   // Fetch resolution rates on mount
   useEffect(() => {
-    apiGet<ResolutionRatesResponse>("/diagnostics/resolution_rates")
+    apiGet<ResolutionRatesResponse>("/diagnostics/resolution_rates", {
+      include_test: includeTest || undefined,
+    })
       .then((res) => setResolutionRates(res.rows ?? []))
       .catch(() => {});
-  }, []);
+  }, [includeTest]);
 
   // ---- Detect available ensemble models ------------------------------------
 
@@ -424,9 +428,10 @@ export default function PerformancePanel({
   ) => {
     setLoading(true);
     try {
-      const params: Record<string, string> = {};
+      const params: Record<string, string | boolean | undefined> = {};
       if (newMetric) params.metric = newMetric;
       if (newTrack != null) params.track = String(newTrack);
+      params.include_test = includeTest || undefined;
       const response = await apiGet<PerformanceScoresResponse>(
         "/performance/scores",
         params,
