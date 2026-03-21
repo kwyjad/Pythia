@@ -159,7 +159,7 @@ def test_hs_triage_json_repair(monkeypatch, tmp_path):
     monkeypatch.setattr(triage_mod, "call_chat_ms", fake_call_chat_ms)
     monkeypatch.setattr(horizon_scanner, "_build_resolver_features_for_country", lambda *_: {})
     monkeypatch.setattr(horizon_scanner, "_maybe_build_country_evidence_pack", lambda *_: None)
-    monkeypatch.setattr(horizon_scanner, "_write_hs_triage", lambda *_: None)
+    monkeypatch.setattr(horizon_scanner, "_write_hs_triage", lambda *_, **__: None)
     monkeypatch.setattr(horizon_scanner, "log_hs_llm_call", lambda **_: None)
     monkeypatch.setattr(rc_llm_mod, "log_hs_llm_call", lambda **_: None)
     monkeypatch.setattr(triage_mod, "log_hs_llm_call", lambda **_: None)
