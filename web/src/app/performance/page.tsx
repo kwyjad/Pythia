@@ -46,7 +46,7 @@ export default async function PerformancePage({
           {loadError}
         </div>
       ) : (
-        <PerformancePanel initialData={data} />
+        <PerformancePanel initialData={data} includeTest={includeTest} />
       )}
     </div>
   );
