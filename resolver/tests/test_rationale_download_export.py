@@ -15,7 +15,8 @@ def _make_con():
             hazard_code TEXT,
             metric TEXT,
             target_month TEXT,
-            hs_run_id TEXT
+            hs_run_id TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -29,7 +30,8 @@ def _make_con():
             bucket_index INTEGER,
             probability DOUBLE,
             status TEXT,
-            human_explanation TEXT
+            human_explanation TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -46,7 +48,8 @@ def _make_con():
             bucket_index INTEGER,
             probability DOUBLE,
             status TEXT,
-            human_explanation TEXT
+            human_explanation TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -108,7 +111,7 @@ def test_deduplication():
     """30 identical rows per (question, model) should collapse to 1."""
     con = _make_con()
     con.execute(
-        "INSERT INTO questions VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
+        "INSERT INTO questions (question_id, iso3, hazard_code, metric, target_month, hs_run_id) VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
     )
     _insert_raw_rows(
         con,
@@ -129,7 +132,7 @@ def test_hazard_filter():
     con = _make_con()
     con.execute(
         """
-        INSERT INTO questions VALUES
+        INSERT INTO questions (question_id, iso3, hazard_code, metric, target_month, hs_run_id) VALUES
             ('q-fl', 'KEN', 'FL', 'PA', '2025-01', 'hs-1'),
             ('q-dr', 'ETH', 'DR', 'PA', '2025-01', 'hs-2')
         """
@@ -156,7 +159,7 @@ def test_model_filter():
     """Optional model filter should restrict to matching model names."""
     con = _make_con()
     con.execute(
-        "INSERT INTO questions VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
+        "INSERT INTO questions (question_id, iso3, hazard_code, metric, target_month, hs_run_id) VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
     )
     _insert_raw_rows(
         con, question_id="q1", run_id="r1", model_name="OpenAI-gpt-5.2",
@@ -183,7 +186,7 @@ def test_null_and_empty_explanation_filtered():
     """NULL and empty-string explanations should be excluded."""
     con = _make_con()
     con.execute(
-        "INSERT INTO questions VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
+        "INSERT INTO questions (question_id, iso3, hazard_code, metric, target_month, hs_run_id) VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
     )
     # Valid explanation
     _insert_raw_rows(
@@ -217,7 +220,7 @@ def test_both_tables_union():
     """Rows from both forecasts_raw and forecasts_ensemble should appear."""
     con = _make_con()
     con.execute(
-        "INSERT INTO questions VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
+        "INSERT INTO questions (question_id, iso3, hazard_code, metric, target_month, hs_run_id) VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
     )
     _insert_raw_rows(
         con, question_id="q1", run_id="r1", model_name="OpenAI-gpt-5.2",
@@ -243,7 +246,8 @@ def test_missing_table_graceful():
         """
         CREATE TABLE questions (
             question_id TEXT, iso3 TEXT, hazard_code TEXT,
-            metric TEXT, target_month TEXT, hs_run_id TEXT
+            metric TEXT, target_month TEXT, hs_run_id TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -264,7 +268,7 @@ def test_output_columns():
     """Output should have the expected columns in order."""
     con = _make_con()
     con.execute(
-        "INSERT INTO questions VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
+        "INSERT INTO questions (question_id, iso3, hazard_code, metric, target_month, hs_run_id) VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
     )
     _insert_raw_rows(
         con, question_id="q1", run_id="r1", model_name="Gemini Flash",
@@ -291,7 +295,7 @@ def test_csv_serialization():
     """Output should be serializable to CSV without errors."""
     con = _make_con()
     con.execute(
-        "INSERT INTO questions VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
+        "INSERT INTO questions (question_id, iso3, hazard_code, metric, target_month, hs_run_id) VALUES ('q1', 'KEN', 'FL', 'PA', '2025-01', 'hs-1')"
     )
     _insert_raw_rows(
         con, question_id="q1", run_id="r1", model_name="OpenAI",

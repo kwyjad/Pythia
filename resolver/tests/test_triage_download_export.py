@@ -13,7 +13,8 @@ def test_build_triage_export_collapses_hazards():
             hazard_code TEXT,
             tier TEXT,
             triage_score DOUBLE,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -23,21 +24,22 @@ def test_build_triage_export_collapses_hazards():
             hs_run_id TEXT,
             phase TEXT,
             model_id TEXT,
-            model_name TEXT
+            model_name TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
 
     con.execute(
         """
-        INSERT INTO hs_triage VALUES
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, created_at) VALUES
             ('hs_20240106T010203', 'KEN', 'DR', 'quiet', 0.4, '2024-01-05'),
             ('hs_20240106T010203', 'KEN', 'ACE', 'priority', 0.8, '2024-01-06')
         """
     )
     con.execute(
         """
-        INSERT INTO llm_calls VALUES
+        INSERT INTO llm_calls (hs_run_id, phase, model_id, model_name) VALUES
             ('hs_20240106T010203', 'hs_triage', 'gemini-3-flash', NULL)
         """
     )
@@ -54,6 +56,7 @@ def test_build_triage_export_collapses_hazards():
         "Country",
         "Triage Score",
         "Triage Tier",
+        "is_test",
     ]
     assert list(df.columns) == expected_columns
     assert len(df) == 1

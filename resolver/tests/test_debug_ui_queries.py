@@ -17,7 +17,8 @@ def _seed_tables(conn):
             hazard_code TEXT,
             tier TEXT,
             triage_score DOUBLE,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -32,7 +33,8 @@ def _seed_tables(conn):
             provider TEXT,
             created_at TIMESTAMP,
             response_text TEXT,
-            parse_error TEXT
+            parse_error TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -44,7 +46,8 @@ def _seed_tables(conn):
             hazard_code TEXT,
             metric TEXT,
             hs_run_id TEXT,
-            status TEXT
+            status TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -52,14 +55,15 @@ def _seed_tables(conn):
         """
         CREATE TABLE forecasts_ensemble (
             question_id INTEGER,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
 
     conn.execute(
         """
-        INSERT INTO hs_triage VALUES
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, created_at) VALUES
           ('hs_20240101', 'UKR', 'TC', 'quiet', 0.0, '2024-01-01 12:00:00'),
           ('hs_20240101', 'UKR', 'FL', 'watch', 0.5, '2024-01-01 12:01:00'),
           ('hs_20240101', 'MLI', 'FL', 'watch', 0.8, '2024-01-01 12:02:00'),
@@ -69,7 +73,7 @@ def _seed_tables(conn):
 
     conn.execute(
         """
-        INSERT INTO llm_calls VALUES
+        INSERT INTO llm_calls (hs_run_id, phase, iso3, hazard_code, model_id, provider, created_at, response_text, parse_error) VALUES
           ('hs_20240101', 'hs_triage', 'UKR', 'TC', 'gpt-4', 'openai',
            '2024-01-01 12:00:00', 'response-ukr-tc', 'parse_failed'),
           ('hs_20240101', 'hs_triage', 'MLI', 'FL', 'gpt-4', 'openai',
@@ -79,7 +83,7 @@ def _seed_tables(conn):
 
     conn.execute(
         """
-        INSERT INTO questions VALUES
+        INSERT INTO questions (question_id, iso3, hazard_code, metric, hs_run_id, status) VALUES
           (1, 'UKR', 'TC', 'PA', 'hs_20240101', 'active'),
           (2, 'UKR', 'FL', 'PA', 'hs_20240101', 'active'),
           (3, 'MLI', 'FL', 'PA', 'hs_20240101', 'active')
@@ -88,7 +92,7 @@ def _seed_tables(conn):
 
     conn.execute(
         """
-        INSERT INTO forecasts_ensemble VALUES
+        INSERT INTO forecasts_ensemble (question_id, created_at) VALUES
           (1, '2024-01-02 00:00:00'),
           (3, '2024-01-02 00:00:00')
         """

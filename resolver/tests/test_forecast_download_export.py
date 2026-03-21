@@ -53,7 +53,8 @@ def test_build_forecast_spd_export():
             hazard_code TEXT,
             metric TEXT,
             target_month TEXT,
-            hs_run_id TEXT
+            hs_run_id TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -67,7 +68,8 @@ def test_build_forecast_spd_export():
             bucket_index INTEGER,
             probability DOUBLE,
             status TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -81,7 +83,8 @@ def test_build_forecast_spd_export():
             bucket_index INTEGER,
             probability DOUBLE,
             status TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -93,7 +96,8 @@ def test_build_forecast_spd_export():
             hazard_code TEXT,
             tier TEXT,
             triage_score DOUBLE,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -110,7 +114,7 @@ def test_build_forecast_spd_export():
 
     con.execute(
         """
-        INSERT INTO questions VALUES
+        INSERT INTO questions (question_id, iso3, hazard_code, metric, target_month, hs_run_id) VALUES
             ('q-pa', 'KEN', 'DR', 'PA', '2024-01', 'hs-run-1'),
             ('q-fat', 'UGA', 'DR', 'FATALITIES', '2024-02', 'hs-run-2')
         """
@@ -190,7 +194,7 @@ def test_build_forecast_spd_export():
 
     con.execute(
         """
-        INSERT INTO hs_triage VALUES
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, created_at) VALUES
             ('hs-run-1', 'KEN', 'DR', 'tier-old', 0.2, '2024-01-01'),
             ('hs-run-1', 'KEN', 'DR', 'tier-2', 0.4, '2024-01-05'),
             ('hs-run-2', 'UGA', 'DR', 'tier-1', 0.3, '2024-01-02')
@@ -198,7 +202,7 @@ def test_build_forecast_spd_export():
     )
     con.execute(
         """
-        INSERT INTO bucket_centroids VALUES
+        INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid) VALUES
             ('*', 'PA', 1, 1.0),
             ('*', 'PA', 2, 10.0),
             ('*', 'PA', 3, 100.0),
@@ -237,6 +241,7 @@ def test_build_forecast_spd_export():
         "regime_change_score",
         "hs_run_ID",
         "track",
+        "is_test",
     ]
     assert list(df.columns) == expected_columns
 

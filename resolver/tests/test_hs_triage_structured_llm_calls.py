@@ -12,7 +12,8 @@ def _seed_tables(conn):
             hazard_code TEXT,
             triage_score DOUBLE,
             tier TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -28,14 +29,15 @@ def _seed_tables(conn):
             status TEXT,
             error_type TEXT,
             hazard_scores_json TEXT,
-            hazard_scores_parse_ok BOOLEAN
+            hazard_scores_parse_ok BOOLEAN,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
 
     conn.execute(
         """
-        INSERT INTO hs_triage VALUES
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, triage_score, tier, created_at) VALUES
           ('hs_20240303', 'USA', 'FL', 0.2, 'watch', '2024-03-03 09:00:00'),
           ('hs_20240303', 'BRA', 'FL', 0.4, 'watch', '2024-03-03 09:10:00')
         """
@@ -43,7 +45,7 @@ def _seed_tables(conn):
 
     conn.execute(
         """
-        INSERT INTO llm_calls VALUES
+        INSERT INTO llm_calls (hs_run_id, phase, iso3, created_at, response_text, parse_error, status, error_type, hazard_scores_json, hazard_scores_parse_ok) VALUES
           ('hs_20240303', 'hs_triage', 'USA', '2024-03-03 09:30:00',
            'not json', NULL, 'ok', NULL, '{"FL":0.8}', TRUE),
           ('hs_20240303', 'hs_triage', 'BRA', '2024-03-03 09:35:00',

@@ -92,7 +92,8 @@ def test_write_hs_triage_falls_back_when_columns_missing(tmp_path, monkeypatch):
             drivers_json TEXT,
             regime_shifts_json TEXT,
             data_quality_json TEXT,
-            scenario_stub TEXT
+            scenario_stub TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )

@@ -32,7 +32,8 @@ def test_build_debug_bundle_markdown_basic(tmp_path: Path) -> None:
                 window_start_date DATE,
                 window_end_date DATE,
                 wording TEXT,
-                status TEXT
+                status TEXT,
+                is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -52,7 +53,8 @@ def test_build_debug_bundle_markdown_basic(tmp_path: Path) -> None:
                 created_at TIMESTAMP,
                 status TEXT,
                 human_explanation TEXT,
-                model_name TEXT
+                model_name TEXT,
+                is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -85,7 +87,8 @@ def test_build_debug_bundle_markdown_basic(tmp_path: Path) -> None:
                 response_text TEXT,
                 error_text TEXT,
                 usage_json TEXT,
-                created_at TIMESTAMP
+                created_at TIMESTAMP,
+                is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -97,7 +100,8 @@ def test_build_debug_bundle_markdown_basic(tmp_path: Path) -> None:
                 hazard_code TEXT,
                 tier TEXT,
                 triage_score DOUBLE,
-                created_at TIMESTAMP
+                created_at TIMESTAMP,
+                is_test BOOLEAN DEFAULT FALSE
             )
             """
         )

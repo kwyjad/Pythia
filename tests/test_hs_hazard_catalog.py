@@ -35,7 +35,8 @@ def test_write_hs_triage_filters_unknown_hazards(monkeypatch, tmp_path):
             drivers_json TEXT,
             regime_shifts_json TEXT,
             data_quality_json TEXT,
-            scenario_stub TEXT
+            scenario_stub TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
