@@ -91,7 +91,8 @@ Pythia/
 - `horizon_scanner/hdx_signals.py` — HDX Signals connector (OCHA automated crisis monitoring, indicator-to-hazard mapping)
 - `horizon_scanner/conflict_forecasts.py` — Unified conflict forecast loader (VIEWS + conflictforecast.org + ACLED CAST)
 - `forecaster/cli.py` — Forecaster main runner (~7300 LOC). Supports both SPD (5-bucket × 6-month) and binary (per-month probability) forecast pipelines. Binary questions (metric=EVENT_OCCURRENCE) are detected and routed to `_run_binary_forecast_for_question()`, which uses `build_binary_event_prompt()` for prompting and `parse_binary_response()` for output parsing. Binary storage convention: bucket_1 = P(yes), bucket_2 = P(no) = 1-P(yes), buckets 3-5 = 0. History builders: `_build_history_summary` dispatches to `_load_fewsnet_phase3_history` for DR/PHASE3PLUS_IN_NEED (null-aware, coverage-tracked), `_build_natural_hazard_seasonal_profile` for natural hazard PA, and `_build_conflict_base_rate` for ACE. `_format_base_rate_for_prompt` handles `fewsnet_phase3` type with null-aware formatting showing "null" for FEWS NET analysis cycle gaps.
-- `pythia/api/app.py` — FastAPI application (~3200 LOC)
+- `pythia/api/app.py` — FastAPI application (~3500 LOC). Phase 4 additions: `_get_risk_index_binary()` serves EVENT_OCCURRENCE probabilities (bucket_1 = P(event)), `/v1/diagnostics/resolution_rates` endpoint returns resolution rate by (hazard, metric). Risk index supports EVENT_OCCURRENCE (binary), PHASE3PLUS_IN_NEED (SPD), PA, and FATALITIES metrics. KPI scopes accept all four metric scopes.
+- `web/src/app/questions/[questionId]/BinaryPanel.tsx` — Binary event forecast display: per-month probability bars, resolution outcomes (event/no event), per-horizon Brier scores.
 - `pythia/tools/compute_resolutions.py` — Resolves forecasts against Resolver ground truth. Supports PA, FATALITIES, EVENT_OCCURRENCE, and PHASE3PLUS_IN_NEED metrics. Source-aware null handling: FATALITIES+ACE/ACO and EVENT_OCCURRENCE default to 0 when no data; PA and PHASE3PLUS_IN_NEED leave horizons unresolved (null) when no data exists. FEWS NET IPC resolution via `_try_fewsnet_ipc()` queries only `phase3plus_in_need` metric (not projections), guarded to DR hazard only.
 - `pythia/tools/compute_bucket_centroids.py` — Computes data-driven bucket centroids from historical facts_resolved. Metric-aware SQL filter: PHASE3PLUS_IN_NEED queries `phase3plus_in_need`, PA queries `affected/people_affected/pa/displaced`, FATALITIES queries `fatalities`.
 - `pythia/tools/compute_scores.py` — Brier/log/CRPS scoring per horizon
@@ -209,6 +210,23 @@ Forecasts cover a 6-month window. Each question has `window_start_date` and `tar
 - **Resolutions**: `compute_resolutions` resolves each horizon independently against Resolver's `facts_resolved.created_at` for ordering. Source-aware null handling: FATALITIES+ACE/ACO defaults to 0 (ACLED continuous coverage), EVENT_OCCURRENCE defaults to 0 (GDACS binary), PA and PHASE3PLUS_IN_NEED leave horizons unresolved when no data exists. Unresolvable hazards: DI, HW.
 - **Scoring**: `compute_scores` scores each (question, horizon_m) pair separately. SPD questions (PA, FATALITIES) get multiclass Brier, log loss, and CRPS. Binary questions (EVENT_OCCURRENCE) get single Brier score: `(forecast_p - outcome)^2` where forecast_p = bucket_1 probability from ensemble. PHASE3PLUS_IN_NEED uses SPD scoring. Missing resolution horizons are naturally excluded via JOIN.
 - **Calibration**: `compute_calibration_pythia` aggregates scores across horizons to produce per-model weights. Groups by (hazard_code, metric), so EVENT_OCCURRENCE questions form their own calibration pool separate from PA/FATALITIES.
+
+## Phase 4: Dashboard + Calibration Integration
+
+**API endpoints (Phase 4):**
+- `/v1/risk_index?metric=EVENT_OCCURRENCE` — Returns binary P(event) as the risk value (0-1). No centroid multiplication. Per-capita returns raw probability unchanged (already a rate).
+- `/v1/risk_index?metric=PHASE3PLUS_IN_NEED` — SPD-based risk index for IPC Phase 3+ population. Supports `normalize=true` for per-capita (fraction of population in Phase 3+).
+- `/v1/diagnostics/resolution_rates` — Returns resolution rates by (hazard_code, metric): total/resolved/skipped questions with rate. Supports `hazard_code` filter.
+- `/v1/diagnostics/kpi_scopes?metric_scope=EVENT_OCCURRENCE` — KPI scopes now accept EVENT_OCCURRENCE and PHASE3PLUS_IN_NEED alongside PA and FATALITIES.
+- `/v1/performance/scores?metric=EVENT_OCCURRENCE` — Performance scores work for all metrics; binary questions produce Brier score only (no log/CRPS).
+
+**Frontend views (Phase 4):**
+- `RiskView` type expanded: `PA_EIV`, `PA_PC`, `FATALITIES_EIV`, `FATALITIES_PC`, `EVENT_OCCURRENCE`, `PHASE3PLUS_EIV`, `PHASE3PLUS_PC` (7 total).
+- RiskIndexMap uses fixed probability thresholds (0-5%, 5-15%, 15-30%, 30-50%, 50-100%) for EVENT_OCCURRENCE instead of Jenks breaks.
+- RiskIndexTable displays probabilities as percentages for binary metrics.
+- BinaryPanel.tsx: Per-month probability bars with resolution outcomes and Brier scores for question detail page.
+- PerformancePanel: Resolution Coverage Summary section with color-coded rates (green >90%, yellow 50-90%, red <50%). Metric filter includes EVENT_OCCURRENCE and PHASE3PLUS_IN_NEED.
+- QuestionsTable: Binary questions display as "Binary (event)", PHASE3PLUS_IN_NEED as "Phase 3+".
 
 ## Regime Change (RC) scoring
 

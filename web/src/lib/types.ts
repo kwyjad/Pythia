@@ -48,14 +48,22 @@ export type DiagnosticsKpiScopesResponse = {
 };
 
 export type RiskIndexResponse = {
-  metric: "PA" | "FATALITIES" | string;
+  metric: "PA" | "FATALITIES" | "EVENT_OCCURRENCE" | "PHASE3PLUS_IN_NEED" | string;
   target_month: string | null;
   horizon_m?: number | null;
   normalize?: boolean | null;
   rows?: RiskIndexRow[];
+  metric_type?: "binary" | "spd" | null;
 };
 
-export type RiskView = "PA_EIV" | "PA_PC" | "FATALITIES_EIV" | "FATALITIES_PC";
+export type RiskView =
+  | "PA_EIV"
+  | "PA_PC"
+  | "FATALITIES_EIV"
+  | "FATALITIES_PC"
+  | "EVENT_OCCURRENCE"
+  | "PHASE3PLUS_EIV"
+  | "PHASE3PLUS_PC";
 
 export type CountriesRow = {
   iso3: string;
@@ -93,6 +101,7 @@ export type RiskIndexRow = {
   m6_pc?: number | null;
   total_pc?: number | null;
   per_capita?: number | null;
+  metric_type?: "binary" | "spd" | null;
 };
 
 export type QuestionsResponse = {
@@ -130,6 +139,9 @@ export type PerformanceSummaryRow = {
   n_questions: number;
   avg_value: number | null;
   median_value: number | null;
+  resolution_rate?: number | null;
+  n_scored?: number | null;
+  n_total?: number | null;
 };
 
 export type PerformanceRunRow = {
@@ -144,6 +156,19 @@ export type PerformanceRunRow = {
   n_questions: number;
   avg_value: number | null;
   median_value: number | null;
+};
+
+export type ResolutionRateRow = {
+  hazard_code: string;
+  metric: string;
+  total_questions: number;
+  resolved_questions: number;
+  skipped_questions: number;
+  resolution_rate: number;
+};
+
+export type ResolutionRatesResponse = {
+  rows: ResolutionRateRow[];
 };
 
 export type PerformanceScoresResponse = {
