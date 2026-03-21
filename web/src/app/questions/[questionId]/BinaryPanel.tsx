@@ -56,13 +56,19 @@ export default function BinaryPanel({ bundle }: BinaryPanelProps) {
   const context = (bundle.context ?? {}) as Record<string, unknown>;
   const metric = ((question.metric as string) ?? "").toUpperCase();
   const isBinary = metric === "EVENT_OCCURRENCE";
-
-  if (!isBinary) return null;
-
   const targetMonth = (question.target_month as string | undefined) ?? null;
-  const ensembleRows = (forecast.ensemble_spd ?? []) as ForecastRow[];
-  const resolutions = (context.resolutions ?? []) as ForecastRow[];
-  const scores = (context.scores ?? []) as ForecastRow[];
+  const ensembleRows = useMemo(
+    () => (forecast.ensemble_spd ?? []) as ForecastRow[],
+    [forecast.ensemble_spd],
+  );
+  const resolutions = useMemo(
+    () => (context.resolutions ?? []) as ForecastRow[],
+    [context.resolutions],
+  );
+  const scores = useMemo(
+    () => (context.scores ?? []) as ForecastRow[],
+    [context.scores],
+  );
 
   // Extract per-month probabilities from ensemble (bucket_1 = P(yes))
   const monthlyProbs = useMemo(() => {
@@ -136,6 +142,8 @@ export default function BinaryPanel({ bundle }: BinaryPanelProps) {
     });
     return map;
   }, [scores]);
+
+  if (!isBinary) return null;
 
   return (
     <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
