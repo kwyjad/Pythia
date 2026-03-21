@@ -194,6 +194,21 @@ def _build_binary_question_wording(
     )
 
 
+def _build_dr_fewsnet_question_wording(
+    iso3: str,
+    window_start_date: date,
+    window_end_date: date,
+) -> str:
+    """Build question wording for DR FEWS NET Phase 3+ PA questions."""
+    country = _country_label(iso3)
+    return (
+        f"How many people will be in IPC Phase 3+ (Crisis or worse) food "
+        f"insecurity each month in {country} between "
+        f"{window_start_date.isoformat()} and {window_end_date.isoformat()}, "
+        f"as reported by FEWS NET's Current Situation assessment?"
+    )
+
+
 def _compute_target_and_window(today: date) -> Tuple[str, str, date, date]:
     """Return (epoch_label, target_month, opening, closing).
 
@@ -396,18 +411,30 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                 continue
 
             for mt in metrics:
-                if th.hazard_code == "DR" and mt == "PA" and not _is_fewsnet_country(th.iso3):
-                    LOG.info("Skipping DR/PA for %s (not a FEWS NET country)", th.iso3)
-                    continue
-
-                if mt == "EVENT_OCCURRENCE":
+                if th.hazard_code == "DR" and mt == "PA":
+                    if not _is_fewsnet_country(th.iso3):
+                        LOG.info(
+                            "Skipping DR/PA (PHASE3PLUS_IN_NEED) for %s: not a FEWS NET-monitored "
+                            "country. Binary DR/EVENT_OCCURRENCE still generated.",
+                            th.iso3,
+                        )
+                        continue
+                    # Use FEWS NET metric for resolution
+                    actual_metric = "PHASE3PLUS_IN_NEED"
+                    wording = _build_dr_fewsnet_question_wording(
+                        th.iso3, opening, closing
+                    )
+                elif mt == "EVENT_OCCURRENCE":
+                    actual_metric = mt
                     wording = _build_binary_question_wording(
                         th.iso3, th.hazard_code, opening, closing
                     )
                 else:
+                    actual_metric = mt
                     wording = _build_question_wording(
                         th.iso3, th.hazard_code, mt, opening, closing
                     )
+
                 meta = {
                     "source": "hs_triage",
                     "hs_run_id": run_id,
@@ -417,11 +444,11 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
 
                 _upsert_question(
                     con,
-                    question_id=f"{th.iso3}_{th.hazard_code}_{mt}_{epoch_label}",
+                    question_id=f"{th.iso3}_{th.hazard_code}_{actual_metric}_{epoch_label}",
                     hs_run_id=run_id,
                     iso3=th.iso3,
                     hazard_code=th.hazard_code,
-                    metric=mt,
+                    metric=actual_metric,
                     wording=wording,
                     status="active",
                     metadata=meta,

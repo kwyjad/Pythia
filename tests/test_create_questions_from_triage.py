@@ -102,7 +102,10 @@ def test_create_questions_from_triage_creates_ace_questions(tmp_path: Path) -> N
 
     assert len(rows) == 2
     qids = {r[0] for r in rows}
-    assert qids == {"SOM_ACE_FATALITIES", "SOM_ACE_PA"}
+    # question_ids are epoch-specific since Phase 2
+    assert all("SOM_ACE_FATALITIES_" in q for q in qids if "FATALITIES" in q)
+    assert all("SOM_ACE_PA_" in q for q in qids if "PA" in q)
+    assert len(qids) == 2
     assert all(r[2] == "ACE" for r in rows)
     assert all(r[4] == "hs_run_ace" for r in rows)
     metas = [json.loads(r[5]) for r in rows]

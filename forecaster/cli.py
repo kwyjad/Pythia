@@ -744,6 +744,65 @@ def _format_base_rate_for_prompt(
         except (TypeError, ValueError):
             return str(n)
 
+    if summary_type == "fewsnet_phase3":
+        source = history_summary.get("source", "FEWSNET_IPC")
+        observed = history_summary.get("observed_months", 0)
+        total = history_summary.get("history_length_months", 36)
+        coverage = history_summary.get("coverage_pct", 0)
+        recent_mean = history_summary.get("recent_mean")
+        recent_max = history_summary.get("recent_max")
+        trend = history_summary.get("trend", "unknown")
+        trend_pct = history_summary.get("trend_pct")
+        data_quality = history_summary.get("data_quality", "unknown")
+        last_6m = history_summary.get("last_6m_values", [])
+
+        lines = [
+            f"RESOLVER HISTORY (FEWS NET IPC Phase 3+, Current Situation):",
+            f"Phase 3+ population reported in {observed} of the last {total} months ({coverage:.0f}% coverage).",
+        ]
+
+        # Latest value
+        latest = None
+        for entry in reversed(last_6m):
+            if entry.get("value") is not None:
+                latest = entry
+                break
+        if latest:
+            lines.append(f"Latest value: {latest['ym']}: {_fmt(latest['value'])}")
+
+        if recent_mean is not None:
+            lines.append(f"Recent 6-month average (observed only): {_fmt(recent_mean)}")
+        if recent_max is not None:
+            lines.append(f"Peak (recent 6 months): {_fmt(recent_max)}")
+
+        trend_str = trend
+        if trend_pct is not None:
+            trend_str = f"{trend} ({'+' if trend_pct > 0 else ''}{trend_pct:.0f}% over 12 months)"
+        lines.append(f"Trend: {trend_str}")
+        lines.append(f"Data quality: {data_quality} ({coverage:.0f}% monthly coverage)")
+
+        lines.append("")
+        lines.append("Recent values (null = no FEWS NET assessment that month):")
+
+        # Format last 6 months in 2 rows of 3
+        for i in range(0, len(last_6m), 3):
+            chunk = last_6m[i:i+3]
+            parts = []
+            for entry in chunk:
+                val = "null" if entry.get("value") is None else _fmt(entry["value"])
+                parts.append(f"  {entry['ym']}: {val:<12}")
+            lines.append(" | ".join(parts))
+
+        lines.append("")
+        lines.append(
+            "Note: Months marked 'null' mean FEWS NET did not publish a Current "
+            "Situation assessment for this country that month. This does NOT mean "
+            "zero food insecurity. Your forecast should interpolate through gaps "
+            "using the surrounding observed values and seasonal patterns."
+        )
+
+        return "\n".join(lines)
+
     if summary_type == "seasonal_profile":
         source = history_summary.get("source", "IFRC")
         data_range = history_summary.get("data_range", "unknown")
@@ -857,6 +916,134 @@ def _format_base_rate_for_prompt(
     )
 
 
+def _load_fewsnet_phase3_history(
+    iso3: str,
+    *,
+    months: int = 36,
+) -> Dict[str, Any]:
+    """Load FEWS NET Phase 3+ history for DR PA questions.
+
+    Returns a dict compatible with the history_summary format, with
+    null-aware semantics: months without data are marked as None.
+    """
+    try:
+        con = duckdb.connect(_pythia_db_path_from_config(), read_only=True)
+    except Exception:
+        return {
+            "type": "fewsnet_phase3",
+            "source": "FEWSNET_IPC",
+            "error": "missing_db",
+        }
+
+    try:
+        # Get last N months of data
+        today = date.today()
+        end_ym = f"{today.year:04d}-{today.month:02d}"
+
+        rows = con.execute(
+            """
+            SELECT ym, value, created_at
+            FROM facts_resolved
+            WHERE iso3 = ?
+              AND hazard_code = 'DR'
+              AND lower(metric) = 'phase3plus_in_need'
+            ORDER BY ym DESC
+            LIMIT ?
+            """,
+            [iso3, months],
+        ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        con.close()
+
+    if not rows:
+        return {
+            "type": "fewsnet_phase3",
+            "source": "FEWSNET_IPC",
+            "history_length_months": months,
+            "observed_months": 0,
+            "coverage_pct": 0.0,
+            "note": "No FEWS NET Phase 3+ data available for this country.",
+        }
+
+    # Build a set of months that have data
+    data_by_ym = {}
+    for ym, value, created_at in rows:
+        ym_str = str(ym)
+        data_by_ym[ym_str] = float(value) if value is not None else None
+
+    # Build monthly series (most recent N months)
+    from datetime import date as date_type
+
+    all_yms = []
+    d = date.today().replace(day=1)
+    for i in range(months):
+        ym = f"{d.year:04d}-{d.month:02d}"
+        all_yms.append(ym)
+        # Go back one month
+        if d.month == 1:
+            d = d.replace(year=d.year - 1, month=12)
+        else:
+            d = d.replace(month=d.month - 1)
+    all_yms.reverse()
+
+    last_6m_values = []
+    for ym in all_yms[-6:]:
+        val = data_by_ym.get(ym)
+        last_6m_values.append({"ym": ym, "value": val})
+
+    # Compute stats over observed months only
+    observed_values = [v for v in data_by_ym.values() if v is not None and v > 0]
+    total_observed = len(observed_values)
+    coverage_pct = (total_observed / months * 100) if months > 0 else 0.0
+
+    recent_6m_yms = all_yms[-6:]
+    recent_observed = [data_by_ym[ym] for ym in recent_6m_yms if ym in data_by_ym and data_by_ym[ym] is not None]
+    prior_6m_yms = all_yms[-12:-6]
+    prior_observed = [data_by_ym[ym] for ym in prior_6m_yms if ym in data_by_ym and data_by_ym[ym] is not None]
+
+    recent_mean = sum(recent_observed) / len(recent_observed) if recent_observed else None
+    recent_max = max(recent_observed) if recent_observed else None
+
+    if recent_mean and prior_observed:
+        prior_mean = sum(prior_observed) / len(prior_observed)
+        if prior_mean > 0:
+            trend_pct = ((recent_mean - prior_mean) / prior_mean) * 100
+            trend = "increasing" if trend_pct > 5 else "decreasing" if trend_pct < -5 else "stable"
+        else:
+            trend = "new_data"
+            trend_pct = None
+    else:
+        trend = "insufficient_data"
+        trend_pct = None
+
+    if coverage_pct > 80:
+        data_quality = "high"
+    elif coverage_pct >= 50:
+        data_quality = "medium"
+    else:
+        data_quality = "low"
+
+    return {
+        "type": "fewsnet_phase3",
+        "source": "FEWSNET_IPC",
+        "history_length_months": months,
+        "observed_months": total_observed,
+        "coverage_pct": round(coverage_pct, 1),
+        "recent_mean": round(recent_mean) if recent_mean else None,
+        "recent_max": round(recent_max) if recent_max else None,
+        "trend": trend,
+        "trend_pct": round(trend_pct, 1) if trend_pct is not None else None,
+        "data_quality": data_quality,
+        "last_6m_values": last_6m_values,
+        "notes": (
+            "FEWS NET Phase 3+ (Current Situation). Months without data reflect "
+            "FEWS NET analysis cycle gaps, not zero food insecurity."
+        ),
+    }
+
+
 def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str, Any]:
     """Build Resolver history summary per hazard/metric rules.
 
@@ -876,6 +1063,10 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
                 "and exogenous neighbour shocks."
             ),
         }
+
+    # FEWS NET Phase 3+ — DR specific
+    if hz == "DR" and m == "PHASE3PLUS_IN_NEED":
+        return _load_fewsnet_phase3_history(iso3, months=36)
 
     # Natural hazards — seasonal profile
     if m == "PA" and hz in NATURAL_HAZARD_CODES:
@@ -939,6 +1130,8 @@ def _infer_resolution_source(hazard_code: str, metric: str) -> str:
         return "NONE"
     if mt == "EVENT_OCCURRENCE" and hz in {"FL", "DR", "TC"}:
         return "GDACS"
+    if mt == "PHASE3PLUS_IN_NEED" and hz == "DR":
+        return "FEWSNET_IPC"
     return "NONE"
 
 

@@ -98,7 +98,17 @@ def compute_bucket_centroids(db_url: str, metric: str = "PA") -> None:
                 )
         case_sql = "\n                ".join(case_lines)
 
-        LOGGER.info("Computing centroids from facts_resolved (PA-like metrics).")
+        # Build metric-aware filter for facts_resolved
+        if metric == "PHASE3PLUS_IN_NEED":
+            metric_filter = "lower(metric) = 'phase3plus_in_need'"
+        elif metric == "PA":
+            metric_filter = "lower(metric) IN ('affected','people_affected','pa','displaced')"
+        elif metric == "FATALITIES":
+            metric_filter = "lower(metric) = 'fatalities'"
+        else:
+            metric_filter = f"lower(metric) = '{metric.lower()}'"
+
+        LOGGER.info("Computing centroids from facts_resolved (metric=%s, filter=%s).", metric, metric_filter)
         conn.execute(
             f"""
             WITH base AS (
@@ -107,7 +117,7 @@ def compute_bucket_centroids(db_url: str, metric: str = "PA") -> None:
                 CAST(value AS DOUBLE) AS v
               FROM facts_resolved
               WHERE value IS NOT NULL
-                AND lower(metric) IN ('affected','people_affected','pa')
+                AND {metric_filter}
             ),
             binned AS (
               SELECT
