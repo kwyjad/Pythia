@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import InfoTooltip from "../../components/InfoTooltip";
 import KpiCard from "../../components/KpiCard";
@@ -10,6 +10,8 @@ import type {
   PerformanceRunRow,
   PerformanceScoresResponse,
   PerformanceSummaryRow,
+  ResolutionRateRow,
+  ResolutionRatesResponse,
 } from "../../lib/types";
 
 // ---------------------------------------------------------------------------
@@ -380,6 +382,16 @@ export default function PerformancePanel({
   const [track, setTrack] = useState<number | null>(null);
   const [data, setData] = useState<PerformanceScoresResponse>(initialData);
   const [loading, setLoading] = useState(false);
+  const [resolutionRates, setResolutionRates] = useState<ResolutionRateRow[]>(
+    [],
+  );
+
+  // Fetch resolution rates on mount
+  useEffect(() => {
+    apiGet<ResolutionRatesResponse>("/diagnostics/resolution_rates")
+      .then((res) => setResolutionRates(res.rows ?? []))
+      .catch(() => {});
+  }, []);
 
   // ---- Detect available ensemble models ------------------------------------
 
@@ -640,6 +652,8 @@ export default function PerformancePanel({
           <option value="">All Metrics</option>
           <option value="PA">People Affected (PA)</option>
           <option value="FATALITIES">Fatalities</option>
+          <option value="EVENT_OCCURRENCE">Event Occurrence (binary)</option>
+          <option value="PHASE3PLUS_IN_NEED">Phase 3+ (IPC)</option>
         </select>
 
         {/* Track filter */}
@@ -675,6 +689,48 @@ export default function PerformancePanel({
           <span className="text-xs text-fred-muted">Loading...</span>
         ) : null}
       </div>
+
+      {/* Resolution Coverage Summary */}
+      {resolutionRates.length > 0 && (
+        <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
+          <h3 className="text-sm font-semibold text-fred-text">
+            Resolution Coverage Summary
+          </h3>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {resolutionRates.map((row) => {
+              const pct = (row.resolution_rate * 100).toFixed(1);
+              const colorClass =
+                row.resolution_rate >= 0.9
+                  ? "text-green-500"
+                  : row.resolution_rate >= 0.5
+                    ? "text-yellow-500"
+                    : "text-red-500";
+              const metricLabel =
+                row.metric === "EVENT_OCCURRENCE"
+                  ? "Binary (event)"
+                  : row.metric === "PHASE3PLUS_IN_NEED"
+                    ? "Phase 3+"
+                    : row.metric;
+              return (
+                <div
+                  key={`${row.hazard_code}-${row.metric}`}
+                  className="rounded border border-fred-secondary bg-fred-surface px-3 py-2"
+                >
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">
+                    {row.hazard_code} / {metricLabel}
+                  </div>
+                  <div className={`mt-1 text-sm font-medium ${colorClass}`}>
+                    {pct}% scored
+                  </div>
+                  <div className="text-xs text-fred-muted">
+                    {row.resolved_questions}/{row.total_questions} questions
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Table */}
       {isEmpty ? (

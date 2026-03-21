@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
 import CollapsiblePanel from "../../../components/CollapsiblePanel";
+import BinaryPanel from "./BinaryPanel";
 import SpdPanel from "./SpdPanel";
 import { asArray, asString, pickResearchJson } from "../../../lib/excerpts";
 import { extractForecastRationale } from "../../../lib/forecast_rationale";
@@ -530,7 +531,11 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
         </div>
       </section>
 
-      <SpdPanel bundle={bundle} />
+      {((question.metric as string) ?? "").toUpperCase() === "EVENT_OCCURRENCE" ? (
+        <BinaryPanel bundle={bundle} />
+      ) : (
+        <SpdPanel bundle={bundle} />
+      )}
 
       <section className="space-y-4">
         <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">

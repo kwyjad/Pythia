@@ -167,7 +167,8 @@ export default function RiskIndexMap({
   const domReplaceCountRef = useRef<number>(0);
   const svgNodeVersionRef = useRef<number>(0);
   const resolvedHeightClassName = heightClassName ?? "h-[360px]";
-  const perCapitaDigits = view === "FATALITIES_PC" ? 5 : 2;
+  const perCapitaDigits =
+    view === "FATALITIES_PC" ? 5 : view === "EVENT_OCCURRENCE" ? 1 : 2;
   const perCapitaFormatter = useMemo(
     () =>
       new Intl.NumberFormat(undefined, {
@@ -228,11 +229,9 @@ export default function RiskIndexMap({
     };
   }, []);
 
-  const isPerCapita = view === "PA_PC" || view === "FATALITIES_PC";
-  const formatValueLabel = (value: number, isPerCapitaValue: boolean) =>
-    isPerCapitaValue
-      ? perCapitaFormatter.format(value)
-      : eivFormatter.format(value);
+  const isBinary = view === "EVENT_OCCURRENCE";
+  const isPerCapita =
+    view === "PA_PC" || view === "FATALITIES_PC" || view === "PHASE3PLUS_PC" || isBinary;
 
   const hasQuestionsIso3 = useMemo(() => {
     const set = new Set<string>();
@@ -386,6 +385,10 @@ export default function RiskIndexMap({
       }
       return Array.from(el.querySelectorAll<SVGPathElement>("path"));
     });
+    const formatValueLabel = (value: number, isPerCapitaValue: boolean) =>
+      isPerCapitaValue
+        ? perCapitaFormatter.format(value)
+        : eivFormatter.format(value);
     const warnings: string[] = [];
     const colorScale = [
       palette.c1,
@@ -394,6 +397,21 @@ export default function RiskIndexMap({
       palette.c4,
       palette.c5,
     ];
+    // Fixed probability thresholds for binary EVENT_OCCURRENCE
+    const binaryColorScale = [
+      "#86efac", // 0-5% very light green
+      "#4ade80", // 5-15% light green
+      "#facc15", // 15-30% yellow
+      "#fb923c", // 30-50% orange
+      "#ef4444", // 50-100% red
+    ];
+    const classifyBinaryProb = (prob: number): number => {
+      if (prob < 0.05) return 0;
+      if (prob < 0.15) return 1;
+      if (prob < 0.30) return 2;
+      if (prob < 0.50) return 3;
+      return 4;
+    };
     if (svgEl) {
       const existingOverlay = svgEl.querySelector("#rc-overlay");
       if (existingOverlay && existingOverlay.parentNode) {
@@ -537,8 +555,13 @@ export default function RiskIndexMap({
       const value = valueByIso3.get(iso3);
       let fillColor = palette.noQ;
       if (typeof value === "number" && Number.isFinite(value)) {
-        const classIndex = classifyJenks(value, breaks);
-        fillColor = colorScale[classIndex] ?? palette.c1;
+        if (isBinary) {
+          const classIndex = classifyBinaryProb(value);
+          fillColor = binaryColorScale[classIndex] ?? binaryColorScale[0];
+        } else {
+          const classIndex = classifyJenks(value, breaks);
+          fillColor = colorScale[classIndex] ?? palette.c1;
+        }
       } else if (hasQuestionsIso3.has(iso3)) {
         fillColor = palette.noEiv;
       }
@@ -913,6 +936,7 @@ export default function RiskIndexMap({
     hasQuestionsIso3,
     isPerCapita,
     perCapitaFormatter,
+    isBinary,
     debugEnabled,
     riskRows,
     rcByIso3,

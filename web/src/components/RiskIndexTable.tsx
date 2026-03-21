@@ -18,6 +18,11 @@ const RC_SCORE_TOOLTIP =
 const formatNumber = (value: number | null | undefined) =>
   typeof value === "number" ? Math.round(value).toLocaleString() : null;
 
+const formatProbability = (value: number | null | undefined) =>
+  typeof value === "number"
+    ? `${(value * 100).toFixed(1)}%`
+    : null;
+
 const parseTargetMonth = (targetMonth?: string | null): Date | null => {
   if (!targetMonth) {
     return null;
@@ -71,7 +76,9 @@ export default function RiskIndexTable({
   stickyHeader = false,
 }: RiskIndexTableProps) {
   const metricUpper = (metric ?? "").toUpperCase();
-  const perCapitaDigits = metricUpper === "FATALITIES" ? 5 : 2;
+  const isBinary = metricUpper === "EVENT_OCCURRENCE";
+  const perCapitaDigits =
+    metricUpper === "FATALITIES" ? 5 : isBinary ? 1 : 2;
   const perCapitaFormatter = useMemo(
     () =>
       new Intl.NumberFormat(undefined, {
@@ -83,10 +90,13 @@ export default function RiskIndexTable({
   );
   const formatPerCapita = (value: number | null | undefined) =>
     typeof value === "number" ? perCapitaFormatter.format(value) : null;
-  const totalLabel =
-    metricUpper === "FATALITIES"
+  const totalLabel = isBinary
+    ? "Peak event probability"
+    : metricUpper === "FATALITIES"
       ? "6-Month cumulative expected deaths"
-      : "6-Month EIV (Peak Month)";
+      : metricUpper === "PHASE3PLUS_IN_NEED"
+        ? "6-Month Phase 3+ (Peak Month)"
+        : "6-Month EIV (Peak Month)";
   const baseMonth = parseTargetMonth(targetMonth);
   const monthLabel = (index: number) =>
     baseMonth
@@ -115,59 +125,61 @@ export default function RiskIndexTable({
   };
 
   const columns = useMemo<Array<SortableColumn<RiskIndexRow>>>(() => {
+    const eivColLabel = isBinary ? "P(event)" : "EIV";
+    const formatValue = isBinary ? formatProbability : formatNumber;
     const eivColumns: Array<SortableColumn<RiskIndexRow>> = [
       {
         key: "m1",
-        label: renderEivHeader(`${monthLabel(1)} EIV`),
+        label: renderEivHeader(`${monthLabel(1)} ${eivColLabel}`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m1 ?? null,
-        render: (row) => formatNumber(row.m1) ?? "-",
+        render: (row) => formatValue(row.m1) ?? "-",
         defaultSortDirection: "desc",
       },
       {
         key: "m2",
-        label: renderEivHeader(`${monthLabel(2)} EIV`),
+        label: renderEivHeader(`${monthLabel(2)} ${eivColLabel}`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m2 ?? null,
-        render: (row) => formatNumber(row.m2) ?? "-",
+        render: (row) => formatValue(row.m2) ?? "-",
         defaultSortDirection: "desc",
       },
       {
         key: "m3",
-        label: renderEivHeader(`${monthLabel(3)} EIV`),
+        label: renderEivHeader(`${monthLabel(3)} ${eivColLabel}`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m3 ?? null,
-        render: (row) => formatNumber(row.m3) ?? "-",
+        render: (row) => formatValue(row.m3) ?? "-",
         defaultSortDirection: "desc",
       },
       {
         key: "m4",
-        label: renderEivHeader(`${monthLabel(4)} EIV`),
+        label: renderEivHeader(`${monthLabel(4)} ${eivColLabel}`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m4 ?? null,
-        render: (row) => formatNumber(row.m4) ?? "-",
+        render: (row) => formatValue(row.m4) ?? "-",
         defaultSortDirection: "desc",
       },
       {
         key: "m5",
-        label: renderEivHeader(`${monthLabel(5)} EIV`),
+        label: renderEivHeader(`${monthLabel(5)} ${eivColLabel}`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m5 ?? null,
-        render: (row) => formatNumber(row.m5) ?? "-",
+        render: (row) => formatValue(row.m5) ?? "-",
         defaultSortDirection: "desc",
       },
       {
         key: "m6",
-        label: renderEivHeader(`${monthLabel(6)} EIV`),
+        label: renderEivHeader(`${monthLabel(6)} ${eivColLabel}`),
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.m6 ?? null,
-        render: (row) => formatNumber(row.m6) ?? "-",
+        render: (row) => formatValue(row.m6) ?? "-",
         defaultSortDirection: "desc",
       },
       {
@@ -176,7 +188,7 @@ export default function RiskIndexTable({
         headerClassName: "w-32 text-right",
         cellClassName: "w-32 text-right tabular-nums",
         sortValue: (row) => row.total ?? null,
-        render: (row) => formatNumber(row.total) ?? "-",
+        render: (row) => formatValue(row.total) ?? "-",
         defaultSortDirection: "desc",
       },
     ];
@@ -316,7 +328,7 @@ export default function RiskIndexTable({
       },
       ...metricColumns,
     ];
-  }, [mode, monthLabel, perCapitaFormatter, rcByIso3]);
+  }, [mode, monthLabel, perCapitaFormatter, rcByIso3, isBinary, totalLabel]);
 
   const emptyMessage = targetMonth
     ? `No rows returned for ${targetMonth}.`

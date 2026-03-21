@@ -1808,6 +1808,187 @@ def list_resolutions(iso3: str, month: str, metric: str = "PIN"):
     return {"rows": _rows_from_df(df)}
 
 
+def _get_risk_index_binary(
+    con,
+    metric_upper: str,
+    hazard_code_upper: Optional[str],
+    target_month: Optional[str],
+    horizon_m: int,
+    duration_m: int,
+    normalize: bool,
+    forecaster_run_id: Optional[str],
+) -> dict:
+    """Risk index for binary EVENT_OCCURRENCE questions.
+
+    The 'risk value' is the ensemble P(event) stored in bucket_1.
+    No centroid multiplication is needed.
+    """
+    horizon_col, bucket_col, prob_col = _resolve_forecasts_ensemble_columns(con)
+    if not horizon_col or not bucket_col or not prob_col:
+        return {
+            "metric": metric_upper, "target_month": target_month,
+            "horizon_m": horizon_m, "duration_m": duration_m,
+            "normalize": normalize, "rows": [], "metric_type": "binary",
+        }
+
+    if not target_month:
+        target_month = _latest_forecasted_target_month(
+            con, metric_upper, horizon_col, horizon_m
+        )
+        if not target_month:
+            row = _execute(
+                con,
+                "SELECT MAX(target_month) FROM questions WHERE UPPER(metric)=:metric",
+                {"metric": metric_upper},
+            ).fetchone()
+            target_month = row[0] if row and row[0] else None
+
+    if not target_month:
+        return {
+            "metric": metric_upper, "target_month": None,
+            "horizon_m": 6, "duration_m": duration_m,
+            "normalize": normalize, "rows": [], "metric_type": "binary",
+        }
+
+    run_cte, run_join = _run_filter_cte(con, forecaster_run_id)
+    run_cte_sql = f", {run_cte}" if run_cte else ""
+
+    model_name_available = _table_has_columns(con, "forecasts_ensemble", ["model_name"])
+
+    # For binary questions, bucket_1 = P(yes). We detect bucket_1 via
+    # bucket_index=1 or class_bin label matching.
+    bucket_is_label = bucket_col == "class_bin"
+    if bucket_is_label:
+        bucket_filter = f"AND fe.{bucket_col} IN ('1', 'bucket_1', 'yes')"
+    else:
+        bucket_filter = f"AND fe.{bucket_col} = 1"
+
+    # Model selection CTE (prefer ensemble_bayesmc_v2 > ensemble_mean_v2)
+    model_cte = ""
+    from_alias = "fe"
+    if model_name_available:
+        model_cte = f"""
+        , base_b AS (
+          SELECT
+            q.question_id, q.iso3, q.hazard_code,
+            fe.{horizon_col} AS m,
+            fe.{prob_col} AS p,
+            COALESCE(fe.model_name, '') AS model_name
+          FROM forecasts_ensemble fe
+          JOIN q ON q.question_id = fe.question_id
+          {run_join}
+          WHERE fe.{horizon_col} BETWEEN 1 AND 6
+            AND fe.{prob_col} IS NOT NULL
+            {bucket_filter}
+        ),
+        chosen_model_b AS (
+          SELECT question_id,
+            CASE
+              WHEN SUM(CASE WHEN model_name = 'ensemble_bayesmc_v2' THEN 1 ELSE 0 END) > 0
+                THEN 'ensemble_bayesmc_v2'
+              WHEN SUM(CASE WHEN model_name = 'ensemble_mean_v2' THEN 1 ELSE 0 END) > 0
+                THEN 'ensemble_mean_v2'
+              ELSE MIN(model_name)
+            END AS chosen_model
+          FROM base_b GROUP BY question_id
+        ),
+        binary_probs AS (
+          SELECT base_b.iso3, base_b.hazard_code, base_b.m, base_b.p
+          FROM base_b
+          JOIN chosen_model_b USING (question_id)
+          WHERE base_b.model_name = chosen_model_b.chosen_model
+        )
+        """
+        from_alias = "binary_probs"
+    else:
+        model_cte = f"""
+        , binary_probs AS (
+          SELECT q.iso3, q.hazard_code,
+                 fe.{horizon_col} AS m,
+                 fe.{prob_col} AS p
+          FROM forecasts_ensemble fe
+          JOIN q ON q.question_id = fe.question_id
+          {run_join}
+          WHERE fe.{horizon_col} BETWEEN 1 AND 6
+            AND fe.{prob_col} IS NOT NULL
+            {bucket_filter}
+        )
+        """
+        from_alias = "binary_probs"
+
+    sql = f"""
+    WITH q AS (
+      SELECT question_id, iso3, hazard_code, metric, target_month
+      FROM questions
+      WHERE UPPER(metric) = :metric
+        AND target_month = :target_month
+        AND (:hazard_code IS NULL OR UPPER(hazard_code) = UPPER(:hazard_code))
+    )
+    {run_cte_sql}
+    {model_cte},
+    monthly AS (
+      SELECT iso3, m, MAX(p) AS prob
+      FROM {from_alias}
+      GROUP BY iso3, m
+    ),
+    hazards AS (
+      SELECT iso3, COUNT(DISTINCT hazard_code) AS n_hazards_forecasted
+      FROM q GROUP BY iso3
+    ),
+    pivoted AS (
+      SELECT
+        iso3,
+        MAX(CASE WHEN m = 1 THEN prob END) AS m1,
+        MAX(CASE WHEN m = 2 THEN prob END) AS m2,
+        MAX(CASE WHEN m = 3 THEN prob END) AS m3,
+        MAX(CASE WHEN m = 4 THEN prob END) AS m4,
+        MAX(CASE WHEN m = 5 THEN prob END) AS m5,
+        MAX(CASE WHEN m = 6 THEN prob END) AS m6,
+        MAX(prob) AS total
+      FROM monthly
+      GROUP BY iso3
+    )
+    SELECT
+      p.iso3,
+      h.n_hazards_forecasted,
+      p.m1, p.m2, p.m3, p.m4, p.m5, p.m6,
+      p.total,
+      NULL AS population,
+      p.m1 AS m1_pc, p.m2 AS m2_pc, p.m3 AS m3_pc,
+      p.m4 AS m4_pc, p.m5 AS m5_pc, p.m6 AS m6_pc,
+      p.total AS total_pc
+    FROM pivoted p
+    LEFT JOIN hazards h ON h.iso3 = p.iso3
+    ORDER BY p.total DESC NULLS LAST
+    """
+    params = {
+        "metric": metric_upper,
+        "target_month": target_month,
+        "hazard_code": hazard_code_upper,
+    }
+    df = _execute(con, sql, params).fetchdf()
+    rows = _rows_from_df(df)
+
+    for row in rows:
+        row["country_name"] = _country_name(row.get("iso3", ""))
+        row["metric_type"] = "binary"
+        # For binary, per-capita IS the raw probability (already a rate)
+        if row.get("total") is not None:
+            row["expected_value"] = row["total"]
+            row["per_capita"] = row["total"]
+
+    return {
+        "metric": metric_upper,
+        "target_month": target_month,
+        "horizon_m": 6,
+        "duration_m": duration_m,
+        "normalize": normalize,
+        "forecaster_run_id": forecaster_run_id,
+        "rows": rows,
+        "metric_type": "binary",
+    }
+
+
 @app.get("/v1/risk_index")
 def get_risk_index(
     metric: str = Query("PA", description="Metric to rank on, e.g. 'PA'"),
@@ -1825,8 +2006,16 @@ def get_risk_index(
     hazard_code_upper = (hazard_code or "").strip().upper() or None
     is_pa = metric_upper == "PA"
     is_fatalities = metric_upper == "FATALITIES"
+    is_binary = metric_upper == "EVENT_OCCURRENCE"
+    is_phase3 = metric_upper == "PHASE3PLUS_IN_NEED"
 
-    if not (is_pa or is_fatalities):
+    if is_binary:
+        return _get_risk_index_binary(
+            con, metric_upper, hazard_code_upper, target_month,
+            horizon_m, duration_m, normalize, forecaster_run_id,
+        )
+
+    if not (is_pa or is_fatalities or is_phase3):
         return {
             "metric": metric_upper,
             "target_month": target_month,
@@ -1901,7 +2090,7 @@ def get_risk_index(
                     continue
                 db_population_map[iso] = pop_value
             populations_available = bool(db_population_map)
-    agg_mode = "surge" if is_pa else "burden"
+    agg_mode = "surge" if (is_pa or is_phase3) else "burden"
     registry_available = False
     if (normalize or agg_mode == "surge") and not populations_available:
         _load_population_registry()
@@ -2246,6 +2435,7 @@ def get_risk_index(
 
     for row in rows:
         row["country_name"] = _country_name(row.get("iso3", ""))
+        row["metric_type"] = "spd"
 
     return {
         "metric": metric_upper,
@@ -2255,6 +2445,7 @@ def get_risk_index(
         "normalize": normalize,
         "forecaster_run_id": forecaster_run_id,
         "rows": rows,
+        "metric_type": "spd",
     }
 
 
@@ -2484,6 +2675,99 @@ def debug_hs_country_summary(
     return {"row": row}
 
 
+@app.get("/v1/diagnostics/resolution_rates")
+def resolution_rates(
+    forecaster_run_id: Optional[str] = Query(None),
+    hazard_code: Optional[str] = Query(None),
+):
+    """Compute resolution rates by hazard and metric.
+
+    Returns how many questions were resolved (have at least 1 resolution row)
+    vs total, broken down by (hazard_code, metric).
+    """
+    con = _con()
+    if not _table_exists(con, "questions"):
+        return {"rows": []}
+
+    has_resolutions = _table_exists(con, "resolutions") and _table_has_columns(
+        con, "resolutions", ["question_id"]
+    )
+
+    hazard_filter = ""
+    params: dict = {}
+    if hazard_code:
+        hazard_filter = "AND UPPER(q.hazard_code) = UPPER(:hazard_code)"
+        params["hazard_code"] = hazard_code.upper()
+
+    run_filter = ""
+    if forecaster_run_id and _table_has_columns(con, "questions", ["forecaster_run_id"]):
+        run_filter = "AND q.forecaster_run_id = :forecaster_run_id"
+        params["forecaster_run_id"] = forecaster_run_id
+
+    # Total questions by (hazard_code, metric)
+    total_sql = f"""
+        SELECT q.hazard_code, UPPER(q.metric) AS metric,
+               COUNT(DISTINCT q.question_id) AS total_questions
+        FROM questions q
+        WHERE 1=1 {hazard_filter} {run_filter}
+        GROUP BY q.hazard_code, UPPER(q.metric)
+    """
+    try:
+        total_rows = _execute(con, total_sql, params).fetchall()
+    except Exception:
+        return {"rows": []}
+
+    if not has_resolutions:
+        return {
+            "rows": [
+                {
+                    "hazard_code": hc,
+                    "metric": m,
+                    "total_questions": int(t),
+                    "resolved_questions": 0,
+                    "skipped_questions": int(t),
+                    "resolution_rate": 0.0,
+                }
+                for hc, m, t in total_rows
+            ]
+        }
+
+    # Resolved questions (at least 1 resolution row)
+    resolved_sql = f"""
+        SELECT q.hazard_code, UPPER(q.metric) AS metric,
+               COUNT(DISTINCT r.question_id) AS resolved_questions
+        FROM resolutions r
+        JOIN questions q ON q.question_id = r.question_id
+        WHERE 1=1 {hazard_filter} {run_filter}
+        GROUP BY q.hazard_code, UPPER(q.metric)
+    """
+    try:
+        resolved_rows = _execute(con, resolved_sql, params).fetchall()
+    except Exception:
+        resolved_rows = []
+
+    resolved_map: dict[tuple[str, str], int] = {}
+    for hc, m, n in resolved_rows:
+        resolved_map[(hc, m)] = int(n)
+
+    result = []
+    for hc, m, total in total_rows:
+        total_int = int(total)
+        resolved = resolved_map.get((hc, m), 0)
+        skipped = total_int - resolved
+        rate = resolved / total_int if total_int > 0 else 0.0
+        result.append({
+            "hazard_code": hc,
+            "metric": m,
+            "total_questions": total_int,
+            "resolved_questions": resolved,
+            "skipped_questions": skipped,
+            "resolution_rate": round(rate, 4),
+        })
+
+    return {"rows": result}
+
+
 @app.get("/v1/diagnostics/kpi_scopes")
 def diagnostics_kpi_scopes(
     metric_scope: str = Query("PA"),
@@ -2501,7 +2785,7 @@ def diagnostics_kpi_scopes(
     }
 
     metric_scope = metric_scope.upper()
-    if metric_scope not in {"PA", "FATALITIES"}:
+    if metric_scope not in {"PA", "FATALITIES", "EVENT_OCCURRENCE", "PHASE3PLUS_IN_NEED"}:
         notes.append("metric_scope_unrecognized")
 
     questions_cols = _table_columns(con, "questions") if _table_exists(con, "questions") else set()

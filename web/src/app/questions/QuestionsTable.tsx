@@ -330,7 +330,12 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
         headerClassName: "text-left whitespace-normal leading-tight",
         cellClassName: "text-left whitespace-nowrap",
         sortValue: (row) => row.metric,
-        render: (row) => row.metric,
+        render: (row) =>
+          row.metric === "EVENT_OCCURRENCE"
+            ? "Binary (event)"
+            : row.metric === "PHASE3PLUS_IN_NEED"
+              ? "Phase 3+"
+              : row.metric,
         defaultSortDirection: "asc",
       },
       {

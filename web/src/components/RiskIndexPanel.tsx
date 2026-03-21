@@ -19,10 +19,13 @@ import RunMonthSelector from "./RunMonthSelector";
 import RunSelector from "./RunSelector";
 
 const VIEW_OPTIONS: Array<{ value: RiskView; label: string }> = [
-  { value: "PA_EIV", label: "People Affected (PA) EIV" },
-  { value: "PA_PC", label: "People Affected (PA) per capita EIV" },
-  { value: "FATALITIES_EIV", label: "Armed Conflict (ACE) fatalities EIV" },
-  { value: "FATALITIES_PC", label: "Armed Conflict (ACE) fatalities per capita EIV" },
+  { value: "PA_EIV", label: "People affected (absolute)" },
+  { value: "PA_PC", label: "People affected (per capita)" },
+  { value: "FATALITIES_EIV", label: "Fatalities (absolute)" },
+  { value: "FATALITIES_PC", label: "Fatalities (per capita)" },
+  { value: "EVENT_OCCURRENCE", label: "Event probability" },
+  { value: "PHASE3PLUS_EIV", label: "Phase 3+ population (absolute)" },
+  { value: "PHASE3PLUS_PC", label: "Phase 3+ (% of population)" },
 ];
 
 type RiskIndexPanelProps = {
@@ -52,13 +55,33 @@ const buildParams = (view: RiskView) => {
         horizon_m: 6,
         normalize: true,
       };
+    case "EVENT_OCCURRENCE":
+      return { metric: "EVENT_OCCURRENCE", horizon_m: 6, normalize: false };
+    case "PHASE3PLUS_EIV":
+      return {
+        metric: "PHASE3PLUS_IN_NEED",
+        hazard_code: "DR",
+        horizon_m: 6,
+        normalize: false,
+      };
+    case "PHASE3PLUS_PC":
+      return {
+        metric: "PHASE3PLUS_IN_NEED",
+        hazard_code: "DR",
+        horizon_m: 6,
+        normalize: true,
+      };
     default:
       return { metric: "PA", horizon_m: 6, normalize: false };
   }
 };
 
-const metricScopeForView = (view: RiskView) =>
-  view === "FATALITIES_EIV" || view === "FATALITIES_PC" ? "FATALITIES" : "PA";
+const metricScopeForView = (view: RiskView) => {
+  if (view === "FATALITIES_EIV" || view === "FATALITIES_PC") return "FATALITIES";
+  if (view === "EVENT_OCCURRENCE") return "EVENT_OCCURRENCE";
+  if (view === "PHASE3PLUS_EIV" || view === "PHASE3PLUS_PC") return "PHASE3PLUS_IN_NEED";
+  return "PA";
+};
 
 const addMonthsYYYYMM = (value: string, months: number): string | null => {
   const parts = value.split("-");
@@ -115,7 +138,11 @@ export default function RiskIndexPanel({
   const searchParams = useSearchParams();
   const showKpiDebug = searchParams?.get("debug_kpi") === "1";
 
-  const isPerCapita = view === "PA_PC" || view === "FATALITIES_PC";
+  const isPerCapita =
+    view === "PA_PC" ||
+    view === "FATALITIES_PC" ||
+    view === "PHASE3PLUS_PC" ||
+    view === "EVENT_OCCURRENCE";
 
   const fetchCountries = async (
     metricScope: string,
