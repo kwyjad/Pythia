@@ -46,6 +46,8 @@ def get_hazard_reasoning_block(hazard_code: str, metric: str) -> str:
         return _DI
     if hz == "FL":
         return _FL
+    if hz == "DR" and m == "PHASE3PLUS_IN_NEED":
+        return _DR_PHASE3
     if hz == "DR":
         return _DR
     if hz == "TC":
@@ -280,6 +282,87 @@ escalate over time.
 forward-looking indicators for drought impacts.
 - Treating drought as binary (either happening or not) rather than as a spectrum \
 of severity.\
+"""
+
+# ---------------------------------------------------------------------------
+# Drought — FEWS NET IPC Phase 3+ (DR / PHASE3PLUS_IN_NEED)
+# ---------------------------------------------------------------------------
+
+_DR_PHASE3 = """\
+HAZARD-SPECIFIC REASONING GUIDANCE: DROUGHT — FEWS NET IPC PHASE 3+ (PHASE3PLUS_IN_NEED)
+
+This question asks about the number of people in IPC Phase 3+ (Crisis or worse) food \
+insecurity in {country}, as reported by FEWS NET's Current Situation assessment. \
+Phase 3+ includes Crisis (Phase 3), Emergency (Phase 4), and Famine (Phase 5) populations.
+
+Bucket interpretation for IPC Phase 3+ population:
+- Bucket 1 (<100k): Minimal food insecurity — few or no populations in Crisis or worse. \
+Typical for stable, food-secure countries or those with very small populations monitored \
+by FEWS NET.
+- Bucket 2 (100k–1M): Moderate crisis — sub-national pockets of food insecurity. Some \
+districts or livelihood zones in IPC Phase 3, but national totals remain below 1 million. \
+Common in countries with localized drought stress or seasonal lean-season peaks.
+- Bucket 3 (1M–5M): Significant national-level food insecurity. Multiple regions in \
+Crisis or Emergency phase. This is the range for countries with widespread but non-extreme \
+drought or conflict-driven food insecurity (e.g. parts of the Sahel, East Africa in a \
+moderate year).
+- Bucket 4 (5M–15M): Severe food emergency. Large portions of the country in Phase 3+, \
+often with significant Phase 4 (Emergency) populations. This is the range for major food \
+crises (e.g. Ethiopia, DRC, or Nigeria in a bad year).
+- Bucket 5 (>=15M): Catastrophic — Sudan/Ethiopia-scale famine risk. Phase 3+ populations \
+exceed 15 million, implying a large fraction of the country's population is in Crisis or \
+worse. Only a handful of the largest food crises in FEWS NET history have reached this \
+level. Requires convergence of severe drought, conflict displacement, and economic collapse.
+
+Key reasoning principles for IPC Phase 3+ forecasting:
+- Phase 3+ populations are PERSISTENT and SLOW-CHANGING. Unlike conflict fatalities or \
+flood PA, IPC Phase 3+ figures do not spike and drop within a single month. Food \
+insecurity builds over weeks and months as rainfall deficits accumulate, food stocks \
+deplete, and prices rise. Your SPD should reflect gradual trends rather than sharp \
+month-to-month swings. Adjacent months should generally be similar unless there is a \
+specific seasonal transition (e.g. harvest vs. lean season).
+- FEWS NET ANALYSIS CYCLES MATTER. FEWS NET does not publish new IPC analyses for every \
+country every month. Some countries are analysed quarterly, others twice a year. Between \
+analysis cycles, the Phase 3+ figure effectively stays constant. If the most recent FEWS \
+NET analysis is 2+ months old, the near-term forecast months will likely reflect that \
+same figure unless a new analysis is imminent. Check the structured data for the most \
+recent analysis date.
+- SEASONAL DRIVERS are critical. Lean seasons (the months before harvest when food stocks \
+are lowest) produce predictable spikes in Phase 3+ populations. The NMME seasonal outlook \
+is especially relevant: below-normal precipitation during the growing season is a strong \
+signal for higher Phase 3+ figures at the subsequent lean season. Above-normal rainfall \
+during the growing season is a signal for improved food security at harvest.
+- CONFLICT is a DOMINANT DRIVER in many FEWS NET-monitored countries. In countries like \
+Sudan, South Sudan, DRC, Somalia, and northern Nigeria, conflict-driven displacement and \
+market disruption are the primary cause of food insecurity, not drought alone. If conflict \
+is escalating, Phase 3+ populations are likely to rise regardless of rainfall conditions.
+- RESOLUTION SOURCE DISTINCTION: FEWS NET publishes both a "Current Situation" analysis \
+(what is happening now) and a "Most Likely" projection (what will happen over the next \
+4–8 months). This question resolves against the Current Situation analysis. However, the \
+Most Likely projection (if provided in structured data as phase3plus_projection) is a \
+strong forward-looking signal — treat it as moderate-to-strong evidence for the direction \
+of change.
+- CUMULATIVE EFFECTS matter. Consecutive poor rainy seasons compound food insecurity. If \
+a country has already experienced one or more below-average seasons, even near-normal \
+rainfall may not be sufficient to return Phase 3+ populations to low levels. Recovery \
+from acute food insecurity takes months, not weeks.
+- IPC data is the STRONGEST ANCHOR for this metric. When FEWS NET Current Situation or \
+Most Likely projection data is available in the structured data, it should receive heavy \
+weight in your Bayesian update. IPC data directly measures what this question asks about.
+
+Common calibration errors to avoid:
+- Assigning volatile month-to-month SPDs as if Phase 3+ populations fluctuate like \
+conflict fatalities. Phase 3+ changes gradually — your SPDs across adjacent months \
+should typically be similar or show a smooth trend.
+- Ignoring the lean season / harvest season cycle. Phase 3+ peaks during lean seasons \
+and drops after harvests. Your SPDs should reflect this seasonal pattern.
+- Underweighting FEWS NET projection data when it is available. The Most Likely projection \
+is produced by food security analysts and is one of the most reliable forward-looking \
+indicators for this metric.
+- Treating bucket 5 (>=15M) as negligible for large, crisis-affected countries. Sudan in \
+2024–2025 and Ethiopia in severe drought years have exceeded 15M Phase 3+.
+- Ignoring conflict signals in countries where conflict, not drought, is the primary \
+food insecurity driver.\
 """
 
 # ---------------------------------------------------------------------------

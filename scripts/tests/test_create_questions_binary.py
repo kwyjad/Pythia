@@ -161,7 +161,7 @@ def test_dr_non_fewsnet_gets_event_occurrence_only(tmp_path):
 
 
 def test_dr_fewsnet_gets_both(tmp_path):
-    """DR for FEWS NET country should generate both PA and EVENT_OCCURRENCE."""
+    """DR for FEWS NET country should generate PHASE3PLUS_IN_NEED and EVENT_OCCURRENCE."""
     db_path = str(tmp_path / "test.duckdb")
     _setup_test_db(db_path, [
         ("test-run-1", "ETH", "DR", "priority", 0.7, True, 1),
@@ -172,13 +172,13 @@ def test_dr_fewsnet_gets_both(tmp_path):
     with patch("scripts.create_questions_from_triage._FEWSNET_COUNTRIES_FILE", fewsnet_file):
         count = create_questions_from_triage(f"duckdb:///{db_path}", "test-run-1")
 
-    assert count == 2  # PA + EVENT_OCCURRENCE
+    assert count == 2  # PHASE3PLUS_IN_NEED + EVENT_OCCURRENCE
 
     con = duckdb.connect(db_path)
     rows = con.execute("SELECT metric FROM questions").fetchall()
     con.close()
     metrics = {r[0] for r in rows}
-    assert "PA" in metrics
+    assert "PHASE3PLUS_IN_NEED" in metrics
     assert "EVENT_OCCURRENCE" in metrics
 
 
