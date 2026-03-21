@@ -17,6 +17,11 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
+try:
+    import pycountry  # noqa: F401
+except ImportError:
+    pytest.skip("pycountry not installed", allow_module_level=True)
+
 from resolver.connectors.fewsnet_ipc import (
     FewsnetIpcConnector,
     _iso2_to_iso3,
