@@ -12,7 +12,8 @@ def _seed_tables(conn):
             hazard_code TEXT,
             triage_score DOUBLE,
             tier TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -27,14 +28,15 @@ def _seed_tables(conn):
             created_at TIMESTAMP,
             response_text TEXT,
             triage_score DOUBLE,
-            parse_error TEXT
+            parse_error TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
 
     conn.execute(
         """
-        INSERT INTO hs_triage VALUES
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, triage_score, tier, created_at) VALUES
           ('hs_20240101', 'UKR', 'ACE', 0.91, 'priority', '2024-01-01 12:00:00'),
           ('hs_20240101', 'UKR', 'FL', 0.11, 'quiet', '2024-01-01 12:01:00'),
           ('hs_20240101', 'CHN', 'TC', 0.15, 'watch', '2024-01-01 12:02:00')
@@ -43,7 +45,7 @@ def _seed_tables(conn):
 
     conn.execute(
         """
-        INSERT INTO llm_calls VALUES
+        INSERT INTO llm_calls (hs_run_id, phase, iso3, hazard_code, model_id, created_at, response_text, triage_score, parse_error) VALUES
           ('hs_20240101', 'hs_triage', 'UKR', NULL, 'gemini',
            '2024-01-01 12:10:00',
            '```json {"hazards":{"ACE":{"triage_score":0.9},"FL":{"triage_score":"20%"}}} ```',
@@ -128,7 +130,8 @@ def test_get_hs_triage_all_call_statuses():
             hazard_code TEXT,
             triage_score DOUBLE,
             tier TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -143,13 +146,14 @@ def test_get_hs_triage_all_call_statuses():
             created_at TIMESTAMP,
             response_text TEXT,
             triage_score DOUBLE,
-            parse_error TEXT
+            parse_error TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
     conn.execute(
         """
-        INSERT INTO hs_triage VALUES
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, triage_score, tier, created_at) VALUES
           ('hs_20240202', 'COL', 'FL', 0.3, 'watch', '2024-02-02 10:00:00'),
           ('hs_20240202', 'COL', 'TC', 0.4, 'watch', '2024-02-02 10:01:00'),
           ('hs_20240202', 'PER', 'FL', 0.2, 'watch', '2024-02-02 10:02:00'),
@@ -158,7 +162,7 @@ def test_get_hs_triage_all_call_statuses():
     )
     conn.execute(
         """
-        INSERT INTO llm_calls VALUES
+        INSERT INTO llm_calls (hs_run_id, phase, iso3, hazard_code, model_id, created_at, response_text, triage_score, parse_error) VALUES
           ('hs_20240202', 'hs_triage', 'COL', NULL, 'gemini',
            '2024-02-02 11:00:00',
            '```json {"hazards":[{"hazard_code":"FL","triage_score":0.6}]} ```',
@@ -204,7 +208,8 @@ def test_hs_triage_long_response_not_truncated():
             hazard_code TEXT,
             triage_score DOUBLE,
             tier TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -219,13 +224,14 @@ def test_hs_triage_long_response_not_truncated():
             created_at TIMESTAMP,
             response_text TEXT,
             triage_score DOUBLE,
-            parse_error TEXT
+            parse_error TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
     conn.execute(
         """
-        INSERT INTO hs_triage VALUES
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, triage_score, tier, created_at) VALUES
           ('hs_20240303', 'USA', 'ACE', 0.42, 'watch', '2024-03-03 09:00:00')
         """
     )
@@ -235,7 +241,7 @@ def test_hs_triage_long_response_not_truncated():
     )
     conn.execute(
         """
-        INSERT INTO llm_calls VALUES
+        INSERT INTO llm_calls (hs_run_id, phase, iso3, hazard_code, model_id, created_at, response_text, triage_score, parse_error) VALUES
           ('hs_20240303', 'hs_triage', 'USA', NULL, 'gemini',
            '2024-03-03 09:10:00', ?, NULL, NULL)
         """,
@@ -260,7 +266,8 @@ def test_hs_triage_error_text_status_mapping():
             hazard_code TEXT,
             triage_score DOUBLE,
             tier TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -276,19 +283,20 @@ def test_hs_triage_error_text_status_mapping():
             response_text TEXT,
             triage_score DOUBLE,
             parse_error TEXT,
-            error_text TEXT
+            error_text TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
     conn.execute(
         """
-        INSERT INTO hs_triage VALUES
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, triage_score, tier, created_at) VALUES
           ('hs_20240404', 'BRA', 'FL', 0.12, 'watch', '2024-04-04 08:00:00')
         """
     )
     conn.execute(
         """
-        INSERT INTO llm_calls VALUES
+        INSERT INTO llm_calls (hs_run_id, phase, iso3, hazard_code, model_id, created_at, response_text, triage_score, parse_error, error_text) VALUES
           ('hs_20240404', 'hs_triage', 'BRA', NULL, 'gemini',
            '2024-04-04 08:10:00', NULL, NULL, NULL,
            'provider disabled after quota reached')
@@ -313,7 +321,8 @@ def test_hs_triage_pass_order_mapping():
             hazard_code TEXT,
             triage_score DOUBLE,
             tier TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -328,19 +337,20 @@ def test_hs_triage_pass_order_mapping():
             created_at TIMESTAMP,
             response_text TEXT,
             triage_score DOUBLE,
-            parse_error TEXT
+            parse_error TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
     conn.execute(
         """
-        INSERT INTO hs_triage VALUES
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, triage_score, tier, created_at) VALUES
           ('hs_20240505', 'IND', 'HW', 0.21, 'watch', '2024-05-05 07:00:00')
         """
     )
     conn.execute(
         """
-        INSERT INTO llm_calls VALUES
+        INSERT INTO llm_calls (hs_run_id, phase, iso3, hazard_code, model_id, created_at, response_text, triage_score, parse_error) VALUES
           ('hs_20240505', 'hs_triage', 'IND', 'PASS_2', 'gemini',
            '2024-05-05 07:05:00',
            '{"hazards":[{"hazard_code":"HW","triage_score":0.8}]}', NULL, NULL),

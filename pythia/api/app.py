@@ -93,6 +93,14 @@ _COUNTRY_NAME_BY_ISO3: dict[str, str] = {}
 _POPULATION_BY_ISO3: dict[str, int] = {}
 
 
+def _test_filter(include_test: bool, alias: str = "") -> str:
+    """Return a SQL AND clause to exclude test rows unless include_test is True."""
+    if include_test:
+        return ""
+    prefix = f"{alias}." if alias else ""
+    return f" AND COALESCE({prefix}is_test, FALSE) = FALSE"
+
+
 def _load_country_registry() -> None:
     global _COUNTRY_NAME_BY_ISO3
     if _COUNTRY_NAME_BY_ISO3:
@@ -975,6 +983,7 @@ def get_questions(
     status: Optional[str] = Query(None),
     run_id: Optional[str] = Query(None),
     latest_only: bool = Query(False),
+    include_test: bool = Query(False),
 ):
     con = _con()
     run_col, _, _ = _resolve_latest_questions_columns(con)
@@ -1010,6 +1019,9 @@ def get_questions(
         sql = "SELECT * FROM questions"
         if where_bits:
             sql += " WHERE " + " AND ".join(where_bits)
+            sql += _test_filter(include_test)
+        else:
+            sql += " WHERE 1=1" + _test_filter(include_test)
         sql += " ORDER BY target_month, iso3, hazard_code, metric"
         if run_col:
             sql += f", {run_col}"
@@ -1082,6 +1094,7 @@ def get_question_bundle(
     include_llm_calls: bool = Query(False, description="Include llm_calls rows"),
     include_transcripts: bool = Query(False, description="Include prompt/response text in llm_calls"),
     limit_llm_calls: int = Query(200, ge=1, le=2000, description="Max llm_calls rows to return"),
+    include_test: bool = Query(False),
 ):
     con = _con()
 
@@ -1499,6 +1512,7 @@ def get_calibration_advice(
 def performance_scores(
     metric: Optional[str] = Query(None, description="PA or FATALITIES"),
     track: Optional[int] = Query(None, description="Filter by track (1 or 2)"),
+    include_test: bool = Query(False),
 ):
     """Return aggregated scoring metrics (Brier, Log, CRPS) for the performance page.
 
@@ -1548,6 +1562,7 @@ def performance_scores(
             logger.debug("Failed to compute track counts for performance")
 
     # Query 1 -- summary rows (all models including ensemble)
+    _tf = _test_filter(include_test, "s")
     sql_summary = f"""
         SELECT
           q.hazard_code,
@@ -1560,7 +1575,7 @@ def performance_scores(
           MEDIAN(s.value) AS median_value
         FROM scores s
         JOIN questions q ON q.question_id = s.question_id
-        WHERE 1=1 {metric_filter} {track_filter}
+        WHERE 1=1 {metric_filter} {track_filter}{_tf}
         GROUP BY q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
         ORDER BY q.hazard_code, UPPER(q.metric), s.score_type,
                  s.model_name NULLS FIRST
@@ -1662,6 +1677,7 @@ def get_forecasts_ensemble(
     target_month: Optional[str] = Query(None),
     horizon_m: Optional[int] = Query(None),
     latest_only: bool = Query(True),
+    include_test: bool = Query(False),
 ):
     con = _con()
     params = {}
@@ -1711,7 +1727,7 @@ def get_forecasts_ensemble(
         return {"rows": _rows_from_df(df)}
 
     # latest_only=False: historical view (all runs)
-    sql = """
+    sql = f"""
       SELECT
         fe.question_id,
         q.iso3,
@@ -1726,7 +1742,7 @@ def get_forecasts_ensemble(
         fe.ensemble_version
       FROM forecasts_ensemble fe
       JOIN questions q ON fe.question_id = q.question_id
-      WHERE 1=1
+      WHERE 1=1{_test_filter(include_test, "fe")}
     """
     if iso3:
         sql += " AND q.iso3 = :iso3"
@@ -1750,6 +1766,7 @@ def get_forecasts_history(
     hazard_code: str = Query(...),
     metric: str = Query(...),
     target_month: str = Query(...),
+    include_test: bool = Query(False),
 ):
     """
     Return all historical ensemble forecasts for a given question concept
@@ -1770,7 +1787,7 @@ def get_forecasts_history(
         "target_month": target_month,
     }
 
-    sql = """
+    sql = f"""
       SELECT
         q.run_id,
         h.created_at AS hs_run_created_at,
@@ -1785,6 +1802,7 @@ def get_forecasts_history(
         AND q.hazard_code = :hazard_code
         AND UPPER(q.metric) = UPPER(:metric)
         AND q.target_month = :target_month
+        {_test_filter(include_test, "fe")}
       ORDER BY h.created_at, fe.horizon_m, fe.class_bin
     """
     df = _execute(con, sql, params).fetchdf()
@@ -1817,6 +1835,7 @@ def _get_risk_index_binary(
     duration_m: int,
     normalize: bool,
     forecaster_run_id: Optional[str],
+    include_test: bool = False,
 ) -> dict:
     """Risk index for binary EVENT_OCCURRENCE questions.
 
@@ -1916,6 +1935,7 @@ def _get_risk_index_binary(
         """
         from_alias = "binary_probs"
 
+    _tf = _test_filter(include_test)
     sql = f"""
     WITH q AS (
       SELECT question_id, iso3, hazard_code, metric, target_month
@@ -1923,6 +1943,7 @@ def _get_risk_index_binary(
       WHERE UPPER(metric) = :metric
         AND target_month = :target_month
         AND (:hazard_code IS NULL OR UPPER(hazard_code) = UPPER(:hazard_code))
+        {_tf}
     )
     {run_cte_sql}
     {model_cte},
@@ -2000,6 +2021,7 @@ def get_risk_index(
     agg: str = Query("surge", description="Aggregation mode: surge (default) or burden (legacy)"),
     alpha: float = Query(0.1, ge=0, le=1, description="Surge blending weight"),
     forecaster_run_id: Optional[str] = Query(None, description="Forecaster run ID to scope results"),
+    include_test: bool = Query(False),
 ):
     con = _con()
     metric_upper = (metric or "").strip().upper() or "PA"
@@ -2013,6 +2035,7 @@ def get_risk_index(
         return _get_risk_index_binary(
             con, metric_upper, hazard_code_upper, target_month,
             horizon_m, duration_m, normalize, forecaster_run_id,
+            include_test=include_test,
         )
 
     if not (is_pa or is_fatalities or is_phase3):
@@ -2284,6 +2307,7 @@ def get_risk_index(
     else:
         monthly_eiv_expr = "ms.sum_eiv"
 
+    _tf = _test_filter(include_test)
     sql = f"""
     WITH q AS (
       SELECT question_id, iso3, hazard_code, metric, target_month
@@ -2291,6 +2315,7 @@ def get_risk_index(
       WHERE UPPER(metric) = :metric
         AND target_month = :target_month
         AND (:hazard_code IS NULL OR UPPER(hazard_code) = UPPER(:hazard_code))
+        {_tf}
     )
     {run_cte_sql}
     {pop_cte}
@@ -2455,6 +2480,7 @@ def rankings(
     metric: str = "PIN",
     normalize: bool = True,
     forecaster_run_id: Optional[str] = Query(None, description="Forecaster run ID to scope results"),
+    include_test: bool = Query(False),
 ):
     con = _con()
     run_cte, run_join = _run_filter_cte(con, forecaster_run_id)
@@ -2482,7 +2508,7 @@ def rankings(
         ON bc.metric = q.metric
        AND bc.class_bin = fe.class_bin
       AND bc.hazard_code = q.hazard_code
-      WHERE q.metric=? AND q.target_month=?
+      WHERE q.metric=? AND q.target_month=?{_test_filter(include_test, "fe")}
       GROUP BY 1,2
     ), pop AS (
       SELECT iso3, MAX_BY(population, year) AS population
@@ -2499,7 +2525,7 @@ def rankings(
 
 
 @app.get("/v1/diagnostics/summary")
-def diagnostics_summary():
+def diagnostics_summary(include_test: bool = Query(False)):
     """
     Return a high-level summary of Pythia's state:
 
@@ -2512,9 +2538,10 @@ def diagnostics_summary():
     """
     con = _con()
 
+    _tf = _test_filter(include_test)
     try:
         q_counts_df = con.execute(
-            "SELECT status, COUNT(*) AS n FROM questions GROUP BY status"
+            f"SELECT status, COUNT(*) AS n FROM questions WHERE 1=1{_tf} GROUP BY status"
         ).fetchdf()
         q_counts = _rows_from_df(q_counts_df)
     except Exception:
@@ -2588,11 +2615,12 @@ def diagnostics_summary():
 @app.get("/v1/debug/hs_runs")
 def debug_hs_runs(
     limit: int = Query(50, ge=1, le=500),
+    include_test: bool = Query(False),
     x_fred_debug_token: Optional[str] = Header(default=None, alias="X-Fred-Debug-Token"),
 ):
     _require_debug_token(x_fred_debug_token)
     con = _con()
-    rows, schema_debug = _list_hs_runs_with_debug(con, limit=limit)
+    rows, schema_debug = _list_hs_runs_with_debug(con, limit=limit, include_test=include_test)
     logger.info("Debug hs_runs rows=%d schema=%s", len(rows), schema_debug)
     return {"rows": rows, "schema_debug": schema_debug}
 
@@ -2600,9 +2628,10 @@ def debug_hs_runs(
 @app.get("/v1/hs_runs")
 def hs_runs(
     limit: int = Query(50, ge=1, le=500),
+    include_test: bool = Query(False),
 ):
     con = _con()
-    rows = list_hs_runs(con, limit=limit)
+    rows = list_hs_runs(con, limit=limit, include_test=include_test)
     logger.info("HS runs rows=%d", len(rows))
     return {"rows": rows}
 
@@ -2613,10 +2642,12 @@ def hs_triage_all(
     iso3: Optional[str] = Query(None),
     hazard_code: Optional[str] = Query(None),
     limit: int = Query(2000, ge=1, le=5000),
+    include_test: bool = Query(False),
 ):
     con = _con()
     rows, diagnostics = get_hs_triage_all(
-        con, run_id=run_id, iso3=iso3, hazard_code=hazard_code, limit=limit
+        con, run_id=run_id, iso3=iso3, hazard_code=hazard_code, limit=limit,
+        include_test=include_test,
     )
     logger.info("HS triage all rows=%d run_id=%s", len(rows), run_id)
     return {"rows": rows, "diagnostics": diagnostics}
@@ -2628,12 +2659,14 @@ def debug_hs_triage(
     iso3: Optional[str] = Query(None),
     hazard_code: Optional[str] = Query(None),
     limit: int = Query(500, ge=1, le=2000),
+    include_test: bool = Query(False),
     x_fred_debug_token: Optional[str] = Header(default=None, alias="X-Fred-Debug-Token"),
 ):
     _require_debug_token(x_fred_debug_token)
     con = _con()
     rows, schema_debug = _get_hs_triage_rows_with_debug(
-        con, run_id=run_id, iso3=iso3, hazard_code=hazard_code, limit=limit
+        con, run_id=run_id, iso3=iso3, hazard_code=hazard_code, limit=limit,
+        include_test=include_test,
     )
     logger.info("Debug hs_triage rows=%d schema=%s", len(rows), schema_debug)
     return {"rows": rows, "schema_debug": schema_debug}
@@ -2646,6 +2679,7 @@ def debug_hs_triage_llm_calls(
     hazard_code: Optional[str] = Query(None),
     limit: int = Query(200, ge=1, le=2000),
     preview_chars: int = Query(800, ge=50, le=5000),
+    include_test: bool = Query(False),
     x_fred_debug_token: Optional[str] = Header(default=None, alias="X-Fred-Debug-Token"),
 ):
     _require_debug_token(x_fred_debug_token)
@@ -2657,6 +2691,7 @@ def debug_hs_triage_llm_calls(
         hazard_code=hazard_code,
         limit=limit,
         preview_chars=preview_chars,
+        include_test=include_test,
     )
     logger.info("Debug hs_triage_llm_calls rows=%d schema=%s", len(rows), schema_debug)
     return {"rows": rows, "schema_debug": schema_debug}
@@ -2666,11 +2701,12 @@ def debug_hs_triage_llm_calls(
 def debug_hs_country_summary(
     run_id: str = Query(...),
     iso3: str = Query(...),
+    include_test: bool = Query(False),
     x_fred_debug_token: Optional[str] = Header(default=None, alias="X-Fred-Debug-Token"),
 ):
     _require_debug_token(x_fred_debug_token)
     con = _con()
-    row = get_country_run_summary(con, run_id=run_id, iso3=iso3)
+    row = get_country_run_summary(con, run_id=run_id, iso3=iso3, include_test=include_test)
     logger.info("Debug hs_country_summary run_id=%s iso3=%s", run_id, iso3)
     return {"row": row}
 
@@ -2679,6 +2715,7 @@ def debug_hs_country_summary(
 def resolution_rates(
     forecaster_run_id: Optional[str] = Query(None),
     hazard_code: Optional[str] = Query(None),
+    include_test: bool = Query(False),
 ):
     """Compute resolution rates by hazard and metric.
 
@@ -2705,11 +2742,12 @@ def resolution_rates(
         params["forecaster_run_id"] = forecaster_run_id
 
     # Total questions by (hazard_code, metric)
+    _tf = _test_filter(include_test, "r")
     total_sql = f"""
         SELECT q.hazard_code, UPPER(q.metric) AS metric,
                COUNT(DISTINCT q.question_id) AS total_questions
         FROM questions q
-        WHERE 1=1 {hazard_filter} {run_filter}
+        WHERE 1=1 {hazard_filter} {run_filter}{_test_filter(include_test, "q")}
         GROUP BY q.hazard_code, UPPER(q.metric)
     """
     try:
@@ -2738,7 +2776,7 @@ def resolution_rates(
                COUNT(DISTINCT r.question_id) AS resolved_questions
         FROM resolutions r
         JOIN questions q ON q.question_id = r.question_id
-        WHERE 1=1 {hazard_filter} {run_filter}
+        WHERE 1=1 {hazard_filter} {run_filter}{_tf}
         GROUP BY q.hazard_code, UPPER(q.metric)
     """
     try:
@@ -2773,6 +2811,7 @@ def diagnostics_kpi_scopes(
     metric_scope: str = Query("PA"),
     year_month: Optional[str] = Query(None),
     forecaster_run_id: Optional[str] = Query(None, description="Forecaster run ID to scope KPIs"),
+    include_test: bool = Query(False),
 ):
     con = _con()
     notes: List[str] = []
@@ -3350,12 +3389,14 @@ def get_countries(
     metric_scope: Optional[str] = Query(None),
     year_month: Optional[str] = Query(None),
     forecaster_run_id: Optional[str] = Query(None, description="Forecaster run ID to scope countries"),
+    include_test: bool = Query(False),
 ):
     con = _con()
     try:
         rows = compute_countries_index(
             con, metric_scope=metric_scope, year_month=year_month,
             forecaster_run_id=forecaster_run_id,
+            include_test=include_test,
         )
         return {"rows": rows}
     except Exception:
@@ -3425,14 +3466,14 @@ def get_resolver_country_facts(
 
 
 @app.get("/v1/downloads/forecasts.xlsx")
-def download_forecasts_xlsx():
+def download_forecasts_xlsx(include_test: bool = Query(False)):
     if find_spec("openpyxl") is None:
         logger.warning("openpyxl missing; falling back to CSV export")
         return RedirectResponse(url="/v1/downloads/forecasts.csv", status_code=307)
 
     con = _con()
     try:
-        df = build_forecast_spd_export(con)
+        df = build_forecast_spd_export(con, include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build forecast download export")
         raise HTTPException(status_code=500, detail="Failed to build forecast download export") from exc
@@ -3454,10 +3495,10 @@ def download_forecasts_xlsx():
 
 
 @app.get("/v1/downloads/forecasts.csv")
-def download_forecasts_csv():
+def download_forecasts_csv(include_test: bool = Query(False)):
     con = _con()
     try:
-        df = build_forecast_spd_export(con)
+        df = build_forecast_spd_export(con, include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build forecast download export")
         raise HTTPException(status_code=500, detail="Failed to build forecast download export") from exc
@@ -3479,10 +3520,10 @@ def download_forecasts_csv():
 
 
 @app.get("/v1/downloads/triage.csv")
-def download_triage_csv():
+def download_triage_csv(include_test: bool = Query(False)):
     con = _con()
     try:
-        df = build_triage_export(con)
+        df = build_triage_export(con, include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build triage download export")
         raise HTTPException(status_code=500, detail="Failed to build triage download export") from exc
@@ -3511,10 +3552,10 @@ def download_triage_csv():
 
 
 @app.get("/v1/downloads/total_costs.csv")
-def download_total_costs_csv():
+def download_total_costs_csv(include_test: bool = Query(False)):
     con = _con()
     try:
-        tables = build_costs_total(con)
+        tables = build_costs_total(con, include_test=include_test)
         df = _concat_cost_tables(tables)
     except Exception as exc:
         logger.exception("Failed to build total cost export")
@@ -3537,10 +3578,10 @@ def download_total_costs_csv():
 
 
 @app.get("/v1/downloads/monthly_costs.csv")
-def download_monthly_costs_csv():
+def download_monthly_costs_csv(include_test: bool = Query(False)):
     con = _con()
     try:
-        tables = build_costs_monthly(con)
+        tables = build_costs_monthly(con, include_test=include_test)
         df = _concat_cost_tables(tables)
     except Exception as exc:
         logger.exception("Failed to build monthly cost export")
@@ -3563,10 +3604,10 @@ def download_monthly_costs_csv():
 
 
 @app.get("/v1/downloads/run_costs.csv")
-def download_run_costs_csv():
+def download_run_costs_csv(include_test: bool = Query(False)):
     con = _con()
     try:
-        tables = build_costs_runs(con)
+        tables = build_costs_runs(con, include_test=include_test)
         df = _concat_cost_tables(tables)
     except Exception as exc:
         logger.exception("Failed to build run cost export")
@@ -3589,10 +3630,10 @@ def download_run_costs_csv():
 
 
 @app.get("/v1/downloads/scores_ensemble_mean.csv")
-def download_scores_ensemble_mean_csv():
+def download_scores_ensemble_mean_csv(include_test: bool = Query(False)):
     con = _con()
     try:
-        df = build_ensemble_scores_export(con, "ensemble_mean")
+        df = build_ensemble_scores_export(con, "ensemble_mean", include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build ensemble_mean scores export")
         raise HTTPException(
@@ -3620,10 +3661,10 @@ def download_scores_ensemble_mean_csv():
 
 
 @app.get("/v1/downloads/scores_ensemble_bayesmc.csv")
-def download_scores_ensemble_bayesmc_csv():
+def download_scores_ensemble_bayesmc_csv(include_test: bool = Query(False)):
     con = _con()
     try:
-        df = build_ensemble_scores_export(con, "ensemble_bayesmc")
+        df = build_ensemble_scores_export(con, "ensemble_bayesmc", include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build ensemble_bayesmc scores export")
         raise HTTPException(
@@ -3651,10 +3692,10 @@ def download_scores_ensemble_bayesmc_csv():
 
 
 @app.get("/v1/downloads/scores_model.csv")
-def download_scores_model_csv():
+def download_scores_model_csv(include_test: bool = Query(False)):
     con = _con()
     try:
-        df = build_model_scores_export(con)
+        df = build_model_scores_export(con, include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build model scores export")
         raise HTTPException(
@@ -3683,10 +3724,11 @@ def download_scores_model_csv():
 def download_rationales_csv(
     hazard: str = Query(..., description="Hazard code filter (e.g. FL, DR, TC)"),
     model: str | None = Query(None, description="Model name filter (e.g. OpenAI, Claude, Gemini Flash)"),
+    include_test: bool = Query(False),
 ):
     con = _con()
     try:
-        df = build_rationale_export(con, hazard_code=hazard, model_name=model)
+        df = build_rationale_export(con, hazard_code=hazard, model_name=model, include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build rationale export")
         raise HTTPException(
@@ -3723,6 +3765,7 @@ def llm_costs(
     model: str | None = Query(None),
     since: str | None = Query(None),
     limit: int = Query(200, ge=1, le=5000),
+    include_test: bool = Query(False),
 ):
     """
     Return recent LLM call cost/usage rows from llm_calls.
@@ -3733,7 +3776,7 @@ def llm_costs(
       - since: ISO timestamp (created_at >= since)
     """
     con = _con()
-    sql = "SELECT * FROM llm_calls WHERE 1=1"
+    sql = f"SELECT * FROM llm_calls WHERE 1=1{_test_filter(include_test)}"
     params: list = []
 
     if component:
@@ -3772,6 +3815,7 @@ def llm_costs_summary(
         description="Comma-separated list of grouping fields: any of 'component','model_name','llm_profile','hs_run_id','ui_run_id','forecaster_run_id'",
     ),
     limit: int = Query(1000, ge=1, le=5000),
+    include_test: bool = Query(False),
 ):
     """
     Summarise LLM usage and cost from llm_calls.
@@ -3850,7 +3894,7 @@ def llm_costs_summary(
     sql = f"""
       SELECT {select_fields}
       FROM llm_calls
-      WHERE {where_clause}
+      WHERE {where_clause}{_test_filter(include_test)}
       {group_by_clause}
       ORDER BY cost_usd DESC NULLS LAST
       LIMIT :limit
@@ -3874,10 +3918,10 @@ def llm_costs_summary(
 
 
 @app.get("/v1/costs/total")
-def costs_total(track: Optional[int] = Query(None)):
+def costs_total(track: Optional[int] = Query(None), include_test: bool = Query(False)):
     con = _con()
     try:
-        tables = build_costs_total(con, track=track)
+        tables = build_costs_total(con, track=track, include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build total costs")
         raise HTTPException(status_code=500, detail="Failed to build total costs") from exc
@@ -3886,10 +3930,10 @@ def costs_total(track: Optional[int] = Query(None)):
 
 
 @app.get("/v1/costs/monthly")
-def costs_monthly(track: Optional[int] = Query(None)):
+def costs_monthly(track: Optional[int] = Query(None), include_test: bool = Query(False)):
     con = _con()
     try:
-        tables = build_costs_monthly(con, track=track)
+        tables = build_costs_monthly(con, track=track, include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build monthly costs")
         raise HTTPException(status_code=500, detail="Failed to build monthly costs") from exc
@@ -3898,10 +3942,10 @@ def costs_monthly(track: Optional[int] = Query(None)):
 
 
 @app.get("/v1/costs/runs")
-def costs_runs(track: Optional[int] = Query(None)):
+def costs_runs(track: Optional[int] = Query(None), include_test: bool = Query(False)):
     con = _con()
     try:
-        tables = build_costs_runs(con, track=track)
+        tables = build_costs_runs(con, track=track, include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build run costs")
         raise HTTPException(status_code=500, detail="Failed to build run costs") from exc
@@ -3910,10 +3954,10 @@ def costs_runs(track: Optional[int] = Query(None)):
 
 
 @app.get("/v1/costs/latencies")
-def costs_latencies(track: Optional[int] = Query(None)):
+def costs_latencies(track: Optional[int] = Query(None), include_test: bool = Query(False)):
     con = _con()
     try:
-        df = build_latencies_runs(con, track=track)
+        df = build_latencies_runs(con, track=track, include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build run latencies")
         raise HTTPException(status_code=500, detail="Failed to build run latencies") from exc
@@ -3922,10 +3966,10 @@ def costs_latencies(track: Optional[int] = Query(None)):
 
 
 @app.get("/v1/costs/run_runtimes")
-def costs_run_runtimes(track: Optional[int] = Query(None)):
+def costs_run_runtimes(track: Optional[int] = Query(None), include_test: bool = Query(False)):
     con = _con()
     try:
-        df = build_run_runtimes(con, track=track)
+        df = build_run_runtimes(con, track=track, include_test=include_test)
     except Exception as exc:
         logger.exception("Failed to build run runtimes")
         raise HTTPException(status_code=500, detail="Failed to build run runtimes") from exc

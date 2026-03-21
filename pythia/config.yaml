@@ -62,16 +62,11 @@ prediction_markets:
   timeout_sec: 30
 
 llm:
-  # Active profile: "test" (cheap) or "prod" (frontier).
+  # Active profile: "prod" (frontier).
   # Override via PYTHIA_LLM_PROFILE env var.
   profile: "prod"
 
   profiles:
-    test:
-      # Cheap models for development / CI
-      ensemble:
-        - google:gemini-3-flash-preview
-
     prod:
       # SPD forecast ensemble — add/remove models by editing this list.
       # String format ("provider:model_id") or dict format with per-model params.

@@ -17,6 +17,7 @@ import duckdb
 
 from horizon_scanner.horizon_scanner import main as hs_main
 from pythia.db import ensure_schema, get_db_url
+from pythia.test_mode import is_test_mode
 from pythia.tools.calibration_loop import maybe_run_calibration
 
 _pool = ThreadPoolExecutor(max_workers=1)
@@ -137,6 +138,7 @@ def _pipeline(ui_run_id: str, countries: list[str]):
     db_path = db_url.replace("duckdb:///", "") if db_url.startswith("duckdb:///") else db_url
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     logging.info("Using DuckDB at %s for pipeline run.", db_url)
+    logging.info("Pipeline test mode: %s", is_test_mode())
 
     # Initial ui_runs row: queued/running
     try:

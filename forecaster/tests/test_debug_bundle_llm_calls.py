@@ -31,7 +31,8 @@ def test_build_debug_bundle_llm_call_counts_without_forecaster_run_id(tmp_path: 
                 window_start_date DATE,
                 window_end_date DATE,
                 wording TEXT,
-                status TEXT
+                status TEXT,
+                is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -51,7 +52,8 @@ def test_build_debug_bundle_llm_call_counts_without_forecaster_run_id(tmp_path: 
                 created_at TIMESTAMP,
                 status TEXT,
                 human_explanation TEXT,
-                model_name TEXT
+                model_name TEXT,
+                is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -85,7 +87,8 @@ def test_build_debug_bundle_llm_call_counts_without_forecaster_run_id(tmp_path: 
                 response_text TEXT,
                 error_text TEXT,
                 usage_json TEXT,
-                created_at TIMESTAMP
+                created_at TIMESTAMP,
+                is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -97,7 +100,8 @@ def test_build_debug_bundle_llm_call_counts_without_forecaster_run_id(tmp_path: 
                 hazard_code TEXT,
                 tier TEXT,
                 triage_score DOUBLE,
-                created_at TIMESTAMP
+                created_at TIMESTAMP,
+                is_test BOOLEAN DEFAULT FALSE
             )
             """
         )

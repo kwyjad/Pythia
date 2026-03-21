@@ -109,6 +109,7 @@ def _load_samples(conn, as_of_month: str) -> List[Sample]:
       JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
       WHERE r.observed_month <= ?
         AND (s.model_name IS NULL OR s.model_name NOT LIKE '__ext_%')
+        AND COALESCE(q.is_test, FALSE) = FALSE
     """
     rows = conn.execute(sql, [as_of_month]).fetchall()
 

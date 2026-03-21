@@ -47,11 +47,12 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
         con.execute(
             """
             CREATE TABLE hs_runs (
-              hs_run_id TEXT PRIMARY KEY
+              hs_run_id TEXT PRIMARY KEY,
+              is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
-        con.execute("INSERT INTO hs_runs VALUES ('hs_run_1')")
+        con.execute("INSERT INTO hs_runs (hs_run_id) VALUES ('hs_run_1')")
 
         con.execute(
             """
@@ -63,7 +64,8 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
               metric TEXT,
               target_month TEXT,
               window_start_date DATE,
-              status TEXT
+              status TEXT,
+              is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -88,7 +90,8 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
               class_bin TEXT,
               p DOUBLE,
               aggregator TEXT,
-              ensemble_version TEXT
+              ensemble_version TEXT,
+              is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -104,7 +107,8 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
               bucket_index INTEGER,
               probability DOUBLE,
               run_id TEXT,
-              created_at TIMESTAMP
+              created_at TIMESTAMP,
+              is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -140,7 +144,8 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
               within_20pct BOOLEAN,
               centroid_version TEXT,
               created_at TIMESTAMP DEFAULT now(),
-              run_id TEXT
+              run_id TEXT,
+              is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -297,8 +302,8 @@ def test_dashboard_resolved_count_uses_resolutions_table(tmp_path: Path):
 
     con = duckdb.connect(str(db_path))
     try:
-        con.execute("CREATE TABLE hs_runs (hs_run_id TEXT PRIMARY KEY)")
-        con.execute("INSERT INTO hs_runs VALUES ('run1')")
+        con.execute("CREATE TABLE hs_runs (hs_run_id TEXT PRIMARY KEY, is_test BOOLEAN DEFAULT FALSE)")
+        con.execute("INSERT INTO hs_runs (hs_run_id) VALUES ('run1')")
         con.execute(
             """
             CREATE TABLE questions (
@@ -309,14 +314,15 @@ def test_dashboard_resolved_count_uses_resolutions_table(tmp_path: Path):
               metric TEXT,
               target_month TEXT,
               window_start_date DATE,
-              status TEXT
+              status TEXT,
+              is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
         # Two questions — both status='active' (NOT 'resolved')
         con.execute(
             """
-            INSERT INTO questions VALUES
+            INSERT INTO questions (question_id, hs_run_id, iso3, hazard_code, metric, target_month, window_start_date, status) VALUES
                 ('Q1', 'run1', 'MLI', 'FL', 'PA', '2025-01', '2024-08-01', 'active'),
                 ('Q2', 'run1', 'ETH', 'DR', 'PA', '2025-01', '2024-08-01', 'active')
             """

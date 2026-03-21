@@ -28,11 +28,11 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     con = duckdb.connect(str(db_path), read_only=False)
     con.execute(
         """
-        CREATE TABLE questions (status TEXT);
-        CREATE TABLE forecasts_ensemble (question_id TEXT);
+        CREATE TABLE questions (status TEXT, is_test BOOLEAN DEFAULT FALSE);
+        CREATE TABLE forecasts_ensemble (question_id TEXT, is_test BOOLEAN DEFAULT FALSE);
         CREATE TABLE resolutions (question_id TEXT);
-        CREATE TABLE scores (question_id TEXT);
-        CREATE TABLE hs_runs (run_id TEXT, created_at TIMESTAMP, meta TEXT);
+        CREATE TABLE scores (question_id TEXT, is_test BOOLEAN DEFAULT FALSE);
+        CREATE TABLE hs_runs (run_id TEXT, created_at TIMESTAMP, meta TEXT, is_test BOOLEAN DEFAULT FALSE);
         CREATE TABLE calibration_weights (as_of_month TEXT, created_at TIMESTAMP);
         """
     )

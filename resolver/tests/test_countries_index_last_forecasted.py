@@ -14,7 +14,8 @@ def test_compute_countries_index_last_forecasted() -> None:
         CREATE TABLE questions (
             question_id TEXT,
             iso3 TEXT,
-            hs_run_id TEXT
+            hs_run_id TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -22,7 +23,8 @@ def test_compute_countries_index_last_forecasted() -> None:
         """
         CREATE TABLE hs_runs (
             hs_run_id TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -31,7 +33,8 @@ def test_compute_countries_index_last_forecasted() -> None:
         CREATE TABLE forecasts_ensemble (
             question_id TEXT,
             created_at TIMESTAMP,
-            status TEXT
+            status TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )

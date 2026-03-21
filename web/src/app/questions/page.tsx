@@ -106,14 +106,21 @@ function addMonthsYYYYMM(value: string, months: number): string | null {
   return `${String(outYear).padStart(4, "0")}-${String(outMonth).padStart(2, "0")}`;
 }
 
-const QuestionsPage = async () => {
+const QuestionsPage = async ({
+  searchParams,
+}: {
+  searchParams: { [key: string]: string | string[] | undefined };
+}) => {
+  const includeTest = searchParams?.include_test === "true";
+
   if (process.env.NODE_ENV !== "production") {
     console.log("[page] dynamic=force-dynamic", { route: "/questions" });
   }
   let rows: QuestionRow[] = [];
   try {
     const response = await apiGet<QuestionsResponse>("/questions", {
-      latest_only: true
+      latest_only: true,
+      include_test: includeTest || undefined,
     });
     rows = response.rows;
   } catch (error) {

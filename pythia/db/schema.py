@@ -266,6 +266,7 @@ def _ensure_hs_triage_table(con: duckdb.DuckDBPyConnection) -> None:
             "regime_change_json": "TEXT",
             "track": "INTEGER",
             "created_at": "TIMESTAMP",
+            "is_test": "BOOLEAN DEFAULT FALSE",
         },
     )
 
@@ -301,6 +302,7 @@ def _ensure_question_research_table(con: duckdb.DuckDBPyConnection) -> None:
             "question_evidence_json": "TEXT",
             "merged_evidence_json": "TEXT",
             "created_at": "TIMESTAMP",
+            "is_test": "BOOLEAN DEFAULT FALSE",
         },
     )
 
@@ -349,6 +351,7 @@ def _ensure_question_run_metrics_table(con: duckdb.DuckDBPyConnection) -> None:
             "missing_model_ids_json": "TEXT",
             "phase_max_ms_json": "TEXT",
             "phase_cost_usd_json": "TEXT",
+            "is_test": "BOOLEAN DEFAULT FALSE",
         },
     )
 
@@ -382,6 +385,7 @@ def _ensure_scenarios_table(con: duckdb.DuckDBPyConnection) -> None:
             "probability": "DOUBLE",
             "text": "TEXT",
             "created_at": "TIMESTAMP",
+            "is_test": "BOOLEAN DEFAULT FALSE",
         },
     )
 
@@ -935,6 +939,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "countries_json": "TEXT",
                 "requested_countries_json": "TEXT",
                 "skipped_entries_json": "TEXT",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -968,6 +973,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "pa_best_guess": "DOUBLE",
                 "scenario_markdown": "TEXT",
                 "scenario_json": "TEXT",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -995,6 +1001,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "grounding_debug_json": "TEXT",
                 "structural_context": "TEXT",
                 "recent_signals_json": "TEXT",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -1036,6 +1043,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "structural_context": "TEXT",
                 "recent_signals_json": "TEXT",
                 "created_at": "TIMESTAMP",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -1069,6 +1077,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "grounded": "BOOLEAN",
                 "model_id": "TEXT",
                 "created_at": "TIMESTAMP",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -1128,6 +1137,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "forecasts_ensemble_before": "BIGINT",
                 "forecasts_ensemble_after": "BIGINT",
                 "created_at": "TIMESTAMP",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -1165,6 +1175,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "status": "TEXT",
                 "pythia_metadata_json": "TEXT",
                 "track": "INTEGER",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -1207,6 +1218,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "p": "DOUBLE",
                 "status": "TEXT",
                 "human_explanation": "TEXT",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -1251,6 +1263,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "horizon_m": "INTEGER",
                 "class_bin": "TEXT",
                 "p": "DOUBLE",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -1280,6 +1293,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "snapshot_end_month": "TEXT",
                 "pa_history_json": "TEXT",
                 "context_json": "TEXT",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -1377,6 +1391,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "centroid_version": "TEXT",
                 "created_at": "TIMESTAMP",
                 "run_id": "TEXT",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -1446,6 +1461,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "iso3": "TEXT",
                 "hazard_code": "TEXT",
                 "metric": "TEXT",
+                "is_test": "BOOLEAN DEFAULT FALSE",
             },
         )
 

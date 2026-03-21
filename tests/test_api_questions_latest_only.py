@@ -35,7 +35,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             metric TEXT,
             target_month TEXT,
             hs_run_id TEXT,
-            status TEXT
+            status TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -43,7 +44,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         CREATE TABLE hs_runs (
             hs_run_id TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -59,7 +61,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             metric TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
-            probability DOUBLE
+            probability DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -72,7 +75,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             tier TEXT,
             triage_score DOUBLE,
             need_full_spd BOOLEAN,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )

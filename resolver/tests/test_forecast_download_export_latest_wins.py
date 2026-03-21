@@ -53,7 +53,8 @@ def test_build_forecast_spd_export_latest_wins():
             hazard_code TEXT,
             metric TEXT,
             target_month TEXT,
-            hs_run_id TEXT
+            hs_run_id TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -67,7 +68,8 @@ def test_build_forecast_spd_export_latest_wins():
             bucket_index INTEGER,
             probability DOUBLE,
             status TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
@@ -79,13 +81,14 @@ def test_build_forecast_spd_export_latest_wins():
             hazard_code TEXT,
             tier TEXT,
             triage_score DOUBLE,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
     con.execute(
         """
-        INSERT INTO questions VALUES
+        INSERT INTO questions (question_id, iso3, hazard_code, metric, target_month, hs_run_id) VALUES
             ('q-pa', 'KEN', 'DR', 'PA', '2024-01', 'hs-run-1')
         """
     )
@@ -112,7 +115,7 @@ def test_build_forecast_spd_export_latest_wins():
     )
     con.execute(
         """
-        INSERT INTO hs_triage VALUES
+        INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, created_at) VALUES
             ('hs-run-1', 'KEN', 'DR', 'tier-1', 0.3, '2024-01-02')
         """
     )

@@ -6,13 +6,15 @@ import QuestionDetailView from "./QuestionDetailView";
 
 type QuestionPageProps = {
   params: { questionId: string };
-  searchParams?: { hs_run_id?: string };
+  searchParams?: { hs_run_id?: string; include_test?: string; [key: string]: string | string[] | undefined };
 };
 
 const isNotFoundError = (error: unknown) =>
   error instanceof Error && error.message.includes("(404)");
 
 const QuestionPage = async ({ params, searchParams }: QuestionPageProps) => {
+  const includeTest = searchParams?.include_test === "true";
+
   let bundle: QuestionBundleResponse;
   const fetchBundle = (hsRunId?: string) =>
     apiGet<QuestionBundleResponse>("/question_bundle", {
@@ -20,7 +22,8 @@ const QuestionPage = async ({ params, searchParams }: QuestionPageProps) => {
       hs_run_id: hsRunId,
       include_llm_calls: true,
       include_transcripts: false,
-      limit_llm_calls: 200
+      limit_llm_calls: 200,
+      include_test: includeTest || undefined,
     });
   try {
     bundle = await fetchBundle(searchParams?.hs_run_id);

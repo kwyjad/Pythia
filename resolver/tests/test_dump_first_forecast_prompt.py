@@ -30,7 +30,8 @@ def _create_forecasts_ensemble_table(con):
             weights_profile TEXT,
             created_at TIMESTAMP,
             status TEXT,
-            human_explanation TEXT
+            human_explanation TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )

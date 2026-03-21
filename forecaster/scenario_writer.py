@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from pythia.db.schema import connect
+from pythia.test_mode import is_test_mode
 
 from .hs_utils import load_hs_triage_entry
 from .llm_logging import log_forecaster_llm_call
@@ -433,8 +434,8 @@ async def _run_scenario_for_question(
             """
             INSERT INTO scenarios (
                 run_id, iso3, hazard_code, metric,
-                scenario_type, bucket_label, probability, text, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                scenario_type, bucket_label, probability, text, created_at, is_test
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
             """,
             [
                 run_id,
@@ -445,6 +446,7 @@ async def _run_scenario_for_question(
                 primary.get("bucket_label") or "",
                 float(primary.get("probability") or 0.0),
                 _render_structured_scenario_text(primary),
+                is_test_mode(),
             ],
         )
 
@@ -453,8 +455,8 @@ async def _run_scenario_for_question(
                 """
                 INSERT INTO scenarios (
                     run_id, iso3, hazard_code, metric,
-                    scenario_type, bucket_label, probability, text, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    scenario_type, bucket_label, probability, text, created_at, is_test
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
                 """,
                 [
                     run_id,
@@ -465,6 +467,7 @@ async def _run_scenario_for_question(
                     alternative.get("bucket_label") or "",
                     float(alternative.get("probability") or 0.0),
                     _render_structured_scenario_text(alternative),
+                    is_test_mode(),
                 ],
             )
     finally:

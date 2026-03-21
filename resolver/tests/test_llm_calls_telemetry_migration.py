@@ -18,13 +18,14 @@ def test_llm_calls_telemetry_migration_backfill(tmp_path):
                 call_id TEXT,
                 phase TEXT,
                 response_text TEXT,
-                error_text TEXT
+                error_text TEXT,
+                is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
         conn.execute(
             """
-            INSERT INTO llm_calls VALUES
+            INSERT INTO llm_calls (call_id, phase, response_text, error_text) VALUES
               ('call_ok', 'hs_triage', '{"hazards":{"ACE":{"triage_score":0.6}}}', NULL),
               ('call_timeout', 'hs_triage', NULL, 'timeout after 60s')
             """

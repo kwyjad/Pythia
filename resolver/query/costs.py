@@ -96,7 +96,7 @@ def _normalize_string(series: pd.Series) -> pd.Series:
     return series.map(_clean)
 
 
-def _load_llm_calls(conn, track: int | None = None) -> pd.DataFrame:
+def _load_llm_calls(conn, track: int | None = None, include_test: bool = False) -> pd.DataFrame:
     if not _table_exists(conn, "llm_calls"):
         return pd.DataFrame()
 
@@ -187,6 +187,14 @@ def _load_llm_calls(conn, track: int | None = None) -> pd.DataFrame:
         if where:
             params = [track]
 
+    test_clause = "" if include_test else " AND COALESCE(lc.is_test, FALSE) = FALSE"
+    if where:
+        combined_where = where + test_clause
+    elif test_clause:
+        combined_where = " WHERE" + test_clause[4:]  # strip leading " AND"
+    else:
+        combined_where = ""
+
     sql = f"""
         SELECT
             {run_expr},
@@ -200,7 +208,7 @@ def _load_llm_calls(conn, track: int | None = None) -> pd.DataFrame:
             {elapsed_expr},
             {created_expr},
             {track_select}
-        FROM llm_calls lc{joins}{where}
+        FROM llm_calls lc{joins}{combined_where}
     """
 
     df = conn.execute(sql, params).fetchdf() if params else conn.execute(sql).fetchdf()
@@ -388,18 +396,18 @@ def _build_costs_grain(df: pd.DataFrame, grain: str, group_cols: list[str]) -> d
     }
 
 
-def build_costs_total(conn, track: int | None = None) -> dict[str, pd.DataFrame]:
-    df = _load_llm_calls(conn, track=track)
+def build_costs_total(conn, track: int | None = None, include_test: bool = False) -> dict[str, pd.DataFrame]:
+    df = _load_llm_calls(conn, track=track, include_test=include_test)
     return _build_costs_grain(df, "total", [])
 
 
-def build_costs_monthly(conn, track: int | None = None) -> dict[str, pd.DataFrame]:
-    df = _load_llm_calls(conn, track=track)
+def build_costs_monthly(conn, track: int | None = None, include_test: bool = False) -> dict[str, pd.DataFrame]:
+    df = _load_llm_calls(conn, track=track, include_test=include_test)
     return _build_costs_grain(df, "monthly", ["year", "month"])
 
 
-def build_costs_runs(conn, track: int | None = None) -> dict[str, pd.DataFrame]:
-    df = _load_llm_calls(conn, track=track)
+def build_costs_runs(conn, track: int | None = None, include_test: bool = False) -> dict[str, pd.DataFrame]:
+    df = _load_llm_calls(conn, track=track, include_test=include_test)
     if df.empty:
         empty = pd.DataFrame(columns=COST_COLUMNS)
         return {"summary": empty, "by_model": empty, "by_phase": empty}
@@ -429,8 +437,8 @@ def build_costs_runs(conn, track: int | None = None) -> dict[str, pd.DataFrame]:
     return tables
 
 
-def build_latencies_runs(conn, track: int | None = None) -> pd.DataFrame:
-    df = _load_llm_calls(conn, track=track)
+def build_latencies_runs(conn, track: int | None = None, include_test: bool = False) -> pd.DataFrame:
+    df = _load_llm_calls(conn, track=track, include_test=include_test)
     if df.empty or "elapsed_ms" not in df.columns:
         return pd.DataFrame(columns=LATENCY_COLUMNS)
 
@@ -459,8 +467,8 @@ def _empty_run_runtimes_frame(**attrs: int) -> pd.DataFrame:
     return empty
 
 
-def build_run_runtimes(conn, track: int | None = None) -> pd.DataFrame:
-    df = _load_llm_calls(conn, track=track)
+def build_run_runtimes(conn, track: int | None = None, include_test: bool = False) -> pd.DataFrame:
+    df = _load_llm_calls(conn, track=track, include_test=include_test)
     total_rows = len(df)
     missing_elapsed_ms = int(df["elapsed_ms"].isna().sum()) if "elapsed_ms" in df.columns else total_rows
     missing_created_at = (

@@ -57,6 +57,7 @@ from horizon_scanner._utils import (
 )
 from horizon_scanner.db_writer import log_hs_hazard_tail_packs_to_db
 from horizon_scanner.llm_logging import log_hs_llm_call
+from pythia.test_mode import is_test_mode
 from horizon_scanner.hs_triage_prompts import build_triage_prompt
 from horizon_scanner.hs_triage_grounding_prompts import (
     build_triage_grounding_prompt,
@@ -709,6 +710,7 @@ def _run_triage_for_single_hazard(
             response_text=text or "",
             usage=usage_for_log,
             error_text=log_error_text,
+            is_test=is_test_mode(),
         )
         logger.info(
             "Triage logged call: hs_run_id=%s iso3=%s hazard=triage_%s_pass_%s",

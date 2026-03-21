@@ -30,7 +30,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         CREATE TABLE questions (
             question_id TEXT,
-            status TEXT
+            status TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -39,7 +40,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         CREATE TABLE llm_calls (
             question_id TEXT,
             created_at TIMESTAMP,
-            phase TEXT
+            phase TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -47,7 +49,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         CREATE TABLE forecasts_ensemble (
             question_id TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -55,7 +58,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
         """
         CREATE TABLE hs_runs (
             hs_run_id TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )

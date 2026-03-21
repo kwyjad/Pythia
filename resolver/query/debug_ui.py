@@ -46,7 +46,7 @@ def _count_distinct_pair(iso_col: str, hazard_col: str) -> str:
 
 
 def _list_hs_runs_with_debug(
-    conn, limit: int = 50
+    conn, limit: int = 50, include_test: bool = False
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     debug: dict[str, Any] = {"source_table": None, "columns": {}, "notes": []}
 
@@ -104,6 +104,7 @@ def _list_hs_runs_with_debug(
     else:
         hazards_expr = "COUNT(*) AS hazards_triaged"
 
+    test_clause = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
     sql = f"""
         SELECT
           {run_col} AS run_id,
@@ -119,8 +120,10 @@ def _list_hs_runs_with_debug(
         if not phase_col:
             debug["notes"].append("phase_missing")
             return [], debug
-        sql += f" WHERE {phase_col} = ?"
+        sql += f" WHERE {phase_col} = ?{test_clause}"
         params.append(phase_filter)
+    elif test_clause:
+        sql += f" WHERE {test_clause[5:]}"  # strip " AND "
 
     sql += f" GROUP BY 1 ORDER BY {order_expr} LIMIT ?"
     params.append(limit)
@@ -134,8 +137,8 @@ def _list_hs_runs_with_debug(
     return _rows_from_df(df), debug
 
 
-def list_hs_runs(conn, limit: int = 50) -> list[dict[str, Any]]:
-    rows, _ = _list_hs_runs_with_debug(conn, limit=limit)
+def list_hs_runs(conn, limit: int = 50, include_test: bool = False) -> list[dict[str, Any]]:
+    rows, _ = _list_hs_runs_with_debug(conn, limit=limit, include_test=include_test)
     return rows
 
 
@@ -145,6 +148,7 @@ def _get_hs_triage_rows_with_debug(
     iso3: str | None = None,
     hazard_code: str | None = None,
     limit: int = 500,
+    include_test: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     debug: dict[str, Any] = {"columns": {}, "notes": []}
     if not _table_exists(conn, "hs_triage"):
@@ -178,6 +182,7 @@ def _get_hs_triage_rows_with_debug(
     hazard_expr = f"{hazard_col} AS hazard_code" if hazard_col else "NULL AS hazard_code"
     iso_expr = f"UPPER({iso_col}) AS iso3" if iso_col else "NULL AS iso3"
 
+    test_clause = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
     sql = f"""
         SELECT
           {run_col} AS run_id,
@@ -187,7 +192,7 @@ def _get_hs_triage_rows_with_debug(
           {tier_expr},
           {created_expr}
         FROM hs_triage
-        WHERE {run_col} = ?
+        WHERE {run_col} = ?{test_clause}
     """
     params: list[Any] = [run_id]
     if iso3 and iso_col:
@@ -220,9 +225,11 @@ def get_hs_triage_rows(
     iso3: str | None = None,
     hazard_code: str | None = None,
     limit: int = 500,
+    include_test: bool = False,
 ) -> list[dict[str, Any]]:
     rows, _ = _get_hs_triage_rows_with_debug(
-        conn, run_id=run_id, iso3=iso3, hazard_code=hazard_code, limit=limit
+        conn, run_id=run_id, iso3=iso3, hazard_code=hazard_code, limit=limit,
+        include_test=include_test,
     )
     return rows
 
@@ -234,6 +241,7 @@ def _get_hs_triage_llm_calls_with_debug(
     hazard_code: str | None = None,
     limit: int = 200,
     preview_chars: int = 800,
+    include_test: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     debug: dict[str, Any] = {"columns": {}, "notes": []}
     if not _table_exists(conn, "llm_calls"):
@@ -282,6 +290,7 @@ def _get_hs_triage_llm_calls_with_debug(
     iso_expr = f"UPPER({iso_col}) AS iso3" if iso_col else "NULL AS iso3"
     hazard_expr = f"{hazard_col} AS hazard_code" if hazard_col else "NULL AS hazard_code"
 
+    test_clause = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
     sql = f"""
         SELECT
           {created_expr},
@@ -293,7 +302,7 @@ def _get_hs_triage_llm_calls_with_debug(
           {response_expr}
         FROM llm_calls
         WHERE {phase_col} = 'hs_triage'
-          AND {run_col} = ?
+          AND {run_col} = ?{test_clause}
     """
     params: list[Any] = [run_id]
 
@@ -328,6 +337,7 @@ def get_hs_triage_llm_calls(
     hazard_code: str | None = None,
     limit: int = 200,
     preview_chars: int = 800,
+    include_test: bool = False,
 ) -> list[dict[str, Any]]:
     rows, _ = _get_hs_triage_llm_calls_with_debug(
         conn,
@@ -336,6 +346,7 @@ def get_hs_triage_llm_calls(
         hazard_code=hazard_code,
         limit=limit,
         preview_chars=preview_chars,
+        include_test=include_test,
     )
     return rows
 
@@ -526,6 +537,7 @@ def get_hs_triage_all(
     iso3: str | None = None,
     hazard_code: str | None = None,
     limit: int = 2000,
+    include_test: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     diagnostics: dict[str, Any] = {
         "parsed_scores": 0,
@@ -599,6 +611,7 @@ def get_hs_triage_all(
     if not (rc_prob_col and rc_dir_col and rc_mag_col and rc_score_col):
         diagnostics["notes"].append("hs_triage_rc_columns_missing")
 
+    test_clause = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
     sql = f"""
         SELECT
           {run_col} AS run_id,
@@ -613,7 +626,7 @@ def get_hs_triage_all(
           {track_expr},
           {created_expr}
         FROM hs_triage
-        WHERE {run_col} = ?
+        WHERE {run_col} = ?{test_clause}
     """
     params: list[Any] = [run_id]
     if iso3 and iso_col:
@@ -1088,7 +1101,7 @@ def get_hs_triage_all(
     return rows, diagnostics
 
 
-def get_country_run_summary(conn, run_id: str, iso3: str) -> dict[str, Any]:
+def get_country_run_summary(conn, run_id: str, iso3: str, include_test: bool = False) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "run_id": run_id,
         "iso3": iso3.upper(),
@@ -1100,6 +1113,7 @@ def get_country_run_summary(conn, run_id: str, iso3: str) -> dict[str, Any]:
     }
 
     iso3_upper = iso3.upper()
+    test_clause = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
 
     if _table_exists(conn, "hs_triage"):
         h_cols = _table_columns(conn, "hs_triage")
@@ -1111,7 +1125,7 @@ def get_country_run_summary(conn, run_id: str, iso3: str) -> dict[str, Any]:
                     f"""
                     SELECT COUNT(*)
                     FROM hs_triage
-                    WHERE {run_col} = ? AND UPPER({iso_col}) = ?
+                    WHERE {run_col} = ? AND UPPER({iso_col}) = ?{test_clause}
                     """,
                     [run_id, iso3_upper],
                 ).fetchone()

@@ -52,7 +52,8 @@ def test_run_scenarios_for_run_matches_scenarios_schema(
                 window_start_date DATE,
                 window_end_date DATE,
                 wording TEXT,
-                status TEXT
+                status TEXT,
+                is_test BOOLEAN DEFAULT FALSE
             )
             """
         )
@@ -84,7 +85,8 @@ def test_run_scenarios_for_run_matches_scenarios_schema(
                 weights_profile TEXT,
                 created_at TIMESTAMP,
                 status TEXT,
-                human_explanation TEXT
+                human_explanation TEXT,
+                is_test BOOLEAN DEFAULT FALSE
             )
             """
         )

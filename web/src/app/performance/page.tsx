@@ -5,12 +5,20 @@ import PerformancePanel from "./PerformancePanel";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-export default async function PerformancePage() {
+export default async function PerformancePage({
+  searchParams,
+}: {
+  searchParams: { [key: string]: string | string[] | undefined };
+}) {
+  const includeTest = searchParams?.include_test === "true";
+
   let data: PerformanceScoresResponse = { summary_rows: [], run_rows: [] };
   let loadError: string | null = null;
 
   try {
-    data = await apiGet<PerformanceScoresResponse>("/performance/scores");
+    data = await apiGet<PerformanceScoresResponse>("/performance/scores", {
+      include_test: includeTest || undefined,
+    });
   } catch (error) {
     loadError = "Unable to load performance scores right now.";
     console.warn("Failed to load performance scores:", error);

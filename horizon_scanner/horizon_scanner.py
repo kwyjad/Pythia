@@ -56,6 +56,7 @@ from horizon_scanner.regime_change_llm import run_rc_for_country
 from horizon_scanner.triage import run_triage_for_country
 from pythia.adversarial_check import run_adversarial_check
 from pythia.db.schema import connect as pythia_connect, ensure_schema
+from pythia.test_mode import is_test_mode
 from pythia.web_research import fetch_evidence_pack
 
 # Ensure package imports resolve when executed as a script
@@ -306,6 +307,7 @@ def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str
                     "recent_signals": pack.get("recent_signals") or [],
                 }
             },
+            is_test=is_test_mode(),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to persist HS evidence pack for %s: %s", iso3, exc)
@@ -890,7 +892,7 @@ def _is_missing_regime_change_column_error(exc: Exception) -> bool:
     )
 
 
-def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text: str | None = None) -> None:
+def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text: str | None = None, is_test: bool = False) -> None:
     allowed_hazards = set(_build_hazard_catalog().keys())
     expected_hazards = get_expected_hs_hazards()
     con = pythia_connect(read_only=False)
@@ -1001,6 +1003,7 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                 regime_change.get("window"),
                 json.dumps(regime_change),
                 track,
+                is_test,
             ]
             try:
                 con.execute(
@@ -1011,9 +1014,10 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                         drivers_json, regime_shifts_json, data_quality_json, scenario_stub,
                         regime_change_likelihood, regime_change_magnitude, regime_change_score,
                         regime_change_level, regime_change_direction, regime_change_window,
-                        regime_change_json, track
+                        regime_change_json, track,
+                        is_test
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     insert_payload,
                 )
@@ -1192,7 +1196,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str, crisiswatch_d
         }
 
     triage = {"country": iso3_up, "hazards": combined_hazards}
-    _write_hs_triage(run_id, iso3_up, triage)
+    _write_hs_triage(run_id, iso3_up, triage, is_test=is_test_mode())
 
     # 5. Tail packs (unchanged — triggered by RC levels)
     if HS_TAIL_PACKS_ENABLED:
@@ -1316,6 +1320,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str, crisiswatch_d
                                 "recent_signals": signals_list,
                             }
                         ],
+                        is_test=is_test_mode(),
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
@@ -1364,6 +1369,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str, crisiswatch_d
                                 "model_id": adv_result.get("model_id", ""),
                             }
                         ],
+                        is_test=is_test_mode(),
                     )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -1461,6 +1467,8 @@ def _load_country_list(
 def main(countries: list[str] | None = None):
     logger.info("Starting Horizon Scanner triage run...")
     ensure_schema()
+
+    _is_test = is_test_mode()
 
     start_time = datetime.utcnow()
     run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
@@ -1563,6 +1571,7 @@ def main(countries: list[str] | None = None):
                 config_profile=config_profile,
                 requested_countries=requested_countries,
                 skipped_entries=skipped_entries,
+                is_test=_is_test,
             )
         except Exception as exc:  # pragma: no cover - best-effort logging
             logger.warning("Failed to log hs_run %s: %s", run_id, exc)

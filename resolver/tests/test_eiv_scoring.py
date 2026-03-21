@@ -25,19 +25,22 @@ def _make_db():
             hs_run_id TEXT,
             iso3 TEXT,
             hazard_code TEXT,
-            metric TEXT
+            metric TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
     """)
     conn.execute("""
         CREATE TABLE hs_runs (
-            hs_run_id TEXT
+            hs_run_id TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         )
     """)
     conn.execute("""
         CREATE TABLE resolutions (
             question_id TEXT,
             horizon_m INTEGER,
-            value DOUBLE
+            value DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         )
     """)
     conn.execute("""
@@ -45,7 +48,8 @@ def _make_db():
             question_id TEXT,
             horizon_m INTEGER,
             class_bin TEXT,
-            p DOUBLE
+            p DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         )
     """)
     conn.execute("""
@@ -54,7 +58,8 @@ def _make_db():
             month_index INTEGER,
             model_name TEXT,
             bucket_index INTEGER,
-            probability DOUBLE
+            probability DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         )
     """)
     conn.execute("""
@@ -65,7 +70,8 @@ def _make_db():
             score_type TEXT,
             model_name TEXT,
             value DOUBLE,
-            created_at TIMESTAMP DEFAULT now()
+            created_at TIMESTAMP DEFAULT now(),
+            is_test BOOLEAN DEFAULT FALSE
         )
     """)
     conn.execute("""
@@ -89,6 +95,7 @@ def _make_db():
             within_20pct BOOLEAN,
             centroid_version TEXT,
             created_at TIMESTAMP DEFAULT now(),
+            is_test BOOLEAN DEFAULT FALSE,
             PRIMARY KEY (question_id, horizon_m, model_name)
         )
     """)
@@ -118,12 +125,12 @@ def test_eiv_basic():
     spd = [0.1, 0.2, 0.4, 0.2, 0.1]
 
     conn.execute(
-        "INSERT INTO questions VALUES ('q1', 'run1', 'SOM', 'ACE', 'PA')"
+        "INSERT INTO questions (question_id, hs_run_id, iso3, hazard_code, metric) VALUES ('q1', 'run1', 'SOM', 'ACE', 'PA')"
     )
-    conn.execute("INSERT INTO hs_runs VALUES ('run1')")
+    conn.execute("INSERT INTO hs_runs (hs_run_id) VALUES ('run1')")
     for cb, p in zip(class_bins, spd):
         conn.execute(
-            "INSERT INTO forecasts_ensemble VALUES ('q1', 1, ?, ?)", [cb, p]
+            "INSERT INTO forecasts_ensemble (question_id, horizon_m, class_bin, p) VALUES ('q1', 1, ?, ?)", [cb, p]
         )
 
     rows = _compute_eiv_for_question(
@@ -189,12 +196,12 @@ def test_eiv_floor():
     spd = [0.9, 0.05, 0.03, 0.01, 0.01]
 
     conn.execute(
-        "INSERT INTO questions VALUES ('q2', 'run1', 'SOM', 'ACE', 'PA')"
+        "INSERT INTO questions (question_id, hs_run_id, iso3, hazard_code, metric) VALUES ('q2', 'run1', 'SOM', 'ACE', 'PA')"
     )
-    conn.execute("INSERT INTO hs_runs VALUES ('run1')")
+    conn.execute("INSERT INTO hs_runs (hs_run_id) VALUES ('run1')")
     for cb, p in zip(class_bins, spd):
         conn.execute(
-            "INSERT INTO forecasts_ensemble VALUES ('q2', 1, ?, ?)", [cb, p]
+            "INSERT INTO forecasts_ensemble (question_id, horizon_m, class_bin, p) VALUES ('q2', 1, ?, ?)", [cb, p]
         )
 
     rows = _compute_eiv_for_question(
@@ -236,11 +243,11 @@ def test_ema_no_activation(caplog):
     for i in range(5):
         qid = f"q_ema_{i}"
         conn.execute(
-            "INSERT INTO questions VALUES (?, 'run1', 'SOM', 'ACE', 'PA')",
+            "INSERT INTO questions (question_id, hs_run_id, iso3, hazard_code, metric) VALUES (?, 'run1', 'SOM', 'ACE', 'PA')",
             [qid],
         )
         conn.execute(
-            "INSERT INTO resolutions VALUES (?, 1, ?)",
+            "INSERT INTO resolutions (question_id, horizon_m, value) VALUES (?, 1, ?)",
             [qid, 3000.0],  # bucket 1 for PA (<10k)
         )
 
@@ -313,11 +320,11 @@ def test_ema_activation():
     for i in range(15):
         qid = f"q_ema_{i}"
         conn.execute(
-            "INSERT INTO questions VALUES (?, 'run1', 'SOM', 'ACE', 'PA')",
+            "INSERT INTO questions (question_id, hs_run_id, iso3, hazard_code, metric) VALUES (?, 'run1', 'SOM', 'ACE', 'PA')",
             [qid],
         )
         conn.execute(
-            "INSERT INTO resolutions VALUES (?, 1, ?)",
+            "INSERT INTO resolutions (question_id, horizon_m, value) VALUES (?, 1, ?)",
             [qid, 3000.0],
         )
 

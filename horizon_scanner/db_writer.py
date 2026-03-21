@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 from typing import Iterable
 
 from pythia.db.schema import connect, ensure_schema
+from pythia.test_mode import is_test_mode
 from pythia.utils.ids import scenario_id as sid, question_id as qid
 
 HAZARD_CONFIG = {
@@ -228,15 +229,10 @@ def _build_question_row(
         "window_end": closing_date.isoformat(),
     }
 
-    if is_test_mode:
-        meta["test_mode"] = True
-        meta["run_profile"] = "test"
-
     hs_json_raw = {"source": "HS", "raw": scenario.get("json", {})}
-    if is_test_mode and isinstance(hs_json_raw.get("raw"), dict):
-        hs_json_raw["raw"] = {**hs_json_raw["raw"], "test_mode": True}
 
     return {
+        "is_test": is_test_mode,
         "question_id": question_id,
         "scenario_ids": scenario_ids,
         "hs_run_id": hs_run_id,
@@ -380,6 +376,7 @@ def log_hs_run_to_db(
     config_profile: str,
     requested_countries: list[str] | None = None,
     skipped_entries: list[dict] | None = None,
+    is_test: bool = False,
 ) -> None:
     con = connect(read_only=False)
     ensure_schema(con)
@@ -399,9 +396,10 @@ def log_hs_run_to_db(
             config_profile,
             countries_json,
             requested_countries_json,
-            skipped_entries_json
+            skipped_entries_json,
+            is_test
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?);
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
         """,
         [
             hs_run_id,
@@ -411,12 +409,13 @@ def log_hs_run_to_db(
             countries_json,
             requested_json,
             skipped_entries_json,
+            is_test,
         ],
     )
     con.close()
 
 
-def log_hs_scenarios_to_db(hs_run_id: str, scenarios: Iterable[dict]) -> None:
+def log_hs_scenarios_to_db(hs_run_id: str, scenarios: Iterable[dict], is_test: bool = False) -> None:
     con = connect(read_only=False)
     ensure_schema(con)
 
@@ -464,8 +463,9 @@ def log_hs_scenarios_to_db(hs_run_id: str, scenarios: Iterable[dict]) -> None:
                 pin_best_guess,
                 pa_best_guess,
                 scenario_markdown,
-                scenario_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                scenario_json,
+                is_test
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 hs_run_id,
@@ -479,13 +479,14 @@ def log_hs_scenarios_to_db(hs_run_id: str, scenarios: Iterable[dict]) -> None:
                 pa_best_guess,
                 scenario_markdown,
                 scenario_json,
+                is_test,
             ],
         )
 
     con.close()
 
 
-def log_hs_country_reports_to_db(hs_run_id: str, reports: dict[str, dict]) -> None:
+def log_hs_country_reports_to_db(hs_run_id: str, reports: dict[str, dict], is_test: bool = False) -> None:
     con = connect(read_only=False)
     ensure_schema(con)
 
@@ -508,8 +509,8 @@ def log_hs_country_reports_to_db(hs_run_id: str, reports: dict[str, dict]) -> No
         )
         con.execute(
             """
-            INSERT INTO hs_country_reports (hs_run_id, iso3, report_markdown, sources_json, grounded, grounding_debug_json, structural_context, recent_signals_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            INSERT INTO hs_country_reports (hs_run_id, iso3, report_markdown, sources_json, grounded, grounding_debug_json, structural_context, recent_signals_json, is_test)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 hs_run_id,
@@ -520,13 +521,14 @@ def log_hs_country_reports_to_db(hs_run_id: str, reports: dict[str, dict]) -> No
                 grounding_debug_json,
                 structural_context,
                 recent_signals_json,
+                is_test,
             ],
         )
 
     con.close()
 
 
-def log_hs_hazard_tail_packs_to_db(hs_run_id: str, packs: list[dict]) -> None:
+def log_hs_hazard_tail_packs_to_db(hs_run_id: str, packs: list[dict], is_test: bool = False) -> None:
     con = connect(read_only=False)
     ensure_schema(con)
 
@@ -588,8 +590,9 @@ def log_hs_hazard_tail_packs_to_db(hs_run_id: str, packs: list[dict]) -> None:
                 grounded,
                 grounding_debug_json,
                 structural_context,
-                recent_signals_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                recent_signals_json,
+                is_test
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 hs_run_id,
@@ -606,13 +609,14 @@ def log_hs_hazard_tail_packs_to_db(hs_run_id: str, packs: list[dict]) -> None:
                 grounding_debug_json,
                 structural_context,
                 recent_signals_json,
+                is_test,
             ],
         )
 
     con.close()
 
 
-def log_hs_adversarial_checks_to_db(hs_run_id: str, checks: list[dict]) -> None:
+def log_hs_adversarial_checks_to_db(hs_run_id: str, checks: list[dict], is_test: bool = False) -> None:
     """Persist adversarial evidence checks to ``hs_adversarial_checks``."""
     con = connect(read_only=False)
     ensure_schema(con)
@@ -630,8 +634,9 @@ def log_hs_adversarial_checks_to_db(hs_run_id: str, checks: list[dict]) -> None:
             INSERT INTO hs_adversarial_checks (
                 hs_run_id, iso3, hazard_code, rc_level,
                 net_assessment, summary, payload_json,
-                sources_json, grounded, model_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                sources_json, grounded, model_id,
+                is_test
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 hs_run_id,
@@ -644,13 +649,14 @@ def log_hs_adversarial_checks_to_db(hs_run_id: str, checks: list[dict]) -> None:
                 check.get("sources_json") or "[]",
                 bool(check.get("grounded")),
                 check.get("model_id") or "",
+                is_test,
             ],
         )
 
     con.close()
 
 
-def log_hs_questions_to_db(hs_run_id: str, question_rows: Iterable[dict]) -> None:
+def log_hs_questions_to_db(hs_run_id: str, question_rows: Iterable[dict], is_test: bool = False) -> None:
     """Persist Horizon Scanner questions to the ``questions`` table.
 
     **Preservation semantics**: if a ``question_id`` already exists in the
@@ -702,8 +708,9 @@ def log_hs_questions_to_db(hs_run_id: str, question_rows: Iterable[dict]) -> Non
                 window_end_date,
                 wording,
                 status,
-                pythia_metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                pythia_metadata_json,
+                is_test
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 question_id,
@@ -718,6 +725,7 @@ def log_hs_questions_to_db(hs_run_id: str, question_rows: Iterable[dict]) -> Non
                 q.get("wording"),
                 q.get("status") or "active",
                 pythia_metadata_json,
+                is_test,
             ],
         )
         inserted += 1
@@ -757,8 +765,6 @@ def upsert_hs_payload(
         s_id = sid(iso3, hz, sc.get("title", ""), sc.get("json", {}))
 
         raw_json = sc.get("json") or {}
-        if is_test_mode and isinstance(raw_json, dict):
-            raw_json = {**raw_json, "test_mode": True}
 
         scenario_payload = {
             "scenario_id": s_id,
@@ -857,8 +863,8 @@ def upsert_hs_payload(
         )
 
     if scenario_rows:
-        log_hs_scenarios_to_db(hs_run_id, scenario_rows)
+        log_hs_scenarios_to_db(hs_run_id, scenario_rows, is_test=is_test_mode)
     if question_rows:
-        log_hs_questions_to_db(hs_run_id, question_rows)
+        log_hs_questions_to_db(hs_run_id, question_rows, is_test=is_test_mode)
 
     return scenario_rows, question_rows

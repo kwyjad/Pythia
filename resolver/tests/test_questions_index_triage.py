@@ -18,7 +18,8 @@ def test_compute_questions_triage_summary_selects_latest_row() -> None:
             hs_run_id TEXT,
             metric TEXT,
             target_month TEXT,
-            status TEXT
+            status TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -31,7 +32,8 @@ def test_compute_questions_triage_summary_selects_latest_row() -> None:
             tier TEXT,
             triage_score DOUBLE,
             need_full_spd BOOLEAN,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )

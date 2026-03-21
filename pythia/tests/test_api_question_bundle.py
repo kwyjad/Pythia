@@ -28,15 +28,19 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
     con = duckdb.connect(str(db_path), read_only=False)
     con.execute(
         """
-        CREATE TABLE hs_runs (hs_run_id TEXT, generated_at TIMESTAMP, created_at TIMESTAMP);
-        INSERT INTO hs_runs VALUES
+        CREATE TABLE hs_runs (hs_run_id TEXT, generated_at TIMESTAMP, created_at TIMESTAMP, is_test BOOLEAN DEFAULT FALSE);
+        INSERT INTO hs_runs (hs_run_id, generated_at, created_at) VALUES
           ('hs-old', TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-01'),
           ('hs-new', TIMESTAMP '2024-02-01', TIMESTAMP '2024-02-01');
         CREATE TABLE hs_triage (
             run_id TEXT, iso3 TEXT, hazard_code TEXT, tier TEXT, triage_score DOUBLE, created_at TIMESTAMP,
-            drivers_json TEXT, regime_shifts_json TEXT, data_quality_json TEXT
+            drivers_json TEXT, regime_shifts_json TEXT, data_quality_json TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
-        INSERT INTO hs_triage VALUES (
+        INSERT INTO hs_triage (
+            run_id, iso3, hazard_code, tier, triage_score, created_at,
+            drivers_json, regime_shifts_json, data_quality_json
+        ) VALUES (
             'hs-new', 'KEN', 'DR', 'priority', 0.8, TIMESTAMP '2024-02-02',
             '{"drivers":["dry"]}', '{"regime":["shift"]}', '{"data":"ok"}'
         );
@@ -52,24 +56,36 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
         INSERT INTO hs_scenarios VALUES ('hs-new', 'S-NEW', 'KEN', 'DR', 'Title', 'md', '{"key":"value"}');
         CREATE TABLE questions (
             question_id TEXT, hs_run_id TEXT, scenario_ids_json TEXT, iso3 TEXT, hazard_code TEXT,
-            metric TEXT, target_month TEXT, wording TEXT
+            metric TEXT, target_month TEXT, wording TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
-        INSERT INTO questions VALUES
+        INSERT INTO questions (
+            question_id, hs_run_id, scenario_ids_json, iso3, hazard_code,
+            metric, target_month, wording
+        ) VALUES
           ('Q1', 'hs-old', '["S-OLD"]', 'KEN', 'DR', 'PA', '2025-01', 'Old wording'),
           ('Q1', 'hs-new', '["S-NEW"]', 'KEN', 'DR', 'PA', '2025-01', 'New wording'),
           ('Q2', 'hs-new', '[]', 'UGA', 'ACE', 'FATALITIES', '2025-02', 'Fatalities wording');
         CREATE TABLE forecasts_ensemble (
             run_id TEXT, question_id TEXT, month_index INTEGER, bucket_index INTEGER,
-            probability DOUBLE, model_name TEXT, created_at TIMESTAMP
+            probability DOUBLE, model_name TEXT, created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
-        INSERT INTO forecasts_ensemble VALUES
+        INSERT INTO forecasts_ensemble (
+            run_id, question_id, month_index, bucket_index,
+            probability, model_name, created_at
+        ) VALUES
           ('f-old', 'Q1', 1, 1, 0.1, 'm', TIMESTAMP '2024-02-01'),
           ('f-new', 'Q1', 1, 2, 0.2, 'm', TIMESTAMP '2024-03-01');
         CREATE TABLE forecasts_raw (
             run_id TEXT, question_id TEXT, model_name TEXT, month_index INTEGER,
-            bucket_index INTEGER, probability DOUBLE, spd_json TEXT
+            bucket_index INTEGER, probability DOUBLE, spd_json TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
-        INSERT INTO forecasts_raw VALUES ('f-new', 'Q1', 'm', 1, 1, 0.3, '{"spd":1}');
+        INSERT INTO forecasts_raw (
+            run_id, question_id, model_name, month_index,
+            bucket_index, probability, spd_json
+        ) VALUES ('f-new', 'Q1', 'm', 1, 1, 0.3, '{"spd":1}');
         CREATE TABLE question_research (
             run_id TEXT, question_id TEXT, iso3 TEXT, hazard_code TEXT, metric TEXT, research_json TEXT,
             hs_evidence_json TEXT, question_evidence_json TEXT, merged_evidence_json TEXT,
@@ -85,23 +101,31 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
         );
         INSERT INTO scenarios VALUES ('f-new', 'KEN', 'DR', 'PA', 'baseline', 'baseline', 0.4, 'story', now());
         CREATE TABLE question_context (
-            run_id TEXT, question_id TEXT, snapshot_end_month TEXT, context_json TEXT, pa_history_json TEXT
+            run_id TEXT, question_id TEXT, snapshot_start_month TEXT, snapshot_end_month TEXT, context_json TEXT, pa_history_json TEXT
         );
-        INSERT INTO question_context VALUES
+        INSERT INTO question_context (run_id, question_id, snapshot_end_month, context_json, pa_history_json) VALUES
           ('f-old', 'Q1', '2025-05', '{"ctx":"old"}', '{"pa":1}'),
           ('f-new', 'Q1', '2025-06', '{"ctx":"new"}', '{"pa":2}');
         CREATE TABLE resolutions (question_id TEXT, observed_month TEXT, value DOUBLE);
         INSERT INTO resolutions VALUES ('Q1', '2025-01', 12.0);
         CREATE TABLE scores (
-            question_id TEXT, horizon_m INTEGER, model_name TEXT, score_type TEXT, value DOUBLE, run_id TEXT, created_at TIMESTAMP
+            question_id TEXT, horizon_m INTEGER, model_name TEXT, score_type TEXT, value DOUBLE, run_id TEXT, created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
-        INSERT INTO scores VALUES ('Q1', 1, 'model-a', 'brier', 0.12, TIMESTAMP '2025-02-01');
+        INSERT INTO scores (
+            question_id, horizon_m, model_name, score_type, value, created_at
+        ) VALUES ('Q1', 1, 'model-a', 'brier', 0.12, TIMESTAMP '2025-02-01');
         CREATE TABLE llm_calls (
             call_id TEXT, run_id TEXT, hs_run_id TEXT, question_id TEXT, phase TEXT, prompt_text TEXT,
             response_text TEXT, parsed_json TEXT, usage_json TEXT, timestamp TIMESTAMP, iso3 TEXT,
-            hazard_code TEXT, model_id TEXT, model_name TEXT
+            hazard_code TEXT, model_id TEXT, model_name TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
-        INSERT INTO llm_calls VALUES
+        INSERT INTO llm_calls (
+            call_id, run_id, hs_run_id, question_id, phase, prompt_text,
+            response_text, parsed_json, usage_json, timestamp, iso3,
+            hazard_code, model_id, model_name
+        ) VALUES
           ('c1', 'f-new', NULL, 'Q1', 'research_v2', 'prompt', 'response', '{"foo":1}', '{"bar":2}', now(), NULL, NULL, 'gemini-3-pro-preview', 'gemini'),
           ('c2', NULL, 'hs-new', NULL, 'hs_triage', 'hs prompt', 'hs response', '{"note":"triage"}', '{"usage":1}', now(), 'KEN', 'DR', 'gpt-5.2', 'gpt'),
           ('c3', NULL, 'hs-new', NULL, 'hs_web_research', 'hs web', 'hs web response', '{"note":"web"}', '{"usage":2}', now(), 'KEN', 'DR', 'gemini-3-flash-preview', 'gemini'),

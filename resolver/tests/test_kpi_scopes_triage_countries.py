@@ -27,13 +27,14 @@ def test_compute_countries_triaged_for_month_from_llm_calls() -> None:
         CREATE TABLE llm_calls (
             iso3 TEXT,
             phase TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
     iso3s = _build_iso3_codes(120)
     rows = [(iso3, "hs_triage", "2026-01-15 00:00:00") for iso3 in iso3s]
-    con.executemany("INSERT INTO llm_calls VALUES (?, ?, ?)", rows)
+    con.executemany("INSERT INTO llm_calls (iso3, phase, created_at) VALUES (?, ?, ?)", rows)
 
     result = compute_countries_triaged_for_month(con, "2026-01")
 
@@ -48,7 +49,8 @@ def test_compute_countries_triaged_for_month_fallback_to_hs_triage() -> None:
         CREATE TABLE llm_calls (
             iso3 TEXT,
             phase TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -56,18 +58,19 @@ def test_compute_countries_triaged_for_month_fallback_to_hs_triage() -> None:
         """
         CREATE TABLE hs_triage (
             iso3 TEXT,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
     con.execute(
         """
-        INSERT INTO llm_calls VALUES ('USA', 'forecast', '2026-01-10 00:00:00');
+        INSERT INTO llm_calls (iso3, phase, created_at) VALUES ('USA', 'forecast', '2026-01-10 00:00:00');
         """
     )
     con.execute(
         """
-        INSERT INTO hs_triage VALUES
+        INSERT INTO hs_triage (iso3, created_at) VALUES
             ('USA', '2026-01-02 00:00:00'),
             ('CAN', '2026-01-03 00:00:00'),
             ('MEX', '2026-01-04 00:00:00');

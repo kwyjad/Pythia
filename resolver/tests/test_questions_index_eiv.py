@@ -15,7 +15,8 @@ def test_compute_questions_forecast_summary_uses_latest_run() -> None:
             question_id TEXT,
             iso3 TEXT,
             hazard_code TEXT,
-            metric TEXT
+            metric TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -31,7 +32,8 @@ def test_compute_questions_forecast_summary_uses_latest_run() -> None:
             metric TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
-            probability DOUBLE
+            probability DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -96,7 +98,8 @@ def test_compute_questions_forecast_summary_uses_wildcard_centroids() -> None:
             question_id TEXT,
             iso3 TEXT,
             hazard_code TEXT,
-            metric TEXT
+            metric TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -112,7 +115,8 @@ def test_compute_questions_forecast_summary_uses_wildcard_centroids() -> None:
             metric TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
-            probability DOUBLE
+            probability DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -175,7 +179,8 @@ def test_compute_questions_forecast_summary_falls_back_without_centroids() -> No
             question_id TEXT,
             iso3 TEXT,
             hazard_code TEXT,
-            metric TEXT
+            metric TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -191,7 +196,8 @@ def test_compute_questions_forecast_summary_falls_back_without_centroids() -> No
             metric TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
-            probability DOUBLE
+            probability DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -238,7 +244,8 @@ def test_compute_questions_forecast_summary_prefers_bayesmc() -> None:
             question_id TEXT,
             iso3 TEXT,
             hazard_code TEXT,
-            metric TEXT
+            metric TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -254,7 +261,8 @@ def test_compute_questions_forecast_summary_prefers_bayesmc() -> None:
             metric TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
-            probability DOUBLE
+            probability DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -319,7 +327,8 @@ def test_compute_questions_forecast_summary_falls_back_to_mean() -> None:
             question_id TEXT,
             iso3 TEXT,
             hazard_code TEXT,
-            metric TEXT
+            metric TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -335,7 +344,8 @@ def test_compute_questions_forecast_summary_falls_back_to_mean() -> None:
             metric TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
-            probability DOUBLE
+            probability DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -398,7 +408,8 @@ def test_compute_questions_forecast_summary_fatalities_additive() -> None:
             question_id TEXT,
             iso3 TEXT,
             hazard_code TEXT,
-            metric TEXT
+            metric TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -414,7 +425,8 @@ def test_compute_questions_forecast_summary_fatalities_additive() -> None:
             metric TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
-            probability DOUBLE
+            probability DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -493,7 +505,8 @@ def test_compute_questions_forecast_summary_ignores_ev_value() -> None:
             month_index INTEGER,
             bucket_index INTEGER,
             probability DOUBLE,
-            ev_value DOUBLE
+            ev_value DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )

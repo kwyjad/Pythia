@@ -73,6 +73,29 @@ def test_get_db_url_prefers_env_over_config(monkeypatch):
     assert url == env_url
 
 
+def test_is_test_column_on_all_target_tables(tmp_path, monkeypatch):
+    """After ensure_schema(), is_test column should exist on all target tables."""
+    db_path = tmp_path / "resolver_is_test.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    ensure_schema()
+
+    con = duckdb.connect(str(db_path))
+    try:
+        target_tables = [
+            "hs_runs", "hs_scenarios", "hs_triage", "hs_country_reports",
+            "hs_hazard_tail_packs", "hs_adversarial_checks", "questions",
+            "forecasts_ensemble", "forecasts_raw", "llm_calls",
+            "question_research", "question_run_metrics", "scenarios",
+            "question_context", "run_provenance",
+        ]
+        for table in target_tables:
+            cols = _columns(con, table)
+            assert "is_test" in cols, f"is_test column missing from {table}"
+    finally:
+        con.close()
+
+
 def test_bucket_definitions_seeded(tmp_path, monkeypatch):
     db_path = tmp_path / "resolver_buckets.duckdb"
     monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")

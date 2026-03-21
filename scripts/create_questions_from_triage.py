@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import duckdb
 
 from pythia.db.schema import ensure_schema
+from pythia.test_mode import is_test_mode
 
 
 DEFAULT_DB_URL = "duckdb:///data/resolver.duckdb"
@@ -306,6 +307,7 @@ def _upsert_question(
     window_start_date: date,
     window_end_date: date,
     track: Optional[int] = None,
+    is_test: bool = False,
 ) -> None:
     existing = con.execute(
         "SELECT 1 FROM questions WHERE question_id = ?", [question_id]
@@ -319,8 +321,9 @@ def _upsert_question(
             question_id, hs_run_id, scenario_ids_json,
             iso3, hazard_code, metric,
             target_month, window_start_date, window_end_date,
-            wording, status, pythia_metadata_json, track
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            wording, status, pythia_metadata_json, track,
+            is_test
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             question_id,
@@ -336,6 +339,7 @@ def _upsert_question(
             status,
             meta_json,
             track,
+            is_test,
         ],
     )
 
@@ -354,6 +358,8 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
         if not triaged:
             print(f"create_questions_from_triage: no eligible hs_triage rows for run_id={run_id}.")
             return 0
+
+        _is_test = is_test_mode()
 
         inserted = 0
         today = date.today()
@@ -386,6 +392,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     window_start_date=opening,
                     window_end_date=closing,
                     track=th.track,
+                    is_test=_is_test,
                 )
                 inserted += 1
 
@@ -406,6 +413,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     window_start_date=opening,
                     window_end_date=closing,
                     track=th.track,
+                    is_test=_is_test,
                 )
                 inserted += 1
                 continue
@@ -456,6 +464,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     window_start_date=opening,
                     window_end_date=closing,
                     track=th.track,
+                    is_test=_is_test,
                 )
                 inserted += 1
 

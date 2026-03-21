@@ -28,13 +28,14 @@ def _seed_llm_calls(con: duckdb.DuckDBPyConnection) -> None:
             model_name VARCHAR,
             cost_usd DOUBLE,
             elapsed_ms DOUBLE,
-            created_at TIMESTAMP
+            created_at TIMESTAMP,
+            is_test BOOLEAN DEFAULT FALSE
         )
         """
     )
     con.execute(
         """
-        INSERT INTO llm_calls VALUES
+        INSERT INTO llm_calls (run_id, hs_run_id, question_id, iso3, phase, model_id, model_name, cost_usd, elapsed_ms, created_at) VALUES
             ('run-1', NULL, 'q1', 'USA', 'web_search', 'gpt-4', NULL, 1.0, 100, '2024-01-15 00:00:00'),
             ('run-1', NULL, 'q1', 'USA', 'hs_summarize', 'gpt-4', NULL, 2.0, 200, '2024-01-15 00:00:00'),
             ('run-1', NULL, 'q2', 'CAN', 'research_step', 'gpt-3.5', NULL, 3.0, 300, '2024-02-10 00:00:00'),

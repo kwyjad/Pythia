@@ -267,7 +267,7 @@ def _latest_triage(conn) -> pd.DataFrame:
     return df
 
 
-def build_forecast_spd_export(con) -> pd.DataFrame:
+def build_forecast_spd_export(con, include_test: bool = False) -> pd.DataFrame:
     columns = [
         "ISO",
         "country_name",
@@ -291,6 +291,7 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
         "regime_change_score",
         "hs_run_ID",
         "track",
+        "is_test",
     ]
 
     if con is None or not _table_exists(con, "questions"):
@@ -302,12 +303,16 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
         _warn_once("questions_missing", "Questions table missing required columns for export.")
         return pd.DataFrame(columns=columns)
 
+    test_clause = "" if include_test else " WHERE COALESCE(is_test, FALSE) = FALSE"
+    has_is_test = "is_test" in q_cols
+    is_test_expr = ", is_test" if has_is_test else ""
+
     has_track = "track" in q_cols
     track_expr = ", track" if has_track else ""
     questions = con.execute(
         f"""
-        SELECT question_id, iso3, hazard_code, metric, target_month, hs_run_id{track_expr}
-        FROM questions
+        SELECT question_id, iso3, hazard_code, metric, target_month, hs_run_id{track_expr}{is_test_expr}
+        FROM questions{test_clause if has_is_test else ""}
         """
     ).fetchdf()
     if not has_track:
@@ -550,13 +555,14 @@ def build_forecast_spd_export(con) -> pd.DataFrame:
             "regime_change_score": pivot.get("regime_change_score"),
             "hs_run_ID": pivot["hs_run_id"],
             "track": pivot.get("track"),
+            "is_test": pivot.get("is_test"),
         }
     )
 
     return output[columns]
 
 
-def build_triage_export(con) -> pd.DataFrame:
+def build_triage_export(con, include_test: bool = False) -> pd.DataFrame:
     columns = [
         "Triage Year",
         "Triage Month",
@@ -567,6 +573,7 @@ def build_triage_export(con) -> pd.DataFrame:
         "Country",
         "Triage Score",
         "Triage Tier",
+        "is_test",
     ]
 
     if con is None or not _table_exists(con, "hs_triage"):
@@ -646,13 +653,14 @@ def build_triage_export(con) -> pd.DataFrame:
             "Country": collapsed["Country"],
             "Triage Score": collapsed["triage_score"],
             "Triage Tier": collapsed["tier"],
+            "is_test": collapsed.get("is_test"),
         }
     )
 
     return output.sort_values(["Run ID", "ISO3"]).reset_index(drop=True)[columns]
 
 
-def build_ensemble_scores_export(con, model_filter: str) -> pd.DataFrame:
+def build_ensemble_scores_export(con, model_filter: str, include_test: bool = False) -> pd.DataFrame:
     """Build per-question scores export for a specific ensemble model.
 
     Args:
@@ -684,7 +692,7 @@ def build_ensemble_scores_export(con, model_filter: str) -> pd.DataFrame:
         columns.append(f"eiv_month{m}")
     for m in range(1, 7):
         columns.append(f"resolution_month{m}")
-    columns.extend(["brier", "log_loss", "crps"])
+    columns.extend(["brier", "log_loss", "crps", "is_test"])
 
     empty = pd.DataFrame(columns=columns)
     if con is None:
@@ -714,6 +722,7 @@ def build_ensemble_scores_export(con, model_filter: str) -> pd.DataFrame:
     track_select = "q.track," if has_track else ""
     track_group = ", q.track" if has_track else ""
 
+    test_clause = "" if include_test else " AND COALESCE(s.is_test, FALSE) = FALSE"
     base = con.execute(
         f"""
         SELECT
@@ -729,7 +738,7 @@ def build_ensemble_scores_export(con, model_filter: str) -> pd.DataFrame:
             AVG(CASE WHEN s.score_type = 'crps'  THEN s.value END) AS crps
         FROM scores s
         JOIN questions q ON s.question_id = q.question_id
-        WHERE s.model_name = ?
+        WHERE s.model_name = ?{test_clause}
         GROUP BY q.question_id, q.hs_run_id, q.iso3,
                  q.hazard_code, UPPER(q.metric), q.target_month{track_group}
         """,
@@ -794,6 +803,7 @@ def build_ensemble_scores_export(con, model_filter: str) -> pd.DataFrame:
     output["brier"] = base["brier"]
     output["log_loss"] = base["log_loss"]
     output["crps"] = base["crps"]
+    output["is_test"] = base.get("is_test")
 
     return (
         output.sort_values(["run_id", "country_iso3", "hazard_type"])
@@ -1048,7 +1058,7 @@ def _add_resolution_columns(con, df: pd.DataFrame) -> None:
             df[col] = merged[col].values
 
 
-def build_model_scores_export(con) -> pd.DataFrame:
+def build_model_scores_export(con, include_test: bool = False) -> pd.DataFrame:
     """Build aggregated model-level scores export.
 
     Returns a DataFrame with 16 columns matching the Scores_model template.
@@ -1159,6 +1169,7 @@ def build_rationale_export(
     con,
     hazard_code: str,
     model_name: str | None = None,
+    include_test: bool = False,
 ) -> pd.DataFrame:
     """Build deduplicated LLM rationale export filtered by hazard and optionally model.
 

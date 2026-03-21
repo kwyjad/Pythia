@@ -34,7 +34,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             iso3 TEXT,
             hazard_code TEXT,
             target_month TEXT,
-            metric TEXT
+            metric TEXT,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )
@@ -44,7 +45,8 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             question_id TEXT,
             month_index INTEGER,
             bucket_index INTEGER,
-            probability DOUBLE
+            probability DOUBLE,
+            is_test BOOLEAN DEFAULT FALSE
         );
         """
     )

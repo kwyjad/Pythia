@@ -1,5 +1,6 @@
 import "../styles/globals.css";
 
+import { Suspense } from "react";
 import type { Metadata } from "next";
 
 import Nav from "../components/Nav";
@@ -17,7 +18,9 @@ const RootLayout = ({ children }: RootLayoutProps) => {
   return (
     <html lang="en">
       <body>
-        <Nav />
+        <Suspense>
+          <Nav />
+        </Suspense>
         <main>{children}</main>
         {process.env.NODE_ENV === "development" ? (
           <script

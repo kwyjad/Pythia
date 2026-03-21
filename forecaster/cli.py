@@ -54,6 +54,7 @@ import numpy as np
 from pathlib import Path
 from pythia.db.schema import connect, ensure_schema
 from pythia.db.schema import connect as pythia_connect
+from pythia.test_mode import is_test_mode
 from pythia.web_research import fetch_evidence_pack
 from forecaster.hs_utils import load_hs_triage_entry
 from forecaster.self_search import (
@@ -76,6 +77,7 @@ COUNTRIES_CSV = Path(__file__).resolve().parents[1] / "resolver" / "data" / "cou
 
 
 _DEFAULT_ENSEMBLE_LOGGED = False
+_IS_TEST = False  # set in main()
 
 
 def _maybe_log_default_ensemble() -> None:
@@ -1164,10 +1166,10 @@ def _record_no_forecast(
             INSERT INTO forecasts_raw (
               run_id, question_id, model_name, month_index, bucket_index,
               probability, ok, elapsed_ms, cost_usd, prompt_tokens, completion_tokens,
-              total_tokens, status, spd_json, human_explanation
-            ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'no_forecast', NULL, ?)
+              total_tokens, status, spd_json, human_explanation, is_test
+            ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'no_forecast', NULL, ?, ?)
             """,
-            [run_id, question_id, model_name, reason],
+            [run_id, question_id, model_name, reason, _IS_TEST],
         )
 
         con.execute(
@@ -1175,10 +1177,10 @@ def _record_no_forecast(
             INSERT INTO forecasts_ensemble (
               run_id, question_id, iso3, hazard_code, metric, model_name,
               month_index, bucket_index, probability, ev_value, weights_profile, created_at,
-              status, human_explanation
-            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'ensemble', CURRENT_TIMESTAMP, 'no_forecast', ?)
+              status, human_explanation, is_test
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'ensemble', CURRENT_TIMESTAMP, 'no_forecast', ?, ?)
             """,
-            [run_id, question_id, iso3, hazard_code, metric, model_name, reason],
+            [run_id, question_id, iso3, hazard_code, metric, model_name, reason, _IS_TEST],
         )
     finally:
         con.close()
@@ -1675,7 +1677,8 @@ def _write_spd_ensemble_to_db(
                 probability DOUBLE,
                 ev_value DOUBLE,
                 weights_profile TEXT,
-                created_at TIMESTAMP
+                created_at TIMESTAMP,
+                is_test BOOLEAN DEFAULT FALSE
             );
             """
         )
@@ -1711,8 +1714,9 @@ def _write_spd_ensemble_to_db(
                             horizon_m,
                             class_bin,
                             p,
-                            created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP);
+                            created_at,
+                            is_test
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?);
                         """,
                         [
                             run_id,
@@ -1723,6 +1727,7 @@ def _write_spd_ensemble_to_db(
                             month_idx,
                             class_bin,
                             float(prob),
+                            _IS_TEST,
                         ],
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -1816,8 +1821,9 @@ def _write_spd_raw_to_db(
                                 total_tokens,
                                 horizon_m,
                                 class_bin,
-                                p
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                                p,
+                                is_test
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                             """,
                             [
                                 run_id,
@@ -1835,6 +1841,7 @@ def _write_spd_raw_to_db(
                                 month_idx,
                                 cb,
                                 float(prob),
+                                _IS_TEST,
                             ],
                         )
                     except Exception as exc:  # noqa: BLE001
@@ -2000,8 +2007,8 @@ def _write_spd_members_v2_to_db(
                     INSERT INTO forecasts_raw (
                         run_id, question_id, model_name, month_index, bucket_index,
                         probability, ok, elapsed_ms, cost_usd, prompt_tokens,
-                        completion_tokens, total_tokens, status, spd_json, human_explanation
-                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'no_forecast', ?, ?)
+                        completion_tokens, total_tokens, status, spd_json, human_explanation, is_test
+                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'no_forecast', ?, ?, ?)
                     """,
                     [
                         run_id,
@@ -2014,6 +2021,7 @@ def _write_spd_members_v2_to_db(
                         total_tokens,
                         json.dumps({"resolution_source": resolution_source, "spds": {}, "member_source": "spd_v2_member_call"}),
                         "No SPD returned for this model.",
+                        _IS_TEST,
                     ],
                 )
                 continue
@@ -2043,8 +2051,8 @@ def _write_spd_members_v2_to_db(
                             run_id, question_id, model_name, month_index, bucket_index,
                             probability, ok, elapsed_ms, cost_usd, prompt_tokens,
                             completion_tokens, total_tokens, status, spd_json, human_explanation,
-                            horizon_m, class_bin, p
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, NULL, ?, ?, ?)
+                            horizon_m, class_bin, p, is_test
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, NULL, ?, ?, ?, ?)
                         """,
                         [
                             run_id,
@@ -2063,6 +2071,7 @@ def _write_spd_members_v2_to_db(
                             month_index,
                             cb,
                             float(prob),
+                            _IS_TEST,
                         ],
                     )
     except Exception as exc:  # noqa: BLE001
@@ -2710,8 +2719,8 @@ def _persist_question_evidence_pack(
         con.execute(
             """
             INSERT INTO question_research
-              (run_id, question_id, iso3, hazard_code, metric, research_json, hs_evidence_json, question_evidence_json, merged_evidence_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              (run_id, question_id, iso3, hazard_code, metric, research_json, hs_evidence_json, question_evidence_json, merged_evidence_json, is_test)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run_id,
@@ -2723,6 +2732,7 @@ def _persist_question_evidence_pack(
                 _json_dumps_for_db({}),
                 _json_dumps_for_db(question_evidence_pack or {}),
                 _json_dumps_for_db(question_evidence_pack or {}),
+                _IS_TEST,
             ],
         )
     finally:
@@ -4650,8 +4660,8 @@ def _write_spd_outputs(
                         run_id, question_id, model_name, month_index, bucket_index,
                         probability, ok, elapsed_ms, cost_usd, prompt_tokens, completion_tokens,
                         total_tokens, status, spd_json, human_explanation,
-                        horizon_m, class_bin, p
-                    ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?)
+                        horizon_m, class_bin, p, is_test
+                    ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         run_id,
@@ -4670,6 +4680,7 @@ def _write_spd_outputs(
                         month_idx,
                         cb,
                         float(prob),
+                        _IS_TEST,
                     ],
                 )
                 con.execute(
@@ -4677,8 +4688,8 @@ def _write_spd_outputs(
                     INSERT INTO forecasts_ensemble (
                         run_id, question_id, iso3, hazard_code, metric, model_name,
                         month_index, bucket_index, probability, ev_value, weights_profile, created_at,
-                        status, human_explanation
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ensemble', CURRENT_TIMESTAMP, 'ok', ?)
+                        status, human_explanation, is_test
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ensemble', CURRENT_TIMESTAMP, 'ok', ?, ?)
                     """,
                     [
                         run_id,
@@ -4691,6 +4702,7 @@ def _write_spd_outputs(
                         bucket_index,
                         float(prob),
                         human_explanation,
+                        _IS_TEST,
                     ],
                 )
     finally:
@@ -4806,8 +4818,8 @@ def _write_binary_outputs(
                         run_id, question_id, model_name, month_index, bucket_index,
                         probability, ok, elapsed_ms, cost_usd, prompt_tokens, completion_tokens,
                         total_tokens, status, spd_json, human_explanation,
-                        horizon_m, class_bin, p
-                    ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?)
+                        horizon_m, class_bin, p, is_test
+                    ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         run_id, qid, model_name, month_idx, bucket_index,
@@ -4822,6 +4834,7 @@ def _write_binary_outputs(
                         month_idx,
                         cb,
                         float(prob),
+                        _IS_TEST,
                     ],
                 )
                 con.execute(
@@ -4829,12 +4842,12 @@ def _write_binary_outputs(
                     INSERT INTO forecasts_ensemble (
                         run_id, question_id, iso3, hazard_code, metric, model_name,
                         month_index, bucket_index, probability, ev_value, weights_profile, created_at,
-                        status, human_explanation
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ensemble', CURRENT_TIMESTAMP, 'ok', ?)
+                        status, human_explanation, is_test
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ensemble', CURRENT_TIMESTAMP, 'ok', ?, ?)
                     """,
                     [
                         run_id, qid, iso3, hz, metric, model_name,
-                        month_idx, bucket_index, float(prob), "",
+                        month_idx, bucket_index, float(prob), "", _IS_TEST,
                     ],
                 )
     finally:
@@ -6339,6 +6352,9 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 def main() -> None:
+    global _IS_TEST
+    _IS_TEST = is_test_mode()
+
     args = _parse_args()
     print("🚀 Forecaster ensemble starting…")
     print(f"Mode: {args.mode} | Limit: {args.limit} | Purpose: {args.purpose}")
@@ -6514,9 +6530,9 @@ def main() -> None:
                         INSERT INTO question_run_metrics (
                             run_id, question_id, iso3, hazard_code, metric,
                             started_at_utc, finished_at_utc, wall_ms, cost_usd,
-                            n_spd_models_expected, n_spd_models_ok, missing_model_ids_json
+                            n_spd_models_expected, n_spd_models_ok, missing_model_ids_json, is_test
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
                             run_id,
@@ -6531,6 +6547,7 @@ def main() -> None:
                             len(expected_model_ids),
                             len(ok_model_ids),
                             json.dumps(missing_model_ids, ensure_ascii=False),
+                            _IS_TEST,
                         ],
                     )
                 finally:
@@ -6550,11 +6567,11 @@ def main() -> None:
                         """
                         INSERT INTO question_research
                           (run_id, question_id, iso3, hazard_code, metric, research_json,
-                           hs_evidence_json, question_evidence_json, merged_evidence_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           hs_evidence_json, question_evidence_json, merged_evidence_json, is_test)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [run_id, qid, iso3, hz, metric,
-                         '{"note": "researcher_retired"}', '{}', '{}', '{}'],
+                         '{"note": "researcher_retired"}', '{}', '{}', '{}', _IS_TEST],
                     )
                     con.close()
                 except Exception:
