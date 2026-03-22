@@ -1947,8 +1947,8 @@ def build_scenario_prompt(
         f"\"\"\"{scenario_text}\"\"\"\n\n"
         "Forecaster rationale:\n"
         f"\"\"\"{rationale_text}\"\"\"\n\n"
-        "Your task is to produce **two possible scenarios** (primary and optional alternative) for the forecast period.\n"
-        "The scenarios must be returned as a single JSON object with the following schema (no extra text):\n\n"
+        "Your task is to produce **one scenario** (primary) for the forecast period.\n"
+        "The scenario must be returned as a single JSON object with the following schema (no extra text):\n\n"
         "```json\n"
         "{\n"
         '  "primary": {\n'
@@ -1965,8 +1965,7 @@ def build_scenario_prompt(
         '      "FoodSecurity": ["• bullet"]\n'
         '    },\n'
         '    "operational_impacts": ["• bullet about ops impact", "• another bullet"]\n'
-        "  },\n"
-        '  "alternative": null\n'
+        "  }\n"
         "}\n"
         "```\n\n"
         "Guidance:\n"
@@ -1975,7 +1974,6 @@ def build_scenario_prompt(
         "- **Operational Impacts**: bullets on what this means for access, surge, supply chains, partnerships, and programmatic choices.\n"
         "- Ensure bullets are concise and specific (no long paragraphs).\n"
         "- Align the scenario with the ensemble SPD (bucket_label and probability) and HS triage evidence.\n"
-        "- If you believe an alternative scenario is important, set `alternative` to an object with the same structure; otherwise, set it to null.\n"
         "\nIf you need more evidence before drafting the scenarios, output EXACTLY one line:\n"
         "NEED_WEB_EVIDENCE: <your query>\n"
         "Otherwise, return only the JSON object above.\n"

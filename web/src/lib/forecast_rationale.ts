@@ -33,17 +33,30 @@ export const extractForecastRationale = (bundle: any): string | null => {
     }
   }
 
-  // Check human_explanation directly in raw_spd and ensemble_spd rows
-  // (the DFS below can hit the seen-limit before reaching these large arrays)
+  // Collect distinct human_explanation values from raw_spd and ensemble_spd rows.
+  // For Track 1 (multi-model), this concatenates explanations from different models.
+  // For Track 2 (single model), this returns the single explanation.
+  const explanations: Array<{ model: string; text: string }> = [];
+  const seenTexts = new Set<string>();
   for (const arr of [forecast?.raw_spd, forecast?.ensemble_spd]) {
     if (Array.isArray(arr)) {
       for (const row of arr) {
         const he = row?.human_explanation;
-        if (typeof he === "string" && isUsefulRationale(he)) {
-          return he.trim();
+        if (typeof he === "string" && isUsefulRationale(he) && !seenTexts.has(he.trim())) {
+          seenTexts.add(he.trim());
+          explanations.push({
+            model: row?.model_name ?? "Model",
+            text: he.trim(),
+          });
         }
       }
     }
+  }
+  if (explanations.length === 1) {
+    return explanations[0].text;
+  }
+  if (explanations.length > 1) {
+    return explanations.map((e) => `${e.model}: ${e.text}`).join("\n\n");
   }
 
   const stack: Array<{ node: unknown; depth: number }> = [

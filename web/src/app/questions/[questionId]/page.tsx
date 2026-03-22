@@ -21,7 +21,7 @@ const QuestionPage = async ({ params, searchParams }: QuestionPageProps) => {
       question_id: params.questionId,
       hs_run_id: hsRunId,
       include_llm_calls: true,
-      include_transcripts: true,
+      include_transcripts: false,
       limit_llm_calls: 200,
       include_test: includeTest || undefined,
     });

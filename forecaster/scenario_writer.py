@@ -397,8 +397,6 @@ async def _run_scenario_for_question(
         LOG.warning("Scenario JSON for %s missing 'primary'; skipping scenario write", qid)
         return
 
-    alternative = scenario.get("alternative") if isinstance(scenario, dict) else None
-
     def _render_structured_scenario_text(s: Dict[str, Any]) -> str:
         lines: list[str] = []
 
@@ -415,7 +413,7 @@ async def _run_scenario_for_question(
         lines.append("Humanitarian Needs")
         for sector in ["WASH", "Health", "Nutrition", "Protection", "Education", "Shelter", "FoodSecurity"]:
             sector_bullets = needs.get(sector) or []
-            lines.append(f"- {sector}:")
+            lines.append(f"{sector}:")
             for sb in sector_bullets:
                 if sb:
                     lines.append(f"  - {sb}")
@@ -450,26 +448,7 @@ async def _run_scenario_for_question(
             ],
         )
 
-        if isinstance(alternative, dict):
-            con.execute(
-                """
-                INSERT INTO scenarios (
-                    run_id, iso3, hazard_code, metric,
-                    scenario_type, bucket_label, probability, text, created_at, is_test
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
-                """,
-                [
-                    run_id,
-                    iso3,
-                    hz,
-                    metric,
-                    "alternative",
-                    alternative.get("bucket_label") or "",
-                    float(alternative.get("probability") or 0.0),
-                    _render_structured_scenario_text(alternative),
-                    is_test_mode(),
-                ],
-            )
+        # Alternative scenarios are no longer generated (prompt requests only primary).
     finally:
         con.close()
 
