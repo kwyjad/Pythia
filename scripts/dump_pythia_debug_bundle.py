@@ -3710,7 +3710,7 @@ def emit_data_inject_inventory_csv(
         "reliefweb_reports_count",
         "hdx_signals_count", "enso_loaded",
         "seasonal_tc_loaded", "nmme_available",
-        "crisiswatch_arrow",
+        "crisiswatch_arrow", "gdacs_event_months",
     ]
 
     # Check which tables exist once
@@ -3836,6 +3836,13 @@ def emit_data_inject_inventory_csv(
             else:
                 cw_arrow = ""
 
+            # GDACS event occurrence months
+            gdacs_event_months = _safe_table_count_where(
+                con, "facts_resolved",
+                "upper(iso3) = ? AND lower(metric) = 'event_occurrence'",
+                [iso3.upper()],
+            ) if has_facts_resolved else 0
+
             writer.writerow({
                 "iso3": iso3,
                 "country_name": country_names.get(iso3.upper(), ""),
@@ -3851,6 +3858,7 @@ def emit_data_inject_inventory_csv(
                 "seasonal_tc_loaded": seasonal_tc_loaded,
                 "nmme_available": nmme_avail,
                 "crisiswatch_arrow": cw_arrow,
+                "gdacs_event_months": gdacs_event_months or 0,
             })
 
     print(f"Wrote data inject inventory to {out_path}")

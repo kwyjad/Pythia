@@ -28,6 +28,7 @@ def build_binary_event_prompt(
     structured_data: dict,
     hs_triage_entry: dict | None = None,
     today: str,
+    gdacs_event_history: dict | None = None,
 ) -> str:
     """Build the full prompt for a binary event forecast.
 
@@ -45,6 +46,8 @@ def build_binary_event_prompt(
         Horizon Scanner triage entry for context.
     today : str
         Today's date as ISO string.
+    gdacs_event_history : dict | None
+        GDACS event occurrence history for seasonal frequency context.
 
     Returns
     -------
@@ -74,6 +77,24 @@ def build_binary_event_prompt(
     sections.append(_section_current_situation(
         current_alerts, structured_data, hs_triage_entry, country, hazard_code
     ))
+
+    # Section 3b: GDACS event history (seasonal frequency context)
+    if gdacs_event_history:
+        try:
+            from forecaster.prompts import _format_gdacs_event_history_for_prompt
+            cal_months = []
+            for fm in forecast_months:
+                try:
+                    cal_months.append(int(fm.split("-")[1]))
+                except (IndexError, ValueError):
+                    pass
+            gdacs_block = _format_gdacs_event_history_for_prompt(
+                gdacs_event_history, cal_months
+            )
+            if gdacs_block:
+                sections.append(gdacs_block)
+        except Exception:
+            pass
 
     # Section 4: Hazard-specific reasoning
     sections.append(get_binary_hazard_reasoning_block(hazard_code))

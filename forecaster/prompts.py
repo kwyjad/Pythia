@@ -1332,6 +1332,112 @@ def _forecast_month_keys_from_question(
     return keys
 
 
+_HAZARD_EVENT_LABELS = {
+    "FL": "flood",
+    "DR": "drought",
+    "TC": "tropical cyclone",
+}
+
+
+def _format_gdacs_event_history_for_prompt(
+    gdacs_history: Dict[str, Any] | None,
+    forecast_months: list[int],
+) -> str:
+    """Format GDACS event history as a prompt block for SPD and binary forecasts.
+
+    Parameters
+    ----------
+    gdacs_history
+        Dict from _build_gdacs_event_history(), or None.
+    forecast_months
+        Calendar month numbers (1-12) that the forecast covers.
+
+    Returns
+    -------
+    str
+        Formatted prompt block, or empty string if no data.
+    """
+    if not gdacs_history:
+        return ""
+
+    hz = gdacs_history.get("hazard_code", "")
+    iso3 = gdacs_history.get("iso3", "")
+    event_label = _HAZARD_EVENT_LABELS.get(hz, hz)
+    data_range = gdacs_history.get("data_range", "")
+    total = gdacs_history.get("total_months", 0)
+    event_months = gdacs_history.get("event_months", 0)
+    event_rate = gdacs_history.get("event_rate_pct", 0)
+    alert_dist = gdacs_history.get("alert_distribution", {})
+    seasonal = gdacs_history.get("seasonal", {})
+    recent_12 = gdacs_history.get("recent_12", [])
+
+    _MONTH_NAMES = {
+        1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+        7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
+    }
+
+    lines: list[str] = []
+    lines.append(
+        f"GDACS EVENT HISTORY ({iso3} — {event_label}):"
+    )
+    lines.append("Source: GDACS (Global Disaster Alert and Coordination System)")
+    lines.append(f"Coverage: {data_range} ({total} months)")
+    lines.append(
+        f"Overall event rate: {event_months} events in {total} months "
+        f"({event_rate:.0f}%)"
+    )
+
+    # Alert distribution
+    if alert_dist:
+        dist_parts = [f"{level}: {count}" for level, count in sorted(alert_dist.items())]
+        lines.append(f"Alert levels (event months only): {', '.join(dist_parts)}")
+
+    # Seasonal frequency for forecast months
+    lines.append("")
+    lines.append("Seasonal event frequency (your forecast months):")
+    for cal_month in forecast_months:
+        s = seasonal.get(cal_month) or seasonal.get(str(cal_month)) or {}
+        years_obs = s.get("years_observed", 0)
+        years_evt = s.get("years_with_event", 0)
+        freq = s.get("frequency_pct", 0)
+        month_name = _MONTH_NAMES.get(cal_month, str(cal_month))
+        if years_obs > 0:
+            lines.append(
+                f"  {month_name}: {years_evt}/{years_obs} years had events ({freq:.0f}%)"
+            )
+        else:
+            lines.append(f"  {month_name}: no historical data")
+
+    # Recent 12 months timeline
+    if recent_12:
+        lines.append("")
+        lines.append("Recent event timeline:")
+        # Format in rows of 3
+        for i in range(0, len(recent_12), 3):
+            chunk = recent_12[i:i + 3]
+            parts = []
+            for entry in chunk:
+                ym = entry.get("ym", "")
+                if entry.get("occurred"):
+                    level = entry.get("alertlevel") or "?"
+                    parts.append(f"{ym}: {level}")
+                else:
+                    parts.append(f"{ym}: --")
+            lines.append("  " + " | ".join(parts))
+
+    lines.append("")
+    lines.append(
+        "INTERPRETATION: GDACS events indicate confirmed disaster activity "
+        "(Orange = moderate, Red = severe). Months with no event (--) mean "
+        "GDACS detected no significant disaster of this type. Use event "
+        "frequency as a prior for whether impact will be zero vs non-zero "
+        "in each forecast month. When an event occurs, use the IFRC/Resolver "
+        "PA seasonal profile to estimate magnitude."
+    )
+
+    return "\n".join(lines)
+
+
 def _build_base_rate_text(
     history_summary: Dict[str, Any],
     forecast_keys: list[str],
@@ -1639,6 +1745,25 @@ def build_spd_prompt_v2(
         projection = _load_fewsnet_projection(iso3, forecast_keys)
         if projection:
             structured_sections.append(projection)
+
+    # GDACS event history for FL/DR/TC
+    if sd.get("gdacs_event_history"):
+        try:
+            forecast_cal_months: list[int] = []
+            for fk in forecast_keys:
+                _m = re.match(r"^\d{4}-(\d{2})", fk)
+                if _m:
+                    forecast_cal_months.append(int(_m.group(1)))
+            if not forecast_cal_months:
+                forecast_cal_months = list(range(1, 7))
+            _gdacs_t = _format_gdacs_event_history_for_prompt(
+                sd["gdacs_event_history"],
+                forecast_cal_months,
+            )
+            if _gdacs_t:
+                structured_sections.append(_gdacs_t)
+        except Exception:
+            pass
 
     structured_data_section = "\n\n".join(structured_sections) + "\n\n" if structured_sections else ""
 
