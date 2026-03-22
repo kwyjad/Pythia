@@ -647,6 +647,7 @@ def _build_llm_calls_bundle(
     include_llm_calls: bool,
     include_transcripts: bool,
     limit_llm_calls: int,
+    transcript_phases: Optional[List[str]] = None,
 ) -> LlmCallsBundle:
     if not include_llm_calls:
         return LlmCallsBundle(included=False, transcripts_included=False, rows=[], by_phase={})
@@ -771,8 +772,24 @@ def _build_llm_calls_bundle(
 
     cleaned_rows: List[Dict[str, Any]] = []
     by_phase: Dict[str, List[Dict[str, Any]]] = {}
+    # If transcript_phases is set, strip transcript text from rows not in the list
+    # to reduce response payload while keeping metadata for all rows.
+    tp_set = {p.lower() for p in transcript_phases} if transcript_phases else None
     for row in rows:
         parsed = _apply_json_fields(row, ["usage_json"])
+        if tp_set and transcripts_included:
+            row_phase = (parsed.get("phase") or "").lower()
+            row_hz = (parsed.get("hazard_code") or "").lower()
+            keep_transcript = row_phase in tp_set or row_hz in tp_set
+            if not keep_transcript:
+                # Check if any transcript_phase matches as a prefix/pattern
+                keep_transcript = any(
+                    row_hz.startswith(tp) or row_phase.startswith(tp)
+                    for tp in tp_set
+                )
+            if not keep_transcript:
+                parsed.pop("prompt_text", None)
+                parsed.pop("response_text", None)
         cleaned_rows.append(parsed)
         phase = parsed.get("phase")
         if phase:
@@ -1132,6 +1149,7 @@ def get_question_bundle(
     forecaster_run_id: Optional[str] = Query(None, description="Optional forecaster run override"),
     include_llm_calls: bool = Query(False, description="Include llm_calls rows"),
     include_transcripts: bool = Query(False, description="Include prompt/response text in llm_calls"),
+    transcript_phases: Optional[str] = Query(None, description="Comma-separated phases to keep transcripts for (strips others to save memory)"),
     limit_llm_calls: int = Query(200, ge=1, le=2000, description="Max llm_calls rows to return"),
     include_test: bool = Query(False),
 ):
@@ -1369,6 +1387,7 @@ def get_question_bundle(
         include_llm_calls=include_llm_calls,
         include_transcripts=include_transcripts,
         limit_llm_calls=limit_llm_calls,
+        transcript_phases=[p.strip() for p in transcript_phases.split(",") if p.strip()] if transcript_phases else None,
     )
 
     metric = (question.get("metric") or "").upper()
@@ -1398,29 +1417,6 @@ def get_question_bundle(
     )
     return _json_sanitize(response.model_dump())
 
-
-@app.get("/v1/llm_call_transcripts")
-def get_llm_call_transcripts(
-    call_ids: str = Query(..., description="Comma-separated call_id values"),
-):
-    """Return prompt_text and response_text for specific LLM calls (lightweight endpoint)."""
-    con = _con()
-    if not _table_exists(con, "llm_calls"):
-        return {"rows": []}
-    available = _table_columns(con, "llm_calls")
-    if not {"call_id", "prompt_text", "response_text"}.issubset(available):
-        return {"rows": []}
-    ids = [cid.strip() for cid in call_ids.split(",") if cid.strip()]
-    if not ids:
-        return {"rows": []}
-    # Limit to 20 IDs per request to prevent abuse
-    ids = ids[:20]
-    placeholders = ", ".join(["?" for _ in ids])
-    sql = f"SELECT call_id, prompt_text, response_text FROM llm_calls WHERE call_id IN ({placeholders})"
-    df = _execute(con, sql, ids).fetchdf()
-    rows = _rows_from_df(df)
-    del df
-    return {"rows": rows}
 
 
 @app.get("/v1/calibration/weights")
