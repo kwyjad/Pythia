@@ -841,10 +841,15 @@ def _resolve_forecasts_ensemble_columns(
 
 
 def _latest_forecasted_target_month(
-    con: duckdb.DuckDBPyConnection, metric_upper: str, horizon_col: str, horizon_m: int
+    con: duckdb.DuckDBPyConnection,
+    metric_upper: str,
+    horizon_col: str,
+    horizon_m: int,
+    include_test: bool = False,
 ) -> Optional[str]:
     if not _table_exists(con, "questions") or not _table_exists(con, "forecasts_ensemble"):
         return None
+    _tf = _test_filter(include_test, "q")
     row = _execute(
         con,
         f"""
@@ -853,6 +858,7 @@ def _latest_forecasted_target_month(
         JOIN questions q ON q.question_id = fe.question_id
         WHERE UPPER(q.metric) = :metric
           AND fe.{horizon_col} = :horizon_m
+          {_tf}
         """,
         {"metric": metric_upper, "horizon_m": horizon_m},
     ).fetchone()
@@ -1869,12 +1875,14 @@ def _get_risk_index_binary(
 
     if not target_month:
         target_month = _latest_forecasted_target_month(
-            con, metric_upper, horizon_col, horizon_m
+            con, metric_upper, horizon_col, horizon_m,
+            include_test=include_test,
         )
         if not target_month:
+            _tf = _test_filter(include_test)
             row = _execute(
                 con,
-                "SELECT MAX(target_month) FROM questions WHERE UPPER(metric)=:metric",
+                f"SELECT MAX(target_month) FROM questions WHERE UPPER(metric)=:metric{_tf}",
                 {"metric": metric_upper},
             ).fetchone()
             target_month = row[0] if row and row[0] else None
@@ -2078,12 +2086,14 @@ def get_risk_index(
 
     if not target_month:
         target_month = _latest_forecasted_target_month(
-            con, metric_upper, horizon_col, horizon_m
+            con, metric_upper, horizon_col, horizon_m,
+            include_test=include_test,
         )
         if not target_month:
+            _tf = _test_filter(include_test)
             row = _execute(
                 con,
-                "SELECT MAX(target_month) FROM questions WHERE UPPER(metric)=:metric",
+                f"SELECT MAX(target_month) FROM questions WHERE UPPER(metric)=:metric{_tf}",
                 {"metric": metric_upper},
             ).fetchone()
             target_month = row[0] if row and row[0] else None
@@ -2906,9 +2916,10 @@ def diagnostics_kpi_scopes(
 
     available_months: List[str] = []
     if month_source_table and month_source_ts:
+        _tf_months = _test_filter(include_test)
         sql = (
             f"SELECT DISTINCT strftime({month_source_ts}, '%Y-%m') AS year_month "
-            f"FROM {month_source_table} WHERE {month_source_ts} IS NOT NULL"
+            f"FROM {month_source_table} WHERE {month_source_ts} IS NOT NULL{_tf_months}"
         )
         params: List[Any] = []
         if month_source_phase:
@@ -3346,6 +3357,7 @@ def diagnostics_kpi_scopes(
         if parsed_sel and fe_ts:
             sel_start, sel_end = _month_window(parsed_sel[0], parsed_sel[1])
             try:
+                _tf_fe = _test_filter(include_test, "fe")
                 runs_rows = con.execute(
                     f"""
                     SELECT fe.run_id,
@@ -3354,6 +3366,7 @@ def diagnostics_kpi_scopes(
                     FROM forecasts_ensemble fe
                     WHERE fe.{fe_ts} >= ? AND fe.{fe_ts} < ?
                       AND fe.run_id IS NOT NULL
+                      {_tf_fe}
                     GROUP BY fe.run_id
                     ORDER BY fe.run_id DESC
                     """,
