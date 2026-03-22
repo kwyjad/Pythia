@@ -1163,7 +1163,7 @@ def get_question_bundle(
                 {"hs_run_id": resolved_hs_run_id, "iso3": iso3, "hazard_code": hazard_code},
             )
             if triage_row:
-                triage = _apply_json_fields(triage_row, ["drivers_json", "regime_shifts_json", "data_quality_json"])
+                triage = _apply_json_fields(triage_row, ["drivers_json", "regime_shifts_json", "data_quality_json", "regime_change_json"])
 
     country_report = None
     if resolved_hs_run_id and iso3:
@@ -3437,9 +3437,7 @@ def diagnostics_kpi_scopes(
     if forecaster_run_id:
         selected_run_id = forecaster_run_id
 
-    explanations = [
-        "Questions can exceed forecasts because runs include triaged or researched questions that did not receive forecasts.",
-    ]
+    explanations = []
 
     return {
         "available_months": available_month_rows,

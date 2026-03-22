@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import CollapsiblePanel from "../../../components/CollapsiblePanel";
 import BinaryPanel from "./BinaryPanel";
 import SpdPanel from "./SpdPanel";
-import { asArray, asString, pickResearchJson } from "../../../lib/excerpts";
+import { asArray, asString } from "../../../lib/excerpts";
 import { extractForecastRationale } from "../../../lib/forecast_rationale";
 import { formatModelList } from "../../../lib/model_names";
 import { formatScenario } from "../../../lib/scenario_format";
@@ -171,101 +171,6 @@ const formatTimeframe = (value: unknown): string | null => {
   return null;
 };
 
-const formatConfidence = (value: unknown): string | null => {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value.toFixed(2);
-  }
-  return asString(value);
-};
-
-const getSourceLabel = (url: string): string => {
-  try {
-    return new URL(url).hostname.replace(/^www\./, "");
-  } catch {
-    const cleaned = url.replace(/^https?:\/\//, "");
-    return cleaned.split("/")[0] || url;
-  }
-};
-
-const normalizeSources = (value: unknown): string[] => {
-  if (Array.isArray(value)) {
-    return value
-      .map((entry) => asString(entry))
-      .filter((entry): entry is string => Boolean(entry));
-  }
-  const single = asString(value);
-  return single ? [single] : [];
-};
-
-const renderSupportText = (support: unknown, fields: { key: string; label: string }[]) => {
-  if (!support) {
-    return <p className="text-sm text-fred-text">—</p>;
-  }
-  if (typeof support === "string") {
-    return <p className="text-sm text-fred-text">{support}</p>;
-  }
-  if (typeof support !== "object") {
-    return <p className="text-sm text-fred-text">{String(support)}</p>;
-  }
-  const entries = fields
-    .map(({ key, label }) => ({
-      label,
-      value: asString((support as Record<string, unknown>)[key]),
-    }))
-    .filter((entry) => entry.value);
-  if (!entries.length) {
-    return <p className="text-sm text-fred-text">—</p>;
-  }
-  return (
-    <ul className="mt-2 space-y-1 text-sm text-fred-text">
-      {entries.map((entry) => (
-        <li key={entry.label}>
-          <span className="text-fred-muted">{entry.label}:</span> {entry.value}
-        </li>
-      ))}
-    </ul>
-  );
-};
-
-const renderExternalSupport = (support: unknown) => {
-  if (!support) {
-    return <p className="text-sm text-fred-text">—</p>;
-  }
-  if (typeof support === "string") {
-    return <p className="text-sm text-fred-text">{support}</p>;
-  }
-  if (typeof support !== "object") {
-    return <p className="text-sm text-fred-text">{String(support)}</p>;
-  }
-  const supportObj = support as Record<string, unknown>;
-  const consensus = asString(supportObj.consensus);
-  const dataQuality = asString(supportObj.data_quality);
-  const analyses = asArray<unknown>(supportObj.recent_analyses)
-    .map((entry) => asString(entry))
-    .filter((entry): entry is string => Boolean(entry));
-  return (
-    <div className="space-y-2 text-sm text-fred-text">
-      {consensus ? (
-        <p>
-          <span className="text-fred-muted">Consensus:</span> {consensus}
-        </p>
-      ) : null}
-      {dataQuality ? (
-        <p>
-          <span className="text-fred-muted">Data quality:</span> {dataQuality}
-        </p>
-      ) : null}
-      {analyses.length ? (
-        <ul className="list-disc space-y-1 pl-5">
-          {analyses.map((analysis, index) => (
-            <li key={`analysis-${index}`}>{analysis}</li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  );
-};
-
 const renderParagraphs = (text: string) => {
   const blocks = text
     .split(/\n\s*\n/)
@@ -278,6 +183,16 @@ const renderParagraphs = (text: string) => {
   ));
 };
 
+const PROMPT_STAGES = [
+  { key: "regime_change", label: "Regime Change" },
+  { key: "rc_grounding", label: "RC Grounding" },
+  { key: "triage", label: "Triage" },
+  { key: "triage_grounding", label: "Triage Grounding" },
+  { key: "adversarial_check", label: "Adversarial Check" },
+  { key: "forecast", label: "Forecast (SPD)" },
+  { key: "scenario", label: "Scenario" },
+];
+
 const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
   const question = (bundle.question ?? {}) as Record<string, unknown>;
   const hs = (bundle.hs ?? {}) as Record<string, unknown>;
@@ -287,13 +202,11 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
 
   const ensemble = (forecast.ensemble_spd ?? []) as ModelRow[];
   const rawSpd = (forecast.raw_spd ?? []) as ModelRow[];
-  const research = (forecast.research ?? {}) as Record<string, unknown>;
   const scenarioWriter = (forecast.scenario_writer ?? []) as ModelRow[];
   const triage = (hs.triage ?? {}) as Record<string, unknown>;
   const resolutions = (context.resolutions ?? []) as ModelRow[];
   const scores = (context.scores ?? []) as ModelRow[];
   const byPhase = (llm.by_phase ?? {}) as Record<string, ModelRow[]>;
-  const researchJson = pickResearchJson(bundle);
   const forecastRationale = extractForecastRationale(bundle);
 
   const [scenarioIndex, setScenarioIndex] = useState(0);
@@ -361,18 +274,6 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
   const showRequestedRunBanner =
     Boolean(requestedHsRunId) && requestedHsRunIdMatched === false;
 
-  const baseRate = (researchJson?.base_rate ?? null) as Record<string, unknown> | null;
-  const updateSignals = asArray<Record<string, unknown>>(researchJson?.update_signals);
-  const regimeShiftSignals = asArray<Record<string, unknown>>(
-    researchJson?.regime_shift_signals
-  );
-  const dataGaps = asArray<unknown>(researchJson?.data_gaps)
-    .map((entry) => asString(entry))
-    .filter((entry): entry is string => Boolean(entry));
-  const researchSources = asArray<unknown>(researchJson?.sources)
-    .map((entry) => asString(entry))
-    .filter((entry): entry is string => Boolean(entry));
-
   const scenarioStubText = asString(triage.scenario_stub);
   const regimeShiftRows = asArray<Record<string, unknown>>(triage.regime_shifts_json);
   const dataQuality = (triage.data_quality_json ?? null) as Record<string, unknown> | null;
@@ -382,6 +283,45 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
     { label: "Notes", value: asString(dataQuality?.notes) },
   ].filter((entry) => entry.value);
   const selectedScenarioText = asString(selectedScenario?.text);
+
+  // Triage narrative
+  const triageConfidenceNote = asString(triage.confidence_note);
+
+  // Regime change detail from regime_change_json
+  const rcJson = (triage.regime_change_json ?? null) as Record<string, unknown> | null;
+  const rcRationaleBullets = getTextList(rcJson?.rationale_bullets);
+  const rcTriggerSignals = getTextList(rcJson?.trigger_signals);
+  const rcConfidenceNote = asString(rcJson?.confidence_note);
+
+  // Prompt viewer: group LLM call rows by pipeline stage
+  const llmRows = (llm.rows ?? []) as ModelRow[];
+
+  const groupedLlmCalls = useMemo(() => {
+    const groups: Record<string, ModelRow[]> = {};
+    PROMPT_STAGES.forEach((stage) => {
+      groups[stage.key] = [];
+    });
+    llmRows.forEach((row) => {
+      const hz = ((row.hazard_code as string) ?? "").toLowerCase();
+      const phase = ((row.phase as string) ?? "").toLowerCase();
+      if (hz.startsWith("rc_") && hz.includes("_pass_")) {
+        groups.regime_change.push(row);
+      } else if (hz.startsWith("grounding_")) {
+        groups.rc_grounding.push(row);
+      } else if (hz.startsWith("triage_") && hz.includes("_pass_")) {
+        groups.triage.push(row);
+      } else if (hz.startsWith("triage_grounding_")) {
+        groups.triage_grounding.push(row);
+      } else if (hz.includes("adversarial") || phase.includes("adversarial")) {
+        groups.adversarial_check.push(row);
+      } else if (phase === "spd_v2") {
+        groups.forecast.push(row);
+      } else if (phase === "scenario_v2") {
+        groups.scenario.push(row);
+      }
+    });
+    return groups;
+  }, [llmRows]);
 
   const brierScores = useMemo(() => {
     return scores.filter((row) => {
@@ -576,6 +516,20 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
         <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
           <h2 className="text-lg font-semibold">Horizon Scan Triage</h2>
           <div className="mt-3 space-y-3">
+            {triageConfidenceNote ? (
+              <div>
+                <h3 className="text-sm font-semibold">Assessment</h3>
+                <p className="mt-2 text-sm text-fred-text leading-relaxed">
+                  {triageConfidenceNote}
+                </p>
+              </div>
+            ) : null}
+            {scenarioStubText ? (
+              <div>
+                <h3 className="text-sm font-semibold">Scenario stub</h3>
+                <div className="mt-2">{renderScenarioBlocks(scenarioStubText)}</div>
+              </div>
+            ) : null}
             <div>
               <h3 className="text-sm font-semibold">Drivers</h3>
               {getTextList(triage.drivers_json).length ? (
@@ -635,224 +589,129 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
                 <p className="mt-2 text-sm text-fred-text">No data quality notes.</p>
               )}
             </div>
-            {scenarioStubText ? (
-              <div>
-                <h3 className="text-sm font-semibold">Scenario stub</h3>
-                <div className="mt-2">{renderScenarioBlocks(scenarioStubText)}</div>
-              </div>
-            ) : null}
           </div>
         </div>
 
         <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
-          <h2 className="text-lg font-semibold">Research</h2>
-          {!baseRate ? (
-            <p className="mt-3 text-sm text-fred-text">
-              No research narrative available for this forecast.
-            </p>
-          ) : (
-            <div className="mt-3 space-y-4">
+          <h2 className="text-lg font-semibold">Regime Change</h2>
+          <div className="mt-3 space-y-3">
+            <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              {[
+                { label: "Likelihood", value: rcProbability },
+                { label: "Magnitude", value: rcMagnitude },
+                { label: "Score", value: rcScore },
+                { label: "Direction", value: rcDirection },
+                { label: "Level", value: asString(triage.regime_change_level) ?? "—" },
+                { label: "Window", value: asString(triage.regime_change_window) ?? "—" },
+              ].map((item) => (
+                <div
+                  key={item.label}
+                  className="rounded border border-fred-secondary bg-fred-surface px-3 py-2"
+                >
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">
+                    {item.label}
+                  </div>
+                  <div className="mt-1 text-sm text-fred-text">{item.value}</div>
+                </div>
+              ))}
+            </div>
+            {rcRationaleBullets.length ? (
               <div>
-                <h3 className="text-sm font-semibold">
-                  Qualitative summary
-                </h3>
+                <h3 className="text-sm font-semibold">Rationale</h3>
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-fred-text">
+                  {rcRationaleBullets.map((bullet, index) => (
+                    <li key={`rc-rationale-${index}`}>{bullet}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {rcTriggerSignals.length ? (
+              <div>
+                <h3 className="text-sm font-semibold">Trigger signals</h3>
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-fred-text">
+                  {rcTriggerSignals.map((signal, index) => (
+                    <li key={`rc-trigger-${index}`}>{signal}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {rcConfidenceNote ? (
+              <div>
+                <h3 className="text-sm font-semibold">Confidence</h3>
                 <p className="mt-2 text-sm text-fred-text leading-relaxed">
-                  {asString(baseRate.qualitative_summary) ??
-                    "No qualitative summary available."}
+                  {rcConfidenceNote}
                 </p>
               </div>
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="rounded border border-fred-secondary bg-fred-surface p-3">
-                  <h4 className="text-xs font-semibold uppercase tracking-wide text-fred-muted">
-                    Resolver support
-                  </h4>
-                  {renderSupportText(baseRate.resolver_support, [
-                    { key: "recent_level", label: "Recent level" },
-                    { key: "trend", label: "Trend" },
-                    { key: "data_quality", label: "Data quality" },
-                    { key: "notes", label: "Notes" },
-                  ])}
-                </div>
-                <div className="rounded border border-fred-secondary bg-fred-surface p-3">
-                  <h4 className="text-xs font-semibold uppercase tracking-wide text-fred-muted">
-                    External support
-                  </h4>
-                  {renderExternalSupport(baseRate.external_support)}
-                </div>
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold">
-                  Update signals
-                </h3>
-                {updateSignals.length ? (
-                  <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-fred-text">
-                    {updateSignals.map((signal, index) => {
-                      const isSignalObject = typeof signal === "object" && signal !== null;
-                      const description = !isSignalObject
-                        ? String(signal)
-                        : asString(signal.description) ?? asString(signal.signal) ?? "—";
-                      const direction = isSignalObject ? asString(signal.direction) : null;
-                      const confidence = isSignalObject
-                        ? formatConfidence(signal.confidence)
-                        : null;
-                      const timeframe = isSignalObject
-                        ? formatTimeframe(signal.timeframe) ??
-                          formatTimeframe(signal.timeframe_months)
-                        : null;
-                      const sources = isSignalObject
-                        ? normalizeSources(
-                            signal.sources ?? signal.source_urls ?? signal.source
-                          )
-                        : [];
-                      const meta = [
-                        direction ? `Direction: ${direction}` : null,
-                        confidence ? `Confidence: ${confidence}` : null,
-                        timeframe ? `Timeframe: ${timeframe}` : null,
-                      ]
-                        .filter(Boolean)
-                        .join(" • ");
-                      return (
-                        <li key={`update-${index}`} className="space-y-1">
-                          <div>{description}</div>
-                          {meta ? <div className="text-xs text-fred-muted">{meta}</div> : null}
-                          {sources.length ? (
-                            <div className="flex flex-wrap gap-2 text-xs">
-                              {sources.map((source) => (
-                                <a
-                                  key={source}
-                                  href={source}
-                                  className="text-fred-primary underline underline-offset-2"
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  {getSourceLabel(source)}
-                                </a>
-                              ))}
-                            </div>
-                          ) : null}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                ) : (
-                  <p className="mt-2 text-sm text-fred-text">No update signals.</p>
-                )}
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold">
-                  Regime shift signals
-                </h3>
-                {regimeShiftSignals.length ? (
-                  <ul className="mt-2 list-disc space-y-2 pl-5 text-sm text-fred-text">
-                    {regimeShiftSignals.map((signal, index) => {
-                      const isSignalObject = typeof signal === "object" && signal !== null;
-                      const description = !isSignalObject
-                        ? String(signal)
-                        : asString(signal.description) ?? asString(signal.signal) ?? "—";
-                      const likelihood = isSignalObject ? asString(signal.likelihood) : null;
-                      const timeframe = isSignalObject
-                        ? formatTimeframe(signal.timeframe) ??
-                          formatTimeframe(signal.timeframe_months)
-                        : null;
-                      const sources = isSignalObject
-                        ? normalizeSources(
-                            signal.sources ?? signal.source_urls ?? signal.source
-                          )
-                        : [];
-                      const meta = [
-                        likelihood ? `Likelihood: ${likelihood}` : null,
-                        timeframe ? `Timeframe: ${timeframe}` : null,
-                      ]
-                        .filter(Boolean)
-                        .join(" • ");
-                      return (
-                        <li key={`regime-signal-${index}`} className="space-y-1">
-                          <div>{description}</div>
-                          {meta ? <div className="text-xs text-fred-muted">{meta}</div> : null}
-                          {sources.length ? (
-                            <div className="flex flex-wrap gap-2 text-xs">
-                              {sources.map((source) => (
-                                <a
-                                  key={source}
-                                  href={source}
-                                  className="text-fred-primary underline underline-offset-2"
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  {getSourceLabel(source)}
-                                </a>
-                              ))}
-                            </div>
-                          ) : null}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                ) : (
-                  <p className="mt-2 text-sm text-fred-text">No regime shift signals.</p>
-                )}
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold">Data gaps</h3>
-                {dataGaps.length ? (
-                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-fred-text">
-                    {dataGaps.map((item, index) => (
-                      <li key={`data-gap-${index}`}>{item}</li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="mt-2 text-sm text-fred-text">No data gaps noted.</p>
-                )}
-              </div>
-              {researchSources.length ? (
-                <div>
-                  <h3 className="text-sm font-semibold">Sources</h3>
-                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                    {researchSources.map((source) => (
-                      <a
-                        key={source}
-                        href={source}
-                        className="text-fred-primary underline underline-offset-2"
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {getSourceLabel(source)}
-                      </a>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          )}
+            ) : null}
+            {!rcRationaleBullets.length && !rcTriggerSignals.length && !rcConfidenceNote ? (
+              <p className="text-sm text-fred-text">No detailed regime change data available.</p>
+            ) : null}
+          </div>
         </div>
       </section>
 
       <section className="space-y-3">
-        <CollapsiblePanel title="Raw HS bundle">
-          <pre className="whitespace-pre-wrap text-xs text-fred-text">
-            {JSON.stringify(hs ?? null, null, 2)}
-          </pre>
-        </CollapsiblePanel>
-        <CollapsiblePanel title="Raw Research bundle">
-          <pre className="whitespace-pre-wrap text-xs text-fred-text">
-            {JSON.stringify(research ?? null, null, 2)}
-          </pre>
-        </CollapsiblePanel>
-        <CollapsiblePanel title="Raw Forecast SPD rows">
-          <pre className="whitespace-pre-wrap text-xs text-fred-text">
-            {JSON.stringify({ ensemble_spd: ensemble, raw_spd: rawSpd }, null, 2)}
-          </pre>
-        </CollapsiblePanel>
-        <CollapsiblePanel title="Raw Scenario writer output">
-          <pre className="whitespace-pre-wrap text-xs text-fred-text">
-            {JSON.stringify(scenarioWriter ?? null, null, 2)}
-          </pre>
-        </CollapsiblePanel>
-        <CollapsiblePanel title="Raw LLM calls (no transcripts)">
-          <pre className="whitespace-pre-wrap text-xs text-fred-text">
-            {JSON.stringify(llm ?? null, null, 2)}
-          </pre>
-        </CollapsiblePanel>
+        <h2 className="text-lg font-semibold text-fred-text">Model Prompts & Responses</h2>
+        {PROMPT_STAGES.map((stage) => {
+          const rows = groupedLlmCalls[stage.key] ?? [];
+          return (
+            <CollapsiblePanel key={stage.key} title={stage.label}>
+              {rows.length ? (
+                <div className="space-y-4">
+                  {rows.map((row, index) => {
+                    const modelName =
+                      asString(row.model_name) ??
+                      asString(row.model_id) ??
+                      "Unknown model";
+                    const timestamp = asString(row.timestamp) ?? asString(row.created_at) ?? "";
+                    const promptText = asString(row.prompt_text) ?? "";
+                    const responseText = asString(row.response_text) ?? "";
+                    return (
+                      <div
+                        key={`${stage.key}-${index}`}
+                        className="space-y-2 rounded border border-fred-secondary bg-fred-surface p-3"
+                      >
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-fred-muted">
+                          <span className="font-semibold">{modelName}</span>
+                          {timestamp ? <span>{timestamp}</span> : null}
+                        </div>
+                        {promptText ? (
+                          <div>
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">
+                              Prompt
+                            </div>
+                            <pre className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded border border-fred-secondary bg-fred-surface p-2 text-xs text-fred-text">
+                              {promptText}
+                            </pre>
+                          </div>
+                        ) : null}
+                        {responseText ? (
+                          <div>
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">
+                              Response
+                            </div>
+                            <pre className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded border border-fred-secondary bg-fred-surface p-2 text-xs text-fred-text">
+                              {responseText}
+                            </pre>
+                          </div>
+                        ) : null}
+                        {!promptText && !responseText ? (
+                          <p className="text-xs text-fred-muted">
+                            No transcript data available for this call.
+                          </p>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-sm text-fred-text">
+                  No data available for this stage.
+                </p>
+              )}
+            </CollapsiblePanel>
+          );
+        })}
       </section>
     </div>
   );

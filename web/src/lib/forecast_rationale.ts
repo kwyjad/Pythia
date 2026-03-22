@@ -33,6 +33,19 @@ export const extractForecastRationale = (bundle: any): string | null => {
     }
   }
 
+  // Check human_explanation directly in raw_spd and ensemble_spd rows
+  // (the DFS below can hit the seen-limit before reaching these large arrays)
+  for (const arr of [forecast?.raw_spd, forecast?.ensemble_spd]) {
+    if (Array.isArray(arr)) {
+      for (const row of arr) {
+        const he = row?.human_explanation;
+        if (typeof he === "string" && isUsefulRationale(he)) {
+          return he.trim();
+        }
+      }
+    }
+  }
+
   const stack: Array<{ node: unknown; depth: number }> = [
     { node: forecast, depth: 0 },
   ];

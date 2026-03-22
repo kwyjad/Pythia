@@ -384,11 +384,7 @@ export default function RiskIndexPanel({
                 {kpiError}
               </div>
             ) : null}
-            <div className="mt-3 grid grid-cols-3 gap-3">
-              <KpiCard
-                label="Questions"
-                value={selectedScope?.questions ?? 0}
-              />
+            <div className="mt-3 grid grid-cols-2 gap-3">
               <KpiCard
                 label="Forecasts"
                 value={selectedScope?.forecasts ?? 0}
@@ -418,7 +414,7 @@ export default function RiskIndexPanel({
                 ) : null}
               </div>
               <KpiCard
-                label="Resolved questions"
+                label="Resolved Forecasts"
                 value={selectedScope?.resolved_questions ?? 0}
               />
             </div>

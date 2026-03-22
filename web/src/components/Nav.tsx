@@ -43,7 +43,7 @@ const Nav = () => {
               </span>
             </div>
           </Link>
-          <div className="hidden items-center gap-4 text-sm md:flex">
+          <div className="hidden items-center flex-wrap justify-center gap-x-6 gap-y-2 text-sm md:flex">
             <Link
               className="text-fred-primary font-semibold hover:text-fred-secondary"
               href="/"
@@ -106,18 +106,6 @@ const Nav = () => {
             >
               Substack
             </Link>
-            <button
-              type="button"
-              onClick={toggleTest}
-              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-                includeTest
-                  ? "bg-amber-100 text-amber-800 border border-amber-300"
-                  : "bg-fred-surface text-fred-muted border border-fred-secondary"
-              }`}
-              title={includeTest ? "Test data included — click to hide" : "Test data hidden — click to show"}
-            >
-              {includeTest ? "Test ON" : "Test OFF"}
-            </button>
             {showDebug ? (
               <Link
                 className="text-fred-primary font-semibold hover:text-fred-secondary"
@@ -148,6 +136,20 @@ const Nav = () => {
               <line x1="3" y1="12" x2="21" y2="12" />
               <line x1="3" y1="18" x2="21" y2="18" />
             </svg>
+          </button>
+        </div>
+        <div className="hidden justify-center pb-2 md:flex">
+          <button
+            type="button"
+            onClick={toggleTest}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+              includeTest
+                ? "bg-amber-100 text-amber-800 border border-amber-300"
+                : "bg-fred-surface text-fred-muted border border-fred-secondary"
+            }`}
+            title={includeTest ? "Test data included — click to hide" : "Test data hidden — click to show"}
+          >
+            {includeTest ? "Test ON" : "Test OFF"}
           </button>
         </div>
         {isMobileMenuOpen ? (

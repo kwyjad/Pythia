@@ -30,20 +30,33 @@ export const formatScenario = (text: string): ScenarioBlock[] => {
 
   lines.forEach((line) => {
     const cleanLine = normalizeHeading(line.replace(/\s+/g, " "));
-    if (H2_HEADINGS.includes(cleanLine)) {
-      blocks.push({ type: "h2", text: cleanLine });
+    // Strip markdown heading markers (## / ###) and bold markers (**)
+    const stripped = cleanLine.replace(/^#+\s*/, "").replace(/\*\*/g, "").trim();
+
+    if (H2_HEADINGS.includes(stripped)) {
+      blocks.push({ type: "h2", text: stripped });
       return;
     }
 
     const h3Match = H3_HEADINGS.find((heading) =>
-      cleanLine.toLowerCase().startsWith(`${heading.toLowerCase()}:`)
+      stripped.toLowerCase().startsWith(`${heading.toLowerCase()}:`)
     );
     if (h3Match) {
       blocks.push({ type: "h3", text: h3Match });
-      const remainder = cleanLine.slice(h3Match.length + 1).trim();
+      const remainder = stripped.slice(h3Match.length + 1).trim();
       if (remainder) {
         blocks.push({ type: "p", text: remainder });
       }
+      return;
+    }
+
+    // Detect markdown headings that aren't in our known lists
+    if (/^#{2}\s+/.test(cleanLine)) {
+      blocks.push({ type: "h2", text: stripped });
+      return;
+    }
+    if (/^#{3}\s+/.test(cleanLine)) {
+      blocks.push({ type: "h3", text: stripped });
       return;
     }
 
@@ -56,10 +69,10 @@ export const formatScenario = (text: string): ScenarioBlock[] => {
     }
 
     const colonMatch = H3_HEADINGS.find((heading) =>
-      cleanLine.toLowerCase().includes(`${heading.toLowerCase()}:`)
+      stripped.toLowerCase().includes(`${heading.toLowerCase()}:`)
     );
     if (colonMatch) {
-      const [before, after] = cleanLine.split(/:\s*/, 2);
+      const [before, after] = stripped.split(/:\s*/, 2);
       blocks.push({ type: "h3", text: before.trim() || colonMatch });
       if (after) {
         blocks.push({ type: "p", text: after.trim() });
