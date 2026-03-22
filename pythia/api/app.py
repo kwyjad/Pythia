@@ -744,11 +744,10 @@ def _build_llm_calls_bundle(
             debug=build_debug_payload({}),
         )
 
-    # Exclude large TEXT columns that the frontend does not use, to reduce
-    # peak memory (avoids OOM on 512 MB Render instances).
-    exclude_cols: set[str] = {"parsed_json"}
-    if not transcripts_included:
-        exclude_cols.update({"prompt_text", "response_text"})
+    # ALWAYS exclude large TEXT columns from the main query to prevent OOM
+    # on 512 MB Render instances.  Transcripts are fetched in a separate,
+    # targeted query below (only for the phases the frontend actually needs).
+    exclude_cols: set[str] = {"parsed_json", "prompt_text", "response_text"}
     select_columns = sorted(available_columns - exclude_cols)
     order_fields: List[str] = []
     if "timestamp" in available_columns:
@@ -758,10 +757,11 @@ def _build_llm_calls_bundle(
     if "call_id" in available_columns:
         order_fields.append("call_id DESC")
 
+    where_clause = " OR ".join(filters)
     sql = f"""
       SELECT {', '.join(select_columns)}
       FROM llm_calls
-      WHERE {' OR '.join(filters)}
+      WHERE {where_clause}
     """
     if order_fields:
         sql += " ORDER BY " + ", ".join(order_fields)
@@ -770,26 +770,45 @@ def _build_llm_calls_bundle(
     rows = _rows_from_df(df)
     del df  # free pandas memory before building response dicts
 
+    # Query 2: fetch transcripts ONLY for rows matching transcript_phases.
+    # This keeps peak memory bounded (~4 MB for ~20 matching rows instead of
+    # ~40 MB for all 200 rows).
+    transcript_map: Dict[str, Dict[str, str]] = {}
+    has_call_id = "call_id" in available_columns
+    if transcripts_included and transcript_phases and has_call_id and transcripts_available:
+        tp_conditions: List[str] = []
+        tp_params = dict(params)  # copy base params (includes filters' params + limit)
+        for i, tp in enumerate(transcript_phases):
+            pk = f"tp_{i}"
+            tp_params[pk] = tp.upper()
+            tp_conditions.append(f"UPPER(phase) = :{pk}")
+            tp_conditions.append(f"UPPER(hazard_code) LIKE :{pk} || '%'")
+        phase_filter = " OR ".join(tp_conditions)
+        transcript_sql = f"""
+          SELECT call_id, prompt_text, response_text
+          FROM llm_calls
+          WHERE ({where_clause}) AND ({phase_filter})
+          LIMIT :limit
+        """
+        t_df = _execute(con, transcript_sql, tp_params).fetchdf()
+        for t_row in _rows_from_df(t_df):
+            cid = t_row.get("call_id")
+            if cid:
+                transcript_map[cid] = {
+                    "prompt_text": t_row.get("prompt_text") or "",
+                    "response_text": t_row.get("response_text") or "",
+                }
+        del t_df
+
     cleaned_rows: List[Dict[str, Any]] = []
     by_phase: Dict[str, List[Dict[str, Any]]] = {}
-    # If transcript_phases is set, strip transcript text from rows not in the list
-    # to reduce response payload while keeping metadata for all rows.
-    tp_set = {p.lower() for p in transcript_phases} if transcript_phases else None
     for row in rows:
         parsed = _apply_json_fields(row, ["usage_json"])
-        if tp_set and transcripts_included:
-            row_phase = (parsed.get("phase") or "").lower()
-            row_hz = (parsed.get("hazard_code") or "").lower()
-            keep_transcript = row_phase in tp_set or row_hz in tp_set
-            if not keep_transcript:
-                # Check if any transcript_phase matches as a prefix/pattern
-                keep_transcript = any(
-                    row_hz.startswith(tp) or row_phase.startswith(tp)
-                    for tp in tp_set
-                )
-            if not keep_transcript:
-                parsed.pop("prompt_text", None)
-                parsed.pop("response_text", None)
+        # Merge transcripts from the targeted query
+        cid = parsed.get("call_id")
+        if cid and cid in transcript_map:
+            parsed["prompt_text"] = transcript_map[cid]["prompt_text"]
+            parsed["response_text"] = transcript_map[cid]["response_text"]
         cleaned_rows.append(parsed)
         phase = parsed.get("phase")
         if phase:
