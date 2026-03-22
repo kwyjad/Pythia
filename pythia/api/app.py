@@ -3059,7 +3059,14 @@ def diagnostics_kpi_scopes(
         if has_hazard and forecast_source_table and forecast_source_ts:
             forecast_ids_sql = question_ids_sql
             forecast_params = list(question_ids_params)
-            if forecast_source_table != question_source_table or forecast_source_phase:
+            # Only switch to a time-window forecast query when the caller
+            # actually passed time-window params (>= 2).  When called with a
+            # single run_id param the original question_ids_sql already
+            # correctly identifies forecasts for that run.
+            if (
+                (forecast_source_table != question_source_table or forecast_source_phase)
+                and len(question_ids_params) >= 2
+            ):
                 forecast_ids_sql = (
                     f"SELECT DISTINCT question_id FROM {forecast_source_table} "
                     f"WHERE {forecast_source_ts} >= ? AND {forecast_source_ts} < ?"
@@ -3100,7 +3107,10 @@ def diagnostics_kpi_scopes(
         elif forecast_source_table and forecast_source_ts:
             forecast_ids_sql = question_ids_sql
             forecast_params = list(question_ids_params)
-            if forecast_source_table != question_source_table or forecast_source_phase:
+            if (
+                (forecast_source_table != question_source_table or forecast_source_phase)
+                and len(question_ids_params) >= 2
+            ):
                 forecast_ids_sql = (
                     f"SELECT DISTINCT question_id FROM {forecast_source_table} "
                     f"WHERE {forecast_source_ts} >= ? AND {forecast_source_ts} < ?"
