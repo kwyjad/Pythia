@@ -706,6 +706,122 @@ def _build_conflict_base_rate(
         con.close()
 
 
+def _build_gdacs_event_history(
+    iso3: str,
+    hazard_code: str,
+) -> Dict[str, Any] | None:
+    """Build GDACS event occurrence history for natural hazard base rate support.
+
+    Queries facts_resolved for event_occurrence metric (binary 1/0) and
+    alertlevel (Green/Orange/Red) for the given country + hazard.
+
+    Only applicable for FL, DR, TC hazards.
+
+    Returns None if no GDACS data exists for this country-hazard.
+    """
+    iso3_up = (iso3 or "").upper().strip()
+    hz_up = (hazard_code or "").upper().strip()
+
+    if hz_up not in ("FL", "DR", "TC"):
+        return None
+
+    con = connect(read_only=True)
+    try:
+        rows = con.execute(
+            """
+            SELECT ym, value, alertlevel
+            FROM facts_resolved
+            WHERE upper(iso3) = ?
+              AND upper(hazard_code) = ?
+              AND lower(metric) = 'event_occurrence'
+            ORDER BY ym
+            """,
+            [iso3_up, hz_up],
+        ).fetchall()
+    except Exception:
+        return None
+    finally:
+        con.close()
+
+    if not rows:
+        return None
+
+    # Parse into structured records
+    now_ym = datetime.utcnow().strftime("%Y-%m")
+    events: list[dict] = []
+    for ym_raw, value, alertlevel in rows:
+        ym = str(ym_raw)[:7] if ym_raw else ""
+        if not ym or ym > now_ym:
+            continue
+        try:
+            v = float(value or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        events.append({
+            "ym": ym,
+            "occurred": v >= 1.0,
+            "alertlevel": str(alertlevel or "").strip() or None,
+        })
+
+    if not events:
+        return None
+
+    events_sorted = sorted(events, key=lambda e: e["ym"])
+
+    # Compute summary stats
+    total_months = len(events_sorted)
+    event_months = sum(1 for e in events_sorted if e["occurred"])
+    event_rate = event_months / total_months if total_months > 0 else 0.0
+
+    # Data range
+    first_ym = events_sorted[0]["ym"]
+    last_ym = events_sorted[-1]["ym"]
+
+    # Alert level distribution (among event months only)
+    alert_counts: Dict[str, int] = {}
+    for e in events_sorted:
+        if e["occurred"] and e["alertlevel"]:
+            level = e["alertlevel"]
+            alert_counts[level] = alert_counts.get(level, 0) + 1
+
+    # Seasonal frequency: group by calendar month
+    by_cal_month: Dict[int, Dict[str, int]] = {
+        m: {"total": 0, "events": 0} for m in range(1, 13)
+    }
+    for e in events_sorted:
+        parsed = _parse_month_key(e["ym"])
+        if parsed:
+            by_cal_month[parsed.month]["total"] += 1
+            if e["occurred"]:
+                by_cal_month[parsed.month]["events"] += 1
+
+    seasonal: Dict[int, Dict[str, Any]] = {}
+    for cal_month in range(1, 13):
+        total = by_cal_month[cal_month]["total"]
+        evts = by_cal_month[cal_month]["events"]
+        seasonal[cal_month] = {
+            "years_observed": total,
+            "years_with_event": evts,
+            "frequency_pct": round(evts / total * 100, 0) if total > 0 else 0.0,
+        }
+
+    # Recent 12 months
+    recent_12 = events_sorted[-12:] if len(events_sorted) >= 12 else events_sorted[:]
+
+    return {
+        "type": "gdacs_event_history",
+        "iso3": iso3_up,
+        "hazard_code": hz_up,
+        "data_range": f"{first_ym} to {last_ym}",
+        "total_months": total_months,
+        "event_months": event_months,
+        "event_rate_pct": round(event_rate * 100, 1),
+        "alert_distribution": alert_counts,
+        "seasonal": seasonal,
+        "recent_12": recent_12,
+    }
+
+
 def _format_base_rate_for_prompt(
     history_summary: Dict[str, Any],
     forecast_keys: list[str],
@@ -3036,6 +3152,15 @@ def _load_structured_data(
         except Exception:
             pass
 
+    # GDACS event history for natural hazard PA questions
+    if hazard_code.upper() in ("FL", "DR", "TC"):
+        try:
+            gdacs = _build_gdacs_event_history(iso3, hazard_code)
+            if gdacs:
+                sd["gdacs_event_history"] = gdacs
+        except Exception:
+            pass
+
     # Adversarial check (RC L2+ only) — load from DB if available
     if (rc_level is not None and rc_level >= 2) and hs_run_id:
         try:
@@ -4932,6 +5057,7 @@ async def _run_binary_forecast_for_question(
             structured_data=structured_data,
             hs_triage_entry=hs_entry,
             today=date.today().isoformat() if date else str(datetime.now().date()),
+            gdacs_event_history=structured_data.get("gdacs_event_history"),
         )
 
         # Select model specs based on track
