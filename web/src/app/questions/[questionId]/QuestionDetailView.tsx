@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
 import CollapsiblePanel from "../../../components/CollapsiblePanel";
@@ -192,6 +192,171 @@ const PROMPT_STAGES = [
   { key: "forecast", label: "Forecast (SPD)" },
   { key: "scenario", label: "Scenario" },
 ];
+
+const API_BASE =
+  typeof window !== "undefined"
+    ? (process.env.NEXT_PUBLIC_PYTHIA_API_BASE ?? "http://localhost:8000/v1")
+    : "";
+
+type TranscriptCache = Record<string, { prompt_text: string; response_text: string }>;
+
+const PromptViewerStage = ({
+  stage,
+  rows,
+}: {
+  stage: { key: string; label: string };
+  rows: ModelRow[];
+}) => {
+  const [transcripts, setTranscripts] = useState<TranscriptCache>({});
+  const [loading, setLoading] = useState(false);
+  const [fetched, setFetched] = useState(false);
+
+  const fetchTranscripts = useCallback(async () => {
+    if (fetched || !rows.length) return;
+    const callIds = rows
+      .map((row) => asString(row.call_id))
+      .filter((id): id is string => Boolean(id));
+    if (!callIds.length) {
+      setFetched(true);
+      return;
+    }
+    setLoading(true);
+    try {
+      const response = await fetch(
+        `${API_BASE}/llm_call_transcripts?call_ids=${encodeURIComponent(callIds.join(","))}`
+      );
+      if (response.ok) {
+        const data = await response.json();
+        const cache: TranscriptCache = {};
+        for (const row of data.rows ?? []) {
+          if (row.call_id) {
+            cache[row.call_id] = {
+              prompt_text: row.prompt_text ?? "",
+              response_text: row.response_text ?? "",
+            };
+          }
+        }
+        setTranscripts(cache);
+      }
+    } catch {
+      // Silently fail — user sees "No transcript data" message
+    }
+    setLoading(false);
+    setFetched(true);
+  }, [rows, fetched]);
+
+  const isForecastStage = stage.key === "forecast";
+
+  if (!rows.length) {
+    return (
+      <CollapsiblePanel title={stage.label}>
+        <p className="text-sm text-fred-text">No data available for this stage.</p>
+      </CollapsiblePanel>
+    );
+  }
+
+  return (
+    <CollapsiblePanel title={stage.label} onExpand={fetchTranscripts}>
+      {loading ? (
+        <p className="text-sm text-fred-muted">Loading transcripts...</p>
+      ) : (
+        <div className="space-y-4">
+          {isForecastStage && rows.length > 1 ? (
+            <>
+              {/* Show one shared prompt */}
+              {fetched && transcripts[asString(rows[0].call_id) ?? ""]?.prompt_text ? (
+                <div className="rounded border border-fred-secondary bg-fred-surface p-3">
+                  <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">
+                    Prompt (shared across models)
+                  </div>
+                  <pre className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded border border-fred-secondary bg-fred-surface p-2 text-xs text-fred-text">
+                    {transcripts[asString(rows[0].call_id) ?? ""]?.prompt_text}
+                  </pre>
+                </div>
+              ) : null}
+              {/* Show per-model responses */}
+              {rows.map((row, index) => {
+                const callId = asString(row.call_id) ?? "";
+                const modelName = asString(row.model_name) ?? asString(row.model_id) ?? "Unknown model";
+                const timestamp = asString(row.timestamp) ?? asString(row.created_at) ?? "";
+                const transcript = transcripts[callId];
+                return (
+                  <div key={`${stage.key}-${index}`} className="space-y-2 rounded border border-fred-secondary bg-fred-surface p-3">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-fred-muted">
+                      <span className="font-semibold">{modelName}</span>
+                      {timestamp ? <span>{timestamp}</span> : null}
+                    </div>
+                    {fetched && transcript?.response_text ? (
+                      <div>
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">Response</div>
+                        <pre className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded border border-fred-secondary bg-fred-surface p-2 text-xs text-fred-text">
+                          {transcript.response_text}
+                        </pre>
+                      </div>
+                    ) : fetched ? (
+                      <p className="text-xs text-fred-muted">No transcript data available.</p>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </>
+          ) : (
+            rows.map((row, index) => {
+              const callId = asString(row.call_id) ?? "";
+              const modelName = asString(row.model_name) ?? asString(row.model_id) ?? "Unknown model";
+              const timestamp = asString(row.timestamp) ?? asString(row.created_at) ?? "";
+              const transcript = transcripts[callId];
+              return (
+                <div key={`${stage.key}-${index}`} className="space-y-2 rounded border border-fred-secondary bg-fred-surface p-3">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-fred-muted">
+                    <span className="font-semibold">{modelName}</span>
+                    {timestamp ? <span>{timestamp}</span> : null}
+                  </div>
+                  {fetched && transcript?.prompt_text ? (
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">Prompt</div>
+                      <pre className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded border border-fred-secondary bg-fred-surface p-2 text-xs text-fred-text">
+                        {transcript.prompt_text}
+                      </pre>
+                    </div>
+                  ) : null}
+                  {fetched && transcript?.response_text ? (
+                    <div>
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">Response</div>
+                      <pre className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded border border-fred-secondary bg-fred-surface p-2 text-xs text-fred-text">
+                        {transcript.response_text}
+                      </pre>
+                    </div>
+                  ) : null}
+                  {fetched && !transcript?.prompt_text && !transcript?.response_text ? (
+                    <p className="text-xs text-fred-muted">No transcript data available for this call.</p>
+                  ) : null}
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+    </CollapsiblePanel>
+  );
+};
+
+const PromptViewerSection = ({
+  groupedLlmCalls,
+}: {
+  groupedLlmCalls: Record<string, ModelRow[]>;
+}) => (
+  <section className="space-y-3">
+    <h2 className="text-lg font-semibold text-fred-text">Model Prompts & Responses</h2>
+    {PROMPT_STAGES.map((stage) => (
+      <PromptViewerStage
+        key={stage.key}
+        stage={stage}
+        rows={groupedLlmCalls[stage.key] ?? []}
+      />
+    ))}
+  </section>
+);
 
 const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
   const question = (bundle.question ?? {}) as Record<string, unknown>;
@@ -650,69 +815,7 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
         </div>
       </section>
 
-      <section className="space-y-3">
-        <h2 className="text-lg font-semibold text-fred-text">Model Prompts & Responses</h2>
-        {PROMPT_STAGES.map((stage) => {
-          const rows = groupedLlmCalls[stage.key] ?? [];
-          return (
-            <CollapsiblePanel key={stage.key} title={stage.label}>
-              {rows.length ? (
-                <div className="space-y-4">
-                  {rows.map((row, index) => {
-                    const modelName =
-                      asString(row.model_name) ??
-                      asString(row.model_id) ??
-                      "Unknown model";
-                    const timestamp = asString(row.timestamp) ?? asString(row.created_at) ?? "";
-                    const promptText = asString(row.prompt_text) ?? "";
-                    const responseText = asString(row.response_text) ?? "";
-                    return (
-                      <div
-                        key={`${stage.key}-${index}`}
-                        className="space-y-2 rounded border border-fred-secondary bg-fred-surface p-3"
-                      >
-                        <div className="flex flex-wrap items-center gap-2 text-xs text-fred-muted">
-                          <span className="font-semibold">{modelName}</span>
-                          {timestamp ? <span>{timestamp}</span> : null}
-                        </div>
-                        {promptText ? (
-                          <div>
-                            <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">
-                              Prompt
-                            </div>
-                            <pre className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded border border-fred-secondary bg-fred-surface p-2 text-xs text-fred-text">
-                              {promptText}
-                            </pre>
-                          </div>
-                        ) : null}
-                        {responseText ? (
-                          <div>
-                            <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">
-                              Response
-                            </div>
-                            <pre className="mt-1 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded border border-fred-secondary bg-fred-surface p-2 text-xs text-fred-text">
-                              {responseText}
-                            </pre>
-                          </div>
-                        ) : null}
-                        {!promptText && !responseText ? (
-                          <p className="text-xs text-fred-muted">
-                            No transcript data available for this call.
-                          </p>
-                        ) : null}
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="text-sm text-fred-text">
-                  No data available for this stage.
-                </p>
-              )}
-            </CollapsiblePanel>
-          );
-        })}
-      </section>
+      <PromptViewerSection groupedLlmCalls={groupedLlmCalls} />
     </div>
   );
 };

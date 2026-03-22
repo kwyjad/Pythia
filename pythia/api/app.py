@@ -720,7 +720,13 @@ def _build_llm_calls_bundle(
             "("
             "hs_run_id = :hs_run_id "
             "AND UPPER(iso3) = :iso3 "
-            "AND UPPER(hazard_code) = :hazard_code "
+            "AND ("
+            "  UPPER(hazard_code) = :hazard_code "
+            "  OR UPPER(hazard_code) LIKE 'RC_' || :hazard_code || '%' "
+            "  OR UPPER(hazard_code) LIKE 'GROUNDING_' || :hazard_code || '%' "
+            "  OR UPPER(hazard_code) LIKE 'TRIAGE_' || :hazard_code || '%' "
+            "  OR UPPER(hazard_code) LIKE 'TRIAGE_GROUNDING_' || :hazard_code || '%' "
+            ") "
             "AND phase IN ('hs_triage','hs_web_research')"
             ")"
         )
@@ -1391,6 +1397,30 @@ def get_question_bundle(
         llm_calls=llm_calls_bundle,
     )
     return _json_sanitize(response.model_dump())
+
+
+@app.get("/v1/llm_call_transcripts")
+def get_llm_call_transcripts(
+    call_ids: str = Query(..., description="Comma-separated call_id values"),
+):
+    """Return prompt_text and response_text for specific LLM calls (lightweight endpoint)."""
+    con = _con()
+    if not _table_exists(con, "llm_calls"):
+        return {"rows": []}
+    available = _table_columns(con, "llm_calls")
+    if not {"call_id", "prompt_text", "response_text"}.issubset(available):
+        return {"rows": []}
+    ids = [cid.strip() for cid in call_ids.split(",") if cid.strip()]
+    if not ids:
+        return {"rows": []}
+    # Limit to 20 IDs per request to prevent abuse
+    ids = ids[:20]
+    placeholders = ", ".join(["?" for _ in ids])
+    sql = f"SELECT call_id, prompt_text, response_text FROM llm_calls WHERE call_id IN ({placeholders})"
+    df = _execute(con, sql, ids).fetchdf()
+    rows = _rows_from_df(df)
+    del df
+    return {"rows": rows}
 
 
 @app.get("/v1/calibration/weights")

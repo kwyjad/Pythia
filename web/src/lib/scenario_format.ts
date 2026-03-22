@@ -62,6 +62,18 @@ export const formatScenario = (text: string): ScenarioBlock[] => {
 
     if (cleanLine.startsWith("•") || cleanLine.startsWith("-")) {
       const bullet = cleanLine.replace(/^[•-]\s?/, "").trim();
+      // Check if this "bullet" is actually a sector heading like "- Health:"
+      const sectorMatch = H3_HEADINGS.find((heading) =>
+        bullet.toLowerCase().startsWith(`${heading.toLowerCase()}:`)
+      );
+      if (sectorMatch) {
+        blocks.push({ type: "h3", text: sectorMatch });
+        const remainder = bullet.slice(sectorMatch.length + 1).trim();
+        if (remainder) {
+          blocks.push({ type: "p", text: remainder });
+        }
+        return;
+      }
       if (bullet) {
         blocks.push({ type: "li", text: bullet });
       }
