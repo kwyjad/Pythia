@@ -3706,7 +3706,8 @@ def emit_data_inject_inventory_csv(
         "iso3", "country_name",
         "acled_fatalities_months", "idmc_displacement_months",
         "ifrc_pa_months", "conflict_forecasts_available",
-        "ipc_available", "reliefweb_reports_count",
+        "ipc_available", "fewsnet_phase3plus_available",
+        "reliefweb_reports_count",
         "hdx_signals_count", "enso_loaded",
         "seasonal_tc_loaded", "nmme_available",
         "crisiswatch_arrow",
@@ -3801,6 +3802,16 @@ def emit_data_inject_inventory_csv(
                 cnt = _safe_table_count_where(con, "ipc_phases", "upper(iso3) = ?", [iso3.upper()])
                 ipc_avail = bool(cnt)
 
+            # FEWS NET Phase 3+ from facts_resolved
+            fewsnet_avail = False
+            if has_facts_resolved:
+                fewsnet_cnt = _safe_table_count_where(
+                    con, "facts_resolved",
+                    "upper(iso3) = ? AND hazard_code = 'DR' AND metric IN ('phase3plus_in_need', 'phase3plus_projection')",
+                    [iso3.upper()],
+                )
+                fewsnet_avail = bool(fewsnet_cnt)
+
             reliefweb_count = _safe_table_count_where(
                 con, "reliefweb_reports", "upper(iso3) = ?", [iso3.upper()]
             ) if has_reliefweb else None
@@ -3833,6 +3844,7 @@ def emit_data_inject_inventory_csv(
                 "ifrc_pa_months": ifrc_months if ifrc_months is not None else "",
                 "conflict_forecasts_available": conflict_avail,
                 "ipc_available": ipc_avail,
+                "fewsnet_phase3plus_available": fewsnet_avail,
                 "reliefweb_reports_count": reliefweb_count if reliefweb_count is not None else "",
                 "hdx_signals_count": hdx_signals_by_iso3.get(iso3.upper(), "N/A" if not hdx_signals_by_iso3 else 0),
                 "enso_loaded": enso_loaded,
@@ -4098,7 +4110,7 @@ def emit_grounding_detail_csv(
               AND (
                 phase IN ('hs_web_research', 'research_web_research')
                 OR phase LIKE '%web_research%'
-                OR hazard_code LIKE '%grounding%'
+                OR LOWER(hazard_code) LIKE '%grounding%'
               )
             ORDER BY iso3, hazard_code, timestamp
             """,
@@ -4130,6 +4142,15 @@ def emit_grounding_detail_csv(
                     n_sources = len(sources) if isinstance(sources, list) else 0
             except Exception:
                 pass
+
+            # Fallback: check for markdown evidence pack pattern
+            if not grounded and resp_text:
+                if "Grounded: True" in resp_text or "Sources:" in resp_text:
+                    grounded = True
+                import re as _re
+                urls = _re.findall(r"https?://[^\s\]\"')>]+", resp_text)
+                if urls and n_sources == 0:
+                    n_sources = len(set(urls))
 
             error_text = (row.get("error_text") or "")[:200]
             prompt_text = (row.get("prompt_text") or "")[:200]

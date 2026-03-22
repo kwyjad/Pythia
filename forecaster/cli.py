@@ -2956,6 +2956,14 @@ def _load_structured_data(
         pass
 
     try:
+        from pythia.fewsnet_food_security import load_fewsnet_food_security
+        fewsnet = load_fewsnet_food_security(iso3)
+        if fewsnet:
+            sd["fewsnet_food_security"] = fewsnet
+    except Exception:
+        pass
+
+    try:
         from pythia.acaps import load_inform_severity
         inform = load_inform_severity(iso3)
         if inform:

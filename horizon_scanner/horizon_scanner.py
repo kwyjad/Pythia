@@ -1332,10 +1332,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str, crisiswatch_d
 
     # 5b. Adversarial checks (counter-evidence for RC L1+ hazards)
     adversarial_enabled = os.getenv("PYTHIA_ADVERSARIAL_CHECK_ENABLED", "1") == "1"
-    if adversarial_enabled and (
-        os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
-        or os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") == "1"
-    ):
+    if adversarial_enabled:
         adv_candidates = _select_tail_pack_hazards(triage, get_expected_hs_hazards())
         for candidate in adv_candidates:
             hazard_code = candidate.get("hazard_code") or ""

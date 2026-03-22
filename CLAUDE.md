@@ -61,7 +61,8 @@ Pythia/
     acaps.py           # ACAPS unified connector (INFORM, Risk Radar, Daily Monitoring, Access)
     acled_political.py # ACLED event-level political data connector
     adversarial_check.py # Counter-evidence checks for RC Level 1+ cases
-    ipc_phases.py      # IPC food security phase connector
+    ipc_phases.py      # IPC food security phase connector (requires API key — currently unused)
+    fewsnet_food_security.py  # FEWS NET Phase 3+ data loader from facts_resolved
     market_snapshot.py # Manifold prediction market snapshot utility
     tests/             # Pythia-specific tests
   web/                 # Next.js 14 dashboard (TypeScript, Tailwind)
@@ -107,7 +108,8 @@ Pythia/
 - `pythia/prediction_markets/retriever.py` — Prediction market signal retriever (currently disabled by default via `PYTHIA_PM_RETRIEVER_ENABLED=0`; Metaculus returns 403, Polymarket returns 422, each times out at 30s)
 - `scripts/print_forecaster_ensemble.py` — Ensemble diagnostic script (must be invoked as `python -m scripts.print_forecaster_ensemble`, not directly)
 - `pythia/acaps.py` — ACAPS unified connector (4 datasets: INFORM Severity, Risk Radar, Daily Monitoring, Humanitarian Access)
-- `pythia/ipc_phases.py` — IPC food security phase classification connector
+- `pythia/ipc_phases.py` — IPC food security phase classification connector (requires IPC_API_KEY — currently unused; ipc_phases table always empty)
+- `pythia/fewsnet_food_security.py` — FEWS NET Phase 3+ data loader from facts_resolved; provides `load_fewsnet_food_security()`, `format_fewsnet_for_prompt()`, `format_fewsnet_for_spd()`. Wired into RC, triage, and SPD prompts alongside IPC data.
 - `pythia/acled_political.py` — ACLED event-level political data (protests, riots, strategic developments); wired into bulk ingest via `_bulk_fetch_acled_political` in `ingest_structured_data.py`
 - `pythia/adversarial_check.py` — Counter-evidence searches for RC Level 1+ (devil's advocate)
 - `horizon_scanner/reliefweb.py` — ReliefWeb humanitarian reports connector
@@ -291,6 +293,8 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `PYTHIA_HS_RC_LEVEL*_*` | RC threshold overrides |
 | `PYTHIA_HS_RC_DIST_WARN_*` | RC distribution warning thresholds |
 | `PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED` | Enable hazard tail packs (0/1, default 1) |
+| `PYTHIA_ADVERSARIAL_CHECK_ENABLED` | Enable adversarial checks for RC L1+ (0/1, default 1) |
+| `PYTHIA_GROUNDING_PRIMARY_BACKEND` | Primary grounding backend: `openai` (default) or `gemini` |
 | `PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED` | Enable web search for RC evidence packs (0/1, default 1) |
 | `PYTHIA_PM_RETRIEVER_ENABLED` | Enable prediction market retriever (0/1, default 0 — see known failure modes) |
 | `PYTHIA_PREDICTION_MARKETS_ENABLED` | Legacy alias; prefer `PYTHIA_PM_RETRIEVER_ENABLED` |
@@ -400,6 +404,7 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 - Structured data connectors follow a standard pattern: `fetch_*()` → `store_*()` → `load_*()` → `format_*_for_prompt()` / `format_*_for_spd()`
 - **Question-level web research pipeline is deprecated**: The `fetch_evidence_pack` / `_build_question_evidence_queries` / `_merge_question_evidence_packs` flow is bypassed. SPD prompts now receive structured data directly via `_load_structured_data()`: conflict forecasts, ReliefWeb, HDX Signals, HS grounding evidence, ACAPS, IPC, ACLED political, NMME, ENSO, seasonal TC, adversarial checks. The `question_research` table is no longer populated by the pipeline (only placeholder rows). Env vars `PYTHIA_RETRIEVER_ENABLED`, `PYTHIA_WEB_RESEARCH_ENABLED`, `PYTHIA_SPD_WEB_SEARCH_ENABLED`, `PYTHIA_FORECASTER_SELF_SEARCH` are set to "0" in the workflow.
 - HS pipeline is per-hazard: each hazard gets its own RC grounding, RC call, triage grounding, and triage call (2-pass each: Gemini Flash + GPT-5-mini)
+- **Grounding backend order**: OpenAI GPT-4.1-mini web search is the primary grounding backend; Gemini Google Search grounding is the fallback. Override with `PYTHIA_GROUNDING_PRIMARY_BACKEND=gemini` to swap. Both RC and triage grounding use this order. Triage grounding calls are now logged to `llm_calls` with `hazard_code=TRIAGE_GROUNDING_{hazard}` (RC grounding was already logged as `grounding_{hazard}`).
 - RC and triage grounding use different signal categories and recency windows (RC: TRIGGER/DAMPENER/BASELINE; triage: SITUATION/RESPONSE/FORECAST/VULNERABILITY)
 - **Grounding recency windows**: RC grounding uses tight windows (ACE=14d, DR=30d, FL=14d, HW=14d, TC=30d) because it hunts for change signals. Triage grounding uses wider windows (ACE=60d, DR=90d, FL=60d, HW=60d, TC=60d) for the operational picture. Both are defined in their respective `RECENCY_DAYS` dicts.
 - **Grounding source steering**: All 10 grounding prompts (5 RC + 5 triage) include a `PRIORITIZE THESE SOURCES` section with hazard-specific source priority lists and a `RECENCY FILTER` instruction. RC prompts prioritize wire services and specialist sources for novelty; triage prompts elevate OCHA/humanitarian sources for the operational picture.
@@ -435,6 +440,11 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 - **False-zero resolution contamination** (fixed): `compute_resolutions` defaulted all unresolved horizons to `value=0.0`, treating "no data" as "no impact". This was correct for ACLED fatalities (continuous coverage) but wrong for IFRC (PA), IDMC, FEWS NET IPC, and EM-DAT where absence means "unknown/not monitored". Fixed by implementing source-aware null handling: FATALITIES+ACE/ACO and EVENT_OCCURRENCE still default to 0; PA and PHASE3PLUS_IN_NEED horizons with no data are now left unresolved (no row written) so scoring skips them. Also added HW to UNRESOLVABLE_HAZARDS set.
 - **HW (heatwave) removed from question generation**: `scripts/create_questions_from_triage.py` no longer creates questions for HW hazard (no resolution data source). HW triage rows are explicitly skipped with a log message. HW remains in `resolver/data/shocks.csv` as a recognized hazard type and in `UNRESOLVABLE_HAZARDS` in `compute_resolutions.py`.
 - **Question overwrite bug destroying run provenance** (fixed): `scripts/create_questions_from_triage.py` used stable question_ids (e.g. `ETH_ACE_FATALITIES`) with a DELETE+INSERT pattern in `_upsert_question`. Each HS run destroyed the previous question's `hs_run_id`, `window_start_date`, and `target_month`. After the March 2026 run, all 524 questions pointed to the March HS run with `window_start_date=2026-04-01`, making December/January forecasts unresolvable while March forecasts were incorrectly scored. Additionally, `_llm_derived_window_starts` in `compute_resolutions.py` used `MIN(timestamp)` from `llm_calls` across all runs for shared question_ids, causing cross-run contamination. Fixed by: (1) making question_ids epoch-specific with `_{epoch_label}` suffix (e.g. `ETH_ACE_FATALITIES_2026-04`), (2) replacing DELETE+INSERT with INSERT-only (skip if exists), (3) fixing `target_month` to represent the 6th horizon month instead of the opening month, (4) removing the LLM-derived window override from `compute_resolutions.py` so the question's own `window_start_date` is authoritative. Recovery script: `scripts/recover_historical_questions.py`.
+- **IPC API unavailable — FEWS NET data used instead** (fixed): The IPC connector (`pythia/ipc_phases.py`) requires `IPC_API_KEY` which is not available; `ipc_phases` table is always empty. FEWS NET Phase 3+ data is already in `facts_resolved` via the Resolver's `fewsnet_ipc` connector. New module `pythia/fewsnet_food_security.py` reads from `facts_resolved` and provides `format_fewsnet_for_prompt()` / `format_fewsnet_for_spd()` formatters, wired into RC, triage, and SPD prompts alongside the existing (empty) IPC blocks. The `ipc_phases.py` module is retained as dead code in case an API key becomes available.
+- **Gemini grounding unreliable — OpenAI primary** (fixed): Gemini Google Search grounding failed 6/6 times in test run fc_1774107846 (HTTP 200 but `grounded=False`). OpenAI web search (GPT-4.1-mini) succeeded 15/15. Swapped primary/fallback: OpenAI web search is now primary, Gemini is fallback. Override with `PYTHIA_GROUNDING_PRIMARY_BACKEND=gemini`. Helper functions `_try_openai_grounding` / `_try_gemini_grounding` extracted for reuse between RC and triage.
+- **Triage grounding calls invisible in telemetry** (fixed): RC grounding logged to `llm_calls` via `log_hs_llm_call` with `hazard_code=grounding_{hazard}`, but triage grounding did not log at all. Added logging in `_run_triage_grounding_for_hazard` with `hazard_code=TRIAGE_GROUNDING_{hazard}` and `purpose=hs_triage_grounding`.
+- **Adversarial checks gated behind deprecated flags** (fixed): Adversarial checks in `horizon_scanner.py` were gated on `PYTHIA_RETRIEVER_ENABLED=1 OR PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED=1`, both deprecated (always 0 in workflow). The adversarial check module manages its own web search enablement internally. Simplified gate to check only `PYTHIA_ADVERSARIAL_CHECK_ENABLED` (default "1"). Added explicit `PYTHIA_ADVERSARIAL_CHECK_ENABLED: "1"` to workflow env block.
+- **Grounding detail CSV case sensitivity and missing data** (fixed): `emit_grounding_detail_csv` in `dump_pythia_debug_bundle.py` used case-sensitive `LIKE '%grounding%'` which missed `GROUNDING_ACE` (uppercase). Fixed with `LOWER(hazard_code) LIKE '%grounding%'`. Also added fallback detection for markdown evidence packs (non-JSON `response_text`) by checking for "Grounded: True" / "Sources:" patterns and counting URLs.
 
 ## Canonical DB artifact discovery
 

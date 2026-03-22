@@ -330,12 +330,11 @@ def _run_triage_grounding_for_hazard(
     *,
     run_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Run a per-hazard Google Search grounding call for triage via Gemini.
+    """Run a per-hazard grounding call for triage (OpenAI primary, Gemini fallback).
 
     Returns an evidence pack dict with a ``markdown`` key ready for the
     triage prompt, or *None* on failure.
     """
-    from pythia.web_research.backends.gemini_grounding import fetch_via_gemini
 
     try:
         rc_summary = _build_rc_summary(rc_result_for_hazard)
@@ -343,8 +342,109 @@ def _run_triage_grounding_for_hazard(
             hazard_code, country_name, iso3, rc_summary=rc_summary,
         )
         recency = get_recency_days(hazard_code)
+        query_label = f"{country_name} ({iso3}) {hazard_code} triage grounding"
+
+        primary_backend = os.getenv("PYTHIA_GROUNDING_PRIMARY_BACKEND", "openai").lower()
+        pack = None
+
+        if primary_backend == "openai":
+            pack = _try_openai_triage_grounding(query_label, recency, iso3, hazard_code)
+            if pack is None or (not pack.get("sources") and not pack.get("grounded")):
+                fallback = _try_gemini_triage_grounding(query_label, recency, grounding_prompt, iso3, hazard_code)
+                if fallback and (fallback.get("sources") or fallback.get("grounded")):
+                    pack = fallback
+                elif pack is None:
+                    pack = fallback
+        else:
+            pack = _try_gemini_triage_grounding(query_label, recency, grounding_prompt, iso3, hazard_code)
+            if pack is None or (not pack.get("sources") and not pack.get("grounded")):
+                fallback = _try_openai_triage_grounding(query_label, recency, iso3, hazard_code)
+                if fallback and (fallback.get("sources") or fallback.get("grounded")):
+                    pack = fallback
+                elif pack is None:
+                    pack = fallback
+
+        if pack is None:
+            pack = {"sources": [], "grounded": False, "markdown": "", "debug": {"grounding_backend": "all_failed"}}
+
+        pack["markdown"] = _render_grounding_markdown(pack)
+
+        # Log triage grounding call to llm_calls for cost tracking
+        try:
+            from horizon_scanner.llm_logging import log_hs_llm_call
+            from forecaster.providers import ModelSpec, estimate_cost_usd
+
+            usage_info = dict(pack.get("debug", {}).get("usage", {}))
+            model_id = pack.get("debug", {}).get("model_id", "unknown")
+            provider = pack.get("debug", {}).get("grounding_backend", "unknown")
+            if "openai" in provider:
+                provider = "openai"
+            elif "gemini" in provider:
+                provider = "google"
+            if not usage_info.get("cost_usd") and usage_info.get("total_tokens"):
+                usage_info["cost_usd"] = estimate_cost_usd(str(model_id), usage_info)
+            log_hs_llm_call(
+                hs_run_id=run_id,
+                iso3=iso3,
+                hazard_code=f"TRIAGE_GROUNDING_{hazard_code}",
+                model_spec=ModelSpec(
+                    name="Grounding", provider=provider,
+                    model_id=str(model_id), active=True, purpose="hs_triage_grounding",
+                ),
+                prompt_text=(pack.get("debug", {}).get("query", "") or query_label)[:2000],
+                response_text=(pack.get("markdown") or "")[:2000],
+                usage=usage_info,
+                error_text=str(pack["error"]["message"]) if pack.get("error") and isinstance(pack["error"], dict) else None,
+                is_test=is_test_mode(),
+            )
+        except Exception:
+            logger.debug("Failed to log triage grounding call for %s %s", iso3, hazard_code, exc_info=True)
+
+        return pack
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Triage grounding failed for %s %s: %s", iso3, hazard_code, exc)
+        return None
+
+
+def _try_openai_triage_grounding(
+    query_label: str,
+    recency: int,
+    iso3: str,
+    hazard_code: str,
+) -> dict[str, Any] | None:
+    """Try OpenAI web search grounding for triage. Returns pack dict or None."""
+    try:
+        from pythia.web_research.backends.openai_web_search import fetch_via_openai_web_search
+        evidence_pack = fetch_via_openai_web_search(
+            query_label,
+            recency_days=recency,
+            include_structural=True,
+            timeout_sec=60,
+            max_results=10,
+        )
+        pack = evidence_pack.to_dict() if hasattr(evidence_pack, "to_dict") else dict(evidence_pack)
+        if pack.get("sources") or pack.get("grounded"):
+            pack.setdefault("debug", {})["grounding_backend"] = "openai_web_search"
+        else:
+            pack.setdefault("debug", {})["grounding_backend"] = "openai_web_search_empty"
+        return pack
+    except Exception as exc:
+        logger.debug("Triage grounding OpenAI failed for %s %s: %s", iso3, hazard_code, exc)
+        return None
+
+
+def _try_gemini_triage_grounding(
+    query_label: str,
+    recency: int,
+    grounding_prompt: str,
+    iso3: str,
+    hazard_code: str,
+) -> dict[str, Any] | None:
+    """Try Gemini Google Search grounding for triage. Returns pack dict or None."""
+    try:
+        from pythia.web_research.backends.gemini_grounding import fetch_via_gemini
         evidence_pack = fetch_via_gemini(
-            query=f"{country_name} ({iso3}) {hazard_code} triage grounding",
+            query=query_label,
             recency_days=recency,
             include_structural=True,
             timeout_sec=60,
@@ -352,33 +452,13 @@ def _run_triage_grounding_for_hazard(
             custom_prompt=grounding_prompt,
         )
         pack = evidence_pack.to_dict() if hasattr(evidence_pack, "to_dict") else dict(evidence_pack)
-
-        # Fallback to OpenAI web search if Gemini grounding returned no sources
-        if not pack.get("sources") and not pack.get("grounded"):
-            try:
-                from pythia.web_research.backends.openai_web_search import fetch_via_openai_web_search
-                fallback_pack = fetch_via_openai_web_search(
-                    f"{country_name} ({iso3}) {hazard_code} triage grounding",
-                    recency_days=recency,
-                    include_structural=True,
-                    timeout_sec=60,
-                    max_results=10,
-                )
-                fb = fallback_pack.to_dict() if hasattr(fallback_pack, "to_dict") else dict(fallback_pack)
-                if fb.get("sources") or fb.get("grounded"):
-                    pack = fb
-                    pack.setdefault("debug", {})["grounding_fallback"] = "openai_web_search"
-                    logger.info("Triage grounding fallback to OpenAI succeeded for %s %s", iso3, hazard_code)
-                else:
-                    pack.setdefault("debug", {})["grounding_fallback"] = "openai_web_search_also_failed"
-                    logger.debug("Triage grounding fallback to OpenAI also failed for %s %s", iso3, hazard_code)
-            except Exception as exc:
-                logger.debug("Triage grounding OpenAI fallback error for %s %s: %s", iso3, hazard_code, exc)
-
-        pack["markdown"] = _render_grounding_markdown(pack)
+        if pack.get("sources") or pack.get("grounded"):
+            pack.setdefault("debug", {})["grounding_backend"] = "gemini_grounding"
+        else:
+            pack.setdefault("debug", {})["grounding_backend"] = "gemini_grounding_empty"
         return pack
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Triage grounding failed for %s %s: %s", iso3, hazard_code, exc)
+    except Exception as exc:
+        logger.debug("Triage grounding Gemini failed for %s %s: %s", iso3, hazard_code, exc)
         return None
 
 
@@ -567,6 +647,15 @@ def _run_triage_for_single_hazard(
             new_data_kwargs["ipc_phases"] = ipc
     except Exception as exc:
         logger.debug("IPC phases load failed for %s: %s", iso3, exc)
+
+    # FEWS NET food security (all hazards)
+    try:
+        from pythia.fewsnet_food_security import load_fewsnet_food_security
+        fewsnet = load_fewsnet_food_security(iso3)
+        if fewsnet:
+            new_data_kwargs["fewsnet_food_security"] = fewsnet
+    except Exception as exc:
+        logger.debug("FEWS NET food security load failed for %s: %s", iso3, exc)
 
     # ACAPS INFORM Severity (all hazards)
     try:

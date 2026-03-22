@@ -154,6 +154,7 @@ def _format_new_data_sections(
     reliefweb_reports: Any = None,
     acled_political_events: Any = None,
     ipc_phases: Any = None,
+    fewsnet_food_security: Any = None,
     inform_severity: Any = None,
     acaps_risk_radar: Any = None,
     acaps_monitoring: Any = None,
@@ -185,6 +186,15 @@ def _format_new_data_sections(
         try:
             from pythia.ipc_phases import format_ipc_for_prompt
             t = format_ipc_for_prompt(ipc_phases)
+            if t:
+                sections.append(t)
+        except Exception:
+            pass
+
+    if fewsnet_food_security:
+        try:
+            from pythia.fewsnet_food_security import format_fewsnet_for_prompt
+            t = format_fewsnet_for_prompt(fewsnet_food_security)
             if t:
                 sections.append(t)
         except Exception:
@@ -248,6 +258,7 @@ def build_triage_prompt_ace(
     reliefweb_reports: Optional[Any] = None,
     acled_political_events: Optional[Any] = None,
     ipc_phases: Optional[Any] = None,
+    fewsnet_food_security: Optional[Any] = None,
     inform_severity: Optional[Any] = None,
     acaps_risk_radar: Optional[Any] = None,
     acaps_monitoring: Optional[Any] = None,
@@ -292,6 +303,7 @@ def build_triage_prompt_ace(
         reliefweb_reports=reliefweb_reports,
         acled_political_events=acled_political_events,
         ipc_phases=ipc_phases,
+        fewsnet_food_security=fewsnet_food_security,
         inform_severity=inform_severity,
         acaps_risk_radar=acaps_risk_radar,
         acaps_monitoring=acaps_monitoring,
@@ -384,6 +396,7 @@ def build_triage_prompt_dr(
     season_context: Optional[str] = None,
     reliefweb_reports: Optional[Any] = None,
     ipc_phases: Optional[Any] = None,
+    fewsnet_food_security: Optional[Any] = None,
     inform_severity: Optional[Any] = None,
     acaps_risk_radar: Optional[Any] = None,
     acaps_monitoring: Optional[Any] = None,
@@ -414,6 +427,7 @@ def build_triage_prompt_dr(
     additional_context = _format_new_data_sections(
         reliefweb_reports=reliefweb_reports,
         ipc_phases=ipc_phases,
+        fewsnet_food_security=fewsnet_food_security,
         inform_severity=inform_severity,
         acaps_risk_radar=acaps_risk_radar,
         acaps_monitoring=acaps_monitoring,
@@ -527,6 +541,7 @@ def build_triage_prompt_fl(
     additional_context = _format_new_data_sections(
         reliefweb_reports=reliefweb_reports,
         ipc_phases=ipc_phases,
+        fewsnet_food_security=fewsnet_food_security,
         inform_severity=inform_severity,
         acaps_risk_radar=acaps_risk_radar,
         acaps_monitoring=acaps_monitoring,
