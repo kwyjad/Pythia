@@ -846,10 +846,16 @@ def _latest_forecasted_target_month(
     horizon_col: str,
     horizon_m: int,
     include_test: bool = False,
+    forecaster_run_id: Optional[str] = None,
 ) -> Optional[str]:
     if not _table_exists(con, "questions") or not _table_exists(con, "forecasts_ensemble"):
         return None
     _tf = _test_filter(include_test, "q")
+    run_clause = ""
+    params: dict[str, Any] = {"metric": metric_upper, "horizon_m": horizon_m}
+    if forecaster_run_id:
+        run_clause = " AND fe.run_id = :run_id"
+        params["run_id"] = forecaster_run_id
     row = _execute(
         con,
         f"""
@@ -858,9 +864,9 @@ def _latest_forecasted_target_month(
         JOIN questions q ON q.question_id = fe.question_id
         WHERE UPPER(q.metric) = :metric
           AND fe.{horizon_col} = :horizon_m
-          {_tf}
+          {_tf}{run_clause}
         """,
-        {"metric": metric_upper, "horizon_m": horizon_m},
+        params,
     ).fetchone()
     return row[0] if row and row[0] else None
 
@@ -1877,13 +1883,19 @@ def _get_risk_index_binary(
         target_month = _latest_forecasted_target_month(
             con, metric_upper, horizon_col, horizon_m,
             include_test=include_test,
+            forecaster_run_id=forecaster_run_id,
         )
         if not target_month:
             _tf = _test_filter(include_test)
+            _run_clause = ""
+            _fallback_params: dict[str, Any] = {"metric": metric_upper}
+            if forecaster_run_id:
+                _run_clause = " AND question_id IN (SELECT question_id FROM forecasts_ensemble WHERE run_id = :run_id)"
+                _fallback_params["run_id"] = forecaster_run_id
             row = _execute(
                 con,
-                f"SELECT MAX(target_month) FROM questions WHERE UPPER(metric)=:metric{_tf}",
-                {"metric": metric_upper},
+                f"SELECT MAX(target_month) FROM questions WHERE UPPER(metric)=:metric{_tf}{_run_clause}",
+                _fallback_params,
             ).fetchone()
             target_month = row[0] if row and row[0] else None
 
@@ -2088,13 +2100,19 @@ def get_risk_index(
         target_month = _latest_forecasted_target_month(
             con, metric_upper, horizon_col, horizon_m,
             include_test=include_test,
+            forecaster_run_id=forecaster_run_id,
         )
         if not target_month:
             _tf = _test_filter(include_test)
+            _run_clause = ""
+            _fallback_params: dict[str, Any] = {"metric": metric_upper}
+            if forecaster_run_id:
+                _run_clause = " AND question_id IN (SELECT question_id FROM forecasts_ensemble WHERE run_id = :run_id)"
+                _fallback_params["run_id"] = forecaster_run_id
             row = _execute(
                 con,
-                f"SELECT MAX(target_month) FROM questions WHERE UPPER(metric)=:metric{_tf}",
-                {"metric": metric_upper},
+                f"SELECT MAX(target_month) FROM questions WHERE UPPER(metric)=:metric{_tf}{_run_clause}",
+                _fallback_params,
             ).fetchone()
             target_month = row[0] if row and row[0] else None
 
@@ -3264,6 +3282,49 @@ def diagnostics_kpi_scopes(
         scope["countries"] = scope["countries_with_forecasts"]
         return scope
 
+    # ── Available forecast runs for the selected month ──
+    # Determined FIRST so selected_run_id can scope KPIs below.
+    available_runs: List[Dict[str, Any]] = []
+    selected_run_id: Optional[str] = None
+    if selected_month and _table_has_columns(con, "forecasts_ensemble", ["run_id"]):
+        parsed_sel = _parse_year_month(selected_month)
+        fe_ts = _pick_timestamp_column(
+            con, "forecasts_ensemble", ["created_at", "timestamp", "started_at"]
+        )
+        if parsed_sel and fe_ts:
+            sel_start, sel_end = _month_window(parsed_sel[0], parsed_sel[1])
+            try:
+                _tf_fe = _test_filter(include_test, "fe")
+                runs_rows = con.execute(
+                    f"""
+                    SELECT fe.run_id,
+                           MIN(fe.{fe_ts}) AS started_at,
+                           COUNT(DISTINCT fe.question_id) AS n_questions
+                    FROM forecasts_ensemble fe
+                    WHERE fe.{fe_ts} >= ? AND fe.{fe_ts} < ?
+                      AND fe.run_id IS NOT NULL
+                      {_tf_fe}
+                    GROUP BY fe.run_id
+                    ORDER BY fe.run_id DESC
+                    """,
+                    [sel_start, sel_end],
+                ).fetchall()
+                for idx, rr in enumerate(runs_rows):
+                    available_runs.append({
+                        "run_id": rr[0],
+                        "started_at": str(rr[1]) if rr[1] else None,
+                        "n_questions": int(rr[2]) if rr[2] else 0,
+                        "is_latest": idx == 0,
+                    })
+                if available_runs:
+                    selected_run_id = available_runs[0]["run_id"]
+            except Exception:
+                notes.append("available_runs_failed")
+
+    # ── Scope KPIs ──
+    # Use the effective run: explicit forecaster_run_id, or the auto-selected latest run.
+    effective_run_id = forecaster_run_id or selected_run_id
+
     selected_scope: Dict[str, Any] = {
         "label": f"Selected run {selected_month}" if selected_month else "Selected run",
         "questions": 0,
@@ -3275,12 +3336,12 @@ def diagnostics_kpi_scopes(
         "forecasts_by_hazard": {},
     }
 
-    if forecaster_run_id and _table_has_columns(con, "forecasts_ensemble", ["run_id", "question_id"]):
-        # ── Scope KPIs to a specific forecaster run ──
+    if effective_run_id and _table_has_columns(con, "forecasts_ensemble", ["run_id", "question_id"]):
+        # ── Scope KPIs to the specific forecaster run ──
         question_ids_sql = (
             "SELECT DISTINCT fe.question_id FROM forecasts_ensemble fe WHERE fe.run_id = ?"
         )
-        question_ids_params: List[Any] = [forecaster_run_id]
+        question_ids_params: List[Any] = [effective_run_id]
         forecast_window_ym = None
         if selected_month:
             parsed = _parse_year_month(selected_month)
@@ -3306,7 +3367,7 @@ def diagnostics_kpi_scopes(
                 WHERE fe.run_id = ?
                   AND ht.iso3 IS NOT NULL
                 """,
-                [forecaster_run_id],
+                [effective_run_id],
             ).fetchone()
             selected_scope["countries_triaged"] = int(triaged_row[0]) if triaged_row else 0
         except Exception:
@@ -3355,44 +3416,6 @@ def diagnostics_kpi_scopes(
                 notes.append("selected_run_questions_unavailable")
         else:
             notes.append("selected_month_invalid")
-
-    # ── Available forecast runs for the selected month ──
-    available_runs: List[Dict[str, Any]] = []
-    selected_run_id: Optional[str] = None
-    if selected_month and _table_has_columns(con, "forecasts_ensemble", ["run_id"]):
-        parsed_sel = _parse_year_month(selected_month)
-        fe_ts = _pick_timestamp_column(
-            con, "forecasts_ensemble", ["created_at", "timestamp", "started_at"]
-        )
-        if parsed_sel and fe_ts:
-            sel_start, sel_end = _month_window(parsed_sel[0], parsed_sel[1])
-            try:
-                _tf_fe = _test_filter(include_test, "fe")
-                runs_rows = con.execute(
-                    f"""
-                    SELECT fe.run_id,
-                           MIN(fe.{fe_ts}) AS started_at,
-                           COUNT(DISTINCT fe.question_id) AS n_questions
-                    FROM forecasts_ensemble fe
-                    WHERE fe.{fe_ts} >= ? AND fe.{fe_ts} < ?
-                      AND fe.run_id IS NOT NULL
-                      {_tf_fe}
-                    GROUP BY fe.run_id
-                    ORDER BY fe.run_id DESC
-                    """,
-                    [sel_start, sel_end],
-                ).fetchall()
-                for idx, rr in enumerate(runs_rows):
-                    available_runs.append({
-                        "run_id": rr[0],
-                        "started_at": str(rr[1]) if rr[1] else None,
-                        "n_questions": int(rr[2]) if rr[2] else 0,
-                        "is_latest": idx == 0,
-                    })
-                if available_runs:
-                    selected_run_id = available_runs[0]["run_id"]
-            except Exception:
-                notes.append("available_runs_failed")
 
     # Override selected_run_id when a specific forecaster run was requested.
     if forecaster_run_id:

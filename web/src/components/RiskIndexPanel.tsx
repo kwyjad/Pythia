@@ -195,9 +195,13 @@ export default function RiskIndexPanel({
     runMonth: string | null,
     runId: string | null
   ) => {
-    const forecastTargetMonthForRun = runMonth
-      ? addMonthsYYYYMM(runMonth, 1)
-      : null;
+    // When a specific run is selected, let the API auto-select the correct
+    // target_month for that run's questions (target_month conventions differ
+    // between old and new question formats).  Only pass an explicit
+    // target_month when no run is selected and we have a runMonth to derive
+    // it from.
+    const forecastTargetMonthForRun =
+      !runId && runMonth ? addMonthsYYYYMM(runMonth, 1) : null;
     const response = await apiGet<RiskIndexResponse>("/risk_index", {
       ...buildParams(nextView),
       ...(forecastTargetMonthForRun
