@@ -737,7 +737,12 @@ def _build_llm_calls_bundle(
             debug=build_debug_payload({}),
         )
 
-    select_columns = sorted(available_columns)
+    # Exclude large TEXT columns that the frontend does not use, to reduce
+    # peak memory (avoids OOM on 512 MB Render instances).
+    exclude_cols: set[str] = {"parsed_json"}
+    if not transcripts_included:
+        exclude_cols.update({"prompt_text", "response_text"})
+    select_columns = sorted(available_columns - exclude_cols)
     order_fields: List[str] = []
     if "timestamp" in available_columns:
         order_fields.append("timestamp DESC NULLS LAST")
@@ -755,14 +760,13 @@ def _build_llm_calls_bundle(
         sql += " ORDER BY " + ", ".join(order_fields)
     sql += " LIMIT :limit"
     df = _execute(con, sql, params).fetchdf()
+    rows = _rows_from_df(df)
+    del df  # free pandas memory before building response dicts
 
     cleaned_rows: List[Dict[str, Any]] = []
     by_phase: Dict[str, List[Dict[str, Any]]] = {}
-    for row in _rows_from_df(df):
-        parsed = _apply_json_fields(row, ["parsed_json", "usage_json"])
-        if not transcripts_included:
-            parsed.pop("prompt_text", None)
-            parsed.pop("response_text", None)
+    for row in rows:
+        parsed = _apply_json_fields(row, ["usage_json"])
         cleaned_rows.append(parsed)
         phase = parsed.get("phase")
         if phase:
@@ -1200,10 +1204,14 @@ def get_question_bundle(
     scenario_writer: List[Dict[str, Any]] = []
     if resolved_forecaster_run_id:
         if _table_has_columns(con, "question_research", ["run_id", "question_id"]):
+            # Exclude deprecated evidence JSON columns (large, unused by frontend).
+            qr_cols = _table_columns(con, "question_research")
+            qr_exclude = {"hs_evidence_json", "question_evidence_json", "merged_evidence_json"}
+            qr_select = sorted(qr_cols - qr_exclude)
             research_row = _fetch_one(
                 con,
-                """
-                SELECT *
+                f"""
+                SELECT {', '.join(qr_select)}
                 FROM question_research
                 WHERE run_id = :run_id AND question_id = :question_id
                 ORDER BY created_at DESC
@@ -1229,6 +1237,7 @@ def get_question_bundle(
                 {"run_id": resolved_forecaster_run_id, "question_id": question_id},
             ).fetchdf()
             ensemble_spd = _rows_from_df(ensemble_df)
+            del ensemble_df
 
         raw_order_fields: List[str] = []
         if _table_has_columns(con, "forecasts_raw", ["horizon_m"]):
@@ -1246,17 +1255,21 @@ def get_question_bundle(
             raw_order_clause = " ORDER BY " + ", ".join(raw_order_fields)
 
         if _table_has_columns(con, "forecasts_raw", ["run_id", "question_id"]):
+            # Select only needed columns; exclude spd_json (large, unused by frontend).
+            raw_cols = _table_columns(con, "forecasts_raw")
+            raw_select = sorted(raw_cols - {"spd_json"})
             raw_df = _execute(
                 con,
                 f"""
-                SELECT *
+                SELECT {', '.join(raw_select)}
                 FROM forecasts_raw
                 WHERE run_id = :run_id AND question_id = :question_id
                 {raw_order_clause}
                 """,
                 {"run_id": resolved_forecaster_run_id, "question_id": question_id},
             ).fetchdf()
-            raw_spd = [_apply_json_fields(r, ["spd_json"]) for r in _rows_from_df(raw_df)]
+            raw_spd = _rows_from_df(raw_df)
+            del raw_df
 
         if _table_has_columns(con, "scenarios", ["run_id", "iso3", "hazard_code", "metric"]):
             scenario_df = _execute(
@@ -1275,6 +1288,7 @@ def get_question_bundle(
                 },
             ).fetchdf()
             scenario_writer = _rows_from_df(scenario_df)
+            del scenario_df
 
     question_context = None
     if resolved_forecaster_run_id and _table_exists(con, "question_context"):
@@ -1319,6 +1333,7 @@ def get_question_bundle(
             {"question_id": question_id},
         ).fetchdf()
         resolutions = _rows_from_df(res_df)
+        del res_df
 
     scores: List[Dict[str, Any]] = []
     if _table_exists(con, "scores") and _table_has_columns(con, "scores", ["question_id", "score_type", "value"]):
@@ -1334,6 +1349,7 @@ def get_question_bundle(
                 {"question_id": question_id},
             ).fetchdf()
             scores = _rows_from_df(scores_df)
+            del scores_df
         except Exception:
             logger.exception("Failed to load scores for question_bundle")
 
