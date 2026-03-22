@@ -272,12 +272,28 @@ def _require_debug_token(token: Optional[str]) -> None:
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
+def _try_artifact_sync() -> None:
+    """Fallback: sync DB from CI artifacts when Release-based sync is unavailable.
+
+    Opt-in via ``PYTHIA_SYNC_FROM_ARTIFACTS=1``.  Requires the ``gh`` CLI.
+    """
+    if os.environ.get("PYTHIA_SYNC_FROM_ARTIFACTS", "").strip() not in ("1", "true", "yes"):
+        return
+    try:
+        from scripts.sync_db import sync  # noqa: C0415
+
+        sync()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Artifact-based DB sync failed: %s", exc)
+
+
 @app.on_event("startup")
 def _startup_sync():
     try:
         maybe_sync_latest_db()
     except DbSyncError as exc:
         logger.warning("DB sync failed during startup: %s", exc)
+        _try_artifact_sync()
     con = None
     try:
         con = db_connect(read_only=False)
