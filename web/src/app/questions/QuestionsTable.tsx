@@ -72,7 +72,7 @@ const parseNumberValue = (value: string) => {
 };
 
 const EIV_TOOLTIP =
-  "PA uses 6-month EIV as the peak month (not a sum). FATALITIES uses 6-month cumulative expected deaths. Values come from sum over buckets of p(bucket, month) × centroid(bucket).";
+  "Peak month EIV for all metrics except FATALITIES, which uses 6-month cumulative expected deaths. Values come from sum over buckets of p(bucket, month) × centroid(bucket).";
 
 const TRIAGE_TOOLTIP =
   "HS triage_score (0–1) estimates risk of unusually high recorded impact in the next 1–6 months using evidence + base-rate signals. Scores map to tiers (priority ≥ 0.50, quiet < 0.50). Priority hazards enter the forecasting pipeline; quiet hazards may appear but have no EIV.";
@@ -413,7 +413,7 @@ export default function QuestionsTable({ rows }: QuestionsTableProps) {
             <span className="flex flex-col">
               <span>6-Month EIV</span>
               <span className="text-[11px] text-fred-muted">
-                / cumulative expected deaths
+                / cumulative
               </span>
             </span>
           )

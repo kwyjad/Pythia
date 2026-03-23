@@ -20,7 +20,19 @@ type ModelRow = Record<string, unknown>;
 
 const getTextList = (value: unknown): string[] => {
   if (Array.isArray(value)) {
-    return value.map((item) => String(item));
+    return value.map((item) => {
+      if (item && typeof item === "object") {
+        // Handle trigger_signals objects: { signal: string, timeframe_months: number }
+        const obj = item as Record<string, unknown>;
+        if (typeof obj.signal === "string") return obj.signal;
+        // Fallback: try common text keys
+        for (const key of ["text", "description", "name", "label", "value"]) {
+          if (typeof obj[key] === "string") return obj[key] as string;
+        }
+        return JSON.stringify(item);
+      }
+      return String(item);
+    });
   }
   if (value && typeof value === "object") {
     const obj = value as Record<string, unknown>;

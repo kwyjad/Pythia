@@ -15,6 +15,34 @@ const isUsefulRationale = (value: string): boolean => {
   return true;
 };
 
+/**
+ * Try to parse a JSON response_text and extract the human_explanation field.
+ * Model responses may be wrapped in code fences.
+ */
+const extractHumanExplanationFromResponseText = (
+  responseText: string
+): string | null => {
+  if (!responseText) return null;
+  // Strip markdown code fences if present
+  let text = responseText.trim();
+  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
+  if (fenceMatch) {
+    text = fenceMatch[1].trim();
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object") {
+      const he = parsed.human_explanation;
+      if (typeof he === "string" && isUsefulRationale(he)) {
+        return he.trim();
+      }
+    }
+  } catch {
+    // Not valid JSON — ignore
+  }
+  return null;
+};
+
 export const extractForecastRationale = (bundle: any): string | null => {
   if (!bundle || typeof bundle !== "object") return null;
   const forecast = (bundle as { forecast?: any }).forecast;
@@ -52,8 +80,31 @@ export const extractForecastRationale = (bundle: any): string | null => {
       }
     }
   }
+
+  // Fallback: extract human_explanation from forecast LLM call response_text JSON.
+  // This catches cases where the DB column is empty but the response text has it.
+  if (explanations.length === 0) {
+    const llmCalls = (bundle as { llm_calls?: any }).llm_calls;
+    const byPhase = llmCalls?.by_phase as Record<string, any[]> | undefined;
+    // Forecast SPD calls use phase "spd_v2"
+    const forecastRows = byPhase?.spd_v2 ?? [];
+    for (const row of forecastRows) {
+      const responseText = row?.response_text;
+      if (typeof responseText !== "string") continue;
+      const modelName =
+        (typeof row?.model_name === "string" ? row.model_name : null) ??
+        (typeof row?.model_id === "string" ? row.model_id : null) ??
+        "Model";
+      const he = extractHumanExplanationFromResponseText(responseText);
+      if (he && !seenTexts.has(he)) {
+        seenTexts.add(he);
+        explanations.push({ model: modelName, text: he });
+      }
+    }
+  }
+
   if (explanations.length === 1) {
-    return explanations[0].text;
+    return `${explanations[0].model}: ${explanations[0].text}`;
   }
   if (explanations.length > 1) {
     return explanations.map((e) => `${e.model}: ${e.text}`).join("\n\n");

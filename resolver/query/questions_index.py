@@ -423,7 +423,7 @@ def compute_questions_forecast_summary(
         if not question_id:
             continue
         metric_upper = str(metric).strip().upper() if metric is not None else ""
-        if metric_upper == "PA" and eiv_peak is not None:
+        if metric_upper in ("PA", "PHASE3PLUS_IN_NEED") and eiv_peak is not None:
             eiv_total = eiv_peak
         summary[str(question_id)] = {
             "forecast_date": forecast_date,
