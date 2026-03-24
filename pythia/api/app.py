@@ -3412,11 +3412,14 @@ def diagnostics_kpi_scopes(
             sel_start, sel_end = _month_window(parsed_sel[0], parsed_sel[1])
             try:
                 _tf_fe = _test_filter(include_test, "fe")
+                _has_is_test = _table_has_columns(con, "forecasts_ensemble", ["is_test"])
+                _is_test_expr = "COALESCE(fe.is_test, FALSE)" if _has_is_test else "FALSE"
                 runs_rows = con.execute(
                     f"""
                     SELECT fe.run_id,
                            MIN(fe.{fe_ts}) AS started_at,
-                           COUNT(DISTINCT fe.question_id) AS n_questions
+                           COUNT(DISTINCT fe.question_id) AS n_questions,
+                           BOOL_OR({_is_test_expr}) AS is_test
                     FROM forecasts_ensemble fe
                     WHERE fe.{fe_ts} >= ? AND fe.{fe_ts} < ?
                       AND fe.run_id IS NOT NULL
@@ -3432,6 +3435,7 @@ def diagnostics_kpi_scopes(
                         "started_at": str(rr[1]) if rr[1] else None,
                         "n_questions": int(rr[2]) if rr[2] else 0,
                         "is_latest": idx == 0,
+                        "is_test": bool(rr[3]) if rr[3] is not None else False,
                     })
                 if available_runs:
                     selected_run_id = available_runs[0]["run_id"]

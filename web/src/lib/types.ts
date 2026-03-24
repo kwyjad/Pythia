@@ -30,6 +30,7 @@ export type ForecastRun = {
   started_at: string | null;
   n_questions: number;
   is_latest: boolean;
+  is_test?: boolean;
 };
 
 export type DiagnosticsKpiScopesResponse = {
