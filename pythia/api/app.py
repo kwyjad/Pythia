@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import os
+import resource
 
 import duckdb, pandas as pd
 import numpy as np
@@ -88,6 +89,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 logger = logging.getLogger(__name__)
+
+_DUCKDB_MEMORY_LIMIT = os.getenv("PYTHIA_DUCKDB_MEMORY_LIMIT", "150MB")
+_DUCKDB_THREADS = int(os.getenv("PYTHIA_DUCKDB_THREADS", "2"))
+_HEAVY_REQUEST_SEMAPHORE = threading.Semaphore(int(os.getenv("PYTHIA_MAX_CONCURRENT_HEAVY", "2")))
 
 _COUNTRY_NAME_BY_ISO3: dict[str, str] = {}
 _POPULATION_BY_ISO3: dict[str, int] = {}
@@ -214,6 +219,18 @@ def _rows_from_df(df: pd.DataFrame) -> List[Dict[str, Any]]:
     return _json_sanitize(rows)
 
 
+def _rows_from_cursor(cursor: duckdb.DuckDBPyConnection) -> List[Dict[str, Any]]:
+    """Convert DuckDB cursor results to list of dicts without pandas."""
+    desc = cursor.description
+    if not desc:
+        return []
+    columns = [d[0] for d in desc]
+    raw = cursor.fetchall()
+    if not raw:
+        return []
+    return _json_sanitize([dict(zip(columns, row)) for row in raw])
+
+
 def _concat_cost_tables(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     frames = [
         tables.get("summary"),
@@ -257,6 +274,9 @@ def _ensure_read_connection() -> duckdb.DuckDBPyConnection:
         if not db_path.exists():
             raise HTTPException(status_code=503, detail="DB not available yet")
         _READ_CON = duckdb.connect(db_url, read_only=False)
+        _READ_CON.execute(f"SET memory_limit='{_DUCKDB_MEMORY_LIMIT}'")
+        _READ_CON.execute(f"SET threads={_DUCKDB_THREADS}")
+        logger.info("DuckDB memory_limit=%s threads=%s", _DUCKDB_MEMORY_LIMIT, _DUCKDB_THREADS)
         return _READ_CON
 
 
@@ -297,6 +317,8 @@ def _startup_sync():
     con = None
     try:
         con = db_connect(read_only=False)
+        con.execute(f"SET memory_limit='{_DUCKDB_MEMORY_LIMIT}'")
+        con.execute(f"SET threads={_DUCKDB_THREADS}")
         ensure_schema(con)
         ensure_llm_calls_columns(con)
     except Exception as exc:  # noqa: BLE001
@@ -487,11 +509,15 @@ def _apply_json_fields(row: Dict[str, Any], fields: List[str]) -> Dict[str, Any]
 
 
 def _fetch_one(con: duckdb.DuckDBPyConnection, sql: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    df = _execute(con, sql, params).fetchdf()
-    rows = _rows_from_df(df)
-    if not rows:
+    cursor = _execute(con, sql, params)
+    desc = cursor.description
+    if not desc:
         return None
-    return rows[0]
+    columns = [d[0] for d in desc]
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return _json_sanitize(dict(zip(columns, row)))
 
 
 def _resolve_question_row(
@@ -517,11 +543,7 @@ def _resolve_question_row(
     sql += f" ORDER BY {', '.join(order_by_parts)} LIMIT 1"
 
     def fetch_row(query: str, query_params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        df = _execute(con, query, query_params).fetchdf()
-        rows = _rows_from_df(df)
-        if not rows:
-            return None
-        return rows[0]
+        return _fetch_one(con, query, query_params)
 
     if hs_run_id and q_run_col:
         filtered_params = dict(params)
@@ -547,7 +569,7 @@ def _resolve_question_row(
             return row
         available_run_ids: List[str] = []
         if q_run_col:
-            available_df = _execute(
+            available_rows = _rows_from_cursor(_execute(
                 con,
                 f"""
                 SELECT DISTINCT q.{q_run_col} AS run_id
@@ -557,9 +579,8 @@ def _resolve_question_row(
                 LIMIT 10
                 """,
                 {"question_id": question_id},
-            ).fetchdf()
-            if not available_df.empty:
-                available_run_ids = available_df["run_id"].dropna().tolist()
+            ))
+            available_run_ids = [r["run_id"] for r in available_rows if r.get("run_id")]
         raise HTTPException(
             status_code=404,
             detail={
@@ -586,7 +607,7 @@ def _resolve_forecaster_run_id(
         return forecaster_run_id
     if not _table_exists(con, "forecasts_ensemble"):
         return None
-    df = con.execute(
+    row = con.execute(
         """
         SELECT run_id
         FROM forecasts_ensemble
@@ -595,10 +616,10 @@ def _resolve_forecaster_run_id(
         LIMIT 1
         """,
         [question_id],
-    ).fetchdf()
-    if df.empty:
+    ).fetchone()
+    if not row:
         return None
-    return df["run_id"].iloc[0]
+    return row[0]
 
 
 def _run_filter_cte(
@@ -766,9 +787,7 @@ def _build_llm_calls_bundle(
     if order_fields:
         sql += " ORDER BY " + ", ".join(order_fields)
     sql += " LIMIT :limit"
-    df = _execute(con, sql, params).fetchdf()
-    rows = _rows_from_df(df)
-    del df  # free pandas memory before building response dicts
+    rows = _rows_from_cursor(_execute(con, sql, params))
 
     # Query 2: fetch transcripts ONLY for rows matching transcript_phases.
     # This keeps peak memory bounded (~4 MB for ~20 matching rows instead of
@@ -790,15 +809,13 @@ def _build_llm_calls_bundle(
           WHERE ({where_clause}) AND ({phase_filter})
           LIMIT :limit
         """
-        t_df = _execute(con, transcript_sql, tp_params).fetchdf()
-        for t_row in _rows_from_df(t_df):
+        for t_row in _rows_from_cursor(_execute(con, transcript_sql, tp_params)):
             cid = t_row.get("call_id")
             if cid:
                 transcript_map[cid] = {
                     "prompt_text": t_row.get("prompt_text") or "",
                     "response_text": t_row.get("response_text") or "",
                 }
-        del t_df
 
     cleaned_rows: List[Dict[str, Any]] = []
     by_phase: Dict[str, List[Dict[str, Any]]] = {}
@@ -1038,15 +1055,13 @@ def get_ui_run(ui_run_id: str):
       - row: dict | None (full ui_runs row if found)
     """
     con = _con()
-    df = con.execute(
+    rows = _rows_from_cursor(con.execute(
         "SELECT * FROM ui_runs WHERE ui_run_id = ?",
         [ui_run_id],
-    ).fetchdf()
-    if df.empty:
+    ))
+    if not rows:
         return {"found": False, "row": None}
-    rows = _rows_from_df(df)
-    row = rows[0] if rows else None
-    return {"found": True, "row": row}
+    return {"found": True, "row": rows[0]}
 
 
 @app.get("/v1/questions")
@@ -1100,8 +1115,7 @@ def get_questions(
         sql += " ORDER BY target_month, iso3, hazard_code, metric"
         if run_col:
             sql += f", {run_col}"
-        df = _execute(con, sql, params).fetchdf()
-        rows = _rows_from_df(df)
+        rows = _rows_from_cursor(_execute(con, sql, params))
     else:
         # latest_only=True: one row per concept (iso3, hazard, metric, target_month) from latest run
         cte, _ = _latest_questions_view(
@@ -1123,8 +1137,7 @@ def get_questions(
         if run_id and run_col:
             sql += " AND rn = 1"
         sql += " ORDER BY target_month, iso3, hazard_code, metric"
-        df = _execute(con, sql, params).fetchdf()
-        rows = _rows_from_df(df)
+        rows = _rows_from_cursor(_execute(con, sql, params))
 
     # Enrich with forecast and triage summaries.
     triage_summary: dict[str, dict[str, Any]] = {}
@@ -1171,6 +1184,23 @@ def get_question_bundle(
     transcript_phases: Optional[str] = Query(None, description="Comma-separated phases to keep transcripts for (strips others to save memory)"),
     limit_llm_calls: int = Query(200, ge=1, le=2000, description="Max llm_calls rows to return"),
     include_test: bool = Query(False),
+):
+    if not _HEAVY_REQUEST_SEMAPHORE.acquire(timeout=30):
+        raise HTTPException(status_code=503, detail="Server busy, try again")
+    try:
+        return _question_bundle_impl(
+            question_id, hs_run_id, forecaster_run_id,
+            include_llm_calls, include_transcripts, transcript_phases,
+            limit_llm_calls, include_test,
+        )
+    finally:
+        _HEAVY_REQUEST_SEMAPHORE.release()
+
+
+def _question_bundle_impl(
+    question_id, hs_run_id, forecaster_run_id,
+    include_llm_calls, include_transcripts, transcript_phases,
+    limit_llm_calls, include_test,
 ):
     con = _con()
 
@@ -1227,15 +1257,14 @@ def get_question_bundle(
     scenarios: List[Dict[str, Any]] = []
     if resolved_hs_run_id and scenario_ids and _table_has_columns(con, "hs_scenarios", ["hs_run_id", "scenario_id"]):
         placeholders = ",".join(["?"] * len(scenario_ids))
-        df = con.execute(
+        scenario_rows = [_apply_json_fields(r, ["scenario_json"]) for r in _rows_from_cursor(con.execute(
             f"""
             SELECT *
             FROM hs_scenarios
             WHERE hs_run_id = ? AND scenario_id IN ({placeholders})
             """,
             [resolved_hs_run_id, *scenario_ids],
-        ).fetchdf()
-        scenario_rows = [_apply_json_fields(r, ["scenario_json"]) for r in _rows_from_df(df)]
+        ))]
         order = {sid: idx for idx, sid in enumerate(scenario_ids)}
         scenarios = sorted(scenario_rows, key=lambda r: order.get(r.get("scenario_id"), len(order)))
 
@@ -1269,7 +1298,7 @@ def get_question_bundle(
             ensemble_order_clause = "ORDER BY month_index, bucket_index, model_name"
             if _table_has_columns(con, "forecasts_ensemble", ["horizon_m", "class_bin"]):
                 ensemble_order_clause = "ORDER BY horizon_m, class_bin, model_name"
-            ensemble_df = _execute(
+            ensemble_spd = _rows_from_cursor(_execute(
                 con,
                 f"""
                 SELECT *
@@ -1278,9 +1307,7 @@ def get_question_bundle(
                 {ensemble_order_clause}
                 """,
                 {"run_id": resolved_forecaster_run_id, "question_id": question_id},
-            ).fetchdf()
-            ensemble_spd = _rows_from_df(ensemble_df)
-            del ensemble_df
+            ))
 
         raw_order_fields: List[str] = []
         if _table_has_columns(con, "forecasts_raw", ["horizon_m"]):
@@ -1301,7 +1328,7 @@ def get_question_bundle(
             # Select only needed columns; exclude spd_json (large, unused by frontend).
             raw_cols = _table_columns(con, "forecasts_raw")
             raw_select = sorted(raw_cols - {"spd_json"})
-            raw_df = _execute(
+            raw_spd = _rows_from_cursor(_execute(
                 con,
                 f"""
                 SELECT {', '.join(raw_select)}
@@ -1310,12 +1337,10 @@ def get_question_bundle(
                 {raw_order_clause}
                 """,
                 {"run_id": resolved_forecaster_run_id, "question_id": question_id},
-            ).fetchdf()
-            raw_spd = _rows_from_df(raw_df)
-            del raw_df
+            ))
 
         if _table_has_columns(con, "scenarios", ["run_id", "iso3", "hazard_code", "metric"]):
-            scenario_df = _execute(
+            scenario_writer = _rows_from_cursor(_execute(
                 con,
                 """
                 SELECT *
@@ -1329,9 +1354,7 @@ def get_question_bundle(
                     "hazard_code": hazard_code,
                     "metric": question.get("metric"),
                 },
-            ).fetchdf()
-            scenario_writer = _rows_from_df(scenario_df)
-            del scenario_df
+            ))
 
     question_context = None
     if resolved_forecaster_run_id and _table_exists(con, "question_context"):
@@ -1365,7 +1388,7 @@ def get_question_bundle(
 
     resolutions: List[Dict[str, Any]] = []
     if _table_exists(con, "resolutions"):
-        res_df = _execute(
+        resolutions = _rows_from_cursor(_execute(
             con,
             """
             SELECT *
@@ -1374,14 +1397,12 @@ def get_question_bundle(
             ORDER BY observed_month
             """,
             {"question_id": question_id},
-        ).fetchdf()
-        resolutions = _rows_from_df(res_df)
-        del res_df
+        ))
 
     scores: List[Dict[str, Any]] = []
     if _table_exists(con, "scores") and _table_has_columns(con, "scores", ["question_id", "score_type", "value"]):
         try:
-            scores_df = _execute(
+            scores = _rows_from_cursor(_execute(
                 con,
                 """
                 SELECT *
@@ -1390,9 +1411,7 @@ def get_question_bundle(
                 ORDER BY created_at DESC NULLS LAST, horizon_m ASC NULLS LAST, score_type ASC, model_name ASC NULLS LAST
                 """,
                 {"question_id": question_id},
-            ).fetchdf()
-            scores = _rows_from_df(scores_df)
-            del scores_df
+            ))
         except Exception:
             logger.exception("Failed to load scores for question_bundle")
 
@@ -1507,16 +1526,16 @@ def get_calibration_weights(
     sql += " WHERE " + " AND ".join(where_full)
     sql += " ORDER BY hazard_code, metric, model_name"
 
-    df = _execute(con, sql, params).fetchdf()
+    rows = _rows_from_cursor(_execute(con, sql, params))
 
-    if df.empty:
+    if not rows:
         return {"found": False, "as_of_month": as_of_month, "rows": []}
 
     # We return rows, plus the resolved as_of_month for convenience
     return {
         "found": True,
         "as_of_month": as_of_month,
-        "rows": _rows_from_df(df),
+        "rows": rows,
     }
 
 
@@ -1581,15 +1600,15 @@ def get_calibration_advice(
     sql += " WHERE " + " AND ".join(where_full)
     sql += " ORDER BY hazard_code, metric"
 
-    df = _execute(con, sql, params).fetchdf()
+    rows = _rows_from_cursor(_execute(con, sql, params))
 
-    if df.empty:
+    if not rows:
         return {"found": False, "as_of_month": as_of_month, "rows": []}
 
     return {
         "found": True,
         "as_of_month": as_of_month,
-        "rows": _rows_from_df(df),
+        "rows": rows,
     }
 
 
@@ -1670,7 +1689,7 @@ def performance_scores(
         ORDER BY q.hazard_code, UPPER(q.metric), s.score_type,
                  s.model_name NULLS FIRST
     """
-    df_summary = _execute(con, sql_summary, params).fetchdf()
+    summary_rows = _rows_from_cursor(_execute(con, sql_summary, params))
 
     # Query 2 -- per-run rows (all models, including named ensembles)
     # Group by forecaster run (scores.run_id) when available so that scores
@@ -1750,11 +1769,11 @@ def performance_scores(
             ORDER BY q.hs_run_id DESC, q.hazard_code, s.score_type,
                      s.model_name NULLS FIRST
         """
-    df_runs = _execute(con, sql_runs, params).fetchdf()
+    run_rows = _rows_from_cursor(_execute(con, sql_runs, params))
 
     return {
-        "summary_rows": _rows_from_df(df_summary),
-        "run_rows": _rows_from_df(df_runs),
+        "summary_rows": summary_rows,
+        "run_rows": run_rows,
         "track_counts": track_counts,
     }
 
@@ -1813,8 +1832,7 @@ def get_forecasts_ensemble(
         if where_bits:
             sql += " WHERE " + " AND ".join(where_bits)
         sql += " ORDER BY q.iso3, q.hazard_code, q.metric, q.target_month, fe.horizon_m, fe.class_bin"
-        df = _execute(con, sql, params).fetchdf()
-        return {"rows": _rows_from_df(df)}
+        return {"rows": _rows_from_cursor(_execute(con, sql, params))}
 
     # latest_only=False: historical view (all runs)
     sql = f"""
@@ -1846,8 +1864,7 @@ def get_forecasts_ensemble(
         sql += " AND fe.horizon_m = :horizon_m"
 
     sql += " ORDER BY q.target_month, q.iso3, q.hazard_code, q.metric, q.run_id, fe.horizon_m, fe.class_bin"
-    df = _execute(con, sql, params).fetchdf()
-    return {"rows": _rows_from_df(df)}
+    return {"rows": _rows_from_cursor(_execute(con, sql, params))}
 
 
 @app.get("/v1/forecasts/history")
@@ -1895,8 +1912,7 @@ def get_forecasts_history(
         {_test_filter(include_test, "fe")}
       ORDER BY h.created_at, fe.horizon_m, fe.class_bin
     """
-    df = _execute(con, sql, params).fetchdf()
-    return {"rows": _rows_from_df(df)}
+    return {"rows": _rows_from_cursor(_execute(con, sql, params))}
 
 
 @app.get("/v1/resolutions")
@@ -1909,11 +1925,10 @@ def list_resolutions(iso3: str, month: str, metric: str = "PIN"):
     if not qids:
         return {"rows": []}
     inlist = ",".join(["?"] * len(qids))
-    df = con.execute(
+    return {"rows": _rows_from_cursor(con.execute(
         f"SELECT * FROM resolutions WHERE question_id IN ({inlist})",
         qids,
-    ).fetchdf()
-    return {"rows": _rows_from_df(df)}
+    ))}
 
 
 def _get_risk_index_binary(
@@ -2085,8 +2100,7 @@ def _get_risk_index_binary(
         "target_month": target_month,
         "hazard_code": hazard_code_upper,
     }
-    df = _execute(con, sql, params).fetchdf()
-    rows = _rows_from_df(df)
+    rows = _rows_from_cursor(_execute(con, sql, params))
 
     for row in rows:
         row["country_name"] = _country_name(row.get("iso3", ""))
@@ -2193,7 +2207,7 @@ def get_risk_index(
         con, "populations", ["iso3", "population", "year"]
     )
     if populations_table_available:
-        pop_df = _execute(
+        for pop_row in _rows_from_cursor(_execute(
             con,
             """
             SELECT iso3, population
@@ -2205,20 +2219,18 @@ def get_risk_index(
             )
             WHERE rn = 1
             """,
-        ).fetchdf()
-        if not pop_df.empty:
-            for iso3, population in zip(pop_df["iso3"], pop_df["population"]):
-                iso = str(iso3).strip().upper()
-                if not iso:
-                    continue
-                try:
-                    pop_value = int(float(population))
-                except Exception:
-                    continue
-                if pop_value <= 0:
-                    continue
-                db_population_map[iso] = pop_value
-            populations_available = bool(db_population_map)
+        )):
+            iso = str(pop_row.get("iso3", "")).strip().upper()
+            if not iso:
+                continue
+            try:
+                pop_value = int(float(pop_row.get("population", 0)))
+            except Exception:
+                continue
+            if pop_value <= 0:
+                continue
+            db_population_map[iso] = pop_value
+        populations_available = bool(db_population_map)
     agg_mode = "surge" if (is_pa or is_phase3) else "burden"
     registry_available = False
     if (normalize or agg_mode == "surge") and not populations_available:
@@ -2494,9 +2506,7 @@ def get_risk_index(
     }
     if populations_available:
         params["normalize"] = normalize
-    df = _execute(con, sql, params).fetchdf()
-
-    rows = _rows_from_df(df)
+    rows = _rows_from_cursor(_execute(con, sql, params))
     for row in rows:
         row.setdefault("population", None)
         row.setdefault("m1_pc", None)
@@ -2626,8 +2636,32 @@ def rankings(
     FROM ev LEFT JOIN pop ON ev.iso3=pop.iso3
       ORDER BY (CASE WHEN ? THEN per_capita ELSE expected_value END) DESC
     """
-    df = con.execute(sql, [metric, month, normalize, normalize]).fetchdf()
-    return {"rows": _rows_from_df(df)}
+    return {"rows": _rows_from_cursor(con.execute(sql, [metric, month, normalize, normalize]))}
+
+
+@app.get("/v1/diagnostics/memory")
+def diagnostics_memory():
+    """Return current process memory and DuckDB buffer pool usage."""
+    rusage = resource.getrusage(resource.RUSAGE_SELF)
+    rss_bytes = rusage.ru_maxrss
+    # macOS returns bytes, Linux returns KB
+    import sys as _sys
+    if _sys.platform == "darwin":
+        rss_mb = rss_bytes / (1024 * 1024)
+    else:
+        rss_mb = rss_bytes / 1024
+    result: Dict[str, Any] = {"rss_mb": round(rss_mb, 1)}
+    try:
+        con = _con()
+        result["duckdb_memory"] = _rows_from_cursor(con.execute("SELECT * FROM duckdb_memory()"))
+    except Exception:
+        result["duckdb_memory"] = []
+    result["limits"] = {
+        "memory_limit": _DUCKDB_MEMORY_LIMIT,
+        "threads": _DUCKDB_THREADS,
+        "max_concurrent_heavy": _HEAVY_REQUEST_SEMAPHORE._value,
+    }
+    return result
 
 
 @app.get("/v1/diagnostics/summary")
@@ -2646,10 +2680,9 @@ def diagnostics_summary(include_test: bool = Query(False)):
 
     _tf = _test_filter(include_test)
     try:
-        q_counts_df = con.execute(
+        q_counts = _rows_from_cursor(con.execute(
             f"SELECT status, COUNT(*) AS n FROM questions WHERE 1=1{_tf} GROUP BY status"
-        ).fetchdf()
-        q_counts = _rows_from_df(q_counts_df)
+        ))
     except Exception:
         q_counts = []
 
@@ -3585,10 +3618,7 @@ def get_countries(
           ORDER BY q.iso3
         """
 
-    df = con.execute(sql, params).fetchdf()
-    if df.empty:
-        return {"rows": []}
-    return {"rows": _rows_from_df(df)}
+    return {"rows": _rows_from_cursor(con.execute(sql, params))}
 
 
 @app.get("/v1/resolver/connector_status")
@@ -3615,259 +3645,170 @@ def get_resolver_country_facts(
     return {"rows": rows, "iso3": iso3_value, "diagnostics": diagnostics}
 
 
+def _acquire_heavy() -> None:
+    """Acquire the heavy-request semaphore or raise 503."""
+    if not _HEAVY_REQUEST_SEMAPHORE.acquire(timeout=30):
+        raise HTTPException(status_code=503, detail="Server busy, try again")
+
+
+def _stream_csv(df: pd.DataFrame, filename: str):
+    """Stream a DataFrame as CSV with chunked output, releasing the semaphore when done."""
+    def _gen():
+        try:
+            yield df.iloc[:0].to_csv(index=False)
+            for start in range(0, len(df), 500):
+                yield df.iloc[start:start + 500].to_csv(index=False, header=False)
+        finally:
+            _HEAVY_REQUEST_SEMAPHORE.release()
+
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(_gen(), media_type="text/csv; charset=utf-8", headers=headers)
+
+
 @app.get("/v1/downloads/forecasts.xlsx")
 def download_forecasts_xlsx(include_test: bool = Query(False)):
     if find_spec("openpyxl") is None:
         logger.warning("openpyxl missing; falling back to CSV export")
         return RedirectResponse(url="/v1/downloads/forecasts.csv", status_code=307)
 
-    con = _con()
+    _acquire_heavy()
     try:
-        df = build_forecast_spd_export(con, include_test=include_test)
-    except Exception as exc:
-        logger.exception("Failed to build forecast download export")
-        raise HTTPException(status_code=500, detail="Failed to build forecast download export") from exc
+        con = _con()
+        try:
+            df = build_forecast_spd_export(con, include_test=include_test)
+        except Exception as exc:
+            logger.exception("Failed to build forecast download export")
+            raise HTTPException(status_code=500, detail="Failed to build forecast download export") from exc
 
-    buffer = BytesIO()
-    try:
-        df.to_excel(buffer, index=False, engine="openpyxl")
-    except Exception as exc:
-        logger.exception("Failed to serialize forecast download export")
-        raise HTTPException(status_code=500, detail="Failed to serialize forecast download export") from exc
+        buffer = BytesIO()
+        try:
+            df.to_excel(buffer, index=False, engine="openpyxl")
+        except Exception as exc:
+            logger.exception("Failed to serialize forecast download export")
+            raise HTTPException(status_code=500, detail="Failed to serialize forecast download export") from exc
 
-    buffer.seek(0)
-    headers = {"Content-Disposition": 'attachment; filename="pythia_forecasts_export.xlsx"'}
-    return StreamingResponse(
-        buffer,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers=headers,
-    )
+        buffer.seek(0)
+        headers = {"Content-Disposition": 'attachment; filename="pythia_forecasts_export.xlsx"'}
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+        )
+    finally:
+        _HEAVY_REQUEST_SEMAPHORE.release()
 
 
 @app.get("/v1/downloads/forecasts.csv")
 def download_forecasts_csv(include_test: bool = Query(False)):
-    con = _con()
+    _acquire_heavy()
     try:
+        con = _con()
         df = build_forecast_spd_export(con, include_test=include_test)
     except Exception as exc:
+        _HEAVY_REQUEST_SEMAPHORE.release()
         logger.exception("Failed to build forecast download export")
         raise HTTPException(status_code=500, detail="Failed to build forecast download export") from exc
-
-    buffer = StringIO()
-    try:
-        df.to_csv(buffer, index=False)
-    except Exception as exc:
-        logger.exception("Failed to serialize forecast download export")
-        raise HTTPException(status_code=500, detail="Failed to serialize forecast download export") from exc
-
-    buffer.seek(0)
-    headers = {"Content-Disposition": 'attachment; filename="pythia_forecasts_export.csv"'}
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers=headers,
-    )
+    return _stream_csv(df, "pythia_forecasts_export.csv")
 
 
 @app.get("/v1/downloads/triage.csv")
 def download_triage_csv(include_test: bool = Query(False)):
-    con = _con()
+    _acquire_heavy()
     try:
+        con = _con()
         df = build_triage_export(con, include_test=include_test)
+        logger.info(
+            "Triage download export rows=%s runs=%s iso3=%s",
+            len(df),
+            df["Run ID"].nunique(dropna=True),
+            df["ISO3"].nunique(dropna=True),
+        )
     except Exception as exc:
+        _HEAVY_REQUEST_SEMAPHORE.release()
         logger.exception("Failed to build triage download export")
         raise HTTPException(status_code=500, detail="Failed to build triage download export") from exc
-
-    logger.info(
-        "Triage download export rows=%s runs=%s iso3=%s",
-        len(df),
-        df["Run ID"].nunique(dropna=True),
-        df["ISO3"].nunique(dropna=True),
-    )
-
-    buffer = StringIO()
-    try:
-        df.to_csv(buffer, index=False)
-    except Exception as exc:
-        logger.exception("Failed to serialize triage download export")
-        raise HTTPException(status_code=500, detail="Failed to serialize triage download export") from exc
-
-    buffer.seek(0)
-    headers = {"Content-Disposition": 'attachment; filename="run_triage_results.csv"'}
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers=headers,
-    )
+    return _stream_csv(df, "run_triage_results.csv")
 
 
 @app.get("/v1/downloads/total_costs.csv")
 def download_total_costs_csv(include_test: bool = Query(False)):
-    con = _con()
+    _acquire_heavy()
     try:
+        con = _con()
         tables = build_costs_total(con, include_test=include_test)
         df = _concat_cost_tables(tables)
     except Exception as exc:
+        _HEAVY_REQUEST_SEMAPHORE.release()
         logger.exception("Failed to build total cost export")
         raise HTTPException(status_code=500, detail="Failed to build total cost export") from exc
-
-    buffer = StringIO()
-    try:
-        df.to_csv(buffer, index=False)
-    except Exception as exc:
-        logger.exception("Failed to serialize total cost export")
-        raise HTTPException(status_code=500, detail="Failed to serialize total cost export") from exc
-
-    buffer.seek(0)
-    headers = {"Content-Disposition": 'attachment; filename="total_costs.csv"'}
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers=headers,
-    )
+    return _stream_csv(df, "total_costs.csv")
 
 
 @app.get("/v1/downloads/monthly_costs.csv")
 def download_monthly_costs_csv(include_test: bool = Query(False)):
-    con = _con()
+    _acquire_heavy()
     try:
+        con = _con()
         tables = build_costs_monthly(con, include_test=include_test)
         df = _concat_cost_tables(tables)
     except Exception as exc:
+        _HEAVY_REQUEST_SEMAPHORE.release()
         logger.exception("Failed to build monthly cost export")
         raise HTTPException(status_code=500, detail="Failed to build monthly cost export") from exc
-
-    buffer = StringIO()
-    try:
-        df.to_csv(buffer, index=False)
-    except Exception as exc:
-        logger.exception("Failed to serialize monthly cost export")
-        raise HTTPException(status_code=500, detail="Failed to serialize monthly cost export") from exc
-
-    buffer.seek(0)
-    headers = {"Content-Disposition": 'attachment; filename="monthly_costs.csv"'}
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers=headers,
-    )
+    return _stream_csv(df, "monthly_costs.csv")
 
 
 @app.get("/v1/downloads/run_costs.csv")
 def download_run_costs_csv(include_test: bool = Query(False)):
-    con = _con()
+    _acquire_heavy()
     try:
+        con = _con()
         tables = build_costs_runs(con, include_test=include_test)
         df = _concat_cost_tables(tables)
     except Exception as exc:
+        _HEAVY_REQUEST_SEMAPHORE.release()
         logger.exception("Failed to build run cost export")
         raise HTTPException(status_code=500, detail="Failed to build run cost export") from exc
-
-    buffer = StringIO()
-    try:
-        df.to_csv(buffer, index=False)
-    except Exception as exc:
-        logger.exception("Failed to serialize run cost export")
-        raise HTTPException(status_code=500, detail="Failed to serialize run cost export") from exc
-
-    buffer.seek(0)
-    headers = {"Content-Disposition": 'attachment; filename="run_costs.csv"'}
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers=headers,
-    )
+    return _stream_csv(df, "run_costs.csv")
 
 
 @app.get("/v1/downloads/scores_ensemble_mean.csv")
 def download_scores_ensemble_mean_csv(include_test: bool = Query(False)):
-    con = _con()
+    _acquire_heavy()
     try:
+        con = _con()
         df = build_ensemble_scores_export(con, "ensemble_mean", include_test=include_test)
     except Exception as exc:
+        _HEAVY_REQUEST_SEMAPHORE.release()
         logger.exception("Failed to build ensemble_mean scores export")
-        raise HTTPException(
-            status_code=500, detail="Failed to build ensemble_mean scores export"
-        ) from exc
-
-    buffer = StringIO()
-    try:
-        df.to_csv(buffer, index=False)
-    except Exception as exc:
-        logger.exception("Failed to serialize ensemble_mean scores export")
-        raise HTTPException(
-            status_code=500, detail="Failed to serialize ensemble_mean scores export"
-        ) from exc
-
-    buffer.seek(0)
-    headers = {
-        "Content-Disposition": 'attachment; filename="scores_ensemble_mean.csv"'
-    }
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers=headers,
-    )
+        raise HTTPException(status_code=500, detail="Failed to build ensemble_mean scores export") from exc
+    return _stream_csv(df, "scores_ensemble_mean.csv")
 
 
 @app.get("/v1/downloads/scores_ensemble_bayesmc.csv")
 def download_scores_ensemble_bayesmc_csv(include_test: bool = Query(False)):
-    con = _con()
+    _acquire_heavy()
     try:
+        con = _con()
         df = build_ensemble_scores_export(con, "ensemble_bayesmc", include_test=include_test)
     except Exception as exc:
+        _HEAVY_REQUEST_SEMAPHORE.release()
         logger.exception("Failed to build ensemble_bayesmc scores export")
-        raise HTTPException(
-            status_code=500, detail="Failed to build ensemble_bayesmc scores export"
-        ) from exc
-
-    buffer = StringIO()
-    try:
-        df.to_csv(buffer, index=False)
-    except Exception as exc:
-        logger.exception("Failed to serialize ensemble_bayesmc scores export")
-        raise HTTPException(
-            status_code=500, detail="Failed to serialize ensemble_bayesmc scores export"
-        ) from exc
-
-    buffer.seek(0)
-    headers = {
-        "Content-Disposition": 'attachment; filename="scores_ensemble_bayesmc.csv"'
-    }
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers=headers,
-    )
+        raise HTTPException(status_code=500, detail="Failed to build ensemble_bayesmc scores export") from exc
+    return _stream_csv(df, "scores_ensemble_bayesmc.csv")
 
 
 @app.get("/v1/downloads/scores_model.csv")
 def download_scores_model_csv(include_test: bool = Query(False)):
-    con = _con()
+    _acquire_heavy()
     try:
+        con = _con()
         df = build_model_scores_export(con, include_test=include_test)
     except Exception as exc:
+        _HEAVY_REQUEST_SEMAPHORE.release()
         logger.exception("Failed to build model scores export")
-        raise HTTPException(
-            status_code=500, detail="Failed to build model scores export"
-        ) from exc
-
-    buffer = StringIO()
-    try:
-        df.to_csv(buffer, index=False)
-    except Exception as exc:
-        logger.exception("Failed to serialize model scores export")
-        raise HTTPException(
-            status_code=500, detail="Failed to serialize model scores export"
-        ) from exc
-
-    buffer.seek(0)
-    headers = {"Content-Disposition": 'attachment; filename="scores_model.csv"'}
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers=headers,
-    )
+        raise HTTPException(status_code=500, detail="Failed to build model scores export") from exc
+    return _stream_csv(df, "scores_model.csv")
 
 
 @app.get("/v1/downloads/rationales.csv")
@@ -3876,37 +3817,19 @@ def download_rationales_csv(
     model: str | None = Query(None, description="Model name filter (e.g. OpenAI, Claude, Gemini Flash)"),
     include_test: bool = Query(False),
 ):
-    con = _con()
+    _acquire_heavy()
     try:
+        con = _con()
         df = build_rationale_export(con, hazard_code=hazard, model_name=model, include_test=include_test)
     except Exception as exc:
+        _HEAVY_REQUEST_SEMAPHORE.release()
         logger.exception("Failed to build rationale export")
-        raise HTTPException(
-            status_code=500, detail="Failed to build rationale export"
-        ) from exc
-
-    buffer = StringIO()
-    try:
-        df.to_csv(buffer, index=False)
-    except Exception as exc:
-        logger.exception("Failed to serialize rationale export")
-        raise HTTPException(
-            status_code=500, detail="Failed to serialize rationale export"
-        ) from exc
-
+        raise HTTPException(status_code=500, detail="Failed to build rationale export") from exc
     parts = ["rationales", hazard.strip().upper()]
     if model:
         safe_model = re.sub(r"[^a-zA-Z0-9_-]", "_", model)
         parts.append(safe_model)
-    filename = "_".join(parts) + ".csv"
-
-    buffer.seek(0)
-    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-    return StreamingResponse(
-        iter([buffer.getvalue()]),
-        media_type="text/csv; charset=utf-8",
-        headers=headers,
-    )
+    return _stream_csv(df, "_".join(parts) + ".csv")
 
 
 @app.get("/v1/llm/costs")
@@ -3942,8 +3865,7 @@ def llm_costs(
     sql += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
 
-    df = _execute(con, sql, params).fetchdf()
-    return {"rows": _rows_from_df(df)}
+    return {"rows": _rows_from_cursor(_execute(con, sql, params))}
 
 
 @app.get("/v1/llm/costs/summary")
@@ -4051,7 +3973,6 @@ def llm_costs_summary(
     """
     params["limit"] = limit
 
-    df = _execute(con, sql, params).fetchdf()
     return {
         "group_by": group_fields,
         "filters": {
@@ -4063,7 +3984,7 @@ def llm_costs_summary(
             "forecaster_run_id": forecaster_run_id,
             "since": since,
         },
-        "rows": _rows_from_df(df),
+        "rows": _rows_from_cursor(_execute(con, sql, params)),
     }
 
 
