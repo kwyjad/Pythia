@@ -4,7 +4,7 @@ on:
   workflow_run:
     workflows:
       - "Horizon Scanner Triage"
-      - "Resolver — Initial Backfill"
+      - "Resolver Update"
       - "Pythia — Compute Calibration Weights & Advice"
     types: [completed]
 

@@ -152,7 +152,7 @@ rows in a given window.
 The ingestion summary now captures the real fetch/normalize/write counts even
 when HELIX takes the fallback path, populating `rows_fetched`,
 `rows_normalized`, and `rows_written` for the diagnostics table. The
-`resolver-initial-backfill` workflow cleans both `resolver/staging/` and
+`resolver_update` workflow cleans both `resolver/staging/` and
 `diagnostics/ingestion/` before each run, executes the HELIX single-shot
 unconditionally (skipping the legacy `RESOLVER_SKIP_IDMC` gate), and forces the
 `gidd` → `idus_last180` fallback order when the primary endpoint is empty. After
@@ -173,7 +173,7 @@ The companion `idmc_to_duckdb` helper accepts both `--db-url` and the shorter
 emits a warning, keeps the success banner (`✅ Wrote …`), and returns `0` so it
 can run as part of automated pipelines focused on flow updates.
 
-All downstream tools invoked by `resolver-initial-backfill` now report
+All downstream tools invoked by `resolver_update` now report
 failures directly into `diagnostics/ingestion/summary.md`. Each CLI wraps its
 entrypoint with a best-effort call to `scripts.ci.append_error_to_summary`,
 emitting sections such as “Export Facts — DB write”, “Precedence Engine — CLI

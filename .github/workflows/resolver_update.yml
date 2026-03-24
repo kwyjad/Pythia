@@ -4,7 +4,7 @@
 # See the LICENSE file in the project root for details.
 
 ---
-name: Resolver — Initial Backfill
+name: Resolver Update
 
 concurrency:
   group: pythia-resolver-db
@@ -143,11 +143,11 @@ jobs:
             --json databaseId,createdAt \
             --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
           gh run list \
-            --workflow "Resolver — Initial Backfill" \
+            --workflow "Resolver Update" \
             --branch main \
             --status success \
             --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver Update"' >>"${CANDIDATES_FILE}" || true
           gh run list \
             --workflow "Ingest Structured Data" \
             --branch main \

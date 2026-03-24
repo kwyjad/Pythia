@@ -115,14 +115,14 @@ jobs:
             --json databaseId,createdAt \
             --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
           gh run list \
-            --workflow "Resolver — Initial Backfill" \
+            --workflow "Resolver Update" \
             --branch main \
             --status success \
             --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver Update"' >>"${CANDIDATES_FILE}" || true
 
           if [ ! -s "${CANDIDATES_FILE}" ]; then
-            echo "ERROR: No successful Horizon Scanner or Resolver — Initial Backfill runs found."
+            echo "ERROR: No successful Horizon Scanner or Resolver Update runs found."
             exit 1
           fi
 

@@ -19,7 +19,7 @@ on:
         type: string
 
   workflow_run:
-    workflows: ["Resolver — Initial Backfill"]
+    workflows: ["Resolver Update"]
     types: [completed]
 
 permissions:

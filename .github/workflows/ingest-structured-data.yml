@@ -3,7 +3,7 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-# Mid-cycle data refresh. The primary ingestion happens in resolver-initial-backfill.yml
+# Mid-cycle data refresh. The primary ingestion happens in resolver_update.yml
 # (15th monthly). This workflow provides supplementary freshness for fast-changing sources
 # between monthly backfills. Its DB artifact is available to the HS workflow as a candidate.
 
@@ -139,7 +139,7 @@ jobs:
             return 1
           }
 
-          # Collect candidate runs from Horizon Scanner Triage, Resolver — Initial Backfill, and Ingest Structured Data
+          # Collect candidate runs from Horizon Scanner Triage, Resolver Update, and Ingest Structured Data
           CANDIDATES_FILE=$(mktemp)
           gh run list \
             --workflow "Horizon Scanner Triage" \
@@ -148,11 +148,11 @@ jobs:
             --json databaseId,createdAt \
             --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
           gh run list \
-            --workflow "Resolver — Initial Backfill" \
+            --workflow "Resolver Update" \
             --branch main \
             --status success \
             --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver Update"' >>"${CANDIDATES_FILE}" || true
           gh run list \
             --workflow "Ingest Structured Data" \
             --branch main \
