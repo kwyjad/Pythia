@@ -30,7 +30,45 @@ calls), for ~600 total. Each is a Gemini Flash call at ~768 output tokens.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# Natural-language search query templates for triage grounding
+# ---------------------------------------------------------------------------
+# These are used as the actual web search query (for OpenAI web search and
+# Gemini grounding). They must be natural-language keyword phrases that real
+# web pages use — NOT internal jargon like "ACE triage grounding".
+
+TRIAGE_GROUNDING_QUERIES = {
+    "ACE": "{country} ({iso3}) armed conflict violence displacement humanitarian situation {year}",
+    "DR": "{country} ({iso3}) drought food insecurity crop failure humanitarian response {year}",
+    "FL": "{country} ({iso3}) flooding displacement humanitarian impact {year}",
+    "HW": "{country} ({iso3}) heatwave extreme heat humanitarian impact health {year}",
+    "TC": "{country} ({iso3}) tropical cyclone hurricane typhoon humanitarian impact {year}",
+    "DI": "{country} ({iso3}) refugee influx cross-border displacement humanitarian {year}",
+}
+
+
+def build_triage_grounding_query(
+    hazard_code: str,
+    country_name: str,
+    iso3: str,
+) -> str:
+    """Build a natural-language search query for triage grounding.
+
+    Returns a keyword-rich query string suitable for web search APIs.
+    """
+    template = TRIAGE_GROUNDING_QUERIES.get(
+        hazard_code,
+        "{country} ({iso3}) humanitarian crisis situation {year}",
+    )
+    return template.format(
+        country=country_name,
+        iso3=iso3,
+        year=datetime.now().year,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -61,6 +61,7 @@ from pythia.test_mode import is_test_mode
 from horizon_scanner.hs_triage_prompts import build_triage_prompt
 from horizon_scanner.hs_triage_grounding_prompts import (
     build_triage_grounding_prompt,
+    build_triage_grounding_query,
     get_recency_days,
 )
 from horizon_scanner.seasonal_context import CLIMATE_HAZARDS, load_seasonal_forecasts
@@ -342,7 +343,7 @@ def _run_triage_grounding_for_hazard(
             hazard_code, country_name, iso3, rc_summary=rc_summary,
         )
         recency = get_recency_days(hazard_code)
-        query_label = f"{country_name} ({iso3}) {hazard_code} triage grounding"
+        query_label = build_triage_grounding_query(hazard_code, country_name, iso3)
 
         primary_backend = os.getenv("PYTHIA_GROUNDING_PRIMARY_BACKEND", "openai").lower()
         pack = None

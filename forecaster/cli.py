@@ -5190,7 +5190,7 @@ async def _run_binary_forecast_for_question(
             model_name=model_name,
         )
 
-        # Also write BayesMC aggregation for Track 1
+        # Also write BayesMC aggregation for Track 1 (needs >1 model)
         if track == 1 and len(all_model_probs) > 1:
             bayesmc_aggregated: dict[str, float] = {}
             for month in sorted(all_months):
@@ -5216,6 +5216,14 @@ async def _run_binary_forecast_for_question(
                     usage=usage or {},
                     model_name="ensemble_bayesmc_v2",
                 )
+            else:
+                # BayesMC attempted but produced no results — record failure
+                _record_no_forecast(
+                    run_id, qid or "", iso3, hz, metric,
+                    "binary: BayesMC aggregation produced no months",
+                    model_name="ensemble_bayesmc_v2",
+                )
+        # Track 1 with only 1 model: BayesMC not applicable, no row needed
 
     except Exception:
         LOG.exception("Binary forecast failed for %s", qid)
