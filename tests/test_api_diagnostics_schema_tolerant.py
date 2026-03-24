@@ -132,7 +132,9 @@ def test_kpi_scopes_schema_tolerant(api_env: None) -> None:
     assert isinstance(latest["questions"], int)
     assert isinstance(latest["forecasts"], int)
     assert isinstance(latest["countries"], int)
-    assert isinstance(latest["countries_total"], int)
+    # countries_total is popped from selected_run scope; only present for
+    # total_active / total_all scopes.
+    assert isinstance(latest.get("countries_total", 0), int)
     assert isinstance(latest["countries_with_forecasts"], int)
     assert isinstance(latest["resolved_questions"], int)
     assert isinstance(latest["forecasts_by_hazard"], dict)
