@@ -113,7 +113,7 @@ jobs:
               --json databaseId,createdAt \
               --limit 10 | jq -r '.[] | "\(.createdAt),\(.databaseId)"' >>"${CANDIDATES_FILE}" || true
             gh run list \
-              --workflow "Resolver — Initial Backfill" \
+              --workflow "Resolver Update" \
               --branch main \
               --status success \
               --json databaseId,createdAt \

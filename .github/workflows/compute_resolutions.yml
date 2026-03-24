@@ -8,7 +8,7 @@ name: Pythia — Compute Resolutions
 
 on:
   workflow_run:
-    workflows: ["Resolver — Initial Backfill"]
+    workflows: ["Resolver Update"]
     types: [completed]
 
   # Optional manual trigger

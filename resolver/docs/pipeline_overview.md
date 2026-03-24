@@ -47,9 +47,9 @@ The pipeline runs as:
 
 This layered design is intentional: each layer can be tested, debugged, and evolved independently while keeping the monthly “new PIN/PA” objective intact.
 
-### Connectors used in `resolver-initial-backfill`
+### Connectors used in `resolver_update`
 
-The manual `resolver-initial-backfill` workflow currently runs only the four connectors that are stable end-to-end:
+The manual `resolver_update` workflow currently runs only the four connectors that are stable end-to-end:
 
 - **DTM** (IOM DTM)
 - **IDMC** (internal displacement)
@@ -62,7 +62,7 @@ Other connectors are intentionally excluded from this workflow to avoid destabil
 
 Resolver’s production workflows now operate in two phases:
 
-1. **Resolver — Initial Backfill**
+1. **Resolver Update**
    - Runs the four stable connectors (DTM, IDMC, EM-DAT, ACLED) for a configured window (e.g., last 36 months).
    - Writes canonical facts into `data/resolver_backfill.duckdb` (including `facts_resolved`, `facts_deltas`, and `acled_monthly_fatalities`).
    - Uploads the DuckDB file as a `resolver-backfill-db` artifact for downstream use.

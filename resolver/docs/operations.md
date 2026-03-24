@@ -60,7 +60,7 @@ Resolver uses a small set of environment variables to control DB access and run 
 
 - `BACKFILL_MONTHS_CSV`
   - Comma-separated list of `YYYY-MM` months to process in backfill workflows.
-- Other window-related envs (for example `BACKFILL_START`, `BACKFILL_END`, or workflow inputs) should be documented where they are defined in `.github/workflows/resolver-initial-backfill.yml`.
+- Other window-related envs (for example `BACKFILL_START`, `BACKFILL_END`, or workflow inputs) should be documented where they are defined in `.github/workflows/resolver_update.yml`.
 
 ### CLI vs Internal Logic
 
@@ -90,8 +90,8 @@ This convention keeps environment-dependent behaviour in a small, well-defined s
 
 ## Initial backfill workflow
 
-- Workflow: `.github/workflows/resolver-initial-backfill.yml` (manual dispatch plus a scheduled run at `0 0 5 * *`).
-- Launch it from the **Actions** tab by choosing **Resolver — Initial Backfill**, overriding the `months_back` input (default `1`) or `only` connector filter as needed. The scheduled run uses the one-month window so upstream sources have time to publish end-of-month data.
+- Workflow: `.github/workflows/resolver_update.yml` (manual dispatch plus a scheduled run at `0 0 5 * *`).
+- Launch it from the **Actions** tab by choosing **Resolver Update**, overriding the `months_back` input (default `1`) or `only` connector filter as needed. The scheduled run uses the one-month window so upstream sources have time to publish end-of-month data.
 - Note: this workflow currently runs only the DTM, IDMC, EM-DAT, and ACLED connectors. Additional connectors will be re-enabled once their ingestion paths are stable.
 - The `ingest` job runs `resolver/ingestion/run_all_stubs.py --mode real`, wiring connector secrets from the environment. Connectors without credentials stay in header-only mode so the workflow still succeeds.
 - The `export-duckdb` job restores ACLED diagnostics, exports canonical facts, and writes DuckDB tables. The legacy freeze snapshot stage is disabled in this workflow; snapshots will be produced by the upcoming DB-first snapshot builder.
@@ -103,7 +103,7 @@ This convention keeps environment-dependent behaviour in a small, well-defined s
 ### Rerunning the ACLED backfill job
 
 - The workflow now includes an **`acled-backfill`** job that restores the DuckDB created by `ingest`, fetches monthly fatalities from ACLED using the live client, and upserts them into the shared database before downstream freeze steps run.
-- To rerun only this slice, open the latest **Resolver — Initial Backfill** run, choose **Rerun jobs**, and keep only `acled-backfill` checked.
+- To rerun only this slice, open the latest **Resolver Update** run, choose **Rerun jobs**, and keep only `acled-backfill` checked.
 - For a fresh window, trigger the workflow via **Run workflow** and adjust the `months_back` input; the job recomputes `BACKFILL_START_ISO`/`BACKFILL_END_ISO` and calls `python -m resolver.cli.acled_to_duckdb --start … --end … --db data/resolver_backfill.duckdb` with the repository ACLED credentials.
 - Review the uploaded artifact named `resolver-backfill-acled-<run_id>-<attempt>` for the updated DuckDB plus `diagnostics/acled/` logs; the step summary also embeds a one-table excerpt from `scripts/ci/duckdb_summary.py` so you can confirm row counts without downloading the file.
 

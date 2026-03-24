@@ -11,7 +11,7 @@ import re
 
 import yaml
 
-WF_BACKFILL = pathlib.Path(".github/workflows/resolver-initial-backfill.yml")
+WF_BACKFILL = pathlib.Path(".github/workflows/resolver_update.yml")
 
 
 def _load_yaml(path: pathlib.Path) -> object:
@@ -72,10 +72,10 @@ def test_backfill_uses_load_and_derive() -> None:
 def test_backfill_schedule_and_months_back_defaults() -> None:
     yaml_data = _load_yaml(WF_BACKFILL)
     on_block = yaml_data.get("on", {})
-    assert on_block, "Expected an 'on' block in resolver-initial-backfill.yml"
+    assert on_block, "Expected an 'on' block in resolver_update.yml"
 
     workflow_dispatch = on_block.get("workflow_dispatch", {})
-    assert workflow_dispatch, "Expected 'workflow_dispatch' under 'on' in resolver-initial-backfill.yml"
+    assert workflow_dispatch, "Expected 'workflow_dispatch' under 'on' in resolver_update.yml"
 
     inputs = workflow_dispatch.get("inputs", {})
     assert inputs, "Expected 'inputs' under workflow_dispatch"

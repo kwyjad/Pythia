@@ -51,7 +51,7 @@ contains zero rows (useful guardrail for automation).
 
 ## Initial backfill automation
 
-The `resolver-initial-backfill.yml` workflow invokes
+The `resolver_update.yml` workflow invokes
 `python -m resolver.cli.idmc_to_duckdb` immediately after exporting the preview
 CSV so the generated facts land in the `BACKFILL_DB_PATH` DuckDB file during CI.
 The step passes `--facts-csv` and `--write-db`, enabling inserts only when the

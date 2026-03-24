@@ -31,7 +31,7 @@ The command:
   `helix_endpoint`/`zero_rows_reason` fields so automation still observes the
   outcome.
 
-The `resolver-initial-backfill` GitHub Actions workflow now calls the CLI
+The `resolver_update` GitHub Actions workflow now calls the CLI
 directly with `--network-mode helix` before launching the generic connector
 runner. The job clears both `resolver/staging/` and `diagnostics/ingestion/`
 before invoking IDMC so stale artifacts never leak into exports, and it always
@@ -203,7 +203,7 @@ Use `--skip-network` or `IDMC_FORCE_CACHE_ONLY=1` to keep runs deterministic.
 Fixtures remain available under `resolver/ingestion/idmc/fixtures/` for offline
 testing and CI.
 
-In the resolver-initial-backfill workflow, staging and connector diagnostics are
+In the resolver_update workflow, staging and connector diagnostics are
 now cleaned **before** running the DTM and IDMC reachability probes. This keeps
 `diagnostics/ingestion/idmc/probe.json`, `diagnostics/ingestion/idmc/hdx_probe.json`,
 and the HELIX manifest for the current run available for the connector

@@ -8,13 +8,13 @@ name: Resolver — Snapshot from DB
 
 on:
   workflow_run:
-    workflows: ["Resolver — Initial Backfill"]
+    workflows: ["Resolver Update"]
     types:
       - completed
   workflow_dispatch:
     inputs:
       backfill_run_id:
-        description: "GitHub run ID of the Resolver — Initial Backfill run (for manual snapshot)"
+        description: "GitHub run ID of the Resolver Update run (for manual snapshot)"
         required: false
       months_back:
         description: "Number of months to snapshot (default 36)"
@@ -33,14 +33,14 @@ jobs:
           set -euo pipefail
           echo "Event name: $GITHUB_EVENT_NAME"
           if [ "$GITHUB_EVENT_NAME" = "workflow_run" ]; then
-            echo "Detected workflow_run for Resolver — Initial Backfill."
+            echo "Detected workflow_run for Resolver Update."
             echo "backfill_run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
             echo "months_back=36" >> "$GITHUB_OUTPUT"
           else
             echo "Detected manual workflow_dispatch."
             if [ -z "${{ github.event.inputs.backfill_run_id }}" ]; then
               echo "ERROR: Manual snapshot requires 'backfill_run_id' input."
-              echo "Please provide the run ID of a successful 'Resolver — Initial Backfill' run."
+              echo "Please provide the run ID of a successful 'Resolver Update' run."
               exit 1
             fi
             echo "backfill_run_id=${{ github.event.inputs.backfill_run_id }}" >> "$GITHUB_OUTPUT"

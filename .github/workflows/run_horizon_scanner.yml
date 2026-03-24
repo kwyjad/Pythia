@@ -240,11 +240,11 @@ jobs:
               --json databaseId,createdAt \
               --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
             gh run list \
-              --workflow "Resolver — Initial Backfill" \
+              --workflow "Resolver Update" \
               --branch main \
               --status success \
               --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver Update"' >>"${CANDIDATES_FILE}" || true
             gh run list \
               --workflow "Ingest Structured Data" \
               --branch main \
@@ -253,7 +253,7 @@ jobs:
               --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
 
             if [ ! -s "${CANDIDATES_FILE}" ]; then
-              echo "ERROR: No successful Horizon Scanner, Resolver — Initial Backfill, or Ingest Structured Data runs found; refusing to start without canonical DB."
+              echo "ERROR: No successful Horizon Scanner, Resolver Update, or Ingest Structured Data runs found; refusing to start without canonical DB."
               exit 1
             fi
 
@@ -312,13 +312,13 @@ jobs:
             done < "${CANDIDATES_FILE}.sorted"
 
             if [ "${FOUND}" -ne 1 ]; then
-              echo "ERROR: No valid canonical DB found after checking Horizon Scanner, Resolver — Initial Backfill, and Ingest Structured Data runs."
+              echo "ERROR: No valid canonical DB found after checking Horizon Scanner, Resolver Update, and Ingest Structured Data runs."
               exit 1
             fi
           fi
 
           if [ -z "${DB_RUN_ID:-}" ]; then
-            echo "ERROR: No successful Horizon Scanner, Resolver — Initial Backfill, or Ingest Structured Data runs found; refusing to start without canonical DB."
+            echo "ERROR: No successful Horizon Scanner, Resolver Update, or Ingest Structured Data runs found; refusing to start without canonical DB."
             exit 1
           fi
 

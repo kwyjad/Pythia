@@ -98,7 +98,7 @@ A successful run creates (or updates) `resolver_data/resolver.duckdb`. Re-runnin
 
 ### Continuous integration usage
 
-The `resolver-initial-backfill` GitHub Actions workflow now calls the IDMC CLI
+The `resolver_update` GitHub Actions workflow now calls the IDMC CLI
 directly in HELIX mode before the generic connector runner starts. That
 single-shot step inherits the backfill window, writes staged exports, and the
 generic connector runner is restricted to the remaining connectors so IDMC runs
