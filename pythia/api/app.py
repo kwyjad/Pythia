@@ -3166,9 +3166,16 @@ def diagnostics_kpi_scopes(
                 "scope_forecasts_failed",
             )
             if has_iso3:
+                # countries_with_forecasts counts across ALL metrics, not just
+                # the selected metric scope, so degraded-triage countries that
+                # have forecasts for any metric are included.
+                forecast_any_metric_sql = (
+                    f"FROM questions q JOIN ({forecast_ids_sql}) f "
+                    f"ON f.question_id = q.question_id WHERE 1=1{status_sql}"
+                )
                 scope["countries_with_forecasts"] = _count(
-                    f"SELECT COUNT(DISTINCT q.iso3) {forecast_base_sql}",
-                    forecast_params + metric_params + status_params,
+                    f"SELECT COUNT(DISTINCT q.iso3) {forecast_any_metric_sql}",
+                    forecast_params + status_params,
                     "scope_countries_with_forecasts_failed",
                 )
             else:
@@ -3210,9 +3217,13 @@ def diagnostics_kpi_scopes(
                 "scope_forecasts_failed",
             )
             if has_iso3:
+                forecast_any_metric_sql = (
+                    f"FROM questions q JOIN ({forecast_ids_sql}) f "
+                    f"ON f.question_id = q.question_id WHERE 1=1{status_sql}"
+                )
                 scope["countries_with_forecasts"] = _count(
-                    f"SELECT COUNT(DISTINCT q.iso3) {forecast_base_sql}",
-                    forecast_params + metric_params + status_params,
+                    f"SELECT COUNT(DISTINCT q.iso3) {forecast_any_metric_sql}",
+                    forecast_params + status_params,
                     "scope_countries_with_forecasts_failed",
                 )
             else:
@@ -3288,9 +3299,15 @@ def diagnostics_kpi_scopes(
                     "scope_forecasts_failed",
                 )
                 if has_iso3:
+                    # Count across all metrics so degraded-triage countries
+                    # with forecasts for any metric are included.
+                    forecast_any_metric_join = (
+                        "FROM questions q JOIN forecasts_ensemble f "
+                        f"ON f.question_id = q.question_id WHERE 1=1{status_sql}"
+                    )
                     scope["countries_with_forecasts"] = _count(
-                        f"SELECT COUNT(DISTINCT q.iso3) {forecast_join}",
-                        forecast_base_params,
+                        f"SELECT COUNT(DISTINCT q.iso3) {forecast_any_metric_join}",
+                        status_params,
                         "scope_countries_with_forecasts_failed",
                     )
                 else:
@@ -3319,9 +3336,15 @@ def diagnostics_kpi_scopes(
                     "scope_forecasts_failed",
                 )
                 if has_iso3:
+                    # Count across all metrics.
+                    forecast_any_metric_join = (
+                        "FROM questions q JOIN llm_calls l ON l.question_id = q.question_id "
+                        f"WHERE l.phase IN ({placeholders}){status_sql}"
+                    )
+                    params_any = list(forecast_source_phase) + status_params
                     scope["countries_with_forecasts"] = _count(
-                        f"SELECT COUNT(DISTINCT q.iso3) {forecast_join}",
-                        params,
+                        f"SELECT COUNT(DISTINCT q.iso3) {forecast_any_metric_join}",
+                        params_any,
                         "scope_countries_with_forecasts_failed",
                     )
                 else:
@@ -3417,16 +3440,21 @@ def diagnostics_kpi_scopes(
             question_ids_sql, question_ids_params,
             forecast_window_ym=forecast_window_ym,
         )
-        # Derive countries_triaged from the HS run(s) associated with this forecaster run.
+        # Derive countries_triaged from ALL countries in the HS run(s) that
+        # fed this forecaster run — including degraded triage results.
         try:
             triaged_row = con.execute(
                 """
                 SELECT COUNT(DISTINCT UPPER(ht.iso3))
                 FROM hs_triage ht
-                JOIN questions q ON q.hs_run_id = ht.run_id AND UPPER(q.iso3) = UPPER(ht.iso3)
-                JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
-                WHERE fe.run_id = ?
-                  AND ht.iso3 IS NOT NULL
+                WHERE ht.run_id IN (
+                    SELECT DISTINCT q.hs_run_id
+                    FROM questions q
+                    JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
+                    WHERE fe.run_id = ?
+                      AND q.hs_run_id IS NOT NULL
+                )
+                AND ht.iso3 IS NOT NULL
                 """,
                 [effective_run_id],
             ).fetchone()

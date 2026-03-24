@@ -516,6 +516,7 @@ def build_triage_prompt_fl(
     season_context: Optional[str] = None,
     reliefweb_reports: Optional[Any] = None,
     ipc_phases: Optional[Any] = None,
+    fewsnet_food_security: Optional[Any] = None,
     inform_severity: Optional[Any] = None,
     acaps_risk_radar: Optional[Any] = None,
     acaps_monitoring: Optional[Any] = None,
