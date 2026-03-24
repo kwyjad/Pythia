@@ -34,15 +34,14 @@ from zipfile import ZipFile, ZipInfo, ZIP_DEFLATED
 
 # --- Option 1: Inline list (edit these if you prefer not to use --file-list)
 DEFAULT_FILE_LIST = [
+"resolver/ingestion/diagnostics_emitter.py",
+"resolver/tools/run_pipeline.py",
 "pythia/tools/ingest_structured_data.py",
-"pythia/ipc_phases.py",
-"resolver/connectors/fewsnet_ipc.py",
-"horizon_scanner/rc_prompts.py",
-"horizon_scanner/hs_triage_prompts.py",
-"forecaster/prompts.py",
-"pythia/web_research/backends/gemini_grounding.py",
-"pythia/adversarial_check.py",
-"scripts/dump_pythia_debug_bundle.py",
+".github/workflows/resolver_update.yml",
+".github/workflows/ingest-structured-data.yml",
+".github/actions/collect-diagnostics/action.yml",
+"resolver/diagnostics/ingestion/summarize_connectors.py",
+"resolver/tools/summarize_connectors.py",
 ]
 
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1\n"
