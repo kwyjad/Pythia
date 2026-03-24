@@ -308,12 +308,19 @@ def _upsert_question(
     window_end_date: date,
     track: Optional[int] = None,
     is_test: bool = False,
-) -> None:
+) -> bool:
     existing = con.execute(
         "SELECT 1 FROM questions WHERE question_id = ?", [question_id]
     ).fetchone()
     if existing:
-        return  # preserve original metadata — never overwrite
+        # Same-epoch re-run: update hs_run_id so the assertion can find
+        # questions belonging to the current run.  Window dates are identical
+        # within the same epoch so provenance is not destroyed.
+        con.execute(
+            "UPDATE questions SET hs_run_id = ?, track = ? WHERE question_id = ?",
+            [hs_run_id, track, question_id],
+        )
+        return False  # signal: no new row inserted
     meta_json = json.dumps(metadata, ensure_ascii=False)
     con.execute(
         """
@@ -342,6 +349,7 @@ def _upsert_question(
             is_test,
         ],
     )
+    return True  # new row inserted
 
 
 def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -> int:
@@ -362,6 +370,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
         _is_test = is_test_mode()
 
         inserted = 0
+        updated = 0
         today = date.today()
         epoch_label, target_month, opening, closing = _compute_target_and_window(today)
 
@@ -375,7 +384,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     "triage_score": th.triage_score,
                     "hazard_family": "conflict",
                 }
-                _upsert_question(
+                if _upsert_question(
                     con,
                     question_id=f"{th.iso3}_ACE_FATALITIES_{epoch_label}",
                     hs_run_id=run_id,
@@ -393,10 +402,12 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     window_end_date=closing,
                     track=th.track,
                     is_test=_is_test,
-                )
-                inserted += 1
+                ):
+                    inserted += 1
+                else:
+                    updated += 1
 
-                _upsert_question(
+                if _upsert_question(
                     con,
                     question_id=f"{th.iso3}_ACE_PA_{epoch_label}",
                     hs_run_id=run_id,
@@ -414,8 +425,10 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     window_end_date=closing,
                     track=th.track,
                     is_test=_is_test,
-                )
-                inserted += 1
+                ):
+                    inserted += 1
+                else:
+                    updated += 1
                 continue
 
             for mt in metrics:
@@ -450,7 +463,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     "triage_score": th.triage_score,
                 }
 
-                _upsert_question(
+                if _upsert_question(
                     con,
                     question_id=f"{th.iso3}_{th.hazard_code}_{actual_metric}_{epoch_label}",
                     hs_run_id=run_id,
@@ -465,10 +478,16 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     window_end_date=closing,
                     track=th.track,
                     is_test=_is_test,
-                )
-                inserted += 1
+                ):
+                    inserted += 1
+                else:
+                    updated += 1
 
-        print(f"create_questions_from_triage: ensured {inserted} questions for run_id={run_id}")
+        total = inserted + updated
+        print(
+            f"create_questions_from_triage: ensured {total} questions for run_id={run_id}"
+            f" ({inserted} inserted, {updated} updated)"
+        )
         return inserted
     finally:
         con.close()
