@@ -66,6 +66,7 @@ jobs:
     env:
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      DIAGNOSTICS_REPORT_PATH: diagnostics/ingestion/connectors_report.jsonl
       ACLED_API_KEY: ${{ secrets.ACLED_API_KEY }}
       ACLED_ACCESS_TOKEN: ${{ secrets.ACLED_ACCESS_TOKEN }}
       ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
@@ -224,6 +225,9 @@ jobs:
             echo "Using user-specified source list (or all if empty)"
           fi
 
+      - name: Prepare diagnostics directory
+        run: mkdir -p diagnostics/ingestion
+
       - name: Run structured data ingestion
         env:
           GDACS_MONTHS: ${{ inputs.gdacs_months || '3' }}
@@ -251,6 +255,27 @@ jobs:
           $CMD
           echo "=== Structured data ingestion completed ==="
 
+      - name: Summarize DuckDB contents
+        if: always()
+        run: |
+          set -euo pipefail
+          python scripts/ci/duckdb_summary.py \
+            --db data/resolver.duckdb \
+            --tables "acled_monthly_fatalities,facts_resolved,facts_deltas" \
+            | tee diagnostics/ingestion/duckdb_summary.md
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            cat diagnostics/ingestion/duckdb_summary.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Consolidated pipeline status summary
+        if: always()
+        run: |
+          set -euo pipefail
+          python -m pythia.tools.summarize_all_phases \
+            --report "${DIAGNOSTICS_REPORT_PATH}" \
+            --db data/resolver.duckdb \
+            >> "${GITHUB_STEP_SUMMARY}" || true
+
       - name: Upload canonical resolver DB
         if: inputs.dry_run != true
         uses: actions/upload-artifact@v4
@@ -258,3 +283,12 @@ jobs:
           name: pythia-resolver-db
           path: data/resolver.duckdb
           retention-days: 90
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingest-diagnostics
+          path: diagnostics/
+          retention-days: 30
+          if-no-files-found: warn

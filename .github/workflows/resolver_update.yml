@@ -93,6 +93,7 @@ jobs:
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
       FEWSNET_MONTHS: ${{ inputs.reset_db == 'true' && '120' || '12' }}
       GDACS_MONTHS: ${{ inputs.reset_db == 'true' && '135' || '3' }}
+      DIAGNOSTICS_REPORT_PATH: diagnostics/ingestion/connectors_report.jsonl
 
     steps:
       # === SETUP ===
@@ -276,6 +277,11 @@ jobs:
           mkdir -p data
           python -c "from pythia.db.schema import ensure_schema; ensure_schema()"
 
+      - name: Prepare diagnostics directories
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,export_preview}
+
       # === PHASE 1: RESOLVER CONNECTORS (ground truth — fatal) ===
       - name: "Phase 1: Run IDMC (HELIX)"
         if: ${{ inputs.only_connector == '' || inputs.only_connector == 'idmc' }}
@@ -430,41 +436,79 @@ jobs:
         if: ${{ inputs.only_connector == '' || inputs.only_connector == 'enso' }}
         continue-on-error: true
         run: |
-          python -c "
+          set -euo pipefail
+          RESULT=$(python -c "
           from horizon_scanner.enso.enso_module import fetch_and_store_enso
           ok = fetch_and_store_enso()
-          print('[enso] OK' if ok else '[enso] WARN: store failed but non-fatal')
-          " || echo "WARNING: ENSO fetch failed (non-fatal)"
+          print('ok' if ok else 'error')
+          " 2>&1 | tail -1) || RESULT="error"
+          if [ "$RESULT" = "ok" ]; then
+            python -m pythia.tools.emit_phase4_diag enso ok --rows 1
+            echo "[enso] OK"
+          else
+            python -m pythia.tools.emit_phase4_diag enso error --reason "fetch-or-store-failed"
+            echo "WARNING: ENSO fetch failed (non-fatal)"
+          fi
 
       - name: "Phase 4: Fetch + store Seasonal TC outlooks"
         if: ${{ inputs.only_connector == '' || inputs.only_connector == 'seasonal_tc' }}
         continue-on-error: true
         run: |
-          python -c "
+          set -euo pipefail
+          RESULT=$(python -c "
           from horizon_scanner.seasonal_tc.seasonal_tc_runner import fetch_and_store_seasonal_tc
           ok = fetch_and_store_seasonal_tc()
-          print('[seasonal_tc] OK' if ok else '[seasonal_tc] WARN: store failed but non-fatal')
-          " || echo "WARNING: Seasonal TC fetch failed (non-fatal)"
+          print('ok' if ok else 'error')
+          " 2>&1 | tail -1) || RESULT="error"
+          if [ "$RESULT" = "ok" ]; then
+            python -m pythia.tools.emit_phase4_diag seasonal_tc ok --rows 1
+            echo "[seasonal_tc] OK"
+          else
+            python -m pythia.tools.emit_phase4_diag seasonal_tc error --reason "fetch-or-store-failed"
+            echo "WARNING: Seasonal TC fetch failed (non-fatal)"
+          fi
 
       - name: "Phase 4: Store HDX Signals"
         if: ${{ inputs.only_connector == '' || inputs.only_connector == 'hdx_signals' }}
         continue-on-error: true
         run: |
-          python -c "
+          set -euo pipefail
+          ROWS=$(python -c "
           from horizon_scanner.hdx_signals import bulk_fetch_and_store_hdx_signals
           n = bulk_fetch_and_store_hdx_signals()
-          print(f'[hdx_signals] OK: stored {n} signals')
-          " || echo "WARNING: HDX Signals fetch failed (non-fatal)"
+          print(n)
+          " 2>&1 | tail -1) || ROWS="0"
+          if ! echo "$ROWS" | grep -qE '^[0-9]+$'; then
+            ROWS="0"
+          fi
+          if [ "$ROWS" -gt 0 ]; then
+            python -m pythia.tools.emit_phase4_diag hdx_signals ok --rows "$ROWS"
+            echo "[hdx_signals] OK: stored ${ROWS} signals"
+          else
+            python -m pythia.tools.emit_phase4_diag hdx_signals error --reason "zero-rows-returned"
+            echo "WARNING: HDX Signals fetch failed (non-fatal)"
+          fi
 
       - name: "Phase 4: Store CrisisWatch from JSON"
         if: ${{ inputs.only_connector == '' || inputs.only_connector == 'crisiswatch' }}
         continue-on-error: true
         run: |
-          python -c "
+          set -euo pipefail
+          ROWS=$(python -c "
           from horizon_scanner.crisiswatch import bulk_store_crisiswatch
           n = bulk_store_crisiswatch()
-          print(f'[crisiswatch] OK: stored {n} entries')
-          " || echo "WARNING: CrisisWatch store failed (non-fatal)"
+          print(n)
+          " 2>&1 | tail -1) || ROWS="0"
+          if ! echo "$ROWS" | grep -qE '^[0-9]+$'; then
+            ROWS="0"
+          fi
+          if [ "$ROWS" -gt 0 ]; then
+            python -m pythia.tools.emit_phase4_diag crisiswatch ok --rows "$ROWS"
+            echo "[crisiswatch] OK: stored ${ROWS} entries"
+          else
+            python -m pythia.tools.emit_phase4_diag crisiswatch error --reason "zero-rows-or-missing-json"
+            echo "WARNING: CrisisWatch store failed (non-fatal)"
+          fi
 
       # === PHASE 5: VERIFY + EXPORT ===
       - name: Verify DuckDB counts
@@ -495,6 +539,15 @@ jobs:
             --report diagnostics/ingestion/connectors_report.jsonl \
             --out diagnostics/ingestion/summary.md \
             --github-step-summary || true
+
+      - name: Consolidated pipeline status summary
+        if: always()
+        run: |
+          set -euo pipefail
+          python -m pythia.tools.summarize_all_phases \
+            --report "${DIAGNOSTICS_REPORT_PATH}" \
+            --db "${BACKFILL_DB_PATH}" \
+            >> "${GITHUB_STEP_SUMMARY}" || true
 
       - name: Simple DuckDB snapshot
         run: |
