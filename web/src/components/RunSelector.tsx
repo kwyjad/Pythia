@@ -10,6 +10,7 @@ type RunSelectorProps = {
 
 const formatRunLabel = (run: ForecastRun, index: number, total: number) => {
   const label = `Run ${total - index}`;
+  const testSuffix = run.is_test ? " [test]" : "";
   if (run.started_at) {
     try {
       const date = new Date(run.started_at);
@@ -17,12 +18,12 @@ const formatRunLabel = (run: ForecastRun, index: number, total: number) => {
         month: "short",
         day: "numeric",
       });
-      return `${label} (${day})`;
+      return `${label} (${day})${testSuffix}`;
     } catch {
-      return label;
+      return `${label}${testSuffix}`;
     }
   }
-  return label;
+  return `${label}${testSuffix}`;
 };
 
 const RunSelector = ({

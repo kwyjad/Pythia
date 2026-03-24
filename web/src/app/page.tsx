@@ -80,6 +80,7 @@ export default async function OverviewPage({
       <section className="space-y-4">
         {riskIndex ? (
           <RiskIndexPanel
+            key={String(includeTest)}
             countriesRows={countries?.rows ?? []}
             initialResponse={riskIndex}
             kpiScopes={kpiScopes}
