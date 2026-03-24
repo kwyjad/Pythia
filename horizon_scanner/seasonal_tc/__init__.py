@@ -170,10 +170,19 @@ def get_seasonal_tc_context(basin_code: str) -> str:
 def get_seasonal_tc_context_for_country(iso3: str) -> str:
     """Return prompt context text for the TC basin(s) relevant to a country.
 
-    Looks up *iso3* in the country-to-basin mapping, then returns the
-    concatenated prompt context for all matching basins.
+    Tries the DB cache first (``seasonal_tc_context_cache``).  If the DB
+    has fresh data, returns it immediately.  Otherwise falls back to the
+    on-disk cached JSON file.
     """
-    basins = COUNTRY_TO_BASINS.get(iso3.upper(), [])
+    iso3 = iso3.upper()
+
+    # --- DB-first path ---
+    db_text = load_seasonal_tc_context_from_db(iso3)
+    if db_text:
+        return db_text
+
+    # --- Fallback: cached JSON file ---
+    basins = COUNTRY_TO_BASINS.get(iso3, [])
     if not basins:
         return ""
 
@@ -207,3 +216,121 @@ def format_seasonal_tc_for_spd(context: str) -> Optional[str]:
         "SEASONAL TC FORECASTS (pre-scraped from TSR, NOAA CPC, BoM):\n"
         + context
     )
+
+
+# ---------------------------------------------------------------------------
+# DB store / load helpers
+# ---------------------------------------------------------------------------
+
+def store_seasonal_tc_context_cache(iso3: str, text: str) -> bool:
+    """Write a country's seasonal TC context to the DB cache.
+
+    Uses INSERT OR REPLACE so repeated calls for the same iso3 overwrite
+    the previous row.  Returns True on success, False on failure.
+    Non-fatal on DB errors.
+    """
+    try:
+        from pythia.db.schema import connect, ensure_schema  # lazy import
+
+        con = connect()
+        ensure_schema(con)
+        con.execute(
+            """
+            INSERT OR REPLACE INTO seasonal_tc_context_cache
+                (iso3, context_text, fetched_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            """,
+            [iso3.upper(), text],
+        )
+        return True
+    except Exception as exc:
+        log.warning("store_seasonal_tc_context_cache(%s): %s", iso3, exc)
+        return False
+
+
+def load_seasonal_tc_context_from_db(
+    iso3: str, max_age_days: int = 90
+) -> Optional[str]:
+    """Read cached seasonal TC context for a country from the DB.
+
+    Returns *None* if no row exists or if the cached row is older than
+    *max_age_days*.  Non-fatal on DB errors.
+    """
+    try:
+        from pythia.db.schema import connect, ensure_schema  # lazy import
+
+        con = connect()
+        ensure_schema(con)
+        rows = con.execute(
+            """
+            SELECT context_text, fetched_at
+            FROM seasonal_tc_context_cache
+            WHERE iso3 = ?
+            """,
+            [iso3.upper()],
+        ).fetchall()
+        if not rows:
+            return None
+        context_text, fetched_at = rows[0]
+        # Check staleness
+        if fetched_at is not None:
+            from datetime import datetime, timezone
+
+            age_days = (
+                datetime.now(timezone.utc) - fetched_at.replace(tzinfo=timezone.utc)
+            ).total_seconds() / 86400
+            if age_days > max_age_days:
+                log.debug(
+                    "seasonal_tc_context_cache for %s is %.0f days old (max %d)",
+                    iso3, age_days, max_age_days,
+                )
+                return None
+        return context_text or None
+    except Exception as exc:
+        log.warning("load_seasonal_tc_context_from_db(%s): %s", iso3, exc)
+        return None
+
+
+def store_seasonal_tc_outlooks(outlooks: list[dict]) -> int:
+    """Persist raw seasonal TC outlook dicts to the DB.
+
+    Takes the list of forecast dicts produced by
+    :func:`seasonal_tc_runner.collect_all` (after deduplication).
+    Returns the number of rows successfully stored.
+    Non-fatal on DB errors.
+    """
+    if not outlooks:
+        return 0
+    try:
+        import json as _json
+        from pythia.db.schema import connect, ensure_schema  # lazy import
+
+        con = connect()
+        ensure_schema(con)
+        stored = 0
+        for f in outlooks:
+            try:
+                con.execute(
+                    """
+                    INSERT OR REPLACE INTO seasonal_tc_outlooks
+                        (basin, source, forecast_season,
+                         named_storms_forecast, category, raw_json, fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    [
+                        f.get("basin", ""),
+                        f.get("source", ""),
+                        f.get("forecast_season", f.get("season", "")),
+                        f.get("named_storms_forecast", f.get("named_storms", "")),
+                        f.get("category", f.get("forecast_type", "")),
+                        _json.dumps(f, default=str),
+                    ],
+                )
+                stored += 1
+            except Exception as row_exc:
+                log.warning("store_seasonal_tc_outlooks row error: %s", row_exc)
+        log.info("store_seasonal_tc_outlooks: stored %d / %d outlooks", stored, len(outlooks))
+        return stored
+    except Exception as exc:
+        log.warning("store_seasonal_tc_outlooks: %s", exc)
+        return 0
