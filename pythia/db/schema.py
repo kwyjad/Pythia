@@ -1197,7 +1197,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 weights_profile TEXT,
                 created_at TIMESTAMP,
                 status TEXT,
-                human_explanation TEXT
+                human_explanation TEXT,
+                reasoning_trace_json TEXT
             );
             """,
             {
@@ -1219,6 +1220,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "status": "TEXT",
                 "human_explanation": "TEXT",
                 "is_test": "BOOLEAN DEFAULT FALSE",
+                "reasoning_trace_json": "TEXT",
             },
         )
 
@@ -1241,7 +1243,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 total_tokens INTEGER,
                 status TEXT,
                 spd_json TEXT,
-                human_explanation TEXT
+                human_explanation TEXT,
+                reasoning_trace_json TEXT
             );
             """,
             {
@@ -1264,6 +1267,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "class_bin": "TEXT",
                 "p": "DOUBLE",
                 "is_test": "BOOLEAN DEFAULT FALSE",
+                "reasoning_trace_json": "TEXT",
             },
         )
 

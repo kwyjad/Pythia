@@ -115,6 +115,7 @@ Pythia/
 - `horizon_scanner/reliefweb.py` — ReliefWeb humanitarian reports connector
 - `forecaster/hazard_prompts.py` — Hazard-specific reasoning guidance for SPD prompts. DR/PHASE3PLUS_IN_NEED dispatches to `_DR_PHASE3` (FEWS NET IPC-specific); DR/PA still uses `_DR` (IFRC Montandon). FEWS NET projection context injected into DR/PHASE3PLUS_IN_NEED prompts via `_load_fewsnet_projection()` in prompts.py.
 - `forecaster/scoring.py` — Scoring utilities: `multiclass_brier()`, `log_score()`, `binary_brier()` (Brier score for binary forecasts: `(forecast_p - outcome)^2`)
+- `forecaster/trace_validation.py` — Diagnostic validation of structured reasoning traces from SPD ensemble members. Checks prior consistency, delta arithmetic, and magnitude consistency. Produces `trace_quality_score` (0-1) per model. Never blocks forecasts.
 - `scripts/ci/snapshot_prompt_artifact.py` — Prompt version snapshot script
 - `scripts/refresh_crisiswatch.py` — Playwright-based CrisisWatch scraper (monthly, writes `crisiswatch_latest.json`)
 - `pythia/tools/generate_calibration_advice.py` — Per-hazard/metric calibration advice generation
@@ -136,7 +137,7 @@ Two DuckDB databases:
 - `seasonal_forecasts` — NMME country-level temp/precip anomalies (monthly from CPC)
 - `conflict_forecasts` — VIEWS + conflictforecast.org + ACLED CAST conflict predictions (PK: source, iso3, hazard_code, metric, lead_months, forecast_issue_date)
 - `questions`, `question_research` — Seeded questions + research briefs
-- `forecasts_raw`, `forecasts_ensemble` — Per-model + aggregated SPDs
+- `forecasts_raw`, `forecasts_ensemble` — Per-model + aggregated SPDs. Both include `reasoning_trace_json TEXT` column storing structured reasoning traces (prior, updates with deltas, point estimate, RC assessment) as JSON. NULL for binary forecasts, Track 2, or models that don't emit traces.
 - `resolutions` — Ground truth values per (question_id, horizon_m). Not all 6 horizons may have rows — source-aware null handling skips unresolvable horizons.
 - `scores` — Brier/log/CRPS per (question, horizon, model)
 - `calibration_weights`, `calibration_advice` — Per hazard/metric weights + LLM advice
@@ -252,7 +253,7 @@ RC detects departures from historical base rates (distinct from triage_score whi
 The forecaster routes questions into two tracks based on RC level:
 
 - **Track 1** (full ensemble): Multi-model ensemble producing both `ensemble_bayesmc_v2` and `ensemble_mean_v2` aggregation rows. Used for RC level > 0 (higher-RC or higher-complexity questions). Higher cost.
-- **Track 2** (single model): Single `track2_flash` model. Used for RC level 0 questions with priority tier. No ensemble aggregation — produces a single forecast row per question. Lower cost.
+- **Track 2** (single model): Single `track2_flash` model. Used for RC level 0 questions with priority tier. No ensemble aggregation — produces a single forecast row per question. Lower cost. Reasoning trace is simplified (prior + rc_assessment only; updates array may be empty).
 
 Track 2 questions have no `ensemble_bayesmc_v2` or `ensemble_mean_v2` rows in `forecasts_ensemble`. The legacy CI step "Verify Forecaster wrote both aggregation methods" (`verify_forecaster_aggregations.py`) was removed because it hard-exited when all questions routed to Track 2. This is a resolved issue — the step should not be re-added.
 
@@ -402,6 +403,7 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 - All LLM calls logged to `llm_calls` table with cost, tokens, latency, error tracking. This includes RC/triage LLM passes (logged by providers module), grounding calls (logged explicitly in `_run_grounding_for_hazard` via `log_hs_llm_call` with `hazard_code=grounding_{hazard}`), and adversarial checks (logged by `web_research` module for evidence fetches and by providers module for synthesis calls).
 - Env vars override config defaults; threshold env vars use `_env_float()` pattern
 - Structured data connectors follow a standard pattern: `fetch_*()` → `store_*()` → `load_*()` → `format_*_for_prompt()` / `format_*_for_spd()`
+- **Reasoning traces** are required in SPD output JSON for Track 1 (full ensemble). The `reasoning_trace` object captures the prior SPD, sequential evidence updates with numeric deltas, point estimate, and RC assessment. Track 2 requires only `prior` and `rc_assessment`. Traces are stored in `reasoning_trace_json` columns on `forecasts_raw` and `forecasts_ensemble`, validated by `forecaster/trace_validation.py` (diagnostic only), and analyzed by `generate_calibration_advice.py` for prior anchoring diagnostics.
 - **Question-level web research pipeline is deprecated**: The `fetch_evidence_pack` / `_build_question_evidence_queries` / `_merge_question_evidence_packs` flow is bypassed. SPD prompts now receive structured data directly via `_load_structured_data()`: conflict forecasts, ReliefWeb, HDX Signals, HS grounding evidence, ACAPS, IPC, ACLED political, NMME, ENSO, seasonal TC, GDACS event history (FL/DR/TC), adversarial checks. The `question_research` table is no longer populated by the pipeline (only placeholder rows). Env vars `PYTHIA_RETRIEVER_ENABLED`, `PYTHIA_WEB_RESEARCH_ENABLED`, `PYTHIA_SPD_WEB_SEARCH_ENABLED`, `PYTHIA_FORECASTER_SELF_SEARCH` are set to "0" in the workflow.
 - HS pipeline is per-hazard: each hazard gets its own RC grounding, RC call, triage grounding, and triage call (2-pass each: Gemini Flash + GPT-5-mini)
 - **Grounding backend order**: OpenAI GPT-4.1-mini web search is the primary grounding backend; Gemini Google Search grounding is the fallback. Override with `PYTHIA_GROUNDING_PRIMARY_BACKEND=gemini` to swap. Both RC and triage grounding use this order. Triage grounding calls are now logged to `llm_calls` with `hazard_code=TRIAGE_GROUNDING_{hazard}` (RC grounding was already logged as `grounding_{hazard}`).
