@@ -727,7 +727,7 @@ def call_openai(
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
-def call_anthropic(prompt: str, model: str, temperature: float) -> ProviderResult:
+def call_anthropic(prompt: str, model: str, temperature: float, *, purpose: str | None = None) -> ProviderResult:
     if not _ANTHROPIC_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing ANTHROPIC_API_KEY")
     url = "https://api.anthropic.com/v1/messages"
@@ -736,9 +736,13 @@ def call_anthropic(prompt: str, model: str, temperature: float) -> ProviderResul
         "anthropic-version": _ANTHROPIC_VERSION,
         "content-type": "application/json",
     }
+    # Use higher max_tokens for SPD/binary forecast calls to avoid truncation
+    max_tokens = _ANTHROPIC_MAX_OUTPUT
+    if purpose in ("spd_v2", "binary_v2"):
+        max_tokens = _ANTHROPIC_SPD_MAX_OUTPUT
     body = {
         "model": model,
-        "max_tokens": _ANTHROPIC_MAX_OUTPUT,
+        "max_tokens": max_tokens,
         "temperature": float(temperature),
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -1019,12 +1023,13 @@ def _call_provider_sync(
     *,
     timeout_sec: Optional[float] = None,
     thinking_level: Optional[str] = None,
+    purpose: str | None = None,
 ) -> ProviderResult:
     p = (provider or "").lower()
     if p == "openai":
         return call_openai(prompt, model, temperature, reasoning_effort=thinking_level)
     if p == "anthropic":
-        return call_anthropic(prompt, model, temperature)
+        return call_anthropic(prompt, model, temperature, purpose=purpose)
     if p in {"google", "gemini"}:
         return call_google(prompt, model, temperature, timeout_sec=timeout_sec, thinking_level=thinking_level)
     if p in {"xai", "grok"}:
@@ -1294,6 +1299,7 @@ async def call_chat_ms(
                     effective_temperature,
                     timeout_sec=timeout_sec,
                     thinking_level=thinking_level,
+                    purpose=ms.purpose,
                 )
                 if timeout_sec is not None:
                     result = await asyncio.wait_for(call_task, timeout=timeout_sec)

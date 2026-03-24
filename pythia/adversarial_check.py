@@ -132,6 +132,10 @@ def _build_adversarial_queries(
                 f"{country} {signal_text} routine not escalation {year}"
             )
 
+    # Truncate all queries to 10 words max — web search engines perform
+    # poorly with long natural-language queries.
+    queries = [" ".join(q.split()[:10]) for q in queries]
+
     return queries[:3]
 
 
