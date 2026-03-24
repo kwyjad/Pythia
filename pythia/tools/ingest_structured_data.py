@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -42,7 +43,33 @@ from typing import Any, Sequence
 
 import requests
 
+from resolver.ingestion.diagnostics_emitter import (
+    start_run as _diag_start,
+    finalize_run as _diag_finalize,
+    append_jsonl as _diag_append,
+)
+
 LOG = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Diagnostics helpers (thread-safe JSONL writer)
+# ---------------------------------------------------------------------------
+
+_DIAG_LOCK = threading.Lock()
+
+
+def _diagnostics_path() -> str | None:
+    return os.environ.get("DIAGNOSTICS_REPORT_PATH") or None
+
+
+def _emit_diag(label: str, ctx: dict, status: str, **kwargs: Any) -> None:
+    """Finalize and append a diagnostics line (thread-safe)."""
+    path = _diagnostics_path()
+    if not path:
+        return
+    result = _diag_finalize(ctx, status, **kwargs)
+    with _DIAG_LOCK:
+        _diag_append(path, result)
 
 # ---------------------------------------------------------------------------
 # Source registry
@@ -1013,7 +1040,12 @@ def _bulk_fetch_fewsnet_ipc(dry_run: bool = False) -> dict[str, Any]:
         LOG.error("[fewsnet_ipc] pipeline failed: %s", exc, exc_info=True)
         return {}
 
-    return {"__fewsnet_ipc_done__": True}
+    return {
+        "__fewsnet_ipc_done__": True,
+        "__pipeline_total_facts__": result.total_facts,
+        "__pipeline_resolved_rows__": result.resolved_rows,
+        "__pipeline_delta_rows__": result.delta_rows,
+    }
 
 
 # ===================================================================
@@ -1050,7 +1082,12 @@ def _bulk_fetch_gdacs(dry_run: bool = False) -> dict[str, Any]:
         LOG.error("[gdacs] pipeline failed: %s", exc, exc_info=True)
         return {}
 
-    return {"__gdacs_done__": True}
+    return {
+        "__gdacs_done__": True,
+        "__pipeline_total_facts__": result.total_facts,
+        "__pipeline_resolved_rows__": result.resolved_rows,
+        "__pipeline_delta_rows__": result.delta_rows,
+    }
 
 
 # ===================================================================
@@ -1090,7 +1127,7 @@ def _bulk_fetch_conflict(label: str, dry_run: bool = False) -> dict[str, Any]:
     if total == 0:
         LOG.warning("[ingest] conflict source %s returned 0 rows", source_name)
         return {}
-    return {f"__{label}_done__": True}
+    return {f"__{label}_done__": True, "__conflict_rows__": total}
 
 
 # ===================================================================
@@ -1205,8 +1242,10 @@ def ingest(
     # --- Phase 1: Bulk-fetch all sources concurrently ---
     # Each source group runs in its own thread for I/O parallelism.
     bulk_data: dict[str, dict[str, Any]] = {}
+    diag_contexts: dict[str, dict] = {}
 
-    def _run_source(label: str) -> tuple[str, dict[str, Any]]:
+    def _run_source(label: str) -> tuple[str, dict[str, Any], dict]:
+        diag_ctx = _diag_start(label, "real")
         LOG.info("[ingest] starting bulk fetch: %s", label)
         t0 = time.monotonic()
         try:
@@ -1244,7 +1283,7 @@ def ingest(
             "[ingest] %s: fetched %d countries in %.1fs",
             label, len(result), elapsed,
         )
-        return label, result
+        return label, result, diag_ctx
 
     # Run ACAPS sources sequentially (shared auth token, rate limits)
     # but run everything else concurrently (conflict forecasts, IPC, ReliefWeb, NMME)
@@ -1255,7 +1294,7 @@ def ingest(
         futures = []
 
         # Submit a single future that runs all ACAPS sources sequentially
-        def _run_acaps_sequential() -> list[tuple[str, dict]]:
+        def _run_acaps_sequential() -> list[tuple[str, dict, dict]]:
             results = []
             for lbl in acaps_labels:
                 results.append(_run_source(lbl))
@@ -1272,11 +1311,13 @@ def ingest(
             result = future.result()
             if isinstance(result, list):
                 # ACAPS sequential batch
-                for lbl, data in result:
+                for lbl, data, diag_ctx in result:
                     bulk_data[lbl] = data
+                    diag_contexts[lbl] = diag_ctx
             else:
-                lbl, data = result
+                lbl, data, diag_ctx = result
                 bulk_data[lbl] = data
+                diag_contexts[lbl] = diag_ctx
 
     # --- Phase 2: Store all data ---
     LOG.info("[ingest] === Storage phase ===")
@@ -1292,6 +1333,52 @@ def ingest(
         # Count countries with no data as "empty"
         covered = s["success"] + s["fail"]
         stats[lbl]["empty"] = len(countries) - covered
+
+    # --- Emit diagnostics ---
+    for lbl in labels:
+        ctx = diag_contexts.get(lbl)
+        if not ctx:
+            continue
+        s = stats[lbl]
+        data = bulk_data.get(lbl, {})
+
+        # Determine status
+        if s["success"] > 0 and s["fail"] == 0:
+            diag_status = "ok"
+            diag_reason = None
+        elif s["success"] > 0 and s["fail"] > 0:
+            diag_status = "ok"
+            diag_reason = "partial"
+        elif not data:
+            diag_status = "error"
+            diag_reason = "fetch-returned-empty"
+        else:
+            diag_status = "error"
+            diag_reason = "all-stores-failed"
+
+        extras: dict[str, Any] = {}
+        if lbl in _SELF_STORING_LABELS and data:
+            extras["self_storing"] = True
+        # Pipeline-delegated sources: stash pipeline result info
+        if lbl in ("gdacs_population_exposed", "fewsnet_ipc_population") and data:
+            extras["total_facts"] = data.get("__pipeline_total_facts__", 0)
+            extras["resolved_rows"] = data.get("__pipeline_resolved_rows__", 0)
+            extras["delta_rows"] = data.get("__pipeline_delta_rows__", 0)
+        # Conflict sources: stash row count
+        if lbl in _CONFLICT_SOURCE_MAP and data:
+            extras["conflict_rows"] = data.get("__conflict_rows__", 0)
+
+        _emit_diag(
+            lbl, ctx, diag_status,
+            reason=diag_reason,
+            counts={
+                "fetched": len(data),
+                "written": s["success"],
+                "failed": s["fail"],
+                "empty": s["empty"],
+            },
+            extras=extras,
+        )
 
     # ---- Summary ----
     print("\n===== Ingestion Summary =====")
