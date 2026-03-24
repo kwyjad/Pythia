@@ -22,7 +22,11 @@ concurrency:
         required: false
         default: "false"
       only_connector:
-        description: "Optional connector name for --only (acled_client, idmc, ifrc_go_client)"
+        description: >-
+          Optional: run only this connector. Core: acled_client, idmc, ifrc_go_client.
+          Resolution: fewsnet_ipc, gdacs. Structured: conflict (views+cf+cast), acaps,
+          reliefweb, acled_political, nmme. Context: enso, seasonal_tc, hdx_signals,
+          crisiswatch. Leave empty to run all.
         required: false
         default: ""
       log_level:
@@ -56,28 +60,16 @@ env:
   PYTHONUNBUFFERED: "1"
   BACKFILL_DB_PATH: data/resolver.duckdb
   SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
-  SIGNATURE_OPTIONAL_TABLES: scenarios
-  BACKFILL_INGEST_ARTIFACT: resolver-backfill-ingest-${{ github.run_id }}-${{ github.run_attempt }}
-  BACKFILL_ACLED_ARTIFACT: resolver-backfill-acled-${{ github.run_id }}-${{ github.run_attempt }}
-  BACKFILL_SNAPSHOT_ARTIFACT: resolver-backfill-snapshots-${{ github.run_id }}-${{ github.run_attempt }}
-  BACKFILL_CONTEXT_ARTIFACT: resolver-backfill-context-${{ github.run_id }}-${{ github.run_attempt }}
+  SIGNATURE_OPTIONAL_TABLES: scenarios,hdx_signals,enso_state,seasonal_tc_outlooks,seasonal_tc_context_cache
 
 jobs:
-  ingest:
-    name: Ingest connectors
+  backfill:
+    name: Full pipeline backfill
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    outputs:
-      months: ${{ steps.window.outputs.months }}
-      start_iso: ${{ steps.window.outputs.start_iso }}
-      end_iso: ${{ steps.window.outputs.end_iso }}
-      month_count: ${{ steps.window.outputs.month_count }}
-      canonical_ready: ${{ steps.canonical_status.outputs.canonical_ready }}
-      canonical_run_id: ${{ steps.canonical_status.outputs.canonical_run_id }}
-      canonical_source: ${{ steps.canonical_status.outputs.canonical_source }}
-      canonical_created_at: ${{ steps.canonical_status.outputs.canonical_created_at }}
+    timeout-minutes: 90
     env:
       RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
+      PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
       ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
       ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
@@ -94,11 +86,16 @@ jobs:
       IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
       IDMC_HELIX_ENV: RELEASE
       RESOLVER_EXPORT_ENABLE_FLOW: "1"
-      CANONICAL_DB_READY: "false"
-      CANONICAL_DB_RUN_ID: ""
-      CANONICAL_DB_SOURCE: ""
-      CANONICAL_CREATED_AT: ""
+      ACAPS_USERNAME: ${{ secrets.ACAPS_USERNAME }}
+      ACAPS_PASSWORD: ${{ secrets.ACAPS_PASSWORD }}
+      IPC_API_KEY: ${{ secrets.IPC_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
+      FEWSNET_MONTHS: ${{ inputs.reset_db == 'true' && '120' || '12' }}
+      GDACS_MONTHS: ${{ inputs.reset_db == 'true' && '135' || '3' }}
+
     steps:
+      # === SETUP ===
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -124,8 +121,6 @@ jobs:
           set -euo pipefail
           if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
             set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
           fi
           python -m scripts.ci.compute_backfill_window
 
@@ -153,9 +148,15 @@ jobs:
             --status success \
             --json databaseId,createdAt \
             --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver — Initial Backfill"' >>"${CANDIDATES_FILE}" || true
+          gh run list \
+            --workflow "Ingest Structured Data" \
+            --branch main \
+            --status success \
+            --json databaseId,createdAt \
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
 
           if [ ! -s "${CANDIDATES_FILE}" ]; then
-            echo "ERROR: No prior successful Horizon Scanner or Resolver — Initial Backfill runs found; cannot build canonical DB."
+            echo "ERROR: No prior successful runs found; cannot build canonical DB."
             exit 1
           fi
 
@@ -171,26 +172,20 @@ jobs:
             local artifact_name="$2"
             local out_dir="$3"
             local max_attempts="${4:-6}"
-
             local attempt=1
             while [ "$attempt" -le "$max_attempts" ]; do
               echo "Downloading artifact '${artifact_name}' from run ${run_id} (attempt ${attempt}/${max_attempts})"
-
-              # avoid partial/old contents
               rm -rf "${out_dir}/pythia-resolver-db" || true
-
               if gh run download "$run_id" -n "$artifact_name" --dir "$out_dir"; then
                 echo "Download OK."
                 return 0
               fi
-
               rc=$?
-              sleep_seconds=$(( 5 * attempt * attempt ))  # 5, 20, 45, 80, 125...
+              sleep_seconds=$(( 5 * attempt * attempt ))
               echo "Download failed (exit=${rc}). Sleeping ${sleep_seconds}s before retry..."
               sleep "${sleep_seconds}"
               attempt=$((attempt + 1))
             done
-
             echo "ERROR: Failed to download artifact '${artifact_name}' from run ${run_id} after ${max_attempts} attempts."
             return 1
           }
@@ -198,6 +193,8 @@ jobs:
           while IFS=',' read -r CREATED RUN_ID LABEL; do
             if [ "$LABEL" = "Horizon Scanner Triage" ]; then
               SOURCE_KIND="pipeline"
+            elif [ "$LABEL" = "Ingest Structured Data" ]; then
+              SOURCE_KIND="ingest"
             else
               SOURCE_KIND="backfill"
             fi
@@ -225,7 +222,6 @@ jobs:
               cp "$SRC" data/resolver.duckdb
             fi
 
-            # Validate candidate DB signature; if it fails, try next candidate instead of aborting
             if python -m scripts.ci.db_signature write \
                 --db data/resolver.duckdb \
                 --required "${SIGNATURE_REQUIRED_TABLES}" \
@@ -233,8 +229,7 @@ jobs:
                 --out diagnostics/db_signature_before.json; then
               echo "Candidate signature OK."
             else
-              rc=$?
-              echo "Candidate rejected (exit ${rc}); missing required tables or invalid signature. Trying next candidate."
+              echo "Candidate rejected; missing required tables. Trying next candidate."
               rm -f diagnostics/db_signature_before.json
               continue
             fi
@@ -244,14 +239,12 @@ jobs:
               FOUND_SOURCE="${SOURCE_KIND}"
               FOUND_RUN_ID="${RUN_ID}"
               FOUND_CREATED_AT="${CREATED}"
-              echo "Baseline signature written to diagnostics/db_signature_before.json"
               break
-            else
-              echo "Signature missing after validating run ${RUN_ID}; trying next candidate."
             fi
           done < "${CANDIDATES_FILE}.sorted"
+
           if [ "${FOUND}" -ne 1 ]; then
-            echo "ERROR: Could not find a valid canonical resolver.duckdb with required tables; run run_horizon_scanner.yml once to seed HS tables, or rerun with reset_db=true to bootstrap."
+            echo "ERROR: Could not find a valid canonical resolver.duckdb; rerun with reset_db=true to bootstrap."
             exit 1
           fi
 
@@ -262,60 +255,33 @@ jobs:
             echo "CANONICAL_CREATED_AT=${FOUND_CREATED_AT}"
           } >> "$GITHUB_ENV"
 
-          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f diagnostics/db_signature_before.json ]; then
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             {
               echo "### Canonical DB signature (before run)"
-              echo "- Source workflow: ${FOUND_SOURCE}"
-              echo "- Run ID: ${FOUND_RUN_ID}"
+              echo "- Source: ${FOUND_SOURCE} (run ${FOUND_RUN_ID})"
               echo "- Created: ${FOUND_CREATED_AT}"
-              echo "- Signature file: diagnostics/db_signature_before.json"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Remove any existing resolver.duckdb (reset mode only)
+      - name: Remove existing resolver.duckdb (reset mode only)
         if: github.event_name == 'workflow_dispatch' && inputs.reset_db == 'true'
         run: |
           set -euo pipefail
           rm -f data/resolver.duckdb
+          echo "CANONICAL_DB_READY=false" >> "$GITHUB_ENV"
 
-      - name: Record canonical DB selection
-        id: canonical_status
-        if: always()
-        run: |
-          {
-            echo "canonical_ready=${CANONICAL_DB_READY:-false}"
-            echo "canonical_run_id=${CANONICAL_DB_RUN_ID:-}"
-            echo "canonical_source=${CANONICAL_DB_SOURCE:-}"
-            echo "canonical_created_at=${CANONICAL_CREATED_AT:-}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Clean staging & diagnostics
+      - name: Ensure schema
         run: |
           set -euo pipefail
-          rm -rf resolver/staging || true
-          rm -rf diagnostics/ingestion || true
+          mkdir -p data
+          python -c "from pythia.db.schema import ensure_schema; ensure_schema()"
 
-      - name: Probe IDMC reachability
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m scripts.ci.probe_idmc_reachability || true
-
-      - name: Run IDMC (HELIX single-shot)
+      # === PHASE 1: RESOLVER CONNECTORS (ground truth — fatal) ===
+      - name: "Phase 1: Run IDMC (HELIX)"
         if: ${{ inputs.only_connector == '' || inputs.only_connector == 'idmc' }}
-        env:
-          IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
-          IDMC_HELIX_ENV: RELEASE
-          RESOLVER_OUTPUT_DIR: resolver/staging
-          RESOLVER_EXPORT_ENABLE_FLOW: "1"
-          LOG_LEVEL: ${{ inputs.log_level }}
         run: |
           set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
+          echo "::group::IDMC (HELIX)"
           python -m resolver.ingestion.idmc.cli \
             --network-mode helix \
             --series flow \
@@ -324,160 +290,32 @@ jobs:
             --start "${{ steps.window.outputs.start_iso }}" \
             --end   "${{ steps.window.outputs.end_iso }}" \
             --debug
+          echo "::endgroup::"
 
-      - name: Run connectors (with per-connector log tee)
+      - name: "Phase 1: Run connectors (ACLED, IFRC)"
         env:
           RESOLVER_START_ISO: ${{ steps.window.outputs.start_iso }}
           RESOLVER_END_ISO: ${{ steps.window.outputs.end_iso }}
           BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
           BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
-          ONLY_CONNECTOR: ${{ inputs.only_connector }}
-          LOG_LEVEL: ${{ inputs.log_level }}
-          EMPTY_POLICY: ${{ inputs.empty_policy }}
           RESOLVER_SKIP_IDMC: "1"
-          IDMC_HTTP_VERIFY: "true"
-          IDMC_HTTP_TIMEOUT_CONNECT: "5"
-          IDMC_HTTP_TIMEOUT_READ: "20"
-        shell: bash
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acled_client' || inputs.only_connector == 'ifrc_go_client' }}
         run: |
           set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
+          echo "::group::Connectors (ACLED, IFRC)"
           mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,export_preview}
           mkdir -p "$(dirname "${BACKFILL_DB_PATH}")"
-          CONNECTOR_EXIT=0
-          python -m scripts.ci.run_connectors || CONNECTOR_EXIT=$?
-          exit ${CONNECTOR_EXIT}
+          python -m scripts.ci.run_connectors
+          echo "::endgroup::"
 
-      - name: Ensure diagnostics dirs exist (post-run)
-        if: always()
-        run: |
-          mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,export_preview}
-          : > diagnostics/ingestion/raw/KEEP.txt
-          : > diagnostics/ingestion/metrics/KEEP.txt
-          : > diagnostics/ingestion/samples/KEEP.txt
-          : > diagnostics/ingestion/export_preview/KEEP.txt
-
-      - name: Prepare diagnostics dir
-        run: mkdir -p diagnostics/ingestion
-
-      - name: Summarize connector diagnostics
-        if: always()
-        run: |
-          set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
-          python -m scripts.ci.summarize_connectors \
-            --report diagnostics/ingestion/connectors_report.jsonl \
-            --out diagnostics/ingestion/summary.md \
-            --github-step-summary
-
-      - name: Prime ingestion artifact placeholders
-        if: always()
-        run: |
-          mkdir -p diagnostics/ingestion/{raw,metrics,samples,export_preview}
-          : > diagnostics/ingestion/raw/KEEP.txt
-          : > diagnostics/ingestion/metrics/KEEP.txt
-          : > diagnostics/ingestion/samples/KEEP.txt
-          : > diagnostics/ingestion/export_preview/KEEP.txt
-
-      - name: Upload connector logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: connector-logs
-          path: diagnostics/ingestion/logs/
-          if-no-files-found: warn
-
-      - name: Upload connector diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: connector-diagnostics
-          path: |
-            diagnostics/ingestion/
-          retention-days: 30
-
-      - name: Upload ingestion outputs
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.BACKFILL_INGEST_ARTIFACT }}
-          if-no-files-found: warn
-          path: |
-            data/
-            diagnostics/db_signature_before.json
-            resolver/staging/
-            resolver/logs/ingestion/
-
-      - name: Build single flat artifacts zip
-        if: always()
-        run: |
-          python scripts/ci/backfill_helpers.py --out diagnostics/all-artifacts-flat.zip
-
-      - name: Upload flat artifacts bundle
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: all-artifacts-flat
-          path: diagnostics/all-artifacts-flat.zip
-          if-no-files-found: warn
-
-  acled-backfill:
-    name: ACLED monthly fatalities → DuckDB
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    needs: ingest
-    env:
-      ACLED_USERNAME: ${{ secrets.ACLED_USERNAME }}
-      ACLED_PASSWORD: ${{ secrets.ACLED_PASSWORD }}
-      ACLED_REFRESH_TOKEN: ${{ secrets.ACLED_REFRESH_TOKEN }}
-      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip wheel setuptools
-          pip install -c constraints-ci.txt -e '.[db,ingestion]'
-
-      - name: Download ingestion bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.BACKFILL_INGEST_ARTIFACT }}
-          path: .
-
-      - name: Compute ACLED backfill window
+      - name: "Phase 1: ACLED monthly fatalities → DuckDB"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acled_client' }}
         env:
-          MONTHS_INPUT: ${{ inputs.months_back }}
-          TIMEZONE: Europe/Istanbul
+          BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
+          BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
         run: |
           set -euo pipefail
-          python -m scripts.ci.compute_backfill_window
-
-      - name: Run ACLED → DuckDB backfill
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acled' || inputs.only_connector == 'acled_client' }}
-        run: |
-          set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
+          echo "::group::ACLED monthly fatalities"
           mkdir -p diagnostics/acled
           python -m resolver.cli.acled_to_duckdb \
             --start "${BACKFILL_START_ISO}" \
@@ -485,111 +323,15 @@ jobs:
             --db "${BACKFILL_DB_PATH}" \
             --log-level "${LOG_LEVEL}" \
             2>&1 | tee diagnostics/acled/acled_to_duckdb.log
+          echo "::endgroup::"
 
-      - name: Summarize ACLED DuckDB table
+      - name: "Phase 1: Normalize + load_and_derive → facts_resolved"
+        env:
+          BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
+          BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
         run: |
           set -euo pipefail
-          mkdir -p diagnostics/acled
-          python scripts/ci/duckdb_summary.py --db "${BACKFILL_DB_PATH}" --tables "acled_monthly_fatalities" | tee diagnostics/acled/duckdb_summary.md
-          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-            cat diagnostics/acled/duckdb_summary.md >> "${GITHUB_STEP_SUMMARY}"
-          fi
-
-      - name: Upload ACLED artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.BACKFILL_ACLED_ARTIFACT }}
-          path: |
-            ${{ env.BACKFILL_DB_PATH }}
-            diagnostics/acled/
-          if-no-files-found: error
-
-  export-duckdb:
-    name: Export canonical facts to DuckDB
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    needs:
-      - ingest
-      - acled-backfill
-    env:
-      RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
-      LOG_LEVEL: ${{ inputs.log_level || 'INFO' }}
-      EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
-      SIGNATURE_OK: "false"
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip wheel setuptools
-          pip install -c constraints-ci.txt -e '.[db,ingestion]'
-
-      - name: Download ingestion bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.BACKFILL_INGEST_ARTIFACT }}
-          path: .
-
-      - name: Download ACLED DuckDB artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.BACKFILL_ACLED_ARTIFACT }}
-          path: acled-artifacts
-
-      - name: Stage ACLED artifacts
-        run: |
-          set -euo pipefail
-          if [ -f "acled-artifacts/${{ env.BACKFILL_DB_PATH }}" ]; then
-            mkdir -p "$(dirname "${{ env.BACKFILL_DB_PATH }}")"
-            cp "acled-artifacts/${{ env.BACKFILL_DB_PATH }}" "${{ env.BACKFILL_DB_PATH }}"
-          fi
-          if [ -d acled-artifacts/diagnostics/acled ]; then
-            mkdir -p diagnostics/ingestion/acled
-            cp -R acled-artifacts/diagnostics/acled/. diagnostics/ingestion/acled/
-          fi
-
-      - name: Restore baseline DB signature
-        run: |
-          set -euo pipefail
-          if [ -f diagnostics/db_signature_before.json ]; then
-            echo "Baseline signature already present at diagnostics/db_signature_before.json"
-          else
-            CANDIDATE=$(find . -maxdepth 4 -name db_signature_before.json | head -n 1 || true)
-            if [ -n "$CANDIDATE" ]; then
-              mkdir -p diagnostics
-              cp "$CANDIDATE" diagnostics/db_signature_before.json
-            fi
-          fi
-
-          if [ "${{ needs.ingest.outputs.canonical_ready }}" = "true" ] && [ ! -f diagnostics/db_signature_before.json ]; then
-            echo "ERROR: Missing baseline signature diagnostics/db_signature_before.json for canonical comparison."
-            exit 1
-          fi
-
-      - name: Load, derive, and export to DuckDB
-        run: |
-          set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
-          mkdir -p diagnostics/ingestion
-          python -m scripts.ci.append_stage_to_summary \
-            --section "Derive-freeze stage: Load and derive (start)" \
-            --status start || true
-
-          # Determine period label from backfill window
+          echo "::group::Normalize and load_and_derive"
           PERIOD_LABEL="$(python -c "
           import os, datetime as dt
           s = os.environ.get('BACKFILL_START_ISO','')
@@ -607,7 +349,6 @@ jobs:
               print('unknown')
           ")"
 
-          # Normalize raw staging CSVs → canonical 12-column schema
           CANONICAL_DIR="resolver/staging/${PERIOD_LABEL}/canonical"
           mkdir -p "${CANONICAL_DIR}"
           python -m resolver.transform.normalize \
@@ -617,126 +358,164 @@ jobs:
             --period "${PERIOD_LABEL}" \
             --log-level "${LOG_LEVEL:-INFO}"
 
-          if python -m resolver.tools.load_and_derive \
+          python -m resolver.tools.load_and_derive \
             --period "${PERIOD_LABEL}" \
             --staging-root resolver/staging \
             --snapshots-root data/snapshots \
             --db "${BACKFILL_DB_PATH}" \
-            --allow-negatives 1; then
-            python -m scripts.ci.append_stage_to_summary \
-              --section "Derive-freeze stage: Load and derive (end)" \
-              --status success || true
-          else
-            python -m scripts.ci.append_stage_to_summary \
-              --section "Derive-freeze stage: Load and derive (failed)" \
-              --status failed || true
-            exit 1
-          fi
-        env:
-          BACKFILL_START_ISO: ${{ needs.ingest.outputs.start_iso }}
-          BACKFILL_END_ISO: ${{ needs.ingest.outputs.end_iso }}
+            --allow-negatives 1
+          echo "::endgroup::"
 
+      # === PHASE 2: RESOLUTION SOURCES (non-fatal) ===
+      - name: "Phase 2: Ingest FEWS NET IPC → facts_resolved"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'fewsnet_ipc' }}
+        continue-on-error: true
+        run: |
+          echo "::group::FEWS NET IPC"
+          python -m pythia.tools.ingest_structured_data --sources fewsnet_ipc 2>&1 | tee diagnostics/phase2_fewsnet.log || echo "WARNING: FEWS NET IPC ingest failed (non-fatal)"
+          echo "::endgroup::"
+
+      - name: "Phase 2: Ingest GDACS → facts_resolved"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'gdacs' }}
+        continue-on-error: true
+        run: |
+          echo "::group::GDACS"
+          python -m pythia.tools.ingest_structured_data --sources gdacs 2>&1 | tee diagnostics/phase2_gdacs.log || echo "WARNING: GDACS ingest failed (non-fatal)"
+          echo "::endgroup::"
+
+      # === PHASE 3: STRUCTURED DATA — Pythia tables (non-fatal) ===
+      - name: "Phase 3: Ingest conflict forecasts"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'conflict' }}
+        continue-on-error: true
+        run: |
+          echo "::group::Conflict forecasts (VIEWS + conflictforecast.org + ACLED CAST)"
+          python -m pythia.tools.ingest_structured_data --sources conflict 2>&1 | tee diagnostics/phase3_conflict.log || echo "WARNING: Conflict forecasts ingest failed (non-fatal)"
+          echo "::endgroup::"
+
+      - name: "Phase 3: Ingest ACAPS (4 datasets)"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acaps' }}
+        continue-on-error: true
+        run: |
+          echo "::group::ACAPS"
+          python -m pythia.tools.ingest_structured_data --sources acaps 2>&1 | tee diagnostics/phase3_acaps.log || echo "WARNING: ACAPS ingest failed (non-fatal)"
+          echo "::endgroup::"
+
+      - name: "Phase 3: Ingest ReliefWeb reports"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'reliefweb' }}
+        continue-on-error: true
+        run: |
+          echo "::group::ReliefWeb"
+          python -m pythia.tools.ingest_structured_data --sources reliefweb 2>&1 | tee diagnostics/phase3_reliefweb.log || echo "WARNING: ReliefWeb ingest failed (non-fatal)"
+          echo "::endgroup::"
+
+      - name: "Phase 3: Ingest ACLED political events"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acled_political' }}
+        continue-on-error: true
+        run: |
+          echo "::group::ACLED political"
+          python -m pythia.tools.ingest_structured_data --sources acled_political 2>&1 | tee diagnostics/phase3_acled_political.log || echo "WARNING: ACLED political ingest failed (non-fatal)"
+          echo "::endgroup::"
+
+      - name: "Phase 3: Ingest NMME seasonal forecasts"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'nmme' }}
+        continue-on-error: true
+        run: |
+          echo "::group::NMME"
+          python -m pythia.tools.ingest_structured_data --sources nmme 2>&1 | tee diagnostics/phase3_nmme.log || echo "WARNING: NMME ingest failed (non-fatal)"
+          echo "::endgroup::"
+
+      # === PHASE 4: CONTEXT SOURCES (non-fatal) ===
+      - name: "Phase 4: Fetch + store ENSO state"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'enso' }}
+        continue-on-error: true
+        run: |
+          python -c "
+          from horizon_scanner.enso.enso_module import fetch_and_store_enso
+          ok = fetch_and_store_enso()
+          print('[enso] OK' if ok else '[enso] WARN: store failed but non-fatal')
+          " || echo "WARNING: ENSO fetch failed (non-fatal)"
+
+      - name: "Phase 4: Fetch + store Seasonal TC outlooks"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'seasonal_tc' }}
+        continue-on-error: true
+        run: |
+          python -c "
+          from horizon_scanner.seasonal_tc.seasonal_tc_runner import fetch_and_store_seasonal_tc
+          ok = fetch_and_store_seasonal_tc()
+          print('[seasonal_tc] OK' if ok else '[seasonal_tc] WARN: store failed but non-fatal')
+          " || echo "WARNING: Seasonal TC fetch failed (non-fatal)"
+
+      - name: "Phase 4: Store HDX Signals"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'hdx_signals' }}
+        continue-on-error: true
+        run: |
+          python -c "
+          from horizon_scanner.hdx_signals import bulk_fetch_and_store_hdx_signals
+          n = bulk_fetch_and_store_hdx_signals()
+          print(f'[hdx_signals] OK: stored {n} signals')
+          " || echo "WARNING: HDX Signals fetch failed (non-fatal)"
+
+      - name: "Phase 4: Store CrisisWatch from JSON"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'crisiswatch' }}
+        continue-on-error: true
+        run: |
+          python -c "
+          from horizon_scanner.crisiswatch import bulk_store_crisiswatch
+          n = bulk_store_crisiswatch()
+          print(f'[crisiswatch] OK: stored {n} entries')
+          " || echo "WARNING: CrisisWatch store failed (non-fatal)"
+
+      # === PHASE 5: VERIFY + EXPORT ===
       - name: Verify DuckDB counts
-        env:
-          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
-        run: |
-          set -euo pipefail
-          if [ "${LOG_LEVEL:-INFO}" = "DEBUG" ]; then
-            set -x
-            export PYTHONDEVMODE=1
-            export PYTHONWARNINGS=default
-          fi
-          DB_PATH="${RESOLVER_DB_URL#duckdb:///}"
-          python -m scripts.ci.append_stage_to_summary \
-            --section "Derive-freeze stage: Verify DuckDB counts (start)" \
-            --status start || true
-          if python scripts/ci/verify_duckdb_counts.py "${DB_PATH}" \
-            --allow-missing \
-            --tables acled_monthly_fatalities facts facts_resolved facts_deltas; then
-            python -m scripts.ci.append_stage_to_summary \
-              --section "Derive-freeze stage: Verify DuckDB counts (end)" \
-              --status success || true
-          else
-            python -m scripts.ci.append_stage_to_summary \
-              --section "Derive-freeze stage: Verify DuckDB counts (failed)" \
-              --status failed || true
-            exit 1
-          fi
-
-      - name: Summarize DuckDB contents (post-freeze)
-        run: |
-          set -euo pipefail
-          mkdir -p diagnostics/ingestion
-          summary_file="${GITHUB_STEP_SUMMARY:-}"
-          python scripts/ci/duckdb_summary.py \
-            --db "${{ env.BACKFILL_DB_PATH }}" \
-            --tables "acled_monthly_fatalities,facts,facts_resolved,facts_deltas" \
-            | tee diagnostics/ingestion/duckdb_summary.md
-          if [ -n "$summary_file" ]; then
-            cat diagnostics/ingestion/duckdb_summary.md >> "$summary_file"
-          fi
-          if [ -f diagnostics/ingestion/summary.md ]; then
-            {
-              echo ""
-              echo ""
-              cat diagnostics/ingestion/duckdb_summary.md
-            } >> diagnostics/ingestion/summary.md
-          fi
-
-      - name: Upload resolver_backfill.duckdb artifact
-        if: ${{ success() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: resolver-backfill-db
-          path: ${{ env.BACKFILL_DB_PATH }}
-
-      - name: Upload exports and database
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.BACKFILL_SNAPSHOT_ARTIFACT }}
-          if-no-files-found: warn
-          path: |
-            resolver/exports/backfill/
-            ${{ env.BACKFILL_DB_PATH }}
-            diagnostics/db_signature_before.json
-            diagnostics/db_signature_after.json
-
-      - name: Simple DuckDB snapshot (facts_resolved/facts_deltas)
         run: |
           set -euo pipefail
           DB_PATH="${BACKFILL_DB_PATH}"
-          echo "[simple_snapshot] Running simple snapshot extract against ${DB_PATH}"
-          python -m resolver.cli.simple_snapshot --db "${DB_PATH}"
+          python scripts/ci/verify_duckdb_counts.py "${DB_PATH}" \
+            --allow-missing \
+            --tables acled_monthly_fatalities facts_resolved facts_deltas
+
+      - name: Summarize DuckDB contents
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics/ingestion
+          python scripts/ci/duckdb_summary.py \
+            --db "${BACKFILL_DB_PATH}" \
+            --tables "acled_monthly_fatalities,facts_resolved,facts_deltas" \
+            | tee diagnostics/ingestion/duckdb_summary.md
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            cat diagnostics/ingestion/duckdb_summary.md >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Summarize connector diagnostics
+        if: always()
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.summarize_connectors \
+            --report diagnostics/ingestion/connectors_report.jsonl \
+            --out diagnostics/ingestion/summary.md \
+            --github-step-summary || true
+
+      - name: Simple DuckDB snapshot
+        run: |
+          set -euo pipefail
+          python -m resolver.cli.simple_snapshot --db "${BACKFILL_DB_PATH}" || true
 
       - name: Compute DB signature after backfill
         id: signature_after
-        if: ${{ needs.ingest.outputs.canonical_ready == 'true' }}
-        env:
-          REQUIRED_TABLES: ${{ env.SIGNATURE_REQUIRED_TABLES }}
-          OPTIONAL_TABLES: ${{ env.SIGNATURE_OPTIONAL_TABLES }}
+        if: ${{ env.CANONICAL_DB_READY == 'true' }}
         run: |
           set -euo pipefail
           python -m scripts.ci.db_signature compare \
             --before diagnostics/db_signature_before.json \
             --after-db "${BACKFILL_DB_PATH}" \
-            --required "${REQUIRED_TABLES}" \
-            --optional "${OPTIONAL_TABLES}" \
+            --required "${SIGNATURE_REQUIRED_TABLES}" \
+            --optional "${SIGNATURE_OPTIONAL_TABLES}" \
             --out diagnostics/db_signature_after.json
-
           echo "SIGNATURE_OK=true" >> "$GITHUB_ENV"
           echo "signature_ok=true" >> "$GITHUB_OUTPUT"
 
-          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-            {
-              echo "### Canonical DB signature (after run)"
-              echo "- Source workflow: ${{ needs.ingest.outputs.canonical_source }}"
-              echo "- Run ID: ${{ needs.ingest.outputs.canonical_run_id }}"
-              echo "- Signature file: diagnostics/db_signature_after.json"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
       - name: Upload canonical resolver DB
-        if: ${{ success() && needs.ingest.outputs.canonical_ready == 'true' && steps.signature_after.outputs.signature_ok == 'true' && (github.event_name != 'workflow_dispatch' || inputs.reset_db != 'true') }}
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db
@@ -748,3 +527,13 @@ jobs:
         with:
           name: pythia-resolver-db-reset
           path: data/resolver.duckdb
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-diagnostics
+          path: |
+            diagnostics/
+          retention-days: 30
+          if-no-files-found: warn

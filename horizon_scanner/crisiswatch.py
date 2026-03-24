@@ -620,6 +620,28 @@ def store_crisiswatch_entries(entries: Dict[str, Any]) -> None:
             pass
 
 
+def bulk_store_crisiswatch() -> int:
+    """Load CrisisWatch from JSON file and persist to DuckDB.
+
+    Convenience function for the backfill workflow::
+
+        python -c "from horizon_scanner.crisiswatch import bulk_store_crisiswatch; bulk_store_crisiswatch()"
+
+    Returns the number of entries stored (0 on failure).
+    """
+    try:
+        data = _load_from_json()
+        if not data:
+            log.warning("bulk_store_crisiswatch: no data loaded from JSON file.")
+            return 0
+        store_crisiswatch_entries(data)
+        log.info("bulk_store_crisiswatch: stored %d entries.", len(data))
+        return len(data)
+    except Exception as exc:
+        log.warning("bulk_store_crisiswatch failed: %s", exc)
+        return 0
+
+
 def load_crisiswatch_for_country(iso3: str) -> Dict[str, Any] | None:
     """Load the most recent CrisisWatch entry for a country from DuckDB."""
     try:
@@ -660,6 +682,70 @@ def load_crisiswatch_for_country(iso3: str) -> Dict[str, Any] | None:
         }
     except Exception as exc:
         log.debug("CrisisWatch DB load failed for %s: %s", iso3, exc)
+        return None
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def load_crisiswatch_from_db() -> Dict[str, Any] | None:
+    """Load ALL CrisisWatch entries from DuckDB, keyed by ISO3.
+
+    Returns the same dict format as :func:`_load_from_json` — one entry per
+    ISO3, keeping only the most recent (year, month) row per country.  Returns
+    ``None`` on DB errors or when the table is empty.
+    """
+    try:
+        from pythia.db.schema import connect
+    except ImportError:
+        return None
+
+    try:
+        con = connect(read_only=True)
+    except Exception:
+        return None
+
+    try:
+        rows = con.execute(
+            """
+            SELECT iso3, month, year, arrow, alert_type, summary,
+                   country_name, fetched_at
+            FROM crisiswatch_entries
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY iso3 ORDER BY year DESC, month DESC
+            ) = 1
+            """
+        ).fetchall()
+        if not rows:
+            return None
+
+        result: Dict[str, Any] = {}
+        for row in rows:
+            iso3 = row[0]
+            month_num = row[1]
+            year = row[2]
+            month_name = (
+                calendar.month_name[month_num] if 1 <= month_num <= 12 else ""
+            )
+            result[iso3] = {
+                "country": row[6] or "",
+                "iso3": iso3,
+                "arrow": row[3] or "",
+                "alert_type": row[4] or "",
+                "summary": row[5] or "",
+                "month": f"{month_name} {year}" if month_name else "",
+                "year": year,
+            }
+
+        if result:
+            log.info(
+                "CrisisWatch: loaded %d entries from DuckDB.", len(result),
+            )
+        return result if result else None
+    except Exception as exc:
+        log.debug("CrisisWatch bulk DB load failed: %s", exc)
         return None
     finally:
         try:
@@ -772,19 +858,21 @@ def fetch_crisiswatch(
     year: int | None = None,
     month: int | None = None,
 ) -> Dict[str, Any] | None:
-    """Fetch CrisisWatch data — JSON file first, Gemini grounding fallback.
+    """Fetch CrisisWatch data — DB first, then JSON file, then Gemini fallback.
 
     Returns a dict keyed by ISO3 (uppercased), where each value is a
     CrisisWatch entry dict with keys: country, iso3, arrow, alert_type,
     summary, month, year.
 
     **Priority order:**
-      1. Local JSON file (``crisiswatch_latest.json``) produced by the
+      1. DuckDB ``crisiswatch_entries`` table (populated by backfill or
+         prior runs).
+      2. Local JSON file (``crisiswatch_latest.json``) produced by the
          monthly Playwright scraper.  Used even if stale (>45 days — a
          warning is logged but data is still consumed).
-      2. Gemini grounding calls (``_fetch_on_the_horizon`` +
-         ``_fetch_global_overview``).  Only attempted when JSON is missing
-         or empty.
+      3. Gemini grounding calls (``_fetch_on_the_horizon`` +
+         ``_fetch_global_overview``).  Only attempted when both DB and
+         JSON are empty.
 
     Called ONCE per HS run; result is cached in-memory.
     """
@@ -799,8 +887,12 @@ def fetch_crisiswatch(
 
     month_name = calendar.month_name[month]
 
-    # --- Phase 1: Try JSON file (primary source) ---
-    merged = _load_from_json()
+    # --- Phase 0: Try DuckDB (fastest, populated by backfill) ---
+    merged = load_crisiswatch_from_db()
+
+    # --- Phase 1: Try JSON file ---
+    if not merged:
+        merged = _load_from_json()
 
     # --- Phase 2: Gemini grounding fallback ---
     if not merged:

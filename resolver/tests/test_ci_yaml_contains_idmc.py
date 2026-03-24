@@ -20,7 +20,6 @@ def _load_yaml(path: pathlib.Path) -> object:
 
 def test_backfill_mentions_idmc() -> None:
     content = WF_BACKFILL.read_text(encoding="utf-8")
-    assert "Probe IDMC reachability" in content
     assert re.search(r"idmc", content, re.IGNORECASE)
     assert _load_yaml(WF_BACKFILL)
 
@@ -28,13 +27,13 @@ def test_backfill_mentions_idmc() -> None:
 def test_backfill_runs_direct_idmc_step() -> None:
     data = _load_yaml(WF_BACKFILL)
     assert isinstance(data, dict)
-    ingest = data.get("jobs", {}).get("ingest", {})
-    steps = ingest.get("steps", [])
+    backfill = data.get("jobs", {}).get("backfill", {})
+    steps = backfill.get("steps", [])
     assert isinstance(steps, list)
     names = [step.get("name") for step in steps if isinstance(step, dict)]
-    assert "Run IDMC (HELIX single-shot)" in names
+    assert "Phase 1: Run IDMC (HELIX)" in names
     direct_step = next(
-        step for step in steps if isinstance(step, dict) and step.get("name") == "Run IDMC (HELIX single-shot)"
+        step for step in steps if isinstance(step, dict) and step.get("name") == "Phase 1: Run IDMC (HELIX)"
     )
     run_script = direct_step.get("run")
     assert isinstance(run_script, str)
@@ -43,19 +42,19 @@ def test_backfill_runs_direct_idmc_step() -> None:
     assert "--end   \"${{ steps.window.outputs.end_iso }}\"" in run_script
 
 
-def test_backfill_export_duckdb_uses_load_and_derive() -> None:
-    """Verify the export-duckdb job uses load_and_derive pipeline."""
+def test_backfill_uses_load_and_derive() -> None:
+    """Verify the backfill job uses load_and_derive pipeline."""
     data = _load_yaml(WF_BACKFILL)
-    derive_job = data.get("jobs", {}).get("export-duckdb", {})
-    steps = derive_job.get("steps", [])
+    backfill_job = data.get("jobs", {}).get("backfill", {})
+    steps = backfill_job.get("steps", [])
     assert isinstance(steps, list)
     names = [step.get("name") for step in steps if isinstance(step, dict)]
-    assert "Load, derive, and export to DuckDB" in names
+    assert "Phase 1: Normalize + load_and_derive → facts_resolved" in names
 
     lda_step = next(
         step
         for step in steps
-        if isinstance(step, dict) and step.get("name") == "Load, derive, and export to DuckDB"
+        if isinstance(step, dict) and step.get("name") == "Phase 1: Normalize + load_and_derive → facts_resolved"
     )
     run_script = lda_step.get("run")
     assert isinstance(run_script, str)
@@ -88,3 +87,24 @@ def test_backfill_schedule_and_months_back_defaults() -> None:
     schedule = on_block.get("schedule", [])
     assert schedule, "Expected 'schedule' under 'on'"
     assert any(item.get("cron") == "0 3 15 * *" for item in schedule if isinstance(item, dict))
+
+
+def test_backfill_has_context_source_phases() -> None:
+    """Verify the consolidated backfill includes context source phases."""
+    data = _load_yaml(WF_BACKFILL)
+    backfill_job = data.get("jobs", {}).get("backfill", {})
+    steps = backfill_job.get("steps", [])
+    names = [step.get("name", "") for step in steps if isinstance(step, dict)]
+
+    # Phase 2: Resolution sources
+    assert any("FEWS NET" in n for n in names)
+    assert any("GDACS" in n for n in names)
+
+    # Phase 3: Structured data
+    assert any("conflict" in n.lower() for n in names)
+
+    # Phase 4: Context sources
+    assert any("ENSO" in n for n in names)
+    assert any("Seasonal TC" in n for n in names)
+    assert any("HDX" in n for n in names)
+    assert any("CrisisWatch" in n for n in names)

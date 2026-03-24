@@ -871,6 +871,38 @@ def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
         pass
 
 
+def _ensure_enso_state_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the enso_state table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "enso_state",
+        """
+        CREATE TABLE IF NOT EXISTS enso_state (
+            fetch_date DATE NOT NULL,
+            enso_phase VARCHAR,
+            nino34_anomaly DOUBLE,
+            iod_phase VARCHAR,
+            forecast_json VARCHAR,
+            plume_json VARCHAR,
+            raw_context VARCHAR,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (fetch_date)
+        );
+        """,
+        {
+            "fetch_date": "DATE",
+            "enso_phase": "VARCHAR",
+            "nino34_anomaly": "DOUBLE",
+            "iod_phase": "VARCHAR",
+            "forecast_json": "VARCHAR",
+            "plume_json": "VARCHAR",
+            "raw_context": "VARCHAR",
+            "created_at": "TIMESTAMP",
+        },
+    )
+
+
 def _ensure_crisiswatch_entries_table(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure the crisiswatch_entries table exists."""
 
@@ -898,6 +930,92 @@ def _ensure_crisiswatch_entries_table(con: duckdb.DuckDBPyConnection) -> None:
             "alert_type": "VARCHAR",
             "summary": "VARCHAR",
             "country_name": "VARCHAR",
+            "fetched_at": "TIMESTAMP",
+        },
+    )
+
+
+def _ensure_hdx_signals_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the hdx_signals table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "hdx_signals",
+        """
+        CREATE TABLE IF NOT EXISTS hdx_signals (
+            iso3              VARCHAR NOT NULL,
+            hazard_code       VARCHAR,
+            indicator         VARCHAR NOT NULL,
+            concern_level     VARCHAR,
+            indicator_value   DOUBLE,
+            description       VARCHAR,
+            source_url        VARCHAR,
+            signal_date       VARCHAR,
+            fetched_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (iso3, indicator, signal_date)
+        );
+        """,
+        {
+            "iso3": "VARCHAR",
+            "hazard_code": "VARCHAR",
+            "indicator": "VARCHAR",
+            "concern_level": "VARCHAR",
+            "indicator_value": "DOUBLE",
+            "description": "VARCHAR",
+            "source_url": "VARCHAR",
+            "signal_date": "VARCHAR",
+            "fetched_at": "TIMESTAMP",
+        },
+    )
+
+
+def _ensure_seasonal_tc_outlooks_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the seasonal_tc_outlooks table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "seasonal_tc_outlooks",
+        """
+        CREATE TABLE IF NOT EXISTS seasonal_tc_outlooks (
+            basin VARCHAR NOT NULL,
+            source VARCHAR NOT NULL,
+            forecast_season VARCHAR,
+            named_storms_forecast VARCHAR,
+            category VARCHAR,
+            raw_json VARCHAR,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (basin, source, fetched_at)
+        );
+        """,
+        {
+            "basin": "VARCHAR",
+            "source": "VARCHAR",
+            "forecast_season": "VARCHAR",
+            "named_storms_forecast": "VARCHAR",
+            "category": "VARCHAR",
+            "raw_json": "VARCHAR",
+            "fetched_at": "TIMESTAMP",
+        },
+    )
+
+
+def _ensure_seasonal_tc_context_cache_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the seasonal_tc_context_cache table exists."""
+
+    _ensure_table_and_columns(
+        con,
+        "seasonal_tc_context_cache",
+        """
+        CREATE TABLE IF NOT EXISTS seasonal_tc_context_cache (
+            iso3 VARCHAR NOT NULL,
+            context_text VARCHAR,
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (iso3)
+        );
+        """,
+        {
+            "iso3": "VARCHAR",
+            "context_text": "VARCHAR",
             "fetched_at": "TIMESTAMP",
         },
     )
@@ -1712,6 +1830,10 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         _ensure_acaps_humanitarian_access_table(con)
         _ensure_calibration_advice_table(con)
         _ensure_crisiswatch_entries_table(con)
+        _ensure_hdx_signals_table(con)
+        _ensure_enso_state_table(con)
+        _ensure_seasonal_tc_outlooks_table(con)
+        _ensure_seasonal_tc_context_cache_table(con)
     finally:
         if own_con and con is not None:
             con.close()

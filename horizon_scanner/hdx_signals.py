@@ -253,9 +253,14 @@ def format_hdx_signals_for_prompt(
 ) -> str:
     """Build the HDX Signals evidence section for a country + hazard.
 
+    Tries the DB first; falls back to the cached CSV if the DB is empty.
     Returns an empty string if no relevant signals are found.
     """
-    signals = get_signals_for_country(iso3, hazard_code, max_age_days=max_age_days)
+    # DB-first: try loading persisted signals.
+    signals = load_hdx_signals_from_db(iso3, hazard_code, max_age_days=max_age_days)
+    # Fallback to CSV-based path if DB returned nothing.
+    if not signals:
+        signals = get_signals_for_country(iso3, hazard_code, max_age_days=max_age_days)
     if not signals:
         log.debug(
             "HDX Signals: no signals for %s/%s (this is normal for most countries)",
@@ -316,6 +321,166 @@ def clear_cache() -> None:
     """Clear the in-memory parsed CSV cache (for testing or new HS run)."""
     global _SIGNALS_CACHE
     _SIGNALS_CACHE = None
+
+
+# ---------------------------------------------------------------------------
+# DB-backed store / load / bulk fetch
+# ---------------------------------------------------------------------------
+
+
+def store_hdx_signals(signals: list[dict]) -> int:
+    """Persist parsed HDX signal dicts to the ``hdx_signals`` DuckDB table.
+
+    Each signal may map to multiple hazard codes via *INDICATOR_TO_HAZARDS*;
+    one row is written per (iso3, indicator, signal_date, hazard_code) combo.
+
+    Returns the number of rows written (0 on error).
+    """
+    if not signals:
+        return 0
+
+    try:
+        from pythia.db.schema import connect, ensure_schema  # lazy import
+    except Exception as exc:
+        log.warning("HDX Signals: cannot import DB helpers — %s", exc)
+        return 0
+
+    rows: list[tuple] = []
+    for s in signals:
+        iso3 = (s.get("iso3") or "").strip().upper()
+        indicator = (s.get("indicator_id") or "").strip()
+        signal_date = (s.get("campaign_date") or "")[:10].strip()
+        if not iso3 or not indicator or not signal_date:
+            continue
+
+        concern_level = (s.get("alert_level") or "").strip()
+        raw_value = (s.get("value") or "").strip()
+        try:
+            indicator_value = float(raw_value) if raw_value else None
+        except (ValueError, TypeError):
+            indicator_value = None
+        description = _pick_summary(s)
+        source_url = (s.get("source_url") or "").strip()
+
+        hazard_codes = INDICATOR_TO_HAZARDS.get(indicator, set())
+        if hazard_codes:
+            for hc in sorted(hazard_codes):
+                rows.append((
+                    iso3, hc, indicator, concern_level,
+                    indicator_value, description, source_url, signal_date,
+                ))
+        else:
+            # Store with NULL hazard_code so the data is not lost.
+            rows.append((
+                iso3, None, indicator, concern_level,
+                indicator_value, description, source_url, signal_date,
+            ))
+
+    if not rows:
+        return 0
+
+    try:
+        con = connect(read_only=False)
+        ensure_schema(con)
+        con.executemany(
+            """
+            INSERT OR REPLACE INTO hdx_signals
+                (iso3, hazard_code, indicator, concern_level,
+                 indicator_value, description, source_url, signal_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        con.close()
+        log.info("HDX Signals: stored %d rows to DB", len(rows))
+        return len(rows)
+    except Exception as exc:
+        log.warning("HDX Signals: DB write failed — %s", exc)
+        return 0
+
+
+def load_hdx_signals_from_db(
+    iso3: str,
+    hazard_code: str | None = None,
+    max_age_days: int = 180,
+) -> list[dict[str, str]]:
+    """Load HDX signals from DB, returning dicts compatible with CSV format.
+
+    The returned dicts use the same keys as ``_load_csv()`` rows so that
+    ``format_hdx_signals_for_prompt`` can consume them directly.
+    """
+    try:
+        from pythia.db.schema import connect  # lazy import
+    except Exception:
+        return []
+
+    cutoff = (datetime.now() - timedelta(days=max_age_days)).strftime("%Y-%m-%d")
+
+    sql = """
+        SELECT iso3, hazard_code, indicator, concern_level,
+               indicator_value, description, source_url, signal_date
+        FROM hdx_signals
+        WHERE iso3 = ?
+          AND signal_date >= ?
+    """
+    params: list[Any] = [iso3.upper(), cutoff]
+
+    if hazard_code:
+        sql += " AND hazard_code = ?"
+        params.append(hazard_code)
+
+    sql += " ORDER BY signal_date DESC, concern_level ASC"
+
+    try:
+        con = connect(read_only=True)
+        result = con.execute(sql, params).fetchall()
+        con.close()
+    except Exception as exc:
+        log.warning("HDX Signals: DB read failed — %s", exc)
+        return []
+
+    if not result:
+        return []
+
+    # Map back to CSV-style dict keys for compatibility with formatting code.
+    out: list[dict[str, str]] = []
+    for row in result:
+        out.append({
+            "iso3": row[0] or "",
+            "indicator_id": row[2] or "",
+            "alert_level": row[3] or "",
+            "value": str(row[4]) if row[4] is not None else "",
+            "summary_long": row[5] or "",
+            "description": row[5] or "",
+            "source_url": row[6] or "",
+            "campaign_date": row[7] or "",
+        })
+    return out
+
+
+def bulk_fetch_and_store_hdx_signals() -> int:
+    """Download HDX Signals CSV, parse it, and persist to DuckDB.
+
+    Returns the number of rows stored.
+    """
+    log.info("HDX Signals: bulk fetch starting …")
+    path = fetch_and_cache()
+    if path is None:
+        log.warning("HDX Signals: fetch_and_cache returned None — nothing to store")
+        return 0
+
+    rows = _load_csv()
+    if not rows:
+        log.warning("HDX Signals: CSV parsed 0 rows — nothing to store")
+        return 0
+
+    stored = store_hdx_signals(rows)
+    log.info(
+        "HDX Signals: bulk fetch complete — %d CSV rows, %d DB rows stored",
+        len(rows),
+        stored,
+    )
+    return stored
 
 
 # ---------------------------------------------------------------------------

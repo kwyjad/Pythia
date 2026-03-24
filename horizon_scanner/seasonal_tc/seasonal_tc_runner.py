@@ -1,3 +1,4 @@
+# Pythia / Copyright (c) 2025 Kevin Wyjad
 """
 Seasonal TC Forecast Runner
 ============================
@@ -164,6 +165,70 @@ def collect_all(year: int) -> list[dict]:
     all_forecasts.extend(collect_bom())
 
     return all_forecasts
+
+
+# ---------------------------------------------------------------------------
+# Fetch, store, and cache (programmatic entry point)
+# ---------------------------------------------------------------------------
+
+def fetch_and_store_seasonal_tc() -> bool:
+    """Collect seasonal TC outlooks, store them in DuckDB, and cache per-country context.
+
+    This is the programmatic entry point used by the ingest pipeline.
+    It calls :func:`collect_all` and :func:`deduplicate`, stores the raw
+    outlooks via :func:`store_seasonal_tc_outlooks`, and pre-generates
+    per-country context for every country in ``COUNTRY_TO_BASINS``.
+
+    Returns True on success, False on failure.  Non-fatal — catches all
+    exceptions so callers are never disrupted.
+    """
+    try:
+        from horizon_scanner.seasonal_tc import (
+            COUNTRY_TO_BASINS,
+            store_seasonal_tc_outlooks,
+            store_seasonal_tc_context_cache,
+        )
+
+        year = datetime.utcnow().year
+        logger.info("fetch_and_store_seasonal_tc: collecting for year %d", year)
+
+        all_forecasts = collect_all(year)
+        all_forecasts = deduplicate(all_forecasts)
+
+        if not all_forecasts:
+            logger.warning("fetch_and_store_seasonal_tc: no forecasts collected")
+            return False
+
+        # Store raw outlooks
+        stored = store_seasonal_tc_outlooks(all_forecasts)
+        logger.info("fetch_and_store_seasonal_tc: stored %d outlooks", stored)
+
+        # Generate and cache per-country context
+        cached = 0
+        for iso3, basins in COUNTRY_TO_BASINS.items():
+            blocks = []
+            seen = set()
+            for f in all_forecasts:
+                basin = f.get("basin", "")
+                ctx = f.get("prompt_context", "")
+                if basin in basins and ctx:
+                    key = (f.get("source", ""), basin, f.get("forecast_type", ""))
+                    if key not in seen:
+                        seen.add(key)
+                        blocks.append(ctx)
+            if blocks:
+                text = "\n\n".join(blocks)
+                if store_seasonal_tc_context_cache(iso3, text):
+                    cached += 1
+
+        logger.info(
+            "fetch_and_store_seasonal_tc: cached context for %d / %d countries",
+            cached, len(COUNTRY_TO_BASINS),
+        )
+        return True
+    except Exception as exc:
+        logger.error("fetch_and_store_seasonal_tc failed: %s", exc)
+        return False
 
 
 # ---------------------------------------------------------------------------

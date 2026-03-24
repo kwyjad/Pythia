@@ -419,9 +419,205 @@ def get_enso_prompt_context(cache_path: Optional[Path] = None) -> str:
     """
     Convenience function: get ENSO state and return a prompt-ready text block.
     This is the main entry point for other Pythia hazard pipelines.
+
+    Tries DB first, then falls back to live scrape (with JSON cache).
     """
+    # 1. Try DB first
+    db_forecast = load_enso_state_from_db()
+    if db_forecast is not None:
+        logger.info("Using ENSO data from DB")
+        return db_forecast.to_prompt_context()
+
+    # 2. Fall back to existing live scrape / JSON cache
     forecast = get_enso_state(cache_path)
+
+    # 3. Store to DB for future use
+    store_enso_state(forecast)
+
     return forecast.to_prompt_context()
+
+
+# ---------------------------------------------------------------------------
+# DB persistence
+# ---------------------------------------------------------------------------
+
+def store_enso_state(forecast: ENSOForecast) -> bool:
+    """
+    Persist an ENSOForecast to the enso_state DuckDB table.
+
+    Returns True on success, False on failure. Non-fatal on DB errors.
+    """
+    try:
+        from pythia.db.schema import connect, ensure_schema
+    except ImportError:
+        logger.warning("pythia.db.schema not available; skipping ENSO DB store")
+        return False
+
+    try:
+        # Parse fetch_date to a date string (YYYY-MM-DD)
+        fd = forecast.fetch_date
+        if fd:
+            try:
+                dt = datetime.fromisoformat(fd.replace("Z", "+00:00"))
+                fetch_date_str = dt.strftime("%Y-%m-%d")
+            except (ValueError, TypeError):
+                fetch_date_str = fd[:10] if len(fd) >= 10 else fd
+        else:
+            fetch_date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # Serialize lists to JSON
+        prob_data = []
+        for sp in forecast.probability_forecast:
+            if isinstance(sp, dict):
+                prob_data.append(sp)
+            else:
+                prob_data.append(asdict(sp))
+        forecast_json = json.dumps(prob_data) if prob_data else None
+
+        plume_data = []
+        for ps in forecast.plume_averages:
+            if isinstance(ps, dict):
+                plume_data.append(ps)
+            else:
+                plume_data.append(asdict(ps))
+        plume_json = json.dumps(plume_data) if plume_data else None
+
+        raw_context = forecast.to_prompt_context()
+
+        con = connect(read_only=False)
+        try:
+            ensure_schema(con)
+            con.execute(
+                """
+                INSERT OR REPLACE INTO enso_state
+                    (fetch_date, enso_phase, nino34_anomaly, iod_phase,
+                     forecast_json, plume_json, raw_context)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    fetch_date_str,
+                    forecast.current_state or None,
+                    forecast.nino34_latest_weekly,
+                    forecast.iod_state or None,
+                    forecast_json,
+                    plume_json,
+                    raw_context,
+                ],
+            )
+            logger.info("Stored ENSO state to DB (fetch_date=%s)", fetch_date_str)
+            return True
+        finally:
+            con.close()
+    except Exception as exc:
+        logger.warning("Failed to store ENSO state to DB: %s", exc)
+        return False
+
+
+def load_enso_state_from_db(max_age_days: int = 30) -> Optional[ENSOForecast]:
+    """
+    Load the most recent ENSO state from the DB.
+
+    Returns None if no data, data is too old, or on any DB error.
+    """
+    try:
+        from pythia.db.schema import connect, ensure_schema
+    except ImportError:
+        return None
+
+    try:
+        con = connect(read_only=True)
+        try:
+            ensure_schema(con)
+            rows = con.execute(
+                """
+                SELECT fetch_date, enso_phase, nino34_anomaly, iod_phase,
+                       forecast_json, plume_json, raw_context
+                FROM enso_state
+                ORDER BY fetch_date DESC
+                LIMIT 1
+                """
+            ).fetchall()
+            if not rows:
+                return None
+
+            row = rows[0]
+            fetch_date_val = row[0]  # DATE type
+
+            # Check staleness
+            if fetch_date_val is not None:
+                from datetime import date
+                if isinstance(fetch_date_val, str):
+                    fetch_date_obj = datetime.strptime(fetch_date_val, "%Y-%m-%d").date()
+                elif isinstance(fetch_date_val, datetime):
+                    fetch_date_obj = fetch_date_val.date()
+                elif isinstance(fetch_date_val, date):
+                    fetch_date_obj = fetch_date_val
+                else:
+                    fetch_date_obj = None
+
+                if fetch_date_obj is not None:
+                    age_days = (datetime.now(timezone.utc).date() - fetch_date_obj).days
+                    if age_days > max_age_days:
+                        logger.info(
+                            "ENSO DB data is %d days old (max %d); treating as stale",
+                            age_days, max_age_days,
+                        )
+                        return None
+
+            # Reconstruct ENSOForecast
+            f = ENSOForecast()
+            f.fetch_date = str(fetch_date_val) if fetch_date_val else ""
+            f.current_state = row[1] or ""
+            f.nino34_latest_weekly = row[2]
+            f.iod_state = row[3] or ""
+
+            # Restore probability forecast
+            if row[4]:
+                try:
+                    f.probability_forecast = json.loads(row[4])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # Restore plume averages
+            if row[5]:
+                try:
+                    f.plume_averages = json.loads(row[5])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # raw_context is available but we regenerate via to_prompt_context()
+            # for consistency; store it as a fallback attribute
+            f._raw_context_from_db = row[6] or ""
+
+            return f
+        finally:
+            con.close()
+    except Exception as exc:
+        logger.warning("Failed to load ENSO state from DB: %s", exc)
+        return None
+
+
+def fetch_and_store_enso() -> bool:
+    """
+    Fetch fresh ENSO data from IRI and store it to the DB.
+
+    Returns True on success, False on failure. Non-fatal.
+    """
+    try:
+        logger.info("Fetching fresh ENSO data from IRI for DB storage...")
+        html = fetch_iri_page()
+        forecast = extract_enso(html)
+        ok = store_enso_state(forecast)
+        if ok:
+            logger.info(
+                "fetch_and_store_enso: stored ENSO state (phase=%s, nino34=%s)",
+                forecast.current_state,
+                forecast.nino34_latest_weekly,
+            )
+        return ok
+    except Exception as exc:
+        logger.warning("fetch_and_store_enso failed: %s", exc)
+        return False
 
 
 # ---------------------------------------------------------------------------

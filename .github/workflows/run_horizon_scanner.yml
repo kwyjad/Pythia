@@ -169,61 +169,9 @@ jobs:
           fi
           pip install -r python_library_requirements.txt
 
-      - name: Download cached seasonal TC forecasts
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          echo "=== Downloading cached seasonal TC forecasts ==="
-
-          # Find the most recent successful run of the Refresh TC Seasonal Forecasts workflow
-          RUN_JSON=$(gh run list \
-            --workflow "Refresh TC Seasonal Forecasts" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 1)
-
-          RUN_ID=$(echo "$RUN_JSON" | jq -r '.[0].databaseId // empty')
-          CREATED_AT=$(echo "$RUN_JSON" | jq -r '.[0].createdAt // empty')
-
-          if [ -z "$RUN_ID" ]; then
-            echo "WARNING: No successful Refresh TC Seasonal Forecasts run found. TC context will be empty."
-            exit 0
-          fi
-
-          echo "Found run ${RUN_ID} created at ${CREATED_AT}"
-
-          # Calculate age
-          if [ -n "$CREATED_AT" ]; then
-            CREATED_EPOCH=$(date -d "$CREATED_AT" +%s 2>/dev/null || echo "")
-            if [ -n "$CREATED_EPOCH" ]; then
-              NOW_EPOCH=$(date +%s)
-              AGE_DAYS=$(( (NOW_EPOCH - CREATED_EPOCH) / 86400 ))
-              echo "Artifact age: ${AGE_DAYS} days"
-              if [ "$AGE_DAYS" -gt 90 ]; then
-                echo "WARNING: Seasonal TC forecasts are ${AGE_DAYS} days old (>90 days). Data may be stale."
-              fi
-            fi
-          fi
-
-          # Download the artifact (name includes run ID suffix)
-          TMPDIR=$(mktemp -d)
-          if gh run download "$RUN_ID" -p "seasonal-tc-forecasts-*" --dir "$TMPDIR"; then
-            TC_FILE=$(find "$TMPDIR" -name "seasonal_tc_forecasts.json" -type f | head -n 1)
-            if [ -n "$TC_FILE" ]; then
-              mkdir -p horizon_scanner/seasonal_tc/output
-              cp "$TC_FILE" horizon_scanner/seasonal_tc/output/seasonal_tc_forecasts.json
-              echo "Seasonal TC forecasts installed at horizon_scanner/seasonal_tc/output/seasonal_tc_forecasts.json"
-              ls -la horizon_scanner/seasonal_tc/output/seasonal_tc_forecasts.json
-            else
-              echo "WARNING: seasonal_tc_forecasts.json not found in downloaded artifact."
-            fi
-          else
-            echo "WARNING: Failed to download seasonal TC forecasts artifact from run ${RUN_ID}."
-          fi
-          rm -rf "$TMPDIR"
+      # Seasonal TC data is now pre-populated in the DB by the backfill workflow
+      # (seasonal_tc_context_cache table). The prompt loader falls back to live
+      # scrape if the DB has no data, so no separate artifact download is needed.
 
       - name: Download canonical resolver DB with signature guardrail
         id: canonical_download

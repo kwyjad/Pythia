@@ -151,6 +151,10 @@ Two DuckDB databases:
 - `acaps_daily_monitoring` — ACAPS analyst-curated daily updates
 - `acaps_humanitarian_access` — ACAPS humanitarian access scores
 - `crisiswatch_entries` — ICG CrisisWatch monthly arrows + alerts (PK: iso3, year, month)
+- `hdx_signals` — HDX Signals (OCHA automated crisis monitoring) persisted from CSV (PK: iso3, indicator, signal_date)
+- `enso_state` — ENSO state/forecast snapshots from IRI/CPC (PK: fetch_date)
+- `seasonal_tc_outlooks` — Seasonal TC forecasts from TSR/NOAA CPC/BoM (PK: basin, source, fetched_at)
+- `seasonal_tc_context_cache` — Pre-formatted per-country TC context text (PK: iso3)
 - `llm_calls` — Full telemetry (cost, tokens, latency, errors)
 
 **Resolver DB** (`resolver/db/schema.sql`): fact ingestion
@@ -193,13 +197,13 @@ Separate from the Connector pipeline. Fetches NMME ensemble mean anomalies from 
 Separate from the Connector pipeline (use `FORECAST_REGISTRY`, not `REGISTRY`). VIEWS connector fetches ML-based fatality predictions from the VIEWS API (`views_predicted_fatalities`, `views_p_gte25_brd`, leads 1–6). conflictforecast.org connector fetches news-based risk scores from Backendless API (`cf_armed_conflict_risk_3m`, `cf_armed_conflict_risk_12m`, `cf_violence_intensity_3m`). ACLED CAST connector fetches event-count forecasts via OAuth2 API (`cast_total_events`, `cast_battles_events`, `cast_erv_events`, `cast_vac_events`, 6-month lead), aggregated from admin1 to country level. All three write to `conflict_forecasts` table. `fetch_and_store` deduplicates before writing (keeps only the latest `forecast_issue_date` per source), and `_write_to_db` prunes old vintages (keeps only the 2 most recent issue dates per source). Loaded into ACE prompts via `horizon_scanner/conflict_forecasts.py`. The conflictforecast.org connector uses suffix-priority column selection: when multiple columns match a metric pattern (e.g. `ons_armedconf_03`), it prefers `_all` (combined forecast) over `_text`/`_hist` sub-models, and explicitly skips `_target` (ground truth, NaN for future) and `_naive` (baseline). Also includes a Backendless metadata skip set and a median-value sanity check (onset metrics only; intensity metrics use log-scale values). **Now integrated into `pythia/tools/ingest_structured_data.py`** as sources `views`, `conflictforecast`, `acledcast` (with `conflict` as a convenience alias for all three). The standalone `python -m resolver.tools.fetch_conflict_forecasts` entry point still works independently.
 
 **ENSO state and forecast** (`horizon_scanner/enso/enso_module.py`):
-Scrapes IRI/CPC ENSO Quick Look page for current ENSO state, Niño 3.4 anomaly, 9-season probabilistic forecast, multi-model plume averages, and IOD state. Cached as JSON with 7-day expiry. Injected into RC and triage prompts for DR, FL, HW, TC hazards via `get_enso_prompt_context()`. Refreshed by `.github/workflows/refresh-enso.yml`.
+Scrapes IRI/CPC ENSO Quick Look page for current ENSO state, Niño 3.4 anomaly, 9-season probabilistic forecast, multi-model plume averages, and IOD state. Cached as JSON with 7-day expiry. Injected into RC and triage prompts for DR, FL, HW, TC hazards via `get_enso_prompt_context()`. Refreshed by `.github/workflows/refresh-enso.yml`. DB-first pattern: `fetch_and_store_enso()` persists to `enso_state` table during backfill; `get_enso_prompt_context()` reads from DB first, falls back to live scrape.
 
 **Seasonal TC forecasts** (`horizon_scanner/seasonal_tc/`):
-Aggregates basin-level seasonal TC forecasts from TSR (PDF extraction), NOAA CPC (press release scraping), and BoM (outlook scraping) across 8 basins. Country-to-basin mapping in `__init__.py`. Cached as JSON; `get_seasonal_tc_context_for_country(iso3)` returns prompt-ready text. Refreshed by `.github/workflows/refresh-seasonal-tc.yml`.
+Aggregates basin-level seasonal TC forecasts from TSR (PDF extraction), NOAA CPC (press release scraping), and BoM (outlook scraping) across 8 basins. Country-to-basin mapping in `__init__.py`. Cached as JSON; `get_seasonal_tc_context_for_country(iso3)` returns prompt-ready text. Refreshed by `.github/workflows/refresh-seasonal-tc.yml`. DB-first pattern: `fetch_and_store_seasonal_tc()` persists to `seasonal_tc_outlooks` + `seasonal_tc_context_cache` tables during backfill; `get_seasonal_tc_context_for_country()` reads from DB first, falls back to cached JSON. The HS workflow no longer downloads the TC artifact separately — TC data is in the DB artifact.
 
 **HDX Signals** (`horizon_scanner/hdx_signals.py`):
-Downloads OCHA's HDX Signals CSV from CKAN API. Indicator-to-hazard mapping (acled_conflict→ACE, ipc_food_insecurity→DR, etc.). Filtered by country, hazard, recency (180 days). Injected into RC and triage prompts for all hazards via `format_hdx_signals_for_prompt()`.
+Downloads OCHA's HDX Signals CSV from CKAN API. Indicator-to-hazard mapping (acled_conflict→ACE, ipc_food_insecurity→DR, etc.). Filtered by country, hazard, recency (180 days). Injected into RC and triage prompts for all hazards via `format_hdx_signals_for_prompt()`. DB-first pattern: `bulk_fetch_and_store_hdx_signals()` persists signals to `hdx_signals` table during backfill; `format_hdx_signals_for_prompt()` reads from DB first, falls back to live CSV download.
 
 **ICG CrisisWatch** (`horizon_scanner/crisiswatch.py` + `scripts/refresh_crisiswatch.py`):
 Monthly fetch of ICG CrisisWatch data. **Primary source**: local JSON file (`horizon_scanner/data/crisiswatch_latest.json`) produced by the Playwright scraper (`scripts/refresh_crisiswatch.py`), which runs monthly via `refresh-crisiswatch.yml` workflow, loading `https://www.crisisgroup.org/crisiswatch` in headless Chromium, parsing with BeautifulSoup, and committing structured JSON. The `/crisiswatch/print` endpoint is broken (stale Oct 2019 data); the main page renders correctly. **Fallback**: Gemini grounding calls (`_call_gemini_grounding` in `crisiswatch.py`) — only attempted when the JSON file is missing or empty. Called once per HS run, cached in-memory, persisted to `crisiswatch_entries` DuckDB table. Injected into ACE RC prompts (via `crisiswatch_context` + deprecated `icg_on_the_horizon`), ACE triage prompts, and ACE SPD prompts. Country name → ISO3 mapping via hardcoded `_ICG_COUNTRY_ISO3` dict. JSON staleness: if `fetched_at` is >45 days old, a warning is logged but data is still used.
@@ -301,6 +305,8 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `PYTHIA_PREDICTION_MARKETS_ENABLED` | Legacy alias; prefer `PYTHIA_PM_RETRIEVER_ENABLED` |
 | `PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC` | Gemini Flash SPD timeout (default 300s) |
 | `PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC` | Gemini Pro SPD timeout (default 300s) |
+| `ANTHROPIC_MAX_OUTPUT_TOKENS` | Anthropic max output tokens for SPD calls (default 16384) |
+| `PYTHIA_ANTHROPIC_SPD_MAX_TOKENS` | Anthropic SPD-specific max tokens override (default: ANTHROPIC_MAX_OUTPUT_TOKENS) |
 | `ACAPS_EMAIL` / `ACAPS_PASSWORD` | ACAPS API credentials |
 | `GDACS_MONTHS` | Number of months of GDACS history to fetch (default 3; 135 for full backfill to 2015) |
 | `GDACS_REQUEST_DELAY` | Seconds between GDACS API requests (default 1.0) |
@@ -453,12 +459,38 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 The `pythia-resolver-db` DuckDB artifact is shared across multiple workflows. Each workflow's "Download canonical resolver DB" step searches for the most recent successful run from candidate workflow types:
 
 1. **Horizon Scanner Triage** (`run_horizon_scanner.yml`) — DB_SOURCE=`pipeline`
-2. **Resolver — Initial Backfill** — DB_SOURCE=`backfill`
-3. **Ingest Structured Data** (`ingest-structured-data.yml`) — DB_SOURCE=`ingest`
+2. **Resolver — Initial Backfill** — DB_SOURCE=`backfill` (primary ingestion: single-job workflow with 5 phases)
+3. **Ingest Structured Data** (`ingest-structured-data.yml`) — DB_SOURCE=`ingest` (mid-cycle refresh for fast-changing sources)
 4. **Compute SPD Scores** (`compute_scores.yml`) — upstream of calibration
 5. **Compute Calibration Weights & Advice** (`compute_calibration_pythia.yml`) — calibration pipeline
 
 Candidates are sorted by `createdAt` descending; the first one that downloads successfully and passes the DB signature check is used. If a new workflow is added that produces `pythia-resolver-db`, it must be added as a candidate source in all workflows that consume the artifact. The `compute_scores.yml` and `compute_calibration_pythia.yml` workflows use the triggering `workflow_run.id` as the primary source, falling back to canonical discovery on manual `workflow_dispatch`.
+
+## Consolidated backfill workflow
+
+The `resolver-initial-backfill.yml` workflow is the primary data ingestion point (runs 15th monthly). It is a single-job workflow with 5 sequential phases operating on one DuckDB file:
+
+```
+Phase 1 (fatal):    Resolver connectors (IDMC, ACLED, IFRC) → facts_resolved + acled_monthly_fatalities
+Phase 2 (non-fatal): Resolution sources (FEWS NET IPC, GDACS) → facts_resolved
+Phase 3 (non-fatal): Structured data (conflict forecasts, ACAPS, ReliefWeb, ACLED political, NMME) → Pythia tables
+Phase 4 (non-fatal): Context sources (ENSO, Seasonal TC, HDX Signals, CrisisWatch) → Pythia tables
+Phase 5:            Verify + export pythia-resolver-db artifact
+```
+
+Phase 1 failures are fatal (core resolution data). Phases 2-4 use `continue-on-error: true` so individual source failures don't block the entire backfill. Backfill depth is controlled by `FEWSNET_MONTHS` (120 on reset, 12 otherwise) and `GDACS_MONTHS` (135 on reset, 3 otherwise).
+
+The `ingest-structured-data.yml` workflow is a mid-cycle refresh for fast-changing sources (weekly Sunday 03:00 UTC). Scheduled runs only refresh `conflict`, `gdacs`, `reliefweb`, and `acled_political`. Manual dispatch supports all sources for debugging.
+
+## DB-first context data pattern
+
+Context sources (ENSO, Seasonal TC, HDX Signals, CrisisWatch) follow a DB-first loading pattern:
+
+1. During backfill (Phase 4): data is fetched from upstream sources and stored in DB tables (`enso_state`, `seasonal_tc_context_cache`, `hdx_signals`, `crisiswatch_entries`)
+2. At HS/forecaster runtime: prompt loaders try DB first, fall back to live fetch/file cache if DB is empty
+3. The HS workflow no longer downloads the seasonal TC artifact — TC data is in the DB artifact
+
+This ensures the DB artifact is fully self-contained and reproducible.
 
 ## Run health diagnostics
 
@@ -470,4 +502,4 @@ Candidates are sorted by `createdAt` descending; the first one that downloads su
 
 ## Structured data bulk ingest
 
-`pythia/tools/ingest_structured_data.py` orchestrates bulk fetch/store for all structured data connectors. The `_SOURCE_GROUPS` dict maps group names to table names. Currently registered groups: `views`, `conflictforecast`, `acledcast`, `acaps_inform_severity`, `acaps_risk_radar`, `acaps_daily_monitoring`, `acaps_humanitarian_access`, `ipc`, `reliefweb`, `acled_political`, `nmme`, `gdacs`, `fewsnet_ipc`. Each group has a `_bulk_fetch_*` function that parallelizes API calls across countries via `ThreadPoolExecutor`. The `acled_political` group fetches event-level political data (protests, riots, strategic developments) from the ACLED API via `pythia.acled_political.fetch_acled_political_events` and stores via `store_acled_political_events`. The `gdacs` group delegates to `resolver.tools.run_pipeline` with `--connectors gdacs`, which writes to `facts_resolved` and `facts_deltas` via the standard Resolver pipeline. GDACS and FEWS NET IPC are self-storing sources (no per-country store function). The `fewsnet_ipc` group delegates to `resolver.tools.run_pipeline` with `--connectors fewsnet_ipc`, fetching IPC Phase 3+ population estimates from the FEWS NET Data Warehouse; backfill depth controlled via `FEWSNET_MONTHS` (default 12; 120 for backfill to 2016). The `ingest-structured-data.yml` workflow runs weekly (Sunday 03:00 UTC) in incremental mode (last 3 months) and monthly (28th) with all sources; GDACS backfill depth is controlled via the `gdacs_months` workflow input (default 3; set to 135 for full backfill to 2015).
+`pythia/tools/ingest_structured_data.py` orchestrates bulk fetch/store for all structured data connectors. The `_SOURCE_GROUPS` dict maps group names to table names. Currently registered groups: `views`, `conflictforecast`, `acledcast`, `acaps_inform_severity`, `acaps_risk_radar`, `acaps_daily_monitoring`, `acaps_humanitarian_access`, `ipc`, `reliefweb`, `acled_political`, `nmme`, `gdacs`, `fewsnet_ipc`. Each group has a `_bulk_fetch_*` function that parallelizes API calls across countries via `ThreadPoolExecutor`. The `acled_political` group fetches event-level political data (protests, riots, strategic developments) from the ACLED API via `pythia.acled_political.fetch_acled_political_events` and stores via `store_acled_political_events`. The `gdacs` group delegates to `resolver.tools.run_pipeline` with `--connectors gdacs`, which writes to `facts_resolved` and `facts_deltas` via the standard Resolver pipeline. GDACS and FEWS NET IPC are self-storing sources (no per-country store function). The `fewsnet_ipc` group delegates to `resolver.tools.run_pipeline` with `--connectors fewsnet_ipc`, fetching IPC Phase 3+ population estimates from the FEWS NET Data Warehouse; backfill depth controlled via `FEWSNET_MONTHS` (default 12; 120 for backfill to 2016). The `ingest-structured-data.yml` workflow runs weekly (Sunday 03:00 UTC) as a mid-cycle refresh for fast-changing sources (`conflict`, `gdacs`, `reliefweb`, `acled_political`). The primary ingestion of all sources happens in the `resolver-initial-backfill.yml` backfill workflow (15th monthly). GDACS backfill depth is controlled via the `gdacs_months` workflow input (default 3; set to 135 for full backfill to 2015).

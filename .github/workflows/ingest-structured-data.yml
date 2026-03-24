@@ -3,6 +3,10 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
+# Mid-cycle data refresh. The primary ingestion happens in resolver-initial-backfill.yml
+# (15th monthly). This workflow provides supplementary freshness for fast-changing sources
+# between monthly backfills. Its DB artifact is available to the HS workflow as a candidate.
+
 ---
 name: Ingest Structured Data
 
@@ -20,10 +24,11 @@ concurrency:
         type: string
       sources:
         description: >-
-          Optional source filter (default: all). Options: views, conflictforecast,
-          acledcast, acaps (alias for all 4 ACAPS sources), acaps_inform_severity,
-          acaps_risk_radar, acaps_daily_monitoring, acaps_humanitarian_access, ipc,
-          reliefweb, nmme, gdacs, fewsnet_ipc. Also accepts: conflict (alias for
+          Optional source filter (default: fast-changing sources for scheduled runs,
+          all for manual). Options: views, conflictforecast, acledcast, acaps (alias
+          for all 4 ACAPS sources), acaps_inform_severity, acaps_risk_radar,
+          acaps_daily_monitoring, acaps_humanitarian_access, ipc, reliefweb, nmme,
+          gdacs, fewsnet_ipc. Also accepts: conflict (alias for
           views+conflictforecast+acledcast). Comma or space separated.
         required: false
         default: ""
@@ -44,9 +49,7 @@ concurrency:
         default: false
         type: boolean
   schedule:
-    # Run at 00:00 UTC on the 28th of each month (same day as TC refresh).
-    - cron: "0 0 28 * *"
-    # Weekly GDACS update: Sunday 03:00 UTC.
+    # Weekly refresh of fast-changing sources (Sunday 03:00 UTC)
     - cron: "0 3 * * 0"
 
 permissions:
@@ -58,7 +61,7 @@ env:
 
 jobs:
   ingest:
-    name: Ingest all structured data sources
+    name: Ingest structured data sources
     runs-on: ubuntu-latest
     env:
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -73,7 +76,7 @@ jobs:
       IPC_API_KEY: ${{ secrets.IPC_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
-      SIGNATURE_OPTIONAL_TABLES: scenarios
+      SIGNATURE_OPTIONAL_TABLES: scenarios,hdx_signals,enso_state,seasonal_tc_outlooks,seasonal_tc_context_cache
 
     steps:
       - name: Check out code
@@ -136,7 +139,7 @@ jobs:
             return 1
           }
 
-          # Collect candidate runs from Horizon Scanner Triage and Resolver — Initial Backfill
+          # Collect candidate runs from Horizon Scanner Triage, Resolver — Initial Backfill, and Ingest Structured Data
           CANDIDATES_FILE=$(mktemp)
           gh run list \
             --workflow "Horizon Scanner Triage" \
@@ -158,7 +161,7 @@ jobs:
             --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
 
           if [ ! -s "${CANDIDATES_FILE}" ]; then
-            echo "ERROR: No successful Horizon Scanner, Resolver — Initial Backfill, or Ingest Structured Data runs found."
+            echo "ERROR: No successful runs found."
             exit 1
           fi
 
@@ -205,8 +208,20 @@ jobs:
           done < "${CANDIDATES_FILE}.sorted"
 
           if [ "${FOUND}" -ne 1 ]; then
-            echo "ERROR: No valid canonical DB found after checking Horizon Scanner, Resolver — Initial Backfill, and Ingest Structured Data runs."
+            echo "ERROR: No valid canonical DB found."
             exit 1
+          fi
+
+      - name: Determine source list for scheduled runs
+        id: sources
+        run: |
+          # For scheduled runs (not manual dispatch), restrict to fast-changing sources
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "sources=conflict gdacs reliefweb acled_political" >> "$GITHUB_OUTPUT"
+            echo "Using fast-changing source list for scheduled run"
+          else
+            echo "sources=${{ inputs.sources }}" >> "$GITHUB_OUTPUT"
+            echo "Using user-specified source list (or all if empty)"
           fi
 
       - name: Run structured data ingestion
@@ -224,9 +239,9 @@ jobs:
             CMD="$CMD --iso3 $ISO3_INPUT"
           fi
 
-          SOURCES_INPUT="${{ inputs.sources }}"
-          if [ -n "$SOURCES_INPUT" ]; then
-            CMD="$CMD --sources $SOURCES_INPUT"
+          SOURCES="${{ steps.sources.outputs.sources }}"
+          if [ -n "$SOURCES" ]; then
+            CMD="$CMD --sources $SOURCES"
           fi
 
           if [ "${{ inputs.dry_run }}" = "true" ]; then
