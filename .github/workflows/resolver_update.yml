@@ -326,6 +326,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 1: Normalize + load_and_derive → facts_resolved"
+        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'idmc' || inputs.only_connector == 'acled_client' || inputs.only_connector == 'ifrc_go_client' }}
         env:
           BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
           BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
