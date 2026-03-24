@@ -1457,7 +1457,6 @@ def build_spd_prompt_v2(
     research_json: Dict[str, Any],
     structured_data: Optional[Dict[str, Any]] = None,
     model_name: Optional[str] = None,
-    track: int = 1,
 ) -> str:
     """Assemble the SPD v2 forecasting prompt with structured context.
 
@@ -1896,57 +1895,17 @@ def build_spd_prompt_v2(
         "Otherwise, produce the forecast JSON.\n\n"
         "Output instructions:\n"
         "- Return ONLY a single JSON object with this schema (no extra commentary):\n\n"
-        "- `human_explanation` MUST include a sentence starting with \"RC:\" stating what HS RC flagged, whether you accepted it, and how it changed the SPD (widened/shifted/rebutted).\n"
-        + (
-            "- `reasoning_trace.prior.spd` MUST match your Step 1 prior SPD (the base-rate-only distribution before any evidence updates).\n"
-            "- `reasoning_trace.updates` MUST contain at least your top 2 update signals from Step 2, with numeric `delta` arrays showing how each signal shifted the distribution. Positive values in `delta` mean probability mass added to that bucket; negative means removed. Each `delta` array must sum to approximately 0.\n"
-            "- `reasoning_trace.updates[].post_update_spd` is the running SPD after applying that signal — it must equal the previous SPD plus the delta (within rounding).\n"
-            "- `reasoning_trace.point_estimate` and `point_estimate_bucket` must be consistent with your Step 6 check.\n"
-            "- `reasoning_trace.rc_assessment` must state whether you accepted, rebutted, or partially accepted the HS regime change flag.\n\n"
-            "```json\n"
-            "{\n"
-            '  "reasoning_trace": {\n'
-            '    "prior": {\n'
-            '      "spd": [p1, p2, p3, p4, p5],\n'
-            '      "rationale": "1-2 sentences explaining the prior derivation from base rate data"\n'
-            "    },\n"
-            '    "updates": [\n'
-            "      {\n"
-            '        "signal": "Short name of the evidence signal",\n'
-            '        "direction": "UP or DOWN",\n'
-            '        "magnitude": "SMALL or MODERATE or LARGE",\n'
-            '        "months_affected": "all or 1-2 or specific month numbers",\n'
-            '        "delta": [dp1, dp2, dp3, dp4, dp5],\n'
-            '        "post_update_spd": [p1, p2, p3, p4, p5]\n'
-            "      }\n"
-            "    ],\n"
-            '    "point_estimate": "~NNN units (e.g. ~40 fatalities or ~15,000 people affected)",\n'
-            '    "point_estimate_bucket": 3,\n'
-            '    "rc_assessment": "accepted or rebutted or partially_accepted"\n'
-            "  },\n"
-            if track < 2
-            else
-            "- `reasoning_trace` must include `prior` (with `spd` and `rationale`) and `rc_assessment`. The `updates` array may be empty for Track 2 forecasts. `point_estimate` and `point_estimate_bucket` are optional.\n\n"
-            "```json\n"
-            "{\n"
-            '  "reasoning_trace": {\n'
-            '    "prior": {\n'
-            '      "spd": [p1, p2, p3, p4, p5],\n'
-            '      "rationale": "1-2 sentences"\n'
-            "    },\n"
-            '    "updates": [],\n'
-            '    "rc_assessment": "accepted or rebutted or partially_accepted"\n'
-            "  },\n"
-        )
-        + f'  "spds": {{\n'
+        "- `human_explanation` MUST include a sentence starting with \"RC:\" stating what HS RC flagged, whether you accepted it, and how it changed the SPD (widened/shifted/rebutted).\n\n"
+        "```json\n"
+        "{\n"
+        '  "spds": {\n'
         f'    "{example_key_1}": {{"buckets": [{bucket_list_str}], "probs": [0.7,0.2,0.07,0.02,0.01]}},\n'
         f'    "{example_key_2}": {{"buckets": [{bucket_list_str}], "probs": [0.7,0.2,0.07,0.02,0.01]}}\n'
         "  },\n"
-        '  "human_explanation": "3-4 sentences summarising the base rate, key update signals, and why any large deviations from the base rate are justified."\n'
+        '  "human_explanation": "3–4 sentences summarising the base rate, key update signals, and why any large deviations from the base rate are justified."\n'
         "}\n"
         "```\n"
         "Each `probs` array must contain exactly five numbers between 0 and 1 that sum to ~1.0.\n"
-        "Each `delta` array must contain exactly five numbers that sum to approximately 0.\n"
         "Do not include any text outside the JSON.\n"
     )
     # --- PROMPT_EXCERPT: spd_v2_end ---

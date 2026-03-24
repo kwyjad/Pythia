@@ -1020,6 +1020,172 @@ def _compute_views_benchmark(
 
 
 # ---------------------------------------------------------------------------
+# Prior anchoring analysis (requires reasoning_trace_json from Fix 2)
+# ---------------------------------------------------------------------------
+
+
+def _has_column(conn: Any, table: str, column: str) -> bool:
+    """Check if a column exists in a table."""
+    try:
+        rows = conn.execute(
+            f"PRAGMA table_info('{table}')"  # noqa: S608
+        ).fetchall()
+        return any(r[1] == column for r in rows)
+    except Exception:
+        return False
+
+
+def _compute_prior_anchoring_quality(
+    conn: Any,
+    hazard_code: str,
+    metric: str,
+    model_name: str | None = None,
+) -> Optional[Dict[str, Any]]:
+    """Analyze how well models anchor their stated priors on the base rate.
+
+    Reads reasoning_trace_json from forecasts_raw, extracts the stated prior SPD,
+    and compares it to the actual resolution distribution.
+
+    Returns None if insufficient data (< MIN_QUESTIONS traces available).
+    """
+    if not _table_exists(conn, "forecasts_raw"):
+        return None
+    if not _has_column(conn, "forecasts_raw", "reasoning_trace_json"):
+        return None
+
+    # Query reasoning traces
+    sql = """
+        SELECT fr.reasoning_trace_json, fr.question_id
+        FROM forecasts_raw fr
+        JOIN questions q ON q.question_id = fr.question_id
+        WHERE q.hazard_code = ?
+          AND q.metric = ?
+          AND fr.reasoning_trace_json IS NOT NULL
+          AND fr.month_index = 1
+          AND fr.bucket_index = 1
+    """
+    params: list[Any] = [hazard_code, metric]
+    if model_name:
+        sql += " AND fr.model_name = ?"
+        params.append(model_name)
+
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except Exception as exc:
+        LOGGER.debug("prior anchoring query failed: %s", exc)
+        return None
+
+    if len(rows) < MIN_QUESTIONS:
+        return None
+
+    # Extract prior SPDs
+    prior_spds: list[list[float]] = []
+    for row in rows:
+        try:
+            trace = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+            if isinstance(trace, dict):
+                prior = trace.get("prior", {})
+                spd = prior.get("spd")
+                if isinstance(spd, list) and len(spd) == 5:
+                    prior_spds.append([float(v) for v in spd])
+        except Exception:
+            continue
+
+    if len(prior_spds) < MIN_QUESTIONS:
+        return None
+
+    # Compute mean prior SPD
+    n = len(prior_spds)
+    mean_prior = [sum(s[i] for s in prior_spds) / n for i in range(5)]
+
+    # Compute prior variance (average variance across buckets)
+    prior_variance = sum(
+        sum((s[i] - mean_prior[i]) ** 2 for s in prior_spds) / n
+        for i in range(5)
+    ) / 5
+
+    # Get actual resolution distribution
+    actual_dist = _compute_actual_resolution_distribution(conn, hazard_code, metric)
+
+    result: Dict[str, Any] = {
+        "n_traces": n,
+        "mean_prior_spd": [round(v, 4) for v in mean_prior],
+        "prior_variance": round(prior_variance, 6),
+    }
+
+    if actual_dist:
+        result["actual_resolution_distribution"] = actual_dist
+        gap = [round(mean_prior[i] - actual_dist[i], 4) for i in range(5)]
+        result["prior_vs_actual_gap"] = gap
+
+        worst_idx = max(range(5), key=lambda i: abs(gap[i]))
+        result["worst_bucket_gap"] = {
+            "bucket": worst_idx + 1,
+            "gap_pp": round(gap[worst_idx] * 100, 1),
+        }
+
+    return result
+
+
+def _compute_actual_resolution_distribution(
+    conn: Any,
+    hazard_code: str,
+    metric: str,
+) -> Optional[list[float]]:
+    """Compute the empirical bucket distribution from resolutions."""
+    if not _table_exists(conn, "resolutions"):
+        return None
+
+    # Get thresholds for bucket assignment
+    if metric.upper() == "FATALITIES":
+        thresholds = list(FATAL_THRESHOLDS)
+    elif metric.upper() == "PHASE3PLUS_IN_NEED":
+        thresholds = [100_000, 1_000_000, 5_000_000, 15_000_000]
+    else:
+        thresholds = list(PA_THRESHOLDS)
+
+    # Build bucket CASE expression
+    cases = []
+    for i, t in enumerate(thresholds):
+        if i == 0:
+            cases.append(f"WHEN value < {t} THEN {i + 1}")
+        else:
+            cases.append(f"WHEN value < {t} THEN {i + 1}")
+    cases.append(f"ELSE {len(thresholds) + 1}")
+    case_sql = " ".join(cases)
+
+    sql = f"""
+        SELECT CASE {case_sql} END AS bucket, COUNT(*) AS cnt
+        FROM resolutions r
+        JOIN questions q ON q.question_id = r.question_id
+        WHERE q.hazard_code = ?
+          AND q.metric = ?
+          AND r.value IS NOT NULL
+        GROUP BY bucket
+    """
+    try:
+        rows = conn.execute(sql, [hazard_code, metric]).fetchall()
+    except Exception as exc:
+        LOGGER.debug("resolution distribution query failed: %s", exc)
+        return None
+
+    if not rows:
+        return None
+
+    counts = [0] * 5
+    for bucket, cnt in rows:
+        idx = int(bucket) - 1
+        if 0 <= idx < 5:
+            counts[idx] = int(cnt)
+
+    total = sum(counts)
+    if total == 0:
+        return None
+
+    return [round(c / total, 4) for c in counts]
+
+
+# ---------------------------------------------------------------------------
 # Advice formatting
 # ---------------------------------------------------------------------------
 
@@ -1250,6 +1416,44 @@ def _format_advice(
                 )
         lines.append("")
 
+    # Prior anchoring (from reasoning traces)
+    pa = findings.get("prior_anchoring")
+    if pa:
+        lines.append("PRIOR ANCHORING:")
+        gap = pa.get("prior_vs_actual_gap", [])
+        worst = pa.get("worst_bucket_gap", {})
+        n = pa.get("n_traces", 0)
+        lines.append(
+            f"  Based on {n} forecasts with reasoning traces."
+        )
+        if worst and abs(worst.get("gap_pp", 0)) > 5:
+            bucket_num = worst["bucket"]
+            gap_pp = worst["gap_pp"]
+            if gap_pp > 0:
+                lines.append(
+                    f"  You over-assign bucket {bucket_num} in your prior by "
+                    f"~{abs(gap_pp):.0f}pp relative to actual resolution rates."
+                )
+                lines.append(
+                    f"  ACTION: Start with less mass in bucket {bucket_num} before "
+                    f"applying evidence updates."
+                )
+            else:
+                lines.append(
+                    f"  You under-assign bucket {bucket_num} in your prior by "
+                    f"~{abs(gap_pp):.0f}pp relative to actual resolution rates."
+                )
+                lines.append(
+                    f"  ACTION: Start with more mass in bucket {bucket_num}."
+                )
+        if pa.get("prior_variance", 0) < 0.01:
+            lines.append(
+                "  WARNING: Your priors show very low variance across questions. "
+                "You may be using a one-size-fits-all prior instead of anchoring "
+                "on each country's specific base rate data."
+            )
+        lines.append("")
+
     text = "\n".join(lines).strip()
     if len(text) > MAX_ADVICE_CHARS:
         text = text[:MAX_ADVICE_CHARS - 20] + "\n...[truncated]"
@@ -1378,6 +1582,41 @@ def _format_per_model_advice(
                 f"NOTE: You (Brier {model_brier:.3f}) outperform ViEWS "
                 f"(Brier {views_brier:.3f}). Use ViEWS as supplementary context, "
                 f"not as a primary anchor."
+            )
+        lines.append("")
+
+    # Prior anchoring (from reasoning traces)
+    pa = findings.get("prior_anchoring")
+    if pa:
+        lines.append("PRIOR ANCHORING:")
+        worst = pa.get("worst_bucket_gap", {})
+        n = pa.get("n_traces", 0)
+        lines.append(f"  Based on {n} of your forecasts with reasoning traces.")
+        if worst and abs(worst.get("gap_pp", 0)) > 5:
+            bucket_num = worst["bucket"]
+            gap_pp = worst["gap_pp"]
+            if gap_pp > 0:
+                lines.append(
+                    f"  You over-assign bucket {bucket_num} in your prior by "
+                    f"~{abs(gap_pp):.0f}pp relative to actual resolution rates."
+                )
+                lines.append(
+                    f"  ACTION: Start with less mass in bucket {bucket_num} before "
+                    f"applying evidence updates."
+                )
+            else:
+                lines.append(
+                    f"  You under-assign bucket {bucket_num} in your prior by "
+                    f"~{abs(gap_pp):.0f}pp relative to actual resolution rates."
+                )
+                lines.append(
+                    f"  ACTION: Start with more mass in bucket {bucket_num}."
+                )
+        if pa.get("prior_variance", 0) < 0.01:
+            lines.append(
+                "  WARNING: Your priors show very low variance across questions. "
+                "You may be using a one-size-fits-all prior instead of anchoring "
+                "on each country's specific base rate data."
             )
         lines.append("")
 
@@ -1672,6 +1911,18 @@ def generate_calibration_advice(
                     conn, hazard_code, metric,
                 )
 
+            # Prior anchoring (requires reasoning_trace_json from Fix 2)
+            if _table_exists(conn, "forecasts_raw"):
+                try:
+                    findings["prior_anchoring"] = _compute_prior_anchoring_quality(
+                        conn, hazard_code, metric,
+                    )
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Prior anchoring analysis failed for %s/%s: %s",
+                        hazard_code, metric, exc,
+                    )
+
             advice_text = _format_advice(
                 findings, hazard_code, metric, as_of_month, n_resolved,
             )
@@ -1737,6 +1988,17 @@ def generate_calibration_advice(
                     model_findings["horizon_diff"] = _compute_per_model_horizon_diff(
                         conn, hazard_code, metric, mname,
                     )
+
+                    # Per-model prior anchoring
+                    try:
+                        model_findings["prior_anchoring"] = _compute_prior_anchoring_quality(
+                            conn, hazard_code, metric, model_name=mname,
+                        )
+                    except Exception as exc:
+                        LOGGER.debug(
+                            "Per-model prior anchoring failed for %s on %s/%s: %s",
+                            mname, hazard_code, metric, exc,
+                        )
 
                     model_advice = _format_per_model_advice(
                         model_name=mname,

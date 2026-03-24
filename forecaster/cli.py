@@ -2117,14 +2117,26 @@ def _write_spd_members_v2_to_db(
             except Exception:
                 pass
 
+            # Extract reasoning trace from raw_calls for this model.
+            _rc_reasoning_trace = None
+            try:
+                _rc_entry = raw_calls[idx]
+                if isinstance(_rc_entry, dict):
+                    _rt = _rc_entry.get("reasoning_trace")
+                    if _rt:
+                        _rc_reasoning_trace = json.dumps(_rt, default=str)
+            except Exception:
+                pass
+
             if not isinstance(model_spd, dict) or not model_spd:
                 con.execute(
                     """
                     INSERT INTO forecasts_raw (
                         run_id, question_id, model_name, month_index, bucket_index,
                         probability, ok, elapsed_ms, cost_usd, prompt_tokens,
-                        completion_tokens, total_tokens, status, spd_json, human_explanation, is_test
-                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'no_forecast', ?, ?, ?)
+                        completion_tokens, total_tokens, status, spd_json, human_explanation,
+                        is_test, reasoning_trace_json
+                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'no_forecast', ?, ?, ?, ?)
                     """,
                     [
                         run_id,
@@ -2138,6 +2150,7 @@ def _write_spd_members_v2_to_db(
                         json.dumps({"resolution_source": resolution_source, "spds": {}, "member_source": "spd_v2_member_call"}),
                         "No SPD returned for this model.",
                         _IS_TEST,
+                        None,
                     ],
                 )
                 continue
@@ -2167,8 +2180,8 @@ def _write_spd_members_v2_to_db(
                             run_id, question_id, model_name, month_index, bucket_index,
                             probability, ok, elapsed_ms, cost_usd, prompt_tokens,
                             completion_tokens, total_tokens, status, spd_json, human_explanation,
-                            horizon_m, class_bin, p, is_test
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, NULL, ?, ?, ?, ?)
+                            horizon_m, class_bin, p, is_test, reasoning_trace_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, NULL, ?, ?, ?, ?, ?)
                         """,
                         [
                             run_id,
@@ -2188,6 +2201,7 @@ def _write_spd_members_v2_to_db(
                             cb,
                             float(prob),
                             _IS_TEST,
+                            _rc_reasoning_trace,
                         ],
                     )
     except Exception as exc:  # noqa: BLE001
@@ -3848,14 +3862,18 @@ async def _call_spd_members_v2(
 
     for text, usage, error, ms_val in call_results:
         usage = usage or {}
-        raw_calls.append(
-            {
-                "model_spec": ms_val,
-                "text": text or "",
-                "usage": usage,
-                "error": error,
-            }
-        )
+        # Placeholders — populated after JSON parsing below.
+        reasoning_trace = None
+        human_explanation = ""
+        raw_call_entry: dict[str, object] = {
+            "model_spec": ms_val,
+            "text": text or "",
+            "usage": usage,
+            "error": error,
+            "reasoning_trace": None,
+            "human_explanation": "",
+        }
+        raw_calls.append(raw_call_entry)
 
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
         completion_tokens = int(usage.get("completion_tokens") or 0)
@@ -3887,6 +3905,12 @@ async def _call_spd_members_v2(
             per_model_spds.append(model_spd)
             model_success.append((getattr(ms_val, "provider", ""), False))
             continue
+
+        # Extract reasoning trace and human explanation from parsed JSON.
+        reasoning_trace = spd_obj.get("reasoning_trace")
+        human_explanation = spd_obj.get("human_explanation", "")
+        raw_call_entry["reasoning_trace"] = reasoning_trace
+        raw_call_entry["human_explanation"] = human_explanation
 
         spds = spd_obj.get("spds")
         if not isinstance(spds, dict):
@@ -4768,6 +4792,9 @@ def _write_spd_outputs(
     human_explanation = spd_obj.get("human_explanation") if isinstance(spd_obj, dict) else None
     human_explanation = human_explanation or ""
 
+    reasoning_trace = spd_obj.get("reasoning_trace") if isinstance(spd_obj, dict) else None
+    reasoning_trace_json_str = json.dumps(reasoning_trace, default=str) if reasoning_trace else None
+
     spd_payload = dict(spd_obj)
     spd_payload.setdefault("resolution_source", resolution_source)
 
@@ -4793,8 +4820,8 @@ def _write_spd_outputs(
                         run_id, question_id, model_name, month_index, bucket_index,
                         probability, ok, elapsed_ms, cost_usd, prompt_tokens, completion_tokens,
                         total_tokens, status, spd_json, human_explanation,
-                        horizon_m, class_bin, p, is_test
-                    ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?)
+                        horizon_m, class_bin, p, is_test, reasoning_trace_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         run_id,
@@ -4814,6 +4841,7 @@ def _write_spd_outputs(
                         cb,
                         float(prob),
                         _IS_TEST,
+                        reasoning_trace_json_str,
                     ],
                 )
                 con.execute(
@@ -4821,8 +4849,8 @@ def _write_spd_outputs(
                     INSERT INTO forecasts_ensemble (
                         run_id, question_id, iso3, hazard_code, metric, model_name,
                         month_index, bucket_index, probability, ev_value, weights_profile, created_at,
-                        status, human_explanation, is_test
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ensemble', CURRENT_TIMESTAMP, 'ok', ?, ?)
+                        status, human_explanation, is_test, reasoning_trace_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ensemble', CURRENT_TIMESTAMP, 'ok', ?, ?, ?)
                     """,
                     [
                         run_id,
@@ -4836,6 +4864,7 @@ def _write_spd_outputs(
                         float(prob),
                         human_explanation,
                         _IS_TEST,
+                        reasoning_trace_json_str,
                     ],
                 )
     finally:
@@ -4951,8 +4980,8 @@ def _write_binary_outputs(
                         run_id, question_id, model_name, month_index, bucket_index,
                         probability, ok, elapsed_ms, cost_usd, prompt_tokens, completion_tokens,
                         total_tokens, status, spd_json, human_explanation,
-                        horizon_m, class_bin, p, is_test
-                    ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?)
+                        horizon_m, class_bin, p, is_test, reasoning_trace_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, NULL)
                     """,
                     [
                         run_id, qid, model_name, month_idx, bucket_index,
@@ -4975,8 +5004,8 @@ def _write_binary_outputs(
                     INSERT INTO forecasts_ensemble (
                         run_id, question_id, iso3, hazard_code, metric, model_name,
                         month_index, bucket_index, probability, ev_value, weights_profile, created_at,
-                        status, human_explanation, is_test
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ensemble', CURRENT_TIMESTAMP, 'ok', ?, ?)
+                        status, human_explanation, is_test, reasoning_trace_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ensemble', CURRENT_TIMESTAMP, 'ok', ?, ?, NULL)
                     """,
                     [
                         run_id, qid, iso3, hz, metric, model_name,
@@ -5266,6 +5295,7 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
             research_json=research_json,
             structured_data=structured_data,
             model_name=TRACK2_MODEL_SPEC.name,
+            track=2,
         )
         if question_evidence_pack:
             prompt = append_retriever_evidence_to_prompt(prompt, question_evidence_pack)
@@ -5786,6 +5816,28 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             ensemble_meta_str = _format_ensemble_meta(ensemble_meta)
             if specs_source:
                 ensemble_meta_str = f"{ensemble_meta_str} | specs_source={specs_source}"
+
+            # Validate reasoning traces (diagnostic only — never blocks).
+            try:
+                from forecaster.trace_validation import validate_reasoning_traces as _validate_traces
+
+                trace_validations = _validate_traces(
+                    raw_calls=raw_calls,
+                    base_rate_summary=history_summary,
+                    hazard_code=hz,
+                    metric=metric,
+                )
+                ensemble_meta["trace_quality"] = trace_validations
+                avg_quality = sum(v.get("trace_quality_score", 0) for v in trace_validations) / max(len(trace_validations), 1)
+                LOG.info(
+                    "Trace quality for %s: avg=%.2f models_with_trace=%d/%d",
+                    qid,
+                    avg_quality,
+                    sum(1 for v in trace_validations if v.get("has_trace")),
+                    len(trace_validations),
+                )
+            except Exception:  # noqa: BLE001
+                LOG.debug("Trace validation skipped for %s", qid, exc_info=True)
 
             spd_mean = aggregate_spd_v2_mean(per_model_spds)
             spd_mean_obj = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
