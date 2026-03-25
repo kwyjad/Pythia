@@ -201,7 +201,7 @@ def test_idmc_as_of_date_is_datetime():
 
     assert drops["date_parse_failed"] == 0
     assert not frame.empty
-    assert pd.api.types.is_datetime64_ns_dtype(frame["as_of_date"])  # noqa: PD013
+    assert pd.api.types.is_datetime64_any_dtype(frame["as_of_date"])  # noqa: PD013
     assert list(frame["as_of_date"]) == [
         pd.Timestamp("2024-05-31"),
         pd.Timestamp("2024-06-30"),

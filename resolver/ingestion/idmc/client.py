@@ -1192,7 +1192,7 @@ def _fetch_hdx_displacements(
         diagnostics.setdefault("zero_rows_reason", "hdx_filtered_empty")
         return empty, diagnostics
 
-    subset["as_of_date"] = subset["event_date"].dt.to_period("M").dt.to_timestamp("M")
+    subset["as_of_date"] = subset["event_date"].dt.to_period("M").dt.to_timestamp() + pd.offsets.MonthEnd(0)
     aggregated = (
         subset.groupby(["iso3", "as_of_date"], as_index=False)["value"].sum()
     )
@@ -2010,7 +2010,7 @@ def _normalise_fallback_monthly_flow(
     if subset.empty:
         return pd.DataFrame(columns=canonical_columns)
 
-    subset["as_of_date"] = subset["event_date"].dt.to_period("M").dt.to_timestamp("M")
+    subset["as_of_date"] = subset["event_date"].dt.to_period("M").dt.to_timestamp() + pd.offsets.MonthEnd(0)
     aggregated = (
         subset.groupby(["iso3", "as_of_date"], as_index=False)["value"].sum()
     )

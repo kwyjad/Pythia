@@ -85,7 +85,13 @@ def phase_group(phase: str | None) -> str:
 
 
 def _normalize_string(series: pd.Series) -> pd.Series:
-    series = series.where(series.notna(), None)
+    """Normalize a string series: strip whitespace, convert empty/NA to None.
+
+    Compatible with both object and StringDtype (pandas 3.0+).
+    """
+    # Convert to object dtype to avoid pd.NA vs None issues with StringDtype
+    s = series.astype(object)
+    s = s.where(s.notna(), None)
 
     def _clean(value: object) -> str | None:
         if value is None:
@@ -93,7 +99,7 @@ def _normalize_string(series: pd.Series) -> pd.Series:
         text = str(value).strip()
         return text if text else None
 
-    return series.map(_clean)
+    return s.map(_clean)
 
 
 def _load_llm_calls(conn, track: int | None = None, include_test: bool = False) -> pd.DataFrame:
@@ -221,9 +227,10 @@ def _load_llm_calls(conn, track: int | None = None, include_test: bool = False) 
     df["cost_usd"] = pd.to_numeric(df["cost_usd"], errors="coerce").fillna(0.0)
     df["elapsed_ms"] = pd.to_numeric(df["elapsed_ms"], errors="coerce")
 
-    model = df["model_id"].where(df["model_id"].notna(), None)
-    model = model.where(model.notna(), df["model_name"])
-    model = model.where(model.notna(), None)
+    # Coalesce model_id → model_name → "unknown" (compatible with StringDtype)
+    model_id = df["model_id"]
+    model_name = df["model_name"]
+    model = model_id.where(model_id.notna(), model_name)
     model = model.fillna("unknown")
     df["model"] = model
 

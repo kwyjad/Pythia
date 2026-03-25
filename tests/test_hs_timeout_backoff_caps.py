@@ -38,6 +38,7 @@ def test_hs_retry_after_fail_fast(monkeypatch):
         *,
         timeout_sec: float | None = None,
         thinking_level: str | None = None,
+        purpose: str | None = None,
     ) -> ProviderResult:
         return ProviderResult(
             "",
@@ -75,6 +76,7 @@ def test_hs_timeout_wiring(monkeypatch):
         *,
         timeout_sec: float | None = None,
         thinking_level: str | None = None,
+        purpose: str | None = None,
     ) -> ProviderResult:
         captured["timeout_sec"] = timeout_sec
         return ProviderResult("ok", usage_to_dict(None), 0.0, model)
@@ -106,6 +108,7 @@ def test_non_hs_retry_after_unclamped(monkeypatch):
         *,
         timeout_sec: float | None = None,
         thinking_level: str | None = None,
+        purpose: str | None = None,
     ) -> ProviderResult:
         return ProviderResult(
             "",

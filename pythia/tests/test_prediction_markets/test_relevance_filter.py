@@ -68,9 +68,9 @@ def test_passthrough_fallback():
         assert "LLM unavailable" in q.relevance_note
 
 
-@pytest.mark.asyncio
-async def test_filter_candidates_falls_back(monkeypatch):
+def test_filter_candidates_falls_back(monkeypatch):
     """When LLM is unavailable, falls back to passthrough."""
+    import asyncio
     from pythia.prediction_markets import relevance_filter
 
     async def _failing_llm(*args, **kwargs):
@@ -82,13 +82,13 @@ async def test_filter_candidates_falls_back(monkeypatch):
         _make_question(title="Q1", volume=50000, forecasters=100),
         _make_question(title="Q2", volume=10000, forecasters=20),
     ]
-    result = await relevance_filter.filter_candidates(
+    result = asyncio.run(relevance_filter.filter_candidates(
         question_text="Test question",
         country_name="Iran",
         hazard_name="armed conflict",
         forecast_start="2026-04-01",
         forecast_end="2026-09-30",
         candidates=candidates,
-    )
+    ))
     assert len(result) == 2
     assert all(q.relevance_score == 5.0 for q in result)

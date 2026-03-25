@@ -26,6 +26,7 @@ def test_hs_triage_retries_timeouts(monkeypatch):
         *,
         timeout_sec: float | None = None,
         thinking_level: str | None = None,
+        purpose: str | None = None,
     ) -> providers.ProviderResult:
         calls["count"] += 1
         if calls["count"] == 1:

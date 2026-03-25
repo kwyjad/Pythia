@@ -75,15 +75,15 @@ def test_filter_by_date_no_forecast_start():
     assert len(result) == 1  # No filtering when no forecast_start
 
 
-@pytest.mark.asyncio
-async def test_get_prediction_market_signals_disabled(monkeypatch):
+def test_get_prediction_market_signals_disabled(monkeypatch):
     """Returns empty bundle when disabled."""
+    import asyncio
     monkeypatch.setenv("PYTHIA_PREDICTION_MARKETS_ENABLED", "0")
 
     # Need to reload config to pick up env change
     from pythia.prediction_markets.retriever import get_prediction_market_signals
 
-    result = await get_prediction_market_signals(
+    result = asyncio.run(get_prediction_market_signals(
         question_text="Test",
         country_name="Iran",
         iso3="IRN",
@@ -91,14 +91,14 @@ async def test_get_prediction_market_signals_disabled(monkeypatch):
         hazard_name="armed conflict",
         forecast_start="2026-04-01",
         forecast_end="2026-09-30",
-    )
+    ))
     assert isinstance(result, MarketBundle)
     assert result.questions == []
 
 
-@pytest.mark.asyncio
-async def test_get_prediction_market_signals_never_raises(monkeypatch):
+def test_get_prediction_market_signals_never_raises(monkeypatch):
     """The retriever should never raise, even if everything fails."""
+    import asyncio
     monkeypatch.setenv("PYTHIA_PREDICTION_MARKETS_ENABLED", "1")
 
     # Mock config to return enabled
@@ -116,7 +116,7 @@ async def test_get_prediction_market_signals_never_raises(monkeypatch):
 
     from pythia.prediction_markets.retriever import get_prediction_market_signals
 
-    result = await get_prediction_market_signals(
+    result = asyncio.run(get_prediction_market_signals(
         question_text="Test",
         country_name="Iran",
         iso3="IRN",
@@ -125,7 +125,7 @@ async def test_get_prediction_market_signals_never_raises(monkeypatch):
         forecast_start="2026-04-01",
         forecast_end="2026-09-30",
         timeout_sec=5.0,
-    )
+    ))
     assert isinstance(result, MarketBundle)
     assert len(result.errors) > 0
 

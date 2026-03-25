@@ -63,9 +63,9 @@ def test_parse_llm_response_empty_array():
     assert result == [] or result is None
 
 
-@pytest.mark.asyncio
-async def test_generate_queries_falls_back_to_keyword(monkeypatch):
+def test_generate_queries_falls_back_to_keyword(monkeypatch):
     """When LLM is unavailable, falls back to keyword generation."""
+    import asyncio
     from pythia.prediction_markets import query_generator
 
     # Make LLM call fail by mocking the import
@@ -74,7 +74,7 @@ async def test_generate_queries_falls_back_to_keyword(monkeypatch):
 
     monkeypatch.setattr(query_generator, "generate_queries_llm", _failing_llm)
 
-    queries = await query_generator.generate_queries(
+    queries = asyncio.run(query_generator.generate_queries(
         question_text="Armed conflict fatalities in Iran",
         country_name="Iran",
         iso3="IRN",
@@ -82,6 +82,6 @@ async def test_generate_queries_falls_back_to_keyword(monkeypatch):
         hazard_name="armed conflict",
         forecast_start="2026-04-01",
         forecast_end="2026-09-30",
-    )
+    ))
     assert len(queries) >= 1
     assert any("iran" in q.lower() for q in queries)

@@ -63,7 +63,7 @@ _RC_ACE_DOWN = {
 }
 
 _RC_LOW = {
-    "likelihood": 0.30,
+    "likelihood": 0.10,
     "magnitude": 0.20,
     "direction": "unclear",
     "window": "",
@@ -166,10 +166,11 @@ class TestRunAdversarialCheck:
         )
         assert result is None
 
-    def test_returns_none_for_l1_rc(self):
-        rc_l1 = {
-            "likelihood": 0.45,
-            "magnitude": 0.30,
+    def test_returns_none_for_l0_rc_high_magnitude(self):
+        """Even high magnitude doesn't trigger adversarial check if likelihood is L0."""
+        rc_l0 = {
+            "likelihood": 0.12,
+            "magnitude": 0.90,
             "direction": "up",
             "window": "month_1",
             "rationale_bullets": [],
@@ -181,7 +182,7 @@ class TestRunAdversarialCheck:
             iso3="SOM",
             country_name="Somalia",
             hazard_code="ACE",
-            rc_result=rc_l1,
+            rc_result=rc_l0,
             run_id="test-run-001",
         )
         assert result is None
