@@ -255,7 +255,7 @@ def apply_precedence(candidates: pd.DataFrame, config: Dict[str, Any]) -> pd.Dat
         return df.iloc[0:0].copy()
 
     final = pd.concat(results, ignore_index=True, sort=False)
-    final["as_of_date"] = pd.PeriodIndex(final["ym"], freq="M").to_timestamp("M")
+    final["as_of_date"] = pd.PeriodIndex(final["ym"], freq="M").to_timestamp() + pd.offsets.MonthEnd(0)
 
     ordered_columns = ["iso3", "as_of_date", "ym", "metric", "value", "semantics"] + metadata_fields
     if "component_sources" in final.columns:

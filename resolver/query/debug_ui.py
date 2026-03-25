@@ -370,7 +370,7 @@ def _coerce_hazard_score(value: Any) -> float | None:
 
 
 def _extract_json_candidate(text: str | None) -> str | None:
-    if not text:
+    if text is None or not isinstance(text, str) or not text:
         return None
     match = _FENCED_JSON_PATTERN.search(text)
     if match:
@@ -792,16 +792,33 @@ def get_hs_triage_all(
                     diagnostics["total_calls"] += 1
                     response_text = row.get("response_text")
                     parse_error = row.get("parse_error")
+                    # pd.NA (pandas 3.0 StringDtype) must be treated as None
                     response_text_present = bool(
-                        response_text is not None and str(response_text).strip()
+                        response_text is not None
+                        and not pd.isna(response_text)
+                        and str(response_text).strip()
                     )
-                    parse_error_present = bool(parse_error is not None and str(parse_error).strip())
+                    parse_error_present = bool(
+                        parse_error is not None
+                        and not pd.isna(parse_error)
+                        and str(parse_error).strip()
+                    )
+                    def _str_or_empty(val: Any) -> str:
+                        if val is None or (isinstance(val, float) and val != val):
+                            return ""
+                        try:
+                            if pd.isna(val):
+                                return ""
+                        except (TypeError, ValueError):
+                            pass
+                        return str(val).strip()
+
                     status_raw = row.get("status")
-                    status_value = str(status_raw).strip().lower() if status_raw else ""
+                    status_value = _str_or_empty(status_raw).lower()
                     error_type = row.get("error_type")
                     error_message = row.get("error_message")
                     error_text = row.get("error_text")
-                    error_text_value = str(error_text).strip() if error_text else ""
+                    error_text_value = _str_or_empty(error_text)
                     scores_json = row.get("hazard_scores_json")
                     scores_parse_ok_value = row.get("hazard_scores_parse_ok")
                     scores_parse_ok = False
@@ -835,9 +852,8 @@ def get_hs_triage_all(
                             json_parsed_ok,
                         ) = _extract_hazard_scores_with_diagnostics(response_text)
                     structured_error_present = any(
-                        value
+                        _str_or_empty(value)
                         for value in (status_raw, error_type, error_message)
-                        if value is not None and str(value).strip()
                     )
                     legacy_error_status = ""
                     if not structured_error_present and error_text_value:

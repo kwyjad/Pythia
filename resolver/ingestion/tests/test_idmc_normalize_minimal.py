@@ -66,6 +66,6 @@ def test_idmc_normalize_flow_maps_figure_to_value() -> None:
     assert drops["no_value_col"] == 0
     assert set(tidy["metric"].unique()) == {"new_displacements"}
     assert tidy["value"].dtype == pd.Int64Dtype()
-    assert pd.api.types.is_datetime64_ns_dtype(tidy["as_of_date"])
+    assert pd.api.types.is_datetime64_any_dtype(tidy["as_of_date"])
     afg_value = tidy.loc[tidy["iso3"] == "AFG", "value"].item()
     assert afg_value == 35

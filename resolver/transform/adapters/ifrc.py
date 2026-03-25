@@ -63,7 +63,13 @@ class IFRCAdapter(BaseAdapter):
         if df.empty:
             return pd.DataFrame(columns=CANONICAL_COLUMNS)
 
-        df["as_of_date"] = df["as_of_date"].dt.to_period("M").dt.to_timestamp("M")
+        # to_period("M") converts to month period; to_timestamp() returns month-start,
+        # then MonthEnd(0) shifts to end-of-month. This avoids the deprecated "M"
+        # freq alias for to_timestamp() which was removed in pandas 3.0.
+        df["as_of_date"] = (
+            df["as_of_date"].dt.to_period("M").dt.to_timestamp()
+            + pd.offsets.MonthEnd(0)
+        )
         df["as_of_date"] = df["as_of_date"].dt.strftime("%Y-%m-%d")
 
         # ------------------------------------------------------------------
