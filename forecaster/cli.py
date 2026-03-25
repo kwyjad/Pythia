@@ -3,7 +3,6 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-from __future__ import annotations
 """
 cli.py — Forecaster runner (Pythia-only question sources)
 
@@ -27,6 +26,8 @@ WHAT THIS FILE DOES (high level, in plain English)
   (c) no_bmc_no_gtmc1     → a very simple average of model outputs (no BMC, no GTMC1).
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import csv
@@ -35,16 +36,13 @@ import importlib
 import importlib.util
 import json
 import os
-import re
 import logging
 from collections import Counter
 from urllib.parse import urlparse
 import time
-import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from contextlib import ExitStack
 from typing import Any, Dict, List, Optional, Set, Tuple
 import inspect
 
@@ -237,6 +235,15 @@ SPD_CLASS_BINS_FATALITIES = [
     "25-<100",
     "100-<500",
     ">=500",
+]
+
+# SPD buckets for FEWS NET IPC Phase 3+ population forecasts
+SPD_CLASS_BINS_PHASE3 = [
+    "<100k",
+    "100k-<1M",
+    "1M-<5M",
+    "5M-<15M",
+    ">=15M",
 ]
 
 # Backwards-compatibility alias; PA remains the default bucket scheme
@@ -875,7 +882,7 @@ def _format_base_rate_for_prompt(
         last_6m = history_summary.get("last_6m_values", [])
 
         lines = [
-            f"RESOLVER HISTORY (FEWS NET IPC Phase 3+, Current Situation):",
+            "RESOLVER HISTORY (FEWS NET IPC Phase 3+, Current Situation):",
             f"Phase 3+ population reported in {observed} of the last {total} months ({coverage:.0f}% coverage).",
         ]
 
@@ -1055,8 +1062,7 @@ def _load_fewsnet_phase3_history(
 
     try:
         # Get last N months of data
-        today = date.today()
-        end_ym = f"{today.year:04d}-{today.month:02d}"
+        today = date.today()  # noqa: F841
 
         rows = con.execute(
             """
@@ -1092,7 +1098,6 @@ def _load_fewsnet_phase3_history(
         data_by_ym[ym_str] = float(value) if value is not None else None
 
     # Build monthly series (most recent N months)
-    from datetime import date as date_type
 
     all_yms = []
     d = date.today().replace(day=1)
@@ -1423,56 +1428,41 @@ def _build_month_labels(start_date: Optional[date], horizon_months: int = 6) -> 
 
 
 # ---- Forecaster internals (all relative imports) --------------------------------
-from .config import ist_iso
-from .prompts import (
+from .prompts import (  # noqa: E402
     build_spd_prompt_v2,
     merge_evidence_packs,
 )
-from .binary_prompts import (
+from .binary_prompts import (  # noqa: E402
     build_binary_event_prompt,
     build_binary_base_rate,
     parse_binary_response,
 )
-from .scenario_writer import run_scenarios_for_run
-from horizon_scanner.seasonal_context import CLIMATE_HAZARDS, load_seasonal_forecasts
-from .providers import (
+from .scenario_writer import run_scenarios_for_run  # noqa: E402
+from horizon_scanner.seasonal_context import CLIMATE_HAZARDS, load_seasonal_forecasts  # noqa: E402
+from .providers import (  # noqa: E402
     DEFAULT_ENSEMBLE,
     GEMINI_MODEL_ID,
     ModelSpec,
     _PROVIDER_STATES,
     SPD_ENSEMBLE,
-    _get_or_client,
     call_chat_ms,
     disabled_providers_for_run,
     is_provider_disabled_for_run,
-    get_llm_semaphore,
-    estimate_cost_usd,
     parse_ensemble_specs,
     reset_provider_failures_for_run,
 )
-from .ensemble import (
+from .ensemble import (  # noqa: E402
     EnsembleResult,
     MemberOutput,
     _normalize_spd_keys,
-    _load_bucket_centroids_db,
-    run_ensemble_binary,
-    run_ensemble_mcq,
-    run_ensemble_numeric,
-    run_ensemble_spd,
-    SPD_BUCKET_CENTROIDS_PA,
-    SPD_BUCKET_CENTROIDS_FATALITIES,
     sanitize_mcq_vector,
 )
-from .aggregate import (
-    SPD_BUCKET_CENTROIDS_DEFAULT,
+from .aggregate import (  # noqa: E402
     aggregate_binary,
-    aggregate_mcq,
-    aggregate_numeric,
-    aggregate_spd,
     aggregate_spd_v2_mean,
     aggregate_spd_v2_bayesmc,
 )
-from .llm_logging import log_forecaster_llm_call
+from .llm_logging import log_forecaster_llm_call  # noqa: E402
 
 # --- Corrected seen_guard import ---
 try:
@@ -1481,7 +1471,6 @@ except ImportError as e:
     print(f"[warn] seen_guard not available ({e!r}); continuing without duplicate protection.")
     seen_guard = None
 
-from . import GTMC1
 
 # --- seen_guard import shim (ensures a callable filter_unseen_posts exists) ---
 try:
@@ -1507,7 +1496,6 @@ except Exception as e:
 
 
 # Unified CSV helpers (single file)
-from .io_logs import ensure_unified_csv, write_unified_row, write_human_markdown, finalize_and_commit
 
 # --------------------------------------------------------------------------------
 # Small utility helpers (safe JSON, timing, clipping, etc.)
@@ -1747,10 +1735,7 @@ def _write_spd_ensemble_to_db(
     metric_up = (metric or "").upper()
     hz_up = (hazard_code or "").upper()
 
-    if metric_up == "FATALITIES" and (hz_up.startswith("CONFLICT") or hz_up in CONFLICT_HAZARD_CODES):
-        class_bins = SPD_CLASS_BINS_FATALITIES
-    else:
-        class_bins = SPD_CLASS_BINS_PA
+    class_bins = _spd_class_bins_for(metric_up, hz_up)
 
     from .ensemble import _normalize_spd_keys  # local import to avoid cycles
 
@@ -1809,12 +1794,11 @@ def _write_spd_ensemble_to_db(
             probs = spd_main.get(key) or []
             if not isinstance(probs, (list, tuple)):
                 continue
-            ev_val = None
             if ev_main and key in ev_main:
                 try:
-                    ev_val = float(ev_main[key])
+                    float(ev_main[key])
                 except Exception:
-                    ev_val = None
+                    pass
 
             for bucket_idx, prob in enumerate(probs, start=1):
                 class_bin = class_bins[bucket_idx - 1] if 0 <= bucket_idx - 1 < len(class_bins) else str(bucket_idx)
@@ -1876,10 +1860,7 @@ def _write_spd_raw_to_db(
     metric_up = (metric or "").upper()
     hz_up = (hazard_code or "").upper()
 
-    if metric_up == "FATALITIES" and (hz_up.startswith("CONFLICT") or hz_up in CONFLICT_HAZARD_CODES):
-        class_bins = SPD_CLASS_BINS_FATALITIES
-    else:
-        class_bins = SPD_CLASS_BINS_PA
+    class_bins = _spd_class_bins_for(metric_up, hz_up)
 
     try:
         con = connect(read_only=False)
@@ -2005,6 +1986,8 @@ def _spd_class_bins_for(metric: str, hazard_code: str) -> list[str]:
     hz_up = (hazard_code or "").upper()
     if metric_up == "FATALITIES" and (hz_up.startswith("CONFLICT") or hz_up in CONFLICT_HAZARD_CODES):
         return SPD_CLASS_BINS_FATALITIES
+    if metric_up == "PHASE3PLUS_IN_NEED":
+        return SPD_CLASS_BINS_PHASE3
     return SPD_CLASS_BINS_PA
 
 
@@ -4611,12 +4594,11 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
     metric = question_row["metric"]
     wording = question_row.get("wording") or question_row.get("title") or ""
     try:
-        resolution_source = _infer_resolution_source(hz, metric)
+        _infer_resolution_source(hz, metric)
 
         hs_run_id = question_row["hs_run_id"] or run_id
         hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
-        history_summary = _build_history_summary(iso3, hz, metric)
-        resolver_features = history_summary
+        _build_history_summary(iso3, hz, metric)  # side-effect: warms cache
 
         hs_evidence_pack: dict[str, Any] | None = None
         question_evidence_pack: dict[str, Any] | None = None
@@ -4783,7 +4765,7 @@ def _write_spd_outputs(
     iso3 = rec["iso3"]
     hz = rec["hazard_code"]
     metric = rec["metric"]
-    bucket_labels = SPD_CLASS_BINS_FATALITIES if metric.upper() == "FATALITIES" else SPD_CLASS_BINS_PA
+    bucket_labels = _spd_class_bins_for(metric, hz)
 
     spds = spd_obj.get("spds") if isinstance(spd_obj, dict) else None
     if not isinstance(spds, dict):
@@ -6449,7 +6431,7 @@ def _simple_average_binary(members: List[MemberOutput]) -> Optional[float]:
     vals = [float(m.parsed) for m in members if m.ok and isinstance(m.parsed, (int, float))]
     if not vals:
         return None
-    return float(np.mean([_clip01(v) for v in vals]))
+    return float(np.mean([max(0.0, min(1.0, v)) for v in vals]))
 
 def _simple_average_mcq(members: List[MemberOutput], n_opts: int) -> Optional[List[float]]:
     vecs: List[List[float]] = []
@@ -6601,18 +6583,6 @@ def main() -> None:
                 )
                 return
 
-            cols = [
-                "question_id",
-                "hs_run_id",
-                "iso3",
-                "hazard_code",
-                "metric",
-                "target_month",
-                "window_start_date",
-                "window_end_date",
-                "wording",
-                "track",
-            ]
             placeholders = ",".join(["?"] * len(allowed_iso3s))
             # Check if track column exists (backward compat with older DBs)
             q_cols = {r[0] for r in con.execute("DESCRIBE questions").fetchall()}
@@ -6672,7 +6642,6 @@ def main() -> None:
         print(f"[v2] run_id={run_id} | questions={len(questions)} (track1={n_track1}, track2={n_track2})")
 
         async def _run_v2_pipeline_async() -> None:
-            research_sem = asyncio.Semaphore(MAX_RESEARCH_WORKERS)
             spd_sem = asyncio.Semaphore(MAX_SPD_WORKERS)
             question_start_ms: dict[str, int] = {}
             expected_model_ids = _expected_spd_model_ids()

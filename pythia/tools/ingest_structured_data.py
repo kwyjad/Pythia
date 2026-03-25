@@ -1287,8 +1287,8 @@ def ingest(
 
     # Run ACAPS sources sequentially (shared auth token, rate limits)
     # but run everything else concurrently (conflict forecasts, IPC, ReliefWeb, NMME)
-    acaps_labels = [l for l in labels if l.startswith("acaps_")]
-    other_labels = [l for l in labels if not l.startswith("acaps_")]
+    acaps_labels = [lbl for lbl in labels if lbl.startswith("acaps_")]
+    other_labels = [lbl for lbl in labels if not lbl.startswith("acaps_")]
 
     with ThreadPoolExecutor(max_workers=max(3, len(other_labels))) as pool:
         futures = []
@@ -1368,11 +1368,21 @@ def ingest(
         if lbl in _CONFLICT_SOURCE_MAP and data:
             extras["conflict_rows"] = data.get("__conflict_rows__", 0)
 
+        # For self-storing sources, use pipeline result's total_facts as fetched count
+        if lbl in _SELF_STORING_LABELS and data:
+            fetched_count = (
+                data.get("__pipeline_total_facts__")
+                or data.get("__conflict_rows__")
+                or len(data)
+            )
+        else:
+            fetched_count = len(data)
+
         _emit_diag(
             lbl, ctx, diag_status,
             reason=diag_reason,
             counts={
-                "fetched": len(data),
+                "fetched": fetched_count,
                 "written": s["success"],
                 "failed": s["fail"],
                 "empty": s["empty"],

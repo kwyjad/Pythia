@@ -26,6 +26,8 @@ FATAL_THRESHOLDS = [0.0, 5.0, 25.0, 100.0, 500.0, float("inf")]
 
 SPD_CLASS_BINS_PA = ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
 SPD_CLASS_BINS_FATALITIES = ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
+PHASE3_THRESHOLDS = [0.0, 100_000.0, 1_000_000.0, 5_000_000.0, 15_000_000.0, float("inf")]
+SPD_CLASS_BINS_PHASE3 = ["<100k", "100k-<1M", "1M-<5M", "5M-<15M", ">=15M"]
 
 EPS = 1e-9
 
@@ -79,6 +81,8 @@ def _bucket_index(value: float, metric: str) -> Optional[int]:
         thr = PA_THRESHOLDS
     elif metric_up == "FATALITIES":
         thr = FATAL_THRESHOLDS
+    elif metric_up == "PHASE3PLUS_IN_NEED":
+        thr = PHASE3_THRESHOLDS
     else:
         return None
 
@@ -94,6 +98,8 @@ def _class_bins(metric: str, hazard_code: Optional[str]) -> Optional[Sequence[st
         return SPD_CLASS_BINS_FATALITIES
     if metric_up == "PA":
         return SPD_CLASS_BINS_PA
+    if metric_up == "PHASE3PLUS_IN_NEED":
+        return SPD_CLASS_BINS_PHASE3
     return None
 
 
@@ -786,19 +792,16 @@ def compute_scores(db_url: str) -> None:
 
         if eiv_rows:
             # Clear stale EIV rows for all resolved (question, run_id) combos.
-            deleted_combos: set = set()
+            deleted_qids: set[str] = set()
             for row in eiv_rows:
                 # row tuple: (qid, horizon_m, metric, model, eiv, actual, log_err, w20, cv, run_id)
                 qid = row[0]
-                rid = row[9]
-                combo = (qid, rid)
-                if combo not in deleted_combos:
-                    rid_clause, rid_params = _run_id_clause(rid)
+                if qid not in deleted_qids:
                     conn.execute(
-                        f"DELETE FROM eiv_scores WHERE question_id = ? {rid_clause}",
-                        [qid] + rid_params,
+                        "DELETE FROM eiv_scores WHERE question_id = ?",
+                        [qid],
                     )
-                    deleted_combos.add(combo)
+                    deleted_qids.add(qid)
             now = datetime.utcnow()
             conn.executemany(
                 """
