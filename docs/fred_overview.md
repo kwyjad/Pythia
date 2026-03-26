@@ -389,15 +389,18 @@ In the current architecture, the forecasting prompt receives a rich set of struc
 - **ACAPS INFORM Severity** — crisis severity scores and trend data (all hazards).
 - **ACAPS Risk Radar** — forward-looking risk assessments with triggers (all hazards, when available).
 - **ACAPS Daily Monitoring** — analyst-curated daily updates (all hazards, when available).
-- **IPC phase data** — food security classifications with population counts per phase (all hazards, when available).
+- **IPC phase data** — food security classifications with population counts per phase (all hazards, when available; currently empty due to unavailable API key).
+- **FEWS NET Phase 3+ data** — IPC Phase 3+ population estimates from FEWS NET-monitored countries, loaded from the Resolver's `facts_resolved` table (all hazards, when available). This is the active food security data source. For DR/PHASE3PLUS_IN_NEED questions, FEWS NET "Most Likely" projection data is additionally injected directly into the SPD prompt, giving the model forward-looking IPC Phase 3+ context.
 - **ACLED political events** — event-level political incidents (ACE and DI hazards only).
 - **HDX Signals** — automated crisis alerts from OCHA, filtered by country and hazard (all hazards).
 - **VIEWS + conflictforecast.org + ACLED CAST** — quantitative conflict predictions and event-count forecasts (ACE only).
+- **ICG CrisisWatch** — per-country directional assessments and "On the Horizon" conflict flags (ACE only).
 
 **Climate and forecast data (loaded from the database or cache):**
 - **NMME seasonal outlook** — temperature and precipitation anomalies for the next seven months (all hazards, via research data).
 - **ENSO state and forecast** — current ENSO conditions, Niño 3.4 anomaly, and 9-season probabilistic outlook from IRI/CPC (climate hazards: DR, FL, HW, TC).
 - **Seasonal TC forecasts** — basin-level seasonal activity predictions from TSR, NOAA CPC, and BoM, mapped to the country's basin(s) (TC only).
+- **GDACS event history** — historical disaster event records showing alert levels and population exposure by country-month (FL, DR, TC only). This provides structured base rate context for both SPD and binary forecast prompts.
 
 **HS-derived context (from the prior Horizon Scanner run):**
 - **HS triage output** — triage score, tier, RC fields (likelihood, magnitude, direction, score, level), and other structured assessments. This is the forecaster's primary link to the Horizon Scanner's judgment. Because the HS now runs per-hazard, the triage output passed to the forecaster reflects the hazard-specific assessment rather than a country-level aggregate.
@@ -408,7 +411,7 @@ In the current architecture, the forecasting prompt receives a rich set of struc
 - **Resolver history summary** — historical distribution data (source, recent level, trend, data quality) from the Resolver.
 - **Calibration advice** — per-hazard/metric guidance text generated from historical scoring performance (all hazards).
 - **Hazard-specific reasoning block** — tailored forecasting instructions for the hazard type (all hazards).
-- **Prediction market signals** — crowd forecasts from Metaculus, Polymarket, and Manifold (all hazards, when available).
+- **Prediction market signals** — crowd forecasts from Metaculus, Polymarket, and Manifold (all hazards, when available; currently disabled — see Section 11).
 
 This evidence is presented to the forecasting models as structured text blocks, each clearly labeled with its source. The forecaster sees, for example, the latest ReliefWeb reports about the country, the ACAPS severity score and trend, the IPC phase populations, the NMME climate outlook, and any adversarial counter-evidence — all formatted for readability rather than raw data.
 
@@ -420,7 +423,8 @@ Each hazard type now receives tailored reasoning instructions in the forecasting
 
 - **Armed conflict (fatalities)**: Guidance on tail-risk coverage for conflict escalation, bucket calibration for fatality counts, how to weigh ceasefire dynamics, and how different conflict types (state-based, one-sided, non-state) produce different fatality patterns.
 - **Flood**: Guidance on seasonal patterns, upstream conditions, infrastructure resilience, and how flood impacts can spike dramatically in a single event.
-- **Drought**: Guidance on slow-onset dynamics, cumulative effects, food security linkages, and how drought impacts often peak months after conditions begin deteriorating.
+- **Drought (PA)**: Guidance on slow-onset dynamics, cumulative effects, food security linkages, and how drought impacts often peak months after conditions begin deteriorating.
+- **Drought (PHASE3PLUS_IN_NEED)**: A dedicated reasoning block for FEWS NET IPC Phase 3+ forecasts, with guidance specific to food security population estimates: how FEWS NET analysis cycles create data gaps that should not be interpreted as improvement, how to interpret current vs. projected phases, and how Phase 3+ populations are bounded by national population.
 - **Displacement**: Guidance on push/pull factors, compound crisis effects, and how displacement flows can be sudden (conflict-driven) or gradual (climate-driven).
 
 This hazard-specific reasoning helps models apply appropriate mental models rather than treating all forecasts identically.
@@ -433,9 +437,16 @@ To prevent hand-waving, SPD v2 requires accountability in the human-facing expla
 
 ### Structured reasoning traces
 
-Each forecasting model now emits a structured reasoning trace alongside its probability distribution. The trace captures how the model arrived at its forecast: the initial prior distribution derived from base rate data, each evidence signal that shifted the distribution (with the direction, magnitude, and numeric delta), a point estimate consistency check, and whether the model accepted or rebutted the Regime Change flag. These traces are stored in the database and validated automatically. Validation checks whether the stated prior is consistent with the base rate data, whether the numeric deltas sum correctly, and whether the claimed magnitude of each update matches its actual size. Validation is purely diagnostic and never blocks a forecast.
+Each forecasting model now emits a structured reasoning trace alongside its SPD probability distribution. The trace is a JSON object with the following structure:
 
-For Track 1 questions (full ensemble), the complete trace is required. For Track 2 questions (single model), only the prior and RC assessment are required. Over time, accumulated traces feed into the calibration advice system, which can now diagnose whether models are anchoring appropriately on base rates or systematically over- or under-assigning probability to certain outcome ranges.
+- **`prior`**: The model's starting distribution before considering evidence. Contains `spd` (a 5-element probability array matching the prior SPD) and `rationale` (text explaining why the model chose this prior).
+- **`updates`**: An array of evidence signals that shifted the distribution. Each update contains `signal` (description of the evidence), `direction` (up/down), `magnitude` (SMALL/MODERATE/LARGE), `delta` (a 5-element array showing how probability mass shifted — must sum to approximately 0), and `post_update_spd` (the running SPD after applying this signal, which must equal the previous SPD plus the delta within rounding).
+- **`point_estimate`**: A human-readable point estimate (e.g., "~40 fatalities") and `point_estimate_bucket` (the bucket index it falls in), used as a consistency check against the final SPD.
+- **`rc_assessment`**: Whether the model accepted, rebutted, or partially accepted the Regime Change flag.
+
+Traces are stored in the `reasoning_trace_json` column on both `forecasts_raw` and `forecasts_ensemble` tables. They are validated automatically by `trace_validation.py`, which checks three dimensions: (1) prior consistency — whether the model's stated prior modal bucket matches the implied bucket from base rate data; (2) delta arithmetic — whether each update's delta sums to approximately 0 and whether `post_update_spd` equals the previous SPD plus the delta; (3) magnitude consistency — whether the claimed magnitude (SMALL/MODERATE/LARGE) matches the actual size of the delta. Each dimension receives a score (0-1), and a composite `trace_quality_score` is computed as 40% prior + 40% delta + 20% magnitude. Validation is purely diagnostic and never blocks a forecast.
+
+For Track 1 questions (full ensemble), the complete trace is required — `prior`, `updates` (at least 2 signals), `point_estimate`, and `rc_assessment`. For Track 2 questions (single model), only `prior` and `rc_assessment` are required; the `updates` array may be empty and `point_estimate` is optional. Binary forecasts (EVENT_OCCURRENCE) do not produce reasoning traces — the `reasoning_trace_json` column is NULL for binary questions. Over time, accumulated traces feed into the calibration advice system, which can now diagnose whether models are anchoring appropriately on base rates or systematically over- or under-assigning probability to certain outcome ranges.
 
 ### Track-based routing
 
@@ -448,7 +459,7 @@ The track field is persisted in the database alongside triage and question recor
 
 ### Ensemble aggregation
 
-For Track 1 questions, the system aggregates member SPDs into named ensemble forecasts. The default named ensembles include ensemble_mean (simple average of member SPDs) and ensemble_bayesmc (a Bayesian Monte Carlo aggregation). Named ensembles are tracked as explicit model names in the database, allowing the dashboard and scoring system to compare ensemble methods against individual models. The ensemble approach is a pragmatic response to model idiosyncrasies: it tends to reduce the chance that a single model's blind spot dominates a forecast.
+For Track 1 questions, the system aggregates member SPDs into named ensemble forecasts. The two named ensembles are `ensemble_mean_v2` (simple average of member SPDs) and `ensemble_bayesmc_v2` (a Bayesian Monte Carlo aggregation that weights models by their historical calibration performance). Named ensembles are tracked as explicit model names in the database, allowing the dashboard and scoring system to compare ensemble methods against individual models. Track 2 questions produce only a single `track2_flash` forecast row — no ensemble aggregation. The ensemble approach is a pragmatic response to model idiosyncrasies: it tends to reduce the chance that a single model's blind spot dominates a forecast.
 
 ### Binary forecasts (EVENT_OCCURRENCE)
 
