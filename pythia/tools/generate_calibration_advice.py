@@ -1843,6 +1843,12 @@ def generate_calibration_advice(
     conn = duckdb_io.get_db(db_url or duckdb_io.DEFAULT_DB_URL)
 
     try:
+        # Ensure is_test column exists on questions (migration for older DBs)
+        try:
+            conn.execute("ALTER TABLE questions ADD COLUMN is_test BOOLEAN DEFAULT FALSE")
+        except Exception:
+            pass  # Column already exists
+
         _ensure_findings_json_column(conn)
 
         # Seed defaults if requested (uses sentinel date so real data supersedes)

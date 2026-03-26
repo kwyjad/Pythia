@@ -308,6 +308,34 @@ jobs:
             --start "${{ steps.window.outputs.start_iso }}" \
             --end   "${{ steps.window.outputs.end_iso }}" \
             --debug
+
+          # Emit IDMC diagnostics line from its summary.json
+          python -c "
+          import json, os
+          from pathlib import Path
+          report_path = os.environ.get('DIAGNOSTICS_REPORT_PATH')
+          if not report_path:
+              exit(0)
+          try:
+              from resolver.ingestion.diagnostics_emitter import start_run, finalize_run, append_jsonl
+          except ImportError:
+              exit(0)
+          summary_path = Path('diagnostics/ingestion/idmc/summary.json')
+          ctx = start_run('idmc_helix', 'real')
+          if summary_path.exists():
+              summary = json.loads(summary_path.read_text())
+              counts = summary.get('counts', {})
+              status = 'ok' if counts.get('written', 0) > 0 else 'error'
+              reason = None if status == 'ok' else 'zero-rows-written'
+              result = finalize_run(ctx, status, reason=reason, counts={
+                  'fetched': counts.get('fetched', 0),
+                  'normalized': counts.get('normalized', 0),
+                  'written': counts.get('written', 0),
+              })
+          else:
+              result = finalize_run(ctx, 'error', reason='summary.json not found')
+          append_jsonl(report_path, result)
+          " || true
           echo "::endgroup::"
 
       - name: "Phase 1: Run connectors (ACLED, IFRC)"
