@@ -530,7 +530,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         LOGGER.info("Derived %s delta rows for period %s", derived, period.label)
         export_dir = Path(args.snapshots_root).expanduser().resolve() / args.period
-        export_counts = _export_parquet(conn, period, export_dir)
+        try:
+            export_counts = _export_parquet(conn, period, export_dir)
+        except ImportError as exc:
+            LOGGER.warning(
+                "Parquet export skipped (missing dependency: %s). "
+                "DuckDB writes completed successfully.",
+                exc,
+            )
+            export_counts = {}
+        except Exception as exc:
+            LOGGER.warning(
+                "Parquet export failed: %s. DuckDB writes completed successfully.",
+                exc,
+            )
+            export_counts = {}
         LOGGER.info("Export counts: %s", export_counts)
     finally:
         conn.close()
