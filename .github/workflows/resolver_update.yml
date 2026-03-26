@@ -23,10 +23,12 @@ concurrency:
         default: "false"
       only_connector:
         description: >-
-          Optional: run only this connector. Core: acled_client, idmc, ifrc_go_client.
+          Optional: run only these connectors (comma-separated).
+          Core: acled_client, idmc, ifrc_go_client.
           Resolution: fewsnet_ipc (see fewsnet_months), gdacs (see gdacs_months).
           Structured: conflict (views+cf+cast), acaps, reliefweb, acled_political, nmme.
-          Context: enso, seasonal_tc, hdx_signals, crisiswatch. Leave empty to run all.
+          Context: enso, seasonal_tc, hdx_signals, crisiswatch.
+          Leave empty to run all. Examples: "gdacs" or "gdacs, fewsnet_ipc".
         required: false
         default: ""
       log_level:
@@ -294,7 +296,7 @@ jobs:
 
       # === PHASE 1: RESOLVER CONNECTORS (ground truth — fatal) ===
       - name: "Phase 1: Run IDMC (HELIX)"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'idmc' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'idmc') }}
         run: |
           set -euo pipefail
           echo "::group::IDMC (HELIX)"
@@ -315,7 +317,7 @@ jobs:
           BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
           BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
           RESOLVER_SKIP_IDMC: "1"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acled_client' || inputs.only_connector == 'ifrc_go_client' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_client') || contains(inputs.only_connector, 'ifrc_go_client') }}
         run: |
           set -euo pipefail
           echo "::group::Connectors (ACLED, IFRC)"
@@ -325,7 +327,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 1: ACLED monthly fatalities → DuckDB"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acled_client' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_client') }}
         env:
           BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
           BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
@@ -342,7 +344,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 1: Normalize + load_and_derive → facts_resolved"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'idmc' || inputs.only_connector == 'acled_client' || inputs.only_connector == 'ifrc_go_client' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'idmc') || contains(inputs.only_connector, 'acled_client') || contains(inputs.only_connector, 'ifrc_go_client') }}
         env:
           BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
           BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
@@ -385,7 +387,7 @@ jobs:
 
       # === PHASE 2: RESOLUTION SOURCES (non-fatal) ===
       - name: "Phase 2: Ingest FEWS NET IPC → facts_resolved"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'fewsnet_ipc' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'fewsnet_ipc') }}
         continue-on-error: true
         run: |
           echo "::group::FEWS NET IPC"
@@ -393,7 +395,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 2: Ingest GDACS → facts_resolved"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'gdacs' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'gdacs') }}
         continue-on-error: true
         run: |
           echo "::group::GDACS"
@@ -402,7 +404,7 @@ jobs:
 
       # === PHASE 3: STRUCTURED DATA — Pythia tables (non-fatal) ===
       - name: "Phase 3: Ingest conflict forecasts"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'conflict' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'conflict') }}
         continue-on-error: true
         run: |
           echo "::group::Conflict forecasts (VIEWS + conflictforecast.org + ACLED CAST)"
@@ -410,7 +412,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 3: Ingest ACAPS (4 datasets)"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acaps' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acaps') }}
         continue-on-error: true
         run: |
           echo "::group::ACAPS"
@@ -418,7 +420,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 3: Ingest ReliefWeb reports"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'reliefweb' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'reliefweb') }}
         continue-on-error: true
         run: |
           echo "::group::ReliefWeb"
@@ -426,7 +428,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 3: Ingest ACLED political events"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'acled_political' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_political') }}
         continue-on-error: true
         run: |
           echo "::group::ACLED political"
@@ -434,7 +436,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 3: Ingest NMME seasonal forecasts"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'nmme' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'nmme') }}
         continue-on-error: true
         run: |
           echo "::group::NMME"
@@ -443,7 +445,7 @@ jobs:
 
       # === PHASE 4: CONTEXT SOURCES (non-fatal) ===
       - name: "Phase 4: Fetch + store ENSO state"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'enso' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'enso') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -461,7 +463,7 @@ jobs:
           fi
 
       - name: "Phase 4: Fetch + store Seasonal TC outlooks"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'seasonal_tc' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'seasonal_tc') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -479,7 +481,7 @@ jobs:
           fi
 
       - name: "Phase 4: Store HDX Signals"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'hdx_signals' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'hdx_signals') }}
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -500,7 +502,7 @@ jobs:
           fi
 
       - name: "Phase 4: Store CrisisWatch from JSON"
-        if: ${{ inputs.only_connector == '' || inputs.only_connector == 'crisiswatch' }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'crisiswatch') }}
         continue-on-error: true
         run: |
           set -euo pipefail

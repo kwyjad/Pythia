@@ -174,6 +174,9 @@ def _migrate_eiv_scores_add_run_id(conn) -> None:
         return
     cols = _table_columns(conn, "eiv_scores")
     if "run_id" in cols:
+        # run_id already exists, but PK may still be present from an
+        # earlier ALTER TABLE migration that didn't use CTAS.
+        _migrate_eiv_scores_remove_pk(conn)
         return
 
     # Check if a PK constraint exists (DuckDB cannot DROP CONSTRAINT for PK)
@@ -241,6 +244,72 @@ def _migrate_eiv_scores_add_run_id(conn) -> None:
             LOGGER.info("eiv_scores: added run_id column.")
         except Exception as exc:
             LOGGER.warning("eiv_scores: failed to add run_id column: %r", exc)
+
+
+def _migrate_eiv_scores_remove_pk(conn) -> None:
+    """Remove PK from eiv_scores via CTAS if one exists (DuckDB limitation)."""
+    has_pk = False
+    try:
+        pk_rows = conn.execute(
+            "SELECT constraint_name FROM information_schema.table_constraints "
+            "WHERE table_name = 'eiv_scores' AND constraint_type = 'PRIMARY KEY'"
+        ).fetchall()
+        has_pk = len(pk_rows) > 0
+    except Exception as exc:
+        LOGGER.debug("eiv_scores: PK check failed: %r", exc)
+        return
+
+    if not has_pk:
+        return
+
+    LOGGER.info("eiv_scores: removing stale PK via CTAS migration.")
+    try:
+        conn.execute("CREATE TABLE _eiv_scores_tmp AS SELECT * FROM eiv_scores")
+        conn.execute("DROP TABLE eiv_scores")
+        conn.execute("""
+            CREATE TABLE eiv_scores (
+                question_id TEXT,
+                horizon_m INTEGER,
+                metric TEXT,
+                model_name TEXT,
+                eiv_forecast DOUBLE,
+                actual_value DOUBLE,
+                log_ratio_err DOUBLE,
+                within_20pct BOOLEAN,
+                centroid_version TEXT,
+                created_at TIMESTAMP DEFAULT now(),
+                run_id TEXT
+            )
+        """)
+        # Use column-safe insert (handle missing columns in old data)
+        tmp_cols = _table_columns(conn, "_eiv_scores_tmp")
+        base_cols = [
+            "question_id", "horizon_m", "metric", "model_name",
+            "eiv_forecast", "actual_value", "log_ratio_err",
+            "within_20pct", "centroid_version", "created_at",
+        ]
+        select_parts = []
+        insert_cols = list(base_cols)
+        for c in base_cols:
+            select_parts.append(c if c in tmp_cols else f"NULL AS {c}")
+        if "run_id" in tmp_cols:
+            insert_cols.append("run_id")
+            select_parts.append("run_id")
+        conn.execute(
+            f"INSERT INTO eiv_scores ({', '.join(insert_cols)}) "
+            f"SELECT {', '.join(select_parts)} FROM _eiv_scores_tmp"
+        )
+        conn.execute("DROP TABLE _eiv_scores_tmp")
+        LOGGER.info("eiv_scores: PK removal CTAS migration complete.")
+    except Exception as exc:
+        LOGGER.warning("eiv_scores: PK removal CTAS migration failed: %r", exc)
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS eiv_scores AS SELECT * FROM _eiv_scores_tmp"
+            )
+            conn.execute("DROP TABLE IF EXISTS _eiv_scores_tmp")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
