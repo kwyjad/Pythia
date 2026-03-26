@@ -35,6 +35,7 @@ PHASE_MAP: dict[str, tuple[int, str]] = {
     "acled_client": (1, "Ground Truth"),
     "ifrc_go_client": (1, "Ground Truth"),
     "idmc": (1, "Ground Truth"),
+    "idmc_helix": (1, "Ground Truth"),
     # Phase 2 — Resolution sources (facts_resolved via run_pipeline)
     "gdacs_population_exposed": (2, "Resolution Sources"),
     "fewsnet_ipc_population": (2, "Resolution Sources"),
@@ -234,6 +235,19 @@ def build_phase_summary(
 
     for phase_num in sorted(by_phase.keys()):
         phase_entries = by_phase[phase_num]
+
+        # Suppress redundant "idmc / skipped" entry when idmc_helix succeeded
+        if phase_num == 1:
+            idmc_helix_ok = any(
+                e.get("connector_id") == "idmc_helix" and e.get("status") == "ok"
+                for e in phase_entries
+            )
+            if idmc_helix_ok:
+                phase_entries = [
+                    e for e in phase_entries
+                    if not (e.get("connector_id") == "idmc" and e.get("status") == "skipped")
+                ]
+
         label = phase_names.get(phase_num, f"Phase {phase_num}")
         lines.append(f"\n### {label}\n")
 

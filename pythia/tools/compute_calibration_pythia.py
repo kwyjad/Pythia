@@ -309,6 +309,12 @@ def compute_calibration_pythia(
             """
         )
 
+        # Ensure is_test column exists on questions (migration for older DBs)
+        try:
+            conn.execute("ALTER TABLE questions ADD COLUMN is_test BOOLEAN DEFAULT FALSE")
+        except Exception:
+            pass  # Column already exists
+
         # Early exit if scores table doesn't exist or is empty
         if not _table_exists(conn, "scores"):
             LOGGER.info("compute_calibration_pythia: scores table not found; nothing to do.")
