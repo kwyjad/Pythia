@@ -80,8 +80,8 @@ Pythia/
 - `pythia/config.yaml` — Central configuration (LLM profiles, hazards, bucket specs)
 - `horizon_scanner/horizon_scanner.py` — HS main entrypoint (~1700 LOC)
 - `horizon_scanner/regime_change.py` — RC scoring (score = likelihood x magnitude, 4 levels)
-- `horizon_scanner/regime_change_llm.py` — Per-hazard RC LLM pipeline (2-pass: Gemini Flash + GPT-5-mini)
-- `horizon_scanner/triage.py` — Per-hazard triage LLM pipeline (2-pass, ACLED low-activity filter)
+- `horizon_scanner/regime_change_llm.py` — Per-hazard RC LLM pipeline (2-pass: both Gemini Flash by default)
+- `horizon_scanner/triage.py` — Per-hazard triage LLM pipeline (2-pass: Gemini Pro + Gemini Flash, ACLED low-activity filter)
 - `horizon_scanner/rc_prompts.py` — Per-hazard RC prompt builders (ACE, DR, FL, HW, TC with calibration anchors)
 - `horizon_scanner/hs_triage_prompts.py` — Per-hazard triage prompt builders (scoring anchors, RC context injection)
 - `horizon_scanner/rc_grounding_prompts.py` — RC-specific grounding queries (TRIGGER/DAMPENER/BASELINE signals)
@@ -427,7 +427,7 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 - Structured data connectors follow a standard pattern: `fetch_*()` → `store_*()` → `load_*()` → `format_*_for_prompt()` / `format_*_for_spd()`
 - **Reasoning traces** are required in SPD output JSON for Track 1 (full ensemble). The `reasoning_trace` object captures the prior SPD, sequential evidence updates with numeric deltas, point estimate, and RC assessment. Track 2 requires only `prior` and `rc_assessment`. Traces are stored in `reasoning_trace_json` columns on `forecasts_raw` and `forecasts_ensemble`, validated by `forecaster/trace_validation.py` (diagnostic only), and analyzed by `generate_calibration_advice.py` for prior anchoring diagnostics.
 - **Question-level web research pipeline is deprecated**: The `fetch_evidence_pack` / `_build_question_evidence_queries` / `_merge_question_evidence_packs` flow is bypassed. SPD prompts now receive structured data directly via `_load_structured_data()`: conflict forecasts, ReliefWeb, HDX Signals, HS grounding evidence, ACAPS, IPC, ACLED political, NMME, ENSO, seasonal TC, GDACS event history (FL/DR/TC), adversarial checks. The `question_research` table is no longer populated by the pipeline (only placeholder rows). Env vars `PYTHIA_RETRIEVER_ENABLED`, `PYTHIA_WEB_RESEARCH_ENABLED`, `PYTHIA_SPD_WEB_SEARCH_ENABLED`, `PYTHIA_FORECASTER_SELF_SEARCH` are set to "0" in the workflow.
-- HS pipeline is per-hazard: each hazard gets its own RC grounding, RC call, triage grounding, and triage call (2-pass each: Gemini Flash + GPT-5-mini)
+- HS pipeline is per-hazard: each hazard gets its own RC grounding, RC call, triage grounding, and triage call (2-pass each: RC uses Gemini Flash for both passes; triage uses Gemini Pro for Pass 1 + Gemini Flash for Pass 2)
 - **Grounding backend order**: OpenAI GPT-4.1-mini web search is the primary grounding backend; Gemini Google Search grounding is the fallback. Override with `PYTHIA_GROUNDING_PRIMARY_BACKEND=gemini` to swap. Both RC and triage grounding use this order. Triage grounding calls are now logged to `llm_calls` with `hazard_code=TRIAGE_GROUNDING_{hazard}` (RC grounding was already logged as `grounding_{hazard}`).
 - RC and triage grounding use different signal categories and recency windows (RC: TRIGGER/DAMPENER/BASELINE; triage: SITUATION/RESPONSE/FORECAST/VULNERABILITY)
 - **Grounding recency windows**: RC grounding uses tight windows (ACE=14d, DR=30d, FL=14d, HW=14d, TC=30d) because it hunts for change signals. Triage grounding uses wider windows (ACE=60d, DR=90d, FL=60d, HW=60d, TC=60d) for the operational picture. Both are defined in their respective `RECENCY_DAYS` dicts.
