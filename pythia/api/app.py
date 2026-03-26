@@ -3649,6 +3649,199 @@ def get_resolver_country_facts(
     return {"rows": rows, "iso3": iso3_value, "diagnostics": diagnostics}
 
 
+# ---------------------------------------------------------------------------
+# Resolver data explorer endpoints
+# ---------------------------------------------------------------------------
+
+_DB_SUMMARY_TABLES = [
+    # (table_name, date_column_candidates, has_iso3)
+    ("facts_resolved", ["as_of_date", "created_at"], True),
+    ("facts_deltas", ["created_at"], True),
+    ("acled_monthly_fatalities", ["created_at"], True),
+    ("conflict_forecasts", ["forecast_issue_date", "created_at"], True),
+    ("reliefweb_reports", ["date", "fetched_at"], True),
+    ("acled_political_events", ["event_date", "fetched_at"], True),
+    ("acaps_inform_severity", ["snapshot_date", "fetched_at"], True),
+    ("acaps_risk_radar", ["fetched_at"], True),
+    ("acaps_daily_monitoring", ["entry_date", "fetched_at"], True),
+    ("acaps_humanitarian_access", ["snapshot_date", "fetched_at"], True),
+    ("seasonal_forecasts", ["forecast_issue_date", "created_at"], True),
+    ("ipc_phases", ["analysis_date", "fetched_at"], True),
+    ("enso_state", ["fetch_date", "created_at"], False),
+    ("seasonal_tc_outlooks", ["fetched_at"], False),
+    ("seasonal_tc_context_cache", ["fetched_at"], True),
+    ("hdx_signals", ["signal_date", "fetched_at"], True),
+    ("crisiswatch_entries", ["fetched_at"], True),
+]
+
+
+@app.get("/v1/resolver/db_summary")
+def get_resolver_db_summary():
+    con = _con()
+    tables = []
+    for tbl, date_candidates, has_iso3 in _DB_SUMMARY_TABLES:
+        if not _table_exists(con, tbl):
+            continue
+        try:
+            row_count = con.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+        except Exception:
+            row_count = 0
+        last_updated = None
+        cols = _table_columns(con, tbl)
+        for cand in date_candidates:
+            if cand.lower() in cols:
+                try:
+                    val = con.execute(
+                        f"SELECT MAX({cand}) FROM {tbl} WHERE {cand} IS NOT NULL"
+                    ).fetchone()
+                    if val and val[0] is not None:
+                        last_updated = str(val[0])[:10]
+                        break
+                except Exception:
+                    pass
+        tables.append({
+            "name": tbl,
+            "row_count": row_count,
+            "last_updated": last_updated,
+            "has_iso3": has_iso3,
+        })
+    return {"tables": tables}
+
+
+def _resolver_query(table: str, iso3: str | None, limit: int,
+                    order_by: str = "", extra_where: str = "",
+                    extra_params: list | None = None,
+                    exclude_cols: set[str] | None = None) -> dict:
+    """Generic helper for resolver data-explorer endpoints."""
+    con = _con()
+    if not _table_exists(con, table):
+        return {"rows": []}
+    cols = _table_columns(con, table)
+    if exclude_cols:
+        select_cols = ", ".join(
+            c for c in sorted(cols) if c not in {e.lower() for e in exclude_cols}
+        )
+    else:
+        select_cols = "*"
+    sql = f"SELECT {select_cols} FROM {table}"
+    params: list = list(extra_params or [])
+    clauses: list[str] = []
+    if iso3 and "iso3" in cols:
+        clauses.append("iso3 = ?")
+        params.append(iso3.upper())
+    if extra_where:
+        clauses.append(extra_where)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    if order_by:
+        sql += f" ORDER BY {order_by}"
+    sql += f" LIMIT {min(limit, 5000)}"
+    return {"rows": _rows_from_cursor(con.execute(sql, params))}
+
+
+@app.get("/v1/resolver/facts_deltas")
+def get_resolver_facts_deltas(
+    iso3: str | None = Query(None), limit: int = Query(500),
+):
+    return _resolver_query("facts_deltas", iso3, limit, order_by="created_at DESC")
+
+
+@app.get("/v1/resolver/acled_monthly_fatalities")
+def get_resolver_acled_monthly_fatalities(
+    iso3: str | None = Query(None), limit: int = Query(500),
+):
+    return _resolver_query("acled_monthly_fatalities", iso3, limit,
+                           order_by="year DESC, month DESC")
+
+
+@app.get("/v1/resolver/conflict_forecasts")
+def get_resolver_conflict_forecasts(
+    iso3: str | None = Query(None),
+    source: str | None = Query(None),
+    limit: int = Query(500),
+):
+    extra_where = ""
+    extra_params: list = []
+    if source:
+        extra_where = "source = ?"
+        extra_params.append(source)
+    return _resolver_query("conflict_forecasts", iso3, limit,
+                           order_by="forecast_issue_date DESC",
+                           extra_where=extra_where, extra_params=extra_params)
+
+
+@app.get("/v1/resolver/reliefweb_reports")
+def get_resolver_reliefweb_reports(
+    iso3: str | None = Query(None),
+    include_body: bool = Query(False),
+    limit: int = Query(100),
+):
+    exclude = {"body"} if not include_body else set()
+    return _resolver_query("reliefweb_reports", iso3, limit,
+                           order_by="date DESC", exclude_cols=exclude)
+
+
+@app.get("/v1/resolver/acled_political_events")
+def get_resolver_acled_political_events(
+    iso3: str | None = Query(None), limit: int = Query(500),
+):
+    return _resolver_query("acled_political_events", iso3, limit,
+                           order_by="event_date DESC")
+
+
+@app.get("/v1/resolver/acaps")
+def get_resolver_acaps(
+    iso3: str | None = Query(None),
+    dataset: str = Query("inform_severity",
+                         description="inform_severity|risk_radar|daily_monitoring|humanitarian_access"),
+    limit: int = Query(500),
+):
+    table_map = {
+        "inform_severity": ("acaps_inform_severity", "snapshot_date DESC"),
+        "risk_radar": ("acaps_risk_radar", "fetched_at DESC"),
+        "daily_monitoring": ("acaps_daily_monitoring", "entry_date DESC"),
+        "humanitarian_access": ("acaps_humanitarian_access", "snapshot_date DESC"),
+    }
+    tbl, order = table_map.get(dataset, ("acaps_inform_severity", "snapshot_date DESC"))
+    return _resolver_query(tbl, iso3, limit, order_by=order)
+
+
+@app.get("/v1/resolver/seasonal_forecasts")
+def get_resolver_seasonal_forecasts(
+    iso3: str | None = Query(None), limit: int = Query(500),
+):
+    return _resolver_query("seasonal_forecasts", iso3, limit,
+                           order_by="forecast_issue_date DESC")
+
+
+@app.get("/v1/resolver/hdx_signals")
+def get_resolver_hdx_signals(
+    iso3: str | None = Query(None), limit: int = Query(500),
+):
+    return _resolver_query("hdx_signals", iso3, limit,
+                           order_by="signal_date DESC")
+
+
+@app.get("/v1/resolver/crisiswatch")
+def get_resolver_crisiswatch(
+    iso3: str | None = Query(None), limit: int = Query(500),
+):
+    return _resolver_query("crisiswatch_entries", iso3, limit,
+                           order_by="year DESC, month DESC")
+
+
+@app.get("/v1/resolver/enso_state")
+def get_resolver_enso_state(limit: int = Query(10)):
+    return _resolver_query("enso_state", None, limit,
+                           order_by="fetch_date DESC")
+
+
+@app.get("/v1/resolver/seasonal_tc_outlooks")
+def get_resolver_seasonal_tc_outlooks(limit: int = Query(50)):
+    return _resolver_query("seasonal_tc_outlooks", None, limit,
+                           order_by="fetched_at DESC")
+
+
 def _acquire_heavy() -> None:
     """Acquire the heavy-request semaphore or raise 503."""
     if not _HEAVY_REQUEST_SEMAPHORE.acquire(timeout=30):

@@ -4,6 +4,7 @@ import path from "node:path";
 import { apiGet } from "../../lib/api";
 import ResolverClient, {
   ConnectorStatusRow,
+  DbSummaryTable,
   ResolverCountryOption,
 } from "./ResolverClient";
 
@@ -18,6 +19,10 @@ type CountriesResponse = {
 
 type ConnectorStatusResponse = {
   rows: ConnectorStatusRow[];
+};
+
+type DbSummaryResponse = {
+  tables: DbSummaryTable[];
 };
 
 function parseCsvLine(line: string): string[] {
@@ -95,24 +100,31 @@ const ResolverPage = async () => {
   if (process.env.NODE_ENV !== "production") {
     console.log("[page] dynamic=force-dynamic", { route: "/resolver" });
   }
-  const [countriesResponse, connectorStatusResponse] = await Promise.all([
-    safeGet<CountriesResponse>("/countries", { rows: [] }),
-    safeGet<ConnectorStatusResponse>("/resolver/connector_status", { rows: [] }),
-  ]);
+  const [countriesResponse, connectorStatusResponse, dbSummaryResponse] =
+    await Promise.all([
+      safeGet<CountriesResponse>("/countries", { rows: [] }),
+      safeGet<ConnectorStatusResponse>("/resolver/connector_status", {
+        rows: [],
+      }),
+      safeGet<DbSummaryResponse>("/resolver/db_summary", { tables: [] }),
+    ]);
 
   const nameMap = await loadCountryNameMap();
-  const countries: ResolverCountryOption[] = countriesResponse.rows.map((row) => {
-    const iso3 = (row.iso3 ?? "").toUpperCase();
-    return {
-      iso3,
-      country_name: nameMap.get(iso3) ?? null,
-    };
-  });
+  const countries: ResolverCountryOption[] = countriesResponse.rows.map(
+    (row) => {
+      const iso3 = (row.iso3 ?? "").toUpperCase();
+      return {
+        iso3,
+        country_name: nameMap.get(iso3) ?? null,
+      };
+    }
+  );
 
   return (
     <ResolverClient
       countries={countries}
       connectorStatus={connectorStatusResponse.rows}
+      dbSummary={dbSummaryResponse.tables}
     />
   );
 };
