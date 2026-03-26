@@ -244,7 +244,7 @@ RC detects departures from historical base rates (distinct from triage_score whi
 - **Track assignment**: RC level > 0 → Track 1 (full ensemble), RC level 0 + priority tier → Track 2 (single Gemini Flash model), otherwise no SPD.
 - L1+ triggers hazard tail pack generation and adversarial evidence checks. L2+ additionally forces `need_full_spd = TRUE`.
 - **CRITICAL sync constraint**: The RC level threshold in `_select_tail_pack_hazards` (horizon_scanner.py) and the re-check threshold inside `adversarial_check.py` must match. If they drift, candidates will be passed to adversarial checks but silently rejected.
-- Tail packs are enabled by default (`HS_TAIL_PACKS_ENABLED` defaults to `"1"`). Override via `PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED=0`.
+- Tail packs are disabled by default (`HS_TAIL_PACKS_ENABLED` defaults to `"0"`). Enable via `PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED=1`.
 - Distribution check warns when too many assessments exceed expected proportions
 - RC prompt templates include a softened distribution anchor paragraph for small-country runs (where few comparative countries are included)
 - **RC model**: Both passes default to `gemini-3-flash-preview` (overridable via `PYTHIA_RC_MODEL_PASS1` / `PYTHIA_RC_MODEL_PASS2`)
@@ -297,7 +297,7 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `FORECASTER_SPD_MAX_WORKERS` | SPD phase concurrency |
 | `PYTHIA_HS_RC_LEVEL*_*` | RC threshold overrides |
 | `PYTHIA_HS_RC_DIST_WARN_*` | RC distribution warning thresholds |
-| `PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED` | Enable hazard tail packs (0/1, default 1) |
+| `PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED` | Enable hazard tail packs (0/1, default 0) |
 | `PYTHIA_ADVERSARIAL_CHECK_ENABLED` | Enable adversarial checks for RC L1+ (0/1, default 1) |
 | `PYTHIA_GROUNDING_PRIMARY_BACKEND` | Primary grounding backend: `openai` (default) or `gemini` |
 | `PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED` | Enable web search for RC evidence packs (0/1, default 1) |
@@ -314,6 +314,22 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `GDACS_FORCE_JSON` | Force JSON search API path ("1" to enable; overrides auto-detection) |
 | `FEWSNET_MONTHS` | Number of months of FEWS NET IPC history to fetch (default 12; 120 for backfill to 2016) |
 | `FEWSNET_REQUEST_DELAY` | Seconds between FEWS NET API retries (default 1.0) |
+
+| `PYTHIA_HS_ONLY_COUNTRIES` | Restrict HS to specific countries (comma-separated ISO3s) |
+| `PYTHIA_HS_FALLBACK_MODEL_SPECS` | Fallback model for HS triage (default from profile `hs_fallback`) |
+| `PYTHIA_HS_LLM_MAX_ATTEMPTS` | Max retry attempts for HS triage LLM calls (default 3) |
+| `PYTHIA_HS_GEMINI_TIMEOUT_SEC` | Gemini timeout for HS triage (default 120s) |
+| `PYTHIA_DUCKDB_MEMORY_LIMIT` | DuckDB memory limit for API (default "150MB") |
+| `PYTHIA_DUCKDB_THREADS` | DuckDB thread count for API (default "2") |
+| `PYTHIA_MAX_CONCURRENT_HEAVY` | Max concurrent heavy API queries (default "2") |
+| `PYTHIA_CORS_ALLOW_ORIGINS` | CORS allowed origins for API (default "*") |
+| `PYTHIA_SYNC_FROM_ARTIFACTS` | Enable DB sync from GitHub artifacts on API startup |
+| `GPT5_CALL_TIMEOUT_SEC` | GPT-5.x SPD call timeout (default 300s) |
+| `GEMINI_CALL_TIMEOUT_SEC` | Gemini SPD call timeout (default 300s) |
+| `GROK_CALL_TIMEOUT_SEC` | Grok (XAI) SPD call timeout (default 300s) |
+| `PYTHIA_SPD_ENSEMBLE_SPECS` | Override SPD ensemble at runtime (comma-separated `provider:model_id`) |
+| `PYTHIA_BLOCK_PROVIDERS` | Comma-separated provider names to exclude from ensemble |
+| `PYTHIA_RC_MODEL_PASS1` / `PYTHIA_RC_MODEL_PASS2` | Override RC LLM model per pass |
 
 Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`.
 
@@ -502,6 +518,68 @@ This ensures the DB artifact is fully self-contained and reproducible.
 - After applying fixes, a clean re-run must produce a queryable DuckDB artifact before connector health can be verified.
 - The `inspect_resolver_duckdb.yml` workflow includes 7 data quality checks: conflict forecast value range validation (warns if probability values > 10), seasonal forecast country count, empty connector table warnings, IDMC/IDU hazard code consistency, conflict forecast staleness (> 45 days), HDX Signals note (cached as CSV, not in DB), and per-country conflict forecast sampling (IRN, SOM, ETH, SDN, UKR).
 - **CrisisWatch diagnostics** in the debug bundle (`scripts/dump_pythia_debug_bundle.py`): (1) Traffic-light health check in `_evaluate_pipeline_health` — reports OK/WARN/FAIL with country counts, arrow breakdown, and alerts; WARN if 0 entries, <10 countries, or no arrow data; (2) Per-country `crisiswatch_arrow` column in the data inject inventory CSV showing arrow direction and alert type; (3) `crisiswatch_health` section in health report JSON with arrow counts, alert counts, notable (deteriorated/alert) entries, and countries missing CrisisWatch data.
+
+## LLM ensemble configuration
+
+The forecast ensemble is defined in `pythia/config.yaml` under `llm.profiles.prod.ensemble` (7 models):
+
+| Provider | Model | Notes |
+|----------|-------|-------|
+| OpenAI | gpt-5.2 | Reasoning model (`reasoning_effort=high`), temperature not supported |
+| Anthropic | claude-sonnet-4-6 | Standard model, low temperature |
+| Google | gemini-3.1-pro-preview | Thinking model (`thinkingLevel=medium`) |
+| Google | gemini-3-flash-preview | Thinking model (`thinkingLevel=low`), also used for Track 2 |
+| Kimi | kimi-k2.5 | Reasoning model, requires `temperature=1.0` |
+| DeepSeek | deepseek-reasoner | Native reasoning model, temperature ignored by API |
+| OpenAI | gpt-5-mini | Reasoning model (`reasoning_effort=medium`) |
+
+Purpose-specific overrides: `hs_fallback: openai:gpt-5.2`, `scenario_writer: google:gemini-3-flash-preview`.
+
+Model costs are in `pythia/model_costs.json` (input/output cost per 1K tokens in USD).
+
+## GitHub Actions workflows
+
+| Workflow | Purpose | Schedule |
+|----------|---------|----------|
+| `run_horizon_scanner.yml` | Full HS + forecaster pipeline | Manual / triggered |
+| `resolver_update.yml` | Primary data ingestion (5-phase backfill) | 15th monthly |
+| `ingest-structured-data.yml` | Mid-cycle refresh (conflict, GDACS, ReliefWeb, ACLED political) | Weekly Sun 03:00 UTC |
+| `compute_resolutions.yml` | Ground truth resolution | After forecaster |
+| `compute_scores.yml` | Brier/log/CRPS scoring | After resolutions |
+| `compute_calibration_pythia.yml` | Calibration weights + advice | After scores |
+| `refresh-enso.yml` | ENSO state/forecast refresh | Scheduled |
+| `refresh-seasonal-tc.yml` | Seasonal TC forecast refresh | Scheduled |
+| `refresh-crisiswatch.yml` | CrisisWatch Playwright scraper | 3rd monthly |
+| `ingest-nmme.yml` | NMME seasonal forecasts (deprecated schedule) | Manual |
+| `inspect_resolver_duckdb.yml` | Data quality checks | Manual |
+| `forecaster-ci.yml` | SPD unit tests | On push/PR |
+| `resolver-ci-fast.yml` | Fast resolver tests | On push/PR |
+| `resolver-smoke.yml` | Resolver smoke tests | On push/PR |
+| `web-ci.yml` | Dashboard build/lint | On push/PR |
+| `ci-lint.yml` / `lint.yml` | Code linting | On push/PR |
+| `manual_test.yaml` | Test mode pipeline run | Manual |
+| `mark_test_runs.yml` | Retroactive test data marking | Manual |
+| `build_dashboard_data.yml` | Dashboard data build | Triggered |
+| `publish_latest_data.yml` | Publish latest data | Triggered |
+| `publish_snapshot.yml` | Publish DB snapshot | Manual |
+| `purge_hs_run.yml` | Delete an HS run | Manual |
+| `resolver-initial-backfill.yml` | Full historical backfill | Manual |
+| `resolver-simple-snapshot.yml` | Simple DB snapshot | Manual |
+| `resolver-snapshot-from-db.yml` | Snapshot from existing DB | Manual |
+| `upload-repaired-db.yml` | Upload repaired DB artifact | Manual |
+
+## Supported hazards and metrics
+
+Hazards allowed (from `config.yaml`): FL, DR, TC, HW, ACE, DI, CU, EC, PHE. MULTI/OT disabled; ACO retired in favor of ACE.
+
+Question generation (`scripts/create_questions_from_triage.py`) supports:
+- **ACE**: FATALITIES, PA
+- **CU**: PA
+- **DR**: PHASE3PLUS_IN_NEED, EVENT_OCCURRENCE (PA remapped to PHASE3PLUS_IN_NEED for FEWS NET countries)
+- **FL**: PA, EVENT_OCCURRENCE
+- **TC**: PA, EVENT_OCCURRENCE
+- **DI**: PA
+- **HW**: excluded (no resolution source)
 
 ## Structured data bulk ingest
 
