@@ -1,23 +1,39 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
-import FactsTab from "./tabs/FactsTab";
-import ConflictForecastsTab from "./tabs/ConflictForecastsTab";
-import SituationTab from "./tabs/SituationTab";
-import ClimateTab from "./tabs/ClimateTab";
-import ContextSignalsTab from "./tabs/ContextSignalsTab";
-import GlobalTab from "./tabs/GlobalTab";
+import SortableTable, { SortableColumn } from "../../components/SortableTable";
+import { apiGet } from "../../lib/api";
 
-export type ConnectorStatusRow = {
-  source: string;
-  last_updated: string | null;
-  rows_scanned: number;
-};
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 export type ResolverCountryOption = {
   iso3: string;
   country_name?: string | null;
+};
+
+export type SourceInventoryItem = {
+  key: string;
+  label: string;
+  category: string;
+  last_updated: string | null;
+  global_rows: number;
+  country_rows: number | null;
+  has_iso3: boolean;
+};
+
+type SourceDataResponse = {
+  rows: Record<string, unknown>[];
+  columns: string[];
+};
+
+// Keep these for backward compat with page.tsx (legacy props still accepted)
+export type ConnectorStatusRow = {
+  source: string;
+  last_updated: string | null;
+  rows_scanned: number;
 };
 
 export type DbSummaryTable = {
@@ -27,22 +43,46 @@ export type DbSummaryTable = {
   has_iso3: boolean;
 };
 
-type TabKey = "facts" | "conflict" | "situation" | "climate" | "context" | "global";
+// ---------------------------------------------------------------------------
+// Category definitions (static)
+// ---------------------------------------------------------------------------
 
-type ResolverClientProps = {
-  countries: ResolverCountryOption[];
-  connectorStatus: ConnectorStatusRow[];
-  dbSummary: DbSummaryTable[];
-};
-
-const TABS: { key: TabKey; label: string; requiresCountry: boolean }[] = [
-  { key: "facts", label: "Facts", requiresCountry: true },
-  { key: "conflict", label: "Conflict Forecasts", requiresCountry: true },
-  { key: "situation", label: "Situation Reports", requiresCountry: true },
-  { key: "climate", label: "Climate", requiresCountry: true },
-  { key: "context", label: "Context Signals", requiresCountry: true },
-  { key: "global", label: "Global", requiresCountry: false },
+const CATEGORIES = [
+  {
+    key: "resolution_data",
+    title: "Resolution Data",
+    sources: ["ifrc", "idmc", "acled", "gdacs", "fewsnet", "acled_fatalities"],
+  },
+  {
+    key: "conflict_forecasts",
+    title: "Conflict Forecasts",
+    sources: ["views", "conflictforecast", "acled_cast", "crisiswatch"],
+  },
+  {
+    key: "weather_climate",
+    title: "Weather and Climate",
+    sources: ["nmme", "enso", "seasonal_tc", "tc_context"],
+  },
+  {
+    key: "situation_reports",
+    title: "Situation Reports",
+    sources: ["reliefweb", "acaps_daily", "acled_political"],
+  },
+  {
+    key: "other_alerts",
+    title: "Other Alerts",
+    sources: ["hdx_signals", "acaps_risk_radar"],
+  },
+  {
+    key: "other",
+    title: "Other",
+    sources: ["acaps_inform", "acaps_access", "ipc_phases"],
+  },
 ];
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 const resolveIso3 = (
   input: string,
@@ -75,38 +115,238 @@ function freshnessColor(dateStr: string | null): string {
   return "text-red-400";
 }
 
-const TABLE_DISPLAY_NAMES: Record<string, string> = {
-  facts_resolved: "Facts Resolved",
-  facts_deltas: "Facts Deltas",
-  acled_monthly_fatalities: "ACLED Fatalities",
-  conflict_forecasts: "Conflict Forecasts",
-  reliefweb_reports: "ReliefWeb",
-  acled_political_events: "ACLED Political",
-  acaps_inform_severity: "ACAPS INFORM",
-  acaps_risk_radar: "ACAPS Risk Radar",
-  acaps_daily_monitoring: "ACAPS Daily",
-  acaps_humanitarian_access: "ACAPS Access",
-  seasonal_forecasts: "NMME Seasonal",
-  ipc_phases: "IPC Phases",
-  enso_state: "ENSO",
-  seasonal_tc_outlooks: "Seasonal TC",
-  seasonal_tc_context_cache: "TC Context",
-  hdx_signals: "HDX Signals",
-  crisiswatch_entries: "CrisisWatch",
+const formatValue = (value: unknown) => {
+  if (value === null || value === undefined) return "";
+  const num = Number(value);
+  if (Number.isNaN(num)) return String(value);
+  if (typeof value === "string" && value.includes("-")) return value; // dates
+  return num.toLocaleString(undefined, { maximumFractionDigits: 2 });
+};
+
+// ---------------------------------------------------------------------------
+// SourceAccordion
+// ---------------------------------------------------------------------------
+
+type SourceAccordionProps = {
+  sourceKey: string;
+  inventory: SourceInventoryItem | null;
+  selectedIso3: string | null;
+};
+
+function SourceAccordion({
+  sourceKey,
+  inventory,
+  selectedIso3,
+}: SourceAccordionProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [allColumns, setAllColumns] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<SourceDataResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // Track which iso3 + allColumns combo was used for the cached data
+  const [fetchedFor, setFetchedFor] = useState<string>("");
+
+  const fetchKey = `${selectedIso3 ?? ""}_${allColumns}`;
+  const isEmpty = inventory && inventory.global_rows === 0;
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params: Record<string, string | number | boolean> = {
+        source: sourceKey,
+        limit: 500,
+        all_columns: allColumns,
+      };
+      if (selectedIso3 && inventory?.has_iso3) {
+        params.iso3 = selectedIso3;
+      }
+      const res = await apiGet<SourceDataResponse>(
+        "/resolver/source_data",
+        params
+      );
+      setData(res);
+      setFetchedFor(fetchKey);
+    } catch {
+      setError("Failed to load data.");
+    } finally {
+      setLoading(false);
+    }
+  }, [sourceKey, selectedIso3, allColumns, fetchKey, inventory?.has_iso3]);
+
+  // Re-fetch when expanded and parameters change
+  useEffect(() => {
+    if (expanded && !isEmpty && fetchedFor !== fetchKey) {
+      loadData();
+    }
+  }, [expanded, isEmpty, fetchKey, fetchedFor, loadData]);
+
+  const handleToggle = () => {
+    if (isEmpty) return;
+    const willExpand = !expanded;
+    setExpanded(willExpand);
+    if (willExpand && fetchedFor !== fetchKey) {
+      loadData();
+    }
+  };
+
+  const handleAllColumnsToggle = () => {
+    setAllColumns((prev) => !prev);
+    // fetchedFor won't match, so useEffect will re-fetch
+  };
+
+  // Build generic columns from response
+  const columns = useMemo<Array<SortableColumn<Record<string, unknown>>>>(() => {
+    const colNames = data?.columns ?? [];
+    if (colNames.length === 0 && data?.rows?.length) {
+      return Object.keys(data.rows[0]).map(
+        (k): SortableColumn<Record<string, unknown>> => ({
+          key: k,
+          label: k.replace(/_/g, " "),
+          headerClassName: "text-left",
+          cellClassName: "text-left",
+          sortValue: (r) => {
+            const v = r[k];
+            if (v === null || v === undefined) return null;
+            return typeof v === "number" ? v : String(v);
+          },
+          render: (r) => formatValue(r[k]),
+        })
+      );
+    }
+    return colNames.map(
+      (k): SortableColumn<Record<string, unknown>> => ({
+        key: k,
+        label: k.replace(/_/g, " "),
+        headerClassName: "text-left",
+        cellClassName: "text-left",
+        sortValue: (r) => {
+          const v = r[k];
+          if (v === null || v === undefined) return null;
+          return typeof v === "number" ? v : String(v);
+        },
+        render: (r) => formatValue(r[k]),
+      })
+    );
+  }, [data]);
+
+  // --- Summary line ---
+  const label = inventory?.label ?? sourceKey;
+  const lastUpdated = inventory?.last_updated;
+  const globalRows = inventory?.global_rows ?? 0;
+  const countryRows = inventory?.country_rows;
+  const hasIso3 = inventory?.has_iso3 ?? true;
+
+  return (
+    <div
+      className={`rounded-lg border ${
+        isEmpty
+          ? "border-fred-secondary/50 opacity-50"
+          : "border-fred-secondary"
+      } bg-fred-surface`}
+    >
+      {/* Summary row */}
+      <button
+        type="button"
+        className={`flex w-full items-center gap-3 px-4 py-3 text-left text-sm ${
+          isEmpty ? "cursor-default" : "cursor-pointer hover:bg-fred-bg/40"
+        }`}
+        onClick={handleToggle}
+        disabled={!!isEmpty}
+      >
+        <span className="text-fred-muted text-xs w-4">
+          {isEmpty ? "" : expanded ? "▼" : "▶"}
+        </span>
+        <span className="font-semibold text-fred-primary min-w-[160px]">
+          {label}
+        </span>
+        <span className={`text-xs ${freshnessColor(lastUpdated ?? null)}`}>
+          {lastUpdated ?? "No data"}
+        </span>
+        <span className="text-xs text-fred-muted ml-auto tabular-nums">
+          {isEmpty ? (
+            "No data"
+          ) : hasIso3 ? (
+            <>
+              Global: {globalRows.toLocaleString()} rows
+              {countryRows != null && (
+                <> | Country: {countryRows.toLocaleString()} rows</>
+              )}
+            </>
+          ) : (
+            <>{globalRows.toLocaleString()} rows (global)</>
+          )}
+        </span>
+      </button>
+
+      {/* Expanded table */}
+      {expanded && !isEmpty && (
+        <div className="border-t border-fred-secondary px-4 pb-4 pt-2 space-y-2">
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5 text-xs text-fred-muted cursor-pointer">
+              <input
+                type="checkbox"
+                checked={allColumns}
+                onChange={handleAllColumnsToggle}
+                className="rounded border-fred-secondary"
+              />
+              Show all columns
+            </label>
+            {data && (
+              <span className="text-xs text-fred-muted">
+                {data.rows.length.toLocaleString()} rows loaded
+              </span>
+            )}
+          </div>
+
+          {loading && (
+            <p className="text-sm text-fred-muted">Loading...</p>
+          )}
+          {error && <p className="text-sm text-red-400">{error}</p>}
+
+          {data && !loading && (
+            <div className="overflow-x-auto rounded-lg border border-fred-secondary max-h-[500px] overflow-y-auto">
+              <SortableTable
+                columns={columns}
+                rows={data.rows}
+                rowKey={(r) => JSON.stringify(r)}
+                emptyMessage="No data found."
+                tableLayout="auto"
+                dense
+                stickyHeader
+              />
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
+
+type ResolverClientProps = {
+  countries: ResolverCountryOption[];
+  // Legacy props (still accepted but not used for primary rendering)
+  connectorStatus?: ConnectorStatusRow[];
+  dbSummary?: DbSummaryTable[];
 };
 
 export default function ResolverClient({
   countries,
-  dbSummary,
 }: ResolverClientProps) {
-  const [activeTab, setActiveTab] = useState<TabKey>("facts");
   const [countryInput, setCountryInput] = useState("");
   const [selectedIso3, setSelectedIso3] = useState<string | null>(null);
+  const [inventory, setInventory] = useState<SourceInventoryItem[]>([]);
+  const [inventoryLoading, setInventoryLoading] = useState(true);
 
   const countryByIso3 = useMemo(() => {
     const map = new Map<string, ResolverCountryOption>();
     countries.forEach((c) => {
-      if (c.iso3) map.set(c.iso3.toUpperCase(), { ...c, iso3: c.iso3.toUpperCase() });
+      if (c.iso3)
+        map.set(c.iso3.toUpperCase(), { ...c, iso3: c.iso3.toUpperCase() });
     });
     return map;
   }, [countries]);
@@ -115,114 +355,101 @@ export default function ResolverClient({
     ? countryByIso3.get(selectedIso3)?.country_name ?? null
     : null;
 
-  const currentTabDef = TABS.find((t) => t.key === activeTab);
-  const showCountrySelector = currentTabDef?.requiresCountry !== false;
+  // Fetch inventory on mount and when iso3 changes
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setInventoryLoading(true);
+      try {
+        const params: Record<string, string> = {};
+        if (selectedIso3) params.iso3 = selectedIso3;
+        const res = await apiGet<{ sources: SourceInventoryItem[] }>(
+          "/resolver/source_inventory",
+          params
+        );
+        if (!cancelled) setInventory(res.sources);
+      } catch {
+        // keep stale inventory on error
+      } finally {
+        if (!cancelled) setInventoryLoading(false);
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedIso3]);
+
+  const inventoryMap = useMemo(() => {
+    const map = new Map<string, SourceInventoryItem>();
+    inventory.forEach((s) => map.set(s.key, s));
+    return map;
+  }, [inventory]);
 
   return (
     <div className="space-y-6">
       <section>
-        <h1 className="text-3xl font-semibold">Resolver Data Explorer</h1>
-        <p className="text-sm text-fred-text">
-          Browse all data collected by the Resolver pipeline across Phases 1-4.
+        <h1 className="text-3xl font-semibold">Resolver</h1>
+        <p className="text-sm text-fred-muted">
+          Browse all data collected by the Resolver pipeline
         </p>
       </section>
 
-      {/* DB Summary Cards */}
-      {dbSummary.length > 0 && (
-        <section className="space-y-2">
-          <h2 className="text-sm font-semibold text-fred-muted">Data inventory</h2>
-          <div className="grid gap-2 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-            {dbSummary.map((tbl) => (
-              <div
-                key={tbl.name}
-                className="rounded-lg border border-fred-secondary bg-fred-surface px-3 py-2"
-              >
-                <div className="text-xs font-semibold text-fred-primary truncate">
-                  {TABLE_DISPLAY_NAMES[tbl.name] ?? tbl.name}
-                </div>
-                <div className="text-lg font-semibold text-fred-text tabular-nums">
-                  {tbl.row_count.toLocaleString()}
-                </div>
-                <div className={`text-xs ${freshnessColor(tbl.last_updated)}`}>
-                  {tbl.last_updated ?? "No data"}
-                </div>
-              </div>
+      {/* Country selector */}
+      <section>
+        <div className="flex flex-col gap-1">
+          <label className="text-sm font-semibold text-fred-primary">
+            Country
+          </label>
+          <input
+            list="country-options"
+            className="w-64 rounded-md border border-fred-secondary bg-fred-surface px-3 py-2 text-sm text-fred-text"
+            placeholder="Type ISO3 or country name"
+            value={countryInput}
+            onChange={(e) => {
+              setCountryInput(e.target.value);
+              setSelectedIso3(resolveIso3(e.target.value, countryByIso3));
+            }}
+          />
+          <datalist id="country-options">
+            {countries.map((c) => (
+              <option key={c.iso3} value={c.iso3}>
+                {c.country_name
+                  ? `${c.country_name} (${c.iso3})`
+                  : c.iso3}
+              </option>
+            ))}
+          </datalist>
+          {selectedIso3 && (
+            <span className="text-xs text-fred-muted">
+              Selected: {countryName ?? selectedIso3}
+            </span>
+          )}
+        </div>
+      </section>
+
+      {inventoryLoading && inventory.length === 0 && (
+        <p className="text-sm text-fred-muted">Loading data inventory...</p>
+      )}
+
+      {/* Category sections with accordion sources */}
+      {CATEGORIES.map((cat) => (
+        <section key={cat.key} className="space-y-2">
+          <h2 className="text-lg font-semibold text-fred-text border-b border-fred-secondary pb-1">
+            {cat.title}
+          </h2>
+          <div className="space-y-1">
+            {cat.sources.map((srcKey) => (
+              <SourceAccordion
+                key={srcKey}
+                sourceKey={srcKey}
+                inventory={inventoryMap.get(srcKey) ?? null}
+                selectedIso3={selectedIso3}
+              />
             ))}
           </div>
         </section>
-      )}
-
-      {/* Country selector + Tab bar */}
-      <section className="space-y-4">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-end">
-          {showCountrySelector && (
-            <div className="flex flex-col gap-1">
-              <label className="text-sm font-semibold text-fred-primary">
-                Country
-              </label>
-              <input
-                list="country-options"
-                className="w-64 rounded-md border border-fred-secondary bg-fred-surface px-3 py-2 text-sm text-fred-text"
-                placeholder="Type ISO3 or country name"
-                value={countryInput}
-                onChange={(e) => {
-                  setCountryInput(e.target.value);
-                  setSelectedIso3(resolveIso3(e.target.value, countryByIso3));
-                }}
-              />
-              <datalist id="country-options">
-                {countries.map((c) => (
-                  <option key={c.iso3} value={c.iso3}>
-                    {c.country_name ? `${c.country_name} (${c.iso3})` : c.iso3}
-                  </option>
-                ))}
-              </datalist>
-              {selectedIso3 && (
-                <span className="text-xs text-fred-muted">
-                  Selected: {countryName ?? selectedIso3}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Top-level tabs */}
-        <div className="flex gap-1 border-b border-fred-secondary overflow-x-auto">
-          {TABS.map((tab) => (
-            <button
-              key={tab.key}
-              className={`whitespace-nowrap px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === tab.key
-                  ? "border-fred-primary text-fred-primary"
-                  : "border-transparent text-fred-muted hover:text-fred-text"
-              }`}
-              onClick={() => setActiveTab(tab.key)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-
-        {/* Tab content */}
-        <div>
-          {activeTab === "facts" && (
-            <FactsTab selectedIso3={selectedIso3} countryName={countryName} />
-          )}
-          {activeTab === "conflict" && (
-            <ConflictForecastsTab selectedIso3={selectedIso3} countryName={countryName} />
-          )}
-          {activeTab === "situation" && (
-            <SituationTab selectedIso3={selectedIso3} countryName={countryName} />
-          )}
-          {activeTab === "climate" && (
-            <ClimateTab selectedIso3={selectedIso3} countryName={countryName} />
-          )}
-          {activeTab === "context" && (
-            <ContextSignalsTab selectedIso3={selectedIso3} countryName={countryName} />
-          )}
-          {activeTab === "global" && <GlobalTab />}
-        </div>
-      </section>
+      ))}
     </div>
   );
 }

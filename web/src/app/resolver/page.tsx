@@ -3,8 +3,6 @@ import path from "node:path";
 
 import { apiGet } from "../../lib/api";
 import ResolverClient, {
-  ConnectorStatusRow,
-  DbSummaryTable,
   ResolverCountryOption,
 } from "./ResolverClient";
 
@@ -15,14 +13,6 @@ type CountriesResponse = {
   rows: Array<{
     iso3: string;
   }>;
-};
-
-type ConnectorStatusResponse = {
-  rows: ConnectorStatusRow[];
-};
-
-type DbSummaryResponse = {
-  tables: DbSummaryTable[];
 };
 
 function parseCsvLine(line: string): string[] {
@@ -100,14 +90,10 @@ const ResolverPage = async () => {
   if (process.env.NODE_ENV !== "production") {
     console.log("[page] dynamic=force-dynamic", { route: "/resolver" });
   }
-  const [countriesResponse, connectorStatusResponse, dbSummaryResponse] =
-    await Promise.all([
-      safeGet<CountriesResponse>("/countries", { rows: [] }),
-      safeGet<ConnectorStatusResponse>("/resolver/connector_status", {
-        rows: [],
-      }),
-      safeGet<DbSummaryResponse>("/resolver/db_summary", { tables: [] }),
-    ]);
+
+  const countriesResponse = await safeGet<CountriesResponse>("/countries", {
+    rows: [],
+  });
 
   const nameMap = await loadCountryNameMap();
   const countries: ResolverCountryOption[] = countriesResponse.rows.map(
@@ -120,13 +106,7 @@ const ResolverPage = async () => {
     }
   );
 
-  return (
-    <ResolverClient
-      countries={countries}
-      connectorStatus={connectorStatusResponse.rows}
-      dbSummary={dbSummaryResponse.tables}
-    />
-  );
+  return <ResolverClient countries={countries} />;
 };
 
 export default ResolverPage;
