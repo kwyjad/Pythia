@@ -113,9 +113,9 @@ class IFRCAdapter(BaseAdapter):
 
         text_columns = [col for col in CANONICAL_COLUMNS if col not in {"value"}]
         for col in text_columns:
-            canonical.loc[:, col] = canonical[col].fillna("").astype(str)
+            canonical[col] = canonical[col].fillna("").astype(str)
 
-        canonical.loc[:, "value"] = canonical["value"].astype(float)
+        canonical["value"] = canonical["value"].astype(float).values
         return canonical
 
 
