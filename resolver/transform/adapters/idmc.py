@@ -83,7 +83,7 @@ class IDMCAdapter(BaseAdapter):
         if dropped:
             LOGGER.warning("idmc: dropping %s rows with non-numeric value", dropped)
         df = df.loc[~numeric_value.isna()].copy()
-        df.loc[:, "value"] = numeric_value.loc[df.index].astype(float)
+        df["value"] = numeric_value.loc[df.index].astype(float).values
 
         if df.empty:
             return pd.DataFrame(columns=CANONICAL_COLUMNS)
