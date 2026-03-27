@@ -89,6 +89,7 @@ _SOURCE_GROUPS: dict[str, list[str]] = {
     "nmme": ["nmme_seasonal_forecasts"],
     "gdacs": ["gdacs_population_exposed"],
     "fewsnet_ipc": ["fewsnet_ipc_population"],
+    "ipc_api": ["ipc_api_population"],
 }
 
 # Convenience aliases that expand to multiple source groups.
@@ -1049,6 +1050,49 @@ def _bulk_fetch_fewsnet_ipc(dry_run: bool = False) -> dict[str, Any]:
 
 
 # ===================================================================
+# IPC API — delegate to resolver.connectors.ipc_api / resolver.tools.run_pipeline
+# ===================================================================
+
+
+def _bulk_fetch_ipc_api(dry_run: bool = False) -> dict[str, Any]:
+    """Run the IPC API connector via the Resolver pipeline.
+
+    Fetches IPC Phase 3+ population estimates (Current Situation and
+    First Projection) from api.ipcinfo.org for countries not covered
+    by FEWS NET.  Writes to ``facts_resolved`` and ``facts_deltas``
+    through the standard Resolver pipeline.
+    """
+    if dry_run:
+        LOG.info("[ipc_api] dry-run — skipping IPC API fetch")
+        return {"__ipc_api_done__": True}
+
+    try:
+        from resolver.tools.run_pipeline import run_pipeline
+
+        db_url = os.getenv("RESOLVER_DB_URL") or None
+        result = run_pipeline(connectors=["ipc_api"], db_url=db_url)
+        LOG.info(
+            "[ipc_api] pipeline complete: %d facts, %d resolved, %d deltas",
+            result.total_facts,
+            result.resolved_rows,
+            result.delta_rows,
+        )
+        if result.total_facts == 0:
+            LOG.warning("[ipc_api] no data returned from IPC API connector")
+            return {}
+    except Exception as exc:
+        LOG.error("[ipc_api] pipeline failed: %s", exc, exc_info=True)
+        return {}
+
+    return {
+        "__ipc_api_done__": True,
+        "__pipeline_total_facts__": result.total_facts,
+        "__pipeline_resolved_rows__": result.resolved_rows,
+        "__pipeline_delta_rows__": result.delta_rows,
+    }
+
+
+# ===================================================================
 # GDACS — delegate to resolver.connectors.gdacs / resolver.tools.run_pipeline
 # ===================================================================
 
@@ -1102,6 +1146,7 @@ _SELF_STORING_LABELS = frozenset([
     "gdacs_population_exposed",
     "acledcast_forecasts",
     "fewsnet_ipc_population",
+    "ipc_api_population",
 ])
 
 # Map from our internal labels to the source names used by
@@ -1267,6 +1312,8 @@ def ingest(
                 result = _bulk_fetch_acled_political(countries)
             elif label == "fewsnet_ipc_population":
                 result = _bulk_fetch_fewsnet_ipc(dry_run)
+            elif label == "ipc_api_population":
+                result = _bulk_fetch_ipc_api(dry_run)
             elif label == "gdacs_population_exposed":
                 result = _bulk_fetch_gdacs(dry_run)
             elif label in _CONFLICT_SOURCE_MAP:
@@ -1360,7 +1407,7 @@ def ingest(
         if lbl in _SELF_STORING_LABELS and data:
             extras["self_storing"] = True
         # Pipeline-delegated sources: stash pipeline result info
-        if lbl in ("gdacs_population_exposed", "fewsnet_ipc_population") and data:
+        if lbl in ("gdacs_population_exposed", "fewsnet_ipc_population", "ipc_api_population") and data:
             extras["total_facts"] = data.get("__pipeline_total_facts__", 0)
             extras["resolved_rows"] = data.get("__pipeline_resolved_rows__", 0)
             extras["delta_rows"] = data.get("__pipeline_delta_rows__", 0)

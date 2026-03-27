@@ -25,7 +25,7 @@ concurrency:
         description: >-
           Optional: run only these connectors (comma-separated).
           Core: acled_client, idmc, ifrc_go_client.
-          Resolution: fewsnet_ipc (see fewsnet_months), gdacs (see gdacs_months).
+          Resolution: fewsnet_ipc (see fewsnet_months), ipc_api (see ipc_api_months), gdacs (see gdacs_months).
           Structured: conflict (views+cf+cast), acaps, reliefweb, acled_political, nmme.
           Context: enso, seasonal_tc, hdx_signals, crisiswatch.
           Leave empty to run all. Examples: "gdacs" or "gdacs, fewsnet_ipc".
@@ -59,6 +59,11 @@ concurrency:
         description: "Months of FEWS NET IPC data to fetch (default 12; use 120 for full backfill to 2016)"
         required: false
         default: "12"
+        type: string
+      ipc_api_months:
+        description: "Months of IPC API data to fetch (default 24; IPC analyses are infrequent)"
+        required: false
+        default: "24"
         type: string
   schedule:
     # Run at 03:00 UTC on the 15th of each month
@@ -104,6 +109,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
       FEWSNET_MONTHS: ${{ inputs.reset_db == 'true' && '120' || inputs.fewsnet_months || '12' }}
+      IPC_API_MONTHS: ${{ inputs.reset_db == 'true' && '120' || inputs.ipc_api_months || '24' }}
       GDACS_MONTHS: ${{ inputs.reset_db == 'true' && '135' || inputs.gdacs_months || '3' }}
       DIAGNOSTICS_REPORT_PATH: diagnostics/ingestion/connectors_report.jsonl
 
@@ -420,6 +426,14 @@ jobs:
         run: |
           echo "::group::FEWS NET IPC"
           python -m pythia.tools.ingest_structured_data --sources fewsnet_ipc 2>&1 | tee diagnostics/phase2_fewsnet.log || echo "WARNING: FEWS NET IPC ingest failed (non-fatal)"
+          echo "::endgroup::"
+
+      - name: "Phase 2: Ingest IPC API → facts_resolved"
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'ipc_api') }}
+        continue-on-error: true
+        run: |
+          echo "::group::IPC API"
+          python -m pythia.tools.ingest_structured_data --sources ipc_api 2>&1 | tee diagnostics/phase2_ipc_api.log || echo "WARNING: IPC API ingest failed (non-fatal)"
           echo "::endgroup::"
 
       - name: "Phase 2: Ingest GDACS → facts_resolved"
