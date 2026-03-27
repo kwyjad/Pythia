@@ -171,27 +171,27 @@ class IpcApiConnector:
         months_back = int(os.getenv("IPC_API_MONTHS", "24"))
         delay = float(os.getenv("IPC_API_REQUEST_DELAY", "1.0"))
 
-        # Compute start date
-        total_months = date.today().year * 12 + date.today().month - months_back
-        start_year = total_months // 12
-        start_month = total_months % 12
-        if start_month == 0:
-            start_month = 12
+        # Compute start year — IPC API accepts year integers, not YYYY-MM
+        today = date.today()
+        start_year = today.year - (months_back // 12)
+        if months_back % 12 >= today.month:
             start_year -= 1
-        start_date = date(start_year, start_month, 1)
+        start_year = max(start_year, 2015)  # IPC API data starts at 2015
+        end_year = today.year
 
         LOG.info(
-            "[ipc_api] fetching IPC data from %s (months_back=%d)",
-            start_date.isoformat(),
+            "[ipc_api] fetching IPC data for years %d–%d (months_back=%d)",
+            start_year,
+            end_year,
             months_back,
         )
 
-        # Fetch from IPC API — key passed as query parameter per Swagger spec
+        # Fetch from IPC API — key and year range as query parameters
         session = _build_session()
-        params = {
+        params: dict[str, str | int] = {
             "key": api_key,
-            "format": "json",
-            "start": start_date.strftime("%Y-%m"),
+            "start": start_year,
+            "end": end_year,
         }
 
         try:
