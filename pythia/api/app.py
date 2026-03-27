@@ -3857,6 +3857,11 @@ _SOURCE_REGISTRY: dict[str, dict] = {
                          "columns": ["iso3", "hazard_code", "metric", "ym",
                                      "value", "as_of_date", "publisher"],
                          "order": "created_at DESC"},
+    "ipc_api":          {"table": "facts_resolved",
+                         "filter": "publisher = 'IPC'",
+                         "columns": ["iso3", "hazard_code", "metric", "ym",
+                                     "value", "as_of_date", "publisher"],
+                         "order": "created_at DESC"},
     "acled_fatalities":  {"table": "acled_monthly_fatalities",
                          "columns": ["iso3", "month", "fatalities", "source"],
                          "order": "month DESC"},
@@ -3956,6 +3961,7 @@ _SOURCE_LABELS: dict[str, str] = {
     "acaps_inform": "ACAPS INFORM Severity",
     "acaps_access": "ACAPS Humanitarian Access",
     "ipc_phases": "IPC Phases",
+    "ipc_api": "IPC API",
 }
 
 _SOURCE_CATEGORIES: dict[str, str] = {
@@ -3971,6 +3977,7 @@ _SOURCE_CATEGORIES: dict[str, str] = {
     "hdx_signals": "other_alerts", "acaps_risk_radar": "other_alerts",
     "acaps_inform": "other", "acaps_access": "other",
     "ipc_phases": "other",
+    "ipc_api": "resolution_data",
 }
 
 
