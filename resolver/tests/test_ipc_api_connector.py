@@ -21,6 +21,7 @@ from resolver.connectors.ipc_api import (
     IpcApiConnector,
     _iso2_to_iso3,
     _load_fewsnet_country_list,
+    _parse_period_dates,
     _write_country_list,
 )
 from resolver.connectors.protocol import CANONICAL_COLUMNS
@@ -33,70 +34,93 @@ from resolver.connectors.validate import validate_canonical
 SAMPLE_RECORDS = [
     {
         "country": "AF",
-        "ipc_period": "A",
         "p3plus": 15800000,
-        "analysis_period_start": "2025-06-01",
-        "analysis_period_end": "2025-06-30",
-        "analysis_date": "2025-05-20",
-    },
-    {
-        "country": "AF",
-        "ipc_period": "P",
-        "p3plus": 17200000,
-        "analysis_period_start": "2025-06-01",
-        "analysis_period_end": "2025-10-31",
-        "analysis_date": "2025-05-20",
+        "p3plus_projected": 17200000,
+        "current_period_dates": "Jun 2025 - Sep 2025",
+        "projected_period_dates": "Oct 2025 - Jan 2026",
+        "analysis_date": "May 2025",
     },
     {
         "country": "PK",
-        "ipc_period": "A",
         "p3plus": 9400000,
-        "analysis_period_start": "2025-06-01",
-        "analysis_period_end": "2025-06-30",
-        "analysis_date": "2025-05-15",
+        "p3plus_projected": 10200000,
+        "current_period_dates": "Jun 2025 - Sep 2025",
+        "projected_period_dates": "Oct 2025 - Jan 2026",
+        "analysis_date": "May 2025",
     },
     # This record has country in FEWS NET list — should be excluded
     {
         "country": "ET",
-        "ipc_period": "A",
         "p3plus": 17000000,
-        "analysis_period_start": "2025-06-01",
-        "analysis_period_end": "2025-06-30",
-        "analysis_date": "2025-05-15",
+        "p3plus_projected": 19000000,
+        "current_period_dates": "Jun 2025 - Sep 2025",
+        "projected_period_dates": "Oct 2025 - Jan 2026",
+        "analysis_date": "May 2025",
     },
     # Invalid country code — should be skipped
     {
         "country": "XX",
-        "ipc_period": "A",
         "p3plus": 100000,
-        "analysis_period_start": "2025-06-01",
-        "analysis_period_end": "2025-06-30",
-        "analysis_date": "2025-05-15",
+        "p3plus_projected": 110000,
+        "current_period_dates": "Jun 2025 - Sep 2025",
+        "projected_period_dates": "Oct 2025 - Jan 2026",
+        "analysis_date": "May 2025",
     },
 ]
 
-# Duplicate records for dedup testing
+# Duplicate records for dedup testing (same country, same current_period_dates)
 SAMPLE_RECORDS_DEDUP = [
     {
         "country": "AF",
-        "ipc_period": "A",
         "p3plus": 15000000,
-        "analysis_period_start": "2025-06-01",
-        "analysis_period_end": "2025-06-30",
-        "analysis_date": "2025-04-01",
+        "current_period_dates": "Jun 2025 - Sep 2025",
+        "projected_period_dates": "",
+        "analysis_date": "Apr 2025",
     },
     {
         "country": "AF",
-        "ipc_period": "A",
         "p3plus": 15800000,
-        "analysis_period_start": "2025-06-01",
-        "analysis_period_end": "2025-06-30",
-        "analysis_date": "2025-05-20",
+        "current_period_dates": "Jun 2025 - Sep 2025",
+        "projected_period_dates": "",
+        "analysis_date": "May 2025",
     },
 ]
 
 # FEWS NET countries to exclude
 FEWSNET_COUNTRIES = ["ETH", "SOM", "KEN", "SDN", "SSD"]
+
+
+# ---------------------------------------------------------------------------
+# Period date parsing tests
+# ---------------------------------------------------------------------------
+
+
+class TestParsePeriodDates:
+    def test_month_year_range(self):
+        start, end = _parse_period_dates("Jun 2025 - Sep 2025")
+        assert start == "2025-06-01"
+        assert end == "2025-09-01"
+
+    def test_full_month_names(self):
+        start, end = _parse_period_dates("January 2025 - June 2025")
+        assert start == "2025-01-01"
+        assert end == "2025-06-01"
+
+    def test_iso_dates(self):
+        start, end = _parse_period_dates("2025-06-01 - 2025-09-30")
+        assert start == "2025-06-01"
+        assert end == "2025-09-30"
+
+    def test_single_month(self):
+        start, end = _parse_period_dates("Jun 2025")
+        assert start == "2025-06-01"
+        assert end == "2025-06-01"
+
+    def test_empty_string(self):
+        assert _parse_period_dates("") == ("", "")
+
+    def test_none(self):
+        assert _parse_period_dates(None) == ("", "")
 
 
 # ---------------------------------------------------------------------------
@@ -317,17 +341,16 @@ class TestIpcApiConnector:
     def test_phase_sum_fallback(
         self, mock_session_fn, mock_fewsnet, mock_write_countries
     ):
-        """If p3plus is not present, sum phase3+phase4+phase5."""
+        """If p3plus is not present, sum phase3+phase4+phase5 populations."""
         records = [
             {
                 "country": "AF",
-                "ipc_period": "A",
                 "phase3_population": 10000000,
                 "phase4_population": 4000000,
                 "phase5_population": 1000000,
-                "analysis_period_start": "2025-06-01",
-                "analysis_period_end": "2025-06-30",
-                "analysis_date": "2025-05-20",
+                "current_period_dates": "Jun 2025 - Sep 2025",
+                "projected_period_dates": "",
+                "analysis_date": "May 2025",
             },
         ]
         session = MagicMock()

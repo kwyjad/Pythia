@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -134,6 +135,52 @@ def _build_session() -> requests.Session:
     return session
 
 
+def _parse_period_dates(date_str: str) -> tuple[str, str]:
+    """Parse IPC API period date strings into (start_iso, end_iso).
+
+    The IPC API returns dates in ``current_period_dates`` and
+    ``projected_period_dates`` as human-readable ranges like:
+        "Jun 2025 - Sep 2025"
+        "June 2025 - September 2025"
+        "2025-06-01 - 2025-09-30"
+        "Jun 2025"  (single month)
+
+    Returns ``("", "")`` if parsing fails.
+    """
+    if not date_str or not isinstance(date_str, str):
+        return ("", "")
+
+    date_str = date_str.strip()
+
+    # Split on common separators: " - ", " to ", " – " (en-dash).
+    # Require at least one space on each side so ISO dates (2025-06-01) are not broken.
+    parts = re.split(r"\s+[-–]\s+|\s+to\s+", date_str, maxsplit=1)
+
+    results: list[str] = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            dt = pd.to_datetime(part, format="mixed", dayfirst=False)
+            results.append(dt.strftime("%Y-%m-%d"))
+        except Exception:
+            # Try common IPC formats explicitly
+            for fmt in ("%b %Y", "%B %Y", "%Y-%m-%d", "%Y-%m", "%d/%m/%Y"):
+                try:
+                    dt = datetime.strptime(part, fmt)
+                    results.append(dt.strftime("%Y-%m-%d"))
+                    break
+                except ValueError:
+                    continue
+
+    if len(results) == 0:
+        return ("", "")
+    if len(results) == 1:
+        return (results[0], results[0])
+    return (results[0], results[1])
+
+
 def _write_country_list(iso3_codes: list[str]) -> None:
     """Write the list of ISO3 codes with IPC API data."""
     try:
@@ -221,11 +268,23 @@ class IpcApiConnector:
             LOG.warning("[ipc_api] no records in IPC API response")
             return empty_canonical()
 
-        # Log sample record keys on first record for schema debugging
-        if records:
+        # Log sample record for schema debugging
+        if records and isinstance(records[0], dict):
+            r0 = records[0]
             LOG.info(
                 "[ipc_api] sample record keys: %s",
-                sorted(records[0].keys()) if isinstance(records[0], dict) else "N/A",
+                sorted(r0.keys()),
+            )
+            LOG.info(
+                "[ipc_api] sample dates: country=%s, current_period_dates=%r, "
+                "projected_period_dates=%r, analysis_date=%r, p3plus=%r, "
+                "p3plus_projected=%r",
+                r0.get("country"),
+                r0.get("current_period_dates"),
+                r0.get("projected_period_dates"),
+                r0.get("analysis_date"),
+                r0.get("p3plus"),
+                r0.get("p3plus_projected"),
             )
 
         LOG.info("[ipc_api] fetched %d raw records", len(records))
@@ -233,8 +292,13 @@ class IpcApiConnector:
         # Load FEWS NET countries for exclusion
         fewsnet_countries = _load_fewsnet_country_list()
 
-        # Parse records into flat rows
+        # Parse records into flat rows.
+        # Each IPC API record contains BOTH current and projected data:
+        #   p3plus / current_period_dates   → phase3plus_in_need  (period "A")
+        #   p3plus_projected / projected_period_dates → phase3plus_projection (period "P")
         parsed_rows: list[dict] = []
+        _date_parse_failures = 0
+
         for rec in records:
             if not isinstance(rec, dict):
                 continue
@@ -265,53 +329,7 @@ class IpcApiConnector:
             if iso3 in fewsnet_countries:
                 continue
 
-            # Extract period type
-            ipc_period = str(rec.get("ipc_period", "") or rec.get("period_type", "") or "").strip().upper()
-            if ipc_period not in _PERIOD_METRIC:
-                # Try to infer from period name
-                period_name = str(rec.get("period_name", "") or "").lower()
-                if "current" in period_name:
-                    ipc_period = "A"
-                elif "project" in period_name:
-                    ipc_period = "P"
-                else:
-                    continue
-
-            # Extract Phase 3+ population
-            p3plus = rec.get("p3plus") or rec.get("phase3plus") or rec.get("p3_plus")
-            if p3plus is None:
-                # Try summing phase 3, 4, 5
-                p3 = rec.get("phase3_population") or rec.get("phase3") or 0
-                p4 = rec.get("phase4_population") or rec.get("phase4") or 0
-                p5 = rec.get("phase5_population") or rec.get("phase5") or 0
-                try:
-                    p3plus = int(p3 or 0) + int(p4 or 0) + int(p5 or 0)
-                except (TypeError, ValueError):
-                    continue
-                if p3plus == 0:
-                    continue
-
-            try:
-                value = float(p3plus)
-            except (TypeError, ValueError):
-                continue
-
-            if value <= 0:
-                continue
-
-            # Extract dates
-            period_start = str(
-                rec.get("analysis_period_start", "")
-                or rec.get("period_start", "")
-                or rec.get("period_from", "")
-                or ""
-            ).strip()
-            period_end = str(
-                rec.get("analysis_period_end", "")
-                or rec.get("period_end", "")
-                or rec.get("period_to", "")
-                or ""
-            ).strip()
+            # Analysis date (common to both current and projected)
             analysis_date = str(
                 rec.get("analysis_date", "")
                 or rec.get("date", "")
@@ -319,14 +337,64 @@ class IpcApiConnector:
                 or ""
             ).strip()
 
-            parsed_rows.append({
-                "iso3": iso3,
-                "ipc_period": ipc_period,
-                "value": value,
-                "period_start": period_start,
-                "period_end": period_end,
-                "analysis_date": analysis_date,
-            })
+            # --- Current Situation row (period "A") ---
+            current_value = rec.get("p3plus")
+            if current_value is None:
+                # Fallback: sum phase3 + phase4 + phase5 populations
+                p3 = rec.get("phase3_population") or rec.get("phase3") or 0
+                p4 = rec.get("phase4_population") or rec.get("phase4") or 0
+                p5 = rec.get("phase5_population") or rec.get("phase5") or 0
+                try:
+                    current_value = int(p3 or 0) + int(p4 or 0) + int(p5 or 0)
+                except (TypeError, ValueError):
+                    current_value = 0
+            if current_value is not None:
+                try:
+                    cv = float(current_value)
+                except (TypeError, ValueError):
+                    cv = 0.0
+                if cv > 0:
+                    current_dates_raw = str(rec.get("current_period_dates", "") or "").strip()
+                    c_start, c_end = _parse_period_dates(current_dates_raw)
+                    if c_start:
+                        parsed_rows.append({
+                            "iso3": iso3,
+                            "ipc_period": "A",
+                            "value": cv,
+                            "period_start": c_start,
+                            "period_end": c_end or c_start,
+                            "analysis_date": analysis_date,
+                        })
+                    else:
+                        _date_parse_failures += 1
+
+            # --- First Projection row (period "P") ---
+            projected_value = rec.get("p3plus_projected")
+            if projected_value is not None:
+                try:
+                    pv = float(projected_value)
+                except (TypeError, ValueError):
+                    pv = 0.0
+                if pv > 0:
+                    proj_dates_raw = str(rec.get("projected_period_dates", "") or "").strip()
+                    p_start, p_end = _parse_period_dates(proj_dates_raw)
+                    if p_start:
+                        parsed_rows.append({
+                            "iso3": iso3,
+                            "ipc_period": "P",
+                            "value": pv,
+                            "period_start": p_start,
+                            "period_end": p_end or p_start,
+                            "analysis_date": analysis_date,
+                        })
+                    else:
+                        _date_parse_failures += 1
+
+        if _date_parse_failures > 0:
+            LOG.warning(
+                "[ipc_api] %d rows skipped due to unparseable period dates",
+                _date_parse_failures,
+            )
 
         if not parsed_rows:
             LOG.warning("[ipc_api] no valid rows after parsing")
