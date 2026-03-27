@@ -379,10 +379,10 @@ def _try_gdacs_binary(
     return float(row[0]), (str(row[1]) if row[1] is not None else None)
 
 
-def _try_fewsnet_ipc(
+def _try_phase3plus(
     conn, iso3: str, hazard_code: str, calendar_month: str,
 ) -> Optional[tuple[float, Optional[str]]]:
-    """Look up Phase 3+ population in ``facts_resolved`` (FEWS NET IPC)."""
+    """Look up Phase 3+ population in ``facts_resolved`` (FEWS NET or IPC)."""
     if hazard_code != "DR":
         return None
     if not _table_exists(conn, "facts_resolved"):
@@ -427,14 +427,14 @@ def _resolve_value(
     EVENT_OCCURRENCE:
       1. ``facts_resolved`` (GDACS binary event rows)
     PHASE3PLUS_IN_NEED:
-      1. ``facts_resolved`` (FEWS NET IPC Phase 3+ data)
+      1. ``facts_resolved`` (FEWS NET or IPC Phase 3+ data)
     """
 
     if metric == "EVENT_OCCURRENCE":
         return _try_gdacs_binary(conn, iso3, hazard_code, calendar_month)
 
     if metric == "PHASE3PLUS_IN_NEED":
-        return _try_fewsnet_ipc(conn, iso3, hazard_code, calendar_month)
+        return _try_phase3plus(conn, iso3, hazard_code, calendar_month)
 
     # PA and FATALITIES: existing priority cascade
     # 1. facts_resolved (IFRC stock rows, highest priority)

@@ -3069,10 +3069,10 @@ def _load_structured_data(
         pass
 
     try:
-        from pythia.fewsnet_food_security import load_fewsnet_food_security
-        fewsnet = load_fewsnet_food_security(iso3)
-        if fewsnet:
-            sd["fewsnet_food_security"] = fewsnet
+        from pythia.food_security import load_food_security
+        food_sec = load_food_security(iso3)
+        if food_sec:
+            sd["fewsnet_food_security"] = food_sec
     except Exception:
         pass
 
