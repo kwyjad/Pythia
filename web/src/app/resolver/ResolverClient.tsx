@@ -51,7 +51,7 @@ const CATEGORIES = [
   {
     key: "resolution_data",
     title: "Resolution Data",
-    sources: ["ifrc", "idmc", "acled", "gdacs", "fewsnet", "acled_fatalities"],
+    sources: ["ifrc", "idmc", "acled", "gdacs", "fewsnet", "ipc_api", "acled_fatalities"],
   },
   {
     key: "conflict_forecasts",
