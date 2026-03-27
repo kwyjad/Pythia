@@ -18,6 +18,7 @@ from .views import ViewsConnector
 from .conflictforecast import ConflictForecastOrgConnector
 from .acled_cast import AcledCastConnector
 from .fewsnet_ipc import FewsnetIpcConnector
+from .ipc_api import IpcApiConnector
 
 # Add new connectors here.  The orchestrator (run_pipeline.py) iterates
 # this registry to discover which sources to pull.
@@ -27,6 +28,7 @@ REGISTRY: dict[str, type] = {
     "idmc": IdmcConnector,
     "ifrc_montandon": IfrcMontandonConnector,
     "fewsnet_ipc": FewsnetIpcConnector,
+    "ipc_api": IpcApiConnector,
 }
 
 # Forecast connectors write to ``conflict_forecasts`` (not facts_resolved).
