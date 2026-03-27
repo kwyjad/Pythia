@@ -101,6 +101,82 @@ def _base_rows(
     return base
 
 
+def _add_hs_country_list(
+    conn,
+    base: dict[str, dict[str, Any]],
+    hs_run_id: str | None = None,
+    forecaster_run_id: str | None = None,
+) -> None:
+    """Add countries from ``hs_triage`` that are in the HS country list but
+    don't yet appear in *base* (e.g. countries with no questions for the
+    selected metric).  These will show as 'in country list but not forecasted'
+    on the map."""
+    if not _table_exists(conn, "hs_triage"):
+        return
+
+    hs_cols = _table_columns(conn, "hs_triage")
+    run_col = _pick_column(hs_cols, ["run_id", "hs_run_id"])
+    iso_col = _pick_column(hs_cols, ["iso3"])
+    if not (run_col and iso_col):
+        return
+
+    try:
+        if forecaster_run_id:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT UPPER(ht.{iso_col}) AS iso3
+                FROM hs_triage ht
+                WHERE ht.{run_col} IN (
+                    SELECT DISTINCT q.hs_run_id
+                    FROM questions q
+                    JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
+                    WHERE fe.run_id = ?
+                      AND q.hs_run_id IS NOT NULL
+                )
+                AND ht.{iso_col} IS NOT NULL
+                """,
+                [forecaster_run_id],
+            ).fetchall()
+        elif hs_run_id:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT UPPER({iso_col}) AS iso3
+                FROM hs_triage
+                WHERE {run_col} = ?
+                  AND {iso_col} IS NOT NULL
+                """,
+                [hs_run_id],
+            ).fetchall()
+        else:
+            return
+    except Exception:
+        LOGGER.exception("Failed to query HS country list from hs_triage")
+        return
+
+    for (iso3,) in rows or []:
+        if not iso3:
+            continue
+        key = str(iso3).upper()
+        if key not in base:
+            base[key] = {
+                "iso3": key,
+                "n_questions": 0,
+                "n_forecasted": 0,
+                "last_triaged": None,
+                "last_forecasted": None,
+                "highest_rc_level": None,
+                "highest_rc_score": None,
+                "in_country_list": True,
+            }
+        else:
+            base[key]["in_country_list"] = True
+
+    # Mark existing entries that weren't from hs_triage
+    for key in base:
+        if "in_country_list" not in base[key]:
+            base[key]["in_country_list"] = True  # has questions → in list
+
+
 def _update_last_triaged(conn, base: dict[str, dict[str, Any]]) -> None:
     if not base:
         return
@@ -438,6 +514,8 @@ def compute_countries_index(
     # When a specific forecaster run is provided, scope everything to that run.
     if forecaster_run_id:
         base = _base_rows(conn, metric_scope=metric_scope, forecaster_run_id=forecaster_run_id, include_test=include_test)
+        # Add HS country list countries (may have 0 questions for this metric).
+        _add_hs_country_list(conn, base, forecaster_run_id=forecaster_run_id)
         if not base:
             return []
         _update_last_triaged(conn, base)
@@ -455,6 +533,8 @@ def compute_countries_index(
     # Filter base rows by metric and run.
     run_filter = hs_run_id if year_month else None
     base = _base_rows(conn, metric_scope=metric_scope, hs_run_id=run_filter, include_test=include_test)
+    # Add HS country list countries (may have 0 questions for this metric).
+    _add_hs_country_list(conn, base, hs_run_id=hs_run_id)
     if not base:
         return []
 

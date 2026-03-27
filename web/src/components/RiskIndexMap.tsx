@@ -233,7 +233,7 @@ export default function RiskIndexMap({
   const isPerCapita =
     view === "PA_PC" || view === "FATALITIES_PC" || view === "PHASE3PLUS_PC" || isBinary;
 
-  const hasQuestionsIso3 = useMemo(() => {
+  const inCountryListIso3 = useMemo(() => {
     const set = new Set<string>();
     countriesRows.forEach((row) => {
       const iso3 = (row.iso3 ?? "").toUpperCase();
@@ -562,7 +562,7 @@ export default function RiskIndexMap({
           const classIndex = classifyJenks(value, breaks);
           fillColor = colorScale[classIndex] ?? palette.c1;
         }
-      } else if (hasQuestionsIso3.has(iso3)) {
+      } else if (inCountryListIso3.has(iso3)) {
         fillColor = palette.noEiv;
       }
       targets.forEach((path) => {
@@ -577,11 +577,11 @@ export default function RiskIndexMap({
         const target = event.currentTarget as SVGElement | null;
         const name =
           target?.getAttribute("data-name")?.trim() || iso3.toUpperCase();
-        let valueLabel = "No forecasts";
+        let valueLabel = "In country list, not forecasted";
         if (typeof value === "number") {
           valueLabel = formatValueLabel(value, isPerCapita);
-        } else if (!hasQuestionsIso3.has(iso3)) {
-          valueLabel = "No questions";
+        } else if (!inCountryListIso3.has(iso3)) {
+          valueLabel = "Not in country list";
         }
         const rect = container.getBoundingClientRect();
         setTooltip({
@@ -933,7 +933,7 @@ export default function RiskIndexMap({
     svgText,
     valueByIso3,
     breaks,
-    hasQuestionsIso3,
+    inCountryListIso3,
     isPerCapita,
     perCapitaFormatter,
     isBinary,
@@ -972,15 +972,25 @@ export default function RiskIndexMap({
       </div>
       <div className="absolute bottom-3 right-3 rounded-md border border-fred-secondary bg-fred-surface/90 px-3 py-2 text-[11px] text-fred-text shadow-fredCard sm:text-xs">
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-1">
-          {[
-            { label: "Very high", color: "var(--risk-map-c5)" },
-            { label: "High", color: "var(--risk-map-c4)" },
-            { label: "Moderate", color: "var(--risk-map-c3)" },
-            { label: "Low", color: "var(--risk-map-c2)" },
-            { label: "Very low", color: "var(--risk-map-c1)" },
-            { label: "Triaged but no forecast", color: "var(--risk-map-no-eiv)" },
-            { label: "Not triaged", color: "var(--risk-map-no-questions)" },
-          ].map((item) => (
+          {(isBinary
+            ? [
+                { label: "50-100%", color: "#ef4444" },
+                { label: "30-50%", color: "#fb923c" },
+                { label: "15-30%", color: "#facc15" },
+                { label: "5-15%", color: "#4ade80" },
+                { label: "0-5%", color: "#86efac" },
+              ]
+            : [
+                { label: "Very high", color: "var(--risk-map-c5)" },
+                { label: "High", color: "var(--risk-map-c4)" },
+                { label: "Moderate", color: "var(--risk-map-c3)" },
+                { label: "Low", color: "var(--risk-map-c2)" },
+                { label: "Very low", color: "var(--risk-map-c1)" },
+              ]
+          ).concat([
+            { label: "In country list but not forecasted", color: "var(--risk-map-no-eiv)" },
+            { label: "Not in country list", color: "var(--risk-map-no-questions)" },
+          ]).map((item) => (
             <div key={item.label} className="flex items-center gap-2">
               <span
                 className="h-3 w-3 rounded-sm border border-fred-border"

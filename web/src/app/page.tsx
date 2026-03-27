@@ -57,6 +57,9 @@ export default async function OverviewPage({
       ...(kpiScopes.selected_month
         ? { year_month: kpiScopes.selected_month }
         : {}),
+      ...(kpiScopes.selected_run_id
+        ? { forecaster_run_id: kpiScopes.selected_run_id }
+        : {}),
       include_test: includeTest || undefined,
     });
   } catch (error) {
