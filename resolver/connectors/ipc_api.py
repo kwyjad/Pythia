@@ -120,8 +120,8 @@ def _iso2_to_iso3(code: str) -> str | None:
     return None
 
 
-def _build_session(api_key: str) -> requests.Session:
-    """Build a requests session with retry logic and API key header."""
+def _build_session() -> requests.Session:
+    """Build a requests session with retry logic."""
     session = requests.Session()
     retries = Retry(
         total=3,
@@ -131,8 +131,6 @@ def _build_session(api_key: str) -> requests.Session:
     adapter = HTTPAdapter(max_retries=retries)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
-    # IPC API uses an Authorization header for API key auth
-    session.headers["Authorization"] = f"Bearer {api_key}"
     return session
 
 
@@ -188,9 +186,10 @@ class IpcApiConnector:
             months_back,
         )
 
-        # Fetch from IPC API
-        session = _build_session(api_key)
+        # Fetch from IPC API — key passed as query parameter per Swagger spec
+        session = _build_session()
         params = {
+            "key": api_key,
             "format": "json",
             "start": start_date.strftime("%Y-%m"),
         }
