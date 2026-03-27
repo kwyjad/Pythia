@@ -54,6 +54,7 @@ COUNTRY_NAMES = {
 }
 
 _FEWSNET_COUNTRIES_FILE = Path(__file__).resolve().parent.parent / "resolver" / "data" / "fewsnet_countries.json"
+_IPC_COUNTRIES_FILE = Path(__file__).resolve().parent.parent / "resolver" / "data" / "ipc_countries.json"
 
 
 def _is_fewsnet_country(iso3: str) -> bool:
@@ -66,6 +67,23 @@ def _is_fewsnet_country(iso3: str) -> bool:
         return iso3.upper() in {c.upper() for c in countries}
     except Exception:
         return True  # fail-open
+
+
+def _is_ipc_country(iso3: str) -> bool:
+    """Check if a country is in the IPC API monitoring list."""
+    if not _IPC_COUNTRIES_FILE.exists():
+        return False  # fail-closed: don't generate questions without IPC data
+    try:
+        with open(_IPC_COUNTRIES_FILE) as f:
+            countries = json.load(f)
+        return iso3.upper() in {c.upper() for c in countries}
+    except Exception:
+        return False  # fail-closed
+
+
+def _is_food_security_country(iso3: str) -> bool:
+    """Check if a country is monitored by FEWS NET or IPC."""
+    return _is_fewsnet_country(iso3) or _is_ipc_country(iso3)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -195,18 +213,18 @@ def _build_binary_question_wording(
     )
 
 
-def _build_dr_fewsnet_question_wording(
+def _build_dr_phase3_question_wording(
     iso3: str,
     window_start_date: date,
     window_end_date: date,
 ) -> str:
-    """Build question wording for DR FEWS NET Phase 3+ PA questions."""
+    """Build question wording for DR Phase 3+ PA questions (FEWS NET or IPC)."""
     country = _country_label(iso3)
     return (
         f"How many people will be in IPC Phase 3+ (Crisis or worse) food "
         f"insecurity each month in {country} between "
         f"{window_start_date.isoformat()} and {window_end_date.isoformat()}, "
-        f"as reported by FEWS NET's Current Situation assessment?"
+        f"as reported by the latest IPC/FEWS NET Current Situation assessment?"
     )
 
 
@@ -433,16 +451,16 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
 
             for mt in metrics:
                 if th.hazard_code == "DR" and mt == "PA":
-                    if not _is_fewsnet_country(th.iso3):
+                    if not _is_food_security_country(th.iso3):
                         LOG.info(
-                            "Skipping DR/PA (PHASE3PLUS_IN_NEED) for %s: not a FEWS NET-monitored "
-                            "country. Binary DR/EVENT_OCCURRENCE still generated.",
+                            "Skipping DR/PA (PHASE3PLUS_IN_NEED) for %s: not monitored by "
+                            "FEWS NET or IPC. Binary DR/EVENT_OCCURRENCE still generated.",
                             th.iso3,
                         )
                         continue
-                    # Use FEWS NET metric for resolution
+                    # Use IPC Phase 3+ metric for resolution
                     actual_metric = "PHASE3PLUS_IN_NEED"
-                    wording = _build_dr_fewsnet_question_wording(
+                    wording = _build_dr_phase3_question_wording(
                         th.iso3, opening, closing
                     )
                 elif mt == "EVENT_OCCURRENCE":

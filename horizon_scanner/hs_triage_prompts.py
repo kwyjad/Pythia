@@ -193,8 +193,8 @@ def _format_new_data_sections(
 
     if fewsnet_food_security:
         try:
-            from pythia.fewsnet_food_security import format_fewsnet_for_prompt
-            t = format_fewsnet_for_prompt(fewsnet_food_security)
+            from pythia.food_security import format_food_security_for_prompt
+            t = format_food_security_for_prompt(fewsnet_food_security)
             if t:
                 sections.append(t)
         except Exception:

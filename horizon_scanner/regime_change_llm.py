@@ -597,10 +597,10 @@ def _run_rc_for_single_hazard(
     # FEWS NET food security (DR and ACE)
     if hazard_code in ("ACE", "DR"):
         try:
-            from pythia.fewsnet_food_security import load_fewsnet_food_security
-            fewsnet = load_fewsnet_food_security(iso3)
-            if fewsnet:
-                new_data_kwargs["fewsnet_food_security"] = fewsnet
+            from pythia.food_security import load_food_security
+            food_sec = load_food_security(iso3)
+            if food_sec:
+                new_data_kwargs["fewsnet_food_security"] = food_sec
         except Exception as exc:
             logger.debug("FEWS NET food security load failed for %s: %s", iso3, exc)
 

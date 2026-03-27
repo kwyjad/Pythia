@@ -19,7 +19,7 @@ from pythia.tools.compute_resolutions import (
     _try_emdat_pa,
     _try_acled_fatalities,
     _try_gdacs_binary,
-    _try_fewsnet_ipc,
+    _try_phase3plus,
     _data_freshness_cutoff,
     _calendar_cutoff,
     _purge_stale_resolutions,
@@ -169,7 +169,7 @@ class TestResolveValue:
         assert result is None
 
     def test_phase3plus_in_need_found(self, resolver_db):
-        """PHASE3PLUS_IN_NEED metric dispatches to _try_fewsnet_ipc."""
+        """PHASE3PLUS_IN_NEED metric dispatches to _try_phase3plus."""
         resolver_db.execute(
             """
             INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value, created_at)
@@ -443,11 +443,11 @@ class TestTryGdacsBinary:
 
 
 # ---------------------------------------------------------------------------
-# _try_fewsnet_ipc
+# _try_phase3plus
 # ---------------------------------------------------------------------------
 
 
-class TestTryFewsnetIpc:
+class TestTryPhase3Plus:
     def test_dr_found(self, resolver_db):
         resolver_db.execute(
             """
@@ -455,17 +455,17 @@ class TestTryFewsnetIpc:
             VALUES ('2025-06', 'ETH', 'DR', 'phase3plus_in_need', 17000000.0, '2025-07-01 00:00:00')
             """
         )
-        result = _try_fewsnet_ipc(resolver_db, "ETH", "DR", "2025-06")
+        result = _try_phase3plus(resolver_db, "ETH", "DR", "2025-06")
         assert result is not None
         assert result[0] == 17000000.0
 
     def test_non_dr_returns_none(self, resolver_db):
-        """FEWS NET IPC only applies to DR hazard."""
-        result = _try_fewsnet_ipc(resolver_db, "ETH", "FL", "2025-06")
+        """Phase 3+ only applies to DR hazard."""
+        result = _try_phase3plus(resolver_db, "ETH", "FL", "2025-06")
         assert result is None
 
     def test_no_match(self, resolver_db):
-        result = _try_fewsnet_ipc(resolver_db, "ZZZ", "DR", "2099-01")
+        result = _try_phase3plus(resolver_db, "ZZZ", "DR", "2099-01")
         assert result is None
 
 

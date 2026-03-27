@@ -16,7 +16,7 @@ from pythia.tools.compute_resolutions import (
     _data_freshness_cutoff,
     _resolve_value,
     _should_default_to_zero,
-    _try_fewsnet_ipc,
+    _try_phase3plus,
 )
 
 
@@ -59,13 +59,13 @@ def _insert_fact(
 
 
 def test_fewsnet_ipc_resolves_value():
-    """_try_fewsnet_ipc returns (value, created_at) when matching data exists."""
+    """_try_phase3plus returns (value, created_at) when matching data exists."""
     conn = duckdb.connect(":memory:")
     _create_facts_resolved(conn)
     _insert_fact(conn, iso3="ETH", ym="2026-01", value=12500000.0,
                  created_at="2026-02-15 10:00:00")
 
-    result = _try_fewsnet_ipc(conn, "ETH", "DR", "2026-01")
+    result = _try_phase3plus(conn, "ETH", "DR", "2026-01")
 
     assert result is not None
     value, source_ts = result
@@ -84,7 +84,7 @@ def test_fewsnet_ipc_returns_latest_by_created_at():
     _insert_fact(conn, iso3="SOM", ym="2026-01", value=3200000.0,
                  created_at="2026-02-10 12:00:00")
 
-    result = _try_fewsnet_ipc(conn, "SOM", "DR", "2026-01")
+    result = _try_phase3plus(conn, "SOM", "DR", "2026-01")
 
     assert result is not None
     value, _ = result
@@ -96,22 +96,22 @@ def test_fewsnet_ipc_returns_latest_by_created_at():
 
 
 def test_fewsnet_ipc_returns_none_when_no_data():
-    """_try_fewsnet_ipc returns None (NOT zero) when no matching row exists."""
+    """_try_phase3plus returns None (NOT zero) when no matching row exists."""
     conn = duckdb.connect(":memory:")
     _create_facts_resolved(conn)
     # Table exists but has no rows for this country/month.
 
-    result = _try_fewsnet_ipc(conn, "ETH", "DR", "2026-01")
+    result = _try_phase3plus(conn, "ETH", "DR", "2026-01")
 
     assert result is None
     conn.close()
 
 
 def test_fewsnet_ipc_returns_none_when_table_missing():
-    """_try_fewsnet_ipc returns None when facts_resolved table does not exist."""
+    """_try_phase3plus returns None when facts_resolved table does not exist."""
     conn = duckdb.connect(":memory:")
 
-    result = _try_fewsnet_ipc(conn, "ETH", "DR", "2026-01")
+    result = _try_phase3plus(conn, "ETH", "DR", "2026-01")
 
     assert result is None
     conn.close()
@@ -128,7 +128,7 @@ def test_fewsnet_ipc_ignores_projection_rows():
     _insert_fact(conn, iso3="ETH", metric="phase3plus_projection",
                  ym="2026-01", value=15000000.0)
 
-    result = _try_fewsnet_ipc(conn, "ETH", "DR", "2026-01")
+    result = _try_phase3plus(conn, "ETH", "DR", "2026-01")
 
     assert result is None
     conn.close()
@@ -145,7 +145,7 @@ def test_fewsnet_ipc_selects_in_need_over_projection():
                  ym="2026-01", value=15000000.0,
                  created_at="2026-02-10 10:00:00")
 
-    result = _try_fewsnet_ipc(conn, "ETH", "DR", "2026-01")
+    result = _try_phase3plus(conn, "ETH", "DR", "2026-01")
 
     assert result is not None
     value, _ = result
@@ -157,14 +157,14 @@ def test_fewsnet_ipc_selects_in_need_over_projection():
 
 
 def test_fewsnet_ipc_returns_none_for_non_dr_hazard():
-    """_try_fewsnet_ipc returns None for hazards other than DR."""
+    """_try_phase3plus returns None for hazards other than DR."""
     conn = duckdb.connect(":memory:")
     _create_facts_resolved(conn)
     _insert_fact(conn, iso3="ETH", hazard_code="DR", ym="2026-01",
                  value=12500000.0)
 
     for hazard in ("FL", "TC", "ACE", "ACO", "HW", "DI", "CU"):
-        result = _try_fewsnet_ipc(conn, "ETH", hazard, "2026-01")
+        result = _try_phase3plus(conn, "ETH", hazard, "2026-01")
         assert result is None, f"Expected None for hazard={hazard}, got {result}"
 
     conn.close()
@@ -248,7 +248,7 @@ def test_data_freshness_cutoff_phase3plus_ignores_projection():
 
 
 def test_resolve_value_dispatches_to_fewsnet():
-    """_resolve_value routes PHASE3PLUS_IN_NEED to _try_fewsnet_ipc."""
+    """_resolve_value routes PHASE3PLUS_IN_NEED to _try_phase3plus."""
     conn = duckdb.connect(":memory:")
     _create_facts_resolved(conn)
     _insert_fact(conn, iso3="ETH", hazard_code="DR",
