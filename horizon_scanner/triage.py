@@ -64,6 +64,7 @@ from horizon_scanner.hs_triage_grounding_prompts import (
     build_triage_grounding_query,
     get_recency_days,
 )
+from horizon_scanner.regime_change import compute_level, compute_score
 from horizon_scanner.seasonal_context import CLIMATE_HAZARDS, load_seasonal_forecasts
 from horizon_scanner.seasonal_filter import get_active_hazards
 from pythia.db.schema import connect as pythia_connect
@@ -113,6 +114,29 @@ _ACE_LOW_ACTIVITY_DEFAULTS: Dict[str, Any] = {
     "valid": True,
     "status": "acled_low_activity",
 }
+
+# Default triage values for hazards promoted by RC level >= 1.
+# These hazards go straight to Track 1 — triage LLM calls are unnecessary.
+_RC_PROMOTED_DEFAULTS: Dict[str, Any] = {
+    "triage_score": 0.0,
+    "tier": "quiet",
+    "drivers": [],
+    "regime_shifts": [],
+    "data_quality": {"status": "rc_promoted"},
+    "scenario_stub": "",
+    "confidence_note": "Triage skipped — promoted to Track 1 by RC assessment",
+    "valid": True,
+    "status": "rc_promoted",
+}
+
+
+def _rc_level_for_hazard(rc_hazards: Dict[str, Any], hz_code: str) -> int:
+    """Return the RC level for a hazard, or 0 if unknown."""
+    rc_hz = rc_hazards.get(hz_code, {})
+    likelihood = rc_hz.get("likelihood")
+    magnitude = rc_hz.get("magnitude")
+    score = compute_score(likelihood, magnitude)
+    return compute_level(likelihood, magnitude, score)
 
 
 # ---------------------------------------------------------------------------
@@ -868,17 +892,26 @@ def run_triage_for_country(
     if ace_low_activity:
         logger.info("ACE triage will be skipped for %s (ACLED low activity)", iso3_up)
 
+    # RC-promoted check: skip triage for hazards already assigned Track 1 by RC.
+    rc_promoted: Set[str] = set()
+    for hz in expected_hazards:
+        if _rc_level_for_hazard(rc_hazards, hz) >= 1:
+            rc_promoted.add(hz)
+    if rc_promoted:
+        logger.info("Triage skipped for %s RC-promoted hazards: %s", iso3_up, sorted(rc_promoted))
+
     logger.info(
-        "Running triage scoring for %s (%s): active=%s ace_low_activity=%s run_date=%s",
-        country_name, iso3_up, sorted(active), ace_low_activity, run_date,
+        "Running triage scoring for %s (%s): active=%s ace_low_activity=%s rc_promoted=%s run_date=%s",
+        country_name, iso3_up, sorted(active), ace_low_activity, sorted(rc_promoted), run_date,
     )
 
     # Phase 1: Parallel triage grounding calls for active hazards.
-    # Exclude ACE from grounding if ACLED shows low activity.
+    # Exclude ACE if ACLED shows low activity; exclude RC-promoted hazards.
     hazards_to_ground = [
         hz for hz in expected_hazards
         if hz in active and hz in _TRIAGE_HAZARDS
         and not (hz == "ACE" and ace_low_activity)
+        and hz not in rc_promoted
     ]
     grounding_results: Dict[str, dict[str, Any] | None] = {}
 
@@ -938,6 +971,10 @@ def run_triage_for_country(
             merged_hazards[hz_code] = dict(_DI_TRIAGE_DEFAULTS)
             continue
 
+        if hz_code in rc_promoted:
+            merged_hazards[hz_code] = dict(_RC_PROMOTED_DEFAULTS)
+            continue
+
         if hz_code == "ACE" and ace_low_activity:
             merged_hazards[hz_code] = dict(_ACE_LOW_ACTIVITY_DEFAULTS)
             logger.info("Triage skip for %s ACE (ACLED low activity)", iso3_up)
@@ -962,11 +999,12 @@ def run_triage_for_country(
         )
         merged_hazards[hz_code] = hazard_triage
 
-    # Determine overall status across active hazards.
+    # Determine overall status across active hazards (exclude RC-promoted).
     active_statuses = [
         merged_hazards[hz].get("status", "error")
         for hz in expected_hazards
         if hz in active and hz in _TRIAGE_HAZARDS
+        and hz not in rc_promoted
     ]
     if not active_statuses:
         status = "ok"

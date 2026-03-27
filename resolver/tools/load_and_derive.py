@@ -23,6 +23,15 @@ from resolver.db.duckdb_io import init_schema
 from resolver.transform.resolve_sources import resolve_sources
 
 LOGGER = logging.getLogger(__name__)
+
+# Map adapter source slugs to canonical publisher names that match the
+# Connector protocol conventions (uppercase) and the API source registry.
+_SOURCE_TO_PUBLISHER: dict[str, str] = {
+    "acled": "ACLED",
+    "idmc": "IDMC",
+    "ifrc_go": "IFRC",
+    "ifrc": "IFRC",
+}
 if not LOGGER.handlers:  # pragma: no cover - library default noise guard
     LOGGER.addHandler(logging.NullHandler())
 
@@ -214,6 +223,7 @@ def _load_into_db(
     resolved_frames: list[pd.DataFrame] = []
 
     if not stock.empty:
+        stock_publisher = stock["source"].map(_SOURCE_TO_PUBLISHER).fillna(stock["source"])
         stock_resolved = pd.DataFrame({
             "ym": stock["ym"],
             "iso3": stock["iso3"],
@@ -227,7 +237,7 @@ def _load_into_db(
             "as_of": stock["as_of_ts"].dt.date.astype(str),
             "as_of_date": stock["as_of_date"],
             "publication_date": stock["as_of_date"],
-            "publisher": stock["source"],
+            "publisher": stock_publisher,
             "source_id": stock["source"],
             "doc_title": stock["source"],
             "event_id": stock["event_id"],
@@ -238,6 +248,7 @@ def _load_into_db(
         resolved_frames.append(stock_resolved)
 
     if not new.empty:
+        new_publisher = new["source"].map(_SOURCE_TO_PUBLISHER).fillna(new["source"])
         new_resolved = pd.DataFrame({
             "ym": new["ym"],
             "iso3": new["iso3"],
@@ -251,7 +262,7 @@ def _load_into_db(
             "as_of": new["as_of_ts"].dt.date.astype(str),
             "as_of_date": new["as_of_date"],
             "publication_date": new["as_of_date"],
-            "publisher": new["source"],
+            "publisher": new_publisher,
             "source_id": new["source"],
             "doc_title": new["source"],
             "event_id": new["event_id"],

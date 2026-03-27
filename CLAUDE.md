@@ -81,7 +81,7 @@ Pythia/
 - `horizon_scanner/horizon_scanner.py` — HS main entrypoint (~1700 LOC)
 - `horizon_scanner/regime_change.py` — RC scoring (score = likelihood x magnitude, 4 levels)
 - `horizon_scanner/regime_change_llm.py` — Per-hazard RC LLM pipeline (2-pass: both Gemini Flash by default)
-- `horizon_scanner/triage.py` — Per-hazard triage LLM pipeline (2-pass: Gemini Pro + Gemini Flash, ACLED low-activity filter)
+- `horizon_scanner/triage.py` — Per-hazard triage LLM pipeline (2-pass: Gemini Pro + Gemini Flash, ACLED low-activity filter, RC-promoted skip for L1+ hazards)
 - `horizon_scanner/rc_prompts.py` — Per-hazard RC prompt builders (ACE, DR, FL, HW, TC with calibration anchors)
 - `horizon_scanner/hs_triage_prompts.py` — Per-hazard triage prompt builders (scoring anchors, RC context injection)
 - `horizon_scanner/rc_grounding_prompts.py` — RC-specific grounding queries (TRIGGER/DAMPENER/BASELINE signals)
@@ -243,6 +243,7 @@ RC detects departures from historical base rates (distinct from triage_score whi
 - `score = likelihood x magnitude`, clamped [0, 1]
 - **Levels** (env-overridable, likelihood-only thresholds): L0 (likelihood < 0.15), L1 (likelihood >= 0.15), L2 (likelihood >= 0.35), L3 (likelihood >= 0.55). Env vars: `PYTHIA_HS_RC_LEVEL1_LIKELIHOOD`, `PYTHIA_HS_RC_LEVEL2_LIKELIHOOD`, `PYTHIA_HS_RC_LEVEL3_LIKELIHOOD`.
 - **Track assignment**: RC level > 0 → Track 1 (full ensemble), RC level 0 + priority tier → Track 2 (single Gemini Flash model), otherwise no SPD.
+- **Triage skip for RC L1+**: Hazards with RC level ≥ 1 are automatically promoted to Track 1, so triage LLM calls are skipped (saving 3 LLM calls per hazard: 1 grounding + 2 triage passes). These hazards receive synthetic `_RC_PROMOTED_DEFAULTS` (triage_score=0, status="rc_promoted"). Downstream `_write_hs_triage()` independently assigns track=1 from RC level, so triage output has no effect. Four triage skip patterns exist: DI silenced, ACE low-activity, seasonal skip, and RC-promoted.
 - L1+ triggers hazard tail pack generation and adversarial evidence checks. L2+ additionally forces `need_full_spd = TRUE`.
 - **CRITICAL sync constraint**: The RC level threshold in `_select_tail_pack_hazards` (horizon_scanner.py) and the re-check threshold inside `adversarial_check.py` must match. If they drift, candidates will be passed to adversarial checks but silently rejected.
 - Tail packs are disabled by default (`HS_TAIL_PACKS_ENABLED` defaults to `"0"`). Enable via `PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED=1`.
@@ -473,6 +474,7 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 - **Triage grounding jargon queries returning 0 sources** (fixed): `_run_triage_grounding_for_hazard` in `triage.py` used `query_label = f"{country} ({iso3}) {hazard_code} triage grounding"` as the search query — internal jargon that no web page contains. Replaced with natural-language keyword queries via `build_triage_grounding_query()` in `hs_triage_grounding_prompts.py` (e.g. "Iraq (IRQ) armed conflict violence displacement humanitarian situation 2026"). RC grounding queries were already using natural language and were not changed.
 - **Adversarial check queries too verbose** (fixed): LLM-generated trigger-specific adversarial queries could be 15+ words, which search engines handle poorly. Added 10-word truncation post-processing in `_build_adversarial_queries()` in `adversarial_check.py`.
 - **Anthropic SPD max_tokens not wired through** (fixed): `_ANTHROPIC_SPD_MAX_OUTPUT` (from `PYTHIA_ANTHROPIC_SPD_MAX_TOKENS` env var) was defined in `providers.py` but never used — all Anthropic calls used `_ANTHROPIC_MAX_OUTPUT` regardless of purpose. Fixed by adding `purpose` parameter to `call_anthropic()` and `_call_provider_sync()`, so SPD/binary calls (`purpose in ("spd_v2", "binary_v2")`) use the higher limit (default 16384).
+- **Resolver page IFRC/IDMC/ACLED showing "No data"** (fixed): Phase 1 of the backfill workflow uses `load_and_derive.py`, which set `publisher` from the adapter's `canonical_source` slug — writing lowercase values `"acled"`, `"idmc"`, `"ifrc_go"`. The API source registry filters used case-sensitive exact matches (`publisher = 'ACLED'`, `publisher = 'IDMC'`, `publisher = 'IFRC'`) which didn't match. Fixed in two places: (1) `load_and_derive.py` now maps source slugs to proper uppercase publisher names via `_SOURCE_TO_PUBLISHER` (`acled→ACLED`, `idmc→IDMC`, `ifrc_go→IFRC`); (2) API source registry filters now use `LOWER(publisher) IN (...)` for case-insensitive matching that handles both old and new data. IFRC filter also matches `ifrc_go` and `ifrc_montandon` variants.
 
 ## Canonical DB artifact discovery
 

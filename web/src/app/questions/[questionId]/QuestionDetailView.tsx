@@ -202,6 +202,123 @@ type PromptStage = {
   dedup?: boolean;
 };
 
+// ---------------------------------------------------------------------------
+// Reasoning Trace renderer
+// ---------------------------------------------------------------------------
+type ReasoningTrace = {
+  prior?: {
+    spd?: number[];
+    rationale?: string;
+  };
+  updates?: {
+    signal?: string;
+    direction?: string;
+    magnitude?: string;
+    months_affected?: string;
+    delta?: number[];
+    post_update_spd?: number[];
+  }[];
+  point_estimate?: string;
+  point_estimate_bucket?: number;
+  rc_assessment?: string;
+};
+
+const fmtProbs = (arr: number[] | undefined): string => {
+  if (!arr || !Array.isArray(arr)) return "—";
+  return "[" + arr.map((v) => (typeof v === "number" ? v.toFixed(3) : String(v))).join(", ") + "]";
+};
+
+const ReasoningTraceBlock = ({ trace }: { trace: ReasoningTrace }) => {
+  const prior = trace.prior;
+  const updates = trace.updates ?? [];
+  const pointEstimate = trace.point_estimate;
+  const rcAssessment = trace.rc_assessment;
+
+  return (
+    <div className="space-y-3 text-sm text-fred-text">
+      {/* Prior */}
+      {prior ? (
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">Prior</div>
+          <div className="mt-1 rounded border border-fred-secondary bg-fred-surface p-2 space-y-1">
+            <div><span className="text-fred-muted">SPD:</span> {fmtProbs(prior.spd)}</div>
+            {prior.rationale ? (
+              <div><span className="text-fred-muted">Rationale:</span> {prior.rationale}</div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Updates */}
+      {updates.length > 0 ? (
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">
+            Evidence Updates ({updates.length})
+          </div>
+          <div className="mt-1 space-y-2">
+            {updates.map((update, i) => (
+              <div key={`update-${i}`} className="rounded border border-fred-secondary bg-fred-surface p-2 space-y-1">
+                <div className="flex flex-wrap gap-2">
+                  <span className="font-semibold">{update.signal ?? `Signal ${i + 1}`}</span>
+                  {update.direction ? (
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${
+                      update.direction === "UP"
+                        ? "bg-red-900/30 text-red-400"
+                        : "bg-green-900/30 text-green-400"
+                    }`}>
+                      {update.direction}
+                    </span>
+                  ) : null}
+                  {update.magnitude ? (
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-fred-secondary text-fred-muted">
+                      {update.magnitude}
+                    </span>
+                  ) : null}
+                  {update.months_affected ? (
+                    <span className="text-xs text-fred-muted">months: {update.months_affected}</span>
+                  ) : null}
+                </div>
+                {update.delta ? (
+                  <div><span className="text-fred-muted">Delta:</span> {fmtProbs(update.delta)}</div>
+                ) : null}
+                {update.post_update_spd ? (
+                  <div><span className="text-fred-muted">Post-update SPD:</span> {fmtProbs(update.post_update_spd)}</div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Point estimate & RC assessment */}
+      {(pointEstimate || rcAssessment) ? (
+        <div className="flex flex-wrap gap-4">
+          {pointEstimate ? (
+            <div>
+              <span className="text-fred-muted">Point estimate:</span>{" "}
+              <span className="font-semibold">{pointEstimate}</span>
+            </div>
+          ) : null}
+          {rcAssessment ? (
+            <div>
+              <span className="text-fred-muted">RC assessment:</span>{" "}
+              <span className={`font-semibold ${
+                rcAssessment === "accepted"
+                  ? "text-red-400"
+                  : rcAssessment === "rebutted"
+                  ? "text-green-400"
+                  : "text-yellow-400"
+              }`}>
+                {rcAssessment}
+              </span>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
 const PROMPT_STAGES: PromptStage[] = [
   { key: "regime_change", label: "Regime Change", dedup: true },
   { key: "rc_grounding", label: "RC Grounding" },
@@ -223,8 +340,10 @@ const renderPromptBlock = (label: string, text: string) => (
 
 const PromptViewerSection = ({
   groupedLlmCalls,
+  tracesByModel,
 }: {
   groupedLlmCalls: Record<string, ModelRow[]>;
+  tracesByModel: Map<string, ReasoningTrace>;
 }) => (
   <section className="space-y-3">
     <h2 className="text-lg font-semibold text-fred-text">Model Prompts & Responses</h2>
@@ -239,6 +358,7 @@ const PromptViewerSection = ({
       }
       const firstPrompt = asString(rows[0]?.prompt_text) ?? "";
       const shouldDedup = stage.dedup && rows.length > 1;
+      const isForecast = stage.key === "forecast";
 
       return (
         <CollapsiblePanel key={stage.key} title={stage.label}>
@@ -255,6 +375,10 @@ const PromptViewerSection = ({
               const timestamp = asString(row.timestamp) ?? asString(row.created_at) ?? "";
               const promptText = asString(row.prompt_text) ?? "";
               const responseText = asString(row.response_text) ?? "";
+
+              // For forecast stage, look up the reasoning trace by model name
+              const trace = isForecast ? tracesByModel.get(modelName) : undefined;
+
               return (
                 <div key={`${stage.key}-${index}`} className="space-y-2 rounded border border-fred-secondary bg-fred-surface p-3">
                   <div className="flex flex-wrap items-center gap-2 text-xs text-fred-muted">
@@ -263,16 +387,30 @@ const PromptViewerSection = ({
                   </div>
                   {/* Show prompt inline only if NOT deduplicated */}
                   {!shouldDedup && promptText ? renderPromptBlock("Prompt", promptText) : null}
-                  {/* Show response unless promptOnly */}
-                  {!stage.promptOnly && responseText
-                    ? renderPromptBlock(
-                        shouldDedup ? `Response ${index + 1}` : "Response",
-                        responseText
-                      )
-                    : null}
-                  {!promptText && !responseText ? (
-                    <p className="text-xs text-fred-muted">No transcript data available for this call.</p>
-                  ) : null}
+                  {/* For forecast stage, show reasoning trace instead of raw response */}
+                  {isForecast ? (
+                    trace ? (
+                      <div className="mt-2">
+                        <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted mb-2">Reasoning Trace</div>
+                        <ReasoningTraceBlock trace={trace} />
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs text-fred-muted">No reasoning trace available.</p>
+                    )
+                  ) : (
+                    <>
+                      {/* Show response unless promptOnly */}
+                      {!stage.promptOnly && responseText
+                        ? renderPromptBlock(
+                            shouldDedup ? `Response ${index + 1}` : "Response",
+                            responseText
+                          )
+                        : null}
+                      {!promptText && !responseText ? (
+                        <p className="text-xs text-fred-muted">No transcript data available for this call.</p>
+                      ) : null}
+                    </>
+                  )}
                 </div>
               );
             })}
@@ -412,6 +550,28 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
     return groups;
   }, [llmRows]);
 
+  // Build model_name → reasoning trace lookup from rawSpd rows.
+  // Each rawSpd row has model_name + reasoning_trace_json (TEXT).
+  // Multiple rows per model (one per month×bucket), so deduplicate by model.
+  const tracesByModel = useMemo(() => {
+    const map = new Map<string, ReasoningTrace>();
+    rawSpd.forEach((row) => {
+      const modelName = asString(row.model_name);
+      if (!modelName || map.has(modelName)) return;
+      const traceRaw = row.reasoning_trace_json;
+      if (!traceRaw) return;
+      try {
+        const parsed = typeof traceRaw === "string" ? JSON.parse(traceRaw) : traceRaw;
+        if (parsed && typeof parsed === "object") {
+          map.set(modelName, parsed as ReasoningTrace);
+        }
+      } catch {
+        // Ignore malformed JSON
+      }
+    });
+    return map;
+  }, [rawSpd]);
+
   const brierScores = useMemo(() => {
     return scores.filter((row) => {
       const scoreType = row.score_type as string | undefined;
@@ -463,6 +623,21 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
 
       <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4 text-fred-text">
         <h2 className="text-lg font-semibold">Summary</h2>
+        {question.track === 1 ? (
+          <p className="mt-2 text-sm text-fred-muted leading-relaxed">
+            This is a <span className="font-semibold text-fred-text">Track 1</span> forecast
+            because it has an elevated Regime Change (RC) score (perceived high probability of
+            impacts exceeding base rates). Track 1 forecasts are made by the whole Fred forecast
+            model ensemble, and receive scenarios.
+          </p>
+        ) : question.track === 2 ? (
+          <p className="mt-2 text-sm text-fred-muted leading-relaxed">
+            This is a <span className="font-semibold text-fred-text">Track 2</span> forecast
+            because it has a low Regime Change (RC) score (perceived low probability of impacts
+            exceeding base rates). Track 2 forecasts are made by a single AI model and do not
+            receive scenarios.
+          </p>
+        ) : null}
         <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
           {[
             { label: "Status", value: status },
@@ -707,7 +882,7 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
         </div>
       </section>
 
-      <PromptViewerSection groupedLlmCalls={groupedLlmCalls} />
+      <PromptViewerSection groupedLlmCalls={groupedLlmCalls} tracesByModel={tracesByModel} />
     </div>
   );
 };

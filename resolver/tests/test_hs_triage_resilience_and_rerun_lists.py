@@ -127,7 +127,7 @@ def test_hs_triage_json_repair(monkeypatch, tmp_path):
             if "regime_change" in prompt_key:
                 # Flat RC repair result
                 return _json.dumps({
-                    "likelihood": 0.15, "magnitude": 0.10,
+                    "likelihood": 0.10, "magnitude": 0.10,
                     "direction": "up", "window": "month_1-2",
                     "rationale_bullets": ["repair"], "trigger_signals": [],
                     "confidence_note": "repaired",
