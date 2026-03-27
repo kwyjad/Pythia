@@ -3199,16 +3199,11 @@ def diagnostics_kpi_scopes(
                 "scope_forecasts_failed",
             )
             if has_iso3:
-                # countries_with_forecasts counts across ALL metrics, not just
-                # the selected metric scope, so degraded-triage countries that
-                # have forecasts for any metric are included.
-                forecast_any_metric_sql = (
-                    f"FROM questions q JOIN ({forecast_ids_sql}) f "
-                    f"ON f.question_id = q.question_id WHERE 1=1{status_sql}"
-                )
+                # countries_with_forecasts respects the metric scope so the
+                # count is consistent with the forecasts count shown alongside.
                 scope["countries_with_forecasts"] = _count(
-                    f"SELECT COUNT(DISTINCT q.iso3) {forecast_any_metric_sql}",
-                    forecast_params + status_params,
+                    f"SELECT COUNT(DISTINCT q.iso3) {forecast_base_sql}",
+                    forecast_params + metric_params + status_params,
                     "scope_countries_with_forecasts_failed",
                 )
             else:
@@ -3250,13 +3245,9 @@ def diagnostics_kpi_scopes(
                 "scope_forecasts_failed",
             )
             if has_iso3:
-                forecast_any_metric_sql = (
-                    f"FROM questions q JOIN ({forecast_ids_sql}) f "
-                    f"ON f.question_id = q.question_id WHERE 1=1{status_sql}"
-                )
                 scope["countries_with_forecasts"] = _count(
-                    f"SELECT COUNT(DISTINCT q.iso3) {forecast_any_metric_sql}",
-                    forecast_params + status_params,
+                    f"SELECT COUNT(DISTINCT q.iso3) {forecast_base_sql}",
+                    forecast_params + metric_params + status_params,
                     "scope_countries_with_forecasts_failed",
                 )
             else:
@@ -3332,15 +3323,9 @@ def diagnostics_kpi_scopes(
                     "scope_forecasts_failed",
                 )
                 if has_iso3:
-                    # Count across all metrics so degraded-triage countries
-                    # with forecasts for any metric are included.
-                    forecast_any_metric_join = (
-                        "FROM questions q JOIN forecasts_ensemble f "
-                        f"ON f.question_id = q.question_id WHERE 1=1{status_sql}"
-                    )
                     scope["countries_with_forecasts"] = _count(
-                        f"SELECT COUNT(DISTINCT q.iso3) {forecast_any_metric_join}",
-                        status_params,
+                        f"SELECT COUNT(DISTINCT q.iso3) {forecast_join}",
+                        forecast_base_params,
                         "scope_countries_with_forecasts_failed",
                     )
                 else:
@@ -3369,15 +3354,9 @@ def diagnostics_kpi_scopes(
                     "scope_forecasts_failed",
                 )
                 if has_iso3:
-                    # Count across all metrics.
-                    forecast_any_metric_join = (
-                        "FROM questions q JOIN llm_calls l ON l.question_id = q.question_id "
-                        f"WHERE l.phase IN ({placeholders}){status_sql}"
-                    )
-                    params_any = list(forecast_source_phase) + status_params
                     scope["countries_with_forecasts"] = _count(
-                        f"SELECT COUNT(DISTINCT q.iso3) {forecast_any_metric_join}",
-                        params_any,
+                        f"SELECT COUNT(DISTINCT q.iso3) {forecast_join}",
+                        params,
                         "scope_countries_with_forecasts_failed",
                     )
                 else:

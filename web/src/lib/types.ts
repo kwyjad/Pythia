@@ -75,6 +75,7 @@ export type CountriesRow = {
   last_forecasted?: string | null;
   highest_rc_level?: number | null;
   highest_rc_score?: number | null;
+  in_country_list?: boolean;
 };
 
 export type CountriesResponse = {
