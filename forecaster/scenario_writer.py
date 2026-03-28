@@ -172,14 +172,15 @@ async def _run_scenario_for_question(
 
     triage = load_hs_triage_entry(hs_run_id, iso3, hz)
     tier = (triage.get("tier") or "").lower() if triage else ""
-    if tier != "priority":
+    if track != 1 and tier != "priority":
         LOG.info(
-            "Skipping scenario for %s (%s/%s/%s) because triage tier=%r is not priority",
+            "Skipping scenario for %s (%s/%s/%s) because triage tier=%r is not priority and track=%s is not 1",
             qid,
             iso3,
             hz,
             metric,
             tier,
+            track,
         )
         return
 
