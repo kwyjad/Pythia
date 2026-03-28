@@ -155,8 +155,13 @@ def _load_backend_module(module_name: str):
         return None, str(exc)
 
 
+_HS_PASSTHROUGH_PURPOSES = frozenset({"hs_adversarial_check"})
+
+
 def _is_hs_country_pack(purpose: str) -> bool:
     purpose_norm = (purpose or "").lower()
+    if purpose_norm in _HS_PASSTHROUGH_PURPOSES:
+        return False
     return purpose_norm == "hs_country_pack" or purpose_norm.startswith("hs_")
 
 
