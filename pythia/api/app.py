@@ -8,6 +8,7 @@ import logging
 import math
 import re
 import threading
+import time
 from datetime import datetime
 from importlib.util import find_spec
 from io import BytesIO, StringIO
@@ -26,6 +27,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from pythia.api.auth import require_admin_token
 from pythia.api.db_sync import (
     DbSyncError,
+    db_was_refreshed,
     get_cached_latest_hs,
     get_cached_manifest,
     maybe_sync_latest_db,
@@ -245,6 +247,18 @@ def _concat_cost_tables(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 _READ_CON: Optional[duckdb.DuckDBPyConnection] = None
 _READ_CON_LOCK = threading.Lock()
+_LAST_SYNC_CHECK: Optional[float] = None
+_SYNC_CHECK_INTERVAL_S = 60  # how often to poll for DB refresh
+
+
+def _open_duckdb_connection() -> duckdb.DuckDBPyConnection:
+    """Open a fresh DuckDB connection to the configured DB path."""
+    db_url = load_cfg()["app"]["db_url"].replace("duckdb:///", "")
+    con = duckdb.connect(db_url, read_only=False)
+    con.execute(f"SET memory_limit='{_DUCKDB_MEMORY_LIMIT}'")
+    con.execute(f"SET threads={_DUCKDB_THREADS}")
+    logger.info("DuckDB connection opened (memory_limit=%s threads=%s)", _DUCKDB_MEMORY_LIMIT, _DUCKDB_THREADS)
+    return con
 
 
 def _ensure_read_connection() -> duckdb.DuckDBPyConnection:
@@ -273,14 +287,51 @@ def _ensure_read_connection() -> duckdb.DuckDBPyConnection:
             logger.warning("DB sync failed: %s", exc)
         if not db_path.exists():
             raise HTTPException(status_code=503, detail="DB not available yet")
-        _READ_CON = duckdb.connect(db_url, read_only=False)
-        _READ_CON.execute(f"SET memory_limit='{_DUCKDB_MEMORY_LIMIT}'")
-        _READ_CON.execute(f"SET threads={_DUCKDB_THREADS}")
-        logger.info("DuckDB memory_limit=%s threads=%s", _DUCKDB_MEMORY_LIMIT, _DUCKDB_THREADS)
+        _READ_CON = _open_duckdb_connection()
         return _READ_CON
 
 
+def _maybe_refresh_db() -> None:
+    """Periodically check if the DB file was replaced and reconnect if so.
+
+    ``maybe_sync_latest_db()`` downloads a new DuckDB file via atomic
+    ``os.replace()``, but on Unix the existing open file descriptor still
+    reads from the old inode.  This function detects that a new file was
+    downloaded and reopens the connection so queries see the latest data.
+    """
+    global _READ_CON, _LAST_SYNC_CHECK  # noqa: PLW0603
+    if _READ_CON is None:
+        return
+
+    now = time.monotonic()
+    if _LAST_SYNC_CHECK is not None and now - _LAST_SYNC_CHECK < _SYNC_CHECK_INTERVAL_S:
+        return
+    _LAST_SYNC_CHECK = now
+
+    try:
+        maybe_sync_latest_db()
+    except DbSyncError as exc:
+        logger.debug("Periodic DB sync check failed: %s", exc)
+        return
+
+    if db_was_refreshed():
+        with _READ_CON_LOCK:
+            old_con = _READ_CON
+            try:
+                _READ_CON = _open_duckdb_connection()
+            except Exception:
+                logger.warning("Failed to reopen DuckDB after refresh; keeping old connection")
+                return
+            try:
+                if old_con is not None:
+                    old_con.close()
+            except Exception:
+                pass
+            logger.info("DuckDB connection reopened after DB refresh")
+
+
 def _con():
+    _maybe_refresh_db()
     return _ensure_read_connection().cursor()
 
 

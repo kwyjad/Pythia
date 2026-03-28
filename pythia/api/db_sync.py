@@ -26,6 +26,7 @@ _LAST_MANIFEST: Optional[Dict[str, Any]] = None
 _LAST_SYNC_AT: Optional[float] = None
 _LATEST_RUNS: Optional[Dict[str, Any]] = None
 _SYNC_LOCK = threading.Lock()
+_DB_REFRESHED = threading.Event()
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,18 @@ def download_db_atomic(dest_path: Path) -> None:
         raise DbSyncError(f"Failed to download DuckDB asset: {exc}") from exc
 
     os.replace(tmp_path, dest_path)
+
+
+def db_was_refreshed() -> bool:
+    """Check and clear the DB-refreshed flag.
+
+    Returns ``True`` exactly once after ``maybe_sync_latest_db()``
+    downloaded a new DB file, signalling callers to reopen connections.
+    """
+    if _DB_REFRESHED.is_set():
+        _DB_REFRESHED.clear()
+        return True
+    return False
 
 
 def get_cached_manifest() -> Optional[Dict[str, Any]]:
@@ -299,6 +312,8 @@ def maybe_sync_latest_db() -> Optional[Dict[str, Any]]:
 
         if should_download:
             download_db_atomic(dest_path)
+            _DB_REFRESHED.set()
+            logger.info("DB refreshed from release (key=%s)", manifest_key)
 
         if should_download or _LATEST_RUNS is None:
             _refresh_latest_runs(dest_path)
