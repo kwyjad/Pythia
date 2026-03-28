@@ -15,6 +15,7 @@ from pythia.adversarial_check import (
     _aggregate_evidence_text,
     _aggregate_sources,
 )
+from pythia.web_research.web_research import _is_hs_country_pack, _build_hs_retry_query
 
 
 # ---------------------------------------------------------------------------
@@ -371,3 +372,64 @@ class TestAggregateHelpers:
         urls = {s["url"] for s in result}
         assert "https://a.com" in urls
         assert "https://b.com" in urls
+
+
+# ---------------------------------------------------------------------------
+# Tests for adversarial query wrapping exclusion
+# ---------------------------------------------------------------------------
+
+
+class TestAdversarialQueryNotWrapped:
+    """Verify adversarial check queries bypass the HS country pack wrapper.
+
+    fetch_evidence_pack adds a 'country context ... latest humanitarian
+    situation' wrapper to queries from HS purposes.  Adversarial queries
+    are already well-formed search queries and must not be wrapped.
+    """
+
+    def test_adversarial_purpose_not_hs_country_pack(self):
+        """hs_adversarial_check purpose should NOT be treated as an HS country pack."""
+        assert _is_hs_country_pack("hs_adversarial_check") is False
+
+    def test_hs_country_pack_still_detected(self):
+        """Regular HS purposes should still be treated as HS country packs."""
+        assert _is_hs_country_pack("hs_country_pack") is True
+        assert _is_hs_country_pack("hs_triage") is True
+
+    def test_adversarial_query_not_contains_wrapper_text(self, monkeypatch):
+        """End-to-end: adversarial queries passed to fetch_evidence_pack should
+        NOT be modified by the HS retry wrapper."""
+        captured_queries: list[str] = []
+
+        def fake_fetch(query, purpose, **kwargs):
+            captured_queries.append(query)
+            return {"sources": [{"title": "T", "url": "https://x.com", "date": ""}],
+                    "recent_signals": [], "structural_context": "", "grounded": True}
+
+        monkeypatch.setattr("pythia.adversarial_check.fetch_evidence_pack", fake_fetch)
+
+        run_adversarial_check(
+            iso3="SOM",
+            country_name="Somalia",
+            hazard_code="ACE",
+            rc_result=_RC_ACE_UP,
+            run_id="test-run-wrap",
+        )
+
+        # All captured queries should be the raw adversarial queries —
+        # none should contain the wrapper phrases.
+        for q in captured_queries:
+            assert "country context" not in q.lower(), (
+                f"Adversarial query was wrapped: {q!r}"
+            )
+            assert "latest humanitarian situation" not in q.lower(), (
+                f"Adversarial query was wrapped: {q!r}"
+            )
+
+    def test_hs_retry_query_not_applied_to_adversarial(self):
+        """The _build_hs_retry_query wrapper should not apply to adversarial queries."""
+        sample_query = "Somalia peace talks ceasefire diplomatic resolution 2026"
+        wrapped = _build_hs_retry_query(sample_query)
+        # The wrapper adds these phrases — adversarial queries must avoid this path
+        assert "country context" in wrapped.lower()
+        assert "latest humanitarian situation" in wrapped.lower()
