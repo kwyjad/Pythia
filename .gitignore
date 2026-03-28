@@ -176,3 +176,4 @@ data/resolver.duckdb.local.dev
 data/resolver.duckdb.local.dev
 tools/make_zip_from_list.py
 tools/make_zip_from_list.py
+/.claude/worktrees
