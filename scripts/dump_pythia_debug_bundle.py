@@ -548,7 +548,7 @@ def _load_spd_llm_model_ids(con: duckdb.DuckDBPyConnection, run_id: str) -> list
             SELECT DISTINCT model_id
             FROM llm_calls
             WHERE run_id = ?
-              AND call_type = 'spd_v2'
+              AND call_type IN ('spd_v2', 'binary_v2')
               AND model_id IS NOT NULL
               AND model_id <> ''
             ORDER BY model_id
@@ -648,7 +648,7 @@ def _compute_question_run_metrics(
             base_rows[qid]["finished_at_utc"] = row.get("finished_at_utc")
             base_rows[qid]["wall_ms"] = row.get("wall_ms")
 
-    phase_types = ["research_v2", "research_web_research", "spd_v2", "scenario_v2"]
+    phase_types = ["research_v2", "research_web_research", "spd_v2", "binary_v2", "scenario_v2"]
     phase_max_by_qid: dict[str, dict[str, int]] = {}
     if "elapsed_ms" in llm_columns and "call_type" in llm_columns:
         phase_in_clause, phase_params = _build_in_clause(phase_types)
@@ -735,7 +735,7 @@ def _compute_question_run_metrics(
             FROM llm_calls
             WHERE run_id = ?
               AND question_id IN {in_clause}
-              AND call_type = 'spd_v2'
+              AND call_type IN ('spd_v2', 'binary_v2')
               AND model_id IS NOT NULL
               AND model_id <> ''
               {error_filter}
