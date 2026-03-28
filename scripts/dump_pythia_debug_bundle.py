@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import statistics as _statistics
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -424,6 +425,83 @@ def _load_grounding_subsystem_stats(
         counts.values(),
         key=lambda r: (str(r.get("provider") or ""), str(r.get("model_id") or "")),
     )
+
+
+def _compute_source_stats(counts: list[int]) -> dict[str, float]:
+    """Return min/max/avg/median from a list of per-call source counts."""
+    if not counts:
+        return {"min": 0, "max": 0, "avg": 0.0, "median": 0}
+    return {
+        "min": min(counts),
+        "max": max(counts),
+        "avg": sum(counts) / len(counts),
+        "median": _statistics.median(counts),
+    }
+
+
+def _load_grounding_call_stats(
+    con: duckdb.DuckDBPyConnection,
+    phase: str,
+    hazard_code_filter: str | None,
+    forecaster_run_id: str | None,
+    hs_run_id: str | None,
+) -> dict[str, Any]:
+    """Load per-call grounding stats.  Returns {n_calls, n_errors, source_counts}.
+
+    *phase* is the ``phase`` column value (``'hs_triage'`` or ``'hs_web_research'``).
+    *hazard_code_filter* is an optional SQL LIKE pattern for ``hazard_code``.
+    """
+    predicate_parts: list[str] = [f"phase = ?"]
+    params: list[Any] = [phase]
+
+    if hazard_code_filter:
+        predicate_parts.append("UPPER(hazard_code) LIKE ?")
+        params.append(hazard_code_filter)
+        # Exclude triage grounding when matching generic 'GROUNDING_%'
+        if hazard_code_filter == "GROUNDING_%":
+            predicate_parts.append("UPPER(hazard_code) NOT LIKE 'TRIAGE_GROUNDING_%'")
+
+    scope_parts: list[str] = []
+    if forecaster_run_id:
+        scope_parts.append("run_id = ?")
+        params.append(forecaster_run_id)
+    if hs_run_id:
+        scope_parts.append("hs_run_id = ?")
+        params.append(hs_run_id)
+    if scope_parts:
+        predicate_parts.append(f"({' OR '.join(scope_parts)})")
+    predicate = " AND ".join(predicate_parts)
+
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            f"SELECT response_text, error_text FROM llm_calls WHERE {predicate}",
+            params,
+        )
+    except Exception:
+        return {"n_calls": 0, "n_errors": 0, "source_counts": []}
+
+    n_calls = 0
+    n_errors = 0
+    source_counts: list[int] = []
+
+    for row in rows:
+        n_calls += 1
+        error_text = (row.get("error_text") or "").strip()
+        response_text = row.get("response_text") or "{}"
+        try:
+            payload = json.loads(response_text)
+        except Exception:
+            payload = {}
+
+        sources = payload.get("sources") if isinstance(payload, dict) else None
+        n_sources = len(sources) if isinstance(sources, list) else 0
+        source_counts.append(n_sources)
+
+        if error_text or n_sources == 0:
+            n_errors += 1
+
+    return {"n_calls": n_calls, "n_errors": n_errors, "source_counts": source_counts}
 
 
 def _extract_urls(sources: Any, limit: int = 5) -> list[str]:
@@ -2480,6 +2558,13 @@ class BundleData:
     crisiswatch_table_exists: bool = False
     crisiswatch_load_error: str | None = None
 
+    # Run summary stats (for executive summary bottom sections)
+    rc_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
+    triage_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
+    adversarial_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
+    hs_triage_detail_rows: list[dict[str, Any]] = field(default_factory=list)
+    structured_data_coverage: dict[str, tuple[int, int]] = field(default_factory=dict)
+
 
 def _load_bundle_data(
     con: duckdb.DuckDBPyConnection,
@@ -2580,6 +2665,35 @@ def _load_bundle_data(
     data.self_search_call_total = sum(
         int(row.get("n_calls") or 0) for row in (data.self_search_rows or [])
     )
+
+    # Per-call grounding stats (for executive summary run sections)
+    data.rc_grounding_call_stats = _load_grounding_call_stats(
+        con, "hs_triage", "GROUNDING_%", forecaster_run_id, manifest_hs_run_id
+    )
+    data.triage_grounding_call_stats = _load_grounding_call_stats(
+        con, "hs_triage", "TRIAGE_GROUNDING_%", forecaster_run_id, manifest_hs_run_id
+    )
+    data.adversarial_grounding_call_stats = _load_grounding_call_stats(
+        con, "hs_web_research", None, forecaster_run_id, manifest_hs_run_id
+    )
+
+    # HS triage detail rows (RC levels, screen-outs, tiers)
+    if manifest_hs_run_id:
+        try:
+            data.hs_triage_detail_rows = _fetch_llm_rows(
+                con,
+                "SELECT iso3, hazard_code, tier, track, regime_change_level, data_quality_json "
+                "FROM hs_triage WHERE run_id = ?",
+                [manifest_hs_run_id],
+            )
+        except Exception:
+            LOG.warning("Failed to load hs_triage detail rows")
+
+    # Structured data coverage
+    if data.resolved_countries_sorted:
+        data.structured_data_coverage = _load_structured_data_coverage(
+            con, data.resolved_countries_sorted
+        )
 
     # LLM call counts and latency
     llm_columns = _llm_calls_columns(con)
@@ -3147,6 +3261,106 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
                 f"| {row.get('question_id')} | {row.get('grounded')} | {row.get('n_verified', 0)} "
                 f"| {row.get('selected_backend') or ''} | {sample_url} |"
             )
+        lines.append("")
+
+    # ----- Section: Grounding -----
+    lines.append("## Grounding")
+    lines.append("")
+    for label, stats in [
+        ("RC Grounding", data.rc_grounding_call_stats),
+        ("Triage Grounding", data.triage_grounding_call_stats),
+        ("Adversarial Check Grounding", data.adversarial_grounding_call_stats),
+    ]:
+        s = _compute_source_stats(stats.get("source_counts", []))
+        lines.append(
+            f"- {label}: {stats.get('n_calls', 0)} calls, "
+            f"{stats.get('n_errors', 0)} fails, "
+            f"sources min/{s['min']} max/{s['max']} avg/{s['avg']:.1f} median/{s['median']}"
+        )
+    lines.append("")
+
+    # ----- Section: Horizon Scan -----
+    lines.append("## Horizon Scan")
+    lines.append("")
+
+    rc_counts: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
+    seasonal_skip = 0
+    acled_low = 0
+    triage_quiet = 0
+    triage_priority = 0
+
+    for row in data.hs_triage_detail_rows:
+        rc_level = row.get("regime_change_level")
+        if rc_level is not None:
+            rc_counts[int(rc_level)] = rc_counts.get(int(rc_level), 0) + 1
+
+        dq_raw = row.get("data_quality_json") or ""
+        status = ""
+        if dq_raw:
+            try:
+                dq = json.loads(dq_raw) if isinstance(dq_raw, str) else dq_raw
+                status = dq.get("status", "") if isinstance(dq, dict) else ""
+            except Exception:
+                pass
+
+        if status == "seasonal_skip":
+            seasonal_skip += 1
+        elif status == "acled_low_activity":
+            acled_low += 1
+        elif status in ("silenced", "rc_promoted"):
+            pass  # don't count in triage quiet/priority
+        else:
+            tier = (row.get("tier") or "").lower()
+            if tier == "quiet":
+                triage_quiet += 1
+            elif tier == "priority":
+                triage_priority += 1
+
+    for level in range(4):
+        lines.append(f"- RC Level {level}: {rc_counts.get(level, 0)}")
+    lines.append(f"- Hazard calendar screen-outs: {seasonal_skip}")
+    lines.append(f'- "Quiet Conflict" screen-outs: {acled_low}')
+    lines.append(f"- Triage Quiet: {triage_quiet}")
+    lines.append(f"- Triage Priority: {triage_priority}")
+
+    track1_qs = [q for q in data.questions if q.get("track") == 1]
+    track2_qs = [q for q in data.questions if q.get("track") == 2]
+    lines.append(f"- Track 1: {len(track1_qs)}")
+    lines.append(f"- Track 2: {len(track2_qs)}")
+
+    for hz in ["ACE", "FL", "DR", "TC"]:
+        hz_qs = [q for q in data.questions if (q.get("hazard_code") or "").upper() == hz]
+        hz_t1 = sum(1 for q in hz_qs if q.get("track") == 1)
+        hz_t2 = sum(1 for q in hz_qs if q.get("track") == 2)
+        lines.append(f"- {hz}: {len(hz_qs)} (Track 1: {hz_t1} / Track 2: {hz_t2})")
+    lines.append("")
+
+    # ----- Section: Structured Data Injects -----
+    if data.structured_data_coverage:
+        lines.append("## Structured Data Injects")
+        lines.append("")
+        source_order = [
+            "ACLED fatalities", "IDMC displacement", "IFRC PA",
+            "Conflict forecasts", "IPC", "FEWS NET Phase 3+",
+            "ReliefWeb reports", "HDX Signals", "ENSO", "Seasonal TC",
+            "NMME", "CrisisWatch", "GDACS events",
+        ]
+        for label in source_order:
+            yes, no = data.structured_data_coverage.get(label, (0, 0))
+            lines.append(f"- {label}: {yes} countries yes, {no} countries no")
+        lines.append("")
+
+    # ----- Section: Scenarios -----
+    if data.forecaster_run_id and data.scenario_status_rows:
+        lines.append("## Scenarios")
+        lines.append("")
+        track1_qids = {q.get("question_id") for q in data.questions if q.get("track") == 1}
+        t1_scenarios = [
+            r for r in data.scenario_status_rows if r.get("question_id") in track1_qids
+        ]
+        t1_yes = sum(1 for r in t1_scenarios if r.get("status") == "generated")
+        t1_no = len(t1_scenarios) - t1_yes
+        lines.append(f"- Track 1 scenarios: {t1_yes} yes / {t1_no} no")
         lines.append("")
 
     lines.append("---")
@@ -3846,6 +4060,66 @@ def _safe_table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def _load_structured_data_coverage(
+    con: duckdb.DuckDBPyConnection,
+    countries: list[str],
+) -> dict[str, tuple[int, int]]:
+    """Return ``{source_label: (countries_yes, countries_no)}`` for each data source."""
+    n = len(countries)
+    if n == 0:
+        return {}
+
+    placeholders = ", ".join("?" for _ in countries)
+    upper_countries = [c.upper() for c in countries]
+    result: dict[str, tuple[int, int]] = {}
+
+    # (label, table, extra WHERE clause appended after the IN filter)
+    source_queries: list[tuple[str, str, str]] = [
+        ("ACLED fatalities", "acled_monthly_fatalities", ""),
+        ("IDMC displacement", "facts_deltas", "AND metric = 'new_displacements'"),
+        ("IFRC PA", "facts_resolved", "AND hazard_code IN ('FL','TC','DR','HW','EQ')"),
+        ("Conflict forecasts", "conflict_forecasts", ""),
+        ("IPC", "ipc_phases", ""),
+        (
+            "FEWS NET Phase 3+",
+            "facts_resolved",
+            "AND hazard_code = 'DR' AND metric IN ('phase3plus_in_need', 'phase3plus_projection')",
+        ),
+        ("ReliefWeb reports", "reliefweb_reports", ""),
+        ("HDX Signals", "hdx_signals", ""),
+        ("Seasonal TC", "seasonal_tc_context_cache", "AND context_text IS NOT NULL"),
+        ("NMME", "seasonal_forecasts", ""),
+        ("CrisisWatch", "crisiswatch_entries", ""),
+        ("GDACS events", "facts_resolved", "AND metric = 'event_occurrence'"),
+    ]
+
+    for label, table, extra_where in source_queries:
+        if not _safe_table_exists(con, table):
+            result[label] = (0, n)
+            continue
+        try:
+            sql = (
+                f"SELECT COUNT(DISTINCT UPPER(iso3)) FROM {table} "
+                f"WHERE UPPER(iso3) IN ({placeholders}) {extra_where}"
+            )
+            yes = con.execute(sql, upper_countries).fetchone()[0]
+            result[label] = (yes, n - yes)
+        except Exception:
+            result[label] = (0, n)
+
+    # ENSO is global (not per-country)
+    try:
+        if _safe_table_exists(con, "enso_state"):
+            row_count = con.execute("SELECT COUNT(*) FROM enso_state").fetchone()[0]
+            result["ENSO"] = (n, 0) if row_count > 0 else (0, n)
+        else:
+            result["ENSO"] = (0, n)
+    except Exception:
+        result["ENSO"] = (0, n)
+
+    return result
 
 
 def emit_data_inject_inventory_csv(
