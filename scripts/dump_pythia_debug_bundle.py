@@ -3722,6 +3722,7 @@ def emit_data_inject_inventory_csv(
     has_acaps = _safe_table_exists(con, "acaps_inform_severity")
     has_reliefweb = _safe_table_exists(con, "reliefweb_reports")
     has_seasonal_forecasts = _safe_table_exists(con, "seasonal_forecasts")
+    has_seasonal_tc_cache = _safe_table_exists(con, "seasonal_tc_context_cache")
 
     # Check ENSO and seasonal TC by calling the actual loaders
     try:
@@ -3729,6 +3730,12 @@ def emit_data_inject_inventory_csv(
         enso_loaded = bool(get_enso_prompt_context())
     except Exception:
         enso_loaded = False
+
+    # Load COUNTRY_TO_BASINS for TC basin exposure check
+    try:
+        from horizon_scanner.seasonal_tc import COUNTRY_TO_BASINS
+    except Exception:
+        COUNTRY_TO_BASINS = {}
 
     # seasonal_tc_loaded is checked per-country below (varies by basin exposure)
 
@@ -3820,11 +3827,19 @@ def emit_data_inject_inventory_csv(
                 con, "seasonal_forecasts", "upper(iso3) = ?", [iso3.upper()]
             )) if has_seasonal_forecasts else False
 
-            # Per-country seasonal TC check (varies by basin exposure)
-            try:
-                from horizon_scanner.seasonal_tc import get_seasonal_tc_context_for_country
-                seasonal_tc_loaded = bool(get_seasonal_tc_context_for_country(iso3))
-            except Exception:
+            # Per-country seasonal TC check — query the DB directly using
+            # the bundle's connection instead of calling
+            # get_seasonal_tc_context_for_country() which opens its own
+            # connection via schema.connect() and may hit a different DB.
+            if iso3.upper() not in COUNTRY_TO_BASINS:
+                seasonal_tc_loaded = ""  # not TC-exposed
+            elif has_seasonal_tc_cache:
+                seasonal_tc_loaded = bool(_safe_table_count_where(
+                    con, "seasonal_tc_context_cache",
+                    "upper(iso3) = ? AND context_text IS NOT NULL AND context_text != ''",
+                    [iso3.upper()],
+                ))
+            else:
                 seasonal_tc_loaded = False
 
             # CrisisWatch arrow for this country (ACE-only data source)
