@@ -3646,7 +3646,6 @@ _DB_SUMMARY_TABLES = [
     ("acaps_daily_monitoring", ["fetched_at", "entry_date"], True),
     ("acaps_humanitarian_access", ["fetched_at", "snapshot_date"], True),
     ("seasonal_forecasts", ["created_at", "forecast_issue_date"], True),
-    ("ipc_phases", ["fetched_at", "analysis_date"], True),
     ("enso_state", ["created_at", "fetch_date"], False),
     ("seasonal_tc_outlooks", ["fetched_at"], False),
     ("seasonal_tc_context_cache", ["fetched_at"], True),
@@ -3940,11 +3939,6 @@ _SOURCE_REGISTRY: dict[str, dict] = {
                          "columns": ["iso3", "access_score",
                                      "access_category", "snapshot_date"],
                          "order": "snapshot_date DESC"},
-    "ipc_phases":       {"table": "ipc_phases",
-                         "columns": ["iso3", "analysis_date",
-                                     "current_phase3plus",
-                                     "current_phase3plus_pct", "trend"],
-                         "order": "analysis_date DESC"},
 }
 
 _SOURCE_LABELS: dict[str, str] = {
@@ -3960,7 +3954,6 @@ _SOURCE_LABELS: dict[str, str] = {
     "hdx_signals": "HDX Signals", "acaps_risk_radar": "ACAPS Risk Radar",
     "acaps_inform": "ACAPS INFORM Severity",
     "acaps_access": "ACAPS Humanitarian Access",
-    "ipc_phases": "IPC Phases",
     "ipc_api": "IPC API",
 }
 
@@ -3976,7 +3969,6 @@ _SOURCE_CATEGORIES: dict[str, str] = {
     "acled_political": "situation_reports",
     "hdx_signals": "other_alerts", "acaps_risk_radar": "other_alerts",
     "acaps_inform": "other", "acaps_access": "other",
-    "ipc_phases": "other",
     "ipc_api": "resolution_data",
 }
 
