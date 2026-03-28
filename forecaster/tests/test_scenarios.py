@@ -147,3 +147,133 @@ def test_run_scenarios_for_run_matches_scenarios_schema(
     assert "Context" in primary_text
     assert "Humanitarian Needs" in primary_text
     assert "Operational Impacts" in primary_text
+
+
+@pytest.mark.db
+def test_track1_quiet_tier_question_gets_scenario(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Track 1 questions with quiet tier (RC-promoted) should NOT be skipped
+    for scenarios.  Before the fix, these were silently dropped because the
+    tier check only allowed 'priority'.
+    """
+
+    from pathlib import Path
+    from pythia.db.schema import ensure_schema
+
+    db_path = Path(tmp_path) / "scenarios_track1_quiet.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        ensure_schema(con)
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS questions (
+                question_id TEXT,
+                hs_run_id TEXT,
+                iso3 TEXT,
+                hazard_code TEXT,
+                metric TEXT,
+                target_month TEXT,
+                window_start_date DATE,
+                window_end_date DATE,
+                wording TEXT,
+                status TEXT,
+                track INTEGER,
+                is_test BOOLEAN DEFAULT FALSE
+            )
+            """
+        )
+        # Track 1 question with quiet tier (RC-promoted, triage_score=0)
+        con.execute(
+            """
+            INSERT INTO questions (
+                question_id, hs_run_id, iso3, hazard_code, metric,
+                target_month, window_start_date, window_end_date,
+                wording, status, track
+            ) VALUES (
+                'Q_RC_PROMOTED', 'hs_test', 'SDN', 'ACE', 'FATALITIES',
+                '2025-01', DATE '2024-12-01', DATE '2025-01-31',
+                'RC-promoted scenario question', 'active', 1
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS forecasts_ensemble (
+                run_id TEXT,
+                question_id TEXT,
+                iso3 TEXT,
+                hazard_code TEXT,
+                metric TEXT,
+                month_index INTEGER,
+                bucket_index INTEGER,
+                probability DOUBLE,
+                ev_value DOUBLE,
+                weights_profile TEXT,
+                created_at TIMESTAMP,
+                status TEXT,
+                human_explanation TEXT,
+                is_test BOOLEAN DEFAULT FALSE
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO forecasts_ensemble (
+                run_id, question_id, iso3, hazard_code, metric,
+                month_index, bucket_index, probability, ev_value,
+                weights_profile, created_at, status, human_explanation
+            ) VALUES (
+                'fc_rc', 'Q_RC_PROMOTED', 'SDN', 'ACE', 'FATALITIES',
+                1, 3, 0.6, NULL,
+                'ensemble', CURRENT_TIMESTAMP, 'ok', 'Test'
+            )
+            """
+        )
+        # Quiet tier triage entry (RC-promoted defaults: triage_score=0)
+        con.execute(
+            """
+            INSERT INTO hs_triage (
+                run_id, iso3, hazard_code, tier, triage_score, need_full_spd, created_at
+            ) VALUES (
+                'hs_test', 'SDN', 'ACE', 'quiet', 0.0, FALSE, CURRENT_TIMESTAMP
+            )
+            """
+        )
+    finally:
+        con.close()
+
+    def fake_connect(read_only: bool = False):
+        return duckdb.connect(str(db_path))
+
+    monkeypatch.setattr(scenario_writer, "connect", fake_connect)
+
+    async def fake_call_chat_ms(ms, prompt, **kwargs):
+        return (
+            '{"primary":{"bucket_label":"bucket_3","probability":0.6,'
+            '"context":["c1","c2"],"needs":{"WASH":["water"],"Health":[],"Nutrition":[],"Protection":[],"Education":[],"Shelter":[],"FoodSecurity":[]},'
+            '"operational_impacts":["ops"]},"alternative":null}',
+            {"total_tokens": 42, "elapsed_ms": 100},
+            None,
+        )
+
+    import forecaster.providers as _providers
+    monkeypatch.setattr(_providers, "call_chat_ms", fake_call_chat_ms)
+
+    scenario_writer.run_scenarios_for_run("fc_rc")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT scenario_type, text FROM scenarios WHERE run_id = 'fc_rc' ORDER BY scenario_type"
+        ).fetchall()
+    finally:
+        con.close()
+
+    # The key assertion: Track 1 + quiet tier must still produce a scenario
+    assert rows, "Track 1 question with quiet tier should NOT be skipped for scenarios"
+    primary_text = dict(rows).get("primary", "")
+    assert "Context" in primary_text

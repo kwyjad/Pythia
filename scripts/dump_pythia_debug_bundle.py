@@ -1536,11 +1536,15 @@ def _scenario_expected(
     if track == 2:
         return False, "track_2"
 
+    # Track 1 questions always receive scenarios, even with quiet tier (RC-promoted).
+    if track == 1:
+        return True, ""
+
     # Non-priority (e.g. quiet) tier questions are skipped by design.
     if tier and tier != "priority":
         return False, "quiet_tier"
 
-    # Track 1 / NULL, priority tier — scenario is expected.
+    # Priority tier — scenario is expected.
     return True, ""
 
 
