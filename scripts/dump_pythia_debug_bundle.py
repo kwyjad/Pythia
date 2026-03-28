@@ -343,6 +343,89 @@ def _load_web_research_summary(
     return summary_rows, failure_rows
 
 
+def _load_grounding_subsystem_stats(
+    con: duckdb.DuckDBPyConnection,
+    hazard_code_filter: str,
+    forecaster_run_id: str | None,
+    hs_run_id: str | None,
+) -> list[dict[str, Any]]:
+    """Load grounding call stats from llm_calls for RC or Triage grounding.
+
+    *hazard_code_filter* is a SQL LIKE pattern applied (case-insensitive) to the
+    ``hazard_code`` column, e.g. ``'GROUNDING_%'`` for RC grounding or
+    ``'TRIAGE_GROUNDING_%'`` for triage grounding.
+
+    Returns a list of summary dicts with keys:
+        provider, model_id, n_calls, n_errors, n_verified_sources
+    """
+    predicate_parts: list[str] = [
+        "phase = 'hs_triage'",
+        "UPPER(hazard_code) LIKE ?",
+    ]
+    params: list[Any] = [hazard_code_filter]
+
+    # RC grounding rows must exclude triage grounding rows when using 'GROUNDING_%'
+    if hazard_code_filter == "GROUNDING_%":
+        predicate_parts.append("UPPER(hazard_code) NOT LIKE 'TRIAGE_GROUNDING_%'")
+
+    scope_parts: list[str] = []
+    if forecaster_run_id:
+        scope_parts.append("run_id = ?")
+        params.append(forecaster_run_id)
+    if hs_run_id:
+        scope_parts.append("hs_run_id = ?")
+        params.append(hs_run_id)
+    if scope_parts:
+        predicate_parts.append(f"({' OR '.join(scope_parts)})")
+    predicate = " AND ".join(predicate_parts)
+
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT provider, model_id, response_text, error_text
+            FROM llm_calls
+            WHERE {predicate}
+            """,
+            params,
+        )
+    except Exception:
+        return []
+
+    counts: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        provider = str(row.get("provider") or "")
+        model_id = str(row.get("model_id") or "")
+        key = (provider, model_id)
+        entry = counts.setdefault(
+            key,
+            {"provider": provider, "model_id": model_id, "n_calls": 0, "n_errors": 0, "n_verified_sources": 0},
+        )
+        entry["n_calls"] += 1
+
+        error_text = (row.get("error_text") or "").strip()
+        response_text = row.get("response_text") or "{}"
+        try:
+            payload = json.loads(response_text)
+        except Exception:
+            payload = {}
+
+        sources = payload.get("sources") if isinstance(payload, dict) else None
+        n_sources = 0
+        if isinstance(sources, list):
+            n_sources = len(sources)
+            entry["n_verified_sources"] += n_sources
+
+        # Count as error if error_text present OR response had 0 sources
+        if error_text or n_sources == 0:
+            entry["n_errors"] += 1
+
+    return sorted(
+        counts.values(),
+        key=lambda r: (str(r.get("provider") or ""), str(r.get("model_id") or "")),
+    )
+
+
 def _extract_urls(sources: Any, limit: int = 5) -> list[str]:
     urls: list[str] = []
     if not sources:
@@ -2359,6 +2442,8 @@ class BundleData:
     web_research_accounting: dict[str, Any] = field(default_factory=dict)
     hs_web_research_rows: list[dict[str, Any]] = field(default_factory=list)
     hs_web_research_failures: list[dict[str, Any]] = field(default_factory=list)
+    rc_grounding_rows: list[dict[str, Any]] = field(default_factory=list)
+    triage_grounding_rows: list[dict[str, Any]] = field(default_factory=list)
     research_web_research_rows: list[dict[str, Any]] = field(default_factory=list)
     research_web_research_failures: list[dict[str, Any]] = field(default_factory=list)
     self_search_rows: list[dict[str, Any]] = field(default_factory=list)
@@ -2475,6 +2560,12 @@ def _load_bundle_data(
     data.web_research_accounting = _web_research_accounting(con, forecaster_run_id, manifest_hs_run_id)
     data.hs_web_research_rows, data.hs_web_research_failures = _load_web_research_summary(
         con, "hs_web_research", forecaster_run_id, manifest_hs_run_id
+    )
+    data.rc_grounding_rows = _load_grounding_subsystem_stats(
+        con, "GROUNDING_%", forecaster_run_id, manifest_hs_run_id
+    )
+    data.triage_grounding_rows = _load_grounding_subsystem_stats(
+        con, "TRIAGE_GROUNDING_%", forecaster_run_id, manifest_hs_run_id
     )
     data.research_web_research_rows, data.research_web_research_failures = _load_web_research_summary(
         con, "research_web_research", forecaster_run_id, manifest_hs_run_id
@@ -2682,10 +2773,43 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
             cw_detail = "; ".join(parts)
     checks.append({"subsystem": "CrisisWatch", "status": cw_status, "detail": cw_detail})
 
-    # Grounding health — HS
-    # Use the actual grounding call stats from hs_web_research_rows (which track
-    # calls logged under hs_web_research), not hs_web_rows (which may be empty
-    # when grounding calls are logged under a different phase label).
+    # RC Grounding health (hazard_code like GROUNDING_ACE, GROUNDING_FL, etc.)
+    _rc_g_calls = sum(int(r.get("n_calls") or 0) for r in (data.rc_grounding_rows or []))
+    _rc_g_errors = sum(int(r.get("n_errors") or 0) for r in (data.rc_grounding_rows or []))
+    _rc_g_verified = sum(int(r.get("n_verified_sources") or 0) for r in (data.rc_grounding_rows or []))
+    if _rc_g_calls > 0 and _rc_g_errors == 0:
+        rc_g_status = "OK"
+        rc_g_detail = f"{_rc_g_calls} calls, {_rc_g_verified} verified sources"
+    elif _rc_g_calls > 0 and _rc_g_errors < _rc_g_calls:
+        rc_g_status = "WARN"
+        rc_g_detail = f"{_rc_g_calls} calls, {_rc_g_errors} returned 0 sources, {_rc_g_verified} verified sources"
+    elif _rc_g_calls > 0:
+        rc_g_status = "FAIL"
+        rc_g_detail = f"{_rc_g_calls} calls, all returned 0 sources"
+    else:
+        rc_g_status = "OK"
+        rc_g_detail = "no RC grounding calls in this run"
+    checks.append({"subsystem": "RC Grounding", "status": rc_g_status, "detail": rc_g_detail})
+
+    # Triage Grounding health (hazard_code like TRIAGE_GROUNDING_ACE, etc.)
+    _tg_calls = sum(int(r.get("n_calls") or 0) for r in (data.triage_grounding_rows or []))
+    _tg_errors = sum(int(r.get("n_errors") or 0) for r in (data.triage_grounding_rows or []))
+    _tg_verified = sum(int(r.get("n_verified_sources") or 0) for r in (data.triage_grounding_rows or []))
+    if _tg_calls > 0 and _tg_errors == 0:
+        tg_status = "OK"
+        tg_detail = f"{_tg_calls} calls, {_tg_verified} verified sources"
+    elif _tg_calls > 0 and _tg_errors < _tg_calls:
+        tg_status = "WARN"
+        tg_detail = f"{_tg_calls} calls, {_tg_errors} returned 0 sources, {_tg_verified} verified sources"
+    elif _tg_calls > 0:
+        tg_status = "FAIL"
+        tg_detail = f"{_tg_calls} calls, all returned 0 sources"
+    else:
+        tg_status = "OK"
+        tg_detail = "no triage grounding calls in this run"
+    checks.append({"subsystem": "Triage Grounding", "status": tg_status, "detail": tg_detail})
+
+    # Adversarial Checks health (hs_web_research phase — adversarial evidence fetches)
     _hs_g_calls = sum(int(r.get("n_calls") or 0) for r in (data.hs_web_research_rows or []))
     _hs_g_errors = sum(int(r.get("n_errors") or 0) for r in (data.hs_web_research_rows or []))
     _hs_g_verified = sum(int(r.get("n_verified_sources") or 0) for r in (data.hs_web_research_rows or []))
@@ -2697,11 +2821,11 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         g_detail = f"{_hs_g_calls} calls, {_hs_g_errors} errors, {_hs_g_verified} verified sources"
     elif data.hs_web_research_active:
         g_status = "WARN"
-        g_detail = "no grounding calls"
+        g_detail = "no adversarial check calls"
     else:
         g_status = "OK"
         g_detail = "disabled"
-    checks.append({"subsystem": "HS Grounding", "status": g_status, "detail": g_detail})
+    checks.append({"subsystem": "Adversarial Checks", "status": g_status, "detail": g_detail})
 
     # Grounding health — Research
     # The question-level web research pipeline is deprecated; when the retriever
@@ -3081,6 +3205,29 @@ def emit_health_report_json(data: BundleData, out_dir: Path) -> None:
             ],
         }
 
+    # RC grounding health (from llm_calls with hazard_code like GROUNDING_*)
+    def _grounding_subsystem_health(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        total_calls = sum(int(r.get("n_calls") or 0) for r in (rows or []))
+        total_errors = sum(int(r.get("n_errors") or 0) for r in (rows or []))
+        total_verified = sum(int(r.get("n_verified_sources") or 0) for r in (rows or []))
+        return {
+            "n_calls": total_calls,
+            "n_errors": total_errors,
+            "n_verified_sources": total_verified,
+            "by_provider_model": [
+                {
+                    "provider": r.get("provider"),
+                    "model_id": r.get("model_id"),
+                    "n_calls": int(r.get("n_calls") or 0),
+                    "n_errors": int(r.get("n_errors") or 0),
+                    "n_verified_sources": int(r.get("n_verified_sources") or 0),
+                }
+                for r in (rows or [])
+            ],
+        }
+    rc_grounding_health = _grounding_subsystem_health(data.rc_grounding_rows)
+    triage_grounding_health = _grounding_subsystem_health(data.triage_grounding_rows)
+
     # LLM health
     llm_health = {
         "by_phase_provider_model": [
@@ -3204,6 +3351,8 @@ def emit_health_report_json(data: BundleData, out_dir: Path) -> None:
             for c in _evaluate_pipeline_health(data)
         ],
         "grounding_health": grounding_health,
+        "rc_grounding_health": rc_grounding_health,
+        "triage_grounding_health": triage_grounding_health,
         "llm_health": llm_health,
         "cost_summary": cost_summary,
         "coverage_funnel": coverage,
