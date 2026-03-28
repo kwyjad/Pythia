@@ -112,6 +112,11 @@ def main(argv: list[str] | None = None) -> None:
     from resolver.db.duckdb_io import get_db, upsert_dataframe
     from pythia.db.schema import ensure_schema
 
+    # Set created_at explicitly so upsert refreshes it on conflict
+    # (DEFAULT CURRENT_TIMESTAMP only fires on INSERT, not UPDATE).
+    from datetime import datetime, timezone
+    df["created_at"] = datetime.now(timezone.utc)
+
     con = get_db(db_url)
     try:
         ensure_schema(con)
