@@ -3826,8 +3826,8 @@ def get_resolver_seasonal_tc_outlooks(limit: int = Query(50)):
 # ---------------------------------------------------------------------------
 
 # Best column for "when was this data last ingested" per table.
-_FRESHNESS_CANDIDATES = ("created_at", "stored_at", "ingested_at",
-                         "fetched_at", "fetch_date", "updated_at")
+_FRESHNESS_CANDIDATES = ("fetched_at", "created_at", "stored_at",
+                         "ingested_at", "fetch_date", "updated_at")
 
 _SOURCE_REGISTRY: dict[str, dict] = {
     # --- Resolution Data (facts_resolved, filtered by publisher) ---
