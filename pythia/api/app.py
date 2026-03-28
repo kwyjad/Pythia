@@ -252,9 +252,28 @@ _SYNC_CHECK_INTERVAL_S = 60  # how often to poll for DB refresh
 
 
 def _open_duckdb_connection() -> duckdb.DuckDBPyConnection:
-    """Open a fresh DuckDB connection to the configured DB path."""
+    """Open a fresh DuckDB connection to the configured DB path.
+
+    If the WAL file is stale (e.g. contains a duplicate ALTER TABLE ADD COLUMN
+    from a previous ``ensure_schema`` run), delete it and retry.  The WAL is a
+    replay log of uncommitted changes; removing it loses at most the last
+    incomplete transaction, which is acceptable for a read-heavy API server
+    whose authoritative data comes from the synced DB file.
+    """
     db_url = load_cfg()["app"]["db_url"].replace("duckdb:///", "")
-    con = duckdb.connect(db_url, read_only=False)
+    try:
+        con = duckdb.connect(db_url, read_only=False)
+    except duckdb.CatalogException as exc:
+        wal_path = Path(db_url + ".wal")
+        if wal_path.exists():
+            logger.warning(
+                "DuckDB WAL replay failed (%s); removing stale WAL file %s and retrying",
+                exc, wal_path,
+            )
+            wal_path.unlink()
+            con = duckdb.connect(db_url, read_only=False)
+        else:
+            raise
     con.execute(f"SET memory_limit='{_DUCKDB_MEMORY_LIMIT}'")
     con.execute(f"SET threads={_DUCKDB_THREADS}")
     logger.info("DuckDB connection opened (memory_limit=%s threads=%s)", _DUCKDB_MEMORY_LIMIT, _DUCKDB_THREADS)
