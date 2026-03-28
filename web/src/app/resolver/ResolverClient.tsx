@@ -76,7 +76,7 @@ const CATEGORIES = [
   {
     key: "other",
     title: "Other",
-    sources: ["acaps_inform", "acaps_access", "ipc_phases"],
+    sources: ["acaps_inform", "acaps_access"],
   },
 ];
 
