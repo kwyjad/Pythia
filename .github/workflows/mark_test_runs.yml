@@ -54,6 +54,7 @@ jobs:
             exit 1
           fi
           cp "$SRC" data/resolver.duckdb
+          rm -f data/resolver.duckdb.wal
           echo "DB downloaded: $(ls -lh data/resolver.duckdb)"
 
       - name: Run mark script

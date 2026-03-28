@@ -201,7 +201,7 @@ jobs:
 
             echo "Attempting canonical DB download from ${LABEL} (run ${RUN_ID}, created ${CREATED})"
             rm -rf data/pythia-resolver-db
-            rm -f data/resolver.duckdb
+            rm -f data/resolver.duckdb data/resolver.duckdb.wal
             if ! download_artifact_with_retries "$RUN_ID" "pythia-resolver-db" data 6; then
               echo "Download failed for run ${RUN_ID}; trying next candidate."
               continue
@@ -221,6 +221,7 @@ jobs:
             if [ "$SRC" != "data/resolver.duckdb" ]; then
               cp "$SRC" data/resolver.duckdb
             fi
+            rm -f data/resolver.duckdb.wal
 
             if python -m scripts.ci.db_signature write \
                 --db data/resolver.duckdb \
@@ -267,7 +268,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.reset_db == 'true'
         run: |
           set -euo pipefail
-          rm -f data/resolver.duckdb
+          rm -f data/resolver.duckdb data/resolver.duckdb.wal
           echo "CANONICAL_DB_READY=false" >> "$GITHUB_ENV"
 
       - name: Ensure schema
