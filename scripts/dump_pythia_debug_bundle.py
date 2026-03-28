@@ -2564,6 +2564,7 @@ class BundleData:
     adversarial_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
     hs_triage_detail_rows: list[dict[str, Any]] = field(default_factory=list)
     structured_data_coverage: dict[str, tuple[int, int]] = field(default_factory=dict)
+    food_security_no_data_countries: list[str] = field(default_factory=list)
 
 
 def _load_bundle_data(
@@ -2694,6 +2695,31 @@ def _load_bundle_data(
         data.structured_data_coverage = _load_structured_data_coverage(
             con, data.resolved_countries_sorted
         )
+
+    # Food security: identify DR countries without food security data
+    dr_iso3s = sorted({
+        (q.get("iso3") or "").upper()
+        for q in data.questions
+        if (q.get("hazard_code") or "").upper() == "DR"
+    })
+    if dr_iso3s and _safe_table_exists(con, "facts_resolved"):
+        try:
+            placeholders = ", ".join("?" for _ in dr_iso3s)
+            covered = {
+                row[0]
+                for row in con.execute(
+                    f"SELECT DISTINCT UPPER(iso3) FROM facts_resolved "
+                    f"WHERE UPPER(iso3) IN ({placeholders}) "
+                    f"AND hazard_code = 'DR' "
+                    f"AND metric IN ('phase3plus_in_need', 'phase3plus_projection')",
+                    dr_iso3s,
+                ).fetchall()
+            }
+            data.food_security_no_data_countries = sorted(
+                iso3 for iso3 in dr_iso3s if iso3 not in covered
+            )
+        except Exception:
+            LOG.warning("Failed to compute food security coverage gaps")
 
     # LLM call counts and latency
     llm_columns = _llm_calls_columns(con)
@@ -2890,6 +2916,29 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
             cw_status = "OK"
             cw_detail = "; ".join(parts)
     checks.append({"subsystem": "CrisisWatch", "status": cw_status, "detail": cw_detail})
+
+    # Food Security (FEWS NET IPC + IPC API sources in facts_resolved)
+    dr_countries = sorted({
+        (q.get("iso3") or "").upper()
+        for q in (data.questions or [])
+        if (q.get("hazard_code") or "").upper() == "DR"
+    })
+    if dr_countries:
+        fewsnet_cov, _ = data.structured_data_coverage.get("FEWS NET IPC", (0, 0))
+        ipc_cov, _ = data.structured_data_coverage.get("IPC API", (0, 0))
+        total_cov = fewsnet_cov + ipc_cov
+        if total_cov == 0:
+            fs_status = "WARN"
+            fs_detail = f"0/{len(dr_countries)} DR countries have food security data"
+        else:
+            fs_status = "OK"
+            parts = []
+            if fewsnet_cov:
+                parts.append(f"{fewsnet_cov} FEWS NET")
+            if ipc_cov:
+                parts.append(f"{ipc_cov} IPC API")
+            fs_detail = f"{' + '.join(parts)} countries with data"
+        checks.append({"subsystem": "Food Security", "status": fs_status, "detail": fs_detail})
 
     # RC Grounding health (hazard_code like GROUNDING_ACE, GROUNDING_FL, etc.)
     _rc_g_calls = sum(int(r.get("n_calls") or 0) for r in (data.rc_grounding_rows or []))
@@ -3142,6 +3191,17 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
             )
     lines.append("")
 
+    # Food security coverage line
+    if data.structured_data_coverage:
+        fewsnet_yes, _ = data.structured_data_coverage.get("FEWS NET IPC", (0, 0))
+        ipc_yes, _ = data.structured_data_coverage.get("IPC API", (0, 0))
+        if fewsnet_yes or ipc_yes:
+            lines.append(
+                f"- Food security: {fewsnet_yes} FEWS NET countries, "
+                f"{ipc_yes} IPC API countries"
+            )
+            lines.append("")
+
     # Cost & Latency summary
     if data.usage_by_phase or data.forecaster_run_id:
         lines.append("## Cost & Latency")
@@ -3341,7 +3401,7 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
         lines.append("")
         source_order = [
             "ACLED fatalities", "IDMC displacement", "IFRC PA",
-            "Conflict forecasts", "IPC", "FEWS NET Phase 3+",
+            "Conflict forecasts", "FEWS NET IPC", "IPC API",
             "ReliefWeb reports", "HDX Signals", "ENSO", "Seasonal TC",
             "NMME", "CrisisWatch", "GDACS events",
         ]
@@ -3379,6 +3439,17 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 # Emitter: Health Report JSON
 # ---------------------------------------------------------------------------
+
+def _build_food_security_health(data: BundleData) -> dict[str, Any]:
+    """Build food security health section for the JSON health report."""
+    fewsnet_cov, _ = data.structured_data_coverage.get("FEWS NET IPC", (0, 0))
+    ipc_cov, _ = data.structured_data_coverage.get("IPC API", (0, 0))
+    return {
+        "fewsnet_countries": fewsnet_cov,
+        "ipc_countries": ipc_cov,
+        "countries_without_food_security": data.food_security_no_data_countries,
+    }
+
 
 def emit_health_report_json(data: BundleData, out_dir: Path) -> None:
     """Write machine-parseable health data to JSON."""
@@ -3575,6 +3646,7 @@ def emit_health_report_json(data: BundleData, out_dir: Path) -> None:
         "cost_summary": cost_summary,
         "coverage_funnel": coverage,
         "crisiswatch_health": cw_health,
+        "food_security_health": _build_food_security_health(data),
         "grounding_spot_checks": {
             "hs_countries": [
                 {
@@ -4081,11 +4153,15 @@ def _load_structured_data_coverage(
         ("IDMC displacement", "facts_deltas", "AND metric = 'new_displacements'"),
         ("IFRC PA", "facts_resolved", "AND hazard_code IN ('FL','TC','DR','HW','EQ')"),
         ("Conflict forecasts", "conflict_forecasts", ""),
-        ("IPC", "ipc_phases", ""),
         (
-            "FEWS NET Phase 3+",
+            "FEWS NET IPC",
             "facts_resolved",
-            "AND hazard_code = 'DR' AND metric IN ('phase3plus_in_need', 'phase3plus_projection')",
+            "AND hazard_code = 'DR' AND metric IN ('phase3plus_in_need', 'phase3plus_projection') AND UPPER(publisher) = 'FEWS NET'",
+        ),
+        (
+            "IPC API",
+            "facts_resolved",
+            "AND hazard_code = 'DR' AND metric IN ('phase3plus_in_need', 'phase3plus_projection') AND UPPER(publisher) = 'IPC'",
         ),
         ("ReliefWeb reports", "reliefweb_reports", ""),
         ("HDX Signals", "hdx_signals", ""),
@@ -4133,7 +4209,7 @@ def emit_data_inject_inventory_csv(
         "iso3", "country_name",
         "acled_fatalities_months", "idmc_displacement_months",
         "ifrc_pa_months", "conflict_forecasts_available",
-        "ipc_available", "fewsnet_phase3plus_available",
+        "fewsnet_ipc_rows", "ipc_api_rows", "food_security_source",
         "reliefweb_reports_count",
         "hdx_signals_count", "enso_loaded",
         "seasonal_tc_loaded", "nmme_available",
@@ -4145,7 +4221,6 @@ def emit_data_inject_inventory_csv(
     has_facts_deltas = _safe_table_exists(con, "facts_deltas")
     has_facts_resolved = _safe_table_exists(con, "facts_resolved")
     has_conflict_forecasts = _safe_table_exists(con, "conflict_forecasts")
-    has_ipc_phases = _safe_table_exists(con, "ipc_phases")
     has_acaps = _safe_table_exists(con, "acaps_inform_severity")
     has_reliefweb = _safe_table_exists(con, "reliefweb_reports")
     has_seasonal_forecasts = _safe_table_exists(con, "seasonal_forecasts")
@@ -4231,20 +4306,28 @@ def emit_data_inject_inventory_csv(
                 con, "conflict_forecasts", "upper(iso3) = ?", [iso3.upper()]
             )) if has_conflict_forecasts else False
 
-            ipc_avail = False
-            if has_ipc_phases:
-                cnt = _safe_table_count_where(con, "ipc_phases", "upper(iso3) = ?", [iso3.upper()])
-                ipc_avail = bool(cnt)
-
-            # FEWS NET Phase 3+ from facts_resolved
-            fewsnet_avail = False
+            # Food security: per-source row counts from facts_resolved
+            fewsnet_ipc_rows = 0
+            ipc_api_rows = 0
             if has_facts_resolved:
-                fewsnet_cnt = _safe_table_count_where(
+                fewsnet_ipc_rows = _safe_table_count_where(
                     con, "facts_resolved",
-                    "upper(iso3) = ? AND hazard_code = 'DR' AND metric IN ('phase3plus_in_need', 'phase3plus_projection')",
+                    "upper(iso3) = ? AND hazard_code = 'DR' AND metric IN ('phase3plus_in_need', 'phase3plus_projection') AND UPPER(publisher) = 'FEWS NET'",
                     [iso3.upper()],
-                )
-                fewsnet_avail = bool(fewsnet_cnt)
+                ) or 0
+                ipc_api_rows = _safe_table_count_where(
+                    con, "facts_resolved",
+                    "upper(iso3) = ? AND hazard_code = 'DR' AND metric IN ('phase3plus_in_need', 'phase3plus_projection') AND UPPER(publisher) = 'IPC'",
+                    [iso3.upper()],
+                ) or 0
+            if fewsnet_ipc_rows and ipc_api_rows:
+                food_security_source = "both"
+            elif fewsnet_ipc_rows:
+                food_security_source = "FEWS NET"
+            elif ipc_api_rows:
+                food_security_source = "IPC"
+            else:
+                food_security_source = ""
 
             reliefweb_count = _safe_table_count_where(
                 con, "reliefweb_reports", "upper(iso3) = ?", [iso3.upper()]
@@ -4292,8 +4375,9 @@ def emit_data_inject_inventory_csv(
                 "idmc_displacement_months": idmc_months if idmc_months is not None else "",
                 "ifrc_pa_months": ifrc_months if ifrc_months is not None else "",
                 "conflict_forecasts_available": conflict_avail,
-                "ipc_available": ipc_avail,
-                "fewsnet_phase3plus_available": fewsnet_avail,
+                "fewsnet_ipc_rows": fewsnet_ipc_rows,
+                "ipc_api_rows": ipc_api_rows,
+                "food_security_source": food_security_source,
                 "reliefweb_reports_count": reliefweb_count if reliefweb_count is not None else "",
                 "hdx_signals_count": hdx_signals_by_iso3.get(iso3.upper(), "N/A" if not hdx_signals_by_iso3 else 0),
                 "enso_loaded": enso_loaded,
