@@ -136,14 +136,6 @@ class FewsnetIpcConnector:
         delay = float(os.getenv("FEWSNET_REQUEST_DELAY", "1.0"))
 
         today = date.today()
-        start_date = date(
-            today.year - months_back // 12,
-            max(1, today.month - months_back % 12)
-            if today.month - months_back % 12 > 0
-            else today.month - months_back % 12 + 12,
-            1,
-        )
-        # Simpler date calculation
         total_months = today.year * 12 + today.month - months_back
         start_year = total_months // 12
         start_month = total_months % 12
@@ -187,13 +179,21 @@ class FewsnetIpcConnector:
             LOG.warning("[fewsnet_ipc] empty CSV response")
             return empty_canonical()
 
-        LOG.info("[fewsnet_ipc] fetched %d raw rows", len(df_raw))
+        LOG.info("[fewsnet_ipc] fetched %d raw rows, columns: %s",
+                 len(df_raw), list(df_raw.columns))
 
         # Filter to wanted scenarios
         df_raw = df_raw[df_raw["scenario_name"].isin(_SCENARIO_METRIC.keys())].copy()
         if df_raw.empty:
             LOG.warning("[fewsnet_ipc] no Current Situation or Most Likely rows")
             return empty_canonical()
+
+        LOG.info(
+            "[fewsnet_ipc] %d rows after scenario filter, "
+            "unique (country_code, scenario_name) pairs: %d",
+            len(df_raw),
+            df_raw.groupby(["country_code", "scenario_name"]).ngroups,
+        )
 
         # Convert ISO2 → ISO3
         df_raw["iso3"] = df_raw["country_code"].apply(_iso2_to_iso3)
@@ -224,16 +224,34 @@ class FewsnetIpcConnector:
         )
         df_raw["ym"] = df_raw["projection_start"].dt.strftime("%Y-%m")
 
-        # Deduplicate: keep latest reporting_date per (iso3, scenario, ym)
-        df_raw = df_raw.sort_values("reporting_date", ascending=False)
-        df_raw = df_raw.drop_duplicates(
-            subset=["iso3", "scenario_name", "ym"], keep="first"
+        n_before_dedup = len(df_raw)
+        unique_ym = df_raw["ym"].nunique()
+        LOG.info(
+            "[fewsnet_ipc] before dedup: %d rows, %d unique ym values, "
+            "%d unique (iso3, scenario) pairs",
+            n_before_dedup,
+            unique_ym,
+            df_raw.groupby(["iso3", "scenario_name"]).ngroups,
         )
 
+        # Deduplicate: keep latest reporting_date per
+        # (iso3, scenario, ym, projection_end).  Earlier versions deduped
+        # on (iso3, scenario, ym) alone, which was too aggressive — FEWS NET
+        # publishes overlapping analysis windows that share the same
+        # projection_start but differ in projection_end (e.g. Oct-Dec vs
+        # Oct-Mar).  Including projection_end preserves distinct windows.
+        df_raw["_proj_end_str"] = df_raw["projection_end"].dt.strftime("%Y-%m-%d")
+        df_raw = df_raw.sort_values("reporting_date", ascending=False)
+        df_raw = df_raw.drop_duplicates(
+            subset=["iso3", "scenario_name", "ym", "_proj_end_str"], keep="first"
+        )
+        df_raw = df_raw.drop(columns=["_proj_end_str"])
+
         LOG.info(
-            "[fewsnet_ipc] %d rows after dedup (%d countries)",
+            "[fewsnet_ipc] %d rows after dedup (%d countries, dropped %d dupes)",
             len(df_raw),
             df_raw["iso3"].nunique(),
+            n_before_dedup - len(df_raw),
         )
 
         # Map metric
