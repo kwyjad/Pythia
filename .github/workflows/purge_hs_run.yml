@@ -154,6 +154,7 @@ jobs:
           if [ "$SRC" != "data/resolver.duckdb" ]; then
             cp "$SRC" data/resolver.duckdb
           fi
+          rm -f data/resolver.duckdb.wal
 
           echo "DB_RUN_ID=${DB_RUN_ID}" >> "$GITHUB_ENV"
           echo "Canonical DB ready from run ${DB_RUN_ID}."

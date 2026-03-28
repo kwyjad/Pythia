@@ -172,7 +172,7 @@ jobs:
 
           while IFS=',' read -r CREATED RUN_ID LABEL; do
             rm -rf data/pythia-resolver-db
-            rm -f data/resolver.duckdb
+            rm -f data/resolver.duckdb data/resolver.duckdb.wal
 
             if ! download_artifact_with_retries "$RUN_ID" "pythia-resolver-db" data 6; then
               echo "Download failed for run ${RUN_ID}; trying next candidate."
@@ -193,6 +193,7 @@ jobs:
             if [ "$SRC" != "data/resolver.duckdb" ]; then
               cp "$SRC" data/resolver.duckdb
             fi
+            rm -f data/resolver.duckdb.wal
 
             # Validate DB signature
             if python -m scripts.ci.db_signature write \

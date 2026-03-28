@@ -32,6 +32,22 @@ def parse_table_list(csv_str: str | None) -> list[str]:
     return [item.strip() for item in csv_str.split(",") if item.strip()]
 
 
+def _remove_stale_wal(db_path: Path) -> None:
+    """Delete any WAL file next to the DB before opening.
+
+    Downloaded artifacts may include a stale ``.wal`` file from the process
+    that originally wrote the DB.  Replaying that WAL on a different machine
+    crashes DuckDB with ``InternalError: Failure while replaying WAL file …
+    Calling DatabaseManager::GetDefaultDatabase with no default database set``.
+    Since the DB file itself is the authoritative snapshot, the WAL is
+    expendable.
+    """
+    wal = db_path.with_suffix(db_path.suffix + ".wal")
+    if wal.exists():
+        print(f"Removing stale WAL file: {wal}")
+        wal.unlink()
+
+
 def compute_signature(
     db_path: str | os.PathLike[str],
     required: Iterable[str],
@@ -46,6 +62,7 @@ def compute_signature(
     required_list = list(required)
     optional_list = list(optional)
 
+    _remove_stale_wal(db_file)
     conn = duckdb_io.get_db(str(db_file))
     try:
         tables = sorted(row[0] for row in conn.execute("SHOW TABLES").fetchall())

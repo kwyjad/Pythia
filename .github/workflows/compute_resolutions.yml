@@ -68,6 +68,7 @@ jobs:
             else
               echo "DB already at canonical path data/resolver.duckdb; no copy needed."
             fi
+            rm -f data/resolver.duckdb.wal
           else
             echo "ERROR: resolver.duckdb not found in pythia-resolver-db for run $RUN_ID"
             exit 1

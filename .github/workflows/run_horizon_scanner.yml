@@ -275,7 +275,7 @@ jobs:
               DB_ARTIFACT_NAME="pythia-resolver-db"
 
               rm -rf data/pythia-resolver-db
-              rm -f data/resolver.duckdb
+              rm -f data/resolver.duckdb data/resolver.duckdb.wal
 
               if ! download_artifact_with_retries "$DB_RUN_ID" "$DB_ARTIFACT_NAME" data 6; then
                 echo "Download failed for run ${DB_RUN_ID}; trying next candidate."
@@ -296,6 +296,7 @@ jobs:
               if [ "$SRC" != "data/resolver.duckdb" ]; then
                 cp "$SRC" data/resolver.duckdb
               fi
+              rm -f data/resolver.duckdb.wal
 
               if python -m scripts.ci.db_signature write \
                   --db data/resolver.duckdb \
@@ -324,7 +325,7 @@ jobs:
 
           if [ -n "$OVERRIDE_RUN_ID" ]; then
             rm -rf data/pythia-resolver-db
-            rm -f data/resolver.duckdb
+            rm -f data/resolver.duckdb data/resolver.duckdb.wal
             if ! download_artifact_with_retries "$DB_RUN_ID" "${DB_ARTIFACT_NAME:-pythia-resolver-db}" data 6; then
               exit 1
             fi
@@ -344,6 +345,7 @@ jobs:
           if [ "$SRC" != "data/resolver.duckdb" ]; then
             cp "$SRC" data/resolver.duckdb
           fi
+          rm -f data/resolver.duckdb.wal
 
           # Bootstrap-only: if we're starting from a fresh reset DB, ensure Pythia schema tables exist before signature check.
           if [ "${DB_ARTIFACT_NAME:-pythia-resolver-db}" = "pythia-resolver-db-reset" ]; then

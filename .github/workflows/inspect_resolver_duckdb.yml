@@ -93,6 +93,7 @@ jobs:
             else
               echo "DB already at canonical path data/resolver.duckdb; no copy needed."
             fi
+            rm -f data/resolver.duckdb.wal
           fi
 
           if [ ! -f data/resolver.duckdb ]; then
