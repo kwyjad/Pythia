@@ -75,6 +75,7 @@ jobs:
       PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED: "1"
       PYTHIA_ADVERSARIAL_CHECK_ENABLED: "1"
       PYTHIA_PREDICTION_MARKETS_ENABLED: "0"
+      BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -416,6 +417,16 @@ jobs:
             echo "OPENAI_API_KEY is set (value hidden)."
           fi
 
+      - name: Diagnostics — BRAVE_SEARCH_API_KEY presence
+        env:
+          BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
+        run: |
+          if [ -z "${BRAVE_SEARCH_API_KEY:-}" ]; then
+            echo "WARNING: BRAVE_SEARCH_API_KEY is NOT set. Brave Search grounding will be skipped; falling back to OpenAI/Gemini."
+          else
+            echo "BRAVE_SEARCH_API_KEY is set (value hidden)."
+          fi
+
       - name: Diagnostics — ANTHROPIC_API_KEY presence
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -451,6 +462,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |

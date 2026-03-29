@@ -404,27 +404,46 @@ def run_adversarial_check(
     packs: list[dict] = []
     for query in queries:
         try:
-            # Adversarial checks always use web search regardless of the
-            # deprecated PYTHIA_WEB_RESEARCH_ENABLED flag (which controls
-            # the old question-level pipeline).
-            _original_web_research = os.environ.get("PYTHIA_WEB_RESEARCH_ENABLED")
-            os.environ["PYTHIA_WEB_RESEARCH_ENABLED"] = "1"
+            pack: dict = {}
+            # Try Brave Search first (direct, deterministic, no LLM overhead)
             try:
-                pack = dict(
-                    fetch_evidence_pack(
+                from pythia.web_research.backends.brave_search import fetch_via_brave_search
+                brave_api_key = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
+                if brave_api_key:
+                    brave_pack = fetch_via_brave_search(
                         query,
-                        purpose="hs_adversarial_check",
-                        run_id=run_id,
-                        hs_run_id=run_id,
-                        model_id=model_id or None,
-                    ) or {}
-                )
-            finally:
-                # Restore original value
-                if _original_web_research is not None:
-                    os.environ["PYTHIA_WEB_RESEARCH_ENABLED"] = _original_web_research
-                else:
-                    os.environ.pop("PYTHIA_WEB_RESEARCH_ENABLED", None)
+                        recency_days=30,
+                        include_structural=True,
+                        timeout_sec=30,
+                        max_results=10,
+                    )
+                    pack = brave_pack.to_dict() if hasattr(brave_pack, "to_dict") else dict(brave_pack)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Adversarial Brave search failed for %s %s: %s", iso3_up, hz, exc)
+
+            # Fall back to fetch_evidence_pack (OpenAI/Gemini) if Brave returned nothing
+            if not pack or (not pack.get("sources") and not pack.get("grounded")):
+                # Adversarial checks always use web search regardless of the
+                # deprecated PYTHIA_WEB_RESEARCH_ENABLED flag (which controls
+                # the old question-level pipeline).
+                _original_web_research = os.environ.get("PYTHIA_WEB_RESEARCH_ENABLED")
+                os.environ["PYTHIA_WEB_RESEARCH_ENABLED"] = "1"
+                try:
+                    pack = dict(
+                        fetch_evidence_pack(
+                            query,
+                            purpose="hs_adversarial_check",
+                            run_id=run_id,
+                            hs_run_id=run_id,
+                            model_id=model_id or None,
+                        ) or {}
+                    )
+                finally:
+                    # Restore original value
+                    if _original_web_research is not None:
+                        os.environ["PYTHIA_WEB_RESEARCH_ENABLED"] = _original_web_research
+                    else:
+                        os.environ.pop("PYTHIA_WEB_RESEARCH_ENABLED", None)
             packs.append(pack)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
