@@ -356,25 +356,40 @@ def _run_triage_grounding_for_hazard(
         recency = get_recency_days(hazard_code)
         query_label = build_triage_grounding_query(hazard_code, country_name, iso3)
 
-        primary_backend = os.getenv("PYTHIA_GROUNDING_PRIMARY_BACKEND", "openai").lower()
+        primary_backend = os.getenv("PYTHIA_GROUNDING_PRIMARY_BACKEND", "brave").lower()
         pack = None
 
-        if primary_backend == "openai":
+        def _has_sources(p: dict | None) -> bool:
+            return p is not None and (bool(p.get("sources")) or bool(p.get("grounded")))
+
+        def _try_fallbacks(primary_pack: dict | None, backends: list[str]) -> dict | None:
+            """Try fallback backends in order until one returns sources."""
+            result = primary_pack
+            for backend in backends:
+                if _has_sources(result):
+                    break
+                fb = None
+                if backend == "brave":
+                    fb = _try_brave_triage_grounding(query_label, recency, iso3, hazard_code, country_name=country_name)
+                elif backend == "openai":
+                    fb = _try_openai_triage_grounding(query_label, recency, iso3, hazard_code)
+                elif backend == "gemini":
+                    fb = _try_gemini_triage_grounding(query_label, recency, grounding_prompt, iso3, hazard_code)
+                if _has_sources(fb):
+                    result = fb
+                elif result is None:
+                    result = fb
+            return result
+
+        if primary_backend == "brave":
+            pack = _try_brave_triage_grounding(query_label, recency, iso3, hazard_code, country_name=country_name)
+            pack = _try_fallbacks(pack, ["openai", "gemini"])
+        elif primary_backend == "openai":
             pack = _try_openai_triage_grounding(query_label, recency, iso3, hazard_code)
-            if pack is None or (not pack.get("sources") and not pack.get("grounded")):
-                fallback = _try_gemini_triage_grounding(query_label, recency, grounding_prompt, iso3, hazard_code)
-                if fallback and (fallback.get("sources") or fallback.get("grounded")):
-                    pack = fallback
-                elif pack is None:
-                    pack = fallback
-        else:
+            pack = _try_fallbacks(pack, ["brave", "gemini"])
+        else:  # gemini
             pack = _try_gemini_triage_grounding(query_label, recency, grounding_prompt, iso3, hazard_code)
-            if pack is None or (not pack.get("sources") and not pack.get("grounded")):
-                fallback = _try_openai_triage_grounding(query_label, recency, iso3, hazard_code)
-                if fallback and (fallback.get("sources") or fallback.get("grounded")):
-                    pack = fallback
-                elif pack is None:
-                    pack = fallback
+            pack = _try_fallbacks(pack, ["brave", "openai"])
 
         if pack is None:
             pack = {"sources": [], "grounded": False, "markdown": "", "debug": {"grounding_backend": "all_failed"}}
@@ -389,7 +404,9 @@ def _run_triage_grounding_for_hazard(
             usage_info = dict(pack.get("debug", {}).get("usage", {}))
             model_id = pack.get("debug", {}).get("model_id", "unknown")
             provider = pack.get("debug", {}).get("grounding_backend", "unknown")
-            if "openai" in provider:
+            if "brave" in provider:
+                provider = "brave"
+            elif "openai" in provider:
                 provider = "openai"
             elif "gemini" in provider:
                 provider = "google"
@@ -415,6 +432,36 @@ def _run_triage_grounding_for_hazard(
         return pack
     except Exception as exc:  # noqa: BLE001
         logger.warning("Triage grounding failed for %s %s: %s", iso3, hazard_code, exc)
+        return None
+
+
+def _try_brave_triage_grounding(
+    query_label: str,
+    recency: int,
+    iso3: str,
+    hazard_code: str,
+    country_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Try Brave Search API grounding for triage. Returns pack dict or None."""
+    try:
+        from pythia.web_research.backends.brave_search import fetch_via_brave_search
+        evidence_pack = fetch_via_brave_search(
+            query_label,
+            recency_days=recency,
+            include_structural=True,
+            timeout_sec=30,
+            max_results=10,
+            hazard_code=hazard_code,
+            country_name=country_name,
+        )
+        pack = evidence_pack.to_dict() if hasattr(evidence_pack, "to_dict") else dict(evidence_pack)
+        if pack.get("sources") or pack.get("grounded"):
+            pack.setdefault("debug", {})["grounding_backend"] = "brave_search"
+        else:
+            pack.setdefault("debug", {})["grounding_backend"] = "brave_search_empty"
+        return pack
+    except Exception as exc:
+        logger.debug("Triage grounding Brave failed for %s %s: %s", iso3, hazard_code, exc)
         return None
 
 

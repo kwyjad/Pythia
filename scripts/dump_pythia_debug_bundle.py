@@ -414,7 +414,14 @@ def _load_grounding_subsystem_stats(
         sources = payload.get("sources") if isinstance(payload, dict) else None
         n_sources = 0
         if isinstance(sources, list):
+            # Old format: full sources list
             n_sources = len(sources)
+        elif isinstance(payload, dict) and isinstance(payload.get("n_sources"), (int, float)):
+            # Compact format: pre-computed n_sources count
+            n_sources = int(payload["n_sources"])
+        elif isinstance(payload, dict) and isinstance(payload.get("source_urls"), list):
+            # Compact format variant: source_urls list
+            n_sources = len(payload["source_urls"])
         elif response_text and "Sources:" in response_text:
             # Markdown evidence pack — count URL lines
             after_sources = response_text.split("Sources:")[-1]
@@ -501,7 +508,14 @@ def _load_grounding_call_stats(
         sources = payload.get("sources") if isinstance(payload, dict) else None
         n_sources = 0
         if isinstance(sources, list):
+            # Old format: full sources list
             n_sources = len(sources)
+        elif isinstance(payload, dict) and isinstance(payload.get("n_sources"), (int, float)):
+            # Compact format: pre-computed n_sources count
+            n_sources = int(payload["n_sources"])
+        elif isinstance(payload, dict) and isinstance(payload.get("source_urls"), list):
+            # Compact format variant: source_urls list
+            n_sources = len(payload["source_urls"])
         elif response_text and "Sources:" in response_text:
             # Markdown evidence pack — count URL lines
             after_sources = response_text.split("Sources:")[-1]
