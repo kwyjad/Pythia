@@ -45,9 +45,7 @@ TRIAGE_GROUNDING_QUERIES = {
     "ACE": "{country} ({iso3}) armed conflict violence displacement humanitarian situation {year}",
     "DR": "{country} ({iso3}) drought food insecurity crop failure humanitarian response {year}",
     "FL": "{country} ({iso3}) flooding displacement humanitarian impact {year}",
-    "HW": "{country} ({iso3}) heatwave extreme heat humanitarian impact health {year}",
     "TC": "{country} ({iso3}) tropical cyclone hurricane typhoon humanitarian impact {year}",
-    "DI": "{country} ({iso3}) refugee influx cross-border displacement humanitarian {year}",
 }
 
 
@@ -81,7 +79,6 @@ RECENCY_DAYS = {
     "ACE": 60,   # Operational picture doesn't need 4 months
     "DR": 90,    # One season is enough
     "FL": 60,    # Flood season + aftermath
-    "HW": 60,    # Seasonal pattern + any ongoing heat events
     "TC": 60,    # Full season context
 }
 

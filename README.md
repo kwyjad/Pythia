@@ -117,12 +117,12 @@ Grounding for RC and triage uses OpenAI GPT-4.1-mini web search (primary) with G
 
 ## NMME seasonal climate forecasts
 
-Pythia ingests NMME (North American Multi-Model Ensemble) seasonal temperature and precipitation anomaly forecasts from the CPC FTP server. These provide structured climate context for drought, flood, heatwave, and tropical cyclone assessments.
+Pythia ingests NMME (North American Multi-Model Ensemble) seasonal temperature and precipitation anomaly forecasts from the CPC FTP server. These provide structured climate context for drought, flood, and tropical cyclone assessments.
 
 - **Source**: `ftp://ftp.cpc.ncep.noaa.gov/NMME/realtime_anom/ENSMEAN/` — ensemble mean anomalies at 1° resolution, updated ~9th of each month with 7 lead months.
 - **Processing**: Country-level area-weighted averages using `xarray` + `regionmask` (Natural Earth admin-0 boundaries). Anomalies expressed in σ (standard deviations from climatology) with derived tercile categories (above/below/near normal).
 - **Storage**: `seasonal_forecasts` table in Pythia DuckDB (~2,700 rows per monthly update: 195 countries × 2 variables × 7 leads).
-- **Injection**: Automatically loaded into HS triage and RC prompts via the existing `climate_data` parameter for DR, FL, HW, TC hazards. Also injected into forecaster research and SPD prompts via `research_json`.
+- **Injection**: Automatically loaded into HS triage and RC prompts via the existing `climate_data` parameter for DR, FL, TC hazards. Also injected into forecaster research and SPD prompts via `research_json`.
 - **Run manually**: `python -m resolver.tools.ingest_nmme` (or `--year-month YYYYMM` for a specific month, `--dry-run` to preview).
 - **Automation**: `.github/workflows/ingest-nmme.yml` runs on the 10th of each month.
 
@@ -162,8 +162,8 @@ Pythia pulls structured humanitarian, climate, and conflict-forecast data from a
 | **ACAPS Humanitarian Access** | `pythia/acaps.py` | Access constraint scores (HS triage only) | `acaps_humanitarian_access` |
 | **IPC Phases** | `pythia/ipc_phases.py` | Food security phase populations (Phase 3+ = Crisis) | `ipc_phases` |
 | **ACLED Political Events** | `pythia/acled_political.py` | Event-level political data (ACE/DI hazards only) | `acled_political_events` |
-| **NMME Seasonal Forecasts** | `resolver/tools/ingest_nmme.py` | Temp/precip anomalies, 7-month lead (DR/FL/HW/TC) | `seasonal_forecasts` |
-| **ENSO State/Forecast** | `horizon_scanner/enso/enso_module.py` | ENSO state, Niño 3.4 anomaly, 9-season probabilistic outlook, IOD (DR/FL/HW/TC) | `enso_state` (DB-first, falls back to live scrape) |
+| **NMME Seasonal Forecasts** | `resolver/tools/ingest_nmme.py` | Temp/precip anomalies, 7-month lead (DR/FL/TC) | `seasonal_forecasts` |
+| **ENSO State/Forecast** | `horizon_scanner/enso/enso_module.py` | ENSO state, Niño 3.4 anomaly, 9-season probabilistic outlook, IOD (DR/FL/TC) | `enso_state` (DB-first, falls back to live scrape) |
 | **Seasonal TC Forecasts** | `horizon_scanner/seasonal_tc/` | Basin-level TC activity forecasts from TSR, NOAA CPC, BoM across 8 basins (TC only) | `seasonal_tc_outlooks`, `seasonal_tc_context_cache` (DB-first) |
 | **HDX Signals** | `horizon_scanner/hdx_signals.py` | OCHA automated crisis alerts: conflict, displacement, food insecurity, agricultural stress (all hazards) | `hdx_signals` (DB-first, falls back to CSV) |
 | **VIEWS** | `resolver/connectors/views.py` | ML-based conflict fatality predictions (ACE, 1–6 month leads) | `conflict_forecasts` |
@@ -441,7 +441,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 - **Prediction market retriever disabled**: Metaculus returns 403, Polymarket returns 422. Do not re-enable until upstream APIs are fixed.
 - **IPC API unavailable**: The IPC connector requires `IPC_API_KEY` which is not available; FEWS NET Phase 3+ data is used instead.
 - **IFRC Montandon sparsity**: natural hazard PA data may be sparse for some hazards/countries, reducing base-rate strength.
-- **HW (heatwave) unresolvable**: No resolution data source exists; excluded from question generation.
+- **DI, CU, HW fully silenced**: Displacement Influx, Civil Unrest, and Heatwave hazards are blocked at the hazard catalog level and never enter RC, triage, grounding, or question generation.
 - **Occasional “200 but ungrounded”**: some web search calls can return success without verified sources. OpenAI is the primary grounding backend; Gemini is the fallback.
 
 ## Troubleshooting

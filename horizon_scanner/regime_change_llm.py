@@ -68,7 +68,7 @@ logger = logging.getLogger(__name__)
 HS_TEMPERATURE = float(os.getenv("HS_TEMPERATURE", "0.0"))
 
 # All RC-eligible hazard codes (DI excluded).
-_RC_HAZARDS = {"ACE", "DR", "FL", "HW", "TC"}
+_RC_HAZARDS = {"ACE", "DR", "FL", "TC"}
 
 # Default RC values for hazards that are seasonally inactive.
 _RC_DEFAULTS: Dict[str, Any] = {
@@ -82,17 +82,6 @@ _RC_DEFAULTS: Dict[str, Any] = {
     "status": "seasonal_skip",
 }
 
-# Default RC values for DI (silenced — no resolution source yet).
-_DI_DEFAULTS: Dict[str, Any] = {
-    "likelihood": 0.05,
-    "direction": "unclear",
-    "magnitude": 0.05,
-    "window": "",
-    "rationale_bullets": [],
-    "trigger_signals": [],
-    "valid": True,
-    "status": "silenced",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +238,6 @@ def _run_grounding_for_hazard(
         "ACE": "armed conflict violence security situation",
         "DR": "drought food insecurity food security crisis",
         "FL": "flooding flood displacement humanitarian impact",
-        "HW": "heatwave extreme heat health humanitarian impact",
         "TC": "tropical cyclone hurricane typhoon storm impact",
     }
 
@@ -833,11 +821,10 @@ def run_rc_for_country(
     rc_start = time.time()
 
     for hz_code in expected_hazards:
-        if hz_code == "DI":
-            merged_hazards[hz_code] = dict(_DI_DEFAULTS)
+        if hz_code not in _RC_HAZARDS:
             continue
 
-        if hz_code not in active or hz_code not in _RC_HAZARDS:
+        if hz_code not in active:
             merged_hazards[hz_code] = dict(_RC_DEFAULTS)
             logger.info("RC skip for %s %s (seasonal or unknown)", iso3_up, hz_code)
             continue

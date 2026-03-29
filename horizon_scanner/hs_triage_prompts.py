@@ -870,7 +870,6 @@ TRIAGE_PROMPT_BUILDERS = {
     "ACE": build_triage_prompt_ace,
     "DR": build_triage_prompt_dr,
     "FL": build_triage_prompt_fl,
-    "HW": build_triage_prompt_hw,
     "TC": build_triage_prompt_tc,
 }
 

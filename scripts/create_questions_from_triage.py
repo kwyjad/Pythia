@@ -35,11 +35,9 @@ class TriagedHazard:
 
 SUPPORTED_HAZARD_METRICS: Dict[str, List[str]] = {
     "ACE": ["FATALITIES", "PA"],
-    "CU": ["PA"],
     "DR": ["PA", "EVENT_OCCURRENCE"],
     "FL": ["PA", "EVENT_OCCURRENCE"],
     "TC": ["PA", "EVENT_OCCURRENCE"],
-    "DI": ["PA"],
 }
 
 HAZARD_HUMAN_NAMES = {
@@ -176,12 +174,6 @@ def _build_question_wording(
             f"between {start_str} and {end_str}, as resolved by ACLED?"
         )
 
-    if hz == "DI" and m == "PA":
-        return (
-            f"How many people will enter {country} because of armed conflict in a neighbouring country "
-            f"between {start_str} and {end_str}?"
-        )
-
     if hz in {"DR", "FL", "TC"} and m == "PA":
         hazard_name = HAZARD_HUMAN_NAMES.get(hz, hz)
         return (
@@ -282,12 +274,6 @@ def _load_triage_rows(
         if hz_up == "ACO":
             LOG.info(
                 "Skipping ACO triage/question for %s; ACE is the canonical conflict hazard",
-                iso3_up,
-            )
-            continue
-        if hz_up == "HW":
-            LOG.info(
-                "Skipping HW triage/question for %s; heatwave dropped (no resolution source)",
                 iso3_up,
             )
             continue

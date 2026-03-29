@@ -920,7 +920,6 @@ RC_PROMPT_BUILDERS = {
     "ACE": build_rc_prompt_ace,
     "DR": build_rc_prompt_dr,
     "FL": build_rc_prompt_fl,
-    "HW": build_rc_prompt_hw,
     "TC": build_rc_prompt_tc,
 }
 

@@ -79,7 +79,7 @@ KEY_TABLES = [
     "forecasts_raw",
     "forecasts_ensemble",
 ]
-EXPECTED_HS_HAZARDS = ["ACE", "DI", "DR", "FL", "HW", "TC"]
+EXPECTED_HS_HAZARDS = ["ACE", "DR", "FL", "TC"]
 
 
 def _table_count(con: duckdb.DuckDBPyConnection, table: str) -> int | None:
@@ -2573,7 +2573,7 @@ class BundleData:
     triage_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
     adversarial_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
     hs_triage_detail_rows: list[dict[str, Any]] = field(default_factory=list)
-    structured_data_coverage: dict[str, tuple[int, int]] = field(default_factory=dict)
+    structured_data_coverage: dict[str, tuple[int, int, list[str]]] = field(default_factory=dict)
     food_security_no_data_countries: list[str] = field(default_factory=list)
 
 
@@ -2934,8 +2934,8 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         if (q.get("hazard_code") or "").upper() == "DR"
     })
     if dr_countries:
-        fewsnet_cov, _ = data.structured_data_coverage.get("FEWS NET IPC", (0, 0))
-        ipc_cov, _ = data.structured_data_coverage.get("IPC API", (0, 0))
+        fewsnet_cov, *_ = data.structured_data_coverage.get("FEWS NET IPC", (0, 0, []))
+        ipc_cov, *_ = data.structured_data_coverage.get("IPC API", (0, 0, []))
         total_cov = fewsnet_cov + ipc_cov
         if total_cov == 0:
             fs_status = "WARN"
@@ -3203,8 +3203,8 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
 
     # Food security coverage line
     if data.structured_data_coverage:
-        fewsnet_yes, _ = data.structured_data_coverage.get("FEWS NET IPC", (0, 0))
-        ipc_yes, _ = data.structured_data_coverage.get("IPC API", (0, 0))
+        fewsnet_yes, *_ = data.structured_data_coverage.get("FEWS NET IPC", (0, 0, []))
+        ipc_yes, *_ = data.structured_data_coverage.get("IPC API", (0, 0, []))
         if fewsnet_yes or ipc_yes:
             lines.append(
                 f"- Food security: {fewsnet_yes} FEWS NET countries, "
@@ -3339,31 +3339,38 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
     for label, stats in [
         ("RC Grounding", data.rc_grounding_call_stats),
         ("Triage Grounding", data.triage_grounding_call_stats),
-        ("Adversarial Check Grounding", data.adversarial_grounding_call_stats),
+        ("Adversarial Checks", data.adversarial_grounding_call_stats),
     ]:
-        s = _compute_source_stats(stats.get("source_counts", []))
+        n_calls = stats.get("n_calls", 0)
+        source_counts = stats.get("source_counts", [])
+        with_sources = sum(1 for c in source_counts if c > 0)
+        empty = n_calls - with_sources
+        s = _compute_source_stats(source_counts)
         lines.append(
-            f"- {label}: {stats.get('n_calls', 0)} calls, "
-            f"{stats.get('n_errors', 0)} fails, "
+            f"- {label}: {n_calls} calls, "
+            f"{with_sources} with sources, {empty} empty, "
             f"sources min/{s['min']} max/{s['max']} avg/{s['avg']:.1f} median/{s['median']}"
         )
     lines.append("")
 
-    # ----- Section: Horizon Scan -----
-    lines.append("## Horizon Scan")
-    lines.append("")
-
+    # ----- Pre-compute shared triage data for RC / Triage / Question Generation -----
+    _SILENCED_HAZARDS = {"DI", "CU", "HW"}
     rc_counts: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
-    seasonal_skip = 0
-    acled_low = 0
-    triage_quiet = 0
-    triage_priority = 0
+    seasonal_skip_count = 0
+    seasonal_skip_pairs: list[str] = []
+    rc_promoted_pairs: list[tuple[str, str, int]] = []  # (iso3, hazard, level)
+    triage_quiet_pairs: list[tuple[str, str]] = []
+    triage_priority_pairs: list[tuple[str, str]] = []
+    n_countries = len(data.resolved_countries_sorted)
+    n_active_hazards = len(EXPECTED_HS_HAZARDS)
 
     for row in data.hs_triage_detail_rows:
-        rc_level = row.get("regime_change_level")
-        if rc_level is not None:
-            rc_counts[int(rc_level)] = rc_counts.get(int(rc_level), 0) + 1
+        hz = (row.get("hazard_code") or "").upper()
+        iso3 = (row.get("iso3") or "").upper()
+        if hz in _SILENCED_HAZARDS:
+            continue
 
+        rc_level = row.get("regime_change_level")
         dq_raw = row.get("data_quality_json") or ""
         status = ""
         if dq_raw:
@@ -3374,35 +3381,154 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
                 pass
 
         if status == "seasonal_skip":
-            seasonal_skip += 1
-        elif status == "acled_low_activity":
-            acled_low += 1
-        elif status in ("silenced", "rc_promoted"):
-            pass  # don't count in triage quiet/priority
-        else:
-            tier = (row.get("tier") or "").lower()
-            if tier == "quiet":
-                triage_quiet += 1
-            elif tier == "priority":
-                triage_priority += 1
+            seasonal_skip_count += 1
+            seasonal_skip_pairs.append(f"{iso3}_{hz}")
+            continue
 
+        if rc_level is not None:
+            lvl = int(rc_level)
+            rc_counts[lvl] = rc_counts.get(lvl, 0) + 1
+            if lvl >= 1:
+                rc_promoted_pairs.append((iso3, hz, lvl))
+
+        if status == "rc_promoted":
+            continue
+
+        tier = (row.get("tier") or "").lower()
+        if tier == "quiet":
+            triage_quiet_pairs.append((iso3, hz))
+        elif tier == "priority":
+            triage_priority_pairs.append((iso3, hz))
+
+    # ----- Section: RC Assessment -----
+    lines.append("## RC Assessment")
+    lines.append("")
+    total_expected = n_active_hazards * n_countries
+    n_assessed = total_expected - seasonal_skip_count
+    lines.append(f"Unit: 1 row = 1 hazard-country pair.")
+    lines.append(
+        f"Assessed hazards: {', '.join(EXPECTED_HS_HAZARDS)} "
+        f"({n_active_hazards} per country × {n_countries} countries = {total_expected})."
+    )
+    if seasonal_skip_pairs:
+        lines.append(
+            f"Seasonal screen-outs: {seasonal_skip_count} ({', '.join(sorted(seasonal_skip_pairs))})"
+        )
+    else:
+        lines.append(f"Seasonal screen-outs: 0")
+    lines.append(f"→ {n_assessed} pairs assessed by RC LLM")
+    lines.append("")
+
+    lines.append("| RC Level | Count | Meaning |")
+    lines.append("|----------|-------|---------|")
+    _rc_meanings = {0: "Baseline → triage", 1: "Watch → Track 1", 2: "Elevated → Track 1", 3: "Critical → Track 1"}
     for level in range(4):
-        lines.append(f"- RC Level {level}: {rc_counts.get(level, 0)}")
-    lines.append(f"- Hazard calendar screen-outs: {seasonal_skip}")
-    lines.append(f'- "Quiet Conflict" screen-outs: {acled_low}')
-    lines.append(f"- Triage Quiet: {triage_quiet}")
-    lines.append(f"- Triage Priority: {triage_priority}")
+        lines.append(f"| {level} | {rc_counts.get(level, 0)} | {_rc_meanings[level]} |")
+    lines.append("")
+
+    if rc_promoted_pairs:
+        lines.append("RC Level ≥1 (promoted to Track 1):")
+        for iso3, hz, lvl in sorted(rc_promoted_pairs):
+            lines.append(f"- {iso3}: {hz} (L{lvl})")
+        lines.append("")
+
+    # ----- Section: Triage -----
+    lines.append("## Triage")
+    lines.append("")
+    n_promoted = len(rc_promoted_pairs)
+    n_triage_input = n_assessed - n_promoted
+    lines.append(f"Unit: 1 row = 1 hazard-country pair.")
+    lines.append(
+        f"Input: {n_triage_input} RC Level 0 pairs "
+        f"({n_assessed} assessed − {n_promoted} RC-promoted − {seasonal_skip_count} seasonal)"
+    )
+    lines.append("")
+
+    lines.append("| Tier | Count |")
+    lines.append("|------|-------|")
+    lines.append(f"| Priority | {len(triage_priority_pairs)} → generates Track 2 questions |")
+    lines.append(f"| Quiet | {len(triage_quiet_pairs)} → no questions |")
+    lines.append("")
+
+    if triage_priority_pairs:
+        lines.append("Triage Priority:")
+        for iso3, hz in sorted(triage_priority_pairs):
+            lines.append(f"- {iso3}: {hz}")
+        lines.append("")
+
+    if triage_quiet_pairs:
+        lines.append("Triage Quiet:")
+        for iso3, hz in sorted(triage_quiet_pairs):
+            lines.append(f"- {iso3}: {hz}")
+        lines.append("")
+
+    # ----- Section: Question Generation -----
+    lines.append("## Question Generation")
+    lines.append("")
+    lines.append("Unit: 1 row = 1 forecast question.")
+    lines.append("Metric rules per hazard:")
+    lines.append("- ACE → PA + FATALITIES (2 questions)")
+    lines.append("- DR → EVENT_OCCURRENCE [+ PHASE3PLUS_IN_NEED if FEWS NET country] (1-2 questions)")
+    lines.append("- FL → PA + EVENT_OCCURRENCE (2 questions)")
+    lines.append("- TC → PA + EVENT_OCCURRENCE (2 questions)")
+    lines.append("")
+
+    # Build lookup from (iso3, hazard) -> RC level from triage detail
+    _rc_level_lookup: dict[tuple[str, str], int] = {}
+    _triage_tier_lookup: dict[tuple[str, str], str] = {}
+    for row in data.hs_triage_detail_rows:
+        hz = (row.get("hazard_code") or "").upper()
+        iso3 = (row.get("iso3") or "").upper()
+        rc_level = row.get("regime_change_level")
+        if rc_level is not None:
+            _rc_level_lookup[(iso3, hz)] = int(rc_level)
+        tier = (row.get("tier") or "").lower()
+        if tier:
+            _triage_tier_lookup[(iso3, hz)] = tier
 
     track1_qs = [q for q in data.questions if q.get("track") == 1]
     track2_qs = [q for q in data.questions if q.get("track") == 2]
-    lines.append(f"- Track 1: {len(track1_qs)}")
-    lines.append(f"- Track 2: {len(track2_qs)}")
 
-    for hz in ["ACE", "FL", "DR", "TC"]:
+    # Group questions by (iso3, hazard_code, track)
+    from collections import defaultdict
+    _t1_by_pair: dict[tuple[str, str], list[str]] = defaultdict(list)
+    _t2_by_pair: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for q in track1_qs:
+        key = ((q.get("iso3") or "").upper(), (q.get("hazard_code") or "").upper())
+        _t1_by_pair[key].append(q.get("question_id") or "?")
+    for q in track2_qs:
+        key = ((q.get("iso3") or "").upper(), (q.get("hazard_code") or "").upper())
+        _t2_by_pair[key].append(q.get("question_id") or "?")
+
+    lines.append(f"### Track 1 ({len(track1_qs)} questions from {len(_t1_by_pair)} hazard-country pairs)")
+    lines.append("")
+    lines.append("| Source pair | RC Level | Questions generated |")
+    lines.append("|-------------|----------|---------------------|")
+    for (iso3, hz), qids in sorted(_t1_by_pair.items()):
+        lvl = _rc_level_lookup.get((iso3, hz), 0)
+        lines.append(f"| {iso3}_{hz} | L{lvl} | {', '.join(sorted(qids))} |")
+    lines.append("")
+
+    lines.append(f"### Track 2 ({len(track2_qs)} questions from {len(_t2_by_pair)} hazard-country pairs)")
+    lines.append("")
+    lines.append("| Source pair | Triage tier | Questions generated |")
+    lines.append("|-------------|-------------|---------------------|")
+    for (iso3, hz), qids in sorted(_t2_by_pair.items()):
+        tier = _triage_tier_lookup.get((iso3, hz), "priority")
+        lines.append(f"| {iso3}_{hz} | {tier.title()} | {', '.join(sorted(qids))} |")
+    lines.append("")
+
+    lines.append("### By hazard")
+    lines.append("")
+    lines.append("| Hazard | Total | Track 1 | Track 2 |")
+    lines.append("|--------|-------|---------|---------|")
+    for hz in ["ACE", "DR", "FL", "TC"]:
         hz_qs = [q for q in data.questions if (q.get("hazard_code") or "").upper() == hz]
         hz_t1 = sum(1 for q in hz_qs if q.get("track") == 1)
         hz_t2 = sum(1 for q in hz_qs if q.get("track") == 2)
-        lines.append(f"- {hz}: {len(hz_qs)} (Track 1: {hz_t1} / Track 2: {hz_t2})")
+        lines.append(f"| {hz} | {len(hz_qs)} | {hz_t1} | {hz_t2} |")
+    lines.append("")
+    lines.append(f"Total questions: {len(data.questions)} (Track 1: {len(track1_qs)}, Track 2: {len(track2_qs)})")
     lines.append("")
 
     # ----- Section: Structured Data Injects -----
@@ -3415,22 +3541,27 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
             "ReliefWeb reports", "HDX Signals", "ENSO", "Seasonal TC",
             "NMME", "CrisisWatch", "GDACS events",
         ]
+        lines.append("| Source | Yes | No | Missing |")
+        lines.append("|--------|-----|----|---------|")
         for label in source_order:
-            yes, no = data.structured_data_coverage.get(label, (0, 0))
-            lines.append(f"- {label}: {yes} countries yes, {no} countries no")
+            yes, no, missing = data.structured_data_coverage.get(label, (0, 0, []))
+            missing_str = ", ".join(missing) if missing else ""
+            lines.append(f"| {label} | {yes} | {no} | {missing_str} |")
         lines.append("")
 
     # ----- Section: Scenarios -----
     if data.forecaster_run_id and data.scenario_status_rows:
         lines.append("## Scenarios")
         lines.append("")
+        lines.append("Track 1 only. 1 scenario per Track 1 question.")
         track1_qids = {q.get("question_id") for q in data.questions if q.get("track") == 1}
         t1_scenarios = [
             r for r in data.scenario_status_rows if r.get("question_id") in track1_qids
         ]
         t1_yes = sum(1 for r in t1_scenarios if r.get("status") == "generated")
         t1_no = len(t1_scenarios) - t1_yes
-        lines.append(f"- Track 1 scenarios: {t1_yes} yes / {t1_no} no")
+        lines.append(f"Generated: {t1_yes} / {len(t1_scenarios)}")
+        lines.append(f"Missing: {t1_no}")
         lines.append("")
 
     lines.append("---")
@@ -3452,8 +3583,8 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
 
 def _build_food_security_health(data: BundleData) -> dict[str, Any]:
     """Build food security health section for the JSON health report."""
-    fewsnet_cov, _ = data.structured_data_coverage.get("FEWS NET IPC", (0, 0))
-    ipc_cov, _ = data.structured_data_coverage.get("IPC API", (0, 0))
+    fewsnet_cov, *_ = data.structured_data_coverage.get("FEWS NET IPC", (0, 0, []))
+    ipc_cov, *_ = data.structured_data_coverage.get("IPC API", (0, 0, []))
     return {
         "fewsnet_countries": fewsnet_cov,
         "ipc_countries": ipc_cov,
@@ -4147,21 +4278,22 @@ def _safe_table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
 def _load_structured_data_coverage(
     con: duckdb.DuckDBPyConnection,
     countries: list[str],
-) -> dict[str, tuple[int, int]]:
-    """Return ``{source_label: (countries_yes, countries_no)}`` for each data source."""
+) -> dict[str, tuple[int, int, list[str]]]:
+    """Return ``{source_label: (countries_yes, countries_no, missing_iso3s)}`` for each data source."""
     n = len(countries)
     if n == 0:
         return {}
 
     placeholders = ", ".join("?" for _ in countries)
     upper_countries = [c.upper() for c in countries]
-    result: dict[str, tuple[int, int]] = {}
+    upper_set = set(upper_countries)
+    result: dict[str, tuple[int, int, list[str]]] = {}
 
     # (label, table, extra WHERE clause appended after the IN filter)
     source_queries: list[tuple[str, str, str]] = [
         ("ACLED fatalities", "acled_monthly_fatalities", ""),
         ("IDMC displacement", "facts_deltas", "AND metric = 'new_displacements'"),
-        ("IFRC PA", "facts_resolved", "AND hazard_code IN ('FL','TC','DR','HW','EQ')"),
+        ("IFRC PA", "facts_resolved", "AND hazard_code IN ('FL','TC','DR','EQ')"),
         ("Conflict forecasts", "conflict_forecasts", ""),
         (
             "FEWS NET IPC",
@@ -4183,27 +4315,28 @@ def _load_structured_data_coverage(
 
     for label, table, extra_where in source_queries:
         if not _safe_table_exists(con, table):
-            result[label] = (0, n)
+            result[label] = (0, n, sorted(upper_set))
             continue
         try:
             sql = (
-                f"SELECT COUNT(DISTINCT UPPER(iso3)) FROM {table} "
+                f"SELECT DISTINCT UPPER(iso3) FROM {table} "
                 f"WHERE UPPER(iso3) IN ({placeholders}) {extra_where}"
             )
-            yes = con.execute(sql, upper_countries).fetchone()[0]
-            result[label] = (yes, n - yes)
+            covered = {row[0] for row in con.execute(sql, upper_countries).fetchall()}
+            missing = sorted(upper_set - covered)
+            result[label] = (len(covered), n - len(covered), missing)
         except Exception:
-            result[label] = (0, n)
+            result[label] = (0, n, sorted(upper_set))
 
     # ENSO is global (not per-country)
     try:
         if _safe_table_exists(con, "enso_state"):
             row_count = con.execute("SELECT COUNT(*) FROM enso_state").fetchone()[0]
-            result["ENSO"] = (n, 0) if row_count > 0 else (0, n)
+            result["ENSO"] = (n, 0, []) if row_count > 0 else (0, n, sorted(upper_set))
         else:
-            result["ENSO"] = (0, n)
+            result["ENSO"] = (0, n, sorted(upper_set))
     except Exception:
-        result["ENSO"] = (0, n)
+        result["ENSO"] = (0, n, sorted(upper_set))
 
     return result
 
