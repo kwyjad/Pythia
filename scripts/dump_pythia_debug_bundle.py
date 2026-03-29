@@ -908,6 +908,13 @@ def _compute_question_run_metrics(
                     entry[call_type] = float(row.get("cost_usd") or 0.0)
 
     expected_model_ids = _expected_spd_model_ids()
+    track_by_qid: dict[str, int | None] = {
+        str(q.get("question_id")): (
+            int(q["track"]) if q.get("track") is not None else None
+        )
+        for q in questions if q.get("question_id")
+    }
+    track2_model = os.getenv("PYTHIA_TRACK2_MODEL_ID", "gemini-3-flash-preview")
     present_by_qid: dict[str, set[str]] = {}
     if expected_model_ids and "call_type" in llm_columns and "model_id" in llm_columns:
         error_filter = ""
@@ -956,9 +963,16 @@ def _compute_question_run_metrics(
 
         if expected_model_ids:
             present = present_by_qid.get(qid, set())
-            missing = sorted(set(expected_model_ids) - present)
-            row["n_spd_models_expected"] = len(expected_model_ids)
-            row["n_spd_models_ok"] = len(set(expected_model_ids) & present)
+            q_track = track_by_qid.get(qid)
+            if q_track == 2:
+                t2_expected = {track2_model}
+                missing = sorted(t2_expected - present)
+                row["n_spd_models_expected"] = len(t2_expected)
+                row["n_spd_models_ok"] = len(t2_expected & present)
+            else:
+                missing = sorted(set(expected_model_ids) - present)
+                row["n_spd_models_expected"] = len(expected_model_ids)
+                row["n_spd_models_ok"] = len(set(expected_model_ids) & present)
             row["missing_model_ids_json"] = json.dumps(missing)
 
         if phase_max:
