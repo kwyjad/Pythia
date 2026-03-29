@@ -22,6 +22,33 @@ from resolver.query.debug_ui import (
 LOG = logging.getLogger(__name__)
 
 
+def build_compact_grounding_log(pack: dict) -> str:
+    """Build a compact JSON string for logging grounding results to llm_calls.
+
+    This is the canonical format that all health report parsers expect.
+    Both RC and triage grounding should use this for ``response_text``.
+    """
+    sources = pack.get("sources") or []
+    log_pack = {
+        "query": pack.get("query", ""),
+        "grounded": pack.get("grounded", False),
+        "n_sources": len(sources),
+        "source_urls": [
+            (s.get("url") if isinstance(s, dict) else getattr(s, "url", str(s)))[:150]
+            for s in sources[:15]
+        ],
+        "structural_context": (pack.get("structural_context") or "")[:500],
+        "recent_signals": [str(s)[:200] for s in (pack.get("recent_signals") or [])[:8]],
+        "backend": (
+            pack.get("debug", {}).get("grounding_backend", "")
+            if isinstance(pack.get("debug"), dict)
+            else pack.get("backend", "")
+        ),
+        "error": pack.get("error"),
+    }
+    return json.dumps(log_pack, default=str)
+
+
 def _safe_get(d: Dict[str, Any], key: str, default: Any = 0) -> Any:
     """Safe dict getter that tolerates missing or None values."""
     try:

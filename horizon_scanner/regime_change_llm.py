@@ -52,7 +52,7 @@ from horizon_scanner._utils import (
     status_from_error,
 )
 from horizon_scanner.db_writer import log_hs_hazard_tail_packs_to_db
-from horizon_scanner.llm_logging import log_hs_llm_call
+from horizon_scanner.llm_logging import build_compact_grounding_log, log_hs_llm_call
 from pythia.test_mode import is_test_mode
 from horizon_scanner.rc_grounding_prompts import (
     build_grounding_prompt,
@@ -321,22 +321,7 @@ def _run_grounding_for_hazard(
                     model_id=str(model_id), active=True, purpose="hs_grounding",
                 ),
                 prompt_text=query_label,
-                response_text=json.dumps(
-                    {
-                        "query": pack.get("query", ""),
-                        "grounded": pack.get("grounded", False),
-                        "n_sources": len(pack.get("sources") or []),
-                        "source_urls": [
-                            (s.get("url") if isinstance(s, dict) else getattr(s, "url", str(s)))[:150]
-                            for s in (pack.get("sources") or [])[:15]
-                        ],
-                        "structural_context": (pack.get("structural_context") or "")[:500],
-                        "recent_signals": (pack.get("recent_signals") or [])[:8],
-                        "backend": pack.get("debug", {}).get("grounding_backend", ""),
-                        "error": pack.get("error"),
-                    },
-                    default=str,
-                ),
+                response_text=build_compact_grounding_log(pack),
                 usage=usage_info,
                 error_text=str(pack["error"]["message"]) if pack.get("error") and isinstance(pack["error"], dict) else None,
                 is_test=is_test_mode(),

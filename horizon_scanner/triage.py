@@ -398,7 +398,7 @@ def _run_triage_grounding_for_hazard(
 
         # Log triage grounding call to llm_calls for cost tracking
         try:
-            from horizon_scanner.llm_logging import log_hs_llm_call
+            from horizon_scanner.llm_logging import build_compact_grounding_log, log_hs_llm_call
             from forecaster.providers import ModelSpec, estimate_cost_usd
 
             usage_info = dict(pack.get("debug", {}).get("usage", {}))
@@ -421,7 +421,7 @@ def _run_triage_grounding_for_hazard(
                     model_id=str(model_id), active=True, purpose="hs_triage_grounding",
                 ),
                 prompt_text=(pack.get("debug", {}).get("query", "") or query_label)[:2000],
-                response_text=(pack.get("markdown") or "")[:2000],
+                response_text=build_compact_grounding_log(pack),
                 usage=usage_info,
                 error_text=str(pack["error"]["message"]) if pack.get("error") and isinstance(pack["error"], dict) else None,
                 is_test=is_test_mode(),

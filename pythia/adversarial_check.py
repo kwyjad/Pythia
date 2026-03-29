@@ -28,6 +28,39 @@ from pythia.web_research import fetch_evidence_pack
 
 logger = logging.getLogger(__name__)
 
+
+def _log_adversarial_brave_call(
+    query: str,
+    pack: dict,
+    run_id: str,
+    iso3: str,
+    hazard_code: str,
+) -> None:
+    """Log a Brave adversarial search to llm_calls so the health report sees it."""
+    try:
+        from horizon_scanner.llm_logging import build_compact_grounding_log, log_hs_llm_call
+        from forecaster.providers import ModelSpec
+        from pythia.test_mode import is_test_mode
+
+        usage_info = dict(pack.get("debug", {}).get("usage", {})) if isinstance(pack.get("debug"), dict) else {}
+        log_hs_llm_call(
+            hs_run_id=run_id,
+            iso3=iso3,
+            hazard_code=f"ADVERSARIAL_{hazard_code}",
+            model_spec=ModelSpec(
+                name="Grounding", provider="brave",
+                model_id="brave-web-search", active=True,
+                purpose="hs_adversarial_check",
+            ),
+            prompt_text=query[:2000],
+            response_text=build_compact_grounding_log(pack),
+            usage=usage_info,
+            error_text=str(pack["error"]["message"]) if pack.get("error") and isinstance(pack["error"], dict) else None,
+            is_test=is_test_mode(),
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to log adversarial Brave call for %s %s", iso3, hazard_code, exc_info=True)
+
 _ADVERSARIAL_CHECK_TIMEOUT_SEC = 60
 _MAX_COUNTER_EVIDENCE = 6
 _MAX_HISTORICAL_ANALOGS = 3
@@ -418,6 +451,8 @@ def run_adversarial_check(
                         max_results=10,
                     )
                     pack = brave_pack.to_dict() if hasattr(brave_pack, "to_dict") else dict(brave_pack)
+                    if pack.get("sources") or pack.get("grounded"):
+                        _log_adversarial_brave_call(query, pack, run_id, iso3_up, hz)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Adversarial Brave search failed for %s %s: %s", iso3_up, hz, exc)
 

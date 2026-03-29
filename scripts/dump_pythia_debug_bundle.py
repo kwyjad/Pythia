@@ -2550,6 +2550,7 @@ class BundleData:
     hs_web_research_failures: list[dict[str, Any]] = field(default_factory=list)
     rc_grounding_rows: list[dict[str, Any]] = field(default_factory=list)
     triage_grounding_rows: list[dict[str, Any]] = field(default_factory=list)
+    adversarial_grounding_rows: list[dict[str, Any]] = field(default_factory=list)
     research_web_research_rows: list[dict[str, Any]] = field(default_factory=list)
     research_web_research_failures: list[dict[str, Any]] = field(default_factory=list)
     self_search_rows: list[dict[str, Any]] = field(default_factory=list)
@@ -2681,6 +2682,9 @@ def _load_bundle_data(
     data.triage_grounding_rows = _load_grounding_subsystem_stats(
         con, "TRIAGE_GROUNDING_%", forecaster_run_id, manifest_hs_run_id
     )
+    data.adversarial_grounding_rows = _load_grounding_subsystem_stats(
+        con, "ADVERSARIAL_%", forecaster_run_id, manifest_hs_run_id
+    )
     data.research_web_research_rows, data.research_web_research_failures = _load_web_research_summary(
         con, "research_web_research", forecaster_run_id, manifest_hs_run_id
     )
@@ -2698,9 +2702,19 @@ def _load_bundle_data(
     data.triage_grounding_call_stats = _load_grounding_call_stats(
         con, "hs_triage", "TRIAGE_GROUNDING_%", forecaster_run_id, manifest_hs_run_id
     )
-    data.adversarial_grounding_call_stats = _load_grounding_call_stats(
+    # Adversarial checks: merge stats from hs_web_research (OpenAI/Gemini fallback)
+    # and hs_triage with ADVERSARIAL_% hazard_code (Brave primary)
+    _adv_web = _load_grounding_call_stats(
         con, "hs_web_research", None, forecaster_run_id, manifest_hs_run_id
     )
+    _adv_brave = _load_grounding_call_stats(
+        con, "hs_triage", "ADVERSARIAL_%", forecaster_run_id, manifest_hs_run_id
+    )
+    data.adversarial_grounding_call_stats = {
+        "n_calls": _adv_web.get("n_calls", 0) + _adv_brave.get("n_calls", 0),
+        "n_errors": _adv_web.get("n_errors", 0) + _adv_brave.get("n_errors", 0),
+        "source_counts": (_adv_web.get("source_counts") or []) + (_adv_brave.get("source_counts") or []),
+    }
 
     # HS triage detail rows (RC levels, screen-outs, tiers)
     if manifest_hs_run_id:
@@ -3000,10 +3014,11 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         tg_detail = "no triage grounding calls in this run"
     checks.append({"subsystem": "Triage Grounding", "status": tg_status, "detail": tg_detail})
 
-    # Adversarial Checks health (hs_web_research phase — adversarial evidence fetches)
-    _hs_g_calls = sum(int(r.get("n_calls") or 0) for r in (data.hs_web_research_rows or []))
-    _hs_g_errors = sum(int(r.get("n_errors") or 0) for r in (data.hs_web_research_rows or []))
-    _hs_g_verified = sum(int(r.get("n_verified_sources") or 0) for r in (data.hs_web_research_rows or []))
+    # Adversarial Checks health (hs_web_research + Brave ADVERSARIAL_% rows)
+    _adv_rows = (data.hs_web_research_rows or []) + (data.adversarial_grounding_rows or [])
+    _hs_g_calls = sum(int(r.get("n_calls") or 0) for r in _adv_rows)
+    _hs_g_errors = sum(int(r.get("n_errors") or 0) for r in _adv_rows)
+    _hs_g_verified = sum(int(r.get("n_verified_sources") or 0) for r in _adv_rows)
     if _hs_g_calls > 0 and _hs_g_errors == 0:
         g_status = "OK"
         g_detail = f"{_hs_g_calls} calls, {_hs_g_verified} verified sources"
@@ -4802,6 +4817,7 @@ def emit_grounding_detail_csv(
                 phase IN ('hs_web_research', 'research_web_research')
                 OR phase LIKE '%web_research%'
                 OR LOWER(hazard_code) LIKE '%grounding%'
+                OR UPPER(hazard_code) LIKE 'ADVERSARIAL_%'
               )
             ORDER BY iso3, hazard_code, timestamp
             """,
@@ -4829,8 +4845,14 @@ def emit_grounding_detail_csv(
                 resp = json.loads(resp_text) if resp_text.strip() else {}
                 if isinstance(resp, dict):
                     grounded = bool(resp.get("grounded") or resp.get("sources"))
-                    sources = resp.get("sources") or []
-                    n_sources = len(sources) if isinstance(sources, list) else 0
+                    # Compact format: pre-computed n_sources count
+                    if "n_sources" in resp:
+                        n_sources = int(resp["n_sources"])
+                    elif isinstance(resp.get("source_urls"), list):
+                        n_sources = len(resp["source_urls"])
+                    else:
+                        sources = resp.get("sources") or []
+                        n_sources = len(sources) if isinstance(sources, list) else 0
             except Exception:
                 pass
 
