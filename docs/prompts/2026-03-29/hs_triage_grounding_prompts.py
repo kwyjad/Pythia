@@ -399,11 +399,11 @@ RECENCY FILTER: Prefer sources from the last 60 days. Active flood events and af
 def build_triage_grounding_prompt_hw(
     country_name: str,
     iso3: str,
-    recency_days: int = RECENCY_DAYS["HW"],
+    recency_days: int = 60,
     rc_summary: Optional[str] = None,
     season_context: Optional[str] = None,
 ) -> str:
-    """Build triage grounding prompt for HW.
+    """Build triage grounding prompt for HW (dead code — HW is silenced).
 
     Heatwave humanitarian data is sparse. The grounding call needs to
     look broadly — meteorological reports, health system data, energy
@@ -580,7 +580,6 @@ TRIAGE_GROUNDING_BUILDERS = {
     "ACE": build_triage_grounding_prompt_ace,
     "DR": build_triage_grounding_prompt_dr,
     "FL": build_triage_grounding_prompt_fl,
-    "HW": build_triage_grounding_prompt_hw,
     "TC": build_triage_grounding_prompt_tc,
 }
 

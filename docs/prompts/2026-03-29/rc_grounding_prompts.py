@@ -375,7 +375,7 @@ RECENCY FILTER: Strongly prefer sources from the last 14 days. Active flood even
 def build_grounding_prompt_hw(
     country_name: str,
     iso3: str,
-    recency_days: int = RECENCY_DAYS["HW"],
+    recency_days: int = 30,
     season_context: Optional[str] = None,
 ) -> str:
     """Build Gemini grounding prompt for HW evidence gathering.
