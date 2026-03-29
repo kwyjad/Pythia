@@ -235,9 +235,9 @@ def _run_grounding_for_hazard(
     """
 
     _HAZARD_QUERY_LABELS = {
-        "ACE": "armed conflict violence security situation",
+        "ACE": "armed conflict violence displacement humanitarian situation",
         "DR": "drought food insecurity food security crisis",
-        "FL": "flooding flood displacement humanitarian impact",
+        "FL": "flooding displacement humanitarian impact",
         "TC": "tropical cyclone hurricane typhoon storm impact",
     }
 
@@ -250,10 +250,14 @@ def _run_grounding_for_hazard(
         primary_backend = os.getenv("PYTHIA_GROUNDING_PRIMARY_BACKEND", "openai").lower()
         pack = None
 
+        # Build a broader fallback query: drop year, add generic humanitarian terms.
+        fallback_query = query_label.replace(f" {date_type.today().year}", "")
+        fallback_query += " humanitarian crisis update"
+
         if primary_backend == "openai":
             pack = _try_openai_grounding(query_label, recency, iso3, hazard_code, "RC")
             if pack is None or (not pack.get("sources") and not pack.get("grounded")):
-                fallback = _try_gemini_grounding(query_label, recency, grounding_prompt, iso3, hazard_code, "RC")
+                fallback = _try_gemini_grounding(fallback_query, recency, grounding_prompt, iso3, hazard_code, "RC")
                 if fallback and (fallback.get("sources") or fallback.get("grounded")):
                     pack = fallback
                 elif pack is None:
@@ -261,7 +265,7 @@ def _run_grounding_for_hazard(
         else:
             pack = _try_gemini_grounding(query_label, recency, grounding_prompt, iso3, hazard_code, "RC")
             if pack is None or (not pack.get("sources") and not pack.get("grounded")):
-                fallback = _try_openai_grounding(query_label, recency, iso3, hazard_code, "RC")
+                fallback = _try_openai_grounding(fallback_query, recency, iso3, hazard_code, "RC")
                 if fallback and (fallback.get("sources") or fallback.get("grounded")):
                     pack = fallback
                 elif pack is None:
@@ -292,7 +296,22 @@ def _run_grounding_for_hazard(
                     model_id=str(model_id), active=True, purpose="hs_grounding",
                 ),
                 prompt_text=query_label,
-                response_text=json.dumps(pack, default=str)[:4000],
+                response_text=json.dumps(
+                    {
+                        "query": pack.get("query", ""),
+                        "grounded": pack.get("grounded", False),
+                        "n_sources": len(pack.get("sources") or []),
+                        "source_urls": [
+                            (s.get("url") if isinstance(s, dict) else getattr(s, "url", str(s)))[:150]
+                            for s in (pack.get("sources") or [])[:15]
+                        ],
+                        "structural_context": (pack.get("structural_context") or "")[:500],
+                        "recent_signals": (pack.get("recent_signals") or [])[:8],
+                        "backend": pack.get("debug", {}).get("grounding_backend", ""),
+                        "error": pack.get("error"),
+                    },
+                    default=str,
+                ),
                 usage=usage_info,
                 error_text=str(pack["error"]["message"]) if pack.get("error") and isinstance(pack["error"], dict) else None,
                 is_test=is_test_mode(),
