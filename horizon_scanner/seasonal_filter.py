@@ -85,11 +85,11 @@ def get_active_hazards(iso3: str, run_date: date) -> Set[str]:
     """Return the set of hazard codes that should get RC assessment.
 
     - ACE: always active
-    - DI: never active (silenced)
-    - FL, DR, TC, HW: active if any of the 6 forecast months has
+    - FL, DR, TC: active if any of the 6 forecast months has
       base-rate > 0 in seasonal_hazards.csv.  If a country/hazard pair
       is missing from the CSV, the hazard is conservatively treated as
       active.
+    - DI, CU, HW: blocked at the hazard catalog level (never reach here).
     """
     iso3_up = (iso3 or "").upper()
     seasonal = _load_seasonal_data()
@@ -97,7 +97,7 @@ def get_active_hazards(iso3: str, run_date: date) -> Set[str]:
 
     active: Set[str] = set(_ALWAYS_ACTIVE)
 
-    for hazard_code in ("FL", "DR", "TC", "HW"):
+    for hazard_code in ("FL", "DR", "TC"):
         key = (iso3_up, hazard_code)
         if key not in seasonal:
             active.add(hazard_code)

@@ -38,7 +38,6 @@ RECENCY_DAYS = {
     "ACE": 30,   # Conflict escalation signals — widened for monthly forecast cycle
     "DR": 60,    # Drought onset signals — slower-moving, needs wider window
     "FL": 30,    # Flood events — widened for monthly forecast cycle
-    "HW": 30,    # Heatwave events — widened for monthly forecast cycle
     "TC": 60,    # TC season outlooks + active storm tracking — slower-moving
 }
 
@@ -376,7 +375,7 @@ RECENCY FILTER: Strongly prefer sources from the last 14 days. Active flood even
 def build_grounding_prompt_hw(
     country_name: str,
     iso3: str,
-    recency_days: int = RECENCY_DAYS["HW"],
+    recency_days: int = 30,
     season_context: Optional[str] = None,
 ) -> str:
     """Build Gemini grounding prompt for HW evidence gathering.
@@ -567,7 +566,6 @@ GROUNDING_PROMPT_BUILDERS = {
     "ACE": build_grounding_prompt_ace,
     "DR": build_grounding_prompt_dr,
     "FL": build_grounding_prompt_fl,
-    "HW": build_grounding_prompt_hw,
     "TC": build_grounding_prompt_tc,
 }
 

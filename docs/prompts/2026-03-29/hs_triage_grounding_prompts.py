@@ -45,9 +45,7 @@ TRIAGE_GROUNDING_QUERIES = {
     "ACE": "{country} ({iso3}) armed conflict violence displacement humanitarian situation {year}",
     "DR": "{country} ({iso3}) drought food insecurity crop failure humanitarian response {year}",
     "FL": "{country} ({iso3}) flooding displacement humanitarian impact {year}",
-    "HW": "{country} ({iso3}) heatwave extreme heat humanitarian impact health {year}",
     "TC": "{country} ({iso3}) tropical cyclone hurricane typhoon humanitarian impact {year}",
-    "DI": "{country} ({iso3}) refugee influx cross-border displacement humanitarian {year}",
 }
 
 
@@ -81,7 +79,6 @@ RECENCY_DAYS = {
     "ACE": 60,   # Operational picture doesn't need 4 months
     "DR": 90,    # One season is enough
     "FL": 60,    # Flood season + aftermath
-    "HW": 60,    # Seasonal pattern + any ongoing heat events
     "TC": 60,    # Full season context
 }
 
@@ -402,11 +399,11 @@ RECENCY FILTER: Prefer sources from the last 60 days. Active flood events and af
 def build_triage_grounding_prompt_hw(
     country_name: str,
     iso3: str,
-    recency_days: int = RECENCY_DAYS["HW"],
+    recency_days: int = 60,
     rc_summary: Optional[str] = None,
     season_context: Optional[str] = None,
 ) -> str:
-    """Build triage grounding prompt for HW.
+    """Build triage grounding prompt for HW (dead code — HW is silenced).
 
     Heatwave humanitarian data is sparse. The grounding call needs to
     look broadly — meteorological reports, health system data, energy
@@ -583,7 +580,6 @@ TRIAGE_GROUNDING_BUILDERS = {
     "ACE": build_triage_grounding_prompt_ace,
     "DR": build_triage_grounding_prompt_dr,
     "FL": build_triage_grounding_prompt_fl,
-    "HW": build_triage_grounding_prompt_hw,
     "TC": build_triage_grounding_prompt_tc,
 }
 

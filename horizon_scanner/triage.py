@@ -74,7 +74,7 @@ logger = logging.getLogger(__name__)
 HS_TEMPERATURE = float(os.getenv("HS_TEMPERATURE", "0.0"))
 
 # All triage-eligible hazard codes (DI excluded).
-_TRIAGE_HAZARDS = {"ACE", "DR", "FL", "HW", "TC"}
+_TRIAGE_HAZARDS = {"ACE", "DR", "FL", "TC"}
 
 # Default triage values for hazards that are seasonally inactive.
 _TRIAGE_DEFAULTS: Dict[str, Any] = {
@@ -87,19 +87,6 @@ _TRIAGE_DEFAULTS: Dict[str, Any] = {
     "confidence_note": "",
     "valid": True,
     "status": "seasonal_skip",
-}
-
-# Default triage values for DI (silenced — no resolution source yet).
-_DI_TRIAGE_DEFAULTS: Dict[str, Any] = {
-    "triage_score": 0.0,
-    "tier": "quiet",
-    "drivers": [],
-    "regime_shifts": [],
-    "data_quality": {"status": "silenced"},
-    "scenario_stub": "",
-    "confidence_note": "",
-    "valid": True,
-    "status": "silenced",
 }
 
 # Default triage values for ACE when ACLED shows low conflict activity.
@@ -967,8 +954,7 @@ def run_triage_for_country(
     triage_start = time.time()
 
     for hz_code in expected_hazards:
-        if hz_code == "DI":
-            merged_hazards[hz_code] = dict(_DI_TRIAGE_DEFAULTS)
+        if hz_code not in _TRIAGE_HAZARDS:
             continue
 
         if hz_code in rc_promoted:

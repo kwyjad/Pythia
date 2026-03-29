@@ -123,10 +123,12 @@ DISPLACEMENT_TEMPLATES = {
 BLOCKED_HAZARDS: set[str] = {
     "CU",
     "ACO",
+    "DI",
+    "HW",
 } | {code for code, cfg in HAZARD_CONFIG.items() if cfg.get("blocked")}
 ALLOWED = set(HAZARD_CONFIG.keys())
 CONFLICT_HAZARDS = {"ACE", "ACO"}
-EXPECTED_HS_HAZARDS = ["ACE", "DI", "DR", "FL", "HW", "TC"]
+EXPECTED_HS_HAZARDS = ["ACE", "DR", "FL", "TC"]
 
 
 def get_expected_hs_hazards() -> list[str]:

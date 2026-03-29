@@ -19,7 +19,7 @@ from typing import Any, Optional
 log = logging.getLogger(__name__)
 
 # Hazard codes for which seasonal climate data is relevant.
-CLIMATE_HAZARDS = {"DR", "FL", "HW", "TC"}
+CLIMATE_HAZARDS = {"DR", "FL", "TC"}
 
 _VARIABLE_LABELS = {
     "tmp2m": "temperature",

@@ -97,7 +97,6 @@ NATURAL_HAZARD_CODES = {
     "FL": "flood",
     "DR": "drought",
     "TC": "tropical_cyclone",
-    "HW": "heat_wave",
 }
 _COUNTRY_ALIASES = {
     "democratic republic of congo": "COD",
