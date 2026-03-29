@@ -175,6 +175,9 @@ def fetch_via_openai_web_search(
     output = data.get("output") or []
     sources = _parse_sources_from_output(output)
     unverified_sources = _parse_unverified_sources_from_output(output)
+    # Promote annotation-based sources when action sources are empty
+    if not sources and unverified_sources:
+        sources = unverified_sources
     grounded = bool(sources)
     structural_context, recent_signals, extra_debug = _parse_structured_text(output, include_structural)
 

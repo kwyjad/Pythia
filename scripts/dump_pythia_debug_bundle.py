@@ -415,7 +415,11 @@ def _load_grounding_subsystem_stats(
         n_sources = 0
         if isinstance(sources, list):
             n_sources = len(sources)
-            entry["n_verified_sources"] += n_sources
+        elif response_text and "Sources:" in response_text:
+            # Markdown evidence pack — count URL lines
+            after_sources = response_text.split("Sources:")[-1]
+            n_sources = sum(1 for line in after_sources.splitlines() if line.strip().startswith("- http"))
+        entry["n_verified_sources"] += n_sources
 
         # Count as error if error_text present OR response had 0 sources
         if error_text or n_sources == 0:
@@ -495,7 +499,13 @@ def _load_grounding_call_stats(
             payload = {}
 
         sources = payload.get("sources") if isinstance(payload, dict) else None
-        n_sources = len(sources) if isinstance(sources, list) else 0
+        n_sources = 0
+        if isinstance(sources, list):
+            n_sources = len(sources)
+        elif response_text and "Sources:" in response_text:
+            # Markdown evidence pack — count URL lines
+            after_sources = response_text.split("Sources:")[-1]
+            n_sources = sum(1 for line in after_sources.splitlines() if line.strip().startswith("- http"))
         source_counts.append(n_sources)
 
         if error_text or n_sources == 0:

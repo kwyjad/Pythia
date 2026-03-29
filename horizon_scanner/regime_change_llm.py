@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import logging
 import os
 import time
@@ -245,17 +246,18 @@ def _run_grounding_for_hazard(
     """
 
     _HAZARD_QUERY_LABELS = {
-        "ACE": "armed conflict escalation signals recent developments",
-        "DR": "drought food security conditions recent developments",
-        "FL": "flood risk river levels recent developments",
-        "HW": "heatwave temperature anomaly recent developments",
-        "TC": "tropical cyclone storm activity recent developments",
+        "ACE": "armed conflict violence security situation",
+        "DR": "drought food insecurity food security crisis",
+        "FL": "flooding flood displacement humanitarian impact",
+        "HW": "heatwave extreme heat health humanitarian impact",
+        "TC": "tropical cyclone hurricane typhoon storm impact",
     }
 
     try:
         grounding_prompt = build_grounding_prompt(hazard_code, country_name, iso3)
         recency = get_recency_days(hazard_code)
-        query_label = f"{country_name} ({iso3}) {_HAZARD_QUERY_LABELS.get(hazard_code, f'{hazard_code} recent developments')}"
+        label = _HAZARD_QUERY_LABELS.get(hazard_code, f"{hazard_code} recent developments")
+        query_label = f"{country_name} ({iso3}) {label} {date_type.today().year}"
 
         primary_backend = os.getenv("PYTHIA_GROUNDING_PRIMARY_BACKEND", "openai").lower()
         pack = None
@@ -302,7 +304,7 @@ def _run_grounding_for_hazard(
                     model_id=str(model_id), active=True, purpose="hs_grounding",
                 ),
                 prompt_text=query_label,
-                response_text=(pack.get("markdown") or "")[:2000],
+                response_text=json.dumps(pack, default=str)[:4000],
                 usage=usage_info,
                 error_text=str(pack["error"]["message"]) if pack.get("error") and isinstance(pack["error"], dict) else None,
                 is_test=is_test_mode(),
