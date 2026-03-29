@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Set
@@ -34,6 +35,31 @@ BRAVE_COST_PER_QUERY = 0.005
 
 # Maximum signal lines to extract from snippets
 MAX_SIGNAL_LINES = 8
+
+# Maximum retries on HTTP 429 responses
+_MAX_429_RETRIES = 3
+
+
+class _RateLimiter:
+    """Thread-safe token-bucket rate limiter."""
+
+    def __init__(self, max_per_second: float = 15.0):
+        self._min_interval = 1.0 / max_per_second
+        self._lock = threading.Lock()
+        self._last_call = 0.0
+
+    def wait(self):
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_call
+            if elapsed < self._min_interval:
+                time.sleep(self._min_interval - elapsed)
+            self._last_call = time.monotonic()
+
+
+_brave_limiter = _RateLimiter(
+    max_per_second=float(os.getenv("PYTHIA_BRAVE_MAX_RPS", "15"))
+)
 
 
 # ---------------------------------------------------------------------------
@@ -138,18 +164,32 @@ def _run_single_query(
         "text_decorations": False,
     }
 
+    resp = None
     try:
-        resp = requests.get(
-            _BRAVE_SEARCH_URL,
-            headers=headers,
-            params=params,
-            timeout=timeout_sec,
-        )
-        if resp.status_code != 200:
-            return [], resp.status_code
-        data = resp.json()
-        web_results = data.get("web", {}).get("results", [])
-        return web_results, resp.status_code
+        for attempt in range(_MAX_429_RETRIES):
+            _brave_limiter.wait()
+            resp = requests.get(
+                _BRAVE_SEARCH_URL,
+                headers=headers,
+                params=params,
+                timeout=timeout_sec,
+            )
+            if resp.status_code == 429:
+                wait_time = 2 ** attempt
+                logger.warning(
+                    "Brave 429 rate limit, retry %d/%d after %ds",
+                    attempt + 1, _MAX_429_RETRIES, wait_time,
+                )
+                time.sleep(wait_time)
+                continue
+            if resp.status_code != 200:
+                return [], resp.status_code
+            data = resp.json()
+            web_results = data.get("web", {}).get("results", [])
+            return web_results, resp.status_code
+        # All retries exhausted on 429
+        logger.warning("Brave 429 rate limit: all %d retries exhausted", _MAX_429_RETRIES)
+        return [], 429
     except Exception as exc:
         logger.debug("Brave Search query failed: %s", exc)
         return [], 599
@@ -306,5 +346,10 @@ def fetch_via_brave_search(
 
     if not grounded:
         pack.error = {"type": "no_results", "message": "Brave Search returned no results"}
+
+    logger.info(
+        "Brave grounding: %d queries, %d sources, %dms, $%.4f",
+        total_queries, len(sources), elapsed_ms, cost_usd,
+    )
 
     return pack

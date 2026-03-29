@@ -309,6 +309,7 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `PYTHIA_ADVERSARIAL_CHECK_ENABLED` | Enable adversarial checks for RC L1+ (0/1, default 1) |
 | `PYTHIA_GROUNDING_PRIMARY_BACKEND` | Primary grounding backend: `brave` (default), `openai`, or `gemini` |
 | `BRAVE_SEARCH_API_KEY` | Brave Search API subscription token (required for Brave grounding) |
+| `PYTHIA_BRAVE_MAX_RPS` | Max Brave Search API requests per second (default: 15, paid limit is 20) |
 | `PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED` | Enable web search for RC evidence packs (0/1, default 1) |
 | `PYTHIA_PM_RETRIEVER_ENABLED` | Enable prediction market retriever (0/1, default 0 — see known failure modes) |
 | `PYTHIA_PREDICTION_MARKETS_ENABLED` | Legacy alias; prefer `PYTHIA_PM_RETRIEVER_ENABLED` |
