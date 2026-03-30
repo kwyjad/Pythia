@@ -40,6 +40,74 @@ GROK_CALL_TIMEOUT_SEC = float(os.getenv("GROK_CALL_TIMEOUT_SEC", "300"))
 
 
 # ---------------------------------------------------------------------------
+# Credit-retry: long-pause retry for billing/quota exhaustion errors
+# ---------------------------------------------------------------------------
+
+class ProviderBillingError(Exception):
+    """Raised when a provider returns a billing/quota-exhaustion error (distinct from rate-limiting)."""
+
+    def __init__(self, provider: str, message: str, status_code: int | None = None):
+        self.provider = provider
+        self.status_code = status_code
+        super().__init__(message)
+
+
+_CREDIT_RETRY_CONFIG: dict[str, dict[str, int]] = {
+    "openai":    {"pause_sec": 900, "max_retries": 3},   # 15 min × 3
+    "anthropic": {"pause_sec": 300, "max_retries": 3},   # 5 min × 3
+    "google":    {"pause_sec": 600, "max_retries": 3},   # 10 min × 3
+}
+
+
+def _credit_retry_config_for(provider: str) -> tuple[int, int] | None:
+    """Return (pause_sec, max_retries) for a provider, with env-var overrides.
+
+    Returns None for providers not in ``_CREDIT_RETRY_CONFIG`` (Kimi, DeepSeek).
+    """
+    p = (provider or "").lower()
+    base = _CREDIT_RETRY_CONFIG.get(p)
+    if base is None:
+        return None
+    p_upper = p.upper()
+    pause = int(os.getenv(f"PYTHIA_CREDIT_RETRY_PAUSE_{p_upper}", str(base["pause_sec"])))
+    max_retries = int(os.getenv(f"PYTHIA_CREDIT_RETRY_MAX_{p_upper}", str(base["max_retries"])))
+    return pause, max_retries
+
+
+def _is_billing_error(provider: str, error_text: str, status_code: int | None = None) -> bool:
+    """Detect billing/quota-exhaustion errors, distinct from transient rate limits.
+
+    Conservative: returns False when uncertain.
+    """
+    if not error_text:
+        return False
+    p = (provider or "").lower()
+    lower = error_text.lower()
+    sc = status_code
+
+    if p == "openai":
+        # OpenAI billing: 429 + quota/billing keywords, but NOT rate-limit 429s
+        if sc == 429 and "rate limit" not in lower:
+            return "quota" in lower or "billing" in lower or "insufficient_quota" in lower
+        return False
+
+    if p == "anthropic":
+        # Anthropic billing: 400 or 403 + credit/billing/blocked keywords
+        if sc in (400, 403):
+            return "insufficient" in lower or "billing" in lower or "blocked" in lower
+        return False
+
+    if p in ("google", "gemini"):
+        # Google billing: 429 + RESOURCE_EXHAUSTED + quota/billing
+        # Excludes RPM/TPM rate limits ("Too Many Requests" without RESOURCE_EXHAUSTED)
+        if sc == 429 and "resource_exhausted" in lower:
+            return "quota" in lower or "billing" in lower
+        return False
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -1287,65 +1355,113 @@ async def call_chat_ms(
     result: Optional[ProviderResult] = None
     error: Optional[str] = None
 
-    while attempt < max_attempts:
-        attempt += 1
-        try:
-            async with _get_llm_semaphore():
-                call_task = asyncio.to_thread(
-                    _call_provider_sync,
-                    ms.provider,
-                    prompt,
-                    ms.model_id,
-                    effective_temperature,
-                    timeout_sec=timeout_sec,
-                    thinking_level=thinking_level,
-                    purpose=ms.purpose,
-                )
-                if timeout_sec is not None:
-                    result = await asyncio.wait_for(call_task, timeout=timeout_sec)
-                else:
-                    result = await call_task
-        except asyncio.TimeoutError:
-            error = f"timeout after {timeout_sec}s"
-            result = ProviderResult("", usage_to_dict(None), 0.0, ms.model_id, error=error)
-        except Exception as exc:  # pragma: no cover - unexpected runtime errors
-            error = _format_provider_exception(exc)
-            result = ProviderResult("", usage_to_dict(None), 0.0, ms.model_id, error=error)
-        else:
-            error = result.error if result and result.error else None
+    # Credit-retry outer loop: wraps the transient-retry inner loop
+    credit_cfg = _credit_retry_config_for(ms.provider)
+    credit_max_retries = credit_cfg[1] if credit_cfg else 0
+    credit_pause_sec = credit_cfg[0] if credit_cfg else 0
+    credit_retries_used = 0
+    credit_retry_pauses: list[float] = []
+    billing_error_detected = False
 
-        retry_after_hint = result.retry_after if result else None
-        allow_timeout_retry = os.getenv("PYTHIA_LLM_RETRY_TIMEOUTS", "1") != "0"
-        should_retry, retry_after = _should_retry_provider_error(
-            error,
-            retry_after_hint,
-            purpose=ms.purpose,
-            allow_timeout_retry=allow_timeout_retry,
-        )
-        if hs_triage and retry_after_hint is not None:
-            hs_usage["retry_after_hint_sec"] = retry_after_hint
-            if hs_max_retry_after_sec is not None and retry_after_hint > hs_max_retry_after_sec:
-                hs_usage["retry_after_capped"] = True
-                if hs_fail_fast_on_retry_after:
-                    hs_usage["retry_after_used_sec"] = 0.0
-                    should_retry = False
-                else:
-                    retry_after = hs_max_retry_after_sec
-        if not should_retry or attempt >= max_attempts:
+    for credit_attempt in range(credit_max_retries + 1):
+        # Reset inner loop state for each credit-retry attempt
+        attempt = 0
+        result = None
+        error = None
+        backoffs_sec = []
+
+        while attempt < max_attempts:
+            attempt += 1
+            try:
+                async with _get_llm_semaphore():
+                    call_task = asyncio.to_thread(
+                        _call_provider_sync,
+                        ms.provider,
+                        prompt,
+                        ms.model_id,
+                        effective_temperature,
+                        timeout_sec=timeout_sec,
+                        thinking_level=thinking_level,
+                        purpose=ms.purpose,
+                    )
+                    if timeout_sec is not None:
+                        result = await asyncio.wait_for(call_task, timeout=timeout_sec)
+                    else:
+                        result = await call_task
+            except asyncio.TimeoutError:
+                error = f"timeout after {timeout_sec}s"
+                result = ProviderResult("", usage_to_dict(None), 0.0, ms.model_id, error=error)
+            except Exception as exc:  # pragma: no cover - unexpected runtime errors
+                error = _format_provider_exception(exc)
+                result = ProviderResult("", usage_to_dict(None), 0.0, ms.model_id, error=error)
+            else:
+                error = result.error if result and result.error else None
+
+            retry_after_hint = result.retry_after if result else None
+            allow_timeout_retry = os.getenv("PYTHIA_LLM_RETRY_TIMEOUTS", "1") != "0"
+            should_retry, retry_after = _should_retry_provider_error(
+                error,
+                retry_after_hint,
+                purpose=ms.purpose,
+                allow_timeout_retry=allow_timeout_retry,
+            )
+            if hs_triage and retry_after_hint is not None:
+                hs_usage["retry_after_hint_sec"] = retry_after_hint
+                if hs_max_retry_after_sec is not None and retry_after_hint > hs_max_retry_after_sec:
+                    hs_usage["retry_after_capped"] = True
+                    if hs_fail_fast_on_retry_after:
+                        hs_usage["retry_after_used_sec"] = 0.0
+                        should_retry = False
+                    else:
+                        retry_after = hs_max_retry_after_sec
+            if not should_retry or attempt >= max_attempts:
+                break
+
+            if retry_after is not None:
+                backoff = min(20.0, float(retry_after))
+            else:
+                backoff = min(20.0, 1.0 * (2 ** (attempt - 1)))
+            backoff += random.uniform(0.0, 0.5)
+            if hs_triage and hs_max_retry_after_sec is not None:
+                if backoff > hs_max_retry_after_sec:
+                    backoff = hs_max_retry_after_sec
+                    hs_usage["retry_after_capped"] = True
+                hs_usage["retry_after_used_sec"] = backoff
+            backoffs_sec.append(backoff)
+            await asyncio.sleep(backoff)
+
+        # Inner loop done — check if we succeeded or hit a billing error
+        if result and not result.error:
+            if credit_retries_used > 0:
+                total_pause = sum(credit_retry_pauses)
+                LOGGER.info(
+                    "[CREDIT_RETRY] %s recovered after %.0fs pause (%d credit retries)",
+                    ms.provider, total_pause, credit_retries_used,
+                )
             break
 
-        if retry_after is not None:
-            backoff = min(20.0, float(retry_after))
-        else:
-            backoff = min(20.0, 1.0 * (2 ** (attempt - 1)))
-        backoff += random.uniform(0.0, 0.5)
-        if hs_triage and hs_max_retry_after_sec is not None:
-            if backoff > hs_max_retry_after_sec:
-                backoff = hs_max_retry_after_sec
-                hs_usage["retry_after_capped"] = True
-            hs_usage["retry_after_used_sec"] = backoff
-        backoffs_sec.append(backoff)
-        await asyncio.sleep(backoff)
+        # Check for billing error
+        err_text = error or (result.error if result else "") or ""
+        err_status = _extract_status_code(err_text)
+        if _is_billing_error(ms.provider, err_text, err_status):
+            billing_error_detected = True
+            if credit_attempt < credit_max_retries:
+                credit_retries_used += 1
+                LOGGER.warning(
+                    "[CREDIT_RETRY] %s billing error detected. Pausing %ds before retry %d/%d. Error: %s",
+                    ms.provider, credit_pause_sec, credit_retries_used, credit_max_retries,
+                    err_text[:200],
+                )
+                credit_retry_pauses.append(float(credit_pause_sec))
+                await asyncio.sleep(credit_pause_sec)
+                continue
+            else:
+                total_pause = sum(credit_retry_pauses)
+                LOGGER.error(
+                    "[CREDIT_RETRY] %s billing error persists after %d credit retries (%.0fs total pause). Giving up.",
+                    ms.provider, credit_max_retries, total_pause,
+                )
+        break  # Not a billing error, or retries exhausted
 
     if result is None:
         result = ProviderResult("", usage_to_dict(None), 0.0, ms.model_id, error=error or "unknown error")
@@ -1356,6 +1472,10 @@ async def call_chat_ms(
     usage = result.usage or usage_to_dict(None)
     usage["attempts_used"] = attempt
     usage["backoffs_sec"] = backoffs_sec
+    if credit_retries_used > 0 or billing_error_detected:
+        usage["credit_retries_used"] = credit_retries_used
+        usage["credit_retry_pauses_sec"] = credit_retry_pauses
+        usage["billing_error_detected"] = True
     if hs_usage:
         usage.update(hs_usage)
     cost = result.cost_usd if result.cost_usd else estimate_cost_usd(ms.model_id, usage)

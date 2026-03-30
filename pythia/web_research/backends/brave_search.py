@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Set
 
 import requests
 
+from pythia.web_research.brave_circuit_breaker import get_breaker as _get_brave_breaker
 from pythia.web_research.types import EvidencePack, EvidenceSource
 
 logger = logging.getLogger(__name__)
@@ -164,6 +165,7 @@ def _run_single_query(
         "text_decorations": False,
     }
 
+    breaker = _get_brave_breaker()
     resp = None
     try:
         for attempt in range(_MAX_429_RETRIES):
@@ -183,15 +185,20 @@ def _run_single_query(
                 time.sleep(wait_time)
                 continue
             if resp.status_code != 200:
+                breaker.record_failure(resp.status_code, f"HTTP {resp.status_code}")
                 return [], resp.status_code
             data = resp.json()
             web_results = data.get("web", {}).get("results", [])
+            if web_results:
+                breaker.record_success()
             return web_results, resp.status_code
         # All retries exhausted on 429
         logger.warning("Brave 429 rate limit: all %d retries exhausted", _MAX_429_RETRIES)
+        breaker.record_failure(429, "429 retries exhausted")
         return [], 429
     except Exception as exc:
         logger.debug("Brave Search query failed: %s", exc)
+        breaker.record_failure(None, str(exc))
         return [], 599
 
 
@@ -234,6 +241,16 @@ def fetch_via_brave_search(
         Evidence pack with sources, signals, and debug info.
     """
     pack = EvidencePack(query=query, recency_days=recency_days, backend="brave")
+
+    # Circuit breaker: skip immediately if Brave budget is likely exhausted
+    if _get_brave_breaker().is_tripped():
+        pack.grounded = False
+        pack.error = {
+            "type": "circuit_breaker_tripped",
+            "message": "Brave Search circuit breaker is open — budget likely exhausted",
+        }
+        pack.debug = {"grounding_backend": "brave_circuit_breaker_tripped"}
+        return pack
 
     api_key = os.getenv("BRAVE_SEARCH_API_KEY", "").strip()
     if not api_key:
