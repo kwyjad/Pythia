@@ -343,6 +343,8 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `PYTHIA_SPD_ENSEMBLE_SPECS` | Override SPD ensemble at runtime (comma-separated `provider:model_id`) |
 | `PYTHIA_BLOCK_PROVIDERS` | Comma-separated provider names to exclude from ensemble |
 | `PYTHIA_RC_MODEL_PASS1` / `PYTHIA_RC_MODEL_PASS2` | Override RC LLM model per pass |
+| `PYTHIA_CREDIT_RETRY_PAUSE_{PROVIDER}` | Credit-retry pause in seconds per provider (default: OpenAI=900, Anthropic=300, Google=600) |
+| `PYTHIA_CREDIT_RETRY_MAX_{PROVIDER}` | Credit-retry max attempts per provider (default: 3 for all) |
 
 Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`.
 
@@ -421,7 +423,8 @@ Key prompt files:
 - `horizon_scanner/hs_triage_prompts.py` — Per-hazard triage prompt builders
 - `horizon_scanner/rc_grounding_prompts.py` — RC-specific grounding queries (per-hazard)
 - `horizon_scanner/hs_triage_grounding_prompts.py` — Triage-specific grounding queries (per-hazard)
-- `pythia/web_research/backends/brave_search.py` — Brave Search API grounding backend (primary, deterministic, $5/1K queries)
+- `pythia/web_research/backends/brave_search.py` — Brave Search API grounding backend (primary, deterministic, $5/1K queries). Wired to Brave circuit breaker: checks `is_tripped()` at entry, records success/failure per query.
+- `pythia/web_research/brave_circuit_breaker.py` — Thread-safe circuit breaker for Brave Search API. Trips after 3 consecutive failures; short-circuits all subsequent Brave calls when tripped. Module-level singleton, reset per HS run.
 - `pythia/web_research/backends/gemini_grounding.py` — Gemini grounding backend (second fallback)
 
 ## Overview editing
@@ -446,6 +449,30 @@ Before editing `docs/fred_overview.md`, always run `bash scripts/snapshot_overvi
 - RC and triage grounding use different signal categories and recency windows (RC: TRIGGER/DAMPENER/BASELINE; triage: SITUATION/RESPONSE/FORECAST/VULNERABILITY)
 - **Grounding recency windows**: RC grounding uses moderate windows (ACE=30d, DR=60d, FL=30d, HW=30d, TC=60d) balancing change signal detection with sufficient search coverage for a monthly forecast cycle. Triage grounding uses wider windows (ACE=60d, DR=90d, FL=60d, HW=60d, TC=60d) for the operational picture. Both are defined in their respective `RECENCY_DAYS` dicts.
 - **Grounding source steering**: All 10 grounding prompts (5 RC + 5 triage) include a `PRIORITIZE THESE SOURCES` section with hazard-specific source priority lists and a `RECENCY FILTER` instruction. RC prompts prioritize wire services and specialist sources for novelty; triage prompts elevate OCHA/humanitarian sources for the operational picture.
+
+## LLM credit-retry safety net
+
+When LLM providers return billing/quota-exhaustion errors (distinct from transient rate limits), a credit-retry wrapper pauses and retries, waiting for auto-recharge. Implemented in `forecaster/providers.py` inside `call_chat_ms`, wrapping the existing transient-retry inner loop.
+
+**Provider-specific config** (`_CREDIT_RETRY_CONFIG`):
+- OpenAI: 900s pause, 3 retries (worst-case 45min)
+- Anthropic: 300s pause, 3 retries (worst-case 15min)
+- Google: 600s pause, 3 retries (worst-case 30min)
+- Kimi/DeepSeek: excluded (no credit retry)
+
+**Detection** (`_is_billing_error`): Conservative per-provider rules that distinguish billing errors from rate limits. OpenAI: 429 + quota/billing keywords but NOT "rate limit". Anthropic: 400/403 + insufficient/billing/blocked. Google: 429 + RESOURCE_EXHAUSTED + quota/billing. Returns False when uncertain.
+
+**Env-var overrides**: `PYTHIA_CREDIT_RETRY_PAUSE_{PROVIDER}` (seconds), `PYTHIA_CREDIT_RETRY_MAX_{PROVIDER}` (count). E.g. `PYTHIA_CREDIT_RETRY_PAUSE_OPENAI=600` reduces OpenAI pause to 10 minutes.
+
+**Usage tracking**: `credit_retries_used`, `credit_retry_pauses_sec`, `billing_error_detected` fields added to the usage dict when billing errors are detected.
+
+## Brave Search circuit breaker
+
+Thread-safe circuit breaker (`pythia/web_research/brave_circuit_breaker.py`) that tracks consecutive Brave API failures across all call sites. When 3 consecutive raw API calls return errors, the breaker trips and all subsequent Brave calls are short-circuited (return immediately with `circuit_breaker_tripped` error). The fallback chain (OpenAI → Gemini) takes over grounding.
+
+**Safety gate**: When the breaker is tripped, `_write_hs_triage` checks whether each hazard received grounding evidence (via `_hazard_has_grounding()` querying `llm_calls`). Hazards without grounding are blocked from forecasting (`need_full_spd = False`, `data_quality.brave_budget_gate = "blocked_no_grounding"`). Hazards that completed grounding before the breaker tripped proceed normally.
+
+**Lifecycle**: Breaker resets at the start of each HS run (`main()` → `reset_brave_breaker()`). Stats logged at run end. `HS_BRAVE_BREAKER_TRIPPED` emitted as workflow output.
 
 ## Known failure modes
 
