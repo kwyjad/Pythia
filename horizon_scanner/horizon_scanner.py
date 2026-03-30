@@ -891,6 +891,37 @@ def _is_missing_regime_change_column_error(exc: Exception) -> bool:
     )
 
 
+def _hazard_has_grounding(run_id: str, iso3: str, hazard_code: str) -> bool:
+    """Check if a hazard received grounding evidence during this run.
+
+    Queries the llm_calls table for RC or triage grounding calls that
+    returned successfully (success=true) for this run/iso3/hazard combination.
+    """
+    con = pythia_connect(read_only=True)
+    iso3_up = (iso3 or "").upper()
+    hazard_up = (hazard_code or "").upper()
+    try:
+        row = con.execute(
+            """
+            SELECT 1 FROM llm_calls
+            WHERE hs_run_id = ?
+              AND (
+                LOWER(hazard_code) = LOWER(?)
+                OR LOWER(hazard_code) = LOWER(?)
+              )
+              AND success = true
+            LIMIT 1
+            """,
+            [run_id, f"grounding_{hazard_up}", f"TRIAGE_GROUNDING_{hazard_up}"],
+        ).fetchone()
+        return row is not None
+    except Exception:
+        # If table doesn't exist or query fails, assume no grounding
+        return False
+    finally:
+        con.close()
+
+
 def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text: str | None = None, is_test: bool = False) -> None:
     allowed_hazards = set(_build_hazard_catalog().keys())
     expected_hazards = get_expected_hs_hazards()
@@ -968,6 +999,18 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                 need_full_spd = True
             else:
                 need_full_spd = False
+
+            # Brave circuit breaker gate: block ungrounded hazards from forecasting
+            from pythia.web_research.brave_circuit_breaker import is_tripped as _brave_breaker_tripped
+            if need_full_spd and _brave_breaker_tripped():
+                if not _hazard_has_grounding(run_id, iso3_up, hz_up):
+                    need_full_spd = False
+                    data_quality["brave_budget_gate"] = "blocked_no_grounding"
+                    logger.warning(
+                        "HS triage: blocking forecast for %s/%s — Brave budget exhausted and no grounding evidence",
+                        iso3_up, hz_up,
+                    )
+
             logger.debug(
                 "HS triage regime change | run_id=%s iso3=%s hazard=%s likelihood=%s magnitude=%s "
                 "direction=%s window=%s score=%.3f level=%s track=%s",
@@ -1470,6 +1513,8 @@ def main(countries: list[str] | None = None):
     run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
     os.environ["PYTHIA_HS_RUN_ID"] = run_id
     reset_provider_failures_for_run(run_id)
+    from pythia.web_research.brave_circuit_breaker import reset as reset_brave_breaker
+    reset_brave_breaker()
 
     _hs_id_emitted = False
     try:
@@ -1658,8 +1703,21 @@ def main(countries: list[str] | None = None):
         except Exception:  # pragma: no cover - best-effort
             logger.exception("Failed to write HS triage failure diagnostics")
 
+        # --- Brave circuit breaker run stats ---
+        from pythia.web_research.brave_circuit_breaker import get_breaker as _get_brave_breaker
+        breaker_stats = _get_brave_breaker().stats()
+        if breaker_stats["tripped"]:
+            logger.error(
+                "BRAVE CIRCUIT BREAKER was tripped during this run. "
+                "Stats: %s. Questions without grounding were blocked from forecasting.",
+                breaker_stats,
+            )
+        else:
+            logger.info("Brave circuit breaker stats: %s", breaker_stats)
+
         resolved_iso3s = sorted({iso3 for iso3 in iso3_list})
         print(f"HS_RUN_ID={run_id}", flush=True)
+        print(f"HS_BRAVE_BREAKER_TRIPPED={'true' if breaker_stats['tripped'] else 'false'}", flush=True)
         print(f"HS_RESOLVED_ISO3S={','.join(resolved_iso3s)}", flush=True)
         ok_iso3s = sorted(
             [result.get("iso3") for result in triage_results if result.get("final_status") == "ok"]
