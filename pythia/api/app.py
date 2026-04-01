@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
 
 from pythia.api.auth import require_admin_token
+from pythia.api import db_sync as _db_sync_mod
 from pythia.api.db_sync import (
     DbSyncError,
     db_was_refreshed,
@@ -330,7 +331,7 @@ def _maybe_refresh_db() -> None:
     try:
         maybe_sync_latest_db()
     except DbSyncError as exc:
-        logger.debug("Periodic DB sync check failed: %s", exc)
+        logger.warning("Periodic DB sync check failed: %s", exc)
         return
 
     if db_was_refreshed():
@@ -375,6 +376,37 @@ def _try_artifact_sync() -> None:
         sync()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Artifact-based DB sync failed: %s", exc)
+
+
+@app.post("/v1/admin/force_sync")
+def admin_force_sync(token: Optional[str] = Query(None)):
+    """Force an immediate DB sync from the GitHub release, bypassing the throttle."""
+    _require_debug_token(token)
+    global _LAST_SYNC_CHECK  # noqa: PLW0603
+    _LAST_SYNC_CHECK = None
+    _db_sync_mod._LAST_SYNC_AT = None  # noqa: SLF001
+    _db_sync_mod._LAST_MANIFEST = None  # noqa: SLF001
+    try:
+        manifest = maybe_sync_latest_db()
+    except DbSyncError as exc:
+        raise HTTPException(status_code=502, detail=f"Sync failed: {exc}") from exc
+    # Force connection refresh if a new DB was downloaded
+    if db_was_refreshed():
+        with _READ_CON_LOCK:
+            old_con = _READ_CON
+            try:
+                global _READ_CON  # noqa: PLW0603
+                _READ_CON = _open_duckdb_connection()
+            except Exception:
+                logger.warning("Failed to reopen DuckDB after force sync")
+                raise HTTPException(status_code=502, detail="DB reopen failed")
+            if old_con is not None:
+                try:
+                    old_con.close()
+                except Exception:
+                    pass
+        logger.info("Force sync: DB refreshed and connection reopened")
+    return {"status": "ok", "manifest": manifest, "db_refreshed": True}
 
 
 @app.on_event("startup")
@@ -1105,7 +1137,22 @@ def api_version() -> Dict[str, Any]:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not manifest:
         raise HTTPException(status_code=503, detail="Manifest not available yet")
-    return manifest
+    result = dict(manifest)
+    # Add DB staleness diagnostics so operators can verify the API has the latest data.
+    try:
+        con = _con()
+        row = con.execute(
+            "SELECT MAX(strftime(created_at, '%Y-%m')) FROM forecasts_ensemble WHERE created_at IS NOT NULL"
+        ).fetchone()
+        result["latest_forecast_month"] = row[0] if row and row[0] else None
+        run_row = con.execute(
+            "SELECT run_id FROM forecasts_ensemble WHERE run_id IS NOT NULL ORDER BY run_id DESC LIMIT 1"
+        ).fetchone()
+        result["latest_forecast_run_id"] = run_row[0] if run_row and run_row[0] else None
+    except Exception:
+        result["latest_forecast_month"] = None
+        result["latest_forecast_run_id"] = None
+    return result
 
 
 @app.post("/v1/run")

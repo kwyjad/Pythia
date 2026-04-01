@@ -87,8 +87,13 @@ def get_release_urls() -> Dict[str, str]:
 
 def fetch_manifest() -> Dict[str, Any]:
     urls = get_release_urls()
+    headers = _build_headers()
+    # Bust GitHub CDN caches so we always see the latest release assets.
+    headers["Cache-Control"] = "no-cache, no-store"
+    headers["Pragma"] = "no-cache"
+    manifest_url = f"{urls['manifest_url']}?t={int(time.time())}"
     try:
-        response = requests.get(urls["manifest_url"], headers=_build_headers(), timeout=30)
+        response = requests.get(manifest_url, headers=headers, timeout=30)
         response.raise_for_status()
     except Exception as exc:
         raise DbSyncError(f"Failed to download manifest: {exc}") from exc
@@ -120,8 +125,12 @@ def download_db_atomic(dest_path: Path) -> None:
     tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
 
+    headers = _build_headers()
+    headers["Cache-Control"] = "no-cache, no-store"
+    headers["Pragma"] = "no-cache"
+    db_url = f"{urls['db_url']}?t={int(time.time())}"
     try:
-        response = requests.get(urls["db_url"], headers=_build_headers(), stream=True, timeout=60)
+        response = requests.get(db_url, headers=headers, stream=True, timeout=60)
         response.raise_for_status()
         with tmp_path.open("wb") as fh:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
