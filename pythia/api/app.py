@@ -381,8 +381,8 @@ def _try_artifact_sync() -> None:
 @app.post("/v1/admin/force_sync")
 def admin_force_sync(token: Optional[str] = Query(None)):
     """Force an immediate DB sync from the GitHub release, bypassing the throttle."""
+    global _READ_CON, _LAST_SYNC_CHECK  # noqa: PLW0603
     _require_debug_token(token)
-    global _LAST_SYNC_CHECK  # noqa: PLW0603
     _LAST_SYNC_CHECK = None
     _db_sync_mod._LAST_SYNC_AT = None  # noqa: SLF001
     _db_sync_mod._LAST_MANIFEST = None  # noqa: SLF001
@@ -395,7 +395,6 @@ def admin_force_sync(token: Optional[str] = Query(None)):
         with _READ_CON_LOCK:
             old_con = _READ_CON
             try:
-                global _READ_CON  # noqa: PLW0603
                 _READ_CON = _open_duckdb_connection()
             except Exception:
                 logger.warning("Failed to reopen DuckDB after force sync")
