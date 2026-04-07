@@ -105,11 +105,11 @@ const CountryPage = async ({ params, searchParams }: CountryPageProps) => {
       include_test: includeTest || undefined,
     });
     questions = response.rows.map((row) => {
-      const firstForecastMonth = row.target_month ?? null;
-      const horizonMonths = row.forecast_horizon_max ?? 6;
-      const lastForecastMonth =
-        firstForecastMonth && horizonMonths > 0
-          ? addMonthsYYYYMM(firstForecastMonth, horizonMonths - 1)
+      const lastForecastMonth = row.target_month ?? null;
+      const firstForecastMonth = row.window_start_date
+        ? String(row.window_start_date).slice(0, 7)
+        : lastForecastMonth
+          ? addMonthsYYYYMM(lastForecastMonth, -5)
           : null;
       return {
         ...row,

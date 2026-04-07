@@ -97,7 +97,8 @@ export default function RiskIndexTable({
       : metricUpper === "PHASE3PLUS_IN_NEED"
         ? "6-Month Phase 3+ (Peak Month)"
         : "6-Month EIV (Peak Month)";
-  const baseMonth = parseTargetMonth(targetMonth);
+  const endMonth = parseTargetMonth(targetMonth);
+  const baseMonth = endMonth ? addMonthsUTC(endMonth, -5) : null;
   const monthLabel = (index: number) =>
     baseMonth
       ? formatMonthLabel(addMonthsUTC(baseMonth, index - 1))

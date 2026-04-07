@@ -114,6 +114,7 @@ export type QuestionsResponse = {
     hazard_code: string;
     metric: string;
     target_month: string;
+    window_start_date?: string | null;
     forecast_date?: string | null;
     forecast_horizon_max?: number | null;
     eiv_total?: number | null;

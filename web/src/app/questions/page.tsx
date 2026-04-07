@@ -13,6 +13,7 @@ type QuestionRow = {
   hazard_code: string;
   metric: string;
   target_month: string;
+  window_start_date?: string | null;
   forecast_date?: string | null;
   forecast_horizon_max?: number | null;
   eiv_total?: number | null;
@@ -131,11 +132,11 @@ const QuestionsPage = async ({
 
   rows = rows.map((row) => {
     const iso3 = (row.iso3 ?? "").toUpperCase();
-    const firstForecastMonth = row.target_month ?? null;
-    const monthsTotal = row.forecast_horizon_max ?? 6;
-    const lastForecastMonth =
-      firstForecastMonth && monthsTotal > 0
-        ? addMonthsYYYYMM(firstForecastMonth, monthsTotal - 1)
+    const lastForecastMonth = row.target_month ?? null;
+    const firstForecastMonth = row.window_start_date
+      ? String(row.window_start_date).slice(0, 7)
+      : lastForecastMonth
+        ? addMonthsYYYYMM(lastForecastMonth, -5)
         : null;
     return {
       ...row,

@@ -183,6 +183,9 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
   const question = (bundle.question ?? {}) as Record<string, unknown>;
   const metric = (question.metric as string | undefined) ?? "";
   const targetMonth = (question.target_month as string | undefined) ?? null;
+  const windowStart = question.window_start_date
+    ? String(question.window_start_date).slice(0, 7)
+    : addMonths(targetMonth, -5);
   const forecast = (bundle.forecast ?? {}) as Record<string, unknown>;
 
   const labels = useMemo(() => {
@@ -285,13 +288,13 @@ const SpdPanel = ({ bundle }: SpdPanelProps) => {
 
   const monthOptions = useMemo(() => {
     return [1, 2, 3, 4, 5, 6].map((monthIndex) => {
-      const label = addMonths(targetMonth, monthIndex - 1);
+      const label = addMonths(windowStart, monthIndex - 1);
       return {
         value: monthIndex,
         label: label ? `Month ${monthIndex} (${label})` : `Month ${monthIndex}`,
       };
     });
-  }, [targetMonth]);
+  }, [windowStart]);
 
   if (!sources.length) {
     return (

@@ -443,7 +443,9 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
   const forecastDate =
     resolveLatestDate(ensemble) ?? resolveLatestDate(rawSpd) ?? "—";
   const targetMonth = (question.target_month as string | undefined) ?? null;
-  const endMonth = addMonths(targetMonth, 5);
+  const windowStart = question.window_start_date
+    ? String(question.window_start_date).slice(0, 7)
+    : addMonths(targetMonth, -5);
   const status = (question.status as string | undefined) ?? "—";
 
   const triageScore =
@@ -644,7 +646,7 @@ const QuestionDetailView = ({ bundle }: QuestionDetailViewProps) => {
             { label: "Forecast date", value: forecastDate },
             {
               label: "Forecast window",
-              value: `${targetMonth ?? "—"} → ${endMonth ?? "—"}`,
+              value: `${windowStart ?? "—"} → ${targetMonth ?? "—"}`,
             },
             { label: "Triage score", value: triageScore },
             { label: "Triage tier", value: triageTier },
