@@ -57,6 +57,9 @@ export default function BinaryPanel({ bundle }: BinaryPanelProps) {
   const metric = ((question.metric as string) ?? "").toUpperCase();
   const isBinary = metric === "EVENT_OCCURRENCE";
   const targetMonth = (question.target_month as string | undefined) ?? null;
+  const windowStart = question.window_start_date
+    ? String(question.window_start_date).slice(0, 7)
+    : addMonths(targetMonth, -5);
   const ensembleRows = useMemo(
     () => (forecast.ensemble_spd ?? []) as ForecastRow[],
     [forecast.ensemble_spd],
@@ -157,7 +160,7 @@ export default function BinaryPanel({ bundle }: BinaryPanelProps) {
           const prob = monthlyProbs.get(horizon);
           const resolution = resolutionByHorizon.get(horizon);
           const brier = brierByHorizon.get(horizon);
-          const monthLabel = formatMonth(addMonths(targetMonth, horizon - 1));
+          const monthLabel = formatMonth(addMonths(windowStart, horizon - 1));
 
           return (
             <div

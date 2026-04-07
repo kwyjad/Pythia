@@ -10,10 +10,11 @@
     },
     {
       "name": "web",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeExecutable": "/opt/homebrew/bin/node",
+      "runtimeArgs": ["/opt/homebrew/bin/npm", "run", "dev"],
       "port": 3000,
-      "cwd": "/Users/kevin/Documents/GitHub/Pythia/web"
+      "cwd": "/Users/kevin/Documents/GitHub/Pythia/web",
+      "env": { "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
     }
   ]
 }
