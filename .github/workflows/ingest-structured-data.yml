@@ -260,7 +260,7 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          python scripts/ci/duckdb_summary.py \
+          python -m scripts.ci.duckdb_summary \
             --db data/resolver.duckdb \
             --tables "acled_monthly_fatalities,facts_resolved,facts_deltas" \
             | tee diagnostics/ingestion/duckdb_summary.md
