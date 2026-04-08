@@ -3772,6 +3772,7 @@ def diagnostics_run_summary(
         "countries_scanned": 0,
         "hazard_pairs_assessed": 0,
         "seasonal_screenouts": 0,
+        "acled_low_activity": 0,
         "pairs_with_questions": 0,
         "total_questions": 0,
         "countries_with_forecasts": 0,
@@ -3779,36 +3780,66 @@ def diagnostics_run_summary(
         "triaged_quiet": 0,
     }
 
+    has_dq_json = False
     if hs_run_id and _table_exists(con, "hs_triage"):
+        has_dq_json = "data_quality_json" in _table_columns(con, "hs_triage")
+
         coverage["countries_scanned"] = _q1(
             f"SELECT COUNT(DISTINCT UPPER(ht.iso3)) FROM hs_triage ht "
             f"WHERE ht.run_id = ?{tf_ht}",
             [hs_run_id],
         ) or 0
 
-        coverage["hazard_pairs_assessed"] = _q1(
-            f"SELECT COUNT(*) FROM hs_triage ht "
-            f"WHERE ht.run_id = ?{tf_ht} "
-            f"AND ht.regime_change_likelihood IS NOT NULL",
-            [hs_run_id],
-        ) or 0
+        # Seasonal screen-outs are marked via data_quality_json.status = 'seasonal_skip'
+        if has_dq_json:
+            coverage["seasonal_screenouts"] = _q1(
+                f"SELECT COUNT(*) FROM hs_triage ht "
+                f"WHERE ht.run_id = ?{tf_ht} "
+                f"AND ht.data_quality_json LIKE '%seasonal_skip%'",
+                [hs_run_id],
+            ) or 0
 
-        # Seasonal screen-outs: pairs where RC was NOT assessed
+            # ACLED low-activity (quiet conflict) screen-outs
+            coverage["acled_low_activity"] = _q1(
+                f"SELECT COUNT(*) FROM hs_triage ht "
+                f"WHERE ht.run_id = ?{tf_ht} "
+                f"AND ht.data_quality_json LIKE '%acled_low_activity%'",
+                [hs_run_id],
+            ) or 0
+
         total_triage_rows = _q1(
             f"SELECT COUNT(*) FROM hs_triage ht WHERE ht.run_id = ?{tf_ht}",
             [hs_run_id],
         ) or 0
-        coverage["seasonal_screenouts"] = total_triage_rows - coverage["hazard_pairs_assessed"]
 
-        # Triaged quiet: tier = 'quiet' and RC was assessed (not seasonal skip, not RC-promoted)
-        coverage["triaged_quiet"] = _q1(
-            f"SELECT COUNT(*) FROM hs_triage ht "
-            f"WHERE ht.run_id = ?{tf_ht} "
-            f"AND LOWER(ht.tier) = 'quiet' "
-            f"AND ht.regime_change_likelihood IS NOT NULL "
-            f"AND COALESCE(ht.regime_change_level, 0) = 0",
-            [hs_run_id],
-        ) or 0
+        # Hazard pairs assessed = total minus seasonal skips and ACLED low-activity
+        coverage["hazard_pairs_assessed"] = (
+            total_triage_rows
+            - coverage["seasonal_screenouts"]
+            - coverage["acled_low_activity"]
+        )
+
+        # Triaged quiet: tier = 'quiet' excluding seasonal skips, ACLED low-activity, and RC-promoted
+        if has_dq_json:
+            coverage["triaged_quiet"] = _q1(
+                f"SELECT COUNT(*) FROM hs_triage ht "
+                f"WHERE ht.run_id = ?{tf_ht} "
+                f"AND LOWER(ht.tier) = 'quiet' "
+                f"AND ht.data_quality_json NOT LIKE '%seasonal_skip%' "
+                f"AND ht.data_quality_json NOT LIKE '%acled_low_activity%' "
+                f"AND ht.data_quality_json NOT LIKE '%rc_promoted%' "
+                f"AND COALESCE(ht.regime_change_level, 0) = 0",
+                [hs_run_id],
+            ) or 0
+        else:
+            coverage["triaged_quiet"] = _q1(
+                f"SELECT COUNT(*) FROM hs_triage ht "
+                f"WHERE ht.run_id = ?{tf_ht} "
+                f"AND LOWER(ht.tier) = 'quiet' "
+                f"AND ht.regime_change_likelihood IS NOT NULL "
+                f"AND COALESCE(ht.regime_change_level, 0) = 0",
+                [hs_run_id],
+            ) or 0
 
     # Questions coverage (from questions table linked to this run)
     q_filter = ""
@@ -3946,12 +3977,16 @@ def diagnostics_run_summary(
             {"hazard_code": hc, **levels} for hc, levels in sorted(hazard_rc.items())
         ]
 
-        # Countries by level: distinct iso3 with at least one hazard at each level
+        # Countries by level: distinct iso3 where max RC level across hazards = that level
         for level_val, level_key in [(1, "L1"), (2, "L2"), (3, "L3")]:
             rc_assessment["countries_by_level"][level_key] = _q1(
-                f"SELECT COUNT(DISTINCT UPPER(ht.iso3)) FROM hs_triage ht "
-                f"WHERE ht.run_id = ?{tf_ht} "
-                f"AND COALESCE(ht.regime_change_level, 0) >= ?",
+                f"SELECT COUNT(*) FROM ("
+                f"  SELECT UPPER(ht.iso3) AS iso3 FROM hs_triage ht "
+                f"  WHERE ht.run_id = ?{tf_ht} "
+                f"  AND ht.regime_change_likelihood IS NOT NULL "
+                f"  GROUP BY UPPER(ht.iso3) "
+                f"  HAVING MAX(COALESCE(ht.regime_change_level, 0)) = ?"
+                f")",
                 [hs_run_id, level_val],
             ) or 0
 
@@ -3976,15 +4011,27 @@ def diagnostics_run_summary(
                     q_params + [track_val],
                 ) or 0
 
-    # Ensemble model count from forecasts_raw
+    # Ensemble model count from forecasts_raw (Track 1 questions only)
     if run_id and _table_exists(con, "forecasts_raw"):
         model_col = "model_name" if "model_name" in _table_columns(con, "forecasts_raw") else None
         if model_col:
-            tracks["track1"]["models"] = _q1(
-                f"SELECT COUNT(DISTINCT fr.{model_col}) FROM forecasts_raw fr "
-                f"WHERE fr.run_id = ? AND COALESCE(fr.ok, TRUE) = TRUE",
-                [run_id],
-            ) or 0
+            # Count distinct models for Track 1 questions only (exclude track2_flash, ensemble aggregation)
+            if q_filter and _table_exists(con, "questions") and "track" in _table_columns(con, "questions"):
+                tracks["track1"]["models"] = _q1(
+                    f"SELECT COUNT(DISTINCT fr.{model_col}) FROM forecasts_raw fr "
+                    f"JOIN questions q ON fr.question_id = q.question_id "
+                    f"WHERE fr.run_id = ? AND COALESCE(fr.ok, TRUE) = TRUE "
+                    f"AND q.track = 1 "
+                    f"AND fr.{model_col} NOT LIKE 'ensemble_%' "
+                    f"AND fr.{model_col} NOT LIKE 'track2_%'",
+                    [run_id],
+                ) or 0
+            else:
+                tracks["track1"]["models"] = _q1(
+                    f"SELECT COUNT(DISTINCT fr.{model_col}) FROM forecasts_raw fr "
+                    f"WHERE fr.run_id = ? AND COALESCE(fr.ok, TRUE) = TRUE",
+                    [run_id],
+                ) or 0
 
     # ---- Ensemble health --------------------------------------------------
     ensemble: Dict[str, int] = {"expected": 7, "ok": tracks["track1"]["models"]}
@@ -4032,9 +4079,9 @@ def diagnostics_run_summary(
 
             # By phase
             PHASE_LABELS = [
-                ("hs_triage", "HS triage"),
-                ("spd_v2", "SPD ensemble"),
-                ("binary_v2", "Binary forecasts"),
+                ("hs_triage", "Horizon Scan Triage and RC"),
+                ("spd_v2", "Ensemble Forecasts"),
+                ("binary_v2", "Binary Forecasts"),
                 ("scenario_v2", "Scenarios"),
             ]
             for phase_val, phase_label in PHASE_LABELS:
@@ -4055,14 +4102,17 @@ def diagnostics_run_summary(
                 lc_params,
             ) or 0
 
-            # Error detection: check for error_text or status = 'error'
+            # Error detection: check for non-empty error_text or status = 'error'
             has_error_text = "error_text" in _table_columns(con, "llm_calls")
             has_status = "status" in _table_columns(con, "llm_calls")
             error_cond = ""
             if has_error_text and has_status:
-                error_cond = " AND (lc.error_text IS NOT NULL OR lc.status = 'error')"
+                error_cond = (
+                    " AND ((lc.error_text IS NOT NULL AND lc.error_text != '')"
+                    " OR lc.status = 'error')"
+                )
             elif has_error_text:
-                error_cond = " AND lc.error_text IS NOT NULL"
+                error_cond = " AND lc.error_text IS NOT NULL AND lc.error_text != ''"
             elif has_status:
                 error_cond = " AND lc.status = 'error'"
 

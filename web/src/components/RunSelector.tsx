@@ -31,7 +31,7 @@ const RunSelector = ({
   selectedRunId,
   onChange,
 }: RunSelectorProps) => {
-  if (!availableRuns || availableRuns.length <= 1) return null;
+  if (!availableRuns || availableRuns.length === 0) return null;
 
   return (
     <label className="flex items-center gap-2 text-sm text-fred-text">

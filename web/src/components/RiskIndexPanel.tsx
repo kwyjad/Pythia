@@ -387,7 +387,12 @@ export default function RiskIndexPanel({
               onChange={handleRunChange}
             />
           </div>
-          {!isSummaryView && (
+          {isSummaryView ? (
+            <div className="text-xs text-fred-muted">
+              Select a non-summary metric view to see the forecast index map and
+              country-level results.
+            </div>
+          ) : (
             <div className="space-y-1 text-xs text-fred-muted">
               <div>
                 World overview • Jenks breaks calculated from the selected risk values.

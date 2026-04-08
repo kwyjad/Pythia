@@ -136,6 +136,7 @@ export type RunSummaryResponse = {
     countries_scanned: number;
     hazard_pairs_assessed: number;
     seasonal_screenouts: number;
+    acled_low_activity: number;
     pairs_with_questions: number;
     total_questions: number;
     countries_with_forecasts: number;
