@@ -36,6 +36,7 @@ const MOCK_DATA: RunSummaryResponse = {
     countries_scanned: 122,
     hazard_pairs_assessed: 365,
     seasonal_screenouts: 123,
+    acled_low_activity: 15,
     pairs_with_questions: 120,
     total_questions: 229,
     countries_with_forecasts: 73,

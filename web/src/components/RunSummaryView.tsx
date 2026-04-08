@@ -72,7 +72,12 @@ function KpiRow({ data }: Props) {
         }
       />
       <KpiCard
-        label="Ensemble models"
+        label={
+          <span className="inline-flex items-center gap-1">
+            Ensemble models
+            <InfoTooltip text="Distinct LLM models that produced forecasts for Track 1 (full ensemble) questions. Expected count is from the ensemble configuration." />
+          </span>
+        }
         value={`${data.ensemble.ok} / ${data.ensemble.expected}`}
       />
       <KpiCard
@@ -106,8 +111,8 @@ function CoverageFunnel({ data }: Props) {
   const c = data.coverage;
   const steps = [
     { label: "countries scanned", value: c.countries_scanned, color: "bg-fred-primary" },
-    { label: "hazard pairs assessed", value: c.hazard_pairs_assessed, color: "bg-fred-primary/80" },
-    { label: "pairs with questions", value: c.pairs_with_questions, color: "bg-fred-primary/60" },
+    { label: "country/hazard pairs assessed", value: c.hazard_pairs_assessed, color: "bg-fred-primary/80" },
+    { label: "country/hazard pairs with questions", value: c.pairs_with_questions, color: "bg-fred-primary/60" },
     { label: "forecast questions", value: c.total_questions, color: "bg-fred-primary/40" },
   ];
   const maxVal = Math.max(...steps.map((s) => s.value), 1);
@@ -129,14 +134,26 @@ function CoverageFunnel({ data }: Props) {
           </div>
         ))}
       </div>
-      <p className="mt-3 text-xs text-fred-muted">
-        {c.seasonal_screenouts.toLocaleString()} seasonal screen-outs
-        {" · "}
-        {c.triaged_quiet.toLocaleString()} triaged quiet
-        {" · "}
-        {c.countries_no_questions.toLocaleString()} countries with no questions
-        generated
-      </p>
+      <div className="mt-3 space-y-1.5 text-xs text-fred-muted">
+        <p>
+          {c.seasonal_screenouts.toLocaleString()} country/hazard pairs seasonally screened out
+          {" · "}
+          {c.acled_low_activity.toLocaleString()} country/hazard pairs with quiet conflict (ACLED low activity)
+          {" · "}
+          {c.triaged_quiet.toLocaleString()} country/hazard pairs triaged quiet
+          {" · "}
+          {c.countries_no_questions.toLocaleString()} countries with no questions generated
+        </p>
+        <p>
+          Each country/hazard pair can produce multiple forecast questions because
+          different metrics apply to each hazard type. For example, an Armed
+          Conflict (ACE) pair generates both a Fatalities and a People Affected
+          question. Flood and Tropical Cyclone pairs each produce a People
+          Affected question and an Event Occurrence question. Drought pairs
+          produce a Phase 3+ Population question (for FEWS NET countries) or an
+          Event Occurrence question.
+        </p>
+      </div>
     </Section>
   );
 }
@@ -260,18 +277,26 @@ function RcAssessment({ data }: Props) {
 
   return (
     <Section title="Regime change assessment">
+      <p className="mb-3 text-xs text-fred-muted">
+        Regime Change (RC) measures how much a country/hazard pair is expected to
+        deviate from its historical base rate. Each pair is scored on likelihood
+        and magnitude to produce an RC level. L1+ pairs are promoted to Track 1
+        (full LLM ensemble forecast); L0 pairs go to Track 2 (single model
+        forecast). Higher RC levels indicate greater expected deviation from
+        normal conditions.
+      </p>
       <RcBar levels={rc.levels} />
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fred-muted">
         {(["L0", "L1", "L2", "L3"] as const).map((key) => (
           <span key={key} className="inline-flex items-center gap-1">
             <span className={`inline-block h-2.5 w-2.5 rounded-sm ${RC_COLORS[key].bg}`} />
-            {key} {RC_LEVEL_LABELS[key]} ({rc.levels[key]})
+            {key} {RC_LEVEL_LABELS[key]} ({rc.levels[key]} pairs)
             {key !== "L0" && rc.countries_by_level[key] > 0 && (
               <span className="text-fred-muted">
                 · {rc.countries_by_level[key]}{" "}
                 <span className="inline-flex items-center gap-0.5">
                   countries
-                  <InfoTooltip text="Countries with at least one hazard flagged at this level (a country may appear at multiple levels)." />
+                  <InfoTooltip text={`Countries whose highest RC level across all hazards is ${key}.`} />
                 </span>
               </span>
             )}
@@ -279,7 +304,7 @@ function RcAssessment({ data }: Props) {
         ))}
       </div>
       <p className="mt-2 text-xs text-fred-muted">
-        {rc.total_assessed.toLocaleString()} hazard-country pairs assessed
+        {rc.total_assessed.toLocaleString()} country/hazard pairs assessed
         {" · "}
         {l1Plus} RC-promoted to Track 1
         {" · "}
@@ -299,7 +324,7 @@ function TrackSplit({ data }: Props) {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="rounded-lg border border-fred-primary/30 bg-fred-primary/5 p-4">
           <div className="text-xs font-semibold uppercase tracking-wide text-fred-primary">
-            Track 1 — full ensemble
+            Track 1 — full ensemble forecast
           </div>
           <div className="mt-1 text-2xl font-bold text-fred-primary">
             {t.track1.questions} questions
@@ -310,7 +335,7 @@ function TrackSplit({ data }: Props) {
         </div>
         <div className="rounded-lg border border-fred-secondary/30 bg-fred-secondary/5 p-4">
           <div className="text-xs font-semibold uppercase tracking-wide text-fred-secondary">
-            Track 2 — single model
+            Track 2 — single model forecast
           </div>
           <div className="mt-1 text-2xl font-bold text-fred-secondary">
             {t.track2.questions} questions

@@ -64,6 +64,7 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             regime_change_likelihood DOUBLE,
             regime_change_level INTEGER,
             track INTEGER,
+            data_quality_json TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             is_test BOOLEAN DEFAULT FALSE
         )
@@ -119,30 +120,30 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     hs_run = "hs_test_run_1"
     fc_run = "fc_test_run_1"
 
-    # HS triage: 3 countries x 4 hazards, with some seasonal skips
+    # HS triage: 3 countries x 4 hazards, with some seasonal skips and ACLED low-activity
     # Country A (AAA): ACE L2, DR L1, FL L0, TC seasonal skip
     # Country B (BBB): ACE L1, DR L0, FL L0, TC L0
-    # Country C (CCC): ACE L0, DR L0, FL seasonal skip, TC seasonal skip
+    # Country C (CCC): ACE acled_low_activity, DR L0, FL seasonal skip, TC seasonal skip
     triage_rows = [
-        # (run_id, iso3, hazard, tier, score, need_spd, rc_likelihood, rc_level, track)
-        (hs_run, "AAA", "ACE", "priority", 0.8, True, 0.45, 2, 1),
-        (hs_run, "AAA", "DR", "priority", 0.6, True, 0.20, 1, 1),
-        (hs_run, "AAA", "FL", "quiet", 0.1, False, 0.05, 0, 2),
-        (hs_run, "AAA", "TC", "quiet", 0.0, False, None, None, None),   # seasonal skip
-        (hs_run, "BBB", "ACE", "priority", 0.5, True, 0.18, 1, 1),
-        (hs_run, "BBB", "DR", "quiet", 0.2, False, 0.08, 0, 2),
-        (hs_run, "BBB", "FL", "quiet", 0.1, False, 0.04, 0, 2),
-        (hs_run, "BBB", "TC", "quiet", 0.1, False, 0.02, 0, 2),
-        (hs_run, "CCC", "ACE", "quiet", 0.1, False, 0.03, 0, 2),
-        (hs_run, "CCC", "DR", "quiet", 0.1, False, 0.05, 0, 2),
-        (hs_run, "CCC", "FL", "quiet", 0.0, False, None, None, None),   # seasonal skip
-        (hs_run, "CCC", "TC", "quiet", 0.0, False, None, None, None),   # seasonal skip
+        # (run_id, iso3, hazard, tier, score, need_spd, rc_likelihood, rc_level, track, dq_json)
+        (hs_run, "AAA", "ACE", "priority", 0.8, True, 0.45, 2, 1, '{"status": "rc_promoted"}'),
+        (hs_run, "AAA", "DR", "priority", 0.6, True, 0.20, 1, 1, '{"status": "rc_promoted"}'),
+        (hs_run, "AAA", "FL", "quiet", 0.1, False, 0.05, 0, 2, '{}'),
+        (hs_run, "AAA", "TC", "quiet", 0.0, False, None, None, None, '{"status": "seasonal_skip"}'),
+        (hs_run, "BBB", "ACE", "priority", 0.5, True, 0.18, 1, 1, '{"status": "rc_promoted"}'),
+        (hs_run, "BBB", "DR", "quiet", 0.2, False, 0.08, 0, 2, '{}'),
+        (hs_run, "BBB", "FL", "quiet", 0.1, False, 0.04, 0, 2, '{}'),
+        (hs_run, "BBB", "TC", "quiet", 0.1, False, 0.02, 0, 2, '{}'),
+        (hs_run, "CCC", "ACE", "quiet", 0.0, False, None, None, None, '{"status": "acled_low_activity"}'),
+        (hs_run, "CCC", "DR", "quiet", 0.1, False, 0.05, 0, 2, '{}'),
+        (hs_run, "CCC", "FL", "quiet", 0.0, False, None, None, None, '{"status": "seasonal_skip"}'),
+        (hs_run, "CCC", "TC", "quiet", 0.0, False, None, None, None, '{"status": "seasonal_skip"}'),
     ]
     for row in triage_rows:
         con.execute(
             "INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, "
-            "need_full_spd, regime_change_likelihood, regime_change_level, track) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "need_full_spd, regime_change_likelihood, regime_change_level, track, data_quality_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             list(row),
         )
 
@@ -182,12 +183,12 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             [fc_run, model],
         )
 
-    # LLM calls
+    # LLM calls (use '' for error_text on success, non-empty string for actual errors)
     llm_rows = [
-        (fc_run, hs_run, "hs_triage", 1.50, 5000, None, "ok"),
-        (fc_run, hs_run, "spd_v2", 3.20, 12000, None, "ok"),
-        (fc_run, hs_run, "binary_v2", 0.80, 3000, None, "ok"),
-        (fc_run, hs_run, "scenario_v2", 0.10, 500, None, "ok"),
+        (fc_run, hs_run, "hs_triage", 1.50, 5000, "", "ok"),
+        (fc_run, hs_run, "spd_v2", 3.20, 12000, "", "ok"),
+        (fc_run, hs_run, "binary_v2", 0.80, 3000, "", "ok"),
+        (fc_run, hs_run, "scenario_v2", 0.10, 500, "", "ok"),
         (fc_run, hs_run, "spd_v2", 0.00, 100, "timeout error", "error"),
     ]
     for run, hs, phase, cost, tokens, err, status in llm_rows:
@@ -246,8 +247,10 @@ def test_run_summary_coverage(api_env: None) -> None:
     cov = data["coverage"]
 
     assert cov["countries_scanned"] == 3  # AAA, BBB, CCC
-    assert cov["hazard_pairs_assessed"] == 9  # 12 total - 3 seasonal skips
     assert cov["seasonal_screenouts"] == 3  # TC for AAA, FL+TC for CCC
+    assert cov["acled_low_activity"] == 1  # CCC/ACE
+    # 12 total - 3 seasonal - 1 ACLED low-activity = 8 assessed
+    assert cov["hazard_pairs_assessed"] == 8
     assert cov["total_questions"] == 10
     assert cov["countries_with_forecasts"] == 2  # AAA, BBB
     assert cov["countries_no_questions"] == 1  # CCC
@@ -277,14 +280,16 @@ def test_run_summary_rc_assessment(api_env: None) -> None:
     )
     rc = resp.json()["rc_assessment"]
 
-    assert rc["total_assessed"] == 9
-    assert rc["levels"]["L0"] == 6
+    # 12 total rows, but only those with regime_change_likelihood IS NOT NULL are assessed
+    # Seasonal skips (3) and ACLED low-activity (1) have NULL rc_likelihood → 8 assessed
+    assert rc["total_assessed"] == 8
+    assert rc["levels"]["L0"] == 5
     assert rc["levels"]["L1"] == 2  # AAA/DR, BBB/ACE
     assert rc["levels"]["L2"] == 1  # AAA/ACE
     assert rc["levels"]["L3"] == 0
 
-    # L1+ rate = 3/9
-    assert abs(rc["l1_plus_rate"] - 3 / 9) < 0.01
+    # L1+ rate = 3/8
+    assert abs(rc["l1_plus_rate"] - 3 / 8) < 0.01
 
     # By hazard
     by_haz = {h["hazard_code"]: h for h in rc["by_hazard"]}
@@ -292,9 +297,10 @@ def test_run_summary_rc_assessment(api_env: None) -> None:
     assert by_haz["ACE"]["L1"] == 1
     assert by_haz["DR"]["L1"] == 1
 
-    # Countries by level: L1 = AAA + BBB (2), L2 = AAA (1)
-    assert rc["countries_by_level"]["L1"] >= 2
-    assert rc["countries_by_level"]["L2"] >= 1
+    # Countries by level (max level per country):
+    # AAA: max = L2, BBB: max = L1, CCC: max = L0
+    assert rc["countries_by_level"]["L1"] == 1  # BBB (max L1)
+    assert rc["countries_by_level"]["L2"] == 1  # AAA (max L2)
 
 
 def test_run_summary_tracks(api_env: None) -> None:
