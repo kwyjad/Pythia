@@ -3097,7 +3097,7 @@ def diagnostics_kpi_scopes(
             if metric_scope and not has_metric:
                 notes.append("metric_scope_ignored_missing_column")
             return "", []
-        return " AND q.metric = ?", [metric_scope]
+        return " AND UPPER(q.metric) = ?", [metric_scope]
 
     def status_clause(status_value: str) -> tuple[str, List[Any]]:
         if not has_status:
@@ -3663,6 +3663,431 @@ def diagnostics_kpi_scopes(
         "explanations": explanations,
         "diagnostics": diagnostics,
         "notes": notes,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Run summary endpoint — aggregate KPIs for the "All metrics" summary view
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/diagnostics/run_summary")
+def diagnostics_run_summary(
+    year_month: Optional[str] = Query(None),
+    forecaster_run_id: Optional[str] = Query(None),
+    include_test: bool = Query(False),
+):
+    """Return aggregate run-level KPIs for the summary dashboard view."""
+    con = _con()
+    tf_q = _test_filter(include_test, "q")
+    tf_ht = _test_filter(include_test, "ht")
+    tf_lc = _test_filter(include_test, "lc")
+
+    # ---- Discover run ids ------------------------------------------------
+    hs_run_id: Optional[str] = None
+    run_id: Optional[str] = None
+    updated_at: Optional[str] = None
+
+    # If forecaster_run_id given, use it directly
+    if forecaster_run_id:
+        run_id = forecaster_run_id
+    else:
+        # Find latest forecaster run_id from forecasts_ensemble for the month
+        if _table_exists(con, "forecasts_ensemble"):
+            fe_ts = _pick_timestamp_column(con, "forecasts_ensemble", ["created_at", "timestamp"])
+            if fe_ts:
+                sql = f"SELECT DISTINCT run_id FROM forecasts_ensemble"
+                params: list = []
+                if year_month:
+                    sql += f" WHERE strftime({fe_ts}, '%Y-%m') = ?"
+                    params.append(year_month)
+                sql += f" ORDER BY run_id DESC LIMIT 1"
+                try:
+                    row = con.execute(sql, params).fetchone()
+                    if row:
+                        run_id = row[0]
+                except Exception:
+                    pass
+
+    # Derive hs_run_id from questions linked to this forecaster run
+    if run_id and _table_exists(con, "questions") and _table_exists(con, "forecasts_ensemble"):
+        try:
+            row = con.execute(
+                "SELECT DISTINCT q.hs_run_id FROM questions q "
+                "JOIN forecasts_ensemble fe ON fe.question_id = q.question_id "
+                "WHERE fe.run_id = ? AND q.hs_run_id IS NOT NULL LIMIT 1",
+                [run_id],
+            ).fetchone()
+            if row:
+                hs_run_id = row[0]
+        except Exception:
+            pass
+
+    # If still no hs_run_id, try hs_triage directly
+    if not hs_run_id and _table_exists(con, "hs_triage"):
+        try:
+            sql = "SELECT DISTINCT run_id FROM hs_triage"
+            params = []
+            if year_month:
+                ht_ts = _pick_timestamp_column(con, "hs_triage", ["created_at", "timestamp"])
+                if ht_ts:
+                    sql += f" WHERE strftime({ht_ts}, '%Y-%m') = ?"
+                    params.append(year_month)
+            sql += " ORDER BY run_id DESC LIMIT 1"
+            row = con.execute(sql, params).fetchone()
+            if row:
+                hs_run_id = row[0]
+        except Exception:
+            pass
+
+    # Get updated_at timestamp
+    if hs_run_id and _table_exists(con, "hs_triage"):
+        ht_ts = _pick_timestamp_column(con, "hs_triage", ["created_at", "timestamp"])
+        if ht_ts:
+            try:
+                row = con.execute(
+                    f"SELECT MAX({ht_ts}) FROM hs_triage WHERE run_id = ?",
+                    [hs_run_id],
+                ).fetchone()
+                if row and row[0]:
+                    updated_at = str(row[0])
+            except Exception:
+                pass
+
+    # ---- Helper: safe query -----------------------------------------------
+    def _q(sql: str, params: list = []) -> list:
+        try:
+            return con.execute(sql, params).fetchall()
+        except Exception:
+            return []
+
+    def _q1(sql: str, params: list = []):
+        try:
+            row = con.execute(sql, params).fetchone()
+            return row[0] if row else None
+        except Exception:
+            return None
+
+    # ---- Coverage funnel --------------------------------------------------
+    coverage: Dict[str, Any] = {
+        "countries_scanned": 0,
+        "hazard_pairs_assessed": 0,
+        "seasonal_screenouts": 0,
+        "pairs_with_questions": 0,
+        "total_questions": 0,
+        "countries_with_forecasts": 0,
+        "countries_no_questions": 0,
+        "triaged_quiet": 0,
+    }
+
+    if hs_run_id and _table_exists(con, "hs_triage"):
+        coverage["countries_scanned"] = _q1(
+            f"SELECT COUNT(DISTINCT UPPER(ht.iso3)) FROM hs_triage ht "
+            f"WHERE ht.run_id = ?{tf_ht}",
+            [hs_run_id],
+        ) or 0
+
+        coverage["hazard_pairs_assessed"] = _q1(
+            f"SELECT COUNT(*) FROM hs_triage ht "
+            f"WHERE ht.run_id = ?{tf_ht} "
+            f"AND ht.regime_change_likelihood IS NOT NULL",
+            [hs_run_id],
+        ) or 0
+
+        # Seasonal screen-outs: pairs where RC was NOT assessed
+        total_triage_rows = _q1(
+            f"SELECT COUNT(*) FROM hs_triage ht WHERE ht.run_id = ?{tf_ht}",
+            [hs_run_id],
+        ) or 0
+        coverage["seasonal_screenouts"] = total_triage_rows - coverage["hazard_pairs_assessed"]
+
+        # Triaged quiet: tier = 'quiet' and RC was assessed (not seasonal skip, not RC-promoted)
+        coverage["triaged_quiet"] = _q1(
+            f"SELECT COUNT(*) FROM hs_triage ht "
+            f"WHERE ht.run_id = ?{tf_ht} "
+            f"AND LOWER(ht.tier) = 'quiet' "
+            f"AND ht.regime_change_likelihood IS NOT NULL "
+            f"AND COALESCE(ht.regime_change_level, 0) = 0",
+            [hs_run_id],
+        ) or 0
+
+    # Questions coverage (from questions table linked to this run)
+    q_filter = ""
+    q_params: list = []
+    if run_id and _table_exists(con, "forecasts_ensemble"):
+        q_filter = (
+            f"q.question_id IN ("
+            f"SELECT DISTINCT fe.question_id FROM forecasts_ensemble fe WHERE fe.run_id = ?"
+            f")"
+        )
+        q_params = [run_id]
+    elif hs_run_id and _table_exists(con, "questions"):
+        q_filter = "q.hs_run_id = ?"
+        q_params = [hs_run_id]
+
+    if q_filter and _table_exists(con, "questions"):
+        coverage["total_questions"] = _q1(
+            f"SELECT COUNT(DISTINCT q.question_id) FROM questions q WHERE {q_filter}{tf_q}",
+            q_params,
+        ) or 0
+
+        coverage["countries_with_forecasts"] = _q1(
+            f"SELECT COUNT(DISTINCT UPPER(q.iso3)) FROM questions q WHERE {q_filter}{tf_q}",
+            q_params,
+        ) or 0
+
+        coverage["pairs_with_questions"] = _q1(
+            f"SELECT COUNT(DISTINCT UPPER(q.iso3) || '_' || UPPER(q.hazard_code)) "
+            f"FROM questions q WHERE {q_filter}{tf_q}",
+            q_params,
+        ) or 0
+
+        # Countries with no questions
+        if hs_run_id and _table_exists(con, "hs_triage"):
+            coverage["countries_no_questions"] = _q1(
+                f"SELECT COUNT(DISTINCT UPPER(ht.iso3)) FROM hs_triage ht "
+                f"WHERE ht.run_id = ?{tf_ht} "
+                f"AND UPPER(ht.iso3) NOT IN ("
+                f"  SELECT DISTINCT UPPER(q.iso3) FROM questions q WHERE {q_filter}{tf_q}"
+                f")",
+                [hs_run_id] + q_params,
+            ) or 0
+
+    # ---- Metrics breakdown ------------------------------------------------
+    metrics_list: list = []
+    METRIC_DEFS = [
+        ("FATALITIES", "Fatalities"),
+        ("PA", "People affected"),
+        ("EVENT_OCCURRENCE", "Event occurrence"),
+        ("PHASE3PLUS_IN_NEED", "Phase 3+ population"),
+    ]
+    if q_filter and _table_exists(con, "questions"):
+        for metric_code, metric_label in METRIC_DEFS:
+            q_count = _q1(
+                f"SELECT COUNT(DISTINCT q.question_id) FROM questions q "
+                f"WHERE {q_filter}{tf_q} AND UPPER(q.metric) = ?",
+                q_params + [metric_code],
+            ) or 0
+            c_count = _q1(
+                f"SELECT COUNT(DISTINCT UPPER(q.iso3)) FROM questions q "
+                f"WHERE {q_filter}{tf_q} AND UPPER(q.metric) = ?",
+                q_params + [metric_code],
+            ) or 0
+            hazard_rows = _q(
+                f"SELECT UPPER(q.hazard_code) AS hc, COUNT(DISTINCT q.question_id) AS n "
+                f"FROM questions q WHERE {q_filter}{tf_q} AND UPPER(q.metric) = ? "
+                f"GROUP BY UPPER(q.hazard_code) ORDER BY n DESC",
+                q_params + [metric_code],
+            )
+            hazards = [{"hazard_code": str(h), "count": int(n)} for h, n in hazard_rows]
+            metrics_list.append({
+                "metric": metric_code,
+                "label": metric_label,
+                "questions": q_count,
+                "countries": c_count,
+                "hazards": hazards,
+            })
+
+    # ---- RC assessment ----------------------------------------------------
+    rc_assessment: Dict[str, Any] = {
+        "total_assessed": 0,
+        "levels": {"L0": 0, "L1": 0, "L2": 0, "L3": 0},
+        "l1_plus_rate": 0.0,
+        "by_hazard": [],
+        "countries_by_level": {"L1": 0, "L2": 0, "L3": 0},
+    }
+
+    if hs_run_id and _table_exists(con, "hs_triage"):
+        # RC level counts (regime_change_level is pre-computed in the table)
+        rc_rows = _q(
+            f"SELECT COALESCE(ht.regime_change_level, 0) AS rc_level, COUNT(*) AS n "
+            f"FROM hs_triage ht "
+            f"WHERE ht.run_id = ?{tf_ht} AND ht.regime_change_likelihood IS NOT NULL "
+            f"GROUP BY COALESCE(ht.regime_change_level, 0)",
+            [hs_run_id],
+        )
+        total_assessed = 0
+        for rc_level_val, cnt in rc_rows:
+            cnt = int(cnt)
+            total_assessed += cnt
+            if rc_level_val == 0:
+                rc_assessment["levels"]["L0"] = cnt
+            elif rc_level_val == 1:
+                rc_assessment["levels"]["L1"] = cnt
+            elif rc_level_val == 2:
+                rc_assessment["levels"]["L2"] = cnt
+            elif rc_level_val >= 3:
+                rc_assessment["levels"]["L3"] = rc_assessment["levels"].get("L3", 0) + cnt
+        rc_assessment["total_assessed"] = total_assessed
+        l1_plus = (
+            rc_assessment["levels"]["L1"]
+            + rc_assessment["levels"]["L2"]
+            + rc_assessment["levels"]["L3"]
+        )
+        rc_assessment["l1_plus_rate"] = round(l1_plus / total_assessed, 3) if total_assessed else 0.0
+
+        # By hazard breakdown
+        hazard_rc_rows = _q(
+            f"SELECT UPPER(ht.hazard_code) AS hc, "
+            f"  COALESCE(ht.regime_change_level, 0) AS rc_level, COUNT(*) AS n "
+            f"FROM hs_triage ht "
+            f"WHERE ht.run_id = ?{tf_ht} AND ht.regime_change_likelihood IS NOT NULL "
+            f"GROUP BY UPPER(ht.hazard_code), COALESCE(ht.regime_change_level, 0) "
+            f"ORDER BY UPPER(ht.hazard_code)",
+            [hs_run_id],
+        )
+        hazard_rc: Dict[str, Dict[str, int]] = {}
+        for hc, rc_lev, cnt in hazard_rc_rows:
+            hc = str(hc)
+            if hc not in hazard_rc:
+                hazard_rc[hc] = {"L0": 0, "L1": 0, "L2": 0, "L3": 0}
+            key = f"L{min(int(rc_lev), 3)}"
+            hazard_rc[hc][key] = hazard_rc[hc].get(key, 0) + int(cnt)
+        rc_assessment["by_hazard"] = [
+            {"hazard_code": hc, **levels} for hc, levels in sorted(hazard_rc.items())
+        ]
+
+        # Countries by level: distinct iso3 with at least one hazard at each level
+        for level_val, level_key in [(1, "L1"), (2, "L2"), (3, "L3")]:
+            rc_assessment["countries_by_level"][level_key] = _q1(
+                f"SELECT COUNT(DISTINCT UPPER(ht.iso3)) FROM hs_triage ht "
+                f"WHERE ht.run_id = ?{tf_ht} "
+                f"AND COALESCE(ht.regime_change_level, 0) >= ?",
+                [hs_run_id, level_val],
+            ) or 0
+
+    # ---- Track split ------------------------------------------------------
+    tracks: Dict[str, Any] = {
+        "track1": {"questions": 0, "countries": 0, "models": 0},
+        "track2": {"questions": 0, "countries": 0},
+    }
+
+    if q_filter and _table_exists(con, "questions"):
+        has_track = "track" in _table_columns(con, "questions")
+        if has_track:
+            for track_val, track_key in [(1, "track1"), (2, "track2")]:
+                tracks[track_key]["questions"] = _q1(
+                    f"SELECT COUNT(DISTINCT q.question_id) FROM questions q "
+                    f"WHERE {q_filter}{tf_q} AND q.track = ?",
+                    q_params + [track_val],
+                ) or 0
+                tracks[track_key]["countries"] = _q1(
+                    f"SELECT COUNT(DISTINCT UPPER(q.iso3)) FROM questions q "
+                    f"WHERE {q_filter}{tf_q} AND q.track = ?",
+                    q_params + [track_val],
+                ) or 0
+
+    # Ensemble model count from forecasts_raw
+    if run_id and _table_exists(con, "forecasts_raw"):
+        model_col = "model_name" if "model_name" in _table_columns(con, "forecasts_raw") else None
+        if model_col:
+            tracks["track1"]["models"] = _q1(
+                f"SELECT COUNT(DISTINCT fr.{model_col}) FROM forecasts_raw fr "
+                f"WHERE fr.run_id = ? AND COALESCE(fr.ok, TRUE) = TRUE",
+                [run_id],
+            ) or 0
+
+    # ---- Ensemble health --------------------------------------------------
+    ensemble: Dict[str, int] = {"expected": 7, "ok": tracks["track1"]["models"]}
+
+    # ---- Cost breakdown ---------------------------------------------------
+    cost: Dict[str, Any] = {
+        "total_usd": 0.0,
+        "total_tokens": 0,
+        "by_phase": [],
+    }
+
+    llm_health: Dict[str, Any] = {
+        "total_calls": 0,
+        "errors": 0,
+        "error_rate": 0.0,
+    }
+
+    if _table_exists(con, "llm_calls"):
+        # Build filter for this run's llm_calls
+        lc_filters = []
+        lc_params: list = []
+        if run_id:
+            lc_filters.append("lc.run_id = ?")
+            lc_params.append(run_id)
+        if hs_run_id:
+            if lc_filters:
+                lc_filters = [f"({lc_filters[0]} OR lc.hs_run_id = ?)"]
+                lc_params.append(hs_run_id)
+            else:
+                lc_filters.append("lc.hs_run_id = ?")
+                lc_params.append(hs_run_id)
+
+        if lc_filters:
+            where = " AND ".join(lc_filters)
+
+            # Total cost and tokens
+            row = _q(
+                f"SELECT COALESCE(SUM(lc.cost_usd), 0), COALESCE(SUM(lc.total_tokens), 0) "
+                f"FROM llm_calls lc WHERE {where}{tf_lc}",
+                lc_params,
+            )
+            if row:
+                cost["total_usd"] = round(float(row[0][0]), 2)
+                cost["total_tokens"] = int(row[0][1])
+
+            # By phase
+            PHASE_LABELS = [
+                ("hs_triage", "HS triage"),
+                ("spd_v2", "SPD ensemble"),
+                ("binary_v2", "Binary forecasts"),
+                ("scenario_v2", "Scenarios"),
+            ]
+            for phase_val, phase_label in PHASE_LABELS:
+                phase_cost = _q1(
+                    f"SELECT COALESCE(SUM(lc.cost_usd), 0) FROM llm_calls lc "
+                    f"WHERE {where}{tf_lc} AND lc.phase = ?",
+                    lc_params + [phase_val],
+                )
+                cost["by_phase"].append({
+                    "phase": phase_val,
+                    "label": phase_label,
+                    "cost_usd": round(float(phase_cost or 0), 2),
+                })
+
+            # LLM health
+            llm_health["total_calls"] = _q1(
+                f"SELECT COUNT(*) FROM llm_calls lc WHERE {where}{tf_lc}",
+                lc_params,
+            ) or 0
+
+            # Error detection: check for error_text or status = 'error'
+            has_error_text = "error_text" in _table_columns(con, "llm_calls")
+            has_status = "status" in _table_columns(con, "llm_calls")
+            error_cond = ""
+            if has_error_text and has_status:
+                error_cond = " AND (lc.error_text IS NOT NULL OR lc.status = 'error')"
+            elif has_error_text:
+                error_cond = " AND lc.error_text IS NOT NULL"
+            elif has_status:
+                error_cond = " AND lc.status = 'error'"
+
+            if error_cond:
+                llm_health["errors"] = _q1(
+                    f"SELECT COUNT(*) FROM llm_calls lc WHERE {where}{tf_lc}{error_cond}",
+                    lc_params,
+                ) or 0
+
+            if llm_health["total_calls"] > 0:
+                llm_health["error_rate"] = round(
+                    llm_health["errors"] / llm_health["total_calls"], 3
+                )
+
+    return {
+        "run_id": run_id,
+        "hs_run_id": hs_run_id,
+        "updated_at": updated_at,
+        "coverage": coverage,
+        "metrics": metrics_list,
+        "rc_assessment": rc_assessment,
+        "tracks": tracks,
+        "ensemble": ensemble,
+        "cost": cost,
+        "llm_health": llm_health,
     }
 
 

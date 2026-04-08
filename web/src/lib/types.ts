@@ -58,6 +58,7 @@ export type RiskIndexResponse = {
 };
 
 export type RiskView =
+  | "ALL_METRICS_SUMMARY"
   | "PA_EIV"
   | "PA_PC"
   | "FATALITIES_EIV"
@@ -104,6 +105,66 @@ export type RiskIndexRow = {
   total_pc?: number | null;
   per_capita?: number | null;
   metric_type?: "binary" | "spd" | null;
+};
+
+export type RunSummaryHazardBreakdown = {
+  hazard_code: string;
+  count: number;
+};
+
+export type RunSummaryMetric = {
+  metric: string;
+  label: string;
+  questions: number;
+  countries: number;
+  hazards: RunSummaryHazardBreakdown[];
+};
+
+export type RunSummaryRcByHazard = {
+  hazard_code: string;
+  L0: number;
+  L1: number;
+  L2: number;
+  L3: number;
+};
+
+export type RunSummaryResponse = {
+  run_id: string | null;
+  hs_run_id: string | null;
+  updated_at: string | null;
+  coverage: {
+    countries_scanned: number;
+    hazard_pairs_assessed: number;
+    seasonal_screenouts: number;
+    pairs_with_questions: number;
+    total_questions: number;
+    countries_with_forecasts: number;
+    countries_no_questions: number;
+    triaged_quiet: number;
+  };
+  metrics: RunSummaryMetric[];
+  rc_assessment: {
+    total_assessed: number;
+    levels: { L0: number; L1: number; L2: number; L3: number };
+    l1_plus_rate: number;
+    by_hazard: RunSummaryRcByHazard[];
+    countries_by_level: { L1: number; L2: number; L3: number };
+  };
+  tracks: {
+    track1: { questions: number; countries: number; models: number };
+    track2: { questions: number; countries: number };
+  };
+  ensemble: { expected: number; ok: number };
+  cost: {
+    total_usd: number;
+    total_tokens: number;
+    by_phase: Array<{ phase: string; label: string; cost_usd: number }>;
+  };
+  llm_health: {
+    total_calls: number;
+    errors: number;
+    error_rate: number;
+  };
 };
 
 export type QuestionsResponse = {
