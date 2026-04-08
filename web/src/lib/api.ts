@@ -17,6 +17,9 @@ const buildUrl = (path: string, params?: QueryParams) => {
   return url.toString();
 };
 
+export const fetchRunSummary = async (params?: QueryParams) =>
+  apiGet<import("./types").RunSummaryResponse>("/diagnostics/run_summary", params);
+
 export const apiGet = async <T>(path: string, params?: QueryParams): Promise<T> => {
   const url = buildUrl(path, params);
   const response = await fetch(url, { cache: "no-store" });
