@@ -349,7 +349,52 @@ function TrackSplit({ data }: Props) {
   );
 }
 
-// ---- 6. Cost breakdown ----
+// ---- 6. Performance ----
+function PerformanceSection({ data }: Props) {
+  const p = data.performance;
+  const fmtScore = (v: number | null) => (v != null ? v.toFixed(3) : "—");
+
+  return (
+    <Section title="Performance">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="rounded-lg border border-fred-secondary/70 bg-fred-bg p-3">
+          <div className="text-xs uppercase tracking-wide text-fred-muted">
+            Forecasts resolved
+          </div>
+          <div className="mt-1 text-xl font-bold text-fred-primary">
+            {p.resolved_questions}
+            <span className="ml-1 text-sm font-normal text-fred-muted">
+              / {p.total_questions}
+            </span>
+          </div>
+        </div>
+        {(["brier", "log", "crps"] as const).map((key) => {
+          const label =
+            key === "brier" ? "Brier" : key === "log" ? "Log Loss" : "CRPS";
+          const score = p[key];
+          return (
+            <div
+              key={key}
+              className="rounded-lg border border-fred-secondary/70 bg-fred-bg p-3"
+            >
+              <div className="text-xs uppercase tracking-wide text-fred-muted">
+                {label}
+              </div>
+              <div className="mt-1 text-xl font-bold text-fred-primary">
+                {fmtScore(score.avg)}
+              </div>
+              <div className="text-[11px] text-fred-muted">
+                median {fmtScore(score.median)}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Section>
+  );
+}
+
+// ---- 7. Cost breakdown ----
 function CostBreakdown({ data }: Props) {
   return (
     <Section title="Cost breakdown">
@@ -381,6 +426,7 @@ export default function RunSummaryView({ data }: Props) {
       <MetricGrid data={data} />
       <RcAssessment data={data} />
       <TrackSplit data={data} />
+      <PerformanceSection data={data} />
       <CostBreakdown data={data} />
     </div>
   );

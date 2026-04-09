@@ -234,6 +234,8 @@ def test_run_summary_shape(api_env: None) -> None:
     assert "ensemble" in data
     assert "cost" in data
     assert "llm_health" in data
+    assert "performance" in data
+    assert data["ensemble"]["expected"] == 6  # DeepSeek removed
 
 
 def test_run_summary_coverage(api_env: None) -> None:

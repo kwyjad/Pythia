@@ -70,7 +70,7 @@ export default async function OverviewPage({
     <div className="space-y-6">
       <section className="space-y-2">
         <h1 className="text-3xl font-semibold">
-          Humanitarian Impact Forecast Index
+          Run Results
         </h1>
         <p className="text-sm text-fred-text">
           Last updated:{" "}

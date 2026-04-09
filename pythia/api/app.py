@@ -4034,7 +4034,7 @@ def diagnostics_run_summary(
                 ) or 0
 
     # ---- Ensemble health --------------------------------------------------
-    ensemble: Dict[str, int] = {"expected": 7, "ok": tracks["track1"]["models"]}
+    ensemble: Dict[str, int] = {"expected": 6, "ok": tracks["track1"]["models"]}
 
     # ---- Cost breakdown ---------------------------------------------------
     cost: Dict[str, Any] = {
@@ -4127,6 +4127,37 @@ def diagnostics_run_summary(
                     llm_health["errors"] / llm_health["total_calls"], 3
                 )
 
+    # ---- Performance scores -------------------------------------------------
+    performance: Dict[str, Any] = {
+        "resolved_questions": 0,
+        "total_questions": coverage.get("total_questions", 0),
+        "brier": {"avg": None, "median": None},
+        "log": {"avg": None, "median": None},
+        "crps": {"avg": None, "median": None},
+    }
+    if _table_exists(con, "resolutions") and q_filter:
+        performance["resolved_questions"] = _q1(
+            f"SELECT COUNT(DISTINCT r.question_id) FROM resolutions r "
+            f"JOIN questions q ON r.question_id = q.question_id "
+            f"WHERE {q_filter}{tf_q}",
+            q_params,
+        ) or 0
+
+    if _table_exists(con, "scores") and q_filter:
+        for score_type in ["brier", "log", "crps"]:
+            row = _q(
+                f"SELECT AVG(s.value), MEDIAN(s.value) FROM scores s "
+                f"JOIN questions q ON s.question_id = q.question_id "
+                f"WHERE {q_filter}{tf_q} AND s.score_type = ? "
+                f"AND s.model_name LIKE 'ensemble_%'",
+                q_params + [score_type],
+            )
+            if row and row[0][0] is not None:
+                performance[score_type] = {
+                    "avg": round(float(row[0][0]), 4),
+                    "median": round(float(row[0][1]), 4) if row[0][1] is not None else None,
+                }
+
     return {
         "run_id": run_id,
         "hs_run_id": hs_run_id,
@@ -4137,6 +4168,7 @@ def diagnostics_run_summary(
         "tracks": tracks,
         "ensemble": ensemble,
         "cost": cost,
+        "performance": performance,
         "llm_health": llm_health,
     }
 
