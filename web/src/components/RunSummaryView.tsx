@@ -315,7 +315,66 @@ function RcAssessment({ data }: Props) {
   );
 }
 
-// ---- 5. Track split ----
+// ---- 5. Triage ----
+function TriageSection({ data }: Props) {
+  const c = data.coverage;
+  const totalPairs = c.hazard_pairs_assessed + c.seasonal_screenouts + c.acled_low_activity;
+  const forecasted = c.pairs_with_questions;
+  const quiet = c.triaged_quiet;
+
+  const segments = [
+    { label: "forecasted", count: forecasted, color: "bg-fred-primary" },
+    { label: "quiet (no forecast)", count: quiet, color: "bg-slate-400" },
+    { label: "seasonal screen-out", count: c.seasonal_screenouts, color: "bg-sky-300" },
+    { label: "quiet conflict", count: c.acled_low_activity, color: "bg-amber-300" },
+  ];
+  const total = segments.reduce((a, s) => a + s.count, 0) || 1;
+
+  return (
+    <Section title="Triage">
+      <p className="mb-3 text-xs text-fred-muted">
+        Each country/hazard pair is triaged based on RC level, data availability,
+        seasonality, and conflict activity. Pairs that pass triage generate
+        forecast questions; others are screened out.
+      </p>
+      <div className="flex h-7 w-full overflow-hidden rounded">
+        {segments.map((seg) => {
+          if (seg.count === 0) return null;
+          const pct = (seg.count / total) * 100;
+          return (
+            <div
+              key={seg.label}
+              className={`${seg.color} flex items-center justify-center text-[10px] font-semibold text-white`}
+              style={{ width: `${pct}%`, minWidth: seg.count > 0 ? "24px" : 0 }}
+              title={`${seg.label}: ${seg.count}`}
+            >
+              {pct > 6 ? seg.count : ""}
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-fred-muted">
+        {segments.map((seg) => (
+          <span key={seg.label} className="inline-flex items-center gap-1">
+            <span className={`inline-block h-2.5 w-2.5 rounded-sm ${seg.color}`} />
+            {seg.label} ({seg.count})
+          </span>
+        ))}
+      </div>
+      <p className="mt-2 text-xs text-fred-muted">
+        {totalPairs.toLocaleString()} total country/hazard pairs
+        {" · "}
+        {c.seasonal_screenouts} seasonal screen-outs
+        {" · "}
+        {c.acled_low_activity} quiet conflict (ACLED low activity)
+        {" · "}
+        {c.countries_no_questions} countries with no questions generated
+      </p>
+    </Section>
+  );
+}
+
+// ---- 6. Track split ----
 function TrackSplit({ data }: Props) {
   const t = data.tracks;
 
@@ -423,8 +482,9 @@ export default function RunSummaryView({ data }: Props) {
     <div className="space-y-4">
       <KpiRow data={data} />
       <CoverageFunnel data={data} />
-      <MetricGrid data={data} />
       <RcAssessment data={data} />
+      <TriageSection data={data} />
+      <MetricGrid data={data} />
       <TrackSplit data={data} />
       <PerformanceSection data={data} />
       <CostBreakdown data={data} />

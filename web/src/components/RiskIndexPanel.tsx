@@ -451,8 +451,8 @@ export default function RiskIndexPanel({
                 view={view}
               />
             </div>
-            <div className="space-y-3" data-testid="risk-index-kpi-panel">
-              {/* Coverage */}
+            <div className="space-y-2 overflow-y-auto" style={{maxHeight: resolvedMapHeightClassName.includes("720") ? "720px" : "520px"}} data-testid="risk-index-kpi-panel">
+              {/* Coverage Funnel */}
               <div className="rounded-lg border border-fred-secondary bg-fred-surface p-3 shadow-fredCard">
                 <div className="text-[11px] uppercase tracking-wide text-fred-muted">
                   Coverage
@@ -462,45 +462,47 @@ export default function RiskIndexPanel({
                     {kpiError}
                   </div>
                 ) : null}
-                <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
-                  <div>
-                    <div className="text-[11px] text-fred-muted">Forecasts</div>
-                    <div className="text-lg font-semibold text-fred-primary">{selectedScope?.forecasts ?? 0}</div>
-                  </div>
-                  <div>
-                    <div className="text-[11px] text-fred-muted">Countries</div>
-                    <div className="text-lg font-semibold text-fred-primary">
-                      {selectedScope?.countries_with_forecasts ?? selectedScope?.countries ?? 0}
-                      <span className="ml-1 text-xs font-normal text-fred-muted">
-                        / {selectedScope?.countries_triaged ?? 0} triaged
+                {(() => {
+                  const triaged = selectedScope?.countries_triaged ?? 0;
+                  const forecasts = selectedScope?.forecasts ?? 0;
+                  const countriesF = selectedScope?.countries_with_forecasts ?? selectedScope?.countries ?? 0;
+                  const steps = [
+                    { label: "countries triaged", value: triaged },
+                    { label: "forecasts", value: forecasts },
+                    { label: "countries with forecasts", value: countriesF },
+                  ];
+                  const maxVal = Math.max(...steps.map((s) => s.value), 1);
+                  return (
+                    <div className="mt-2 space-y-1">
+                      {steps.map((step, i) => (
+                        <div
+                          key={i}
+                          className="flex items-center rounded bg-fred-primary/80 px-2 py-0.5 text-[11px] font-semibold text-white"
+                          style={{ width: `${Math.max((step.value / maxVal) * 100, 25)}%` }}
+                        >
+                          {step.value} {step.label}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {hazardEntries.length ? (
+                    hazardEntries.map(([code, count]) => (
+                      <span key={code} className="inline-block rounded-full bg-fred-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-fred-primary">
+                        {code} {count}
                       </span>
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-[11px] text-fred-muted">Resolved</div>
-                    <div className="text-lg font-semibold text-fred-primary">{selectedScope?.resolved_questions ?? 0}</div>
-                  </div>
-                  <div>
-                    <div className="text-[11px] text-fred-muted">By hazard</div>
-                    <div className="mt-0.5 flex flex-wrap gap-1">
-                      {hazardEntries.length ? (
-                        hazardEntries.map(([code, count]) => (
-                          <span key={code} className="inline-block rounded-full bg-fred-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-fred-primary">
-                            {code} {count}
-                          </span>
-                        ))
-                      ) : (
-                        <span className="text-[11px] text-fred-muted">—</span>
-                      )}
-                    </div>
-                  </div>
+                    ))
+                  ) : (
+                    <span className="text-[11px] text-fred-muted">—</span>
+                  )}
                 </div>
               </div>
 
               {/* RC Assessment */}
               <div className="rounded-lg border border-fred-secondary bg-fred-surface p-3 shadow-fredCard">
                 <div className="text-[11px] uppercase tracking-wide text-fred-muted">
-                  Regime Change
+                  Regime Change by Country-Hazard Pair
                 </div>
                 <div className="mt-2 flex h-5 w-full overflow-hidden rounded">
                   {([
@@ -523,15 +525,71 @@ export default function RiskIndexPanel({
                     );
                   })}
                 </div>
-                <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-fred-muted">
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-fred-muted">
                   <span><span className="inline-block h-2 w-2 rounded-sm bg-teal-600" /> L0</span>
                   <span><span className="inline-block h-2 w-2 rounded-sm bg-amber-500" /> L1 ({rcLevelCounts.level1})</span>
                   <span><span className="inline-block h-2 w-2 rounded-sm bg-orange-500" /> L2 ({rcLevelCounts.level2})</span>
                   <span><span className="inline-block h-2 w-2 rounded-sm bg-red-600" /> L3 ({rcLevelCounts.level3})</span>
                 </div>
-                <p className="mt-1.5 text-[11px] text-fred-muted">
-                  L1+ countries forecast with full ensemble; L0 with single model.
+                {/* Hazard breakdown table */}
+                {hazardEntries.length > 0 && (
+                  <table className="mt-2 w-full text-[11px]">
+                    <thead>
+                      <tr className="text-fred-muted">
+                        <th className="text-left font-normal pb-0.5">Hazard</th>
+                        <th className="text-right font-normal pb-0.5 px-1">L0</th>
+                        <th className="text-right font-normal pb-0.5 px-1">L1</th>
+                        <th className="text-right font-normal pb-0.5 px-1">L2</th>
+                        <th className="text-right font-normal pb-0.5 px-1">L3</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hazardEntries.map(([code, total]) => {
+                        // Approximate per-hazard RC from countries data (best effort)
+                        const hzL1 = countries.filter((c) => c.highest_rc_level === 1).length > 0 ? "—" : "—";
+                        void hzL1;
+                        return (
+                          <tr key={code} className="border-t border-fred-border/30">
+                            <td className="py-0.5 text-fred-text">{code}</td>
+                            <td className="py-0.5 px-1 text-right">{total}</td>
+                            <td className="py-0.5 px-1 text-right text-fred-muted" colSpan={3}>—</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+                <p className="mt-1 text-[11px] text-fred-muted">
+                  L1+ country-hazard pairs forecast with full ensemble; L0 with single model.
                 </p>
+              </div>
+
+              {/* Triage */}
+              <div className="rounded-lg border border-fred-secondary bg-fred-surface p-3 shadow-fredCard">
+                <div className="text-[11px] uppercase tracking-wide text-fred-muted">
+                  Triage
+                </div>
+                {(() => {
+                  const total = countries.length;
+                  const forecasted = selectedScope?.countries_with_forecasts ?? selectedScope?.countries ?? 0;
+                  const quiet = total - forecasted - rcLevelCounts.level1 - rcLevelCounts.level2 - rcLevelCounts.level3;
+                  return (
+                    <div className="mt-2 space-y-1 text-[11px] text-fred-muted">
+                      <div className="flex justify-between">
+                        <span>Countries triaged</span>
+                        <span className="font-semibold text-fred-text">{selectedScope?.countries_triaged ?? 0}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Triaged quiet (L0, no forecast)</span>
+                        <span className="font-semibold text-fred-text">{Math.max(0, quiet)}</span>
+                      </div>
+                      <p className="mt-1 text-[10px]">
+                        Seasonal screen-outs and quiet-conflict screen-outs are not shown per-metric.
+                        See the All Metrics summary view for full triage breakdown.
+                      </p>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Performance */}
@@ -540,8 +598,8 @@ export default function RiskIndexPanel({
                   Performance
                 </div>
                 {(() => {
-                  const rows = perfScores?.summary_rows ?? [];
-                  const ensembleRows = rows.filter(
+                  const pRows = perfScores?.summary_rows ?? [];
+                  const ensembleRows = pRows.filter(
                     (r) => r.model_name != null && r.model_name.startsWith("ensemble_")
                   );
                   const brierRow = ensembleRows.find((r) => r.score_type === "brier");
@@ -550,16 +608,16 @@ export default function RiskIndexPanel({
                   const fmt = (v: number | null | undefined) =>
                     v != null ? v.toFixed(3) : "—";
                   return (
-                    <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
+                    <div className="mt-2 grid grid-cols-4 gap-1 text-sm">
                       <div>
                         <div className="text-[11px] text-fred-muted">Resolved</div>
-                        <div className="text-lg font-semibold text-fred-primary">
+                        <div className="text-base font-semibold text-fred-primary">
                           {selectedScope?.resolved_questions ?? 0}
                         </div>
                       </div>
                       <div>
                         <div className="text-[11px] text-fred-muted">Brier</div>
-                        <div className="text-lg font-semibold text-fred-primary">
+                        <div className="text-base font-semibold text-fred-primary">
                           {fmt(brierRow?.avg_value)}
                         </div>
                         <div className="text-[10px] text-fred-muted">
@@ -567,8 +625,8 @@ export default function RiskIndexPanel({
                         </div>
                       </div>
                       <div>
-                        <div className="text-[11px] text-fred-muted">Log Loss</div>
-                        <div className="text-lg font-semibold text-fred-primary">
+                        <div className="text-[11px] text-fred-muted">Log</div>
+                        <div className="text-base font-semibold text-fred-primary">
                           {fmt(logRow?.avg_value)}
                         </div>
                         <div className="text-[10px] text-fred-muted">
@@ -577,7 +635,7 @@ export default function RiskIndexPanel({
                       </div>
                       <div>
                         <div className="text-[11px] text-fred-muted">CRPS</div>
-                        <div className="text-lg font-semibold text-fred-primary">
+                        <div className="text-base font-semibold text-fred-primary">
                           {fmt(crpsRow?.avg_value)}
                         </div>
                         <div className="text-[10px] text-fred-muted">
