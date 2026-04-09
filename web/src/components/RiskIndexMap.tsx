@@ -429,6 +429,14 @@ export default function RiskIndexMap({
           2: "#fb923c",
           3: "#ef4444",
         };
+        // Centroid overrides for countries whose SVG bounding-box center
+        // is misleading (multi-part geometry spanning dateline, overseas
+        // territories, etc.). Coordinates are in the SVG viewBox (0-1000 x 0-500).
+        const centroidOverrides: Record<string, { cx: number; cy: number }> = {
+          RUS: { cx: 560, cy: 115 },  // European Russia (not Siberian center)
+          USA: { cx: 150, cy: 175 },  // CONUS (not mid-Pacific with Alaska/Hawaii)
+          FRA: { cx: 468, cy: 162 },  // Metropolitan France (not mid-Atlantic with overseas)
+        };
         rcByIso3.forEach((level, iso3) => {
           const elements = iso3ElementMap.get(iso3) ?? [];
           if (!elements.length) {
@@ -474,13 +482,25 @@ export default function RiskIndexMap({
           if (!Number.isFinite(width) || !Number.isFinite(height)) {
             return;
           }
-          const radius = Math.max(2, Math.min(8, Math.min(width, height) * 0.2));
+          // Scale radius by EIV when available; fall back to country bbox size
+          const countryRow = riskRows.find(
+            (r) => r.iso3?.toUpperCase() === iso3.toUpperCase()
+          );
+          const eiv = countryRow?.expected_value ?? countryRow?.total ?? null;
+          let radius: number;
+          if (eiv != null && Number.isFinite(eiv) && eiv > 0) {
+            // Log-scale EIV into 3-10 range
+            radius = Math.max(3, Math.min(10, 2 + Math.log10(eiv + 1) * 1.5));
+          } else {
+            radius = Math.max(2, Math.min(8, Math.min(width, height) * 0.2));
+          }
           const circle = document.createElementNS(
             "http://www.w3.org/2000/svg",
             "circle"
           );
-          circle.setAttribute("cx", String(minX + width / 2));
-          circle.setAttribute("cy", String(minY + height / 2));
+          const override = centroidOverrides[iso3.toUpperCase()];
+          circle.setAttribute("cx", String(override ? override.cx : minX + width / 2));
+          circle.setAttribute("cy", String(override ? override.cy : minY + height / 2));
           circle.setAttribute("r", String(radius));
           circle.setAttribute("fill", rcColors[level] ?? rcColors[1]);
           circle.setAttribute("stroke", "rgba(15, 23, 42, 0.75)");
@@ -988,8 +1008,8 @@ export default function RiskIndexMap({
                 { label: "Very low", color: "var(--risk-map-c1)" },
               ]
           ).concat([
-            { label: "In country list but not forecasted", color: "var(--risk-map-no-eiv)" },
-            { label: "Not in country list", color: "var(--risk-map-no-questions)" },
+            { label: "Scanned, no forecasts", color: "var(--risk-map-no-eiv)" },
+            { label: "Not scanned", color: "var(--risk-map-no-questions)" },
           ]).map((item) => (
             <div key={item.label} className="flex items-center gap-2">
               <span
@@ -1013,6 +1033,7 @@ export default function RiskIndexMap({
               <span>{item.label}</span>
             </div>
           ))}
+          <div className="mt-0.5 text-[10px] text-fred-muted">Circle size indicates EIV</div>
         </div>
       </div>
       {debugEnabled && debugInfo ? (

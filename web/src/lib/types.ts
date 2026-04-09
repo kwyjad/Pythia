@@ -166,6 +166,13 @@ export type RunSummaryResponse = {
     errors: number;
     error_rate: number;
   };
+  performance: {
+    resolved_questions: number;
+    total_questions: number;
+    brier: { avg: number | null; median: number | null };
+    log: { avg: number | null; median: number | null };
+    crps: { avg: number | null; median: number | null };
+  };
 };
 
 export type QuestionsResponse = {

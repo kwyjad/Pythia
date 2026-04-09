@@ -113,6 +113,13 @@ const MOCK_DATA: RunSummaryResponse = {
     errors: 10,
     error_rate: 0.003,
   },
+  performance: {
+    resolved_questions: 120,
+    total_questions: 229,
+    brier: { avg: 0.245, median: 0.198 },
+    log: { avg: 1.32, median: 1.05 },
+    crps: { avg: 0.156, median: 0.128 },
+  },
 };
 
 describe("RunSummaryView", () => {

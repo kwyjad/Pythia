@@ -48,7 +48,7 @@ const Nav = () => {
               className="text-fred-primary font-semibold hover:text-fred-secondary"
               href="/"
             >
-              Forecast Index
+              Run Results
             </Link>
             <Link
               className="text-fred-primary font-semibold hover:text-fred-secondary"
@@ -159,7 +159,7 @@ const Nav = () => {
                 className="text-fred-primary font-semibold hover:text-fred-secondary"
                 href="/"
               >
-                Forecast Index
+                Run Results
               </Link>
               <Link
                 className="text-fred-primary font-semibold hover:text-fred-secondary"
