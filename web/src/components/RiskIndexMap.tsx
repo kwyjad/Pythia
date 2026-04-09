@@ -437,7 +437,24 @@ export default function RiskIndexMap({
           USA: { cx: 150, cy: 175 },  // CONUS (not mid-Pacific with Alaska/Hawaii)
           FRA: { cx: 468, cy: 162 },  // Metropolitan France (not mid-Atlantic with overseas)
         };
+
+        // Only show RC circles for countries represented in the current metric view
+        const riskIso3Set = new Set(
+          riskRows.map((r) => (r.iso3 ?? "").toUpperCase()).filter(Boolean)
+        );
+
+        // Compute EIV range across all risk rows for radius normalization
+        const eivValues = riskRows
+          .map((r) => r.expected_value ?? r.total ?? 0)
+          .filter((v) => Number.isFinite(v) && v > 0);
+        const minEiv = eivValues.length > 0 ? Math.min(...eivValues) : 1;
+        const maxEiv = eivValues.length > 0 ? Math.max(...eivValues) : 1;
+        const eivRange = Math.max(maxEiv - minEiv, 1);
+
         rcByIso3.forEach((level, iso3) => {
+          // Skip countries not in the current metric's risk data
+          if (!riskIso3Set.has(iso3.toUpperCase())) return;
+
           const elements = iso3ElementMap.get(iso3) ?? [];
           if (!elements.length) {
             return;
@@ -482,17 +499,18 @@ export default function RiskIndexMap({
           if (!Number.isFinite(width) || !Number.isFinite(height)) {
             return;
           }
-          // Scale radius by EIV when available; fall back to country bbox size
+          // Scale radius by EIV relative to the range across all countries
           const countryRow = riskRows.find(
             (r) => r.iso3?.toUpperCase() === iso3.toUpperCase()
           );
           const eiv = countryRow?.expected_value ?? countryRow?.total ?? null;
           let radius: number;
           if (eiv != null && Number.isFinite(eiv) && eiv > 0) {
-            // Log-scale EIV into 3-10 range
-            radius = Math.max(3, Math.min(10, 2 + Math.log10(eiv + 1) * 1.5));
+            // Linear interpolation within 3-12 range based on EIV position
+            const t = Math.min(1, Math.max(0, (eiv - minEiv) / eivRange));
+            radius = 3 + t * 9;
           } else {
-            radius = Math.max(2, Math.min(8, Math.min(width, height) * 0.2));
+            radius = 3;
           }
           const circle = document.createElementNS(
             "http://www.w3.org/2000/svg",
