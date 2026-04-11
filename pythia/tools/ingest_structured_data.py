@@ -90,6 +90,7 @@ _SOURCE_GROUPS: dict[str, list[str]] = {
     "gdacs": ["gdacs_population_exposed"],
     "fewsnet_ipc": ["fewsnet_ipc_population"],
     "ipc_api": ["ipc_api_population"],
+    "gdelt": ["gdelt_conflict_indicators"],
 }
 
 # Convenience aliases that expand to multiple source groups.
@@ -1135,6 +1136,44 @@ def _bulk_fetch_gdacs(dry_run: bool = False) -> dict[str, Any]:
 
 
 # ===================================================================
+# GDELT — delegate to pythia.gdelt
+# ===================================================================
+
+
+def _bulk_fetch_gdelt(dry_run: bool = False) -> dict[str, Any]:
+    """Run the GDELT conflict indicators connector.
+
+    Downloads the last N days of GDELT 1.0 daily event exports, computes
+    per-country indicators, and persists them to the
+    ``gdelt_conflict_indicators`` table.  Self-storing.
+    """
+    if dry_run:
+        LOG.info("[gdelt] dry-run — skipping GDELT fetch")
+        return {"__gdelt_done__": True}
+
+    try:
+        from pythia.gdelt import fetch_and_store_gdelt_indicators
+
+        summary = fetch_and_store_gdelt_indicators()
+        LOG.info(
+            "[gdelt] complete: %d days fetched, %d skipped, %d rows stored",
+            summary.get("days_fetched", 0),
+            summary.get("days_skipped", 0),
+            summary.get("rows_stored", 0),
+        )
+        if summary.get("rows_stored", 0) == 0:
+            LOG.warning("[gdelt] no rows stored")
+            return {}
+        return {
+            "__gdelt_done__": True,
+            "__gdelt_rows__": summary.get("rows_stored", 0),
+        }
+    except Exception as exc:
+        LOG.error("[gdelt] fetch failed: %s", exc, exc_info=True)
+        return {}
+
+
+# ===================================================================
 # Conflict forecasts — delegate to resolver.tools.fetch_conflict_forecasts
 # ===================================================================
 
@@ -1147,6 +1186,7 @@ _SELF_STORING_LABELS = frozenset([
     "acledcast_forecasts",
     "fewsnet_ipc_population",
     "ipc_api_population",
+    "gdelt_conflict_indicators",
 ])
 
 # Map from our internal labels to the source names used by
@@ -1316,6 +1356,8 @@ def ingest(
                 result = _bulk_fetch_ipc_api(dry_run)
             elif label == "gdacs_population_exposed":
                 result = _bulk_fetch_gdacs(dry_run)
+            elif label == "gdelt_conflict_indicators":
+                result = _bulk_fetch_gdelt(dry_run)
             elif label in _CONFLICT_SOURCE_MAP:
                 result = _bulk_fetch_conflict(label, dry_run)
             else:
