@@ -969,6 +969,54 @@ def _ensure_hdx_signals_table(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _ensure_gdelt_conflict_indicators_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the gdelt_conflict_indicators table exists.
+
+    Stores per-country daily aggregates of GDELT 1.0 event data, classified
+    by CAMEO tier (T1 direct violence, T2 escalatory, T3 political
+    deterioration) and Goldstein/tone averages.  Used as a media-derived
+    conflict intensity signal for ACE prompts.
+    """
+
+    _ensure_table_and_columns(
+        con,
+        "gdelt_conflict_indicators",
+        """
+        CREATE TABLE IF NOT EXISTS gdelt_conflict_indicators (
+            iso3                     VARCHAR NOT NULL,
+            event_date               DATE NOT NULL,
+            total_events             INTEGER DEFAULT 0,
+            material_conflict_events INTEGER DEFAULT 0,
+            verbal_conflict_events   INTEGER DEFAULT 0,
+            tier1_events             INTEGER DEFAULT 0,
+            tier2_events             INTEGER DEFAULT 0,
+            tier3_events             INTEGER DEFAULT 0,
+            avg_goldstein            DOUBLE,
+            avg_tone_conflict        DOUBLE,
+            top_codes_json           VARCHAR,
+            is_test                  BOOLEAN DEFAULT FALSE,
+            fetched_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (iso3, event_date)
+        );
+        """,
+        {
+            "iso3": "VARCHAR",
+            "event_date": "DATE",
+            "total_events": "INTEGER",
+            "material_conflict_events": "INTEGER",
+            "verbal_conflict_events": "INTEGER",
+            "tier1_events": "INTEGER",
+            "tier2_events": "INTEGER",
+            "tier3_events": "INTEGER",
+            "avg_goldstein": "DOUBLE",
+            "avg_tone_conflict": "DOUBLE",
+            "top_codes_json": "VARCHAR",
+            "is_test": "BOOLEAN",
+            "fetched_at": "TIMESTAMP",
+        },
+    )
+
+
 def _ensure_seasonal_tc_outlooks_table(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure the seasonal_tc_outlooks table exists."""
 
@@ -1833,6 +1881,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         _ensure_calibration_advice_table(con)
         _ensure_crisiswatch_entries_table(con)
         _ensure_hdx_signals_table(con)
+        _ensure_gdelt_conflict_indicators_table(con)
         _ensure_enso_state_table(con)
         _ensure_seasonal_tc_outlooks_table(con)
         _ensure_seasonal_tc_context_cache_table(con)

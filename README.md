@@ -26,7 +26,7 @@ Pythia connects historical hazard data, web research, and LLM reasoning into a r
 ```
 Resolver facts/base rates → Horizon Scanner per-hazard pipeline:
   Per hazard: RC grounding → RC assessment (2-pass) → triage grounding → triage (2-pass)
-  + Structured data: ReliefWeb, ACAPS, IPC, ACLED political, ENSO, seasonal TC, HDX Signals
+  + Structured data: ReliefWeb, ACAPS, IPC, ACLED political, ENSO, seasonal TC, HDX Signals, GDELT
   + Conflict forecasts: VIEWS, conflictforecast.org, ACLED CAST
   + Adversarial checks (RC L1+) → Calibration advice
   → Track 1: full ensemble SPD + scenarios
@@ -172,6 +172,7 @@ Pythia pulls structured humanitarian, climate, and conflict-forecast data from a
 | **FEWS NET IPC** | `resolver/connectors/fewsnet_ipc.py` | Phase 3+ population estimates (DR hazard; Current Situation + Most Likely) | `facts_resolved` (via Resolver pipeline) |
 | **GDACS** | `resolver/connectors/gdacs.py` | Disaster population exposure + event occurrence (FL/DR/TC) | `facts_resolved` (via Resolver pipeline) |
 | **ICG CrisisWatch** | `horizon_scanner/crisiswatch.py` + `scripts/refresh_crisiswatch.py` | Expert conflict arrows + "On the Horizon" flags (ACE RC + triage + SPD). Playwright scraper (monthly) + Gemini grounding (runtime fallback) | `crisiswatch_entries` |
+| **GDELT** | `pythia/gdelt.py` | Media-derived conflict intensity indicators from GDELT 1.0 daily event exports (CAMEO-tiered, Goldstein, tone; ACE only) | `gdelt_conflict_indicators` |
 
 ### Adversarial evidence checks
 

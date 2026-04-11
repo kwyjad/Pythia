@@ -28,7 +28,7 @@ concurrency:
           all for manual). Options: views, conflictforecast, acledcast, acaps (alias
           for all 4 ACAPS sources), acaps_inform_severity, acaps_risk_radar,
           acaps_daily_monitoring, acaps_humanitarian_access, ipc, reliefweb, nmme,
-          gdacs, fewsnet_ipc. Also accepts: conflict (alias for
+          gdacs, fewsnet_ipc, gdelt. Also accepts: conflict (alias for
           views+conflictforecast+acledcast). Comma or space separated.
         required: false
         default: ""
@@ -219,7 +219,7 @@ jobs:
         run: |
           # For scheduled runs (not manual dispatch), restrict to fast-changing sources
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            echo "sources=conflict gdacs reliefweb acled_political" >> "$GITHUB_OUTPUT"
+            echo "sources=conflict gdacs reliefweb acled_political gdelt" >> "$GITHUB_OUTPUT"
             echo "Using fast-changing source list for scheduled run"
           else
             echo "sources=${{ inputs.sources }}" >> "$GITHUB_OUTPUT"

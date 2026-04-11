@@ -591,6 +591,17 @@ def _run_rc_for_single_hazard(
     except Exception as exc:
         logger.debug("HDX Signals load failed for %s %s: %s", iso3, hazard_code, exc)
 
+    # Inject GDELT media conflict indicators (ACE only).
+    gdelt_kwargs: dict[str, Any] = {}
+    if hazard_code == "ACE":
+        try:
+            from pythia.gdelt import format_gdelt_for_rc_prompt
+            gdelt_text = format_gdelt_for_rc_prompt(iso3, country_name=country_name)
+            if gdelt_text:
+                gdelt_kwargs["gdelt_conflict_indicators"] = gdelt_text
+        except Exception as exc:
+            logger.debug("GDELT load failed for %s: %s", iso3, exc)
+
     # --- Load additional structured data sources for RC ---
     new_data_kwargs: dict[str, Any] = {}
     # ReliefWeb reports (all hazards)
@@ -663,6 +674,7 @@ def _run_rc_for_single_hazard(
         **climate_kwargs,
         **conflict_kwargs,
         **hdx_kwargs,
+        **gdelt_kwargs,
         **new_data_kwargs,
     )
 

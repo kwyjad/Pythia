@@ -26,7 +26,7 @@ concurrency:
           Optional: run only these connectors (comma-separated).
           Core: acled_client, idmc, ifrc_go_client.
           Resolution: fewsnet_ipc (see fewsnet_months), ipc_api (see ipc_api_months), gdacs (see gdacs_months).
-          Structured: conflict (views+cf+cast), acaps, reliefweb, acled_political, nmme.
+          Structured: conflict (views+cf+cast), acaps, reliefweb, acled_political, nmme, gdelt.
           Context: enso, seasonal_tc, hdx_signals, crisiswatch.
           Leave empty to run all. Examples: "gdacs" or "gdacs, fewsnet_ipc".
         required: false
@@ -486,6 +486,14 @@ jobs:
         run: |
           echo "::group::NMME"
           python -m pythia.tools.ingest_structured_data --sources nmme 2>&1 | tee diagnostics/phase3_nmme.log || echo "WARNING: NMME ingest failed (non-fatal)"
+          echo "::endgroup::"
+
+      - name: "Phase 3: Ingest GDELT conflict indicators"
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'gdelt') }}
+        continue-on-error: true
+        run: |
+          echo "::group::GDELT"
+          python -m pythia.tools.ingest_structured_data --sources gdelt 2>&1 | tee diagnostics/phase3_gdelt.log || echo "WARNING: GDELT ingest failed (non-fatal)"
           echo "::endgroup::"
 
       # === PHASE 4: CONTEXT SOURCES (non-fatal) ===

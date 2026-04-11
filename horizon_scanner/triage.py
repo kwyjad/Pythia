@@ -761,6 +761,16 @@ def _run_triage_for_single_hazard(
     except Exception as exc:
         logger.debug("HDX Signals load failed for %s %s: %s", iso3, hazard_code, exc)
 
+    # GDELT media conflict indicators (ACE only)
+    if hazard_code == "ACE":
+        try:
+            from pythia.gdelt import format_gdelt_for_prompt
+            gdelt_text = format_gdelt_for_prompt(iso3, country_name=country_name)
+            if gdelt_text:
+                new_data_kwargs["gdelt_conflict_indicators"] = gdelt_text
+        except Exception as exc:
+            logger.debug("GDELT load failed for %s: %s", iso3, exc)
+
     prompt = build_triage_prompt(
         hazard_code,
         country_name=country_name,

@@ -160,6 +160,7 @@ def _format_new_data_sections(
     acaps_monitoring: Any = None,
     humanitarian_access: Any = None,
     hdx_signals: Any = None,
+    gdelt_conflict_indicators: Any = None,
 ) -> str:
     """Format all new data sources into a combined text block for triage prompts."""
     sections: list[str] = []
@@ -240,6 +241,10 @@ def _format_new_data_sections(
         if isinstance(hdx_signals, str) and hdx_signals.strip():
             sections.append(hdx_signals)
 
+    if gdelt_conflict_indicators:
+        if isinstance(gdelt_conflict_indicators, str) and gdelt_conflict_indicators.strip():
+            sections.append(gdelt_conflict_indicators)
+
     return "\n\n".join(sections)
 
 
@@ -265,6 +270,7 @@ def build_triage_prompt_ace(
     humanitarian_access: Optional[Any] = None,
     hdx_signals: Optional[str] = None,
     crisiswatch_context: Optional[str] = None,
+    gdelt_conflict_indicators: Optional[str] = None,
     **kwargs: Any,
 ) -> str:
     """Build triage prompt for Armed Conflict Events (ACE).
@@ -309,6 +315,7 @@ def build_triage_prompt_ace(
         acaps_monitoring=acaps_monitoring,
         hdx_signals=hdx_signals,
         humanitarian_access=humanitarian_access,
+        gdelt_conflict_indicators=gdelt_conflict_indicators,
     )
     additional_section = f"\n\n{additional_context}\n" if additional_context else ""
 

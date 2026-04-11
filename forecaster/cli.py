@@ -3110,6 +3110,16 @@ def _load_structured_data(
         except Exception:
             pass
 
+    # GDELT media conflict indicators (ACE only)
+    if hazard_code.upper() == "ACE":
+        try:
+            from pythia.gdelt import format_gdelt_for_prompt
+            gdelt_text = format_gdelt_for_prompt(iso3)
+            if gdelt_text:
+                sd["gdelt_conflict_indicators"] = gdelt_text
+        except Exception:
+            pass
+
     # ICG CrisisWatch (ACE only)
     if hazard_code.upper() == "ACE":
         try:
