@@ -74,6 +74,7 @@ def resolve_sources(
     priority_path: Path | None = None,
     input_table: str = "facts_resolved",
     output_table: str | None = None,
+    sources: Iterable[str] | None = None,
 ) -> int:
     """Resolve multi-source rows in ``facts_resolved`` according to priority.
 
@@ -89,6 +90,14 @@ def resolve_sources(
     output_table:
         Optional destination table name. When ``None`` (default) the input
         table is overwritten with the prioritized view.
+    sources:
+        Optional iterable of ``source_id`` values to scope the resolution
+        to. When provided, only rows whose source matches one of these
+        values are loaded, deduplicated, and rewritten; rows from other
+        sources are left untouched. This prevents a Phase 1 connector run
+        (ACLED/IDMC/IFRC) from silently collapsing rows written by other
+        connectors that participate in ``facts_resolved`` via their own
+        upsert paths (GDACS, FEWS NET IPC, IPC API).
 
     Returns
     -------
@@ -102,6 +111,18 @@ def resolve_sources(
         source: idx + 1 for idx, source in enumerate(normalised_priority)
     }
     fallback_rank = len(priority_map) + 1
+
+    scoped_sources = (
+        sorted({_normalise_source(s) for s in sources if _normalise_source(s)})
+        if sources is not None
+        else None
+    )
+
+    if scoped_sources is not None and not scoped_sources:
+        LOGGER.info(
+            "resolve_sources called with empty source scope; nothing to do"
+        )
+        return 0
 
     query = f"SELECT * FROM {input_table}"
     frame = conn.execute(query).df()
@@ -128,26 +149,52 @@ def resolve_sources(
     )
     frame["provenance_rank"] = frame["provenance_rank"].astype(int)
 
+    if scoped_sources is not None:
+        in_scope_mask = normalised.isin(scoped_sources)
+        scoped_frame = frame[in_scope_mask].copy()
+        out_of_scope_frame = frame[~in_scope_mask].copy()
+        LOGGER.info(
+            "resolve_sources scope | in_scope=%s out_of_scope=%s sources=%s",
+            len(scoped_frame),
+            len(out_of_scope_frame),
+            scoped_sources,
+        )
+        if scoped_frame.empty:
+            # No rows for any of the targeted sources; nothing to rewrite.
+            return 0
+        working = scoped_frame
+    else:
+        out_of_scope_frame = None
+        working = frame
+
     sort_columns: list[str] = list(_REQUIRED_GROUP_COLS) + [
         "provenance_rank",
-        "publication_date" if "publication_date" in frame.columns else "ym",
+        "publication_date" if "publication_date" in working.columns else "ym",
         source_col,
     ]
-    existing_sort = [col for col in sort_columns if col in frame.columns]
-    frame = frame.sort_values(existing_sort)
+    existing_sort = [col for col in sort_columns if col in working.columns]
+    working = working.sort_values(existing_sort)
 
-    dedup_keys = [col for col in _REQUIRED_GROUP_COLS if col in frame.columns]
-    prioritized = frame.drop_duplicates(subset=dedup_keys, keep="first")
+    dedup_keys = [col for col in _REQUIRED_GROUP_COLS if col in working.columns]
+    prioritized = working.drop_duplicates(subset=dedup_keys, keep="first")
 
     target_table = output_table or input_table
-    cols = list(frame.columns)
+    cols = list(working.columns)
     temp_name = "tmp_resolved_priority"
     conn.register(temp_name, prioritized[cols])
+    placeholders = ", ".join(cols)
     try:
         conn.execute("BEGIN TRANSACTION")
         try:
-            conn.execute(f"DELETE FROM {target_table}")
-            placeholders = ", ".join(cols)
+            if scoped_sources is None:
+                conn.execute(f"DELETE FROM {target_table}")
+            else:
+                src_ph = ",".join(["?"] * len(scoped_sources))
+                conn.execute(
+                    f"DELETE FROM {target_table} "
+                    f"WHERE LOWER({source_col}) IN ({src_ph})",
+                    list(scoped_sources),
+                )
             conn.execute(
                 f"INSERT INTO {target_table} ({placeholders})"
                 f" SELECT {placeholders} FROM {temp_name}"
@@ -164,7 +211,7 @@ def resolve_sources(
         "Resolved %s rows for %s (from %s input rows)",
         kept,
         target_table,
-        len(frame),
+        len(working),
     )
     return kept
 

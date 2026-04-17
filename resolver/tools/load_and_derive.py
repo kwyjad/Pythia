@@ -531,9 +531,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         LOGGER.info("Sources in canonical data: %s", loaded_sources)
         counts = _load_into_db(conn, canonical, loaded_sources=loaded_sources)
         LOGGER.info("Loaded canonical counts: %s", counts)
-        prioritized = resolve_sources(conn)
+        # Scope source resolution to the sources loaded in this run.
+        # Without this scope, resolve_sources would read the entire
+        # facts_resolved table and collapse rows from other connectors
+        # (GDACS, FEWS NET IPC, IPC API) that coexist with Phase 1
+        # rows via the Connector-protocol upsert path.
+        prioritized = resolve_sources(conn, sources=loaded_sources)
         LOGGER.info(
-            "Applied source resolution: %s prioritized rows", prioritized
+            "Applied source resolution: %s prioritized rows (scoped to %s)",
+            prioritized,
+            loaded_sources,
         )
         derived = _derive_deltas(
             conn, period, allow_negatives=bool(args.allow_negatives),

@@ -302,3 +302,157 @@ def test_resolve_sources_stock_and_new_coexist(tmp_path):
 
     assert stock_row["source_id"] == "IFRC"
     assert stock_row["value"] == 5000.0
+
+
+def test_resolve_sources_scoped_preserves_out_of_scope(tmp_path):
+    """Scoped dedup must leave rows from non-scoped sources alone.
+
+    Regression test for the Resolver Update workflow crash where
+    load_and_derive's unscoped ``resolve_sources`` call collapsed
+    GDACS / FEWS NET / IPC API rows coexisting with Phase 1 rows.
+    """
+
+    conn = duckdb.connect(str(tmp_path / "resolver.duckdb"))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE facts_resolved (
+                ym TEXT,
+                iso3 TEXT,
+                hazard_code TEXT,
+                hazard_label TEXT,
+                hazard_class TEXT,
+                metric TEXT,
+                series_semantics TEXT,
+                value DOUBLE,
+                unit TEXT,
+                as_of DATE,
+                as_of_date VARCHAR,
+                publication_date VARCHAR,
+                publisher TEXT,
+                source_id TEXT,
+                source_type TEXT,
+                source_url TEXT,
+                doc_title TEXT,
+                definition_text TEXT,
+                precedence_tier TEXT,
+                event_id TEXT,
+                proxy_for TEXT,
+                confidence TEXT,
+                series TEXT,
+                provenance_source TEXT,
+                provenance_rank INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        base = {
+            "hazard_label": None,
+            "hazard_class": None,
+            "unit": "persons",
+            "as_of": None,
+            "publication_date": "2024-01-20",
+            "source_type": None,
+            "source_url": None,
+            "doc_title": None,
+            "definition_text": None,
+            "precedence_tier": None,
+            "proxy_for": None,
+            "confidence": None,
+            "series": None,
+            "provenance_source": None,
+            "provenance_rank": None,
+        }
+
+        rows = pd.DataFrame(
+            [
+                # Two Phase 1 candidates for the same cell — IFRC should win.
+                {
+                    **base,
+                    "ym": "2024-01",
+                    "iso3": "SYR",
+                    "hazard_code": "FL",
+                    "metric": "in_need",
+                    "series_semantics": "stock",
+                    "value": 5000.0,
+                    "as_of_date": "2024-01-15",
+                    "publisher": "IFRC",
+                    "source_id": "ifrc_go",
+                    "event_id": "evt-ifrc",
+                },
+                {
+                    **base,
+                    "ym": "2024-01",
+                    "iso3": "SYR",
+                    "hazard_code": "FL",
+                    "metric": "in_need",
+                    "series_semantics": "stock",
+                    "value": 4200.0,
+                    "as_of_date": "2024-01-15",
+                    "publisher": "IDMC",
+                    "source_id": "idmc",
+                    "event_id": "evt-idmc",
+                },
+                # Phase 2 GDACS row — same cell, but different source and
+                # NOT in the scope passed to resolve_sources.
+                {
+                    **base,
+                    "ym": "2024-01",
+                    "iso3": "SYR",
+                    "hazard_code": "FL",
+                    "metric": "in_need",
+                    "series_semantics": "stock",
+                    "value": 6100.0,
+                    "as_of_date": "2024-01-15",
+                    "publisher": "GDACS / JRC",
+                    "source_id": "GDACS / JRC",
+                    "event_id": "evt-gdacs",
+                },
+                # Phase 2 FEWS NET row — different metric, different cell.
+                {
+                    **base,
+                    "ym": "2024-01",
+                    "iso3": "SYR",
+                    "hazard_code": "DR",
+                    "metric": "phase3plus_in_need",
+                    "series_semantics": "stock",
+                    "value": 7500.0,
+                    "as_of_date": "2024-01-15",
+                    "publisher": "FEWS NET",
+                    "source_id": "FEWS NET",
+                    "event_id": "evt-fewsnet",
+                },
+            ]
+        )
+
+        conn.register("tmp_fixture", rows)
+        try:
+            cols = ", ".join(rows.columns)
+            conn.execute(
+                f"INSERT INTO facts_resolved ({cols}) SELECT {cols} FROM tmp_fixture"
+            )
+        finally:
+            conn.unregister("tmp_fixture")
+
+        kept = resolve_sources(
+            conn,
+            sources=["acled", "idmc", "ifrc_go"],
+        )
+
+        result = conn.execute(
+            "SELECT source_id, value FROM facts_resolved ORDER BY source_id"
+        ).df()
+    finally:
+        conn.close()
+
+    # After scoped resolution we expect 3 rows:
+    #   - IFRC (winner within Phase 1 scope)
+    #   - GDACS / JRC (out of scope, preserved)
+    #   - FEWS NET (out of scope, preserved)
+    assert kept == 1, f"Scoped dedup should write 1 Phase 1 row, got {kept}"
+    assert len(result) == 3
+    source_ids = set(result["source_id"])
+    assert source_ids == {"ifrc_go", "GDACS / JRC", "FEWS NET"}
+    ifrc_row = result[result["source_id"] == "ifrc_go"].iloc[0]
+    assert ifrc_row["value"] == 5000.0
