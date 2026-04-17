@@ -146,6 +146,20 @@ def download_db_atomic(dest_path: Path) -> None:
 
     os.replace(tmp_path, dest_path)
 
+    # Any WAL file present now belongs to the previous DB instance (which we
+    # just replaced) or to the process that produced the downloaded artifact.
+    # Replaying it against the new DB file risks an InternalException
+    # ("Calling DatabaseManager::GetDefaultDatabase with no default database
+    # set").  The fresh DB file is the authoritative snapshot, so the stale
+    # WAL is expendable.
+    wal_path = dest_path.with_suffix(dest_path.suffix + ".wal")
+    try:
+        if wal_path.exists():
+            wal_path.unlink()
+            logger.info("Removed stale WAL alongside refreshed DB: %s", wal_path)
+    except OSError as exc:
+        logger.warning("Failed to remove stale WAL %s: %s", wal_path, exc)
+
 
 def db_was_refreshed() -> bool:
     """Check and clear the DB-refreshed flag.
