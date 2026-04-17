@@ -1128,7 +1128,7 @@ class ACLEDClient:
         *,
         base_url: str = ACLED_API_BASE_URL,
         endpoint: str = "",
-        timeout: int = 30,
+        timeout: int = 120,
         max_retries: int = 4,
         page_size: int = 5000,
         session: Optional[requests.Session] = None,
@@ -1171,7 +1171,26 @@ class ACLEDClient:
         while True:
             attempt += 1
             start = time.time()
-            response = self.session.get(url, params=params, headers=self._headers(), timeout=self.timeout)
+            try:
+                response = self.session.get(url, params=params, headers=self._headers(), timeout=self.timeout)
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                elapsed = time.time() - start
+                wait = min(60.0, 2 ** attempt)
+                self.logger.warning(
+                    "ACLED network error (retrying)",
+                    extra={
+                        "attempt": attempt,
+                        "max_retries": self.max_retries,
+                        "wait_seconds": wait,
+                        "elapsed": round(elapsed, 3),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+                if attempt >= self.max_retries:
+                    raise
+                time.sleep(wait)
+                continue
             elapsed = time.time() - start
             _write_acled_http_diag(status=response.status_code, url=str(response.url))
             safe_url = f"{_safe_base_url(url)}?..."
