@@ -264,9 +264,17 @@ def _fetch_latest_run(
 
 
 def _refresh_latest_runs(db_path: Path) -> None:
+    """Populate ``_LATEST_RUNS`` from the current DB file on disk.
+
+    Opens a FRESH direct DuckDB connection each call.  ``duckdb_io.get_db()``
+    caches connections process-wide by path, but ``download_db_atomic``
+    swaps the DB file inode via ``os.replace``; a cached connection keeps
+    reading the old inode indefinitely, which would leave ``_LATEST_RUNS``
+    stuck on pre-refresh runs even after a successful download.
+    """
     global _LATEST_RUNS
     try:
-        conn = duckdb_io.get_db(_db_url_from_path(db_path))
+        conn = duckdb_io.duckdb.connect(str(db_path), read_only=True)
     except Exception as exc:
         logger.warning("Failed to open DuckDB for latest run introspection: %s", exc)
         return
@@ -304,7 +312,10 @@ def _refresh_latest_runs(db_path: Path) -> None:
     except Exception as exc:
         logger.warning("Failed to introspect latest runs: %s", exc)
     finally:
-        duckdb_io.close_db(conn)
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def maybe_sync_latest_db() -> Optional[Dict[str, Any]]:
