@@ -36,7 +36,7 @@ source_type: "other"
 client:
   base_url: "https://acleddata.com/api/acled/read"
   endpoint: ""
-  timeout: 30
+  timeout: 120
   max_retries: 4
   page_size: 5000
   fields:
