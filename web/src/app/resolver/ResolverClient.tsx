@@ -71,7 +71,7 @@ const CATEGORIES = [
   {
     key: "other_alerts",
     title: "Other Alerts",
-    sources: ["hdx_signals", "acaps_risk_radar"],
+    sources: ["hdx_signals", "acaps_risk_radar", "gdelt"],
   },
   {
     key: "other",

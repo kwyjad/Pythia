@@ -4597,6 +4597,12 @@ _SOURCE_REGISTRY: dict[str, dict] = {
                          "columns": ["iso3", "risk_title", "risk_level",
                                      "risk_type", "risk_trend"],
                          "order": "fetched_at DESC"},
+    "gdelt":            {"table": "gdelt_conflict_indicators",
+                         "columns": ["iso3", "event_date", "total_events",
+                                     "tier1_events", "tier2_events",
+                                     "tier3_events", "avg_goldstein",
+                                     "avg_tone_conflict"],
+                         "order": "event_date DESC"},
     # --- Other ---
     "acaps_inform":     {"table": "acaps_inform_severity",
                          "columns": ["iso3", "crisis_name", "severity_score",
@@ -4619,6 +4625,7 @@ _SOURCE_LABELS: dict[str, str] = {
     "reliefweb": "ReliefWeb", "acaps_daily": "ACAPS Daily Monitoring",
     "acled_political": "ACLED Political Events",
     "hdx_signals": "HDX Signals", "acaps_risk_radar": "ACAPS Risk Radar",
+    "gdelt": "GDELT Conflict Events",
     "acaps_inform": "ACAPS INFORM Severity",
     "acaps_access": "ACAPS Humanitarian Access",
     "ipc_api": "IPC API",
@@ -4635,6 +4642,7 @@ _SOURCE_CATEGORIES: dict[str, str] = {
     "reliefweb": "situation_reports", "acaps_daily": "situation_reports",
     "acled_political": "situation_reports",
     "hdx_signals": "other_alerts", "acaps_risk_radar": "other_alerts",
+    "gdelt": "other_alerts",
     "acaps_inform": "other", "acaps_access": "other",
     "ipc_api": "resolution_data",
 }
