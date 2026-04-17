@@ -248,8 +248,18 @@ def _concat_cost_tables(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 _READ_CON: Optional[duckdb.DuckDBPyConnection] = None
 _READ_CON_LOCK = threading.Lock()
+_READ_CON_MTIME: Optional[float] = None  # DB file mtime when _READ_CON was opened
 _LAST_SYNC_CHECK: Optional[float] = None
 _SYNC_CHECK_INTERVAL_S = 60  # how often to poll for DB refresh
+
+
+def _db_file_mtime() -> Optional[float]:
+    """Return the mtime of the configured DuckDB file, or None if missing."""
+    try:
+        db_url = load_cfg()["app"]["db_url"].replace("duckdb:///", "")
+        return os.path.getmtime(db_url)
+    except (OSError, Exception):
+        return None
 
 
 def _open_duckdb_connection() -> duckdb.DuckDBPyConnection:
@@ -316,6 +326,8 @@ def _ensure_read_connection() -> duckdb.DuckDBPyConnection:
         if not db_path.exists():
             raise HTTPException(status_code=503, detail="DB not available yet")
         _READ_CON = _open_duckdb_connection()
+        global _READ_CON_MTIME  # noqa: PLW0603
+        _READ_CON_MTIME = _db_file_mtime()
         return _READ_CON
 
 
@@ -326,8 +338,19 @@ def _maybe_refresh_db() -> None:
     ``os.replace()``, but on Unix the existing open file descriptor still
     reads from the old inode.  This function detects that a new file was
     downloaded and reopens the connection so queries see the latest data.
+
+    Reopen is triggered by EITHER of:
+
+    * ``db_was_refreshed()`` — the consume-once flag set immediately after
+      ``download_db_atomic``. Fast path for the worker that performed the
+      download.
+    * The DB file's on-disk mtime is newer than the mtime captured when the
+      current connection was opened. Covers multi-worker deployments (each
+      worker has its own ``_READ_CON`` but sees the same shared DB file)
+      and any scenario where the flag was consumed by another code path
+      before this worker could act on it.
     """
-    global _READ_CON, _LAST_SYNC_CHECK  # noqa: PLW0603
+    global _READ_CON, _READ_CON_MTIME, _LAST_SYNC_CHECK  # noqa: PLW0603
     if _READ_CON is None:
         return
 
@@ -342,20 +365,32 @@ def _maybe_refresh_db() -> None:
         logger.warning("Periodic DB sync check failed: %s", exc)
         return
 
-    if db_was_refreshed():
+    flag_refreshed = db_was_refreshed()
+    current_mtime = _db_file_mtime()
+    mtime_newer = (
+        current_mtime is not None
+        and _READ_CON_MTIME is not None
+        and current_mtime > _READ_CON_MTIME
+    )
+
+    if flag_refreshed or mtime_newer:
         with _READ_CON_LOCK:
             old_con = _READ_CON
             try:
                 _READ_CON = _open_duckdb_connection()
+                _READ_CON_MTIME = _db_file_mtime()
             except Exception:
                 logger.warning("Failed to reopen DuckDB after refresh; keeping old connection")
                 return
+            logger.info(
+                "DuckDB connection reopened (flag=%s mtime_newer=%s)",
+                flag_refreshed, mtime_newer,
+            )
             try:
                 if old_con is not None:
                     old_con.close()
             except Exception:
                 pass
-            logger.info("DuckDB connection reopened after DB refresh")
 
 
 def _con():
@@ -389,7 +424,7 @@ def _try_artifact_sync() -> None:
 @app.post("/v1/admin/force_sync")
 def admin_force_sync(token: Optional[str] = Query(None)):
     """Force an immediate DB sync from the GitHub release, bypassing the throttle."""
-    global _READ_CON, _LAST_SYNC_CHECK  # noqa: PLW0603
+    global _READ_CON, _READ_CON_MTIME, _LAST_SYNC_CHECK  # noqa: PLW0603
     _require_debug_token(token)
     _LAST_SYNC_CHECK = None
     _db_sync_mod._LAST_SYNC_AT = None  # noqa: SLF001
@@ -404,6 +439,7 @@ def admin_force_sync(token: Optional[str] = Query(None)):
             old_con = _READ_CON
             try:
                 _READ_CON = _open_duckdb_connection()
+                _READ_CON_MTIME = _db_file_mtime()
             except Exception:
                 logger.warning("Failed to reopen DuckDB after force sync")
                 raise HTTPException(status_code=502, detail="DB reopen failed")
