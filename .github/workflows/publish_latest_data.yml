@@ -13,6 +13,14 @@ on:
         description: "Optional: GitHub Actions run ID to publish pythia-resolver-db from. Leave blank to auto-discover the most recent successful upstream run."
         required: false
         default: ""
+      force_publish:
+        description: "Bypass the regression check that prevents publishing a DB with fewer post-pipeline rows (resolutions/scores/bucket_centroids) than the current release. Use only if you intentionally want to roll back."
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: write   # needed to upload release assets
@@ -195,6 +203,120 @@ jobs:
           SHA="$(sha256sum data_out/resolver.duckdb | awk '{print $1}')"
           echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
 
+      - name: Regression guard — block stale DB overwriting newer release
+        env:
+          FORCE_PUBLISH: ${{ inputs.force_publish }}
+        run: |
+          set -euo pipefail
+
+          python -m pip install --upgrade pip >/dev/null
+          pip install duckdb >/dev/null
+
+          # Download the currently-published DB (if any) for comparison.
+          # If the release doesn't exist yet, skip the check.
+          mkdir -p current_release
+          if gh release view "${RELEASE_TAG}" -R "${GH_REPO}" >/dev/null 2>&1; then
+            if gh release download "${RELEASE_TAG}" -R "${GH_REPO}" \
+                 --pattern "resolver.duckdb" \
+                 --dir current_release --clobber; then
+              echo "Downloaded current release DB for comparison."
+            else
+              echo "WARN: Could not download current release DB; skipping regression check."
+              exit 0
+            fi
+          else
+            echo "Release ${RELEASE_TAG} does not exist yet; skipping regression check."
+            exit 0
+          fi
+
+          # Strip stale WAL files (DuckDB read-only open will fail on WAL replay otherwise).
+          rm -f current_release/resolver.duckdb.wal data_out/resolver.duckdb.wal
+
+          python - <<'PY'
+          import os
+          import sys
+          import duckdb
+
+          NEW_DB = "data_out/resolver.duckdb"
+          OLD_DB = "current_release/resolver.duckdb"
+          force = os.environ.get("FORCE_PUBLISH", "false").lower() in ("true", "1", "yes")
+
+          # Tables to compare. (table_name, where_clause_or_None) — counts
+          # only "post-pipeline" output rows. bucket_centroids excludes the
+          # seed wildcards (hazard_code='*') and only counts EMA updates
+          # (as_of_month IS NOT NULL).
+          checks = [
+            ("resolutions", None),
+            ("scores", None),
+            ("bucket_centroids",
+             "hazard_code <> '*' AND as_of_month IS NOT NULL"),
+            ("calibration_weights", None),
+            ("calibration_advice", None),
+          ]
+
+          def count(db_path: str, table: str, where: str | None) -> int | None:
+            """Return COUNT(*) or None if table doesn't exist."""
+            try:
+              con = duckdb.connect(db_path, read_only=True)
+            except Exception as exc:
+              print(f"  ! could not open {db_path}: {exc}")
+              return None
+            try:
+              has = con.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_name = ? LIMIT 1",
+                [table],
+              ).fetchone()
+              if not has:
+                return None
+              sql = f"SELECT COUNT(*) FROM {table}"
+              if where:
+                sql += f" WHERE {where}"
+              return int(con.execute(sql).fetchone()[0])
+            finally:
+              con.close()
+
+          regressions: list[str] = []
+          print("Regression guard — comparing new DB to current release:")
+          print(f"  new: {NEW_DB}")
+          print(f"  old: {OLD_DB}")
+          for table, where in checks:
+            new_n = count(NEW_DB, table, where)
+            old_n = count(OLD_DB, table, where)
+            label = table + (f" (where {where})" if where else "")
+            print(f"  {label}: new={new_n} old={old_n}")
+            # Only flag a regression when the OLD DB has data and the NEW
+            # DB has strictly less. Missing tables in the new DB count as
+            # zero (regression). Missing tables in the old DB are skipped
+            # (first-time publish or pre-existing schema gap).
+            if old_n is None or old_n == 0:
+              continue
+            new_effective = 0 if new_n is None else new_n
+            if new_effective < old_n:
+              regressions.append(
+                f"{label}: new={new_effective} < old={old_n}"
+              )
+
+          if not regressions:
+            print("OK: no regressions detected.")
+            sys.exit(0)
+
+          print()
+          print("REGRESSION DETECTED in candidate DB:")
+          for line in regressions:
+            print(f"  - {line}")
+          print()
+          if force:
+            print("force_publish=true — overriding regression guard and "
+                  "proceeding with publish.")
+            sys.exit(0)
+          print("Refusing to publish a DB with fewer post-pipeline rows "
+                "than the current release. Re-run with force_publish=true "
+                "if this rollback is intentional, or pick a run_id whose "
+                "artifact has the missing data.")
+          sys.exit(1)
+          PY
+
       - name: Build manifest.json (best-effort hs_run_id)
         run: |
           set -euo pipefail
@@ -218,6 +340,7 @@ jobs:
             "db_sha256": os.environ.get("DB_SHA256", ""),
             "latest_hs_run_id": None,
             "latest_hs_created_at": None,
+            "table_counts": {},
           }
 
           # Try to read latest HS run from DB if table exists
@@ -231,6 +354,35 @@ jobs:
               if row:
                 event["latest_hs_run_id"] = row[0]
                 event["latest_hs_created_at"] = str(row[1])
+
+              # Stamp post-pipeline table counts so the regression guard
+              # and downstream debugging can see at a glance whether the
+              # published DB has resolutions/scores/calibration data.
+              for table, where in (
+                ("resolutions", None),
+                ("scores", None),
+                ("bucket_centroids",
+                 "hazard_code <> '*' AND as_of_month IS NOT NULL"),
+                ("calibration_weights", None),
+                ("calibration_advice", None),
+              ):
+                try:
+                  has = con.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_name = ? LIMIT 1",
+                    [table],
+                  ).fetchone()
+                  if not has:
+                    event["table_counts"][table] = None
+                    continue
+                  sql = f"SELECT COUNT(*) FROM {table}"
+                  if where:
+                    sql += f" WHERE {where}"
+                  event["table_counts"][table] = int(
+                    con.execute(sql).fetchone()[0]
+                  )
+                except Exception:
+                  event["table_counts"][table] = None
             finally:
               con.close()
           except Exception:
