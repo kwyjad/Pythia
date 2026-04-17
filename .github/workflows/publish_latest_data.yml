@@ -7,6 +7,12 @@ on:
       - "Resolver Update"
       - "Pythia — Compute Calibration Weights & Advice"
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Optional: GitHub Actions run ID to publish pythia-resolver-db from. Leave blank to auto-discover the most recent successful upstream run."
+        required: false
+        default: ""
 
 permissions:
   contents: write   # needed to upload release assets
@@ -18,7 +24,8 @@ concurrency:
 
 jobs:
   publish:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Run on manual dispatch always, or on successful workflow_run events.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     env:
@@ -28,11 +35,78 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
+      - name: Resolve source run_id (input → workflow_run → canonical discovery)
+        id: resolve_run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_RUN_ID: ${{ inputs.run_id }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+          ARTIFACT_NAME: ${{ env.DB_ARTIFACT_NAME }}
+        run: |
+          set -euo pipefail
+
+          # Priority 1: explicit input (manual dispatch with run_id)
+          if [ -n "${INPUT_RUN_ID}" ]; then
+            echo "Using run_id from workflow_dispatch input: ${INPUT_RUN_ID}"
+            echo "run_id=${INPUT_RUN_ID}" >> "$GITHUB_OUTPUT"
+            echo "source=input" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Priority 2: triggering workflow_run (scheduled/automatic path)
+          if [ -n "${WORKFLOW_RUN_ID}" ]; then
+            echo "Using run_id from triggering workflow_run: ${WORKFLOW_RUN_ID}"
+            echo "run_id=${WORKFLOW_RUN_ID}" >> "$GITHUB_OUTPUT"
+            echo "source=workflow_run" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Priority 3: canonical discovery — most recent successful run from upstream workflows
+          echo "No run_id provided; searching for most recent successful upstream run with '${ARTIFACT_NAME}'..."
+          CANDIDATES_FILE=$(mktemp)
+
+          for WF in \
+            "Resolver Update" \
+            "Horizon Scanner Triage" \
+            "Pythia — Compute Calibration Weights & Advice" \
+            "Pythia — Compute SPD Scores" \
+            "Ingest Structured Data"
+          do
+            gh run list \
+              --workflow "${WF}" \
+              --branch main --status success \
+              --json databaseId,createdAt --limit 10 \
+              | jq -r --arg LABEL "${WF}" '.[] | "\(.createdAt),\(.databaseId),\($LABEL)"' >>"${CANDIDATES_FILE}" || true
+          done
+
+          if [ ! -s "${CANDIDATES_FILE}" ]; then
+            echo "::error::No successful upstream runs found for canonical discovery."
+            exit 1
+          fi
+
+          sort -r "${CANDIDATES_FILE}" > "${CANDIDATES_FILE}.sorted"
+
+          while IFS=',' read -r CREATED CAND_RUN_ID LABEL; do
+            echo "Checking ${LABEL} run ${CAND_RUN_ID} (${CREATED}) for artifact..."
+            JSON="$(gh api -H "Accept: application/vnd.github+json" "/repos/${REPO}/actions/runs/${CAND_RUN_ID}/artifacts" 2>/dev/null || echo '{}')"
+            HAS_ART="$(echo "${JSON}" | jq -r --arg NAME "${ARTIFACT_NAME}" '.artifacts[]? | select(.name==$NAME and .expired==false) | .id' | head -n 1 || true)"
+            if [ -n "${HAS_ART}" ] && [ "${HAS_ART}" != "null" ]; then
+              echo "Selected ${LABEL} run ${CAND_RUN_ID} (artifact id=${HAS_ART})"
+              echo "run_id=${CAND_RUN_ID}" >> "$GITHUB_OUTPUT"
+              echo "source=discovered:${LABEL}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done < "${CANDIDATES_FILE}.sorted"
+
+          echo "::error::No upstream run had a non-expired '${ARTIFACT_NAME}' artifact."
+          exit 1
+
       - name: Wait for DB artifact to be visible (retry)
         id: wait_artifact
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ID: ${{ steps.resolve_run.outputs.run_id }}
           REPO: ${{ github.repository }}
           ARTIFACT_NAME: ${{ env.DB_ARTIFACT_NAME }}
         run: |
