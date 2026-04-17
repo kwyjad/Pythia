@@ -437,3 +437,106 @@ def test_centroid_version_tracking():
     assert result == pytest.approx(feb_centroids)
 
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Test 6: test_ema_repeat_run_under_unique_index
+# ---------------------------------------------------------------------------
+
+def test_ema_repeat_run_under_unique_index(tmp_path, monkeypatch):
+    """Regression: two consecutive EMA runs (different months) must not violate
+    the ux_bucket_centroids unique constraint on (hazard_code, metric,
+    bucket_index).
+
+    The production schema enforces this 3-column unique index. On the second
+    EMA run, the existing row (from the first run) has a different as_of_month,
+    and an INSERT of a new row for the same (hazard, metric, bucket) conflicts.
+    """
+    from datetime import date as _date
+
+    from pythia.tools.compute_bucket_centroids import update_bucket_centroids_ema
+
+    db_path = tmp_path / "ema_repeat.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    # Build the DB with the same structure as _make_db() plus the production
+    # unique index on bucket_centroids.
+    conn = duckdb.connect(str(db_path))
+    try:
+        conn.execute("""
+            CREATE TABLE questions (
+                question_id TEXT,
+                hs_run_id TEXT,
+                iso3 TEXT,
+                hazard_code TEXT,
+                metric TEXT,
+                is_test BOOLEAN DEFAULT FALSE
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE resolutions (
+                question_id TEXT,
+                horizon_m INTEGER,
+                value DOUBLE,
+                is_test BOOLEAN DEFAULT FALSE
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE bucket_centroids (
+                hazard_code TEXT,
+                metric TEXT,
+                bucket_index INTEGER,
+                centroid DOUBLE,
+                as_of_month TEXT
+            )
+        """)
+        conn.execute(
+            "CREATE UNIQUE INDEX ux_bucket_centroids "
+            "ON bucket_centroids (hazard_code, metric, bucket_index)"
+        )
+
+        # Seed default PA bucket centroids (wildcard hazard).
+        defaults = [0.0, 30_000.0, 150_000.0, 375_000.0, 700_000.0]
+        for idx, c in enumerate(defaults, start=1):
+            conn.execute(
+                "INSERT INTO bucket_centroids "
+                "(hazard_code, metric, bucket_index, centroid, as_of_month) "
+                "VALUES ('*', 'PA', ?, ?, NULL)",
+                [idx, c],
+            )
+
+        # Seed >=10 resolutions for TC/PA bucket 1 (<10k) so EMA activates.
+        for i in range(12):
+            qid = f"q_tc_{i}"
+            conn.execute(
+                "INSERT INTO questions "
+                "(question_id, hs_run_id, iso3, hazard_code, metric) "
+                "VALUES (?, 'run1', 'PHL', 'TC', 'PA')",
+                [qid],
+            )
+            conn.execute(
+                "INSERT INTO resolutions (question_id, horizon_m, value) "
+                "VALUES (?, 1, ?)",
+                [qid, 3000.0],
+            )
+    finally:
+        conn.close()
+
+    # First EMA run (March) — should succeed and insert TC/PA/1 row.
+    update_bucket_centroids_ema(db_url=db_url, metric="PA", as_of=_date(2026, 3, 1))
+
+    # Second EMA run (April) — must not raise ConstraintException even though
+    # a TC/PA/1 row already exists with as_of_month='2026-03'.
+    update_bucket_centroids_ema(db_url=db_url, metric="PA", as_of=_date(2026, 4, 1))
+
+    # Verify: exactly one TC/PA/1 row exists, stamped with the April as_of_month.
+    conn2 = duckdb.connect(str(db_path))
+    try:
+        rows = conn2.execute(
+            "SELECT as_of_month, centroid FROM bucket_centroids "
+            "WHERE hazard_code = 'TC' AND metric = 'PA' AND bucket_index = 1"
+        ).fetchall()
+    finally:
+        conn2.close()
+    assert len(rows) == 1
+    assert rows[0][0] == "2026-04"

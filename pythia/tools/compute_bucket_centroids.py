@@ -285,14 +285,19 @@ def update_bucket_centroids_ema(
                 + EMA_LEARNING_RATE * float(empirical_mean)
             )
 
-            # Upsert for this as_of_month
+            # Replace any existing row for this (hazard, metric, bucket).
+            # The unique index ux_bucket_centroids is on (hazard_code, metric,
+            # bucket_index) — it does NOT include as_of_month — so we must
+            # delete any prior row (regardless of as_of_month) before inserting
+            # the new EMA value, or the INSERT will violate the unique
+            # constraint on the second and subsequent EMA runs.
             conn.execute(
                 """
                 DELETE FROM bucket_centroids
                 WHERE upper(hazard_code) = ? AND upper(metric) = ?
-                  AND bucket_index = ? AND as_of_month = ?
+                  AND bucket_index = ?
                 """,
-                [hazard_code.upper(), metric.upper(), int(bucket_index), as_of_month],
+                [hazard_code.upper(), metric.upper(), int(bucket_index)],
             )
             conn.execute(
                 """
