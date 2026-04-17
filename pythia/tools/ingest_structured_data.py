@@ -812,7 +812,7 @@ def _bulk_fetch_reliefweb(
             "offset": offset,
         }
 
-        url = "https://api.reliefweb.int/v1/reports"
+        url = "https://api.reliefweb.int/v2/reports"
         headers = {"Accept": "application/json"}
         params = {"appname": appname}
 

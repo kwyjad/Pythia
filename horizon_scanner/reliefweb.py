@@ -35,7 +35,7 @@ _STALENESS_DAYS = 60  # days_back (45) + 15-day grace
 _DEFAULT_DAYS_BACK = 45
 _DEFAULT_MAX_REPORTS = 15
 _BODY_EXCERPT_LENGTH = 500
-_API_BASE_URL = "https://api.reliefweb.int/v1"
+_API_BASE_URL = "https://api.reliefweb.int/v2"
 _MAX_PROMPT_REPORTS = 10
 
 
