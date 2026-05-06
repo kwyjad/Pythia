@@ -309,6 +309,56 @@ jobs:
                 f"{label}: new={new_effective} < old={old_n}"
               )
 
+          # Freshness override: if the candidate DB has strictly newer
+          # hs_runs (generated_at) or forecasts_ensemble (created_at) than
+          # the current release, the candidate is genuinely newer — even if
+          # some post-pipeline tables have fewer rows (e.g. a fresh
+          # recomputation that scored fewer questions, or a different
+          # calibration window). In that case the row-count regression is
+          # not a real "stale DB overwrites newer release" situation and we
+          # should publish.
+          def _max_timestamp(db_path: str, table: str, column: str) -> str | None:
+            try:
+              con = duckdb.connect(db_path, read_only=True)
+            except Exception as exc:
+              print(f"  ! could not open {db_path}: {exc}")
+              return None
+            try:
+              has = con.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_name = ? LIMIT 1",
+                [table],
+              ).fetchone()
+              if not has:
+                return None
+              try:
+                row = con.execute(
+                  f"SELECT max({column}) FROM {table}"
+                ).fetchone()
+              except Exception as exc:
+                print(f"  ! max({table}.{column}) on {db_path} failed: {exc}")
+                return None
+              return None if row is None or row[0] is None else str(row[0])
+            finally:
+              con.close()
+
+          fresher = False
+          freshness_evidence: list[str] = []
+          for table, column in (
+            ("hs_runs", "generated_at"),
+            ("forecasts_ensemble", "created_at"),
+          ):
+            new_ts = _max_timestamp(NEW_DB, table, column)
+            old_ts = _max_timestamp(OLD_DB, table, column)
+            print(f"  freshness {table}.{column}: new={new_ts} old={old_ts}")
+            if new_ts is None:
+              continue
+            if old_ts is None or new_ts > old_ts:
+              fresher = True
+              freshness_evidence.append(
+                f"{table}.{column}: new={new_ts} > old={old_ts}"
+              )
+
           out_path = os.environ.get("GITHUB_OUTPUT")
 
           def _set_output(name: str, value: str) -> None:
@@ -323,10 +373,24 @@ jobs:
             sys.exit(0)
 
           print()
-          print("REGRESSION DETECTED in candidate DB:")
+          print("Row-count regression detected in candidate DB:")
           for line in regressions:
             print(f"  - {line}")
           print()
+          if fresher:
+            print("FRESHER: candidate DB has newer data than the current "
+                  "release; publishing despite row-count regression.")
+            for line in freshness_evidence:
+              print(f"  - {line}")
+            print(
+              "Rationale: a fresher DB with fewer rows in some "
+              "post-pipeline tables (e.g. scores/calibration_*) is a "
+              "fresh recomputation, not a stale-DB overwrite. The "
+              "row-count guard exists to prevent the latter; the former "
+              "should publish."
+            )
+            _set_output("skip_publish", "false")
+            sys.exit(0)
           if force:
             print("force_publish=true — overriding regression guard and "
                   "proceeding with publish.")
@@ -376,17 +440,24 @@ jobs:
             "table_counts": {},
           }
 
-          # Try to read latest HS run from DB if table exists
+          # Try to read latest HS run from DB if table exists. Wrap each
+          # block in its own try/except so a failure on hs_runs doesn't
+          # silently empty the whole manifest (the prior bug — which used
+          # the wrong column names — silently produced empty
+          # `table_counts: {}` and `latest_hs_run_id: null`, hiding which
+          # post-pipeline tables were present).
           try:
             con = duckdb.connect(db_path, read_only=True)
             try:
-              # hs_runs is expected in your pipeline DB
-              row = con.execute(
-                "SELECT run_id, created_at FROM hs_runs ORDER BY created_at DESC LIMIT 1"
-              ).fetchone()
-              if row:
-                event["latest_hs_run_id"] = row[0]
-                event["latest_hs_created_at"] = str(row[1])
+              try:
+                row = con.execute(
+                  "SELECT hs_run_id, generated_at FROM hs_runs ORDER BY generated_at DESC LIMIT 1"
+                ).fetchone()
+                if row:
+                  event["latest_hs_run_id"] = row[0]
+                  event["latest_hs_created_at"] = str(row[1])
+              except Exception as exc:
+                print(f"WARN: hs_runs query failed: {exc}")
 
               # Stamp post-pipeline table counts so the regression guard
               # and downstream debugging can see at a glance whether the
@@ -418,9 +489,10 @@ jobs:
                   event["table_counts"][table] = None
             finally:
               con.close()
-          except Exception:
-            # best-effort only; leave nulls
-            pass
+          except Exception as exc:
+            # best-effort only; leave nulls but log so future failures
+            # are diagnosable instead of producing a silently-empty manifest.
+            print(f"WARN: manifest enrichment failed: {exc}")
 
           with open("data_out/manifest.json", "w", encoding="utf-8") as f:
             json.dump(event, f, indent=2, sort_keys=True)
