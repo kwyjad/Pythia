@@ -79,6 +79,7 @@ jobs:
             "Horizon Scanner Triage" \
             "Pythia — Compute Calibration Weights & Advice" \
             "Pythia — Compute SPD Scores" \
+            "Pythia — Compute Resolutions" \
             "Ingest Structured Data"
           do
             gh run list \
