@@ -207,7 +207,15 @@ jobs:
         id: regression_guard
         env:
           FORCE_PUBLISH: ${{ inputs.force_publish }}
-          AUTO_TRIGGER: ${{ github.event_name == 'workflow_run' && '1' || '0' }}
+          # Treat as auto-triggered (soft-skip on regression) when:
+          #   - Triggered by upstream workflow_run, OR
+          #   - Manual dispatch with no explicit run_id (canonical discovery
+          #     picked the candidate, so the user did not intentionally
+          #     choose to roll back to a stale DB).
+          # Manual dispatch WITH an explicit run_id keeps hard-fail semantics
+          # so the user is told their picked run lacks post-pipeline data.
+          AUTO_TRIGGER: ${{ (github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.run_id == '')) && '1' || '0' }}
+          RESOLVE_SOURCE: ${{ steps.resolve_run.outputs.source }}
         run: |
           set -euo pipefail
 
@@ -324,11 +332,13 @@ jobs:
             _set_output("skip_publish", "false")
             sys.exit(0)
           if auto_trigger:
-            print("Auto-trigger (workflow_run): skipping publish gracefully "
-                  "instead of failing. The current release already has more "
-                  "post-pipeline data than this candidate DB, so no publish "
-                  "is needed. Use workflow_dispatch with force_publish=true "
-                  "to intentionally roll back.")
+            source = os.environ.get("RESOLVE_SOURCE", "")
+            print(f"Auto-trigger (resolve_source={source!r}): skipping "
+                  "publish gracefully instead of failing. The current "
+                  "release already has more post-pipeline data than this "
+                  "candidate DB, so no publish is needed. Use "
+                  "workflow_dispatch with an explicit run_id (and "
+                  "force_publish=true) to intentionally roll back.")
             _set_output("skip_publish", "true")
             sys.exit(0)
           print("Refusing to publish a DB with fewer post-pipeline rows "
