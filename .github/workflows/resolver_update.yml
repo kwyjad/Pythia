@@ -173,6 +173,26 @@ jobs:
             --status success \
             --json databaseId,createdAt \
             --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
+          # Include the post-pipeline chain so we start from the most-complete
+          # DB (calibration is the chain terminus and carries all prior tables).
+          gh run list \
+            --workflow "Pythia — Compute Calibration Weights & Advice" \
+            --branch main \
+            --status success \
+            --json databaseId,createdAt \
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Calibration Weights & Advice"' >>"${CANDIDATES_FILE}" || true
+          gh run list \
+            --workflow "Pythia — Compute SPD Scores" \
+            --branch main \
+            --status success \
+            --json databaseId,createdAt \
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute SPD Scores"' >>"${CANDIDATES_FILE}" || true
+          gh run list \
+            --workflow "Pythia — Compute Resolutions" \
+            --branch main \
+            --status success \
+            --json databaseId,createdAt \
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Resolutions"' >>"${CANDIDATES_FILE}" || true
 
           if [ ! -s "${CANDIDATES_FILE}" ]; then
             echo "ERROR: No prior successful runs found; cannot build canonical DB."
@@ -214,6 +234,10 @@ jobs:
               SOURCE_KIND="pipeline"
             elif [ "$LABEL" = "Ingest Structured Data" ]; then
               SOURCE_KIND="ingest"
+            elif [ "$LABEL" = "Pythia — Compute Calibration Weights & Advice" ] \
+              || [ "$LABEL" = "Pythia — Compute SPD Scores" ] \
+              || [ "$LABEL" = "Pythia — Compute Resolutions" ]; then
+              SOURCE_KIND="calibration"
             else
               SOURCE_KIND="backfill"
             fi

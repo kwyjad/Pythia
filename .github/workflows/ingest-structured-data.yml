@@ -140,7 +140,14 @@ jobs:
             return 1
           }
 
-          # Collect candidate runs from Horizon Scanner Triage, Resolver Update, and Ingest Structured Data
+          # Collect candidate runs from Horizon Scanner Triage, Resolver Update,
+          # Ingest Structured Data, and the post-pipeline chain (Compute
+          # Resolutions/Scores/Calibration). Including the post-pipeline
+          # workflows is critical so this run starts from the most-complete
+          # DB — calibration is the chain terminus and carries all prior
+          # tables (resolutions, scores, calibration_weights, calibration_advice)
+          # forward. Without this, calibration's artifact never propagates back
+          # and downstream artifacts silently lose post-pipeline data.
           CANDIDATES_FILE=$(mktemp)
           gh run list \
             --workflow "Horizon Scanner Triage" \
@@ -160,6 +167,24 @@ jobs:
             --status success \
             --json databaseId,createdAt \
             --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
+          gh run list \
+            --workflow "Pythia — Compute Calibration Weights & Advice" \
+            --branch main \
+            --status success \
+            --json databaseId,createdAt \
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Calibration Weights & Advice"' >>"${CANDIDATES_FILE}" || true
+          gh run list \
+            --workflow "Pythia — Compute SPD Scores" \
+            --branch main \
+            --status success \
+            --json databaseId,createdAt \
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute SPD Scores"' >>"${CANDIDATES_FILE}" || true
+          gh run list \
+            --workflow "Pythia — Compute Resolutions" \
+            --branch main \
+            --status success \
+            --json databaseId,createdAt \
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Resolutions"' >>"${CANDIDATES_FILE}" || true
 
           if [ ! -s "${CANDIDATES_FILE}" ]; then
             echo "ERROR: No successful runs found."

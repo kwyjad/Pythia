@@ -252,9 +252,32 @@ jobs:
               --status success \
               --json databaseId,createdAt \
               --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
+            # Include the post-pipeline chain so HS Triage starts from the
+            # most-complete DB (calibration is the chain terminus and carries
+            # all prior tables). Without this, calibration's artifact never
+            # propagates back into HS Triage and its hs_runs/forecasts get
+            # written onto a stale base lacking resolutions/scores.
+            gh run list \
+              --workflow "Pythia — Compute Calibration Weights & Advice" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Calibration Weights & Advice"' >>"${CANDIDATES_FILE}" || true
+            gh run list \
+              --workflow "Pythia — Compute SPD Scores" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute SPD Scores"' >>"${CANDIDATES_FILE}" || true
+            gh run list \
+              --workflow "Pythia — Compute Resolutions" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Resolutions"' >>"${CANDIDATES_FILE}" || true
 
             if [ ! -s "${CANDIDATES_FILE}" ]; then
-              echo "ERROR: No successful Horizon Scanner, Resolver Update, or Ingest Structured Data runs found; refusing to start without canonical DB."
+              echo "ERROR: No successful Horizon Scanner, Resolver Update, Ingest Structured Data, or post-pipeline runs found; refusing to start without canonical DB."
               exit 1
             fi
 
@@ -314,13 +337,13 @@ jobs:
             done < "${CANDIDATES_FILE}.sorted"
 
             if [ "${FOUND}" -ne 1 ]; then
-              echo "ERROR: No valid canonical DB found after checking Horizon Scanner, Resolver Update, and Ingest Structured Data runs."
+              echo "ERROR: No valid canonical DB found after checking Horizon Scanner, Resolver Update, Ingest Structured Data, and post-pipeline (Resolutions/Scores/Calibration) runs."
               exit 1
             fi
           fi
 
           if [ -z "${DB_RUN_ID:-}" ]; then
-            echo "ERROR: No successful Horizon Scanner, Resolver Update, or Ingest Structured Data runs found; refusing to start without canonical DB."
+            echo "ERROR: No successful Horizon Scanner, Resolver Update, Ingest Structured Data, or post-pipeline runs found; refusing to start without canonical DB."
             exit 1
           fi
 
