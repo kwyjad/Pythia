@@ -204,8 +204,10 @@ jobs:
           echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Regression guard — block stale DB overwriting newer release
+        id: regression_guard
         env:
           FORCE_PUBLISH: ${{ inputs.force_publish }}
+          AUTO_TRIGGER: ${{ github.event_name == 'workflow_run' && '1' || '0' }}
         run: |
           set -euo pipefail
 
@@ -240,6 +242,7 @@ jobs:
           NEW_DB = "data_out/resolver.duckdb"
           OLD_DB = "current_release/resolver.duckdb"
           force = os.environ.get("FORCE_PUBLISH", "false").lower() in ("true", "1", "yes")
+          auto_trigger = os.environ.get("AUTO_TRIGGER", "0") == "1"
 
           # Tables to compare. (table_name, where_clause_or_None) — counts
           # only "post-pipeline" output rows. bucket_centroids excludes the
@@ -297,8 +300,17 @@ jobs:
                 f"{label}: new={new_effective} < old={old_n}"
               )
 
+          out_path = os.environ.get("GITHUB_OUTPUT")
+
+          def _set_output(name: str, value: str) -> None:
+            if not out_path:
+              return
+            with open(out_path, "a", encoding="utf-8") as fh:
+              fh.write(f"{name}={value}\n")
+
           if not regressions:
             print("OK: no regressions detected.")
+            _set_output("skip_publish", "false")
             sys.exit(0)
 
           print()
@@ -309,6 +321,15 @@ jobs:
           if force:
             print("force_publish=true — overriding regression guard and "
                   "proceeding with publish.")
+            _set_output("skip_publish", "false")
+            sys.exit(0)
+          if auto_trigger:
+            print("Auto-trigger (workflow_run): skipping publish gracefully "
+                  "instead of failing. The current release already has more "
+                  "post-pipeline data than this candidate DB, so no publish "
+                  "is needed. Use workflow_dispatch with force_publish=true "
+                  "to intentionally roll back.")
+            _set_output("skip_publish", "true")
             sys.exit(0)
           print("Refusing to publish a DB with fewer post-pipeline rows "
                 "than the current release. Re-run with force_publish=true "
@@ -318,6 +339,7 @@ jobs:
           PY
 
       - name: Build manifest.json (best-effort hs_run_id)
+        if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
         run: |
           set -euo pipefail
 
@@ -400,6 +422,7 @@ jobs:
           GITHUB_EVENT_WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
 
       - name: Ensure release exists (create if missing)
+        if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
         run: |
           set -euo pipefail
           echo "Repo: ${GH_REPO}"
@@ -416,6 +439,7 @@ jobs:
           fi
 
       - name: Upload resolver.duckdb + manifest.json to release (overwrite)
+        if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
         run: |
           set -euo pipefail
           ls -lh data_out || true
