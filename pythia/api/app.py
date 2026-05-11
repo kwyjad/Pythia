@@ -423,7 +423,17 @@ def _try_artifact_sync() -> None:
 
 @app.post("/v1/admin/force_sync")
 def admin_force_sync(token: Optional[str] = Query(None)):
-    """Force an immediate DB sync from the GitHub release, bypassing the throttle."""
+    """Force an immediate DB sync from the GitHub release, bypassing the throttle.
+
+    Also forcibly reopens the DuckDB read connection if the on-disk DB file
+    is newer than the connection's captured mtime — mirroring the mtime
+    fallback in ``_maybe_refresh_db``. This matters because
+    ``db_was_refreshed()`` is a consume-once flag: another request can
+    consume it before this handler runs, which previously left the
+    connection pinned to the pre-sync inode even though a fresh DB was on
+    disk. Now we reopen whenever EITHER the flag is set OR the file mtime
+    advanced past what the current connection captured.
+    """
     global _READ_CON, _READ_CON_MTIME, _LAST_SYNC_CHECK  # noqa: PLW0603
     _require_debug_token(token)
     _LAST_SYNC_CHECK = None
@@ -433,8 +443,15 @@ def admin_force_sync(token: Optional[str] = Query(None)):
         manifest = maybe_sync_latest_db()
     except DbSyncError as exc:
         raise HTTPException(status_code=502, detail=f"Sync failed: {exc}") from exc
-    # Force connection refresh if a new DB was downloaded
-    if db_was_refreshed():
+    flag_refreshed = db_was_refreshed()
+    current_mtime = _db_file_mtime()
+    mtime_newer = (
+        current_mtime is not None
+        and _READ_CON_MTIME is not None
+        and current_mtime > _READ_CON_MTIME
+    )
+    db_refreshed = flag_refreshed or mtime_newer
+    if db_refreshed:
         with _READ_CON_LOCK:
             old_con = _READ_CON
             try:
@@ -448,8 +465,17 @@ def admin_force_sync(token: Optional[str] = Query(None)):
                     old_con.close()
                 except Exception:
                     pass
-        logger.info("Force sync: DB refreshed and connection reopened")
-    return {"status": "ok", "manifest": manifest, "db_refreshed": True}
+        logger.info(
+            "Force sync: DB refreshed and connection reopened (flag=%s mtime_newer=%s)",
+            flag_refreshed, mtime_newer,
+        )
+    return {
+        "status": "ok",
+        "manifest": manifest,
+        "db_refreshed": db_refreshed,
+        "flag_refreshed": flag_refreshed,
+        "mtime_newer": mtime_newer,
+    }
 
 
 @app.on_event("startup")
