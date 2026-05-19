@@ -3099,6 +3099,13 @@ def resolution_rates(
     # These were the bulk of the dashboard's permanent-0% tiles.
     retired_filter = "AND COALESCE(q.status, '') != 'retired'"
 
+    # The resolution pipeline's calendar cutoff is the previous complete
+    # month (see pythia/tools/compute_resolutions.py). A question's earliest
+    # horizon maps to its window_start_date month. So a question is
+    # "pending_too_new" — structurally unresolvable until the calendar
+    # advances — when window_start_date > the first day of the cutoff month.
+    has_window_start = _table_has_columns(con, "questions", ["window_start_date"])
+
     # Total questions by (hazard_code, metric)
     _tf = _test_filter(include_test, "r")
     total_sql = f"""
@@ -3113,6 +3120,27 @@ def resolution_rates(
     except Exception:
         return {"rows": []}
 
+    pending_map: dict[tuple[str, str], int] = {}
+    if has_window_start:
+        # window_start_date is stored as TEXT in some DBs and DATE in others.
+        # DATE_TRUNC works on both via DuckDB's TRY_CAST behaviour.
+        pending_sql = f"""
+            SELECT q.hazard_code, UPPER(q.metric) AS metric,
+                   COUNT(DISTINCT q.question_id) AS pending
+            FROM questions q
+            WHERE 1=1 {hazard_filter} {run_filter} {retired_filter}{_test_filter(include_test, "q")}
+              AND CAST(q.window_start_date AS DATE)
+                  > DATE_TRUNC('month', CURRENT_DATE - INTERVAL 1 MONTH)
+            GROUP BY q.hazard_code, UPPER(q.metric)
+        """
+        try:
+            for hc, m, n in _execute(con, pending_sql, params).fetchall():
+                pending_map[(hc, m)] = int(n)
+        except Exception:
+            # If the date cast fails or column is unusable, fall through with
+            # an empty pending_map — the response still includes 0 pending.
+            pending_map = {}
+
     if not has_resolutions:
         return {
             "rows": [
@@ -3122,6 +3150,7 @@ def resolution_rates(
                     "total_questions": int(t),
                     "resolved_questions": 0,
                     "skipped_questions": int(t),
+                    "pending_too_new": pending_map.get((hc, m), 0),
                     "resolution_rate": 0.0,
                 }
                 for hc, m, t in total_rows
@@ -3158,6 +3187,7 @@ def resolution_rates(
             "total_questions": total_int,
             "resolved_questions": resolved,
             "skipped_questions": skipped,
+            "pending_too_new": pending_map.get((hc, m), 0),
             "resolution_rate": round(rate, 4),
         })
 

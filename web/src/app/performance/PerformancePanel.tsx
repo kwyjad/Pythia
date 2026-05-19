@@ -704,8 +704,17 @@ export default function PerformancePanel({
           <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             {resolutionRates.map((row) => {
               const pct = (row.resolution_rate * 100).toFixed(1);
-              const colorClass =
-                row.resolution_rate >= 0.9
+              const pending = row.pending_too_new ?? 0;
+              // Empty-state: every question in this (hazard, metric) group is
+              // from an epoch whose earliest horizon hasn't reached the
+              // calendar cutoff yet. Show "pending" copy instead of a red 0%.
+              const isAllPending =
+                row.total_questions > 0 &&
+                row.resolved_questions === 0 &&
+                pending === row.total_questions;
+              const colorClass = isAllPending
+                ? "text-fred-muted"
+                : row.resolution_rate >= 0.9
                   ? "text-green-500"
                   : row.resolution_rate >= 0.5
                     ? "text-yellow-500"
@@ -720,15 +729,29 @@ export default function PerformancePanel({
                 <div
                   key={`${row.hazard_code}-${row.metric}`}
                   className="rounded border border-fred-secondary bg-fred-surface px-3 py-2"
+                  title={
+                    isAllPending
+                      ? `${row.total_questions} questions in this group are from the latest forecast epoch — their earliest horizon hasn't reached the resolution calendar cutoff yet.`
+                      : undefined
+                  }
                 >
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">
                     {row.hazard_code} / {metricLabel}
                   </div>
                   <div className={`mt-1 text-sm font-medium ${colorClass}`}>
-                    {pct}% scored
+                    {isAllPending ? "Awaiting first horizon" : `${pct}% scored`}
                   </div>
                   <div className="text-xs text-fred-muted">
-                    {row.resolved_questions}/{row.total_questions} questions
+                    {isAllPending ? (
+                      <>
+                        0 / {row.total_questions} — questions too new, will
+                        resolve next month
+                      </>
+                    ) : (
+                      <>
+                        {row.resolved_questions}/{row.total_questions} questions
+                      </>
+                    )}
                   </div>
                 </div>
               );
