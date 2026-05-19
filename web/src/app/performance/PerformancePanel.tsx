@@ -602,154 +602,187 @@ export default function PerformancePanel({
   const isEmpty =
     data.summary_rows.length === 0 && data.run_rows.length === 0;
 
+  // Defensive filter: drop blocked hazards (DI, HW, CU, ACO) from the
+  // coverage panel even if the API hasn't been updated yet. We don't forecast
+  // these anymore, so their tiles would always sit at 0% and create the
+  // impression of broken calibration.
+  const BLOCKED_HAZARDS = new Set(["DI", "HW", "CU", "ACO"]);
+  const visibleResolutionRates = resolutionRates.filter(
+    (row) => !BLOCKED_HAZARDS.has(row.hazard_code.toUpperCase()),
+  );
+
+  // Summary across all coverage rows: how many questions are eligible
+  // for resolution (cutoff has passed), how many of those are scored, how
+  // many are pending (too new). Pre-Track questions are included here via
+  // the questions table — this is the count the user is looking for.
+  const coverageTotals = useMemo(() => {
+    let total = 0;
+    let resolved = 0;
+    let pending = 0;
+    for (const row of visibleResolutionRates) {
+      total += row.total_questions;
+      resolved += row.resolved_questions;
+      pending += row.pending_too_new ?? 0;
+    }
+    const eligible = Math.max(0, total - pending);
+    return { total, resolved, pending, eligible };
+  }, [visibleResolutionRates]);
+
+  const totalScored =
+    data.track_counts?.total ??
+    (data.track_counts
+      ? (data.track_counts.track1 ?? 0) + (data.track_counts.track2 ?? 0)
+      : 0);
+
   return (
     <div className="space-y-6">
-      {/* KPI cards */}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-        <KpiCard
-          label="Scored Track 1"
-          value={formatInt(data.track_counts?.track1 ?? 0)}
-        />
-        <KpiCard
-          label="Scored Track 2"
-          value={formatInt(data.track_counts?.track2 ?? 0)}
-        />
-        <KpiCard label="Hazards" value={formatInt(kpiStats.hazards)} />
-        <KpiCard label="Models" value={formatInt(kpiStats.models)} />
-        <KpiCard label="HS Runs" value={formatInt(kpiStats.runs)} />
-        <KpiCard
-          label={
-            <span className="inline-flex items-center gap-1">
-              Ensemble Brier{" "}
-              <InfoTooltip text="Average Brier score across all ensemble forecasts. Lower is better." />
-            </span>
-          }
-          value={formatScore(kpiStats.overallBrier)}
-        />
-      </div>
-
-      {/* Controls */}
-      <div className="flex flex-wrap items-center gap-4">
-        {/* View selector tabs */}
-        <div className="flex gap-1 rounded-lg border border-fred-secondary bg-fred-surface p-1">
-          {VIEW_LABELS.map(({ key, label }) => (
-            <button
-              key={key}
-              type="button"
-              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                view === key
-                  ? "bg-fred-primary text-fred-bg"
-                  : "text-fred-text hover:bg-fred-bg/60"
-              }`}
-              onClick={() => setView(key)}
-            >
-              {label}
-            </button>
-          ))}
+      {/* Summary KPI cards */}
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface/50 p-4">
+        <div className="mb-3 flex items-baseline justify-between">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-fred-text">
+            Summary
+          </h2>
+          <span className="text-xs text-fred-muted">
+            Counts cover every question in the database, including legacy
+            questions before the Track 1/2 split.
+          </span>
         </div>
-
-        {/* Metric filter */}
-        <select
-          className="rounded-md border border-fred-secondary bg-fred-surface px-3 py-1.5 text-sm text-fred-text"
-          value={metric ?? ""}
-          onChange={(e) => handleMetricChange(e.target.value || null)}
-        >
-          <option value="">All Metrics</option>
-          <option value="PA">People Affected (PA)</option>
-          <option value="FATALITIES">Fatalities</option>
-          <option value="EVENT_OCCURRENCE">Event Occurrence (binary)</option>
-          <option value="PHASE3PLUS_IN_NEED">Phase 3+ (IPC)</option>
-        </select>
-
-        {/* Track filter */}
-        <select
-          className="rounded-md border border-fred-secondary bg-fred-surface px-3 py-1.5 text-sm text-fred-text"
-          value={track != null ? String(track) : ""}
-          onChange={(e) =>
-            handleTrackChange(e.target.value ? Number(e.target.value) : null)
-          }
-        >
-          <option value="">All Tracks</option>
-          <option value="1">Track 1</option>
-          <option value="2">Track 2</option>
-        </select>
-
-        {/* Ensemble selector (shown for By Hazard and By Run views) */}
-        {(view === "by_hazard" || view === "by_run") &&
-        ensembleModels.length > 0 ? (
-          <select
-            className="rounded-md border border-fred-secondary bg-fred-surface px-3 py-1.5 text-sm text-fred-text"
-            value={activeEnsemble ?? ""}
-            onChange={(e) => setSelectedEnsemble(e.target.value || null)}
-          >
-            {ensembleModels.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-        ) : null}
-
-        {loading ? (
-          <span className="text-xs text-fred-muted">Loading...</span>
-        ) : null}
-      </div>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+          <KpiCard
+            label={
+              <span className="inline-flex items-center gap-1">
+                Resolved Questions{" "}
+                <InfoTooltip
+                  text={
+                    "Questions with at least one resolved horizon (ground " +
+                    "truth from the Resolver). Excludes blocked hazards " +
+                    "(DI/HW/CU/ACO). Pending questions whose earliest " +
+                    "horizon is in the future are not counted here."
+                  }
+                />
+              </span>
+            }
+            value={`${formatInt(coverageTotals.resolved)} / ${formatInt(coverageTotals.eligible)}`}
+          />
+          <KpiCard
+            label={
+              <span className="inline-flex items-center gap-1">
+                Scored Questions{" "}
+                <InfoTooltip
+                  text={
+                    "Distinct questions with at least one row in the scores " +
+                    "table. Includes legacy pre-Track questions that don't " +
+                    "carry a track tag."
+                  }
+                />
+              </span>
+            }
+            value={formatInt(totalScored)}
+          />
+          <KpiCard
+            label={
+              <span className="inline-flex items-center gap-1">
+                Track Split{" "}
+                <InfoTooltip
+                  text={
+                    "Breakdown of scored questions by track. Track 1 = full " +
+                    "ensemble; Track 2 = single Gemini Flash model. Older " +
+                    "questions predate this split and are counted only in " +
+                    "Scored Questions above."
+                  }
+                />
+              </span>
+            }
+            value={`T1 ${formatInt(data.track_counts?.track1 ?? 0)} / T2 ${formatInt(data.track_counts?.track2 ?? 0)}`}
+          />
+          <KpiCard label="Hazards" value={formatInt(kpiStats.hazards)} />
+          <KpiCard label="Models" value={formatInt(kpiStats.models)} />
+          <KpiCard
+            label={
+              <span className="inline-flex items-center gap-1">
+                Ensemble Brier{" "}
+                <InfoTooltip text="Average Brier score across all ensemble forecasts. Lower is better." />
+              </span>
+            }
+            value={formatScore(kpiStats.overallBrier)}
+          />
+        </div>
+      </section>
 
       {/* Resolution Coverage Summary */}
-      {resolutionRates.length > 0 && (
-        <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
-          <h3 className="text-sm font-semibold text-fred-text">
-            Resolution Coverage Summary
-          </h3>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-            {resolutionRates.map((row) => {
-              const pct = (row.resolution_rate * 100).toFixed(1);
+      {visibleResolutionRates.length > 0 && (
+        <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
+          <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-fred-text">
+              Resolution Coverage
+            </h2>
+            <span className="text-xs text-fred-muted">
+              Eligible {formatInt(coverageTotals.eligible)} · Resolved{" "}
+              {formatInt(coverageTotals.resolved)} · Pending (too new){" "}
+              {formatInt(coverageTotals.pending)}
+            </span>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {visibleResolutionRates.map((row) => {
               const pending = row.pending_too_new ?? 0;
-              // Empty-state: every question in this (hazard, metric) group is
-              // from an epoch whose earliest horizon hasn't reached the
-              // calendar cutoff yet. Show "pending" copy instead of a red 0%.
+              const eligible = Math.max(
+                0,
+                row.total_questions - pending,
+              );
+              // Eligible rate = resolved / (total - pending). This is the
+              // honest accuracy number — denominator excludes questions that
+              // can't possibly be resolved yet.
+              const eligibleRate =
+                eligible > 0 ? row.resolved_questions / eligible : null;
               const isAllPending =
-                row.total_questions > 0 &&
-                row.resolved_questions === 0 &&
-                pending === row.total_questions;
+                row.total_questions > 0 && eligible === 0 && pending > 0;
               const colorClass = isAllPending
                 ? "text-fred-muted"
-                : row.resolution_rate >= 0.9
-                  ? "text-green-500"
-                  : row.resolution_rate >= 0.5
-                    ? "text-yellow-500"
-                    : "text-red-500";
+                : eligibleRate == null
+                  ? "text-fred-muted"
+                  : eligibleRate >= 0.9
+                    ? "text-green-500"
+                    : eligibleRate >= 0.5
+                      ? "text-yellow-500"
+                      : "text-red-500";
               const metricLabel =
                 row.metric === "EVENT_OCCURRENCE"
                   ? "Binary (event)"
                   : row.metric === "PHASE3PLUS_IN_NEED"
                     ? "Phase 3+"
                     : row.metric;
+              const pctLabel =
+                eligibleRate == null
+                  ? "—"
+                  : `${(eligibleRate * 100).toFixed(1)}% scored`;
               return (
                 <div
                   key={`${row.hazard_code}-${row.metric}`}
                   className="rounded border border-fred-secondary bg-fred-surface px-3 py-2"
                   title={
                     isAllPending
-                      ? `${row.total_questions} questions in this group are from the latest forecast epoch — their earliest horizon hasn't reached the resolution calendar cutoff yet.`
-                      : undefined
+                      ? `${pending} questions in this group are from the latest forecast epoch — their earliest horizon hasn't reached the resolution calendar cutoff yet.`
+                      : pending > 0
+                        ? `${pending} additional question(s) too new to resolve yet.`
+                        : undefined
                   }
                 >
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-fred-muted">
                     {row.hazard_code} / {metricLabel}
                   </div>
                   <div className={`mt-1 text-sm font-medium ${colorClass}`}>
-                    {isAllPending ? "Awaiting first horizon" : `${pct}% scored`}
+                    {isAllPending ? "Awaiting first horizon" : pctLabel}
                   </div>
                   <div className="text-xs text-fred-muted">
                     {isAllPending ? (
                       <>
-                        0 / {row.total_questions} — questions too new, will
-                        resolve next month
+                        0 of 0 eligible — {pending} too new, will resolve next
+                        month
                       </>
                     ) : (
                       <>
-                        {row.resolved_questions}/{row.total_questions} questions
+                        {row.resolved_questions} of {eligible} eligible
+                        {pending > 0 ? ` · ${pending} too new` : null}
                       </>
                     )}
                   </div>
@@ -757,76 +790,151 @@ export default function PerformancePanel({
               );
             })}
           </div>
-        </div>
+        </section>
       )}
 
-      {/* Table */}
-      {isEmpty ? (
-        <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center text-slate-300">
-          No scoring data available yet. Scores are generated once forecasts
-          have been resolved against ground truth.
+      {/* Detailed Scores: filters + table grouped together */}
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-fred-text">
+            Detailed Scores
+          </h2>
+          {loading ? (
+            <span className="text-xs text-fred-muted">Loading…</span>
+          ) : null}
         </div>
-      ) : (
-        <div className="overflow-x-auto rounded-lg border border-fred-secondary">
-          {view === "total" && (
-            <SortableTable
-              columns={PIVOTED_COLUMNS}
-              rows={totalRows}
-              rowKey={(row) => row.key}
-              initialSortKey="avg_brier"
-              initialSortDirection="asc"
-              tableLayout="auto"
-              emptyMessage="No scores available."
-              rowClassName={(row) =>
-                row.key.startsWith("__ext_")
-                  ? "bg-amber-500/5 border-l-2 border-l-amber-400/40"
-                  : undefined
-              }
-            />
-          )}
 
-          {view === "by_hazard" && (
-            <SortableTable
-              columns={PIVOTED_COLUMNS}
-              rows={hazardRows}
-              rowKey={(row) => row.key}
-              initialSortKey="avg_brier"
-              initialSortDirection="asc"
-              tableLayout="auto"
-              emptyMessage="No hazard-level scores available."
-            />
-          )}
+        {/* Controls — directly above the table they control */}
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          {/* View selector tabs */}
+          <div className="flex gap-1 rounded-lg border border-fred-secondary bg-fred-bg/40 p-1">
+            {VIEW_LABELS.map(({ key, label }) => (
+              <button
+                key={key}
+                type="button"
+                className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  view === key
+                    ? "bg-fred-primary text-fred-bg"
+                    : "text-fred-text hover:bg-fred-bg/60"
+                }`}
+                onClick={() => setView(key)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
 
-          {view === "by_run" && (
-            <SortableTable
-              columns={RUN_COLUMNS}
-              rows={runRows}
-              rowKey={(row) => row.key}
-              initialSortKey="run_date"
-              initialSortDirection="desc"
-              tableLayout="auto"
-              emptyMessage="No per-run scores available."
-            />
-          )}
+          {/* Metric filter */}
+          <select
+            className="rounded-md border border-fred-secondary bg-fred-bg/40 px-3 py-1.5 text-sm text-fred-text"
+            value={metric ?? ""}
+            onChange={(e) => handleMetricChange(e.target.value || null)}
+          >
+            <option value="">All Metrics</option>
+            <option value="PA">People Affected (PA)</option>
+            <option value="FATALITIES">Fatalities</option>
+            <option value="EVENT_OCCURRENCE">Event Occurrence (binary)</option>
+            <option value="PHASE3PLUS_IN_NEED">Phase 3+ (IPC)</option>
+          </select>
 
-          {view === "by_model" && (
-            <SortableTable
-              columns={PIVOTED_COLUMNS}
-              rows={modelRows}
-              rowKey={(row) => row.key}
-              initialSortKey="avg_brier"
-              initialSortDirection="asc"
-              tableLayout="auto"
-              emptyMessage="No per-model scores available."
-              rowClassName={(row) =>
-                row.key.startsWith("__ext_")
-                  ? "bg-amber-500/5 border-l-2 border-l-amber-400/40"
-                  : undefined
-              }
-            />
-          )}
+          {/* Track filter */}
+          <select
+            className="rounded-md border border-fred-secondary bg-fred-bg/40 px-3 py-1.5 text-sm text-fred-text"
+            value={track != null ? String(track) : ""}
+            onChange={(e) =>
+              handleTrackChange(e.target.value ? Number(e.target.value) : null)
+            }
+          >
+            <option value="">All Tracks</option>
+            <option value="1">Track 1</option>
+            <option value="2">Track 2</option>
+          </select>
+
+          {/* Ensemble selector (shown for By Hazard and By Run views) */}
+          {(view === "by_hazard" || view === "by_run") &&
+          ensembleModels.length > 0 ? (
+            <select
+              className="rounded-md border border-fred-secondary bg-fred-bg/40 px-3 py-1.5 text-sm text-fred-text"
+              value={activeEnsemble ?? ""}
+              onChange={(e) => setSelectedEnsemble(e.target.value || null)}
+            >
+              {ensembleModels.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          ) : null}
         </div>
-      )}
+
+        {/* Table */}
+        {isEmpty ? (
+          <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-6 text-center text-slate-300">
+            No scoring data available yet. Scores are generated once forecasts
+            have been resolved against ground truth.
+          </div>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-fred-secondary">
+            {view === "total" && (
+              <SortableTable
+                columns={PIVOTED_COLUMNS}
+                rows={totalRows}
+                rowKey={(row) => row.key}
+                initialSortKey="avg_brier"
+                initialSortDirection="asc"
+                tableLayout="auto"
+                emptyMessage="No scores available."
+                rowClassName={(row) =>
+                  row.key.startsWith("__ext_")
+                    ? "bg-amber-500/5 border-l-2 border-l-amber-400/40"
+                    : undefined
+                }
+              />
+            )}
+
+            {view === "by_hazard" && (
+              <SortableTable
+                columns={PIVOTED_COLUMNS}
+                rows={hazardRows}
+                rowKey={(row) => row.key}
+                initialSortKey="avg_brier"
+                initialSortDirection="asc"
+                tableLayout="auto"
+                emptyMessage="No hazard-level scores available."
+              />
+            )}
+
+            {view === "by_run" && (
+              <SortableTable
+                columns={RUN_COLUMNS}
+                rows={runRows}
+                rowKey={(row) => row.key}
+                initialSortKey="run_date"
+                initialSortDirection="desc"
+                tableLayout="auto"
+                emptyMessage="No per-run scores available."
+              />
+            )}
+
+            {view === "by_model" && (
+              <SortableTable
+                columns={PIVOTED_COLUMNS}
+                rows={modelRows}
+                rowKey={(row) => row.key}
+                initialSortKey="avg_brier"
+                initialSortDirection="asc"
+                tableLayout="auto"
+                emptyMessage="No per-model scores available."
+                rowClassName={(row) =>
+                  row.key.startsWith("__ext_")
+                    ? "bg-amber-500/5 border-l-2 border-l-amber-400/40"
+                    : undefined
+                }
+              />
+            )}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

@@ -1861,8 +1861,26 @@ def performance_scores(
         track_filter = "AND q.track = :track"
         params["track"] = track
 
-    # Track counts for KPI cards (always unfiltered by track)
-    track_counts = {"track1": 0, "track2": 0}
+    _tf = _test_filter(include_test, "s")
+
+    # Track counts for KPI cards (always unfiltered by track).
+    # ``total`` counts every distinct scored question regardless of track
+    # (including legacy questions that pre-date the Track 1/2 split, where
+    # q.track IS NULL). track1/track2 are the breakdown for questions that
+    # do carry a track tag.
+    track_counts = {"track1": 0, "track2": 0, "total": 0}
+    try:
+        tc_filter = metric_filter  # respect metric filter but not track filter
+        total_row = _execute(con, f"""
+            SELECT COUNT(DISTINCT s.question_id) AS n
+            FROM scores s
+            JOIN questions q ON q.question_id = s.question_id
+            WHERE 1=1 {tc_filter}{_tf}
+        """, {k: v for k, v in params.items() if k != "track"}).fetchone()
+        if total_row and total_row[0] is not None:
+            track_counts["total"] = int(total_row[0])
+    except Exception:
+        logger.debug("Failed to compute total scored question count")
     if has_track:
         try:
             tc_filter = metric_filter  # respect metric filter but not track filter
@@ -1882,7 +1900,6 @@ def performance_scores(
             logger.debug("Failed to compute track counts for performance")
 
     # Query 1 -- summary rows (all models including ensemble)
-    _tf = _test_filter(include_test, "s")
     sql_summary = f"""
         SELECT
           q.hazard_code,
@@ -3070,11 +3087,20 @@ def resolution_rates(
     forecaster_run_id: Optional[str] = Query(None),
     hazard_code: Optional[str] = Query(None),
     include_test: bool = Query(False),
+    include_blocked: bool = Query(
+        False,
+        description=(
+            "Include blocked hazards (DI, HW, CU, ACO) that are no longer "
+            "forecasted but still have legacy questions in the DB."
+        ),
+    ),
 ):
     """Compute resolution rates by hazard and metric.
 
     Returns how many questions were resolved (have at least 1 resolution row)
-    vs total, broken down by (hazard_code, metric).
+    vs total, broken down by (hazard_code, metric). Blocked hazards (DI, HW,
+    CU, ACO) are excluded by default — pass ``include_blocked=true`` to see
+    them.
     """
     con = _con()
     if not _table_exists(con, "questions"):
@@ -3099,6 +3125,18 @@ def resolution_rates(
     # These were the bulk of the dashboard's permanent-0% tiles.
     retired_filter = "AND COALESCE(q.status, '') != 'retired'"
 
+    # Also exclude blocked hazards by hazard_code. The retired-status guard
+    # above only catches questions that were retired by
+    # scripts/retire_blocked_hazard_questions.py — but a fresh DB or a DB
+    # where that script hasn't run yet still has active rows for DI/HW/CU/ACO.
+    # Block them here too so the resolution coverage panel doesn't show
+    # permanently-unresolvable tiles for hazards we don't forecast anymore.
+    blocked_filter = ""
+    if not include_blocked:
+        blocked_filter = (
+            "AND UPPER(q.hazard_code) NOT IN ('DI', 'HW', 'CU', 'ACO')"
+        )
+
     # The resolution pipeline's calendar cutoff is the previous complete
     # month (see pythia/tools/compute_resolutions.py). A question's earliest
     # horizon maps to its window_start_date month. So a question is
@@ -3112,7 +3150,7 @@ def resolution_rates(
         SELECT q.hazard_code, UPPER(q.metric) AS metric,
                COUNT(DISTINCT q.question_id) AS total_questions
         FROM questions q
-        WHERE 1=1 {hazard_filter} {run_filter} {retired_filter}{_test_filter(include_test, "q")}
+        WHERE 1=1 {hazard_filter} {run_filter} {retired_filter} {blocked_filter}{_test_filter(include_test, "q")}
         GROUP BY q.hazard_code, UPPER(q.metric)
     """
     try:
@@ -3128,7 +3166,7 @@ def resolution_rates(
             SELECT q.hazard_code, UPPER(q.metric) AS metric,
                    COUNT(DISTINCT q.question_id) AS pending
             FROM questions q
-            WHERE 1=1 {hazard_filter} {run_filter} {retired_filter}{_test_filter(include_test, "q")}
+            WHERE 1=1 {hazard_filter} {run_filter} {retired_filter} {blocked_filter}{_test_filter(include_test, "q")}
               AND CAST(q.window_start_date AS DATE)
                   > DATE_TRUNC('month', CURRENT_DATE - INTERVAL 1 MONTH)
             GROUP BY q.hazard_code, UPPER(q.metric)
@@ -3163,7 +3201,7 @@ def resolution_rates(
                COUNT(DISTINCT r.question_id) AS resolved_questions
         FROM resolutions r
         JOIN questions q ON q.question_id = r.question_id
-        WHERE 1=1 {hazard_filter} {run_filter} {retired_filter}{_tf}
+        WHERE 1=1 {hazard_filter} {run_filter} {retired_filter} {blocked_filter}{_tf}
         GROUP BY q.hazard_code, UPPER(q.metric)
     """
     try:
