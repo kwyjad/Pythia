@@ -236,6 +236,15 @@ export type ResolutionRateRow = {
   total_questions: number;
   resolved_questions: number;
   skipped_questions: number;
+  /**
+   * Questions whose earliest horizon (window_start_date) is after the
+   * resolution pipeline's calendar cutoff (previous complete month). These
+   * are structurally unresolvable until the calendar advances — typically
+   * brand-new questions from the latest epoch. The dashboard uses this to
+   * distinguish a "waiting for first horizon" state from a real 0% scored.
+   * Optional for backward compatibility with older API versions.
+   */
+  pending_too_new?: number;
   resolution_rate: number;
 };
 

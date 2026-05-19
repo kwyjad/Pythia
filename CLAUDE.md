@@ -229,7 +229,7 @@ Forecasts cover a 6-month window. Each question has `window_start_date` and `tar
 **API endpoints (Phase 4):**
 - `/v1/risk_index?metric=EVENT_OCCURRENCE` — Returns binary P(event) as the risk value (0-1). No centroid multiplication. Per-capita returns raw probability unchanged (already a rate).
 - `/v1/risk_index?metric=PHASE3PLUS_IN_NEED` — SPD-based risk index for IPC Phase 3+ population. Supports `normalize=true` for per-capita (fraction of population in Phase 3+).
-- `/v1/diagnostics/resolution_rates` — Returns resolution rates by (hazard_code, metric): total/resolved/skipped questions with rate. Supports `hazard_code` filter.
+- `/v1/diagnostics/resolution_rates` — Returns resolution rates by (hazard_code, metric): total/resolved/skipped/pending_too_new questions with rate. Supports `hazard_code` filter. `pending_too_new` is the count of questions whose `window_start_date` is after the resolution pipeline's calendar cutoff (previous complete month) — i.e. structurally unresolvable until the calendar advances. The Performance page's Resolution Coverage Summary renders a muted "Awaiting first horizon — questions too new, will resolve next month" tile (instead of red 0%) when `pending_too_new == total_questions`, so brand-new epoch questions don't look like calibration failures.
 - `/v1/diagnostics/kpi_scopes?metric_scope=EVENT_OCCURRENCE` — KPI scopes now accept EVENT_OCCURRENCE and PHASE3PLUS_IN_NEED alongside PA and FATALITIES.
 - `/v1/performance/scores?metric=EVENT_OCCURRENCE` — Performance scores work for all metrics; binary questions produce Brier score only (no log/CRPS).
 
