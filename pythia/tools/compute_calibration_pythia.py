@@ -22,11 +22,22 @@ if not LOGGER.handlers:
     LOGGER.addHandler(logging.NullHandler())
 
 
+def _rollback_quietly(conn) -> None:
+    # DuckDB >= 1.5 leaves the connection in an aborted-transaction state after a
+    # failed DDL inside an implicit transaction. Issue ROLLBACK so the next
+    # statement isn't poisoned with "Current transaction is aborted".
+    try:
+        conn.execute("ROLLBACK")
+    except Exception:
+        pass
+
+
 def _table_exists(conn, name: str) -> bool:
     try:
         conn.execute(f"PRAGMA table_info('{name}')").fetchall()
         return True
     except Exception:
+        _rollback_quietly(conn)
         return False
 
 
@@ -34,7 +45,27 @@ def _row_count(conn, name: str) -> int:
     try:
         return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
     except Exception:
+        _rollback_quietly(conn)
         return 0
+
+
+def _column_exists(conn, table: str, column: str) -> bool:
+    try:
+        rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
+        return any(str(r[1]).lower() == column.lower() for r in rows)
+    except Exception:
+        _rollback_quietly(conn)
+        return False
+
+
+def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:
+    if _column_exists(conn, table, column):
+        return
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+    except Exception as exc:
+        LOGGER.warning("Failed to add %s.%s: %s", table, column, exc)
+        _rollback_quietly(conn)
 
 
 MIN_QUESTIONS = 20
@@ -289,31 +320,36 @@ def compute_calibration_pythia(
             )
             """
         )
-        # Ensure train_cutoff_month column exists on existing tables
-        try:
-            conn.execute(
-                "ALTER TABLE calibration_weights ADD COLUMN train_cutoff_month TEXT"
-            )
-        except Exception:
-            pass
+        # Ensure train_cutoff_month column exists on existing tables.
+        # Must use _add_column_if_missing to avoid leaving the DuckDB connection
+        # in an aborted-transaction state when the column already exists.
+        _add_column_if_missing(
+            conn, "calibration_weights", "train_cutoff_month", "TEXT"
+        )
+        # calibration_advice schema must match pythia/db/schema.py — 4-column PK
+        # including model_name. The previous 3-column PK here would re-trigger
+        # the dual-constraint failure documented in CLAUDE.md on a fresh DB.
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS calibration_advice (
               as_of_month TEXT,
               hazard_code TEXT,
               metric TEXT,
+              model_name TEXT,
               advice TEXT,
+              findings_json TEXT,
+              advice_version TEXT,
               created_at TIMESTAMP DEFAULT now(),
-              PRIMARY KEY (as_of_month, hazard_code, metric)
+              PRIMARY KEY (as_of_month, hazard_code, metric, model_name)
             )
             """
         )
 
-        # Ensure is_test column exists on questions (migration for older DBs)
-        try:
-            conn.execute("ALTER TABLE questions ADD COLUMN is_test BOOLEAN DEFAULT FALSE")
-        except Exception:
-            pass  # Column already exists
+        # Ensure is_test column exists on questions (migration for older DBs).
+        if _table_exists(conn, "questions"):
+            _add_column_if_missing(
+                conn, "questions", "is_test", "BOOLEAN DEFAULT FALSE"
+            )
 
         # Early exit if scores table doesn't exist or is empty
         if not _table_exists(conn, "scores"):
@@ -366,10 +402,13 @@ def compute_calibration_pythia(
                 """,
                 [as_of_month, hazard_code, metric],
             )
+            # Only delete our own '__shared__' row; per-model advice is owned
+            # by generate_calibration_advice.py and must not be clobbered here.
             conn.execute(
                 """
                 DELETE FROM calibration_advice
                 WHERE as_of_month = ? AND hazard_code = ? AND metric = ?
+                  AND model_name = '__shared__'
                 """,
                 [as_of_month, hazard_code, metric],
             )
@@ -401,13 +440,16 @@ def compute_calibration_pythia(
                     for row in weight_rows
                 ],
             )
+            # model_name='__shared__' marks advice that applies to all models
+            # (the per-model-specific advice is written by generate_calibration_advice.py).
+            # model_name is part of the calibration_advice PRIMARY KEY.
             conn.execute(
                 """
                 INSERT INTO calibration_advice (
-                  as_of_month, hazard_code, metric, advice, created_at
-                ) VALUES (?, ?, ?, ?, ?)
+                  as_of_month, hazard_code, metric, model_name, advice, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                [as_of_month, hazard_code, metric, advice_text, now],
+                [as_of_month, hazard_code, metric, "__shared__", advice_text, now],
             )
 
             total_weight_rows += len(weight_rows)

@@ -143,13 +143,20 @@ jobs:
             exit 1
           fi
 
-      - name: EMA centroid update
+      - name: Seed and update bucket centroids
         env:
           PYTHIA_CONFIG_YAML: "pythia/config.yaml"
+          PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
         run: |
-          echo "=== Running EMA centroid update ==="
-          python -m pythia.tools.compute_bucket_centroids --ema --metric PA --db-url "${RESOLVER_DB_URL}"
-          echo "=== EMA centroid update completed ==="
+          echo "=== Seeding bucket centroids from BUCKET_SPECS ==="
+          python -m scripts.db.update_bucket_centroids
+          echo "=== EMA centroid update (all metrics) ==="
+          for METRIC in PA FATALITIES EVENT_OCCURRENCE PHASE3PLUS_IN_NEED; do
+            echo "--- metric=${METRIC} ---"
+            python -m pythia.tools.compute_bucket_centroids --ema --metric "${METRIC}" --db-url "${RESOLVER_DB_URL}" \
+              || echo "WARN: EMA update failed for metric=${METRIC} (non-fatal)"
+          done
+          echo "=== Centroid update completed ==="
 
       - name: Compute calibration weights/advice from scores
         env:
@@ -166,6 +173,39 @@ jobs:
           echo "=== Running pythia.tools.generate_calibration_advice ==="
           python -m pythia.tools.generate_calibration_advice --db-url "${RESOLVER_DB_URL}"
           echo "=== generate_calibration_advice completed ==="
+
+      - name: Emit calibration summary
+        if: always()
+        run: |
+          DB_PATH="${RESOLVER_DB_URL#duckdb:///}"
+          python - <<PY
+          import duckdb, json, pathlib
+          con = duckdb.connect("${DB_PATH}", read_only=True)
+          tables = (
+              "resolutions",
+              "scores",
+              "bucket_centroids",
+              "bucket_definitions",
+              "calibration_weights",
+              "calibration_advice",
+          )
+          counts = {}
+          for t in tables:
+              try:
+                  counts[t] = con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+              except Exception as exc:
+                  counts[t] = f"error: {exc}"
+          summary = {"table_counts": counts}
+          pathlib.Path("calibration_summary.json").write_text(json.dumps(summary, indent=2))
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Upload calibration summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-summary
+          path: calibration_summary.json
 
       - name: Upload canonical resolver DB
         if: success()

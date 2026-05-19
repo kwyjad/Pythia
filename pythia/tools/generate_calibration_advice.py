@@ -90,12 +90,23 @@ SEED_ADVICE: Dict[Tuple[str, str], str] = {
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _rollback_quietly(conn: Any) -> None:
+    # DuckDB >= 1.5 leaves a connection in an aborted-transaction state after a
+    # failed DDL inside an implicit transaction. Issue ROLLBACK so the next
+    # statement isn't poisoned with "Current transaction is aborted".
+    try:
+        conn.execute("ROLLBACK")
+    except Exception:
+        pass
+
+
 def _table_exists(conn: Any, name: str) -> bool:
     try:
         conn.execute(f"PRAGMA table_info('{name}')").fetchall()
         return True
     except Exception as exc:
         LOGGER.debug("_table_exists(%s) returned False: %s", name, exc)
+        _rollback_quietly(conn)
         return False
 
 
@@ -104,7 +115,27 @@ def _row_count(conn: Any, name: str) -> int:
         return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
     except Exception as exc:
         LOGGER.warning("_row_count(%s) failed, returning 0: %s", name, exc)
+        _rollback_quietly(conn)
         return 0
+
+
+def _column_exists(conn: Any, table: str, column: str) -> bool:
+    try:
+        rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
+        return any(str(r[1]).lower() == column.lower() for r in rows)
+    except Exception:
+        _rollback_quietly(conn)
+        return False
+
+
+def _add_column_if_missing(conn: Any, table: str, column: str, col_type: str) -> None:
+    if _column_exists(conn, table, column):
+        return
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+    except Exception as exc:
+        LOGGER.warning("Failed to add %s.%s: %s", table, column, exc)
+        _rollback_quietly(conn)
 
 
 def _get_db_url_from_config() -> str:
@@ -121,26 +152,16 @@ def _get_db_url_from_config() -> str:
 
 def _ensure_findings_json_column(conn: Any) -> None:
     """Ensure calibration_advice table has all required columns."""
-    existing = set()
-    try:
-        for row in conn.execute("PRAGMA table_info('calibration_advice')").fetchall():
-            existing.add(str(row[1]).lower())
-    except Exception as exc:
-        LOGGER.warning("Cannot inspect calibration_advice columns: %s", exc)
+    if not _table_exists(conn, "calibration_advice"):
+        LOGGER.debug("calibration_advice table not yet created; nothing to migrate.")
         return
 
-    for col, col_type in [
+    for col, col_type in (
         ("findings_json", "TEXT"),
         ("model_name", "TEXT"),
         ("advice_version", "TEXT"),
-    ]:
-        if col not in existing:
-            try:
-                conn.execute(
-                    f"ALTER TABLE calibration_advice ADD COLUMN {col} {col_type}"
-                )
-            except Exception as exc:
-                LOGGER.warning("Failed to add column %s to calibration_advice: %s", col, exc)
+    ):
+        _add_column_if_missing(conn, "calibration_advice", col, col_type)
 
     # Backfill NULL model_name to sentinel
     try:
@@ -149,6 +170,7 @@ def _ensure_findings_json_column(conn: Any) -> None:
         )
     except Exception as exc:
         LOGGER.debug("model_name backfill skipped: %s", exc)
+        _rollback_quietly(conn)
 
 
 def _class_bins_for_metric(metric: str) -> List[str]:
@@ -1843,11 +1865,11 @@ def generate_calibration_advice(
     conn = duckdb_io.get_db(db_url or duckdb_io.DEFAULT_DB_URL)
 
     try:
-        # Ensure is_test column exists on questions (migration for older DBs)
-        try:
-            conn.execute("ALTER TABLE questions ADD COLUMN is_test BOOLEAN DEFAULT FALSE")
-        except Exception:
-            pass  # Column already exists
+        # Ensure is_test column exists on questions (migration for older DBs).
+        # Must use _add_column_if_missing to avoid leaving the DuckDB connection
+        # in an aborted-transaction state when the column already exists.
+        if _table_exists(conn, "questions"):
+            _add_column_if_missing(conn, "questions", "is_test", "BOOLEAN DEFAULT FALSE")
 
         _ensure_findings_json_column(conn)
 
