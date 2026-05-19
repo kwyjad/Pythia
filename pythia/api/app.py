@@ -660,6 +660,31 @@ def _safe_count_distinct(
     return int(row[0]) if row else 0
 
 
+def _count_distinct_active_questions(
+    con: duckdb.DuckDBPyConnection, table: str, include_test: bool
+) -> int:
+    """COUNT(DISTINCT question_id) in `table`, JOINed with `questions` so that
+    retired (and optionally test) questions are excluded. Used by the
+    /v1/diagnostics/summary endpoint."""
+    if not _table_exists(con, table) or not _table_exists(con, "questions"):
+        return 0
+    if "question_id" not in _table_columns(con, table):
+        return 0
+    test_clause = "" if include_test else " AND COALESCE(q.is_test, FALSE) = FALSE"
+    try:
+        row = con.execute(
+            f"""
+            SELECT COUNT(DISTINCT t.question_id)
+            FROM {table} t
+            JOIN questions q ON q.question_id = t.question_id
+            WHERE COALESCE(q.status, '') != 'retired'{test_clause}
+            """
+        ).fetchone()
+    except Exception:
+        return 0
+    return int(row[0]) if row else 0
+
+
 def _safe_json_load(value: Any) -> Any:
     if value is None or isinstance(value, (dict, list)):
         return value
@@ -2866,15 +2891,19 @@ def diagnostics_summary(include_test: bool = Query(False)):
 
     _tf = _test_filter(include_test)
     try:
+        # questions_by_status is still grouped by status (including 'retired'),
+        # so the count of retired questions remains visible/auditable here.
         q_counts = _rows_from_cursor(con.execute(
             f"SELECT status, COUNT(*) AS n FROM questions WHERE 1=1{_tf} GROUP BY status"
         ))
     except Exception:
         q_counts = []
 
-    q_with_forecast = _safe_count_distinct(con, "forecasts_ensemble", ["question_id"])
-    q_with_resolutions = _safe_count_distinct(con, "resolutions", ["question_id"])
-    q_with_scores = _safe_count_distinct(con, "scores", ["question_id"])
+    # The "with X" counts below exclude retired questions so the dashboard's
+    # active-question metrics aren't inflated by unforecastable legacy rows.
+    q_with_forecast = _count_distinct_active_questions(con, "forecasts_ensemble", include_test)
+    q_with_resolutions = _count_distinct_active_questions(con, "resolutions", include_test)
+    q_with_scores = _count_distinct_active_questions(con, "scores", include_test)
 
     latest_hs = get_cached_latest_hs()
     if latest_hs is None:
@@ -3066,13 +3095,17 @@ def resolution_rates(
         run_filter = "AND q.forecaster_run_id = :forecaster_run_id"
         params["forecaster_run_id"] = forecaster_run_id
 
+    # Exclude retired questions (legacy DI/HW/CU/ACO that will never resolve).
+    # These were the bulk of the dashboard's permanent-0% tiles.
+    retired_filter = "AND COALESCE(q.status, '') != 'retired'"
+
     # Total questions by (hazard_code, metric)
     _tf = _test_filter(include_test, "r")
     total_sql = f"""
         SELECT q.hazard_code, UPPER(q.metric) AS metric,
                COUNT(DISTINCT q.question_id) AS total_questions
         FROM questions q
-        WHERE 1=1 {hazard_filter} {run_filter}{_test_filter(include_test, "q")}
+        WHERE 1=1 {hazard_filter} {run_filter} {retired_filter}{_test_filter(include_test, "q")}
         GROUP BY q.hazard_code, UPPER(q.metric)
     """
     try:
@@ -3101,7 +3134,7 @@ def resolution_rates(
                COUNT(DISTINCT r.question_id) AS resolved_questions
         FROM resolutions r
         JOIN questions q ON q.question_id = r.question_id
-        WHERE 1=1 {hazard_filter} {run_filter}{_tf}
+        WHERE 1=1 {hazard_filter} {run_filter} {retired_filter}{_tf}
         GROUP BY q.hazard_code, UPPER(q.metric)
     """
     try:
