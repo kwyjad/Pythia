@@ -143,6 +143,14 @@ jobs:
             exit 1
           fi
 
+      - name: Retire blocked-hazard questions (DI / HW / CU / ACO)
+        env:
+          PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+        run: |
+          echo "=== Retiring blocked-hazard questions ==="
+          python -m scripts.retire_blocked_hazard_questions
+          echo "=== retire_blocked_hazard_questions completed ==="
+
       - name: Seed and update bucket centroids
         env:
           PYTHIA_CONFIG_YAML: "pythia/config.yaml"
