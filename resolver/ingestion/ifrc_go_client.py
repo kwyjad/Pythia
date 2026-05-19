@@ -89,6 +89,20 @@ IMPACT_FIELDS = [
     ("num_missing",   "gov_num_missing",   "other_num_missing",   "missing",    "persons"),
 ]
 
+# Collateral metrics that, when present alongside each other but in the absence
+# of a primary `affected` count, are summed to produce a derived `affected`
+# floor estimate. See ``_maybe_derive_affected``.
+COLLATERAL_FOR_AFFECTED = ("fatalities", "injured", "displaced", "missing")
+
+# Source-field prefix used to mark derived rows in the `definition_text` so
+# downstream auditing can distinguish them from real IFRC fields.
+_DERIVED_SOURCE_PREFIX = "derived_sum:"
+
+# Minimum number of collateral metrics required before we synthesize an
+# `affected` row. Two avoids extrapolating from a single isolated number
+# (which is usually a wild floor estimate).
+_DERIVED_MIN_COLLATERAL = 2
+
 def _debug() -> bool:
     return os.getenv("RESOLVER_DEBUG", "") == "1"
 
@@ -171,6 +185,18 @@ def extract_all_metrics(rec: dict) -> List[Tuple[str, int, str, str]]:
     Returns a list of (metric, value, unit, source_field) tuples — one per
     non-null impact field found.  For each metric the best (max) value across
     primary/gov/other variants is used.
+
+    When the record has no ``num_affected`` (and variants) but does carry at
+    least :data:`_DERIVED_MIN_COLLATERAL` of ``fatalities``/``injured``/
+    ``displaced``/``missing``, this function also appends a derived
+    ``affected`` row whose value is the sum of those collateral metrics. The
+    derived row's source_field starts with :data:`_DERIVED_SOURCE_PREFIX` so
+    auditors can filter it out.
+
+    The derived value is a *floor* estimate — IFRC's "affected" headline is
+    usually broader than the sum of fatalities+injured+displaced+missing, but
+    the sum is the most defensible reconstruction when the primary field is
+    absent.
     """
     results: List[Tuple[str, int, str, str]] = []
     for primary, gov, other, metric, unit in IMPACT_FIELDS:
@@ -188,7 +214,33 @@ def extract_all_metrics(rec: dict) -> List[Tuple[str, int, str, str]]:
         if candidates:
             val, source_fld = max(candidates, key=lambda x: x[0])
             results.append((metric, val, unit, source_fld))
+
+    derived = _maybe_derive_affected(results)
+    if derived is not None:
+        results.append(derived)
     return results
+
+
+def _maybe_derive_affected(
+    results: List[Tuple[str, int, str, str]]
+) -> Optional[Tuple[str, int, str, str]]:
+    """Return a derived ``("affected", sum, "persons", "derived_sum:...")``
+    tuple if (a) no real ``affected`` was extracted and (b) at least
+    :data:`_DERIVED_MIN_COLLATERAL` collateral metrics are present.
+
+    Otherwise return ``None``. See :func:`extract_all_metrics` for rationale.
+    """
+    by_metric: Dict[str, int] = {m: v for m, v, _u, _f in results}
+    if "affected" in by_metric:
+        return None
+    present = [m for m in COLLATERAL_FOR_AFFECTED if m in by_metric]
+    if len(present) < _DERIVED_MIN_COLLATERAL:
+        return None
+    total = sum(by_metric[m] for m in present)
+    if total <= 0:
+        return None
+    components = "+".join(present)
+    return ("affected", total, "persons", f"{_DERIVED_SOURCE_PREFIX}{components}")
 
 
 def extract_metric_record_first(rec: dict, cfg: Dict[str, Any]) -> Optional[Tuple[str,int,str,str]]:
@@ -450,7 +502,31 @@ def collect_rows() -> List[List[str]]:
                     emitted = False
                     for country_name, iso3 in iso_pairs:
                         for metric, value, unit, why in metric_packs:
-                            event_id = f"{iso3}-{hazard_code}-{metric}-ifrcgo-{r.get('id','0')}"
+                            # Mark derived (synthesised) rows so downstream
+                            # consumers can audit / down-weight them. See
+                            # _maybe_derive_affected for rationale.
+                            is_derived = isinstance(why, str) and why.startswith(
+                                _DERIVED_SOURCE_PREFIX
+                            )
+                            method = "derived" if is_derived else "api"
+                            confidence = "low" if is_derived else "med"
+                            event_id_suffix = "-derived" if is_derived else ""
+                            event_id = (
+                                f"{iso3}-{hazard_code}-{metric}-ifrcgo"
+                                f"{event_id_suffix}-{r.get('id','0')}"
+                            )
+                            if is_derived:
+                                definition = (
+                                    f"Derived {metric} as the sum of "
+                                    f"{why[len(_DERIVED_SOURCE_PREFIX):]} from "
+                                    f"IFRC GO {key.replace('_', ' ')} (no "
+                                    f"num_affected reported on the source record)."
+                                )
+                            else:
+                                definition = (
+                                    f"Extracted {metric} via {why} from "
+                                    f"IFRC GO {key.replace('_', ' ')}."
+                                )
                             rows.append([
                                 event_id,
                                 country_name,
@@ -468,9 +544,9 @@ def collect_rows() -> List[List[str]]:
                                 map_source_type(key, cfg),
                                 url,
                                 doc_title,
-                                f"Extracted {metric} via {why} from IFRC GO {key.replace('_',' ')}.",
-                                "api",
-                                "med",
+                                definition,
+                                method,
+                                confidence,
                                 1,
                                 dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                             ])
