@@ -11,7 +11,9 @@ import pytest
 
 from resolver.ingestion.ifrc_go_client import (
     DTYPE_TO_HAZARD,
+    _DERIVED_SOURCE_PREFIX,
     _dtype_id_from_record,
+    _maybe_derive_affected,
     detect_hazard,
     extract_all_metrics,
     load_cfg,
@@ -233,3 +235,125 @@ class TestExtractAllMetrics:
         result = extract_all_metrics(rec)
         assert len(result) == 1
         assert result[0][1] == 12500
+
+
+# ---------------------------------------------------------------------------
+# Derived `affected` imputation
+# ---------------------------------------------------------------------------
+
+
+class TestDerivedAffected:
+    """When IFRC reports collateral impact metrics (fatalities / injured /
+    displaced / missing) but no `affected`, ``extract_all_metrics`` should
+    synthesise an `affected` row as their sum so PA-eligible resolution can
+    fire. The synthesised row is marked via the source-field prefix."""
+
+    def test_derives_affected_from_fatalities_plus_injured(self):
+        rec = {"num_dead": 10, "num_injured": 50}
+        result = extract_all_metrics(rec)
+        metrics_by_name = {r[0]: r for r in result}
+        assert "affected" in metrics_by_name, (
+            "Two collateral metrics present, no num_affected — must synthesise."
+        )
+        affected = metrics_by_name["affected"]
+        assert affected[1] == 60  # 10 + 50
+        assert affected[2] == "persons"
+        assert affected[3].startswith(_DERIVED_SOURCE_PREFIX)
+        assert "fatalities" in affected[3]
+        assert "injured" in affected[3]
+
+    def test_derives_from_all_four_collateral(self):
+        rec = {
+            "num_dead": 5,
+            "num_injured": 20,
+            "num_displaced": 1000,
+            "num_missing": 3,
+        }
+        result = extract_all_metrics(rec)
+        affected = [r for r in result if r[0] == "affected"]
+        assert len(affected) == 1
+        assert affected[0][1] == 1028  # 5 + 20 + 1000 + 3
+        # Components show up in alphabet-of-insertion order matching
+        # COLLATERAL_FOR_AFFECTED tuple
+        assert "fatalities" in affected[0][3]
+        assert "injured" in affected[0][3]
+        assert "displaced" in affected[0][3]
+        assert "missing" in affected[0][3]
+
+    def test_no_derivation_when_only_one_collateral(self):
+        """Single isolated metric is not enough to extrapolate from."""
+        rec = {"num_dead": 10}
+        result = extract_all_metrics(rec)
+        metrics = {r[0] for r in result}
+        assert metrics == {"fatalities"}
+        assert "affected" not in metrics
+
+    def test_no_derivation_when_real_affected_present(self):
+        """If num_affected is reported, do NOT replace or augment it."""
+        rec = {"num_affected": 5000, "num_dead": 10, "num_injured": 50}
+        result = extract_all_metrics(rec)
+        affected_rows = [r for r in result if r[0] == "affected"]
+        assert len(affected_rows) == 1
+        assert affected_rows[0][1] == 5000  # the real one, not the sum (60)
+        assert affected_rows[0][3] == "num_affected"
+        assert not affected_rows[0][3].startswith(_DERIVED_SOURCE_PREFIX)
+
+    def test_no_derivation_when_only_displaced_present(self):
+        """displaced alone is < threshold (need 2 collateral)."""
+        rec = {"num_displaced": 3000}
+        result = extract_all_metrics(rec)
+        metrics = {r[0] for r in result}
+        assert metrics == {"displaced"}
+        assert "affected" not in metrics
+
+    def test_displaced_plus_fatalities_derives(self):
+        rec = {"num_displaced": 3000, "num_dead": 12}
+        result = extract_all_metrics(rec)
+        affected = [r for r in result if r[0] == "affected"]
+        assert len(affected) == 1
+        assert affected[0][1] == 3012
+        assert affected[0][3].startswith(_DERIVED_SOURCE_PREFIX)
+
+    def test_gov_variants_count_toward_derivation(self):
+        """Derivation works on the consolidated metric, not on the raw
+        field name — gov_num_dead still produces a 'fatalities' result."""
+        rec = {"gov_num_dead": 7, "other_num_injured": 30}
+        result = extract_all_metrics(rec)
+        affected = [r for r in result if r[0] == "affected"]
+        assert len(affected) == 1
+        assert affected[0][1] == 37  # 7 + 30
+
+    def test_zero_collateral_does_not_derive(self):
+        """If all collateral metrics are zero, no derived row even if 2+
+        nominally present (extract_all_metrics filters zeros out before
+        we see them)."""
+        rec = {"num_dead": 0, "num_injured": 0}
+        result = extract_all_metrics(rec)
+        assert result == []
+
+
+class TestMaybeDeriveAffectedUnit:
+    """Direct unit tests for the helper, independent of extract_all_metrics."""
+
+    def test_no_results_returns_none(self):
+        assert _maybe_derive_affected([]) is None
+
+    def test_real_affected_present_returns_none(self):
+        results = [("affected", 1000, "persons", "num_affected"),
+                   ("fatalities", 10, "persons", "num_dead"),
+                   ("injured", 20, "persons", "num_injured")]
+        assert _maybe_derive_affected(results) is None
+
+    def test_one_collateral_returns_none(self):
+        results = [("fatalities", 10, "persons", "num_dead")]
+        assert _maybe_derive_affected(results) is None
+
+    def test_two_collateral_derives(self):
+        results = [("fatalities", 10, "persons", "num_dead"),
+                   ("injured", 50, "persons", "num_injured")]
+        derived = _maybe_derive_affected(results)
+        assert derived is not None
+        assert derived[0] == "affected"
+        assert derived[1] == 60
+        assert derived[2] == "persons"
+        assert derived[3].startswith(_DERIVED_SOURCE_PREFIX)
