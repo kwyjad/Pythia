@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import pytest
 
+import pandas as pd
+
 from resolver.ingestion.ifrc_go_client import (
     DTYPE_TO_HAZARD,
+    _APPEAL_SOURCE_PREFIX,
     _DERIVED_SOURCE_PREFIX,
     _dtype_id_from_record,
     _maybe_derive_affected,
+    _maybe_use_beneficiaries_as_affected,
     detect_hazard,
     extract_all_metrics,
+    iso3_pairs_from_go,
     load_cfg,
 )
 
@@ -329,6 +334,146 @@ class TestDerivedAffected:
         we see them)."""
         rec = {"num_dead": 0, "num_injured": 0}
         result = extract_all_metrics(rec)
+        assert result == []
+
+
+class TestAppealBeneficiaries:
+    """When a record (typically a DREF / Emergency Appeal) has no
+    ``num_affected`` but does carry ``num_beneficiaries`` (the appeal's
+    "people targeted" figure), ``extract_all_metrics`` should promote it to
+    an ``affected`` row marked with the appeal source prefix."""
+
+    def test_beneficiaries_promoted_to_affected(self):
+        rec = {"num_beneficiaries": 50000}
+        result = extract_all_metrics(rec)
+        affected = [r for r in result if r[0] == "affected"]
+        assert len(affected) == 1
+        assert affected[0][1] == 50000
+        assert affected[0][2] == "persons"
+        assert affected[0][3].startswith(_APPEAL_SOURCE_PREFIX)
+        assert affected[0][3] == f"{_APPEAL_SOURCE_PREFIX}num_beneficiaries"
+
+    def test_real_num_affected_wins_over_beneficiaries(self):
+        """If both are present, num_affected (the actual impact field) wins;
+        num_beneficiaries is the planning estimate."""
+        rec = {"num_affected": 80000, "num_beneficiaries": 50000}
+        result = extract_all_metrics(rec)
+        affected = [r for r in result if r[0] == "affected"]
+        assert len(affected) == 1
+        assert affected[0][1] == 80000
+        assert affected[0][3] == "num_affected"
+        assert not affected[0][3].startswith(_APPEAL_SOURCE_PREFIX)
+
+    def test_beneficiaries_with_collateral_picks_beneficiaries(self):
+        """Beneficiaries fallback fires before the imputation fallback —
+        an official IFRC planning figure beats a sum of collateral metrics."""
+        rec = {"num_beneficiaries": 100000, "num_dead": 10, "num_injured": 50}
+        result = extract_all_metrics(rec)
+        affected = [r for r in result if r[0] == "affected"]
+        assert len(affected) == 1
+        assert affected[0][1] == 100000  # not 60 (collateral sum)
+        assert affected[0][3].startswith(_APPEAL_SOURCE_PREFIX)
+
+    def test_zero_beneficiaries_skipped(self):
+        rec = {"num_beneficiaries": 0}
+        result = extract_all_metrics(rec)
+        assert result == []  # no metrics at all
+
+    def test_amount_beneficiaries_variant(self):
+        """Fallback to ``amount_beneficiaries`` if ``num_beneficiaries`` is
+        absent (schema variant guard)."""
+        rec = {"amount_beneficiaries": 25000}
+        result = extract_all_metrics(rec)
+        affected = [r for r in result if r[0] == "affected"]
+        assert len(affected) == 1
+        assert affected[0][1] == 25000
+        assert affected[0][3] == f"{_APPEAL_SOURCE_PREFIX}amount_beneficiaries"
+
+    def test_beneficiaries_coexists_with_collateral_rows(self):
+        """Promoting beneficiaries to 'affected' must not suppress the other
+        fields' rows — fatalities and injured should still appear."""
+        rec = {"num_beneficiaries": 80000, "num_dead": 5, "num_injured": 20}
+        result = extract_all_metrics(rec)
+        metrics = {r[0] for r in result}
+        assert metrics == {"affected", "fatalities", "injured"}
+
+
+class TestMaybeUseBeneficiariesAsAffectedUnit:
+    """Direct unit tests for the appeals helper."""
+
+    def test_no_results_with_no_beneficiaries(self):
+        assert _maybe_use_beneficiaries_as_affected({}, []) is None
+
+    def test_existing_affected_short_circuits(self):
+        rec = {"num_beneficiaries": 50000}
+        results = [("affected", 10000, "persons", "num_affected")]
+        assert _maybe_use_beneficiaries_as_affected(rec, results) is None
+
+    def test_string_beneficiaries_parsed(self):
+        rec = {"num_beneficiaries": "12,345"}
+        out = _maybe_use_beneficiaries_as_affected(rec, [])
+        assert out is not None
+        assert out[1] == 12345
+
+
+class TestIso3PairsFromGo:
+    """Country-detail extraction must handle both Field Report / Event shape
+    (``countries_details`` — list) and Appeals shape (``country`` — single
+    dict). Before this PR, only the plural list shape was recognised, so
+    every appeal silently failed at the no-country gate."""
+
+    @pytest.fixture
+    def countries_df(self):
+        return pd.DataFrame(
+            [
+                {"iso3": "ECU", "country_name": "Ecuador"},
+                {"iso3": "PAK", "country_name": "Pakistan"},
+                {"iso3": "BGD", "country_name": "Bangladesh"},
+            ]
+        )
+
+    def test_field_report_countries_details_plural(self, countries_df):
+        """Existing behaviour — list of country dicts."""
+        rec = {"countries_details": [{"iso3": "PAK", "name": "Pakistan"}]}
+        result = iso3_pairs_from_go(countries_df, rec)
+        assert result == [("Pakistan", "PAK")]
+
+    def test_appeals_country_singular_dict(self, countries_df):
+        """Appeal records use the singular ``country`` field with a dict —
+        this is the shape we needed to support."""
+        rec = {"country": {"iso3": "ECU", "name": "Ecuador", "iso": "EC"}}
+        result = iso3_pairs_from_go(countries_df, rec)
+        assert result == [("Ecuador", "ECU")]
+
+    def test_country_details_singular_also_handled(self, countries_df):
+        """If the API ever returns ``country_details`` (singular) we should
+        accept that shape too — belt-and-suspenders."""
+        rec = {"country_details": {"iso3": "BGD", "name": "Bangladesh"}}
+        result = iso3_pairs_from_go(countries_df, rec)
+        assert result == [("Bangladesh", "BGD")]
+
+    def test_appeal_with_multi_country_field_report_payload(self, countries_df):
+        """If both plural and singular shapes are present (defensive), accept
+        both — duplicates are deduped naturally by the caller's
+        seen_ids set."""
+        rec = {
+            "countries_details": [{"iso3": "PAK", "name": "Pakistan"}],
+            "country": {"iso3": "ECU", "name": "Ecuador"},
+        }
+        result = iso3_pairs_from_go(countries_df, rec)
+        # Order: plural first (existing precedence), then singular
+        assert ("Pakistan", "PAK") in result
+        assert ("Ecuador", "ECU") in result
+
+    def test_no_country_returns_empty(self, countries_df):
+        rec = {"title": "No country info"}
+        result = iso3_pairs_from_go(countries_df, rec)
+        assert result == []
+
+    def test_unknown_iso3_returns_empty(self, countries_df):
+        """If the iso3 isn't in our registry, drop the candidate."""
+        rec = {"country": {"iso3": "XYZ", "name": "Nowhere"}}
+        result = iso3_pairs_from_go(countries_df, rec)
         assert result == []
 
 

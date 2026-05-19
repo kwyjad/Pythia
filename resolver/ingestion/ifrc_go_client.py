@@ -103,6 +103,18 @@ _DERIVED_SOURCE_PREFIX = "derived_sum:"
 # (which is usually a wild floor estimate).
 _DERIVED_MIN_COLLATERAL = 2
 
+# Source-field prefix used to mark `affected` rows that come from IFRC GO
+# Appeals (DREF + Emergency Appeals) via ``num_beneficiaries``. Appeals are
+# real published planning figures — distinct from the imputed-sum derivation
+# (which is a floor estimate) — so they get `method='api'` + `confidence='high'`
+# rather than `'derived' / 'low'`.
+_APPEAL_SOURCE_PREFIX = "appeal:"
+
+# IFRC GO Appeals headline beneficiary fields, in order of preference. The
+# canonical field is ``num_beneficiaries`` (people the appeal targets, which
+# IFRC uses as their headline "people affected" figure for funding documents).
+APPEAL_BENEFICIARY_FIELDS = ("num_beneficiaries", "amount_beneficiaries")
+
 def _debug() -> bool:
     return os.getenv("RESOLVER_DEBUG", "") == "1"
 
@@ -186,17 +198,24 @@ def extract_all_metrics(rec: dict) -> List[Tuple[str, int, str, str]]:
     non-null impact field found.  For each metric the best (max) value across
     primary/gov/other variants is used.
 
-    When the record has no ``num_affected`` (and variants) but does carry at
-    least :data:`_DERIVED_MIN_COLLATERAL` of ``fatalities``/``injured``/
-    ``displaced``/``missing``, this function also appends a derived
-    ``affected`` row whose value is the sum of those collateral metrics. The
-    derived row's source_field starts with :data:`_DERIVED_SOURCE_PREFIX` so
-    auditors can filter it out.
+    Two fallbacks fire (in order) if no real ``affected`` is extracted from
+    the standard num_affected variants:
 
-    The derived value is a *floor* estimate — IFRC's "affected" headline is
-    usually broader than the sum of fatalities+injured+displaced+missing, but
-    the sum is the most defensible reconstruction when the primary field is
-    absent.
+      1. **IFRC Appeals beneficiaries.** If the record carries
+         ``num_beneficiaries`` (or ``amount_beneficiaries``) — the headline
+         "people targeted" figure on DREF and Emergency Appeals — promote
+         that value to an ``affected`` row. Source-field prefix:
+         :data:`_APPEAL_SOURCE_PREFIX`.
+
+      2. **Collateral imputation.** Otherwise, if at least
+         :data:`_DERIVED_MIN_COLLATERAL` of
+         {fatalities, injured, displaced, missing} are present, sum them and
+         emit a derived ``affected`` row. Source-field prefix:
+         :data:`_DERIVED_SOURCE_PREFIX`.
+
+    The beneficiaries fallback is preferred because it's an authoritative
+    IFRC planning figure (high confidence); the imputation is a floor
+    estimate (low confidence).
     """
     results: List[Tuple[str, int, str, str]] = []
     for primary, gov, other, metric, unit in IMPACT_FIELDS:
@@ -215,10 +234,44 @@ def extract_all_metrics(rec: dict) -> List[Tuple[str, int, str, str]]:
             val, source_fld = max(candidates, key=lambda x: x[0])
             results.append((metric, val, unit, source_fld))
 
+    # Fallback 1: appeal beneficiaries → 'affected'
+    beneficiaries = _maybe_use_beneficiaries_as_affected(rec, results)
+    if beneficiaries is not None:
+        results.append(beneficiaries)
+
+    # Fallback 2: derive 'affected' from collateral sums (only when neither
+    # num_affected nor num_beneficiaries was available).
     derived = _maybe_derive_affected(results)
     if derived is not None:
         results.append(derived)
     return results
+
+
+def _maybe_use_beneficiaries_as_affected(
+    rec: dict, results: List[Tuple[str, int, str, str]]
+) -> Optional[Tuple[str, int, str, str]]:
+    """For IFRC GO Appeals: if no ``affected`` was extracted from the standard
+    num_affected variants, promote ``num_beneficiaries`` (the appeal's
+    headline "people targeted" figure) to an ``affected`` row.
+
+    Beneficiaries ≈ the population the appeal plans to assist. For PA
+    resolution this is the closest available proxy for "people affected"
+    and is published as IFRC's official figure — so it gets high confidence,
+    not the low-confidence treatment imputation rows get.
+    """
+    if any(m == "affected" for m, *_ in results):
+        return None
+    for fld in APPEAL_BENEFICIARY_FIELDS:
+        raw = rec.get(fld)
+        if raw in (None, "", 0, "0"):
+            continue
+        try:
+            val = int(float(str(raw).replace(",", "")))
+        except Exception:
+            continue
+        if val > 0:
+            return ("affected", val, "persons", f"{_APPEAL_SOURCE_PREFIX}{fld}")
+    return None
 
 
 def _maybe_derive_affected(
@@ -308,24 +361,41 @@ def map_source_type(endpoint_key: str, cfg: Dict[str, Any]) -> str:
 
 def iso3_pairs_from_go(countries_df: pd.DataFrame, rec: dict) -> List[Tuple[str,str]]:
     """
-    Return [(country_name, ISO3), ...] using countries_details if present,
-    else fallback to empty (we don't chase IDs here).
+    Return [(country_name, ISO3), ...].
+
+    Handles the two shapes IFRC GO uses:
+      - ``countries_details``: list of country dicts (used by Field Reports
+        and Events — these can span multiple countries).
+      - ``country_details``: a single country dict (used by Appeals — DREF /
+        Emergency Appeals are tied to one country).
+
+    Both yield ``[(country_name, ISO3)]`` tuples by joining against the
+    canonical ``countries.csv`` registry. We don't chase numeric IDs here —
+    the input record must already include iso3 or country name.
     """
     out: List[Tuple[str,str]] = []
-    details = rec.get("countries_details") or []
-    if isinstance(details, list) and details:
-        for c in details:
-            iso = str(c.get("iso3", "")).strip().upper()
-            name = str(c.get("name", "") or c.get("name_en","")).strip()
-            if iso:
-                row = countries_df[countries_df["iso3"] == iso]
-                if not row.empty:
-                    out.append((row.iloc[0]["country_name"], iso))
-                    continue
-            if name:
-                row = countries_df[countries_df["country_name"].str.lower() == name.lower()]
-                if not row.empty:
-                    out.append((row.iloc[0]["country_name"], row.iloc[0]["iso3"]))
+
+    # Collect country dicts from either shape into a single list.
+    candidates: List[dict] = []
+    plural = rec.get("countries_details")
+    if isinstance(plural, list):
+        candidates.extend(c for c in plural if isinstance(c, dict))
+    singular = rec.get("country_details") or rec.get("country")
+    if isinstance(singular, dict):
+        candidates.append(singular)
+
+    for c in candidates:
+        iso = str(c.get("iso3", "") or c.get("iso3_code", "")).strip().upper()
+        name = str(c.get("name", "") or c.get("name_en","")).strip()
+        if iso:
+            row = countries_df[countries_df["iso3"] == iso]
+            if not row.empty:
+                out.append((row.iloc[0]["country_name"], iso))
+                continue
+        if name:
+            row = countries_df[countries_df["country_name"].str.lower() == name.lower()]
+            if not row.empty:
+                out.append((row.iloc[0]["country_name"], row.iloc[0]["iso3"]))
     return out
 
 def collect_rows() -> List[List[str]]:
@@ -383,16 +453,18 @@ def collect_rows() -> List[List[str]]:
                     "ordering": "-created_at",
                     "fields": (
                         "id,title,name,summary,description,created_at,updated_at,"
-                        "report_date,disaster_start_date,"
+                        "report_date,disaster_start_date,start_date,end_date,"
                         "document_url,external_link,source,"
                         "dtype,disaster_type,disaster_type_details,"
-                        "countries,countries_details,"
+                        "countries,countries_details,country,country_details,"
                         "num_affected,people_in_need,affected,"
                         "num_dead,num_injured,num_displaced,num_missing,"
                         "gov_num_affected,gov_num_dead,gov_num_injured,gov_num_displaced,"
                         "other_num_affected,other_num_dead,other_num_injured,other_num_displaced,"
                         "epi_cases,epi_confirmed_cases,epi_num_dead,"
-                        "num_beneficiaries"
+                        # IFRC GO Appeals headline figures
+                        "num_beneficiaries,amount_beneficiaries,amount_requested,amount_funded,"
+                        "code,aid,atype"
                     ),
                     filter_key: since,
                 }
@@ -485,6 +557,12 @@ def collect_rows() -> List[List[str]]:
                     as_of = (str(
                         r.get("report_date")
                         or r.get("disaster_start_date")
+                        # IFRC GO Appeals expose ``start_date`` (when the
+                        # appeal funding window begins, ~the disaster date).
+                        # Without this fallback, appeals attribute to
+                        # updated_at/created_at, which can land them in the
+                        # wrong ym during back-dated ingestion.
+                        or r.get("start_date")
                         or r.get("updated_at")
                         or created
                     ) or "")[:10]
@@ -502,15 +580,34 @@ def collect_rows() -> List[List[str]]:
                     emitted = False
                     for country_name, iso3 in iso_pairs:
                         for metric, value, unit, why in metric_packs:
-                            # Mark derived (synthesised) rows so downstream
-                            # consumers can audit / down-weight them. See
-                            # _maybe_derive_affected for rationale.
+                            # Provenance branches:
+                            #  • 'appeal:'      → real IFRC Appeals beneficiary
+                            #                     figure promoted to 'affected'
+                            #                     (high confidence, real API).
+                            #  • 'derived_sum:' → floor estimate synthesised
+                            #                     from collateral metrics
+                            #                     (low confidence).
+                            #  • other          → standard num_* field
+                            #                     (medium confidence).
                             is_derived = isinstance(why, str) and why.startswith(
                                 _DERIVED_SOURCE_PREFIX
                             )
+                            is_appeal = isinstance(why, str) and why.startswith(
+                                _APPEAL_SOURCE_PREFIX
+                            )
                             method = "derived" if is_derived else "api"
-                            confidence = "low" if is_derived else "med"
-                            event_id_suffix = "-derived" if is_derived else ""
+                            if is_derived:
+                                confidence = "low"
+                            elif is_appeal:
+                                confidence = "high"
+                            else:
+                                confidence = "med"
+                            if is_derived:
+                                event_id_suffix = "-derived"
+                            elif is_appeal:
+                                event_id_suffix = "-appeal"
+                            else:
+                                event_id_suffix = ""
                             event_id = (
                                 f"{iso3}-{hazard_code}-{metric}-ifrcgo"
                                 f"{event_id_suffix}-{r.get('id','0')}"
@@ -521,6 +618,14 @@ def collect_rows() -> List[List[str]]:
                                     f"{why[len(_DERIVED_SOURCE_PREFIX):]} from "
                                     f"IFRC GO {key.replace('_', ' ')} (no "
                                     f"num_affected reported on the source record)."
+                                )
+                            elif is_appeal:
+                                src_fld = why[len(_APPEAL_SOURCE_PREFIX):]
+                                definition = (
+                                    f"Extracted {metric} from IFRC GO appeal "
+                                    f"beneficiary count ({src_fld}) — IFRC's "
+                                    f"headline 'people targeted' figure for "
+                                    f"this DREF / Emergency Appeal."
                                 )
                             else:
                                 definition = (
