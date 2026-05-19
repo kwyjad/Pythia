@@ -258,6 +258,12 @@ export type PerformanceScoresResponse = {
   track_counts?: {
     track1: number;
     track2: number;
+    /**
+     * Total distinct scored questions, including legacy questions that
+     * pre-date the Track 1/2 split (where ``q.track IS NULL``). Optional
+     * for backward compatibility with older API versions.
+     */
+    total?: number;
   };
 };
 
