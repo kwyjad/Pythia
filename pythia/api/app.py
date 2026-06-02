@@ -31,6 +31,7 @@ from pythia.api.db_sync import (
     db_was_refreshed,
     get_cached_latest_hs,
     get_cached_manifest,
+    get_sync_status,
     maybe_sync_latest_db,
 )
 from pythia.api.models import (
@@ -1218,7 +1219,25 @@ def _latest_questions_view(
 
 @app.get("/v1/health")
 def health():
-    return {"ok": True}
+    """Liveness + DB-sync health.
+
+    Always returns HTTP 200 so Render's health check does not kill the pod for
+    a recoverable data-sync problem, but flips ``status`` to ``"degraded"`` and
+    populates ``reason``/``sync`` when the most recent DB sync errored or the
+    on-disk DB has drifted behind the published release. This makes a silent
+    sync failure (e.g. a wedged temp path freezing the API on a stale DB)
+    visible without trawling the server logs.
+    """
+    sync = get_sync_status()
+    degraded = bool(sync.get("last_error")) or sync.get("in_sync") is False
+    if not degraded:
+        return {"ok": True, "status": "ok", "sync": sync}
+    return {
+        "ok": True,
+        "status": "degraded",
+        "reason": "db_sync_failing",
+        "sync": sync,
+    }
 
 
 @app.get("/v1/version")
@@ -1232,6 +1251,8 @@ def api_version() -> Dict[str, Any]:
     if not manifest:
         raise HTTPException(status_code=503, detail="Manifest not available yet")
     result = dict(manifest)
+    # Surface DB-sync health so a stale/drifted API is obvious at a glance.
+    result["sync_status"] = get_sync_status()
     # Add DB staleness diagnostics so operators can verify the API has the latest data.
     try:
         con = _con()
