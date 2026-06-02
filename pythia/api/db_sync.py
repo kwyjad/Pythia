@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -28,6 +29,24 @@ _LATEST_RUNS: Optional[Dict[str, Any]] = None
 _SYNC_LOCK = threading.Lock()
 _DB_REFRESHED = threading.Event()
 
+# Sync-health observability. These record the outcome of the most recent sync
+# attempt so operators can see failures via /v1/version and /v1/health without
+# having to read the server logs. ``_LAST_DOWNLOADED_KEY`` is the manifest key
+# (db_sha256, falling back to latest_hs_run_id) of the DB currently on disk; it
+# is compared against the live manifest to derive ``in_sync`` cheaply, without
+# re-hashing the (large) DB file on every call.
+_LAST_SYNC_ERROR: Optional[str] = None
+_LAST_SYNC_OK_AT: Optional[str] = None
+_LAST_SYNC_ATTEMPT_AT: Optional[str] = None
+# Key (db_sha256, falling back to latest_hs_run_id) of the DB currently on disk.
+_LAST_DOWNLOADED_KEY: Optional[str] = None
+# Key of the newest manifest we have observed from the release — updated even
+# when the subsequent DB download fails, so ``in_sync`` correctly reports drift
+# (a new release the API has not yet managed to download). Kept separate from
+# ``_LAST_MANIFEST`` because that one drives the download decision and must NOT
+# advance on failure (or retries would stop).
+_LAST_FETCHED_KEY: Optional[str] = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +59,10 @@ def _get_env(name: str, default: Optional[str] = None) -> Optional[str]:
     if value is None or value == "":
         return default
     return value
+
+
+def _utc_now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _db_path_from_config() -> Path:
@@ -124,6 +147,28 @@ def download_db_atomic(dest_path: Path) -> None:
     urls = get_release_urls()
     tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Self-heal a wedged temp path. A crashed/interrupted download (or an older
+    # code path / artifact sync) can leave ``<dest>.tmp`` behind as a *directory*
+    # on a persistent disk. ``tmp_path.open("wb")`` would then fail with
+    # ``[Errno 21] Is a directory`` on every subsequent sync, silently freezing
+    # the API on a stale DB. Clear any pre-existing temp path (file or dir)
+    # before writing so the download can always proceed.
+    if tmp_path.is_dir() and not tmp_path.is_symlink():
+        logger.warning("Removing stale temp directory before download: %s", tmp_path)
+        shutil.rmtree(tmp_path, ignore_errors=True)
+    elif tmp_path.exists() or tmp_path.is_symlink():
+        try:
+            tmp_path.unlink()
+        except OSError as exc:
+            logger.warning("Failed to remove stale temp file %s: %s", tmp_path, exc)
+
+    # The destination must be a regular file for ``os.replace`` to swap it. If a
+    # directory has somehow taken its place, fail loudly rather than wedge.
+    if dest_path.is_dir() and not dest_path.is_symlink():
+        raise DbSyncError(
+            f"Destination DB path is a directory, not a file: {dest_path}"
+        )
 
     headers = _build_headers()
     headers["Cache-Control"] = "no-cache, no-store"
@@ -318,9 +363,32 @@ def _refresh_latest_runs(db_path: Path) -> None:
             pass
 
 
+def get_sync_status() -> Dict[str, Any]:
+    """Return a snapshot of the most recent DB-sync outcome.
+
+    ``in_sync`` is ``True`` when the key of the DB currently on disk matches the
+    newest manifest key we have observed from the release (cheap — no file
+    hashing). It is ``None`` when we have not yet observed both.
+    """
+    if _LAST_FETCHED_KEY is None or _LAST_DOWNLOADED_KEY is None:
+        in_sync: Optional[bool] = None
+    else:
+        in_sync = _LAST_FETCHED_KEY == _LAST_DOWNLOADED_KEY
+    return {
+        "last_error": _LAST_SYNC_ERROR,
+        "last_ok_at": _LAST_SYNC_OK_AT,
+        "last_attempt_at": _LAST_SYNC_ATTEMPT_AT,
+        "manifest_key": _LAST_FETCHED_KEY,
+        "downloaded_key": _LAST_DOWNLOADED_KEY,
+        "in_sync": in_sync,
+    }
+
+
 def maybe_sync_latest_db() -> Optional[Dict[str, Any]]:
     global _LAST_MANIFEST, _LAST_SYNC_AT
     global _LATEST_RUNS
+    global _LAST_SYNC_ERROR, _LAST_SYNC_OK_AT, _LAST_SYNC_ATTEMPT_AT
+    global _LAST_DOWNLOADED_KEY, _LAST_FETCHED_KEY
 
     dest_path = _db_path_from_config()
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -331,26 +399,42 @@ def maybe_sync_latest_db() -> Optional[Dict[str, Any]]:
         if _LAST_SYNC_AT is not None and now - _LAST_SYNC_AT < interval_s:
             return get_cached_manifest()
         _LAST_SYNC_AT = now
+        _LAST_SYNC_ATTEMPT_AT = _utc_now_iso()
 
-        manifest = fetch_manifest()
-        manifest_key = _manifest_key(manifest)
-        last_key = _manifest_key(_LAST_MANIFEST) if _LAST_MANIFEST else None
-        should_download = not dest_path.exists()
-        if manifest_key and last_key:
-            if manifest_key != last_key:
-                should_download = True
-        elif manifest_key and not last_key:
-            should_download = True
-        elif not manifest_key and _LAST_MANIFEST is None:
+        try:
+            manifest = fetch_manifest()
+            manifest_key = _manifest_key(manifest)
+            # Record the newest release we've seen *before* attempting the
+            # download, so a failed download leaves ``in_sync`` reporting drift.
+            if manifest_key:
+                _LAST_FETCHED_KEY = manifest_key
+            last_key = _manifest_key(_LAST_MANIFEST) if _LAST_MANIFEST else None
             should_download = not dest_path.exists()
+            if manifest_key and last_key:
+                if manifest_key != last_key:
+                    should_download = True
+            elif manifest_key and not last_key:
+                should_download = True
+            elif not manifest_key and _LAST_MANIFEST is None:
+                should_download = not dest_path.exists()
 
-        if should_download:
-            download_db_atomic(dest_path)
-            _DB_REFRESHED.set()
-            logger.info("DB refreshed from release (key=%s)", manifest_key)
+            if should_download:
+                download_db_atomic(dest_path)
+                _DB_REFRESHED.set()
+                _LAST_DOWNLOADED_KEY = manifest_key
+                logger.info("DB refreshed from release (key=%s)", manifest_key)
+            elif _LAST_DOWNLOADED_KEY is None and manifest_key:
+                # DB already on disk and matches the manifest (e.g. survived a
+                # restart with a persistent disk); treat it as in-sync.
+                _LAST_DOWNLOADED_KEY = manifest_key
 
-        if should_download or _LATEST_RUNS is None:
-            _refresh_latest_runs(dest_path)
+            if should_download or _LATEST_RUNS is None:
+                _refresh_latest_runs(dest_path)
 
-        _LAST_MANIFEST = dict(manifest)
-        return get_cached_manifest()
+            _LAST_MANIFEST = dict(manifest)
+            _LAST_SYNC_ERROR = None
+            _LAST_SYNC_OK_AT = _utc_now_iso()
+            return get_cached_manifest()
+        except DbSyncError as exc:
+            _LAST_SYNC_ERROR = str(exc)
+            raise
