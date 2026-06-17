@@ -2,9 +2,14 @@ name: Publish Latest Data (Release)
 
 on:
   workflow_run:
+    # NOTE: "Resolver Update" is intentionally NOT a trigger here. It used to be,
+    # but it kicks off the resolution→scores→calibration chain in parallel with
+    # publish, so a Resolver-Update-triggered publish raced ahead and shipped the
+    # pre-resolution DB (stale resolutions/scores, empty calibration_*). The
+    # calibration workflow now dispatches publish explicitly at the end of that
+    # chain (see compute_calibration_pythia.yml), so the terminus DB always wins.
     workflows:
       - "Horizon Scanner Triage"
-      - "Resolver Update"
       - "Pythia — Compute Calibration Weights & Advice"
     types: [completed]
   workflow_dispatch:

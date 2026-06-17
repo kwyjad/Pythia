@@ -20,7 +20,7 @@ concurrency:
 
 permissions:
   contents: read
-  actions: read
+  actions: write   # needed to dispatch publish_latest_data.yml at the end of the chain
 
 jobs:
   compute-calibration:
@@ -221,3 +221,20 @@ jobs:
         with:
           name: pythia-resolver-db
           path: data/resolver.duckdb
+
+      # The implicit workflow_run chain (Resolver Update → Resolutions → Scores →
+      # Calibration → Publish) is too deep: GitHub does not propagate the
+      # workflow_run event from Calibration to "Publish Latest Data (Release)", so
+      # the post-calibration terminus DB never reaches the release on its own.
+      # Dispatch the publish explicitly, targeting THIS run's pythia-resolver-db
+      # artifact (uploaded in the step above). workflow_dispatch is one of the
+      # documented events that GITHUB_TOKEN is allowed to trigger, so no PAT needed.
+      - name: Publish post-calibration DB to release
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run publish_latest_data.yml \
+            -R "${{ github.repository }}" \
+            --ref main \
+            -f run_id=${{ github.run_id }}
