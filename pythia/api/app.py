@@ -1267,6 +1267,41 @@ def api_version() -> Dict[str, Any]:
     except Exception:
         result["latest_forecast_month"] = None
         result["latest_forecast_run_id"] = None
+
+    # "Last updated" should reflect the most recent *pipeline activity*, not just
+    # the last Horizon Scanner run. The scoring/calibration loop updates the data
+    # the dashboard shows (resolutions/scores/calibration) without creating a new
+    # HS run, so latest_hs_created_at alone under-reports freshness. Surface a
+    # unified latest_data_at = MAX(created_at) across the contributing tables.
+    # NOTE: deliberately excludes the manifest's `created_utc` (publish/repackage
+    # time), which is later than and distinct from when the data was computed.
+    def _max_created_at(table: str) -> Optional[str]:
+        try:
+            con_local = _con()
+            r = con_local.execute(
+                f"SELECT strftime(MAX(created_at), '%Y-%m-%dT%H:%M:%S') "
+                f"FROM {table} WHERE created_at IS NOT NULL"
+            ).fetchone()
+            return r[0] if r and r[0] else None
+        except Exception:
+            return None
+
+    result["latest_scores_at"] = _max_created_at("scores")
+    result["latest_calibration_at"] = _max_created_at("calibration_weights")
+    latest_resolutions_at = _max_created_at("resolutions")
+    latest_advice_at = _max_created_at("calibration_advice")
+    latest_forecast_at = _max_created_at("forecasts_ensemble")
+
+    candidates = [
+        result.get("latest_hs_created_at"),
+        latest_forecast_at,
+        latest_resolutions_at,
+        result["latest_scores_at"],
+        result["latest_calibration_at"],
+        latest_advice_at,
+    ]
+    normalized = [str(c)[:19] for c in candidates if c]
+    result["latest_data_at"] = max(normalized) if normalized else None
     return result
 
 
