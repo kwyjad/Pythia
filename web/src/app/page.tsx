@@ -75,8 +75,14 @@ export default async function OverviewPage({
         <p className="text-sm text-fred-text">
           Last updated:{" "}
           <span className="text-fred-text font-medium">
-            {formatLastUpdated(version.latest_hs_created_at)}
+            {formatLastUpdated(
+              version.latest_data_at ?? version.latest_hs_created_at
+            )}
           </span>
+        </p>
+        <p className="text-xs text-fred-muted">
+          Latest forecast scan:{" "}
+          {formatLastUpdated(version.latest_hs_created_at)}
         </p>
       </section>
 
