@@ -12,6 +12,7 @@ import type {
   PerformanceSummaryRow,
   ResolutionRateRow,
   ResolutionRatesResponse,
+  ScoreFamily,
 } from "../../lib/types";
 
 // ---------------------------------------------------------------------------
@@ -26,17 +27,24 @@ type PerformancePanelProps = {
 };
 
 // Aggregated row used by Total, By Hazard, and By Model views after pivoting.
+// `avg_brier`/`n_questions`/`n_samples` are the SPD family (multiclass, 0-2);
+// the `*_binary` fields are the EVENT_OCCURRENCE family (0-1). The two families
+// are never blended into a single average.
 type PivotedRow = {
   key: string;
   label: string;
   avg_brier: number | null;
   median_brier: number | null;
+  avg_brier_binary: number | null;
+  median_brier_binary: number | null;
   avg_log: number | null;
   median_log: number | null;
   avg_crps: number | null;
   median_crps: number | null;
   n_questions: number;
   n_samples: number;
+  n_questions_binary: number;
+  n_samples_binary: number;
 };
 
 // Aggregated row used by the By Run view after pivoting.
@@ -47,12 +55,16 @@ type RunPivotedRow = {
   run_date: string | null;
   avg_brier: number | null;
   median_brier: number | null;
+  avg_brier_binary: number | null;
+  median_brier_binary: number | null;
   avg_log: number | null;
   median_log: number | null;
   avg_crps: number | null;
   median_crps: number | null;
   n_questions: number;
   n_samples: number;
+  n_questions_binary: number;
+  n_samples_binary: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -67,8 +79,14 @@ const VIEW_LABELS: { key: ViewMode; label: string }[] = [
 ];
 
 // Shared tooltip texts (consistent across all views)
-const TOOLTIP_BRIER =
-  "Brier score measures the accuracy of probabilistic predictions. Lower is better. Range: 0 (perfect) to 1.";
+const TOOLTIP_BRIER_SPD =
+  "Multiclass Brier score for SPD questions (PA, FATALITIES, PHASE3PLUS_IN_NEED). " +
+  "Lower is better. Range: 0 (perfect) to 2. Not comparable to Binary Brier.";
+const TOOLTIP_BRIER_BINARY =
+  "Brier score for binary EVENT_OCCURRENCE questions: (forecast_p − outcome)². " +
+  "Lower is better. Range: 0 (perfect) to 1. Structurally near-zero for rare events " +
+  "correctly forecast as unlikely. Not comparable to SPD Brier — the two families " +
+  "are never averaged together.";
 const TOOLTIP_LOG =
   "Logarithmic scoring rule. Lower is better. Heavily penalises confident wrong predictions. Range: 0 (perfect) to +\u221E.";
 const TOOLTIP_CRPS =
@@ -144,10 +162,28 @@ const formatInt = (value: number | null | undefined) => {
   return value.toLocaleString();
 };
 
-/** Compute weighted average + weighted median of `scoreType` across rows. */
+/**
+ * Resolve a row's Brier family. Prefers the API-provided `score_family`, but
+ * falls back to deriving it from the metric so the UI stays correct even if the
+ * frontend is deployed ahead of the API that adds the field.
+ */
+const familyOf = (row: {
+  score_family?: ScoreFamily;
+  metric?: string;
+}): ScoreFamily =>
+  row.score_family ??
+  ((row.metric ?? "").toUpperCase() === "EVENT_OCCURRENCE" ? "binary" : "spd");
+
+/**
+ * Compute weighted average + weighted median of `scoreType` across rows.
+ * When `family` is provided, only rows of that Brier family are included, so a
+ * single call never blends binary (0-1) and multiclass SPD (0-2) Brier scales.
+ */
 function aggregateScore<
   T extends {
     score_type: string;
+    score_family?: ScoreFamily;
+    metric?: string;
     avg_value: number | null;
     median_value: number | null;
     n_samples: number;
@@ -156,13 +192,18 @@ function aggregateScore<
 >(
   rows: T[],
   scoreType: string,
+  family?: ScoreFamily,
 ): {
   avg: number | null;
   median: number | null;
   nQuestions: number;
   nSamples: number;
 } {
-  const matching = rows.filter((r) => r.score_type === scoreType);
+  const matching = rows.filter(
+    (r) =>
+      r.score_type === scoreType &&
+      (family === undefined || familyOf(r) === family),
+  );
   let totalWeight = 0;
   let weightedSumAvg = 0;
   let weightedSumMedian = 0;
@@ -215,7 +256,7 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
     key: "avg_brier",
     label: (
       <span className="inline-flex items-center gap-1">
-        Avg Brier <InfoTooltip text={TOOLTIP_BRIER} />
+        SPD Brier <InfoTooltip text={TOOLTIP_BRIER_SPD} />
       </span>
     ),
     sortValue: (row) => row.avg_brier,
@@ -224,10 +265,21 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
   },
   {
     key: "median_brier",
-    label: "Mdn Brier",
+    label: "Mdn SPD Brier",
     sortValue: (row) => row.median_brier,
     defaultSortDirection: "asc",
     render: (row) => formatScore(row.median_brier),
+  },
+  {
+    key: "avg_brier_binary",
+    label: (
+      <span className="inline-flex items-center gap-1">
+        Binary Brier <InfoTooltip text={TOOLTIP_BRIER_BINARY} />
+      </span>
+    ),
+    sortValue: (row) => row.avg_brier_binary,
+    defaultSortDirection: "asc",
+    render: (row) => formatScore(row.avg_brier_binary),
   },
   {
     key: "avg_log",
@@ -267,10 +319,17 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
   },
   {
     key: "n_questions",
-    label: "Questions",
+    label: "SPD Q",
     sortValue: (row) => row.n_questions,
     defaultSortDirection: "desc",
     render: (row) => formatInt(row.n_questions),
+  },
+  {
+    key: "n_questions_binary",
+    label: "Binary Q",
+    sortValue: (row) => row.n_questions_binary,
+    defaultSortDirection: "desc",
+    render: (row) => formatInt(row.n_questions_binary),
   },
   {
     key: "n_samples",
@@ -301,7 +360,7 @@ const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
     key: "avg_brier",
     label: (
       <span className="inline-flex items-center gap-1">
-        Avg Brier <InfoTooltip text={TOOLTIP_BRIER} />
+        SPD Brier <InfoTooltip text={TOOLTIP_BRIER_SPD} />
       </span>
     ),
     sortValue: (row) => row.avg_brier,
@@ -310,10 +369,21 @@ const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
   },
   {
     key: "median_brier",
-    label: "Mdn Brier",
+    label: "Mdn SPD Brier",
     sortValue: (row) => row.median_brier,
     defaultSortDirection: "asc",
     render: (row) => formatScore(row.median_brier),
+  },
+  {
+    key: "avg_brier_binary",
+    label: (
+      <span className="inline-flex items-center gap-1">
+        Binary Brier <InfoTooltip text={TOOLTIP_BRIER_BINARY} />
+      </span>
+    ),
+    sortValue: (row) => row.avg_brier_binary,
+    defaultSortDirection: "asc",
+    render: (row) => formatScore(row.avg_brier_binary),
   },
   {
     key: "avg_log",
@@ -353,10 +423,17 @@ const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
   },
   {
     key: "n_questions",
-    label: "Questions",
+    label: "SPD Q",
     sortValue: (row) => row.n_questions,
     defaultSortDirection: "desc",
     render: (row) => formatInt(row.n_questions),
+  },
+  {
+    key: "n_questions_binary",
+    label: "Binary Q",
+    sortValue: (row) => row.n_questions_binary,
+    defaultSortDirection: "desc",
+    render: (row) => formatInt(row.n_questions_binary),
   },
   {
     key: "n_samples",
@@ -469,13 +546,16 @@ export default function PerformancePanel({
       data.summary_rows.map((r) => r.model_name).filter(Boolean),
     );
     const allRuns = new Set(data.run_rows.map((r) => r.forecaster_run_id ?? r.hs_run_id));
-    const brier = aggregateScore(ensembleRows, "brier");
+    const brierSpd = aggregateScore(ensembleRows, "brier", "spd");
+    const brierBinary = aggregateScore(ensembleRows, "brier", "binary");
     return {
       hazards: allHazards.size,
       models: allModels.size,
       runs: allRuns.size,
-      totalQuestions: brier.nQuestions,
-      overallBrier: brier.avg,
+      totalQuestions: brierSpd.nQuestions,
+      totalQuestionsBinary: brierBinary.nQuestions,
+      overallBrierSpd: brierSpd.avg,
+      overallBrierBinary: brierBinary.avg,
     };
   }, [data, activeEnsemble]);
 
@@ -495,20 +575,25 @@ export default function PerformancePanel({
     }
     const result: PivotedRow[] = [];
     for (const [gk, gRows] of groups) {
-      const brier = aggregateScore(gRows, "brier");
-      const log = aggregateScore(gRows, "log");
-      const crps = aggregateScore(gRows, "crps");
+      const brierSpd = aggregateScore(gRows, "brier", "spd");
+      const brierBinary = aggregateScore(gRows, "brier", "binary");
+      const log = aggregateScore(gRows, "log", "spd");
+      const crps = aggregateScore(gRows, "crps", "spd");
       result.push({
         key: gk,
         label: labelFor(gk),
-        avg_brier: brier.avg,
-        median_brier: brier.median,
+        avg_brier: brierSpd.avg,
+        median_brier: brierSpd.median,
+        avg_brier_binary: brierBinary.avg,
+        median_brier_binary: brierBinary.median,
         avg_log: log.avg,
         median_log: log.median,
         avg_crps: crps.avg,
         median_crps: crps.median,
-        n_questions: brier.nQuestions,
-        n_samples: brier.nSamples,
+        n_questions: brierSpd.nQuestions,
+        n_samples: brierSpd.nSamples,
+        n_questions_binary: brierBinary.nQuestions,
+        n_samples_binary: brierBinary.nSamples,
       });
     }
     return result;
@@ -556,9 +641,10 @@ export default function PerformancePanel({
     }
     const result: RunPivotedRow[] = [];
     for (const [runId, gRows] of groups) {
-      const brier = aggregateScore(gRows, "brier");
-      const log = aggregateScore(gRows, "log");
-      const crps = aggregateScore(gRows, "crps");
+      const brierSpd = aggregateScore(gRows, "brier", "spd");
+      const brierBinary = aggregateScore(gRows, "brier", "binary");
+      const log = aggregateScore(gRows, "log", "spd");
+      const crps = aggregateScore(gRows, "crps", "spd");
       const runDate = gRows[0]?.run_date ?? null;
       const forecasterRunId = gRows[0]?.forecaster_run_id ?? null;
       const hsRunId = gRows[0]?.hs_run_id ?? runId;
@@ -567,14 +653,18 @@ export default function PerformancePanel({
         forecaster_run_id: forecasterRunId,
         hs_run_id: hsRunId,
         run_date: runDate,
-        avg_brier: brier.avg,
-        median_brier: brier.median,
+        avg_brier: brierSpd.avg,
+        median_brier: brierSpd.median,
+        avg_brier_binary: brierBinary.avg,
+        median_brier_binary: brierBinary.median,
         avg_log: log.avg,
         median_log: log.median,
         avg_crps: crps.avg,
         median_crps: crps.median,
-        n_questions: brier.nQuestions,
-        n_samples: brier.nSamples,
+        n_questions: brierSpd.nQuestions,
+        n_samples: brierSpd.nSamples,
+        n_questions_binary: brierBinary.nQuestions,
+        n_samples_binary: brierBinary.nSamples,
       });
     }
     return result;
@@ -701,10 +791,25 @@ export default function PerformancePanel({
             label={
               <span className="inline-flex items-center gap-1">
                 Ensemble Brier{" "}
-                <InfoTooltip text="Average Brier score across all ensemble forecasts. Lower is better." />
+                <InfoTooltip
+                  text={
+                    "Average ensemble Brier score, split by family because the " +
+                    "two scales are not comparable. SPD = multiclass " +
+                    "(PA/FATALITIES/PHASE3PLUS_IN_NEED, range 0-2). Binary = " +
+                    "EVENT_OCCURRENCE (range 0-1, near-zero for rare events " +
+                    "correctly forecast as unlikely). Lower is better."
+                  }
+                />
               </span>
             }
-            value={formatScore(kpiStats.overallBrier)}
+            value={
+              <span className="inline-flex flex-col leading-tight">
+                <span>SPD {formatScore(kpiStats.overallBrierSpd)}</span>
+                <span className="text-fred-muted">
+                  Binary {formatScore(kpiStats.overallBrierBinary)}
+                </span>
+              </span>
+            }
           />
         </div>
       </section>

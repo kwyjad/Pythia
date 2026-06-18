@@ -338,6 +338,29 @@ def test_performance_scores_binary(api_env: None) -> None:
     for row in payload["summary_rows"]:
         # Binary questions only have Brier scores
         assert row["score_type"] == "brier"
+        # ...and are tagged as the 'binary' Brier family (0-1 scale), so the
+        # dashboard never averages them together with multiclass SPD Brier.
+        assert row["score_family"] == "binary"
+    for row in payload["run_rows"]:
+        assert row["score_family"] == "binary"
+
+
+def test_performance_scores_family_split(api_env: None) -> None:
+    """Unfiltered performance scores tag each row with binary/spd family."""
+    client = TestClient(app)
+    resp = client.get("/v1/performance/scores")
+    assert resp.status_code == 200
+    payload = resp.json()
+    seen = set()
+    for row in payload["summary_rows"] + payload["run_rows"]:
+        fam = row["score_family"]
+        assert fam in ("binary", "spd")
+        # Family is derived purely from the metric.
+        expected = "binary" if row["metric"].upper() == "EVENT_OCCURRENCE" else "spd"
+        assert fam == expected
+        seen.add(fam)
+    # The fixture seeds both binary (EVENT_OCCURRENCE) and SPD questions.
+    assert "binary" in seen and "spd" in seen
 
 
 def test_diagnostics_kpi_scopes_event_occurrence(api_env: None) -> None:

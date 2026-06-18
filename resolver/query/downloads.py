@@ -668,7 +668,10 @@ def build_ensemble_scores_export(con, model_filter: str, include_test: bool = Fa
         model_filter: substring to match model_name in scores table
             (e.g. ``'ensemble_mean'`` or ``'ensemble_bayesmc'``).
 
-    Returns a DataFrame with 56 columns matching the Scores_ensemble template.
+    Returns a DataFrame matching the Scores_ensemble template, including a
+    ``metric_family`` column ('binary' for EVENT_OCCURRENCE, 'spd' otherwise).
+    Binary Brier (0-1) and multiclass SPD Brier (0-2) are on different scales
+    and must never be averaged together — group by ``metric_family`` first.
     """
 
     columns: list[str] = [
@@ -679,6 +682,7 @@ def build_ensemble_scores_export(con, model_filter: str, include_test: bool = Fa
         "country_name",
         "hazard_type",
         "metric",
+        "metric_family",
         "triage_score",
         "triage_class",
         "rc_score",
@@ -785,6 +789,14 @@ def build_ensemble_scores_export(con, model_filter: str, include_test: bool = Fa
             "country_name": base["country_name"],
             "hazard_type": base["hazard_code"],
             "metric": base["metric"],
+            # Brier scores for binary (EVENT_OCCURRENCE, range 0-1) and
+            # multiclass SPD (range 0-2) questions are on different scales and
+            # must NEVER be averaged together.  This column lets consumers group
+            # by family before aggregating (a blind mean of the `brier` column
+            # across families is meaningless).
+            "metric_family": base["metric"].map(
+                lambda m: "binary" if str(m).upper() == "EVENT_OCCURRENCE" else "spd"
+            ),
             "triage_score": base.get("triage_score"),
             "triage_class": base.get("triage_class"),
             "rc_score": base.get("rc_score"),

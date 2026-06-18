@@ -205,9 +205,18 @@ export type QuestionsResponse = {
   }>;
 };
 
+/**
+ * Brier score family. `binary` = EVENT_OCCURRENCE (range 0-1); `spd` =
+ * multiclass PA/FATALITIES/PHASE3PLUS_IN_NEED (range 0-2). The two are on
+ * different scales and must never be averaged together. Optional because a
+ * frontend build may be deployed ahead of the API that adds the field.
+ */
+export type ScoreFamily = "binary" | "spd";
+
 export type PerformanceSummaryRow = {
   hazard_code: string;
   metric: string;
+  score_family?: ScoreFamily;
   score_type: string;
   model_name: string | null;
   n_samples: number;
@@ -225,6 +234,7 @@ export type PerformanceRunRow = {
   run_date: string | null;
   hazard_code: string;
   metric: string;
+  score_family?: ScoreFamily;
   score_type: string;
   model_name: string | null;
   n_samples: number;
