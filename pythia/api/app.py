@@ -1898,6 +1898,12 @@ def performance_scores(
       By Hazard, and By Model views.
     - ``run_rows``: ensemble-only scores grouped by HS run (and hazard/metric/
       score_type).  Powers the By Run view.
+
+    Each row also carries a derived ``score_family`` field: ``'binary'`` for
+    EVENT_OCCURRENCE questions (Brier range 0-1) and ``'spd'`` for multiclass
+    questions (PA / FATALITIES / PHASE3PLUS_IN_NEED, Brier range 0-2).  These
+    two families are on different scales and MUST NEVER be averaged together —
+    the dashboard renders them as separate columns/KPIs.
     """
     con = _con()
 
@@ -1960,6 +1966,7 @@ def performance_scores(
         SELECT
           q.hazard_code,
           UPPER(q.metric) AS metric,
+          CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END AS score_family,
           s.score_type,
           s.model_name,
           COUNT(*) AS n_samples,
@@ -1969,7 +1976,9 @@ def performance_scores(
         FROM scores s
         JOIN questions q ON q.question_id = s.question_id
         WHERE 1=1 {metric_filter} {track_filter}{_tf}
-        GROUP BY q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
+        GROUP BY q.hazard_code, UPPER(q.metric),
+                 CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END,
+                 s.score_type, s.model_name
         ORDER BY q.hazard_code, UPPER(q.metric), s.score_type,
                  s.model_name NULLS FIRST
     """
@@ -1991,6 +2000,7 @@ def performance_scores(
               STRFTIME(MAX(h.generated_at), '%Y-%m-%d') AS run_date,
               q.hazard_code,
               UPPER(q.metric) AS metric,
+              CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END AS score_family,
               s.score_type,
               s.model_name,
               COUNT(*) AS n_samples,
@@ -2006,6 +2016,7 @@ def performance_scores(
             GROUP BY s.run_id,
                      COALESCE(rp.hs_run_id, q.hs_run_id),
                      q.hazard_code, UPPER(q.metric),
+                     CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END,
                      s.score_type, s.model_name
             ORDER BY run_date DESC NULLS LAST, q.hazard_code, s.score_type,
                      s.model_name NULLS FIRST
@@ -2018,6 +2029,7 @@ def performance_scores(
               STRFTIME(MAX(h.generated_at), '%Y-%m-%d') AS run_date,
               q.hazard_code,
               UPPER(q.metric) AS metric,
+              CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END AS score_family,
               s.score_type,
               s.model_name,
               COUNT(*) AS n_samples,
@@ -2028,7 +2040,9 @@ def performance_scores(
             JOIN questions q ON q.question_id = s.question_id
             LEFT JOIN hs_runs h ON q.hs_run_id = h.hs_run_id
             WHERE 1=1 {metric_filter} {track_filter}{_tf}
-            GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
+            GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric),
+                     CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END,
+                     s.score_type, s.model_name
             ORDER BY run_date DESC NULLS LAST, q.hazard_code, s.score_type,
                      s.model_name NULLS FIRST
         """
@@ -2040,6 +2054,7 @@ def performance_scores(
               NULL AS run_date,
               q.hazard_code,
               UPPER(q.metric) AS metric,
+              CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END AS score_family,
               s.score_type,
               s.model_name,
               COUNT(*) AS n_samples,
@@ -2049,7 +2064,9 @@ def performance_scores(
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
             WHERE 1=1 {metric_filter} {track_filter}{_tf}
-            GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric), s.score_type, s.model_name
+            GROUP BY q.hs_run_id, q.hazard_code, UPPER(q.metric),
+                     CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END,
+                     s.score_type, s.model_name
             ORDER BY q.hs_run_id DESC, q.hazard_code, s.score_type,
                      s.model_name NULLS FIRST
         """
