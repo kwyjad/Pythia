@@ -205,9 +205,18 @@ def aggregate_spd(
 
 
 def aggregate_spd_v2_mean(
-    per_model_spds: list[dict[str, list[float]]], *, n_buckets: int = 5
+    per_model_spds: list[dict[str, list[float]]],
+    *,
+    n_buckets: int = 5,
+    member_weights: Optional[list[float]] = None,
 ) -> dict[str, list[float]]:
-    """Simple mean aggregation for SPD v2 per month across ensemble members."""
+    """Mean aggregation for SPD v2 per month across ensemble members.
+
+    ``member_weights`` (optional) is index-aligned with ``per_model_spds``
+    and turns the simple mean into a weighted mean (weights renormalized
+    over the members actually contributing to each month). ``None`` keeps
+    the legacy unweighted behavior.
+    """
 
     if not per_model_spds:
         return {}
@@ -218,22 +227,33 @@ def aggregate_spd_v2_mean(
 
     out: dict[str, list[float]] = {}
     for month in sorted(months):
-        vecs: list[list[float]] = []
-        for mspds in per_model_spds:
+        vecs: list[tuple[list[float], float]] = []
+        for i, mspds in enumerate(per_model_spds):
             vec = mspds.get(month)
             if not vec:
                 continue
-            vecs.append(sanitize_mcq_vector(list(vec), n_options=n_buckets))
+            w = 1.0
+            if member_weights is not None and i < len(member_weights):
+                try:
+                    w = max(float(member_weights[i]), 0.0)
+                except Exception:
+                    w = 1.0
+            if w <= 0.0:
+                continue
+            vecs.append((sanitize_mcq_vector(list(vec), n_options=n_buckets), w))
 
         if not vecs:
             continue
 
+        w_total = sum(w for _, w in vecs)
+        if w_total <= 0.0:
+            continue
         sums = [0.0] * n_buckets
-        for vec in vecs:
+        for vec, w in vecs:
             for idx, val in enumerate(vec[:n_buckets]):
-                sums[idx] += float(val)
+                sums[idx] += w * float(val)
 
-        mean_vec = [val / float(len(vecs)) for val in sums]
+        mean_vec = [val / w_total for val in sums]
         out[month] = sanitize_mcq_vector(mean_vec, n_options=n_buckets)
 
     return out

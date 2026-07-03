@@ -71,6 +71,16 @@ def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None
 MIN_QUESTIONS = 20
 HALF_LIFE_MONTHS = 12.0
 
+# Score rows written for ensemble aggregations rather than individual
+# ensemble members. These must NOT compete in the per-model weight softmax:
+# they are outputs of the ensemble, not inputs to it, and (being aggregates)
+# they typically have the best Brier — diluting every member's weight and
+# making the "best model" advice name an aggregate. NULL model_name rows
+# (the ensemble score convention in compute_scores) are excluded likewise.
+AGGREGATE_MODEL_NAMES = frozenset(
+    {"ensemble_mean_v2", "ensemble_bayesmc_v2", "track2_flash", "ensemble"}
+)
+
 # Adaptive softmax temperature (replaces fixed TEMP_SOFTMAX = 0.1)
 TEMP_SOFTMAX_BASE = 0.1       # asymptotic temperature at high N
 TEMP_SOFTMAX_HIGH = 0.5       # temperature at low N
@@ -181,9 +191,20 @@ def _group_by_hazard_metric(samples: List[Sample]) -> Dict[Tuple[str, str], List
 
 
 def _compute_weights_for_group(as_of_month: str, samples: List[Sample]) -> Tuple[List[Dict], str]:
-    brier_samples = [s for s in samples if s.score_type == "brier"]
+    # Weights are computed over individual ensemble members only — aggregate
+    # rows (ensemble_mean_v2/bayesmc/track2_flash/NULL) are excluded so they
+    # cannot dilute member weights or win "best model" advice.
+    member_samples = [
+        s
+        for s in samples
+        if s.model_name is not None and s.model_name not in AGGREGATE_MODEL_NAMES
+    ]
+    brier_samples = [s for s in member_samples if s.score_type == "brier"]
     if not brier_samples:
-        return [], "No Brier samples available for calibration."
+        return [], (
+            "No member-model Brier samples available for calibration "
+            "(aggregate/ensemble score rows are excluded from weighting)."
+        )
 
     question_keys = {s.question_key for s in brier_samples}
     n_questions = len(question_keys)
@@ -195,7 +216,7 @@ def _compute_weights_for_group(as_of_month: str, samples: List[Sample]) -> Tuple
     agg: Dict[str, Dict[Optional[str], Tuple[float, float]]] = defaultdict(lambda: defaultdict(lambda: (0.0, 0.0)))
     counts_samples: Dict[Optional[str], int] = defaultdict(int)
 
-    for s in samples:
+    for s in member_samples:
         age_m = _months_diff(as_of_month, s.observed_month)
         w = math.exp(-lambda_ * age_m)
         cur_sum, cur_w = agg[s.score_type][s.model_name]

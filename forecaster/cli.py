@@ -2027,26 +2027,28 @@ def _write_spd_members_v2_to_db(
             return specs_used[i]
         return None
 
+    anchor_month = _anchor_month_for_question(question_row)
+
     def _month_indices(spd: dict[str, list[float]]) -> list[tuple[int, str]]:
-        parsed = []
+        # Month index derived from each label (offset from the window anchor
+        # for calendar keys, numeric suffix for month_N keys) — never from
+        # sort position, which would shift months when a label is missing.
+        pairs: list[tuple[int, str]] = []
+        seen: set[int] = set()
         for key in spd.keys():
-            if isinstance(key, str) and key.startswith("month_"):
-                try:
-                    idx = int(key.split("_", 1)[1])
-                    parsed.append((idx, key))
-                    continue
-                except Exception:
-                    pass
-            dt = _parse_month_key(str(key))
-            if dt:
-                parsed.append((int(dt.strftime("%Y%m")), key))
-            else:
-                parsed.append((0, key))
-        parsed.sort(key=lambda t: (t[0], str(t[1])))
-        numbered = []
-        for new_idx, (_score, key) in enumerate(parsed[:6], start=1):
-            numbered.append((new_idx, key))
-        return numbered
+            idx = _month_index_for_label(str(key), anchor_month)
+            if idx is None:
+                print(
+                    f"[warn] Skipping unmappable member SPD month label {key!r} "
+                    f"for q={qid} (anchor={anchor_month})"
+                )
+                continue
+            if idx in seen:
+                continue
+            seen.add(idx)
+            pairs.append((idx, key))
+        pairs.sort()
+        return pairs
 
     # Pre-compute safe model names to avoid collisions when providers share a label.
     def _safe_names() -> list[str]:
@@ -3210,12 +3212,12 @@ def _build_question_evidence_query(question_row: duckdb.Row, wording: str) -> st
     metric = (question_row.get("metric") or "").upper()
 
     hazard_label = HZ_QUERY_MAP.get(hazard, hazard)
-    target_month = question_row.get("target_month") or ""
+    window_start = question_row.get("window_start_date") or ""
     window_end = question_row.get("window_end_date") or ""
 
     timeframe = ""
-    if target_month:
-        timeframe = f" starting {target_month}"
+    if window_start:
+        timeframe = f" starting {str(window_start)[:7]}"
     elif window_end:
         timeframe = f" through {window_end}"
 
@@ -3239,12 +3241,12 @@ def _build_question_evidence_queries(
     hazard = (question_row.get("hazard_code") or "").upper()
     metric = (question_row.get("metric") or "").upper()
     hazard_label = HZ_QUERY_MAP.get(hazard, hazard)
-    target_month = question_row.get("target_month") or ""
+    window_start = question_row.get("window_start_date") or ""
     window_end = question_row.get("window_end_date") or ""
 
     timeframe = ""
-    if target_month:
-        timeframe = f" starting {target_month}"
+    if window_start:
+        timeframe = f" starting {str(window_start)[:7]}"
     elif window_end:
         timeframe = f" through {window_end}"
 
@@ -3331,14 +3333,14 @@ def _build_spd_web_search_query(
     iso3: str | None,
     hazard_code: str | None,
     metric: str | None,
-    target_month: str | None,
+    anchor_month: str | None,
     wording: str | None,
 ) -> str:
     iso3_val = (iso3 or "").upper()
     hazard = (hazard_code or "").upper()
     metric_val = (metric or "").upper()
     hazard_label = HZ_QUERY_MAP.get(hazard, hazard)
-    timeframe = f" starting {target_month}" if target_month else ""
+    timeframe = f" starting {anchor_month}" if anchor_month else ""
     wording_val = wording or ""
     country = _country_label(iso3_val)
     return (
@@ -3461,7 +3463,7 @@ async def _call_spd_model(
     iso3: str | None = None,
     hazard_code: str | None = None,
     metric: str | None = None,
-    target_month: str | None = None,
+    anchor_month: str | None = None,
     wording: str | None = None,
 ) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the SPD LLM call for v2 pipeline."""
@@ -3487,7 +3489,7 @@ async def _call_spd_model(
         iso3=iso3,
         hazard_code=hazard_code,
         metric=metric,
-        target_month=target_month,
+        anchor_month=anchor_month,
         wording=wording,
     )
 
@@ -3501,7 +3503,7 @@ async def _call_spd_model_for_spec(
     iso3: str | None = None,
     hazard_code: str | None = None,
     metric: str | None = None,
-    target_month: str | None = None,
+    anchor_month: str | None = None,
     wording: str | None = None,
     **_kwargs,
 ) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
@@ -3527,7 +3529,7 @@ async def _call_spd_model_for_spec(
             iso3=iso3,
             hazard_code=hazard_code,
             metric=metric,
-            target_month=target_month,
+            anchor_month=anchor_month,
             wording=wording,
         )
         try:
@@ -3621,7 +3623,7 @@ async def _call_spd_model_for_spec(
             iso3=iso3,
             hazard_code=hazard_code,
             metric=metric,
-            target_month=target_month,
+            anchor_month=anchor_month,
             wording=wording,
         )
         try:
@@ -3791,7 +3793,7 @@ async def _call_spd_members_v2(
     iso3: str | None = None,
     hazard_code: str | None = None,
     metric: str | None = None,
-    target_month: str | None = None,
+    anchor_month: str | None = None,
     wording: str | None = None,
 ) -> tuple[
     list[dict[str, list[float]]],
@@ -3835,7 +3837,7 @@ async def _call_spd_members_v2(
             iso3=iso3,
             hazard_code=hazard_code,
             metric=metric,
-            target_month=target_month,
+            anchor_month=anchor_month,
             wording=wording,
         )
         for ms in specs_used
@@ -3954,7 +3956,7 @@ async def _call_spd_members_v2_compat(
     iso3: str | None = None,
     hazard_code: str | None = None,
     metric: str | None = None,
-    target_month: str | None = None,
+    anchor_month: str | None = None,
     wording: str | None = None,
 ) -> tuple[list[dict[str, list[float]]], dict[str, object], list[dict[str, object]], dict[str, object]]:
     """
@@ -3975,8 +3977,8 @@ async def _call_spd_members_v2_compat(
             kwargs["hazard_code"] = hazard_code
         if "metric" in sig.parameters:
             kwargs["metric"] = metric
-        if "target_month" in sig.parameters:
-            kwargs["target_month"] = target_month
+        if "anchor_month" in sig.parameters:
+            kwargs["anchor_month"] = anchor_month
         if "wording" in sig.parameters:
             kwargs["wording"] = wording
         return await fn(prompt, specs, **kwargs)
@@ -3992,7 +3994,7 @@ async def _call_spd_model_compat(
     iso3: str | None = None,
     hazard_code: str | None = None,
     metric: str | None = None,
-    target_month: str | None = None,
+    anchor_month: str | None = None,
     wording: str | None = None,
 ) -> tuple[str, dict[str, Any], Optional[str], ModelSpec]:
     """
@@ -4009,7 +4011,7 @@ async def _call_spd_model_compat(
             "iso3": iso3,
             "hazard_code": hazard_code,
             "metric": metric,
-            "target_month": target_month,
+            "anchor_month": anchor_month,
             "wording": wording,
         }.items():
             if key in sig.parameters:
@@ -4187,25 +4189,41 @@ def _add_months(ym: str, offset: int) -> str:
     return f"{year:04d}-{month:02d}"
 
 
-def _expected_months(target_month: str, n: int = 6) -> list[str]:
-    if not target_month:
+def _expected_months(anchor_month: str, n: int = 6) -> list[str]:
+    """Return the n forecast-window months starting at ``anchor_month``.
+
+    ``anchor_month`` is the FIRST window month (horizon_m=1) — see
+    ``_anchor_month_for_question``. It must never be the questions-table
+    ``target_month`` (the 6th window month).
+    """
+    if not anchor_month:
         return []
-    return [_add_months(target_month, i) for i in range(n)]
+    return [_add_months(anchor_month, i) for i in range(n)]
 
 
 def _build_bayesmc_spd_obj(
     per_model_spds: list[dict[str, list[float]]],
     *,
-    target_month: str | None,
+    anchor_month: str | None,
     specs_used: list[ModelSpec],
+    member_weights: Optional[Dict[str, float]] = None,
 ) -> tuple[dict[str, object], dict[str, Any]]:
+    # Model names use the disambiguated 'Name (model_id)' key so calibration
+    # weights resolve per member even when two specs share a display name.
+    member_keys = [_member_weight_key(ms) for ms in specs_used]
     spd_by_month, diag = aggregate_spd_v2_bayesmc(
         per_model_spds,
         n_buckets=5,
         prior_alpha=0.1,
-        weights_by_model=None,
-        model_names=[ms.name for ms in specs_used],
+        weights_by_model=member_weights,
+        model_names=member_keys,
     )
+    if isinstance(diag, dict):
+        diag["calibration_weights_applied"] = bool(member_weights)
+        if member_weights:
+            diag["calibration_weights"] = {
+                k: round(v, 4) for k, v in member_weights.items()
+            }
 
     if not isinstance(diag, dict):
         diag = {"status": "unknown"}
@@ -4220,14 +4238,19 @@ def _build_bayesmc_spd_obj(
     if keys and all(_is_calendar_month_key(k) for k in keys):
         normalized = dict(spd_by_month)
     elif any(_parse_month_offset_key(k) is not None for k in keys):
-        if not target_month:
-            diag["status"] = "missing_target_month"
+        if not anchor_month:
+            diag["status"] = "missing_anchor_month"
             return {}, diag
+        offsets = {k: _parse_month_offset_key(k) for k in spd_by_month.keys()}
+        parsed_offsets = [o for o in offsets.values() if o is not None]
+        # Canonical SPD keys are 1-based ('month_1' = anchor month). Only
+        # treat offsets as 0-based when a 0 key is actually present.
+        offset_base = 0 if (parsed_offsets and min(parsed_offsets) == 0) else 1
         for k, vec in spd_by_month.items():
-            offset = _parse_month_offset_key(k)
+            offset = offsets.get(k)
             if offset is None:
                 continue
-            ym = _add_months(target_month, offset)
+            ym = _add_months(anchor_month, offset - offset_base)
             if ym:
                 normalized[ym] = vec
         for k, vec in spd_by_month.items():
@@ -4238,8 +4261,8 @@ def _build_bayesmc_spd_obj(
         diag["sample_keys"] = sorted([str(k) for k in keys][:5])
         return {}, diag
 
-    if target_month:
-        expected_months = _expected_months(target_month, 6)
+    if anchor_month:
+        expected_months = _expected_months(anchor_month, 6)
         missing_months = [m for m in expected_months if m not in normalized]
         if missing_months:
             diag["status"] = "insufficient_month_coverage"
@@ -4258,7 +4281,7 @@ async def _call_spd_bayesmc_v2(
     run_id: str,
     question_id: str,
     hs_run_id: str | None,
-    target_month: str | None = None,
+    anchor_month: str | None = None,
     specs: list[ModelSpec] | None = None,
     iso3: str | None = None,
     hazard_code: str | None = None,
@@ -4281,8 +4304,8 @@ async def _call_spd_bayesmc_v2(
       - raw_calls: list of member call summaries (model_spec, text, usage, error)
       - ensemble_meta: {"n_models_active", "n_models_called", "n_models_ok", "failed_providers", "partial_ensemble", "skipped_providers"}
 
-    BayesMC emits month_* labels; when provided, ``target_month`` anchors those labels
-    to YYYY-MM calendar months for compatibility with SPD v2 compare artifacts.
+    BayesMC emits month_* labels; when provided, ``anchor_month`` (the FIRST
+    forecast-window month) anchors those labels to YYYY-MM calendar months.
     """
     specs = specs or DEFAULT_ENSEMBLE
     specs_used = [ms for ms in specs if ms.active]
@@ -4306,7 +4329,7 @@ async def _call_spd_bayesmc_v2(
         iso3=iso3,
         hazard_code=hazard_code,
         metric=metric,
-        target_month=target_month,
+        anchor_month=anchor_month,
         wording=wording,
     )
     member_raw_by_model_id: dict[str, str] = {}
@@ -4318,8 +4341,14 @@ async def _call_spd_bayesmc_v2(
         except Exception:
             continue
 
+    member_weights_by_key, _member_keys, _member_weight_list = _resolve_member_weights(
+        specs_used, hazard_code, metric
+    )
     spd_obj, _diag = _build_bayesmc_spd_obj(
-        per_model_spds, target_month=target_month, specs_used=specs_used
+        per_model_spds,
+        anchor_month=anchor_month,
+        specs_used=specs_used,
+        member_weights=member_weights_by_key,
     )
     try:
         ensemble_meta["bayesmc_diag"] = _diag
@@ -4800,7 +4829,17 @@ def _write_spd_outputs(
             "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ? AND model_name = ?;",
             [run_id, qid, model_name],
         )
-        for month_idx, (month_label, payload) in enumerate(sorted(spds.items()), start=1):
+        anchor_month = _anchor_month_for_question(rec)
+        for month_label, payload in sorted(spds.items()):
+            # Month index derived from the label itself, never from position:
+            # a missing/off-window label must not shift the others.
+            month_idx = _month_index_for_label(month_label, anchor_month)
+            if month_idx is None:
+                print(
+                    f"[warn] Skipping unmappable SPD month label {month_label!r} "
+                    f"for q={qid} (anchor={anchor_month})"
+                )
+                continue
             probs = payload.get("probs") if isinstance(payload, dict) else None
             if not probs:
                 continue
@@ -4922,6 +4961,65 @@ def _first_target_month(target_months: Any) -> str | None:
     return None
 
 
+def _anchor_month_for_question(rec: Mapping[str, Any]) -> str | None:
+    """Return the first forecast-window month ('YYYY-MM') for a question row.
+
+    ``window_start_date`` is authoritative: compute_resolutions maps
+    horizon_m=1 to the window_start month, so month labels in prompts and
+    month-offset expansion must anchor there. ``target_month`` in the
+    questions table is the 6th (last) window month, so when window_start
+    is missing the anchor is target_month minus 5 months. Anchoring at
+    target_month directly shifts every forecast +5 months (the bug that
+    affected runs 2026-03-21 → 2026-07-01).
+    """
+    ws = _coerce_date(rec.get("window_start_date"))
+    if ws is not None:
+        return f"{ws.year:04d}-{ws.month:02d}"
+    tm = _first_target_month(rec.get("target_months") or rec.get("target_month"))
+    if tm:
+        anchored = _add_months(tm[:7], -5)
+        return anchored or None
+    return None
+
+
+def _month_index_for_label(label: str, anchor_month: str | None) -> int | None:
+    """Map a forecast month label to its 1-based horizon index (1..6).
+
+    Calendar labels ('YYYY-MM' / 'YYYY-MM-DD') are offset from
+    ``anchor_month`` (the first window month, = resolutions horizon_m=1);
+    canonical 'month_N' labels map to N directly. Returns None for labels
+    that fall outside the 6-month window or cannot be parsed — positional
+    enumeration must never be used instead, because a missing or off-window
+    label would silently shift every subsequent month against resolutions.
+    """
+    s = str(label).strip()
+
+    def _cal_index(y: int, m: int) -> int | None:
+        if not anchor_month:
+            return None
+        try:
+            ay, am = map(int, anchor_month.split("-"))
+        except Exception:
+            return None
+        idx = (y * 12 + m) - (ay * 12 + am) + 1
+        return idx if 1 <= idx <= 6 else None
+
+    if _is_calendar_month_key(s):
+        y, m = map(int, s.split("-"))
+        return _cal_index(y, m)
+
+    offset = _parse_month_offset_key(s)
+    if offset is not None:
+        idx = offset if offset >= 1 else 1  # 'month_0' style → first month
+        return idx if 1 <= idx <= 6 else None
+
+    dt = _parse_month_key(s)
+    if dt is not None:
+        return _cal_index(dt.year, dt.month)
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Binary event forecast support (EVENT_OCCURRENCE questions)
 # ---------------------------------------------------------------------------
@@ -4960,7 +5058,17 @@ def _write_binary_outputs(
             "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ? AND model_name = ?;",
             [run_id, qid, model_name],
         )
-        for month_idx, month_label in enumerate(sorted(month_probs.keys()), start=1):
+        anchor_month = _anchor_month_for_question(rec)
+        for month_label in sorted(month_probs.keys()):
+            # Month index derived from the label itself, never from position:
+            # an off-window or missing label must not shift the others.
+            month_idx = _month_index_for_label(month_label, anchor_month)
+            if month_idx is None:
+                print(
+                    f"[warn] Skipping off-window binary month {month_label!r} "
+                    f"for q={qid} (anchor={anchor_month})"
+                )
+                continue
             p_yes = float(month_probs[month_label])
             # bucket_1 = P(yes), bucket_2 = P(no), buckets 3-5 = 0
             probs = [p_yes, 1.0 - p_yes, 0.0, 0.0, 0.0]
@@ -5060,7 +5168,6 @@ async def _run_binary_forecast_for_question(
         except Exception:
             pass
 
-        target_months = rec.get("target_months") or rec.get("target_month")
         window_start = rec.get("window_start_date")
 
         prompt = build_binary_event_prompt(
@@ -5097,7 +5204,7 @@ async def _run_binary_forecast_for_question(
             specs = specs_active
             model_name = "ensemble_mean_v2"
 
-        target_month = _first_target_month(target_months)
+        anchor_month = _anchor_month_for_question(rec)
 
         # Call models — reuse the same model calling infrastructure
         per_model_spds, usage, raw_calls, ensemble_meta = (
@@ -5109,7 +5216,7 @@ async def _run_binary_forecast_for_question(
                 iso3=iso3,
                 hazard_code=hz,
                 metric=metric,
-                target_month=target_month,
+                anchor_month=anchor_month,
                 wording=wording,
             )
         )
@@ -5135,13 +5242,26 @@ async def _run_binary_forecast_for_question(
                 hs_run_id=hs_run_id,
             )
 
-        # Parse binary responses from raw model outputs
+        # Parse binary responses from raw model outputs. Only months inside
+        # the question window are kept — an off-window (hallucinated) month
+        # label must not enter the aggregation.
+        expected_months = _expected_months(anchor_month, 6) if anchor_month else []
+        expected_set = set(expected_months)
         all_model_probs: list[dict[str, float]] = []
         for call in raw_calls:
             raw_text = str(call.get("text") or "")
             if not raw_text:
                 continue
-            parsed = parse_binary_response(raw_text)
+            parsed = parse_binary_response(raw_text, expected_months=expected_months or None)
+            if parsed and expected_set:
+                dropped = sorted(set(parsed) - expected_set)
+                if dropped:
+                    LOG.warning(
+                        "Binary forecast for %s: dropping off-window months %s "
+                        "(window %s..%s)",
+                        qid, dropped, expected_months[0], expected_months[-1],
+                    )
+                parsed = {m: p for m, p in parsed.items() if m in expected_set}
             if parsed:
                 all_model_probs.append(parsed)
 
@@ -5267,7 +5387,9 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
             research_json = dict(research_json)
 
         target_months = rec.get("target_months") or rec.get("target_month")
-        target_month = _first_target_month(target_months)
+        # First forecast-window month — NOT the questions-table target_month,
+        # which is the 6th window month (see _anchor_month_for_question).
+        anchor_month = _anchor_month_for_question(rec)
 
         # Inject NMME seasonal outlook for climate hazards.
         if hz in CLIMATE_HAZARDS and "nmme_seasonal_outlook" not in research_json:
@@ -5288,6 +5410,7 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
                 "metric": metric,
                 "resolution_source": resolution_source,
                 "wording": wording,
+                "window_start_date": rec.get("window_start_date"),
                 "target_months": target_months,
             },
             history_summary=history_summary,
@@ -5310,7 +5433,7 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
                 iso3=iso3,
                 hazard_code=hz,
                 metric=metric,
-                target_month=target_month,
+                anchor_month=anchor_month,
                 wording=wording,
             )
         )
@@ -5483,7 +5606,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 logging.debug("Seasonal forecast load failed for %s: %s", iso3, _exc)
 
         target_months = rec.get("target_months") or rec.get("target_month")
-        target_month = _first_target_month(target_months)
+        # First forecast-window month — NOT the questions-table target_month,
+        # which is the 6th window month (see _anchor_month_for_question).
+        anchor_month = _anchor_month_for_question(rec)
 
         question_evidence_pack = _load_question_evidence_pack(run_id, qid) if qid else None
         # DEPRECATED: question-level web research via fetch_evidence_pack is replaced
@@ -5531,6 +5656,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 "metric": metric,
                 "resolution_source": resolution_source,
                 "wording": wording,
+                "window_start_date": rec.get("window_start_date"),
                 "target_months": target_months,
             },
             history_summary=history_summary,
@@ -5614,7 +5740,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                         iso3=iso3,
                         hazard_code=hz,
                         metric=metric,
-                        target_month=target_month,
+                        anchor_month=anchor_month,
                         wording=wording,
                     )
                 )
@@ -5622,12 +5748,20 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     member_spds_snapshot = per_model_spds
                     member_specs_snapshot = specs_active
                     member_raw_calls_snapshot = raw_calls
-                spd_mean = aggregate_spd_v2_mean(per_model_spds)
+                member_weights_by_key, _member_keys, member_weight_list = (
+                    _resolve_member_weights(specs_active, hz, metric)
+                )
+                spd_mean = aggregate_spd_v2_mean(
+                    per_model_spds, member_weights=member_weight_list
+                )
                 spd_v2 = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
                 _attach_ensemble_meta(spd_v2, ensemble_meta)
 
                 spd_bm, diag_bm = _build_bayesmc_spd_obj(
-                    per_model_spds, target_month=target_month, specs_used=specs_active
+                    per_model_spds,
+                    anchor_month=anchor_month,
+                    specs_used=specs_active,
+                    member_weights=member_weights_by_key,
                 )
                 if spd_bm:
                     spd_bm.setdefault("bayesmc_diag", diag_bm)
@@ -5708,7 +5842,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 iso3=iso3,
                 hazard_code=hz,
                 metric=metric,
-                target_month=target_month,
+                anchor_month=anchor_month,
                 wording=wording,
             )
             if member_spds_snapshot is None:
@@ -5839,13 +5973,29 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             except Exception:  # noqa: BLE001
                 LOG.debug("Trace validation skipped for %s", qid, exc_info=True)
 
-            spd_mean = aggregate_spd_v2_mean(per_model_spds)
+            member_weights_by_key, _member_keys, member_weight_list = (
+                _resolve_member_weights(specs_used_for_bayesmc, hz, metric)
+            )
+            if member_weights_by_key:
+                LOG.info(
+                    "Applying calibration weights for %s (%s/%s): %s",
+                    qid,
+                    hz,
+                    metric,
+                    {k: round(v, 3) for k, v in member_weights_by_key.items()},
+                )
+            spd_mean = aggregate_spd_v2_mean(
+                per_model_spds, member_weights=member_weight_list
+            )
             spd_mean_obj = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
             if _has_v2_spds(spd_mean_obj):
                 _attach_ensemble_meta(spd_mean_obj, ensemble_meta)
 
             spd_bm_obj, diag_bm = _build_bayesmc_spd_obj(
-                per_model_spds, target_month=target_month, specs_used=specs_used_for_bayesmc
+                per_model_spds,
+                anchor_month=anchor_month,
+                specs_used=specs_used_for_bayesmc,
+                member_weights=member_weights_by_key,
             )
             if _has_v2_spds(spd_bm_obj):
                 spd_bm_obj.setdefault("bayesmc_diag", diag_bm)
@@ -5955,7 +6105,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 run_id=run_id,
                 question_id=qid,
                 hs_run_id=hs_run_id,
-                target_month=target_month,
+                anchor_month=anchor_month,
                 specs=specs_active,
                 iso3=iso3,
                 hazard_code=hz,
@@ -6113,7 +6263,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 iso3=iso3,
                 hazard_code=hz,
                 metric=metric,
-                target_month=target_month,
+                anchor_month=anchor_month,
                 wording=wording,
             )
 
@@ -6306,6 +6456,86 @@ def _load_calibration_weights_db(
             duckdb_io.close_db(conn)
         except Exception:
             pass
+
+
+def _calibration_weights_enabled() -> bool:
+    """Whether calibration weights are applied to ensemble aggregation."""
+    return os.getenv("PYTHIA_USE_CALIBRATION_WEIGHTS", "1") != "0"
+
+
+# Per-process cache: one DB read per (hazard, metric) per run instead of one
+# per question. Values may be None (no weights available).
+_CALIB_WEIGHTS_CACHE: Dict[Tuple[str, str], Optional[Dict[str, float]]] = {}
+
+
+def _member_weight_key(ms: ModelSpec) -> str:
+    """Disambiguated member key matching _write_spd_members_v2_to_db naming."""
+    return f"{getattr(ms, 'name', '')} ({getattr(ms, 'model_id', '')})"
+
+
+def _resolve_member_weights(
+    specs_used: list[ModelSpec],
+    hazard_code: str,
+    metric: str,
+) -> tuple[Optional[Dict[str, float]], list[str], Optional[list[float]]]:
+    """Resolve calibration weights for the given ensemble members.
+
+    Returns ``(weights_by_key, keys, weights_list)`` where ``keys`` is the
+    disambiguated member key per spec (index-aligned with ``specs_used``),
+    ``weights_by_key`` maps those keys to weights for BayesMC, and
+    ``weights_list`` is the same weights index-aligned for the mean
+    aggregation. Both weight values are ``None`` when weighting is disabled
+    or no stored weight matches any member.
+
+    Stored calibration weights are keyed by member display name — the plain
+    spec name ('Claude') or the disambiguated 'Name (model_id)' form used
+    when two specs share a name; both are tried. Members without a stored
+    weight get 1.0 (neutral). Weights are rescaled to mean 1.0 across
+    members so the total BayesMC evidence mass stays comparable to the
+    unweighted case (softmax weights sum to 1 and would otherwise shrink
+    the evidence relative to the prior).
+    """
+    keys = [_member_weight_key(ms) for ms in specs_used]
+    if not specs_used or not _calibration_weights_enabled():
+        return None, keys, None
+
+    cache_key = ((hazard_code or "").upper(), (metric or "").upper())
+    if cache_key not in _CALIB_WEIGHTS_CACHE:
+        try:
+            _CALIB_WEIGHTS_CACHE[cache_key] = _load_calibration_weights_db(
+                hazard_code, metric
+            )
+        except Exception:
+            _CALIB_WEIGHTS_CACHE[cache_key] = None
+    stored = _CALIB_WEIGHTS_CACHE[cache_key]
+    if not stored:
+        return None, keys, None
+
+    raw: list[float] = []
+    matched = 0
+    for ms, key in zip(specs_used, keys):
+        w = stored.get(key)
+        if w is None:
+            w = stored.get(getattr(ms, "name", ""))
+        if w is None:
+            raw.append(1.0)
+        else:
+            try:
+                raw.append(max(float(w), 0.0))
+                matched += 1
+            except Exception:
+                raw.append(1.0)
+
+    if matched == 0:
+        return None, keys, None
+
+    mean_w = sum(raw) / len(raw)
+    if mean_w <= 0.0:
+        return None, keys, None
+    scaled = [w / mean_w for w in raw]
+
+    weights_by_key = {k: w for k, w in zip(keys, scaled)}
+    return weights_by_key, keys, scaled
 
 
 def _expected_spd_model_ids() -> list[str]:
