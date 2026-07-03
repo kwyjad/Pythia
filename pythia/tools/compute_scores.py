@@ -649,14 +649,26 @@ def compute_scores(db_url: str) -> None:
                     else:
                         fe_rid_clause, fe_rid_params = "", []
 
-                    # Score ensemble (bucket_1 = P(yes) in binary convention)
+                    # Score ensemble (bucket_1 = P(yes) in binary convention).
+                    # Deterministic model selection: the NULL-model "ensemble"
+                    # score row is the MEAN aggregation (track2_flash for
+                    # Track 2 questions; legacy 'ensemble' rows as a last
+                    # resort). Without this filter the row picked depended on
+                    # created_at ordering between mean and bayesmc writes.
                     try:
                         ens_row = conn.execute(
                             f"""
                             SELECT probability FROM forecasts_ensemble
                             WHERE question_id = ? AND month_index = ? AND bucket_index = 1
+                              AND model_name IN ('ensemble_mean_v2', 'track2_flash', 'ensemble')
                             {fe_rid_clause}
-                            ORDER BY created_at DESC LIMIT 1
+                            ORDER BY CASE model_name
+                                       WHEN 'ensemble_mean_v2' THEN 0
+                                       WHEN 'track2_flash' THEN 1
+                                       ELSE 2
+                                     END,
+                                     created_at DESC
+                            LIMIT 1
                             """,
                             [question_id, horizon_m] + fe_rid_params,
                         ).fetchone()

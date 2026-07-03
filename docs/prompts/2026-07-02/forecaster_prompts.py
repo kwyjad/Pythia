@@ -1289,43 +1289,34 @@ def _forecast_month_keys_from_question(
     """
     Derive a list of YYYY-MM month keys for the SPD forecast horizon.
 
-    Preference order:
-      1. question['window_start_date'] — the authoritative window anchor.
-         Resolutions map horizon_m=1 to the window_start month, so the
-         first forecast key MUST be that month.
-      2. question['target_months'] / question['target_month'] — the 6th
-         (last) window month per create_questions_from_triage, so keys
-         start at target - (horizon_months - 1).
-      3. return [] (caller falls back to generic placeholders).
+    We prefer:
+      - question['target_months'], then
+      - question['target_month'], else
+      - return [] (caller falls back to generic placeholders).
 
-    Expected formats: 'YYYY-MM' or 'YYYY-MM-DD' (dates are accepted too
-    via str()).
+    Expected formats:
+      - 'YYYY-MM'
+      - 'YYYY-MM-DD'
     """
 
-    year: int | None = None
-    month: int | None = None
+    raw = str(
+        question.get("target_months")
+        or question.get("target_month")
+        or ""
+    ).strip()
+    if not raw:
+        return []
 
-    ws = str(question.get("window_start_date") or "").strip()
-    m = re.match(r"^(\d{4})-(\d{2})(?:-\d{2})?", ws)
-    if m:
+    # Normalize to 'YYYY-MM'
+    m = re.match(r"^(\d{4})-(\d{2})(?:-\d{2})?$", raw)
+    if not m:
+        return []
+
+    try:
         year = int(m.group(1))
         month = int(m.group(2))
-    else:
-        raw = str(
-            question.get("target_months")
-            or question.get("target_month")
-            or ""
-        ).strip()
-        if not raw:
-            return []
-        m = re.match(r"^(\d{4})-(\d{2})(?:-\d{2})?$", raw)
-        if not m:
-            return []
-        year = int(m.group(1))
-        month = int(m.group(2))
-        # target_month is the LAST window month: shift back to the opener.
-        total = year * 12 + (month - 1) - (horizon_months - 1)
-        year, month = total // 12, (total % 12) + 1
+    except Exception:
+        return []
 
     if not (1 <= month <= 12):
         return []

@@ -84,3 +84,73 @@ def test_js_divergence_different():
     assert jsd > 0.1, f"JSD of very different distributions should be > 0.1, got {jsd}"
     # JSD is bounded by ln(2) ~ 0.693
     assert jsd <= math.log(2) + 1e-10, f"JSD should be <= ln(2), got {jsd}"
+
+
+def test_weights_exclude_aggregate_pseudo_models():
+    """Aggregate score rows (ensemble_mean_v2 etc.) must not receive weights.
+
+    They are outputs of the ensemble, not members, and would otherwise win
+    the softmax and dilute every real member's weight.
+    """
+    from pythia.tools.compute_calibration_pythia import (
+        MIN_QUESTIONS,
+        Sample,
+        _compute_weights_for_group,
+    )
+
+    def _samples_for(model_name, brier):
+        return [
+            Sample(
+                question_key=(f"q{i}", "ACE", "FATALITIES", "1"),
+                hazard_code="ACE",
+                metric="FATALITIES",
+                model_name=model_name,
+                score_type="brier",
+                value=brier,
+                observed_month="2026-05",
+            )
+            for i in range(MIN_QUESTIONS + 5)
+        ]
+
+    samples = (
+        _samples_for("ModelA", 0.30)
+        + _samples_for("ModelB", 0.40)
+        + _samples_for("ensemble_mean_v2", 0.05)   # best Brier, must be excluded
+        + _samples_for("ensemble_bayesmc_v2", 0.06)
+        + _samples_for("track2_flash", 0.07)
+        + _samples_for(None, 0.05)                  # NULL-model ensemble rows
+    )
+
+    rows, note = _compute_weights_for_group("2026-06", samples)
+    weighted_models = {r["model_name"] for r in rows}
+    assert weighted_models == {"ModelA", "ModelB"}, (weighted_models, note)
+
+    weights = {r["model_name"]: r["weight"] for r in rows}
+    assert weights["ModelA"] > weights["ModelB"]
+    assert abs(sum(weights.values()) - 1.0) < 1e-6
+
+
+def test_weights_empty_when_only_aggregates():
+    """Binary pools contain only aggregate rows — no weights, clear note."""
+    from pythia.tools.compute_calibration_pythia import (
+        Sample,
+        _compute_weights_for_group,
+    )
+
+    samples = [
+        Sample(
+            question_key=(f"q{i}", "FL", "EVENT_OCCURRENCE", "1"),
+            hazard_code="FL",
+            metric="EVENT_OCCURRENCE",
+            model_name=name,
+            score_type="brier",
+            value=0.1,
+            observed_month="2026-05",
+        )
+        for i in range(30)
+        for name in ("ensemble_mean_v2", "track2_flash", None)
+    ]
+
+    rows, note = _compute_weights_for_group("2026-06", samples)
+    assert rows == []
+    assert "aggregate" in note.lower()

@@ -266,7 +266,10 @@ def test_build_spd_prompt_v2_includes_rc_guidance_and_self_search() -> None:
     assert "NEED_WEB_EVIDENCE" in prompt_text
 
 
-def test_build_spd_prompt_uses_target_month_keys_for_pa() -> None:
+def test_build_spd_prompt_uses_window_start_month_keys_for_pa() -> None:
+    # Month 1 must be the window_start month, NOT the questions-table
+    # target_month (the 6th window month). Regression test for the
+    # +5-month forecast shift that affected runs 2026-03-21 → 2026-07-01.
     question = {
         "question_id": "TEST_FL_PA",
         "iso3": "ETH",
@@ -274,7 +277,8 @@ def test_build_spd_prompt_uses_target_month_keys_for_pa() -> None:
         "metric": "PA",
         "resolution_source": "EM-DAT",
         "wording": "Monthly people affected or displaced in ETH for hazard FL, as recorded by the canonical Pythia resolution source.",
-        "target_months": "2026-01",
+        "window_start_date": "2026-01-01",
+        "target_months": "2026-06",
     }
     history_summary = {"source": "EM-DAT"}
     hs_triage_entry = {}
@@ -288,7 +292,32 @@ def test_build_spd_prompt_uses_target_month_keys_for_pa() -> None:
     )
 
     assert "Month 1: January 2026 (key: \"2026-01\")" in prompt
+    assert "Month 6: June 2026 (key: \"2026-06\")" in prompt
     assert "\"2026-01\": {\"buckets\": [" in prompt
+
+
+def test_build_spd_prompt_target_month_fallback_anchors_at_window_open() -> None:
+    # Without window_start_date, target_month (the LAST window month) must
+    # be shifted back 5 months so Month 1 is still the window opener.
+    question = {
+        "question_id": "TEST_FL_PA_FALLBACK",
+        "iso3": "ETH",
+        "hazard_code": "FL",
+        "metric": "PA",
+        "resolution_source": "EM-DAT",
+        "wording": "Monthly people affected in ETH for hazard FL.",
+        "target_months": "2026-06",
+    }
+
+    prompt = prompts.build_spd_prompt_v2(
+        question=question,
+        history_summary={"source": "EM-DAT"},
+        hs_triage_entry={},
+        research_json={},
+    )
+
+    assert "Month 1: January 2026 (key: \"2026-01\")" in prompt
+    assert "Month 6: June 2026 (key: \"2026-06\")" in prompt
 
 
 def test_build_spd_prompt_v2_di_and_nat_notes() -> None:
@@ -572,8 +601,9 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
                 "ETH",
                 "DR",
                 "PA",
-                "2025-12",
-                None,
+                # target_month = 6th window month; window opens 2025-12.
+                "2026-05",
+                "2025-12-01",
                 None,
                 "Test DR PA question",
                 "active",
@@ -761,7 +791,7 @@ def test_bayesmc_month_mapping_preserves_calendar_keys(monkeypatch: pytest.Monke
     ms = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
     spd_obj, diag = cli._build_bayesmc_spd_obj(
         [{}],
-        target_month="2025-12",
+        anchor_month="2025-12",
         specs_used=[ms],
     )
 
@@ -793,7 +823,7 @@ def test_bayesmc_month_mapping_offsets_to_calendar(monkeypatch: pytest.MonkeyPat
     ms = ModelSpec(name="Google", provider="google", model_id="gemini-test", active=True, purpose="spd_v2")
     spd_obj, diag = cli._build_bayesmc_spd_obj(
         [{}],
-        target_month="2025-12",
+        anchor_month="2025-12",
         specs_used=[ms],
     )
 
@@ -835,8 +865,9 @@ def test_bayesmc_missing_months_records_reason(tmp_path: Path, monkeypatch: pyte
                 "ETH",
                 "DR",
                 "PA",
-                "2025-12",
-                None,
+                # target_month = 6th window month; window opens 2025-12.
+                "2026-05",
+                "2025-12-01",
                 None,
                 "Test DR PA missing months",
                 "active",
@@ -1387,8 +1418,10 @@ def test_spd_member_writes_alongside_ensemble(tmp_path: Path, monkeypatch: pytes
         "iso3": "ETH",
         "hazard_code": "ACE",
         "metric": "PA",
-        "target_month": "2025-12",
-        "window_start_date": None,
+        # Window opens 2025-01 to match the member month labels below;
+        # target_month is the 6th window month.
+        "target_month": "2025-06",
+        "window_start_date": "2025-01-01",
         "window_end_date": None,
         "wording": "Test member write",
         "status": "active",
