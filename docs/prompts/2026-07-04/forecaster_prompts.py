@@ -12,8 +12,6 @@ import re
 from datetime import date
 from typing import Any, Dict, Optional
 import json
-from pythia.buckets import labels_for, n_buckets_for
-
 from .config import CALIBRATION_PATH, ist_date
 from .hazard_prompts import get_hazard_reasoning_block
 
@@ -522,7 +520,7 @@ You are a careful probabilistic forecaster on a humanitarian early warning panel
 
 Your task is to forecast {quantity_description}.
 
-You will express your beliefs as a SUBJECTIVE PROBABILITY DISTRIBUTION (SPD) over {n_buckets_word} buckets
+You will express your beliefs as a SUBJECTIVE PROBABILITY DISTRIBUTION (SPD) over FIVE buckets
 for each month.
 
 SPD (Subjective Probability Distribution) means:
@@ -535,7 +533,7 @@ For each month, distribute 100% probability across these buckets:
 {bucket_text}
 
 One of these buckets MUST occur for each month. For each month m, your probabilities
-{prob_placeholder} must all be between 0 and 1 and sum to approximately 1.0.
+[p1, p2, p3, p4, p5] must all be between 0 and 1 and sum to approximately 1.0.
 
 Question:
 {question}
@@ -581,86 +579,35 @@ FORECASTING INSTRUCTIONS (Bayesian SPD)
    - At the very end, output ONLY a single JSON object with this exact schema:
 
    {{
-     "month_1": {prob_placeholder},
-     "month_2": {prob_placeholder},
-     "month_3": {prob_placeholder},
-     "month_4": {prob_placeholder},
-     "month_5": {prob_placeholder},
-     "month_6": {prob_placeholder}
+     "month_1": [p1, p2, p3, p4, p5],
+     "month_2": [p1, p2, p3, p4, p5],
+     "month_3": [p1, p2, p3, p4, p5],
+     "month_4": [p1, p2, p3, p4, p5],
+     "month_5": [p1, p2, p3, p4, p5],
+     "month_6": [p1, p2, p3, p4, p5]
    }}
 
    - Do not include any text before or after the JSON.
-   - Each list must contain exactly {n_buckets_lower} numbers between 0 and 1 inclusive.
+   - Each list must contain exactly five numbers between 0 and 1 inclusive.
    - For each month, the probabilities must sum to roughly 1.0 (we allow small rounding error).
 """
 
-
-_BUCKET_COUNT_WORDS = {
-    5: ("FIVE", "five"),
-    6: ("SIX", "six"),
-    7: ("SEVEN", "seven"),
-}
-
-
-def _bucket_count_words(n: int) -> tuple[str, str]:
-    """(UPPER, lower) word forms for a bucket count, falling back to digits."""
-    return _BUCKET_COUNT_WORDS.get(n, (str(n), str(n)))
-
-
-def _prob_placeholder(n: int) -> str:
-    """Render '[p1, p2, ..., pN]' for the metric's bucket count."""
-    return "[" + ", ".join(f"p{i}" for i in range(1, n + 1)) + "]"
-
-
-def _delta_placeholder(n: int) -> str:
-    """Render '[dp1, dp2, ..., dpN]' for the metric's bucket count."""
-    return "[" + ", ".join(f"dp{i}" for i in range(1, n + 1)) + "]"
-
-
-_EXAMPLE_PROBS = {
-    5: "0.7,0.2,0.07,0.02,0.01",
-    6: "0.55,0.25,0.12,0.05,0.02,0.01",
-    7: "0.5,0.25,0.12,0.07,0.03,0.02,0.01",
-}
-
-
-def _example_probs_str(n: int) -> str:
-    """A plausible decreasing example probs vector for the bucket count."""
-    if n in _EXAMPLE_PROBS:
-        return _EXAMPLE_PROBS[n]
-    vals = [1.0 / n] * n
-    return ",".join(f"{v:.3f}" for v in vals)
-
-
 SPD_BUCKET_TEXT_PA = """
 People affected (PA) buckets (per month, country-level):
-- Bucket 1: exactly 0 people affected (label: "0")
-- Bucket 2: 1 to < 10,000 people affected (label: "1-<10k")
-- Bucket 3: 10,000 to < 50,000 people affected (label: "10k-<50k")
-- Bucket 4: 50,000 to < 250,000 people affected (label: "50k-<250k")
-- Bucket 5: 250,000 to < 500,000 people affected (label: "250k-<500k")
-- Bucket 6: >= 500,000 people affected (label: ">=500k")
+- Bucket 1: < 10,000 people affected (label: "<10k")
+- Bucket 2: 10,000 to < 50,000 people affected (label: "10k-<50k")
+- Bucket 3: 50,000 to < 250,000 people affected (label: "50k-<250k")
+- Bucket 4: 250,000 to < 500,000 people affected (label: "250k-<500k")
+- Bucket 5: >= 500,000 people affected (label: ">=500k")
 """
 
 SPD_BUCKET_TEXT_FATALITIES = """
 Conflict fatalities buckets (per month, country-level):
-- Bucket 1: 0 deaths (label: "0")
-- Bucket 2: 1–4 deaths (label: "1-<5")
-- Bucket 3: 5–24 deaths (label: "5-<25")
-- Bucket 4: 25–99 deaths (label: "25-<100")
-- Bucket 5: 100–499 deaths (label: "100-<500")
-- Bucket 6: 500–999 deaths (label: "500-<1000")
-- Bucket 7: >= 1,000 deaths (label: ">=1000")
-"""
-
-SPD_BUCKET_TEXT_PHASE3 = """
-IPC Phase 3+ population buckets (per month, country-level):
-- Bucket 1: exactly 0 people in Phase 3+ (label: "0")
-- Bucket 2: 1 to < 100,000 people in Phase 3+ (label: "1-<100k")
-- Bucket 3: 100,000 to < 1,000,000 people in Phase 3+ (label: "100k-<1M")
-- Bucket 4: 1,000,000 to < 5,000,000 people in Phase 3+ (label: "1M-<5M")
-- Bucket 5: 5,000,000 to < 15,000,000 people in Phase 3+ (label: "5M-<15M")
-- Bucket 6: >= 15,000,000 people in Phase 3+ (label: ">=15M")
+- Bucket 1: 0–4 deaths (label: "<5")
+- Bucket 2: 5–24 deaths (label: "5-<25")
+- Bucket 3: 25–99 deaths (label: "25-<100")
+- Bucket 4: 100–499 deaths (label: "100-<500")
+- Bucket 5: >= 500 deaths (label: ">=500")
 """
 
 RESEARCHER_PROMPT = """You are a professional RESEARCHER for a Bayesian forecasting panel.
@@ -855,9 +802,6 @@ def build_spd_prompt_pa(
         resolution_text=resolution_text,
         quantity_description=quantity_description,
         bucket_text=SPD_BUCKET_TEXT_PA,
-        n_buckets_word=_bucket_count_words(len(labels_for("PA")))[0],
-        n_buckets_lower=_bucket_count_words(len(labels_for("PA")))[1],
-        prob_placeholder=_prob_placeholder(len(labels_for("PA"))),
         today=today_str,
     )
 
@@ -912,9 +856,6 @@ def build_spd_prompt_fatalities(
         resolution_text=resolution_text,
         quantity_description=quantity_description,
         bucket_text=SPD_BUCKET_TEXT_FATALITIES,
-        n_buckets_word=_bucket_count_words(len(labels_for("FATALITIES")))[0],
-        n_buckets_lower=_bucket_count_words(len(labels_for("FATALITIES")))[1],
-        prob_placeholder=_prob_placeholder(len(labels_for("FATALITIES"))),
         today=today_str,
     )
 
@@ -1274,16 +1215,16 @@ def build_research_prompt_v2(
     return "\n\n".join(parts) + "\n"
 
 def _bucket_labels_for_question(question: Dict[str, Any]) -> list[str]:
-    """Return the metric's bucket labels for this question."""
+    """Return the correct 5 bucket labels for this question based on metric/hazard."""
 
     metric = (question.get("metric") or "").upper()
-    expected_k = n_buckets_for(metric) or n_buckets_for("PA")
     explicit = question.get("bucket_labels") or question.get("class_bins")
-    if isinstance(explicit, list) and len(explicit) == expected_k:
+    if isinstance(explicit, list) and len(explicit) == 5:
         return [str(x) for x in explicit]
 
-    labels = labels_for(metric)
-    return list(labels) if labels else labels_for("PA")
+    if metric == "FATALITIES":
+        return ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
+    return ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
 
 
 def _load_fewsnet_projection(
@@ -1631,15 +1572,8 @@ def build_spd_prompt_v2(
     buckets = _bucket_labels_for_question(question)
     if metric == "FATALITIES" or "ACLED" in resolution_source:
         unit_phrase = "people killed (conflict fatalities) per month"
-    elif metric == "PHASE3PLUS_IN_NEED":
-        unit_phrase = "people in IPC Phase 3+ (crisis or worse) per month"
     else:
         unit_phrase = "people affected or displaced per month"
-    n_buckets = len(buckets)
-    n_buckets_lower = _bucket_count_words(n_buckets)[1]
-    prob_ph = _prob_placeholder(n_buckets)
-    delta_ph = _delta_placeholder(n_buckets)
-    example_probs = _example_probs_str(n_buckets)
 
     hazard_reasoning_block = get_hazard_reasoning_block(hazard, metric)
 
@@ -1873,7 +1807,7 @@ def build_spd_prompt_v2(
     return (
         "You are a careful probabilistic forecaster on a humanitarian early warning panel.\n\n"
         f"{calibration_section}"
-        f"Your task is to produce a six-month PROBABILITY DISTRIBUTION over {n_buckets_lower} impact buckets for the question below, where each month’s probabilities sum to 1.0.\n\n"
+        "Your task is to produce a six-month PROBABILITY DISTRIBUTION over five impact buckets for the question below, where each month’s probabilities sum to 1.0.\n\n"
         "Natural-language question:\n"
         f"\"{wording}\"\n\n"
         "Question metadata:\n"
@@ -1902,11 +1836,11 @@ def build_spd_prompt_v2(
         "Before considering ANY evidence, state your prior (base-rate) SPD for each month. "
         "Derive this prior from the Resolver history summary above. "
         "If Resolver history is available, convert the historical distribution into bucket probabilities. "
-        "If history is missing or sparse, state an uninformative prior (e.g. heavy weight on the \"0\" "
-        "bucket for countries with no recent events) and explain your reasoning.\n"
+        "If history is missing or sparse, state an uninformative prior (e.g. heavy weight on bucket 1 "
+        "for countries with no recent events) and explain your reasoning.\n"
         f"{base_rate_note}"
         "Write out the prior explicitly:\n"
-        f"  Prior SPD: {prob_ph} for each month (or a single prior if months are similar).\n"
+        "  Prior SPD: [p1, p2, p3, p4, p5] for each month (or a single prior if months are similar).\n"
         "  Prior rationale: 1–2 sentences explaining why this is the right starting point.\n\n"
         "STEP 2 — IDENTIFY AND RANK UPDATE SIGNALS\n"
         "List the 3–6 most decision-relevant pieces of evidence from the structured data, HS triage, "
@@ -1921,13 +1855,13 @@ def build_spd_prompt_v2(
         "For each update:\n"
         "  a) State the signal being incorporated.\n"
         "  b) State which bucket(s) gain or lose probability mass, and roughly how much.\n"
-        f"  c) Write the updated SPD after this signal: {prob_ph}.\n"
+        "  c) Write the updated SPD after this signal: [p1, p2, p3, p4, p5].\n"
         "  d) Verify the updated SPD sums to ~1.0.\n"
         "You must show at least 2 explicit update steps (for your top 2 signals). "
         "Remaining signals can be incorporated in a single combined step if they are small.\n\n"
         "After all updates, state your POSTERIOR SPD for each month:\n"
-        f"  Posterior SPD month_1: {prob_ph}\n"
-        f"  Posterior SPD month_2: {prob_ph}\n"
+        "  Posterior SPD month_1: [p1, p2, p3, p4, p5]\n"
+        "  Posterior SPD month_2: [p1, p2, p3, p4, p5]\n"
         "  ... (all 6 months)\n\n"
         "STEP 4 — REFERENCE CLASS CHECK (outside view)\n"
         "Name 2–3 historical cases that are most similar to this country-hazard-period "
@@ -1949,19 +1883,19 @@ def build_spd_prompt_v2(
         "and the revised SPD. If not, state \"No adjustment needed\" and why.\n\n"
         "STEP 5b — SCENARIO DECOMPOSITION CROSS-CHECK (optional but recommended for complex cases)\n"
         "Enumerate 3 concrete, mutually exclusive scenarios for the forecast period:\n"
-        "  a) A LOW-impact scenario (outcome in the bottom two buckets). Describe in 1–2 sentences. "
+        "  a) A LOW-impact scenario (outcome in bucket 1 or 2). Describe in 1–2 sentences. "
         "Estimate its probability.\n"
-        "  b) A MODERATE-impact scenario (outcome in a middle bucket). Describe. Estimate probability.\n"
-        "  c) A HIGH-impact scenario (outcome in the top two buckets). Describe. Estimate probability.\n"
+        "  b) A MODERATE-impact scenario (outcome in bucket 3). Describe. Estimate probability.\n"
+        "  c) A HIGH-impact scenario (outcome in bucket 4 or 5). Describe. Estimate probability.\n"
         "These scenario probabilities should roughly sum to ~100%. "
         "Cross-check: does your SPD match these scenario probabilities? "
-        "If your high-impact scenario is 15% probable, the combined probability of the top two buckets should be roughly 15%. "
+        "If your high-impact scenario is 15% probable, your combined bucket 4+5 should be roughly 15%. "
         "Resolve any mismatch.\n\n"
         "STEP 6 — POINT ESTIMATE CONSISTENCY CHECK\n"
         "For each month, state your single best-guess point estimate of the metric value "
         "(e.g. \"~15,000 people affected\" or \"~40 fatalities\"). State which bucket this falls in. "
         "Verify this is consistent with where your SPD places the most probability mass. "
-        "If your point estimate falls in a middle bucket but your SPD puts 70% in the bottom bucket, "
+        "If your point estimate falls in bucket 3 but your SPD puts 70% in bucket 1, "
         "something is wrong — resolve the inconsistency before proceeding.\n\n"
         f"{spd_web_search_section}"
         "STEP 7 — FINAL OUTPUT\n"
@@ -1985,7 +1919,7 @@ def build_spd_prompt_v2(
             "{\n"
             '  "reasoning_trace": {\n'
             '    "prior": {\n'
-            f'      "spd": {prob_ph},\n'
+            '      "spd": [p1, p2, p3, p4, p5],\n'
             '      "rationale": "1-2 sentences explaining the prior derivation from base rate data"\n'
             "    },\n"
             '    "updates": [\n'
@@ -1994,8 +1928,8 @@ def build_spd_prompt_v2(
             '        "direction": "UP or DOWN",\n'
             '        "magnitude": "SMALL or MODERATE or LARGE",\n'
             '        "months_affected": "all or 1-2 or specific month numbers",\n'
-            f'        "delta": {delta_ph},\n'
-            f'        "post_update_spd": {prob_ph}\n'
+            '        "delta": [dp1, dp2, dp3, dp4, dp5],\n'
+            '        "post_update_spd": [p1, p2, p3, p4, p5]\n'
             "      }\n"
             "    ],\n"
             '    "point_estimate": "~NNN units (e.g. ~40 fatalities or ~15,000 people affected)",\n'
@@ -2009,7 +1943,7 @@ def build_spd_prompt_v2(
             "{\n"
             '  "reasoning_trace": {\n'
             '    "prior": {\n'
-            f'      "spd": {prob_ph},\n'
+            '      "spd": [p1, p2, p3, p4, p5],\n'
             '      "rationale": "1-2 sentences"\n'
             "    },\n"
             '    "updates": [],\n'
@@ -2017,14 +1951,14 @@ def build_spd_prompt_v2(
             "  },\n"
         )
         + f'  "spds": {{\n'
-        f'    "{example_key_1}": {{"buckets": [{bucket_list_str}], "probs": [{example_probs}]}},\n'
-        f'    "{example_key_2}": {{"buckets": [{bucket_list_str}], "probs": [{example_probs}]}}\n'
+        f'    "{example_key_1}": {{"buckets": [{bucket_list_str}], "probs": [0.7,0.2,0.07,0.02,0.01]}},\n'
+        f'    "{example_key_2}": {{"buckets": [{bucket_list_str}], "probs": [0.7,0.2,0.07,0.02,0.01]}}\n'
         "  },\n"
         '  "human_explanation": "3-4 sentences summarising the base rate, key update signals, and why any large deviations from the base rate are justified."\n'
         "}\n"
         "```\n"
-        f"Each `probs` array must contain exactly {n_buckets_lower} numbers between 0 and 1 that sum to ~1.0.\n"
-        f"Each `delta` array must contain exactly {n_buckets_lower} numbers that sum to approximately 0.\n"
+        "Each `probs` array must contain exactly five numbers between 0 and 1 that sum to ~1.0.\n"
+        "Each `delta` array must contain exactly five numbers that sum to approximately 0.\n"
         "Do not include any text outside the JSON.\n"
     )
     # --- PROMPT_EXCERPT: spd_v2_end ---

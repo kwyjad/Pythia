@@ -1364,7 +1364,7 @@ def test_spd_prompt_template_allows_literal_json_braces() -> None:
         criteria="Some resolution criteria",
     )
 
-    assert '"month_1": [p1, p2, p3, p4, p5],' in prompt
+    assert '"month_1": [p1, p2, p3, p4, p5, p6],' in prompt
     assert "Test SPD PA question" in prompt
 
 

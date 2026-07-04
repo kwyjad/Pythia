@@ -73,11 +73,12 @@ in mind as you work through your Bayesian update:
 Key reasoning principles for conflict fatalities:
 - Conflict fatalities are HEAVY-TAILED and LUMPY. A single major battle or offensive \
 can produce more fatalities in one month than the previous six months combined. Your \
-SPD must reflect this: even in relatively calm periods, bucket 4/5 should rarely be \
-zero unless there is a ceasefire or peace agreement with strong compliance.
+SPD must reflect this: even in relatively calm periods, the >=100 buckets (100-<500 \
+and above) should rarely be zero unless there is a ceasefire or peace agreement with \
+strong compliance.
 - Base rates from ACLED history are your strongest prior anchor. If the Resolver \
 history shows a country averaging 10–20 fatalities/month, your prior should be \
-centred on bucket 2 (<25) with meaningful mass in bucket 1 (<5) and bucket 3 (25–100). \
+centred on the 5-<25 bucket with meaningful mass in the 0, 1-<5, and 25-<100 buckets. \
 Deviations from this base rate require specific evidence.
 - VIEWS predicted fatalities and conflictforecast.org risk scores (if provided in \
 structured data) are quantitative forecasts from ML models trained on conflict data. \
@@ -100,9 +101,10 @@ are expert-curated signals. Treat them as moderate-strength evidence for rightwa
 
 Common calibration errors to avoid:
 - Anchoring too heavily on the most recent month rather than the 6–12 month trend.
-- Treating "no major change" as evidence for bucket 1 when the base rate is bucket 2–3.
-- Underweighting tail risk (bucket 5, >=500) in active conflict zones. Even in moderate \
-conflicts, there is always some probability of a major escalation event.
+- Treating "no major change" as evidence for the bottom buckets when the base rate sits \
+in the 5-<25 or 25-<100 range.
+- Underweighting tail risk (the 500-<1000 and >=1000 buckets) in active conflict zones. \
+Even in moderate conflicts, there is always some probability of a major escalation event.
 - Overreacting to a single dramatic event when it is an outlier against a stable base rate.\
 """
 
@@ -144,7 +146,7 @@ Common calibration errors to avoid:
 flows (often tens of thousands). Your buckets measure monthly flows.
 - Assuming displacement is proportional to fatalities — it is correlated but the \
 relationship is nonlinear and context-dependent.
-- Ignoring the possibility of mass displacement events (bucket 5, >=500k) in countries \
+- Ignoring the possibility of mass displacement events (the >=500k bucket) in countries \
 with large urban populations near conflict zones.\
 """
 
@@ -161,18 +163,18 @@ states — not internal displacement. There is NO Resolver base rate for DI.
 Key reasoning principles for displacement inflow:
 - You must CONSTRUCT your own prior. Use UNHCR/IOM flux estimates, known historical \
 inflow episodes from neighbouring countries, and reference cases from similar \
-situations. Typical monthly inflows during non-crisis periods are often in bucket 1 \
-(<10k). During active neighbour-country crises, flows can surge to bucket 3–5 \
-within weeks.
+situations. Typical monthly inflows during non-crisis periods are often in the bottom \
+buckets (0 or 1-<10k). During active neighbour-country crises, flows can surge to the \
+50k-<250k bucket or higher within weeks.
 - The DRIVER is EXTERNAL. Focus your reasoning on what is happening in neighbouring \
 countries, not domestic conditions. Key questions: Is there active conflict, famine, \
 or state collapse in a neighbouring country? Are borders open or restricted? What \
 is the geographic and ethnic/linguistic relationship between border communities?
 - Inflows are EPISODIC and BINARY-ISH. Either a crisis in a neighbouring country is \
 producing significant outflows toward this country, or it is not. The SPD should \
-reflect this bimodal quality: heavy mass in bucket 1 during calm periods, with a \
-clear probability mass in higher buckets if a neighbour-country crisis is active or \
-plausible.
+reflect this bimodal quality: heavy mass in the 0 and 1-<10k buckets during calm \
+periods, with a clear probability mass in higher buckets if a neighbour-country crisis \
+is active or plausible.
 - Neighbouring country conflict/hazard signals: if the structured data includes \
 information about armed conflict, drought, or food insecurity in neighbouring \
 countries, treat these as the primary update signals. Check ACAPS risk radar and \
@@ -182,7 +184,8 @@ geographic barriers (rivers, mountains) all affect inflow volumes. A crisis in a
 neighbouring country with an open, flat border will produce larger inflows than one \
 with restrictive border policies or geographic barriers.
 - Month-to-month variation can be extreme. An inflow surge triggered by a new \
-offensive in a neighbour can go from bucket 1 to bucket 4 in a single month.
+offensive in a neighbour can go from the bottom buckets to the 250k-<500k bucket \
+in a single month.
 
 Common calibration errors to avoid:
 - Confusing internal displacement (ACE/PA) with cross-border inflows (DI). The \
@@ -205,8 +208,8 @@ This question asks about people affected by flooding as recorded by IFRC Montand
 Key reasoning principles for flood forecasting:
 - Flooding is HIGHLY SEASONAL. Your prior should be strongly shaped by whether the \
 forecast months overlap with the country's wet/rainy season. During dry season months, \
-the prior should be heavily weighted toward bucket 1 (<10k). During peak rainy season, \
-the prior should shift substantially rightward based on historical flood impacts.
+the prior should be heavily weighted toward the 0 and 1-<10k buckets. During peak rainy \
+season, the prior should shift substantially rightward based on historical flood impacts.
 - NMME seasonal outlook (if provided) is a key signal. Above-normal precipitation \
 anomalies (positive σ) during rainy season months are a moderate-to-strong signal for \
 rightward shift. Below-normal anomalies are a signal for leftward shift. The magnitude \
@@ -216,8 +219,9 @@ risk in Southeast Asia, East Africa, and Australia. El Niño increases flood ris
 Peru, Ecuador, and parts of East Africa. If these teleconnection patterns are relevant \
 to this country, factor them in.
 - Flood impacts are LUMPY and depend on specific events. A single major flood event \
-can dominate the monthly PA figure. The difference between bucket 1 and bucket 3 may \
-be a single cyclone making landfall or a river exceeding its flood stage.
+can dominate the monthly PA figure. The difference between the bottom buckets and the \
+50k-<250k bucket may be a single cyclone making landfall or a river exceeding its flood \
+stage.
 - Urban vs. rural matters enormously for PA. Flooding in densely populated river \
 basins or coastal cities produces far more people affected than equivalent rainfall \
 in sparsely populated areas.
@@ -231,8 +235,8 @@ Common calibration errors to avoid:
 - Ignoring seasonality and assigning flat SPDs across all 6 months.
 - Treating NMME anomalies as deterministic — they are probabilistic signals about \
 conditions, not predictions of specific flood events.
-- Underweighting tail risk during active monsoon/rainy seasons. Bucket 4–5 events \
-do occur during extreme rainfall years.\
+- Underweighting tail risk during active monsoon/rainy seasons. Top-bucket events \
+(250k-<500k and >=500k) do occur during extreme rainfall years.\
 """
 
 # ---------------------------------------------------------------------------
@@ -266,10 +270,11 @@ shows millions in Phase 3+, your SPD should reflect this.
 Africa) and parts of Central America. El Niño can worsen drought in Southeast Asia, \
 Southern Africa, and parts of South Asia. These are moderate-to-strong signals when \
 they align with the forecast window.
-- Drought PA figures can be VERY LARGE. Unlike conflict fatalities where bucket 5 \
-(>=500k) is rare, drought can affect millions of people. In major drought events \
-(Horn of Africa 2011, 2017, 2022), PA figures routinely exceed 500k per month. Do \
-not treat bucket 5 as negligibly unlikely for drought-prone countries during dry seasons.
+- Drought PA figures can be VERY LARGE. Unlike conflict displacement where the >=500k \
+bucket is rare, drought can affect millions of people. In major drought events \
+(Horn of Africa 2011, 2017, 2022), PA figures routinely exceed 500k per month. Do not \
+treat the >=500k bucket as negligibly unlikely for drought-prone countries during dry \
+seasons.
 - Humanitarian response can REDUCE recorded PA. If a major drought response is \
 underway, some affected populations may be reached by assistance and not appear in \
 certain PA definitions. This is a modest downward signal.
@@ -297,20 +302,23 @@ insecurity in {country}, as reported by the latest IPC/FEWS NET Current Situatio
 Phase 3+ includes Crisis (Phase 3), Emergency (Phase 4), and Famine (Phase 5) populations.
 
 Bucket interpretation for IPC Phase 3+ population:
-- Bucket 1 (<100k): Minimal food insecurity — few or no populations in Crisis or worse. \
+- Bucket "0": No population in Crisis or worse — the assessment reports zero people in \
+Phase 3+. Rare in IPC/FEWS NET-monitored countries, which are monitored precisely because \
+food insecurity is a concern.
+- Bucket "1-<100k": Minimal food insecurity — few populations in Crisis or worse. \
 Typical for stable, food-secure countries or those with very small populations monitored \
 by IPC/FEWS NET.
-- Bucket 2 (100k–1M): Moderate crisis — sub-national pockets of food insecurity. Some \
+- Bucket "100k-<1M": Moderate crisis — sub-national pockets of food insecurity. Some \
 districts or livelihood zones in IPC Phase 3, but national totals remain below 1 million. \
 Common in countries with localized drought stress or seasonal lean-season peaks.
-- Bucket 3 (1M–5M): Significant national-level food insecurity. Multiple regions in \
+- Bucket "1M-<5M": Significant national-level food insecurity. Multiple regions in \
 Crisis or Emergency phase. This is the range for countries with widespread but non-extreme \
 drought or conflict-driven food insecurity (e.g. parts of the Sahel, East Africa in a \
 moderate year).
-- Bucket 4 (5M–15M): Severe food emergency. Large portions of the country in Phase 3+, \
+- Bucket "5M-<15M": Severe food emergency. Large portions of the country in Phase 3+, \
 often with significant Phase 4 (Emergency) populations. This is the range for major food \
 crises (e.g. Ethiopia, DRC, or Nigeria in a bad year).
-- Bucket 5 (>=15M): Catastrophic — Sudan/Ethiopia-scale famine risk. Phase 3+ populations \
+- Bucket ">=15M": Catastrophic — Sudan/Ethiopia-scale famine risk. Phase 3+ populations \
 exceed 15 million, implying a large fraction of the country's population is in Crisis or \
 worse. Only a handful of the largest food crises have reached this level. Requires \
 convergence of severe drought, conflict displacement, and economic collapse.
@@ -359,7 +367,7 @@ and drops after harvests. Your SPDs should reflect this seasonal pattern.
 - Underweighting IPC/FEWS NET projection data when it is available. The Most Likely \
 projection is produced by food security analysts and is one of the most reliable \
 forward-looking indicators for this metric.
-- Treating bucket 5 (>=15M) as negligible for large, crisis-affected countries. Sudan in \
+- Treating the >=15M bucket as negligible for large, crisis-affected countries. Sudan in \
 2024–2025 and Ethiopia in severe drought years have exceeded 15M Phase 3+.
 - Ignoring conflict signals in countries where conflict, not drought, is the primary \
 food insecurity driver.\
@@ -378,18 +386,18 @@ Montandon.
 Key reasoning principles for tropical cyclone forecasting:
 - Cyclone impacts are EPISODIC and BINARY. In any given month, either a significant \
 cyclone makes landfall near populated areas, or it does not. Your SPD should reflect \
-this: during cyclone season months, there should be substantial mass in bucket 1 \
-(no major landfall) alongside meaningful probability in higher buckets (a major \
+this: during cyclone season months, there should be substantial mass in the "0" \
+bucket (no major landfall) alongside meaningful probability in higher buckets (a major \
 landfall occurs). Outside cyclone season, the SPD should be very heavily weighted \
-toward bucket 1.
+toward the "0" bucket.
 - SEASONALITY is the dominant factor. Every cyclone basin has a well-defined season:
   - Atlantic/Caribbean: June–November (peak Aug–Oct)
   - Western Pacific/Philippines: May–December (peak Jul–Nov)
   - Bay of Bengal/South Asia: April–June and October–December
   - Southwest Indian Ocean/Madagascar: November–April
   - South Pacific/Fiji: November–April
-  If the forecast window is entirely outside the relevant cyclone season, bucket 1 \
-should receive 90%+ probability for those months.
+  If the forecast window is entirely outside the relevant cyclone season, the "0" \
+bucket should receive 90%+ probability for those months.
 - FREQUENCY vs. IMPACT is a two-stage process. Think about cyclone risk as: \
 (probability of a cyclone forming and tracking toward the country) × (impact if it \
 makes landfall). Seasonal forecasts affect the first factor. Country vulnerability, \
@@ -400,7 +408,7 @@ La Niña typically increases Atlantic hurricane activity but suppresses Eastern 
 El Niño does the reverse.
 - A single major cyclone can produce EXTREME PA. Cyclone Idai (Mozambique 2019) \
 affected 1.85 million people. During active cyclone seasons in exposed countries, \
-bucket 5 (>=500k) is a realistic possibility, not a tail event.
+the >=500k bucket is a realistic possibility, not a tail event.
 - Track uncertainty is high at monthly horizons. You cannot predict whether a specific \
 cyclone will hit a specific country months in advance. Your SPD should reflect this \
 fundamental uncertainty rather than trying to predict specific events.
@@ -426,8 +434,8 @@ Key reasoning principles for heatwave forecasting:
 - Heatwave impacts are SEASONAL and PREDICTABLE in timing. Unlike cyclones or \
 conflict, the timing of heatwave risk is highly predictable: it occurs during the \
 hot season for each country. Your SPD should have the strongest rightward shift \
-during known hot-season months and be heavily weighted toward bucket 1 during \
-cool-season months.
+during known hot-season months and be heavily weighted toward the 0 and 1-<10k \
+buckets during cool-season months.
 - NMME temperature anomalies are a direct driver. Above-normal temperature forecasts \
 (positive σ) during the hot season are a moderate-to-strong signal for higher PA. \
 The combination of above-normal temperatures AND above-normal humidity (or below-normal \
@@ -444,11 +452,11 @@ rather than evidence of no risk.
 countries with large outdoor labor forces, limited air conditioning, urban heat \
 islands, and vulnerable populations (elderly, children). South Asia, the Middle East, \
 and parts of sub-Saharan Africa are highest risk.
-- Unlike other hazards, heatwave PA rarely reaches bucket 5 (>=500k) in IFRC \
+- Unlike other hazards, heatwave PA rarely reaches the >=500k bucket in IFRC \
 Montandon data, because the metric captures people affected enough to need \
-humanitarian assistance, not total heat-exposed population. Bucket 3–4 is a more \
-realistic ceiling for most countries in most years, though extreme events in highly \
-exposed countries (India, Pakistan) can exceed this.
+humanitarian assistance, not total heat-exposed population. The 50k-<250k to \
+250k-<500k range is a more realistic ceiling for most countries in most years, though \
+extreme events in highly exposed countries (India, Pakistan) can exceed this.
 
 Common calibration errors to avoid:
 - Ignoring seasonality — assigning heatwave risk to winter months.
