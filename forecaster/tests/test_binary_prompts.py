@@ -156,7 +156,7 @@ def test_parse_response_with_code_fences():
 
 
 def test_parse_response_clamps_values():
-    """Out-of-range probabilities should be clamped to [0.01, 0.99]."""
+    """Out-of-range probabilities should be clamped to [0.001, 0.999]."""
     raw = json.dumps({
         "months": {
             "2026-04": {"posterior": 0.0},
@@ -165,9 +165,9 @@ def test_parse_response_clamps_values():
         }
     })
     result = parse_binary_response(raw)
-    assert result["2026-04"] == 0.01
-    assert result["2026-05"] == 0.99
-    assert result["2026-06"] == 0.01
+    assert result["2026-04"] == 0.001
+    assert result["2026-05"] == 0.999
+    assert result["2026-06"] == 0.001
 
 
 def test_parse_malformed_json():

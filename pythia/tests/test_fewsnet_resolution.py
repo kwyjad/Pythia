@@ -68,7 +68,7 @@ def test_fewsnet_ipc_resolves_value():
     result = _try_phase3plus(conn, "ETH", "DR", "2026-01")
 
     assert result is not None
-    value, source_ts = result
+    value, source_ts, _source_desc = result
     assert value == 12500000.0
     assert source_ts is not None
     assert "2026-02-15" in source_ts
@@ -87,7 +87,7 @@ def test_fewsnet_ipc_returns_latest_by_created_at():
     result = _try_phase3plus(conn, "SOM", "DR", "2026-01")
 
     assert result is not None
-    value, _ = result
+    value, _, _source_desc = result
     assert value == 3200000.0
     conn.close()
 
@@ -148,7 +148,7 @@ def test_fewsnet_ipc_selects_in_need_over_projection():
     result = _try_phase3plus(conn, "ETH", "DR", "2026-01")
 
     assert result is not None
-    value, _ = result
+    value, _, _source_desc = result
     assert value == 10000000.0
     conn.close()
 
@@ -258,7 +258,7 @@ def test_resolve_value_dispatches_to_fewsnet():
     result = _resolve_value(conn, "ETH", "DR", "2026-01", "PHASE3PLUS_IN_NEED")
 
     assert result is not None
-    value, source_ts = result
+    value, source_ts, _source_desc = result
     assert value == 12500000.0
     conn.close()
 

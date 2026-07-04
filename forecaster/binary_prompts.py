@@ -280,8 +280,9 @@ Respond with a JSON object:
   }}
 }}
 
-All probabilities must be between 0.01 and 0.99. Never assign exactly \
-0 or 1 \u2014 there is always some residual uncertainty."""
+All probabilities must be between 0.001 and 0.999. Never assign exactly \
+0 or 1 \u2014 there is always some residual uncertainty. Rare events with \
+very low monthly base rates may warrant probabilities well below 0.01."""
 
 
 # ---- Binary hazard reasoning blocks ----
@@ -364,7 +365,7 @@ tropical cyclone alert affecting this country in each month.
 Key reasoning principles:
 - Cyclone alerts are HIGHLY SEASONAL. Every cyclone basin has a well-defined \
 season. Outside the season, assign probabilities very close to the minimum \
-(0.01-0.03). During peak season, probabilities can be substantially higher.
+(0.001-0.01). During peak season, probabilities can be substantially higher.
 - Basin seasons:
   - Atlantic/Caribbean: June\u2013November (peak Aug\u2013Oct)
   - Western Pacific/Philippines: May\u2013December (peak Jul\u2013Nov)
@@ -587,9 +588,16 @@ def parse_binary_response(raw_text: str, expected_months: list[str] | None = Non
         except (TypeError, ValueError):
             continue
 
-        # Clamp to [0.01, 0.99]
-        p = max(0.01, min(0.99, p))
-        result[month_key] = p
+        # Clamp to [0.001, 0.999]. The floor must stay below plausible
+        # rare-event monthly base rates: a 1% floor put a hard minimum
+        # under the Brier score of well-calibrated low forecasts.
+        clamped = max(0.001, min(0.999, p))
+        if clamped != p:
+            LOG.debug(
+                "Clamped binary probability %s -> %s for month %s",
+                p, clamped, month_key,
+            )
+        result[month_key] = clamped
 
     # Fill missing months from expected_months with None (caller handles fallback)
     if expected_months:

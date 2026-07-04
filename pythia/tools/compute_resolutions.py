@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from resolver.db import duckdb_io
@@ -20,6 +20,11 @@ if not LOGGER.handlers:
     LOGGER.addHandler(logging.NullHandler())
 
 NUM_HORIZONS = 6
+
+
+def _utcnow_naive() -> datetime:
+    """Naive-UTC now (datetime.utcnow is deprecated; DB columns are naive)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 # Hazards without a resolution data source.  Remove entries once a source
 # is available (e.g. when a DI resolution connector is added).
@@ -34,11 +39,56 @@ _ZERO_DEFAULT_RULES: dict[str, set[str]] = {
     "EVENT_OCCURRENCE": {"FL", "DR", "TC"},
 }
 
+# Deterministic ground-truth selection. Multiple candidate rows can exist
+# for the same (iso3, hazard, ym) — different metrics within the PA family
+# and different publishers — and "ORDER BY created_at DESC" made the
+# resolved value depend on ingestion order (observed spreads up to 145x,
+# e.g. IFRC 'affected' 19M vs 'displaced' 130k for the same month).
+#
+# Preference 1 — metric: direct affected counts beat displacement
+# components (position in this list = priority; lower wins).
+_PA_METRIC_PREFERENCE = [
+    "affected",
+    "people_affected",
+    "pa",
+    "new_displacements",
+    "displaced",
+]
+
+# Preference 2 — publisher tier, mirroring
+# resolver/tools/precedence_config.yml (tier 0: IFRC Montandon + ACLED;
+# tier 1: IDMC; everything else tier 2). facts_resolved stores publisher
+# in mixed case/slug forms ('IFRC', 'ifrc_go', 'ifrc_montandon', ...).
+_PUBLISHER_TIER_CASE = (
+    "CASE"
+    " WHEN lower(COALESCE(publisher, '')) IN"
+    " ('ifrc', 'ifrc_go', 'ifrc_montandon', 'acled') THEN 0"
+    " WHEN lower(COALESCE(publisher, '')) = 'idmc' THEN 1"
+    " ELSE 2 END"
+)
+
+
+def _metric_preference_case(column: str = "metric") -> str:
+    """SQL CASE ranking a metric column by ``_PA_METRIC_PREFERENCE``."""
+    parts = " ".join(
+        f"WHEN lower({column}) = '{m}' THEN {i}"
+        for i, m in enumerate(_PA_METRIC_PREFERENCE)
+    )
+    return f"CASE {parts} ELSE {len(_PA_METRIC_PREFERENCE)} END"
+
 
 def _table_exists(conn, name: str) -> bool:
     try:
         conn.execute(f"PRAGMA table_info('{name}')").fetchall()
         return True
+    except Exception:
+        return False
+
+
+def _has_column(conn, table: str, column: str) -> bool:
+    try:
+        rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
+        return column in {str(r[1]) for r in rows}
     except Exception:
         return False
 
@@ -245,6 +295,47 @@ def _data_freshness_cutoff(conn, metric: str) -> Optional[str]:
     return max(max_yms) if max_yms else None
 
 
+def _months_with_source_data(conn, metric: str) -> set[str]:
+    """Return the set of 'YYYY-MM' months where the metric's source tables
+    contain ANY row (globally).
+
+    Gates zero-defaulting: the absence of a row for a (country, month) only
+    means "zero impact" when the source actually reported that month at
+    all. A month missing from every source table is an ingestion gap (or
+    predates source coverage) — horizons in it must stay unresolved rather
+    than become false zeros. The freshness cutoff only guards the right
+    edge; this guards the left edge and interior gaps.
+    """
+    months: set[str] = set()
+    if metric == "FATALITIES":
+        queries = [
+            ("facts_resolved",
+             "SELECT DISTINCT ym FROM facts_resolved WHERE lower(metric) = 'fatalities'"),
+            ("facts_deltas",
+             "SELECT DISTINCT ym FROM facts_deltas WHERE lower(metric) = 'fatalities'"),
+            ("acled_monthly_fatalities",
+             "SELECT DISTINCT strftime(month, '%Y-%m') FROM acled_monthly_fatalities"),
+        ]
+    elif metric == "EVENT_OCCURRENCE":
+        queries = [
+            ("facts_resolved",
+             "SELECT DISTINCT ym FROM facts_resolved "
+             "WHERE lower(metric) = 'event_occurrence'"),
+        ]
+    else:
+        return months
+    for table, sql in queries:
+        if not _table_exists(conn, table):
+            continue
+        try:
+            for (ym,) in conn.execute(sql).fetchall():
+                if ym:
+                    months.add(str(ym))
+        except Exception as exc:
+            LOGGER.warning("Source-coverage query on %s failed: %r", table, exc)
+    return months
+
+
 # Hazard-code → EM-DAT shock_type mapping for emdat_pa table lookups.
 _HAZARD_TO_EMDAT_SHOCK: dict[str, str] = {
     "FL": "flood",
@@ -256,8 +347,13 @@ _HAZARD_TO_EMDAT_SHOCK: dict[str, str] = {
 
 def _try_facts_resolved(
     conn, iso3: str, hazard_code: str, calendar_month: str, metric: str,
-) -> Optional[tuple[float, Optional[str]]]:
-    """Look up in ``facts_resolved`` (IFRC stock data, highest priority)."""
+) -> Optional[tuple[float, Optional[str], str]]:
+    """Look up in ``facts_resolved`` (IFRC stock data, highest priority).
+
+    Candidate rows are ranked deterministically: metric preference first
+    (direct affected counts beat displacement components), then publisher
+    tier (IFRC/ACLED > IDMC > others), then recency — never recency alone.
+    """
     if not _table_exists(conn, "facts_resolved"):
         return None
     if metric == "PA":
@@ -266,11 +362,17 @@ def _try_facts_resolved(
         metric_filter = "lower(metric) = 'fatalities'"
     else:
         return None
+    # Legacy DBs / minimal test fixtures may lack the publisher column;
+    # degrade to metric-preference + recency ordering.
+    has_publisher = _has_column(conn, "facts_resolved", "publisher")
+    publisher_col = "publisher" if has_publisher else "NULL AS publisher"
+    publisher_order = f"{_PUBLISHER_TIER_CASE}, " if has_publisher else ""
     sql = f"""
-        SELECT value, created_at
+        SELECT value, created_at, metric, {publisher_col}
         FROM facts_resolved
         WHERE iso3 = ? AND hazard_code = ? AND ym = ? AND {metric_filter}
-        ORDER BY created_at DESC LIMIT 1
+        ORDER BY {_metric_preference_case()}, {publisher_order}created_at DESC
+        LIMIT 1
     """
     try:
         row = conn.execute(sql, [iso3, hazard_code, calendar_month]).fetchone()
@@ -278,13 +380,19 @@ def _try_facts_resolved(
         return None
     if not row:
         return None
-    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+    source_desc = f"facts_resolved:{row[3] or '?'}:{row[2]}"
+    return float(row[0]), (str(row[1]) if row[1] is not None else None), source_desc
 
 
 def _try_facts_deltas(
     conn, iso3: str, hazard_code: str, calendar_month: str, metric: str,
-) -> Optional[tuple[float, Optional[str]]]:
-    """Look up in ``facts_deltas`` (IDMC flow data, etc.)."""
+) -> Optional[tuple[float, Optional[str], str]]:
+    """Look up in ``facts_deltas`` (IDMC flow data, etc.).
+
+    facts_deltas is unique per (ym, iso3, hazard_code, metric), so ranking
+    by metric preference fully determines the winner; created_at only
+    breaks ties among legacy duplicates.
+    """
     if not _table_exists(conn, "facts_deltas"):
         return None
     if metric == "PA":
@@ -297,10 +405,11 @@ def _try_facts_deltas(
     else:
         return None
     sql = f"""
-        SELECT COALESCE(value_new, value_stock) AS value, created_at
+        SELECT COALESCE(value_new, value_stock) AS value, created_at, metric
         FROM facts_deltas
         WHERE iso3 = ? AND hazard_code = ? AND ym = ? AND {metric_filter}
-        ORDER BY created_at DESC LIMIT 1
+        ORDER BY {_metric_preference_case()}, created_at DESC
+        LIMIT 1
     """
     try:
         row = conn.execute(sql, [iso3, hazard_code, calendar_month]).fetchone()
@@ -308,12 +417,12 @@ def _try_facts_deltas(
         return None
     if not row or row[0] is None:
         return None
-    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+    return float(row[0]), (str(row[1]) if row[1] is not None else None), f"facts_deltas:{row[2]}"
 
 
 def _try_emdat_pa(
     conn, iso3: str, hazard_code: str, calendar_month: str,
-) -> Optional[tuple[float, Optional[str]]]:
+) -> Optional[tuple[float, Optional[str], str]]:
     """Look up people-affected in the ``emdat_pa`` table."""
     if not _table_exists(conn, "emdat_pa"):
         return None
@@ -332,12 +441,12 @@ def _try_emdat_pa(
         return None
     if not row or row[0] is None:
         return None
-    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+    return float(row[0]), (str(row[1]) if row[1] is not None else None), "emdat_pa"
 
 
 def _try_acled_fatalities(
     conn, iso3: str, calendar_month: str,
-) -> Optional[tuple[float, Optional[str]]]:
+) -> Optional[tuple[float, Optional[str], str]]:
     """Look up fatalities in ``acled_monthly_fatalities``."""
     if not _table_exists(conn, "acled_monthly_fatalities"):
         return None
@@ -353,12 +462,16 @@ def _try_acled_fatalities(
         return None
     if not row or row[0] is None:
         return None
-    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+    return (
+        float(row[0]),
+        (str(row[1]) if row[1] is not None else None),
+        "acled_monthly_fatalities",
+    )
 
 
 def _try_gdacs_binary(
     conn, iso3: str, hazard_code: str, calendar_month: str,
-) -> Optional[tuple[float, Optional[str]]]:
+) -> Optional[tuple[float, Optional[str], str]]:
     """Look up GDACS binary event occurrence in ``facts_resolved``."""
     if not _table_exists(conn, "facts_resolved"):
         return None
@@ -376,19 +489,28 @@ def _try_gdacs_binary(
         return None
     if not row or row[0] is None:
         return None
-    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+    return (
+        float(row[0]),
+        (str(row[1]) if row[1] is not None else None),
+        "facts_resolved:event_occurrence",
+    )
 
 
 def _try_phase3plus(
     conn, iso3: str, hazard_code: str, calendar_month: str,
-) -> Optional[tuple[float, Optional[str]]]:
+) -> Optional[tuple[float, Optional[str], str]]:
     """Look up Phase 3+ population in ``facts_resolved`` (FEWS NET or IPC)."""
     if hazard_code != "DR":
         return None
     if not _table_exists(conn, "facts_resolved"):
         return None
-    sql = """
-        SELECT value, created_at
+    publisher_col = (
+        "publisher"
+        if _has_column(conn, "facts_resolved", "publisher")
+        else "NULL AS publisher"
+    )
+    sql = f"""
+        SELECT value, created_at, {publisher_col}
         FROM facts_resolved
         WHERE iso3 = ? AND hazard_code = 'DR'
           AND ym = ?
@@ -401,7 +523,11 @@ def _try_phase3plus(
         return None
     if not row or row[0] is None:
         return None
-    return float(row[0]), (str(row[1]) if row[1] is not None else None)
+    return (
+        float(row[0]),
+        (str(row[1]) if row[1] is not None else None),
+        f"facts_resolved:{row[2] or '?'}:phase3plus_in_need",
+    )
 
 
 def _resolve_value(
@@ -410,8 +536,10 @@ def _resolve_value(
     hazard_code: str,
     calendar_month: str,
     metric: str,
-) -> Optional[tuple[float, Optional[str]]]:
+) -> Optional[tuple[float, Optional[str], str]]:
     """Resolve a single metric for (iso3, hazard_code, calendar_month).
+
+    Returns (value, source_timestamp, source_description) or None.
 
     Checks multiple Resolver tables in priority order.  The dispatch
     depends on the metric type:
@@ -599,6 +727,13 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         skipped_null_resolution = 0
         skipped_unresolvable_hazard = 0
 
+        # Per-month global source coverage for zero-default metrics: a month
+        # absent from every source table is an ingestion gap, not "no impact".
+        zero_default_coverage: dict[str, set[str]] = {
+            m: _months_with_source_data(conn, m)
+            for m in _ZERO_DEFAULT_RULES
+        }
+
         for question_id, iso3, hazard_code, metric, target_month, window_start_date in rows:
             iso3_norm = (iso3 or "").upper()
             hazard_norm = (hazard_code or "").upper()
@@ -657,6 +792,16 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             # Select the per-metric effective cutoff.
             data_cutoff = metric_cutoffs.get(metric_norm)
 
+            # is_test is per question — look it up once, not per horizon.
+            try:
+                q_test = conn.execute(
+                    "SELECT COALESCE(is_test, FALSE) FROM questions WHERE question_id = ?",
+                    [question_id],
+                ).fetchone()
+                is_test_val = q_test[0] if q_test else False
+            except Exception:
+                is_test_val = False
+
             for horizon_m in range(1, NUM_HORIZONS + 1):
                 cal_month = horizon_to_calendar_month(ws_date, horizon_m)
 
@@ -670,10 +815,17 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                 )
                 if resolved is None:
                     # Source-aware null handling: only default to zero for
-                    # sources where absence genuinely means zero impact.
+                    # sources where absence genuinely means zero impact —
+                    # and only when the source actually covered this month
+                    # at all (ingestion gaps must not become false zeros).
                     if _should_default_to_zero(metric_norm, hazard_norm):
+                        covered = zero_default_coverage.get(metric_norm) or set()
+                        if cal_month not in covered:
+                            skipped_no_data_coverage += 1
+                            continue
                         value: float = 0.0
                         source_ts: Optional[str] = None
+                        source_desc = "zero_default"
                         resolved_as_zero += 1
                     else:
                         # All other sources: no record = unresolvable.
@@ -682,17 +834,8 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                         skipped_null_resolution += 1
                         continue
                 else:
-                    value, source_ts = resolved
+                    value, source_ts, source_desc = resolved
                     resolved_from_source += 1
-
-                try:
-                    q_test = conn.execute(
-                        "SELECT COALESCE(is_test, FALSE) FROM questions WHERE question_id = ?",
-                        [question_id],
-                    ).fetchone()
-                    is_test_val = q_test[0] if q_test else False
-                except Exception:
-                    is_test_val = False
 
                 conn.execute(
                     """
@@ -712,13 +855,13 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                         cal_month,
                         float(value),
                         source_ts,
-                        datetime.utcnow(),
+                        _utcnow_naive(),
                         is_test_val,
                     ],
                 )
                 written += 1
                 LOGGER.info(
-                    "Resolved %s h%d (%s/%s/%s %s) -> value=%.1f source_ts=%s",
+                    "Resolved %s h%d (%s/%s/%s %s) -> value=%.1f source=%s source_ts=%s",
                     question_id,
                     horizon_m,
                     iso3_norm,
@@ -726,7 +869,8 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                     cal_month,
                     metric_norm,
                     value,
-                    source_ts or "<zero-default>",
+                    source_desc,
+                    source_ts or "<none>",
                 )
 
         # Update question status for fully-resolved questions.

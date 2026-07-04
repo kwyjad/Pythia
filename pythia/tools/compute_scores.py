@@ -9,10 +9,10 @@ import argparse
 import logging
 import math
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from pythia.buckets import get_bucket_specs
+from pythia.buckets import get_bucket_specs, labels_for, thresholds_for
 from pythia.config import load as load_cfg
 from resolver.db import duckdb_io
 
@@ -21,15 +21,23 @@ LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:
     LOGGER.addHandler(logging.NullHandler())
 
-PA_THRESHOLDS = [0.0, 10_000.0, 50_000.0, 250_000.0, 500_000.0, float("inf")]
-FATAL_THRESHOLDS = [0.0, 5.0, 25.0, 100.0, 500.0, float("inf")]
+# Bucket boundaries and labels are single-sourced from pythia.buckets
+# BUCKET_SPECS. The module-level names are preserved because
+# generate_calibration_advice.py imports them.
+PA_THRESHOLDS = thresholds_for("PA")
+FATAL_THRESHOLDS = thresholds_for("FATALITIES")
+PHASE3_THRESHOLDS = thresholds_for("PHASE3PLUS_IN_NEED")
 
-SPD_CLASS_BINS_PA = ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
-SPD_CLASS_BINS_FATALITIES = ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
-PHASE3_THRESHOLDS = [0.0, 100_000.0, 1_000_000.0, 5_000_000.0, 15_000_000.0, float("inf")]
-SPD_CLASS_BINS_PHASE3 = ["<100k", "100k-<1M", "1M-<5M", "5M-<15M", ">=15M"]
+SPD_CLASS_BINS_PA = labels_for("PA")
+SPD_CLASS_BINS_FATALITIES = labels_for("FATALITIES")
+SPD_CLASS_BINS_PHASE3 = labels_for("PHASE3PLUS_IN_NEED")
 
 EPS = 1e-9
+
+
+def _utcnow_naive() -> datetime:
+    """Naive-UTC now (datetime.utcnow is deprecated; DB columns are naive)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _table_exists(conn, name: str) -> bool:
@@ -73,9 +81,20 @@ def _close_db(conn) -> None:
 
 
 def _bucket_index(value: float, metric: str) -> Optional[int]:
-    """Map a resolved value to a bucket index [0..4] based on metric."""
+    """Map a resolved value to a bucket index [0..4] based on metric.
+
+    Returns None (skip scoring) for negative or non-finite values — the
+    old fallthrough sent them to the TOP bucket, scoring garbage input as
+    a maximal-impact outcome.
+    """
 
     v = float(value)
+    if not math.isfinite(v) or v < 0.0:
+        LOGGER.warning(
+            "Resolved value %r for metric %s is negative/non-finite; skipping.",
+            value, metric,
+        )
+        return None
     metric_up = (metric or "").upper()
     if metric_up == "PA":
         thr = PA_THRESHOLDS
@@ -89,6 +108,8 @@ def _bucket_index(value: float, metric: str) -> Optional[int]:
     for i in range(len(thr) - 1):
         if thr[i] <= v < thr[i + 1]:
             return i
+    # v >= the last finite threshold (only reachable if thresholds were
+    # redefined without a trailing +inf): top bucket.
     return len(thr) - 2
 
 
@@ -117,19 +138,34 @@ def _log_score(p: List[float], j: int) -> float:
     return -math.log(pj)
 
 
-def _crps_like(p: List[float], j: int) -> float:
+def _rps(p: List[float], j: int) -> float:
+    """Normalized Ranked Probability Score (the discrete form of CRPS).
+
+    RPS = sum_{k=1..K-1} (F_k - H_k)^2 / (K - 1), where F is the forecast
+    CDF over the ordered buckets and H is the outcome step CDF (0 below the
+    observed bucket j, 1 at and above it). The K-th term is omitted — it is
+    identically 0 when the probabilities sum to 1 (Epstein 1969; Murphy
+    1971). Range 0 (perfect) to 1 (all mass in the bucket farthest from the
+    outcome). Stored under score_type='crps' for continuity.
+    """
     K = len(p)
+    if K < 2:
+        return 0.0
     F = []
     s = 0.0
     for pk in p:
         s += pk
         F.append(s)
     sq = 0.0
-    for k in range(K):
+    for k in range(K - 1):
         Hk = 0.0 if k < j else 1.0
         d = F[k] - Hk
         sq += d * d
-    return sq / float(K)
+    return sq / float(K - 1)
+
+
+# Backward-compat alias (pythia/tools/score_views.py imports _crps_like).
+_crps_like = _rps
 
 
 # ---------------------------------------------------------------------------
@@ -322,64 +358,58 @@ def _load_spd(
     question_id: str,
     horizon_m: int,
     class_bins: Sequence[str],
-    table: str,
-    model_name: Optional[str] = None,
+    model_name: str,
     run_id: Optional[str] = None,
     _has_run_id: bool = True,
 ) -> Optional[List[float]]:
+    """Load one model's SPD vector from ``forecasts_raw``.
+
+    Every scored entity — individual members AND the named aggregates
+    (``ensemble_mean_v2`` / ``ensemble_bayesmc_v2`` / ``track2_flash``) —
+    lives in forecasts_raw keyed by ``model_name``. The legacy path that
+    read NULL-model rows from ``forecasts_ensemble`` via
+    ``horizon_m/class_bin/p`` was retired (no live writer populated those
+    columns; the NULL-model score convention with it).
+    """
     # Only apply run_id filtering if the forecast table actually has the column.
     if _has_run_id:
         rid_clause, rid_params = _run_id_clause(run_id)
     else:
         rid_clause, rid_params = "", []
 
-    if table == "ensemble":
-        sql = f"""
-          SELECT class_bin, p
-          FROM forecasts_ensemble
-          WHERE question_id = ? AND horizon_m = ? {rid_clause}
-        """
-        params: List[object] = [question_id, horizon_m] + rid_params
+    # forecasts_raw stores data using month_index / bucket_index / probability.
+    # Map bucket_index (1-based) back to class_bins positions.
+    sql = f"""
+      SELECT COALESCE(bucket_index, 0), COALESCE(probability, 0.0)
+      FROM forecasts_raw
+      WHERE question_id = ? AND month_index = ? AND model_name = ? {rid_clause}
+    """
+    params: List[object] = [question_id, horizon_m, model_name] + rid_params
 
-        try:
-            rows = conn.execute(sql, params).fetchall()
-        except Exception as exc:
-            LOGGER.error("SPD query failed for %s horizon %s: %r", question_id, horizon_m, exc)
-            return None
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except Exception as exc:
+        LOGGER.error("SPD query failed for %s horizon %s: %r", question_id, horizon_m, exc)
+        return None
 
-        if not rows:
-            return None
+    if not rows:
+        return None
 
-        by_bin: Dict[str, float] = {cb: float(p) for cb, p in rows}
-        vec = [by_bin.get(cb, 0.0) for cb in class_bins]
-    else:
-        # forecasts_raw stores data using month_index / bucket_index / probability.
-        # Map bucket_index (1-based) back to class_bins positions.
-        sql = f"""
-          SELECT COALESCE(bucket_index, 0), COALESCE(probability, 0.0)
-          FROM forecasts_raw
-          WHERE question_id = ? AND month_index = ? AND model_name = ? {rid_clause}
-        """
-        params = [question_id, horizon_m, model_name] + rid_params
-
-        try:
-            rows = conn.execute(sql, params).fetchall()
-        except Exception as exc:
-            LOGGER.error("SPD query failed for %s horizon %s: %r", question_id, horizon_m, exc)
-            return None
-
-        if not rows:
-            return None
-
-        vec = [0.0] * len(class_bins)
-        for bucket_idx, prob in rows:
-            idx = int(bucket_idx) - 1  # bucket_index is 1-based
-            if 0 <= idx < len(class_bins):
-                vec[idx] = float(prob)
+    vec = [0.0] * len(class_bins)
+    for bucket_idx, prob in rows:
+        idx = int(bucket_idx) - 1  # bucket_index is 1-based
+        if 0 <= idx < len(class_bins):
+            vec[idx] = float(prob)
 
     total = float(sum(vec))
     if total <= 0.0:
-        return [1.0 / float(len(class_bins)) for _ in class_bins]
+        # A forecast that was never made (or stored as all-zero) must not
+        # be scored as if the model held uniform beliefs.
+        LOGGER.warning(
+            "Zero-sum SPD for %s horizon %s (model=%s); skipping.",
+            question_id, horizon_m, model_name,
+        )
+        return None
     return [float(x) / total for x in vec]
 
 
@@ -479,20 +509,10 @@ def _compute_eiv_for_question(
     else:
         rid_clause, rid_params = "", []
 
-    # Ensemble
-    spd_e = _load_spd(
-        conn, question_id=question_id, horizon_m=horizon_m,
-        class_bins=class_bins, table="ensemble", run_id=run_id,
-        _has_run_id=_has_run_id,
-    )
-    if spd_e:
-        eiv, log_err, w20 = _eiv_and_error(spd_e)
-        rows_to_insert.append((
-            question_id, horizon_m, metric, "__ensemble__",
-            eiv, resolved_value, log_err, w20, centroid_version, run_id,
-        ))
-
-    # Per-model
+    # Per-model — includes the named aggregates (ensemble_mean_v2 etc.),
+    # which are written to forecasts_raw alongside the members. The legacy
+    # '__ensemble__' rows (from NULL-model forecasts_ensemble reads) were
+    # retired with the NULL-model score convention.
     model_rows = conn.execute(
         f"SELECT DISTINCT model_name FROM forecasts_raw "
         f"WHERE question_id = ? AND month_index = ? {rid_clause}",
@@ -501,7 +521,7 @@ def _compute_eiv_for_question(
     for (model_name,) in model_rows:
         spd_m = _load_spd(
             conn, question_id=question_id, horizon_m=horizon_m,
-            class_bins=class_bins, table="raw", model_name=model_name,
+            class_bins=class_bins, model_name=model_name,
             run_id=run_id, _has_run_id=_has_run_id,
         )
         if spd_m:
@@ -637,7 +657,12 @@ def compute_scores(db_url: str) -> None:
                     _is_test_cache[question_id] = False
             is_test_val = _is_test_cache[question_id]
 
-            # Binary EVENT_OCCURRENCE questions use Brier score directly
+            # Binary EVENT_OCCURRENCE questions use Brier score directly.
+            # Every scored entity is keyed by an explicit model_name — the
+            # ensemble aggregations appear as 'ensemble_mean_v2' /
+            # 'ensemble_bayesmc_v2' / 'track2_flash' rows in forecasts_raw
+            # (the NULL-model score convention is retired: it duplicated the
+            # named mean row and its value depended on write order).
             is_binary = (metric or "").upper() == "EVENT_OCCURRENCE"
             if is_binary:
                 outcome = float(resolved_value)
@@ -649,55 +674,7 @@ def compute_scores(db_url: str) -> None:
                     else:
                         fe_rid_clause, fe_rid_params = "", []
 
-                    # Score ensemble (bucket_1 = P(yes) in binary convention).
-                    # Deterministic model selection: the NULL-model "ensemble"
-                    # score row is the MEAN aggregation (track2_flash for
-                    # Track 2 questions; legacy 'ensemble' rows as a last
-                    # resort). Without this filter the row picked depended on
-                    # created_at ordering between mean and bayesmc writes.
-                    try:
-                        ens_row = conn.execute(
-                            f"""
-                            SELECT probability FROM forecasts_ensemble
-                            WHERE question_id = ? AND month_index = ? AND bucket_index = 1
-                              AND model_name IN ('ensemble_mean_v2', 'track2_flash', 'ensemble')
-                            {fe_rid_clause}
-                            ORDER BY CASE model_name
-                                       WHEN 'ensemble_mean_v2' THEN 0
-                                       WHEN 'track2_flash' THEN 1
-                                       ELSE 2
-                                     END,
-                                     created_at DESC
-                            LIMIT 1
-                            """,
-                            [question_id, horizon_m] + fe_rid_params,
-                        ).fetchone()
-                    except Exception:
-                        ens_row = None
-
-                    if ens_row and ens_row[0] is not None:
-                        p_yes = float(ens_row[0])
-                        brier_val = (p_yes - outcome) ** 2
-                        conn.execute(
-                            f"""
-                            DELETE FROM scores
-                            WHERE question_id = ? AND horizon_m = ? AND metric = ?
-                              AND model_name IS NULL {rid_clause}
-                            """,
-                            [question_id, horizon_m, metric] + rid_params,
-                        )
-                        now = datetime.utcnow()
-                        conn.execute(
-                            """
-                            INSERT INTO scores (question_id, horizon_m, metric, score_type,
-                                                model_name, value, run_id, created_at, is_test)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            [question_id, horizon_m, metric, "brier", None, brier_val, run_id, now, is_test_val],
-                        )
-                        n_written += 1
-
-                    # Score individual models
+                    # Score each model (members + named aggregates)
                     try:
                         model_rows = conn.execute(
                             f"""
@@ -735,7 +712,7 @@ def compute_scores(db_url: str) -> None:
                                 """,
                                 [question_id, horizon_m, metric, model_name] + rid_params,
                             )
-                            now = datetime.utcnow()
+                            now = _utcnow_naive()
                             conn.execute(
                                 """
                                 INSERT INTO scores (question_id, horizon_m, metric, score_type,
@@ -766,45 +743,10 @@ def compute_scores(db_url: str) -> None:
                 else:
                     fe_rid_clause, fe_rid_params = "", []
 
-                # Score ensemble for this specific (horizon, run_id)
-                spd_e = _load_spd(
-                    conn,
-                    question_id=question_id,
-                    horizon_m=horizon_m,
-                    class_bins=class_bins,
-                    table="ensemble",
-                    run_id=run_id,
-                    _has_run_id=has_run_id,
-                )
-                if spd_e:
-                    brier_e = _brier(spd_e, j)
-                    log_e = _log_score(spd_e, j)
-                    crps_e = _crps_like(spd_e, j)
-
-                    conn.execute(
-                        f"""
-                        DELETE FROM scores
-                        WHERE question_id = ? AND horizon_m = ? AND metric = ?
-                          AND model_name IS NULL {rid_clause}
-                        """,
-                        [question_id, horizon_m, metric] + rid_params,
-                    )
-                    now = datetime.utcnow()
-                    conn.executemany(
-                        """
-                        INSERT INTO scores (question_id, horizon_m, metric, score_type,
-                                            model_name, value, run_id, created_at, is_test)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            (question_id, horizon_m, metric, "brier", None, brier_e, run_id, now, is_test_val),
-                            (question_id, horizon_m, metric, "log", None, log_e, run_id, now, is_test_val),
-                            (question_id, horizon_m, metric, "crps", None, crps_e, run_id, now, is_test_val),
-                        ],
-                    )
-                    n_written += 3
-
-                # Score individual models for this specific (horizon, run_id)
+                # Score each model (members + named aggregates) for this
+                # specific (horizon, run_id). Aggregates are scored via
+                # their explicit forecasts_raw rows (ensemble_mean_v2 etc.);
+                # the NULL-model score convention is retired.
                 model_rows = conn.execute(
                     f"""
                       SELECT DISTINCT model_name
@@ -820,7 +762,6 @@ def compute_scores(db_url: str) -> None:
                         question_id=question_id,
                         horizon_m=horizon_m,
                         class_bins=class_bins,
-                        table="raw",
                         model_name=model_name,
                         run_id=run_id,
                         _has_run_id=has_run_id,
@@ -830,7 +771,7 @@ def compute_scores(db_url: str) -> None:
 
                     brier_m = _brier(spd_m, j)
                     log_m = _log_score(spd_m, j)
-                    crps_m = _crps_like(spd_m, j)
+                    crps_m = _rps(spd_m, j)
 
                     conn.execute(
                         f"""
@@ -840,7 +781,7 @@ def compute_scores(db_url: str) -> None:
                         """,
                         [question_id, horizon_m, metric, model_name] + rid_params,
                     )
-                    now = datetime.utcnow()
+                    now = _utcnow_naive()
                     conn.executemany(
                         """
                         INSERT INTO scores (question_id, horizon_m, metric, score_type,
@@ -883,7 +824,7 @@ def compute_scores(db_url: str) -> None:
                         [qid],
                     )
                     deleted_qids.add(qid)
-            now = datetime.utcnow()
+            now = _utcnow_naive()
             conn.executemany(
                 """
                 INSERT INTO eiv_scores (question_id, horizon_m, metric, model_name,

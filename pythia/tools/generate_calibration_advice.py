@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from pythia.config import load as load_cfg
+from pythia.tools.compute_calibration_pythia import AGGREGATE_MODEL_NAMES
 from pythia.tools.compute_scores import (
     PA_THRESHOLDS,
     FATAL_THRESHOLDS,
@@ -418,14 +419,25 @@ def _compute_per_model_brier(
 
     models = []
     ensemble_brier = None
+    agg_briers: Dict[str, float] = {}
     for row in rows:
         name = str(row[0])
         brier = float(row[1] or 0)
         n = int(row[2] or 0)
-        if name == "__ensemble__":
-            ensemble_brier = brier
+        # Aggregates are stored under explicit model names
+        # (ensemble_mean_v2 etc.); '__ensemble__' covers legacy NULL-model
+        # rows in old DBs.
+        if name == "__ensemble__" or name in AGGREGATE_MODEL_NAMES:
+            agg_briers[name] = brier
         else:
             models.append({"name": name, "brier": brier, "n": n})
+
+    # "The ensemble" = the mean aggregation, with legacy/track-2 fallbacks.
+    for key in ("ensemble_mean_v2", "__ensemble__", "track2_flash",
+                "ensemble", "ensemble_bayesmc_v2"):
+        if key in agg_briers:
+            ensemble_brier = agg_briers[key]
+            break
 
     if not models:
         return None
@@ -917,7 +929,8 @@ def _compute_eiv_accuracy(
             WHERE upper(q.hazard_code) = ?
               AND upper(e.metric) = ?
               AND COALESCE(q.is_test, FALSE) = FALSE
-              AND e.model_name = '__ensemble__'
+              AND e.model_name IN
+                  ('ensemble_mean_v2', 'track2_flash', '__ensemble__')
             """,
             [hz, m],
         ).fetchone()

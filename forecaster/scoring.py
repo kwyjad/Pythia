@@ -9,9 +9,13 @@ from __future__ import annotations
 import math
 from typing import Iterable, List
 
+from pythia.buckets import interior_thresholds_for
 
-PA_THRESHOLDS = [10000, 50000, 250000, 500000]
-FATALITIES_THRESHOLDS = [5, 25, 100, 500]
+# Interior bucket boundaries, single-sourced from pythia.buckets
+# BUCKET_SPECS (this module's bucket_index_from_value is 1-based and only
+# needs the finite boundaries).
+PA_THRESHOLDS = interior_thresholds_for("PA")
+FATALITIES_THRESHOLDS = interior_thresholds_for("FATALITIES")
 
 
 def normalize_probs(probs: Iterable[float]) -> list[float]:

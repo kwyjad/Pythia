@@ -90,7 +90,7 @@ const TOOLTIP_BRIER_BINARY =
 const TOOLTIP_LOG =
   "Logarithmic scoring rule. Lower is better. Heavily penalises confident wrong predictions. Range: 0 (perfect) to +\u221E.";
 const TOOLTIP_CRPS =
-  "Continuous Ranked Probability Score. Lower is better. Measures full distribution accuracy. Range: 0 (perfect) to +\u221E.";
+  "Normalized Ranked Probability Score (the discrete form of CRPS): squared cumulative-distribution error across the ordered buckets, divided by K\u22121. Lower is better. Range: 0 (perfect) to 1 (all probability in the bucket farthest from the outcome).";
 const TOOLTIP_SAMPLES =
   "Number of individual scored data points (question \u00D7 horizon combinations). Each question can produce multiple samples across different forecast horizons.";
 const TOOLTIP_EXTERNAL_BENCHMARK =

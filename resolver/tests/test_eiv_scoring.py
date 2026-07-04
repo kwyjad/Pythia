@@ -128,9 +128,11 @@ def test_eiv_basic():
         "INSERT INTO questions (question_id, hs_run_id, iso3, hazard_code, metric) VALUES ('q1', 'run1', 'SOM', 'ACE', 'PA')"
     )
     conn.execute("INSERT INTO hs_runs (hs_run_id) VALUES ('run1')")
-    for cb, p in zip(class_bins, spd):
+    for bucket_idx, p in enumerate(spd, start=1):
         conn.execute(
-            "INSERT INTO forecasts_ensemble (question_id, horizon_m, class_bin, p) VALUES ('q1', 1, ?, ?)", [cb, p]
+            "INSERT INTO forecasts_raw (question_id, model_name, month_index, bucket_index, probability) "
+            "VALUES ('q1', 'ensemble_mean_v2', 1, ?, ?)",
+            [bucket_idx, p],
         )
 
     rows = _compute_eiv_for_question(
@@ -144,10 +146,11 @@ def test_eiv_basic():
         _has_run_id=False,
     )
 
-    assert len(rows) >= 1  # at least ensemble row
+    assert len(rows) >= 1  # at least the aggregate row
 
-    # Ensemble row
-    ensemble = [r for r in rows if r[3] == "__ensemble__"]
+    # Aggregate row (named ensemble_mean_v2 — the NULL-model/'__ensemble__'
+    # convention is retired)
+    ensemble = [r for r in rows if r[3] == "ensemble_mean_v2"]
     assert len(ensemble) == 1
     row = ensemble[0]
     eiv = row[4]
@@ -199,9 +202,11 @@ def test_eiv_floor():
         "INSERT INTO questions (question_id, hs_run_id, iso3, hazard_code, metric) VALUES ('q2', 'run1', 'SOM', 'ACE', 'PA')"
     )
     conn.execute("INSERT INTO hs_runs (hs_run_id) VALUES ('run1')")
-    for cb, p in zip(class_bins, spd):
+    for bucket_idx, p in enumerate(spd, start=1):
         conn.execute(
-            "INSERT INTO forecasts_ensemble (question_id, horizon_m, class_bin, p) VALUES ('q2', 1, ?, ?)", [cb, p]
+            "INSERT INTO forecasts_raw (question_id, model_name, month_index, bucket_index, probability) "
+            "VALUES ('q2', 'ensemble_mean_v2', 1, ?, ?)",
+            [bucket_idx, p],
         )
 
     rows = _compute_eiv_for_question(
@@ -215,7 +220,7 @@ def test_eiv_floor():
         _has_run_id=False,
     )
 
-    ensemble = [r for r in rows if r[3] == "__ensemble__"]
+    ensemble = [r for r in rows if r[3] == "ensemble_mean_v2"]
     assert len(ensemble) == 1
     row = ensemble[0]
     log_ratio_err = row[6]
