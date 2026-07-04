@@ -20,13 +20,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from pythia.buckets import interior_thresholds_for, labels_for, n_buckets_for
 from pythia.config import load as load_cfg
 from pythia.tools.compute_calibration_pythia import AGGREGATE_MODEL_NAMES
 from pythia.tools.compute_scores import (
     PA_THRESHOLDS,
     FATAL_THRESHOLDS,
-    SPD_CLASS_BINS_PA,
-    SPD_CLASS_BINS_FATALITIES,
+    PHASE3_THRESHOLDS,
 )
 from resolver.db import duckdb_io
 
@@ -56,16 +56,18 @@ METRIC_LABELS = {
 SEED_ADVICE: Dict[Tuple[str, str], str] = {
     ("ACE", "FATALITIES"): (
         "TAIL COVERAGE:\n"
-        "- Historical pattern: conflict fatality spikes (bucket 4-5, >=100 fatalities) "
-        "occur ~15-20% of months in active-conflict countries.\n"
+        "- Historical pattern: conflict fatality spikes (>=100 fatalities, i.e. "
+        "the 100-<500, 500-<1000, and >=1000 buckets) occur ~15-20% of months "
+        "in active-conflict countries.\n"
         "- Known bias: models assign <5% to top buckets even when RC is elevated.\n"
-        "- ACTION: For active conflict zones, ensure bucket 4+5 combined >= 10%. "
-        "When RC >= L2, bucket 4+5 combined should be >= 15%.\n\n"
+        "- ACTION: For active conflict zones, ensure the >=100 buckets combined "
+        ">= 10%. When RC >= L2, they should combine to >= 15%.\n\n"
         "BUCKET CALIBRATION:\n"
-        "- Bucket 1 (<5 fatalities) is typically overweighted by 10-15pp in "
-        "active conflict zones.\n"
+        "- The bottom buckets (0 and 1-<5 fatalities) are typically overweighted "
+        "by 10-15pp in active conflict zones.\n"
         "- ACTION: In countries with recent conflict history, do not assign >60% "
-        "to bucket 1 unless there is strong de-escalation evidence.\n\n"
+        "combined to the 0 and 1-<5 buckets unless there is strong "
+        "de-escalation evidence.\n\n"
         "HORIZON DIFFERENTIATION:\n"
         "- Conflict fatalities show meaningful month-to-month variation. Later "
         "horizons (months 4-6) should carry wider distributions.\n"
@@ -74,15 +76,15 @@ SEED_ADVICE: Dict[Tuple[str, str], str] = {
     ),
     ("ACE", "PA"): (
         "TAIL COVERAGE:\n"
-        "- Displacement events reaching 250k+ (buckets 4-5) occur in ~5-10% "
-        "of country-months for ACE hazard.\n"
-        "- ACTION: Ensure non-trivial tail mass (>=3% combined for buckets 4-5) "
-        "unless the country has no recent displacement.\n\n"
+        "- Displacement events reaching 250k+ (the top two buckets) occur in "
+        "~5-10% of country-months for ACE hazard.\n"
+        "- ACTION: Ensure non-trivial tail mass (>=3% combined for the top two "
+        "buckets) unless the country has no recent displacement.\n\n"
         "BUCKET CALIBRATION:\n"
-        "- The 10k-50k range (bucket 2) is systematically under-predicted in "
+        "- The 10k-<50k bucket is systematically under-predicted in "
         "countries with ongoing low-level displacement.\n"
-        "- ACTION: In countries with established IDP populations, give bucket 2 "
-        "at least 15% probability."
+        "- ACTION: In countries with established IDP populations, give the "
+        "10k-<50k bucket at least 15% probability."
     ),
 }
 
@@ -177,27 +179,35 @@ def _ensure_findings_json_column(conn: Any) -> None:
 def _class_bins_for_metric(metric: str) -> List[str]:
     """Return ordered class_bin labels for the given metric."""
     m = (metric or "").upper()
-    if m == "FATALITIES":
-        return list(SPD_CLASS_BINS_FATALITIES)
-    return list(SPD_CLASS_BINS_PA)
+    labels = labels_for(m)
+    if labels:
+        return list(labels)
+    return list(labels_for("PA"))
 
 
 def _tail_bins(metric: str) -> Tuple[str, str]:
-    """Return the two class_bin labels corresponding to buckets 4 and 5."""
+    """Return the class_bin labels of the top two buckets for the metric."""
+    bins = _class_bins_for_metric(metric)
+    return (bins[-2], bins[-1])
+
+
+def _thresholds_for_metric(metric: str) -> List[float]:
+    """Full threshold list [0, b1, .., inf] for the metric (PA fallback)."""
     m = (metric or "").upper()
     if m == "FATALITIES":
-        return ("100-<500", ">=500")
-    return ("250k-<500k", ">=500k")
+        return list(FATAL_THRESHOLDS)
+    if m == "PHASE3PLUS_IN_NEED":
+        return list(PHASE3_THRESHOLDS)
+    return list(PA_THRESHOLDS)
 
 
 def _bucket_case_sql(metric: str) -> str:
     """Generate a SQL CASE expression to bucketify resolutions.value.
 
-    Thresholds are derived from the canonical ``PA_THRESHOLDS`` /
-    ``FATAL_THRESHOLDS`` lists in ``compute_scores`` so they stay in sync.
+    Thresholds are derived from the canonical lists in ``compute_scores``
+    (which in turn come from ``pythia.buckets``) so they stay in sync.
     """
-    m = (metric or "").upper()
-    thresholds = FATAL_THRESHOLDS if m == "FATALITIES" else PA_THRESHOLDS
+    thresholds = _thresholds_for_metric(metric)
     # thresholds = [0.0, t1, t2, t3, t4, inf] → bucket boundaries are t1..t4
     when_clauses = "\n".join(
         f"                WHEN r.value < {t:g} THEN {i + 1}"
@@ -261,6 +271,7 @@ def _compute_tail_coverage(
     m = metric.upper()
     tail_bin_1, tail_bin_2 = _tail_bins(m)
     bucket_case = _bucket_case_sql(m)
+    tail_start = max(n_buckets_for(m) - 1, 2)  # top two buckets
 
     sql = f"""
         WITH resolved_with_bucket AS (
@@ -293,7 +304,7 @@ def _compute_tail_coverage(
             AVG(et.tail_prob) AS avg_assigned_tail,
             SUM(CASE WHEN et.tail_prob < 0.05 THEN 1 ELSE 0 END)::DOUBLE
                 / GREATEST(COUNT(*), 1) AS frac_starved,
-            SUM(CASE WHEN rb.resolved_bucket >= 4 THEN 1 ELSE 0 END)::DOUBLE
+            SUM(CASE WHEN rb.resolved_bucket >= {tail_start} THEN 1 ELSE 0 END)::DOUBLE
                 / GREATEST(COUNT(*), 1) AS actual_tail_rate
         FROM ensemble_tail_probs et
         JOIN resolved_with_bucket rb
@@ -611,10 +622,11 @@ def _compute_per_model_bucket_calibration(
 def _compute_per_model_tail_coverage(
     conn: Any, hazard_code: str, metric: str, model_name: str,
 ) -> Optional[Dict[str, Any]]:
-    """Tail coverage (buckets 4-5) for a single model from forecasts_raw."""
+    """Tail coverage (top two buckets) for a single model from forecasts_raw."""
     hz = hazard_code.upper()
     m = metric.upper()
     bucket_case = _bucket_case_sql(m)
+    tail_start = max(n_buckets_for(m) - 1, 2)  # top two buckets
 
     sql = f"""
         WITH resolved_with_bucket AS (
@@ -632,7 +644,7 @@ def _compute_per_model_tail_coverage(
             SELECT
                 fr.question_id,
                 fr.month_index AS horizon_m,
-                SUM(CASE WHEN fr.bucket_index >= 4 THEN fr.probability ELSE 0 END) AS tail_prob
+                SUM(CASE WHEN fr.bucket_index >= {tail_start} THEN fr.probability ELSE 0 END) AS tail_prob
             FROM forecasts_raw fr
             JOIN questions q ON q.question_id = fr.question_id
             WHERE upper(q.hazard_code) = ?
@@ -647,7 +659,7 @@ def _compute_per_model_tail_coverage(
             AVG(mt.tail_prob) AS avg_assigned_tail,
             SUM(CASE WHEN mt.tail_prob < 0.05 THEN 1 ELSE 0 END)::DOUBLE
                 / GREATEST(COUNT(*), 1) AS frac_starved,
-            SUM(CASE WHEN rb.resolved_bucket >= 4 THEN 1 ELSE 0 END)::DOUBLE
+            SUM(CASE WHEN rb.resolved_bucket >= {tail_start} THEN 1 ELSE 0 END)::DOUBLE
                 / GREATEST(COUNT(*), 1) AS actual_tail_rate
         FROM model_tail_probs mt
         JOIN resolved_with_bucket rb
@@ -1113,7 +1125,12 @@ def _compute_prior_anchoring_quality(
     if len(rows) < MIN_QUESTIONS:
         return None
 
-    # Extract prior SPDs
+    # Extract prior SPDs. Traces whose prior length doesn't match the
+    # metric's current bucket count come from another bucket scheme and
+    # are skipped.
+    k = n_buckets_for(metric)
+    if k < 2:
+        return None
     prior_spds: list[list[float]] = []
     for row in rows:
         try:
@@ -1121,7 +1138,7 @@ def _compute_prior_anchoring_quality(
             if isinstance(trace, dict):
                 prior = trace.get("prior", {})
                 spd = prior.get("spd")
-                if isinstance(spd, list) and len(spd) == 5:
+                if isinstance(spd, list) and len(spd) == k:
                     prior_spds.append([float(v) for v in spd])
         except Exception:
             continue
@@ -1131,13 +1148,13 @@ def _compute_prior_anchoring_quality(
 
     # Compute mean prior SPD
     n = len(prior_spds)
-    mean_prior = [sum(s[i] for s in prior_spds) / n for i in range(5)]
+    mean_prior = [sum(s[i] for s in prior_spds) / n for i in range(k)]
 
     # Compute prior variance (average variance across buckets)
     prior_variance = sum(
         sum((s[i] - mean_prior[i]) ** 2 for s in prior_spds) / n
-        for i in range(5)
-    ) / 5
+        for i in range(k)
+    ) / k
 
     # Get actual resolution distribution
     actual_dist = _compute_actual_resolution_distribution(conn, hazard_code, metric)
@@ -1148,12 +1165,12 @@ def _compute_prior_anchoring_quality(
         "prior_variance": round(prior_variance, 6),
     }
 
-    if actual_dist:
+    if actual_dist and len(actual_dist) == k:
         result["actual_resolution_distribution"] = actual_dist
-        gap = [round(mean_prior[i] - actual_dist[i], 4) for i in range(5)]
+        gap = [round(mean_prior[i] - actual_dist[i], 4) for i in range(k)]
         result["prior_vs_actual_gap"] = gap
 
-        worst_idx = max(range(5), key=lambda i: abs(gap[i]))
+        worst_idx = max(range(k), key=lambda i: abs(gap[i]))
         result["worst_bucket_gap"] = {
             "bucket": worst_idx + 1,
             "gap_pp": round(gap[worst_idx] * 100, 1),
@@ -1171,22 +1188,19 @@ def _compute_actual_resolution_distribution(
     if not _table_exists(conn, "resolutions"):
         return None
 
-    # Get thresholds for bucket assignment
-    if metric.upper() == "FATALITIES":
-        thresholds = list(FATAL_THRESHOLDS)
-    elif metric.upper() == "PHASE3PLUS_IN_NEED":
-        thresholds = [100_000, 1_000_000, 5_000_000, 15_000_000]
-    else:
-        thresholds = list(PA_THRESHOLDS)
+    # Interior thresholds only: the previous version fed the FULL threshold
+    # list (leading 0, trailing inf) into this CASE builder, shifting every
+    # resolution one bucket high and producing invalid `value < inf` SQL.
+    metric_up = metric.upper()
+    interior = interior_thresholds_for(metric_up)
+    n_buckets = n_buckets_for(metric_up)
+    if not interior or n_buckets < 2:
+        return None
 
-    # Build bucket CASE expression
-    cases = []
-    for i, t in enumerate(thresholds):
-        if i == 0:
-            cases.append(f"WHEN value < {t} THEN {i + 1}")
-        else:
-            cases.append(f"WHEN value < {t} THEN {i + 1}")
-    cases.append(f"ELSE {len(thresholds) + 1}")
+    cases = [
+        f"WHEN value < {t:g} THEN {i + 1}" for i, t in enumerate(interior)
+    ]
+    cases.append(f"ELSE {n_buckets}")
     case_sql = " ".join(cases)
 
     sql = f"""
@@ -1207,10 +1221,10 @@ def _compute_actual_resolution_distribution(
     if not rows:
         return None
 
-    counts = [0] * 5
+    counts = [0] * n_buckets
     for bucket, cnt in rows:
         idx = int(bucket) - 1
-        if 0 <= idx < 5:
+        if 0 <= idx < n_buckets:
             counts[idx] = int(cnt)
 
     total = sum(counts)
@@ -1251,14 +1265,14 @@ def _format_advice(
         frac_starved = tc["frac_starved"] * 100
 
         lines.append(
-            f"TAIL: Ensemble assigns avg {avg_tail:.1f}% to buckets 4-5; "
+            f"TAIL: Ensemble assigns avg {avg_tail:.1f}% to the top two buckets; "
             f"actual resolution rate is {actual:.1f}%."
         )
         if actual > avg_tail + 3:
             gap = actual - avg_tail
             target = max(avg_tail + gap * 0.6, actual * 0.7)
             lines.append(
-                f"ACTION: Increase bucket 4+5 combined probability to at least "
+                f"ACTION: Increase top-two-bucket combined probability to at least "
                 f"{target:.0f}% unless you have strong evidence against tail outcomes."
             )
         elif avg_tail > actual + 5:
@@ -1365,7 +1379,7 @@ def _format_advice(
                 lines.append(
                     "ACTION: When RC >= L2, tail mass should be meaningfully "
                     "higher than at RC L0. Ensure at least 5pp increase in "
-                    "bucket 4+5 combined probability."
+                    "top-two-bucket combined probability."
                 )
             else:
                 lines.append("RC-conditional adjustment looks appropriate.")
@@ -1531,14 +1545,14 @@ def _format_per_model_advice(
         avg_tail = tc["avg_assigned_tail"] * 100
         actual = tc["actual_tail_rate"] * 100
         lines.append(
-            f"YOUR TAIL: You assign avg {avg_tail:.1f}% to buckets 4-5; "
+            f"YOUR TAIL: You assign avg {avg_tail:.1f}% to the top two buckets; "
             f"actual rate is {actual:.1f}%."
         )
         if actual > avg_tail + 3:
             gap = actual - avg_tail
             target = max(avg_tail + gap * 0.6, actual * 0.7)
             lines.append(
-                f"ACTION: Increase your bucket 4+5 combined to at least {target:.0f}%."
+                f"ACTION: Increase your top-two-bucket combined to at least {target:.0f}%."
             )
         elif avg_tail > actual + 5:
             lines.append(

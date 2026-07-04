@@ -170,7 +170,7 @@ def test_write_spd_outputs_maps_calendar_labels_to_window_indices(tmp_path) -> N
         "status": "active",
         "pythia_metadata_json": None,
     }
-    probs = [0.2, 0.2, 0.2, 0.2, 0.2]
+    probs = [0.1, 0.1, 0.2, 0.2, 0.2, 0.2]
     spd_obj = {
         "spds": {
             "2026-07": {"probs": probs},
@@ -212,12 +212,12 @@ def test_write_spd_outputs_maps_calendar_labels_to_window_indices(tmp_path) -> N
 # ---------------------------------------------------------------------------
 
 def test_weighted_mean_shifts_toward_heavier_member() -> None:
-    a = {"2026-07": [1.0, 0.0, 0.0, 0.0, 0.0]}
-    b = {"2026-07": [0.0, 1.0, 0.0, 0.0, 0.0]}
-    out = aggregate_spd_v2_mean([a, b], member_weights=[3.0, 1.0])
+    a = {"2026-07": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+    b = {"2026-07": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]}
+    out = aggregate_spd_v2_mean([a, b], n_buckets=6, member_weights=[3.0, 1.0])
     assert abs(out["2026-07"][0] - 0.75) < 1e-9
     # None keeps the legacy unweighted mean
-    out = aggregate_spd_v2_mean([a, b], member_weights=None)
+    out = aggregate_spd_v2_mean([a, b], n_buckets=6, member_weights=None)
     assert abs(out["2026-07"][0] - 0.5) < 1e-9
 
 

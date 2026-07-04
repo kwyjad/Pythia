@@ -180,7 +180,8 @@ const PANELS: PanelConfig[] = [
     description: (
       <p>
         The v2 forecaster prompt produces a six-month SPD (Subjective
-        Probability Distribution) over five impact buckets using a structured
+        Probability Distribution) over six or seven impact buckets
+        (metric-dependent, with a dedicated zero-impact bucket) using a structured
         7-step Bayesian updating method. It injects calibration guidance,
         regime change signals, hazard tail pack data, prediction market
         signals, seasonal outlook, and structured data connectors

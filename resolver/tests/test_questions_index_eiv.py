@@ -222,8 +222,8 @@ def test_compute_questions_forecast_summary_falls_back_without_centroids() -> No
             probability
         )
         VALUES
-            ('q3', 'run_new', '2024-03-05 00:00:00', 'ensemble_mean_v2', 'ok', 'EQ', 'PA', 1, 2, 0.5),
-            ('q3', 'run_new', '2024-03-05 00:00:00', 'ensemble_mean_v2', 'ok', 'EQ', 'PA', 2, 3, 0.5);
+            ('q3', 'run_new', '2024-03-05 00:00:00', 'ensemble_mean_v2', 'ok', 'EQ', 'PA', 1, 3, 0.5),
+            ('q3', 'run_new', '2024-03-05 00:00:00', 'ensemble_mean_v2', 'ok', 'EQ', 'PA', 2, 4, 0.5);
         """
     )
 

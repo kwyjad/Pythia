@@ -73,10 +73,12 @@ class TestDRPhase3Buckets:
         block = get_hazard_reasoning_block("DR", "PHASE3PLUS_IN_NEED")
         assert "15M" in block or "15m" in block.lower() or "15 million" in block.lower()
 
-    def test_all_five_buckets_referenced(self):
+    def test_all_buckets_referenced(self):
+        from pythia.buckets import labels_for
+
         block = get_hazard_reasoning_block("DR", "PHASE3PLUS_IN_NEED")
-        for label in ["Bucket 1", "Bucket 2", "Bucket 3", "Bucket 4", "Bucket 5"]:
-            assert label in block, f"{label} not found in _DR_PHASE3 block"
+        for label in labels_for("PHASE3PLUS_IN_NEED"):
+            assert f'"{label}"' in block, f"bucket {label} not found in _DR_PHASE3 block"
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ import numpy as np
 
 from .providers import ModelSpec, call_chat_ms, estimate_cost_usd
 from .llm_logging import log_forecaster_llm_call
+from pythia.buckets import centroids_for
 from pythia.db.schema import connect as pythia_connect
 
 @dataclass
@@ -37,30 +38,16 @@ class MemberOutput:
 class EnsembleResult:
     members: List[MemberOutput]
 
-# PA bucket centroids: conditional expected PA given each bucket, in people.
-# Bucket 1 centroid is 0.0 because there is no explicit "0" bucket and much of
-# the probability mass in this bucket will be on zero.
-SPD_BUCKET_CENTROIDS_PA: list[float] = [
-    0.0,  # Bucket 1: <10k (treated as no major emergency)
-    30_000.0,  # Bucket 2: 10k–<50k
-    150_000.0,  # Bucket 3: 50k–<250k
-    375_000.0,  # Bucket 4: 250k–<500k
-    700_000.0,  # Bucket 5: >=500k
-]
+# Seed bucket centroids, single-sourced from pythia/buckets.py BUCKET_SPECS.
+# The leading "0" bucket has centroid 0.0 (exactly-zero impact); DB-loaded
+# EMA centroids override these when available.
+SPD_BUCKET_CENTROIDS_PA: list[float] = centroids_for("PA")
 
 # Backwards-compatible alias used by debug tools and any generic callers.
 # "Default" SPD centroids are PA-style centroids aligned with SPD_BUCKET_TEXT_PA.
 SPD_BUCKET_CENTROIDS_DEFAULT: list[float] = SPD_BUCKET_CENTROIDS_PA
 
-# Fatalities bucket centroids: expected deaths conditional on each bucket.
-# Bucket 1 centroid is 0.0 to reflect heavy mass on zero within the "<5" range.
-SPD_BUCKET_CENTROIDS_FATALITIES: list[float] = [
-    0.0,  # Bucket 1: <5
-    15.0,  # Bucket 2: 5–<25
-    62.0,  # Bucket 3: 25–<100
-    300.0,  # Bucket 4: 100–<500
-    700.0,  # Bucket 5: >=500
-]
+SPD_BUCKET_CENTROIDS_FATALITIES: list[float] = centroids_for("FATALITIES")
 
 # ---------- helpers ----------
 def sanitize_mcq_vector(vec: List[float], n_options: Optional[int] = None) -> List[float]:
@@ -85,8 +72,8 @@ def sanitize_mcq_vector(vec: List[float], n_options: Optional[int] = None) -> Li
 def _normalize_spd_keys(
     data: dict,
     *,
-    n_months: int = 6,
-    n_buckets: int = 5,
+    n_months: int,
+    n_buckets: int,
 ) -> dict:
     """
     Normalize SPD dict keys to canonical 'month_1'..'month_n'.
@@ -143,15 +130,21 @@ def _normalize_spd_keys(
 
 def _parse_spd_json(
     text: str,
-    n_months: int = 6,
-    n_buckets: int = 5,
+    n_months: int,
+    n_buckets: int,
 ) -> Optional[dict]:
     """
     Parse an SPD-style JSON object of the form:
-      {"month_1": [...5 numbers...], ..., "month_6": [...5 numbers...]}
+      {"month_1": [...n_buckets numbers...], ..., "month_6": [...]}
 
     Returns a dict mapping month keys to sanitized lists of length n_buckets,
-    or None if parsing fails.
+    or None if parsing fails. A month vector with the WRONG number of
+    entries fails the whole parse: silently zero-padding a short vector
+    would systematically suppress the tail buckets (and truncating a long
+    one would drop them), writing a bias into the DB as if the model
+    believed it. A rejected member drops out along the existing
+    fail-loudly path (insufficient month coverage -> mean fallback ->
+    no-forecast row).
     """
     if not text:
         return None
@@ -210,6 +203,17 @@ def _parse_spd_json(
                     raw_vals.append(float(x))
                 except Exception:
                     continue
+
+        # Strict bucket-count check: a present-but-wrong-length vector is a
+        # scheme mismatch (e.g. a model still emitting 5 buckets), not a
+        # recoverable formatting issue.
+        if isinstance(raw_vec, list) and raw_vec and len(raw_vals) != n_buckets:
+            if os.getenv("PYTHIA_DEBUG_SPD", "0") == "1":
+                print(
+                    f"[spd] parse rejected: {key} has {len(raw_vals)} values, "
+                    f"expected {n_buckets}"
+                )
+            return None
 
         if sum(abs(v) for v in raw_vals) > 1e-8:
             any_nonzero_raw = True
@@ -418,13 +422,14 @@ async def run_ensemble_spd(
     *,
     run_id: str,
     question_id: str,
+    n_buckets: int,
     hs_run_id: str | None = None,
 ) -> EnsembleResult:
     """
     Run the ensemble for SPD questions.
 
     Each member's parsed output is a dict:
-      { "month_1": [...5...], ..., "month_6": [...5...] }.
+      { "month_1": [...n_buckets...], ..., "month_6": [...n_buckets...] }.
     """
     tasks = []
 
@@ -460,7 +465,7 @@ async def run_ensemble_spd(
             )
 
             # Parse SPD JSON
-            parsed = _parse_spd_json(text, n_months=6, n_buckets=5)
+            parsed = _parse_spd_json(text, n_months=6, n_buckets=n_buckets)
             ok = parsed is not None
             if parsed is None:
                 parsed = {}

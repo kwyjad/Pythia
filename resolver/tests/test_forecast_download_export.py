@@ -127,7 +127,7 @@ def test_build_forecast_spd_export():
         run_id="ens-old",
         model_name="ensemble_mean_v2",
         month_index=1,
-        probabilities=[0.2, 0.2, 0.2, 0.2, 0.2],
+        probabilities=[0.1, 0.1, 0.2, 0.2, 0.2, 0.2],
         created_at="2024-01-01",
     )
     _insert_forecast_rows(
@@ -137,7 +137,7 @@ def test_build_forecast_spd_export():
         run_id="ens-new",
         model_name="ensemble_mean_v2",
         month_index=1,
-        probabilities=[0.1, 0.2, 0.3, 0.2, 0.2],
+        probabilities=[0.1, 0.1, 0.2, 0.3, 0.2, 0.1],
         created_at="2024-01-02",
     )
     _insert_forecast_rows(
@@ -147,7 +147,7 @@ def test_build_forecast_spd_export():
         run_id="ens-new",
         model_name="ensemble_bayesmc_v2",
         month_index=1,
-        probabilities=[0.05, 0.2, 0.35, 0.2, 0.2],
+        probabilities=[0.05, 0.05, 0.2, 0.3, 0.2, 0.2],
         created_at="2024-01-02",
     )
     _insert_forecast_rows(
@@ -157,7 +157,7 @@ def test_build_forecast_spd_export():
         run_id="ens-new",
         model_name="ensemble_mean_v2",
         month_index=1,
-        probabilities=[0.3, 0.25, 0.2, 0.15, 0.1],
+        probabilities=[0.2, 0.15, 0.2, 0.15, 0.15, 0.1, 0.05],
         created_at="2024-01-03",
     )
     _insert_forecast_rows(
@@ -167,7 +167,7 @@ def test_build_forecast_spd_export():
         run_id="ens-new",
         model_name="ensemble_bayesmc_v2",
         month_index=1,
-        probabilities=[0.25, 0.25, 0.2, 0.2, 0.1],
+        probabilities=[0.15, 0.15, 0.2, 0.2, 0.15, 0.1, 0.05],
         created_at="2024-01-03",
     )
 
@@ -178,7 +178,7 @@ def test_build_forecast_spd_export():
         run_id="raw-1",
         model_name="gpt-5.2",
         month_index=1,
-        probabilities=[0.15, 0.2, 0.25, 0.2, 0.2],
+        probabilities=[0.1, 0.1, 0.2, 0.25, 0.2, 0.15],
         created_at="2024-01-04",
     )
     _insert_forecast_rows(
@@ -188,7 +188,7 @@ def test_build_forecast_spd_export():
         run_id="raw-2",
         model_name="gpt-5.2",
         month_index=1,
-        probabilities=[0.4, 0.2, 0.15, 0.15, 0.1],
+        probabilities=[0.3, 0.15, 0.15, 0.15, 0.1, 0.1, 0.05],
         created_at="2024-01-04",
     )
 
@@ -203,16 +203,19 @@ def test_build_forecast_spd_export():
     con.execute(
         """
         INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid) VALUES
-            ('*', 'PA', 1, 1.0),
-            ('*', 'PA', 2, 10.0),
-            ('*', 'PA', 3, 100.0),
-            ('*', 'PA', 4, 1000.0),
-            ('*', 'PA', 5, 10000.0),
-            ('*', 'FATALITIES', 1, 2.0),
-            ('*', 'FATALITIES', 2, 4.0),
-            ('*', 'FATALITIES', 3, 6.0),
-            ('*', 'FATALITIES', 4, 8.0),
-            ('*', 'FATALITIES', 5, 10.0)
+            ('*', 'PA', 1, 0.0),
+            ('*', 'PA', 2, 1.0),
+            ('*', 'PA', 3, 10.0),
+            ('*', 'PA', 4, 100.0),
+            ('*', 'PA', 5, 1000.0),
+            ('*', 'PA', 6, 10000.0),
+            ('*', 'FATALITIES', 1, 0.0),
+            ('*', 'FATALITIES', 2, 2.0),
+            ('*', 'FATALITIES', 3, 4.0),
+            ('*', 'FATALITIES', 4, 6.0),
+            ('*', 'FATALITIES', 5, 8.0),
+            ('*', 'FATALITIES', 6, 10.0),
+            ('*', 'FATALITIES', 7, 12.0)
         """
     )
 
@@ -232,6 +235,8 @@ def test_build_forecast_spd_export():
         "SPD_3",
         "SPD_4",
         "SPD_5",
+        "SPD_6",
+        "SPD_7",
         "EIV",
         "triage_score",
         "triage_tier",
@@ -254,17 +259,29 @@ def test_build_forecast_spd_export():
         set(df["model"])
     )
 
+    spd_cols_6 = ["SPD_1", "SPD_2", "SPD_3", "SPD_4", "SPD_5", "SPD_6"]
+    spd_cols_7 = spd_cols_6 + ["SPD_7"]
+
     pa_row = df[(df["ISO"] == "KEN") & (df["model"] == "ensemble_mean_v2")].iloc[0]
     assert pa_row["SPD_1"] == pytest.approx(0.1)
-    assert sum(pa_row[["SPD_1", "SPD_2", "SPD_3", "SPD_4", "SPD_5"]]) == pytest.approx(1.0)
+    assert sum(pa_row[spd_cols_6]) == pytest.approx(1.0)
+    # PA has 6 buckets: the SPD_7 column exists (wide schema) but is 0.
+    assert pa_row["SPD_7"] == pytest.approx(0.0)
 
     fatal_row = df[(df["ISO"] == "UGA") & (df["model"] == "ensemble_bayesmc_v2")].iloc[0]
-    assert sum(fatal_row[["SPD_1", "SPD_2", "SPD_3", "SPD_4", "SPD_5"]]) == pytest.approx(1.0)
+    assert sum(fatal_row[spd_cols_7]) == pytest.approx(1.0)
+    assert fatal_row["SPD_7"] == pytest.approx(0.05)
 
-    pa_expected = 0.1 * 1.0 + 0.2 * 10.0 + 0.3 * 100.0 + 0.2 * 1000.0 + 0.2 * 10000.0
+    pa_expected = (
+        0.1 * 0.0 + 0.1 * 1.0 + 0.2 * 10.0 + 0.3 * 100.0
+        + 0.2 * 1000.0 + 0.1 * 10000.0
+    )
     assert pa_row["EIV"] == pytest.approx(pa_expected)
 
-    fatal_expected = 0.25 * 2.0 + 0.25 * 4.0 + 0.2 * 6.0 + 0.2 * 8.0 + 0.1 * 10.0
+    fatal_expected = (
+        0.15 * 0.0 + 0.15 * 2.0 + 0.2 * 4.0 + 0.2 * 6.0
+        + 0.15 * 8.0 + 0.1 * 10.0 + 0.05 * 12.0
+    )
     assert fatal_row["EIV"] == pytest.approx(fatal_expected)
 
     assert pa_row["triage_score"] == pytest.approx(0.4)

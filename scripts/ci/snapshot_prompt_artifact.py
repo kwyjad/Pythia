@@ -507,14 +507,22 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
             lines.append("## 4. Scenario Prompt")
             lines.append("")
             if question:
-                # Build a synthetic ensemble SPD summary
+                # Build a synthetic ensemble SPD summary from canonical specs
+                from pythia.buckets import labels_for as _labels_for
+
+                _pa_labels = _labels_for("PA")
+                _pa_probs = [0.1, 0.2, 0.35, 0.2, 0.1, 0.05][: len(_pa_labels)]
                 sample_ensemble = {
-                    "bucket_labels": ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"],
+                    "bucket_labels": _pa_labels,
                     "per_month": {
-                        "1": {"probs": [0.3, 0.35, 0.2, 0.1, 0.05], "bucket_label_max": "10k-<50k", "prob_max": 0.35},
+                        "1": {
+                            "probs": _pa_probs,
+                            "bucket_label_max": _pa_labels[2],
+                            "prob_max": max(_pa_probs),
+                        },
                     },
-                    "bucket_max": {"bucket_label": "10k-<50k", "probability": 0.35},
-                    "bucket_alt": {"bucket_label": "<10k", "probability": 0.30},
+                    "bucket_max": {"bucket_label": _pa_labels[2], "probability": max(_pa_probs)},
+                    "bucket_alt": {"bucket_label": _pa_labels[3], "probability": 0.20},
                 }
 
                 lines.append("<details>")

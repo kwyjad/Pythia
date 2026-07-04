@@ -112,17 +112,19 @@ def test_eiv_basic():
 
     conn = _make_db()
 
-    # Seed centroids: PA buckets [0, 30000, 150000, 375000, 700000]
-    for idx, c in enumerate([0.0, 30_000.0, 150_000.0, 375_000.0, 700_000.0], start=1):
+    # Seed centroids from the canonical PA specs
+    from pythia.buckets import centroids_for, labels_for
+
+    for idx, c in enumerate(centroids_for("PA"), start=1):
         conn.execute(
             "INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid, as_of_month) "
             "VALUES ('*', 'PA', ?, ?, NULL)",
             [idx, c],
         )
 
-    # Ensemble SPD: [0.1, 0.2, 0.4, 0.2, 0.1]
-    class_bins = ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
-    spd = [0.1, 0.2, 0.4, 0.2, 0.1]
+    # Ensemble SPD over the 6 PA buckets (0.1 on the "0" bucket)
+    class_bins = labels_for("PA")
+    spd = [0.1, 0.0, 0.2, 0.4, 0.2, 0.1]
 
     conn.execute(
         "INSERT INTO questions (question_id, hs_run_id, iso3, hazard_code, metric) VALUES ('q1', 'run1', 'SOM', 'ACE', 'PA')"
@@ -158,9 +160,9 @@ def test_eiv_basic():
     log_ratio_err = row[6]
     within_20 = row[7]
 
-    # EIV = 0*0.1 + 30000*0.2 + 150000*0.4 + 375000*0.2 + 700000*0.1 = 211000
+    # EIV = 0*0.1 + 5000*0 + 30000*0.2 + 150000*0.4 + 375000*0.2 + 700000*0.1
     expected_eiv = (
-        0.0 * 0.1 + 30_000.0 * 0.2 + 150_000.0 * 0.4
+        0.0 * 0.1 + 5_000.0 * 0.0 + 30_000.0 * 0.2 + 150_000.0 * 0.4
         + 375_000.0 * 0.2 + 700_000.0 * 0.1
     )
     assert eiv == pytest.approx(expected_eiv, rel=1e-6)
@@ -188,15 +190,17 @@ def test_eiv_floor():
 
     conn = _make_db()
 
-    for idx, c in enumerate([0.0, 30_000.0, 150_000.0, 375_000.0, 700_000.0], start=1):
+    from pythia.buckets import centroids_for, labels_for
+
+    for idx, c in enumerate(centroids_for("PA"), start=1):
         conn.execute(
             "INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid, as_of_month) "
             "VALUES ('*', 'PA', ?, ?, NULL)",
             [idx, c],
         )
 
-    class_bins = ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
-    spd = [0.9, 0.05, 0.03, 0.01, 0.01]
+    class_bins = labels_for("PA")
+    spd = [0.9, 0.02, 0.03, 0.03, 0.01, 0.01]
 
     conn.execute(
         "INSERT INTO questions (question_id, hs_run_id, iso3, hazard_code, metric) VALUES ('q2', 'run1', 'SOM', 'ACE', 'PA')"
@@ -253,7 +257,7 @@ def test_ema_no_activation(caplog):
         )
         conn.execute(
             "INSERT INTO resolutions (question_id, horizon_m, value) VALUES (?, 1, ?)",
-            [qid, 3000.0],  # bucket 1 for PA (<10k)
+            [qid, 3000.0],  # bucket index 2 for PA (1-<10k)
         )
 
     # We need to test the function via its db_url interface.
@@ -306,7 +310,7 @@ def test_ema_no_activation(caplog):
 # ---------------------------------------------------------------------------
 
 def test_ema_activation():
-    """15 resolutions in bucket 1 -> EMA produces new_centroid = 0.9*0.0 + 0.1*3000 = 300.0."""
+    """15 resolutions in one bucket -> EMA produces new_centroid = 0.9*0.0 + 0.1*3000 = 300.0."""
     from pythia.tools.compute_bucket_centroids import (
         EMA_LEARNING_RATE,
         MIN_RESOLUTIONS_PER_BUCKET,
@@ -315,13 +319,13 @@ def test_ema_activation():
 
     conn = _make_db()
 
-    # Seed default centroid for bucket 1 (PA): centroid=0.0
+    # Seed default centroid for the 1-<10k bucket (index 2): centroid=0.0
     conn.execute(
         "INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid, as_of_month) "
-        "VALUES ('*', 'PA', 1, 0.0, NULL)"
+        "VALUES ('*', 'PA', 2, 0.0, NULL)"
     )
 
-    # Seed 15 resolutions all in bucket 1 (value ~3000)
+    # Seed 15 resolutions all in the 1-<10k bucket (value ~3000)
     for i in range(15):
         qid = f"q_ema_{i}"
         conn.execute(
@@ -375,7 +379,7 @@ def test_ema_activation():
     assert empirical_mean == pytest.approx(3000.0)
 
     # Simulate EMA update
-    current_centroid = 0.0  # default for PA bucket 1
+    current_centroid = 0.0  # seeded above for the 1-<10k bucket
     new_centroid = (1.0 - EMA_LEARNING_RATE) * current_centroid + EMA_LEARNING_RATE * empirical_mean
     assert new_centroid == pytest.approx(300.0)
 
@@ -501,7 +505,9 @@ def test_ema_repeat_run_under_unique_index(tmp_path, monkeypatch):
         )
 
         # Seed default PA bucket centroids (wildcard hazard).
-        defaults = [0.0, 30_000.0, 150_000.0, 375_000.0, 700_000.0]
+        from pythia.buckets import centroids_for
+
+        defaults = centroids_for("PA")
         for idx, c in enumerate(defaults, start=1):
             conn.execute(
                 "INSERT INTO bucket_centroids "
@@ -510,7 +516,7 @@ def test_ema_repeat_run_under_unique_index(tmp_path, monkeypatch):
                 [idx, c],
             )
 
-        # Seed >=10 resolutions for TC/PA bucket 1 (<10k) so EMA activates.
+        # Seed >=10 resolutions for TC/PA bucket index 2 (1-<10k) so EMA activates.
         for i in range(12):
             qid = f"q_tc_{i}"
             conn.execute(
@@ -539,7 +545,7 @@ def test_ema_repeat_run_under_unique_index(tmp_path, monkeypatch):
     try:
         rows = conn2.execute(
             "SELECT as_of_month, centroid FROM bucket_centroids "
-            "WHERE hazard_code = 'TC' AND metric = 'PA' AND bucket_index = 1"
+            "WHERE hazard_code = 'TC' AND metric = 'PA' AND bucket_index = 2"
         ).fetchall()
     finally:
         conn2.close()

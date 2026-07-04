@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from pythia.buckets import interior_thresholds_for, n_buckets_for
+
 LOG = logging.getLogger(__name__)
 
 
@@ -72,9 +74,10 @@ def _validate_single_trace(
             "trace_quality_score": 0.0,
         }
 
+    expected_k = n_buckets_for(metric) or 5
     prior_result = _check_prior_consistency(trace, base_rate_summary, hazard_code, metric)
-    delta_result = _check_delta_arithmetic(trace)
-    magnitude_result = _check_magnitude_consistency(trace)
+    delta_result = _check_delta_arithmetic(trace, expected_k)
+    magnitude_result = _check_magnitude_consistency(trace, expected_k)
 
     prior_score = prior_result.get("score", 0.0)
     delta_score = delta_result.get("score", 0.0)
@@ -123,13 +126,10 @@ def _implied_modal_bucket(base_rate_summary: dict, hazard_code: str, metric: str
     if value is None:
         return None
 
-    # Map value to bucket using metric-specific thresholds.
-    if metric.upper() == "FATALITIES":
-        thresholds = [5, 25, 100, 500]
-    elif metric.upper() == "PHASE3PLUS_IN_NEED":
-        thresholds = [100_000, 1_000_000, 5_000_000, 15_000_000]
-    else:  # PA and default
-        thresholds = [10_000, 50_000, 250_000, 500_000]
+    # Map value to bucket using the canonical metric thresholds.
+    thresholds = interior_thresholds_for(metric.upper())
+    if not thresholds:  # unknown metric: fall back to PA
+        thresholds = interior_thresholds_for("PA")
 
     for i, t in enumerate(thresholds):
         if value < t:
@@ -149,7 +149,8 @@ def _check_prior_consistency(
         return {"score": 0.0, "detail": "no prior in trace"}
 
     prior_spd = prior.get("spd")
-    if not isinstance(prior_spd, list) or len(prior_spd) != 5:
+    expected_k = n_buckets_for(metric) or 5
+    if not isinstance(prior_spd, list) or len(prior_spd) != expected_k:
         return {"score": 0.0, "detail": "prior.spd missing or wrong length"}
 
     # Determine model's modal bucket
@@ -179,7 +180,7 @@ def _check_prior_consistency(
     }
 
 
-def _check_delta_arithmetic(trace: dict) -> dict:
+def _check_delta_arithmetic(trace: dict, expected_k: int) -> dict:
     """Check that update deltas sum to ~0 and post_update_spd = prev + delta."""
     updates = trace.get("updates")
     if not isinstance(updates, list) or len(updates) == 0:
@@ -210,7 +211,7 @@ def _check_delta_arithmetic(trace: dict) -> dict:
         detail: Dict[str, Any] = {"signal": update.get("signal", "?")}
 
         # Check delta sums to ~0
-        if isinstance(delta, list) and len(delta) == 5:
+        if isinstance(delta, list) and len(delta) == expected_k:
             delta_sum = sum(delta)
             if abs(delta_sum) >= 0.05:
                 ok = False
@@ -223,13 +224,16 @@ def _check_delta_arithmetic(trace: dict) -> dict:
         if (
             ok
             and isinstance(prev_spd, list)
-            and len(prev_spd) == 5
+            and len(prev_spd) == expected_k
             and isinstance(post_spd, list)
-            and len(post_spd) == 5
+            and len(post_spd) == expected_k
             and isinstance(delta, list)
-            and len(delta) == 5
+            and len(delta) == expected_k
         ):
-            l1 = sum(abs(post_spd[i] - (prev_spd[i] + delta[i])) for i in range(5))
+            l1 = sum(
+                abs(post_spd[i] - (prev_spd[i] + delta[i]))
+                for i in range(expected_k)
+            )
             if l1 >= 0.1:
                 ok = False
                 detail["l1_norm"] = round(l1, 4)
@@ -239,14 +243,14 @@ def _check_delta_arithmetic(trace: dict) -> dict:
         details.append(detail)
 
         # Update prev_spd for chain checking
-        if isinstance(post_spd, list) and len(post_spd) == 5:
+        if isinstance(post_spd, list) and len(post_spd) == expected_k:
             prev_spd = post_spd
 
     score = n_pass / max(n_total, 1)
     return {"score": round(score, 4), "n_updates": n_total, "n_pass": n_pass, "details": details}
 
 
-def _check_magnitude_consistency(trace: dict) -> dict:
+def _check_magnitude_consistency(trace: dict, expected_k: int) -> dict:
     """Check that claimed magnitude is consistent with actual delta values."""
     updates = trace.get("updates")
     if not isinstance(updates, list) or len(updates) == 0:
@@ -265,7 +269,7 @@ def _check_magnitude_consistency(trace: dict) -> dict:
         magnitude = (update.get("magnitude") or "").upper()
         delta = update.get("delta")
 
-        if not isinstance(delta, list) or len(delta) != 5 or not magnitude:
+        if not isinstance(delta, list) or len(delta) != expected_k or not magnitude:
             continue
 
         n_total += 1

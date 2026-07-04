@@ -5,7 +5,7 @@
 
 """Binary event prompt builder for EVENT_OCCURRENCE questions.
 
-Binary questions produce a single probability per month (not a 5-bucket SPD).
+Binary questions produce a single probability per month (not a bucketed SPD).
 They ask: "Will GDACS report a significant event (Orange/Red alert)?"
 """
 

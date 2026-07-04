@@ -11,18 +11,17 @@ from typing import List, Tuple, Dict, Optional, Any
 
 from forecaster.bayes_mc import DirichletPrior, MCQEvidence, update_mcq_with_mc
 from forecaster.ensemble import sanitize_mcq_vector
+from pythia.buckets import centroids_for
 
 from .ensemble import EnsembleResult, MemberOutput
 from . import bayes_mc as BMC
 
-# Default centroids for PA buckets (can be moved to config later). Bucket 1
-# centroid is 0.0 because there is no explicit "0" bucket and much of the
-# probability mass here will be on zero.
-SPD_BUCKET_CENTROIDS_DEFAULT = [0.0, 30_000.0, 150_000.0, 375_000.0, 700_000.0]
+# Seed centroids, single-sourced from pythia/buckets.py BUCKET_SPECS. The
+# leading "0" bucket has centroid 0.0; DB-loaded EMA centroids override
+# these when available.
+SPD_BUCKET_CENTROIDS_DEFAULT = centroids_for("PA")
 
-# Default centroids for conflict fatalities buckets (per month), aligned with
-# SPD_BUCKET_TEXT_FATALITIES.
-SPD_BUCKET_CENTROIDS_FATALITIES_DEFAULT = [0.0, 15.0, 62.0, 300.0, 700.0]
+SPD_BUCKET_CENTROIDS_FATALITIES_DEFAULT = centroids_for("FATALITIES")
 
 def _extract_gtmc1_prob(sig: dict | None) -> float | None:
     """
@@ -147,7 +146,7 @@ def aggregate_spd(
     ensemble_res: EnsembleResult,
     *,
     n_months: int = 6,
-    n_buckets: int = 5,
+    n_buckets: int,
     weights: Optional[Dict[str, float]] = None,
     bucket_centroids: Optional[List[float]] = None,
 ) -> Tuple[Dict[str, List[float]], Dict[str, float], Dict[str, Any]]:
@@ -207,7 +206,7 @@ def aggregate_spd(
 def aggregate_spd_v2_mean(
     per_model_spds: list[dict[str, list[float]]],
     *,
-    n_buckets: int = 5,
+    n_buckets: int,
     member_weights: Optional[list[float]] = None,
 ) -> dict[str, list[float]]:
     """Mean aggregation for SPD v2 per month across ensemble members.
@@ -262,7 +261,7 @@ def aggregate_spd_v2_mean(
 def aggregate_spd_v2_bayesmc(
     per_model_spds: list[dict[str, list[float]]],
     *,
-    n_buckets: int = 5,
+    n_buckets: int,
     prior_alpha: float = 0.1,
     weights_by_model: dict[str, float] | None = None,
     model_names: list[str] | None = None,

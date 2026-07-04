@@ -32,7 +32,8 @@ def _perfect_raw_call() -> dict:
         "error": None,
         "reasoning_trace": {
             "prior": {
-                "spd": [0.60, 0.20, 0.10, 0.07, 0.03],
+                # 7 FATALITIES buckets; mode on 1-<5 (matches base rate avg 3.0)
+                "spd": [0.30, 0.35, 0.15, 0.10, 0.05, 0.03, 0.02],
                 "rationale": "Based on historical low fatality counts.",
             },
             "updates": [
@@ -41,20 +42,20 @@ def _perfect_raw_call() -> dict:
                     "direction": "UP",
                     "magnitude": "MODERATE",
                     "months_affected": "all",
-                    "delta": [-0.10, 0.05, 0.03, 0.01, 0.01],
-                    "post_update_spd": [0.50, 0.25, 0.13, 0.08, 0.04],
+                    "delta": [-0.10, 0.02, 0.03, 0.02, 0.01, 0.01, 0.01],
+                    "post_update_spd": [0.20, 0.37, 0.18, 0.12, 0.06, 0.04, 0.03],
                 },
                 {
                     "signal": "Peace talks initiated",
                     "direction": "DOWN",
                     "magnitude": "SMALL",
                     "months_affected": "3-6",
-                    "delta": [0.04, -0.02, -0.01, -0.005, -0.005],
-                    "post_update_spd": [0.54, 0.23, 0.12, 0.075, 0.035],
+                    "delta": [0.04, -0.01, -0.01, -0.01, -0.005, -0.0025, -0.0025],
+                    "post_update_spd": [0.24, 0.36, 0.17, 0.11, 0.055, 0.0375, 0.0275],
                 },
             ],
             "point_estimate": "~8 fatalities",
-            "point_estimate_bucket": 2,
+            "point_estimate_bucket": 3,
             "rc_assessment": "partially_accepted",
         },
         "human_explanation": "Test explanation.",
@@ -62,7 +63,7 @@ def _perfect_raw_call() -> dict:
 
 
 def _base_rate_summary_fatalities() -> dict:
-    """A conflict_trajectory base rate where modal bucket is bucket 0 (<5 fatalities)."""
+    """A conflict_trajectory base rate whose modal bucket is 1-<5 (index 1)."""
     return {
         "type": "conflict_trajectory",
         "fatalities": {"trailing_3m_avg": 3.0},
@@ -87,7 +88,7 @@ class TestBadDeltaArithmetic:
     def test_bad_deltas_lower_quality(self):
         rc = _perfect_raw_call()
         # Make delta not sum to 0
-        rc["reasoning_trace"]["updates"][0]["delta"] = [0.10, 0.10, 0.10, 0.10, 0.10]
+        rc["reasoning_trace"]["updates"][0]["delta"] = [0.10] * 7
         # Also break post_update_spd consistency
         results = validate_reasoning_traces(
             raw_calls=[rc],
@@ -104,8 +105,8 @@ class TestBadDeltaArithmetic:
 class TestMismatchedPrior:
     def test_prior_mode_off_by_two(self):
         rc = _perfect_raw_call()
-        # Set prior mode to bucket 3 (should be 0 based on base rate)
-        rc["reasoning_trace"]["prior"]["spd"] = [0.05, 0.05, 0.05, 0.60, 0.25]
+        # Set prior mode far above the implied mode (index 1 per base rate)
+        rc["reasoning_trace"]["prior"]["spd"] = [0.05, 0.05, 0.05, 0.05, 0.55, 0.15, 0.10]
         results = validate_reasoning_traces(
             raw_calls=[rc],
             base_rate_summary=_base_rate_summary_fatalities(),
