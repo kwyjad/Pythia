@@ -13,16 +13,21 @@ from forecaster import scoring
 @pytest.mark.parametrize(
     "metric,value,expected",
     [
-        ("PA", 0, 1),
-        ("PA", 9999, 1),
-        ("PA", 10000, 2),
-        ("PA", 49999, 2),
-        ("PA", 250000, 4),
-        ("PA", 750000, 5),
-        ("fatalities", 0, 1),
-        ("fatalities", 5, 2),
-        ("fatalities", 26, 3),
-        ("fatalities", 500, 5),
+        ("PA", 0, 1),          # "0" bucket
+        ("PA", 0.5, 1),
+        ("PA", 1, 2),          # 1-<10k
+        ("PA", 9999, 2),
+        ("PA", 10000, 3),
+        ("PA", 49999, 3),
+        ("PA", 250000, 5),
+        ("PA", 750000, 6),
+        ("fatalities", 0, 1),  # "0" bucket
+        ("fatalities", 1, 2),  # 1-<5
+        ("fatalities", 5, 3),
+        ("fatalities", 26, 4),
+        ("fatalities", 500, 6),  # 500-<1000
+        ("fatalities", 999, 6),
+        ("fatalities", 1000, 7),  # >=1000
     ],
 )
 def test_bucket_index_from_value(metric: str, value: float, expected: int) -> None:

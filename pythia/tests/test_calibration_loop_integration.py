@@ -161,12 +161,12 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
         )
 
         # Per-horizon resolutions: different ground truth values for each month
-        # h1=2024-08: 5000 (bucket 0: <10k)
-        # h2=2024-09: 15000 (bucket 1: 10k-<50k)
-        # h3=2024-10: 30000 (bucket 1: 10k-<50k)
-        # h4=2024-11: 60000 (bucket 2: 50k-<250k)
-        # h5=2024-12: 8000  (bucket 0: <10k)
-        # h6=2025-01: 30000 (bucket 1: 10k-<50k)
+        # h1=2024-08: 5000 (bucket idx 1: 1-<10k)
+        # h2=2024-09: 15000 (bucket idx 2: 10k-<50k)
+        # h3=2024-10: 30000 (bucket idx 2: 10k-<50k)
+        # h4=2024-11: 60000 (bucket idx 3: 50k-<250k)
+        # h5=2024-12: 8000  (bucket idx 1: 1-<10k)
+        # h6=2025-01: 30000 (bucket idx 2: 10k-<50k)
         resolution_values = [
             ('Q1', 1, '2024-08', 5000.0),
             ('Q1', 2, '2024-09', 15000.0),
@@ -184,12 +184,14 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
             resolution_values,
         )
 
-        # Ensemble SPD that puts most mass in bucket 1 (10k-<50k) for all
+        # Ensemble SPD that puts most mass in the 10k-<50k bucket for all
         # horizons. Aggregates are stored as named forecasts_raw rows
         # (ensemble_mean_v2), mirroring _write_spd_outputs — the NULL-model
         # convention is retired.
-        ensemble_spd = [0.1, 0.6, 0.2, 0.05, 0.05]
-        bin_labels_e = ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
+        from pythia.buckets import labels_for
+
+        ensemble_spd = [0.05, 0.05, 0.6, 0.2, 0.05, 0.05]
+        bin_labels_e = labels_for("PA")
         for h in range(1, 7):
             for bucket_idx, (bin_label, p) in enumerate(zip(bin_labels_e, ensemble_spd), start=1):
                 con.execute(
@@ -204,10 +206,10 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
         # Two models with slightly different SPDs
         model_spds = {
-            "ModelA": [0.2, 0.5, 0.2, 0.05, 0.05],
-            "ModelB": [0.05, 0.7, 0.15, 0.05, 0.05],
+            "ModelA": [0.05, 0.15, 0.5, 0.2, 0.05, 0.05],
+            "ModelB": [0.02, 0.03, 0.7, 0.15, 0.05, 0.05],
         }
-        bin_labels = ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
+        bin_labels = labels_for("PA")
         for model_name, spd in model_spds.items():
             for h in range(1, 7):
                 for bucket_idx, (bin_label, p) in enumerate(zip(bin_labels, spd), start=1):
@@ -252,8 +254,8 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
         h4_brier = con.execute(
             "SELECT value FROM scores WHERE horizon_m = 4 AND score_type = 'brier' AND model_name = 'ensemble_mean_v2'"
         ).fetchone()[0]
-        # h1 resolved to 5000 (bucket 0), h4 resolved to 60000 (bucket 2)
-        # Both scored against ensemble SPD [0.1, 0.6, 0.2, 0.05, 0.05]
+        # h1 resolved to 5000 (1-<10k), h4 resolved to 60000 (50k-<250k)
+        # Both scored against the same ensemble SPD
         # These must differ since the true bucket is different
         assert abs(h1_brier - h4_brier) > 1e-4, (
             f"h1 and h4 Brier scores should differ (h1={h1_brier}, h4={h4_brier})"

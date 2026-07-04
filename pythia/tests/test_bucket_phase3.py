@@ -23,14 +23,15 @@ from pythia.buckets import (
 class TestPhase3BucketSpecs:
     """Verify PHASE3PLUS_IN_NEED bucket specs are correctly configured."""
 
-    def test_get_bucket_specs_returns_5(self):
+    def test_get_bucket_specs_returns_6(self):
         specs = get_bucket_specs("PHASE3PLUS_IN_NEED")
-        assert len(specs) == 5
+        assert len(specs) == 6
 
     def test_bucket_boundaries_match_expected(self):
         specs = get_bucket_specs("PHASE3PLUS_IN_NEED")
         expected = [
-            (0.0, 100_000.0),
+            (0.0, 1.0),
+            (1.0, 100_000.0),
             (100_000.0, 1_000_000.0),
             (1_000_000.0, 5_000_000.0),
             (5_000_000.0, 15_000_000.0),
@@ -53,7 +54,9 @@ class TestPhase3BucketSpecs:
 
     def test_expected_centroids(self):
         specs = get_bucket_specs("PHASE3PLUS_IN_NEED")
-        expected_centroids = [50_000.0, 500_000.0, 2_500_000.0, 10_000_000.0, 20_000_000.0]
+        expected_centroids = [
+            0.0, 50_000.0, 500_000.0, 2_500_000.0, 10_000_000.0, 20_000_000.0
+        ]
         for spec, expected in zip(specs, expected_centroids):
             assert spec.centroid == expected
 

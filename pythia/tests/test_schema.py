@@ -112,7 +112,8 @@ def test_bucket_definitions_seeded(tmp_path, monkeypatch):
             ORDER BY bucket_index
             """
         ).fetchall()
-        assert len(pa_bucket_rows) == 5
+        assert len(pa_bucket_rows) == 6
+        assert pa_bucket_rows[0][1] == "0"
 
         pa_centroids = con.execute(
             """
@@ -122,7 +123,7 @@ def test_bucket_definitions_seeded(tmp_path, monkeypatch):
             ORDER BY bucket_index
             """
         ).fetchall()
-        assert [row[0] for row in pa_centroids] == [1, 2, 3, 4, 5]
+        assert [row[0] for row in pa_centroids] == [1, 2, 3, 4, 5, 6]
     finally:
         con.close()
 

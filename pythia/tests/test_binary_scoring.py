@@ -166,7 +166,9 @@ def test_spd_questions_unaffected_by_binary_scoring(tmp_path: Path):
     db_url = f"duckdb:///{db_path}"
     con = duckdb.connect(str(db_path))
 
-    class_bins_pa = ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
+    from pythia.buckets import labels_for
+
+    class_bins_pa = labels_for("PA")
 
     try:
         _setup_scoring_db(con)
@@ -180,15 +182,16 @@ def test_spd_questions_unaffected_by_binary_scoring(tmp_path: Path):
                     '2026-09', '2026-04-01', 'active', 'test PA')
         """)
 
-        # Create resolution: 5000 people affected in h1 (bucket 1: <10k)
+        # Create resolution: 5000 people affected in h1 (bucket 2: 1-<10k)
         con.execute("""
             INSERT INTO resolutions (question_id, horizon_m, value, source_ts, run_id)
             VALUES ('ETH_FL_PA_2026-04', 1, 5000.0, CURRENT_TIMESTAMP, NULL)
         """)
 
         # Create the aggregate SPD in forecasts_raw (what scoring reads),
-        # mirroring _write_spd_outputs.
-        bins_probs = [0.6, 0.2, 0.1, 0.05, 0.05]
+        # mirroring _write_spd_outputs. One probability per PA bucket.
+        bins_probs = [0.1, 0.5, 0.2, 0.1, 0.05, 0.05]
+        assert len(bins_probs) == len(class_bins_pa)
         for i, (cb, prob) in enumerate(zip(class_bins_pa, bins_probs)):
             con.execute("""
                 INSERT INTO forecasts_raw

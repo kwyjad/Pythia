@@ -5,8 +5,9 @@
 
 """Score ViEWS conflict forecasts against Pythia resolutions.
 
-Converts ViEWS point forecasts into synthetic 5-bucket SPDs, then scores
-them using the same Brier/log/CRPS functions as compute_scores.py.
+Converts ViEWS point forecasts into synthetic FATALITIES-bucket SPDs
+(bucket count derived from pythia/buckets.py), then scores them using the
+same Brier/log/CRPS functions as compute_scores.py.
 """
 
 from __future__ import annotations
@@ -46,7 +47,8 @@ VIEWS_MODEL_NAME = "__ext_views"
 LOGNORMAL_SIGMA = 1.0
 
 # Minimum point forecast value for log-normal conversion.
-# Values below this are treated as "near-zero" and get a spike on bucket 1.
+# Values below this are treated as "near-zero" and get a spike on the
+# "0" bucket.
 MIN_POINT_FOR_LOGNORMAL = 0.5
 
 
@@ -70,35 +72,42 @@ def point_to_spd_fatalities(
     point_forecast: float,
     sigma: float = LOGNORMAL_SIGMA,
 ) -> List[float]:
-    """Convert a ViEWS fatalities point forecast into a 5-bucket SPD.
+    """Convert a ViEWS fatalities point forecast into a FATALITIES-bucket SPD.
 
     Uses a log-normal distribution centered on the point forecast to
-    compute probability mass in each FATALITIES bucket.
+    compute probability mass in each FATALITIES bucket (K derived from
+    the canonical thresholds, so bucket restructures flow through).
 
     For near-zero forecasts (< MIN_POINT_FOR_LOGNORMAL), returns a
-    distribution heavily concentrated on bucket 1.
+    distribution heavily concentrated on the bottom buckets ("0" and the
+    smallest nonzero bucket).
 
     Args:
         point_forecast: Expected fatalities (continuous, non-negative).
         sigma: Log-normal sigma (spread parameter). Higher = more uncertain.
 
     Returns:
-        List of 5 probabilities summing to 1.0, one per bucket.
+        List of K probabilities summing to 1.0, one per bucket.
     """
-    thresholds = FATAL_THRESHOLDS  # [0, 5, 25, 100, 500, inf]
-    n_buckets = len(thresholds) - 1  # 5
+    thresholds = FATAL_THRESHOLDS  # [0, 1, 5, 25, 100, 500, 1000, inf]
+    n_buckets = len(thresholds) - 1
 
     pf = max(float(point_forecast), 0.0)
 
-    # Near-zero: spike on bucket 1
+    # Near-zero: spike on the "0" bucket, small mass on the smallest
+    # nonzero bucket, geometric tail over the rest.
     if pf < MIN_POINT_FOR_LOGNORMAL:
         spd = [0.0] * n_buckets
         spd[0] = 0.90
         spd[1] = 0.05
-        spd[2] = 0.03
-        spd[3] = 0.015
-        spd[4] = 0.005
-        return spd
+        # Remaining 0.05 split geometrically (halving) over buckets 3..K.
+        remaining = 0.05
+        tail = [remaining / (2 ** (i + 1)) for i in range(n_buckets - 2)]
+        tail[-1] += remaining - sum(tail)  # absorb rounding remainder
+        for i, p in enumerate(tail):
+            spd[i + 2] = p
+        total = sum(spd)
+        return [p / total for p in spd]
 
     # Log-normal: mu chosen so that E[X] = pf
     # For log-normal: E[X] = exp(mu + sigma^2/2)

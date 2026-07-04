@@ -81,7 +81,7 @@ def _close_db(conn) -> None:
 
 
 def _bucket_index(value: float, metric: str) -> Optional[int]:
-    """Map a resolved value to a bucket index [0..4] based on metric.
+    """Map a resolved value to a 0-based bucket index for the metric.
 
     Returns None (skip scoring) for negative or non-finite values — the
     old fallthrough sent them to the TOP bucket, scoring garbage input as
@@ -393,6 +393,21 @@ def _load_spd(
         return None
 
     if not rows:
+        return None
+
+    # Stale-data guard: every live writer emits a full K-vector per month,
+    # so a stored bucket set that doesn't match {1..K} means the forecast
+    # was written under a different bucket scheme (e.g. a pre-restructure
+    # 5-bucket DB resurfacing via canonical-DB discovery). Skip it loudly
+    # rather than mis-score it against the wrong buckets.
+    stored = {int(b) for b, _ in rows}
+    expected = set(range(1, len(class_bins) + 1))
+    if stored != expected:
+        LOGGER.warning(
+            "[warn] bucket-count mismatch for %s horizon %s (model=%s): "
+            "stored bucket indices %s, expected 1..%d; skipping stale forecast.",
+            question_id, horizon_m, model_name, sorted(stored), len(class_bins),
+        )
         return None
 
     vec = [0.0] * len(class_bins)

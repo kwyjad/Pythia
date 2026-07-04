@@ -18,28 +18,37 @@ class BucketSpec:
     upper: float | None = None
 
 
+# Every SPD metric leads with a dedicated "0" bucket (exactly zero impact,
+# centroid 0 so EIV treats "nothing happened" as 0) — the next bucket starts
+# at 1. Centroid seeds for interior buckets are midpoints; open-ended top
+# buckets seed at ~1.5x their lower bound. The EMA loop in
+# compute_bucket_centroids refines all of them from resolution data.
 PA_BUCKETS: tuple[BucketSpec, ...] = (
-    BucketSpec(idx=1, label="<10k", centroid=0.0, lower=0.0, upper=10_000.0),
-    BucketSpec(idx=2, label="10k-<50k", centroid=30_000.0, lower=10_000.0, upper=50_000.0),
-    BucketSpec(idx=3, label="50k-<250k", centroid=150_000.0, lower=50_000.0, upper=250_000.0),
-    BucketSpec(idx=4, label="250k-<500k", centroid=375_000.0, lower=250_000.0, upper=500_000.0),
-    BucketSpec(idx=5, label=">=500k", centroid=700_000.0, lower=500_000.0, upper=None),
+    BucketSpec(idx=1, label="0", centroid=0.0, lower=0.0, upper=1.0),
+    BucketSpec(idx=2, label="1-<10k", centroid=5_000.0, lower=1.0, upper=10_000.0),
+    BucketSpec(idx=3, label="10k-<50k", centroid=30_000.0, lower=10_000.0, upper=50_000.0),
+    BucketSpec(idx=4, label="50k-<250k", centroid=150_000.0, lower=50_000.0, upper=250_000.0),
+    BucketSpec(idx=5, label="250k-<500k", centroid=375_000.0, lower=250_000.0, upper=500_000.0),
+    BucketSpec(idx=6, label=">=500k", centroid=700_000.0, lower=500_000.0, upper=None),
 )
 
 FATALITIES_BUCKETS: tuple[BucketSpec, ...] = (
-    BucketSpec(idx=1, label="<5", centroid=0.0, lower=0.0, upper=5.0),
-    BucketSpec(idx=2, label="5-<25", centroid=15.0, lower=5.0, upper=25.0),
-    BucketSpec(idx=3, label="25-<100", centroid=62.0, lower=25.0, upper=100.0),
-    BucketSpec(idx=4, label="100-<500", centroid=300.0, lower=100.0, upper=500.0),
-    BucketSpec(idx=5, label=">=500", centroid=700.0, lower=500.0, upper=None),
+    BucketSpec(idx=1, label="0", centroid=0.0, lower=0.0, upper=1.0),
+    BucketSpec(idx=2, label="1-<5", centroid=3.0, lower=1.0, upper=5.0),
+    BucketSpec(idx=3, label="5-<25", centroid=15.0, lower=5.0, upper=25.0),
+    BucketSpec(idx=4, label="25-<100", centroid=62.0, lower=25.0, upper=100.0),
+    BucketSpec(idx=5, label="100-<500", centroid=300.0, lower=100.0, upper=500.0),
+    BucketSpec(idx=6, label="500-<1000", centroid=750.0, lower=500.0, upper=1_000.0),
+    BucketSpec(idx=7, label=">=1000", centroid=1_500.0, lower=1_000.0, upper=None),
 )
 
 DR_PHASE3_BUCKETS: tuple[BucketSpec, ...] = (
-    BucketSpec(idx=1, label="<100k", centroid=50_000.0, lower=0.0, upper=100_000.0),
-    BucketSpec(idx=2, label="100k-<1M", centroid=500_000.0, lower=100_000.0, upper=1_000_000.0),
-    BucketSpec(idx=3, label="1M-<5M", centroid=2_500_000.0, lower=1_000_000.0, upper=5_000_000.0),
-    BucketSpec(idx=4, label="5M-<15M", centroid=10_000_000.0, lower=5_000_000.0, upper=15_000_000.0),
-    BucketSpec(idx=5, label=">=15M", centroid=20_000_000.0, lower=15_000_000.0, upper=None),
+    BucketSpec(idx=1, label="0", centroid=0.0, lower=0.0, upper=1.0),
+    BucketSpec(idx=2, label="1-<100k", centroid=50_000.0, lower=1.0, upper=100_000.0),
+    BucketSpec(idx=3, label="100k-<1M", centroid=500_000.0, lower=100_000.0, upper=1_000_000.0),
+    BucketSpec(idx=4, label="1M-<5M", centroid=2_500_000.0, lower=1_000_000.0, upper=5_000_000.0),
+    BucketSpec(idx=5, label="5M-<15M", centroid=10_000_000.0, lower=5_000_000.0, upper=15_000_000.0),
+    BucketSpec(idx=6, label=">=15M", centroid=20_000_000.0, lower=15_000_000.0, upper=None),
 )
 
 BUCKET_SPECS: Mapping[str, Sequence[BucketSpec]] = {
@@ -77,3 +86,30 @@ def interior_thresholds_for(metric: str) -> list[float]:
 def labels_for(metric: str) -> list[str]:
     """Bucket display labels for a metric, in bucket order."""
     return [s.label for s in get_bucket_specs(metric)]
+
+
+def n_buckets_for(metric: str) -> int:
+    """Number of SPD buckets for a metric (0 for unknown metrics)."""
+    return len(get_bucket_specs(metric))
+
+
+def max_bucket_count() -> int:
+    """The widest bucket count across all metrics (drives wide exports)."""
+    return max(len(specs) for specs in BUCKET_SPECS.values())
+
+
+def centroids_for(metric: str) -> list[float]:
+    """Seed centroid values for a metric, in bucket order."""
+    return [float(s.centroid) for s in get_bucket_specs(metric)]
+
+
+def label_index_map(metric: str, *, lowercase: bool = False) -> dict[str, int]:
+    """Map bucket label -> 1-based bucket index for a metric.
+
+    ``lowercase=True`` lowercases keys for consumers that normalise labels
+    before lookup (downloads.py, eiv_sql.py).
+    """
+    specs = get_bucket_specs(metric)
+    if lowercase:
+        return {s.label.lower(): int(s.idx) for s in specs}
+    return {s.label: int(s.idx) for s in specs}
