@@ -40,19 +40,11 @@ def _utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _table_exists(conn, name: str) -> bool:
-    try:
-        conn.execute(f"PRAGMA table_info('{name}')").fetchall()
-        return True
-    except Exception:
-        return False
-
-
-def _row_count(conn, name: str) -> int:
-    try:
-        return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
-    except Exception:
-        return 0
+# Shared rollback-safe DuckDB helpers (see pythia/tools/_db_utils.py).
+from pythia.tools._db_utils import (
+    row_count as _row_count,
+    table_exists as _table_exists,
+)
 
 
 def _get_db_url_from_config() -> str:

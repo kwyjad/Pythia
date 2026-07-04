@@ -16,7 +16,6 @@ import numpy as np
 
 from .providers import ModelSpec, call_chat_ms, estimate_cost_usd
 from .llm_logging import log_forecaster_llm_call
-from pythia.buckets import centroids_for
 from pythia.db.schema import connect as pythia_connect
 
 @dataclass
@@ -37,17 +36,6 @@ class MemberOutput:
 @dataclass
 class EnsembleResult:
     members: List[MemberOutput]
-
-# Seed bucket centroids, single-sourced from pythia/buckets.py BUCKET_SPECS.
-# The leading "0" bucket has centroid 0.0 (exactly-zero impact); DB-loaded
-# EMA centroids override these when available.
-SPD_BUCKET_CENTROIDS_PA: list[float] = centroids_for("PA")
-
-# Backwards-compatible alias used by debug tools and any generic callers.
-# "Default" SPD centroids are PA-style centroids aligned with SPD_BUCKET_TEXT_PA.
-SPD_BUCKET_CENTROIDS_DEFAULT: list[float] = SPD_BUCKET_CENTROIDS_PA
-
-SPD_BUCKET_CENTROIDS_FATALITIES: list[float] = centroids_for("FATALITIES")
 
 # ---------- helpers ----------
 def sanitize_mcq_vector(vec: List[float], n_options: Optional[int] = None) -> List[float]:

@@ -18,6 +18,13 @@ class BucketSpec:
     upper: float | None = None
 
 
+# Forecast window length in months. Horizon/month index 1 = the question's
+# window_start_date month (see the month-anchoring convention in CLAUDE.md).
+# Single-sourced here so the forecaster's month-label validation and the
+# resolution pipeline can never drift apart.
+NUM_HORIZONS = 6
+
+
 # Every SPD metric leads with a dedicated "0" bucket (exactly zero impact,
 # centroid 0 so EIV treats "nothing happened" as 0) — the next bucket starts
 # at 1. Centroid seeds for interior buckets are midpoints; open-ended top

@@ -19,7 +19,7 @@ LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:
     LOGGER.addHandler(logging.NullHandler())
 
-NUM_HORIZONS = 6
+from pythia.buckets import NUM_HORIZONS
 
 
 def _utcnow_naive() -> datetime:
@@ -77,27 +77,12 @@ def _metric_preference_case(column: str = "metric") -> str:
     return f"CASE {parts} ELSE {len(_PA_METRIC_PREFERENCE)} END"
 
 
-def _table_exists(conn, name: str) -> bool:
-    try:
-        conn.execute(f"PRAGMA table_info('{name}')").fetchall()
-        return True
-    except Exception:
-        return False
-
-
-def _has_column(conn, table: str, column: str) -> bool:
-    try:
-        rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
-        return column in {str(r[1]) for r in rows}
-    except Exception:
-        return False
-
-
-def _row_count(conn, name: str) -> int:
-    try:
-        return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
-    except Exception:
-        return 0
+# Shared rollback-safe DuckDB helpers (see pythia/tools/_db_utils.py).
+from pythia.tools._db_utils import (
+    column_exists as _has_column,
+    row_count as _row_count,
+    table_exists as _table_exists,
+)
 
 
 def _get_db_url_from_config() -> str:

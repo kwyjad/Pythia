@@ -52,7 +52,7 @@ import numpy as np
 
 from pathlib import Path
 from pythia.buckets import labels_for as bucket_labels_for
-from pythia.buckets import n_buckets_for
+from pythia.buckets import NUM_HORIZONS, n_buckets_for
 from pythia.db.schema import connect, ensure_schema
 from pythia.db.schema import connect as pythia_connect
 from pythia.test_mode import is_test_mode
@@ -4067,7 +4067,7 @@ def _add_months(ym: str, offset: int) -> str:
     return f"{year:04d}-{month:02d}"
 
 
-def _expected_months(anchor_month: str, n: int = 6) -> list[str]:
+def _expected_months(anchor_month: str, n: int = NUM_HORIZONS) -> list[str]:
     """Return the n forecast-window months starting at ``anchor_month``.
 
     ``anchor_month`` is the FIRST window month (horizon_m=1) — see
@@ -4141,7 +4141,7 @@ def _build_bayesmc_spd_obj(
         return {}, diag
 
     if anchor_month:
-        expected_months = _expected_months(anchor_month, 6)
+        expected_months = _expected_months(anchor_month, NUM_HORIZONS)
         missing_months = [m for m in expected_months if m not in normalized]
         if missing_months:
             diag["status"] = "insufficient_month_coverage"
@@ -4882,7 +4882,7 @@ def _month_index_for_label(label: str, anchor_month: str | None) -> int | None:
         except Exception:
             return None
         idx = (y * 12 + m) - (ay * 12 + am) + 1
-        return idx if 1 <= idx <= 6 else None
+        return idx if 1 <= idx <= NUM_HORIZONS else None
 
     if _is_calendar_month_key(s):
         y, m = map(int, s.split("-"))
@@ -4891,7 +4891,7 @@ def _month_index_for_label(label: str, anchor_month: str | None) -> int | None:
     offset = _parse_month_offset_key(s)
     if offset is not None:
         idx = offset if offset >= 1 else 1  # 'month_0' style → first month
-        return idx if 1 <= idx <= 6 else None
+        return idx if 1 <= idx <= NUM_HORIZONS else None
 
     dt = _parse_month_key(s)
     if dt is not None:
@@ -5129,7 +5129,7 @@ async def _run_binary_forecast_for_question(
         # Parse binary responses from raw model outputs. Only months inside
         # the question window are kept — an off-window (hallucinated) month
         # label must not enter the aggregation.
-        expected_months = _expected_months(anchor_month, 6) if anchor_month else []
+        expected_months = _expected_months(anchor_month, NUM_HORIZONS) if anchor_month else []
         expected_set = set(expected_months)
         all_model_probs: list[dict[str, float]] = []
         for call in raw_calls:
