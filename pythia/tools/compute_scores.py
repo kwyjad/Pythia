@@ -472,15 +472,22 @@ def _load_centroids(conn, hazard_code: str, metric: str, n_buckets: int) -> list
 
 
 def _get_centroid_version(conn, hazard_code: str, metric: str) -> str:
-    """Return the as_of_month of the newest centroid row, or 'default'."""
+    """Return the as_of_month of the newest centroid row, or 'default'.
+
+    Mirrors :func:`_load_centroids` lookup order (hazard-specific, then
+    wildcard) so the stamped version reflects the centroids actually used —
+    a metric-only MAX would blame the wrong hazard's EMA update.
+    """
     try:
-        row = conn.execute(
-            "SELECT MAX(as_of_month) FROM bucket_centroids "
-            "WHERE upper(metric) = ? AND as_of_month IS NOT NULL",
-            [metric.upper()],
-        ).fetchone()
-        if row and row[0]:
-            return str(row[0])
+        for hc in [hazard_code.upper(), "*"]:
+            row = conn.execute(
+                "SELECT MAX(as_of_month) FROM bucket_centroids "
+                "WHERE upper(hazard_code) = ? AND upper(metric) = ? "
+                "AND as_of_month IS NOT NULL",
+                [hc, metric.upper()],
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
     except Exception:
         pass
     return "default"

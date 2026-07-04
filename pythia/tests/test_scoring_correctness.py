@@ -204,6 +204,38 @@ def test_eiv_zero_bucket_mass_gives_zero_eiv() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Centroid version stamping must be per-hazard (mirrors _load_centroids):
+# a metric-only MAX would blame the wrong hazard's EMA update.
+# ---------------------------------------------------------------------------
+
+def test_centroid_version_is_per_hazard() -> None:
+    from pythia.tools.compute_scores import _get_centroid_version
+
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE bucket_centroids (
+            hazard_code TEXT, metric TEXT, bucket_index INTEGER,
+            centroid DOUBLE, as_of_month TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO bucket_centroids VALUES "
+        "('FL', 'PA', 1, 0.0, '2026-02'), "
+        "('DR', 'PA', 1, 0.0, '2026-05'), "
+        "('*', 'PA', 1, 0.0, '2026-01')"
+    )
+    # Each hazard gets its own newest as_of_month, not the global max.
+    assert _get_centroid_version(conn, "FL", "PA") == "2026-02"
+    assert _get_centroid_version(conn, "DR", "PA") == "2026-05"
+    # No hazard-specific rows -> wildcard fallback.
+    assert _get_centroid_version(conn, "TC", "PA") == "2026-01"
+    # Nothing at all -> default.
+    assert _get_centroid_version(conn, "TC", "FATALITIES") == "default"
+
+
+# ---------------------------------------------------------------------------
 # Threshold/label single-sourcing: the derived values must equal the
 # canonical literals that scoring has always used.
 # ---------------------------------------------------------------------------
