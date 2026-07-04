@@ -37,6 +37,7 @@ import importlib.util
 import json
 import os
 import logging
+import threading
 from collections import Counter
 from urllib.parse import urlparse
 import time
@@ -5151,6 +5152,19 @@ async def _run_binary_forecast_for_question(
             )
             return
 
+        # Never write a partial window: mirror the SPD
+        # insufficient_month_coverage convention. (The parser already
+        # rejects incomplete models, so this only fires if that guard or
+        # the window derivation regresses.)
+        if expected_set and set(aggregated) != expected_set:
+            _record_no_forecast(
+                run_id, qid or "", iso3, hz, metric,
+                f"binary: insufficient_month_coverage "
+                f"({len(aggregated)}/{len(expected_set)} months)",
+                model_name=model_name,
+            )
+            return
+
         # Write binary outputs
         _write_binary_outputs(
             run_id,
@@ -6331,8 +6345,18 @@ def _calibration_weights_enabled() -> bool:
 
 
 # Per-process cache: one DB read per (hazard, metric) per run instead of one
-# per question. Values may be None (no weights available).
+# per question. Values may be None (no weights available). Guarded by a lock:
+# the SPD phase runs questions on worker threads, and an unguarded check-then-
+# set raced duplicate DB reads for the same (hazard, metric).
 _CALIB_WEIGHTS_CACHE: Dict[Tuple[str, str], Optional[Dict[str, float]]] = {}
+_CALIB_WEIGHTS_LOCK = threading.Lock()
+
+
+def _reset_calibration_weights_cache() -> None:
+    """Clear cached calibration weights (call at run start so a long-lived
+    process picks up freshly computed weights)."""
+    with _CALIB_WEIGHTS_LOCK:
+        _CALIB_WEIGHTS_CACHE.clear()
 
 
 def _member_weight_key(ms: ModelSpec) -> str:
@@ -6367,14 +6391,15 @@ def _resolve_member_weights(
         return None, keys, None
 
     cache_key = ((hazard_code or "").upper(), (metric or "").upper())
-    if cache_key not in _CALIB_WEIGHTS_CACHE:
-        try:
-            _CALIB_WEIGHTS_CACHE[cache_key] = _load_calibration_weights_db(
-                hazard_code, metric
-            )
-        except Exception:
-            _CALIB_WEIGHTS_CACHE[cache_key] = None
-    stored = _CALIB_WEIGHTS_CACHE[cache_key]
+    with _CALIB_WEIGHTS_LOCK:
+        if cache_key not in _CALIB_WEIGHTS_CACHE:
+            try:
+                _CALIB_WEIGHTS_CACHE[cache_key] = _load_calibration_weights_db(
+                    hazard_code, metric
+                )
+            except Exception:
+                _CALIB_WEIGHTS_CACHE[cache_key] = None
+        stored = _CALIB_WEIGHTS_CACHE[cache_key]
     if not stored:
         return None, keys, None
 
@@ -6644,6 +6669,8 @@ def main() -> None:
 
     def _run_v2_pipeline():
         ensure_schema()
+        # Weights may have been recomputed since this process started.
+        _reset_calibration_weights_cache()
 
         # Parse iso3 filter from CLI
         iso3_filter: Optional[set[str]] = None
