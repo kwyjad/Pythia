@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from pythia.buckets import label_index_map, max_bucket_count, n_buckets_for
 from pythia.db.helpers import table_exists as _table_exists, table_columns as _table_columns, pick_column as _pick_column
 from resolver.query import eiv_sql
 
@@ -268,6 +269,8 @@ def _latest_triage(conn) -> pd.DataFrame:
 
 
 def build_forecast_spd_export(con, include_test: bool = False) -> pd.DataFrame:
+    max_k = max_bucket_count()
+    spd_cols = [f"SPD_{i}" for i in range(1, max_k + 1)]
     columns = [
         "ISO",
         "country_name",
@@ -277,11 +280,7 @@ def build_forecast_spd_export(con, include_test: bool = False) -> pd.DataFrame:
         "metric",
         "hazard",
         "model",
-        "SPD_1",
-        "SPD_2",
-        "SPD_3",
-        "SPD_4",
-        "SPD_5",
+        *spd_cols,
         "EIV",
         "triage_score",
         "triage_tier",
@@ -341,23 +340,14 @@ def build_forecast_spd_export(con, include_test: bool = False) -> pd.DataFrame:
     bucket_series = bucket_series.where(~bucket_series.isna(), None)
     if bucket_series.isna().any():
         class_bin = merged["bucket_index"].astype(str).str.strip().str.lower()
-        pa_map = {
-            "<10k": 1,
-            "10k-<50k": 2,
-            "50k-<250k": 3,
-            "250k-<500k": 4,
-            ">=500k": 5,
-        }
-        fatal_map = {
-            "<5": 1,
-            "5-<25": 2,
-            "25-<100": 3,
-            "100-<500": 4,
-            ">=500": 5,
-        }
+        pa_map = label_index_map("PA", lowercase=True)
+        fatal_map = label_index_map("FATALITIES", lowercase=True)
+        phase3_map = label_index_map("PHASE3PLUS_IN_NEED", lowercase=True)
         is_fatal = merged["metric"].eq("FATALITIES")
+        is_phase3 = merged["metric"].eq("PHASE3PLUS_IN_NEED")
         mapped = class_bin.map(pa_map)
         mapped = mapped.where(~is_fatal, class_bin.map(fatal_map))
+        mapped = mapped.where(~is_phase3, class_bin.map(phase3_map))
         bucket_series = bucket_series.fillna(mapped)
 
     merged["bucket"] = pd.to_numeric(bucket_series, errors="coerce")
@@ -368,7 +358,7 @@ def build_forecast_spd_export(con, include_test: bool = False) -> pd.DataFrame:
 
     merged["bucket"] = merged["bucket"].round().astype(int)
     merged["month_index"] = merged["month_index"].round().astype(int)
-    merged = merged[(merged["bucket"] >= 1) & (merged["bucket"] <= 5)]
+    merged = merged[(merged["bucket"] >= 1) & (merged["bucket"] <= max_k)]
     merged = merged[merged["month_index"] >= 1]
     if merged.empty:
         return pd.DataFrame(columns=columns)
@@ -472,7 +462,7 @@ def build_forecast_spd_export(con, include_test: bool = False) -> pd.DataFrame:
     pivot = (
         dedup.set_index(pivot_index + ["bucket"])["probability"]
         .unstack("bucket")
-        .reindex(columns=[1, 2, 3, 4, 5])
+        .reindex(columns=list(range(1, max_k + 1)))
         .fillna(0.0)
     )
     pivot.columns = [f"SPD_{int(col)}" for col in pivot.columns]
@@ -524,7 +514,8 @@ def build_forecast_spd_export(con, include_test: bool = False) -> pd.DataFrame:
         hazard = str(row["hazard_code"]).upper()
         metric = str(row["metric"]).upper()
         total = 0.0
-        for idx in range(1, 6):
+        k = n_buckets_for(metric) or max_k
+        for idx in range(1, k + 1):
             centroid = _resolve_centroid(hazard, metric, idx) or 0.0
             total += float(row[f"SPD_{idx}"]) * centroid
         return float(total)
@@ -541,11 +532,7 @@ def build_forecast_spd_export(con, include_test: bool = False) -> pd.DataFrame:
             "metric": pivot["metric"],
             "hazard": pivot["hazard_code"],
             "model": pivot["model_name"],
-            "SPD_1": pivot["SPD_1"],
-            "SPD_2": pivot["SPD_2"],
-            "SPD_3": pivot["SPD_3"],
-            "SPD_4": pivot["SPD_4"],
-            "SPD_5": pivot["SPD_5"],
+            **{c: pivot[c] for c in spd_cols},
             "EIV": pivot["EIV"],
             "triage_score": pivot.get("triage_score"),
             "triage_tier": pivot.get("triage_tier"),

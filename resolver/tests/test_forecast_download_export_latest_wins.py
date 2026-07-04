@@ -100,7 +100,7 @@ def test_build_forecast_spd_export_latest_wins():
         run_id="ens-old",
         model_name="ensemble_mean_v2",
         month_index=1,
-        probabilities=[0.2, 0.2, 0.2, 0.2, 0.2],
+        probabilities=[0.1, 0.1, 0.2, 0.2, 0.2, 0.2],
         created_at="2024-01-01",
     )
     _insert_forecast_rows(
@@ -110,7 +110,7 @@ def test_build_forecast_spd_export_latest_wins():
         run_id="ens-new",
         model_name="ensemble_mean_v2",
         month_index=1,
-        probabilities=[0.1, 0.2, 0.3, 0.2, 0.2],
+        probabilities=[0.1, 0.1, 0.2, 0.3, 0.2, 0.1],
         created_at="2024-01-02",
     )
     con.execute(
@@ -126,4 +126,4 @@ def test_build_forecast_spd_export_latest_wins():
         (df["ISO"] == "KEN") & (df["hazard"] == "DR") & (df["model"] == "ensemble_mean_v2")
     ].iloc[0]
     assert row["SPD_1"] == pytest.approx(0.1)
-    assert (row[["SPD_1", "SPD_2", "SPD_3", "SPD_4", "SPD_5"]].sum()) == pytest.approx(1.0)
+    assert (row[["SPD_1", "SPD_2", "SPD_3", "SPD_4", "SPD_5", "SPD_6"]].sum()) == pytest.approx(1.0)

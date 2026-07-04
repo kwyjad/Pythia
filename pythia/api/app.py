@@ -2902,6 +2902,15 @@ def rankings(
     con = _con()
     run_cte, run_join = _run_filter_cte(con, forecaster_run_id)
     run_cte_sql = f"{run_cte}," if run_cte else ""
+    # Fallback centroid CASE derived from the canonical BUCKET_SPECS (labels
+    # are code-controlled constants, not user input). PA specs cover the
+    # legacy PIN metric alias.
+    _fallback_specs = BUCKET_SPECS.get(
+        (metric or "").upper(), BUCKET_SPECS["PA"]
+    )
+    centroid_case = " ".join(
+        f"WHEN '{s.label}' THEN {float(s.centroid):g}" for s in _fallback_specs
+    )
     sql = f"""
     WITH {run_cte_sql}
     ev AS (
@@ -2910,11 +2919,7 @@ def rankings(
                fe.p * COALESCE(
                  bc.ev,
                  CASE fe.class_bin
-                   WHEN '<10k' THEN 5000
-                   WHEN '10k-<50k' THEN 25000
-                   WHEN '50k-<250k' THEN 120000
-                   WHEN '250k-<500k' THEN 350000
-                   WHEN '>=500k' THEN 700000
+                   {centroid_case}
                  END
                )
              ) AS ev_pin

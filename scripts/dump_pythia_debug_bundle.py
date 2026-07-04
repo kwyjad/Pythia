@@ -1343,10 +1343,11 @@ def _get_bucket_labels_for_question(question: Dict[str, Any]) -> List[str]:
     if _bucket_labels_for_question is not None:
         return list(_bucket_labels_for_question(question))
 
+    from pythia.buckets import labels_for
+
     metric = (question.get("metric") or "").upper()
-    if metric == "FATALITIES":
-        return ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
-    return ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
+    labels = labels_for(metric)
+    return list(labels) if labels else labels_for("PA")
 
 
 def _load_forecasts_raw_counts(

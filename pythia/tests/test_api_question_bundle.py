@@ -135,30 +135,36 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[dict[s
             metric TEXT, bucket_index INTEGER, label TEXT, lower_bound DOUBLE, upper_bound DOUBLE
         );
         INSERT INTO bucket_definitions VALUES
-          ('PA', 1, '<10k', 0, 10000),
-          ('PA', 2, '10k-<50k', 10000, 50000),
-          ('PA', 3, '50k-<250k', 50000, 250000),
-          ('PA', 4, '250k-<500k', 250000, 500000),
-          ('PA', 5, '>=500k', 500000, NULL),
-          ('FATALITIES', 1, '<5', 0, 5),
-          ('FATALITIES', 2, '5-<25', 5, 25),
-          ('FATALITIES', 3, '25-<100', 25, 100),
-          ('FATALITIES', 4, '100-<500', 100, 500),
-          ('FATALITIES', 5, '>=500', 500, NULL);
+          ('PA', 1, '0', 0, 1),
+          ('PA', 2, '1-<10k', 1, 10000),
+          ('PA', 3, '10k-<50k', 10000, 50000),
+          ('PA', 4, '50k-<250k', 50000, 250000),
+          ('PA', 5, '250k-<500k', 250000, 500000),
+          ('PA', 6, '>=500k', 500000, NULL),
+          ('FATALITIES', 1, '0', 0, 1),
+          ('FATALITIES', 2, '1-<5', 1, 5),
+          ('FATALITIES', 3, '5-<25', 5, 25),
+          ('FATALITIES', 4, '25-<100', 25, 100),
+          ('FATALITIES', 5, '100-<500', 100, 500),
+          ('FATALITIES', 6, '500-<1000', 500, 1000),
+          ('FATALITIES', 7, '>=1000', 1000, NULL);
         CREATE TABLE bucket_centroids (
             hazard_code TEXT, metric TEXT, bucket_index INTEGER, centroid DOUBLE
         );
         INSERT INTO bucket_centroids VALUES
           ('*', 'PA', 1, 0),
-          ('*', 'PA', 2, 30000),
-          ('*', 'PA', 3, 150000),
-          ('*', 'PA', 4, 375000),
-          ('*', 'PA', 5, 700000),
+          ('*', 'PA', 2, 5000),
+          ('*', 'PA', 3, 30000),
+          ('*', 'PA', 4, 150000),
+          ('*', 'PA', 5, 375000),
+          ('*', 'PA', 6, 700000),
           ('*', 'FATALITIES', 1, 0),
-          ('*', 'FATALITIES', 2, 15),
-          ('*', 'FATALITIES', 3, 62),
-          ('*', 'FATALITIES', 4, 300),
-          ('*', 'FATALITIES', 5, 700);
+          ('*', 'FATALITIES', 2, 3),
+          ('*', 'FATALITIES', 3, 15),
+          ('*', 'FATALITIES', 4, 62),
+          ('*', 'FATALITIES', 5, 300),
+          ('*', 'FATALITIES', 6, 750),
+          ('*', 'FATALITIES', 7, 1500);
         """
     )
     con.close()
@@ -199,13 +205,16 @@ def test_question_bundle_returns_expected_payload(client: TestClient) -> None:
     assert data["context"]["question_context"]["run_id"] == "f-new"
     assert isinstance(data["context"]["scores"], list)
     assert data["forecast"]["bucket_labels"] == [
-        "<10k",
+        "0",
+        "1-<10k",
         "10k-<50k",
         "50k-<250k",
         "250k-<500k",
         ">=500k",
     ]
-    assert data["forecast"]["bucket_centroids"] == [0.0, 30000.0, 150000.0, 375000.0, 700000.0]
+    assert data["forecast"]["bucket_centroids"] == [
+        0.0, 5000.0, 30000.0, 150000.0, 375000.0, 700000.0
+    ]
     assert any(
         row["score_type"] == "brier" and row["value"] == pytest.approx(0.12)
         for row in data["context"]["scores"]
@@ -223,8 +232,12 @@ def test_question_bundle_fatalities_bucket_specs(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
 
-    assert data["forecast"]["bucket_labels"] == ["<5", "5-<25", "25-<100", "100-<500", ">=500"]
-    assert data["forecast"]["bucket_centroids"] == [0.0, 15.0, 62.0, 300.0, 700.0]
+    assert data["forecast"]["bucket_labels"] == [
+        "0", "1-<5", "5-<25", "25-<100", "100-<500", "500-<1000", ">=1000"
+    ]
+    assert data["forecast"]["bucket_centroids"] == [
+        0.0, 3.0, 15.0, 62.0, 300.0, 750.0, 1500.0
+    ]
 
 
 def test_question_bundle_accepts_legacy_header(api_env: dict[str, str]) -> None:
