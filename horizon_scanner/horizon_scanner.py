@@ -22,7 +22,7 @@ import sys
 import re
 import time
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Tuple, TypedDict
 
@@ -1509,7 +1509,7 @@ def main(countries: list[str] | None = None):
 
     _is_test = is_test_mode()
 
-    start_time = datetime.utcnow()
+    start_time = datetime.now(timezone.utc).replace(tzinfo=None)
     run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
     os.environ["PYTHIA_HS_RUN_ID"] = run_id
     reset_provider_failures_for_run(run_id)

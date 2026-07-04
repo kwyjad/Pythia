@@ -10,7 +10,7 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from pythia.config import load as load_cfg
@@ -434,7 +434,7 @@ def compute_calibration_pythia(
                 [as_of_month, hazard_code, metric],
             )
 
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             conn.executemany(
                 """
                 INSERT INTO calibration_weights (

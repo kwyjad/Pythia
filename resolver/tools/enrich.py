@@ -149,6 +149,15 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     facts["event_id"] = facts["event_id"].fillna("").astype(str)
     missing_eid = facts["event_id"].str.strip() == ""
     if missing_eid.any():
+        # Empty components produce degenerate, collision-prone IDs like
+        # "AFG--2026-01" — flag them so the upstream connector gets fixed.
+        for col in ("iso3", "hazard_code", "as_of_date"):
+            blank = facts.loc[missing_eid, col].fillna("").astype(str).str.strip() == ""
+            if blank.any():
+                LOG.warning(
+                    "event_id fallback: %d row(s) have empty %s; generated "
+                    "IDs may collide", int(blank.sum()), col,
+                )
         fallback = (
             facts.loc[missing_eid, "iso3"].fillna("UNK")
             + "-"

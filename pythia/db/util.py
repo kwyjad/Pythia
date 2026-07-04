@@ -11,7 +11,7 @@ from typing import Mapping, Any
 
 import duckdb
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 _FENCED_JSON_PATTERN = re.compile(r"```json\s*[\s\S]*?```", re.IGNORECASE)
@@ -223,7 +223,7 @@ def log_web_research_call(
             response_format,
             None,
             None,
-            datetime.utcnow(),
+            datetime.now(timezone.utc).replace(tzinfo=None),
             iso3,
             hazard_code,
             metric,

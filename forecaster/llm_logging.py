@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import time
 import inspect
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from pythia.db.schema import connect, ensure_schema
@@ -171,7 +171,7 @@ async def log_forecaster_llm_call(
     }
 
     call_id = f"fc_{run_id}_{question_id}_{int(time.time() * 1000)}"
-    ts = datetime.utcnow()
+    ts = datetime.now(timezone.utc).replace(tzinfo=None)
     call_phase = phase or call_type or ""
 
     parsed_payload = parsed_json() if callable(parsed_json) else parsed_json

@@ -150,6 +150,9 @@ def _rps(p: List[float], j: int) -> float:
     """
     K = len(p)
     if K < 2:
+        # A <2-bucket SPD is a misconfigured question/metric; a silent 0.0
+        # would be indistinguishable from a perfect score.
+        LOGGER.warning("RPS called with %d bucket(s); returning 0.0", K)
         return 0.0
     F = []
     s = 0.0

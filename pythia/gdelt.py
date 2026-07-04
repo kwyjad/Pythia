@@ -34,7 +34,7 @@ import os
 import time
 import zipfile
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Optional
 
 import requests
@@ -473,7 +473,7 @@ def fetch_and_store_gdelt_indicators(
 
     con = _get_connection(db_url)
     try:
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).replace(tzinfo=None).date()
         # GDELT 1.0 daily exports are published once per day (next day). Start
         # from yesterday to avoid 404s.
         start_offset = 1
@@ -531,7 +531,7 @@ def load_gdelt_conflict_indicators(
 
     con = _get_connection(db_url)
     try:
-        start = (datetime.utcnow().date() - timedelta(days=lookback_days))
+        start = (datetime.now(timezone.utc).replace(tzinfo=None).date() - timedelta(days=lookback_days))
         rows = con.execute(
             """
             SELECT event_date, total_events, material_conflict_events,

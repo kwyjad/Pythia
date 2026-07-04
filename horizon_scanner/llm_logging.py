@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from pythia.db.schema import connect, ensure_schema
@@ -160,7 +160,7 @@ def log_hs_llm_call(
             hazard_scores_json = None
 
     call_id = f"hs_{hs_run_id}_{iso3_up}_{hz_up}_{int(time.time() * 1000)}"
-    ts = datetime.utcnow()
+    ts = datetime.now(timezone.utc).replace(tzinfo=None)
 
     try:
         con = connect(read_only=False)

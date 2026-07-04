@@ -2240,7 +2240,7 @@ def upsert_dataframe(
 def _default_created_at(value: str | None = None) -> str:
     if value:
         return value
-    return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).replace(microsecond=0).isoformat() + "Z"
 
 
 def _ensure_columns(frame: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:

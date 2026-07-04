@@ -1074,7 +1074,7 @@ def collect_rows() -> List[Dict[str, Any]]:
             return []
         return []
     publication_date = date.today().isoformat()
-    ingested_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    ingested_at = datetime.now(timezone.utc).replace(tzinfo=None).replace(microsecond=0).isoformat() + "Z"
     rows: List[Dict[str, Any]] = []
     if records:
         rows = _build_rows(records, config, countries, shocks, source_url, publication_date, ingested_at)

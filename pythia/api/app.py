@@ -1288,7 +1288,10 @@ def api_version() -> Dict[str, Any]:
                 f"FROM {table} WHERE created_at IS NOT NULL"
             ).fetchone()
             return r[0] if r and r[0] else None
-        except Exception:
+        except Exception as exc:
+            # A failed staleness probe silently under-reports latest_data_at;
+            # log so the gap is diagnosable.
+            logger.warning("staleness probe failed for %s: %r", table, exc)
             return None
 
     result["latest_scores_at"] = _max_created_at("scores")
@@ -3239,6 +3242,7 @@ def resolution_rates(
     try:
         total_rows = _execute(con, total_sql, params).fetchall()
     except Exception:
+        logger.exception("resolution_rates total-count query failed")
         return {"rows": []}
 
     pending_map: dict[tuple[str, str], int] = {}

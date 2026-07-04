@@ -110,7 +110,10 @@ class AcledCastConnector:
         try:
             records = self._fetch_all_records()
         except Exception as exc:
-            LOG.warning("[acled_cast] fetch failed: %s", exc)
+            LOG.error(
+                "[acled_cast] fetch failed — CAST forecasts will be MISSING "
+                "from this ingest cycle: %s", exc,
+            )
             return pd.DataFrame()
 
         if not records:
