@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 
 from pythia.db.schema import connect, ensure_schema
@@ -386,7 +386,7 @@ def log_hs_run_to_db(
     countries_json = json.dumps(sorted(set(iso3_list)))
     requested_json = json.dumps(requested_countries or [])
     skipped_entries_json = json.dumps(skipped_entries or [], ensure_ascii=False)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     con.execute("DELETE FROM hs_runs WHERE hs_run_id = ?;", [hs_run_id])
     con.execute(

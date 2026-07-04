@@ -10,7 +10,7 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from pythia.config import load as load_cfg
@@ -22,50 +22,14 @@ if not LOGGER.handlers:
     LOGGER.addHandler(logging.NullHandler())
 
 
-def _rollback_quietly(conn) -> None:
-    # DuckDB >= 1.5 leaves the connection in an aborted-transaction state after a
-    # failed DDL inside an implicit transaction. Issue ROLLBACK so the next
-    # statement isn't poisoned with "Current transaction is aborted".
-    try:
-        conn.execute("ROLLBACK")
-    except Exception:
-        pass
-
-
-def _table_exists(conn, name: str) -> bool:
-    try:
-        conn.execute(f"PRAGMA table_info('{name}')").fetchall()
-        return True
-    except Exception:
-        _rollback_quietly(conn)
-        return False
-
-
-def _row_count(conn, name: str) -> int:
-    try:
-        return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
-    except Exception:
-        _rollback_quietly(conn)
-        return 0
-
-
-def _column_exists(conn, table: str, column: str) -> bool:
-    try:
-        rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
-        return any(str(r[1]).lower() == column.lower() for r in rows)
-    except Exception:
-        _rollback_quietly(conn)
-        return False
-
-
-def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:
-    if _column_exists(conn, table, column):
-        return
-    try:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-    except Exception as exc:
-        LOGGER.warning("Failed to add %s.%s: %s", table, column, exc)
-        _rollback_quietly(conn)
+# Shared rollback-safe DuckDB helpers (see pythia/tools/_db_utils.py).
+from pythia.tools._db_utils import (
+    add_column_if_missing as _add_column_if_missing,
+    column_exists as _column_exists,
+    rollback_quietly as _rollback_quietly,
+    row_count as _row_count,
+    table_exists as _table_exists,
+)
 
 
 MIN_QUESTIONS = 20
@@ -434,7 +398,7 @@ def compute_calibration_pythia(
                 [as_of_month, hazard_code, metric],
             )
 
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             conn.executemany(
                 """
                 INSERT INTO calibration_weights (

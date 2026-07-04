@@ -189,6 +189,36 @@ def test_parse_flat_probability_values():
     assert result["2026-05"] == 0.25
 
 
+def test_parse_complete_expected_months_accepted():
+    """A response covering every expected month passes through."""
+    months = ["2026-04", "2026-05", "2026-06"]
+    raw = json.dumps({"months": {m: {"posterior": 0.1} for m in months}})
+    result = parse_binary_response(raw, expected_months=months)
+    assert sorted(result) == months
+
+
+def test_parse_incomplete_expected_months_rejected():
+    """A response missing any expected month is a model-level failure —
+    partial forecasts must not flow into aggregation."""
+    raw = json.dumps({
+        "months": {
+            "2026-04": {"posterior": 0.1},
+            "2026-05": {"posterior": 0.2},
+        }
+    })
+    result = parse_binary_response(
+        raw, expected_months=["2026-04", "2026-05", "2026-06"]
+    )
+    assert result == {}
+
+
+def test_parse_partial_allowed_without_expected_months():
+    """Without expected_months, partial results still pass (backward compat)."""
+    raw = json.dumps({"months": {"2026-04": {"posterior": 0.1}}})
+    result = parse_binary_response(raw)
+    assert result == {"2026-04": 0.1}
+
+
 # ---- Base rate tests ----
 
 def _setup_facts_resolved(con, rows: list[tuple]):

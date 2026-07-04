@@ -6,10 +6,26 @@
 # Precedence policy — 3 active connectors + EM-DAT (historical read-only)
 metric_preference: [in_need, affected]   # PIN first, else PA
 
+# Tier entries must match the lowercased `publisher` column that connectors
+# write (run_pipeline uses publisher as the precedence source id). "ifrc" is
+# the value the IFRC Montandon connector actually writes; the legacy
+# "ifrc_montandon" slug is kept for the CLI path and old data.
 tiers:
-  - ["ifrc_montandon", "acled"]
+  - ["ifrc_montandon", "ifrc", "acled"]
   - ["idmc"]
   - ["emdat"]                            # historical read-only (no connector)
+
+# Within-tier tiebreak rules for resolve_facts_frame (the run_pipeline path).
+# Without this key the engine used to fall back to alphabetical source order,
+# ignoring recency and allowing NULL-value rows to win.
+tiebreak:
+  - as_of_desc
+  - value_nonnull
+  - source_alpha
+
+defaults:
+  require_nonnegative: true
+  prefer_full_row_coverage: true
 
 source_precedence:
   - ifrc_or_gov_sitrep

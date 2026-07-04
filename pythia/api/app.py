@@ -832,6 +832,11 @@ def _run_filter_cte(
     if not _table_has_columns(con, "forecasts_ensemble", ["run_id"]):
         return ("", "")
     if forecaster_run_id:
+        # The run id is interpolated into a CTE that is embedded in larger
+        # queries, so it must be validated here — this is a security boundary
+        # for the user-supplied forecaster_run_id query param.
+        if not re.match(r"^[A-Za-z0-9_.:\-]{1,128}$", forecaster_run_id):
+            raise HTTPException(status_code=400, detail="Invalid forecaster_run_id")
         cte = (
             "fc_run_filter AS (\n"
             "            SELECT question_id, run_id\n"
@@ -1283,7 +1288,10 @@ def api_version() -> Dict[str, Any]:
                 f"FROM {table} WHERE created_at IS NOT NULL"
             ).fetchone()
             return r[0] if r and r[0] else None
-        except Exception:
+        except Exception as exc:
+            # A failed staleness probe silently under-reports latest_data_at;
+            # log so the gap is diagnosable.
+            logger.warning("staleness probe failed for %s: %r", table, exc)
             return None
 
     result["latest_scores_at"] = _max_created_at("scores")
@@ -1950,7 +1958,7 @@ def performance_scores(
                 SELECT q.track, COUNT(DISTINCT s.question_id) AS n
                 FROM scores s
                 JOIN questions q ON q.question_id = s.question_id
-                WHERE q.track IS NOT NULL {tc_filter}
+                WHERE q.track IS NOT NULL {tc_filter}{_tf}
                 GROUP BY q.track
             """, {k: v for k, v in params.items() if k != "track"}).fetchall()
             for t, n in tc_rows:
@@ -3234,6 +3242,7 @@ def resolution_rates(
     try:
         total_rows = _execute(con, total_sql, params).fetchall()
     except Exception:
+        logger.exception("resolution_rates total-count query failed")
         return {"rows": []}
 
     pending_map: dict[tuple[str, str], int] = {}
@@ -4883,6 +4892,25 @@ def _source_freshness(con, spec: dict) -> str | None:
     return None
 
 
+_ISO3_PATTERN = re.compile(r"^[A-Za-z]{3}$")
+
+
+def _validate_iso3_param(iso3: str | None) -> str | None:
+    """Normalize an iso3 query param; reject anything that is not 3 letters.
+
+    The value is interpolated into SQL filters downstream, so this is a
+    security boundary, not just input hygiene.
+    """
+    if iso3 is None:
+        return None
+    val = iso3.strip().upper()
+    if not val:
+        return None
+    if not _ISO3_PATTERN.match(val):
+        raise HTTPException(status_code=400, detail="Invalid iso3 parameter")
+    return val
+
+
 def _source_row_count(con, spec: dict, iso3: str | None = None) -> int:
     """Count rows for a source, optionally filtered by iso3."""
     table = spec["table"]
@@ -4890,15 +4918,17 @@ def _source_row_count(con, spec: dict, iso3: str | None = None) -> int:
         return 0
     filt = spec.get("filter", "")
     clauses: list[str] = []
-    if filt:
-        clauses.append(filt)
+    params: list = []
     if iso3 and spec.get("has_iso3", True):
         cols = _table_columns(con, table)
         if "iso3" in cols:
-            clauses.append(f"iso3 = '{iso3.upper()}'")
+            clauses.append("iso3 = ?")
+            params.append(iso3.strip().upper())
+    if filt:
+        clauses.append(filt)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     try:
-        return con.execute(f"SELECT COUNT(*) FROM {table}{where}").fetchone()[0]
+        return con.execute(f"SELECT COUNT(*) FROM {table}{where}", params).fetchone()[0]
     except Exception:
         return 0
 
@@ -4915,7 +4945,7 @@ def get_resolver_source_inventory(
 ):
     """Per-source metadata for the accordion data explorer."""
     con = _con()
-    iso3_val = iso3.strip().upper() if iso3 else None
+    iso3_val = _validate_iso3_param(iso3)
     sources = []
     for key, spec in _SOURCE_REGISTRY.items():
         has_iso3 = spec.get("has_iso3", True)
@@ -4967,11 +4997,14 @@ def get_resolver_source_data(
 
     select_sql = ", ".join(select_list)
     clauses: list[str] = []
+    params: list = []
     filt = spec.get("filter", "")
     if filt:
         clauses.append(filt)
-    if iso3 and spec.get("has_iso3", True) and "iso3" in actual_cols:
-        clauses.append(f"iso3 = '{iso3.strip().upper()}'")
+    iso3_val = _validate_iso3_param(iso3)
+    if iso3_val and spec.get("has_iso3", True) and "iso3" in actual_cols:
+        clauses.append("iso3 = ?")
+        params.append(iso3_val)
 
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     order = spec.get("order", "")
@@ -4987,7 +5020,7 @@ def get_resolver_source_data(
     sql = f"SELECT {select_sql} FROM {table}{where}{order_sql} LIMIT {min(limit, 5000)}"
 
     try:
-        rows = _rows_from_cursor(con.execute(sql))
+        rows = _rows_from_cursor(con.execute(sql, params))
     except Exception as exc:
         logger.warning("source_data query failed for %s: %s", source, exc)
         return {"rows": [], "columns": select_list}

@@ -19,7 +19,7 @@ LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:
     LOGGER.addHandler(logging.NullHandler())
 
-NUM_HORIZONS = 6
+from pythia.buckets import NUM_HORIZONS
 
 
 def _utcnow_naive() -> datetime:
@@ -77,27 +77,12 @@ def _metric_preference_case(column: str = "metric") -> str:
     return f"CASE {parts} ELSE {len(_PA_METRIC_PREFERENCE)} END"
 
 
-def _table_exists(conn, name: str) -> bool:
-    try:
-        conn.execute(f"PRAGMA table_info('{name}')").fetchall()
-        return True
-    except Exception:
-        return False
-
-
-def _has_column(conn, table: str, column: str) -> bool:
-    try:
-        rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
-        return column in {str(r[1]) for r in rows}
-    except Exception:
-        return False
-
-
-def _row_count(conn, name: str) -> int:
-    try:
-        return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
-    except Exception:
-        return 0
+# Shared rollback-safe DuckDB helpers (see pythia/tools/_db_utils.py).
+from pythia.tools._db_utils import (
+    column_exists as _has_column,
+    row_count as _row_count,
+    table_exists as _table_exists,
+)
 
 
 def _get_db_url_from_config() -> str:
@@ -334,6 +319,47 @@ def _months_with_source_data(conn, metric: str) -> set[str]:
         except Exception as exc:
             LOGGER.warning("Source-coverage query on %s failed: %r", table, exc)
     return months
+
+
+def _countries_with_source_data(conn, metric: str) -> set[str]:
+    """Return the set of ISO3 codes that appear at least once (any month)
+    in the metric's source tables.
+
+    Gates zero-defaulting alongside :func:`_months_with_source_data`: a
+    country the source has NEVER reported is outside the source's coverage
+    universe, so absence of a row is "unknown", not "zero impact". Countries
+    the source does cover still zero-default normally for covered months
+    (e.g. a peaceful country appears in ACLED via protests/riots even when
+    it has no conflict fatalities).
+    """
+    countries: set[str] = set()
+    if metric == "FATALITIES":
+        queries = [
+            ("facts_resolved",
+             "SELECT DISTINCT upper(iso3) FROM facts_resolved WHERE lower(metric) = 'fatalities'"),
+            ("facts_deltas",
+             "SELECT DISTINCT upper(iso3) FROM facts_deltas WHERE lower(metric) = 'fatalities'"),
+            ("acled_monthly_fatalities",
+             "SELECT DISTINCT upper(iso3) FROM acled_monthly_fatalities"),
+        ]
+    elif metric == "EVENT_OCCURRENCE":
+        queries = [
+            ("facts_resolved",
+             "SELECT DISTINCT upper(iso3) FROM facts_resolved "
+             "WHERE lower(metric) = 'event_occurrence'"),
+        ]
+    else:
+        return countries
+    for table, sql in queries:
+        if not _table_exists(conn, table):
+            continue
+        try:
+            for (iso3,) in conn.execute(sql).fetchall():
+                if iso3:
+                    countries.add(str(iso3))
+        except Exception as exc:
+            LOGGER.warning("Source-universe query on %s failed: %r", table, exc)
+    return countries
 
 
 # Hazard-code → EM-DAT shock_type mapping for emdat_pa table lookups.
@@ -726,12 +752,26 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         skipped_no_data_coverage = 0
         skipped_null_resolution = 0
         skipped_unresolvable_hazard = 0
+        skipped_outside_source_universe = 0
 
         # Per-month global source coverage for zero-default metrics: a month
         # absent from every source table is an ingestion gap, not "no impact".
         zero_default_coverage: dict[str, set[str]] = {
             m: _months_with_source_data(conn, m)
             for m in _ZERO_DEFAULT_RULES
+        }
+
+        # Per-country source universe: countries the source has NEVER
+        # reported stay unresolved instead of zero-defaulting. Applies to
+        # FATALITIES only — ACLED has a defined coverage universe that
+        # expanded over time. EVENT_OCCURRENCE is exempt: GDACS coverage is
+        # satellite-global and only writes rows where events occurred, so a
+        # country with no GDACS rows genuinely had no qualifying events.
+        universe_gated_metrics = {"FATALITIES"}
+        zero_default_universe: dict[str, set[str]] = {
+            m: _countries_with_source_data(conn, m)
+            for m in _ZERO_DEFAULT_RULES
+            if m in universe_gated_metrics
         }
 
         for question_id, iso3, hazard_code, metric, target_month, window_start_date in rows:
@@ -823,6 +863,10 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                         if cal_month not in covered:
                             skipped_no_data_coverage += 1
                             continue
+                        universe = zero_default_universe.get(metric_norm)
+                        if universe is not None and iso3_norm not in universe:
+                            skipped_outside_source_universe += 1
+                            continue
                         value: float = 0.0
                         source_ts: Optional[str] = None
                         source_desc = "zero_default"
@@ -897,6 +941,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             "written (%d from source data, %d defaulted to 0.0), "
             "%d horizon-months skipped (no resolution data), "
             "%d horizon-months skipped (no data coverage yet), "
+            "%d horizon-months skipped (country outside source universe), "
             "%d questions skipped (unresolvable hazard).",
             len(rows),
             written,
@@ -904,6 +949,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             resolved_as_zero,
             skipped_null_resolution,
             skipped_no_data_coverage,
+            skipped_outside_source_universe,
             skipped_unresolvable_hazard,
         )
     finally:

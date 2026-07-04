@@ -37,12 +37,13 @@ import importlib.util
 import json
 import os
 import logging
+import threading
 from collections import Counter
 from urllib.parse import urlparse
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 import inspect
 
@@ -51,7 +52,7 @@ import numpy as np
 
 from pathlib import Path
 from pythia.buckets import labels_for as bucket_labels_for
-from pythia.buckets import n_buckets_for
+from pythia.buckets import NUM_HORIZONS, n_buckets_for
 from pythia.db.schema import connect, ensure_schema
 from pythia.db.schema import connect as pythia_connect
 from pythia.test_mode import is_test_mode
@@ -233,6 +234,23 @@ SPD_CLASS_BINS_PHASE3 = bucket_labels_for("PHASE3PLUS_IN_NEED")
 
 # Backwards-compatibility alias; PA remains the default bucket scheme
 SPD_CLASS_BINS = SPD_CLASS_BINS_PA
+
+
+def _n_buckets_for_metric(metric: str | None) -> int:
+    """Bucket count for a metric, falling back to the PA scheme — loudly.
+
+    A silent PA fallback for an empty/unknown metric would make the whole
+    SPD chain quietly use the wrong bucket count (hard to debug); the
+    fallback is kept for robustness but always logged.
+    """
+    n = n_buckets_for(metric or "")
+    if n:
+        return n
+    LOG.warning(
+        "Unknown/empty metric %r for bucket count; falling back to PA scheme (%d buckets)",
+        metric, len(SPD_CLASS_BINS),
+    )
+    return len(SPD_CLASS_BINS)
 
 HZ_QUERY_MAP = {
     # Natural hazards
@@ -485,7 +503,7 @@ def _build_natural_hazard_seasonal_profile(
             return empty
 
         # Parse rows, filter future months, group by calendar month
-        now_month = datetime.utcnow().strftime("%Y-%m")
+        now_month = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m")
         by_cal_month: Dict[int, list[float]] = {m: [] for m in range(1, 13)}
         all_yms: list[str] = []
 
@@ -739,7 +757,7 @@ def _build_gdacs_event_history(
         return None
 
     # Parse into structured records
-    now_ym = datetime.utcnow().strftime("%Y-%m")
+    now_ym = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m")
     events: list[dict] = []
     for ym_raw, value, alertlevel in rows:
         ym = str(ym_raw)[:7] if ym_raw else ""
@@ -1373,7 +1391,7 @@ def _sanitize_month_series(
 
     Returns (cleaned_dict, dropped_future_months, unparseable_month_keys).
     """
-    now_month = datetime.utcnow().strftime("%Y-%m")
+    now_month = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m")
     cleaned: Dict[str, Any] = {}
     dropped: list[str] = []
     unparseable: list[str] = []
@@ -1968,8 +1986,11 @@ def _write_spd_members_v2_to_db(
                     _rt = _rc_entry.get("reasoning_trace")
                     if _rt:
                         _rc_reasoning_trace = json.dumps(_rt, default=str)
-            except Exception:
-                pass
+            except Exception as exc:
+                LOG.warning(
+                    "Discarding unserializable reasoning trace for model #%d: %r",
+                    idx, exc,
+                )
 
             if not isinstance(model_spd, dict) or not model_spd:
                 con.execute(
@@ -2495,7 +2516,7 @@ def _pythia_question_to_post(question: PythiaQuestion) -> Optional[dict]:
         "pythia_window_start_date": question.window_start_date,
         "pythia_window_end_date": question.window_end_date,
         "pythia_metadata": meta,
-        "created_time_iso": datetime.utcnow().isoformat(),
+        "created_time_iso": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
 
 
@@ -3771,7 +3792,7 @@ async def _call_spd_members_v2(
             model_success.append((getattr(ms_val, "provider", ""), False))
             continue
 
-        bucket_count = n_buckets_for(metric or "PA") or len(SPD_CLASS_BINS)
+        bucket_count = _n_buckets_for_metric(metric)
         for month, payload in spds.items():
             if not isinstance(payload, dict):
                 continue
@@ -3898,7 +3919,7 @@ async def _call_spd_ensemble_v2(
     """Thin wrapper around the current SPD v2 call path for diagnostics."""
 
     specs = specs or SPD_ENSEMBLE
-    bucket_count = n_buckets_for(metric) or len(SPD_CLASS_BINS)
+    bucket_count = _n_buckets_for_metric(metric)
 
     tasks = [_call_spd_model_for_spec(ms, prompt) for ms in specs if ms.active]
     if not tasks:
@@ -4046,7 +4067,7 @@ def _add_months(ym: str, offset: int) -> str:
     return f"{year:04d}-{month:02d}"
 
 
-def _expected_months(anchor_month: str, n: int = 6) -> list[str]:
+def _expected_months(anchor_month: str, n: int = NUM_HORIZONS) -> list[str]:
     """Return the n forecast-window months starting at ``anchor_month``.
 
     ``anchor_month`` is the FIRST window month (horizon_m=1) — see
@@ -4120,7 +4141,7 @@ def _build_bayesmc_spd_obj(
         return {}, diag
 
     if anchor_month:
-        expected_months = _expected_months(anchor_month, 6)
+        expected_months = _expected_months(anchor_month, NUM_HORIZONS)
         missing_months = [m for m in expected_months if m not in normalized]
         if missing_months:
             diag["status"] = "insufficient_month_coverage"
@@ -4206,7 +4227,7 @@ async def _call_spd_bayesmc_v2(
         per_model_spds,
         anchor_month=anchor_month,
         specs_used=specs_used,
-        n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS),
+        n_buckets=_n_buckets_for_metric(metric),
         member_weights=member_weights_by_key,
     )
     try:
@@ -4861,7 +4882,7 @@ def _month_index_for_label(label: str, anchor_month: str | None) -> int | None:
         except Exception:
             return None
         idx = (y * 12 + m) - (ay * 12 + am) + 1
-        return idx if 1 <= idx <= 6 else None
+        return idx if 1 <= idx <= NUM_HORIZONS else None
 
     if _is_calendar_month_key(s):
         y, m = map(int, s.split("-"))
@@ -4870,7 +4891,7 @@ def _month_index_for_label(label: str, anchor_month: str | None) -> int | None:
     offset = _parse_month_offset_key(s)
     if offset is not None:
         idx = offset if offset >= 1 else 1  # 'month_0' style → first month
-        return idx if 1 <= idx <= 6 else None
+        return idx if 1 <= idx <= NUM_HORIZONS else None
 
     dt = _parse_month_key(s)
     if dt is not None:
@@ -5024,8 +5045,12 @@ async def _run_binary_forecast_for_question(
                     "value": float(arow[1] or 0),
                     "alertlevel": str(arow[2] or ""),
                 })
-        except Exception:
-            pass
+        except Exception as exc:
+            # Non-fatal: the prompt just loses recent-alert context — but
+            # that degradation must be visible, not silent.
+            LOG.warning(
+                "Failed to load current GDACS alerts for %s/%s: %r", iso3, hz, exc
+            )
 
         window_start = rec.get("window_start_date")
 
@@ -5104,7 +5129,7 @@ async def _run_binary_forecast_for_question(
         # Parse binary responses from raw model outputs. Only months inside
         # the question window are kept — an off-window (hallucinated) month
         # label must not enter the aggregation.
-        expected_months = _expected_months(anchor_month, 6) if anchor_month else []
+        expected_months = _expected_months(anchor_month, NUM_HORIZONS) if anchor_month else []
         expected_set = set(expected_months)
         all_model_probs: list[dict[str, float]] = []
         for call in raw_calls:
@@ -5147,6 +5172,19 @@ async def _run_binary_forecast_for_question(
             _record_no_forecast(
                 run_id, qid or "", iso3, hz, metric,
                 "binary: no months in aggregated result",
+                model_name=model_name,
+            )
+            return
+
+        # Never write a partial window: mirror the SPD
+        # insufficient_month_coverage convention. (The parser already
+        # rejects incomplete models, so this only fires if that guard or
+        # the window derivation regresses.)
+        if expected_set and set(aggregated) != expected_set:
+            _record_no_forecast(
+                run_id, qid or "", iso3, hz, metric,
+                f"binary: insufficient_month_coverage "
+                f"({len(aggregated)}/{len(expected_set)} months)",
                 model_name=model_name,
             )
             return
@@ -5328,7 +5366,7 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
 
         # Use mean aggregation (effectively identity for single model)
         spd_mean = aggregate_spd_v2_mean(
-            per_model_spds, n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS)
+            per_model_spds, n_buckets=_n_buckets_for_metric(metric)
         )
         spd_obj = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
         _attach_ensemble_meta(spd_obj, ensemble_meta)
@@ -5614,7 +5652,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 )
                 spd_mean = aggregate_spd_v2_mean(
                     per_model_spds,
-                    n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS),
+                    n_buckets=_n_buckets_for_metric(metric),
                     member_weights=member_weight_list,
                 )
                 spd_v2 = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
@@ -5624,7 +5662,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     per_model_spds,
                     anchor_month=anchor_month,
                     specs_used=specs_active,
-                    n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS),
+                    n_buckets=_n_buckets_for_metric(metric),
                     member_weights=member_weights_by_key,
                 )
                 if spd_bm:
@@ -5850,7 +5888,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 )
             spd_mean = aggregate_spd_v2_mean(
                 per_model_spds,
-                n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS),
+                n_buckets=_n_buckets_for_metric(metric),
                 member_weights=member_weight_list,
             )
             spd_mean_obj = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
@@ -5861,7 +5899,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 per_model_spds,
                 anchor_month=anchor_month,
                 specs_used=specs_used_for_bayesmc,
-                n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS),
+                n_buckets=_n_buckets_for_metric(metric),
                 member_weights=member_weights_by_key,
             )
             if _has_v2_spds(spd_bm_obj):
@@ -6331,8 +6369,18 @@ def _calibration_weights_enabled() -> bool:
 
 
 # Per-process cache: one DB read per (hazard, metric) per run instead of one
-# per question. Values may be None (no weights available).
+# per question. Values may be None (no weights available). Guarded by a lock:
+# the SPD phase runs questions on worker threads, and an unguarded check-then-
+# set raced duplicate DB reads for the same (hazard, metric).
 _CALIB_WEIGHTS_CACHE: Dict[Tuple[str, str], Optional[Dict[str, float]]] = {}
+_CALIB_WEIGHTS_LOCK = threading.Lock()
+
+
+def _reset_calibration_weights_cache() -> None:
+    """Clear cached calibration weights (call at run start so a long-lived
+    process picks up freshly computed weights)."""
+    with _CALIB_WEIGHTS_LOCK:
+        _CALIB_WEIGHTS_CACHE.clear()
 
 
 def _member_weight_key(ms: ModelSpec) -> str:
@@ -6367,14 +6415,15 @@ def _resolve_member_weights(
         return None, keys, None
 
     cache_key = ((hazard_code or "").upper(), (metric or "").upper())
-    if cache_key not in _CALIB_WEIGHTS_CACHE:
-        try:
-            _CALIB_WEIGHTS_CACHE[cache_key] = _load_calibration_weights_db(
-                hazard_code, metric
-            )
-        except Exception:
-            _CALIB_WEIGHTS_CACHE[cache_key] = None
-    stored = _CALIB_WEIGHTS_CACHE[cache_key]
+    with _CALIB_WEIGHTS_LOCK:
+        if cache_key not in _CALIB_WEIGHTS_CACHE:
+            try:
+                _CALIB_WEIGHTS_CACHE[cache_key] = _load_calibration_weights_db(
+                    hazard_code, metric
+                )
+            except Exception:
+                _CALIB_WEIGHTS_CACHE[cache_key] = None
+        stored = _CALIB_WEIGHTS_CACHE[cache_key]
     if not stored:
         return None, keys, None
 
@@ -6644,6 +6693,8 @@ def main() -> None:
 
     def _run_v2_pipeline():
         ensure_schema()
+        # Weights may have been recomputed since this process started.
+        _reset_calibration_weights_cache()
 
         # Parse iso3 filter from CLI
         iso3_filter: Optional[set[str]] = None
@@ -6757,7 +6808,7 @@ def main() -> None:
                 qid = str(q.get("question_id") or "")
                 if not qid:
                     return
-                finished_at = datetime.utcnow()
+                finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 wall_ms = int(time.time() * 1000) - int(start_ms)
                 started_at = datetime.utcfromtimestamp(start_ms / 1000.0)
                 cost_usd = 0.0

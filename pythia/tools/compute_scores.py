@@ -40,19 +40,11 @@ def _utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _table_exists(conn, name: str) -> bool:
-    try:
-        conn.execute(f"PRAGMA table_info('{name}')").fetchall()
-        return True
-    except Exception:
-        return False
-
-
-def _row_count(conn, name: str) -> int:
-    try:
-        return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
-    except Exception:
-        return 0
+# Shared rollback-safe DuckDB helpers (see pythia/tools/_db_utils.py).
+from pythia.tools._db_utils import (
+    row_count as _row_count,
+    table_exists as _table_exists,
+)
 
 
 def _get_db_url_from_config() -> str:
@@ -150,6 +142,9 @@ def _rps(p: List[float], j: int) -> float:
     """
     K = len(p)
     if K < 2:
+        # A <2-bucket SPD is a misconfigured question/metric; a silent 0.0
+        # would be indistinguishable from a perfect score.
+        LOGGER.warning("RPS called with %d bucket(s); returning 0.0", K)
         return 0.0
     F = []
     s = 0.0
@@ -472,15 +467,22 @@ def _load_centroids(conn, hazard_code: str, metric: str, n_buckets: int) -> list
 
 
 def _get_centroid_version(conn, hazard_code: str, metric: str) -> str:
-    """Return the as_of_month of the newest centroid row, or 'default'."""
+    """Return the as_of_month of the newest centroid row, or 'default'.
+
+    Mirrors :func:`_load_centroids` lookup order (hazard-specific, then
+    wildcard) so the stamped version reflects the centroids actually used —
+    a metric-only MAX would blame the wrong hazard's EMA update.
+    """
     try:
-        row = conn.execute(
-            "SELECT MAX(as_of_month) FROM bucket_centroids "
-            "WHERE upper(metric) = ? AND as_of_month IS NOT NULL",
-            [metric.upper()],
-        ).fetchone()
-        if row and row[0]:
-            return str(row[0])
+        for hc in [hazard_code.upper(), "*"]:
+            row = conn.execute(
+                "SELECT MAX(as_of_month) FROM bucket_centroids "
+                "WHERE upper(hazard_code) = ? AND upper(metric) = ? "
+                "AND as_of_month IS NOT NULL",
+                [hc, metric.upper()],
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0])
     except Exception:
         pass
     return "default"

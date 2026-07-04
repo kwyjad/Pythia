@@ -16,7 +16,7 @@ import argparse
 import json
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from pythia.config import load as load_cfg
@@ -302,7 +302,7 @@ def score_views(db_url: str, sigma: float = LOGNORMAL_SIGMA) -> None:
                 """,
                 [qid, hm, metric, VIEWS_MODEL_NAME],
             )
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             conn.executemany(
                 """
                 INSERT INTO scores

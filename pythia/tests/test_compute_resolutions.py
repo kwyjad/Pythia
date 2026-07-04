@@ -1012,6 +1012,14 @@ def test_fatalities_no_data_defaults_to_zero(tmp_path: Path, monkeypatch: pytest
             VALUES ('ETH', '2025-08-01', 50, '2025-09-15 00:00:00')
             """
         )
+        # Historical SOM row so SOM is inside ACLED's coverage universe
+        # (countries the source has never reported must not zero-default).
+        con.execute(
+            """
+            INSERT INTO acled_monthly_fatalities (iso3, month, fatalities, updated_at)
+            VALUES ('SOM', '2020-01-01', 5, '2020-02-15 00:00:00')
+            """
+        )
     finally:
         con.close()
 
@@ -1031,6 +1039,54 @@ def test_fatalities_no_data_defaults_to_zero(tmp_path: Path, monkeypatch: pytest
         qid, h, val = rows[0]
         assert h == 2, f"Expected horizon 2 (2025-08), got h{h}"
         assert val == 0.0, f"Expected 0.0 for FATALITIES h{h}, got {val}"
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_fatalities_country_never_in_source_stays_unresolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A country that has NEVER appeared in ACLED's tables is outside the
+    source's coverage universe — its FATALITIES horizons must stay
+    unresolved instead of zero-defaulting (absence means "unknown", not
+    "no fatalities")."""
+    db_path = tmp_path / "e2e_universe_fat.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_UNIV', 'run1', 'TUV', 'ACE', 'FATALITIES', '2025-12', '2025-07-01', 'active')
+            """
+        )
+        # ACLED coverage exists globally (ETH), but TUV never appears.
+        con.execute(
+            """
+            INSERT INTO acled_monthly_fatalities (iso3, month, fatalities, updated_at)
+            VALUES ('ETH', '2025-08-01', 50, '2025-09-15 00:00:00')
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute("SELECT question_id, horizon_m, value FROM resolutions").fetchall()
+        assert len(rows) == 0, (
+            f"Country outside the source universe must stay unresolved, got: {rows}"
+        )
     finally:
         con.close()
 

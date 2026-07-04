@@ -21,8 +21,6 @@ from . import bayes_mc as BMC
 # these when available.
 SPD_BUCKET_CENTROIDS_DEFAULT = centroids_for("PA")
 
-SPD_BUCKET_CENTROIDS_FATALITIES_DEFAULT = centroids_for("FATALITIES")
-
 def _extract_gtmc1_prob(sig: dict | None) -> float | None:
     """
     Pull a probability-like value out of GTMC1 signal dict.

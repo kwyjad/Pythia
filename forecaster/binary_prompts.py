@@ -599,10 +599,18 @@ def parse_binary_response(raw_text: str, expected_months: list[str] | None = Non
             )
         result[month_key] = clamped
 
-    # Fill missing months from expected_months with None (caller handles fallback)
+    # Completeness is enforced per model: a response missing any expected
+    # month is rejected outright rather than passed through partially —
+    # partial forecasts previously flowed into aggregation and left silent
+    # gaps in forecasts_ensemble that scoring later skipped.
     if expected_months:
-        for m in expected_months:
-            if m not in result:
-                LOG.warning("Missing forecast for month %s", m)
+        missing = [m for m in expected_months if m not in result]
+        if missing:
+            LOG.warning(
+                "Binary response missing %d/%d expected months (%s); "
+                "rejecting this model's forecast",
+                len(missing), len(expected_months), ", ".join(missing),
+            )
+            return {}
 
     return result
