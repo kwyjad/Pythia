@@ -34,7 +34,7 @@ async def test_spd_self_search_triggers_follow_up(monkeypatch: pytest.MonkeyPatc
                 None,
             )
         return (
-            '{"spds": {"month_1": {"probs": [0.2,0.2,0.2,0.2,0.2]}}}',
+            '{"spds": {"month_1": {"probs": [0.1,0.1,0.2,0.2,0.2,0.2]}}}',
             {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
             None,
         )

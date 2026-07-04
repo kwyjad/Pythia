@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from pythia.buckets import labels_for
 from pythia.db.schema import connect
 from pythia.test_mode import is_test_mode
 
@@ -68,29 +69,24 @@ def _safe_json_loads_scenario(text: str) -> Any:
             return json.loads(candidate)
         raise
 
-SPD_CLASS_BINS_PA = [
-    "<10k",
-    "10k-<50k",
-    "50k-<250k",
-    "250k-<500k",
-    ">=500k",
-]
+# Bucket labels single-sourced from pythia/buckets.py BUCKET_SPECS.
+SPD_CLASS_BINS_PA = labels_for("PA")
 
-SPD_CLASS_BINS_FATALITIES = [
-    "<5",
-    "5-<25",
-    "25-<100",
-    "100-<500",
-    ">=500",
-]
+SPD_CLASS_BINS_FATALITIES = labels_for("FATALITIES")
+
+SPD_CLASS_BINS_PHASE3 = labels_for("PHASE3PLUS_IN_NEED")
 
 
 def _build_spd_summary_from_ensemble(
     ensemble_spd: Dict[str, Any], metric: str
 ) -> Dict[str, Any]:
-    bucket_labels = (
-        SPD_CLASS_BINS_FATALITIES if (metric or "").upper() == "FATALITIES" else SPD_CLASS_BINS_PA
-    )
+    metric_up = (metric or "").upper()
+    if metric_up == "FATALITIES":
+        bucket_labels = SPD_CLASS_BINS_FATALITIES
+    elif metric_up == "PHASE3PLUS_IN_NEED":
+        bucket_labels = SPD_CLASS_BINS_PHASE3
+    else:
+        bucket_labels = SPD_CLASS_BINS_PA
 
     per_month_summary: Dict[str, Any] = {}
     per_month_int: Dict[int, List[float]] = {}

@@ -50,6 +50,8 @@ import duckdb
 import numpy as np
 
 from pathlib import Path
+from pythia.buckets import labels_for as bucket_labels_for
+from pythia.buckets import n_buckets_for
 from pythia.db.schema import connect, ensure_schema
 from pythia.db.schema import connect as pythia_connect
 from pythia.test_mode import is_test_mode
@@ -219,32 +221,15 @@ except Exception:
 # Hazard codes for which GTMC1 is relevant (adjust as needed for your schema)
 CONFLICT_HAZARD_CODES = {"ACE", "ACO"}
 
-# SPD buckets for Pythia PA/PIN forecasts (order must match prompts & aggregation)
-SPD_CLASS_BINS_PA = [
-    "<10k",
-    "10k-<50k",
-    "50k-<250k",
-    "250k-<500k",
-    ">=500k",
-]
+# SPD bucket labels, single-sourced from pythia/buckets.py BUCKET_SPECS
+# (order must match prompts & aggregation).
+SPD_CLASS_BINS_PA = bucket_labels_for("PA")
 
 # SPD buckets for conflict fatalities forecasts (per month)
-SPD_CLASS_BINS_FATALITIES = [
-    "<5",
-    "5-<25",
-    "25-<100",
-    "100-<500",
-    ">=500",
-]
+SPD_CLASS_BINS_FATALITIES = bucket_labels_for("FATALITIES")
 
 # SPD buckets for FEWS NET IPC Phase 3+ population forecasts
-SPD_CLASS_BINS_PHASE3 = [
-    "<100k",
-    "100k-<1M",
-    "1M-<5M",
-    "5M-<15M",
-    ">=15M",
-]
+SPD_CLASS_BINS_PHASE3 = bucket_labels_for("PHASE3PLUS_IN_NEED")
 
 # Backwards-compatibility alias; PA remains the default bucket scheme
 SPD_CLASS_BINS = SPD_CLASS_BINS_PA
@@ -3786,13 +3771,23 @@ async def _call_spd_members_v2(
             model_success.append((getattr(ms_val, "provider", ""), False))
             continue
 
+        bucket_count = n_buckets_for(metric or "PA") or len(SPD_CLASS_BINS)
         for month, payload in spds.items():
             if not isinstance(payload, dict):
                 continue
             probs = payload.get("probs")
             if not isinstance(probs, list):
                 continue
-            vec = sanitize_mcq_vector(list(probs), n_options=5)
+            if len(probs) != bucket_count:
+                # Wrong bucket count is a scheme mismatch; skip the month
+                # instead of silently zero-padding/truncating (which would
+                # bias the tail buckets).
+                print(
+                    f"[warn] spd member month {month} has {len(probs)} buckets, "
+                    f"expected {bucket_count}; skipping month"
+                )
+                continue
+            vec = sanitize_mcq_vector(list(probs), n_options=bucket_count)
             model_spd[str(month)] = vec
 
         per_model_spds.append(model_spd)
@@ -3898,10 +3893,12 @@ async def _call_spd_ensemble_v2(
     prompt: str,
     *,
     specs: list[ModelSpec] | None = None,
+    metric: str = "PA",
 ) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
     """Thin wrapper around the current SPD v2 call path for diagnostics."""
 
     specs = specs or SPD_ENSEMBLE
+    bucket_count = n_buckets_for(metric) or len(SPD_CLASS_BINS)
 
     tasks = [_call_spd_model_for_spec(ms, prompt) for ms in specs if ms.active]
     if not tasks:
@@ -3965,7 +3962,9 @@ async def _call_spd_ensemble_v2(
             if not isinstance(probs, list):
                 continue
 
-            vec = sanitize_mcq_vector(list(probs), n_options=5)
+            if len(probs) != bucket_count:
+                continue
+            vec = sanitize_mcq_vector(list(probs), n_options=bucket_count)
             if month not in month_sums:
                 month_sums[month] = [0.0 for _ in vec]
                 month_counts[month] = 0
@@ -4064,6 +4063,7 @@ def _build_bayesmc_spd_obj(
     *,
     anchor_month: str | None,
     specs_used: list[ModelSpec],
+    n_buckets: int,
     member_weights: Optional[Dict[str, float]] = None,
 ) -> tuple[dict[str, object], dict[str, Any]]:
     # Model names use the disambiguated 'Name (model_id)' key so calibration
@@ -4071,7 +4071,7 @@ def _build_bayesmc_spd_obj(
     member_keys = [_member_weight_key(ms) for ms in specs_used]
     spd_by_month, diag = aggregate_spd_v2_bayesmc(
         per_model_spds,
-        n_buckets=5,
+        n_buckets=n_buckets,
         prior_alpha=0.1,
         weights_by_model=member_weights,
         model_names=member_keys,
@@ -4206,6 +4206,7 @@ async def _call_spd_bayesmc_v2(
         per_model_spds,
         anchor_month=anchor_month,
         specs_used=specs_used,
+        n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS),
         member_weights=member_weights_by_key,
     )
     try:
@@ -5326,7 +5327,9 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
             return
 
         # Use mean aggregation (effectively identity for single model)
-        spd_mean = aggregate_spd_v2_mean(per_model_spds)
+        spd_mean = aggregate_spd_v2_mean(
+            per_model_spds, n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS)
+        )
         spd_obj = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
         _attach_ensemble_meta(spd_obj, ensemble_meta)
 
@@ -5610,7 +5613,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     _resolve_member_weights(specs_active, hz, metric)
                 )
                 spd_mean = aggregate_spd_v2_mean(
-                    per_model_spds, member_weights=member_weight_list
+                    per_model_spds,
+                    n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS),
+                    member_weights=member_weight_list,
                 )
                 spd_v2 = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
                 _attach_ensemble_meta(spd_v2, ensemble_meta)
@@ -5619,6 +5624,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     per_model_spds,
                     anchor_month=anchor_month,
                     specs_used=specs_active,
+                    n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS),
                     member_weights=member_weights_by_key,
                 )
                 if spd_bm:
@@ -5843,7 +5849,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     {k: round(v, 3) for k, v in member_weights_by_key.items()},
                 )
             spd_mean = aggregate_spd_v2_mean(
-                per_model_spds, member_weights=member_weight_list
+                per_model_spds,
+                n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS),
+                member_weights=member_weight_list,
             )
             spd_mean_obj = {"spds": {m: {"probs": vec} for m, vec in spd_mean.items()}}
             if _has_v2_spds(spd_mean_obj):
@@ -5853,6 +5861,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 per_model_spds,
                 anchor_month=anchor_month,
                 specs_used=specs_used_for_bayesmc,
+                n_buckets=n_buckets_for(metric) or len(SPD_CLASS_BINS),
                 member_weights=member_weights_by_key,
             )
             if _has_v2_spds(spd_bm_obj):

@@ -55,43 +55,57 @@ def test_parse_spd_json_basic():
     """Happy-path SPD parsing: minimal JSON, missing months filled, rows normalized."""
     text = """
     {
-      "month_1": [0.1, 0.2, 0.3, 0.2, 0.2],
-      "month_2": [0.0, 0.0, 0.0, 0.0, 1.0]
+      "month_1": [0.1, 0.1, 0.2, 0.2, 0.2, 0.2],
+      "month_2": [0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     }
     """
-    out = _parse_spd_json(text)
+    out = _parse_spd_json(text, n_months=6, n_buckets=6)
     assert isinstance(out, dict)
 
     # We always materialise month_1..month_6
     expected_keys = {f"month_{i}" for i in range(1, 7)}
     assert set(out.keys()) == expected_keys
 
-    # Each month is a length-5 prob vector that sums to ~1
+    # Each month is a length-6 prob vector that sums to ~1
     for key, vec in out.items():
         assert isinstance(vec, list)
-        assert len(vec) == 5
+        assert len(vec) == 6
         s = sum(vec)
         assert 0.99 <= s <= 1.01, f"{key} not normalised: sum={s}"
 
-    # month_1 preserves the relative mass ordering
-    m1 = out["month_1"]
-    assert m1[2] == max(m1)  # bucket 3 has the highest weight
+    # month_2 preserves the mass on the top bucket
+    m2 = out["month_2"]
+    assert m2[5] == max(m2)
 
 
 def test_parse_spd_json_failure_all_zero():
     """All-zero or empty SPDs should be treated as parse failure."""
     text = """
     {
-      "month_1": [0, 0, 0, 0, 0],
-      "month_2": [0, 0, 0, 0, 0]
+      "month_1": [0, 0, 0, 0, 0, 0],
+      "month_2": [0, 0, 0, 0, 0, 0]
     }
     """
-    out = _parse_spd_json(text)
+    out = _parse_spd_json(text, n_months=6, n_buckets=6)
     assert out is None
 
     # Completely invalid JSON also returns None
     bad = "this is not json at all"
-    assert _parse_spd_json(bad) is None
+    assert _parse_spd_json(bad, n_months=6, n_buckets=6) is None
+
+
+def test_parse_spd_json_rejects_wrong_bucket_count():
+    """A month vector with the wrong number of buckets fails the whole
+    parse — silently padding a 5-bucket vector into a 7-bucket scheme
+    would suppress the tail buckets."""
+    text = """
+    {
+      "month_1": [0.2, 0.2, 0.2, 0.2, 0.2]
+    }
+    """
+    assert _parse_spd_json(text, n_months=6, n_buckets=7) is None
+    # The same vector parses fine when the scheme expects 5 buckets.
+    assert _parse_spd_json(text, n_months=6, n_buckets=5) is not None
 
 
 def test_build_spd_prompt_v2_handles_date_in_history_summary() -> None:
@@ -357,8 +371,8 @@ def test_build_spd_prompt_v2_di_and_nat_notes() -> None:
 
 def test_aggregate_spd_shape_and_uniform_fallback():
     """aggregate_spd should normalise, respect evidence, and fall back to uniform."""
-    # Member with a strong preference for bucket 1 in month_1 only
-    spd_single = {"month_1": [1.0, 0.0, 0.0, 0.0, 0.0]}
+    # Member with a strong preference for the 1-<10k bucket in month_1 only
+    spd_single = {"month_1": [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]}
     member = MemberOutput(
         name="m1",
         ok=True,
@@ -367,19 +381,19 @@ def test_aggregate_spd_shape_and_uniform_fallback():
     )
     ens = EnsembleResult(members=[member])
 
-    spd_mean, expected, summary = aggregate_spd(ens)
+    spd_mean, expected, summary = aggregate_spd(ens, n_buckets=6)
 
     # month_1 is concentrated in bucket 1
     m1 = spd_mean["month_1"]
-    assert len(m1) == 5
+    assert len(m1) == 6
     assert 0.99 <= sum(m1) <= 1.01
-    assert m1[0] == max(m1)
+    assert m1[1] == max(m1)
 
     # Months without explicit evidence should be (approximately) uniform
     for m_idx in range(2, 7):
         key = f"month_{m_idx}"
         v = spd_mean[key]
-        assert len(v) == 5
+        assert len(v) == 6
         assert 0.99 <= sum(v) <= 1.01
         # All entries should be close to each other
         assert max(v) - min(v) < 0.05
@@ -484,8 +498,8 @@ def test_spd_runs_without_research(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
     fake_spd = {
         "spds": {
-            "month_1": {"probs": [0.1, 0.2, 0.3, 0.2, 0.2]},
-            "month_2": {"probs": [0.1, 0.2, 0.3, 0.2, 0.2]},
+            "month_1": {"probs": [0.05, 0.05, 0.2, 0.3, 0.2, 0.2]},
+            "month_2": {"probs": [0.05, 0.05, 0.2, 0.3, 0.2, 0.2]},
         }
     }
     fake_ms = ModelSpec(name="stub", provider="test", model_id="m1", active=True, purpose="spd_v2")
@@ -579,7 +593,7 @@ def test_spd_bayesmc_flag_happy_path_writes_db_and_logs(
 
     fake_spd = {
         "spds": {
-            month: {"probs": [0.1, 0.2, 0.3, 0.2, 0.2]}
+            month: {"probs": [0.05, 0.05, 0.2, 0.3, 0.2, 0.2]}
             for month in [
                 "2025-12",
                 "2026-01",
@@ -726,7 +740,7 @@ def test_bayesmc_month_mapping_preserves_calendar_keys(monkeypatch: pytest.Monke
     monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "0")
     monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
 
-    probs = [0.2, 0.2, 0.2, 0.2, 0.2]
+    probs = [0.1, 0.1, 0.2, 0.2, 0.2, 0.2]
 
     def _fake_bmc(per_model_spds, n_buckets, prior_alpha, weights_by_model, model_names):
         return (
@@ -748,6 +762,7 @@ def test_bayesmc_month_mapping_preserves_calendar_keys(monkeypatch: pytest.Monke
         [{}],
         anchor_month="2025-12",
         specs_used=[ms],
+        n_buckets=6,
     )
 
     assert diag.get("status") == "ok"
@@ -765,7 +780,7 @@ def test_bayesmc_month_mapping_offsets_to_calendar(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("PYTHIA_SPD_V2_WRITE_BOTH", "0")
     monkeypatch.setenv("PYTHIA_SPD_V2_DUAL_RUN", "0")
 
-    probs = [0.2, 0.2, 0.2, 0.2, 0.2]
+    probs = [0.1, 0.1, 0.2, 0.2, 0.2, 0.2]
 
     def _fake_bmc(per_model_spds, n_buckets, prior_alpha, weights_by_model, model_names):
         return (
@@ -780,6 +795,7 @@ def test_bayesmc_month_mapping_offsets_to_calendar(monkeypatch: pytest.MonkeyPat
         [{}],
         anchor_month="2025-12",
         specs_used=[ms],
+        n_buckets=6,
     )
 
     assert diag.get("status") == "ok"
@@ -842,8 +858,8 @@ def test_bayesmc_missing_months_records_reason(tmp_path: Path, monkeypatch: pyte
 
     fake_spd = {
         "spds": {
-            "month_0": {"probs": [0.2, 0.2, 0.2, 0.2, 0.2]},
-            "month_1": {"probs": [0.2, 0.2, 0.2, 0.2, 0.2]},
+            "month_0": {"probs": [0.1, 0.1, 0.2, 0.2, 0.2, 0.2]},
+            "month_1": {"probs": [0.1, 0.1, 0.2, 0.2, 0.2, 0.2]},
         }
     }
 
@@ -1035,7 +1051,7 @@ def test_spd_write_both_variants(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(cli, "_load_research_json", lambda *_args, **_kwargs: {})
 
     months = ["2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05"]
-    fake_spd = {"spds": {m: {"probs": [0.2, 0.2, 0.2, 0.2, 0.2]} for m in months}}
+    fake_spd = {"spds": {m: {"probs": [0.1, 0.1, 0.2, 0.2, 0.2, 0.2]} for m in months}}
 
     async def fake_call_spd_model_for_spec(ms, prompt, **_kwargs):
         return json.dumps(fake_spd), {"total_tokens": 10, "elapsed_ms": 5}, None, ms
@@ -1149,7 +1165,7 @@ def test_spd_write_both_falls_back_to_default_ensemble(tmp_path: Path, monkeypat
         _prompt: str, specs: list[ModelSpec], *, run_id: str | None = None
     ):
         captured_specs.append(specs)
-        spd_vec = [0.1, 0.2, 0.3, 0.2, 0.2]
+        spd_vec = [0.05, 0.05, 0.2, 0.3, 0.2, 0.2]
         per_model_spds = [{"2025-12": spd_vec} for _ in specs]
         raw_calls = [
             {
@@ -1265,7 +1281,7 @@ def test_spd_write_both_variants_bayesmc_fallback_to_mean_when_missing_months(
         "2026-04",
         "2026-05",
     ]
-    per_model_spds = [{m: [0.2, 0.2, 0.2, 0.2, 0.2] for m in full_months}]
+    per_model_spds = [{m: [0.1, 0.1, 0.2, 0.2, 0.2, 0.2] for m in full_months}]
 
     async def fake_call_spd_members_v2(_prompt: str, specs: list[ModelSpec], *, run_id: str | None = None):
         raw_calls = [
