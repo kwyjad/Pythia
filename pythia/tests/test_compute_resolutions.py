@@ -88,7 +88,7 @@ class TestResolveValue:
         )
         result = _resolve_value(resolver_db, "MLI", "FL", "2025-01", "PA")
         assert result is not None
-        value, source_ts = result
+        value, source_ts, _source_desc = result
         assert value == 12345.0
         assert source_ts is not None
 
@@ -101,7 +101,7 @@ class TestResolveValue:
         )
         result = _resolve_value(resolver_db, "SOM", "ACE", "2025-01", "FATALITIES")
         assert result is not None
-        value, _ = result
+        value, _, _source_desc = result
         assert value == 200.0
 
     def test_no_match_returns_none(self, resolver_db):
@@ -1023,11 +1023,14 @@ def test_fatalities_no_data_defaults_to_zero(tmp_path: Path, monkeypatch: pytest
             "SELECT question_id, horizon_m, value "
             "FROM resolutions ORDER BY horizon_m"
         ).fetchall()
-        # h1=2025-07 and h2=2025-08 are <= cutoff 2025-08
-        # Both should default to 0.0 (FATALITIES+ACE)
-        assert len(rows) == 2, f"Expected 2 resolution rows, got {len(rows)}: {rows}"
-        for qid, h, val in rows:
-            assert val == 0.0, f"Expected 0.0 for FATALITIES h{h}, got {val}"
+        # h1=2025-07 and h2=2025-08 are <= cutoff 2025-08, but ACLED only
+        # has data for 2025-08 — the source-coverage guard must NOT
+        # zero-default 2025-07 (no global data = ingestion gap, not
+        # "no fatalities"). Only h2 resolves, to 0.0.
+        assert len(rows) == 1, f"Expected 1 resolution row, got {len(rows)}: {rows}"
+        qid, h, val = rows[0]
+        assert h == 2, f"Expected horizon 2 (2025-08), got h{h}"
+        assert val == 0.0, f"Expected 0.0 for FATALITIES h{h}, got {val}"
     finally:
         con.close()
 
@@ -1071,9 +1074,12 @@ def test_event_occurrence_no_data_defaults_to_zero(tmp_path: Path, monkeypatch: 
             "SELECT question_id, horizon_m, value "
             "FROM resolutions ORDER BY horizon_m"
         ).fetchall()
-        assert len(rows) == 2, f"Expected 2 resolution rows, got {len(rows)}: {rows}"
-        for qid, h, val in rows:
-            assert val == 0.0, f"Expected 0.0 for EVENT_OCCURRENCE h{h}, got {val}"
+        # GDACS only has data for 2025-08 — the source-coverage guard must
+        # NOT zero-default 2025-07. Only h2 (2025-08) resolves, to 0.0.
+        assert len(rows) == 1, f"Expected 1 resolution row, got {len(rows)}: {rows}"
+        qid, h, val = rows[0]
+        assert h == 2, f"Expected horizon 2 (2025-08), got h{h}"
+        assert val == 0.0, f"Expected 0.0 for EVENT_OCCURRENCE h{h}, got {val}"
     finally:
         con.close()
 

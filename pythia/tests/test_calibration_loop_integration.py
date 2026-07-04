@@ -184,19 +184,22 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
             resolution_values,
         )
 
-        # Ensemble SPD that puts most mass in bucket 1 (10k-<50k) for all horizons
+        # Ensemble SPD that puts most mass in bucket 1 (10k-<50k) for all
+        # horizons. Aggregates are stored as named forecasts_raw rows
+        # (ensemble_mean_v2), mirroring _write_spd_outputs — the NULL-model
+        # convention is retired.
         ensemble_spd = [0.1, 0.6, 0.2, 0.05, 0.05]
+        bin_labels_e = ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"]
         for h in range(1, 7):
-            for bin_label, p in zip(
-                ["<10k", "10k-<50k", "50k-<250k", "250k-<500k", ">=500k"], ensemble_spd
-            ):
+            for bucket_idx, (bin_label, p) in enumerate(zip(bin_labels_e, ensemble_spd), start=1):
                 con.execute(
                     """
-                    INSERT INTO forecasts_ensemble (question_id, horizon_m, class_bin, p,
-                                                    aggregator, ensemble_version)
-                    VALUES ('Q1', ?, ?, ?, 'Bayes_MC', 'v1_spd')
+                    INSERT INTO forecasts_raw (question_id, model_name, horizon_m,
+                                               class_bin, p, month_index, bucket_index,
+                                               probability, run_id, created_at)
+                    VALUES ('Q1', 'ensemble_mean_v2', ?, ?, ?, ?, ?, ?, 'forecaster_run_1', now())
                     """,
-                    [h, bin_label, p],
+                    [h, bin_label, p, h, bucket_idx, p],
                 )
 
         # Two models with slightly different SPDs
@@ -230,7 +233,8 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
     try:
         # Scores: all 6 horizons should be scored
         score_count = con.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
-        # 6 horizons x 3 score_types x 3 entities (ensemble + ModelA + ModelB) = 54
+        # 6 horizons x 3 score_types x 3 entities
+        # (ensemble_mean_v2 + ModelA + ModelB) = 54
         assert score_count == 54, f"Expected 54 score rows, got {score_count}"
 
         # Each horizon should have scores
@@ -243,10 +247,10 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
         # Scores should differ between horizons because ground truth differs
         h1_brier = con.execute(
-            "SELECT value FROM scores WHERE horizon_m = 1 AND score_type = 'brier' AND model_name IS NULL"
+            "SELECT value FROM scores WHERE horizon_m = 1 AND score_type = 'brier' AND model_name = 'ensemble_mean_v2'"
         ).fetchone()[0]
         h4_brier = con.execute(
-            "SELECT value FROM scores WHERE horizon_m = 4 AND score_type = 'brier' AND model_name IS NULL"
+            "SELECT value FROM scores WHERE horizon_m = 4 AND score_type = 'brier' AND model_name = 'ensemble_mean_v2'"
         ).fetchone()[0]
         # h1 resolved to 5000 (bucket 0), h4 resolved to 60000 (bucket 2)
         # Both scored against ensemble SPD [0.1, 0.6, 0.2, 0.05, 0.05]
@@ -255,11 +259,13 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
             f"h1 and h4 Brier scores should differ (h1={h1_brier}, h4={h4_brier})"
         )
 
-        # Scores: expect brier/log/crps for ensemble (model_name NULL) and two models
+        # Scores: expect brier/log/crps for the named aggregate and two members;
+        # no NULL-model rows may exist.
         score_types = {r[0] for r in con.execute("SELECT DISTINCT score_type FROM scores").fetchall()}
         models_scored = {r[0] for r in con.execute("SELECT DISTINCT model_name FROM scores").fetchall()}
         assert {"brier", "log", "crps"} <= score_types
-        assert {None, "ModelA", "ModelB"} <= models_scored
+        assert {"ensemble_mean_v2", "ModelA", "ModelB"} <= models_scored
+        assert None not in models_scored
 
         # Calibration weights: one row per model_name for (FL, PA)
         weights_df = con.execute(
@@ -270,8 +276,10 @@ def test_calibration_loop_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyP
             """
         ).fetchdf()
         assert not weights_df.empty
-        # Ensure ModelA and ModelB both present and weights not identical
+        # Ensure ModelA and ModelB both present and weights not identical;
+        # the aggregate must be excluded from the weight pool.
         assert {"ModelA", "ModelB"} <= set(weights_df["model_name"].tolist())
+        assert "ensemble_mean_v2" not in set(weights_df["model_name"].tolist())
         wa = float(weights_df.loc[weights_df["model_name"] == "ModelA", "weight"].iloc[0])
         wb = float(weights_df.loc[weights_df["model_name"] == "ModelB", "weight"].iloc[0])
         assert abs(wa - wb) > 1e-4

@@ -18,7 +18,7 @@ import forecaster.cli as cli  # type: ignore
 import forecaster.prompts as prompts
 from forecaster.ensemble import _parse_spd_json, MemberOutput, EnsembleResult  # type: ignore
 from forecaster.aggregate import aggregate_spd  # type: ignore
-from forecaster.cli import _write_spd_ensemble_to_db, SPD_CLASS_BINS  # type: ignore
+from forecaster.cli import SPD_CLASS_BINS  # type: ignore
 from forecaster.providers import ModelSpec
 from pythia.db import schema as db_schema
 
@@ -390,51 +390,6 @@ def test_aggregate_spd_shape_and_uniform_fallback():
     assert set(expected.keys()) == {f"month_{i}" for i in range(1, 7)}
     for val in expected.values():
         assert val > 0.0
-
-
-@pytest.mark.db
-def test_write_spd_ensemble_to_db_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Write a simple SPD to DuckDB and confirm row counts and normalisation."""
-    # Use a private DuckDB file and override config lookup
-    db_path = tmp_path / "pythia_spd_test.duckdb"
-    db_url = f"duckdb:///{db_path}"
-    monkeypatch.setattr("forecaster.cli._pythia_db_url_from_config", lambda: db_url)
-
-    # Simple SPD: uniform across all buckets and months
-    spd_main = {f"month_{i}": [1.0 / len(SPD_CLASS_BINS)] * len(SPD_CLASS_BINS) for i in range(1, 7)}
-
-    question_id = "q-spd-test"
-    _write_spd_ensemble_to_db(
-        question_id=question_id,
-        run_id="run-test",
-        spd_main=spd_main,
-        metric="PA",
-        hazard_code="FL",
-    )
-
-    con = duckdb.connect(str(db_path))
-    try:
-        rows = con.execute(
-            "SELECT horizon_m, class_bin, p FROM forecasts_ensemble WHERE question_id=? ORDER BY horizon_m, class_bin",
-            [question_id],
-        ).fetchall()
-    finally:
-        con.close()
-
-    # 6 months × 5 buckets = 30 rows
-    assert len(rows) == 6 * len(SPD_CLASS_BINS)
-
-    # Per-horizon sum of probabilities should be ~1.0 and include all buckets
-    by_h = {}
-    for horizon_m, class_bin, p in rows:
-        by_h.setdefault(horizon_m, []).append(float(p))
-        assert class_bin in SPD_CLASS_BINS
-
-    assert set(by_h.keys()) == set(range(1, 7))
-    for h, probs in by_h.items():
-        assert len(probs) == len(SPD_CLASS_BINS)
-        s = sum(probs)
-        assert 0.99 <= s <= 1.01, f"horizon {h} not normalised: sum={s}"
 
 
 @pytest.mark.db

@@ -57,7 +57,7 @@ def test_parse_binary_response_malformed():
 
 
 def test_parse_binary_response_clamping():
-    """Out-of-range probabilities should be clamped."""
+    """Out-of-range probabilities should be clamped to [0.001, 0.999]."""
     raw = json.dumps({
         "months": {
             "2026-04": {"posterior": 0.0},
@@ -65,8 +65,24 @@ def test_parse_binary_response_clamping():
         }
     })
     result = parse_binary_response(raw)
-    assert result["2026-04"] == 0.01
-    assert result["2026-05"] == 0.99
+    assert result["2026-04"] == 0.001
+    assert result["2026-05"] == 0.999
+
+
+def test_parse_binary_response_preserves_rare_event_probabilities():
+    """Probabilities below the old 1% floor are kept (down to 0.001), so
+    well-calibrated rare-event forecasts are not inflated."""
+    raw = json.dumps({
+        "months": {
+            "2026-04": {"posterior": 0.005},
+            "2026-05": {"posterior": 0.0001},
+            "2026-06": {"posterior": 0.5},
+        }
+    })
+    result = parse_binary_response(raw)
+    assert result["2026-04"] == 0.005
+    assert result["2026-05"] == 0.001
+    assert result["2026-06"] == 0.5
 
 
 # ---- Binary ensemble aggregation ----

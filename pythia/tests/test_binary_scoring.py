@@ -108,8 +108,10 @@ def test_binary_brier_scoring_integration(tmp_path: Path):
             VALUES ('BGD_FL_EVENT_OCCURRENCE_2026-04', 1, 1.0, CURRENT_TIMESTAMP, NULL)
         """)
 
-        # Create forecast ensemble: P(yes) = 0.3 for h1
-        # bucket_1 = P(yes) = 0.3, bucket_2 = P(no) = 0.7
+        # Create the aggregate forecast: P(yes) = 0.3 for h1
+        # bucket_1 = P(yes) = 0.3, bucket_2 = P(no) = 0.7.
+        # Production (_write_binary_outputs) writes the named aggregate to
+        # BOTH forecasts_raw (scored) and forecasts_ensemble (dashboard).
         for bucket_idx, prob in [(1, 0.3), (2, 0.7), (3, 0.0), (4, 0.0), (5, 0.0)]:
             con.execute("""
                 INSERT INTO forecasts_ensemble
@@ -117,6 +119,13 @@ def test_binary_brier_scoring_integration(tmp_path: Path):
                      month_index, bucket_index, probability, status, created_at)
                 VALUES ('BGD_FL_EVENT_OCCURRENCE_2026-04', 'BGD', 'FL', 'EVENT_OCCURRENCE',
                         'ensemble_mean_v2', 1, ?, ?, 'ok', CURRENT_TIMESTAMP)
+            """, [bucket_idx, prob])
+            con.execute("""
+                INSERT INTO forecasts_raw
+                    (question_id, model_name, month_index, bucket_index,
+                     probability, ok, status)
+                VALUES ('BGD_FL_EVENT_OCCURRENCE_2026-04',
+                        'ensemble_mean_v2', 1, ?, ?, TRUE, 'ok')
             """, [bucket_idx, prob])
     finally:
         con.close()
@@ -130,8 +139,14 @@ def test_binary_brier_scoring_integration(tmp_path: Path):
             SELECT score_type, value FROM scores
             WHERE question_id = 'BGD_FL_EVENT_OCCURRENCE_2026-04'
               AND horizon_m = 1
-              AND model_name IS NULL
+              AND model_name = 'ensemble_mean_v2'
         """).fetchall()
+        # NULL-model score rows are retired: every score row is keyed by an
+        # explicit model_name.
+        null_rows = con.execute("""
+            SELECT COUNT(*) FROM scores WHERE model_name IS NULL
+        """).fetchone()[0]
+        assert null_rows == 0, f"Expected no NULL-model score rows, got {null_rows}"
         assert len(rows) > 0, f"Expected score rows, got none"
         # Should have brier score only (not log or crps)
         score_types = {r[0] for r in rows}
@@ -171,18 +186,16 @@ def test_spd_questions_unaffected_by_binary_scoring(tmp_path: Path):
             VALUES ('ETH_FL_PA_2026-04', 1, 5000.0, CURRENT_TIMESTAMP, NULL)
         """)
 
-        # Create forecast ensemble using class_bin/p/horizon_m columns
-        # (the scoring code reads class_bin + p for ensemble table)
+        # Create the aggregate SPD in forecasts_raw (what scoring reads),
+        # mirroring _write_spd_outputs.
         bins_probs = [0.6, 0.2, 0.1, 0.05, 0.05]
         for i, (cb, prob) in enumerate(zip(class_bins_pa, bins_probs)):
             con.execute("""
-                INSERT INTO forecasts_ensemble
-                    (question_id, iso3, hazard_code, metric, model_name,
-                     month_index, bucket_index, probability, status, created_at,
-                     class_bin, p, horizon_m)
-                VALUES ('ETH_FL_PA_2026-04', 'ETH', 'FL', 'PA',
-                        'ensemble_mean_v2', 1, ?, ?, 'ok', CURRENT_TIMESTAMP,
-                        ?, ?, 1)
+                INSERT INTO forecasts_raw
+                    (question_id, model_name, month_index, bucket_index,
+                     probability, ok, status, class_bin, p, horizon_m)
+                VALUES ('ETH_FL_PA_2026-04', 'ensemble_mean_v2', 1, ?, ?,
+                        TRUE, 'ok', ?, ?, 1)
             """, [i + 1, prob, cb, prob])
     finally:
         con.close()
@@ -196,7 +209,7 @@ def test_spd_questions_unaffected_by_binary_scoring(tmp_path: Path):
             SELECT score_type FROM scores
             WHERE question_id = 'ETH_FL_PA_2026-04'
               AND horizon_m = 1
-              AND model_name IS NULL
+              AND model_name = 'ensemble_mean_v2'
         """).fetchall()
         score_types = {r[0] for r in rows}
         assert "brier" in score_types
