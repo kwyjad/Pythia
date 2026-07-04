@@ -154,7 +154,10 @@ def resolve_facts_frame(
     default_tier = len(tier_index_to_name)
     work["tier_index"] = work["source_norm"].map(source_to_tier).fillna(default_tier)
 
-    tiebreak = config.get("tiebreak", [])
+    # Default tiebreaks when the config omits the key: recency then non-null
+    # value. Without this, within-tier winners fell through to alphabetical
+    # source order, so a stale or NULL-value row could beat a fresh one.
+    tiebreak = config.get("tiebreak") or ["as_of_desc", "value_nonnull"]
     metric_overrides = config.get("metrics", {})
     defaults = config.get("defaults", {})
     prefer_full_row = bool(defaults.get("prefer_full_row_coverage", False))
