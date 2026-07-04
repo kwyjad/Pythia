@@ -1955,7 +1955,7 @@ def performance_scores(
                 SELECT q.track, COUNT(DISTINCT s.question_id) AS n
                 FROM scores s
                 JOIN questions q ON q.question_id = s.question_id
-                WHERE q.track IS NOT NULL {tc_filter}
+                WHERE q.track IS NOT NULL {tc_filter}{_tf}
                 GROUP BY q.track
             """, {k: v for k, v in params.items() if k != "track"}).fetchall()
             for t, n in tc_rows:
