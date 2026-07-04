@@ -98,10 +98,10 @@ const TOOLTIP_EXTERNAL_BENCHMARK =
   "forecasting model from Uppsala University that produces monthly point forecasts " +
   "(expected fatality counts) for every country at lead times of 1\u20136 months \u2014 the " +
   "same horizons Fred uses.\n\n" +
-  "Scoring method: ViEWS point forecasts are converted into synthetic 5-bucket " +
+  "Scoring method: ViEWS point forecasts are converted into synthetic 7-bucket " +
   "probability distributions using a log-normal model. Given a point forecast of X " +
   "fatalities, we construct a log-normal distribution with E[X] = point forecast and " +
-  "integrate over Fred\u2019s fatality bucket boundaries (<5, 5\u201325, 25\u2013100, 100\u2013500, \u2265500) " +
+  "integrate over Fred\u2019s fatality bucket boundaries (0, 1\u20134, 5\u201324, 25\u201399, 100\u2013499, 500\u2013999, \u22651000) " +
   "to get bucket probabilities. These synthetic SPDs are then scored with the same " +
   "Brier, Log Loss, and CRPS functions used for Fred\u2019s own models.\n\n" +
   "The log-normal spread parameter (\u03C3) controls how uncertain the synthetic SPD is " +

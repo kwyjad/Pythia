@@ -205,7 +205,12 @@ function extractPromptsFromSources(
       forecasterSrc,
       "SPD_BUCKET_TEXT_FATALITIES",
     );
-    const parts = [pa?.trim(), fat?.trim()].filter(Boolean);
+    // PHASE3 constant exists only in newer snapshots; null-safe for old ones.
+    const phase3 = extractNamedConstant(
+      forecasterSrc,
+      "SPD_BUCKET_TEXT_PHASE3",
+    );
+    const parts = [pa?.trim(), fat?.trim(), phase3?.trim()].filter(Boolean);
     result.spd_buckets = parts.length > 0 ? parts.join("\n\n") : null;
   } else {
     result.spd_buckets = null;
