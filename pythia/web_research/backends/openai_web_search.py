@@ -128,10 +128,11 @@ def fetch_via_openai_web_search(
         pack.debug = {"error": "missing_api_key"}
         return pack
 
-    model_id = (os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or "gpt-4.1").strip()
-    fallback_model = "gpt-4.1-mini"
-    if not model_id:
-        model_id = "gpt-4.1"
+    from pythia.llm_profiles import get_role_model, split_model_ref
+
+    default_model = split_model_ref(get_role_model("grounding_openai"), "openai")[1]
+    model_id = (os.getenv("PYTHIA_WEB_RESEARCH_MODEL_ID") or default_model).strip() or default_model
+    fallback_model = split_model_ref(get_role_model("grounding_openai_fallback"), "openai")[1]
 
     prompt = (
         "You are a research assistant using OpenAI web_search. "

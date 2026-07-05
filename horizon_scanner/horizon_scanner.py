@@ -74,14 +74,9 @@ HS_PRIORITY_THRESHOLD = float(os.getenv("PYTHIA_HS_PRIORITY_THRESHOLD", "0.50"))
 HS_EVIDENCE_MAX_SOURCES = int(os.getenv("PYTHIA_HS_EVIDENCE_MAX_SOURCES", "8"))
 HS_EVIDENCE_MAX_SIGNALS = int(os.getenv("PYTHIA_HS_EVIDENCE_MAX_SIGNALS", "8"))
 def _hs_fallback_default() -> str:
-    try:
-        from pythia.llm_profiles import get_purpose_model
-        val = get_purpose_model("hs_fallback")
-        if val:
-            return val
-    except Exception:
-        pass
-    return "openai:gpt-5.2"
+    from pythia.llm_profiles import get_role_model
+
+    return get_role_model("hs_fallback")
 
 HS_FALLBACK_MODEL_SPECS = os.getenv("PYTHIA_HS_FALLBACK_MODEL_SPECS") or _hs_fallback_default()
 HS_TAIL_PACKS_ENABLED = os.getenv("PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED", "0") == "1"
@@ -429,10 +424,9 @@ def _adversarial_check_exists(run_id: str, iso3: str, hazard_code: str) -> bool:
 
 
 def _resolve_hs_model() -> str:
-    model_id = (GEMINI_MODEL_ID or "").strip()
-    if model_id:
-        return model_id
-    return os.getenv("HS_MODEL_ID", "gemini-3-flash-preview")
+    from horizon_scanner._utils import resolve_hs_model
+
+    return resolve_hs_model()
 
 
 def _resolve_hs_fallback_specs() -> list[ModelSpec]:

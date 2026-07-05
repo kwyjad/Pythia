@@ -264,68 +264,32 @@ async def log_forecaster_llm_call(
         )
 
     return response, usage
-MODEL_PRICING: dict[tuple[str, str], dict[str, float]] = {
-    ("google", "gemini-3-pro-preview"): {
-        "input_per_million": 1.25,
-        "output_per_million": 5.0,
-    },
-    ("google", "gemini-3.1-pro-preview"): {
-        "input_per_million": 2.0,
-        "output_per_million": 12.0,
-    },
-    ("google", "gemini-3-flash-preview"): {
-        "input_per_million": 0.50,
-        "output_per_million": 3.0,
-    },
-    ("google", "gemini-2.5-flash"): {
-        "input_per_million": 0.15,
-        "output_per_million": 0.60,
-    },
-    ("openai", "gpt-5.1"): {
-        "input_per_million": 1.25,
-        "output_per_million": 10.0,
-    },
-    ("openai", "gpt-5.2"): {
-        "input_per_million": 1.75,
-        "output_per_million": 14.0,
-    },
-    ("openai", "gpt-5-mini"): {
-        "input_per_million": 0.25,
-        "output_per_million": 2.0,
-    },
-    ("kimi", "kimi-k2.5"): {
-        "input_per_million": 0.60,
-        "output_per_million": 3.0,
-    },
-    ("deepseek", "deepseek-reasoner"): {
-        "input_per_million": 0.28,
-        "output_per_million": 0.42,
-    },
-}
-
-
 def _compute_costs_for_usage(
     provider: Optional[str], model_id: Optional[str], usage: Dict[str, Any]
 ) -> Tuple[float, float, float]:
     """
-    Compute (input_cost_usd, output_cost_usd, total_cost_usd) from provider/model and usage.
+    Compute (input_cost_usd, output_cost_usd, total_cost_usd) from model and usage.
+
+    Pricing is single-sourced from pythia/model_costs.json via
+    ``forecaster.providers.resolve_price_per_1k`` (the old hardcoded
+    MODEL_PRICING dict here drifted out of sync — it was missing
+    claude-sonnet-4-6, so Anthropic calls logged a zero input/output split).
     Falls back to zeros if pricing or token counts are missing.
     """
 
-    if not provider or not model_id:
+    if not model_id:
         return 0.0, 0.0, 0.0
 
-    pricing = MODEL_PRICING.get((provider, model_id))
-    if not pricing:
+    from forecaster.providers import resolve_price_per_1k
+
+    prices = resolve_price_per_1k(model_id)
+    if not prices:
         return 0.0, 0.0, 0.0
 
     prompt_tokens = float(_safe_get(usage, "prompt_tokens", 0.0))
     completion_tokens = float(_safe_get(usage, "completion_tokens", 0.0))
 
-    input_rate = float(pricing.get("input_per_million") or 0.0)
-    output_rate = float(pricing.get("output_per_million") or 0.0)
-
-    input_cost = (prompt_tokens / 1_000_000.0) * input_rate
-    output_cost = (completion_tokens / 1_000_000.0) * output_rate
+    input_cost = (prompt_tokens / 1_000.0) * prices[0]
+    output_cost = (completion_tokens / 1_000.0) * prices[1]
     total_cost = input_cost + output_cost
     return input_cost, output_cost, total_cost

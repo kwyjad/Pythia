@@ -97,8 +97,8 @@ async def _call_rc_model(
 ) -> tuple[str, Dict[str, Any], str, ModelSpec]:
     """Call the LLM for regime-change assessment.
 
-    Pass 1: Primary RC model (default: gemini-3.1-pro-preview)
-    Pass 2: Secondary RC model for diversity (default: gemini-3-flash-preview)
+    Pass 1: Primary RC model (config role ``rc_pass1``)
+    Pass 2: Secondary RC model for diversity (config role ``rc_pass2``)
 
     Override via env vars:
       PYTHIA_RC_MODEL_PASS1=google:gemini-3.1-pro-preview
@@ -107,18 +107,16 @@ async def _call_rc_model(
     Returns (text, usage, error, model_spec).
     """
 
+    from pythia.llm_profiles import get_role_model, split_model_ref
+
     if pass_idx == 2:
-        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS2", "google:gemini-3-flash-preview")
+        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS2") or get_role_model("rc_pass2")
         default_name = "Gemini Flash"
     else:
-        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS1", "google:gemini-3-flash-preview")
+        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS1") or get_role_model("rc_pass1")
         default_name = "Gemini Flash"
 
-    parts = model_spec_str.split(":", 1)
-    if len(parts) == 2:
-        provider, model_id = parts[0].strip(), parts[1].strip()
-    else:
-        provider, model_id = "google", model_spec_str.strip()
+    provider, model_id = split_model_ref(model_spec_str)
 
     spec = ModelSpec(
         name=default_name,

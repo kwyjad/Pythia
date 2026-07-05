@@ -18,13 +18,27 @@ from typing import Any, Dict
 # ---------------------------------------------------------------------------
 
 def resolve_hs_model() -> str:
-    """Return the Gemini model ID for Horizon Scanner calls."""
+    """Return the Gemini model ID for Horizon Scanner calls.
+
+    Priority: HS_MODEL_ID env var (true override) > ``hs_default`` role in
+    config.yaml > first Google model in the SPD ensemble (legacy).
+    """
+    env_model = (os.getenv("HS_MODEL_ID") or "").strip()
+    if env_model:
+        return env_model
+
+    try:
+        from pythia.llm_profiles import get_role_model, split_model_ref
+
+        role_ref = get_role_model("hs_default")
+        if role_ref:
+            return split_model_ref(role_ref)[1]
+    except Exception:
+        pass
+
     from forecaster.providers import GEMINI_MODEL_ID
 
-    model_id = (GEMINI_MODEL_ID or "").strip()
-    if model_id:
-        return model_id
-    return os.getenv("HS_MODEL_ID", "gemini-3-flash-preview")
+    return (GEMINI_MODEL_ID or "").strip() or "gemini-3-flash-preview"
 
 
 # ---------------------------------------------------------------------------

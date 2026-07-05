@@ -436,52 +436,40 @@ def parse_ensemble_specs(spec_str: str | None) -> List[ModelSpec]:
 def _load_ensemble_from_config() -> List[ModelSpec]:
     """Read the active profile's ``ensemble`` list from config.yaml.
 
-    Supports two entry formats in the ensemble list:
-    - String: ``"provider:model_id"`` (backward compatible)
-    - Dict:  ``{provider, model_id, temperature?, thinking?}``
+    Entry parsing (registry aliases, ``provider:model_id`` strings, and
+    ``{provider, model_id}`` dicts) lives in
+    ``pythia.llm_profiles.get_ensemble_resolved``.
 
     Falls back to the legacy ``forecaster.providers`` format or an empty list.
     """
 
     try:
-        from pythia.llm_profiles import get_ensemble_list
-        ensemble_list = get_ensemble_list()
+        from pythia.llm_profiles import get_ensemble_resolved
+        ensemble_list = get_ensemble_resolved()
     except Exception:
         ensemble_list = []
 
     if ensemble_list:
         specs: List[ModelSpec] = []
         for entry in ensemble_list:
-            if isinstance(entry, str):
-                entry_str = entry.strip()
-                if not entry_str or ":" not in entry_str:
-                    continue
-                provider, model_id = entry_str.split(":", 1)
-                provider = provider.strip().lower()
-                model_id = model_id.strip()
-                if not provider or not model_id:
-                    continue
-                specs.append(_make_model_spec(provider, model_id))
+            provider = str(entry.get("provider", "")).strip().lower()
+            model_id = str(entry.get("model_id", "")).strip()
+            if not provider or not model_id:
+                continue
+            ms = _make_model_spec(provider, model_id)
 
-            elif isinstance(entry, dict):
-                provider = str(entry.get("provider", "")).strip().lower()
-                model_id = str(entry.get("model_id", "")).strip()
-                if not provider or not model_id:
-                    continue
-                ms = _make_model_spec(provider, model_id)
+            temp_val = entry.get("temperature")
+            if temp_val is not None:
+                try:
+                    ms.temperature = float(temp_val)
+                except (ValueError, TypeError):
+                    pass
 
-                temp_val = entry.get("temperature")
-                if temp_val is not None:
-                    try:
-                        ms.temperature = float(temp_val)
-                    except (ValueError, TypeError):
-                        pass
+            thinking_val = entry.get("thinking")
+            if isinstance(thinking_val, str) and thinking_val.strip():
+                ms.thinking = thinking_val.strip().lower()
 
-                thinking_val = entry.get("thinking")
-                if isinstance(thinking_val, str) and thinking_val.strip():
-                    ms.thinking = thinking_val.strip().lower()
-
-                specs.append(ms)
+            specs.append(ms)
 
         return _apply_provider_block(specs)
 
@@ -672,6 +660,49 @@ def usage_to_dict(usage_obj: Any) -> Dict[str, int]:
     return base
 
 
+def resolve_price_per_1k(model_id: str) -> Optional[tuple[float, float]]:
+    """Return (input, output) USD cost per 1K tokens for *model_id*.
+
+    Single lookup path into pythia/model_costs.json (plus the MODEL_COSTS_JSON
+    env override). Accepts plain ids ("gpt-5.2") and provider-prefixed forms
+    ("openai/gpt-5.2"). Returns None when the model has no cost entry.
+    """
+
+    if not model_id:
+        return None
+    original = str(model_id).strip()
+    if not original:
+        return None
+    normalized = original.lower()
+    prices: Optional[tuple[float, float]] = MODEL_PRICES_PER_1K.get(normalized)
+    if not prices:
+        alt_ids = [normalized.replace("/", "-"), normalized.split("/", 1)[-1]]
+        for alt in alt_ids:
+            if alt in MODEL_PRICES_PER_1K:
+                prices = MODEL_PRICES_PER_1K[alt]
+                break
+    if prices:
+        return float(prices[0]), float(prices[1])
+
+    # Fallback to JSON overrides if provided via MODEL_COSTS_JSON
+    dynamic_prices = _load_model_prices()
+    price_entry = (
+        dynamic_prices.get(normalized)
+        or dynamic_prices.get(original)
+        or dynamic_prices.get(normalized.replace("/", "-"))
+        or dynamic_prices.get(normalized.split("/", 1)[-1])
+        or {}
+    )
+    if not price_entry:
+        return None
+    try:
+        prompt_rate = float(price_entry.get("prompt", 0.0))
+        completion_rate = float(price_entry.get("completion", 0.0))
+        return prompt_rate, completion_rate
+    except Exception:
+        return None
+
+
 def estimate_cost_usd(model_id: str, usage: Dict[str, int]) -> float:
     if not usage or not isinstance(usage, dict):
         return 0.0
@@ -680,40 +711,7 @@ def estimate_cost_usd(model_id: str, usage: Dict[str, int]) -> float:
     completion_tokens = int(usage.get("completion_tokens", 0) or 0)
     total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
 
-    def _resolve_price_tuple(mid: str) -> Optional[tuple[float, float]]:
-        if not mid:
-            return None
-        original = str(mid).strip()
-        if not original:
-            return None
-        normalized = original.lower()
-        prices: Optional[tuple[float, float]] = MODEL_PRICES_PER_1K.get(normalized)
-        if not prices:
-            alt_ids = [normalized.replace("/", "-"), normalized.split("/", 1)[-1]]
-            for alt in alt_ids:
-                if alt in MODEL_PRICES_PER_1K:
-                    prices = MODEL_PRICES_PER_1K[alt]
-                    break
-        if prices:
-            return float(prices[0]), float(prices[1])
-
-        # Fallback to JSON overrides if provided via MODEL_COSTS_JSON
-        dynamic_prices = _load_model_prices()
-        price_entry = (
-            dynamic_prices.get(normalized)
-            or dynamic_prices.get(original)
-            or dynamic_prices.get(normalized.replace("/", "-"))
-            or dynamic_prices.get(normalized.split("/", 1)[-1])
-            or {}
-        )
-        try:
-            prompt_rate = float(price_entry.get("prompt", 0.0))
-            completion_rate = float(price_entry.get("completion", 0.0))
-            return prompt_rate, completion_rate
-        except Exception:
-            return None
-
-    price_tuple = _resolve_price_tuple(model_id)
+    price_tuple = resolve_price_per_1k(model_id)
     if not price_tuple:
         return 0.0
 

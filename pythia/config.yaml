@@ -62,53 +62,86 @@ prediction_markets:
   timeout_sec: 30
 
 llm:
+  # ==========================================================================
+  # MODEL REGISTRY — the single place to swap a model family.
+  #
+  # To upgrade a family (e.g. GPT-5.2 -> GPT-5.5):
+  #   1. Change the id on ONE line below.
+  #   2. Add a cost entry in pythia/model_costs.json (per-1K [input, output]).
+  # Everything downstream (SPD ensemble, HS triage/RC, Track 2, scenario
+  # writer, grounding fallbacks, CrisisWatch) references these aliases via
+  # the ensemble and roles blocks — never a literal model id.
+  # pythia/tests/test_model_registry.py enforces registry <-> cost-table sync.
+  # ==========================================================================
+  models:
+    gpt:          openai:gpt-5.2                  # OpenAI frontier
+    gpt_mini:     openai:gpt-5-mini               # OpenAI small
+    claude:       anthropic:claude-sonnet-4-6     # Anthropic
+    gemini_pro:   google:gemini-3.1-pro-preview   # Google frontier
+    gemini_flash: google:gemini-3-flash-preview   # Google fast (thinking)
+    gemini_lite:  google:gemini-2.5-flash         # Google cheap tier (grounding/scraping fallbacks)
+    kimi:         kimi:kimi-k2.5                  # Moonshot
+    deepseek:     deepseek:deepseek-reasoner      # DeepSeek
+
   # Active profile: "prod" (frontier).
   # Override via PYTHIA_LLM_PROFILE env var.
   profile: "prod"
 
   profiles:
     prod:
-      # SPD forecast ensemble — add/remove models by editing this list.
-      # String format ("provider:model_id") or dict format with per-model params.
+      # SPD forecast ensemble — add/remove members by editing this list.
+      # Each entry references a registry alias via `model:` (preferred) and may
+      # carry per-model params. Legacy formats ("provider:model_id" strings or
+      # {provider, model_id} dicts) still work.
       ensemble:
-        # GPT-5.2: reasoning model — temperature not supported (API rejects it).
-        - provider: openai
-          model_id: gpt-5.2
+        # GPT: reasoning model — temperature not supported (API rejects it).
+        - model: gpt
           thinking: high            # maps to reasoning_effort=high
 
-        # Claude Sonnet 4.6: standard model — low temperature for calibrated output.
-        - anthropic:claude-sonnet-4-6
+        # Claude: standard model — default temperature for calibrated output.
+        - model: claude
 
-        # Gemini 3.1 Pro: thinking model — medium thinking for analytical depth.
-        - provider: google
-          model_id: gemini-3.1-pro-preview
+        # Gemini Pro: thinking model — medium thinking for analytical depth.
+        - model: gemini_pro
           temperature: 0.2
           thinking: medium           # maps to thinkingConfig.thinkingLevel
 
-        # Gemini 3 Flash: thinking model — low thinking for speed/cost balance.
-        - provider: google
-          model_id: gemini-3-flash-preview
+        # Gemini Flash: thinking model — low thinking for speed/cost balance.
+        - model: gemini_flash
           temperature: 0.2
           thinking: low
 
-        # Kimi K2.5: reasoning model — Moonshot recommends temperature=1.0 for thinking mode.
-        - provider: kimi
-          model_id: kimi-k2.5
+        # Kimi: reasoning model — Moonshot recommends temperature=1.0 for thinking mode.
+        - model: kimi
           temperature: 1.0
 
-        # DeepSeek Reasoner: native reasoning model — temperature ignored by API.
-        - provider: deepseek
-          model_id: deepseek-reasoner
+        # DeepSeek: native reasoning model — temperature ignored by API.
+        - model: deepseek
           temperature: 1.0
 
-        # GPT-5-mini: reasoning model (smaller) — medium reasoning effort.
-        - provider: openai
-          model_id: gpt-5-mini
+        # GPT mini: reasoning model (smaller) — medium reasoning effort.
+        - model: gpt_mini
           thinking: medium           # maps to reasoning_effort=medium
 
-      # Purpose-specific model overrides (optional, defaults to ensemble members)
-      hs_fallback: openai:gpt-5.2
-      scenario_writer: google:gemini-3-flash-preview
+      # Role -> model assignments. Values are registry aliases (preferred) or
+      # explicit "provider:model_id" refs. Env vars still win where noted.
+      roles:
+        # --- Horizon Scanner ---
+        hs_default:       gemini_pro    # triage pass 1 + adversarial checks (HS_MODEL_ID env overrides)
+        hs_triage_pass1:  gemini_pro    # PYTHIA_TRIAGE_MODEL_PASS1 overrides
+        hs_triage_pass2:  gemini_flash  # PYTHIA_TRIAGE_MODEL_PASS2 overrides
+        rc_pass1:         gemini_flash  # PYTHIA_RC_MODEL_PASS1 overrides
+        rc_pass2:         gemini_flash  # PYTHIA_RC_MODEL_PASS2 overrides
+        hs_fallback:      gpt           # JSON repair; PYTHIA_HS_FALLBACK_MODEL_SPECS overrides
+        # --- Forecaster ---
+        track2_spd:       gemini_flash  # Track 2 single-model SPD (stored as model_name=track2_flash)
+        scenario_writer:  gemini_flash  # PYTHIA_SCENARIO_MODEL_ID overrides
+        # --- Grounding / scraping fallbacks ---
+        grounding_gemini: gemini_lite   # Gemini grounding backend (PYTHIA_GROUNDING_MODEL_ID overrides)
+        grounding_openai: openai:gpt-4.1  # OpenAI web search backend (PYTHIA_WEB_RESEARCH_MODEL_ID overrides)
+        grounding_openai_fallback: openai:gpt-4.1-mini  # retry model when the primary web-search call fails
+        grounding_claude: claude        # Claude web search backend (PYTHIA_WEB_RESEARCH_MODEL_ID overrides)
+        crisiswatch:      gemini_lite   # CrisisWatch Gemini grounding fallback
 
 forecaster:
   horizons: [1,2,3,4,5,6]
