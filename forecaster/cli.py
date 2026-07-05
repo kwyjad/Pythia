@@ -2558,7 +2558,7 @@ async def _call_spd_model_for_spec(
         try:
             from pythia.web_research.backends import gemini_grounding
 
-            model_override = (os.getenv("PYTHIA_SPD_GOOGLE_MODEL_ID") or "gemini-2.5-pro").strip()
+            model_override = (os.getenv("PYTHIA_SPD_GOOGLE_MODEL_ID") or "").strip()
             pack = gemini_grounding.fetch_via_gemini(
                 query,
                 recency_days=recency_days,
@@ -4146,14 +4146,23 @@ async def _run_binary_forecast_for_question(
         )
 
 
-TRACK2_MODEL_SPEC = ModelSpec(
-    name="track2_flash",
-    provider="google",
-    model_id="gemini-3-flash-preview",
-    weight=1.0,
-    active=True,
-    purpose="track2_spd",
-)
+def _build_track2_model_spec() -> ModelSpec:
+    from pythia.llm_profiles import get_role_model, split_model_ref
+
+    provider, model_id = split_model_ref(get_role_model("track2_spd"))
+    # name stays "track2_flash": it is the stable model_name in
+    # forecasts_ensemble/scores regardless of which model backs the role.
+    return ModelSpec(
+        name="track2_flash",
+        provider=provider,
+        model_id=model_id,
+        weight=1.0,
+        active=True,
+        purpose="track2_spd",
+    )
+
+
+TRACK2_MODEL_SPEC = _build_track2_model_spec()
 
 
 async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:

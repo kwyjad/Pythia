@@ -205,46 +205,53 @@ Key tables (see [`pythia/db/schema.py`](pythia/db/schema.py) and [`SCHEMAS.md`](
 
 ## Model management
 
-The forecast ensemble and purpose-specific models are configured in [`pythia/config.yaml`](pythia/config.yaml) under `llm.profiles`. Each profile contains an `ensemble` list supporting both string format (`provider:model_id`) and dict format with per-model parameters (`thinking`, `temperature`). To add, remove, or swap a model, edit this list.
+All model choices are centralized in [`pythia/config.yaml`](pythia/config.yaml) under `llm.models` (the **model registry**: one alias per model family) and `llm.profiles.prod` (the SPD `ensemble` list plus a `roles` block assigning an alias to every other purpose).
 
 ```yaml
 llm:
-  profile: "prod"        # or "test"; override with PYTHIA_LLM_PROFILE
+  models:                # THE single place to swap a model family
+    gpt:          openai:gpt-5.2
+    gpt_mini:     openai:gpt-5-mini
+    claude:       anthropic:claude-sonnet-4-6
+    gemini_pro:   google:gemini-3.1-pro-preview
+    gemini_flash: google:gemini-3-flash-preview
+    gemini_lite:  google:gemini-2.5-flash
+    kimi:         kimi:kimi-k2.5
+    deepseek:     deepseek:deepseek-reasoner
+
+  profile: "prod"        # override with PYTHIA_LLM_PROFILE
 
   profiles:
-    test:
-      ensemble:
-        - google:gemini-3-flash-preview
-
     prod:
-      ensemble:
-        - openai:gpt-5.2
-        - anthropic:claude-sonnet-4-6
-        - google:gemini-3.1-pro-preview
-        - google:gemini-3-flash-preview
-        - kimi:kimi-k2.5
-        - deepseek:deepseek-reasoner
-        - openai:gpt-5-mini
-
-      # Purpose-specific overrides (optional)
-      hs_fallback: openai:gpt-5.2
-      scenario_writer: google:gemini-3-flash-preview
+      ensemble:          # SPD forecast ensemble — entries reference aliases
+        - model: gpt
+          thinking: high
+        - model: claude
+        # ... (see config.yaml for the full list and per-model params)
+      roles:             # every non-ensemble purpose -> alias
+        hs_default:      gemini_pro
+        rc_pass1:        gemini_flash
+        track2_spd:      gemini_flash
+        scenario_writer: gemini_flash
+        # ... (see config.yaml for all roles)
 ```
 
 ### Changing models
 
-- **Swap a model**: change the `provider:model_id` line in the ensemble list.
-- **Add a model**: add a new line. Multiple models from the same provider are supported (e.g. two Google models).
-- **Remove a model**: delete the line.
-- **Add a new provider**: requires adding a `call_<provider>()` function and dispatch branch in `forecaster/providers.py`, plus an entry in `_PROVIDER_ENV_KEYS`.
+- **Upgrade a model family** (e.g. GPT-5.2 → GPT-5.5): change the id on one line in `llm.models`, then add a cost entry in `pythia/model_costs.json`. Every ensemble member and role that references the alias picks up the new model.
+- **Add/remove an ensemble member**: add or delete a `- model: <alias>` entry (define the alias in `llm.models` first). Multiple members from the same provider are supported.
+- **Point a role at a different model**: edit the `roles:` block. Values are registry aliases or explicit `provider:model_id` refs.
+- **Add a new provider**: requires a `call_<provider>()` function and dispatch branch in `forecaster/providers.py`, plus an entry in `_PROVIDER_ENV_KEYS`.
+
+`pythia/tests/test_model_registry.py` validates the registry: every alias/role resolves and every reachable model has a cost entry.
 
 ### Model costs
 
-Per-model cost rates are stored in [`pythia/model_costs.json`](pythia/model_costs.json) as `[input, output]` cost per 1,000 tokens in USD. When switching to a new model ID, add its cost entry to this file.
+Per-model cost rates are stored in [`pythia/model_costs.json`](pythia/model_costs.json) as `[input, output]` cost per 1,000 tokens in USD — one entry per model id (provider-prefixed lookups are normalized automatically). When switching to a new model id, add its cost entry to this file; models without an entry log $0 cost, and the registry test fails to remind you.
 
-### Purpose-specific overrides
+### Purpose-specific env overrides
 
-The `hs_fallback` and `scenario_writer` keys under a profile set the default model for HS triage fallback and scenario generation respectively. These can still be overridden at runtime via `PYTHIA_HS_FALLBACK_MODEL_SPECS` and `PYTHIA_SCENARIO_MODEL_ID` env vars.
+Every role can still be overridden at runtime without touching config: `PYTHIA_HS_FALLBACK_MODEL_SPECS`, `PYTHIA_SCENARIO_MODEL_ID`, `PYTHIA_TRIAGE_MODEL_PASS1/2`, `PYTHIA_RC_MODEL_PASS1/2`, `HS_MODEL_ID`, `PYTHIA_GROUNDING_MODEL_ID`, `PYTHIA_WEB_RESEARCH_MODEL_ID`. Env vars always win over config roles.
 
 ### Env var overrides
 

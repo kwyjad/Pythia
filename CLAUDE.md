@@ -616,23 +616,24 @@ This ensures the DB artifact is fully self-contained and reproducible.
 - **CrisisWatch diagnostics** in the debug bundle (`scripts/dump_pythia_debug_bundle.py`): (1) Traffic-light health check in `_evaluate_pipeline_health` — reports OK/WARN/FAIL with country counts, arrow breakdown, and alerts; WARN if 0 entries, <10 countries, or no arrow data; (2) Per-country `crisiswatch_arrow` column in the data inject inventory CSV showing arrow direction and alert type; (3) `crisiswatch_health` section in health report JSON with arrow counts, alert counts, notable (deteriorated/alert) entries, and countries missing CrisisWatch data.
 - **Food security diagnostics** in the debug bundle: Food security data comes from two separate connectors: `fewsnet_ipc` (48 FEWS NET countries, no auth) and `ipc_api` (non-FEWS NET countries, requires `IPC_API_KEY`). The data inject inventory shows per-country row counts (`fewsnet_ipc_rows`, `ipc_api_rows`) and source attribution (`food_security_source`) for each connector. The health report flags countries with DR questions but no food security data. The `ipc_phases` table (from the legacy `pythia/ipc_phases.py` module) is dead code and is not used for diagnostics.
 
-## LLM ensemble configuration
+## LLM model registry and ensemble configuration
 
-The forecast ensemble is defined in `pythia/config.yaml` under `llm.profiles.prod.ensemble` (7 models):
+**All model choices are centralized in `pythia/config.yaml` (July 2026 model-registry refactor).** Two blocks:
 
-| Provider | Model | Notes |
-|----------|-------|-------|
-| OpenAI | gpt-5.2 | Reasoning model (`reasoning_effort=high`), temperature not supported |
-| Anthropic | claude-sonnet-4-6 | Standard model, low temperature |
-| Google | gemini-3.1-pro-preview | Thinking model (`thinkingLevel=medium`) |
-| Google | gemini-3-flash-preview | Thinking model (`thinkingLevel=low`), also used for Track 2 |
-| Kimi | kimi-k2.5 | Reasoning model, requires `temperature=1.0` |
-| DeepSeek | deepseek-reasoner | Native reasoning model, temperature ignored by API |
-| OpenAI | gpt-5-mini | Reasoning model (`reasoning_effort=medium`) |
+1. **`llm.models` — the model registry**: one alias per model family (`gpt: openai:gpt-5.2`, `gpt_mini`, `claude`, `gemini_pro`, `gemini_flash`, `gemini_lite`, `kimi`, `deepseek`). **To swap a family (e.g. GPT-5.2 → GPT-5.5), change the id on that ONE line and add a cost entry in `pythia/model_costs.json`.** Everything downstream references aliases.
+2. **`llm.profiles.prod`**: the `ensemble` list (7 members, each `- model: <alias>` plus per-model params like `thinking`/`temperature`) and the `roles` block mapping every non-ensemble purpose to an alias: `hs_default` (triage pass 1 + adversarial checks), `hs_triage_pass1/2`, `rc_pass1/2`, `hs_fallback` (JSON repair), `track2_spd`, `scenario_writer`, `grounding_gemini`, `grounding_openai`, `grounding_openai_fallback`, `grounding_claude`, `crisiswatch`.
 
-Purpose-specific overrides: `hs_fallback: openai:gpt-5.2`, `scenario_writer: google:gemini-3-flash-preview`.
+Resolution lives in `pythia/llm_profiles.py` (`get_model_registry`, `resolve_model_ref`, `split_model_ref`, `get_role_model`, `get_ensemble_resolved`). Precedence at every call site: **purpose-specific env var > config role > `_ROLE_FALLBACKS`** (the single code-level fallback table — call sites contain no model-id literals). Legacy ensemble formats (`provider:model_id` strings, `{provider, model_id}` dicts) still parse; `get_purpose_model()` is a compat wrapper over `get_role_model()`.
 
-Model costs are in `pythia/model_costs.json` (input/output cost per 1K tokens in USD).
+Current ensemble (each member's params in config.yaml): gpt (reasoning_effort=high, no temperature), claude, gemini_pro (thinkingLevel=medium), gemini_flash (thinkingLevel=low, also Track 2), kimi (requires temperature=1.0), deepseek (temperature ignored by API), gpt_mini (reasoning_effort=medium).
+
+**Cost tracking is single-sourced** from `pythia/model_costs.json` (per-1K `[input, output]` USD; one entry per model_id — the lookup in `forecaster.providers.resolve_price_per_1k` normalizes `provider/model` forms). `forecaster/llm_logging.py`'s input/output cost split derives from the same table (its old hardcoded `MODEL_PRICING` dict drifted — it was missing `claude-sonnet-4-6`, so Anthropic calls logged a $0 split). `pythia/tests/test_model_registry.py` enforces: every registry alias/role/ensemble member resolves, and every reachable model has a cost entry (a missing entry means silent $0 cost logging). When adding a role call site, add the role to config.yaml `roles`, `_ROLE_FALLBACKS`, and `CONSUMED_ROLES` in the test.
+
+**HS_MODEL_ID is now a true override** (env > `hs_default` role > first-Google-in-ensemble legacy fallback). Before the refactor it was dead in CI: `resolve_hs_model()` consulted the ensemble-derived `GEMINI_MODEL_ID` first, so the `HS_MODEL_ID: gemini-3-flash-preview` set in `run_horizon_scanner.yml` never took effect (triage pass 1 actually ran Gemini Pro). The workflow env was removed to preserve that behavior — do not re-add it without intending to change the HS default model.
+
+**Config is authoritative for the production ensemble** (since 2026-07): `run_horizon_scanner.yml` no longer sets `PYTHIA_SPD_ENSEMBLE_SPECS` — the SPD ensemble, membership AND per-model params, comes from config.yaml. Two production effects of that removal: (1) deepseek rejoined the ensemble (the env override had excluded it); (2) the OpenAI members now actually receive their configured `reasoning_effort` (high for gpt, medium for gpt_mini) — env-spec-built ModelSpecs carried no thinking param, so prior runs silently used OpenAI's default effort. `PYTHIA_BLOCK_PROVIDERS: xai` remains as a provider kill-switch (no xai member exists in config; the workflow deliberately doesn't pass XAI_API_KEY). The `PYTHIA_GOOGLE_SPD_THINKING_LEVEL_*` env vars in the workflow are fallbacks only — `ModelSpec.thinking` from config wins. Do not re-add `PYTHIA_SPD_ENSEMBLE_SPECS` to the workflow except for one-off experiments. **Latent quirk (pre-existing, not changed)**: the Google thinking-config gate in `providers.py` uses `api_model.startswith("gemini-3-")`, which does not match `gemini-3.1-pro-preview` — so gemini_pro's `thinking: medium` is currently dropped at the API layer (flash matches and works). Fixing the prefix would enable thinkingLevel for 3.1 Pro — a deliberate behavior/cost decision, not a mechanical fix.
+
+Track 2's stored `model_name` stays `track2_flash` regardless of which model backs the `track2_spd` role (it is a stable aggregate name in `forecasts_ensemble`/`scores`). Note on calibration when swapping ensemble members: per-model calibration weights are keyed by display name (e.g. `Gemini Pro`, `OpenAI-gpt-5.2`); a swapped-in model with a new name simply gets weight 1.0 until it accumulates scores — no migration needed.
 
 ## GitHub Actions workflows
 

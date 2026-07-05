@@ -120,12 +120,12 @@ def fetch_via_claude_web_search(
         pack.debug = {"error": "missing_dependency"}
         return pack
 
+    from pythia.llm_profiles import get_role_model, split_model_ref
+
+    default_model = split_model_ref(get_role_model("grounding_claude"), "anthropic")[1]
     model_id = (
-        os.getenv("PYTHIA_SPD_ANTHROPIC_WEB_SEARCH_MODEL_ID")
-        or "claude-sonnet-4-20250514"
-    ).strip()
-    if not model_id:
-        model_id = "claude-sonnet-4-20250514"
+        os.getenv("PYTHIA_SPD_ANTHROPIC_WEB_SEARCH_MODEL_ID") or default_model
+    ).strip() or default_model
 
     prompt = (
         "You are a research assistant using the Claude web_search tool. "

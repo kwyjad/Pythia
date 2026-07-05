@@ -225,7 +225,13 @@ def _resolve_iso3(country_name: str) -> str | None:
 # Direct Gemini grounding call (bypasses EvidencePack JSON re-parsing)
 # ---------------------------------------------------------------------------
 
-_GEMINI_MODEL_CANDIDATES = ["gemini-2.5-flash"]
+def _default_crisiswatch_candidates() -> list[str]:
+    from pythia.llm_profiles import get_role_model, split_model_ref
+
+    return [split_model_ref(get_role_model("crisiswatch"))[1]]
+
+
+_GEMINI_MODEL_CANDIDATES = _default_crisiswatch_candidates()
 
 
 def _call_gemini_grounding(prompt: str, *, timeout_sec: int = 30) -> str:
