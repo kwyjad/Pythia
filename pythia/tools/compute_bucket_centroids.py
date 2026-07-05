@@ -11,7 +11,7 @@ from datetime import date
 
 from resolver.db import duckdb_io
 
-from pythia.buckets import get_bucket_specs
+from pythia.buckets import bucket_schema_version, get_bucket_specs
 from pythia.config import load as load_cfg
 
 
@@ -45,6 +45,16 @@ def _close_db(conn) -> None:
         pass
 
 
+def _ensure_schema_version_column(conn) -> None:
+    """Add the bucket-boundary version stamp on DBs that predate it."""
+    cols = {
+        str(r[1]).lower()
+        for r in conn.execute("PRAGMA table_info('bucket_centroids')").fetchall()
+    }
+    if "schema_version" not in cols:
+        conn.execute("ALTER TABLE bucket_centroids ADD COLUMN schema_version TEXT")
+
+
 def compute_bucket_centroids(db_url: str, metric: str = "PA") -> None:
     """
     Compute hazard-specific bucket centroids from historical facts_resolved.
@@ -70,6 +80,7 @@ def compute_bucket_centroids(db_url: str, metric: str = "PA") -> None:
             )
             """
         )
+        _ensure_schema_version_column(conn)
 
         conn.execute(
             """
@@ -138,15 +149,16 @@ def compute_bucket_centroids(db_url: str, metric: str = "PA") -> None:
               WHERE bucket_index IS NOT NULL
               GROUP BY hazard_code, bucket_index
             )
-            INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
+            INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid, schema_version)
             SELECT
               hazard_code,
               ? AS metric,
               bucket_index,
-              centroid
+              centroid,
+              ? AS schema_version
             FROM agg
             """,
-            [metric],
+            [metric, bucket_schema_version(metric)],
         )
 
         rows = conn.execute(
@@ -204,13 +216,16 @@ def update_bucket_centroids_ema(
 
     conn = _open_db(db_url)
     try:
-        # Ensure as_of_month column exists
-        try:
-            conn.execute(
-                "ALTER TABLE bucket_centroids ADD COLUMN as_of_month TEXT"
-            )
-        except Exception:
-            pass
+        # Ensure stamp columns exist (PRAGMA-first — a failed ALTER inside an
+        # implicit transaction aborts the connection on DuckDB >= 1.5).
+        cols = {
+            str(r[1]).lower()
+            for r in conn.execute("PRAGMA table_info('bucket_centroids')").fetchall()
+        }
+        if "as_of_month" not in cols:
+            conn.execute("ALTER TABLE bucket_centroids ADD COLUMN as_of_month TEXT")
+        if "schema_version" not in cols:
+            conn.execute("ALTER TABLE bucket_centroids ADD COLUMN schema_version TEXT")
 
         specs = list(get_bucket_specs(metric))
         if not specs:
@@ -302,11 +317,12 @@ def update_bucket_centroids_ema(
             conn.execute(
                 """
                 INSERT INTO bucket_centroids
-                    (hazard_code, metric, bucket_index, centroid, as_of_month)
-                VALUES (?, ?, ?, ?, ?)
+                    (hazard_code, metric, bucket_index, centroid, as_of_month,
+                     schema_version)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [hazard_code.upper(), metric.upper(), int(bucket_index),
-                 new_centroid, as_of_month],
+                 new_centroid, as_of_month, bucket_schema_version(metric)],
             )
 
             LOGGER.info(

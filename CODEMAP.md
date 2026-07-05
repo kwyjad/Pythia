@@ -104,7 +104,7 @@ Resolver is organised into several layers. Each layer has a clear responsibility
 | `python resolver/ingestion/<connector>_client.py` | Run a specific connector against live APIs. | Source-specific tokens such as `ACLED_REFRESH_TOKEN`, `DTM_API_KEY`, `GO_API_TOKEN`, `RELIEFWEB_APPNAME`, toggles like `RESOLVER_SKIP_<SOURCE>`, `RESOLVER_DEBUG=1` for verbose logging. |
 | `python resolver/tools/export_facts.py --in resolver/staging --out resolver/exports` | Map staging columns to canonical facts. | Optional `--config resolver/tools/export_config.yml` for custom mappings. |
 | `python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv` | Enforce schema, registry, and enum rules before precedence. | Requires registries in `resolver/data/` and schema definition `resolver/tools/schema.yml`. |
-| `python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff 2025-09-30` | Apply precedence tiers to produce `resolved.csv/jsonl` plus diagnostics. | Configuration in `resolver/tools/precedence_config.yml`; uses Istanbul timezone lag logic. |
+| `python -m resolver.tools.run_pipeline` | Apply precedence tiers via `resolve_facts_frame` and write `facts_resolved`/`facts_deltas` (the standalone precedence CLI was removed in the July 2026 consolidation). | Configuration in `resolver/tools/precedence_config.yml` (tiers, tiebreak, defaults). |
 | `python resolver/tools/make_deltas.py --resolved resolver/exports/resolved.csv --out resolver/exports/deltas.csv --lookback-months 24` | Compute monthly "new" deltas with rebasing detection. | Reads resolved exports and writes `deltas.csv` with provenance columns. |
 | `python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --resolved resolver/exports/resolved.csv --deltas resolver/exports/deltas.csv --month 2025-09` | Freeze immutable monthly bundles. | Writes `resolver/snapshots/<YYYY-MM>/` artifacts and, with `RESOLVER_DB_URL`, upserts DuckDB tables. |
 | `python resolver/tools/write_repo_state.py --mode daily --id 2025-09-30` | Copy exports/review outputs into `resolver/state/daily/...` for archival. | `--retain-days` controls pruning; stages deletions via Git. |
@@ -152,10 +152,9 @@ Series semantics for both CSV exports and DuckDB writes are derived by [`resolve
    python resolver/tools/export_facts.py --in resolver/staging --out resolver/exports
    python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv
    ```
-4. Build resolved outputs and deltas:
+4. Build resolved outputs and deltas (precedence + deltas run inside the pipeline):
    ```bash
-   python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff YYYY-MM-30
-   python resolver/tools/make_deltas.py --resolved resolver/exports/resolved.csv --out resolver/exports/deltas.csv
+   python -m resolver.tools.run_pipeline
    ```
 5. Regenerate docs/tests: `python resolver/tools/generate_schemas_md.py --in resolver/tools/schema.yml --out SCHEMAS.md --sort` and `pytest -q resolver/tests/test_ingestion_smoke_all_connectors.py`.
 
@@ -172,8 +171,7 @@ Series semantics for both CSV exports and DuckDB writes are derived by [`resolve
    ```bash
    python resolver/tools/export_facts.py --in resolver/staging --out resolver/exports
    python resolver/tools/validate_facts.py --facts resolver/exports/facts.csv
-   python resolver/tools/precedence_engine.py --facts resolver/exports/facts.csv --cutoff <YYYY-MM-DD>
-   python resolver/tools/make_deltas.py --resolved resolver/exports/resolved.csv --out resolver/exports/deltas.csv
+   python -m resolver.tools.run_pipeline   # precedence + deltas (standalone precedence CLI removed July 2026)
     python resolver/tools/freeze_snapshot.py --facts resolver/exports/facts.csv --resolved resolver/exports/resolved.csv --deltas resolver/exports/deltas.csv --month <YYYY-MM>
    ```
 4. Prepare review queue if curators are on call: `python resolver/review/make_review_queue.py`.

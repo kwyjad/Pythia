@@ -208,6 +208,65 @@ def test_eiv_zero_bucket_mass_gives_zero_eiv() -> None:
 # a metric-only MAX would blame the wrong hazard's EMA update.
 # ---------------------------------------------------------------------------
 
+def test_load_centroids_refuses_stale_schema_version() -> None:
+    """EMA centroids learned under an old bucket-boundary layout must be
+    refused; NULL (pre-stamp) rows are grandfathered."""
+    from pythia.buckets import bucket_schema_version, centroids_for, n_buckets_for
+    from pythia.tools.compute_scores import _load_centroids
+
+    conn = duckdb.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE bucket_centroids (
+            hazard_code TEXT, metric TEXT, bucket_index INTEGER,
+            centroid DOUBLE, as_of_month TEXT, schema_version TEXT
+        )
+        """
+    )
+    n = n_buckets_for("PA")
+    current = bucket_schema_version("PA")
+
+    # Hazard-specific rows stamped with a STALE version -> refused;
+    # wildcard rows stamped with the CURRENT version -> used.
+    for b in range(1, n + 1):
+        conn.execute(
+            "INSERT INTO bucket_centroids VALUES ('FL', 'PA', ?, ?, '2026-06', 'deadbeef0000')",
+            [b, 111.0 * b],
+        )
+        conn.execute(
+            "INSERT INTO bucket_centroids VALUES ('*', 'PA', ?, ?, '2026-05', ?)",
+            [b, 222.0 * b, current],
+        )
+    got = _load_centroids(conn, "FL", "PA", n)
+    assert got == [222.0 * b for b in range(1, n + 1)]
+
+    # NULL-version rows are grandfathered (pre-stamp DBs keep working).
+    conn.execute("DELETE FROM bucket_centroids")
+    for b in range(1, n + 1):
+        conn.execute(
+            "INSERT INTO bucket_centroids VALUES ('FL', 'PA', ?, ?, '2026-06', NULL)",
+            [b, 333.0 * b],
+        )
+    got = _load_centroids(conn, "FL", "PA", n)
+    assert got == [333.0 * b for b in range(1, n + 1)]
+
+    # Everything stale -> BucketSpec defaults.
+    conn.execute("UPDATE bucket_centroids SET schema_version = 'deadbeef0000'")
+    got = _load_centroids(conn, "FL", "PA", n)
+    assert got == [float(c) for c in centroids_for("PA")]
+
+
+def test_bucket_schema_version_tracks_boundaries_only() -> None:
+    from pythia.buckets import bucket_schema_version
+
+    v_pa = bucket_schema_version("PA")
+    v_fat = bucket_schema_version("FATALITIES")
+    assert v_pa != v_fat
+    assert len(v_pa) == 12
+    # Deterministic across calls.
+    assert bucket_schema_version("PA") == v_pa
+
+
 def test_centroid_version_is_per_hazard() -> None:
     from pythia.tools.compute_scores import _get_centroid_version
 

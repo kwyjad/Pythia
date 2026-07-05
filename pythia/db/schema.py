@@ -15,7 +15,7 @@ from typing import Optional, Sequence
 import duckdb
 from duckdb import CatalogException
 
-from pythia.buckets import BucketSpec, BUCKET_SPECS
+from pythia.buckets import BucketSpec, BUCKET_SPECS, bucket_schema_version
 from pythia.config import load as load_config
 
 PYTHIA_DEFAULT_DB_URL = "duckdb:///data/resolver.duckdb"
@@ -719,16 +719,23 @@ def _seed_bucket_centroids(
     """Ensure wildcard centroids exist in bucket_centroids."""
 
     metric_upper = metric.upper()
+    version = bucket_schema_version(metric)
     rows = con.execute(
         """
-        SELECT COUNT(*)
+        SELECT COUNT(*),
+               COUNT(*) FILTER (WHERE schema_version = ?)
         FROM bucket_centroids
         WHERE upper(metric) = ? AND hazard_code = '*'
         """,
-        [metric_upper],
+        [version, metric_upper],
     ).fetchone()
 
-    if rows and (rows[0] or 0) >= len(specs):
+    total = (rows[0] or 0) if rows else 0
+    current = (rows[1] or 0) if rows else 0
+    # Reseed when incomplete OR when any wildcard row predates the current
+    # bucket-boundary layout (schema_version NULL or stale) — seeds are
+    # derived from BUCKET_SPECS, so rebuilding is always safe.
+    if total >= len(specs) and current == total:
         return
 
     con.execute(
@@ -742,10 +749,11 @@ def _seed_bucket_centroids(
     for spec in specs:
         con.execute(
             """
-            INSERT INTO bucket_centroids (hazard_code, metric, bucket_index, centroid)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO bucket_centroids
+                (hazard_code, metric, bucket_index, centroid, schema_version)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            ["*", metric_upper, int(spec.idx), float(spec.centroid)],
+            ["*", metric_upper, int(spec.idx), float(spec.centroid), version],
         )
 
 
@@ -899,6 +907,38 @@ def _ensure_enso_state_table(con: duckdb.DuckDBPyConnection) -> None:
             "plume_json": "VARCHAR",
             "raw_context": "VARCHAR",
             "created_at": "TIMESTAMP",
+        },
+    )
+
+
+def _ensure_source_coverage_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the source_coverage table exists.
+
+    Per-(metric, iso3, ym) record of where resolution source data exists.
+    Rebuilt by pythia/tools/source_coverage.py at the start of each
+    compute_resolutions run; gates zero-defaulting (month coverage +
+    country universe) and gives dashboards a queryable coverage map.
+    """
+
+    _ensure_table_and_columns(
+        con,
+        "source_coverage",
+        """
+        CREATE TABLE IF NOT EXISTS source_coverage (
+            metric VARCHAR NOT NULL,
+            iso3 VARCHAR NOT NULL,
+            ym VARCHAR NOT NULL,
+            row_count INTEGER NOT NULL DEFAULT 0,
+            refreshed_at TIMESTAMP,
+            PRIMARY KEY (metric, iso3, ym)
+        );
+        """,
+        {
+            "metric": "VARCHAR",
+            "iso3": "VARCHAR",
+            "ym": "VARCHAR",
+            "row_count": "INTEGER",
+            "refreshed_at": "TIMESTAMP",
         },
     )
 
@@ -1504,7 +1544,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 metric TEXT,
                 bucket_index INTEGER,
                 centroid DOUBLE,
-                as_of_month TEXT
+                as_of_month TEXT,
+                schema_version TEXT
             );
             """,
             {
@@ -1513,6 +1554,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "bucket_index": "INTEGER",
                 "centroid": "DOUBLE",
                 "as_of_month": "TEXT",
+                "schema_version": "TEXT",
             },
         )
 
@@ -1885,6 +1927,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         _ensure_enso_state_table(con)
         _ensure_seasonal_tc_outlooks_table(con)
         _ensure_seasonal_tc_context_cache_table(con)
+        _ensure_source_coverage_table(con)
     finally:
         if own_con and con is not None:
             con.close()

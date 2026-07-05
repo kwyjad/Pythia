@@ -3,8 +3,12 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-# Precedence policy — 3 active connectors + EM-DAT (historical read-only)
-metric_preference: [in_need, affected]   # PIN first, else PA
+# Precedence policy — 3 active connectors + EM-DAT (historical read-only).
+# Consumed by resolve_facts_frame (resolver/tools/precedence_engine.py) via
+# run_pipeline. Recognized keys: tiers, tiebreak, defaults, metrics.
+# (The pre-connector-era CLI keys — metric_preference, source_precedence,
+# source_mapping, conflict_rule, cutoff, lags — were removed with the legacy
+# CLI path in the July 2026 S4 consolidation.)
 
 # Tier entries must match the lowercased `publisher` column that connectors
 # write (run_pipeline uses publisher as the precedence source id). "ifrc" is
@@ -26,36 +30,3 @@ tiebreak:
 defaults:
   require_nonnegative: true
   prefer_full_row_coverage: true
-
-source_precedence:
-  - ifrc_or_gov_sitrep
-  - acled
-  - idmc
-  - emdat_historical
-
-source_mapping:
-  ifrc_or_gov_sitrep:
-    source_type: ["sitrep", "gov"]
-    publisher: ["IFRC"]
-  acled:
-    source_type: ["other"]
-    publisher: ["ACLED"]
-  idmc:
-    source_type: ["agency"]
-    publisher: ["IDMC"]
-  emdat_historical:
-    source_type: ["agency"]
-    publisher: ["EM-DAT", "CRED/EM-DAT"]
-
-conflict_rule:
-  threshold_pct: 20
-  tie_breaker: latest_as_of
-
-cutoff:
-  timezone: "Europe/Istanbul"
-  lag_days_allowed: 7
-
-lags:
-  acled: 2d
-  ifrc_montandon: 2d
-  idmc: 3d

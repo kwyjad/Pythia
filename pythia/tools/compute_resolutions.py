@@ -83,6 +83,11 @@ from pythia.tools._db_utils import (
     row_count as _row_count,
     table_exists as _table_exists,
 )
+from pythia.tools.source_coverage import (
+    countries_with_source_data as _coverage_countries,
+    months_with_source_data as _coverage_months,
+    refresh_source_coverage as _refresh_source_coverage,
+)
 
 
 def _get_db_url_from_config() -> str:
@@ -281,8 +286,7 @@ def _data_freshness_cutoff(conn, metric: str) -> Optional[str]:
 
 
 def _months_with_source_data(conn, metric: str) -> set[str]:
-    """Return the set of 'YYYY-MM' months where the metric's source tables
-    contain ANY row (globally).
+    """Months ('YYYY-MM') where the metric's sources have ANY row globally.
 
     Gates zero-defaulting: the absence of a row for a (country, month) only
     means "zero impact" when the source actually reported that month at
@@ -290,40 +294,16 @@ def _months_with_source_data(conn, metric: str) -> set[str]:
     predates source coverage) — horizons in it must stay unresolved rather
     than become false zeros. The freshness cutoff only guards the right
     edge; this guards the left edge and interior gaps.
+
+    Reads the ``source_coverage`` table (rebuilt at run start by
+    :func:`pythia.tools.source_coverage.refresh_source_coverage`).
     """
-    months: set[str] = set()
-    if metric == "FATALITIES":
-        queries = [
-            ("facts_resolved",
-             "SELECT DISTINCT ym FROM facts_resolved WHERE lower(metric) = 'fatalities'"),
-            ("facts_deltas",
-             "SELECT DISTINCT ym FROM facts_deltas WHERE lower(metric) = 'fatalities'"),
-            ("acled_monthly_fatalities",
-             "SELECT DISTINCT strftime(month, '%Y-%m') FROM acled_monthly_fatalities"),
-        ]
-    elif metric == "EVENT_OCCURRENCE":
-        queries = [
-            ("facts_resolved",
-             "SELECT DISTINCT ym FROM facts_resolved "
-             "WHERE lower(metric) = 'event_occurrence'"),
-        ]
-    else:
-        return months
-    for table, sql in queries:
-        if not _table_exists(conn, table):
-            continue
-        try:
-            for (ym,) in conn.execute(sql).fetchall():
-                if ym:
-                    months.add(str(ym))
-        except Exception as exc:
-            LOGGER.warning("Source-coverage query on %s failed: %r", table, exc)
-    return months
+    return _coverage_months(conn, metric)
 
 
 def _countries_with_source_data(conn, metric: str) -> set[str]:
-    """Return the set of ISO3 codes that appear at least once (any month)
-    in the metric's source tables.
+    """ISO3 codes that appear at least once (any month) in the metric's
+    source tables.
 
     Gates zero-defaulting alongside :func:`_months_with_source_data`: a
     country the source has NEVER reported is outside the source's coverage
@@ -331,35 +311,10 @@ def _countries_with_source_data(conn, metric: str) -> set[str]:
     the source does cover still zero-default normally for covered months
     (e.g. a peaceful country appears in ACLED via protests/riots even when
     it has no conflict fatalities).
+
+    Reads the ``source_coverage`` table (rebuilt at run start).
     """
-    countries: set[str] = set()
-    if metric == "FATALITIES":
-        queries = [
-            ("facts_resolved",
-             "SELECT DISTINCT upper(iso3) FROM facts_resolved WHERE lower(metric) = 'fatalities'"),
-            ("facts_deltas",
-             "SELECT DISTINCT upper(iso3) FROM facts_deltas WHERE lower(metric) = 'fatalities'"),
-            ("acled_monthly_fatalities",
-             "SELECT DISTINCT upper(iso3) FROM acled_monthly_fatalities"),
-        ]
-    elif metric == "EVENT_OCCURRENCE":
-        queries = [
-            ("facts_resolved",
-             "SELECT DISTINCT upper(iso3) FROM facts_resolved "
-             "WHERE lower(metric) = 'event_occurrence'"),
-        ]
-    else:
-        return countries
-    for table, sql in queries:
-        if not _table_exists(conn, table):
-            continue
-        try:
-            for (iso3,) in conn.execute(sql).fetchall():
-                if iso3:
-                    countries.add(str(iso3))
-        except Exception as exc:
-            LOGGER.warning("Source-universe query on %s failed: %r", table, exc)
-    return countries
+    return _coverage_countries(conn, metric)
 
 
 # Hazard-code → EM-DAT shock_type mapping for emdat_pa table lookups.
@@ -753,6 +708,10 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         skipped_null_resolution = 0
         skipped_unresolvable_hazard = 0
         skipped_outside_source_universe = 0
+
+        # Rebuild the source_coverage table from the metric source tables so
+        # the gates below (and any dashboard consumer) see current coverage.
+        _refresh_source_coverage(conn)
 
         # Per-month global source coverage for zero-default metrics: a month
         # absent from every source table is an ingestion gap, not "no impact".
