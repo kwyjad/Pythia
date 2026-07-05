@@ -4112,7 +4112,7 @@ async def _run_binary_forecast_for_question(
                 # Use aggregate_binary from aggregate.py
                 from .ensemble import EnsembleResult, MemberOutput
                 members = [
-                    MemberOutput(name=f"model_{i}", ok=True, parsed=p, raw="")
+                    MemberOutput(name=f"model_{i}", ok=True, parsed=p, raw_text="")
                     for i, p in enumerate(probs)
                 ]
                 ens_res = EnsembleResult(members=members)
