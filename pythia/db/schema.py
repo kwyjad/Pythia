@@ -903,6 +903,38 @@ def _ensure_enso_state_table(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _ensure_source_coverage_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the source_coverage table exists.
+
+    Per-(metric, iso3, ym) record of where resolution source data exists.
+    Rebuilt by pythia/tools/source_coverage.py at the start of each
+    compute_resolutions run; gates zero-defaulting (month coverage +
+    country universe) and gives dashboards a queryable coverage map.
+    """
+
+    _ensure_table_and_columns(
+        con,
+        "source_coverage",
+        """
+        CREATE TABLE IF NOT EXISTS source_coverage (
+            metric VARCHAR NOT NULL,
+            iso3 VARCHAR NOT NULL,
+            ym VARCHAR NOT NULL,
+            row_count INTEGER NOT NULL DEFAULT 0,
+            refreshed_at TIMESTAMP,
+            PRIMARY KEY (metric, iso3, ym)
+        );
+        """,
+        {
+            "metric": "VARCHAR",
+            "iso3": "VARCHAR",
+            "ym": "VARCHAR",
+            "row_count": "INTEGER",
+            "refreshed_at": "TIMESTAMP",
+        },
+    )
+
+
 def _ensure_crisiswatch_entries_table(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure the crisiswatch_entries table exists."""
 
@@ -1885,6 +1917,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         _ensure_enso_state_table(con)
         _ensure_seasonal_tc_outlooks_table(con)
         _ensure_seasonal_tc_context_cache_table(con)
+        _ensure_source_coverage_table(con)
     finally:
         if own_con and con is not None:
             con.close()
