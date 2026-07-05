@@ -12,7 +12,12 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from pythia.buckets import get_bucket_specs, labels_for, thresholds_for
+from pythia.buckets import (
+    bucket_schema_version,
+    get_bucket_specs,
+    labels_for,
+    thresholds_for,
+)
 from pythia.config import load as load_cfg
 from resolver.db import duckdb_io
 
@@ -432,16 +437,38 @@ def _load_centroids(conn, hazard_code: str, metric: str, n_buckets: int) -> list
 
     Prefers the newest as_of_month (EMA-updated), falling back to seed/default
     rows (as_of_month IS NULL), then to BucketSpec hard-coded defaults.
+
+    Rows stamped with a bucket-boundary ``schema_version`` different from the
+    current one are refused — EMA centroids learned under an old boundary
+    layout are meaningless for the new buckets. Unstamped (NULL) rows are
+    grandfathered: they predate the stamp and get versioned on the next
+    calibration cycle.
     """
+    current_version = bucket_schema_version(metric)
+    has_version_col = False
+    try:
+        cols = {
+            str(r[1]).lower()
+            for r in conn.execute("PRAGMA table_info('bucket_centroids')").fetchall()
+        }
+        has_version_col = "schema_version" in cols
+    except Exception:
+        pass
+    version_filter = (
+        " AND (schema_version IS NULL OR schema_version = ?)" if has_version_col else ""
+    )
     for hc in [hazard_code.upper(), "*"]:
+        params = [hc, metric.upper()]
+        if has_version_col:
+            params.append(current_version)
         rows = conn.execute(
-            """
+            f"""
             SELECT bucket_index, centroid, as_of_month
             FROM bucket_centroids
-            WHERE upper(hazard_code) = ? AND upper(metric) = ?
+            WHERE upper(hazard_code) = ? AND upper(metric) = ?{version_filter}
             ORDER BY as_of_month DESC NULLS LAST, bucket_index
             """,
-            [hc, metric.upper()],
+            params,
         ).fetchall()
         if not rows:
             continue

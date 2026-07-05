@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -103,6 +104,25 @@ def n_buckets_for(metric: str) -> int:
 def max_bucket_count() -> int:
     """The widest bucket count across all metrics (drives wide exports)."""
     return max(len(specs) for specs in BUCKET_SPECS.values())
+
+
+def bucket_schema_version(metric: str) -> str:
+    """Deterministic version id for a metric's bucket BOUNDARIES.
+
+    A 12-hex digest over the ordered (idx, lower, upper) tuples. Learned
+    centroids (EMA) are only meaningful for the boundary layout they were
+    learned under, so bucket_centroids rows are stamped with this version
+    and readers refuse rows from a different layout. Centroid seed values
+    and labels are deliberately excluded — retuning them must NOT
+    invalidate learned centroids; changing any boundary MUST.
+    """
+    specs = get_bucket_specs(metric)
+    canon = ";".join(
+        f"{s.idx}:{'' if s.lower is None else format(float(s.lower), '.6g')}"
+        f"-{'' if s.upper is None else format(float(s.upper), '.6g')}"
+        for s in specs
+    )
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
 
 
 def centroids_for(metric: str) -> list[float]:

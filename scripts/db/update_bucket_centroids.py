@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 from typing import Sequence
 
-from pythia.buckets import BUCKET_SPECS
+from pythia.buckets import BUCKET_SPECS, bucket_schema_version
 from pythia.db.schema import connect, get_db_url
 
 
@@ -23,6 +23,10 @@ def _ensure_table(conn) -> None:
         );
         """
     )
+    # Older DBs predate the boundary-version stamp; add it idempotently.
+    cols = {str(r[1]).lower() for r in conn.execute("PRAGMA table_info('bucket_centroids')").fetchall()}
+    if "schema_version" not in cols:
+        conn.execute("ALTER TABLE bucket_centroids ADD COLUMN schema_version TEXT")
 
 
 def _ensure_bucket_definitions_table(conn) -> None:
@@ -41,13 +45,18 @@ def _ensure_bucket_definitions_table(conn) -> None:
 
 def _upsert_centroids(conn, metric: str, values: Sequence[float]) -> None:
     metric_upper = str(metric).upper()
+    version = bucket_schema_version(metric_upper)
     conn.execute(
         "DELETE FROM bucket_centroids WHERE upper(metric) = ? AND hazard_code = '*'",
         [metric_upper],
     )
-    rows = [(metric_upper, "*", idx + 1, float(value)) for idx, value in enumerate(values)]
+    rows = [
+        (metric_upper, "*", idx + 1, float(value), version)
+        for idx, value in enumerate(values)
+    ]
     conn.executemany(
-        "INSERT INTO bucket_centroids (metric, hazard_code, bucket_index, centroid) VALUES (?, ?, ?, ?)",
+        "INSERT INTO bucket_centroids (metric, hazard_code, bucket_index, centroid, schema_version) "
+        "VALUES (?, ?, ?, ?, ?)",
         rows,
     )
 
