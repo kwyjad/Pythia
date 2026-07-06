@@ -55,6 +55,8 @@ def download_forecasts_xlsx(include_test: bool = Query(False)):
         fmt="xlsx",
         build_error_detail="Failed to build forecast download export",
         serialize_error_detail="Failed to serialize forecast download export",
+        cache_slug="forecasts",
+        cache_params={"include_test": include_test},
     )
 
 
@@ -64,6 +66,8 @@ def download_forecasts_csv(include_test: bool = Query(False)):
         lambda: build_forecast_spd_export(_con(), include_test=include_test),
         "pythia_forecasts_export.csv",
         build_error_detail="Failed to build forecast download export",
+        cache_slug="forecasts",
+        cache_params={"include_test": include_test},
     )
 
 
@@ -83,6 +87,8 @@ def download_triage_csv(include_test: bool = Query(False)):
         _build,
         "run_triage_results.csv",
         build_error_detail="Failed to build triage download export",
+        cache_slug="triage",
+        cache_params={"include_test": include_test},
     )
 
 
@@ -92,6 +98,8 @@ def download_total_costs_csv(include_test: bool = Query(False)):
         lambda: _concat_cost_tables(build_costs_total(_con(), include_test=include_test)),
         "total_costs.csv",
         build_error_detail="Failed to build total cost export",
+        cache_slug="total_costs",
+        cache_params={"include_test": include_test},
     )
 
 
@@ -101,6 +109,8 @@ def download_monthly_costs_csv(include_test: bool = Query(False)):
         lambda: _concat_cost_tables(build_costs_monthly(_con(), include_test=include_test)),
         "monthly_costs.csv",
         build_error_detail="Failed to build monthly cost export",
+        cache_slug="monthly_costs",
+        cache_params={"include_test": include_test},
     )
 
 
@@ -110,6 +120,8 @@ def download_run_costs_csv(include_test: bool = Query(False)):
         lambda: _concat_cost_tables(build_costs_runs(_con(), include_test=include_test)),
         "run_costs.csv",
         build_error_detail="Failed to build run cost export",
+        cache_slug="run_costs",
+        cache_params={"include_test": include_test},
     )
 
 
@@ -119,6 +131,8 @@ def download_scores_ensemble_mean_csv(include_test: bool = Query(False)):
         lambda: build_ensemble_scores_export(_con(), "ensemble_mean", include_test=include_test),
         "scores_ensemble_mean.csv",
         build_error_detail="Failed to build ensemble_mean scores export",
+        cache_slug="scores_ensemble_mean",
+        cache_params={"include_test": include_test},
     )
 
 
@@ -128,6 +142,8 @@ def download_scores_ensemble_bayesmc_csv(include_test: bool = Query(False)):
         lambda: build_ensemble_scores_export(_con(), "ensemble_bayesmc", include_test=include_test),
         "scores_ensemble_bayesmc.csv",
         build_error_detail="Failed to build ensemble_bayesmc scores export",
+        cache_slug="scores_ensemble_bayesmc",
+        cache_params={"include_test": include_test},
     )
 
 
@@ -137,6 +153,8 @@ def download_scores_model_csv(include_test: bool = Query(False)):
         lambda: build_model_scores_export(_con(), include_test=include_test),
         "scores_model.csv",
         build_error_detail="Failed to build model scores export",
+        cache_slug="scores_model",
+        cache_params={"include_test": include_test},
     )
 
 
@@ -154,4 +172,6 @@ def download_rationales_csv(
         lambda: build_rationale_export(_con(), hazard_code=hazard, model_name=model, include_test=include_test),
         "_".join(parts) + ".csv",
         build_error_detail="Failed to build rationale export",
+        cache_slug="rationales",
+        cache_params={"hazard": hazard, "model": model, "include_test": include_test},
     )

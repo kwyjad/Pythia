@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Generator
 
 import pandas as pd
@@ -47,7 +48,7 @@ def _fake_df() -> pd.DataFrame:
 
 
 @pytest.fixture()
-def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path, None, None]:
+def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[SimpleNamespace, None, None]:
     db_path = tmp_path / "api.duckdb"
     con = duckdb.connect(str(db_path))
     con.execute("CREATE TABLE questions (question_id TEXT)")
@@ -63,13 +64,13 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path, 
     pythia_config.load.cache_clear()
     _app_mod._READ_CON = None
     try:
-        yield export_dir
+        yield SimpleNamespace(export_dir=export_dir, db_path=db_path)
     finally:
         _app_mod._READ_CON = None
         pythia_config.load.cache_clear()
 
 
-def test_forecasts_csv_bytes_identical(api_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_forecasts_csv_bytes_identical(api_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     df = _fake_df()
     monkeypatch.setattr(downloads_mod, "build_forecast_spd_export", lambda con, include_test=False: df.copy())
 
@@ -82,7 +83,7 @@ def test_forecasts_csv_bytes_identical(api_env: Path, monkeypatch: pytest.Monkey
     assert resp.headers["content-type"].startswith("text/csv")
 
 
-def test_forecasts_xlsx_round_trip(api_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_forecasts_xlsx_round_trip(api_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("openpyxl")
     df = _fake_df()
     monkeypatch.setattr(downloads_mod, "build_forecast_spd_export", lambda con, include_test=False: df.copy())
@@ -96,11 +97,12 @@ def test_forecasts_xlsx_round_trip(api_env: Path, monkeypatch: pytest.MonkeyPatc
     pd.testing.assert_frame_equal(round_trip, df, check_dtype=False)
 
 
-def test_semaphore_released_before_streaming(api_env: Path) -> None:
+def test_semaphore_released_before_streaming(api_env: SimpleNamespace) -> None:
     """The new guarantee: the heavy semaphore is released when the build
     finishes, not when the client finishes downloading."""
     initial = _core._HEAVY_REQUEST_SEMAPHORE._value
 
+    # No cache_slug: exercises the mkstemp + background-delete path.
     resp = _core._serve_export(_fake_df, "x.csv", build_error_detail="boom")
 
     # Released before the response object is even returned to the framework.
@@ -111,19 +113,50 @@ def test_semaphore_released_before_streaming(api_env: Path) -> None:
     assert not os.path.exists(resp.path)
 
 
-def test_tmp_file_cleaned_after_request(api_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cache_file_persists_no_tmp_leftovers(api_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(downloads_mod, "build_forecast_spd_export", lambda con, include_test=False: _fake_df())
 
     client = TestClient(app)
     resp = client.get("/v1/downloads/forecasts.csv")
     assert resp.status_code == 200
 
-    # TestClient runs background tasks synchronously after the response.
-    leftovers = list(api_env.glob("*")) if api_env.exists() else []
-    assert leftovers == []
+    # The cached export remains (keyed by DB mtime); no mkstemp strays.
+    leftovers = sorted(p.name for p in api_env.export_dir.glob("*"))
+    assert len(leftovers) == 1
+    assert leftovers[0].startswith("forecasts-")
+    assert leftovers[0].endswith(".csv")
 
 
-def test_build_error_returns_500_and_releases_semaphore(api_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cache_hit_skips_build_and_mtime_invalidates(api_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+
+    def _counting_builder(con, include_test=False):
+        calls["n"] += 1
+        return _fake_df()
+
+    monkeypatch.setattr(downloads_mod, "build_forecast_spd_export", _counting_builder)
+    client = TestClient(app)
+
+    r1 = client.get("/v1/downloads/forecasts.csv")
+    r2 = client.get("/v1/downloads/forecasts.csv")
+    assert r1.status_code == r2.status_code == 200
+    assert r1.content == r2.content
+    assert calls["n"] == 1  # second request served from cache
+
+    # Different params -> separate cache entry.
+    r3 = client.get("/v1/downloads/forecasts.csv", params={"include_test": "true"})
+    assert r3.status_code == 200
+    assert calls["n"] == 2
+
+    # A DB refresh (os.replace in sync advances the file mtime) invalidates.
+    st = os.stat(api_env.db_path)
+    os.utime(api_env.db_path, (st.st_atime, st.st_mtime + 5))
+    r4 = client.get("/v1/downloads/forecasts.csv")
+    assert r4.status_code == 200
+    assert calls["n"] == 3
+
+
+def test_build_error_returns_500_and_releases_semaphore(api_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(con, include_test=False):
         raise ValueError("builder exploded")
 
@@ -136,5 +169,5 @@ def test_build_error_returns_500_and_releases_semaphore(api_env: Path, monkeypat
     assert resp.status_code == 500
     assert resp.json()["detail"] == "Failed to build forecast download export"
     assert _core._HEAVY_REQUEST_SEMAPHORE._value == initial
-    leftovers = list(api_env.glob("*")) if api_env.exists() else []
+    leftovers = list(api_env.export_dir.glob("*")) if api_env.export_dir.exists() else []
     assert leftovers == []

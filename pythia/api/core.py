@@ -20,6 +20,7 @@ changing anything here.
 """
 
 import gc
+import hashlib
 import json
 import logging
 import math
@@ -979,6 +980,31 @@ def _unlink_quietly(path: str) -> None:
         pass
 
 
+def _export_cache_path(slug: str, params: Dict[str, Any], fmt: str, db_mtime: float) -> str:
+    param_hash = hashlib.sha1(
+        json.dumps(params, sort_keys=True, default=str).encode()
+    ).hexdigest()[:12]
+    return os.path.join(_export_tmp_dir(), f"{slug}-{param_hash}-{int(db_mtime)}.{fmt}")
+
+
+def _sweep_stale_exports(slug: str, fmt: str, current_mtime: int) -> None:
+    """Delete cached exports for this slug built from older DB versions.
+
+    Files younger than 60s are left alone so an in-flight FileResponse from
+    another request isn't raced right at a DB swap.
+    """
+    now = time.time()
+    for p in Path(_export_tmp_dir()).glob(f"{slug}-*.{fmt}"):
+        tail = p.stem.rsplit("-", 1)[-1]
+        if tail.isdigit() and int(tail) == current_mtime:
+            continue
+        try:
+            if now - p.stat().st_mtime > 60:
+                p.unlink()
+        except OSError:
+            pass
+
+
 def _serve_export(
     build: Callable[[], pd.DataFrame],
     filename: str,
@@ -986,6 +1012,8 @@ def _serve_export(
     *,
     build_error_detail: str,
     serialize_error_detail: Optional[str] = None,
+    cache_slug: Optional[str] = None,
+    cache_params: Optional[Dict[str, Any]] = None,
 ):
     """Build a DataFrame export under the heavy semaphore, spill it to a temp
     file, free the DataFrame, release the semaphore, and serve from disk.
@@ -995,7 +1023,25 @@ def _serve_export(
     heavy semaphore — for the entire client download, so a slow client held
     hundreds of MB for minutes and two concurrent downloads could OOM the
     2GB Render instance.
+
+    With ``cache_slug`` set, the serialized file is kept on disk keyed by
+    (slug, params, DB file mtime) and reused until the sync layer replaces
+    the DB (``os.replace`` advances the mtime — the same freshness signal
+    ``_maybe_refresh_db`` trusts). Repeat downloads then skip the build
+    entirely: zero DataFrame materialization, no semaphore contention.
     """
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    media_type = _EXPORT_MEDIA_TYPES[fmt]
+
+    cache_path: Optional[str] = None
+    if cache_slug is not None:
+        db_mtime = _db_file_mtime()
+        if db_mtime is not None:
+            cache_path = _export_cache_path(cache_slug, cache_params or {}, fmt, db_mtime)
+            _sweep_stale_exports(cache_slug, fmt, int(db_mtime))
+            if os.path.exists(cache_path):
+                return FileResponse(cache_path, media_type=media_type, headers=headers)
+
     _acquire_heavy()
     tmp_path: Optional[str] = None
     try:
@@ -1027,9 +1073,16 @@ def _serve_export(
     finally:
         _HEAVY_REQUEST_SEMAPHORE.release()
 
+    if cache_path is not None:
+        try:
+            os.replace(tmp_path, cache_path)  # atomic; concurrent builds are idempotent
+            return FileResponse(cache_path, media_type=media_type, headers=headers)
+        except OSError:
+            logger.warning("Failed to move export into cache; serving temp file", exc_info=True)
+
     return FileResponse(
         tmp_path,
-        media_type=_EXPORT_MEDIA_TYPES[fmt],
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        media_type=media_type,
+        headers=headers,
         background=BackgroundTask(_unlink_quietly, tmp_path),
     )
