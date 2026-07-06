@@ -359,6 +359,15 @@ PYTHIA_HS_ONLY_COUNTRIES="<ISO3S>" python -m horizon_scanner.horizon_scanner
 PYTHIA_DB_URL="duckdb:///data/resolver.duckdb" uvicorn pythia.api.app:app --reload --port 8000
 ```
 
+Production (Render) runs a single worker — multiple workers each open their own
+DuckDB connection and caches, multiplying memory on the 2GB instance:
+```bash
+uvicorn pythia.api.app:app --host 0.0.0.0 --port $PORT --workers 1
+```
+Recommended Render env: `PYTHIA_MAX_CONCURRENT_HEAVY=1`, `MALLOC_ARENA_MAX=2`.
+The `/v1/run` endpoint is disabled by default; set `PYTHIA_ALLOW_INPROCESS_RUN=1`
+locally if you want the API to launch pipeline runs in-process.
+
 ### Run the web UI locally
 ```bash
 cd web

@@ -47,6 +47,14 @@ def _update_ui_run(
         return
 
     try:
+        # Cap like the API's read connection — an uncapped DuckDB connection
+        # defaults to ~80% of system RAM.
+        con.execute(f"SET memory_limit='{os.getenv('PYTHIA_DUCKDB_MEMORY_LIMIT', '150MB')}'")
+        con.execute(f"SET threads={int(os.getenv('PYTHIA_DUCKDB_THREADS', '2'))}")
+    except Exception:
+        logging.warning("ui_runs: failed to cap DuckDB connection memory", exc_info=True)
+
+    try:
         # Ensure table exists (init_db should already have done this, but be defensive)
         con.execute(
             """
