@@ -70,7 +70,6 @@ from pythia.api.models import (
 from pythia.db.schema import connect as db_connect, ensure_schema
 from pythia.db.util import ensure_llm_calls_columns
 from pythia.config import load as load_cfg
-from pythia.pipeline.run import enqueue_run
 from resolver.query.countries_index import compute_countries_index
 from resolver.query.costs import (
     COST_COLUMNS,
@@ -379,6 +378,19 @@ def api_version() -> Dict[str, Any]:
 
 @app.post("/v1/run")
 def start_run(payload: dict = Body(...), _=Depends(require_admin_token)):
+    if os.getenv("PYTHIA_ALLOW_INPROCESS_RUN", "0").strip().lower() not in ("1", "true", "yes"):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "In-process pipeline runs are disabled on this deployment "
+                "(set PYTHIA_ALLOW_INPROCESS_RUN=1 to enable)"
+            ),
+        )
+    # Deferred import: pythia.pipeline.run pulls in the full horizon_scanner
+    # + calibration module tree (~100-300MB RSS), which must never load in
+    # the memory-constrained API process unless a run is explicitly allowed.
+    from pythia.pipeline.run import enqueue_run
+
     countries = payload.get("countries") or []
     run_id = enqueue_run(countries)
     return {"accepted": True, "run_id": run_id}
