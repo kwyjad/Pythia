@@ -19,23 +19,26 @@ spot; the wedged temp path) — see "Known failure modes" in CLAUDE.md before
 changing anything here.
 """
 
+import gc
 import json
 import logging
 import math
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import duckdb
 import numpy as np
 import pandas as pd
 from fastapi import HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
 from pythia.api.db_sync import (
     DbSyncError,
@@ -950,3 +953,83 @@ def _stream_csv(df: pd.DataFrame, filename: str):
 
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     return StreamingResponse(_gen(), media_type="text/csv; charset=utf-8", headers=headers)
+
+
+_EXPORT_MEDIA_TYPES = {
+    "csv": "text/csv; charset=utf-8",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+def _export_tmp_dir() -> str:
+    """Directory for spilled export files.
+
+    Deliberately NOT under /data: the Render persistent disk must keep
+    >= 2x the DB size free for atomic sync staging (see CLAUDE.md).
+    """
+    d = os.getenv("PYTHIA_EXPORT_TMP_DIR") or os.path.join(tempfile.gettempdir(), "pythia-exports")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _unlink_quietly(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _serve_export(
+    build: Callable[[], pd.DataFrame],
+    filename: str,
+    fmt: str = "csv",
+    *,
+    build_error_detail: str,
+    serialize_error_detail: Optional[str] = None,
+):
+    """Build a DataFrame export under the heavy semaphore, spill it to a temp
+    file, free the DataFrame, release the semaphore, and serve from disk.
+
+    Peak memory is bounded to build+serialize time. The previous pattern
+    (``_stream_csv`` / BytesIO XLSX) pinned the full DataFrame — and the
+    heavy semaphore — for the entire client download, so a slow client held
+    hundreds of MB for minutes and two concurrent downloads could OOM the
+    2GB Render instance.
+    """
+    _acquire_heavy()
+    tmp_path: Optional[str] = None
+    try:
+        try:
+            df = build()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception(build_error_detail)
+            raise HTTPException(status_code=500, detail=build_error_detail) from exc
+
+        fd, tmp_path = tempfile.mkstemp(prefix="pythia-export-", suffix=f".{fmt}", dir=_export_tmp_dir())
+        os.close(fd)
+        try:
+            if fmt == "xlsx":
+                df.to_excel(tmp_path, index=False, engine="openpyxl")
+            else:
+                df.to_csv(tmp_path, index=False)
+        except Exception as exc:
+            detail = serialize_error_detail or build_error_detail
+            logger.exception(detail)
+            raise HTTPException(status_code=500, detail=detail) from exc
+        del df
+        gc.collect()
+    except Exception:
+        if tmp_path is not None:
+            _unlink_quietly(tmp_path)
+        raise
+    finally:
+        _HEAVY_REQUEST_SEMAPHORE.release()
+
+    return FileResponse(
+        tmp_path,
+        media_type=_EXPORT_MEDIA_TYPES[fmt],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        background=BackgroundTask(_unlink_quietly, tmp_path),
+    )

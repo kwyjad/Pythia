@@ -7,22 +7,24 @@
 
 Endpoint functions moved verbatim from pythia.api.app (July 2026
 decomposition); shared helpers come from pythia.api.core.
+
+All endpoints serve via ``_serve_export``: the DataFrame is built under
+the heavy semaphore, spilled to a temp file on the ephemeral disk, freed,
+and streamed from disk — peak memory lasts for the build only, not the
+whole client download.
 """
 
 import logging
 import re
 from importlib.util import find_spec
-from io import BytesIO
 
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi import APIRouter, Query
+from fastapi.responses import RedirectResponse
 
 from pythia.api.core import (
-    _HEAVY_REQUEST_SEMAPHORE,
-    _acquire_heavy,
     _con,
     _concat_cost_tables,
-    _stream_csv,
+    _serve_export,
 )
 from resolver.query.costs import (
     build_costs_monthly,
@@ -47,144 +49,95 @@ def download_forecasts_xlsx(include_test: bool = Query(False)):
         logger.warning("openpyxl missing; falling back to CSV export")
         return RedirectResponse(url="/v1/downloads/forecasts.csv", status_code=307)
 
-    _acquire_heavy()
-    try:
-        con = _con()
-        try:
-            df = build_forecast_spd_export(con, include_test=include_test)
-        except Exception as exc:
-            logger.exception("Failed to build forecast download export")
-            raise HTTPException(status_code=500, detail="Failed to build forecast download export") from exc
-
-        buffer = BytesIO()
-        try:
-            df.to_excel(buffer, index=False, engine="openpyxl")
-        except Exception as exc:
-            logger.exception("Failed to serialize forecast download export")
-            raise HTTPException(status_code=500, detail="Failed to serialize forecast download export") from exc
-
-        buffer.seek(0)
-        headers = {"Content-Disposition": 'attachment; filename="pythia_forecasts_export.xlsx"'}
-        return StreamingResponse(
-            buffer,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers=headers,
-        )
-    finally:
-        _HEAVY_REQUEST_SEMAPHORE.release()
+    return _serve_export(
+        lambda: build_forecast_spd_export(_con(), include_test=include_test),
+        "pythia_forecasts_export.xlsx",
+        fmt="xlsx",
+        build_error_detail="Failed to build forecast download export",
+        serialize_error_detail="Failed to serialize forecast download export",
+    )
 
 
 @router.get("/v1/downloads/forecasts.csv")
 def download_forecasts_csv(include_test: bool = Query(False)):
-    _acquire_heavy()
-    try:
-        con = _con()
-        df = build_forecast_spd_export(con, include_test=include_test)
-    except Exception as exc:
-        _HEAVY_REQUEST_SEMAPHORE.release()
-        logger.exception("Failed to build forecast download export")
-        raise HTTPException(status_code=500, detail="Failed to build forecast download export") from exc
-    return _stream_csv(df, "pythia_forecasts_export.csv")
+    return _serve_export(
+        lambda: build_forecast_spd_export(_con(), include_test=include_test),
+        "pythia_forecasts_export.csv",
+        build_error_detail="Failed to build forecast download export",
+    )
 
 
 @router.get("/v1/downloads/triage.csv")
 def download_triage_csv(include_test: bool = Query(False)):
-    _acquire_heavy()
-    try:
-        con = _con()
-        df = build_triage_export(con, include_test=include_test)
+    def _build():
+        df = build_triage_export(_con(), include_test=include_test)
         logger.info(
             "Triage download export rows=%s runs=%s iso3=%s",
             len(df),
             df["Run ID"].nunique(dropna=True),
             df["ISO3"].nunique(dropna=True),
         )
-    except Exception as exc:
-        _HEAVY_REQUEST_SEMAPHORE.release()
-        logger.exception("Failed to build triage download export")
-        raise HTTPException(status_code=500, detail="Failed to build triage download export") from exc
-    return _stream_csv(df, "run_triage_results.csv")
+        return df
+
+    return _serve_export(
+        _build,
+        "run_triage_results.csv",
+        build_error_detail="Failed to build triage download export",
+    )
 
 
 @router.get("/v1/downloads/total_costs.csv")
 def download_total_costs_csv(include_test: bool = Query(False)):
-    _acquire_heavy()
-    try:
-        con = _con()
-        tables = build_costs_total(con, include_test=include_test)
-        df = _concat_cost_tables(tables)
-    except Exception as exc:
-        _HEAVY_REQUEST_SEMAPHORE.release()
-        logger.exception("Failed to build total cost export")
-        raise HTTPException(status_code=500, detail="Failed to build total cost export") from exc
-    return _stream_csv(df, "total_costs.csv")
+    return _serve_export(
+        lambda: _concat_cost_tables(build_costs_total(_con(), include_test=include_test)),
+        "total_costs.csv",
+        build_error_detail="Failed to build total cost export",
+    )
 
 
 @router.get("/v1/downloads/monthly_costs.csv")
 def download_monthly_costs_csv(include_test: bool = Query(False)):
-    _acquire_heavy()
-    try:
-        con = _con()
-        tables = build_costs_monthly(con, include_test=include_test)
-        df = _concat_cost_tables(tables)
-    except Exception as exc:
-        _HEAVY_REQUEST_SEMAPHORE.release()
-        logger.exception("Failed to build monthly cost export")
-        raise HTTPException(status_code=500, detail="Failed to build monthly cost export") from exc
-    return _stream_csv(df, "monthly_costs.csv")
+    return _serve_export(
+        lambda: _concat_cost_tables(build_costs_monthly(_con(), include_test=include_test)),
+        "monthly_costs.csv",
+        build_error_detail="Failed to build monthly cost export",
+    )
 
 
 @router.get("/v1/downloads/run_costs.csv")
 def download_run_costs_csv(include_test: bool = Query(False)):
-    _acquire_heavy()
-    try:
-        con = _con()
-        tables = build_costs_runs(con, include_test=include_test)
-        df = _concat_cost_tables(tables)
-    except Exception as exc:
-        _HEAVY_REQUEST_SEMAPHORE.release()
-        logger.exception("Failed to build run cost export")
-        raise HTTPException(status_code=500, detail="Failed to build run cost export") from exc
-    return _stream_csv(df, "run_costs.csv")
+    return _serve_export(
+        lambda: _concat_cost_tables(build_costs_runs(_con(), include_test=include_test)),
+        "run_costs.csv",
+        build_error_detail="Failed to build run cost export",
+    )
 
 
 @router.get("/v1/downloads/scores_ensemble_mean.csv")
 def download_scores_ensemble_mean_csv(include_test: bool = Query(False)):
-    _acquire_heavy()
-    try:
-        con = _con()
-        df = build_ensemble_scores_export(con, "ensemble_mean", include_test=include_test)
-    except Exception as exc:
-        _HEAVY_REQUEST_SEMAPHORE.release()
-        logger.exception("Failed to build ensemble_mean scores export")
-        raise HTTPException(status_code=500, detail="Failed to build ensemble_mean scores export") from exc
-    return _stream_csv(df, "scores_ensemble_mean.csv")
+    return _serve_export(
+        lambda: build_ensemble_scores_export(_con(), "ensemble_mean", include_test=include_test),
+        "scores_ensemble_mean.csv",
+        build_error_detail="Failed to build ensemble_mean scores export",
+    )
 
 
 @router.get("/v1/downloads/scores_ensemble_bayesmc.csv")
 def download_scores_ensemble_bayesmc_csv(include_test: bool = Query(False)):
-    _acquire_heavy()
-    try:
-        con = _con()
-        df = build_ensemble_scores_export(con, "ensemble_bayesmc", include_test=include_test)
-    except Exception as exc:
-        _HEAVY_REQUEST_SEMAPHORE.release()
-        logger.exception("Failed to build ensemble_bayesmc scores export")
-        raise HTTPException(status_code=500, detail="Failed to build ensemble_bayesmc scores export") from exc
-    return _stream_csv(df, "scores_ensemble_bayesmc.csv")
+    return _serve_export(
+        lambda: build_ensemble_scores_export(_con(), "ensemble_bayesmc", include_test=include_test),
+        "scores_ensemble_bayesmc.csv",
+        build_error_detail="Failed to build ensemble_bayesmc scores export",
+    )
 
 
 @router.get("/v1/downloads/scores_model.csv")
 def download_scores_model_csv(include_test: bool = Query(False)):
-    _acquire_heavy()
-    try:
-        con = _con()
-        df = build_model_scores_export(con, include_test=include_test)
-    except Exception as exc:
-        _HEAVY_REQUEST_SEMAPHORE.release()
-        logger.exception("Failed to build model scores export")
-        raise HTTPException(status_code=500, detail="Failed to build model scores export") from exc
-    return _stream_csv(df, "scores_model.csv")
+    return _serve_export(
+        lambda: build_model_scores_export(_con(), include_test=include_test),
+        "scores_model.csv",
+        build_error_detail="Failed to build model scores export",
+    )
 
 
 @router.get("/v1/downloads/rationales.csv")
@@ -193,16 +146,12 @@ def download_rationales_csv(
     model: str | None = Query(None, description="Model name filter (e.g. OpenAI, Claude, Gemini Flash)"),
     include_test: bool = Query(False),
 ):
-    _acquire_heavy()
-    try:
-        con = _con()
-        df = build_rationale_export(con, hazard_code=hazard, model_name=model, include_test=include_test)
-    except Exception as exc:
-        _HEAVY_REQUEST_SEMAPHORE.release()
-        logger.exception("Failed to build rationale export")
-        raise HTTPException(status_code=500, detail="Failed to build rationale export") from exc
     parts = ["rationales", hazard.strip().upper()]
     if model:
         safe_model = re.sub(r"[^a-zA-Z0-9_-]", "_", model)
         parts.append(safe_model)
-    return _stream_csv(df, "_".join(parts) + ".csv")
+    return _serve_export(
+        lambda: build_rationale_export(_con(), hazard_code=hazard, model_name=model, include_test=include_test),
+        "_".join(parts) + ".csv",
+        build_error_detail="Failed to build rationale export",
+    )
