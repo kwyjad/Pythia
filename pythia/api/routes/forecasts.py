@@ -28,6 +28,23 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Row cap for the unfiltered JSON endpoints: _rows_from_cursor materializes
+# every row as a Python dict, so an unbounded pull of forecasts_ensemble can
+# take hundreds of MB. The default is generous (well above current data
+# volume); explicit ?limit= raises it to the hard max.
+_DEFAULT_ROW_CAP = 200_000
+_MAX_ROW_CAP = 500_000
+
+
+def _capped_rows(con, sql: str, params, cap: int) -> dict:
+    """Execute with LIMIT cap+1; truncate to cap and flag if exceeded."""
+    sql += f" LIMIT {cap + 1}"
+    rows = _rows_from_cursor(_execute(con, sql, params))
+    if len(rows) > cap:
+        return {"rows": rows[:cap], "truncated": True}
+    return {"rows": rows}
+
+
 @router.get("/v1/forecasts/ensemble")
 def get_forecasts_ensemble(
     iso3: Optional[str] = Query(None),
@@ -37,6 +54,7 @@ def get_forecasts_ensemble(
     horizon_m: Optional[int] = Query(None),
     latest_only: bool = Query(True),
     include_test: bool = Query(False),
+    limit: Optional[int] = Query(None, ge=1, le=_MAX_ROW_CAP),
 ):
     con = _con()
     params = {}
@@ -82,7 +100,7 @@ def get_forecasts_ensemble(
         if where_bits:
             sql += " WHERE " + " AND ".join(where_bits)
         sql += " ORDER BY q.iso3, q.hazard_code, q.metric, q.target_month, fe.horizon_m, fe.class_bin"
-        return {"rows": _rows_from_cursor(_execute(con, sql, params))}
+        return _capped_rows(con, sql, params, limit or _DEFAULT_ROW_CAP)
 
     # latest_only=False: historical view (all runs)
     sql = f"""
@@ -114,7 +132,7 @@ def get_forecasts_ensemble(
         sql += " AND fe.horizon_m = :horizon_m"
 
     sql += " ORDER BY q.target_month, q.iso3, q.hazard_code, q.metric, q.run_id, fe.horizon_m, fe.class_bin"
-    return {"rows": _rows_from_cursor(_execute(con, sql, params))}
+    return _capped_rows(con, sql, params, limit or _DEFAULT_ROW_CAP)
 
 
 @router.get("/v1/forecasts/history")
@@ -124,6 +142,7 @@ def get_forecasts_history(
     metric: str = Query(...),
     target_month: str = Query(...),
     include_test: bool = Query(False),
+    limit: Optional[int] = Query(None, ge=1, le=_MAX_ROW_CAP),
 ):
     """
     Return all historical ensemble forecasts for a given question concept
@@ -162,7 +181,7 @@ def get_forecasts_history(
         {_test_filter(include_test, "fe")}
       ORDER BY h.created_at, fe.horizon_m, fe.class_bin
     """
-    return {"rows": _rows_from_cursor(_execute(con, sql, params))}
+    return _capped_rows(con, sql, params, limit or _DEFAULT_ROW_CAP)
 
 
 @router.get("/v1/resolutions")
