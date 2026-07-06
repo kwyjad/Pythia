@@ -70,7 +70,6 @@ from pythia.api.models import (
 from pythia.db.schema import connect as db_connect, ensure_schema
 from pythia.db.util import ensure_llm_calls_columns
 from pythia.config import load as load_cfg
-from pythia.pipeline.run import enqueue_run
 from resolver.query.countries_index import compute_countries_index
 from resolver.query.costs import (
     COST_COLUMNS,
@@ -309,41 +308,31 @@ def health():
     }
 
 
-@app.get("/v1/version")
-def api_version() -> Dict[str, Any]:
-    try:
-        manifest = maybe_sync_latest_db()
-    except DbSyncError as exc:
-        manifest = get_cached_manifest()
-        if not manifest:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if not manifest:
-        raise HTTPException(status_code=503, detail="Manifest not available yet")
-    result = dict(manifest)
-    # Surface DB-sync health so a stale/drifted API is obvious at a glance.
-    result["sync_status"] = get_sync_status()
-    # Add DB staleness diagnostics so operators can verify the API has the latest data.
+# Staleness probes (full-column MAX scans over 5 tables) are cached per DB
+# version: the dashboard homepage is force-dynamic and calls /v1/version on
+# every page view, which used to re-run all 6 scans each time. The DB only
+# changes when the sync layer os.replace()s the file, which advances its
+# mtime — the same freshness signal _maybe_refresh_db trusts.
+_VERSION_PROBE_LOCK = threading.Lock()
+_VERSION_PROBE_CACHE: Optional[tuple] = None  # (db_mtime, probes dict)
+
+
+def _compute_staleness_probes() -> Dict[str, Any]:
+    probes: Dict[str, Any] = {}
     try:
         con = _con()
         row = con.execute(
             "SELECT MAX(strftime(created_at, '%Y-%m')) FROM forecasts_ensemble WHERE created_at IS NOT NULL"
         ).fetchone()
-        result["latest_forecast_month"] = row[0] if row and row[0] else None
+        probes["latest_forecast_month"] = row[0] if row and row[0] else None
         run_row = con.execute(
             "SELECT run_id FROM forecasts_ensemble WHERE run_id IS NOT NULL ORDER BY run_id DESC LIMIT 1"
         ).fetchone()
-        result["latest_forecast_run_id"] = run_row[0] if run_row and run_row[0] else None
+        probes["latest_forecast_run_id"] = run_row[0] if run_row and run_row[0] else None
     except Exception:
-        result["latest_forecast_month"] = None
-        result["latest_forecast_run_id"] = None
+        probes["latest_forecast_month"] = None
+        probes["latest_forecast_run_id"] = None
 
-    # "Last updated" should reflect the most recent *pipeline activity*, not just
-    # the last Horizon Scanner run. The scoring/calibration loop updates the data
-    # the dashboard shows (resolutions/scores/calibration) without creating a new
-    # HS run, so latest_hs_created_at alone under-reports freshness. Surface a
-    # unified latest_data_at = MAX(created_at) across the contributing tables.
-    # NOTE: deliberately excludes the manifest's `created_utc` (publish/repackage
-    # time), which is later than and distinct from when the data was computed.
     def _max_created_at(table: str) -> Optional[str]:
         try:
             con_local = _con()
@@ -358,19 +347,70 @@ def api_version() -> Dict[str, Any]:
             logger.warning("staleness probe failed for %s: %r", table, exc)
             return None
 
-    result["latest_scores_at"] = _max_created_at("scores")
-    result["latest_calibration_at"] = _max_created_at("calibration_weights")
-    latest_resolutions_at = _max_created_at("resolutions")
-    latest_advice_at = _max_created_at("calibration_advice")
-    latest_forecast_at = _max_created_at("forecasts_ensemble")
+    probes["latest_scores_at"] = _max_created_at("scores")
+    probes["latest_calibration_at"] = _max_created_at("calibration_weights")
+    probes["latest_resolutions_at"] = _max_created_at("resolutions")
+    probes["latest_advice_at"] = _max_created_at("calibration_advice")
+    probes["latest_forecast_at"] = _max_created_at("forecasts_ensemble")
+    return probes
+
+
+def _staleness_probes() -> Dict[str, Any]:
+    global _VERSION_PROBE_CACHE
+    mtime = _core._db_file_mtime()
+    with _VERSION_PROBE_LOCK:
+        if (
+            _VERSION_PROBE_CACHE is not None
+            and mtime is not None
+            and _VERSION_PROBE_CACHE[0] == mtime
+        ):
+            return _VERSION_PROBE_CACHE[1]
+    probes = _compute_staleness_probes()
+    # Don't cache an all-None result: it usually means a transient connection
+    # failure, and caching it would blank the staleness fields until the next
+    # DB refresh. (A genuinely empty DB re-probes each call — it's cheap there.)
+    if mtime is not None and any(v is not None for v in probes.values()):
+        with _VERSION_PROBE_LOCK:
+            _VERSION_PROBE_CACHE = (mtime, probes)
+    return probes
+
+
+@app.get("/v1/version")
+def api_version() -> Dict[str, Any]:
+    try:
+        manifest = maybe_sync_latest_db()
+    except DbSyncError as exc:
+        manifest = get_cached_manifest()
+        if not manifest:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not manifest:
+        raise HTTPException(status_code=503, detail="Manifest not available yet")
+    result = dict(manifest)
+    # Surface DB-sync health so a stale/drifted API is obvious at a glance.
+    result["sync_status"] = get_sync_status()
+    # Add DB staleness diagnostics so operators can verify the API has the
+    # latest data. Probes are cached per DB version (see _staleness_probes).
+    probes = _staleness_probes()
+    result["latest_forecast_month"] = probes["latest_forecast_month"]
+    result["latest_forecast_run_id"] = probes["latest_forecast_run_id"]
+
+    # "Last updated" should reflect the most recent *pipeline activity*, not just
+    # the last Horizon Scanner run. The scoring/calibration loop updates the data
+    # the dashboard shows (resolutions/scores/calibration) without creating a new
+    # HS run, so latest_hs_created_at alone under-reports freshness. Surface a
+    # unified latest_data_at = MAX(created_at) across the contributing tables.
+    # NOTE: deliberately excludes the manifest's `created_utc` (publish/repackage
+    # time), which is later than and distinct from when the data was computed.
+    result["latest_scores_at"] = probes["latest_scores_at"]
+    result["latest_calibration_at"] = probes["latest_calibration_at"]
 
     candidates = [
         result.get("latest_hs_created_at"),
-        latest_forecast_at,
-        latest_resolutions_at,
+        probes["latest_forecast_at"],
+        probes["latest_resolutions_at"],
         result["latest_scores_at"],
         result["latest_calibration_at"],
-        latest_advice_at,
+        probes["latest_advice_at"],
     ]
     normalized = [str(c)[:19] for c in candidates if c]
     result["latest_data_at"] = max(normalized) if normalized else None
@@ -379,6 +419,19 @@ def api_version() -> Dict[str, Any]:
 
 @app.post("/v1/run")
 def start_run(payload: dict = Body(...), _=Depends(require_admin_token)):
+    if os.getenv("PYTHIA_ALLOW_INPROCESS_RUN", "0").strip().lower() not in ("1", "true", "yes"):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "In-process pipeline runs are disabled on this deployment "
+                "(set PYTHIA_ALLOW_INPROCESS_RUN=1 to enable)"
+            ),
+        )
+    # Deferred import: pythia.pipeline.run pulls in the full horizon_scanner
+    # + calibration module tree (~100-300MB RSS), which must never load in
+    # the memory-constrained API process unless a run is explicitly allowed.
+    from pythia.pipeline.run import enqueue_run
+
     countries = payload.get("countries") or []
     run_id = enqueue_run(countries)
     return {"accepted": True, "run_id": run_id}

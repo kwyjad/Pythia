@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 from typing import Generator
 
@@ -45,7 +47,12 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
     def _fake_enqueue_run(_: list[str]) -> str:
         return "ui_run_test"
 
-    monkeypatch.setattr("pythia.api.app.enqueue_run", _fake_enqueue_run)
+    # /v1/run imports pythia.pipeline.run lazily inside the handler (the real
+    # module pulls in the full horizon_scanner tree); stub it in sys.modules so
+    # the deferred import resolves to the fake without loading the pipeline.
+    stub = types.ModuleType("pythia.pipeline.run")
+    stub.enqueue_run = _fake_enqueue_run
+    monkeypatch.setitem(sys.modules, "pythia.pipeline.run", stub)
 
     try:
         yield
@@ -56,6 +63,7 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
 
 def test_public_reads_and_admin_run_require_token(api_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PYTHIA_API_TOKEN", "x")
+    monkeypatch.setenv("PYTHIA_ALLOW_INPROCESS_RUN", "1")
     monkeypatch.delenv("PYTHIA_API_KEY", raising=False)
     pythia_config.load.cache_clear()
 
@@ -73,6 +81,20 @@ def test_public_reads_and_admin_run_require_token(api_env: None, monkeypatch: py
     authed = TestClient(app, headers={"Authorization": "Bearer x"})
     resp = authed.post("/v1/run", json={"countries": []})
     assert resp.status_code == 200
+
+
+def test_admin_run_disabled_by_default(api_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without PYTHIA_ALLOW_INPROCESS_RUN=1 the endpoint refuses even with a
+    valid token — the in-process pipeline must never run on the memory-
+    constrained API deployment unless explicitly enabled."""
+    monkeypatch.setenv("PYTHIA_API_TOKEN", "x")
+    monkeypatch.delenv("PYTHIA_ALLOW_INPROCESS_RUN", raising=False)
+    pythia_config.load.cache_clear()
+
+    authed = TestClient(app, headers={"Authorization": "Bearer x"})
+    resp = authed.post("/v1/run", json={"countries": []})
+    assert resp.status_code == 503
+    assert "PYTHIA_ALLOW_INPROCESS_RUN" in resp.json()["detail"]
 
 
 def test_admin_run_fails_closed_without_token(api_env: None, monkeypatch: pytest.MonkeyPatch) -> None:

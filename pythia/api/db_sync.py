@@ -324,6 +324,15 @@ def _refresh_latest_runs(db_path: Path) -> None:
         logger.warning("Failed to open DuckDB for latest run introspection: %s", exc)
         return
     try:
+        # Cap this connection like the main read connection. Without an explicit
+        # limit DuckDB allows itself ~80% of system RAM, and this runs right
+        # after a ~1GB DB download — the worst moment for a memory spike.
+        # (Env read directly: importing pythia.api.core here would be circular.)
+        conn.execute(f"SET memory_limit='{os.getenv('PYTHIA_DUCKDB_MEMORY_LIMIT', '150MB')}'")
+        conn.execute(f"SET threads={int(os.getenv('PYTHIA_DUCKDB_THREADS', '2'))}")
+    except Exception:
+        logger.warning("Failed to cap introspection connection memory", exc_info=True)
+    try:
         latest: Dict[str, Any] = {}
         hs_latest = _fetch_latest_run(
             conn,
