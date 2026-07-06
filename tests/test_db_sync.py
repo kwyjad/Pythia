@@ -176,3 +176,44 @@ def test_get_sync_status_reports_drift_on_failed_download(tmp_path, monkeypatch)
     assert status["manifest_key"] == "key-2"
     assert status["downloaded_key"] == "key-1"
     assert status["in_sync"] is False  # drift is visible, not silently green
+
+
+def test_refresh_latest_runs_caps_connection_memory(tmp_path, monkeypatch):
+    """The introspection connection must be capped like the main read
+    connection — uncapped, DuckDB allows itself ~80% of system RAM right
+    after a large DB download (the post-publish OOM window on Render)."""
+    import duckdb
+
+    db_path = tmp_path / "resolver.duckdb"
+    seed = duckdb.connect(str(db_path))
+    seed.execute("CREATE TABLE hs_runs (hs_run_id TEXT, generated_at TIMESTAMP)")
+    seed.close()
+
+    executed: list[str] = []
+    real_connect = db_sync.duckdb_io.duckdb.connect
+
+    class _RecordingConn:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *args, **kwargs):
+            executed.append(" ".join(str(sql).split()))
+            return self._inner.execute(sql, *args, **kwargs)
+
+        def close(self):
+            self._inner.close()
+
+    def fake_connect(path, read_only=False):
+        return _RecordingConn(real_connect(path, read_only=read_only))
+
+    monkeypatch.setattr(db_sync.duckdb_io.duckdb, "connect", fake_connect)
+    monkeypatch.setenv("PYTHIA_DUCKDB_MEMORY_LIMIT", "123MB")
+    monkeypatch.setenv("PYTHIA_DUCKDB_THREADS", "1")
+
+    db_sync._refresh_latest_runs(db_path)
+
+    assert "SET memory_limit='123MB'" in executed
+    assert "SET threads=1" in executed
+    # Caps must be applied before any data query touches the DB.
+    first_query = next(i for i, s in enumerate(executed) if not s.upper().startswith("SET "))
+    assert all(i < first_query for i, s in enumerate(executed) if s.upper().startswith("SET "))
