@@ -408,6 +408,61 @@ function TrackSplit({ data }: Props) {
   );
 }
 
+// ---- 6b. Sibyl parallel track ----
+function SibylSection({ data }: Props) {
+  const s = data.sibyl;
+  if (!s) {
+    return null;
+  }
+
+  return (
+    <Section title="Sibyl — deep-research track">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-4">
+          <div className="text-xs font-semibold uppercase tracking-wide text-indigo-600">
+            Coverage
+          </div>
+          <div className="mt-1 text-2xl font-bold text-indigo-600">
+            {s.n_forecast} / {s.n_selected}
+          </div>
+          <div className="mt-0.5 text-xs text-fred-muted">
+            top-volatility questions forecast · {s.n_skipped} skipped
+          </div>
+        </div>
+        <div className="rounded-lg border border-fred-secondary/30 bg-fred-secondary/5 p-4">
+          <div className="text-xs font-semibold uppercase tracking-wide text-fred-secondary">
+            Run cost
+          </div>
+          <div className="mt-1 text-2xl font-bold text-fred-secondary">
+            ${s.run_cost_usd.toFixed(2)}
+          </div>
+          <div className="mt-0.5 text-xs text-fred-muted">
+            Opus ${s.opus_cost_usd.toFixed(2)} · Brave ${s.brave_cost_usd.toFixed(2)} ·
+            K={s.k} · {s.aggregation ?? "?"}
+          </div>
+        </div>
+        <div className="rounded-lg border border-fred-secondary/30 bg-fred-bg p-4">
+          <div className="text-xs font-semibold uppercase tracking-wide text-fred-muted">
+            Budget status
+          </div>
+          {s.budget_capped ? (
+            <>
+              <div className="mt-1 text-xl font-bold text-red-600">CAPPED</div>
+              <div className="mt-0.5 text-xs text-fred-muted">
+                {s.n_skipped_budget_cap} question
+                {s.n_skipped_budget_cap === 1 ? "" : "s"} skipped by the run
+                budget cap
+              </div>
+            </>
+          ) : (
+            <div className="mt-1 text-xl font-bold text-green-600">Within budget</div>
+          )}
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 // ---- 6. Performance ----
 function PerformanceSection({ data }: Props) {
   const p = data.performance;
@@ -486,6 +541,7 @@ export default function RunSummaryView({ data }: Props) {
       <TriageSection data={data} />
       <MetricGrid data={data} />
       <TrackSplit data={data} />
+      <SibylSection data={data} />
       <PerformanceSection data={data} />
       <CostBreakdown data={data} />
     </div>

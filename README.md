@@ -46,6 +46,7 @@ Resolver facts/base rates → Horizon Scanner per-hazard pipeline:
 - **Hazard-specific reasoning**: Per-hazard forecasting instructions injected into SPD prompts. See [`forecaster/hazard_prompts.py`](forecaster/hazard_prompts.py).
 - **Calibration advice**: Per-hazard/metric calibration guidance generated from historical performance, injected into forecasting prompts. See [`pythia/tools/generate_calibration_advice.py`](pythia/tools/generate_calibration_advice.py).
 - **Forecaster SPD v2 ensemble**: `python -m forecaster.cli --mode pythia` runs SPD v2 prompts across the active ensemble and writes per-model outputs (`forecasts_raw`) and aggregated results (`forecasts_ensemble`). Questions are routed by track: **Track 1** (RC-elevated, level > 0) uses the full multi-model ensemble; **Track 2** (priority, no RC) uses a lightweight single-model path (Gemini Flash).
+- **Sibyl (parallel deep-research track)**: `python -m sibyl.run` independently re-forecasts the 10 highest-volatility affected/fatalities questions per run using agentic open-web research (Claude Opus + Brave Search). K independent belief-updating trials per question are linear-pooled into an SPD written beside the standard track (`model_name='sibyl'` in `forecasts_raw`/`forecasts_ensemble`), so scoring grades the two tracks head-to-head. Shares exactly one structured input with the standard track: the Resolver base rate. Hard run budget cap (default $40). See [`sibyl/`](sibyl/) and [`sibyl/DISCOVERY.md`](sibyl/DISCOVERY.md).
 - **Scenarios (Track 1 only)**: When an ensemble SPD is available, scenarios can be generated for Track 1 questions and written back to DuckDB.
 - **Dashboard + API**: FastAPI serves `/v1/*` endpoints for the dashboard, downloads, and diagnostics. The Next.js UI lives in `web/`.
 
@@ -198,6 +199,7 @@ Key tables (see [`pythia/db/schema.py`](pythia/db/schema.py) and [`SCHEMAS.md`](
 - **Context sources**: `enso_state`, `seasonal_tc_outlooks`, `seasonal_tc_context_cache`, `hdx_signals`, `crisiswatch_entries`
 - **Questions + research**: `questions`, `question_research`
 - **Forecasts**: `forecasts_raw`, `forecasts_ensemble` (both include `reasoning_trace_json`)
+- **Sibyl**: `sibyl_runs` (run coverage, cost, budget_capped), `sibyl_forecasts` (per-question trial traces, pooled quantiles, JS divergences)
 - **Resolutions + scoring**: `resolutions`, `scores`, `eiv_scores`
 - **Calibration**: `calibration_weights`, `calibration_advice`, `bucket_centroids`, `bucket_definitions`
 - **Diagnostics**: `llm_calls`, `question_run_metrics`

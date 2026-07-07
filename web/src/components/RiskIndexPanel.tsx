@@ -140,6 +140,8 @@ export default function RiskIndexPanel({
   const [summaryData, setSummaryData] = useState<RunSummaryResponse | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
   const [perfScores, setPerfScores] = useState<PerformanceScoresResponse | null>(null);
+  // Source toggle: standard ensemble vs the Sibyl deep-research track.
+  const [sibylSource, setSibylSource] = useState(false);
   const searchParams = useSearchParams();
   const showKpiDebug = searchParams?.get("debug_kpi") === "1";
 
@@ -235,7 +237,8 @@ export default function RiskIndexPanel({
   const fetchRiskIndex = async (
     nextView: RiskView,
     runMonth: string | null,
-    runId: string | null
+    runId: string | null,
+    useSibyl?: boolean
   ) => {
     // When a specific run is selected, let the API auto-select the correct
     // target_month for that run's questions (target_month conventions differ
@@ -250,6 +253,7 @@ export default function RiskIndexPanel({
         ? { target_month: forecastTargetMonthForRun }
         : {}),
       ...(runId ? { forecaster_run_id: runId } : {}),
+      ...((useSibyl ?? sibylSource) ? { model: "sibyl" } : {}),
       include_test: includeTest || undefined,
     });
     setRows(response.rows ?? []);
@@ -310,6 +314,24 @@ export default function RiskIndexPanel({
       console.warn("Risk index unavailable:", fetchError);
       setError("Risk index unavailable (API error).");
       setRunMonthFallback(false);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSibylToggle = async () => {
+    const next = !sibylSource;
+    setSibylSource(next);
+    if (view === "ALL_METRICS_SUMMARY") {
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    try {
+      await fetchRiskIndex(view, selectedRunMonth, selectedRunId, next);
+    } catch (fetchError) {
+      console.warn("Risk index unavailable:", fetchError);
+      setError("Risk index unavailable (API error).");
     } finally {
       setIsLoading(false);
     }
@@ -397,6 +419,23 @@ export default function RiskIndexPanel({
               selectedRunId={selectedRunId}
               onChange={handleRunChange}
             />
+            <button
+              type="button"
+              disabled={isLoading || isSummaryView}
+              onClick={handleSibylToggle}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                sibylSource
+                  ? "border border-indigo-400 bg-indigo-100 text-indigo-800"
+                  : "border border-fred-secondary bg-fred-surface text-fred-muted"
+              } ${isSummaryView ? "opacity-50" : ""}`}
+              title={
+                sibylSource
+                  ? "Showing Sibyl deep-research forecasts — click for the standard ensemble"
+                  : "Showing standard ensemble forecasts — click to overlay the Sibyl deep-research track (top-10 volatile questions only)"
+              }
+            >
+              {sibylSource ? "Sibyl ON" : "Sibyl OFF"}
+            </button>
           </div>
           {isSummaryView ? (
             <div className="text-xs text-fred-muted">

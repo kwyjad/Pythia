@@ -42,7 +42,7 @@ HALF_LIFE_MONTHS = 12.0
 # making the "best model" advice name an aggregate. NULL model_name rows
 # (the ensemble score convention in compute_scores) are excluded likewise.
 AGGREGATE_MODEL_NAMES = frozenset(
-    {"ensemble_mean_v2", "ensemble_bayesmc_v2", "track2_flash", "ensemble"}
+    {"ensemble_mean_v2", "ensemble_bayesmc_v2", "track2_flash", "ensemble", "sibyl"}
 )
 
 # Adaptive softmax temperature (replaces fixed TEMP_SOFTMAX = 0.1)

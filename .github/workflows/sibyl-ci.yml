@@ -1,0 +1,60 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+name: Sibyl CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sibyl/**"
+      - "tests/test_sibyl_*.py"
+      - "tests/sibyl_test_utils.py"
+      - "pythia/db/schema.py"
+      - "pythia/buckets.py"
+      - "pythia/web_research/backends/brave_search.py"
+      - ".github/workflows/sibyl-ci.yml"
+  pull_request:
+    paths:
+      - "sibyl/**"
+      - "tests/test_sibyl_*.py"
+      - "tests/sibyl_test_utils.py"
+      - "pythia/db/schema.py"
+      - "pythia/buckets.py"
+      - "pythia/web_research/backends/brave_search.py"
+      - ".github/workflows/sibyl-ci.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  sibyl-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (minimal, via python_library_requirements.txt)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+          pip install pytest pytest-timeout
+
+      - name: Run Sibyl unit + smoke tests
+        run: |
+          pytest -vv tests/test_sibyl_aggregate.py \
+                     tests/test_sibyl_belief_state.py \
+                     tests/test_sibyl_base_rates.py \
+                     tests/test_sibyl_leakage.py \
+                     tests/test_sibyl_cost.py \
+                     tests/test_sibyl_smoke.py

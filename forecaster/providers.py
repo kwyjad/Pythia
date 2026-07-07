@@ -561,6 +561,14 @@ _DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").
 
 _OPENAI_NO_CUSTOM_TEMPERATURE = {"gpt-5-mini"}
 _KIMI_FIXED_TEMPERATURE_MODELS = {"kimi-k2.5"}
+# Anthropic models that reject sampling params outright (HTTP 400 if sent):
+# the Opus 4.7+/Sonnet 5+/Fable family removed temperature/top_p/top_k.
+_ANTHROPIC_NO_TEMPERATURE_PREFIXES = (
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-fable",
+)
 _OPENAI_TIMEOUT = _resolve_timeout("OPENAI_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _ANTHROPIC_TIMEOUT = _resolve_timeout("ANTHROPIC_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _GEMINI_TIMEOUT = _resolve_timeout("GEMINI_CALL_TIMEOUT_SEC", GEMINI_CALL_TIMEOUT_SEC, 60.0)
@@ -812,6 +820,9 @@ def call_anthropic(prompt: str, model: str, temperature: float, *, purpose: str 
         "temperature": float(temperature),
         "messages": [{"role": "user", "content": prompt}],
     }
+    # Opus 4.7+ family models reject sampling params with HTTP 400.
+    if model.lower().startswith(_ANTHROPIC_NO_TEMPERATURE_PREFIXES):
+        body.pop("temperature", None)
     try:
         resp = requests.post(url, headers=headers, json=body, timeout=_ANTHROPIC_TIMEOUT)
     except Exception as exc:

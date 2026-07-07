@@ -473,6 +473,7 @@ from pythia.api.routes import (  # noqa: E402
     questions as _questions_routes,
     resolver_explorer as _resolver_explorer_routes,
     risk_index as _risk_index_routes,
+    sibyl as _sibyl_routes,
 )
 
 app.include_router(_questions_routes.router)
@@ -539,6 +540,7 @@ def get_countries(
 app.include_router(_resolver_explorer_routes.router)
 app.include_router(_downloads_routes.router)
 app.include_router(_costs_routes.router)
+app.include_router(_sibyl_routes.router)
 
 # ---------------------------------------------------------------------------
 # Backward-compat re-exports of names moved into route modules.

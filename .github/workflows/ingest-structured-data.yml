@@ -156,6 +156,12 @@ jobs:
             --json databaseId,createdAt \
             --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
           gh run list \
+            --workflow "Sibyl Deep Research" \
+            --branch main \
+            --status success \
+            --json databaseId,createdAt \
+            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Sibyl Deep Research"' >>"${CANDIDATES_FILE}" || true
+          gh run list \
             --workflow "Resolver Update" \
             --branch main \
             --status success \

@@ -1515,6 +1515,40 @@ def diagnostics_run_summary(
                     "median": round(float(row[0][1]), 4) if row[0][1] is not None else None,
                 }
 
+    # ---- Sibyl parallel track coverage -------------------------------------
+    sibyl_block: Optional[Dict[str, Any]] = None
+    if _table_exists(con, "sibyl_runs"):
+        sibyl_run = _q(
+            "SELECT sibyl_run_id, budget_capped, run_cost_usd, opus_cost_usd, "
+            "brave_cost_usd, n_selected, n_forecast, n_skipped, k, aggregation "
+            "FROM sibyl_runs "
+            + ("WHERE hs_run_id = ? " if hs_run_id else "")
+            + "ORDER BY created_at DESC LIMIT 1",
+            [hs_run_id] if hs_run_id else [],
+        )
+        if sibyl_run:
+            (s_run_id, s_capped, s_cost, s_opus, s_brave,
+             s_selected, s_forecast, s_skipped, s_k, s_agg) = sibyl_run[0]
+            skipped_by_cap = _q1(
+                "SELECT COUNT(*) FROM sibyl_forecasts "
+                "WHERE sibyl_run_id = ? AND status = 'skipped' "
+                "AND skip_reason = 'run budget cap'",
+                [s_run_id],
+            ) or 0
+            sibyl_block = {
+                "sibyl_run_id": s_run_id,
+                "budget_capped": bool(s_capped),
+                "run_cost_usd": round(float(s_cost or 0.0), 2),
+                "opus_cost_usd": round(float(s_opus or 0.0), 2),
+                "brave_cost_usd": round(float(s_brave or 0.0), 2),
+                "n_selected": int(s_selected or 0),
+                "n_forecast": int(s_forecast or 0),
+                "n_skipped": int(s_skipped or 0),
+                "n_skipped_budget_cap": int(skipped_by_cap),
+                "k": int(s_k or 0),
+                "aggregation": s_agg,
+            }
+
     return {
         "run_id": run_id,
         "hs_run_id": hs_run_id,
@@ -1527,4 +1561,5 @@ def diagnostics_run_summary(
         "cost": cost,
         "performance": performance,
         "llm_health": llm_health,
+        "sibyl": sibyl_block,
     }

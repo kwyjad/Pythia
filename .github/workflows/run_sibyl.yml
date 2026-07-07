@@ -4,15 +4,33 @@
 # See the LICENSE file in the project root for details.
 
 ---
-name: Pythia — Compute Calibration Weights & Advice
+name: Sibyl Deep Research
+
+# Sibling to the standard forecasting pipeline: runs once a Horizon Scanner
+# Triage run (which writes the volatility/RC scores and questions Sibyl
+# selects from) has completed. Forecasts the top-10 highest-volatility
+# affected/fatalities questions via agentic open-web research (Opus + Brave)
+# and writes the results beside the standard track in the canonical DB.
 
 on:
   workflow_run:
-    workflows: ["Pythia — Compute SPD Scores"]
+    workflows: ["Horizon Scanner Triage"]
     types: [completed]
 
-  # Optional manual trigger
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      hs_run_id:
+        description: "HS run to forecast (default: latest with active questions)"
+        required: false
+        default: ""
+      run_hard_cap_usd:
+        description: "Hard run budget cap in USD"
+        required: false
+        default: "40"
+      db_run_id:
+        description: "Force pythia-resolver-db from this workflow run id"
+        required: false
+        default: ""
 
 concurrency:
   group: pythia-resolver-db
@@ -20,14 +38,16 @@ concurrency:
 
 permissions:
   contents: read
-  actions: write   # needed to dispatch publish_latest_data.yml at the end of the chain
+  actions: write  # dispatches publish_latest_data.yml after the artifact upload
 
 jobs:
-  compute-calibration:
+  sibyl:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
 
     steps:
       - name: Checkout repository
@@ -70,6 +90,18 @@ jobs:
             return 0
           }
 
+          # ── Path A0: explicit db_run_id from manual dispatch ──
+          FORCE_RUN_ID="${{ github.event.inputs.db_run_id }}"
+          if [ -n "$FORCE_RUN_ID" ]; then
+            echo "Downloading pythia-resolver-db from forced run $FORCE_RUN_ID"
+            if gh run download "$FORCE_RUN_ID" -n pythia-resolver-db --dir data && locate_and_copy_db; then
+              ls -lh data/resolver.duckdb
+              exit 0
+            fi
+            echo "ERROR: could not download pythia-resolver-db from run $FORCE_RUN_ID"
+            exit 1
+          fi
+
           # ── Path A: triggered by workflow_run — download from triggering run ──
           RUN_ID="${{ github.event.workflow_run.id }}"
           if [ -n "$RUN_ID" ]; then
@@ -88,18 +120,6 @@ jobs:
           CANDIDATES_FILE=$(mktemp)
 
           gh run list \
-            --workflow "Pythia — Compute SPD Scores" \
-            --branch main --status success \
-            --json databaseId,createdAt --limit 10 \
-            | jq -r '.[] | "\(.createdAt),\(.databaseId),Compute SPD Scores"' >>"${CANDIDATES_FILE}" || true
-
-          gh run list \
-            --workflow "Pythia — Compute Calibration Weights & Advice" \
-            --branch main --status success \
-            --json databaseId,createdAt --limit 10 \
-            | jq -r '.[] | "\(.createdAt),\(.databaseId),Compute Calibration"' >>"${CANDIDATES_FILE}" || true
-
-          gh run list \
             --workflow "Horizon Scanner Triage" \
             --branch main --status success \
             --json databaseId,createdAt --limit 10 \
@@ -110,6 +130,18 @@ jobs:
             --branch main --status success \
             --json databaseId,createdAt --limit 10 \
             | jq -r '.[] | "\(.createdAt),\(.databaseId),Sibyl Deep Research"' >>"${CANDIDATES_FILE}" || true
+
+          gh run list \
+            --workflow "Pythia — Compute Calibration Weights & Advice" \
+            --branch main --status success \
+            --json databaseId,createdAt --limit 10 \
+            | jq -r '.[] | "\(.createdAt),\(.databaseId),Compute Calibration"' >>"${CANDIDATES_FILE}" || true
+
+          gh run list \
+            --workflow "Pythia — Compute SPD Scores" \
+            --branch main --status success \
+            --json databaseId,createdAt --limit 10 \
+            | jq -r '.[] | "\(.createdAt),\(.databaseId),Compute SPD Scores"' >>"${CANDIDATES_FILE}" || true
 
           gh run list \
             --workflow "Ingest Structured Data" \
@@ -149,77 +181,40 @@ jobs:
             exit 1
           fi
 
-      - name: Retire blocked-hazard questions (DI / HW / CU / ACO)
+      - name: Gate on eligible questions with volatility scores
+        id: gate
+        run: |
+          set -euo pipefail
+          python - <<'EOF' | tee gate_out.txt
+          import os
+          os.environ.setdefault("PYTHIA_DB_URL", os.environ["RESOLVER_DB_URL"])
+          from sibyl.select_questions import select_top_questions
+          qs = select_top_questions(os.environ.get("SIBYL_HS_RUN_ID") or None)
+          print(f"SIBYL_ELIGIBLE_COUNT={len(qs)}")
+          EOF
+          COUNT=$(grep -oE 'SIBYL_ELIGIBLE_COUNT=[0-9]+' gate_out.txt | tail -1 | cut -d= -f2)
+          echo "eligible=${COUNT:-0}" >> "$GITHUB_OUTPUT"
+          if [ "${COUNT:-0}" = "0" ]; then
+            echo "No eligible questions with volatility scores — skipping Sibyl run."
+          fi
         env:
-          PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
-        run: |
-          echo "=== Retiring blocked-hazard questions ==="
-          python -m scripts.retire_blocked_hazard_questions
-          echo "=== retire_blocked_hazard_questions completed ==="
+          SIBYL_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
 
-      - name: Seed and update bucket centroids
+      - name: Run Sibyl
+        if: steps.gate.outputs.eligible != '0'
         env:
-          PYTHIA_CONFIG_YAML: "pythia/config.yaml"
-          PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
+          MODEL_COSTS_JSON: ${{ secrets.MODEL_COSTS_JSON }}
+          SIBYL_RUN_HARD_CAP_USD: ${{ github.event.inputs.run_hard_cap_usd || '40' }}
+          SIBYL_BUDGET_USD_PER_QUESTION: ${{ vars.SIBYL_BUDGET_USD_PER_QUESTION || '' }}
         run: |
-          echo "=== Seeding bucket centroids from BUCKET_SPECS ==="
-          python -m scripts.db.update_bucket_centroids
-          echo "=== EMA centroid update (all metrics) ==="
-          for METRIC in PA FATALITIES EVENT_OCCURRENCE PHASE3PLUS_IN_NEED; do
-            echo "--- metric=${METRIC} ---"
-            python -m pythia.tools.compute_bucket_centroids --ema --metric "${METRIC}" --db-url "${RESOLVER_DB_URL}" \
-              || echo "WARN: EMA update failed for metric=${METRIC} (non-fatal)"
-          done
-          echo "=== Centroid update completed ==="
-
-      - name: Compute calibration weights/advice from scores
-        env:
-          PYTHIA_CONFIG_YAML: "pythia/config.yaml"
-        run: |
-          echo "=== Running pythia.tools.compute_calibration_pythia ==="
-          python -m pythia.tools.compute_calibration_pythia --db-url "${RESOLVER_DB_URL}"
-          echo "=== compute_calibration_pythia completed ==="
-
-      - name: Generate concrete calibration advice
-        env:
-          PYTHIA_CONFIG_YAML: "pythia/config.yaml"
-        run: |
-          echo "=== Running pythia.tools.generate_calibration_advice ==="
-          python -m pythia.tools.generate_calibration_advice --db-url "${RESOLVER_DB_URL}"
-          echo "=== generate_calibration_advice completed ==="
-
-      - name: Emit calibration summary
-        if: always()
-        run: |
-          DB_PATH="${RESOLVER_DB_URL#duckdb:///}"
-          python - <<PY
-          import duckdb, json, pathlib
-          con = duckdb.connect("${DB_PATH}", read_only=True)
-          tables = (
-              "resolutions",
-              "scores",
-              "bucket_centroids",
-              "bucket_definitions",
-              "calibration_weights",
-              "calibration_advice",
-          )
-          counts = {}
-          for t in tables:
-              try:
-                  counts[t] = con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-              except Exception as exc:
-                  counts[t] = f"error: {exc}"
-          summary = {"table_counts": counts}
-          pathlib.Path("calibration_summary.json").write_text(json.dumps(summary, indent=2))
-          print(json.dumps(summary, indent=2))
-          PY
-
-      - name: Upload calibration summary
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: calibration-summary
-          path: calibration_summary.json
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.hs_run_id }}" ]; then
+            python -m sibyl.run --hs-run-id "${{ github.event.inputs.hs_run_id }}" | tee sibyl_stdout.txt
+          else
+            python -m sibyl.run | tee sibyl_stdout.txt
+          fi
 
       - name: Upload canonical resolver DB
         if: success()
@@ -228,15 +223,8 @@ jobs:
           name: pythia-resolver-db
           path: data/resolver.duckdb
 
-      # The implicit workflow_run chain (Resolver Update → Resolutions → Scores →
-      # Calibration → Publish) is too deep: GitHub does not propagate the
-      # workflow_run event from Calibration to "Publish Latest Data (Release)", so
-      # the post-calibration terminus DB never reaches the release on its own.
-      # Dispatch the publish explicitly, targeting THIS run's pythia-resolver-db
-      # artifact (uploaded in the step above). workflow_dispatch is one of the
-      # documented events that GITHUB_TOKEN is allowed to trigger, so no PAT needed.
-      - name: Publish post-calibration DB to release
-        if: success()
+      - name: Publish post-Sibyl DB to release
+        if: success() && steps.gate.outputs.eligible != '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
