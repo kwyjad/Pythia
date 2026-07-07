@@ -101,6 +101,13 @@ ELIGIBLE_HAZARD_METRICS = frozenset(
     }
 )
 
+# Which standard-track aggregate a Sibyl SPD is compared against (and
+# attached to), in preference order. Single-sourced here — the API route
+# (pythia/api/routes/sibyl.py) and sibyl/spd.py both import it. This module
+# must stay import-light (os only) so the API process can import it without
+# pulling in the sibyl agent/provider tree.
+STANDARD_MODEL_PREFERENCE = ("ensemble_bayesmc_v2", "ensemble_mean_v2", "track2_flash")
+
 # --- Time / backtest ---------------------------------------------------------
 # Live mode: asOf = now. Backtest mode: asOf = the question's window anchor
 # (window_start_date), and the leakage controls in sibyl/leakage.py become

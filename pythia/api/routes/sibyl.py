@@ -34,7 +34,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_STANDARD_MODEL_PREFERENCE = ("ensemble_bayesmc_v2", "ensemble_mean_v2", "track2_flash")
+# Single-sourced from sibyl.config (import-light: os only — safe for the
+# memory-constrained API process; see test_api_lazy_pipeline_import.py).
+from sibyl.config import STANDARD_MODEL_PREFERENCE as _STANDARD_MODEL_PREFERENCE
 
 
 def _maybe_json(raw: Any) -> Any:

@@ -40,12 +40,9 @@ from pythia.buckets import NUM_HORIZONS, n_buckets_for, thresholds_for
 from pythia.test_mode import is_test_mode
 
 from sibyl.aggregate import PooledDistribution, cdf_from_quantiles
-from sibyl.config import SIBYL_MODEL_NAME
+from sibyl.config import SIBYL_MODEL_NAME, STANDARD_MODEL_PREFERENCE
 
 logger = logging.getLogger(__name__)
-
-# Standard-track aggregate preference for the head-to-head comparison.
-STANDARD_MODEL_PREFERENCE = ("ensemble_bayesmc_v2", "ensemble_mean_v2", "track2_flash")
 
 
 def _probs_from_cdf_values(cdf_at_thresholds: np.ndarray) -> List[float]:
