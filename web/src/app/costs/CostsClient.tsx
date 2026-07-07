@@ -63,6 +63,7 @@ export type RunRuntimeRow = {
   research_ms: number | null;
   forecast_ms: number | null;
   scenario_ms: number | null;
+  sibyl_ms: number | null;
   other_ms: number | null;
   total_ms: number | null;
 };
@@ -502,6 +503,15 @@ const RunRuntimesTable = ({
         cellClassName: "text-right tabular-nums",
         sortValue: (row) => row.scenario_ms,
         render: (row) => formatDurationMs(row.scenario_ms),
+        defaultSortDirection: "desc",
+      },
+      {
+        key: "sibyl_ms",
+        label: "Sibyl",
+        headerClassName: "text-right",
+        cellClassName: "text-right tabular-nums",
+        sortValue: (row) => row.sibyl_ms,
+        render: (row) => formatDurationMs(row.sibyl_ms),
         defaultSortDirection: "desc",
       },
       {
