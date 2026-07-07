@@ -49,6 +49,10 @@ def _maybe_json(raw: Any) -> Any:
 
 
 def _latest_sibyl_run_id(con, include_test: bool) -> Optional[str]:
+    # Pre-Sibyl / partial-schema DBs may have sibyl_forecasts without
+    # sibyl_runs (or neither); this module's contract is to never 500 there.
+    if not _table_exists(con, "sibyl_runs"):
+        return None
     rows = _execute(
         con,
         f"""

@@ -148,9 +148,13 @@ def test_cache_hit_skips_build_and_mtime_invalidates(api_env: SimpleNamespace, m
     assert r3.status_code == 200
     assert calls["n"] == 2
 
-    # A DB refresh (os.replace in sync advances the file mtime) invalidates.
+    # A DB refresh (os.replace in sync advances the file mtime) invalidates —
+    # once the throttled refresh check reopens the read connection (the cache
+    # is keyed on the connection's open-time mtime so a build that still reads
+    # the old inode can't be cached under the new DB version).
     st = os.stat(api_env.db_path)
     os.utime(api_env.db_path, (st.st_atime, st.st_mtime + 5))
+    _app_mod._LAST_SYNC_CHECK = None  # expire the 60s refresh throttle
     r4 = client.get("/v1/downloads/forecasts.csv")
     assert r4.status_code == 200
     assert calls["n"] == 3

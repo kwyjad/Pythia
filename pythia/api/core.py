@@ -333,23 +333,44 @@ def _maybe_refresh_db() -> None:
     )
 
     if flag_refreshed or mtime_newer:
-        with _READ_CON_LOCK:
-            old_con = _READ_CON
-            try:
-                _READ_CON = _open_duckdb_connection()
-                _READ_CON_MTIME = _db_file_mtime()
-            except Exception:
-                logger.warning("Failed to reopen DuckDB after refresh; keeping old connection")
-                return
+        if _swap_read_connection():
             logger.info(
                 "DuckDB connection reopened (flag=%s mtime_newer=%s)",
                 flag_refreshed, mtime_newer,
             )
-            try:
-                if old_con is not None:
-                    old_con.close()
-            except Exception:
-                pass
+
+
+def _swap_read_connection() -> bool:
+    """Close the cached read connection FIRST, then reopen from the DB path.
+
+    The ordering is load-bearing: DuckDB caches database instances per path
+    within a process, so opening a "new" connection while the old one is
+    still open hands back a handle to the SAME cached instance — which still
+    reads the pre-``os.replace()`` inode. The old open-new-then-close-old
+    sequence therefore never actually picked up a swapped DB file (verified
+    on DuckDB 1.5.x); close-then-open does.
+
+    On reopen failure the connection is left ``None`` (the old one is already
+    closed) and the next ``_ensure_read_connection()`` call recreates it.
+    Returns True when the swap produced a fresh connection.
+    """
+    global _READ_CON, _READ_CON_MTIME  # noqa: PLW0603
+    with _READ_CON_LOCK:
+        old_con = _READ_CON
+        _READ_CON = None
+        _READ_CON_MTIME = None
+        try:
+            if old_con is not None:
+                old_con.close()
+        except Exception:
+            pass
+        try:
+            _READ_CON = _open_duckdb_connection()
+            _READ_CON_MTIME = _db_file_mtime()
+        except Exception:
+            logger.warning("Failed to reopen DuckDB after refresh; will retry on next request")
+            return False
+    return True
 
 
 def _con():
@@ -980,23 +1001,34 @@ def _unlink_quietly(path: str) -> None:
         pass
 
 
+def _export_mtime_tag(db_mtime: float) -> str:
+    # Full-precision mtime, filename-safe. int() truncation would collide two
+    # os.replace()s landing within the same wall-clock second: the cache key
+    # wouldn't change, so the pre-swap export would be served for the new DB
+    # and the sweeper couldn't tell the files apart.
+    return f"{db_mtime:.6f}".replace(".", "p")
+
+
 def _export_cache_path(slug: str, params: Dict[str, Any], fmt: str, db_mtime: float) -> str:
     param_hash = hashlib.sha1(
         json.dumps(params, sort_keys=True, default=str).encode()
     ).hexdigest()[:12]
-    return os.path.join(_export_tmp_dir(), f"{slug}-{param_hash}-{int(db_mtime)}.{fmt}")
+    return os.path.join(
+        _export_tmp_dir(), f"{slug}-{param_hash}-{_export_mtime_tag(db_mtime)}.{fmt}"
+    )
 
 
-def _sweep_stale_exports(slug: str, fmt: str, current_mtime: int) -> None:
+def _sweep_stale_exports(slug: str, fmt: str, current_mtime: float) -> None:
     """Delete cached exports for this slug built from older DB versions.
 
     Files younger than 60s are left alone so an in-flight FileResponse from
     another request isn't raced right at a DB swap.
     """
     now = time.time()
+    current_tag = _export_mtime_tag(current_mtime)
     for p in Path(_export_tmp_dir()).glob(f"{slug}-*.{fmt}"):
         tail = p.stem.rsplit("-", 1)[-1]
-        if tail.isdigit() and int(tail) == current_mtime:
+        if tail == current_tag:
             continue
         try:
             if now - p.stat().st_mtime > 60:
@@ -1035,10 +1067,22 @@ def _serve_export(
 
     cache_path: Optional[str] = None
     if cache_slug is not None:
-        db_mtime = _db_file_mtime()
+        # Key the cache on the mtime the read connection was OPENED with,
+        # not the raw on-disk mtime: in the window between a DB swap and the
+        # throttled connection reopen, the build below still reads the old
+        # inode — keying on the file mtime would cache pre-swap data under
+        # the new DB version until the next publish. With no connection yet,
+        # the build opens one against the current file, so its mtime is the
+        # right key.
+        _maybe_refresh_db()
+        db_mtime = (
+            _READ_CON_MTIME
+            if (_READ_CON is not None and _READ_CON_MTIME is not None)
+            else _db_file_mtime()
+        )
         if db_mtime is not None:
             cache_path = _export_cache_path(cache_slug, cache_params or {}, fmt, db_mtime)
-            _sweep_stale_exports(cache_slug, fmt, int(db_mtime))
+            _sweep_stale_exports(cache_slug, fmt, db_mtime)
             if os.path.exists(cache_path):
                 return FileResponse(cache_path, media_type=media_type, headers=headers)
 

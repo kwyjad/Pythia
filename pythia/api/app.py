@@ -235,19 +235,13 @@ def admin_force_sync(token: Optional[str] = Query(None)):
     )
     db_refreshed = flag_refreshed or mtime_newer
     if db_refreshed:
-        with _core._READ_CON_LOCK:
-            old_con = _core._READ_CON
-            try:
-                _core._READ_CON = _open_duckdb_connection()
-                _core._READ_CON_MTIME = _db_file_mtime()
-            except Exception:
-                logger.warning("Failed to reopen DuckDB after force sync")
-                raise HTTPException(status_code=502, detail="DB reopen failed")
-            if old_con is not None:
-                try:
-                    old_con.close()
-                except Exception:
-                    pass
+        # Close-then-open (core._swap_read_connection): DuckDB caches database
+        # instances per path, so opening the new connection while the old one
+        # is still open would hand back the SAME stale instance reading the
+        # pre-sync inode.
+        if not _core._swap_read_connection():
+            logger.warning("Failed to reopen DuckDB after force sync")
+            raise HTTPException(status_code=502, detail="DB reopen failed")
         logger.info(
             "Force sync: DB refreshed and connection reopened (flag=%s mtime_newer=%s)",
             flag_refreshed, mtime_newer,
@@ -357,7 +351,20 @@ def _compute_staleness_probes() -> Dict[str, Any]:
 
 def _staleness_probes() -> Dict[str, Any]:
     global _VERSION_PROBE_CACHE
-    mtime = _core._db_file_mtime()
+    # Cache key = the DB mtime captured when the read connection was OPENED
+    # (core._READ_CON_MTIME), not the raw on-disk mtime. Right after a publish
+    # swaps the DB file, the throttled _maybe_refresh_db may not have reopened
+    # the connection yet; keying on the file mtime would compute probes against
+    # the OLD inode and pin them under the NEW DB version until the next
+    # publish (the cache-hit early return never recomputes). Keyed on the
+    # connection's own mtime, pre-reopen requests cache under the old version
+    # and the first post-reopen request recomputes against fresh data.
+    try:
+        _core._maybe_refresh_db()
+        _core._ensure_read_connection()
+    except Exception as exc:
+        logger.warning("staleness probe connection setup failed: %r", exc)
+    mtime = _core._READ_CON_MTIME
     with _VERSION_PROBE_LOCK:
         if (
             _VERSION_PROBE_CACHE is not None
