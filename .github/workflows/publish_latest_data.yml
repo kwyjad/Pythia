@@ -82,6 +82,7 @@ jobs:
           for WF in \
             "Resolver Update" \
             "Horizon Scanner Triage" \
+            "Sibyl Deep Research" \
             "Pythia — Compute Calibration Weights & Advice" \
             "Pythia — Compute SPD Scores" \
             "Pythia — Compute Resolutions" \
