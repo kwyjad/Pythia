@@ -268,7 +268,11 @@ def _load_triage_rows(
         iso3_up = (iso3 or "").upper()
         hz_up = (hz or "").upper()
         tier_str = (tier or "").lower()
-        need = bool(need_full_spd) or tier_str == "priority"
+        # Trust the stored need_full_spd verbatim: the HS writer already sets
+        # it TRUE for RC>0 and priority tiers, and clears it when the Brave
+        # circuit-breaker gate blocks an ungrounded hazard. Re-deriving from
+        # tier here would bypass that safety gate for priority hazards.
+        need = bool(need_full_spd)
         score_f = float(score or 0.0)
         track_int = int(track_val) if track_val is not None else None
         if hz_up == "ACO":

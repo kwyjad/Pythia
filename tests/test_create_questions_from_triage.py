@@ -159,3 +159,54 @@ def test_create_questions_from_triage_skips_hw(tmp_path: Path) -> None:
         con.close()
 
     assert count == 0, f"HW questions should not be created, got {count}"
+
+
+def test_create_questions_honors_blocked_need_full_spd(tmp_path: Path) -> None:
+    """A priority-tier hazard whose need_full_spd was cleared (e.g. by the
+    Brave circuit-breaker grounding gate) must NOT get questions; the stored
+    need_full_spd column is the single source of truth."""
+    db_path = tmp_path / "triage_gate.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    con = duckdb.connect(str(db_path))
+    try:
+        ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO hs_runs (hs_run_id, generated_at, git_sha, config_profile, countries_json)
+            VALUES ('hs_run_gate', CURRENT_TIMESTAMP, 'abc123', 'default', '[]')
+            """
+        )
+        # Priority tier but gated off — must be skipped.
+        con.execute(
+            """
+            INSERT INTO hs_triage (
+                run_id, iso3, hazard_code, tier, triage_score, need_full_spd,
+                drivers_json, regime_shifts_json, data_quality_json, scenario_stub
+            ) VALUES ('hs_run_gate', 'SOM', 'ACE', 'priority', 0.85, FALSE, '[]', '[]',
+                      '{"brave_budget_gate": "blocked_no_grounding"}', '')
+            """
+        )
+        # Quiet tier (RC-promoted defaults) with need_full_spd TRUE — must be kept.
+        con.execute(
+            """
+            INSERT INTO hs_triage (
+                run_id, iso3, hazard_code, tier, triage_score, need_full_spd,
+                drivers_json, regime_shifts_json, data_quality_json, scenario_stub
+            ) VALUES ('hs_run_gate', 'ETH', 'FL', 'quiet', 0.0, TRUE, '[]', '[]', '{}', '')
+            """
+        )
+    finally:
+        con.close()
+
+    created = create_questions_from_triage(db_url, hs_run_id="hs_run_gate")
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute("SELECT DISTINCT iso3, hazard_code FROM questions").fetchall()
+    finally:
+        con.close()
+
+    assert ("SOM", "ACE") not in rows, "gated priority hazard must not produce questions"
+    assert ("ETH", "FL") in rows, "need_full_spd=TRUE hazard must still produce questions"
+    assert created > 0
