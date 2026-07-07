@@ -521,7 +521,7 @@ def _log_web_research(
         if not provider:
             provider = "google" if pack.backend in {"gemini", "google"} else pack.backend or "unknown"
         if os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1" and pack.backend in {"gemini", "google"}:
-            model_id = model_id or os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "gemini-3-flash-preview"
+            model_id = model_id or os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "gemini-3.5-flash"
         if pack.backend in {"gemini", "google"}:
             model_name = "Gemini Grounding"
         if "cost_usd" not in usage_json or float(usage_json.get("cost_usd") or 0.0) == 0.0:

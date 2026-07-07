@@ -94,7 +94,7 @@ def _select_gemini_model() -> str:
     if profile_model:
         return str(profile_model).strip()
     # Fallback, if needed:
-    return "gemini-3-flash-preview"
+    return "gemini-3.5-flash"
 
 
 # --- Debug hook: last error message from research step (for human log & CSV) ---
@@ -587,7 +587,7 @@ async def _compose_research_via_gemini(
         "generationConfig": {"temperature": float(RESEARCH_TEMP), "maxOutputTokens": 5000},
     }
 
-    spec = ModelSpec(name="Gemini", provider="google", model_id=model, active=bool(model))
+    spec = ModelSpec(name=model, provider="google", model_id=model, active=bool(model))
 
     try:
         text, usage, error = await call_chat_ms(

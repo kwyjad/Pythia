@@ -60,16 +60,15 @@ def test_blocked_providers_removed_from_specs(monkeypatch: pytest.MonkeyPatch) -
             "OPENAI_API_KEY": "x",
             "ANTHROPIC_API_KEY": "x",
             "GEMINI_API_KEY": "x",
-            "XAI_API_KEY": "x",
-            "PYTHIA_BLOCK_PROVIDERS": "xai",
+            "PYTHIA_BLOCK_PROVIDERS": "google",
         },
     )
 
     specs = providers.parse_ensemble_specs(
-        "openai:gpt-5.2,xai:grok-4-0709,google:gemini-3-pro-preview"
+        "openai:gpt-5.4,google:gemini-3.1-pro-preview,anthropic:claude-opus-4-8"
     )
 
-    assert all(ms.provider != "xai" for ms in specs)
+    assert all(ms.provider != "google" for ms in specs)
     assert any(ms.provider == "openai" for ms in specs)
 
 
@@ -81,7 +80,7 @@ def test_spd_ensemble_override_keeps_two_gemini_models(monkeypatch: pytest.Monke
             "ANTHROPIC_API_KEY": "x",
             "GEMINI_API_KEY": "x",
             "PYTHIA_SPD_ENSEMBLE_SPECS": (
-                "openai:gpt-5.2,anthropic:claude-opus-4-5-20251101,"
+                "openai:gpt-5.4,anthropic:claude-opus-4-8,"
                 "google:gemini-3-pro-preview,google:gemini-3-flash-preview"
             ),
             "PYTHIA_BLOCK_PROVIDERS": "",
@@ -94,10 +93,41 @@ def test_spd_ensemble_override_keeps_two_gemini_models(monkeypatch: pytest.Monke
     assert {ms.model_id for ms in google_specs} == {"gemini-3-pro-preview", "gemini-3-flash-preview"}
 
 
-def test_estimate_cost_usd_flash_lite() -> None:
+def test_estimate_cost_usd_per_million_rates() -> None:
+    """Cost table is per-1M tokens: 1M in + 1M out == input rate + output rate."""
+    from forecaster import providers
+
+    usage = {
+        "prompt_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+        "total_tokens": 2_000_000,
+    }
+    cost = providers.estimate_cost_usd("gemini-3.5-flash", usage)
+
+    # gemini-3.5-flash: $1.50/1M input + $9.00/1M output
+    assert cost == pytest.approx(10.50)
+
+
+def test_estimate_cost_usd_small_call() -> None:
     from forecaster import providers
 
     usage = {"prompt_tokens": 1000, "completion_tokens": 1000, "total_tokens": 2000}
-    cost = providers.estimate_cost_usd("gemini-3-flash-preview", usage)
+    cost = providers.estimate_cost_usd("gpt-5.4", usage)
 
-    assert cost == pytest.approx(0.0035)
+    # gpt-5.4: $2.50/1M input + $15.00/1M output -> (2.50 + 15.00) / 1000
+    assert cost == pytest.approx(0.0175)
+
+
+def test_display_name_is_specific_model_id() -> None:
+    """Display names must be specific model ids, not generic family labels."""
+    from forecaster import providers
+
+    assert providers._provider_display_name("google", "gemini-3.5-flash") == "gemini-3.5-flash"
+    assert providers._provider_display_name("google", "gemini-3.1-pro-preview") == "gemini-3.1-pro-preview"
+    assert providers._provider_display_name("openai", "gpt-5.4") == "gpt-5.4"
+    assert providers._provider_display_name("anthropic", "claude-opus-4-8") == "claude-opus-4-8"
+    # Explicit config display_name still wins.
+    assert (
+        providers._provider_display_name("openai", "gpt-5.4", {"display_name": "Custom"})
+        == "Custom"
+    )

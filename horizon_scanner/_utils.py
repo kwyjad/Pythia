@@ -38,7 +38,7 @@ def resolve_hs_model() -> str:
 
     from forecaster.providers import GEMINI_MODEL_ID
 
-    return (GEMINI_MODEL_ID or "").strip() or "gemini-3-flash-preview"
+    return (GEMINI_MODEL_ID or "").strip() or "gemini-3.5-flash"
 
 
 # ---------------------------------------------------------------------------

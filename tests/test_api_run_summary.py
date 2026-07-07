@@ -235,7 +235,12 @@ def test_run_summary_shape(api_env: None) -> None:
     assert "cost" in data
     assert "llm_health" in data
     assert "performance" in data
-    assert data["ensemble"]["expected"] == 6  # DeepSeek removed
+    # Expected member count is derived from the configured SPD ensemble
+    # (the endpoint falls back to 5 when the config has no ensemble, as in
+    # this test's minimal PYTHIA_CONFIG_PATH).
+    from pythia.llm_profiles import get_ensemble_resolved
+
+    assert data["ensemble"]["expected"] == (len(get_ensemble_resolved()) or 5)
 
 
 def test_run_summary_coverage(api_env: None) -> None:

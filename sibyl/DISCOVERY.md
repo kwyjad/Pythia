@@ -149,7 +149,7 @@ post-filters results by date and blocked domains.
 Single ledger: the **`llm_calls`** table. Writer:
 `forecaster/llm_logging.py::log_forecaster_llm_call(...)` (async) — computes
 cost from `pythia/model_costs.json` via
-`forecaster/providers.py::resolve_price_per_1k`/`estimate_cost_usd`, records
+`forecaster/providers.py::resolve_price_per_1m`/`estimate_cost_usd`, records
 `phase`, `provider`, `model_id`, tokens, `cost_usd`, `iso3`, `hazard_code`,
 `is_test`. Brave grounding calls are logged as `provider='brave'`,
 `model_id='brave-web-search'` with explicit `cost_usd`.
@@ -169,12 +169,13 @@ the cap) and persisted to `sibyl_runs` / `sibyl_forecasts`.
 
 **Cost table gap fixed:** `pythia/model_costs.json` had no
 `claude-opus-4-8` entry (missing entries silently log $0). Added
-`[0.005, 0.025]` per 1K tokens ($5/$25 per MTok).
+`[0.005, 0.025]` per 1K tokens ($5/$25 per MTok). (The cost table was
+later converted to per-1M rates — the entry is now `[5.00, 25.00]`.)
 
 **Provider gap fixed:** `providers.py::call_anthropic` always sends
 `temperature`, but `claude-opus-4-8` (like Opus 4.7) rejects sampling
-params with HTTP 400. Added a no-temperature model guard (mirrors the
-existing `_KIMI_FIXED_TEMPERATURE_MODELS` pattern). Trial diversity comes
+params with HTTP 400. Added a no-temperature model guard
+(`_ANTHROPIC_NO_TEMPERATURE_PREFIXES`). Trial diversity comes
 from prompt variation (per-trial perspective seeds), not temperature.
 
 ## 7. Dashboard integration points

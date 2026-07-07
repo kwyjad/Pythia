@@ -400,7 +400,7 @@ function TrackSplit({ data }: Props) {
             {t.track2.questions} questions
           </div>
           <div className="mt-0.5 text-xs text-fred-muted">
-            Gemini Flash · {t.track2.countries} countries
+            {t.track2.model ?? "Single model"} · {t.track2.countries} countries
           </div>
         </div>
       </div>

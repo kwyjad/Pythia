@@ -205,7 +205,9 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
-          MODEL_COSTS_JSON: ${{ secrets.MODEL_COSTS_JSON }}
+          # MODEL_COSTS_JSON env override removed 2026-07: pythia/model_costs.json
+          # (now per-1M-token rates) is authoritative and carries the
+          # claude-opus-4-8 entry Sibyl's budget cap depends on.
           SIBYL_RUN_HARD_CAP_USD: ${{ github.event.inputs.run_hard_cap_usd || '40' }}
           SIBYL_BUDGET_USD_PER_QUESTION: ${{ vars.SIBYL_BUDGET_USD_PER_QUESTION || '' }}
         run: |

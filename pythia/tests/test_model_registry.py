@@ -28,7 +28,7 @@ from pythia.llm_profiles import (
     split_model_ref,
 )
 
-KNOWN_PROVIDERS = {"openai", "anthropic", "google", "xai", "kimi", "deepseek"}
+KNOWN_PROVIDERS = {"openai", "anthropic", "google"}
 
 # Roles the codebase actually consults (call sites in horizon_scanner,
 # forecaster, web_research backends). Adding a call site for a new role?
@@ -93,7 +93,7 @@ def test_resolve_model_ref_forms():
 
 def test_all_reachable_models_have_cost_entries():
     """Any model the system can call must have a price in model_costs.json."""
-    from forecaster.providers import resolve_price_per_1k
+    from forecaster.providers import resolve_price_per_1m
 
     reachable: dict[str, str] = {}
     for alias, ref in get_model_registry().items():
@@ -106,7 +106,7 @@ def test_all_reachable_models_have_cost_entries():
     missing = {
         model_id: origin
         for model_id, origin in reachable.items()
-        if resolve_price_per_1k(model_id) is None
+        if resolve_price_per_1m(model_id) is None
     }
     assert not missing, (
         "models without a cost entry in pythia/model_costs.json "
@@ -115,15 +115,19 @@ def test_all_reachable_models_have_cost_entries():
 
 
 def test_llm_logging_cost_split_matches_cost_table():
-    """llm_logging must derive its input/output split from model_costs.json."""
+    """llm_logging must derive its input/output split from model_costs.json.
+
+    The cost table is USD per 1M tokens, so a 1M-in / 1M-out call costs
+    exactly (input_rate + output_rate).
+    """
     from forecaster.llm_logging import _compute_costs_for_usage
-    from forecaster.providers import resolve_price_per_1k
+    from forecaster.providers import resolve_price_per_1m
 
     for entry in get_ensemble_resolved():
         model_id = entry["model_id"]
-        prices = resolve_price_per_1k(model_id)
+        prices = resolve_price_per_1m(model_id)
         assert prices is not None, f"{model_id} missing from model_costs.json"
-        usage = {"prompt_tokens": 1000, "completion_tokens": 1000}
+        usage = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
         input_cost, output_cost, total = _compute_costs_for_usage(
             entry["provider"], model_id, usage
         )

@@ -116,17 +116,10 @@ class TestIsBillingError:
             status_code=429,
         ) is False
 
-    def test_kimi_not_supported(self):
+    def test_unknown_provider_not_supported(self):
         assert _is_billing_error(
-            "kimi",
-            "Kimi HTTP 429: quota exceeded",
-            status_code=429,
-        ) is False
-
-    def test_deepseek_not_supported(self):
-        assert _is_billing_error(
-            "deepseek",
-            "DeepSeek HTTP 429: billing error",
+            "someprovider",
+            "SomeProvider HTTP 429: quota exceeded billing",
             status_code=429,
         ) is False
 
@@ -156,11 +149,8 @@ class TestCreditRetryConfig:
         cfg = _credit_retry_config_for("google")
         assert cfg == (600, 3)
 
-    def test_kimi_returns_none(self):
-        assert _credit_retry_config_for("kimi") is None
-
-    def test_deepseek_returns_none(self):
-        assert _credit_retry_config_for("deepseek") is None
+    def test_unknown_provider_returns_none(self):
+        assert _credit_retry_config_for("someprovider") is None
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("PYTHIA_CREDIT_RETRY_PAUSE_OPENAI", "600")
@@ -271,16 +261,16 @@ class TestCallChatMsCreditRetry:
         assert usage.get("billing_error_detected") is True
         assert usage.get("credit_retries_used", 0) == 1
 
-    def test_kimi_no_credit_retry(self, monkeypatch):
-        """Kimi errors should NOT trigger credit retry."""
+    def test_unsupported_provider_no_credit_retry(self, monkeypatch):
+        """Providers outside _CREDIT_RETRY_CONFIG should NOT trigger credit retry."""
         monkeypatch.setenv("PYTHIA_LLM_RETRIES", "1")
-        ms = self._make_model_spec(provider="kimi", model_id="kimi-k2.5")
+        ms = self._make_model_spec(provider="someprovider", model_id="some-model")
         billing_result = ProviderResult(
             text="",
             usage=usage_to_dict(None),
             cost_usd=0.0,
-            model_id="kimi-k2.5",
-            error="Kimi HTTP 429: quota exceeded billing",
+            model_id="some-model",
+            error="SomeProvider HTTP 429: quota exceeded billing",
         )
 
         call_count = 0

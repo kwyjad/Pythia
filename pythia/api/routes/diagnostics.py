@@ -1391,7 +1391,18 @@ def diagnostics_run_summary(
                 ) or 0
 
     # ---- Ensemble health --------------------------------------------------
-    ensemble: Dict[str, int] = {"expected": 6, "ok": tracks["track1"]["models"]}
+    # Expected member count comes from the configured SPD ensemble (falls
+    # back to the current 5-member lineup if config is unreadable). Also
+    # surface the specific Track 2 model id so the dashboard never has to
+    # hardcode a generic label like "Gemini Flash".
+    try:
+        from pythia.llm_profiles import get_ensemble_resolved, get_role_model, split_model_ref
+
+        expected_members = len(get_ensemble_resolved()) or 5
+        tracks["track2"]["model"] = split_model_ref(get_role_model("track2_spd"))[1]
+    except Exception:
+        expected_members = 5
+    ensemble: Dict[str, int] = {"expected": expected_members, "ok": tracks["track1"]["models"]}
 
     # ---- Cost breakdown ---------------------------------------------------
     cost: Dict[str, Any] = {

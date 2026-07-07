@@ -53,10 +53,10 @@ prediction_markets:
       min_unique_bettors: 10
       min_liquidity_mana: 500
   query_generation:
-    model: "gemini-3-flash-preview"  # Cheap/fast model for query generation
+    model: "gemini-3.5-flash"  # Cheap/fast model for query generation
     max_queries: 5
   relevance_filter:
-    model: "gemini-3-flash-preview"
+    model: "gemini-3.5-flash"
     min_relevance_score: 6
     max_results: 5
   timeout_sec: 30
@@ -65,23 +65,21 @@ llm:
   # ==========================================================================
   # MODEL REGISTRY — the single place to swap a model family.
   #
-  # To upgrade a family (e.g. GPT-5.2 -> GPT-5.5):
+  # To upgrade a family (e.g. GPT-5.4 -> GPT-5.5):
   #   1. Change the id on ONE line below.
-  #   2. Add a cost entry in pythia/model_costs.json (per-1K [input, output]).
+  #   2. Add a cost entry in pythia/model_costs.json (per-1M [input, output]).
   # Everything downstream (SPD ensemble, HS triage/RC, Track 2, scenario
   # writer, grounding fallbacks, CrisisWatch) references these aliases via
   # the ensemble and roles blocks — never a literal model id.
   # pythia/tests/test_model_registry.py enforces registry <-> cost-table sync.
   # ==========================================================================
   models:
-    gpt:          openai:gpt-5.2                  # OpenAI frontier
-    gpt_mini:     openai:gpt-5-mini               # OpenAI small
-    claude:       anthropic:claude-sonnet-4-6     # Anthropic
+    gpt:          openai:gpt-5.4                  # OpenAI frontier
+    gpt_mini:     openai:gpt-5.4-mini             # OpenAI small
+    claude:       anthropic:claude-opus-4-8       # Anthropic frontier (ensemble + Sibyl)
     gemini_pro:   google:gemini-3.1-pro-preview   # Google frontier
-    gemini_flash: google:gemini-3-flash-preview   # Google fast (thinking)
+    gemini_flash: google:gemini-3.5-flash         # Google fast (thinking) — HS triage/RC, Track 2, scenarios
     gemini_lite:  google:gemini-2.5-flash         # Google cheap tier (grounding/scraping fallbacks)
-    kimi:         kimi:kimi-k2.5                  # Moonshot
-    deepseek:     deepseek:deepseek-reasoner      # DeepSeek
 
   # Active profile: "prod" (frontier).
   # Override via PYTHIA_LLM_PROFILE env var.
@@ -95,40 +93,39 @@ llm:
       # {provider, model_id} dicts) still work.
       ensemble:
         # GPT: reasoning model — temperature not supported (API rejects it).
+        # High effort reserved for the frontier member (main reasoning depth).
         - model: gpt
           thinking: high            # maps to reasoning_effort=high
 
-        # Claude: standard model — default temperature for calibrated output.
+        # Claude Opus: rejects sampling params (the provider adapter drops
+        # temperature for the opus-4-7+/sonnet-5+/fable family). Uses the
+        # API's default (adaptive) thinking — no thinking knob is wired for
+        # Anthropic in providers.py.
         - model: claude
 
-        # Gemini Pro: thinking model — medium thinking for analytical depth.
+        # Gemini Pro: thinking model — medium thinking for analytical depth
+        # without paying for the "high" tier on every SPD call.
         - model: gemini_pro
           temperature: 0.2
           thinking: medium           # maps to thinkingConfig.thinkingLevel
 
-        # Gemini Flash: thinking model — low thinking for speed/cost balance.
+        # Gemini Flash: the fast/cheap member — low thinking keeps latency
+        # and output-token cost down; depth comes from Pro/GPT/Opus.
         - model: gemini_flash
           temperature: 0.2
           thinking: low
 
-        # Kimi: reasoning model — Moonshot recommends temperature=1.0 for thinking mode.
-        - model: kimi
-          temperature: 1.0
-
-        # DeepSeek: native reasoning model — temperature ignored by API.
-        - model: deepseek
-          temperature: 1.0
-
-        # GPT mini: reasoning model (smaller) — medium reasoning effort.
+        # GPT mini: smaller reasoning model — medium effort is the sweet spot
+        # (low degrades SPD quality; high costs nearly as much as full GPT).
         - model: gpt_mini
           thinking: medium           # maps to reasoning_effort=medium
 
       # Role -> model assignments. Values are registry aliases (preferred) or
       # explicit "provider:model_id" refs. Env vars still win where noted.
       roles:
-        # --- Horizon Scanner ---
-        hs_default:       gemini_pro    # triage pass 1 + adversarial checks (HS_MODEL_ID env overrides)
-        hs_triage_pass1:  gemini_pro    # PYTHIA_TRIAGE_MODEL_PASS1 overrides
+        # --- Horizon Scanner (all triage + RC passes on Gemini Flash) ---
+        hs_default:       gemini_flash  # triage pass 1 + adversarial checks (HS_MODEL_ID env overrides)
+        hs_triage_pass1:  gemini_flash  # PYTHIA_TRIAGE_MODEL_PASS1 overrides
         hs_triage_pass2:  gemini_flash  # PYTHIA_TRIAGE_MODEL_PASS2 overrides
         rc_pass1:         gemini_flash  # PYTHIA_RC_MODEL_PASS1 overrides
         rc_pass2:         gemini_flash  # PYTHIA_RC_MODEL_PASS2 overrides
@@ -140,7 +137,7 @@ llm:
         grounding_gemini: gemini_lite   # Gemini grounding backend (PYTHIA_GROUNDING_MODEL_ID overrides)
         grounding_openai: openai:gpt-4.1  # OpenAI web search backend (PYTHIA_WEB_RESEARCH_MODEL_ID overrides)
         grounding_openai_fallback: openai:gpt-4.1-mini  # retry model when the primary web-search call fails
-        grounding_claude: claude        # Claude web search backend (PYTHIA_WEB_RESEARCH_MODEL_ID overrides)
+        grounding_claude: anthropic:claude-haiku-4-5-20251001  # Claude web search backend — cheap tier; Opus is reserved for forecasts
         crisiswatch:      gemini_lite   # CrisisWatch Gemini grounding fallback
 
 forecaster:

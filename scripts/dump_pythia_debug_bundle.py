@@ -914,7 +914,7 @@ def _compute_question_run_metrics(
         )
         for q in questions if q.get("question_id")
     }
-    track2_model = os.getenv("PYTHIA_TRACK2_MODEL_ID", "gemini-3-flash-preview")
+    track2_model = os.getenv("PYTHIA_TRACK2_MODEL_ID", "gemini-3.5-flash")
     present_by_qid: dict[str, set[str]] = {}
     if expected_model_ids and "call_type" in llm_columns and "model_id" in llm_columns:
         error_filter = ""
