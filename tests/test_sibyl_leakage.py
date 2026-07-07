@@ -178,3 +178,48 @@ def test_leakage_stats_merge():
 def test_clamp_live_lookup_date():
     assert clamp_live_lookup_date(date(2026, 1, 1), PAST_AS_OF) == PAST_AS_OF
     assert clamp_live_lookup_date(date(2025, 1, 1), PAST_AS_OF) == date(2025, 1, 1)
+
+
+# --- relative page_age parsing + undatable-source policy ----------------------
+
+def test_parse_source_date_relative_ages():
+    from sibyl.leakage import _parse_source_date
+
+    assert _parse_source_date("2 weeks ago", today=TODAY) == date(2026, 6, 23)
+    assert _parse_source_date("3 days ago", today=TODAY) == date(2026, 7, 4)
+    assert _parse_source_date("5 hours ago", today=TODAY) == TODAY
+    assert _parse_source_date("1 month ago", today=TODAY) == date(2026, 6, 7)
+    assert _parse_source_date("1 year ago", today=TODAY) == date(2025, 7, 7)
+    assert _parse_source_date("2025-02-01", today=TODAY) == date(2025, 2, 1)
+    assert _parse_source_date("gibberish", today=TODAY) is None
+    assert _parse_source_date(None, today=TODAY) is None
+
+
+def test_relative_page_age_dropped_in_backtest():
+    """Brave often reports page_age as a relative form; '2 weeks ago' relative
+    to the fetch time is post-asOf in a backtest and must be dropped."""
+    sources = [
+        _src("https://news.example.com/rel", date_str="2 weeks ago"),
+        _src("https://news.example.com/old", date_str="2025-02-01"),
+    ]
+    kept, stats = filter_sources(sources, PAST_AS_OF, today=TODAY)
+    assert [s.url for s in kept] == ["https://news.example.com/old"]
+    assert stats.dropped_post_asof == 1
+
+
+def test_undatable_source_dropped_in_backtest_only():
+    """A populated-but-unparseable date field must not bypass the post-asOf
+    filter in backtest; sources with NO date stay (freshness range + snippet
+    classifier still guard them)."""
+    sources = [
+        _src("https://news.example.com/mystery", date_str="a while back"),
+        _src("https://news.example.com/undated", date_str=None),
+    ]
+    kept, stats = filter_sources(sources, PAST_AS_OF, today=TODAY)
+    assert [s.url for s in kept] == ["https://news.example.com/undated"]
+    assert stats.dropped_undatable == 1
+
+    # Live mode: unparseable dates are fine, nothing to leak.
+    kept_live, stats_live = filter_sources(sources, TODAY, today=TODAY)
+    assert len(kept_live) == 2
+    assert stats_live.dropped_undatable == 0

@@ -396,6 +396,13 @@ def run_sibyl(
                     tracker=tracker, trials=outcome.trials,
                 )
 
+        # The cap can also fire during the LAST question's trials (no
+        # subsequent question gets skipped at the top of the loop, so the
+        # flag above never flips); record it from realized spend so the
+        # dashboard's BUDGET CAPPED badge reflects every capped run.
+        if tracker.hard_cap_reached():
+            budget_capped = True
+
         breakdown = tracker.run_breakdown()
         run_record = {
             "sibyl_run_id": sibyl_run_id,

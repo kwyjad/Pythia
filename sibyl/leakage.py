@@ -57,6 +57,20 @@ _MONTHS = {
 }
 
 _ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})(?:-(\d{2}))?\b")
+# Brave's page_age is frequently a relative form ("2 weeks ago", "3 hours
+# ago") rather than ISO-8601; unparsed, such sources used to bypass the
+# post-asOf date filter entirely in backtest.
+_RELATIVE_AGE_RE = re.compile(
+    r"\b(\d+)\s+(minute|hour|day|week|month|year)s?\s+ago\b", re.IGNORECASE
+)
+_RELATIVE_AGE_DAYS = {
+    "minute": 0.0,
+    "hour": 0.0,
+    "day": 1.0,
+    "week": 7.0,
+    "month": 30.0,
+    "year": 365.0,
+}
 _TEXT_DATE_RE = re.compile(
     r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
     r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
@@ -72,6 +86,7 @@ class LeakageStats:
     total_retrieved: int = 0
     dropped_post_asof: int = 0
     dropped_blocked_domain: int = 0
+    dropped_undatable: int = 0
     notes: List[str] = field(default_factory=list)
 
     @property
@@ -84,6 +99,7 @@ class LeakageStats:
         self.total_retrieved += other.total_retrieved
         self.dropped_post_asof += other.dropped_post_asof
         self.dropped_blocked_domain += other.dropped_blocked_domain
+        self.dropped_undatable += other.dropped_undatable
         self.notes.extend(other.notes)
 
     def to_dict(self) -> dict:
@@ -91,6 +107,7 @@ class LeakageStats:
             "total_retrieved": self.total_retrieved,
             "dropped_post_asof": self.dropped_post_asof,
             "dropped_blocked_domain": self.dropped_blocked_domain,
+            "dropped_undatable": self.dropped_undatable,
             "residual_leak_rate": round(self.residual_leak_rate, 4),
             "notes": list(self.notes),
         }
@@ -156,8 +173,13 @@ def extract_dates(text: str, *, limit: int = 8) -> List[date]:
     return found
 
 
-def _parse_source_date(raw: Optional[str]) -> Optional[date]:
-    """Parse a Brave ``page_age``/date field (ISO-ish) into a date."""
+def _parse_source_date(raw: Optional[str], *, today: Optional[date] = None) -> Optional[date]:
+    """Parse a Brave ``page_age``/date field into a date.
+
+    Handles ISO-8601, relative ages ("2 weeks ago" — resolved against
+    *today*, the fetch time, since page age is relative to retrieval), and
+    falls back to the explicit-date extractor for textual forms.
+    """
     if not raw:
         return None
     txt = str(raw).strip()
@@ -165,6 +187,11 @@ def _parse_source_date(raw: Optional[str]) -> Optional[date]:
         return datetime.fromisoformat(txt.replace("Z", "+00:00")).date()
     except ValueError:
         pass
+    m = _RELATIVE_AGE_RE.search(txt)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        base = today or date.today()
+        return base - timedelta(days=n * _RELATIVE_AGE_DAYS[unit])
     dates = extract_dates(txt, limit=1)
     return dates[0] if dates else None
 
@@ -197,9 +224,18 @@ def filter_sources(
             stats.dropped_blocked_domain += 1
             continue
         if backtest:
-            src_date = _parse_source_date(src.date)
+            raw_date = src.date
+            src_date = _parse_source_date(raw_date, today=today)
             if src_date is not None and src_date > as_of:
                 stats.dropped_post_asof += 1
+                continue
+            if raw_date and src_date is None:
+                # A populated date field we cannot interpret: in backtest,
+                # treat as suspect and drop — an unreadable date must not be
+                # a bypass of the post-asOf filter. (Sources with NO date at
+                # all are kept: the Brave freshness range is the primary
+                # guard and the snippet classifier still applies.)
+                stats.dropped_undatable += 1
                 continue
             if snippet_leaks(f"{src.title} {src.summary}", as_of):
                 stats.dropped_post_asof += 1

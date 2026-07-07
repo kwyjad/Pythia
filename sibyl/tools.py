@@ -180,7 +180,9 @@ def fetch_url(url: str, as_of: date, *, today: Optional[date] = None) -> ToolRes
             leakage=stats, error="empty",
         )
 
-    if is_backtest(as_of, today=today) and snippet_leaks(text[:2000], as_of):
+    # Scan the SAME text that is returned to the model — a post-asOf date
+    # after an arbitrary scan cutoff must not slip through to the prompt.
+    if is_backtest(as_of, today=today) and snippet_leaks(text, as_of):
         stats.dropped_post_asof = 1
         stats.notes.append(f"fetched page dated after asOf dropped: {url}")
         logger.info("sibyl.leakage: dropped fetched page post-asOf: %s", url)
