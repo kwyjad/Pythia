@@ -537,7 +537,16 @@ _GEMINI_API_KEY = _GEMINI_STATE.get("api_key", "")
 
 _OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
 
-_OPENAI_NO_CUSTOM_TEMPERATURE = {"gpt-5-mini", "gpt-5.4-mini"}
+# OpenAI models that reject a custom temperature (HTTP 400 if sent): the
+# GPT-5 reasoning family (gpt-5, gpt-5-mini, gpt-5.4, gpt-5.4-mini, ...).
+# Prefix-matched so a lineup bump (e.g. gpt-5.5) can't silently reintroduce
+# temperature on a path that doesn't set reasoning_effort (the hs_fallback
+# JSON-repair spec carries no thinking value).
+_OPENAI_NO_TEMPERATURE_PREFIXES = ("gpt-5",)
+
+
+def _openai_drops_temperature(model: str) -> bool:
+    return (model or "").startswith(_OPENAI_NO_TEMPERATURE_PREFIXES)
 # Anthropic models that reject sampling params outright (HTTP 400 if sent):
 # the Opus 4.7+/Sonnet 5+/Fable family removed temperature/top_p/top_k.
 _ANTHROPIC_NO_TEMPERATURE_PREFIXES = (
@@ -753,7 +762,7 @@ def call_openai(
     }
     if reasoning_effort and reasoning_effort not in ("none", "off"):
         body["reasoning_effort"] = reasoning_effort
-    elif model not in _OPENAI_NO_CUSTOM_TEMPERATURE:
+    elif not _openai_drops_temperature(model):
         body["temperature"] = float(temperature)
     try:
         resp = requests.post(
