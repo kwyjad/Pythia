@@ -518,7 +518,7 @@ def build_run_runtimes(conn, track: int | None = None, include_test: bool = Fals
     )
     pivot = phase_totals.pivot(index="run_id", columns="phase", values="elapsed_ms")
     pivot = pivot.fillna(0.0)
-    known_phases = {"web_search", "hs", "research", "forecast", "scenario", "other"}
+    known_phases = {"web_search", "hs", "research", "forecast", "scenario", "sibyl", "other"}
     other_cols = [col for col in pivot.columns if col not in known_phases]
     if other_cols:
         pivot["other"] = pivot.get("other", 0.0) + pivot[other_cols].sum(axis=1)
@@ -533,6 +533,7 @@ def build_run_runtimes(conn, track: int | None = None, include_test: bool = Fals
         "research": "research_ms",
         "forecast": "forecast_ms",
         "scenario": "scenario_ms",
+        "sibyl": "sibyl_ms",
         "other": "other_ms",
     }
     pivot = pivot.rename(columns=phase_columns)

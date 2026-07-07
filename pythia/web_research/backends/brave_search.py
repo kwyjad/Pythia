@@ -211,6 +211,7 @@ def fetch_via_brave_search(
     max_results: int,
     hazard_code: str | None = None,
     country_name: str | None = None,
+    freshness_override: str | None = None,
 ) -> EvidencePack:
     """Fetch web research evidence via Brave Search API.
 
@@ -234,6 +235,11 @@ def fetch_via_brave_search(
         Hazard code for multi-query formulations.
     country_name : str or None
         Country name for multi-query formulations.
+    freshness_override : str or None
+        Explicit Brave ``freshness`` value (e.g. a date range
+        ``YYYY-MM-DDtoYYYY-MM-DD``). When set it is passed through verbatim
+        instead of the value mapped from *recency_days*. Used by Sibyl to
+        cap searches at an ``asOf`` date (backtest leakage control).
 
     Returns
     -------
@@ -258,7 +264,7 @@ def fetch_via_brave_search(
         pack.debug = {"error": "missing_api_key"}
         return pack
 
-    freshness = _map_freshness(recency_days)
+    freshness = freshness_override or _map_freshness(recency_days)
     start_time = time.time()
 
     # Build query list: multi-query for hazard grounding, single query otherwise
