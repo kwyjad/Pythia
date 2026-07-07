@@ -21,6 +21,7 @@ Do not update these files for trivial changes (e.g. formatting, minor refactors 
 Resolver facts/base rates -> Horizon Scanner per-hazard pipeline (RC grounding → RC → triage grounding → triage)
   -> Structured data connectors (ReliefWeb, ACAPS, IPC, ACLED political, ENSO, seasonal TC, HDX Signals, ACLED CAST, GDACS, GDACS event history, FEWS NET IPC)
   -> Adversarial checks (RC L1+) -> Forecaster SPD ensemble
+  -> Sibyl parallel track (top-10 volatile questions, agentic web research)
   -> DuckDB -> FastAPI API -> Next.js Dashboard + CSV/Excel exports
 ```
 
@@ -46,6 +47,7 @@ Pythia/
     hdx_signals.py     #   HDX Signals (OCHA automated crisis monitoring) connector
     conflict_forecasts.py  # Unified conflict forecast loader (VIEWS + CF.org + ACLED CAST)
   forecaster/          # LLM ensemble for SPD forecasts (structured data + SPD phases)
+  sibyl/               # Parallel deep-research forecasting track (agentic open-web research)
   resolver/            # Fact ingestion, resolution, and ground truth DB
     connectors/        #   Connector protocol + registry (ACLED, IDMC, IFRC Montandon, GDACS, FEWS NET IPC) + forecast registry (VIEWS, CF.org, ACLED CAST)
     ingestion/         #   Source-specific fetch/normalise clients (acled_client, idmc/)
@@ -145,6 +147,8 @@ Two DuckDB databases:
 - `conflict_forecasts` — VIEWS + conflictforecast.org + ACLED CAST conflict predictions (PK: source, iso3, hazard_code, metric, lead_months, forecast_issue_date)
 - `questions`, `question_research` — Seeded questions + research briefs
 - `forecasts_raw`, `forecasts_ensemble` — Per-model + aggregated SPDs. Both include `reasoning_trace_json TEXT` column storing structured reasoning traces (prior, updates with deltas, point estimate, RC assessment) as JSON. NULL for binary forecasts, Track 2, or models that don't emit traces.
+- `sibyl_runs` — Sibyl run records (hs_run_id, K, aggregation, run cost split Opus/Brave, `budget_capped` flag, coverage counts)
+- `sibyl_forecasts` — Per-question Sibyl provenance (status incl. `skipped`/`run budget cap`, asOf, per-trial belief traces + quantiles JSON, pooled quantiles, bucket probs, JS divergences vs standard + inter-trial, cost split, leakage stats). The scoreable SPD itself lives in `forecasts_raw`/`forecasts_ensemble` under `model_name='sibyl'`.
 - `resolutions` — Ground truth values per (question_id, horizon_m). Not all 6 horizons may have rows — source-aware null handling skips unresolvable horizons.
 - `scores` — Brier/log/CRPS per (question, horizon, model)
 - `calibration_weights`, `calibration_advice` — Per hazard/metric weights + LLM advice
@@ -278,6 +282,26 @@ The forecaster routes questions into two tracks based on RC level:
 Track 1 questions always receive scenarios, even when their triage tier is "quiet" (which occurs for RC-promoted hazards whose `_RC_PROMOTED_DEFAULTS` set `triage_score=0`).
 
 Track 2 questions have no `ensemble_bayesmc_v2` or `ensemble_mean_v2` rows in `forecasts_ensemble`. The legacy CI step "Verify Forecaster wrote both aggregation methods" (`verify_forecaster_aggregations.py`) was removed because it hard-exited when all questions routed to Track 2. This is a resolved issue — the step should not be re-added.
+
+## Sibyl parallel deep-research track
+
+Sibyl (`sibyl/` package, July 2026) is a parallel forecasting harness that independently re-forecasts the **10 highest-volatility affected/fatalities questions** per run via agentic open-web research (Claude Opus + Brave Search), scored head-to-head against the standard track. Full integration map and design decisions: `sibyl/DISCOVERY.md`. Entry point: `python -m sibyl.run [--hs-run-id X] [--n N]`; workflow: `run_sibyl.yml` (chains off HS Triage, re-uploads `pythia-resolver-db`, dispatches publish).
+
+**Architecture** (per question, in DESCENDING volatility order so the budget cap sacrifices the least-volatile work first): load Resolver base rate (the ONLY shared input with the standard track, by design) → K=3 independent agentic trials (sequential belief-updating loop, ≤10 steps, tools = `brave_search` + `fetch_url` only — never the structured connectors) → linear-pool the trial CDFs (PCHIP in log1p space, numpy — scipy is not a dependency) → identity calibration hook (`CALIBRATION_ENABLED=False`; deferred PIT-based recalibration documented in `sibyl/calibration.py`) → discretize onto `BUCKET_SPECS` buckets → write.
+
+**Key decisions (do not silently change):**
+- **Volatility proxy** = `hs_triage.regime_change_score` (likelihood × magnitude), tiebreak `triage_score`. There is no first-class volatility score in Pythia.
+- **Eligible pairs** = `{(ACE,FATALITIES),(FL,PA),(TC,PA),(DR,PHASE3PLUS_IN_NEED)}` (config `ELIGIBLE_HAZARD_METRICS`). EVENT_OCCURRENCE is never eligible and never used as padding — a shortfall below N is logged loudly and the run proceeds.
+- **Native output**: same bucket-row format under `model_name='sibyl'` in `forecasts_raw` + `forecasts_ensemble` (`weights_profile='sibyl'`), written under the question's **standard forecaster run_id** so `compute_scores` (DISTINCT model_name) and the question-page SPD panel pick it up with zero changes. A trial emits ONE quantile set for the monthly value; the same bucket vector is written for all 6 `month_index` values. Full provenance (trial traces, quantiles, costs, divergences, leakage) goes to `sibyl_forecasts`/`sibyl_runs`.
+- **`'sibyl'` is in `AGGREGATE_MODEL_NAMES`** (`compute_calibration_pythia.py`): scored, but excluded from the ensemble-member weight softmax.
+- **Cost ledger**: every Opus call and Brave query is logged to `llm_calls` with `phase='sibyl'` (itemised on /v1/costs; `'sibyl'` is in `known_phases` in `resolver/query/costs.py`). The authoritative budget total is the in-process `CostTracker`; the hard cap (`SIBYL_RUN_HARD_CAP_USD`, default $40) is checked at question AND trial boundaries — the in-flight unit finishes (overshoot ≈ one question), remaining questions are persisted as `skipped`/`run budget cap`, and `sibyl_runs.budget_capped` is set. Never abort mid-trial.
+- **Leakage controls** (`sibyl/leakage.py`): every search passes a Brave `freshness` date-range ending at asOf (via the `freshness_override` kwarg added to `fetch_via_brave_search` — one search path, no second Brave client); resolution-source domains (ACLED, IFRC GO, IDMC, GDACS, FEWS NET, IPC) are blocked always; the post-asOf snippet classifier only activates in backtest (`SIBYL_BACKTEST_MODE=1`, asOf = question `window_start_date`); residual leak rate persisted per question.
+- **`claude-opus-4-8` rejects sampling params** (HTTP 400): `providers.call_anthropic` drops `temperature` for `_ANTHROPIC_NO_TEMPERATURE_PREFIXES` (opus-4-7/4-8, sonnet-5, fable). Trial diversity comes from per-trial perspective seeds in the prompt (`TRIAL_PERSPECTIVES`), not temperature. The model has a `pythia/model_costs.json` entry (`[0.005, 0.025]`) — a missing entry means silent $0 cost logging AND a broken budget cap.
+- **Dashboard**: `/v1/sibyl/{runs,summary,questions,question_detail}` (`pythia/api/routes/sibyl.py`, tolerant of pre-Sibyl DBs), `sibyl` block in `/v1/diagnostics/run_summary`, optional `model=sibyl` param on `/v1/risk_index`, `/sibyl` Next.js page (sortable JS-divergence table + trial traces), RunSummaryView Sibyl section, PA-KPI Sibyl toggle. JS divergence reuses `_js_divergence` from `generate_calibration_advice.py`.
+
+**Env vars**: `SIBYL_MODEL` (default `claude-opus-4-8`), `SIBYL_K` (3), `SIBYL_MAX_STEPS` (10), `SIBYL_AGGREGATION` (`linear_pool`|`vincent`), `SIBYL_RUN_HARD_CAP_USD` (40), `SIBYL_BUDGET_USD_PER_QUESTION` (unset), `SIBYL_N_QUESTIONS` (10), `SIBYL_BACKTEST_MODE` (0), `SIBYL_CALIBRATION_ENABLED` (0), `SIBYL_LIVE_LOOKUPS_ENABLED` (0), plus Brave/fetch tuning knobs in `sibyl/config.py`.
+
+**Tests**: `tests/test_sibyl_*.py` + `tests/sibyl_test_utils.py`, run by `sibyl-ci.yml` (no other CI workflow covers the top-level `tests/` directory). The smoke test is fully deterministic (model call + Brave mocked).
 
 ## Testing
 
@@ -653,6 +677,8 @@ Track 2's stored `model_name` stays `track2_flash` regardless of which model bac
 | `refresh-crisiswatch.yml` | CrisisWatch Playwright scraper | 3rd monthly |
 | `ingest-nmme.yml` | NMME seasonal forecasts (deprecated schedule) | Manual |
 | `inspect_resolver_duckdb.yml` | Data quality checks | Manual |
+| `run_sibyl.yml` | Sibyl deep-research track (top-10 volatile questions) | After HS Triage completes |
+| `sibyl-ci.yml` | Sibyl unit + smoke tests | On push/PR (sibyl paths) |
 | `forecaster-ci.yml` | SPD unit tests | On push/PR |
 | `resolver-ci-fast.yml` | Fast resolver tests | On push/PR |
 | `resolver-smoke.yml` | Resolver smoke tests | On push/PR |
