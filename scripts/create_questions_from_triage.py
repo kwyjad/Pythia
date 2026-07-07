@@ -268,7 +268,11 @@ def _load_triage_rows(
         iso3_up = (iso3 or "").upper()
         hz_up = (hz or "").upper()
         tier_str = (tier or "").lower()
-        need = bool(need_full_spd) or tier_str == "priority"
+        # Trust the stored need_full_spd verbatim: the HS writer already sets
+        # it TRUE for RC>0 and priority tiers, and clears it when the Brave
+        # circuit-breaker gate blocks an ungrounded hazard. Re-deriving from
+        # tier here would bypass that safety gate for priority hazards.
+        need = bool(need_full_spd)
         score_f = float(score or 0.0)
         track_int = int(track_val) if track_val is not None else None
         if hz_up == "ACO":
@@ -316,16 +320,20 @@ def _upsert_question(
     existing = con.execute(
         "SELECT 1 FROM questions WHERE question_id = ?", [question_id]
     ).fetchone()
+    meta_json = json.dumps(metadata, ensure_ascii=False)
     if existing:
         # Same-epoch re-run: update hs_run_id so the assertion can find
         # questions belonging to the current run.  Window dates are identical
-        # within the same epoch so provenance is not destroyed.
+        # within the same epoch so provenance is not destroyed. The metadata
+        # JSON embeds hs_run_id/tier/triage_score from its run, so refresh it
+        # together with the column — otherwise the blob keeps pointing at the
+        # first run while the column points at the latest.
         con.execute(
-            "UPDATE questions SET hs_run_id = ?, track = ? WHERE question_id = ?",
-            [hs_run_id, track, question_id],
+            "UPDATE questions SET hs_run_id = ?, track = ?, pythia_metadata_json = ? "
+            "WHERE question_id = ?",
+            [hs_run_id, track, meta_json, question_id],
         )
         return False  # signal: no new row inserted
-    meta_json = json.dumps(metadata, ensure_ascii=False)
     con.execute(
         """
         INSERT INTO questions (

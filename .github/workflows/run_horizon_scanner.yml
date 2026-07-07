@@ -177,6 +177,12 @@ jobs:
       # (seasonal_tc_context_cache table). The prompt loader falls back to live
       # scrape if the DB has no data, so no separate artifact download is needed.
 
+      # INTENTIONALLY BESPOKE: this block is not migrated to
+      # .github/actions/download-canonical-db because it is entangled with
+      # the db_run_id/db_artifact_name override inputs, DB_SOURCE mapping,
+      # and the bootstrap-reset ensure_schema special case. Its candidate
+      # list MUST be kept in sync with the composite action (the single
+      # authoritative list).
       - name: Download canonical resolver DB with signature guardrail
         id: canonical_download
         env:

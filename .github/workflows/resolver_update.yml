@@ -143,174 +143,47 @@ jobs:
           fi
           python -m scripts.ci.compute_backfill_window
 
+      # Canonical discovery via the shared composite action (single home of
+      # the candidate list). Per-candidate signature validation rejects DBs
+      # missing required tables before they are accepted.
       - name: Download canonical resolver DB for incremental runs
         id: canonical_download
         if: github.event_name != 'workflow_dispatch' || inputs.reset_db != 'true'
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          validate-cmd: >-
+            mkdir -p diagnostics &&
+            python -m scripts.ci.db_signature write
+            --db data/resolver.duckdb
+            --required "${SIGNATURE_REQUIRED_TABLES}"
+            --optional "${SIGNATURE_OPTIONAL_TABLES}"
+            --out diagnostics/db_signature_before.json
+
+      - name: Record canonical DB provenance
+        if: github.event_name != 'workflow_dispatch' || inputs.reset_db != 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FOUND_LABEL: ${{ steps.canonical_download.outputs.source }}
+          FOUND_RUN_ID: ${{ steps.canonical_download.outputs.run-id }}
+          FOUND_CREATED_AT: ${{ steps.canonical_download.outputs.created-at }}
         run: |
           set -euo pipefail
-          mkdir -p data diagnostics
-          rm -f diagnostics/db_signature_before.json
-          rm -rf data/pythia-resolver-db
-
-          CANDIDATES_FILE=$(mktemp)
-          gh run list \
-            --workflow "Horizon Scanner Triage" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
-          gh run list \
-            --workflow "Sibyl Deep Research" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Sibyl Deep Research"' >>"${CANDIDATES_FILE}" || true
-          gh run list \
-            --workflow "Resolver Update" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver Update"' >>"${CANDIDATES_FILE}" || true
-          gh run list \
-            --workflow "Ingest Structured Data" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
-          # Include the post-pipeline chain so we start from the most-complete
-          # DB (calibration is the chain terminus and carries all prior tables).
-          gh run list \
-            --workflow "Pythia — Compute Calibration Weights & Advice" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Calibration Weights & Advice"' >>"${CANDIDATES_FILE}" || true
-          gh run list \
-            --workflow "Pythia — Compute SPD Scores" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute SPD Scores"' >>"${CANDIDATES_FILE}" || true
-          gh run list \
-            --workflow "Pythia — Compute Resolutions" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Resolutions"' >>"${CANDIDATES_FILE}" || true
-
-          if [ ! -s "${CANDIDATES_FILE}" ]; then
-            echo "ERROR: No prior successful runs found; cannot build canonical DB."
-            exit 1
-          fi
-
-          sort -r "${CANDIDATES_FILE}" > "${CANDIDATES_FILE}.sorted"
-
-          FOUND=0
-          FOUND_SOURCE=""
-          FOUND_RUN_ID=""
-          FOUND_CREATED_AT=""
-
-          download_artifact_with_retries() {
-            local run_id="$1"
-            local artifact_name="$2"
-            local out_dir="$3"
-            local max_attempts="${4:-6}"
-            local attempt=1
-            while [ "$attempt" -le "$max_attempts" ]; do
-              echo "Downloading artifact '${artifact_name}' from run ${run_id} (attempt ${attempt}/${max_attempts})"
-              rm -rf "${out_dir}/pythia-resolver-db" || true
-              if gh run download "$run_id" -n "$artifact_name" --dir "$out_dir"; then
-                echo "Download OK."
-                return 0
-              fi
-              rc=$?
-              sleep_seconds=$(( 5 * attempt * attempt ))
-              echo "Download failed (exit=${rc}). Sleeping ${sleep_seconds}s before retry..."
-              sleep "${sleep_seconds}"
-              attempt=$((attempt + 1))
-            done
-            echo "ERROR: Failed to download artifact '${artifact_name}' from run ${run_id} after ${max_attempts} attempts."
-            return 1
-          }
-
-          while IFS=',' read -r CREATED RUN_ID LABEL; do
-            if [ "$LABEL" = "Horizon Scanner Triage" ]; then
-              SOURCE_KIND="pipeline"
-            elif [ "$LABEL" = "Ingest Structured Data" ]; then
-              SOURCE_KIND="ingest"
-            elif [ "$LABEL" = "Pythia — Compute Calibration Weights & Advice" ] \
-              || [ "$LABEL" = "Pythia — Compute SPD Scores" ] \
-              || [ "$LABEL" = "Pythia — Compute Resolutions" ]; then
-              SOURCE_KIND="calibration"
-            else
-              SOURCE_KIND="backfill"
-            fi
-
-            echo "Attempting canonical DB download from ${LABEL} (run ${RUN_ID}, created ${CREATED})"
-            rm -rf data/pythia-resolver-db
-            rm -f data/resolver.duckdb data/resolver.duckdb.wal
-            if ! download_artifact_with_retries "$RUN_ID" "pythia-resolver-db" data 6; then
-              echo "Download failed for run ${RUN_ID}; trying next candidate."
-              continue
-            fi
-
-            if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
-              SRC="data/pythia-resolver-db/resolver.duckdb"
-            else
-              SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
-            fi
-
-            if [ -z "${SRC}" ]; then
-              echo "resolver.duckdb not found in downloaded artifact from ${RUN_ID}; trying next candidate."
-              continue
-            fi
-
-            if [ "$SRC" != "data/resolver.duckdb" ]; then
-              cp "$SRC" data/resolver.duckdb
-            fi
-
-            # Remove stale WAL files that can crash DuckDB on replay
-            rm -f data/resolver.duckdb.wal
-
-            if python -m scripts.ci.db_signature write \
-                --db data/resolver.duckdb \
-                --required "${SIGNATURE_REQUIRED_TABLES}" \
-                --optional "${SIGNATURE_OPTIONAL_TABLES}" \
-                --out diagnostics/db_signature_before.json; then
-              echo "Candidate signature OK."
-            else
-              echo "Candidate rejected; missing required tables. Trying next candidate."
-              rm -f diagnostics/db_signature_before.json
-              continue
-            fi
-
-            if [ -f diagnostics/db_signature_before.json ]; then
-              FOUND=1
-              FOUND_SOURCE="${SOURCE_KIND}"
-              FOUND_RUN_ID="${RUN_ID}"
-              FOUND_CREATED_AT="${CREATED}"
-              break
-            fi
-          done < "${CANDIDATES_FILE}.sorted"
-
-          if [ "${FOUND}" -ne 1 ]; then
-            echo "ERROR: Could not find a valid canonical resolver.duckdb; rerun with reset_db=true to bootstrap."
-            exit 1
-          fi
-
+          case "${FOUND_LABEL}" in
+            "Horizon Scanner Triage") SOURCE_KIND="pipeline" ;;
+            "Ingest Structured Data") SOURCE_KIND="ingest" ;;
+            "Pythia — Compute Calibration Weights & Advice"|"Pythia — Compute SPD Scores"|"Pythia — Compute Resolutions") SOURCE_KIND="calibration" ;;
+            *) SOURCE_KIND="backfill" ;;
+          esac
           {
             echo "CANONICAL_DB_READY=true"
-            echo "CANONICAL_DB_SOURCE=${FOUND_SOURCE}"
+            echo "CANONICAL_DB_SOURCE=${SOURCE_KIND}"
             echo "CANONICAL_DB_RUN_ID=${FOUND_RUN_ID}"
             echo "CANONICAL_CREATED_AT=${FOUND_CREATED_AT}"
           } >> "$GITHUB_ENV"
-
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             {
               echo "### Canonical DB signature (before run)"
-              echo "- Source: ${FOUND_SOURCE} (run ${FOUND_RUN_ID})"
+              echo "- Source: ${SOURCE_KIND} (run ${FOUND_RUN_ID})"
               echo "- Created: ${FOUND_CREATED_AT}"
             } >> "$GITHUB_STEP_SUMMARY"
           fi

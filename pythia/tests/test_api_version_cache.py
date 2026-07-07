@@ -79,9 +79,13 @@ def test_version_probes_cached_until_db_mtime_changes(api_env: Path, monkeypatch
     assert r2.json()["latest_forecast_month"] == "2026-07"
     assert calls["n"] == 1  # served from cache — same DB version
 
-    # A DB refresh (sync's os.replace advances the mtime) invalidates.
+    # A DB refresh (sync's os.replace advances the mtime) invalidates — once
+    # the throttled refresh check runs and reopens the read connection (the
+    # cache is keyed on the connection's open-time mtime, not the raw file
+    # mtime, so probes are only recomputed when new data is actually visible).
     st = os.stat(api_env)
     os.utime(api_env, (st.st_atime, st.st_mtime + 5))
+    _app_mod._LAST_SYNC_CHECK = None  # expire the 60s refresh throttle
     r3 = client.get("/v1/version")
     assert r3.status_code == 200
     assert calls["n"] == 2
@@ -94,3 +98,35 @@ def test_version_latest_data_at_combines_manifest_and_probes(api_env: Path) -> N
     payload = resp.json()
     # forecasts_ensemble created_at (10:00) beats the manifest HS timestamp (09:00).
     assert payload["latest_data_at"] == "2026-07-01T10:00:00"
+
+
+def test_version_probes_not_pinned_by_throttled_refresh(api_env: Path) -> None:
+    """A DB swap during the 60s refresh-throttle window must not pin the
+    pre-swap probes under the new DB version: the first request after the
+    swap still reads the old inode, and keying the cache on the raw file
+    mtime would cache those stale probes under the new mtime forever."""
+    import time as _time
+
+    client = TestClient(app)
+    r1 = client.get("/v1/version")
+    assert r1.json()["latest_forecast_run_id"] == "fc_1"
+
+    # Publish a new DB (sync's os.replace semantics) with fresher data.
+    new_db = api_env.parent / "new.duckdb"
+    con = duckdb.connect(str(new_db))
+    con.execute("CREATE TABLE forecasts_ensemble (run_id TEXT, created_at TIMESTAMP)")
+    con.execute("INSERT INTO forecasts_ensemble VALUES ('fc_2', TIMESTAMP '2026-07-02 10:00:00')")
+    con.close()
+    os.replace(new_db, api_env)
+    st = os.stat(api_env)
+    os.utime(api_env, (st.st_atime, st.st_mtime + 5))  # mtime strictly advances
+
+    # Request inside the throttle window: connection still reads the old inode.
+    _app_mod._LAST_SYNC_CHECK = _time.monotonic()
+    r2 = client.get("/v1/version")
+    assert r2.json()["latest_forecast_run_id"] == "fc_1"
+
+    # Throttle expires -> connection reopens -> probes must show the new data.
+    _app_mod._LAST_SYNC_CHECK = None
+    r3 = client.get("/v1/version")
+    assert r3.json()["latest_forecast_run_id"] == "fc_2"

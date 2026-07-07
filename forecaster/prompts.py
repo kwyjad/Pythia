@@ -1348,56 +1348,21 @@ def _forecast_month_keys_from_question(
     """
     Derive a list of YYYY-MM month keys for the SPD forecast horizon.
 
-    Preference order:
-      1. question['window_start_date'] — the authoritative window anchor.
-         Resolutions map horizon_m=1 to the window_start month, so the
-         first forecast key MUST be that month.
-      2. question['target_months'] / question['target_month'] — the 6th
-         (last) window month per create_questions_from_triage, so keys
-         start at target - (horizon_months - 1).
-      3. return [] (caller falls back to generic placeholders).
-
-    Expected formats: 'YYYY-MM' or 'YYYY-MM-DD' (dates are accepted too
-    via str()).
+    Thin wrapper over the single-sourced month arithmetic in
+    ``forecaster.month_utils``: ``_anchor_month_for_question`` prefers
+    ``window_start_date`` (resolutions map horizon_m=1 to that month, so
+    the first key MUST be it) and falls back to ``target_months`` /
+    ``target_month`` minus 5 (the 6th/last window month per
+    create_questions_from_triage); ``_expected_months`` expands the window.
+    Returns [] when neither field is usable (caller falls back to generic
+    placeholders).
     """
+    from forecaster.month_utils import _anchor_month_for_question, _expected_months
 
-    year: int | None = None
-    month: int | None = None
-
-    ws = str(question.get("window_start_date") or "").strip()
-    m = re.match(r"^(\d{4})-(\d{2})(?:-\d{2})?", ws)
-    if m:
-        year = int(m.group(1))
-        month = int(m.group(2))
-    else:
-        raw = str(
-            question.get("target_months")
-            or question.get("target_month")
-            or ""
-        ).strip()
-        if not raw:
-            return []
-        m = re.match(r"^(\d{4})-(\d{2})(?:-\d{2})?$", raw)
-        if not m:
-            return []
-        year = int(m.group(1))
-        month = int(m.group(2))
-        # target_month is the LAST window month: shift back to the opener.
-        total = year * 12 + (month - 1) - (horizon_months - 1)
-        year, month = total // 12, (total % 12) + 1
-
-    if not (1 <= month <= 12):
+    anchor = _anchor_month_for_question(question)
+    if not anchor:
         return []
-
-    keys: list[str] = []
-    y, mm = year, month
-    for _ in range(horizon_months):
-        keys.append(f"{y:04d}-{mm:02d}")
-        mm += 1
-        if mm > 12:
-            mm = 1
-            y += 1
-    return keys
+    return _expected_months(anchor, horizon_months)
 
 
 _HAZARD_EVENT_LABELS = {

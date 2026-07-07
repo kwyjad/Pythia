@@ -44,36 +44,14 @@ jobs:
           pip install -r python_library_requirements.txt
           pip install duckdb
 
-      - name: Download canonical resolver DB for this backfill
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p data
-          RUN_ID=${{ github.event.workflow_run.id }}
-          echo "Downloading pythia-resolver-db from backfill run $RUN_ID"
-          gh run download "$RUN_ID" -n pythia-resolver-db --dir data
-
-          echo "Artifacts under data/:"
-          ls -R data
-
-          if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
-            SRC="data/pythia-resolver-db/resolver.duckdb"
-          else
-            SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
-          fi
-
-          if [ -n "$SRC" ]; then
-            echo "Found resolver DB at $SRC"
-            if [ "$SRC" != "data/resolver.duckdb" ]; then
-              cp "$SRC" data/resolver.duckdb
-            else
-              echo "DB already at canonical path data/resolver.duckdb; no copy needed."
-            fi
-            rm -f data/resolver.duckdb.wal
-          else
-            echo "ERROR: resolver.duckdb not found in pythia-resolver-db for run $RUN_ID"
-            exit 1
-          fi
+      # Path A: triggering Compute Resolutions run; Path B (manual dispatch or
+      # expired artifact): canonical discovery — previously manual dispatch
+      # always failed here because workflow_run.id is empty on dispatch.
+      - name: Download canonical resolver DB
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
 
       - name: Compute SPD scores for PA/FATALITIES
         env:

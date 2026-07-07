@@ -61,103 +61,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r python_library_requirements.txt
 
+      # Forced mode: operator-supplied db_run_id (fatal if unavailable).
+      # Otherwise canonical discovery via the shared composite action, with
+      # this workflow's own prior runs included as extra candidates.
       - name: Download canonical resolver DB
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          mkdir -p data
-
-          OVERRIDE_RUN_ID="${{ github.event.inputs.db_run_id }}"
-
-          download_artifact_with_retries() {
-            local run_id="$1"
-            local artifact_name="$2"
-            local out_dir="$3"
-            local max_attempts="${4:-6}"
-            local attempt=1
-
-            while [ "$attempt" -le "$max_attempts" ]; do
-              echo "Downloading artifact '${artifact_name}' from run ${run_id} (attempt ${attempt}/${max_attempts})"
-              rm -rf "${out_dir}/pythia-resolver-db" || true
-
-              if gh run download "$run_id" -n "$artifact_name" --dir "$out_dir"; then
-                echo "Download OK."
-                return 0
-              fi
-
-              sleep_seconds=$(( 5 * attempt * attempt ))
-              echo "Download failed. Sleeping ${sleep_seconds}s before retry..."
-              sleep "${sleep_seconds}"
-              attempt=$((attempt + 1))
-            done
-
-            echo "ERROR: Failed to download after ${max_attempts} attempts."
-            return 1
-          }
-
-          # Determine which run to download from
-          if [ -n "$OVERRIDE_RUN_ID" ]; then
-            if ! echo "$OVERRIDE_RUN_ID" | grep -Eq '^[0-9]+$'; then
-              echo "ERROR: db_run_id must be a numeric Actions run ID. Got: '$OVERRIDE_RUN_ID'"
-              exit 1
-            fi
-            DB_RUN_ID="$OVERRIDE_RUN_ID"
-          else
-            # Find the latest successful run that produced pythia-resolver-db
-            CANDIDATES_FILE=$(mktemp)
-            gh run list \
-              --workflow "Horizon Scanner Triage" \
-              --branch main \
-              --status success \
-              --json databaseId,createdAt \
-              --limit 10 | jq -r '.[] | "\(.createdAt),\(.databaseId)"' >>"${CANDIDATES_FILE}" || true
-            gh run list \
-              --workflow "Resolver Update" \
-              --branch main \
-              --status success \
-              --json databaseId,createdAt \
-              --limit 10 | jq -r '.[] | "\(.createdAt),\(.databaseId)"' >>"${CANDIDATES_FILE}" || true
-            gh run list \
-              --workflow "Purge HS Run" \
-              --branch main \
-              --status success \
-              --json databaseId,createdAt \
-              --limit 10 | jq -r '.[] | "\(.createdAt),\(.databaseId)"' >>"${CANDIDATES_FILE}" || true
-
-            if [ ! -s "${CANDIDATES_FILE}" ]; then
-              echo "ERROR: No successful runs found with a canonical DB artifact."
-              exit 1
-            fi
-
-            sort -r "${CANDIDATES_FILE}" > "${CANDIDATES_FILE}.sorted"
-            DB_RUN_ID=$(head -n 1 "${CANDIDATES_FILE}.sorted" | cut -d, -f2)
-          fi
-
-          echo "Downloading DB from run ${DB_RUN_ID}..."
-          if ! download_artifact_with_retries "$DB_RUN_ID" "pythia-resolver-db" data 6; then
-            exit 1
-          fi
-
-          # Locate resolver.duckdb in the downloaded artifact
-          if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
-            SRC="data/pythia-resolver-db/resolver.duckdb"
-          else
-            SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
-          fi
-
-          if [ -z "${SRC}" ]; then
-            echo "ERROR: resolver.duckdb not found in downloaded artifact."
-            exit 1
-          fi
-
-          if [ "$SRC" != "data/resolver.duckdb" ]; then
-            cp "$SRC" data/resolver.duckdb
-          fi
-          rm -f data/resolver.duckdb.wal
-
-          echo "DB_RUN_ID=${DB_RUN_ID}" >> "$GITHUB_ENV"
-          echo "Canonical DB ready from run ${DB_RUN_ID}."
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ github.event.inputs.db_run_id }}
+          extra-workflows: Purge HS Run
 
       - name: DB signature before purge
         run: |

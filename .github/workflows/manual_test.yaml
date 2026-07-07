@@ -39,15 +39,6 @@ jobs:
       METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
 
       # ---- LLM providers ----
-      USE_OPENROUTER: "1"
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
-      OPENROUTER_FALLBACK_ID: openai/gpt-4o
-      OPENROUTER_GPT5_ID: openai/gpt-4o
-      OPENROUTER_GPT5_THINK_ID: openai/gpt-4o
-      OPENROUTER_CLAUDE37_ID: anthropic/claude-3.7-sonnet
-      OR_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-
       USE_GOOGLE: "1"
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

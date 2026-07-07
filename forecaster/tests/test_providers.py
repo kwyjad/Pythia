@@ -131,3 +131,51 @@ def test_display_name_is_specific_model_id() -> None:
         providers._provider_display_name("openai", "gpt-5.4", {"display_name": "Custom"})
         == "Custom"
     )
+
+
+def test_openai_drops_temperature_for_gpt5_family() -> None:
+    """GPT-5 reasoning models reject temperature; gpt-4.1 still accepts it."""
+    from forecaster import providers
+
+    assert providers._openai_drops_temperature("gpt-5.4")
+    assert providers._openai_drops_temperature("gpt-5.4-mini")
+    assert providers._openai_drops_temperature("gpt-5-mini")
+    assert not providers._openai_drops_temperature("gpt-4.1")
+    assert not providers._openai_drops_temperature("gpt-4.1-mini")
+    assert not providers._openai_drops_temperature("")
+
+
+def test_call_openai_gpt54_body_never_contains_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hs_fallback JSON-repair path calls gpt-5.4 with no reasoning_effort;
+    the request body must not carry temperature (the API rejects it)."""
+    from forecaster import providers
+
+    captured: dict = {}
+
+    class _FakeResponse:
+        ok = True
+        status_code = 200
+        headers: dict = {}
+        text = ""
+
+        @staticmethod
+        def json() -> dict:
+            return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):  # noqa: A002
+        captured["body"] = json
+        return _FakeResponse()
+
+    monkeypatch.setattr(providers, "_OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(providers.requests, "post", _fake_post)
+
+    result = providers.call_openai("hi", "gpt-5.4", 0.0)
+    assert result.error is None
+    assert "temperature" not in captured["body"]
+    assert "reasoning_effort" not in captured["body"]
+
+    result = providers.call_openai("hi", "gpt-4.1", 0.2)
+    assert result.error is None
+    assert captured["body"]["temperature"] == 0.2

@@ -34,7 +34,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_STANDARD_MODEL_PREFERENCE = ("ensemble_bayesmc_v2", "ensemble_mean_v2", "track2_flash")
+# Single-sourced from sibyl.config (import-light: os only — safe for the
+# memory-constrained API process; see test_api_lazy_pipeline_import.py).
+from sibyl.config import STANDARD_MODEL_PREFERENCE as _STANDARD_MODEL_PREFERENCE
 
 
 def _maybe_json(raw: Any) -> Any:
@@ -49,6 +51,10 @@ def _maybe_json(raw: Any) -> Any:
 
 
 def _latest_sibyl_run_id(con, include_test: bool) -> Optional[str]:
+    # Pre-Sibyl / partial-schema DBs may have sibyl_forecasts without
+    # sibyl_runs (or neither); this module's contract is to never 500 there.
+    if not _table_exists(con, "sibyl_runs"):
+        return None
     rows = _execute(
         con,
         f"""
