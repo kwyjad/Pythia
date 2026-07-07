@@ -1,0 +1,223 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+name: Download canonical resolver DB
+description: >
+  Locate and download the shared pythia-resolver-db DuckDB artifact.
+  Path A: when run-id is provided (a workflow_run trigger id), try that run
+  first and fall back to discovery. Forced mode: when force-run-id is
+  provided (manual operator override), use exactly that run or fail.
+  Path B: canonical discovery — the most recent successful run across ALL
+  workflows that produce the artifact, newest first, each candidate
+  optionally checked with validate-cmd before being accepted.
+
+  THIS ACTION IS THE SINGLE HOME OF THE CANONICAL CANDIDATE LIST. When a
+  new workflow starts producing pythia-resolver-db, add it here (and to the
+  two intentionally-bespoke consumers: run_horizon_scanner.yml and
+  publish_latest_data.yml).
+
+inputs:
+  github-token:
+    description: Token for the gh CLI (usually secrets.GITHUB_TOKEN)
+    required: true
+  run-id:
+    description: >
+      Optional run id to try first (typically github.event.workflow_run.id;
+      empty on workflow_dispatch). Falls back to discovery when the download
+      fails or the artifact has expired.
+    default: ""
+  force-run-id:
+    description: >
+      Optional operator-supplied run id. When set, exactly this run is used
+      and any failure is fatal — no discovery fallback (the operator asked
+      for a specific DB and should be told when it is not available).
+    default: ""
+  artifact-name:
+    description: Artifact name to download
+    default: "pythia-resolver-db"
+  dest:
+    description: Directory to place resolver.duckdb in
+    default: "data"
+  extra-workflows:
+    description: >
+      Newline-separated additional workflow names to include as discovery
+      candidates (e.g. a maintenance workflow that re-uploads the artifact
+      itself). Candidates from all lists are merged and sorted by createdAt.
+    default: ""
+  validate-cmd:
+    description: >
+      Optional shell command run after each candidate DB is copied to
+      <dest>/resolver.duckdb. Nonzero exit rejects the candidate and moves
+      to the next one (fatal in forced mode / Path A only after fallback is
+      exhausted). Inherits the job environment.
+    default: ""
+  per-workflow-limit:
+    description: How many recent successful runs to consider per workflow
+    default: "10"
+
+outputs:
+  run-id:
+    description: The run id the DB was downloaded from
+    value: ${{ steps.download.outputs.run-id }}
+  source:
+    description: Which workflow the winning run belonged to (or "forced"/"triggering-run")
+    value: ${{ steps.download.outputs.source }}
+  created-at:
+    description: createdAt of the winning run (empty for forced/triggering-run)
+    value: ${{ steps.download.outputs.created-at }}
+
+runs:
+  using: composite
+  steps:
+    - id: download
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        RUN_ID_INPUT: ${{ inputs.run-id }}
+        FORCE_RUN_ID: ${{ inputs.force-run-id }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        DEST: ${{ inputs.dest }}
+        EXTRA_WORKFLOWS: ${{ inputs.extra-workflows }}
+        VALIDATE_CMD: ${{ inputs.validate-cmd }}
+        PER_WF_LIMIT: ${{ inputs.per-workflow-limit }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${DEST}"
+
+        clean_dest() {
+          rm -rf "${DEST}/${ARTIFACT_NAME}"
+          rm -f "${DEST}/resolver.duckdb" "${DEST}/resolver.duckdb.wal"
+        }
+
+        # Locate resolver.duckdb inside a downloaded artifact, copy it to the
+        # canonical path, and always drop any stale WAL (a leftover WAL from
+        # another connection crashes DuckDB's replay on open).
+        locate_and_copy_db() {
+          local src
+          if [ -f "${DEST}/${ARTIFACT_NAME}/resolver.duckdb" ]; then
+            src="${DEST}/${ARTIFACT_NAME}/resolver.duckdb"
+          else
+            src=$(find "${DEST}" -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
+          fi
+          if [ -z "${src}" ]; then
+            return 1
+          fi
+          if [ "${src}" != "${DEST}/resolver.duckdb" ]; then
+            cp "${src}" "${DEST}/resolver.duckdb"
+          fi
+          rm -f "${DEST}/resolver.duckdb.wal"
+          return 0
+        }
+
+        download_with_retries() {
+          local run_id="$1" max_attempts="${2:-3}" attempt=1 sleep_seconds
+          while [ "${attempt}" -le "${max_attempts}" ]; do
+            rm -rf "${DEST}/${ARTIFACT_NAME}" || true
+            if gh run download "${run_id}" -n "${ARTIFACT_NAME}" --dir "${DEST}"; then
+              return 0
+            fi
+            echo "Download from run ${run_id} failed (attempt ${attempt}/${max_attempts})"
+            if [ "${attempt}" -lt "${max_attempts}" ]; then
+              sleep_seconds=$((5 * attempt * attempt))
+              sleep "${sleep_seconds}"
+            fi
+            attempt=$((attempt + 1))
+          done
+          return 1
+        }
+
+        validate_candidate() {
+          if [ -z "${VALIDATE_CMD}" ]; then
+            return 0
+          fi
+          if bash -c "${VALIDATE_CMD}"; then
+            return 0
+          fi
+          echo "Candidate rejected by validate-cmd."
+          return 1
+        }
+
+        emit_outputs() {
+          echo "run-id=$1" >> "${GITHUB_OUTPUT}"
+          echo "source=$2" >> "${GITHUB_OUTPUT}"
+          echo "created-at=$3" >> "${GITHUB_OUTPUT}"
+        }
+
+        # ── Forced mode: operator picked an exact run — no fallback ──
+        if [ -n "${FORCE_RUN_ID}" ]; then
+          if ! echo "${FORCE_RUN_ID}" | grep -Eq '^[0-9]+$'; then
+            echo "ERROR: force-run-id must be a numeric Actions run id. Got: '${FORCE_RUN_ID}'"
+            exit 1
+          fi
+          echo "Downloading ${ARTIFACT_NAME} from forced run ${FORCE_RUN_ID}"
+          clean_dest
+          if download_with_retries "${FORCE_RUN_ID}" 3 && locate_and_copy_db && validate_candidate; then
+            ls -lh "${DEST}/resolver.duckdb"
+            emit_outputs "${FORCE_RUN_ID}" "forced" ""
+            exit 0
+          fi
+          echo "ERROR: could not obtain a valid ${ARTIFACT_NAME} from forced run ${FORCE_RUN_ID}"
+          exit 1
+        fi
+
+        # ── Path A: triggering run (workflow_run trigger) — fall back on failure ──
+        if [ -n "${RUN_ID_INPUT}" ]; then
+          echo "Downloading ${ARTIFACT_NAME} from triggering run ${RUN_ID_INPUT}"
+          clean_dest
+          if download_with_retries "${RUN_ID_INPUT}" 3 && locate_and_copy_db && validate_candidate; then
+            echo "Found resolver DB from triggering run ${RUN_ID_INPUT}"
+            ls -lh "${DEST}/resolver.duckdb"
+            emit_outputs "${RUN_ID_INPUT}" "triggering-run" ""
+            exit 0
+          fi
+          echo "WARNING: Could not use triggering run ${RUN_ID_INPUT}; falling back to canonical discovery."
+        fi
+
+        # ── Path B: canonical discovery across every producing workflow ──
+        # The one authoritative candidate list. Sorting is global by
+        # createdAt, so list order does not matter.
+        CANONICAL_WORKFLOWS=$(cat <<'EOF_WF'
+        Horizon Scanner Triage
+        Sibyl Deep Research
+        Resolver Update
+        Ingest Structured Data
+        Pythia — Compute Resolutions
+        Pythia — Compute SPD Scores
+        Pythia — Compute Calibration Weights & Advice
+        EOF_WF
+        )
+
+        CANDIDATES_FILE=$(mktemp)
+        printf '%s\n%s\n' "${CANONICAL_WORKFLOWS}" "${EXTRA_WORKFLOWS}" \
+          | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NF' | sort -u \
+          | while IFS= read -r WF; do
+              gh run list \
+                --workflow "${WF}" \
+                --branch main --status success \
+                --json databaseId,createdAt --limit "${PER_WF_LIMIT}" \
+                | jq -r --arg wf "${WF}" '.[] | "\(.createdAt),\(.databaseId),\($wf)"' \
+                >>"${CANDIDATES_FILE}" || true
+            done
+
+        if [ ! -s "${CANDIDATES_FILE}" ]; then
+          echo "ERROR: No successful runs found for any workflow producing ${ARTIFACT_NAME}."
+          exit 1
+        fi
+
+        sort -r "${CANDIDATES_FILE}" > "${CANDIDATES_FILE}.sorted"
+
+        while IFS=',' read -r CREATED CAND_RUN_ID LABEL; do
+          echo "Trying ${LABEL} run ${CAND_RUN_ID} (${CREATED})..."
+          clean_dest
+          if download_with_retries "${CAND_RUN_ID}" 1 && locate_and_copy_db && validate_candidate; then
+            echo "Found resolver DB from ${LABEL} run ${CAND_RUN_ID}"
+            ls -lh "${DEST}/resolver.duckdb"
+            emit_outputs "${CAND_RUN_ID}" "${LABEL}" "${CREATED}"
+            exit 0
+          fi
+        done < "${CANDIDATES_FILE}.sorted"
+
+        echo "ERROR: No valid ${ARTIFACT_NAME} artifact found across canonical candidates."
+        exit 1

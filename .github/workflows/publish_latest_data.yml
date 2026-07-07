@@ -75,7 +75,10 @@ jobs:
             exit 0
           fi
 
-          # Priority 3: canonical discovery — most recent successful run from upstream workflows
+          # Priority 3: canonical discovery — most recent successful run from upstream workflows.
+          # INTENTIONALLY BESPOKE (not the download-canonical-db composite action):
+          # this step's resolve outputs feed the regression guard. Keep the WF
+          # list below in sync with the composite action (the authoritative list).
           echo "No run_id provided; searching for most recent successful upstream run with '${ARTIFACT_NAME}'..."
           CANDIDATES_FILE=$(mktemp)
 

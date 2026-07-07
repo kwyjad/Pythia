@@ -104,146 +104,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh auth status
 
+      # Canonical discovery via the shared composite action (single home of
+      # the candidate list — includes the post-pipeline chain so this run
+      # starts from the most-complete DB). Per-candidate signature validation
+      # rejects DBs missing required tables.
       - name: Download canonical resolver DB
         id: canonical_download
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          mkdir -p data
-
-          download_artifact_with_retries() {
-            local run_id="$1"
-            local artifact_name="$2"
-            local out_dir="$3"
-            local max_attempts="${4:-6}"
-
-            local attempt=1
-            while [ "$attempt" -le "$max_attempts" ]; do
-              echo "Downloading artifact '${artifact_name}' from run ${run_id} (attempt ${attempt}/${max_attempts})"
-
-              rm -rf "${out_dir}/pythia-resolver-db" || true
-
-              if gh run download "$run_id" -n "$artifact_name" --dir "$out_dir"; then
-                echo "Download OK."
-                return 0
-              fi
-
-              rc=$?
-              sleep_seconds=$(( 5 * attempt * attempt ))
-              echo "Download failed (exit=${rc}). Sleeping ${sleep_seconds}s before retry..."
-              sleep "${sleep_seconds}"
-              attempt=$((attempt + 1))
-            done
-
-            echo "ERROR: Failed to download artifact '${artifact_name}' from run ${run_id} after ${max_attempts} attempts."
-            return 1
-          }
-
-          # Collect candidate runs from Horizon Scanner Triage, Resolver Update,
-          # Ingest Structured Data, and the post-pipeline chain (Compute
-          # Resolutions/Scores/Calibration). Including the post-pipeline
-          # workflows is critical so this run starts from the most-complete
-          # DB — calibration is the chain terminus and carries all prior
-          # tables (resolutions, scores, calibration_weights, calibration_advice)
-          # forward. Without this, calibration's artifact never propagates back
-          # and downstream artifacts silently lose post-pipeline data.
-          CANDIDATES_FILE=$(mktemp)
-          gh run list \
-            --workflow "Horizon Scanner Triage" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
-          gh run list \
-            --workflow "Sibyl Deep Research" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Sibyl Deep Research"' >>"${CANDIDATES_FILE}" || true
-          gh run list \
-            --workflow "Resolver Update" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver Update"' >>"${CANDIDATES_FILE}" || true
-          gh run list \
-            --workflow "Ingest Structured Data" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
-          gh run list \
-            --workflow "Pythia — Compute Calibration Weights & Advice" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Calibration Weights & Advice"' >>"${CANDIDATES_FILE}" || true
-          gh run list \
-            --workflow "Pythia — Compute SPD Scores" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute SPD Scores"' >>"${CANDIDATES_FILE}" || true
-          gh run list \
-            --workflow "Pythia — Compute Resolutions" \
-            --branch main \
-            --status success \
-            --json databaseId,createdAt \
-            --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Resolutions"' >>"${CANDIDATES_FILE}" || true
-
-          if [ ! -s "${CANDIDATES_FILE}" ]; then
-            echo "ERROR: No successful runs found."
-            exit 1
-          fi
-
-          sort -r "${CANDIDATES_FILE}" > "${CANDIDATES_FILE}.sorted"
-
-          FOUND=0
-
-          while IFS=',' read -r CREATED RUN_ID LABEL; do
-            rm -rf data/pythia-resolver-db
-            rm -f data/resolver.duckdb data/resolver.duckdb.wal
-
-            if ! download_artifact_with_retries "$RUN_ID" "pythia-resolver-db" data 6; then
-              echo "Download failed for run ${RUN_ID}; trying next candidate."
-              continue
-            fi
-
-            if [ -f data/pythia-resolver-db/resolver.duckdb ]; then
-              SRC="data/pythia-resolver-db/resolver.duckdb"
-            else
-              SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1 || true)
-            fi
-
-            if [ -z "${SRC}" ]; then
-              echo "resolver.duckdb not found in artifact from ${RUN_ID}; trying next candidate."
-              continue
-            fi
-
-            if [ "$SRC" != "data/resolver.duckdb" ]; then
-              cp "$SRC" data/resolver.duckdb
-            fi
-            rm -f data/resolver.duckdb.wal
-
-            # Validate DB signature
-            if python -m scripts.ci.db_signature write \
-                --db data/resolver.duckdb \
-                --required "${SIGNATURE_REQUIRED_TABLES}" \
-                --optional "${SIGNATURE_OPTIONAL_TABLES}" \
-                --out data/db_signature_before.json; then
-              FOUND=1
-              echo "Canonical DB from run ${RUN_ID} (${LABEL}, ${CREATED}) validated OK."
-              break
-            else
-              echo "Candidate rejected; missing required tables. Trying next candidate."
-            fi
-          done < "${CANDIDATES_FILE}.sorted"
-
-          if [ "${FOUND}" -ne 1 ]; then
-            echo "ERROR: No valid canonical DB found."
-            exit 1
-          fi
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          validate-cmd: >-
+            python -m scripts.ci.db_signature write
+            --db data/resolver.duckdb
+            --required "${SIGNATURE_REQUIRED_TABLES}"
+            --optional "${SIGNATURE_OPTIONAL_TABLES}"
+            --out data/db_signature_before.json
 
       - name: Determine source list for scheduled runs
         id: sources
