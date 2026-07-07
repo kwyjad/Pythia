@@ -176,6 +176,20 @@ export type RunSummaryResponse = {
     log: { avg: number | null; median: number | null };
     crps: { avg: number | null; median: number | null };
   };
+  /** Parallel deep-research track coverage; null when no Sibyl run exists. */
+  sibyl?: {
+    sibyl_run_id: string;
+    budget_capped: boolean;
+    run_cost_usd: number;
+    opus_cost_usd: number;
+    brave_cost_usd: number;
+    n_selected: number;
+    n_forecast: number;
+    n_skipped: number;
+    n_skipped_budget_cap: number;
+    k: number;
+    aggregation: string | null;
+  } | null;
 };
 
 export type QuestionsResponse = {
@@ -317,4 +331,108 @@ export type QuestionBundleResponse = {
         by_phase?: Record<string, unknown[]>;
       }
     | null;
+};
+
+// --- Sibyl (parallel deep-research track) ----------------------------------
+
+export type SibylRun = {
+  sibyl_run_id: string;
+  hs_run_id?: string | null;
+  as_of?: string | null;
+  model?: string | null;
+  k?: number | null;
+  max_steps?: number | null;
+  aggregation?: string | null;
+  run_hard_cap_usd?: number | null;
+  budget_capped?: boolean | null;
+  run_cost_usd?: number | null;
+  opus_cost_usd?: number | null;
+  brave_cost_usd?: number | null;
+  n_selected?: number | null;
+  n_forecast?: number | null;
+  n_skipped?: number | null;
+  created_at?: string | null;
+  config?: Record<string, unknown> | null;
+};
+
+export type SibylQuestionRow = {
+  sibyl_run_id?: string;
+  run_id?: string | null;
+  question_id: string;
+  iso3?: string | null;
+  hazard_code?: string | null;
+  metric?: string | null;
+  status?: string | null;
+  skip_reason?: string | null;
+  as_of?: string | null;
+  k?: number | null;
+  aggregation?: string | null;
+  volatility_score?: number | null;
+  triage_score?: number | null;
+  js_divergence_vs_standard?: number | null;
+  js_divergence_inter_trial?: number | null;
+  cost_usd?: number | null;
+  opus_cost_usd?: number | null;
+  brave_cost_usd?: number | null;
+  pooled_quantiles?: Record<string, number> | null;
+};
+
+export type SibylSummaryResponse = {
+  run: SibylRun | null;
+  questions: SibylQuestionRow[];
+};
+
+export type SibylQuestionsResponse = {
+  sibyl_run_id: string | null;
+  rows: SibylQuestionRow[];
+};
+
+export type SibylTrialStep = {
+  step: number;
+  action: string;
+  action_input: string;
+  tool_ok?: boolean | null;
+  belief?: {
+    quantiles?: Record<string, number>;
+    confidence?: string;
+    evidence_higher?: string[];
+    evidence_lower?: string[];
+    open_questions?: string[];
+    baserate_reconciliation?: string;
+    step_rationale?: string;
+  };
+  repaired?: boolean;
+};
+
+export type SibylTrial = {
+  trial_index: number;
+  perspective?: string;
+  quantiles?: Record<string, number> | null;
+  confidence?: string;
+  belief_trace?: SibylTrialStep[];
+  evidence_higher?: string[];
+  evidence_lower?: string[];
+  source_urls?: string[];
+  steps_used?: number;
+  submitted?: boolean;
+  cost?: { opus_usd?: number; brave_usd?: number; total_usd?: number };
+  error?: string | null;
+};
+
+export type SibylQuestionDetailResponse = {
+  record: SibylQuestionRow & {
+    trials?: SibylTrial[] | null;
+    bucket_probs?: number[] | null;
+    leakage?: Record<string, unknown> | null;
+  };
+  question?: Record<string, unknown> | null;
+  bucket_labels: string[];
+  standard_spd: {
+    model_name: string | null;
+    by_month: Record<string, number[]>;
+  };
+};
+
+export type SibylRunsResponse = {
+  rows: SibylRun[];
 };

@@ -76,6 +76,12 @@ const Nav = () => {
             </Link>
             <Link
               className="text-fred-primary font-semibold hover:text-fred-secondary"
+              href="/sibyl"
+            >
+              Sibyl
+            </Link>
+            <Link
+              className="text-fred-primary font-semibold hover:text-fred-secondary"
               href="/costs"
             >
               Costs
@@ -184,6 +190,12 @@ const Nav = () => {
                 href="/resolver"
               >
                 Resolver
+              </Link>
+              <Link
+                className="text-fred-primary font-semibold hover:text-fred-secondary"
+                href="/sibyl"
+              >
+                Sibyl
               </Link>
               <Link
                 className="text-fred-primary font-semibold hover:text-fred-secondary"

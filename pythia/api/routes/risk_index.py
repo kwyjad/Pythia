@@ -238,10 +238,18 @@ def get_risk_index(
     agg: str = Query("surge", description="Aggregation mode: surge (default) or burden (legacy)"),
     alpha: float = Query(0.1, ge=0, le=1, description="Surge blending weight"),
     forecaster_run_id: Optional[str] = Query(None, description="Forecaster run ID to scope results"),
+    model: Optional[str] = Query(
+        None,
+        description=(
+            "Override the forecast source model_name (e.g. 'sibyl' for the "
+            "parallel deep-research track); default = ensemble preference"
+        ),
+    ),
     include_test: bool = Query(False),
 ):
     con = _con()
     metric_upper = (metric or "").strip().upper() or "PA"
+    model_override = (model or "").strip() or None
     hazard_code_upper = (hazard_code or "").strip().upper() or None
     is_pa = metric_upper == "PA"
     is_fatalities = metric_upper == "FATALITIES"
@@ -481,8 +489,21 @@ def get_risk_index(
           WHERE fe.{horizon_col} BETWEEN 1 AND 6
             AND fe.{bucket_col} IS NOT NULL
             AND fe.{prob_col} IS NOT NULL
-        ),
-        chosen_model AS (
+        )
+        """
+        if model_override:
+            # Explicit source override (e.g. model=sibyl): only questions
+            # that have rows under that model_name contribute.
+            base_cte += """
+        , filtered AS (
+          SELECT base.*
+          FROM base
+          WHERE base.model_name = :model_override
+        )
+        """
+        else:
+            base_cte += """
+        , chosen_model AS (
           SELECT
             question_id,
             CASE
@@ -612,6 +633,8 @@ def get_risk_index(
         "agg": agg_mode,
         "alpha": alpha,
     }
+    if model_name_available and model_override:
+        params["model_override"] = model_override
     if populations_available:
         params["normalize"] = normalize
     rows = _rows_from_cursor(_execute(con, sql, params))
@@ -693,6 +716,7 @@ def get_risk_index(
         "duration_m": duration_m,
         "normalize": normalize,
         "forecaster_run_id": forecaster_run_id,
+        "model": model_override,
         "rows": rows,
         "metric_type": "spd",
     }
