@@ -94,10 +94,10 @@ const MOCK_DATA: RunSummaryResponse = {
     countries_by_level: { L1: 30, L2: 9, L3: 6 },
   },
   tracks: {
-    track1: { questions: 103, countries: 45, models: 6 },
-    track2: { questions: 126, countries: 51 },
+    track1: { questions: 103, countries: 45, models: 5 },
+    track2: { questions: 126, countries: 51, model: "gemini-3.5-flash" },
   },
-  ensemble: { expected: 7, ok: 6 },
+  ensemble: { expected: 5, ok: 5 },
   cost: {
     total_usd: 37.93,
     total_tokens: 18325326,

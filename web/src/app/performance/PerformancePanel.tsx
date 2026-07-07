@@ -776,9 +776,9 @@ export default function PerformancePanel({
                 <InfoTooltip
                   text={
                     "Breakdown of scored questions by track. Track 1 = full " +
-                    "ensemble; Track 2 = single Gemini Flash model. Older " +
-                    "questions predate this split and are counted only in " +
-                    "Scored Questions above."
+                    "ensemble; Track 2 = a single fast model (currently " +
+                    "gemini-3.5-flash). Older questions predate this split " +
+                    "and are counted only in Scored Questions above."
                   }
                 />
               </span>

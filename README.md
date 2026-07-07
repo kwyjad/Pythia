@@ -40,7 +40,7 @@ Resolver facts/base rates → Horizon Scanner per-hazard pipeline:
 ## Core components
 - **Resolver (facts + base rates)**: Resolver tables in DuckDB (`facts_resolved`, `facts_deltas`, `snapshots`) provide historical context. Schema is defined in [`pythia/db/schema.py`](pythia/db/schema.py).
 - **Horizon Scanner (HS)**: `python -m horizon_scanner.horizon_scanner` triages countries and hazards, writes `hs_runs`/`hs_triage`, seeds `questions`/`question_research`, and generates country evidence packs. HS runs a fully per-hazard pipeline: each hazard (ACE, DR, FL, HW, TC) gets its own RC grounding call, RC assessment, triage grounding call, and triage assessment. RC and triage each run 2-pass for stability (RC: both Gemini Flash; triage: Gemini Pro + Gemini Flash). RC grounding uses TRIGGER/DAMPENER/BASELINE signal categories; triage grounding uses SITUATION/RESPONSE/FORECAST/VULNERABILITY categories with longer recency windows. An ACLED low-activity filter skips ACE triage for countries with minimal recent conflict (0 fatalities in 2 months AND <25 in 12 months).
-- **Retriever web research (shared evidence packs)**: When enabled, the retriever builds evidence packs reused across HS, research, and SPD prompts. The shared retriever defaults to `gemini-3-flash-preview` when `PYTHIA_RETRIEVER_ENABLED=1` and `PYTHIA_RETRIEVER_MODEL_ID` is unset; see [`pythia/web_research/web_research.py`](pythia/web_research/web_research.py).
+- **Retriever web research (shared evidence packs)**: When enabled, the retriever builds evidence packs reused across HS, research, and SPD prompts. The shared retriever defaults to `gemini-3.5-flash` when `PYTHIA_RETRIEVER_ENABLED=1` and `PYTHIA_RETRIEVER_MODEL_ID` is unset; see [`pythia/web_research/web_research.py`](pythia/web_research/web_research.py).
 - **Structured data connectors**: Authoritative humanitarian, climate, and conflict-forecast data pulled from specialist APIs and stored in DuckDB for direct prompt injection. Replaced the former Research LLM stage. See [`pythia/acaps.py`](pythia/acaps.py), [`pythia/fewsnet_food_security.py`](pythia/fewsnet_food_security.py), [`horizon_scanner/reliefweb.py`](horizon_scanner/reliefweb.py), [`pythia/acled_political.py`](pythia/acled_political.py), [`horizon_scanner/enso/`](horizon_scanner/enso/), [`horizon_scanner/seasonal_tc/`](horizon_scanner/seasonal_tc/), [`horizon_scanner/hdx_signals.py`](horizon_scanner/hdx_signals.py), [`resolver/connectors/acled_cast.py`](resolver/connectors/acled_cast.py).
 - **Adversarial evidence checks**: Counter-evidence searches for RC Level 1+ cases, stored in `hs_adversarial_checks`. See [`pythia/adversarial_check.py`](pythia/adversarial_check.py).
 - **Hazard-specific reasoning**: Per-hazard forecasting instructions injected into SPD prompts. See [`forecaster/hazard_prompts.py`](forecaster/hazard_prompts.py).
@@ -212,14 +212,12 @@ All model choices are centralized in [`pythia/config.yaml`](pythia/config.yaml) 
 ```yaml
 llm:
   models:                # THE single place to swap a model family
-    gpt:          openai:gpt-5.2
-    gpt_mini:     openai:gpt-5-mini
-    claude:       anthropic:claude-sonnet-4-6
+    gpt:          openai:gpt-5.4
+    gpt_mini:     openai:gpt-5.4-mini
+    claude:       anthropic:claude-opus-4-8
     gemini_pro:   google:gemini-3.1-pro-preview
-    gemini_flash: google:gemini-3-flash-preview
+    gemini_flash: google:gemini-3.5-flash
     gemini_lite:  google:gemini-2.5-flash
-    kimi:         kimi:kimi-k2.5
-    deepseek:     deepseek:deepseek-reasoner
 
   profile: "prod"        # override with PYTHIA_LLM_PROFILE
 
@@ -231,7 +229,7 @@ llm:
         - model: claude
         # ... (see config.yaml for the full list and per-model params)
       roles:             # every non-ensemble purpose -> alias
-        hs_default:      gemini_pro
+        hs_default:      gemini_flash
         rc_pass1:        gemini_flash
         track2_spd:      gemini_flash
         scenario_writer: gemini_flash
@@ -240,7 +238,7 @@ llm:
 
 ### Changing models
 
-- **Upgrade a model family** (e.g. GPT-5.2 → GPT-5.5): change the id on one line in `llm.models`, then add a cost entry in `pythia/model_costs.json`. Every ensemble member and role that references the alias picks up the new model.
+- **Upgrade a model family** (e.g. GPT-5.4 → GPT-5.5): change the id on one line in `llm.models`, then add a cost entry in `pythia/model_costs.json`. Every ensemble member and role that references the alias picks up the new model.
 - **Add/remove an ensemble member**: add or delete a `- model: <alias>` entry (define the alias in `llm.models` first). Multiple members from the same provider are supported.
 - **Point a role at a different model**: edit the `roles:` block. Values are registry aliases or explicit `provider:model_id` refs.
 - **Add a new provider**: requires a `call_<provider>()` function and dispatch branch in `forecaster/providers.py`, plus an entry in `_PROVIDER_ENV_KEYS`.
@@ -249,7 +247,7 @@ llm:
 
 ### Model costs
 
-Per-model cost rates are stored in [`pythia/model_costs.json`](pythia/model_costs.json) as `[input, output]` cost per 1,000 tokens in USD — one entry per model id (provider-prefixed lookups are normalized automatically). When switching to a new model id, add its cost entry to this file; models without an entry log $0 cost, and the registry test fails to remind you.
+Per-model cost rates are stored in [`pythia/model_costs.json`](pythia/model_costs.json) as `[input, output]` cost per **1,000,000 (1M) tokens** in USD — one entry per model id (provider-prefixed lookups are normalized automatically). When switching to a new model id, add its cost entry to this file; models without an entry log $0 cost, and the registry test fails to remind you.
 
 ### Purpose-specific env overrides
 
@@ -258,7 +256,7 @@ Every role can still be overridden at runtime without touching config: `PYTHIA_H
 ### Env var overrides
 
 - `PYTHIA_SPD_ENSEMBLE_SPECS`: overrides the entire SPD ensemble at runtime (comma-separated `provider:model_id` pairs).
-- `PYTHIA_BLOCK_PROVIDERS`: comma-separated provider names to exclude (e.g. `xai`).
+- `PYTHIA_BLOCK_PROVIDERS`: comma-separated provider names to exclude (e.g. `google`).
 - `PYTHIA_SPD_GOOGLE_MODEL_ID`: overrides all Google model IDs in the SPD ensemble.
 
 ## Quickstart (local)
@@ -406,7 +404,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 - [`pythia/model_costs.json`](pythia/model_costs.json) contains per-model cost rates.
 
 ### Key env vars
-- **Provider keys**: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`, `EXA_API_KEY`, `PERPLEXITY_API_KEY`.
+- **Provider keys**: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `EXA_API_KEY`, `PERPLEXITY_API_KEY`.
 - **Structured data**: `ACAPS_EMAIL`, `ACAPS_PASSWORD` (ACAPS API auth); `ACLED_ACCESS_KEY`, `ACLED_EMAIL` (ACLED CAST API auth).
 - **Concurrency**:
   - `PYTHIA_LLM_CONCURRENCY` (global LLM call cap)
@@ -421,9 +419,9 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
   - `PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH`, `PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO`
   - `PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC`, `PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC`
   - `PYTHIA_GOOGLE_SPD_RETRIES`
-- **SPD ensemble override**: `PYTHIA_SPD_ENSEMBLE_SPECS` (e.g. `openai:gpt-5.2,google:gemini-3-flash-preview`).
+- **SPD ensemble override**: `PYTHIA_SPD_ENSEMBLE_SPECS` (e.g. `openai:gpt-5.4,google:gemini-3.5-flash`).
 - **HS triage resilience**:
-  - `PYTHIA_HS_FALLBACK_MODEL_SPECS` (defaults to `hs_fallback` from the active profile, then `openai:gpt-5.2`; keeps HS triage running when Gemini fails).
+  - `PYTHIA_HS_FALLBACK_MODEL_SPECS` (defaults to `hs_fallback` from the active profile, then `openai:gpt-5.4`; keeps HS triage running when Gemini fails).
   - `PYTHIA_HS_ONLY_COUNTRIES` (comma-separated ISO3s/names to rerun HS triage for a subset).
   - `PYTHIA_PROVIDER_FAILURE_THRESHOLD`, `PYTHIA_PROVIDER_COOLDOWN_SECONDS`, `PYTHIA_PROVIDER_RESET_ON_SUCCESS`
   - `PYTHIA_LLM_RETRY_TIMEOUTS` (set `0` to opt out of timeout retries outside HS triage)
@@ -436,10 +434,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 | --- | --- | --- |
 | `OPENAI_API_KEY` | Forecaster SPD ensemble | OpenAI models in ensemble |
 | `GEMINI_API_KEY` | HS, retriever, forecaster | Gemini models (HS + SPD + retriever) |
-| `ANTHROPIC_API_KEY` | Forecaster SPD ensemble | Anthropic models |
-| `XAI_API_KEY` | Forecaster SPD ensemble | XAI models |
-| `KIMI_API_KEY` | Forecaster SPD ensemble | Kimi models (Moonshot) |
-| `DEEPSEEK_API_KEY` | Forecaster SPD ensemble | DeepSeek models |
+| `ANTHROPIC_API_KEY` | Forecaster SPD ensemble + Sibyl | Anthropic models |
 | `EXA_API_KEY` | Web research | Exa backend (optional) |
 | `PERPLEXITY_API_KEY` | Web research | Perplexity backend (optional) |
 | `ACAPS_EMAIL` | Structured data | ACAPS API auth (INFORM, Risk Radar, etc.) |
@@ -448,7 +443,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 | `ACLED_EMAIL` | Structured data | ACLED CAST API auth |
 | `GITHUB_TOKEN` | Actions | Artifact download + summary updates |
 
-**Minimum set for full pipeline**: `GEMINI_API_KEY` + at least one of (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `DEEPSEEK_API_KEY`). Missing keys disable their providers, and the run proceeds with a partial ensemble.
+**Minimum set for full pipeline**: `GEMINI_API_KEY` + at least one of (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`). Missing keys disable their providers, and the run proceeds with a partial ensemble.
 
 ## Operational notes
 - **Partial ensembles are expected**: providers can timeout; the ensemble uses available members and records `ensemble_meta`.

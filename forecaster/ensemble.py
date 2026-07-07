@@ -6,7 +6,7 @@
 from __future__ import annotations
 """
 ensemble.py — async per-model calls with robust parsing + usage/cost capture,
-using providers.call_chat_ms(...) which supports OpenRouter, Gemini-direct, Grok-direct.
+using providers.call_chat_ms(...) which supports the OpenAI, Anthropic, and Google APIs.
 """
 
 import asyncio, time, re, json, os

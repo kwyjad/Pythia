@@ -56,13 +56,6 @@ jobs:
       GEMINI_CALL_TIMEOUT_SEC: "300"
       GPT5_CALL_TIMEOUT_SEC: "300"
 
-      ENABLE_GROK: "1"
-      XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
-      XAI_BASE_URL: https://api.x.ai/v1/chat/completions
-      XAI_GROK_ID: grok-4
-      GROK_MODEL_ID: grok-4
-      GROK_CALL_TIMEOUT_SEC: "300"
-
       # ---- Optional providers ----
       PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
       EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
@@ -110,9 +103,9 @@ jobs:
       GIT_REMOTE_NAME: origin
       GIT_BRANCH_NAME: main
 
-       # ---- Cost table (string JSON) ----
+       # ---- Cost table (string JSON; USD per 1M tokens) ----
       MODEL_COSTS_JSON: |
-        {"openai/gpt-4o":{"prompt":0.0025,"completion":0.01},"anthropic/claude-3.7-sonnet":{"prompt":0.003,"completion":0.015},"gemini-2.5-pro":{"prompt":0.00125,"completion":0.01},"grok-4":{"prompt":0.003,"completion":0.015}}
+        {"openai/gpt-4o":{"prompt":2.50,"completion":10.00},"anthropic/claude-3.7-sonnet":{"prompt":3.00,"completion":15.00},"gemini-2.5-pro":{"prompt":1.25,"completion":10.00}}
 
     # ---- Steps ----
     steps:

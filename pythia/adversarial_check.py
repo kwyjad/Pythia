@@ -276,7 +276,7 @@ async def _synthesize_counter_evidence(
 
     model_id = resolve_hs_model()
     spec = ModelSpec(
-        name="Gemini",
+        name=model_id,  # specific model id — never a generic family label
         provider="google",
         model_id=model_id,
         active=True,

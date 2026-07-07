@@ -1116,10 +1116,11 @@ async def _call_hs_model(
     run_id: str | None = None,
     fallback_specs: list[ModelSpec] | None = None,
 ) -> tuple[str, Dict[str, Any], str, ModelSpec]:
+    hs_model_id = _resolve_hs_model()
     spec = ModelSpec(
-        name="Gemini",
+        name=hs_model_id,  # specific model id — never a generic family label
         provider="google",
-        model_id=_resolve_hs_model(),
+        model_id=hs_model_id,
         active=True,
         purpose="hs_triage",
     )

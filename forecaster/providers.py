@@ -36,7 +36,6 @@ from pythia.llm_profiles import get_current_models, get_current_profile
 # Default timeouts (seconds); can be overridden via env
 GPT5_CALL_TIMEOUT_SEC = float(os.getenv("GPT5_CALL_TIMEOUT_SEC", "300"))
 GEMINI_CALL_TIMEOUT_SEC = float(os.getenv("GEMINI_CALL_TIMEOUT_SEC", "300"))
-GROK_CALL_TIMEOUT_SEC = float(os.getenv("GROK_CALL_TIMEOUT_SEC", "300"))
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +61,7 @@ _CREDIT_RETRY_CONFIG: dict[str, dict[str, int]] = {
 def _credit_retry_config_for(provider: str) -> tuple[int, int] | None:
     """Return (pause_sec, max_retries) for a provider, with env-var overrides.
 
-    Returns None for providers not in ``_CREDIT_RETRY_CONFIG`` (Kimi, DeepSeek).
+    Returns None for providers not in ``_CREDIT_RETRY_CONFIG``.
     """
     p = (provider or "").lower()
     base = _CREDIT_RETRY_CONFIG.get(p)
@@ -124,7 +123,7 @@ class ProviderResult:
 @dataclass
 class ModelSpec:
     name: str
-    provider: str  # "openai" | "anthropic" | "google" | "xai"
+    provider: str  # "openai" | "anthropic" | "google"
     model_id: str
     weight: float = 1.0
     active: bool = True
@@ -267,9 +266,6 @@ _PROVIDER_ENV_KEYS: Dict[str, str] = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "google": "GEMINI_API_KEY",
-    "xai": "XAI_API_KEY",
-    "kimi": "KIMI_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
 }
 
 _cfg = load_cfg()
@@ -278,28 +274,20 @@ _forecaster_cfg = _cfg.get("forecaster", {}) if isinstance(_cfg, dict) else {}
 
 
 def _provider_display_name(provider: str, model_id: str, cfg: Dict[str, Any] | None = None) -> str:
+    """Return the display name stored as ``model_name`` in forecasts_raw / scores / llm_calls.
+
+    Uses the specific model id (e.g. ``gemini-3.5-flash``, ``gpt-5.4``) so
+    dashboards, downloads, and calibration weights always reference a clear,
+    unambiguous model — never a generic family label like "Gemini" or
+    "Gemini Flash". An explicit ``display_name`` in config still wins.
+    """
     if cfg:
         explicit = cfg.get("display_name")
         if isinstance(explicit, str) and explicit.strip():
             return explicit.strip()
-    base_names = {
-        "openai": "OpenAI",
-        "anthropic": "Claude",
-        "google": "Gemini",
-        "xai": "Grok",
-        "kimi": "Kimi",
-        "deepseek": "DeepSeek",
-    }
-    base = base_names.get(provider, provider.title())
-    if not model_id:
-        return base
-    if provider == "google":
-        mid = model_id.lower()
-        if "flash" in mid:
-            return "Gemini Flash"
-        if "pro" in mid:
-            return "Gemini Pro"
-    return f"{base}-{model_id.replace('/', '-')}"
+    if model_id:
+        return model_id.replace("/", "-")
+    return provider.title()
 
 
 def _resolve_timeout(env_name: str, fallback: float | int | None, default: float) -> float:
@@ -542,25 +530,14 @@ _OPENAI_STATE = _PROVIDER_STATES.get("openai", {})
 OPENAI_MODEL_ID = _OPENAI_STATE.get("model", "")
 _GEMINI_STATE = _PROVIDER_STATES.get("google", {})
 GEMINI_MODEL_ID = _GEMINI_STATE.get("model", "")
-_XAI_STATE = _PROVIDER_STATES.get("xai", {})
-GROK_MODEL_ID = _XAI_STATE.get("model", "")
 
 _OPENAI_API_KEY = _OPENAI_STATE.get("api_key", "")
 _ANTHROPIC_API_KEY = _PROVIDER_STATES.get("anthropic", {}).get("api_key", "")
 _GEMINI_API_KEY = _GEMINI_STATE.get("api_key", "")
-_XAI_API_KEY = _XAI_STATE.get("api_key", "")
-_KIMI_STATE = _PROVIDER_STATES.get("kimi", {})
-_KIMI_API_KEY = _KIMI_STATE.get("api_key", "")
-_DEEPSEEK_STATE = _PROVIDER_STATES.get("deepseek", {})
-_DEEPSEEK_API_KEY = _DEEPSEEK_STATE.get("api_key", "")
 
 _OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
-_XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1").strip()
-_KIMI_BASE_URL = os.getenv("KIMI_BASE_URL", "https://api.moonshot.ai/v1").strip()
-_DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
 
-_OPENAI_NO_CUSTOM_TEMPERATURE = {"gpt-5-mini"}
-_KIMI_FIXED_TEMPERATURE_MODELS = {"kimi-k2.5"}
+_OPENAI_NO_CUSTOM_TEMPERATURE = {"gpt-5-mini", "gpt-5.4-mini"}
 # Anthropic models that reject sampling params outright (HTTP 400 if sent):
 # the Opus 4.7+/Sonnet 5+/Fable family removed temperature/top_p/top_k.
 _ANTHROPIC_NO_TEMPERATURE_PREFIXES = (
@@ -572,9 +549,6 @@ _ANTHROPIC_NO_TEMPERATURE_PREFIXES = (
 _OPENAI_TIMEOUT = _resolve_timeout("OPENAI_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _ANTHROPIC_TIMEOUT = _resolve_timeout("ANTHROPIC_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _GEMINI_TIMEOUT = _resolve_timeout("GEMINI_CALL_TIMEOUT_SEC", GEMINI_CALL_TIMEOUT_SEC, 60.0)
-_XAI_TIMEOUT = _resolve_timeout("XAI_CALL_TIMEOUT_SEC", GROK_CALL_TIMEOUT_SEC, 60.0)
-_KIMI_TIMEOUT = _resolve_timeout("KIMI_CALL_TIMEOUT_SEC", None, 300.0)
-_DEEPSEEK_TIMEOUT = _resolve_timeout("DEEPSEEK_CALL_TIMEOUT_SEC", None, 300.0)
 
 _ANTHROPIC_VERSION = os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")
 _ANTHROPIC_MAX_OUTPUT = int(os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS", "16384") or 16384)
@@ -597,11 +571,12 @@ def _get_or_client() -> httpx.AsyncClient:
 # Usage / cost helpers
 # ---------------------------------------------------------------------------
 
-# Cost per 1,000 tokens for known models (USD). Loaded from pythia/model_costs.json
-# so that adding a new model's cost only requires editing a JSON file, not Python code.
+# Cost per 1,000,000 (1M) tokens for known models (USD). Loaded from
+# pythia/model_costs.json so that adding a new model's cost only requires
+# editing a JSON file, not Python code.
 
 def _load_model_costs_json() -> Dict[str, tuple[float, float]]:
-    """Load model cost data from ``pythia/model_costs.json``."""
+    """Load model cost data from ``pythia/model_costs.json`` (per-1M rates)."""
     import pathlib
 
     try:
@@ -626,7 +601,7 @@ def _load_model_costs_json() -> Dict[str, tuple[float, float]]:
     return result
 
 
-MODEL_PRICES_PER_1K: Dict[str, tuple[float, float]] = _load_model_costs_json()
+MODEL_PRICES_PER_1M: Dict[str, tuple[float, float]] = _load_model_costs_json()
 
 _MODEL_PRICES: Optional[Dict[str, Dict[str, float]]] = None
 
@@ -668,12 +643,12 @@ def usage_to_dict(usage_obj: Any) -> Dict[str, int]:
     return base
 
 
-def resolve_price_per_1k(model_id: str) -> Optional[tuple[float, float]]:
-    """Return (input, output) USD cost per 1K tokens for *model_id*.
+def resolve_price_per_1m(model_id: str) -> Optional[tuple[float, float]]:
+    """Return (input, output) USD cost per 1,000,000 (1M) tokens for *model_id*.
 
     Single lookup path into pythia/model_costs.json (plus the MODEL_COSTS_JSON
-    env override). Accepts plain ids ("gpt-5.2") and provider-prefixed forms
-    ("openai/gpt-5.2"). Returns None when the model has no cost entry.
+    env override). Accepts plain ids ("gpt-5.4") and provider-prefixed forms
+    ("openai/gpt-5.4"). Returns None when the model has no cost entry.
     """
 
     if not model_id:
@@ -682,17 +657,18 @@ def resolve_price_per_1k(model_id: str) -> Optional[tuple[float, float]]:
     if not original:
         return None
     normalized = original.lower()
-    prices: Optional[tuple[float, float]] = MODEL_PRICES_PER_1K.get(normalized)
+    prices: Optional[tuple[float, float]] = MODEL_PRICES_PER_1M.get(normalized)
     if not prices:
         alt_ids = [normalized.replace("/", "-"), normalized.split("/", 1)[-1]]
         for alt in alt_ids:
-            if alt in MODEL_PRICES_PER_1K:
-                prices = MODEL_PRICES_PER_1K[alt]
+            if alt in MODEL_PRICES_PER_1M:
+                prices = MODEL_PRICES_PER_1M[alt]
                 break
     if prices:
         return float(prices[0]), float(prices[1])
 
     # Fallback to JSON overrides if provided via MODEL_COSTS_JSON
+    # (same convention: {"prompt": ..., "completion": ...} in USD per 1M tokens)
     dynamic_prices = _load_model_prices()
     price_entry = (
         dynamic_prices.get(normalized)
@@ -719,23 +695,47 @@ def estimate_cost_usd(model_id: str, usage: Dict[str, int]) -> float:
     completion_tokens = int(usage.get("completion_tokens", 0) or 0)
     total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
 
-    price_tuple = resolve_price_per_1k(model_id)
+    price_tuple = resolve_price_per_1m(model_id)
     if not price_tuple:
         return 0.0
 
-    input_cost_per_1k, output_cost_per_1k = price_tuple
+    input_cost_per_1m, output_cost_per_1m = price_tuple
 
     if prompt_tokens or completion_tokens:
-        input_cost = (prompt_tokens / 1000.0) * input_cost_per_1k
-        output_cost = (completion_tokens / 1000.0) * output_cost_per_1k
+        input_cost = (prompt_tokens / 1_000_000.0) * input_cost_per_1m
+        output_cost = (completion_tokens / 1_000_000.0) * output_cost_per_1m
         return float(input_cost + output_cost)
 
-    return float((total_tokens / 1000.0) * input_cost_per_1k)
+    return float((total_tokens / 1_000_000.0) * input_cost_per_1m)
 
 
 # ---------------------------------------------------------------------------
 # Provider calls
 # ---------------------------------------------------------------------------
+
+
+def _is_gemini_3_family(model_id: str) -> bool:
+    """True for Gemini 3.x model ids (gemini-3-*, gemini-3.1-*, gemini-3.5-*, ...)."""
+
+    return (model_id or "").lower().startswith(("gemini-3-", "gemini-3."))
+
+
+def _google_model_family(model_id: str) -> Optional[str]:
+    """Classify a Gemini 3.x model id as "flash" or "pro".
+
+    Used for the per-family SPD timeout / thinking-level env fallbacks.
+    Substring-based so version bumps (gemini-3-flash-preview ->
+    gemini-3.5-flash) don't silently disable the env overrides.
+    """
+
+    mid = (model_id or "").lower()
+    if not _is_gemini_3_family(mid):
+        return None
+    if "flash" in mid:
+        return "flash"
+    if "pro" in mid:
+        return "pro"
+    return None
 
 
 def call_openai(
@@ -884,7 +884,10 @@ def call_google(
     api_model = model.split("/", 1)[-1] if "/" in model else model
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={_GEMINI_API_KEY}"
     generation_config: Dict[str, Any] = {"temperature": float(temperature)}
-    if thinking_level and api_model.lower().startswith("gemini-3-"):
+    # thinkingLevel is supported by the Gemini 3.x families (gemini-3-*,
+    # gemini-3.1-*, gemini-3.5-*); older 2.5 models use a different knob
+    # (thinkingBudget) and would reject this config.
+    if thinking_level and _is_gemini_3_family(api_model):
         generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -939,159 +942,6 @@ def call_google(
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
-def call_xai(prompt: str, model: str, temperature: float) -> ProviderResult:
-    if not _XAI_API_KEY:
-        return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing XAI_API_KEY")
-    headers = {"Authorization": f"Bearer {_XAI_API_KEY}", "Content-Type": "application/json"}
-    body = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": float(temperature)}
-    try:
-        resp = requests.post(f"{_XAI_BASE_URL.rstrip('/')}/chat/completions", headers=headers, json=body, timeout=_XAI_TIMEOUT)
-    except Exception as exc:
-        return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"xAI request error: {exc}")
-
-    try:
-        payload = resp.json()
-    except Exception:
-        try:
-            payload = json.loads(resp.text)
-        except Exception:
-            payload = {}
-
-    if not resp.ok:
-        retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-        message = ""
-        if isinstance(payload, dict):
-            err = payload.get("error")
-            if isinstance(err, dict):
-                for key in ("message", "error"):
-                    msg = err.get(key)
-                    if isinstance(msg, str) and msg:
-                        message = msg
-                        break
-            elif isinstance(err, str):
-                message = err
-            if not message:
-                for key in ("message", "detail", "error_message"):
-                    msg = payload.get(key)
-                    if isinstance(msg, str) and msg:
-                        message = msg
-                        break
-        if not message:
-            message = resp.text[:400]
-        return ProviderResult(
-            "",
-            usage_to_dict(None),
-            0.0,
-            model,
-            error=f"xAI HTTP {resp.status_code}: {message}",
-            retry_after=retry_after,
-        )
-
-    text = ""
-    if isinstance(payload, dict):
-        choices = payload.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0]
-            if isinstance(first, dict):
-                message = first.get("message")
-                if isinstance(message, dict):
-                    content = message.get("content")
-                    if isinstance(content, str):
-                        text = content.strip()
-    usage_raw = payload.get("usage") if isinstance(payload, dict) else {}
-    usage = usage_to_dict({
-        "prompt_tokens": usage_raw.get("prompt_tokens", 0),
-        "completion_tokens": usage_raw.get("completion_tokens", 0),
-        "total_tokens": usage_raw.get("total_tokens")
-        or usage_raw.get("totalTokens")
-        or (usage_raw.get("prompt_tokens", 0) or 0) + (usage_raw.get("completion_tokens", 0) or 0),
-    })
-    return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
-
-
-def _call_openai_compatible(
-    prompt: str,
-    model: str,
-    temperature: float,
-    *,
-    api_key: str,
-    base_url: str,
-    timeout: float,
-    provider_label: str,
-) -> ProviderResult:
-    """Shared implementation for OpenAI-compatible APIs (Kimi, DeepSeek, etc.)."""
-    if not api_key:
-        return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"missing {provider_label} API key")
-    try:
-        resp = requests.post(
-            f"{base_url.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 1.0 if model in _KIMI_FIXED_TEMPERATURE_MODELS else float(temperature),
-            },
-            timeout=timeout,
-        )
-    except Exception as exc:
-        return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"{provider_label} error: {exc}")
-
-    try:
-        payload = resp.json()
-    except Exception:
-        payload = {}
-
-    if not resp.ok:
-        retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-        message = ""
-        if isinstance(payload, dict):
-            err = payload.get("error")
-            if isinstance(err, dict):
-                message = str(err.get("message", ""))
-            elif isinstance(err, str):
-                message = err
-        if not message:
-            message = resp.text[:400]
-        return ProviderResult(
-            "",
-            usage_to_dict(None),
-            0.0,
-            model,
-            error=f"{provider_label} HTTP {resp.status_code}: {message}",
-            retry_after=retry_after,
-        )
-
-    text = ""
-    if isinstance(payload, dict):
-        choices = payload.get("choices") or []
-        if choices and isinstance(choices[0], dict):
-            message = choices[0].get("message") or {}
-            if isinstance(message, dict):
-                text = str(message.get("content", "")).strip()
-    usage = usage_to_dict(payload.get("usage") if isinstance(payload, dict) else {})
-    return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
-
-
-def call_kimi(prompt: str, model: str, temperature: float) -> ProviderResult:
-    return _call_openai_compatible(
-        prompt, model, temperature,
-        api_key=_KIMI_API_KEY,
-        base_url=_KIMI_BASE_URL,
-        timeout=_KIMI_TIMEOUT,
-        provider_label="Kimi",
-    )
-
-
-def call_deepseek(prompt: str, model: str, temperature: float) -> ProviderResult:
-    return _call_openai_compatible(
-        prompt, model, temperature,
-        api_key=_DEEPSEEK_API_KEY,
-        base_url=_DEEPSEEK_BASE_URL,
-        timeout=_DEEPSEEK_TIMEOUT,
-        provider_label="DeepSeek",
-    )
-
-
 def _call_provider_sync(
     provider: str,
     prompt: str,
@@ -1109,12 +959,6 @@ def _call_provider_sync(
         return call_anthropic(prompt, model, temperature, purpose=purpose)
     if p in {"google", "gemini"}:
         return call_google(prompt, model, temperature, timeout_sec=timeout_sec, thinking_level=thinking_level)
-    if p in {"xai", "grok"}:
-        return call_xai(prompt, model, temperature)
-    if p == "kimi":
-        return call_kimi(prompt, model, temperature)
-    if p == "deepseek":
-        return call_deepseek(prompt, model, temperature)
     return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"unsupported provider {provider}")
 
 
@@ -1317,10 +1161,10 @@ async def call_chat_ms(
         thinking_level = ms.thinking
     # 2) Env var fallback for Google SPD models (backward compat)
     elif spd_google:
-        model_id_lower = ms.model_id.lower()
-        if "gemini-3-flash" in model_id_lower:
+        google_family = _google_model_family(ms.model_id)
+        if google_family == "flash":
             thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH", "low") or "").strip()
-        elif "gemini-3-pro" in model_id_lower:
+        elif google_family == "pro":
             thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO", "") or "").strip()
     # 3) Normalize empty/off/none to None
     if thinking_level in ("", "off", "none"):
@@ -1330,10 +1174,10 @@ async def call_chat_ms(
     effective_temperature = ms.temperature if ms.temperature is not None else temperature
 
     if spd_google:
-        model_id_lower = ms.model_id.lower()
-        if "gemini-3-flash" in model_id_lower:
+        google_family = _google_model_family(ms.model_id)
+        if google_family == "flash":
             timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC", None, 300.0)
-        elif "gemini-3-pro" in model_id_lower:
+        elif google_family == "pro":
             timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC", None, 300.0)
         try:
             max_attempts = max(1, int(os.getenv("PYTHIA_GOOGLE_SPD_RETRIES", "1") or 1))

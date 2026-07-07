@@ -15,7 +15,7 @@ export function formatModelName(raw: string): string {
     }
   }
 
-  // GPT models: gpt-5.2, gpt-5-mini, gpt-5-nano, etc.
+  // GPT models: gpt-5.4, gpt-5.4-mini, etc.
   const gptMatch = lowered.match(/^gpt-([\d.]+)(?:-(.+))?$/);
   if (gptMatch) {
     const version = gptMatch[1];
@@ -35,27 +35,6 @@ export function formatModelName(raw: string): string {
     const version = minor ? `${major}.${minor}` : major;
     const tierLabel = tier.charAt(0).toUpperCase() + tier.slice(1);
     return `Claude ${tierLabel} ${version}`;
-  }
-
-  const grokMatch = lowered.match(/^grok-(\d+)/);
-  if (grokMatch) {
-    return `Grok ${grokMatch[1]}`;
-  }
-
-  // Kimi models: kimi-k2.5 → Kimi K2.5
-  const kimiMatch = lowered.match(/^kimi-(.+)$/);
-  if (kimiMatch) {
-    return `Kimi ${kimiMatch[1].toUpperCase()}`;
-  }
-
-  // DeepSeek models: deepseek-reasoner → DeepSeek Reasoner
-  const deepseekMatch = lowered.match(/^deepseek-(.+)$/);
-  if (deepseekMatch) {
-    const suffix = deepseekMatch[1]
-      .split("-")
-      .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
-      .join(" ");
-    return `DeepSeek ${suffix}`;
   }
 
   return raw;

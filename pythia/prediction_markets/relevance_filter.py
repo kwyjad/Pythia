@@ -123,7 +123,7 @@ async def filter_by_relevance_llm(
         return []
 
     cfg = get_relevance_filter_config()
-    model_id = cfg.get("model", "gemini-3-flash-preview")
+    model_id = cfg.get("model", "gemini-3.5-flash")
 
     prompt = _build_filter_prompt(
         question_text, country_name, hazard_name,

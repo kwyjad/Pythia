@@ -77,13 +77,10 @@ jobs:
       PYTHIA_PREDICTION_MARKETS_ENABLED: "0"
       BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       # HS models come from the llm.models registry + roles in pythia/config.yaml.
       # (HS_MODEL_ID was removed: it is now a true override, and the old value
       # here was dead — the ensemble-derived Gemini Pro always won.)
       PYTHIA_HS_ONLY_COUNTRIES: ${{ github.event.inputs.hs_only_countries }}
-      PYTHIA_BLOCK_PROVIDERS: xai
       # The SPD ensemble comes from pythia/config.yaml (llm.models registry +
       # llm.profiles.prod.ensemble) — the PYTHIA_SPD_ENSEMBLE_SPECS override
       # was removed 2026-07 so config is authoritative. Per-model thinking/
@@ -472,34 +469,12 @@ jobs:
             echo "ANTHROPIC_API_KEY is set (value hidden)."
           fi
 
-      - name: Diagnostics — KIMI_API_KEY presence
-        env:
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-        run: |
-          if [ -z "${KIMI_API_KEY:-}" ]; then
-            echo "WARNING: KIMI_API_KEY is NOT set. Kimi models will be skipped in the ensemble."
-          else
-            echo "KIMI_API_KEY is set (value hidden)."
-          fi
-
-      - name: Diagnostics — DEEPSEEK_API_KEY presence
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
-            echo "WARNING: DEEPSEEK_API_KEY is NOT set. DeepSeek models will be skipped in the ensemble."
-          else
-            echo "DEEPSEEK_API_KEY is set (value hidden)."
-          fi
-
       # Step 6: Run the main Python script (as a module)
       - name: Run Horizon Scanner
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           set -eo pipefail
           mkdir -p diagnostics
@@ -714,10 +689,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # XAI_API_KEY: ${{ secrets.XAI_API_KEY }}  # blocked via PYTHIA_BLOCK_PROVIDERS
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          MODEL_COSTS_JSON: ${{ secrets.MODEL_COSTS_JSON }}
+          # MODEL_COSTS_JSON env override removed 2026-07: pythia/model_costs.json
+          # (now per-1M-token rates) is authoritative; a stale per-1K secret here
+          # would silently misprice any model missing from the JSON file.
         run: |
           set -e
           mkdir -p diagnostics
@@ -736,10 +710,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # XAI_API_KEY: ${{ secrets.XAI_API_KEY }}  # blocked via PYTHIA_BLOCK_PROVIDERS
-          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          MODEL_COSTS_JSON: ${{ secrets.MODEL_COSTS_JSON }}
+          # MODEL_COSTS_JSON env override removed 2026-07: pythia/model_costs.json
+          # (now per-1M-token rates) is authoritative; a stale per-1K secret here
+          # would silently misprice any model missing from the JSON file.
 
           # SPD model self-driven web search
           PYTHIA_SPD_WEB_SEARCH_ENABLED: "1"

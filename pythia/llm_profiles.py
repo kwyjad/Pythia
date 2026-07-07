@@ -8,7 +8,7 @@
 All model choices flow through this module:
 
 - ``llm.models`` in config.yaml is the MODEL REGISTRY: one alias per model
-  family (e.g. ``gpt: openai:gpt-5.2``). Swapping a family means editing that
+  family (e.g. ``gpt: openai:gpt-5.4``). Swapping a family means editing that
   one line (plus a cost entry in pythia/model_costs.json).
 - ``llm.profiles.<profile>.ensemble`` lists SPD ensemble members, each
   referencing a registry alias via ``model:`` (legacy ``provider:model_id``
@@ -33,18 +33,18 @@ from pythia.config import load as load_cfg
 # Last-resort defaults, used only when config.yaml is missing/unreadable or a
 # role is absent from it. Keep in sync with the roles block in config.yaml.
 _ROLE_FALLBACKS: Dict[str, str] = {
-    "hs_default": "google:gemini-3.1-pro-preview",
-    "hs_triage_pass1": "google:gemini-3.1-pro-preview",
-    "hs_triage_pass2": "google:gemini-3-flash-preview",
-    "rc_pass1": "google:gemini-3-flash-preview",
-    "rc_pass2": "google:gemini-3-flash-preview",
-    "hs_fallback": "openai:gpt-5.2",
-    "track2_spd": "google:gemini-3-flash-preview",
-    "scenario_writer": "google:gemini-3-flash-preview",
+    "hs_default": "google:gemini-3.5-flash",
+    "hs_triage_pass1": "google:gemini-3.5-flash",
+    "hs_triage_pass2": "google:gemini-3.5-flash",
+    "rc_pass1": "google:gemini-3.5-flash",
+    "rc_pass2": "google:gemini-3.5-flash",
+    "hs_fallback": "openai:gpt-5.4",
+    "track2_spd": "google:gemini-3.5-flash",
+    "scenario_writer": "google:gemini-3.5-flash",
     "grounding_gemini": "google:gemini-2.5-flash",
     "grounding_openai": "openai:gpt-4.1",
     "grounding_openai_fallback": "openai:gpt-4.1-mini",
-    "grounding_claude": "anthropic:claude-sonnet-4-6",
+    "grounding_claude": "anthropic:claude-haiku-4-5-20251001",
     "crisiswatch": "google:gemini-2.5-flash",
 }
 
@@ -120,7 +120,7 @@ def split_model_ref(ref: str, default_provider: str = "google") -> Tuple[str, st
     """Split ``provider:model_id`` into (provider, model_id).
 
     A bare model id is attributed to *default_provider* (legacy env-var
-    values like ``HS_MODEL_ID=gemini-3-flash-preview``).
+    values like ``HS_MODEL_ID=gemini-3.5-flash``).
     """
 
     if ":" in ref:
@@ -207,8 +207,8 @@ def get_current_models() -> Dict[str, str]:
     provider in the ensemble).
 
     Example return:
-      {"openai": "gpt-5.2", "google": "gemini-3.1-pro-preview",
-       "anthropic": "claude-sonnet-4-6"}
+      {"openai": "gpt-5.4", "google": "gemini-3.1-pro-preview",
+       "anthropic": "claude-opus-4-8"}
     """
 
     models: Dict[str, str] = {}

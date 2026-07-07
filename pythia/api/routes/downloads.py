@@ -161,7 +161,7 @@ def download_scores_model_csv(include_test: bool = Query(False)):
 @router.get("/v1/downloads/rationales.csv")
 def download_rationales_csv(
     hazard: str = Query(..., description="Hazard code filter (e.g. FL, DR, TC)"),
-    model: str | None = Query(None, description="Model name filter (e.g. OpenAI, Claude, Gemini Flash)"),
+    model: str | None = Query(None, description="Model name filter (e.g. gpt-5.4, claude-opus-4-8, gemini-3.5-flash)"),
     include_test: bool = Query(False),
 ):
     parts = ["rationales", hazard.strip().upper()]

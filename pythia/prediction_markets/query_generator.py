@@ -106,7 +106,7 @@ async def generate_queries_llm(
     Returns None if the LLM call fails (caller should use keyword fallback).
     """
     cfg = get_query_generation_config()
-    model_id = cfg.get("model", "gemini-3-flash-preview")
+    model_id = cfg.get("model", "gemini-3.5-flash")
     max_queries = int(cfg.get("max_queries", 5))
 
     prompt = _build_llm_prompt(

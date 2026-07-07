@@ -101,8 +101,8 @@ async def _call_rc_model(
     Pass 2: Secondary RC model for diversity (config role ``rc_pass2``)
 
     Override via env vars:
-      PYTHIA_RC_MODEL_PASS1=google:gemini-3.1-pro-preview
-      PYTHIA_RC_MODEL_PASS2=google:gemini-3-flash-preview
+      PYTHIA_RC_MODEL_PASS1=google:gemini-3.5-flash
+      PYTHIA_RC_MODEL_PASS2=google:gemini-3.5-flash
 
     Returns (text, usage, error, model_spec).
     """
@@ -111,15 +111,13 @@ async def _call_rc_model(
 
     if pass_idx == 2:
         model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS2") or get_role_model("rc_pass2")
-        default_name = "Gemini Flash"
     else:
         model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS1") or get_role_model("rc_pass1")
-        default_name = "Gemini Flash"
 
     provider, model_id = split_model_ref(model_spec_str)
 
     spec = ModelSpec(
-        name=default_name,
+        name=model_id,  # specific model id — never a generic family label
         provider=provider,
         model_id=model_id,
         active=True,

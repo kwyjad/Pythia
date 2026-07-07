@@ -2392,7 +2392,7 @@ async def _call_spd_model(
     ms = (
         ModelSpec(**ms_default.__dict__)
         if ms_default is not None
-        else ModelSpec(name="Gemini", provider="google", model_id=GEMINI_MODEL_ID, active=True, purpose="spd_v2")
+        else ModelSpec(name=GEMINI_MODEL_ID, provider="google", model_id=GEMINI_MODEL_ID, active=True, purpose="spd_v2")
     )
     return await _call_spd_model_for_spec(
         ms,
@@ -4166,7 +4166,7 @@ TRACK2_MODEL_SPEC = _build_track2_model_spec()
 
 
 async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
-    """Run single-model SPD forecast for Track 2 questions (Gemini Flash only)."""
+    """Run single-model SPD forecast for Track 2 questions (track2_spd role model only)."""
     rec = _normalize_question_row_for_spd(question_row)
     qid = rec.get("question_id")
     iso3 = (rec.get("iso3") or "").upper()
@@ -4232,7 +4232,7 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
         if question_evidence_pack:
             prompt = append_retriever_evidence_to_prompt(prompt, question_evidence_pack)
 
-        # Single model call with Gemini Flash
+        # Single model call with the track2_spd role model
         per_model_spds, usage, raw_calls, ensemble_meta = (
             await _call_spd_members_v2_compat(
                 prompt,

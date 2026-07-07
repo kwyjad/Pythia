@@ -1,29 +1,17 @@
 {
-  "_comment": "Cost per 1,000 tokens [input, output] in USD. One entry per model_id — lookup normalizes provider-prefixed forms like 'openai/gpt-5.2' automatically (see forecaster.providers.resolve_price_per_1k). When swapping a model in pythia/config.yaml llm.models, add its cost entry here; pythia/tests/test_model_registry.py enforces the sync. brave-web-search cost is per-query ($0.005), injected directly in usage dict — zero here to avoid double-counting.",
+  "_comment": "Cost per 1,000,000 (1M) tokens [input, output] in USD. One entry per model_id — lookup normalizes provider-prefixed forms like 'openai/gpt-5.4' automatically (see forecaster.providers.resolve_price_per_1m). When swapping a model in pythia/config.yaml llm.models, add its cost entry here; pythia/tests/test_model_registry.py enforces the sync. brave-web-search cost is per-query ($0.005), injected directly in usage dict — zero here to avoid double-counting. Prices verified 2026-07 against provider pricing pages.",
 
-  "brave-web-search":         [0.0, 0.0],
+  "brave-web-search":          [0.0, 0.0],
 
-  "gpt-4.1":                  [0.00200, 0.00800],
-  "gpt-4.1-mini":             [0.00040, 0.00160],
-  "gpt-5-nano":               [0.00005, 0.00040],
-  "gpt-5.1":                  [0.00125, 0.01000],
-  "gpt-5.2":                  [0.00175, 0.01400],
-  "gpt-5-mini":               [0.00025, 0.00200],
+  "gpt-4.1":                   [2.00, 8.00],
+  "gpt-4.1-mini":              [0.40, 1.60],
+  "gpt-5.4":                   [2.50, 15.00],
+  "gpt-5.4-mini":              [0.75, 4.50],
 
-  "gemini-2.5-flash":         [0.00015, 0.00060],
-  "gemini-3-flash-preview":   [0.00050, 0.00300],
-  "gemini-3-pro-preview":     [0.00200, 0.01200],
-  "gemini-3.1-pro-preview":   [0.00200, 0.01200],
+  "gemini-2.5-flash":          [0.30, 2.50],
+  "gemini-3.1-pro-preview":    [2.00, 12.00],
+  "gemini-3.5-flash":          [1.50, 9.00],
 
-  "claude-haiku-4-5-20251001": [0.00100, 0.00500],
-  "claude-opus-4-5-20251101":  [0.00500, 0.02500],
-  "claude-opus-4-8":           [0.00500, 0.02500],
-  "claude-sonnet-4-6":         [0.00300, 0.01500],
-
-  "grok-4-0709":              [0.00300, 0.01500],
-  "grok-4-1-fast-reasoning":  [0.00030, 0.00050],
-
-  "kimi-k2.5":                [0.00060, 0.00300],
-
-  "deepseek-reasoner":        [0.00028, 0.00042]
+  "claude-haiku-4-5-20251001": [1.00, 5.00],
+  "claude-opus-4-8":           [5.00, 25.00]
 }

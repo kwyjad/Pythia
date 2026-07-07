@@ -270,26 +270,26 @@ def _compute_costs_for_usage(
     """
     Compute (input_cost_usd, output_cost_usd, total_cost_usd) from model and usage.
 
-    Pricing is single-sourced from pythia/model_costs.json via
-    ``forecaster.providers.resolve_price_per_1k`` (the old hardcoded
-    MODEL_PRICING dict here drifted out of sync — it was missing
-    claude-sonnet-4-6, so Anthropic calls logged a zero input/output split).
+    Pricing is single-sourced from pythia/model_costs.json (USD per 1M
+    tokens) via ``forecaster.providers.resolve_price_per_1m`` (the old
+    hardcoded MODEL_PRICING dict here drifted out of sync, so Anthropic
+    calls logged a zero input/output split).
     Falls back to zeros if pricing or token counts are missing.
     """
 
     if not model_id:
         return 0.0, 0.0, 0.0
 
-    from forecaster.providers import resolve_price_per_1k
+    from forecaster.providers import resolve_price_per_1m
 
-    prices = resolve_price_per_1k(model_id)
+    prices = resolve_price_per_1m(model_id)
     if not prices:
         return 0.0, 0.0, 0.0
 
     prompt_tokens = float(_safe_get(usage, "prompt_tokens", 0.0))
     completion_tokens = float(_safe_get(usage, "completion_tokens", 0.0))
 
-    input_cost = (prompt_tokens / 1_000.0) * prices[0]
-    output_cost = (completion_tokens / 1_000.0) * prices[1]
+    input_cost = (prompt_tokens / 1_000_000.0) * prices[0]
+    output_cost = (completion_tokens / 1_000_000.0) * prices[1]
     total_cost = input_cost + output_cost
     return input_cost, output_cost, total_cost
