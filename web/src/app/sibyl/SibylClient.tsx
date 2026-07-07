@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiGet } from "../../lib/api";
 import type {
@@ -253,9 +253,9 @@ const QuestionDetail = ({
     }
   }, [questionId, sibylRunId, includeTest]);
 
-  if (!detail && !loading && !error) {
+  useEffect(() => {
     void load();
-  }
+  }, [load]);
 
   if (loading) {
     return <div className="p-3 text-sm text-fred-muted">Loading detail…</div>;
@@ -487,9 +487,8 @@ const SibylClient = ({
           </thead>
           <tbody>
             {sorted.map((row) => (
-              <>
+              <Fragment key={row.question_id}>
                 <tr
-                  key={row.question_id}
                   className="cursor-pointer border-t border-fred-secondary/40 hover:bg-fred-surface"
                   onClick={() =>
                     setExpanded((cur) =>
@@ -538,7 +537,7 @@ const SibylClient = ({
                   </td>
                 </tr>
                 {expanded === row.question_id && row.status === "ok" ? (
-                  <tr key={`${row.question_id}-detail`}>
+                  <tr>
                     <td colSpan={6} className="bg-fred-bg">
                       <QuestionDetail
                         questionId={row.question_id}
@@ -548,7 +547,7 @@ const SibylClient = ({
                     </td>
                   </tr>
                 ) : null}
-              </>
+              </Fragment>
             ))}
             {sorted.length === 0 ? (
               <tr>
