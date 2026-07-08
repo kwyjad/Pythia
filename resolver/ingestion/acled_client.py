@@ -427,6 +427,8 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
     limit = int(os.getenv("ACLED_MAX_LIMIT", config.get("limit", 1000)))
     max_pages = _env_int("RESOLVER_MAX_PAGES")
     max_results = _env_int("RESOLVER_MAX_RESULTS")
+    page_timeout = int(os.getenv("ACLED_PAGE_TIMEOUT", config.get("timeout", 120)))
+    max_retries = int(os.getenv("ACLED_MAX_RETRIES", config.get("max_retries", 4)))
 
     override_start, override_end = resolve_ingestion_window()
     end_date = override_end or date.today()
@@ -473,7 +475,28 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
             break
         params["page"] = page
         dbg(f"fetching page {page}")
-        resp = session.get(base_url, params=params, headers=headers, timeout=60)
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = session.get(base_url, params=params, headers=headers, timeout=page_timeout)
+                break
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                wait = min(60.0, 2 ** attempt)
+                LOG.warning(
+                    "ACLED network error (retrying)",
+                    extra={
+                        "attempt": attempt,
+                        "max_retries": max_retries,
+                        "wait_seconds": wait,
+                        "page": page,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+                if attempt >= max_retries:
+                    raise
+                time.sleep(wait)
         status = resp.status_code
         last_status = status
         last_url = str(resp.url)

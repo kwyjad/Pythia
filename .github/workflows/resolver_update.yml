@@ -20,7 +20,8 @@ concurrency:
       reset_db:
         description: "Delete existing resolver.duckdb and rebuild from scratch?"
         required: false
-        default: "false"
+        default: false
+        type: boolean
       only_connector:
         description: >-
           Optional: run only these connectors (comma-separated).
@@ -83,7 +84,7 @@ jobs:
   backfill:
     name: Full pipeline backfill
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -108,9 +109,9 @@ jobs:
       IPC_API_KEY: ${{ secrets.IPC_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
-      FEWSNET_MONTHS: ${{ inputs.reset_db == 'true' && '120' || inputs.fewsnet_months || '12' }}
-      IPC_API_MONTHS: ${{ inputs.reset_db == 'true' && '120' || inputs.ipc_api_months || '24' }}
-      GDACS_MONTHS: ${{ inputs.reset_db == 'true' && '135' || inputs.gdacs_months || '3' }}
+      FEWSNET_MONTHS: ${{ inputs.reset_db && '120' || inputs.fewsnet_months || '12' }}
+      IPC_API_MONTHS: ${{ inputs.reset_db && '120' || inputs.ipc_api_months || '24' }}
+      GDACS_MONTHS: ${{ inputs.reset_db && '135' || inputs.gdacs_months || '3' }}
       DIAGNOSTICS_REPORT_PATH: diagnostics/ingestion/connectors_report.jsonl
 
     steps:
@@ -148,7 +149,7 @@ jobs:
       # missing required tables before they are accepted.
       - name: Download canonical resolver DB for incremental runs
         id: canonical_download
-        if: github.event_name != 'workflow_dispatch' || inputs.reset_db != 'true'
+        if: github.event_name != 'workflow_dispatch' || !inputs.reset_db
         uses: ./.github/actions/download-canonical-db
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -161,7 +162,7 @@ jobs:
             --out diagnostics/db_signature_before.json
 
       - name: Record canonical DB provenance
-        if: github.event_name != 'workflow_dispatch' || inputs.reset_db != 'true'
+        if: github.event_name != 'workflow_dispatch' || !inputs.reset_db
         env:
           FOUND_LABEL: ${{ steps.canonical_download.outputs.source }}
           FOUND_RUN_ID: ${{ steps.canonical_download.outputs.run-id }}
@@ -189,7 +190,7 @@ jobs:
           fi
 
       - name: Remove existing resolver.duckdb (reset mode only)
-        if: github.event_name == 'workflow_dispatch' && inputs.reset_db == 'true'
+        if: github.event_name == 'workflow_dispatch' && inputs.reset_db
         run: |
           set -euo pipefail
           rm -f data/resolver.duckdb
@@ -257,6 +258,7 @@ jobs:
           BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
           BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
           RESOLVER_SKIP_IDMC: "1"
+          CONNECTOR_TIMEOUT: "1800"
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_client') || contains(inputs.only_connector, 'ifrc_go_client') }}
         run: |
           set -euo pipefail
@@ -544,7 +546,7 @@ jobs:
           path: data/resolver.duckdb
 
       - name: Upload reset resolver DB snapshot
-        if: success() && github.event_name == 'workflow_dispatch' && inputs.reset_db == 'true'
+        if: success() && github.event_name == 'workflow_dispatch' && inputs.reset_db
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db-reset
