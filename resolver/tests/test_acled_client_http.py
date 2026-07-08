@@ -193,6 +193,51 @@ def test_fetch_events_reraises_timeout_after_max_retries(tmp_path: Path, monkeyp
         acled_client.fetch_events({})
 
 
+def test_fetch_events_forwards_fields_param(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `query.fields` config value is sent to ACLED (limits payload size)."""
+    monkeypatch.chdir(tmp_path)
+    _patch_acled_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(acled_client.acled_auth, "get_access_token", lambda: "ACCESS-TOKEN")
+
+    captured: List[dict[str, Any]] = []
+
+    class _CapturingSession:
+        def get(self, url: str, params: dict[str, Any], headers: dict[str, str], timeout: int) -> StubResponse:
+            captured.append(dict(params))
+            return StubResponse(url, params, [])  # empty → single page
+
+    monkeypatch.setattr(acled_client.requests, "Session", lambda: _CapturingSession())
+
+    acled_client.fetch_events({"query": {"fields": "event_date|iso3|fatalities"}})
+
+    assert captured, "expected at least one request"
+    assert captured[0].get("fields") == "event_date|iso3|fatalities"
+
+
+def test_fetch_events_respects_runtime_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wall-clock deadline stops pagination gracefully (regression for SIGKILL)."""
+    monkeypatch.chdir(tmp_path)
+    _patch_acled_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(acled_client.acled_auth, "get_access_token", lambda: "ACCESS-TOKEN")
+    monkeypatch.setenv("ACLED_MAX_RUNTIME_SEC", "5")
+
+    # Advancing monotonic clock: first call sets the deadline (t=0 → deadline=5),
+    # the next loop-top check is already past it (t=1000) → break before any fetch.
+    ticks = iter([0.0, 1000.0])
+    monkeypatch.setattr(acled_client.time, "monotonic", lambda: next(ticks, 1000.0))
+
+    class _NeverCalledSession:
+        def get(self, *_a: Any, **_k: Any) -> StubResponse:  # pragma: no cover - must not run
+            raise AssertionError("deadline should have stopped pagination before any fetch")
+
+    monkeypatch.setattr(acled_client.requests, "Session", lambda: _NeverCalledSession())
+
+    records, _source_url, meta = acled_client.fetch_events({})
+
+    assert records == []
+    assert meta.get("truncated_by_deadline") is True
+
+
 def test_fetch_events_error_raises_and_records_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     _patch_acled_paths(tmp_path, monkeypatch)
