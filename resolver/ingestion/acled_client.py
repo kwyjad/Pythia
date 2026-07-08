@@ -429,6 +429,12 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
     max_results = _env_int("RESOLVER_MAX_RESULTS")
     page_timeout = int(os.getenv("ACLED_PAGE_TIMEOUT", config.get("timeout", 120)))
     max_retries = int(os.getenv("ACLED_MAX_RETRIES", config.get("max_retries", 4)))
+    # Wall-clock safety net: stop paginating and return what we have (rc=0,
+    # logged loudly) before the per-connector wrapper (CONNECTOR_TIMEOUT in
+    # scripts/ci/run_connectors.py) SIGKILLs the process (rc=124 → fatal Phase 1).
+    # 0/unset disables the deadline. Set below the wrapper timeout in the workflow.
+    max_runtime_sec = float(os.getenv("ACLED_MAX_RUNTIME_SEC", "0") or "0")
+    deadline = (time.monotonic() + max_runtime_sec) if max_runtime_sec > 0 else None
 
     override_start, override_end = resolve_ingestion_window()
     end_date = override_end or date.today()
@@ -473,7 +479,29 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
         if max_pages is not None and page > max_pages:
             dbg(f"max pages reached at page {page}")
             break
+        if deadline is not None and time.monotonic() >= deadline:
+            LOG.warning(
+                "ACLED runtime deadline reached; returning partial results",
+                extra={
+                    "page": page,
+                    "rows_so_far": len(records),
+                    "max_runtime_sec": max_runtime_sec,
+                },
+            )
+            print(
+                f"[acled_client] runtime deadline ({max_runtime_sec:.0f}s) reached at "
+                f"page {page}; returning {len(records)} partial rows",
+                flush=True,
+            )
+            diagnostics_meta["truncated_by_deadline"] = True
+            break
         params["page"] = page
+        # Progress to stdout so the connector log shows pagination advancing
+        # (previously nothing printed between auth and the timeout SIGKILL).
+        print(
+            f"[acled_client] fetching page {page} (rows so far={len(records)})",
+            flush=True,
+        )
         dbg(f"fetching page {page}")
         attempt = 0
         while True:

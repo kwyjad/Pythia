@@ -259,6 +259,9 @@ jobs:
           BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
           RESOLVER_SKIP_IDMC: "1"
           CONNECTOR_TIMEOUT: "1800"
+          # Graceful ACLED deadline below the hard wrapper so a slow/huge pull
+          # returns partial rows (rc=0) instead of being SIGKILLed (rc=124).
+          ACLED_MAX_RUNTIME_SEC: "1500"
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_client') || contains(inputs.only_connector, 'ifrc_go_client') }}
         run: |
           set -euo pipefail

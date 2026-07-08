@@ -11,6 +11,13 @@ query:
   event_date_where: "BETWEEN"
   _format: "json"
   limit: 5000
+  # Restrict the response to only the fields the connector actually normalizes
+  # (see `keys` below + `_prepare_dataframe`). Without this, ACLED returns all
+  # ~30 columns per event (actors, admin1-3, geo, tags, long `notes`) for every
+  # event globally, making the all-country pull huge/slow and prone to the
+  # per-connector timeout SIGKILL. Pipe-separated, matching the ACLED API's
+  # `fields=a|b|c` convention (same limiter the monthly-fatalities path uses).
+  fields: "event_date|iso3|country|event_type|sub_event_type|fatalities|notes"
 token: ""
 keys:
   date: ["event_date", "event_date_new", "date"]
