@@ -124,6 +124,75 @@ def test_fetch_events_creates_diag_and_csv(tmp_path: Path, monkeypatch: pytest.M
     assert "https://" in http_diag["url"]
 
 
+class _TimeoutThenSession:
+    """Raise a Timeout on the first N ``get`` calls, then serve real responses."""
+
+    def __init__(self, responses: List[Any], *, fail_times: int) -> None:
+        self._delegate = StubSession(responses)
+        self._remaining_failures = fail_times
+        self.timeout_raises = 0
+
+    def get(self, url: str, params: dict[str, Any], headers: dict[str, str], timeout: int):
+        if self._remaining_failures > 0:
+            self._remaining_failures -= 1
+            self.timeout_raises += 1
+            raise acled_client.requests.exceptions.Timeout("simulated read timeout")
+        return self._delegate.get(url, params=params, headers=headers, timeout=timeout)
+
+
+def test_fetch_events_retries_on_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transient page timeout is retried, not fatal (regression for the 900s SIGKILL)."""
+    monkeypatch.chdir(tmp_path)
+    _patch_acled_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(acled_client.acled_auth, "get_access_token", lambda: "ACCESS-TOKEN")
+    monkeypatch.setattr(acled_client.time, "sleep", lambda *_a, **_k: None)
+
+    payloads = [
+        [
+            {
+                "event_date": "2024-01-01",
+                "iso3": "KEN",
+                "country": "Kenya",
+                "fatalities": "1",
+                "event_type": "Battles",
+                "notes": "",
+            }
+        ],
+        [],
+    ]
+    sessions: List[_TimeoutThenSession] = []
+
+    def _session_factory() -> _TimeoutThenSession:
+        session = _TimeoutThenSession(list(payloads), fail_times=1)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(acled_client.requests, "Session", _session_factory)
+
+    records, _source_url, meta = acled_client.fetch_events({})
+
+    assert sessions[0].timeout_raises == 1, "expected exactly one timeout retry"
+    assert len(records) == 1, "records should be fetched after the retry succeeds"
+    assert meta["http_status"] == 200
+
+
+def test_fetch_events_reraises_timeout_after_max_retries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Persistent timeouts still surface once retries are exhausted."""
+    monkeypatch.chdir(tmp_path)
+    _patch_acled_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(acled_client.acled_auth, "get_access_token", lambda: "ACCESS-TOKEN")
+    monkeypatch.setattr(acled_client.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setenv("ACLED_MAX_RETRIES", "3")
+
+    def _session_factory() -> _TimeoutThenSession:
+        return _TimeoutThenSession([], fail_times=99)
+
+    monkeypatch.setattr(acled_client.requests, "Session", _session_factory)
+
+    with pytest.raises(acled_client.requests.exceptions.Timeout):
+        acled_client.fetch_events({})
+
+
 def test_fetch_events_error_raises_and_records_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     _patch_acled_paths(tmp_path, monkeypatch)
