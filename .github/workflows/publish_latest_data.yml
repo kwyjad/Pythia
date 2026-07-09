@@ -415,10 +415,17 @@ jobs:
                   "force_publish=true) to intentionally roll back.")
             _set_output("skip_publish", "true")
             sys.exit(0)
-          print("Refusing to publish a DB with fewer post-pipeline rows "
-                "than the current release. Re-run with force_publish=true "
-                "if this rollback is intentional, or pick a run_id whose "
-                "artifact has the missing data.")
+          print("Refusing to publish: this candidate DB has fewer "
+                "post-pipeline rows than the current release "
+                "(resolutions/scores/calibration are 0 here). If this is a "
+                "FRESH reset/backfill DB (facts present but no forecasts "
+                "yet), do NOT force-publish it — run the full pipeline "
+                "(Horizon Scanner Triage -> forecaster -> resolutions -> "
+                "scores -> calibration), which republishes automatically at "
+                "the end so this guard passes on its own. Only pass "
+                "force_publish=true to intentionally roll the release back "
+                "to this DB, or pick a run_id whose artifact already "
+                "contains the post-pipeline tables.")
           sys.exit(1)
           PY
 
