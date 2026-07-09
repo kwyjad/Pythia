@@ -153,6 +153,16 @@ jobs:
                   return "—"
               return f"{n:,}"
 
+          def fmt_float(n, nd=4):
+              # None-safe float formatter. Aggregate queries with no GROUP BY
+              # return one all-NULL row on an empty table (e.g. AVG/SUM over
+              # zero rows -> None); applying a numeric format spec to None
+              # raises TypeError. Guard at the format site so a NULL in a
+              # non-empty result is also handled.
+              if n is None:
+                  return "—"
+              return f"{n:,.{nd}f}"
+
           # =====================================================================
           db_path = Path("data/resolver.duckdb")
           if not db_path.exists():
@@ -821,7 +831,7 @@ jobs:
                   L("| hazard_code | metric | bucket_index | centroid |")
                   L("|-------------|--------|:------------:|---------:|")
                   for hz, m, bi, c in rows:
-                      L(f"| {hz} | {m} | {bi} | {c:,.0f} |")
+                      L(f"| {hz} | {m} | {bi} | {fmt_float(c, 0)} |")
                   L()
           else:
               L("_Table does not exist._")
@@ -856,7 +866,7 @@ jobs:
                   L("| phase | status | calls | cost_usd | tokens |")
                   L("|-------|--------|------:|---------:|-------:|")
                   for ph, st, n, cost, tok in rows:
-                      L(f"| {ph} | {st} | {fmt_num(n)} | ${cost:.4f} | {fmt_num(tok)} |")
+                      L(f"| {ph} | {st} | {fmt_num(n)} | ${fmt_float(cost, 4)} | {fmt_num(tok)} |")
                   L()
 
               # By provider/model
@@ -878,7 +888,7 @@ jobs:
                   L("| provider | model | calls | cost_usd | avg_ms |")
                   L("|----------|-------|------:|---------:|-------:|")
                   for prov, mod, n, cost, avg_ms in rows:
-                      L(f"| {prov} | {mod} | {fmt_num(n)} | ${cost:.4f} | {avg_ms:.0f} |")
+                      L(f"| {prov} | {mod} | {fmt_num(n)} | ${fmt_float(cost, 4)} | {fmt_float(avg_ms, 0)} |")
                   L()
 
               # Error summary
@@ -919,9 +929,9 @@ jobs:
               """)
               if rows and rows[0]:
                   n, avg_wall, total_cost, avg_cost = rows[0]
-                  L(f"- Avg wall time: {avg_wall:.0f}ms")
-                  L(f"- Total cost: ${total_cost:.4f}")
-                  L(f"- Avg cost per question: ${avg_cost:.4f}")
+                  L(f"- Avg wall time: {fmt_float(avg_wall, 0)}ms")
+                  L(f"- Total cost: ${fmt_float(total_cost, 4)}")
+                  L(f"- Avg cost per question: ${fmt_float(avg_cost, 4)}")
               L()
           else:
               L("_Table does not exist._")
