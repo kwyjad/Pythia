@@ -60,17 +60,25 @@ Other connectors are intentionally excluded from this workflow to avoid destabil
 
 ## Two-Phase Pipeline: Backfill → Snapshot
 
-Resolver’s production workflows now operate in two phases:
+> **Note (outdated section).** This "two phases" description predates the
+> connector-based architecture and the consolidated `resolver_update.yml`
+> workflow. The `resolver-backfill-db` artifact and the standalone
+> **Resolver — Snapshot from DB** workflow were removed (the latter in July
+> 2026); the current pipeline is the 5-phase `resolver_update.yml` producing
+> the `pythia-resolver-db` artifact — see the "Consolidated backfill workflow"
+> section of the root `CLAUDE.md` for the authoritative description. The
+> `resolver.snapshot.*` / `resolver.cli.snapshot_from_db` modules below still
+> exist and remain manually runnable.
+
+Historically, Resolver’s production workflows operated in two phases:
 
 1. **Resolver Update**
-   - Runs the four stable connectors (DTM, IDMC, EM-DAT, ACLED) for a configured window (e.g., last 36 months).
-   - Writes canonical facts into `data/resolver_backfill.duckdb` (including `facts_resolved`, `facts_deltas`, and `acled_monthly_fatalities`).
-   - Uploads the DuckDB file as a `resolver-backfill-db` artifact for downstream use.
+   - Ran the stable connectors for a configured window (e.g., last 36 months).
+   - Wrote canonical facts into a DuckDB file (including `facts_resolved`, `facts_deltas`, and `acled_monthly_fatalities`).
 
-2. **Resolver — Snapshot from DB**
-   - Triggered automatically when the backfill workflow completes successfully, or manually via `workflow_dispatch`.
-   - Downloads the `resolver-backfill-db` artifact and runs the DB-backed snapshot builder (`resolver.snapshot.builder.build_monthly_snapshot`) for a configurable number of months (default: 36).
-   - Writes unified snapshot parquet files under `snapshots/<ym>/facts.parquet` and uploads them as a `resolver-snapshots` artifact.
+2. **Resolver — Snapshot from DB** (workflow removed July 2026)
+   - Ran the DB-backed snapshot builder (`resolver.snapshot.builder.build_monthly_snapshot`) for a configurable number of months (default: 36).
+   - Wrote unified snapshot parquet files under `snapshots/<ym>/facts.parquet`.
 
 Clients such as Forecaster can then consume the snapshot parquet files or the underlying DuckDB database and use `resolver.snapshot.pa_trends` to derive PA time series for specific countries and hazards.
 

@@ -125,7 +125,7 @@ Pythia ingests NMME (North American Multi-Model Ensemble) seasonal temperature a
 - **Storage**: `seasonal_forecasts` table in Pythia DuckDB (~2,700 rows per monthly update: 195 countries × 2 variables × 7 leads).
 - **Injection**: Automatically loaded into HS triage and RC prompts via the existing `climate_data` parameter for DR, FL, TC hazards. Also injected into forecaster research and SPD prompts via `research_json`.
 - **Run manually**: `python -m resolver.tools.ingest_nmme` (or `--year-month YYYYMM` for a specific month, `--dry-run` to preview).
-- **Automation**: `.github/workflows/ingest-nmme.yml` runs on the 10th of each month.
+- **Automation**: NMME runs as the `nmme` source inside `resolver_update.yml` Phase 3 (15th monthly) and `ingest-structured-data.yml`. (The standalone `ingest-nmme.yml` workflow was removed July 2026.)
 
 ## Conflict forecasts
 
@@ -323,8 +323,7 @@ python -m scripts.dump_pythia_debug_bundle \
 - **Structured data refresh**: [`ingest-structured-data.yml`](.github/workflows/ingest-structured-data.yml) — mid-cycle refresh for fast-changing sources (weekly Sunday 03:00 UTC): conflict forecasts, GDACS, ReliefWeb, ACLED political.
 - **Post-forecast pipeline**: [`compute_resolutions.yml`](.github/workflows/compute_resolutions.yml), [`compute_scores.yml`](.github/workflows/compute_scores.yml), [`compute_calibration_pythia.yml`](.github/workflows/compute_calibration_pythia.yml).
 - **Forecaster CI**: [`forecaster-ci.yml`](.github/workflows/forecaster-ci.yml) covers SPD unit tests and optional compare artifacts.
-- **ENSO refresh**: [`refresh-enso.yml`](.github/workflows/refresh-enso.yml) refreshes the ENSO state/forecast cache (scrapes IRI/CPC).
-- **Seasonal TC refresh**: [`refresh-seasonal-tc.yml`](.github/workflows/refresh-seasonal-tc.yml) refreshes the seasonal TC forecast cache (TSR, NOAA CPC, BoM scrapers).
+- **ENSO / Seasonal TC refresh**: fetched fresh and stored to the DB by `resolver_update.yml` Phase 4 (`fetch_and_store_enso()` / `fetch_and_store_seasonal_tc()`). Run manually via `python -m horizon_scanner.enso.enso_module` / `python -m horizon_scanner.seasonal_tc.seasonal_tc_runner`. (The standalone `refresh-enso.yml` / `refresh-seasonal-tc.yml` workflows were removed July 2026 — Phase 4 does the real fetch+store.)
 - **CrisisWatch refresh**: [`refresh-crisiswatch.yml`](.github/workflows/refresh-crisiswatch.yml) fetches ICG CrisisWatch data via Playwright (headless Chromium) on the 3rd of each month, parses with BeautifulSoup, and commits updated JSON to `horizon_scanner/data/crisiswatch_latest.json`.
 - **DuckDB inspection**: [`inspect_resolver_duckdb.yml`](.github/workflows/inspect_resolver_duckdb.yml) — 7 data quality checks on the DB artifact.
 
@@ -492,7 +491,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 - Calibration advice: [`pythia/tools/generate_calibration_advice.py`](pythia/tools/generate_calibration_advice.py)
 - Schema: [`pythia/db/schema.py`](pythia/db/schema.py)
 - Debug bundle script: [`scripts/dump_pythia_debug_bundle.py`](scripts/dump_pythia_debug_bundle.py)
-- Workflows: [`run_horizon_scanner.yml`](.github/workflows/run_horizon_scanner.yml), [`forecaster-ci.yml`](.github/workflows/forecaster-ci.yml), [`refresh-enso.yml`](.github/workflows/refresh-enso.yml), [`refresh-seasonal-tc.yml`](.github/workflows/refresh-seasonal-tc.yml), [`refresh-crisiswatch.yml`](.github/workflows/refresh-crisiswatch.yml)
+- Workflows: [`run_horizon_scanner.yml`](.github/workflows/run_horizon_scanner.yml), [`forecaster-ci.yml`](.github/workflows/forecaster-ci.yml), [`refresh-crisiswatch.yml`](.github/workflows/refresh-crisiswatch.yml) (ENSO/Seasonal TC are fetched+stored by `resolver_update.yml` Phase 4)
 - Public API contracts: [`PUBLIC_APIS.md`](PUBLIC_APIS.md)
 
 ## Contributing

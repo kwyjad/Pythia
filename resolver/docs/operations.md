@@ -81,12 +81,10 @@ Resolver uses a small set of environment variables to control DB access and run 
 
 This convention keeps environment-dependent behaviour in a small, well-defined surface area.
 
-## Monthly snapshots in CI
+## Monthly snapshots
 
-- Workflow: `.github/workflows/publish_snapshot.yml` (manual dispatch remains available; scheduled runs are gated to the first day of the month in Europe/Istanbul time).
-- Schedule: cron `0 23 * * *` with a guard that skips non‑first‑day runs; the workflow derives `YM` from Istanbul time when not provided.
-- Pipeline: run `python -m resolver.cli.snapshot_cli make-monthly --ym "${YM}" --write-db 1`, upload `resolver/snapshots/${YM}` as an artifact, and optionally commit the snapshot when `SNAPSHOT_PUBLISH_TOKEN` is configured.
-- Runbook checks: confirm the artifact upload succeeds, validate the snapshot directory contents, and review the job logs for skipped connectors or missing credentials.
+- The standalone `publish_snapshot.yml` workflow was **removed (July 2026)** — no API/dashboard reads the monthly `resolver/snapshots/<YM>` parquet, so the scheduled monthly commit was retired.
+- The CLI still works manually: `python -m resolver.cli.snapshot_cli make-monthly --ym "${YM}" --write-db 1` writes `resolver/snapshots/${YM}`. Run it locally (or in an ad-hoc job) if you need a point-in-time snapshot; previously-committed snapshot directories are unaffected.
 
 ## Initial backfill workflow
 
