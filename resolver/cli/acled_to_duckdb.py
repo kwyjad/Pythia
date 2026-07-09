@@ -212,6 +212,53 @@ def _print_cli_fetch_summary(*, start: str, end: str, rows: int, meta: dict) -> 
     print(f" fields_param: {'true' if fields_param else 'false'}")
 
 
+def _load_staged_events(
+    events_file: str,
+    start: str,
+    end: str,
+) -> tuple["pd.DataFrame | None", str]:
+    """Load connector-staged raw events if they safely cover the window.
+
+    Returns ``(frame, reason)``. ``frame`` is ``None`` whenever the staged
+    data cannot be trusted for this window (missing file/sidecar, truncated
+    pull, window not covered, zero rows) — the caller then falls back to a
+    fresh API fetch.
+    """
+    path = Path(events_file)
+    meta_path = path.with_suffix(".meta.json")
+    if not path.exists():
+        return None, f"events file not found: {path}"
+    if not meta_path.exists():
+        return None, f"meta sidecar not found: {meta_path}"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"meta sidecar unreadable: {exc}"
+    if not isinstance(meta, dict):
+        return None, "meta sidecar is not a JSON object"
+    if meta.get("truncated_by_deadline"):
+        return None, "staged pull was truncated by the runtime deadline"
+    if int(meta.get("rows") or 0) <= 0:
+        return None, "staged pull contains zero rows"
+    meta_start = str(meta.get("start") or "")
+    meta_end = str(meta.get("end") or "")
+    if not meta_start or not meta_end:
+        return None, "meta sidecar missing window bounds"
+    # ISO date strings compare correctly as strings.
+    if meta_start > str(start)[:10] or meta_end < str(end)[:10]:
+        return None, (
+            f"staged window {meta_start}→{meta_end} does not cover "
+            f"requested {start}→{end}"
+        )
+    try:
+        frame = pd.read_csv(path)
+    except Exception as exc:
+        return None, f"events file unreadable: {exc}"
+    if frame.empty:
+        return None, "events file is empty"
+    return frame, f"staged events reused ({len(frame)} rows, window {meta_start}→{meta_end})"
+
+
 def _write_cli_frame_diag(payload: dict) -> None:
     try:
         ACLED_DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
@@ -236,6 +283,17 @@ def run(argv: Sequence[str] | None = None) -> int:
         dest="countries",
         default=None,
         help="Optional comma-separated ISO3 country codes",
+    )
+    parser.add_argument(
+        "--events-file",
+        dest="events_file",
+        default=None,
+        help=(
+            "Optional CSV of raw events staged by the ACLED connector "
+            "(resolver/staging/acled_events_raw.csv). When it exists, covers "
+            "the requested window, and was not truncated, the CLI aggregates "
+            "from it instead of re-fetching the same events from the API."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -274,9 +332,25 @@ def run(argv: Sequence[str] | None = None) -> int:
         bool(args.dry_run),
     )
 
+    events_frame = None
+    if args.events_file:
+        events_frame, events_reason = _load_staged_events(args.events_file, args.start, args.end)
+        if events_frame is not None:
+            LOGGER.info("acled_to_duckdb.events_source | staged | %s", events_reason)
+            print(f"[acled_to_duckdb] {events_reason}; skipping API fetch")
+        else:
+            LOGGER.info("acled_to_duckdb.events_source | api | %s", events_reason)
+            print(f"[acled_to_duckdb] staged events unavailable ({events_reason}); falling back to API fetch")
+
     client = ACLEDClient()
     try:
-        frame = client.monthly_fatalities(args.start, args.end, countries=countries or None)
+        # Pass events_frame only when staged data was actually loaded, so
+        # test stubs (and older client implementations) without the kwarg
+        # keep working on the default API path.
+        monthly_kwargs: dict = {"countries": countries or None}
+        if events_frame is not None:
+            monthly_kwargs["events_frame"] = events_frame
+        frame = client.monthly_fatalities(args.start, args.end, **monthly_kwargs)
     except Exception as exc:  # pragma: no cover - error path
         context = {
             "start": args.start,

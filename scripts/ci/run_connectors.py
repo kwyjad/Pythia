@@ -441,23 +441,42 @@ def main(argv: Sequence[str] | None = None) -> int:
                 written_rows = int(m.group(1))
         except Exception:
             pass
+        run_data: Dict[str, Any] = {}
+        run_json_path = diag_base / name / f"{name}_run.json"
+        if run_json_path.exists():
+            try:
+                run_data = json.loads(run_json_path.read_text())
+            except Exception:
+                run_data = {}
         if written_rows == 0:
-            run_json_path = diag_base / name / f"{name}_run.json"
-            if run_json_path.exists():
-                try:
-                    run_data = json.loads(run_json_path.read_text())
-                    written_rows = int(run_data.get("rows_written", 0))
-                except Exception:
-                    pass
+            try:
+                written_rows = int(run_data.get("rows_written", 0))
+            except Exception:
+                pass
+        truncated_by_deadline = bool(run_data.get("truncated_by_deadline"))
+        if truncated_by_deadline:
+            # Surface loudly: a deadline-truncated pull means downstream
+            # monthly aggregates for this window are UNDERCOUNTED. The
+            # 2026-07-08 reset run wrote silently-partial ACLED data this way.
+            print(
+                f"::warning title={name} truncated by runtime deadline::"
+                f"{name} hit its runtime deadline and returned partial rows; "
+                "aggregates built from this pull may be undercounted. Raise "
+                "ACLED_MAX_RUNTIME_SEC / CONNECTOR_TIMEOUT or narrow the window "
+                "(reset runs scale these automatically)."
+            )
+        extras: Dict[str, Any] = {
+            "exit_code": rc,
+            "log_path": str(log_path),
+        }
+        if truncated_by_deadline:
+            extras["truncated_by_deadline"] = True
         result = diagnostics_finalize_run(
             diagnostics_ctx,
             status,
             reason=reason,
             counts={"fetched": written_rows, "normalized": written_rows, "written": written_rows},
-            extras={
-                "exit_code": rc,
-                "log_path": str(log_path),
-            },
+            extras=extras,
         )
         records[name] = result
         _write_report(report_path, [result])

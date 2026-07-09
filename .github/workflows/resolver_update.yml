@@ -84,7 +84,10 @@ jobs:
   backfill:
     name: Full pipeline backfill
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # Self-imposed budget (GitHub's hard cap is 360 min/job on hosted runners).
+    # Reset/backfill runs pull 10+ years of GDACS + 12 months of ACLED and need
+    # far more headroom than the scheduled monthly incremental run.
+    timeout-minutes: ${{ inputs.reset_db && 300 || 150 }}
     env:
       RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -258,11 +261,16 @@ jobs:
           BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
           BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
           RESOLVER_SKIP_IDMC: "1"
-          CONNECTOR_TIMEOUT: "1800"
+          # Reset runs use a ~12-month window (vs 3 months scheduled) — the
+          # 2026-07-08 reset run hit the 1500s deadline at page 77 and wrote
+          # silently-truncated monthly aggregates. Scale both budgets up so a
+          # full-window pull (~35 min observed) completes.
+          CONNECTOR_TIMEOUT: ${{ inputs.reset_db && '4200' || '1800' }}
           # Graceful ACLED deadline below the hard wrapper so a slow/huge pull
           # returns partial rows (rc=0) instead of being SIGKILLed (rc=124).
-          ACLED_MAX_RUNTIME_SEC: "1500"
+          ACLED_MAX_RUNTIME_SEC: ${{ inputs.reset_db && '3900' || '1500' }}
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_client') || contains(inputs.only_connector, 'ifrc_go_client') }}
+        timeout-minutes: ${{ inputs.reset_db && 90 || 45 }}
         run: |
           set -euo pipefail
           echo "::group::Connectors (ACLED, IFRC)"
@@ -273,6 +281,7 @@ jobs:
 
       - name: "Phase 1: ACLED monthly fatalities → DuckDB"
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_client') }}
+        timeout-minutes: ${{ inputs.reset_db && 60 || 30 }}
         env:
           BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
           BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
@@ -280,10 +289,14 @@ jobs:
           set -euo pipefail
           echo "::group::ACLED monthly fatalities"
           mkdir -p diagnostics/acled
+          # --events-file reuses the raw events the connector step just staged
+          # (single ACLED pull per run). Falls back to a fresh API fetch when
+          # the file is missing, truncated, or doesn't cover the window.
           python -m resolver.cli.acled_to_duckdb \
             --start "${BACKFILL_START_ISO}" \
             --end "${BACKFILL_END_ISO}" \
             --db "${BACKFILL_DB_PATH}" \
+            --events-file resolver/staging/acled_events_raw.csv \
             --log-level "${LOG_LEVEL}" \
             2>&1 | tee diagnostics/acled/acled_to_duckdb.log
           echo "::endgroup::"
@@ -332,6 +345,7 @@ jobs:
 
       # === PHASE 2: RESOLUTION SOURCES (non-fatal) ===
       - name: "Phase 2: Ingest FEWS NET IPC → facts_resolved"
+        timeout-minutes: 30
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'fewsnet_ipc') }}
         continue-on-error: true
         run: |
@@ -340,6 +354,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 2: Ingest IPC API → facts_resolved"
+        timeout-minutes: 30
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'ipc_api') }}
         continue-on-error: true
         run: |
@@ -348,6 +363,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 2: Ingest GDACS → facts_resolved"
+        timeout-minutes: ${{ inputs.reset_db && 60 || 20 }}
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'gdacs') }}
         continue-on-error: true
         run: |
@@ -357,6 +373,7 @@ jobs:
 
       # === PHASE 3: STRUCTURED DATA — Pythia tables (non-fatal) ===
       - name: "Phase 3: Ingest conflict forecasts"
+        timeout-minutes: 30
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'conflict') }}
         continue-on-error: true
         run: |
@@ -365,6 +382,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 3: Ingest ACAPS (4 datasets)"
+        timeout-minutes: 30
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acaps') }}
         continue-on-error: true
         run: |
@@ -373,6 +391,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 3: Ingest ReliefWeb reports"
+        timeout-minutes: 30
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'reliefweb') }}
         continue-on-error: true
         run: |
@@ -381,6 +400,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 3: Ingest ACLED political events"
+        timeout-minutes: 30
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_political') }}
         continue-on-error: true
         run: |
@@ -389,6 +409,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 3: Ingest NMME seasonal forecasts"
+        timeout-minutes: 30
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'nmme') }}
         continue-on-error: true
         run: |
@@ -397,6 +418,7 @@ jobs:
           echo "::endgroup::"
 
       - name: "Phase 3: Ingest GDELT conflict indicators"
+        timeout-minutes: 30
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'gdelt') }}
         continue-on-error: true
         run: |
@@ -406,6 +428,7 @@ jobs:
 
       # === PHASE 4: CONTEXT SOURCES (non-fatal) ===
       - name: "Phase 4: Fetch + store ENSO state"
+        timeout-minutes: 15
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'enso') }}
         continue-on-error: true
         run: |
@@ -424,6 +447,7 @@ jobs:
           fi
 
       - name: "Phase 4: Fetch + store Seasonal TC outlooks"
+        timeout-minutes: 15
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'seasonal_tc') }}
         continue-on-error: true
         run: |
@@ -442,6 +466,7 @@ jobs:
           fi
 
       - name: "Phase 4: Store HDX Signals"
+        timeout-minutes: 15
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'hdx_signals') }}
         continue-on-error: true
         run: |
@@ -463,6 +488,7 @@ jobs:
           fi
 
       - name: "Phase 4: Store CrisisWatch from JSON"
+        timeout-minutes: 15
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'crisiswatch') }}
         continue-on-error: true
         run: |

@@ -52,6 +52,15 @@ SHOCKS = DATA / "shocks.csv"
 DEFAULT_OUTPUT = ROOT / "staging" / "acled.csv"
 OUT_PATH = resolve_output_path(DEFAULT_OUTPUT)
 
+# Raw per-event staging (event_date/iso3/country/fatalities + meta sidecar)
+# written by collect_rows() so downstream consumers (acled_to_duckdb
+# --events-file) can reuse the connector's pull instead of re-downloading
+# the same window from the ACLED API. Derived from OUT_PATH's directory
+# (NOT resolve_output_path) so a RESOLVER_OUTPUT_PATH file override can
+# never collide the two outputs onto the same file.
+EVENTS_STAGING_PATH = OUT_PATH.parent / "acled_events_raw.csv"
+EVENTS_STAGING_COLUMNS = ["event_date", "iso3", "country", "fatalities"]
+
 CANONICAL_HEADERS = [
     "event_id",
     "country_name",
@@ -203,6 +212,7 @@ def _write_run_summary(meta: Dict[str, Any], *, rows_fetched: int, rows_normaliz
         "source_url": meta.get("source_url"),
         "window": {"start": meta.get("start"), "end": meta.get("end")},
         "params_keys": sorted(set(meta.get("params_keys", []))),
+        "truncated_by_deadline": bool(meta.get("truncated_by_deadline", False)),
     }
     _write_json(ACLED_RUN_PATH, payload)
 
@@ -1107,6 +1117,50 @@ def _build_rows(
     return rows
 
 
+def _stage_raw_events(
+    records: Sequence[MutableMapping[str, Any]],
+    diagnostics_meta: Dict[str, Any],
+) -> None:
+    """Stage minimal raw event columns + a meta sidecar for downstream reuse.
+
+    Written best-effort: a staging failure must never fail the connector.
+    ``acled_to_duckdb --events-file`` consumes this to skip its own (second)
+    full-window API pull; the sidecar's window/truncation fields let it decide
+    whether the staged data is safe to reuse.
+    """
+    try:
+        frame = pd.DataFrame(list(records))
+        if frame.empty:
+            frame = pd.DataFrame(columns=EVENTS_STAGING_COLUMNS)
+        else:
+            for column in EVENTS_STAGING_COLUMNS:
+                if column not in frame.columns:
+                    frame[column] = pd.NA
+            frame = frame[EVENTS_STAGING_COLUMNS]
+        EVENTS_STAGING_PATH.parent.mkdir(parents=True, exist_ok=True)
+        frame.to_csv(EVENTS_STAGING_PATH, index=False)
+        meta = {
+            "start": diagnostics_meta.get("start"),
+            "end": diagnostics_meta.get("end"),
+            "rows": int(len(frame)),
+            "truncated_by_deadline": bool(
+                diagnostics_meta.get("truncated_by_deadline", False)
+            ),
+            "fetched_at": datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat(),
+        }
+        meta_path = EVENTS_STAGING_PATH.with_suffix(".meta.json")
+        meta_path.write_text(json.dumps(meta, indent=2, sort_keys=True), encoding="utf-8")
+        print(
+            f"[acled_client] staged {len(frame)} raw events to {EVENTS_STAGING_PATH} "
+            f"(truncated={meta['truncated_by_deadline']})",
+            flush=True,
+        )
+    except Exception as exc:  # pragma: no cover - staging is best effort
+        LOG.warning("ACLED raw-event staging failed: %s", exc)
+
+
 def collect_rows() -> List[Dict[str, Any]]:
     config = load_config()
     countries, shocks = load_registries()
@@ -1124,6 +1178,7 @@ def collect_rows() -> List[Dict[str, Any]]:
                 raise
             return []
         return []
+    _stage_raw_events(records, diagnostics_meta)
     publication_date = date.today().isoformat()
     ingested_at = datetime.now(timezone.utc).replace(tzinfo=None).replace(microsecond=0).isoformat() + "Z"
     rows: List[Dict[str, Any]] = []
@@ -1403,6 +1458,20 @@ class ACLEDClient:
         _write_cli_fetch_meta(diagnostics_meta)
 
         frame = pd.DataFrame(records)
+        return self._normalize_events_frame(frame, selected_fields)
+
+    def _normalize_events_frame(
+        self,
+        frame: pd.DataFrame,
+        selected_fields: Sequence[str],
+    ) -> pd.DataFrame:
+        """Normalize a raw events frame (API records or staged CSV).
+
+        Shared by ``fetch_events`` and the ``events_frame`` reuse path in
+        ``monthly_fatalities`` so both produce identical frames: column
+        selection, event_date parsing, iso3 cleanup with country-name
+        fallback, and fatalities coercion.
+        """
         if frame.empty:
             return frame.reindex(columns=selected_fields)
 
@@ -1440,10 +1509,30 @@ class ACLEDClient:
         end_date: str | date,
         *,
         countries: Optional[Sequence[str]] = None,
+        events_frame: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
-        """Aggregate fatalities per ISO3/month bucket."""
+        """Aggregate fatalities per ISO3/month bucket.
 
-        frame = self.fetch_events(start_date, end_date, countries=countries)
+        When ``events_frame`` is provided (e.g. the raw events the connector
+        step already staged), the API fetch is skipped: the frame is run
+        through the same normalization ``fetch_events`` applies and filtered
+        to the requested window, so the aggregation is identical to a fresh
+        fetch of the same events.
+        """
+
+        if events_frame is not None:
+            selected_fields = list(self.fields or self._DEFAULT_FIELDS)
+            frame = self._normalize_events_frame(events_frame.copy(), selected_fields)
+            if not frame.empty:
+                start_ts = pd.to_datetime(start_date, utc=True).tz_convert(None).normalize()
+                end_ts = pd.to_datetime(end_date, utc=True).tz_convert(None).normalize()
+                if start_ts > end_ts:
+                    start_ts, end_ts = end_ts, start_ts
+                frame = frame[
+                    (frame["event_date"] >= start_ts) & (frame["event_date"] <= end_ts)
+                ].copy()
+        else:
+            frame = self.fetch_events(start_date, end_date, countries=countries)
         if frame.empty:
             result = pd.DataFrame(
                 columns=["iso3", "month", "fatalities", "source", "updated_at"],
