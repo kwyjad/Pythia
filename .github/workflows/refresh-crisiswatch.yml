@@ -10,13 +10,16 @@ concurrency:
   group: pythia-crisiswatch-refresh
   cancel-in-progress: false
 
+# NOTE (July 2026): the LOCAL refresh is the designed path. crisisgroup.org
+# sits behind Cloudflare, which blocks CI-runner Playwright fetches — every
+# scheduled/dispatch run of this workflow failed and it was manually disabled
+# in the GitHub UI (last data commit 2026-03-14). Monthly local step instead:
+#   python -m scripts.refresh_crisiswatch
+#   git add horizon_scanner/data/crisiswatch_latest.json && git commit
+# The cron was removed to document that reality; workflow_dispatch is kept
+# for occasional retry attempts from CI.
 "on":
   workflow_dispatch: {}
-  schedule:
-    # ICG publishes CrisisWatch updates in the first days of each month.
-    # Run on the 3rd at 06:00 UTC to catch the update before the
-    # pipeline run.
-    - cron: "0 6 3 * *"
 
 permissions:
   contents: write  # required to commit the JSON back to the repo

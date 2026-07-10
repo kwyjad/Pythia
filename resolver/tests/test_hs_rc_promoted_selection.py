@@ -2,10 +2,10 @@ import pytest
 
 pytest.importorskip("duckdb")
 
-from horizon_scanner.horizon_scanner import _select_tail_pack_hazards
+from horizon_scanner.horizon_scanner import _select_rc_promoted_hazards
 
 
-def test_hs_tail_pack_selection_limits_and_ordering():
+def test_hs_rc_promoted_selection_limits_and_ordering():
     triage = {
         "country": "USA",
         "hazards": {
@@ -48,7 +48,7 @@ def test_hs_tail_pack_selection_limits_and_ordering():
         },
     }
 
-    selected = _select_tail_pack_hazards(triage, expected_hazards=["ACE", "DI", "DR", "FL", "HW", "TC"])
+    selected = _select_rc_promoted_hazards(triage, expected_hazards=["ACE", "DI", "DR", "FL", "HW", "TC"])
 
     assert len(selected) <= 2
     assert [item["hazard_code"] for item in selected] == ["ACE", "DI"]

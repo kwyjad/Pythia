@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 from dataclasses import dataclass
@@ -46,13 +47,27 @@ HAZARD_HUMAN_NAMES = {
     "TC": "tropical cyclone",
 }
 
-COUNTRY_NAMES = {
-    "ETH": "Ethiopia",
-    "SOM": "Somalia",
-}
-
 _FEWSNET_COUNTRIES_FILE = Path(__file__).resolve().parent.parent / "resolver" / "data" / "fewsnet_countries.json"
 _IPC_COUNTRIES_FILE = Path(__file__).resolve().parent.parent / "resolver" / "data" / "ipc_countries.json"
+_COUNTRIES_CSV = Path(__file__).resolve().parent.parent / "resolver" / "data" / "countries.csv"
+
+
+def _load_country_names() -> Dict[str, str]:
+    """ISO3 -> country name from the resolver registry (empty dict on failure)."""
+    names: Dict[str, str] = {}
+    try:
+        with open(_COUNTRIES_CSV, encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                iso3 = (row.get("iso3") or "").strip().upper()
+                name = (row.get("country_name") or "").strip()
+                if iso3 and name:
+                    names[iso3] = name
+    except Exception:
+        return {}
+    return names
+
+
+COUNTRY_NAMES: Dict[str, str] = _load_country_names()
 
 
 def _is_fewsnet_country(iso3: str) -> bool:
@@ -403,9 +418,8 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     iso3=th.iso3,
                     hazard_code="ACE",
                     metric="FATALITIES",
-                    wording=(
-                        f"How many people will be killed each month by armed conflict in {th.iso3} "
-                        "between the forecast start and end dates, as resolved by ACLED?"
+                    wording=_build_question_wording(
+                        th.iso3, "ACE", "FATALITIES", opening, closing
                     ),
                     status="active",
                     metadata=conflict_meta,
@@ -426,9 +440,8 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
                     iso3=th.iso3,
                     hazard_code="ACE",
                     metric="PA",
-                    wording=(
-                        f"How many people will be newly displaced or affected by conflict in {th.iso3} "
-                        "each month, as measured by IDMC displacement data and related sources?"
+                    wording=_build_question_wording(
+                        th.iso3, "ACE", "PA", opening, closing
                     ),
                     status="active",
                     metadata=conflict_meta,

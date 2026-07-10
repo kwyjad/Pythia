@@ -952,7 +952,19 @@ def _bulk_fetch_acled_political(
     max_workers: int = 4,
 ) -> dict[str, list[dict]]:
     """Fetch ACLED political events — per-country, concurrent."""
-    from pythia.acled_political import fetch_acled_political_events
+    from pythia.acled_political import (
+        fetch_acled_political_events,
+        purge_contaminated_events,
+    )
+
+    # Self-heal: wipe rows written by the pre-July-2026 fetcher, which stored
+    # the same GLOBAL events under every country (iso3 filter param ignored).
+    purged = purge_contaminated_events()
+    if purged:
+        LOG.warning(
+            "ACLED political: purged %d cross-contaminated rows before refetch",
+            purged,
+        )
 
     results: dict[str, list[dict]] = {}
 

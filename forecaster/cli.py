@@ -495,6 +495,11 @@ def _build_conflict_base_rate(
             "last_6m": last_6,
         }
 
+    # Exclude the current (incomplete) calendar month: a run on e.g. the 9th
+    # would otherwise present 8 days of data as "last month", producing a
+    # spurious de-escalating trend that biases the prior anchor.
+    current_ym = date.today().strftime("%Y-%m")
+
     con = connect(read_only=True)
     try:
         # --- Fatalities from ACLED ---
@@ -505,10 +510,11 @@ def _build_conflict_base_rate(
                 SELECT month, fatalities
                 FROM acled_monthly_fatalities
                 WHERE iso3 = ?
+                  AND substr(CAST(month AS VARCHAR), 1, 7) < ?
                 ORDER BY month DESC
                 LIMIT 6
                 """,
-                [iso3_up],
+                [iso3_up, current_ym],
             ).fetchall()
             # Reverse to ascending order
             fat_rows = list(reversed(fat_rows))
@@ -543,11 +549,12 @@ def _build_conflict_base_rate(
                           'idp_displacement_flow_idmc'
                       )
                   )
+                  AND substr(CAST(ym AS VARCHAR), 1, 7) < ?
                 GROUP BY ym
                 ORDER BY ym DESC
                 LIMIT 6
                 """,
-                [iso3_up, hz_up],
+                [iso3_up, hz_up, current_ym],
             ).fetchall()
             logging.debug("IDMC displacement query for %s/%s: %d rows", iso3_up, hz_up, len(disp_rows))
             disp_rows = list(reversed(disp_rows))
@@ -581,9 +588,15 @@ def _load_fewsnet_phase3_history(
 
     Returns a dict compatible with the history_summary format, with
     null-aware semantics: months without data are marked as None.
+
+    Uses the pooled pythia connection (schema.connect) — a raw
+    duckdb.connect(..., read_only=True) here fails with DuckDB's
+    same-process "different configuration" error whenever the pipeline
+    already holds a read-write handle, which silently rendered every
+    DR/PHASE3PLUS prompt with a false "0% coverage" history.
     """
     try:
-        con = duckdb.connect(_pythia_db_path_from_config(), read_only=True)
+        con = connect(read_only=True)
     except Exception:
         return {
             "type": "fewsnet_phase3",
@@ -2099,8 +2112,9 @@ def _load_structured_data(
         except Exception:
             pass
 
-    # Adversarial check (RC L2+ only) — load from DB if available
-    if (rc_level is not None and rc_level >= 2) and hs_run_id:
+    # Adversarial check (RC L1+, matching the generation gate in
+    # horizon_scanner/adversarial_check.py) — load from DB if available
+    if (rc_level is not None and rc_level >= 1) and hs_run_id:
         try:
             con = connect(read_only=True)
             try:
@@ -2639,6 +2653,31 @@ async def _call_spd_model_for_spec(
             "query": query,
             "reason": "self_search_disabled",
         }
+        # The prompt no longer offers the NEED_WEB_EVIDENCE escape when
+        # self-search is disabled, but a model may still emit it. Rather than
+        # dropping the member (the old behavior), retry once with an explicit
+        # no-evidence instruction so the forecast is recovered.
+        retry_prompt = (
+            f"{prompt_with_evidence}\n\n"
+            "WEB EVIDENCE IS UNAVAILABLE THIS RUN. Do NOT output NEED_WEB_EVIDENCE. "
+            "Produce the required forecast JSON now using only the evidence provided above."
+        )
+        try:
+            retry_text, retry_usage, retry_error = await call_chat_ms(
+                ms,
+                retry_prompt,
+                temperature=0.2,
+                prompt_key="spd.v2",
+                prompt_version="1.0.0",
+                component="Forecaster",
+                run_id=run_id,
+            )
+        except Exception:
+            return text, usage, error or "self_search_disabled", ms
+        if retry_text and not extract_self_search_query(retry_text):
+            merged_usage = combine_usage(usage, dict(retry_usage or {}))
+            merged_usage["self_search"] = dict(usage["self_search"], retried_without_evidence=True)
+            return retry_text, merged_usage, retry_error, ms
         return text, usage, error or "self_search_disabled", ms
 
     self_search_meta: dict[str, Any] = {
@@ -3497,7 +3536,6 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
 
         hs_evidence_pack: dict[str, Any] | None = None
         question_evidence_pack: dict[str, Any] | None = None
-        hazard_tail_pack: dict[str, Any] | None = None
         # DEPRECATED: web research via fetch_evidence_pack is replaced by structured
         # data injection. The retriever code below is kept for reference but bypassed.
         retriever_enabled = False  # was: _retriever_enabled()
@@ -3527,27 +3565,8 @@ async def _run_research_for_question(run_id: str, question_row: duckdb.Row) -> N
             except Exception as exc:  # noqa: BLE001
                 logging.warning("Question evidence pack fetch failed for %s: %s", qid, exc)
                 question_evidence_pack = None
-            try:
-                hazard_tail_pack = _load_hs_hazard_tail_pack(hs_run_id, iso3, hz)
-            except Exception as exc:  # noqa: BLE001
-                logging.warning("HS hazard tail pack load failed for %s/%s: %s", iso3, hz, exc)
-                hazard_tail_pack = None
 
         merged_evidence_pack = merge_evidence_packs(hs_evidence_pack, question_evidence_pack)
-        if hazard_tail_pack:
-            if hs_evidence_pack is None:
-                hs_evidence_pack = {}
-            hs_evidence_pack["hazard_tail_pack"] = hazard_tail_pack
-            merged_evidence_pack = merge_evidence_packs(
-                merged_evidence_pack,
-                {
-                    **hazard_tail_pack,
-                    "recent_signals": (hazard_tail_pack.get("recent_signals") or [])[:12],
-                },
-                max_sources=12,
-                max_signals=12,
-            )
-            merged_evidence_pack["hs_hazard_tail_pack"] = hazard_tail_pack
 
         # Inject NMME seasonal outlook for climate hazards.
         if hz in CLIMATE_HAZARDS:
@@ -4375,37 +4394,10 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 rc_score = rc_score if rc_score is not None else _coerce_float(rc_payload.get("score"))
                 rc_level = _coerce_int(rc_payload.get("level"))
 
-        rc_elevated = False
-        if rc_level is not None:
-            rc_elevated = rc_level >= 2
-        elif rc_score is not None:
-            rc_elevated = rc_score >= 0.30
-
-        if rc_elevated:
-            max_signals = int(os.getenv("PYTHIA_SPD_TAIL_PACKS_MAX_SIGNALS", "12"))
-            try:
-                tail_pack = _load_hs_hazard_tail_pack(
-                    hs_run_id,
-                    iso3,
-                    hz,
-                    max_signals=max_signals,
-                )
-            except Exception as exc:  # noqa: BLE001
-                LOG.debug("SPD tail pack load failed for %s/%s: %s", iso3, hz, exc)
-                tail_pack = None
-            if tail_pack:
-                research_json["hs_hazard_tail_pack"] = tail_pack
-                merged_sources = _dedupe_sources_by_url(
-                    (research_json.get("sources") or []) + (tail_pack.get("sources") or [])
-                )
-                research_json["sources"] = merged_sources
-                LOG.debug(
-                    "SPD tail pack injected for %s/%s: bullets=%d sources=%d",
-                    iso3,
-                    hz,
-                    len(tail_pack.get("recent_signals") or []),
-                    len(merged_sources),
-                )
+        # (Tail-pack research_json injection removed July 2026 — RC/triage
+        # grounding evidence reaches SPD prompts via sd["hazard_grounding"]
+        # in _load_structured_data, and counter-evidence via the RC L1+
+        # adversarial-check inject.)
 
         # Inject NMME seasonal outlook for climate hazards.
         if hz in CLIMATE_HAZARDS and "nmme_seasonal_outlook" not in research_json:

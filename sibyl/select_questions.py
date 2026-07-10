@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pythia.db.schema import connect
 from pythia.test_mode import is_test_mode
@@ -96,6 +96,30 @@ def latest_hs_run_id(con: Any = None) -> Optional[str]:
             con.close()
 
 
+def hs_run_is_test(hs_run_id: Optional[str], con: Any = None) -> bool:
+    """Whether *hs_run_id* is stamped ``is_test`` in ``hs_runs``.
+
+    Sibyl chains off HS via ``workflow_run``, which cannot carry the upstream
+    run's test-mode input — so test mode is derived from the DB instead.
+    """
+    if not hs_run_id:
+        return False
+    own = con is None
+    if own:
+        con = connect(read_only=False)
+    try:
+        row = con.execute(
+            "SELECT COALESCE(is_test, FALSE) FROM hs_runs WHERE hs_run_id = ?",
+            [hs_run_id],
+        ).fetchone()
+        return bool(row[0]) if row else False
+    except Exception:
+        return False
+    finally:
+        if own:
+            con.close()
+
+
 def select_top_questions(
     hs_run_id: Optional[str] = None,
     n: int = N_QUESTIONS,
@@ -111,7 +135,20 @@ def select_top_questions(
             logger.error("sibyl.select_questions: no HS run with active questions found")
             return []
 
-        test_filter = "" if is_test_mode() else "AND COALESCE(q.is_test, FALSE) = FALSE"
+        # Run-aware test filter: a test-mode HS run stamps every question
+        # is_test=TRUE, and the Sibyl workflow cannot inherit the upstream
+        # test-mode env — filtering purely on env silently excluded ALL
+        # questions of test runs (gate reported 0 eligible).
+        run_is_test = hs_run_is_test(run_id, con)
+        include_test = is_test_mode() or run_is_test
+        test_filter = "" if include_test else "AND COALESCE(q.is_test, FALSE) = FALSE"
+        if run_is_test and not is_test_mode():
+            logger.warning(
+                "sibyl.select_questions: HS run %s is a test run — including "
+                "its is_test questions; Sibyl outputs should also be stamped "
+                "is_test (see sibyl.run).",
+                run_id,
+            )
         sql = f"""
             SELECT
                 q.question_id, q.hs_run_id, q.iso3,
@@ -163,3 +200,54 @@ def select_top_questions(
             len(questions), n, hs_run_id or "(latest)",
         )
     return questions
+
+
+def eligibility_breakdown(
+    hs_run_id: Optional[str] = None,
+    con: Any = None,
+) -> Dict[str, Any]:
+    """Diagnostic counts explaining the gate outcome (logged by run_sibyl.yml).
+
+    Returns per-(hazard, metric) active-question counts for the resolved HS
+    run, plus how many rows the eligibility pair filter and the test filter
+    would exclude — so a 0-eligible gate result is self-explanatory in logs.
+    """
+    own = con is None
+    if own:
+        con = connect(read_only=False)
+    try:
+        run_id = hs_run_id or latest_hs_run_id(con)
+        if not run_id:
+            return {"hs_run_id": None, "note": "no HS run with active questions"}
+
+        run_is_test = hs_run_is_test(run_id, con)
+        rows = con.execute(
+            """
+            SELECT upper(q.hazard_code), upper(q.metric),
+                   COUNT(*),
+                   SUM(CASE WHEN COALESCE(q.is_test, FALSE) THEN 1 ELSE 0 END)
+            FROM questions q
+            WHERE q.status = 'active' AND q.hs_run_id = ?
+            GROUP BY 1, 2
+            ORDER BY 1, 2
+            """,
+            [run_id],
+        ).fetchall()
+        pairs = {
+            f"{hz}/{m}": {
+                "active": int(cnt),
+                "is_test": int(test_cnt or 0),
+                "pair_eligible": (hz, m) in ELIGIBLE_HAZARD_METRICS,
+            }
+            for hz, m, cnt, test_cnt in rows
+        }
+        return {
+            "hs_run_id": run_id,
+            "run_is_test": run_is_test,
+            "env_test_mode": is_test_mode(),
+            "eligible_pairs": sorted(f"{hz}/{m}" for hz, m in ELIGIBLE_HAZARD_METRICS),
+            "pairs": pairs,
+        }
+    finally:
+        if own:
+            con.close()
