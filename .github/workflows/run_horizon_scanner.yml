@@ -72,7 +72,6 @@ jobs:
       PYTHIA_SPD_WEB_SEARCH_ENABLED: "0"     # deprecated — SPD evidence now from structured data
       PYTHIA_FORECASTER_SELF_SEARCH: "0"     # deprecated — replaced by structured data injection
       PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED: "1"
-      PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED: "1"
       PYTHIA_ADVERSARIAL_CHECK_ENABLED: "1"
       PYTHIA_PREDICTION_MARKETS_ENABLED: "0"
       BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
@@ -587,7 +586,10 @@ jobs:
           python - <<'PY'
           import os
           from resolver.db import duckdb_io
-          expected = ["ACE", "DI", "DR", "FL", "HW", "TC"]
+          # Active pipeline hazards only — DI/HW/CU are BLOCKED_HAZARDS and
+          # never get hs_triage rows (listing them here produced a perpetual
+          # false "missing hazard rows" warning: 2 countries x 2 blocked = 4).
+          expected = ["ACE", "DR", "FL", "TC"]
           db_url = os.environ.get("RESOLVER_DB_URL", "")
           hs_run_id = os.environ.get("HS_RUN_ID", "")
           iso3_raw = os.environ.get("HS_RESOLVED_ISO3S", "")
@@ -720,11 +722,15 @@ jobs:
           # (now per-1M-token rates) is authoritative; a stale per-1K secret here
           # would silently misprice any model missing from the JSON file.
 
-          # SPD model self-driven web search
-          PYTHIA_SPD_WEB_SEARCH_ENABLED: "1"
-          PYTHIA_SPD_GOOGLE_WEB_SEARCH_ENABLED: "1"
-          PYTHIA_SELF_SEARCH_MAX_CALLS: "2"
-          PYTHIA_SELF_SEARCH_MAX_SOURCES: "5"
+          # SPD self-driven web search stays OFF: the workflow-level
+          # PYTHIA_MODEL_SELF_SEARCH_ENABLED/PYTHIA_FORECASTER_SELF_SEARCH are
+          # "0" (deprecated), so forecaster.self_search.self_search_enabled()
+          # is false. The step-level "1" overrides that used to live here only
+          # tricked the prompt into offering a NEED_WEB_EVIDENCE escape the
+          # executor then refused (dropping the member with
+          # `self_search_disabled`). To actually enable self-search, set ALL of
+          # PYTHIA_FORECASTER_SELF_SEARCH, PYTHIA_SPD_WEB_SEARCH_ENABLED and
+          # PYTHIA_MODEL_SELF_SEARCH_ENABLED to "1".
         run: |
           set -e
           mkdir -p diagnostics

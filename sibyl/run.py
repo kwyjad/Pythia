@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -53,7 +54,12 @@ from sibyl.config import (
 )
 from sibyl.cost import CostTracker
 from sibyl.leakage import LeakageStats
-from sibyl.select_questions import SibylQuestion, select_top_questions
+from sibyl.select_questions import (
+    SibylQuestion,
+    hs_run_is_test,
+    latest_hs_run_id,
+    select_top_questions,
+)
 from sibyl.spd import (
     bucket_probs_from_distribution,
     find_standard_run_id,
@@ -331,7 +337,21 @@ def run_sibyl(
     resolved_hs_run_id = hs_run_id
 
     try:
-        questions = select_top_questions(hs_run_id, n=n_questions, con=con)
+        # Derive test mode from the target HS run (workflow_run triggers
+        # cannot carry the upstream run's test_mode input). Setting the env
+        # var here makes every downstream is_test_mode() consumer — question
+        # selection, cost ledger, SPD writers — stamp is_test consistently.
+        resolved_hs_run_id = hs_run_id or latest_hs_run_id(con)
+        from pythia.test_mode import is_test_mode as _is_test_mode
+        if resolved_hs_run_id and hs_run_is_test(resolved_hs_run_id, con) and not _is_test_mode():
+            os.environ["PYTHIA_TEST_MODE"] = "1"
+            logger.warning(
+                "sibyl.run: HS run %s is a test run — enabling PYTHIA_TEST_MODE "
+                "so Sibyl outputs are stamped is_test.",
+                resolved_hs_run_id,
+            )
+
+        questions = select_top_questions(resolved_hs_run_id, n=n_questions, con=con)
         if questions:
             resolved_hs_run_id = questions[0].hs_run_id
         logger.info(

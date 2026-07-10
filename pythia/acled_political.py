@@ -38,6 +38,7 @@ _POLITICAL_EVENT_TYPES = "Strategic developments|Protests|Riots"
 _ACLED_FIELDS = (
     "event_id_cnty|event_date|event_type|sub_event_type"
     "|actor1|actor2|admin1|location|notes|fatalities|source"
+    "|iso3|country"
 )
 
 _ALWAYS_INCLUDE_SUB_TYPES = frozenset({
@@ -72,6 +73,46 @@ def _db_url() -> str:
         pass
     from resolver.db.duckdb_io import DEFAULT_DB_URL
     return DEFAULT_DB_URL
+
+
+def _iso_numeric(iso3: str) -> Optional[int]:
+    """Numeric ISO 3166-1 code for the ACLED API's documented `iso` filter."""
+    try:
+        import pycountry
+
+        country = pycountry.countries.get(alpha_3=(iso3 or "").upper())
+        return int(country.numeric) if country else None
+    except Exception:
+        return None
+
+
+def _filter_events_to_country(events: list[dict], iso3: str) -> list[dict]:
+    """Keep only events whose OWN returned iso3 matches the requested country.
+
+    The ACLED API silently ignores unsupported filter params: a previous
+    version passed `iso3=` (not a filter) and received the same ~50 GLOBAL
+    events for every country, which were then stored stamped with the
+    requested iso3 — injecting Iranian/Ecuadorian events into e.g. Somalia's
+    prompts. Never trust the request; attribute by the event's returned iso3.
+    """
+    iso3_up = (iso3 or "").upper()
+    matched = [
+        ev for ev in events
+        if str(ev.get("iso3") or "").strip().upper() == iso3_up
+    ]
+    if events and not matched:
+        log.warning(
+            "ACLED political: 0/%d returned events match iso3=%s — the "
+            "server-side country filter was likely ignored; storing nothing "
+            "rather than misattributed events.",
+            len(events), iso3_up,
+        )
+    elif len(matched) < len(events):
+        log.info(
+            "ACLED political: kept %d/%d events matching iso3=%s",
+            len(matched), len(events), iso3_up,
+        )
+    return matched
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +203,9 @@ def fetch_acled_political_events(
     start_date = end_date - timedelta(days=days_back)
 
     params: dict[str, Any] = {
-        "iso3": iso3.upper(),
+        # `iso` (numeric ISO 3166-1) is ACLED's documented country filter.
+        # `iso3` is a RESPONSE field only — passing it as a filter is silently
+        # ignored and returns global events (see _filter_events_to_country).
         "event_date": f"{start_date:%Y-%m-%d}|{end_date:%Y-%m-%d}",
         "event_date_where": "BETWEEN",
         "event_type": _POLITICAL_EVENT_TYPES,
@@ -170,10 +213,25 @@ def fetch_acled_political_events(
         "limit": max_events,
         "_format": "json",
     }
+    iso_num = _iso_numeric(iso3)
+    if iso_num is not None:
+        params["iso"] = iso_num
+    else:
+        log.warning(
+            "ACLED political: could not resolve numeric ISO code for %s — "
+            "no server-side country filter; relying on client-side "
+            "attribution only.",
+            iso3,
+        )
 
     headers = {"Authorization": f"Bearer {token}"}
 
     raw_events = _fetch_with_retry(params, headers)
+    if not raw_events:
+        return []
+
+    # Never trust the request-side filter — attribute by returned iso3.
+    raw_events = _filter_events_to_country(raw_events, iso3)
     if not raw_events:
         return []
 
@@ -191,6 +249,7 @@ def fetch_acled_political_events(
 
         result.append({
             "event_id": ev.get("event_id_cnty", ""),
+            "iso3": str(ev.get("iso3") or "").strip().upper(),
             "event_date": ev.get("event_date", ""),
             "event_type": ev.get("event_type", ""),
             "sub_event_type": ev.get("sub_event_type", ""),
@@ -293,7 +352,18 @@ def store_acled_political_events(
         ensure_schema(con)
         now = datetime.now(timezone.utc).isoformat()
 
+        iso3_up = iso3.upper()
         for ev in events:
+            # Guard against misattribution: never store an event under a
+            # country its own returned iso3 contradicts.
+            ev_iso3 = str(ev.get("iso3") or "").strip().upper()
+            if ev_iso3 and ev_iso3 != iso3_up:
+                log.warning(
+                    "ACLED political: dropping event %s (iso3=%s) requested "
+                    "under %s — misattribution guard.",
+                    ev.get("event_id"), ev_iso3, iso3_up,
+                )
+                continue
             con.execute(
                 """
                 INSERT OR REPLACE INTO acled_political_events
@@ -534,3 +604,63 @@ def _format_actors(ev: dict) -> str:
     if a1 and a2:
         return f"{a1} vs {a2}"
     return a1 or a2
+
+
+# ---------------------------------------------------------------------------
+# Contamination purge (one-time self-heal)
+# ---------------------------------------------------------------------------
+
+def purge_contaminated_events() -> int:
+    """Self-heal the table if cross-country contamination is detected.
+
+    The pre-July-2026 fetcher passed ``iso3`` as an (unsupported, silently
+    ignored) ACLED filter param, so every country stored the SAME global
+    events stamped with its own iso3 — the signature is identical event_ids
+    appearing under multiple iso3 values. When detected, the whole table is
+    wiped so the fixed fetcher can repopulate it with correctly attributed
+    events. Returns the number of rows deleted (0 when clean or absent).
+    """
+    try:
+        from pythia.db.schema import connect
+    except Exception:
+        return 0
+
+    try:
+        con = connect(read_only=False)
+    except Exception:
+        return 0
+
+    try:
+        try:
+            dup = con.execute(
+                """
+                SELECT COUNT(*) FROM (
+                    SELECT event_id
+                    FROM acled_political_events
+                    WHERE event_id IS NOT NULL AND event_id != ''
+                    GROUP BY event_id
+                    HAVING COUNT(DISTINCT iso3) > 1
+                )
+                """
+            ).fetchone()
+        except Exception:
+            return 0  # table missing — nothing to heal
+        if not dup or int(dup[0] or 0) == 0:
+            return 0
+
+        total = con.execute(
+            "SELECT COUNT(*) FROM acled_political_events"
+        ).fetchone()
+        n_rows = int(total[0] or 0) if total else 0
+        con.execute("DELETE FROM acled_political_events")
+        log.warning(
+            "ACLED political: purged %d rows — %d event_ids were stored under "
+            "multiple countries (pre-fix global-fetch contamination).",
+            n_rows, int(dup[0]),
+        )
+        return n_rows
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ACLED political contamination purge failed: %s", exc)
+        return 0
+    finally:
+        con.close()

@@ -754,11 +754,50 @@ def _percentile(values: list[float], pct: float) -> float | None:
     return float(ordered[idx])
 
 
-def _expected_spd_model_ids() -> list[str]:
+def _expected_ensemble_entries() -> tuple[list[dict[str, str]], str]:
+    """Config-declared SPD ensemble as [{'name','model_id'}] plus a source label.
+
+    Derived from pythia.llm_profiles.get_ensemble_resolved(), NOT
+    providers.SPD_ENSEMBLE — the latter's `active` flags depend on which API
+    keys the *report* process happens to see (a bundle job with only
+    ANTHROPIC_API_KEY reported "Expected ensemble size: 1" while 5 models ran).
+    """
     spec_override = os.getenv("PYTHIA_SPD_ENSEMBLE_SPECS", "").strip()
-    specs = parse_ensemble_specs(spec_override) if spec_override else SPD_ENSEMBLE
-    model_ids = [spec.model_id for spec in specs if getattr(spec, "model_id", "")]
-    return sorted({mid for mid in model_ids if mid})
+    if spec_override:
+        specs = parse_ensemble_specs(spec_override)
+        return (
+            [
+                {"name": (s.name or s.model_id), "model_id": s.model_id}
+                for s in specs
+                if getattr(s, "model_id", "")
+            ],
+            "PYTHIA_SPD_ENSEMBLE_SPECS",
+        )
+    try:
+        from pythia.llm_profiles import get_ensemble_resolved
+
+        entries = [
+            {"name": str(e.get("model_id") or ""), "model_id": str(e.get("model_id") or "")}
+            for e in get_ensemble_resolved()
+            if e.get("model_id")
+        ]
+        if entries:
+            return entries, "config ensemble via llm_profiles"
+    except Exception:
+        pass
+    return (
+        [
+            {"name": (s.name or s.model_id), "model_id": s.model_id}
+            for s in SPD_ENSEMBLE
+            if getattr(s, "model_id", "")
+        ],
+        "SPD_ENSEMBLE",
+    )
+
+
+def _expected_spd_model_ids() -> list[str]:
+    entries, _src = _expected_ensemble_entries()
+    return sorted({e["model_id"] for e in entries if e.get("model_id")})
 
 
 def _compute_question_run_metrics(
@@ -1593,22 +1632,15 @@ def _ensemble_participation_summary(
     else:
         lines.append("- No forecasts_raw rows found for this run.")
 
-    spec_override = os.getenv("PYTHIA_SPD_ENSEMBLE_SPECS", "").strip()
-    expected_specs = parse_ensemble_specs(spec_override) if spec_override else SPD_ENSEMBLE
-    expected_specs = [spec for spec in expected_specs if getattr(spec, "model_id", "")]
-    expected_names = {
-        (spec.name or spec.model_id)
-        for spec in expected_specs
-        if getattr(spec, "name", "") or getattr(spec, "model_id", "")
-    }
-    expected_model_ids = {spec.model_id for spec in expected_specs if getattr(spec, "model_id", "")}
+    expected_entries, expected_source = _expected_ensemble_entries()
+    expected_names = {e["name"] for e in expected_entries if e.get("name")}
+    expected_model_ids = {e["model_id"] for e in expected_entries if e.get("model_id")}
     missing_by_model_id = sorted(expected_model_ids - present_spd_models)
     missing_by_name = sorted(expected_names - set(present.keys()))
 
-    if expected_specs:
+    if expected_entries:
         lines.append(
-            f"- Expected ensemble size: {len(expected_specs)} "
-            f"({('PYTHIA_SPD_ENSEMBLE_SPECS' if spec_override else 'SPD_ENSEMBLE')})."
+            f"- Expected ensemble size: {len(expected_entries)} ({expected_source})."
         )
         if missing_by_model_id:
             for model_id in missing_by_model_id:
@@ -1746,6 +1778,31 @@ def _scenario_expected(
 
     # Priority tier — scenario is expected.
     return True, ""
+
+
+def _load_scenario_row_count(
+    con: duckdb.DuckDBPyConnection,
+    run_id: str,
+    iso3: str,
+    hazard_code: str,
+    metric: str,
+) -> int:
+    """Rows actually persisted to the scenarios table (DB truth, not attempts)."""
+    try:
+        row = con.execute(
+            """
+            SELECT COUNT(*)
+            FROM scenarios
+            WHERE run_id = ?
+              AND upper(iso3) = upper(?)
+              AND upper(hazard_code) = upper(?)
+              AND upper(metric) = upper(?)
+            """,
+            [run_id, iso3, hazard_code, metric],
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+    except Exception:
+        return 0
 
 
 def _load_scenario_call_count(
@@ -2838,8 +2895,16 @@ def _load_bundle_data(
             q_track = int(q_track_raw) if q_track_raw is not None else None
             expected, reason = _scenario_expected(q_hz, q_metric, triage_entry, track=q_track)
             call_count = _load_scenario_call_count(con, forecaster_run_id, str(qid))
-            if call_count > 0:
+            row_count = _load_scenario_row_count(
+                con, forecaster_run_id, q_iso3, q_hz, q_metric
+            )
+            # "generated" means a row landed in the scenarios table — an LLM
+            # attempt whose JSON failed to parse must not be reported as
+            # generated (the old call_count-based status did exactly that).
+            if row_count > 0:
                 status = "generated"
+            elif call_count > 0 and expected:
+                status = "failed_parse"
             elif not expected:
                 status = f"skipped_by_design: {reason or 'not_expected'}"
             else:
@@ -2959,7 +3024,30 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
             parts.append(f"{n_alerts} alerts")
         if latest[0]:
             parts.append(f"latest: {latest[0]}-{latest[1]:02d}" if latest[1] else f"latest: {latest[0]}")
-        if n_entries < 10:
+        # Staleness: CrisisWatch is refreshed by a manual LOCAL Playwright run
+        # (CI is Cloudflare-blocked) — data older than ~45 days means the
+        # monthly local refresh was missed. Fail loudly instead of the old
+        # silent WARN (the July 2026 run was serving February data).
+        stale_months = False
+        if latest[0]:
+            try:
+                _now = datetime.utcnow()
+                _age_months = (_now.year - int(latest[0])) * 12 + (
+                    _now.month - int(latest[1] or _now.month)
+                )
+                # CrisisWatch covers month M and is published early in M+1,
+                # so age 1-2 months is normal cadence; >2 means the monthly
+                # local refresh was missed.
+                stale_months = _age_months > 2
+            except Exception:
+                stale_months = False
+        if stale_months:
+            cw_status = "FAIL"
+            cw_detail = (
+                f"STALE — {'; '.join(parts)}. Run the local refresh: "
+                "python -m scripts.refresh_crisiswatch (CI is Cloudflare-blocked)."
+            )
+        elif n_entries < 10:
             cw_status = "WARN"
             cw_detail = f"low coverage — {'; '.join(parts)}"
         elif n_with_arrow == 0:
@@ -3112,6 +3200,9 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
 
         # Scenarios
         generated = sum(1 for r in data.scenario_status_rows if r.get("status") == "generated")
+        failed_parse = sum(
+            1 for r in data.scenario_status_rows if r.get("status") == "failed_parse"
+        )
         missing_unexp = sum(
             1 for r in data.scenario_status_rows if r.get("status") == "missing_unexpected"
         )
@@ -3119,11 +3210,16 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
             1 for r in data.scenario_status_rows
             if str(r.get("status") or "").startswith("skipped_by_design")
         )
-        if missing_unexp == 0:
+        if missing_unexp == 0 and failed_parse == 0:
             s_status = "OK"
+        elif missing_unexp == 0:
+            s_status = "WARN"
         else:
             s_status = "FAIL"
-        s_detail = f"{generated} generated, {skipped} skipped, {missing_unexp} missing"
+        s_detail = (
+            f"{generated} generated, {failed_parse} failed parse, "
+            f"{skipped} skipped, {missing_unexp} missing"
+        )
         checks.append({"subsystem": "Scenarios", "status": s_status, "detail": s_detail})
 
     return checks
@@ -3603,8 +3699,10 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
             r for r in data.scenario_status_rows if r.get("question_id") in track1_qids
         ]
         t1_yes = sum(1 for r in t1_scenarios if r.get("status") == "generated")
-        t1_no = len(t1_scenarios) - t1_yes
-        lines.append(f"Generated: {t1_yes} / {len(t1_scenarios)}")
+        t1_failed = sum(1 for r in t1_scenarios if r.get("status") == "failed_parse")
+        t1_no = len(t1_scenarios) - t1_yes - t1_failed
+        lines.append(f"Generated (in scenarios table): {t1_yes} / {len(t1_scenarios)}")
+        lines.append(f"Failed to parse (attempted, not stored): {t1_failed}")
         lines.append(f"Missing: {t1_no}")
         lines.append("")
 
@@ -3883,7 +3981,11 @@ def emit_question_metrics_csv(
             triage_rows = _fetch_llm_rows(
                 con,
                 """
-                SELECT iso3, hazard_code, triage_score, rc_likelihood, rc_level, rc_direction, track
+                SELECT iso3, hazard_code, triage_score,
+                       regime_change_likelihood AS rc_likelihood,
+                       regime_change_level AS rc_level,
+                       regime_change_direction AS rc_direction,
+                       track
                 FROM hs_triage
                 WHERE run_id = ?
                 """,
@@ -4121,25 +4223,27 @@ def emit_rc_triage_summary_csv(
         return
 
     try:
+        # Column names must match the hs_triage DDL in pythia/db/schema.py —
+        # the RC fields are regime_change_*, drivers live in drivers_json and
+        # the triage status inside data_quality_json.
         rows = _fetch_llm_rows(
             con,
             """
             SELECT
                 iso3,
                 hazard_code,
-                rc_likelihood,
-                rc_magnitude,
-                rc_score,
-                rc_level,
-                rc_direction,
-                rc_window,
+                regime_change_likelihood AS rc_likelihood,
+                regime_change_magnitude AS rc_magnitude,
+                regime_change_score AS rc_score,
+                regime_change_level AS rc_level,
+                regime_change_direction AS rc_direction,
+                regime_change_window AS rc_window,
                 triage_score,
                 tier,
                 track,
                 need_full_spd,
-                drivers,
-                confidence_note,
-                status
+                drivers_json AS drivers,
+                data_quality_json
             FROM hs_triage
             WHERE run_id = ?
             ORDER BY triage_score DESC
@@ -4174,6 +4278,16 @@ def emit_rc_triage_summary_csv(
                 drivers_list = []
             drivers_str = "|".join(str(d) for d in drivers_list[:3])
 
+            status = ""
+            dq_raw = row.get("data_quality_json") or ""
+            if dq_raw:
+                try:
+                    dq = json.loads(dq_raw)
+                    if isinstance(dq, dict):
+                        status = str(dq.get("status") or "")
+                except Exception:
+                    status = ""
+
             writer.writerow({
                 "iso3": row.get("iso3") or "",
                 "hazard_code": row.get("hazard_code") or "",
@@ -4188,8 +4302,8 @@ def emit_rc_triage_summary_csv(
                 "track": row.get("track") or "",
                 "need_full_spd": row.get("need_full_spd") or "",
                 "drivers": drivers_str,
-                "confidence_note": row.get("confidence_note") or "",
-                "status": row.get("status") or "",
+                "confidence_note": "",
+                "status": status,
             })
 
     print(f"Wrote RC triage summary to {out_path}")
@@ -4723,7 +4837,9 @@ def emit_model_config_snapshot(
         "PYTHIA_SPD_V2_DUAL_RUN",
         "PYTHIA_CONFIG_PROFILE",
         "PYTHIA_ADVERSARIAL_CHECK_ENABLED",
-        "PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED",
+        "PYTHIA_HS_ADVERSARIAL_MAX_PER_COUNTRY",
+        "PYTHIA_FORECASTER_SELF_SEARCH",
+        "PYTHIA_MODEL_SELF_SEARCH_ENABLED",
     ]
 
     env_vars = {}
@@ -4765,12 +4881,10 @@ def emit_model_config_snapshot(
         except Exception:
             pass
 
-    # Build the SPD ensemble models list
+    # Build the SPD ensemble models list (config-declared, key-independent)
     spd_ensemble_list: list[str] = []
     try:
-        spec_override = os.getenv("PYTHIA_SPD_ENSEMBLE_SPECS", "").strip()
-        specs = parse_ensemble_specs(spec_override) if spec_override else SPD_ENSEMBLE
-        spd_ensemble_list = [spec.model_id for spec in specs if getattr(spec, "model_id", "")]
+        spd_ensemble_list = _expected_spd_model_ids()
     except Exception:
         pass
 

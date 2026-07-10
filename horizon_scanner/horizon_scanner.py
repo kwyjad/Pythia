@@ -40,7 +40,6 @@ from horizon_scanner.db_writer import (
     get_expected_hs_hazards,
     log_hs_adversarial_checks_to_db,
     log_hs_country_reports_to_db,
-    log_hs_hazard_tail_packs_to_db,
     log_hs_run_to_db,
 )
 from horizon_scanner.regime_change import (
@@ -79,14 +78,10 @@ def _hs_fallback_default() -> str:
     return get_role_model("hs_fallback")
 
 HS_FALLBACK_MODEL_SPECS = os.getenv("PYTHIA_HS_FALLBACK_MODEL_SPECS") or _hs_fallback_default()
-HS_TAIL_PACKS_ENABLED = os.getenv("PYTHIA_HS_HAZARD_TAIL_PACKS_ENABLED", "0") == "1"
-HS_TAIL_PACKS_MAX_PER_COUNTRY = int(os.getenv("PYTHIA_HS_HAZARD_TAIL_PACKS_MAX_PER_COUNTRY", "2"))
-HS_TAIL_PACKS_MAX_SOURCES = int(
-    os.getenv("PYTHIA_HS_HAZARD_TAIL_PACKS_MAX_SOURCES", str(HS_EVIDENCE_MAX_SOURCES))
-)
-HS_TAIL_PACKS_MAX_SIGNALS = int(
-    os.getenv("PYTHIA_HS_HAZARD_TAIL_PACKS_MAX_SIGNALS", str(HS_EVIDENCE_MAX_SIGNALS))
-)
+# Max RC-promoted hazards per country handed to adversarial checks
+# (was PYTHIA_HS_HAZARD_TAIL_PACKS_MAX_PER_COUNTRY before the tail-pack
+# subsystem was removed in July 2026).
+HS_ADVERSARIAL_MAX_PER_COUNTRY = int(os.getenv("PYTHIA_HS_ADVERSARIAL_MAX_PER_COUNTRY", "2"))
 COUNTRIES_CSV = REPO_ROOT / "resolver" / "data" / "countries.csv"
 NATURAL_HAZARD_CODES = {
     "FL": "flood",
@@ -148,41 +143,6 @@ def _build_hs_evidence_query(country_name: str, iso3: str) -> str:
         "FL/TC: seasonal outlook, rainfall anomalies, SST/ENSO, landfall/track, dam releases. "
         "DR/HW: rainfall deficit, vegetation stress, heat index warnings, water rationing, food price spikes. "
         "Also include concise structural drivers (max 8 lines) as background context."
-    )
-
-
-def _build_hazard_tail_query(
-    country_name: str,
-    iso3: str,
-    hazard_code: str,
-    rc_direction: str,
-    rc_window: str,
-) -> str:
-    iso3_val = (iso3 or "").strip().upper()
-    hazard_code = (hazard_code or "").strip().upper()
-    name = (country_name or "").strip()
-    label = f"{name} ({iso3_val})" if name else iso3_val
-    direction = (rc_direction or "unclear").strip().upper()
-    window = (rc_window or "month_1-2").strip()
-    hazard_vocab = {
-        "ACE": "ceasefire collapse, major offensive, external intervention, election violence",
-        "DI": "border policy shifts, forced returns, new corridor openings, camp capacity alerts, UNHCR/IOM updates",
-        "FL": "rainfall anomalies, river gauge alerts, dam releases, flood warnings, seasonal outlooks",
-        "TC": "tropical cyclone formation, SST/ENSO signals, landfall forecasts, track shifts, storm surge alerts",
-        "DR": "rainfall deficit, vegetation stress, reservoir levels, water rationing, food price spikes",
-        "HW": "heat index warnings, heatwave advisories, grid stress, water rationing, excess mortality alerts",
-    }
-    vocab = hazard_vocab.get(hazard_code, "observable hazard alerts, policy actions, humanitarian updates")
-
-    return (
-        f"{label} hazard tail pack for {hazard_code}. Focus on RC direction {direction} in window {window}. "
-        "Provide recent signals with three bullet groups, formatted exactly as: "
-        f"TRIGGER | {window} | {direction} | <signal>; "
-        f"DAMPENER | {window} | {direction} | <signal>; "
-        f"BASELINE | {window} | {direction} | <signal>. "
-        "Each bullet should cite observable indicators and sources. "
-        f"Hazard trigger vocabulary: {vocab}. "
-        "Include concise structural context (max 8 lines) as background."
     )
 
 
@@ -310,7 +270,13 @@ def _maybe_build_country_evidence_pack(run_id: str, iso3: str, country_name: str
     return pack
 
 
-def _select_tail_pack_hazards(triage: dict[str, Any], expected_hazards: list[str]) -> list[dict[str, Any]]:
+def _select_rc_promoted_hazards(triage: dict[str, Any], expected_hazards: list[str]) -> list[dict[str, Any]]:
+    """Select RC Level 1+ hazards (descending level/score) for adversarial checks.
+
+    The RC-level threshold here (>= 1) must stay in sync with the re-check
+    inside pythia/adversarial_check.py and with the forecaster's injection
+    gate (rc_level >= 1 in forecaster/cli.py + forecaster/prompts.py).
+    """
     hazards = triage.get("hazards") if isinstance(triage, dict) else {}
     if not isinstance(hazards, dict):
         hazards = {}
@@ -348,10 +314,10 @@ def _select_tail_pack_hazards(triage: dict[str, Any], expected_hazards: list[str
             str(item.get("hazard_code") or ""),
         )
     )
-    selected = candidates[: max(0, HS_TAIL_PACKS_MAX_PER_COUNTRY)]
+    selected = candidates[: max(0, HS_ADVERSARIAL_MAX_PER_COUNTRY)]
     if selected:
         logger.debug(
-            "HS tail pack selection: %s",
+            "HS RC-promoted hazard selection (adversarial checks): %s",
             [
                 {
                     "hazard": item.get("hazard_code"),
@@ -362,40 +328,6 @@ def _select_tail_pack_hazards(triage: dict[str, Any], expected_hazards: list[str
             ],
         )
     return selected
-
-
-def _tail_pack_exists(run_id: str, iso3: str, hazard_code: str) -> bool:
-    con = pythia_connect(read_only=True)
-    iso3_up = (iso3 or "").upper()
-    hazard_up = (hazard_code or "").upper()
-    try:
-        try:
-            table_info = con.execute("PRAGMA table_info('hs_hazard_tail_packs')").fetchall()
-        except Exception:  # noqa: BLE001
-            logger.debug("HS tail pack cache check: table missing for %s %s", iso3_up, hazard_up)
-            return False
-        if not table_info:
-            return False
-        row = con.execute(
-            """
-            SELECT 1
-            FROM hs_hazard_tail_packs
-            WHERE hs_run_id = ? AND iso3 = ? AND hazard_code = ?
-            LIMIT 1
-            """,
-            [run_id, iso3_up, hazard_up],
-        ).fetchone()
-        hit = row is not None
-        logger.debug(
-            "HS tail pack cache check: %s for run_id=%s iso3=%s hazard=%s",
-            "hit" if hit else "miss",
-            run_id,
-            iso3_up,
-            hazard_up,
-        )
-        return hit
-    finally:
-        con.close()
 
 
 def _adversarial_check_exists(run_id: str, iso3: str, hazard_code: str) -> bool:
@@ -1235,142 +1167,14 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str, crisiswatch_d
     triage = {"country": iso3_up, "hazards": combined_hazards}
     _write_hs_triage(run_id, iso3_up, triage, is_test=is_test_mode())
 
-    # 5. Tail packs (unchanged — triggered by RC levels)
-    if HS_TAIL_PACKS_ENABLED:
-        retriever_enabled = os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1"
-        web_search_enabled = os.getenv("PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED", "0") == "1"
-        if not retriever_enabled and not web_search_enabled:
-            logger.debug(
-                "HS tail packs skipped (web research disabled) for run_id=%s iso3=%s",
-                run_id,
-                iso3_up,
-            )
-        else:
-            tail_candidates = _select_tail_pack_hazards(triage, get_expected_hs_hazards())
-            for candidate in tail_candidates:
-                hazard_code = candidate.get("hazard_code") or ""
-                rc_level = candidate.get("rc_level")
-                rc_score_val = candidate.get("rc_score")
-                rc_direction = candidate.get("rc_direction") or "unclear"
-                rc_window = candidate.get("rc_window") or ""
-
-                if _tail_pack_exists(run_id, iso3_up, hazard_code):
-                    continue
-
-                try:
-                    query = _build_hazard_tail_query(
-                        country_name,
-                        iso3_up,
-                        hazard_code,
-                        rc_direction,
-                        rc_window,
-                    )
-                    logger.debug(
-                        "HS hazard tail query for %s %s: %s",
-                        iso3_up,
-                        hazard_code,
-                        query,
-                    )
-                    model_id = (
-                        (os.getenv("PYTHIA_RETRIEVER_MODEL_ID") or "").strip()
-                        if retriever_enabled
-                        else None
-                    )
-                    # Tail packs always use web search regardless of the
-                    # deprecated PYTHIA_WEB_RESEARCH_ENABLED flag (which
-                    # controls the old question-level pipeline).
-                    _orig_web_research = os.environ.get("PYTHIA_WEB_RESEARCH_ENABLED")
-                    os.environ["PYTHIA_WEB_RESEARCH_ENABLED"] = "1"
-                    try:
-                        pack = dict(
-                            fetch_evidence_pack(
-                                query,
-                                purpose="hs_hazard_tail_pack",
-                                run_id=run_id,
-                                hs_run_id=run_id,
-                                model_id=model_id or None,
-                            )
-                            or {}
-                        )
-                    finally:
-                        if _orig_web_research is not None:
-                            os.environ["PYTHIA_WEB_RESEARCH_ENABLED"] = _orig_web_research
-                        else:
-                            os.environ.pop("PYTHIA_WEB_RESEARCH_ENABLED", None)
-                    sources_raw = pack.get("sources") or []
-                    sources_list = [src for src in sources_raw if isinstance(src, dict)]
-                    signals_raw = pack.get("recent_signals") or []
-                    signals_list = [str(sig) for sig in signals_raw if str(sig).strip()]
-
-                    sources_before = len(sources_list)
-                    signals_before = len(signals_list)
-                    sources_list = _sort_sources_by_url(sources_list)[:HS_TAIL_PACKS_MAX_SOURCES]
-                    signals_list = signals_list[:HS_TAIL_PACKS_MAX_SIGNALS]
-                    pack["sources"] = sources_list
-                    pack["recent_signals"] = signals_list
-                    pack["grounded"] = bool(pack.get("grounded"))
-                    pack.setdefault("structural_context", "")
-
-                    debug = pack.get("debug") or {}
-                    grounding_debug = {
-                        "groundingSupports_count": debug.get("groundingSupports_count", 0),
-                        "groundingChunks_count": debug.get("groundingChunks_count", 0),
-                        "webSearchQueries_len": len(debug.get("webSearchQueries") or []),
-                        "n_sources_before": sources_before,
-                        "n_sources_after": len(sources_list),
-                        "n_signals_before": signals_before,
-                        "n_signals_after": len(signals_list),
-                        "reason_code": debug.get("reason_code"),
-                    }
-
-                    markdown_body = _render_evidence_markdown(
-                        {
-                            **pack,
-                            "query": query,
-                        }
-                    )
-                    rc_score_fmt = float(rc_score_val or 0.0)
-                    header = f"# Hazard tail pack — {iso3_up} {hazard_code}"
-                    rc_line = (
-                        "RC: level "
-                        f"{rc_level} score {rc_score_fmt:.3f} "
-                        f"direction {rc_direction} window {rc_window}"
-                    )
-                    markdown = "\n".join([header, rc_line, "", markdown_body])
-
-                    log_hs_hazard_tail_packs_to_db(
-                        run_id,
-                        [
-                            {
-                                "iso3": iso3_up,
-                                "hazard_code": hazard_code,
-                                "rc_level": rc_level,
-                                "rc_score": rc_score_fmt,
-                                "rc_direction": rc_direction,
-                                "rc_window": rc_window,
-                                "query": query,
-                                "markdown": markdown,
-                                "sources": sources_list,
-                                "grounded": pack.get("grounded", False),
-                                "grounding_debug": grounding_debug,
-                                "structural_context": pack.get("structural_context") or "",
-                                "recent_signals": signals_list,
-                            }
-                        ],
-                        is_test=is_test_mode(),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "HS hazard tail pack failed for %s %s: %s",
-                        iso3_up,
-                        hazard_code,
-                        exc,
-                    )
-
-    # 5b. Adversarial checks (counter-evidence for RC L1+ hazards)
+    # 5. Adversarial checks (counter-evidence for RC L1+ hazards).
+    # The tail-pack subsystem that used to sit here was removed July 2026 —
+    # adversarial checks (generated AND injected at RC L1+) replace it; the
+    # RC/triage grounding packs still persist to hs_hazard_tail_packs for
+    # SPD-prompt injection.
     adversarial_enabled = os.getenv("PYTHIA_ADVERSARIAL_CHECK_ENABLED", "1") == "1"
     if adversarial_enabled:
-        adv_candidates = _select_tail_pack_hazards(triage, get_expected_hs_hazards())
+        adv_candidates = _select_rc_promoted_hazards(triage, get_expected_hs_hazards())
         for candidate in adv_candidates:
             hazard_code = candidate.get("hazard_code") or ""
             if _adversarial_check_exists(run_id, iso3_up, hazard_code):

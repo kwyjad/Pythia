@@ -79,10 +79,15 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'EOF' | tee gate_out.txt
+          import json
           import os
           os.environ.setdefault("PYTHIA_DB_URL", os.environ["RESOLVER_DB_URL"])
-          from sibyl.select_questions import select_top_questions
-          qs = select_top_questions(os.environ.get("SIBYL_HS_RUN_ID") or None)
+          from sibyl.select_questions import eligibility_breakdown, select_top_questions
+          hs_run_id = os.environ.get("SIBYL_HS_RUN_ID") or None
+          # Per-pair diagnostics so a 0-eligible outcome is self-explanatory
+          # (active questions per pair, pair eligibility, test-run status).
+          print("SIBYL_ELIGIBILITY_BREAKDOWN=" + json.dumps(eligibility_breakdown(hs_run_id)))
+          qs = select_top_questions(hs_run_id)
           print(f"SIBYL_ELIGIBLE_COUNT={len(qs)}")
           EOF
           COUNT=$(grep -oE 'SIBYL_ELIGIBLE_COUNT=[0-9]+' gate_out.txt | tail -1 | cut -d= -f2)

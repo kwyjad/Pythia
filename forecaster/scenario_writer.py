@@ -365,18 +365,65 @@ async def _run_scenario_for_question(
 
     try:
         scenario = _safe_json_loads_scenario(text)
-    except json.JSONDecodeError as exc:
-        raw_dir = Path("debug/scenarios_raw")
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        raw_path = raw_dir / f"{run_id}__{qid}.txt"
-        raw_path.write_text(text or "", encoding="utf-8")
-        LOG.error(
-            "Invalid scenario JSON for %s: %s (saved to %s)",
+    except json.JSONDecodeError as first_exc:
+        # One corrective retry: invalid scenario JSON previously dropped the
+        # scenario silently (no row in the scenarios table).
+        LOG.warning(
+            "Invalid scenario JSON for %s (%s) — retrying once with a "
+            "corrective instruction.",
             qid,
-            exc,
-            raw_path,
+            first_exc,
         )
-        return
+        retry_prompt = (
+            f"{prompt}\n\n"
+            "IMPORTANT: Your previous response was not valid JSON "
+            f"({first_exc}). Return ONLY the JSON object described above — "
+            "no commentary, no code fences, valid JSON syntax."
+        )
+        try:
+            retry_text, retry_usage, retry_error = await asyncio.wait_for(
+                call_chat_ms(
+                    ms,
+                    retry_prompt,
+                    temperature=0.4,
+                    prompt_key="scenario.v2.json_retry",
+                    prompt_version="1.0.0",
+                    component="ScenarioWriter",
+                    run_id=run_id,
+                ),
+                timeout=SCENARIO_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001
+            retry_text, retry_usage, retry_error = "", {}, f"{type(exc).__name__}: {exc}"
+        await log_forecaster_llm_call(
+            run_id=run_id,
+            question_id=qid,
+            iso3=iso3,
+            hazard_code=hz,
+            metric=metric,
+            model_spec=ms,
+            prompt_text=retry_prompt,
+            response_text=retry_text or "",
+            usage=dict(retry_usage or {}),
+            error_text=str(retry_error) if retry_error else None,
+            phase="scenario_v2",
+            hs_run_id=hs_run_id,
+        )
+        try:
+            scenario = _safe_json_loads_scenario(retry_text)
+            text = retry_text
+        except json.JSONDecodeError as exc:
+            raw_dir = Path("debug/scenarios_raw")
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            raw_path = raw_dir / f"{run_id}__{qid}.txt"
+            raw_path.write_text(retry_text or text or "", encoding="utf-8")
+            LOG.error(
+                "Invalid scenario JSON for %s after retry: %s (saved to %s)",
+                qid,
+                exc,
+                raw_path,
+            )
+            return
 
     primary = scenario.get("primary") if isinstance(scenario, dict) else None
     if not isinstance(primary, dict):

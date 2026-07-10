@@ -369,6 +369,14 @@ def _format_base_rate_for_prompt(
             return str(n)
 
     if summary_type == "fewsnet_phase3":
+        if history_summary.get("error"):
+            # Loader-level failure (e.g. DB unavailable) — say so explicitly
+            # instead of rendering a false "0% coverage" history.
+            return (
+                "RESOLVER HISTORY (FEWS NET IPC Phase 3+, Current Situation):\n"
+                "History unavailable this run (data loader error — not evidence "
+                "of missing FEWS NET coverage). Treat the base rate as uncertain."
+            )
         source = history_summary.get("source", "FEWSNET_IPC")
         observed = history_summary.get("observed_months", 0)
         total = history_summary.get("history_length_months", 36)

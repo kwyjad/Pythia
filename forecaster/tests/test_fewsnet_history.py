@@ -64,13 +64,12 @@ def _sample_rows(today: date | None = None):
 class TestLoadFewsnetPhase3History:
     """Tests for _load_fewsnet_phase3_history."""
 
-    @patch("forecaster.cli.duckdb")
-    @patch("forecaster.cli._pythia_db_path_from_config", return_value=":memory:")
-    def test_returns_correct_structure(self, mock_path, mock_duckdb):
+    @patch("forecaster.cli.connect")
+    def test_returns_correct_structure(self, mock_connect):
         """Result dict has the expected top-level keys and type."""
         rows = _sample_rows()
         mock_con = _make_mock_connection(rows)
-        mock_duckdb.connect.return_value = mock_con
+        mock_connect.return_value = mock_con
 
         result = cli._load_fewsnet_phase3_history("ETH", months=36)
 
@@ -86,13 +85,12 @@ class TestLoadFewsnetPhase3History:
         assert "last_6m_values" in result
         assert "notes" in result
 
-    @patch("forecaster.cli.duckdb")
-    @patch("forecaster.cli._pythia_db_path_from_config", return_value=":memory:")
-    def test_null_months_preserved(self, mock_path, mock_duckdb):
+    @patch("forecaster.cli.connect")
+    def test_null_months_preserved(self, mock_connect):
         """Months without data should appear as None, not zero."""
         rows = _sample_rows()
         mock_con = _make_mock_connection(rows)
-        mock_duckdb.connect.return_value = mock_con
+        mock_connect.return_value = mock_con
 
         result = cli._load_fewsnet_phase3_history("ETH", months=36)
 
@@ -111,13 +109,12 @@ class TestLoadFewsnetPhase3History:
                 f"Value for {entry['ym']} should be None or positive, got {entry['value']}"
             )
 
-    @patch("forecaster.cli.duckdb")
-    @patch("forecaster.cli._pythia_db_path_from_config", return_value=":memory:")
-    def test_statistics_over_observed_only(self, mock_path, mock_duckdb):
+    @patch("forecaster.cli.connect")
+    def test_statistics_over_observed_only(self, mock_connect):
         """Statistics (mean, max) should be computed over observed months only."""
         rows = _sample_rows()
         mock_con = _make_mock_connection(rows)
-        mock_duckdb.connect.return_value = mock_con
+        mock_connect.return_value = mock_con
 
         result = cli._load_fewsnet_phase3_history("ETH", months=36)
 
@@ -127,25 +124,23 @@ class TestLoadFewsnetPhase3History:
         # We have 7 non-null rows out of 8 total
         assert result["observed_months"] == 7
 
-    @patch("forecaster.cli.duckdb")
-    @patch("forecaster.cli._pythia_db_path_from_config", return_value=":memory:")
-    def test_coverage_percentage(self, mock_path, mock_duckdb):
+    @patch("forecaster.cli.connect")
+    def test_coverage_percentage(self, mock_connect):
         """Coverage pct = observed / total months * 100."""
         rows = _sample_rows()
         mock_con = _make_mock_connection(rows)
-        mock_duckdb.connect.return_value = mock_con
+        mock_connect.return_value = mock_con
 
         result = cli._load_fewsnet_phase3_history("ETH", months=36)
 
         expected_coverage = round(7 / 36 * 100, 1)
         assert result["coverage_pct"] == expected_coverage
 
-    @patch("forecaster.cli.duckdb")
-    @patch("forecaster.cli._pythia_db_path_from_config", return_value=":memory:")
-    def test_empty_rows_returns_zero_coverage(self, mock_path, mock_duckdb):
+    @patch("forecaster.cli.connect")
+    def test_empty_rows_returns_zero_coverage(self, mock_connect):
         """When no data exists, return a note dict with 0 coverage."""
         mock_con = _make_mock_connection([])
-        mock_duckdb.connect.return_value = mock_con
+        mock_connect.return_value = mock_con
 
         result = cli._load_fewsnet_phase3_history("ZZZ", months=36)
 
@@ -156,10 +151,8 @@ class TestLoadFewsnetPhase3History:
 
     def test_db_connection_failure_returns_error(self):
         """When the DB cannot be connected, return an error dict."""
-        with patch("forecaster.cli._pythia_db_path_from_config", side_effect=Exception("boom")):
-            with patch("forecaster.cli.duckdb") as mock_duckdb:
-                mock_duckdb.connect.side_effect = Exception("boom")
-                result = cli._load_fewsnet_phase3_history("ETH")
+        with patch("forecaster.cli.connect", side_effect=Exception("boom")):
+            result = cli._load_fewsnet_phase3_history("ETH")
 
         assert result["type"] == "fewsnet_phase3"
         assert result.get("error") == "missing_db"

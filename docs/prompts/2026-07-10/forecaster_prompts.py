@@ -26,21 +26,6 @@ def _json_dumps_for_prompt(obj: Any, **kwargs: Any) -> str:
 
     return json.dumps(obj, default=str, **kwargs)
 
-
-def _self_search_enabled() -> bool:
-    """Mirror of the executor's self-search gate.
-
-    Prompt text offering the NEED_WEB_EVIDENCE escape must agree with
-    forecaster.self_search.self_search_enabled(), otherwise models are
-    invited to request evidence the pipeline refuses to fetch and their
-    forecast is dropped with error `self_search_disabled`.
-    """
-    try:
-        from forecaster.self_search import self_search_enabled
-        return bool(self_search_enabled())
-    except Exception:
-        return False
-
 _PYTHIA_CFG_LOAD = None
 if importlib.util.find_spec("pythia.config") is not None:
     _PYTHIA_CFG_LOAD = getattr(importlib.import_module("pythia.config"), "load", None)
@@ -1659,8 +1644,18 @@ def build_spd_prompt_v2(
         "- Level 2: treat base rate as less reliable; widen posterior; ensure non-trivial tail mass in the RC direction unless rebutted.\n"
         "- Level 3: explicitly model a regime-shift scenario; avoid narrow SPDs; tails must be meaningfully represented if direction is UP/DOWN.\n\n"
     )
+    tail_pack_guidance = (
+        "HAZARD TAIL PACK (if provided):\n"
+        "- The evidence JSON may include `hs_hazard_tail_pack`.\n"
+        "- Use its `recent_signals` bullets as trigger/counter-trigger evidence.\n"
+        "- TRIGGER supports a regime-shift hypothesis (tail risk).\n"
+        "- DAMPENER argues against the shift (stay closer to base rate).\n"
+        "- BASELINE supports continuation.\n"
+        "- Up to 12 bullets are included; absence does not imply no evidence exists.\n\n"
+    )
+
     rc_self_search_line = ""
-    if rc_level_effective >= 2 and _self_search_enabled():
+    if rc_level_effective >= 2:
         rc_self_search_line = (
             "If sources/signals are sparse in the merged evidence, you may respond with:\n"
             f"NEED_WEB_EVIDENCE: {iso3} {hazard} leading indicators next 3 months escalation trigger OR de-escalation trigger humanitarian\n\n"
@@ -1753,7 +1748,7 @@ def build_spd_prompt_v2(
         except Exception:
             pass
 
-    if sd.get("adversarial_check") and rc_level_effective >= 1:
+    if sd.get("adversarial_check") and rc_level_effective >= 2:
         try:
             from pythia.adversarial_check import format_adversarial_check_for_spd
             t = format_adversarial_check_for_spd(sd["adversarial_check"], rc_level=rc_level_effective)
@@ -1762,20 +1757,11 @@ def build_spd_prompt_v2(
         except Exception:
             pass
 
-    if sd.get("crisiswatch"):
-        # Pre-formatted by horizon_scanner.crisiswatch.format_crisiswatch_for_prompt
-        # (loaded for ACE questions only in _load_structured_data).
-        structured_sections.append(str(sd["crisiswatch"]))
-
     if sd.get("hazard_grounding"):
         _hg = sd["hazard_grounding"]
-        # RC/triage grounding packs store their text under `report_markdown`
-        # (see _load_hs_hazard_tail_pack); accept the legacy `markdown` key too.
-        _hg_md = None
-        if isinstance(_hg, dict):
-            _hg_md = _hg.get("report_markdown") or _hg.get("markdown")
+        _hg_md = _hg.get("markdown") if isinstance(_hg, dict) else None
         if _hg_md:
-            structured_sections.append("HS GROUNDING EVIDENCE:\n" + str(_hg_md))
+            structured_sections.append("HS GROUNDING EVIDENCE:\n" + _hg_md)
 
     if sd.get("conflict_forecasts") and hazard in ("ACE", "DI"):
         structured_sections.append(sd["conflict_forecasts"])
@@ -1825,12 +1811,9 @@ def build_spd_prompt_v2(
 
     structured_data_section = "\n\n".join(structured_sections) + "\n\n" if structured_sections else ""
 
-    # SPD self-driven web search instruction. Gated on the SAME check the
-    # executor uses (forecaster.self_search.self_search_enabled) — the prompt
-    # must never invite a NEED_WEB_EVIDENCE request the pipeline will refuse
-    # (that drops the model's forecast with error `self_search_disabled`).
+    # SPD self-driven web search instruction (gated on env vars)
     spd_web_search_section = ""
-    if _self_search_enabled():
+    if os.getenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0") == "1" or os.getenv("PYTHIA_SPD_GOOGLE_WEB_SEARCH_ENABLED", "0") == "1":
         spd_web_search_section = (
             "\nWEB SEARCH: If you need to verify a specific recent data point, "
             "check a recent development, or resolve an ambiguity in the evidence, "
@@ -1839,22 +1822,10 @@ def build_spd_prompt_v2(
             "factual question would materially change your probability distribution.\n\n"
         )
 
-    if _self_search_enabled():
-        need_evidence_block = (
-            "If you need more evidence before forecasting, output EXACTLY one line:\n"
-            "NEED_WEB_EVIDENCE: <your query>\n"
-            "Otherwise, produce the forecast JSON.\n\n"
-        )
-    else:
-        need_evidence_block = (
-            "Web evidence requests are not available in this run. Do NOT output "
-            "NEED_WEB_EVIDENCE. Produce the forecast JSON from the evidence provided.\n\n"
-        )
-
     # Conditional research section — only render if research_json has PM,
     # seasonal, or tail pack data (full research brief no longer produced).
     research_section = ""
-    _rj_keys = {"prediction_market_signals", "nmme_seasonal_outlook"}
+    _rj_keys = {"prediction_market_signals", "nmme_seasonal_outlook", "hs_hazard_tail_pack"}
     if any(research_json.get(k) for k in _rj_keys):
         research_section = (
             "Reference data:\n"
@@ -1882,6 +1853,7 @@ def build_spd_prompt_v2(
         "```\n\n"
         f"{research_section}"
         f"{rc_guidance}"
+        f"{tail_pack_guidance}"
         f"{pm_signals_section}"
         f"{seasonal_outlook_section}"
         f"{structured_data_section}"
@@ -1962,7 +1934,9 @@ def build_spd_prompt_v2(
         "Your JSON probabilities must match the posterior SPD from Step 5 (with any adjustments "
         "from the stress test). Do not change the numbers at this stage.\n\n"
         f"{rc_self_search_line}"
-        f"{need_evidence_block}"
+        "If you need more evidence before forecasting, output EXACTLY one line:\n"
+        "NEED_WEB_EVIDENCE: <your query>\n"
+        "Otherwise, produce the forecast JSON.\n\n"
         "Output instructions:\n"
         "- Return ONLY a single JSON object with this schema (no extra commentary):\n\n"
         "- `human_explanation` MUST include a sentence starting with \"RC:\" stating what HS RC flagged, whether you accepted it, and how it changed the SPD (widened/shifted/rebutted).\n"
@@ -2084,14 +2058,8 @@ def build_scenario_prompt(
         "- **Operational Impacts**: bullets on what this means for access, surge, supply chains, partnerships, and programmatic choices.\n"
         "- Ensure bullets are concise and specific (no long paragraphs).\n"
         "- Align the scenario with the ensemble SPD (bucket_label and probability) and HS triage evidence.\n"
-        + (
-            "\nIf you need more evidence before drafting the scenarios, output EXACTLY one line:\n"
-            "NEED_WEB_EVIDENCE: <your query>\n"
-            "Otherwise, return only the JSON object above.\n"
-            if _self_search_enabled()
-            else
-            "\nWeb evidence requests are not available in this run. Do NOT output "
-            "NEED_WEB_EVIDENCE. Return only the JSON object above.\n"
-        )
+        "\nIf you need more evidence before drafting the scenarios, output EXACTLY one line:\n"
+        "NEED_WEB_EVIDENCE: <your query>\n"
+        "Otherwise, return only the JSON object above.\n"
     )
     # --- PROMPT_EXCERPT: scenario_end ---
