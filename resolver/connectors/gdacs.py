@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from calendar import monthrange
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -651,6 +653,44 @@ class GdacsConnector:
 
         return events
 
+    def _enrich_one_event(
+        self,
+        session: requests.Session,
+        ev: dict[str, Any],
+        name_to_iso3: dict[str, str],
+    ) -> dict[str, Any]:
+        """Fetch one event's per-event RSS and merge population data in place.
+
+        Errors (404, network, parse) are tolerated — the event is returned
+        unenriched with ``population`` left at its discovery-time value.
+        """
+        etype = ev["eventtype"]
+        eid = ev["eventid"]
+        url = _EVENT_RSS_PATTERN.format(type=etype, eventid=eid)
+
+        try:
+            resp = session.get(url, timeout=30)
+            if resp.status_code == 404:
+                LOG.debug("[gdacs] per-event RSS 404 for %s/%s", etype, eid)
+                return ev
+            resp.raise_for_status()
+
+            # Parse the per-event RSS to get population
+            rss_events = self._parse_rss(resp.content, name_to_iso3)
+            if rss_events:
+                # Take the latest episode (highest todate)
+                best = max(rss_events, key=lambda e: (e["todate"], e.get("pub_date") or e["todate"]))
+                ev["population"] = best["population"]
+                # Also update iso3/country if the RSS has better data
+                if best.get("iso3") and not ev.get("iso3"):
+                    ev["iso3"] = best["iso3"]
+                if best.get("country") and not ev.get("country"):
+                    ev["country"] = best["country"]
+        except Exception as exc:
+            LOG.debug("[gdacs] error fetching RSS for %s/%s: %s", etype, eid, exc)
+
+        return ev
+
     def _enrich_with_population(
         self,
         session: requests.Session,
@@ -658,44 +698,50 @@ class GdacsConnector:
         delay: float,
         name_to_iso3: dict[str, str],
     ) -> list[dict[str, Any]]:
-        """Fetch per-event RSS to get population data for each event."""
-        enriched: list[dict[str, Any]] = []
+        """Fetch per-event RSS to get population data for each event.
+
+        With ``GDACS_ENRICH_WORKERS`` > 1 (default 6) the per-event fetches
+        run on a thread pool — each worker keeps its own ``requests.Session``
+        (sessions are not thread-safe) and still sleeps ``delay`` between its
+        own requests, so the effective request rate is roughly
+        ``workers / (delay + response_time)``.  The 2026-07-08 reset run
+        enriched 3,272 events strictly sequentially at ~1.3s each (72 min);
+        the pool brings that to ~10 min without hammering GDACS.
+        ``GDACS_ENRICH_WORKERS=1`` preserves the exact sequential behavior.
+        """
         total = len(events)
+        workers = max(1, int(os.getenv("GDACS_ENRICH_WORKERS", "6") or "6"))
 
-        for i, ev in enumerate(events):
-            etype = ev["eventtype"]
-            eid = ev["eventid"]
-            url = _EVENT_RSS_PATTERN.format(type=etype, eventid=eid)
+        if workers == 1 or total <= 1:
+            enriched: list[dict[str, Any]] = []
+            for i, ev in enumerate(events):
+                enriched.append(self._enrich_one_event(session, ev, name_to_iso3))
+                if (i + 1) % 50 == 0:
+                    LOG.info("[gdacs] enriched %d/%d events", i + 1, total)
+                if delay > 0:
+                    time.sleep(delay)
+            return enriched
 
-            try:
-                resp = session.get(url, timeout=30)
-                if resp.status_code == 404:
-                    LOG.debug("[gdacs] per-event RSS 404 for %s/%s", etype, eid)
-                    enriched.append(ev)
-                    continue
-                resp.raise_for_status()
+        LOG.info("[gdacs] enriching %d events with %d workers", total, workers)
+        thread_local = threading.local()
 
-                # Parse the per-event RSS to get population
-                rss_events = self._parse_rss(resp.content, name_to_iso3)
-                if rss_events:
-                    # Take the latest episode (highest todate)
-                    best = max(rss_events, key=lambda e: (e["todate"], e.get("pub_date") or e["todate"]))
-                    ev["population"] = best["population"]
-                    # Also update iso3/country if the RSS has better data
-                    if best.get("iso3") and not ev.get("iso3"):
-                        ev["iso3"] = best["iso3"]
-                    if best.get("country") and not ev.get("country"):
-                        ev["country"] = best["country"]
-            except Exception as exc:
-                LOG.debug("[gdacs] error fetching RSS for %s/%s: %s", etype, eid, exc)
-
-            enriched.append(ev)
-
-            if (i + 1) % 50 == 0:
-                LOG.info("[gdacs] enriched %d/%d events", i + 1, total)
-
+        def _worker(ev: dict[str, Any]) -> dict[str, Any]:
+            worker_session = getattr(thread_local, "session", None)
+            if worker_session is None:
+                worker_session = _build_session()
+                thread_local.session = worker_session
+            result = self._enrich_one_event(worker_session, ev, name_to_iso3)
             if delay > 0:
                 time.sleep(delay)
+            return result
+
+        enriched = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_worker, ev) for ev in events]
+            for done, future in enumerate(as_completed(futures)):
+                enriched.append(future.result())
+                if (done + 1) % 50 == 0:
+                    LOG.info("[gdacs] enriched %d/%d events", done + 1, total)
 
         return enriched
 

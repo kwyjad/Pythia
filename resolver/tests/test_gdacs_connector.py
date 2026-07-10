@@ -733,3 +733,141 @@ class TestAggregation:
         assert result.iloc[0]["value"] == 800000.0
         # Max alert level should be Orange
         assert result.iloc[0]["alertlevel"] == "Orange"
+
+
+# ---------------------------------------------------------------------------
+# Parallel per-event RSS enrichment
+# ---------------------------------------------------------------------------
+
+_EVENT_RSS_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"
+     xmlns:gdacs="http://www.gdacs.org"
+     xmlns:geo="http://www.w3.org/2003/01/geo/wgs84_pos#">
+  <channel>
+    <title>GDACS</title>
+    <item>
+      <title>Flood event {eid}</title>
+      <gdacs:eventtype>FL</gdacs:eventtype>
+      <gdacs:eventid>{eid}</gdacs:eventid>
+      <gdacs:alertlevel>Orange</gdacs:alertlevel>
+      <gdacs:alertscore>2.5</gdacs:alertscore>
+      <gdacs:population value="{pop}" unit="people"/>
+      <gdacs:iso3>BGD</gdacs:iso3>
+      <gdacs:country>Bangladesh</gdacs:country>
+      <gdacs:fromdate>2024-07-01</gdacs:fromdate>
+      <gdacs:todate>2024-07-05</gdacs:todate>
+      <pubDate>Fri, 05 Jul 2024 12:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+"""
+
+
+class _FakeEnrichResponse:
+    def __init__(self, content: bytes = b"", status_code: int = 200):
+        self.content = content
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+
+            raise requests.HTTPError(f"HTTP {self.status_code}")
+
+
+class _FakeEnrichSession:
+    """Serves deterministic per-event RSS keyed by the event id in the URL."""
+
+    def __init__(self, fail_ids=(), notfound_ids=()):
+        self.fail_ids = set(fail_ids)
+        self.notfound_ids = set(notfound_ids)
+
+    def get(self, url, timeout=None, **_kwargs):
+        eid = int(url.rsplit("rss_", 1)[1].split(".")[0])
+        if eid in self.fail_ids:
+            import requests
+
+            raise requests.ConnectionError(f"boom for {eid}")
+        if eid in self.notfound_ids:
+            return _FakeEnrichResponse(status_code=404)
+        pop = (eid % 100) * 1000 + 500
+        xml = _EVENT_RSS_TEMPLATE.format(eid=eid, pop=pop).encode()
+        return _FakeEnrichResponse(content=xml)
+
+
+class TestParallelEnrichment:
+    """_enrich_with_population: thread-pool path matches sequential path."""
+
+    @staticmethod
+    def _make_events(n):
+        return [
+            {
+                "eventtype": "FL",
+                "eventid": 1000 + i,
+                "iso3": "",
+                "iso3_list": [],
+                "country": "",
+                "fromdate": date(2024, 7, 1),
+                "todate": date(2024, 7, 5),
+                "alertlevel": "Orange",
+                "alertscore": 2.5,
+                "population": 0.0,
+                "pub_date": date(2024, 7, 5),
+            }
+            for i in range(n)
+        ]
+
+    def test_parallel_matches_sequential(self, monkeypatch):
+        connector = GdacsConnector()
+        monkeypatch.setattr(
+            "resolver.connectors.gdacs._build_session", lambda: _FakeEnrichSession()
+        )
+
+        monkeypatch.setenv("GDACS_ENRICH_WORKERS", "1")
+        sequential = connector._enrich_with_population(
+            _FakeEnrichSession(), self._make_events(12), 0.0, {}
+        )
+        monkeypatch.setenv("GDACS_ENRICH_WORKERS", "4")
+        parallel = connector._enrich_with_population(
+            _FakeEnrichSession(), self._make_events(12), 0.0, {}
+        )
+
+        seq_map = {e["eventid"]: e["population"] for e in sequential}
+        par_map = {e["eventid"]: e["population"] for e in parallel}
+        assert len(parallel) == 12
+        assert par_map == seq_map
+        # Every event got its own population (deterministic id-keyed values,
+        # so any cross-thread mixup would show as a mismatch).
+        for eid, pop in par_map.items():
+            assert pop == (eid % 100) * 1000 + 500
+
+    def test_parallel_tolerates_errors_and_404(self, monkeypatch):
+        connector = GdacsConnector()
+        fail_session = lambda: _FakeEnrichSession(fail_ids={1001}, notfound_ids={1002})  # noqa: E731
+        monkeypatch.setattr("resolver.connectors.gdacs._build_session", fail_session)
+        monkeypatch.setenv("GDACS_ENRICH_WORKERS", "3")
+
+        enriched = connector._enrich_with_population(
+            fail_session(), self._make_events(6), 0.0, {}
+        )
+
+        pops = {e["eventid"]: e["population"] for e in enriched}
+        assert len(enriched) == 6
+        # Failed / 404 events survive unenriched.
+        assert pops[1001] == 0.0
+        assert pops[1002] == 0.0
+        for eid in pops:
+            if eid not in (1001, 1002):
+                assert pops[eid] == (eid % 100) * 1000 + 500
+
+    def test_workers_env_default_is_parallel(self, monkeypatch):
+        monkeypatch.delenv("GDACS_ENRICH_WORKERS", raising=False)
+        connector = GdacsConnector()
+        monkeypatch.setattr(
+            "resolver.connectors.gdacs._build_session", lambda: _FakeEnrichSession()
+        )
+        enriched = connector._enrich_with_population(
+            _FakeEnrichSession(), self._make_events(8), 0.0, {}
+        )
+        assert len(enriched) == 8
+        assert all(e["population"] > 0 for e in enriched)
