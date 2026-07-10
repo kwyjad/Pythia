@@ -8,8 +8,10 @@
 Loads the latest ICG CrisisWatch data from two sources, in priority order:
 
   1. **Local JSON file** (``horizon_scanner/data/crisiswatch_latest.json``)
-     produced by the Playwright scraper (``scripts/refresh_crisiswatch.py``,
-     run monthly via ``.github/workflows/refresh-crisiswatch.yml``).
+     produced by ``scripts/refresh_crisiswatch.py`` — refreshed monthly in
+     CI via the Wayback Machine path (``--source wayback``,
+     ``.github/workflows/refresh-crisiswatch.yml``); a local Playwright
+     path (``--source live``) is kept for manual runs.
      Used even if stale (>45 days — a warning is logged).
   2. **Gemini grounding calls** (fallback) — "On the Horizon" flags +
      Global Overview arrows.  Only attempted when the JSON file is missing
@@ -126,6 +128,7 @@ _ICG_COUNTRY_ISO3: dict[str, str] = {
     "Kazakhstan": "KAZ",
     "Kenya": "KEN",
     "Kosovo": "XKX",
+    "Kuwait": "KWT",
     "Kyrgyzstan": "KGZ",
     "Laos": "LAO",
     "Lebanon": "LBN",
@@ -153,6 +156,7 @@ _ICG_COUNTRY_ISO3: dict[str, str] = {
     "Nigeria": "NGA",
     "North Korea": "PRK",
     "North Macedonia": "MKD",
+    "Oman": "OMN",
     "Pakistan": "PAK",
     "Palestine": "PSE",
     "Palestinian Territories": "PSE",
@@ -161,6 +165,7 @@ _ICG_COUNTRY_ISO3: dict[str, str] = {
     "Peru": "PER",
     "Philippines": "PHL",
     "Poland": "POL",
+    "Qatar": "QAT",
     "Republic of Congo": "COG",
     "Russia": "RUS",
     "Rwanda": "RWA",
