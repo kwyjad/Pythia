@@ -18,6 +18,7 @@ Covers:
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from unittest.mock import MagicMock, patch
 
@@ -467,3 +468,73 @@ class TestMetricMapping:
         assert _METRIC_MAP["battles_forecast"] == "cast_battles_events"
         assert _METRIC_MAP["erv_forecast"] == "cast_erv_events"
         assert _METRIC_MAP["vac_forecast"] == "cast_vac_events"
+
+
+# ---------------------------------------------------------------------------
+# Current-year filter + staleness warning (2026-07 fix)
+# ---------------------------------------------------------------------------
+
+
+class TestYearFilterAndStaleness:
+    """The connector prefers the current forecast year and warns when the
+    newest issue date is stale (the ACLED CAST API had been serving only
+    Dec-2025 vintages while auth/fetch reported success)."""
+
+    @patch("resolver.ingestion.utils.iso_normalize.to_iso3", return_value="NGA")
+    @patch("resolver.connectors.acled_cast.requests.get")
+    @patch("resolver.ingestion.acled_auth.get_auth_header",
+           return_value={"Authorization": "Bearer test"})
+    def test_year_param_sent_on_first_attempt(self, mock_auth, mock_get, mock_iso3):
+        resp = MagicMock()
+        resp.json.return_value = _make_api_response(
+            [_make_cast_record(month="March", year=2026)]
+        )
+        resp.raise_for_status = MagicMock()
+        mock_get.return_value = resp
+
+        AcledCastConnector().fetch_forecasts()
+
+        # The first (and here only) request carries the current-year filter.
+        _args, kwargs = mock_get.call_args_list[0]
+        assert "year" in kwargs["params"]
+        assert kwargs["params"]["year"] == date.today().year
+
+    @patch("resolver.ingestion.utils.iso_normalize.to_iso3", return_value="NGA")
+    @patch("resolver.connectors.acled_cast.requests.get")
+    @patch("resolver.ingestion.acled_auth.get_auth_header",
+           return_value={"Authorization": "Bearer test"})
+    def test_falls_back_to_unfiltered_when_year_empty(self, mock_auth, mock_get, mock_iso3):
+        empty = MagicMock()
+        empty.json.return_value = _make_api_response([])
+        empty.raise_for_status = MagicMock()
+        full = MagicMock()
+        full.json.return_value = _make_api_response(
+            [_make_cast_record(month="March", year=2026)]
+        )
+        full.raise_for_status = MagicMock()
+        # First call (year-filtered) returns empty → second call (unfiltered) has data.
+        mock_get.side_effect = [empty, full]
+
+        df = AcledCastConnector().fetch_forecasts()
+        assert not df.empty
+        # Second request must NOT carry the year filter.
+        _args, kwargs = mock_get.call_args_list[1]
+        assert "year" not in kwargs["params"]
+
+    @patch("resolver.ingestion.utils.iso_normalize.to_iso3", return_value="NGA")
+    @patch("resolver.connectors.acled_cast.requests.get")
+    @patch("resolver.ingestion.acled_auth.get_auth_header",
+           return_value={"Authorization": "Bearer test"})
+    def test_staleness_warning_fires_for_old_issue_date(self, mock_auth, mock_get, mock_iso3, caplog):
+        # timestamp far in the past → issue date > 45 days old.
+        resp = MagicMock()
+        resp.json.return_value = _make_api_response(
+            [_make_cast_record(month="March", year=2026,
+                               timestamp="2025-12-06T00:00:00")]
+        )
+        resp.raise_for_status = MagicMock()
+        mock_get.return_value = resp
+
+        with caplog.at_level(logging.WARNING):
+            AcledCastConnector().fetch_forecasts()
+        assert any("days old" in r.message for r in caplog.records)

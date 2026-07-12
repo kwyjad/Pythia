@@ -86,25 +86,55 @@ def _iso_numeric(iso3: str) -> Optional[int]:
         return None
 
 
+# Candidate keys the ACLED API uses for the ISO3 code, beyond the ones
+# `resolve_iso3` already understands. The live API does NOT reliably return
+# the code under the literal key ``iso3`` — it may use the HXL tag
+# ``#country+code`` or the underscore variant ``country_iso3`` — so a single
+# ``ev.get("iso3")`` read attributes nothing and every event is discarded.
+# Mirror the robust extraction the fatalities connector uses
+# (resolver/ingestion/acled_client.py).
+_ISO3_EXTRA_KEYS = ("iso3", "country_iso3", "#country+code")
+
+
+def _event_iso3(ev: dict) -> str:
+    """Best-effort ISO3 for one raw ACLED event.
+
+    Tries the explicit ISO3 response keys, then falls back to resolving from
+    the ``country`` name (which the request already asks for in ``fields``).
+    Returns "" when nothing resolves.
+    """
+    from resolver.ingestion.utils.iso_normalize import resolve_iso3, to_iso3
+
+    for key in _ISO3_EXTRA_KEYS:
+        raw = ev.get(key)
+        if raw:
+            code = to_iso3(str(raw))
+            if code:
+                return code
+    # resolve_iso3 also covers ISO3/CountryISO3 and the country-name fallback.
+    resolved, _reason = resolve_iso3(ev, name_keys=("country",))
+    return (resolved or "").strip().upper()
+
+
 def _filter_events_to_country(events: list[dict], iso3: str) -> list[dict]:
-    """Keep only events whose OWN returned iso3 matches the requested country.
+    """Keep only events whose OWN returned country matches the requested one.
 
     The ACLED API silently ignores unsupported filter params: a previous
     version passed `iso3=` (not a filter) and received the same ~50 GLOBAL
     events for every country, which were then stored stamped with the
     requested iso3 — injecting Iranian/Ecuadorian events into e.g. Somalia's
-    prompts. Never trust the request; attribute by the event's returned iso3.
+    prompts. Never trust the request; attribute by the event's OWN country,
+    resolved robustly (the live API's ISO3 key is not always ``iso3``).
     """
     iso3_up = (iso3 or "").upper()
     matched = [
         ev for ev in events
-        if str(ev.get("iso3") or "").strip().upper() == iso3_up
+        if _event_iso3(ev) == iso3_up
     ]
     if events and not matched:
         log.warning(
-            "ACLED political: 0/%d returned events match iso3=%s — the "
-            "server-side country filter was likely ignored; storing nothing "
-            "rather than misattributed events.",
+            "ACLED political: 0/%d returned events resolve to iso3=%s — "
+            "storing nothing rather than misattributed events.",
             len(events), iso3_up,
         )
     elif len(matched) < len(events):
@@ -249,7 +279,7 @@ def fetch_acled_political_events(
 
         result.append({
             "event_id": ev.get("event_id_cnty", ""),
-            "iso3": str(ev.get("iso3") or "").strip().upper(),
+            "iso3": _event_iso3(ev),
             "event_date": ev.get("event_date", ""),
             "event_type": ev.get("event_type", ""),
             "sub_event_type": ev.get("sub_event_type", ""),
