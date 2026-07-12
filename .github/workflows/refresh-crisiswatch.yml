@@ -10,16 +10,30 @@ concurrency:
   group: pythia-crisiswatch-refresh
   cancel-in-progress: false
 
-# NOTE (July 2026): the LOCAL refresh is the designed path. crisisgroup.org
-# sits behind Cloudflare, which blocks CI-runner Playwright fetches — every
-# scheduled/dispatch run of this workflow failed and it was manually disabled
-# in the GitHub UI (last data commit 2026-03-14). Monthly local step instead:
-#   python -m scripts.refresh_crisiswatch
-#   git add horizon_scanner/data/crisiswatch_latest.json && git commit
-# The cron was removed to document that reality; workflow_dispatch is kept
-# for occasional retry attempts from CI.
+# NOTE (July 2026): crisisgroup.org's Cloudflare blocks CI-runner
+# Playwright fetches, so this workflow fetches the SERVER-RENDERED page
+# from the Internet Archive instead (--source wayback): trigger a Save
+# Page Now capture (best-effort; authenticated when the optional
+# IA_S3_ACCESS_KEY / IA_S3_SECRET_KEY secrets are set — free keys from
+# https://archive.org/account/s3.php), then walk CDX snapshots newest-
+# first with validation that rejects Cloudflare-challenged captures.
+#
+# ICG publishes the previous month's edition in the first days of each
+# month; the early-month cron burst plus --only-if-newer makes repeat
+# runs idempotent no-ops (green, no commit). --max-age-days turns runs
+# red when the on-disk edition is more than two months stale, so silent
+# rot is visible. The local Playwright path (--source live, default)
+# still works for manual refreshes.
 "on":
-  workflow_dispatch: {}
+  schedule:
+    - cron: "17 6 3,5,7,10 * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Write even if the parsed edition is not newer than the checked-in JSON"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write  # required to commit the JSON back to the repo
@@ -29,32 +43,38 @@ env:
 
 jobs:
   refresh:
-    name: Fetch & parse ICG CrisisWatch via Playwright
+    name: Fetch & parse ICG CrisisWatch via Wayback Machine
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install system deps + Python packages
+      - name: Install Python packages (no browser needed)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm2 \
-            libxkbcommon0 libgbm1 libpango-1.0-0 libcairo2 libasound2t64
           python -m pip install --upgrade pip
-          pip install -r python_library_requirements.txt
-          pip install playwright playwright-stealth
-          playwright install chromium --with-deps
+          pip install "requests>=2.32,<3" "beautifulsoup4>=4.12,<5" "PyYAML>=6.0,<7"
 
-      - name: Run CrisisWatch scraper
+      - name: Run CrisisWatch refresh (wayback source)
+        env:
+          IA_S3_ACCESS_KEY: ${{ secrets.IA_S3_ACCESS_KEY }}
+          IA_S3_SECRET_KEY: ${{ secrets.IA_S3_SECRET_KEY }}
         run: |
-          python -m scripts.refresh_crisiswatch --verbose --timeout 90
+          FORCE_FLAG=""
+          if [ "${{ inputs.force }}" = "true" ]; then
+            FORCE_FLAG="--force"
+          fi
+          python -m scripts.refresh_crisiswatch \
+            --source wayback \
+            --only-if-newer \
+            --max-age-days 60 \
+            $FORCE_FLAG \
+            --verbose
 
       - name: Upload CrisisWatch JSON
         uses: actions/upload-artifact@v4
@@ -64,8 +84,6 @@ jobs:
           path: |
             horizon_scanner/data/crisiswatch_latest.json
             horizon_scanner/data/crisiswatch_debug.html
-            horizon_scanner/data/crisiswatch_debug.png
-            horizon_scanner/data/crisiswatch_cf_block_attempt*.html
           retention-days: 90
 
       - name: Commit updated JSON

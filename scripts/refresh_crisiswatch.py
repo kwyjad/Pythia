@@ -3,11 +3,21 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""Playwright-based ICG CrisisWatch scraper.
+"""ICG CrisisWatch scraper (two acquisition paths, one parser).
 
-Fetches the current CrisisWatch edition from the main page at
-https://www.crisisgroup.org/crisiswatch using headless Chromium
-(Playwright) and parses the HTML with BeautifulSoup.
+Fetches the current CrisisWatch edition from
+https://www.crisisgroup.org/crisiswatch and parses the HTML with
+BeautifulSoup.  Two acquisition paths:
+
+- ``--source live`` (default): headless Chromium via Playwright against
+  the live site.  Works locally (system Chrome passes Cloudflare); CI
+  datacenter IPs are blocked by Cloudflare.
+- ``--source wayback`` (used in CI): the Internet Archive's copy of the
+  page.  The page is fully server-rendered, so a Wayback snapshot
+  contains all country entries.  Flow: best-effort Save Page Now capture
+  request -> CDX snapshot listing (newest first) -> download raw
+  ``id_`` HTML (gzip-sniffed) -> validate (size + entry count, rejecting
+  Cloudflare-challenged captures) -> parse.  No browser needed.
 
 The /crisiswatch/print endpoint is BROKEN (serves stale October 2019
 data).  The main page renders the current edition correctly — a single
@@ -16,26 +26,38 @@ long page with all country entries in the DOM.
 Output is written to ``horizon_scanner/data/crisiswatch_latest.json`` in
 a format compatible with ``crisiswatch._load_fallback_json()``.
 
+Exit codes: 0 = wrote a newer edition, or skipped because no newer
+edition exists yet (``--only-if-newer`` no-op); 1 = fetch/parse/
+validation failure, zero ISO3 resolution, or the ``--max-age-days``
+staleness alarm tripped.
+
 Usage::
 
-    # Install Playwright first (one-time)
+    # Local (live site; install Playwright first)
     pip install playwright && playwright install chromium
-
-    # Run the scraper
     python -m scripts.refresh_crisiswatch [--output PATH] [--verbose]
+
+    # CI (Wayback Machine; only needs requests + beautifulsoup4 + PyYAML)
+    python -m scripts.refresh_crisiswatch --source wayback \\
+        --only-if-newer --max-age-days 60 --verbose
 """
 
 from __future__ import annotations
 
 import argparse
+import calendar
+import gzip
 import json
 import logging
+import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import requests
 
 from bs4 import BeautifulSoup, Tag
 
@@ -78,6 +100,34 @@ _MAX_ATTEMPTS = 3
 # Seconds to wait between retry attempts (allows CF challenge cookie to
 # settle in the reused browser context).
 _RETRY_DELAY_SEC = 15
+
+# ---- Wayback Machine (--source wayback) constants ----
+
+_WAYBACK_CDX_URL = "https://web.archive.org/cdx/search/cdx"
+# The `id_` suffix returns the raw archived HTML without Wayback's
+# rewriting (original URLs, no toolbar chrome).
+_WAYBACK_SNAPSHOT_URL = (
+    "https://web.archive.org/web/{timestamp}id_/" + _CRISISWATCH_URL
+)
+_WAYBACK_SPN_URL = "https://web.archive.org/save/" + _CRISISWATCH_URL
+_WAYBACK_SPN_API_URL = "https://web.archive.org/save"
+
+# Identify ourselves politely to archive.org (generic UAs are throttled
+# harder).
+_WAYBACK_USER_AGENT = (
+    "PythiaCrisisWatchRefresh/1.0 (+https://github.com/kwyjad/Pythia)"
+)
+
+# The real page has ~70-85 c-crisiswatch-entry divs; Cloudflare challenge
+# captures have 0.
+_MIN_ENTRY_COUNT = 20
+
+# How far back to walk the CDX index for a valid snapshot.
+_DEFAULT_LOOKBACK_DAYS = 120
+
+# Save Page Now: seconds between CDX polls while waiting for the fresh
+# capture to be indexed.
+_SPN_POLL_INTERVAL_SEC = 30
 
 # SVG xlink:href value → (arrow, alert_type) mapping.
 # The CrisisWatch page encodes status via SVG <use xlink:href="#...">
@@ -419,6 +469,365 @@ def _fetch_with_system_chrome(
 
 
 # ---------------------------------------------------------------------------
+# Wayback Machine fetch (--source wayback; no browser needed)
+# ---------------------------------------------------------------------------
+
+
+def _get_with_retries(
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+    timeout_sec: int = 60,
+    max_attempts: int = 3,
+    backoff_sec: int = 15,
+) -> requests.Response | None:
+    """GET with a polite UA and retries on connection errors/429/5xx.
+
+    Returns ``None`` when all attempts fail — callers decide fatality.
+    """
+    headers = {"User-Agent": _WAYBACK_USER_AGENT}
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(
+                url, params=params, headers=headers, timeout=timeout_sec,
+            )
+        except requests.RequestException as exc:
+            log.warning(
+                "GET %s failed on attempt %d/%d: %s",
+                url, attempt, max_attempts, exc,
+            )
+            resp = None
+        if resp is not None:
+            if resp.status_code < 400:
+                return resp
+            if resp.status_code not in (429,) and resp.status_code < 500:
+                # Non-retryable client error (403, 404, ...).
+                log.warning(
+                    "GET %s returned HTTP %d (not retrying)",
+                    url, resp.status_code,
+                )
+                return None
+            log.warning(
+                "GET %s returned HTTP %d on attempt %d/%d",
+                url, resp.status_code, attempt, max_attempts,
+            )
+        if attempt < max_attempts:
+            delay = backoff_sec
+            if resp is not None and resp.headers.get("Retry-After"):
+                try:
+                    delay = min(120, int(resp.headers["Retry-After"]))
+                except ValueError:
+                    pass
+            time.sleep(delay)
+    return None
+
+
+def _maybe_gunzip(raw: bytes) -> bytes:
+    """Decompress gzip payloads (Wayback serves stored gzip bytes raw).
+
+    The ``id_`` snapshot endpoint returns the stored gzip payload without
+    a ``Content-Encoding`` header, so ``requests`` does not decompress
+    it.  Sniff the magic bytes; a bounded loop covers accidental
+    double-compression.
+    """
+    for _ in range(3):
+        if raw[:2] != b"\x1f\x8b":
+            break
+        try:
+            raw = gzip.decompress(raw)
+        except OSError:
+            # Corrupt gzip — return as-is; validation will reject it.
+            break
+    return raw
+
+
+def _validate_snapshot_html(
+    html: str,
+    *,
+    min_length: int | None = None,
+    min_entries: int | None = None,
+) -> str | None:
+    """Return a rejection reason, or ``None`` if the HTML looks real.
+
+    Cloudflare-challenged captures ("Just a moment...") fail both the
+    size check (~6 KB) and the entry-count check (0 entry divs).
+
+    Defaults are read from the module constants at call time so tests
+    can tune them via monkeypatch.
+    """
+    if min_length is None:
+        min_length = _MIN_HTML_LENGTH
+    if min_entries is None:
+        min_entries = _MIN_ENTRY_COUNT
+    if len(html) < min_length:
+        return f"too small ({len(html)} chars < {min_length})"
+    n_entries = html.count("c-crisiswatch-entry")
+    if n_entries < min_entries:
+        return f"only {n_entries} entry divs (< {min_entries})"
+    return None
+
+
+def _list_wayback_snapshots(
+    *,
+    lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
+    timeout_sec: int = 30,
+) -> list[str]:
+    """Return snapshot timestamps (newest first) from the CDX index.
+
+    ``limit=-100`` (the last 100 captures) plus the ``from=`` window
+    sidesteps CDX pagination entirely — the page gets a handful of
+    captures per month.
+    """
+    from_date = (
+        datetime.now(timezone.utc) - timedelta(days=lookback_days)
+    ).strftime("%Y%m%d")
+    resp = _get_with_retries(
+        _WAYBACK_CDX_URL,
+        params={
+            "url": "crisisgroup.org/crisiswatch",
+            "output": "json",
+            "from": from_date,
+            "fl": "timestamp,statuscode,mimetype",
+            "filter": "mimetype:text/html",
+            "limit": "-100",
+        },
+        timeout_sec=timeout_sec,
+    )
+    if resp is None:
+        log.warning("CDX snapshot listing failed")
+        return []
+    try:
+        rows = resp.json()
+    except ValueError as exc:
+        log.warning("CDX response is not JSON: %s", exc)
+        return []
+    # Row 0 of output=json is the header row (["timestamp", ...]).
+    timestamps = [
+        row[0]
+        for row in rows[1:]
+        if len(row) >= 2 and row[1] == "200"
+    ]
+    # 14-digit timestamps sort chronologically as strings.
+    timestamps.sort(reverse=True)
+    log.info(
+        "CDX: %d snapshots in the last %d days (newest: %s)",
+        len(timestamps), lookback_days,
+        timestamps[0] if timestamps else "none",
+    )
+    return timestamps
+
+
+def _fetch_snapshot_html(
+    timestamp: str, *, timeout_sec: int = 120,
+) -> str | None:
+    """Download and validate one raw snapshot; ``None`` on rejection."""
+    url = _WAYBACK_SNAPSHOT_URL.format(timestamp=timestamp)
+    resp = _get_with_retries(url, timeout_sec=timeout_sec)
+    if resp is None:
+        log.warning("Snapshot %s download failed", timestamp)
+        return None
+    html = _maybe_gunzip(resp.content).decode("utf-8", errors="replace")
+    reason = _validate_snapshot_html(html)
+    if reason:
+        log.warning("Snapshot %s rejected: %s", timestamp, reason)
+        return None
+    log.info(
+        "Snapshot %s valid: %d chars, %d entry divs",
+        timestamp, len(html), html.count("c-crisiswatch-entry"),
+    )
+    return html
+
+
+def _trigger_save_page_now(*, timeout_sec: int = 120) -> bool:
+    """Ask archive.org to capture a fresh snapshot (best-effort).
+
+    Uses the authenticated SPN2 API when ``IA_S3_ACCESS_KEY`` /
+    ``IA_S3_SECRET_KEY`` are set (higher rate limits from shared CI
+    IPs; free keys at https://archive.org/account/s3.php), else the
+    anonymous endpoint.  Never raises — a failed capture request just
+    means we fall back to existing snapshots.
+
+    Note the anonymous endpoint renders the capture synchronously and
+    often exceeds any client timeout even when the capture succeeds
+    server-side — callers should still poll CDX afterwards regardless
+    of the return value.
+    """
+    access = os.environ.get("IA_S3_ACCESS_KEY", "").strip()
+    secret = os.environ.get("IA_S3_SECRET_KEY", "").strip()
+    try:
+        if access and secret:
+            resp = requests.post(
+                _WAYBACK_SPN_API_URL,
+                data={"url": _CRISISWATCH_URL},
+                headers={
+                    "User-Agent": _WAYBACK_USER_AGENT,
+                    "Accept": "application/json",
+                    "Authorization": f"LOW {access}:{secret}",
+                },
+                timeout=timeout_sec,
+            )
+            mode = "authenticated"
+        else:
+            resp = requests.get(
+                _WAYBACK_SPN_URL,
+                headers={"User-Agent": _WAYBACK_USER_AGENT},
+                timeout=timeout_sec,
+            )
+            mode = "anonymous"
+    except requests.RequestException as exc:
+        log.warning("Save Page Now request failed: %s", exc)
+        return False
+    ok = resp.status_code < 400
+    log.log(
+        logging.INFO if ok else logging.WARNING,
+        "Save Page Now (%s): HTTP %d", mode, resp.status_code,
+    )
+    return ok
+
+
+def _wait_for_new_snapshot(
+    baseline: str | None,
+    *,
+    wait_sec: int,
+    timeout_sec: int = 30,
+) -> str | None:
+    """Poll CDX for a snapshot newer than *baseline*; ``None`` on timeout."""
+    deadline = time.monotonic() + wait_sec
+    while time.monotonic() < deadline:
+        time.sleep(_SPN_POLL_INTERVAL_SEC)
+        snapshots = _list_wayback_snapshots(timeout_sec=timeout_sec)
+        if snapshots and (baseline is None or snapshots[0] > baseline):
+            log.info("Fresh snapshot indexed: %s", snapshots[0])
+            return snapshots[0]
+    log.info(
+        "No fresh snapshot indexed within %ds — using existing captures",
+        wait_sec,
+    )
+    return None
+
+
+def _fetch_wayback_html(
+    *,
+    timeout_sec: int = 120,
+    spn: bool = True,
+    spn_wait_sec: int = 240,
+    lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
+) -> tuple[str, str]:
+    """Fetch CrisisWatch HTML from the Wayback Machine.
+
+    Returns ``(html, snapshot_timestamp)`` or exits(1) when no valid
+    snapshot exists in the lookback window.
+    """
+    snapshots = _list_wayback_snapshots(
+        lookback_days=lookback_days, timeout_sec=timeout_sec,
+    )
+    baseline = snapshots[0] if snapshots else None
+
+    if spn:
+        # Poll CDX even when the SPN request itself failed or timed
+        # out: the anonymous endpoint renders the capture synchronously,
+        # so the capture frequently succeeds server-side after the
+        # client has given up (verified 2026-07-10).
+        if not _trigger_save_page_now():
+            log.info(
+                "SPN request did not confirm — polling CDX anyway in "
+                "case the capture succeeded server-side",
+            )
+        fresh_ts = _wait_for_new_snapshot(baseline, wait_sec=spn_wait_sec)
+        if fresh_ts:
+            # The fresh capture goes through the same validation — SPN
+            # captures can themselves be Cloudflare-challenged.
+            html = _fetch_snapshot_html(fresh_ts, timeout_sec=timeout_sec)
+            if html is not None:
+                return html, fresh_ts
+            log.warning(
+                "Fresh SPN capture %s invalid — walking existing snapshots",
+                fresh_ts,
+            )
+
+    for timestamp in snapshots:
+        html = _fetch_snapshot_html(timestamp, timeout_sec=timeout_sec)
+        if html is not None:
+            return html, timestamp
+
+    log.error(
+        "No valid Wayback snapshot in the last %d days "
+        "(%d candidates tried).  crisisgroup.org may be blocking "
+        "archive.org's crawler; try a manual local run "
+        "(--source live --channel chrome).",
+        lookback_days, len(snapshots),
+    )
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Edition comparison / staleness (--only-if-newer, --max-age-days)
+# ---------------------------------------------------------------------------
+
+
+def _edition_key(month_str: str, year: int) -> tuple[int, int] | None:
+    """Parse ``"April 2026"`` -> ``(2026, 4)``; ``None`` if unparseable."""
+    month_str = (month_str or "").strip()
+    for fmt in ("%B %Y", "%b %Y"):
+        try:
+            dt = datetime.strptime(month_str, fmt)
+            return (dt.year, dt.month)
+        except ValueError:
+            pass
+    # Fallback: scan month names within the string.
+    lowered = month_str.lower()
+    for idx, name in enumerate(calendar.month_name):
+        if idx and name.lower() in lowered:
+            m = re.search(r"(\d{4})", month_str)
+            y = int(m.group(1)) if m else year
+            if y:
+                return (y, idx)
+    return None
+
+
+def _load_existing_edition(output_path: Path) -> tuple[int, int] | None:
+    """Edition key of the JSON already on disk; ``None`` if absent/corrupt."""
+    try:
+        data = json.loads(output_path.read_text(encoding="utf-8"))
+        return _edition_key(
+            str(data.get("month", "")), int(data.get("year", 0) or 0),
+        )
+    except Exception as exc:
+        log.debug("No existing edition at %s: %s", output_path, exc)
+        return None
+
+
+def _check_staleness(
+    edition: tuple[int, int] | None,
+    max_age_days: int,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """exit(1) when *edition* ended more than *max_age_days* ago.
+
+    Keyed on the edition month (not ``fetched_at``, which no longer
+    advances on --only-if-newer no-op runs) so a rotting refresh
+    eventually turns scheduled runs red instead of silently serving
+    months-old data.
+    """
+    if max_age_days <= 0 or edition is None:
+        return
+    year, month = edition
+    last_day = calendar.monthrange(year, month)[1]
+    end_of_month = datetime(year, month, last_day, tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    age_days = (now - end_of_month).days
+    if age_days > max_age_days:
+        log.error(
+            "On-disk CrisisWatch edition %04d-%02d is %d days old "
+            "(> %d) — the refresh is rotting.  Investigate Wayback "
+            "snapshot availability or run a manual local refresh.",
+            year, month, age_days, max_age_days,
+        )
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # HTML parsing
 # ---------------------------------------------------------------------------
 
@@ -673,12 +1082,25 @@ def run(
     verbose: bool = False,
     channel: str | None = None,
     auto_push: bool = False,
+    source: str = "live",
+    only_if_newer: bool = False,
+    force: bool = False,
+    spn: bool = True,
+    spn_wait_sec: int = 240,
+    max_age_days: int = 0,
 ) -> dict[str, Any]:
     """Fetch and parse CrisisWatch, write JSON, return the data dict."""
 
-    html = _fetch_page_html(
-        timeout_sec=timeout_sec, verbose=verbose, channel=channel,
-    )
+    if source == "wayback":
+        html, snapshot_ts = _fetch_wayback_html(
+            timeout_sec=timeout_sec, spn=spn, spn_wait_sec=spn_wait_sec,
+        )
+        provenance = f"wayback:{snapshot_ts}"
+    else:
+        html = _fetch_page_html(
+            timeout_sec=timeout_sec, verbose=verbose, channel=channel,
+        )
+        provenance = "live"
 
     if verbose:
         debug_html_path = Path("horizon_scanner/data/crisiswatch_debug.html")
@@ -728,6 +1150,37 @@ def run(
     n_unresolved = len(entries) - n_resolved
     if n_unresolved:
         log.warning("%d entries have unresolved ISO3 codes", n_unresolved)
+    if n_resolved == 0:
+        log.error(
+            "0 of %d entries resolved to ISO3 — the "
+            "horizon_scanner.crisiswatch import likely failed and the "
+            "_resolve_iso3 stub is active (missing PyYAML?).  Refusing "
+            "to write useless data.",
+            len(entries),
+        )
+        sys.exit(1)
+
+    # Only-if-newer gate: never regress to an older edition, and skip
+    # the write (no fetched_at churn, no commit) when the parsed
+    # edition is not strictly newer than what is already on disk.
+    if only_if_newer and not force:
+        candidate = _edition_key(month_str, year)
+        existing = _load_existing_edition(output_path)
+        if candidate is None:
+            log.error(
+                "Cannot parse candidate edition month %r — refusing "
+                "--only-if-newer write (page structure may have changed).",
+                month_str,
+            )
+            sys.exit(1)
+        if existing is not None and candidate <= existing:
+            log.info(
+                "Candidate edition %04d-%02d is not newer than existing "
+                "%04d-%02d — skipping write.",
+                candidate[0], candidate[1], existing[0], existing[1],
+            )
+            _check_staleness(existing, max_age_days)
+            return {}
 
     # Build output dict (compatible with _load_fallback_json).
     now = datetime.now(timezone.utc).isoformat()
@@ -735,6 +1188,7 @@ def run(
         "month": month_str,
         "year": year,
         "fetched_at": now,
+        "source": provenance,
         "outlook_month": overview.get("outlook_month", ""),
         "conflict_risk_alerts": overview.get("conflict_risk_alerts", []),
         "resolution_opportunities": overview.get("resolution_opportunities", []),
@@ -764,6 +1218,10 @@ def run(
         n_alerts, n_resolved,
     )
 
+    # Staleness alarm (trivially passes right after a fresh write unless
+    # even the newest available edition is old).
+    _check_staleness(_edition_key(month_str, year), max_age_days)
+
     # Auto-push: git add, commit, push the output JSON.
     if auto_push:
         import subprocess
@@ -786,7 +1244,7 @@ def run(
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Fetch ICG CrisisWatch data via Playwright and write JSON.",
+        description="Fetch ICG CrisisWatch data and write JSON.",
     )
     parser.add_argument(
         "--output", type=str, default=str(_DEFAULT_OUTPUT),
@@ -808,6 +1266,35 @@ def main() -> None:
         "--auto-push", action="store_true",
         help="Git add, commit and push the output JSON after success",
     )
+    parser.add_argument(
+        "--source", choices=["live", "wayback"], default="live",
+        help="Acquisition path: 'live' = Playwright against "
+             "crisisgroup.org (default), 'wayback' = Internet Archive "
+             "snapshots (no browser needed; used in CI)",
+    )
+    parser.add_argument(
+        "--only-if-newer", action="store_true",
+        help="Skip the write when the parsed edition is not strictly "
+             "newer than the existing JSON",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Write even when --only-if-newer would skip",
+    )
+    parser.add_argument(
+        "--no-spn", action="store_true",
+        help="Wayback only: skip the Save Page Now capture trigger",
+    )
+    parser.add_argument(
+        "--spn-wait", type=int, default=240,
+        help="Wayback only: seconds to poll for a fresh snapshot after "
+             "Save Page Now (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--max-age-days", type=int, default=0,
+        help="Exit non-zero when the resulting on-disk edition is older "
+             "than this many days (0 = disabled)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -822,6 +1309,12 @@ def main() -> None:
         verbose=args.verbose,
         channel=args.channel,
         auto_push=args.auto_push,
+        source=args.source,
+        only_if_newer=args.only_if_newer,
+        force=args.force,
+        spn=not args.no_spn,
+        spn_wait_sec=args.spn_wait,
+        max_age_days=args.max_age_days,
     )
 
 

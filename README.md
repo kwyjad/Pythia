@@ -139,7 +139,7 @@ Pythia ingests external conflict forecasts from three independent quantitative s
 
 ### Qualitative source (prompt-time web research)
 
-- **ICG CrisisWatch**: International Crisis Group's monthly [CrisisWatch](https://www.crisisgroup.org/crisiswatch) bulletin. Per-country directional assessments (Deteriorated/Improved/Unchanged) and forward-looking "On the Horizon" flags (~3 conflict risks + ~1 resolution opportunity per month). Primary data source: Playwright-based scraper (`scripts/refresh_crisiswatch.py`) runs monthly via `refresh-crisiswatch.yml`, loading the main CrisisWatch page in headless Chromium and parsing with BeautifulSoup. Secondary: Gemini grounding calls during HS runs. Data injected into RC and triage evidence for ACE hazards.
+- **ICG CrisisWatch**: International Crisis Group's monthly [CrisisWatch](https://www.crisisgroup.org/crisiswatch) bulletin. Per-country directional assessments (Deteriorated/Improved/Unchanged) and forward-looking "On the Horizon" flags (~3 conflict risks + ~1 resolution opportunity per month). Primary data source: `scripts/refresh_crisiswatch.py` runs monthly in CI via `refresh-crisiswatch.yml`, fetching the server-rendered page from the Internet Archive's Wayback Machine (`--source wayback` — the ICG site's Cloudflare blocks direct CI fetches) and parsing with BeautifulSoup; a local Playwright path (`--source live`) is kept for manual refreshes. Secondary: Gemini grounding calls during HS runs. Data injected into RC and triage evidence for ACE hazards.
 
 ### Storage and injection
 
@@ -172,7 +172,7 @@ Pythia pulls structured humanitarian, climate, and conflict-forecast data from a
 | **ACLED CAST** | `resolver/connectors/acled_cast.py` | Event-count forecasts by type: total/battles/ERV/VAC (ACE, 6-month lead) | `conflict_forecasts` |
 | **FEWS NET IPC** | `resolver/connectors/fewsnet_ipc.py` | Phase 3+ population estimates (DR hazard; Current Situation + Most Likely) | `facts_resolved` (via Resolver pipeline) |
 | **GDACS** | `resolver/connectors/gdacs.py` | Disaster population exposure + event occurrence (FL/DR/TC) | `facts_resolved` (via Resolver pipeline) |
-| **ICG CrisisWatch** | `horizon_scanner/crisiswatch.py` + `scripts/refresh_crisiswatch.py` | Expert conflict arrows + "On the Horizon" flags (ACE RC + triage + SPD). Playwright scraper (monthly) + Gemini grounding (runtime fallback) | `crisiswatch_entries` |
+| **ICG CrisisWatch** | `horizon_scanner/crisiswatch.py` + `scripts/refresh_crisiswatch.py` | Expert conflict arrows + "On the Horizon" flags (ACE RC + triage + SPD). Wayback Machine scraper (monthly, in CI) + Gemini grounding (runtime fallback) | `crisiswatch_entries` |
 | **GDELT** | `pythia/gdelt.py` | Media-derived conflict intensity indicators from GDELT 1.0 daily event exports (CAMEO-tiered, Goldstein, tone; ACE only) | `gdelt_conflict_indicators` |
 
 ### Adversarial evidence checks
@@ -324,7 +324,7 @@ python -m scripts.dump_pythia_debug_bundle \
 - **Post-forecast pipeline**: [`compute_resolutions.yml`](.github/workflows/compute_resolutions.yml), [`compute_scores.yml`](.github/workflows/compute_scores.yml), [`compute_calibration_pythia.yml`](.github/workflows/compute_calibration_pythia.yml).
 - **Forecaster CI**: [`forecaster-ci.yml`](.github/workflows/forecaster-ci.yml) covers SPD unit tests and optional compare artifacts.
 - **ENSO / Seasonal TC refresh**: fetched fresh and stored to the DB by `resolver_update.yml` Phase 4 (`fetch_and_store_enso()` / `fetch_and_store_seasonal_tc()`). Run manually via `python -m horizon_scanner.enso.enso_module` / `python -m horizon_scanner.seasonal_tc.seasonal_tc_runner`. (The standalone `refresh-enso.yml` / `refresh-seasonal-tc.yml` workflows were removed July 2026 — Phase 4 does the real fetch+store.)
-- **CrisisWatch refresh**: [`refresh-crisiswatch.yml`](.github/workflows/refresh-crisiswatch.yml) fetches ICG CrisisWatch data via Playwright (headless Chromium) on the 3rd of each month, parses with BeautifulSoup, and commits updated JSON to `horizon_scanner/data/crisiswatch_latest.json`.
+- **CrisisWatch refresh**: [`refresh-crisiswatch.yml`](.github/workflows/refresh-crisiswatch.yml) fetches ICG CrisisWatch data from the Internet Archive's Wayback Machine (Save Page Now capture + CDX snapshot walk — the ICG site's Cloudflare blocks direct CI fetches) on the 3rd/5th/7th/10th of each month, parses with BeautifulSoup, and commits updated JSON to `horizon_scanner/data/crisiswatch_latest.json` only when a newer edition is available. [`crisiswatch-ci.yml`](.github/workflows/crisiswatch-ci.yml) runs the refresh-script tests.
 - **DuckDB inspection**: [`inspect_resolver_duckdb.yml`](.github/workflows/inspect_resolver_duckdb.yml) — 7 data quality checks on the DB artifact.
 
 ### Canonical DB artifacts + signature guardrails

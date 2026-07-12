@@ -1,0 +1,61 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+name: CrisisWatch CI
+
+# Tests for the CrisisWatch refresh script (Wayback acquisition path).
+# Deliberately installs ONLY the minimal packages the refresh workflow
+# installs (requests, beautifulsoup4, PyYAML) so a new heavy import in
+# the script/module chain breaks THIS workflow instead of silently
+# breaking the monthly refresh.
+"on":
+  push:
+    paths:
+      - "scripts/refresh_crisiswatch.py"
+      - "horizon_scanner/crisiswatch.py"
+      - "tests/test_refresh_crisiswatch.py"
+      - "tests/fixtures/crisiswatch_*"
+      - ".github/workflows/crisiswatch-ci.yml"
+      - ".github/workflows/refresh-crisiswatch.yml"
+  pull_request:
+    paths:
+      - "scripts/refresh_crisiswatch.py"
+      - "horizon_scanner/crisiswatch.py"
+      - "tests/test_refresh_crisiswatch.py"
+      - "tests/fixtures/crisiswatch_*"
+      - ".github/workflows/crisiswatch-ci.yml"
+      - ".github/workflows/refresh-crisiswatch.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  crisiswatch-tests:
+    name: CrisisWatch refresh tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install minimal dependencies (mirrors refresh workflow)
+        run: |
+          python -m pip install --upgrade pip
+          pip install "requests>=2.32,<3" "beautifulsoup4>=4.12,<5" "PyYAML>=6.0,<7"
+          pip install pytest pytest-timeout
+
+      - name: Run CrisisWatch refresh tests
+        run: |
+          pytest -vv tests/test_refresh_crisiswatch.py
