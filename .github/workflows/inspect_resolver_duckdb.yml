@@ -163,6 +163,58 @@ jobs:
                   return "—"
               return f"{n:,.{nd}f}"
 
+          def _colset(con, table):
+              # Lowercased column names for a table (PRAGMA table_info idx 1 = name).
+              return {str(c[1]).lower() for c in schema_info(con, table)}
+
+          def newest(con, table, candidates):
+              # MAX() over the first candidate column that actually exists.
+              # Returns (column, value) or (None, None) when nothing matches —
+              # so a renamed/absent column degrades gracefully instead of raising.
+              if not table_exists(con, table):
+                  return None, None
+              cols = _colset(con, table)
+              for c in candidates:
+                  if c.lower() in cols:
+                      try:
+                          v = con.execute(f"SELECT MAX({c}) FROM {table}").fetchone()
+                          return c, (v[0] if v else None)
+                      except Exception:
+                          continue
+              return None, None
+
+          def _age_days(val, now):
+              # Best-effort age in days for YYYY-MM / YYYY-MM-DD / timestamp values
+              # (str, date, or datetime). None when unparseable (→ no staleness flag).
+              if val is None:
+                  return None
+              s = str(val).strip()
+              for txt, fmt in (
+                  (s[:19], "%Y-%m-%d %H:%M:%S"),
+                  (s[:19], "%Y-%m-%dT%H:%M:%S"),
+                  (s[:10], "%Y-%m-%d"),
+                  (s[:7], "%Y-%m"),
+              ):
+                  try:
+                      return (now - datetime.strptime(txt, fmt)).days
+                  except ValueError:
+                      continue
+              return None
+
+          def _fresh_status(rows, newest_val, stale_days, now):
+              if not rows:
+                  return "❌ EMPTY"
+              age = _age_days(newest_val, now)
+              if age is None:
+                  return "—"
+              if age < 0:
+                  # Future-dated (e.g. a projection/forecast horizon reaching
+                  # ahead, like FEWS NET phase3plus_projection) — never stale.
+                  return "✅ current (future-dated)"
+              if age > stale_days:
+                  return f"⚠️ {age}d old"
+              return f"✅ {age}d"
+
           # =====================================================================
           db_path = Path("data/resolver.duckdb")
           if not db_path.exists():
@@ -182,6 +234,112 @@ jobs:
           L()
           L(f"_Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}_")
           L(f"_Database size: {db_size_mb:.1f} MB ({db_size:,} bytes)_")
+          L()
+
+          # =====================================================================
+          # DATA FRESHNESS — AT A GLANCE
+          # The single "never have to guess" view: newest data point + row count
+          # per source, with a per-source staleness flag. Detailed per-table
+          # sections follow below.
+          # =====================================================================
+          L("## Data Freshness — At a Glance")
+          L()
+          L("_Newest data point and row count per source, with a staleness flag "
+            "computed against this report's generation time. ✅ current · "
+            "⚠️ past its refresh cadence · ❌ empty · — undated/unparseable. "
+            "The parenthesised name is the column the 'Newest' value came from. "
+            "Thresholds are per-source refresh cadences, not hard SLAs._")
+          L()
+          L("| Source | Rows | Newest | Status |")
+          L("|--------|-----:|--------|--------|")
+
+          _now = datetime.utcnow()
+          # (label, table, [candidate date/label columns, newest-first], stale_days)
+          _freshness_sources = [
+              ("Resolution facts (facts_resolved)", "facts_resolved", ["ym"], 45),
+              ("ACLED monthly fatalities", "acled_monthly_fatalities", ["month", "ym"], 45),
+              ("ACLED political events", "acled_political_events", ["event_date", "fetched_at"], 45),
+              ("GDELT conflict indicators", "gdelt_conflict_indicators", ["event_date", "fetched_at"], 45),
+              ("NMME seasonal forecasts", "seasonal_forecasts", ["forecast_issue_date"], 45),
+              ("ReliefWeb reports", "reliefweb_reports", ["published_date", "created_at", "fetched_at"], 45),
+              ("ACAPS INFORM severity", "acaps_inform_severity", ["snapshot_date", "fetched_at"], 120),
+              ("ACAPS daily monitoring", "acaps_daily_monitoring", ["entry_date", "fetched_at"], 45),
+              ("ACAPS risk radar", "acaps_risk_radar", ["fetched_at"], 120),
+              ("ACAPS humanitarian access", "acaps_humanitarian_access", ["snapshot_date", "fetched_at"], 120),
+              ("HDX Signals", "hdx_signals", ["signal_date", "fetched_at"], 60),
+              ("ENSO state", "enso_state", ["fetch_date"], 45),
+              ("Seasonal TC outlooks", "seasonal_tc_outlooks", ["fetched_at"], 120),
+          ]
+          for _label, _table, _cands, _stale in _freshness_sources:
+              _n = row_count(con, _table)
+              if _n is None:
+                  L(f"| {_label} | _n/a_ | (no table) | — |")
+                  continue
+              _col, _val = newest(con, _table, _cands)
+              _status = _fresh_status(_n, _val, _stale, _now)
+              _shown = f"{_val} ({_col})" if _val is not None else "—"
+              L(f"| {_label} | {fmt_num(_n)} | {_shown} | {_status} |")
+
+          # conflict_forecasts — one row per source; CAST staleness hides behind an
+          # overall MAX (a fresh conflictforecast.org vintage would mask a stale CAST).
+          if table_exists(con, "conflict_forecasts") and row_count(con, "conflict_forecasts"):
+              _cf = safe_query(con, """
+                  SELECT source, COUNT(*) AS n, MAX(forecast_issue_date) AS newest
+                  FROM conflict_forecasts GROUP BY source ORDER BY source
+              """)
+              for _src, _n, _newest in _cf:
+                  L(f"| Conflict forecast · {_src} | {fmt_num(_n)} | {_newest} | "
+                    f"{_fresh_status(_n, _newest, 45, _now)} |")
+
+          # CrisisWatch — the edition month we most often have to guess.
+          if table_exists(con, "crisiswatch_entries"):
+              _cwn = row_count(con, "crisiswatch_entries")
+              _ed = safe_query(con, """
+                  SELECT year, month, COUNT(*) AS n
+                  FROM crisiswatch_entries GROUP BY year, month
+                  ORDER BY year DESC, month DESC LIMIT 1
+              """) if _cwn else []
+              if _ed:
+                  _y, _m, _cnt = _ed[0]
+                  _ym = f"{int(_y):04d}-{int(_m):02d}"
+                  L(f"| CrisisWatch (latest edition) | {fmt_num(_cwn)} | "
+                    f"{_ym} ({_cnt} entries) | {_fresh_status(_cwn, _ym, 60, _now)} |")
+              else:
+                  L(f"| CrisisWatch (latest edition) | {fmt_num(_cwn or 0)} | — | ❌ EMPTY |")
+          L()
+
+          # =====================================================================
+          # PIPELINE STAGE COMPLETENESS
+          # At a glance: is this a resolver-only DB, or a full end-to-end run?
+          # (An easy-to-miss "resolutions/scores = 0" means scoring hasn't run.)
+          # =====================================================================
+          L("## Pipeline Stage Completeness")
+          L()
+          L("_Row presence per pipeline stage, in run order. Tells you at a glance "
+            "whether this DB is resolver-only or a full end-to-end run. "
+            "✓ populated · ✗ empty (stage not run / no output)._")
+          L()
+          L("| # | Stage | Table | Rows | |")
+          L("|--:|-------|-------|-----:|:-:|")
+          _stages = [
+              ("Resolver facts", "facts_resolved"),
+              ("HS runs", "hs_runs"),
+              ("HS triage", "hs_triage"),
+              ("Questions", "questions"),
+              ("Forecasts (raw)", "forecasts_raw"),
+              ("Forecasts (ensemble)", "forecasts_ensemble"),
+              ("Sibyl forecasts", "sibyl_forecasts"),
+              ("Resolutions (ground truth)", "resolutions"),
+              ("Scores", "scores"),
+              ("Calibration weights", "calibration_weights"),
+              ("Calibration advice", "calibration_advice"),
+              ("Source coverage map", "source_coverage"),
+          ]
+          for _i, (_lbl, _t) in enumerate(_stages, 1):
+              _rc = row_count(con, _t)
+              _mark = "✓" if _rc else "✗"
+              _rcs = fmt_num(_rc) if _rc is not None else "_(no table)_"
+              L(f"| {_i} | {_lbl} | `{_t}` | {_rcs} | {_mark} |")
           L()
 
           # =====================================================================
@@ -280,15 +438,15 @@ jobs:
                       COALESCE(shock_type, '(null)') AS shock_type,
                       COUNT(*) AS n,
                       COUNT(DISTINCT iso3) AS n_countries,
-                      MIN(year) AS min_year,
-                      MAX(year) AS max_year
+                      MIN(ym) AS min_ym,
+                      MAX(ym) AS max_ym
                   FROM emdat_pa
                   GROUP BY 1
                   ORDER BY 1
               """)
               if rows:
-                  L("| shock_type | rows | countries | min_year | max_year |")
-                  L("|------------|-----:|----------:|---------:|---------:|")
+                  L("| shock_type | rows | countries | min_ym | max_ym |")
+                  L("|------------|-----:|----------:|--------|--------|")
                   for st, n, nc, mn, mx in rows:
                       L(f"| {st} | {fmt_num(n)} | {nc} | {mn} | {mx} |")
                   L()
@@ -305,15 +463,15 @@ jobs:
               rows = safe_query(con, """
                   SELECT
                       COUNT(DISTINCT iso3) AS n_countries,
-                      MIN(ym) AS min_ym,
-                      MAX(ym) AS max_ym,
+                      MIN(month) AS min_month,
+                      MAX(month) AS max_month,
                       SUM(fatalities) AS total_fatalities
                   FROM acled_monthly_fatalities
               """)
               if rows and rows[0]:
                   nc, mn, mx, tf = rows[0]
                   L(f"- Countries: {nc}")
-                  L(f"- Date range: {mn} → {mx}")
+                  L(f"- Month range: {mn} → {mx}")
                   L(f"- Total fatalities: {fmt_num(tf)}")
                   L()
 
@@ -1016,6 +1174,58 @@ jobs:
               else:
                   L("_Table does not exist._")
               L()
+
+          # --- CrisisWatch (ICG) edition detail ---
+          # Explicit answer to "what month is CrisisWatch on?" — the store step
+          # accumulates one edition per (year, month), so list every edition,
+          # name the latest, and break down its arrows/alerts.
+          L("### crisiswatch_entries (ICG CrisisWatch)")
+          if table_exists(con, "crisiswatch_entries"):
+              n = row_count(con, "crisiswatch_entries")
+              L(f"Total rows: **{fmt_num(n)}**")
+              L()
+              if n:
+                  eds = safe_query(con, """
+                      SELECT year, month, COUNT(*) AS entries,
+                             COUNT(DISTINCT iso3) AS countries,
+                             MAX(fetched_at) AS fetched_at
+                      FROM crisiswatch_entries
+                      GROUP BY year, month
+                      ORDER BY year DESC, month DESC
+                  """)
+                  if eds:
+                      ly, lm = int(eds[0][0]), int(eds[0][1])
+                      L(f"**Latest edition: {ly:04d}-{lm:02d}** "
+                        f"({fmt_num(eds[0][2])} entries, {eds[0][3]} countries, "
+                        f"fetched {eds[0][4]}).")
+                      L()
+                      L("**All editions present (newest first):**")
+                      L()
+                      L("| edition | entries | countries | fetched_at |")
+                      L("|---------|--------:|----------:|------------|")
+                      for y, m, e, c, fa in eds:
+                          L(f"| {int(y):04d}-{int(m):02d} | {fmt_num(e)} | {c} | {fa} |")
+                      L()
+                      dist = safe_query(con, f"""
+                          SELECT COALESCE(NULLIF(arrow, ''), '(none)') AS arrow,
+                                 COALESCE(NULLIF(alert_type, ''), '(none)') AS alert_type,
+                                 COUNT(*) AS n
+                          FROM crisiswatch_entries
+                          WHERE year = {ly} AND month = {lm}
+                          GROUP BY 1, 2 ORDER BY n DESC
+                      """)
+                      if dist:
+                          L(f"Arrow / alert breakdown for the latest edition "
+                            f"({ly:04d}-{lm:02d}):")
+                          L()
+                          L("| arrow | alert_type | count |")
+                          L("|-------|-----------|------:|")
+                          for a, al, cn in dist:
+                              L(f"| {a} | {al} | {cn} |")
+                          L()
+          else:
+              L("_Table does not exist._")
+          L()
 
           # --- Check 1: Conflict forecast value range ---
           if table_exists(con, "conflict_forecasts") and row_count(con, "conflict_forecasts"):
