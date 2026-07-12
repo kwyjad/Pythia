@@ -3,15 +3,29 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""Consolidated multi-phase pipeline summary with CrisisWatch inject check.
+"""Consolidated Resolver Update run summary for the GitHub Step Summary.
 
-Reads ``connectors_report.jsonl`` (populated by all ingestion phases),
-groups entries by phase, and produces a Markdown summary for the
-GitHub Step Summary.
+Reads ``connectors_report.jsonl`` (status/reason/duration per connector) and
+the just-written resolver DuckDB (authoritative row/country counts), and
+produces a clean Markdown summary:
+
+  1. A one-line result verdict + per-phase roll-up.
+  2. A **Problems & Warnings** section that surfaces every failed/skipped
+     source AND every "succeeded but wrote 0 rows" source, with reasons.
+  3. Per-phase tables with uniform, honestly-labelled columns.
+  4. CrisisWatch edition status.
+
+Why the DB is the source of truth: the JSONL ``counts`` are inconsistent
+across connector types — per-country sources report *countries* in
+``written``, self-storing global sources report *rows* in ``fetched`` and a
+nominal 1-2 in ``written``, and some (gdelt, nmme) report neither. Querying
+the target table gives one uniform, trustworthy number. The per-run delta
+is taken from the JSONL only where it is reliably a row count.
 
 Usage:
-    python -m pythia.tools.summarize_all_phases --report diagnostics/ingestion/connectors_report.jsonl
-    python -m pythia.tools.summarize_all_phases --report path/to/report.jsonl --db data/resolver.duckdb
+    python -m pythia.tools.summarize_all_phases \
+        --report diagnostics/ingestion/connectors_report.jsonl \
+        --db data/resolver.duckdb
 """
 
 from __future__ import annotations
@@ -20,63 +34,78 @@ import argparse
 import json
 import logging
 import os
-from datetime import date, datetime, timezone
+from datetime import date
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Optional, Sequence
 
 LOG = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Phase mapping — assigns each connector_id to a phase
+# Connector metadata: phase + authoritative DB target
 # ---------------------------------------------------------------------------
-
-PHASE_MAP: dict[str, tuple[int, str]] = {
-    # Phase 1 — Ground truth (resolver ingestion framework)
-    "acled_client": (1, "Ground Truth"),
-    "ifrc_go_client": (1, "Ground Truth"),
-    "idmc": (1, "Ground Truth"),
-    "idmc_helix": (1, "Ground Truth"),
-    # Phase 2 — Resolution sources (facts_resolved via run_pipeline)
-    "gdacs_population_exposed": (2, "Resolution Sources"),
-    "fewsnet_ipc_population": (2, "Resolution Sources"),
+# connector_id -> (phase_num, table, where_clause | None, iso_col | None)
+# `table`/`where` drive the authoritative "Rows in DB" / "Countries" columns;
+# publisher/source filters are verified exact strings from facts_resolved /
+# conflict_forecasts. iso_col=None means the table has no country dimension.
+_CONNECTORS: dict[str, tuple[int, Optional[str], Optional[str], Optional[str]]] = {
+    # Phase 1 — Ground truth
+    "acled_client":            (1, "facts_resolved", "publisher = 'ACLED'", "iso3"),
+    "ifrc_go_client":          (1, "facts_resolved", "publisher = 'IFRC'", "iso3"),
+    "idmc":                    (1, "facts_resolved", "publisher = 'IDMC'", "iso3"),
+    "idmc_helix":              (1, "facts_resolved", "publisher = 'IDMC'", "iso3"),
+    # Phase 2 — Resolution sources (facts_resolved)
+    "fewsnet_ipc_population":  (2, "facts_resolved", "publisher = 'FEWS NET'", "iso3"),
+    "ipc_api_population":      (2, "facts_resolved", "publisher = 'IPC'", "iso3"),
+    "gdacs_population_exposed": (2, "facts_resolved", "publisher = 'GDACS / JRC'", "iso3"),
     # Phase 3 — Structured data (Pythia tables)
-    "acaps_inform_severity": (3, "Structured Data"),
-    "acaps_risk_radar": (3, "Structured Data"),
-    "acaps_daily_monitoring": (3, "Structured Data"),
-    "acaps_humanitarian_access": (3, "Structured Data"),
-    "views_forecasts": (3, "Structured Data"),
-    "conflictforecast_forecasts": (3, "Structured Data"),
-    "acledcast_forecasts": (3, "Structured Data"),
-    "ipc_phases": (3, "Structured Data"),
-    "reliefweb_reports": (3, "Structured Data"),
-    "acled_political_events": (3, "Structured Data"),
-    "nmme_seasonal_forecasts": (3, "Structured Data"),
+    "views_forecasts":         (3, "conflict_forecasts", "source = 'VIEWS'", "iso3"),
+    "conflictforecast_forecasts": (3, "conflict_forecasts", "source = 'conflictforecast_org'", "iso3"),
+    "acledcast_forecasts":     (3, "conflict_forecasts", "source = 'ACLED_CAST'", "iso3"),
+    "acaps_inform_severity":   (3, "acaps_inform_severity", None, "iso3"),
+    "acaps_risk_radar":        (3, "acaps_risk_radar", None, "iso3"),
+    "acaps_daily_monitoring":  (3, "acaps_daily_monitoring", None, "iso3"),
+    "acaps_humanitarian_access": (3, "acaps_humanitarian_access", None, "iso3"),
+    "reliefweb_reports":       (3, "reliefweb_reports", None, "iso3"),
+    "acled_political_events":  (3, "acled_political_events", None, "iso3"),
+    "nmme_seasonal_forecasts": (3, "seasonal_forecasts", None, "iso3"),
+    "gdelt_conflict_indicators": (3, "gdelt_conflict_indicators", None, "iso3"),
+    "ipc_phases":              (3, "ipc_phases", None, "iso3"),
     # Phase 4 — Context sources
-    "enso": (4, "Context Sources"),
-    "seasonal_tc": (4, "Context Sources"),
-    "hdx_signals": (4, "Context Sources"),
-    "crisiswatch": (4, "Context Sources"),
+    "enso":                    (4, "enso_state", None, None),
+    "seasonal_tc":             (4, "seasonal_tc_outlooks", None, None),
+    "hdx_signals":             (4, "hdx_signals", None, "iso3"),
+    "crisiswatch":             (4, "crisiswatch_entries", None, "iso3"),
 }
 
-_STATUS_EMOJI = {
-    "ok": "\u2705",
-    "error": "\u274c",
-    "skipped": "\u23ed\ufe0f",
+_PHASE_NAMES = {
+    1: "Phase 1 — Ground Truth (ACLED, IFRC, IDMC → facts_resolved)",
+    2: "Phase 2 — Resolution Sources (FEWS NET, IPC, GDACS → facts_resolved)",
+    3: "Phase 3 — Structured Data (Pythia tables)",
+    4: "Phase 4 — Context Sources",
 }
+
+_STATUS_EMOJI = {"ok": "✅", "error": "❌", "skipped": "⏭️"}
+
+
+def _status_icon(status: str) -> str:
+    return _STATUS_EMOJI.get(status, f"`{status}`")
 
 
 def _fmt_duration(duration_ms: int) -> str:
     if not duration_ms:
-        return "\u2014"
-    return f"{duration_ms / 1000:.1f}s"
+        return "—"
+    secs = duration_ms / 1000
+    if secs >= 60:
+        return f"{secs / 60:.1f}m"
+    return f"{secs:.1f}s"
 
 
-def _status_icon(status: str) -> str:
-    return _STATUS_EMOJI.get(status, status)
+def _fmt_int(n: Any) -> str:
+    return f"{n:,}" if isinstance(n, int) else "—"
 
 
 # ---------------------------------------------------------------------------
-# JSONL loader
+# JSONL loader + per-run row extractor
 # ---------------------------------------------------------------------------
 
 
@@ -84,8 +113,8 @@ def _load_jsonl(path: str) -> list[dict]:
     p = Path(path)
     if not p.exists():
         return []
-    entries = []
-    for line in p.read_text(encoding="utf-8").strip().splitlines():
+    entries: list[dict] = []
+    for line in p.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -96,261 +125,281 @@ def _load_jsonl(path: str) -> list[dict]:
     return entries
 
 
-# ---------------------------------------------------------------------------
-# CrisisWatch inject check
-# ---------------------------------------------------------------------------
+def _rows_written_this_run(entry: dict) -> Optional[int]:
+    """Rows this connector wrote THIS run, or None when not reliably a row count.
 
-
-def _check_crisiswatch_inject(db_path: str | None = None) -> dict:
-    """Check CrisisWatch inject status in DuckDB.
-
-    Returns a dict with:
-      - table_exists: bool
-      - row_count: int
-      - latest_date: str | None  (ISO date of most recent entry)
-      - freshness: str  ("current", "stale", "empty", "missing")
+    The JSONL is inconsistent, so only trust fields that are unambiguously
+    rows: self-storing sources stamp ``extras.{conflict_rows,total_facts,
+    resolved_rows}``; direct-store P1/P4 connectors (no per-country loop, so
+    no ``empty`` key) put rows in ``counts.written``. Per-country sources put
+    *countries* in ``written`` (they carry an ``empty`` key) — return None so
+    the caller shows the authoritative DB count / country count instead.
     """
+    extras = entry.get("extras") or {}
+    for key in ("conflict_rows", "total_facts", "resolved_rows"):
+        val = extras.get(key)
+        if isinstance(val, int):
+            return val
+    counts = entry.get("counts") or {}
+    if "empty" in counts:  # per-country loop → written is a country count
+        return None
+    val = counts.get("written")
+    return val if isinstance(val, int) else None
+
+
+# ---------------------------------------------------------------------------
+# DuckDB access (authoritative counts)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_db_path(db_path: str | None) -> str:
     if db_path is None:
         db_path = (
             os.environ.get("PYTHIA_DB_URL")
             or os.environ.get("BACKFILL_DB_PATH")
             or "data/resolver.duckdb"
         )
-    # Strip duckdb:/// prefix if present
     if db_path.startswith("duckdb:///"):
         db_path = db_path[len("duckdb:///"):]
+    return db_path
 
-    result: dict[str, Any] = {
-        "table_exists": False,
-        "row_count": 0,
-        "latest_date": None,
-        "freshness": "missing",
-    }
 
+def _open_db(db_path: str | None):
+    path = _resolve_db_path(db_path)
+    if not Path(path).exists():
+        LOG.warning("Resolver DB not found at %s — DB-backed counts unavailable", path)
+        return None
     try:
         import duckdb
     except ImportError:
-        LOG.warning("duckdb not installed; CrisisWatch check skipped")
-        result["freshness"] = "unknown"
-        return result
-
+        LOG.warning("duckdb not installed; DB-backed counts unavailable")
+        return None
     try:
-        con = duckdb.connect(db_path, read_only=True)
+        return duckdb.connect(path, read_only=True)
     except Exception as exc:
-        LOG.warning("Cannot open DuckDB at %s: %s", db_path, exc)
-        result["freshness"] = "unknown"
-        return result
+        LOG.warning("Cannot open DuckDB at %s: %s", path, exc)
+        return None
 
+
+def _table_columns(con, table: str) -> set[str]:
     try:
-        tables = [
-            r[0]
-            for r in con.execute(
-                "SELECT table_name FROM information_schema.tables WHERE table_name = 'crisiswatch_entries'"
-            ).fetchall()
-        ]
-        if not tables:
-            return result
+        return {str(r[1]).lower() for r in con.execute(f"PRAGMA table_info('{table}')").fetchall()}
+    except Exception:
+        return set()
 
-        result["table_exists"] = True
-        row = con.execute(
-            "SELECT COUNT(*) AS cnt, MAX(year * 100 + month) AS latest_ym FROM crisiswatch_entries"
-        ).fetchone()
 
-        if row is None or row[0] == 0:
-            result["freshness"] = "empty"
-            return result
-
-        result["row_count"] = row[0]
-        latest_ym = row[1]
-        if latest_ym:
-            latest_year = latest_ym // 100
-            latest_month = latest_ym % 100
-            result["latest_date"] = f"{latest_year}-{latest_month:02d}-01"
-
-            today = date.today()
-            months_old = (today.year - latest_year) * 12 + (today.month - latest_month)
-            if months_old <= 2:
-                result["freshness"] = "current"
-                result["days_old"] = months_old * 30  # approximate
-            else:
-                result["freshness"] = "stale"
-                result["days_old"] = months_old * 30
-        else:
-            result["freshness"] = "empty"
+def _table_stats(con, table: Optional[str], where: Optional[str], iso_col: Optional[str]):
+    """(rows, countries) for a table/filter. Either may be None on failure/absence."""
+    if con is None or not table:
+        return (None, None)
+    cols = _table_columns(con, table)
+    if not cols:
+        return (None, None)
+    clause = f" WHERE {where}" if where else ""
+    rows: Optional[int] = None
+    countries: Optional[int] = None
+    try:
+        rows = con.execute(f"SELECT COUNT(*) FROM {table}{clause}").fetchone()[0]
     except Exception as exc:
-        LOG.warning("CrisisWatch check query failed: %s", exc)
-        result["freshness"] = "unknown"
-    finally:
+        LOG.warning("row count failed for %s: %s", table, exc)
+    if iso_col and iso_col.lower() in cols:
         try:
-            con.close()
+            countries = con.execute(
+                f"SELECT COUNT(DISTINCT {iso_col}) FROM {table}{clause}"
+            ).fetchone()[0]
         except Exception:
-            pass
+            countries = None
+    return (rows, countries)
 
-    return result
+
+def _crisiswatch_edition(con) -> dict:
+    """Latest CrisisWatch edition + freshness."""
+    out: dict[str, Any] = {"state": "missing", "rows": 0, "edition": None, "months_old": None}
+    if con is None:
+        out["state"] = "unknown"
+        return out
+    if "crisiswatch_entries" not in {r[0] for r in con.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_name='crisiswatch_entries'"
+    ).fetchall()}:
+        return out
+    row = con.execute(
+        "SELECT COUNT(*), MAX(year * 100 + month) FROM crisiswatch_entries"
+    ).fetchone()
+    if not row or not row[0]:
+        out["state"] = "empty"
+        return out
+    out["rows"] = row[0]
+    ym = row[1]
+    if ym:
+        y, m = ym // 100, ym % 100
+        out["edition"] = f"{y:04d}-{m:02d}"
+        today = date.today()
+        months_old = (today.year - y) * 12 + (today.month - m)
+        out["months_old"] = months_old
+        out["state"] = "current" if months_old <= 2 else "stale"
+    return out
 
 
 # ---------------------------------------------------------------------------
-# Phase summary builder
+# Summary builder
 # ---------------------------------------------------------------------------
 
 
-def build_phase_summary(
-    entries: list[dict],
-    crisiswatch_status: dict | None = None,
-) -> str:
-    """Build a Markdown summary grouped by phase."""
+def build_phase_summary(entries: list[dict], con=None) -> str:
     if not entries:
-        return "\u26a0\ufe0f No connector diagnostics found. Check DIAGNOSTICS_REPORT_PATH env var.\n"
+        return (
+            "⚠️ **No connector diagnostics found** "
+            "(`connectors_report.jsonl` missing or empty). "
+            "Check `DIAGNOSTICS_REPORT_PATH`.\n"
+        )
 
-    # Group by phase
-    by_phase: dict[int, list[dict]] = {}
-    other: list[dict] = []
+    # Enrich each entry with phase + authoritative DB counts once.
+    enriched: list[dict] = []
     for e in entries:
-        cid = e.get("connector_id", "")
-        phase_info = PHASE_MAP.get(cid)
-        if phase_info:
-            phase_num = phase_info[0]
-            by_phase.setdefault(phase_num, []).append(e)
-        else:
-            other.append(e)
+        cid = e.get("connector_id", "?")
+        phase, table, where, iso_col = _CONNECTORS.get(cid, (0, None, None, None))
+        rows_db, countries = _table_stats(con, table, where, iso_col)
+        enriched.append({
+            "cid": cid,
+            "phase": phase,
+            "status": e.get("status", "?"),
+            "reason": e.get("reason"),
+            "duration_ms": e.get("duration_ms", 0),
+            "rows_run": _rows_written_this_run(e),
+            "rows_db": rows_db,
+            "countries": countries,
+            "has_table": table is not None,
+        })
 
-    # Overall status line
-    total = len(entries)
-    ok_count = sum(1 for e in entries if e.get("status") == "ok")
-    error_count = sum(1 for e in entries if e.get("status") == "error")
-    skipped_count = sum(1 for e in entries if e.get("status") == "skipped")
-    lines = [
-        f"**Overall: {ok_count}/{total} sources OK"
-        + (f", {error_count} error" if error_count else "")
-        + (f", {skipped_count} skipped" if skipped_count else "")
-        + "**\n",
+    total = len(enriched)
+    ok = sum(1 for e in enriched if e["status"] == "ok")
+    errs = [e for e in enriched if e["status"] == "error"]
+    skipped = [e for e in enriched if e["status"] == "skipped"]
+    # "Succeeded but empty" — ok status yet the target table has 0 rows.
+    empty_ok = [
+        e for e in enriched
+        if e["status"] == "ok" and e["has_table"] and e["rows_db"] == 0
     ]
 
-    phase_names = {
-        1: "Phase 1: Ground Truth",
-        2: "Phase 2: Resolution Sources",
-        3: "Phase 3: Structured Data",
-        4: "Phase 4: Context Sources",
-    }
+    lines: list[str] = []
+    lines.append("# \U0001f6f0️ Resolver Update — Run Summary\n")
 
-    for phase_num in sorted(by_phase.keys()):
-        phase_entries = by_phase[phase_num]
-
-        # Suppress redundant "idmc / skipped" entry when idmc_helix succeeded
-        if phase_num == 1:
-            idmc_helix_ok = any(
-                e.get("connector_id") == "idmc_helix" and e.get("status") == "ok"
-                for e in phase_entries
-            )
-            if idmc_helix_ok:
-                phase_entries = [
-                    e for e in phase_entries
-                    if not (e.get("connector_id") == "idmc" and e.get("status") == "skipped")
-                ]
-
-        label = phase_names.get(phase_num, f"Phase {phase_num}")
-        lines.append(f"\n### {label}\n")
-
-        if phase_num == 1:
-            lines.append("| Connector | Status | Reason | Rows (f/n/w) | Duration |")
-            lines.append("|-----------|--------|--------|-------------|----------|")
-            for e in phase_entries:
-                cid = e.get("connector_id", "?")
-                st = _status_icon(e.get("status", "?"))
-                reason = e.get("reason") or "\u2014"
-                counts = e.get("counts", {})
-                fetched = counts.get("fetched", "\u2014")
-                normalized = counts.get("normalized", "\u2014")
-                written = counts.get("written", "\u2014")
-                dur = _fmt_duration(e.get("duration_ms", 0))
-                lines.append(f"| {cid} | {st} | {reason} | {fetched}/{normalized}/{written} | {dur} |")
-
-        elif phase_num == 2:
-            lines.append("| Source | Status | Facts | Resolved | Deltas | Duration |")
-            lines.append("|--------|--------|-------|----------|--------|----------|")
-            for e in phase_entries:
-                cid = e.get("connector_id", "?")
-                st = _status_icon(e.get("status", "?"))
-                extras = e.get("extras", {})
-                facts = extras.get("total_facts", "\u2014")
-                resolved = extras.get("resolved_rows", "\u2014")
-                deltas = extras.get("delta_rows", "\u2014")
-                dur = _fmt_duration(e.get("duration_ms", 0))
-                lines.append(f"| {cid} | {st} | {facts} | {resolved} | {deltas} | {dur} |")
-
-        elif phase_num == 3:
-            lines.append("| Source | Status | Countries Fetched | Written | Failed | Duration |")
-            lines.append("|--------|--------|------------------|---------|--------|----------|")
-            for e in phase_entries:
-                cid = e.get("connector_id", "?")
-                st = _status_icon(e.get("status", "?"))
-                counts = e.get("counts", {})
-                fetched = counts.get("fetched", "\u2014")
-                written = counts.get("written", "\u2014")
-                failed = counts.get("failed", "\u2014")
-                dur = _fmt_duration(e.get("duration_ms", 0))
-                lines.append(f"| {cid} | {st} | {fetched} | {written} | {failed} | {dur} |")
-
-        elif phase_num == 4:
-            lines.append("| Source | Status | Rows | Duration |")
-            lines.append("|--------|--------|------|----------|")
-            for e in phase_entries:
-                cid = e.get("connector_id", "?")
-                st = _status_icon(e.get("status", "?"))
-                counts = e.get("counts", {})
-                written = counts.get("written", "\u2014")
-                dur = _fmt_duration(e.get("duration_ms", 0))
-                lines.append(f"| {cid} | {st} | {written} | {dur} |")
-
-    # Other (unknown phase)
-    if other:
-        lines.append("\n### Other\n")
-        lines.append("| Source | Status | Rows Written | Duration |")
-        lines.append("|--------|--------|-------------|----------|")
-        for e in other:
-            cid = e.get("connector_id", "?")
-            st = _status_icon(e.get("status", "?"))
-            counts = e.get("counts", {})
-            written = counts.get("written", "\u2014")
-            dur = _fmt_duration(e.get("duration_ms", 0))
-            lines.append(f"| {cid} | {st} | {written} | {dur} |")
-
-    # CrisisWatch inject status
-    lines.append("\n### ICG CrisisWatch Inject Status\n")
-    if crisiswatch_status:
-        freshness = crisiswatch_status.get("freshness", "unknown")
-        if freshness == "missing":
-            lines.append("- **Table**: crisiswatch_entries \u2014 \u274c NOT FOUND")
-            lines.append("- **Action needed**: Run CrisisWatch local ingest (launchd job) or check `horizon_scanner/data/crisiswatch_latest.json`")
-        elif freshness == "empty":
-            lines.append("- **Table**: crisiswatch_entries \u2014 \u26a0\ufe0f EMPTY")
-            lines.append("- **Action needed**: Run CrisisWatch ingest")
-        elif freshness == "unknown":
-            lines.append("- CrisisWatch status: unknown (DuckDB not available)")
-        else:
-            row_count = crisiswatch_status.get("row_count", 0)
-            latest = crisiswatch_status.get("latest_date", "?")
-            days_old = crisiswatch_status.get("days_old", "?")
-            icon = "\u2705" if freshness == "current" else "\u26a0\ufe0f"
-            lines.append(f"- **Table**: crisiswatch_entries")
-            lines.append(f"- **Rows**: {row_count}")
-            lines.append(f"- **Latest entry**: {latest}")
-            lines.append(f"- **Freshness**: {icon} {freshness} ({days_old} days old)")
+    # --- Verdict -----------------------------------------------------------
+    if errs or empty_ok:
+        verdict = "❌" if errs else "⚠️"
     else:
-        lines.append("- CrisisWatch status: unknown (check not run)")
+        verdict = "✅"
+    parts = [f"{ok}/{total} sources OK"]
+    if errs:
+        parts.append(f"{len(errs)} error{'s' if len(errs) != 1 else ''}")
+    if skipped:
+        parts.append(f"{len(skipped)} skipped")
+    if empty_ok:
+        parts.append(f"{len(empty_ok)} wrote 0 rows")
+    lines.append(f"**Result: {verdict} " + " · ".join(parts) + "**\n")
 
+    # Per-phase roll-up
+    rollup = []
+    for pn in (1, 2, 3, 4):
+        pe = [e for e in enriched if e["phase"] == pn]
+        if pe:
+            pok = sum(1 for e in pe if e["status"] == "ok")
+            rollup.append(f"P{pn} {pok}/{len(pe)}")
+    if rollup:
+        lines.append("Phase roll-up: " + " · ".join(rollup) + "\n")
+
+    # facts_resolved headline (what the resolution core holds after the run)
+    if con is not None:
+        fr_rows, fr_ctys = _table_stats(con, "facts_resolved", None, "iso3")
+        if fr_rows is not None:
+            lines.append(
+                f"`facts_resolved`: **{_fmt_int(fr_rows)}** rows across "
+                f"**{_fmt_int(fr_ctys)}** countries.\n"
+            )
+
+    # --- Problems & Warnings (surfaced first) ------------------------------
+    lines.append("\n## Problems & Warnings\n")
+    if not (errs or skipped or empty_ok):
+        lines.append("✅ None — every source ran and wrote data.\n")
+    else:
+        for e in errs:
+            reason = e["reason"] or "no reason recorded"
+            lines.append(f"- ❌ **{e['cid']}** (P{e['phase']}): {reason} — wrote 0 rows.")
+        for e in empty_ok:
+            lines.append(
+                f"- ⚠️ **{e['cid']}** (P{e['phase']}): reported OK but "
+                f"`{_CONNECTORS[e['cid']][1]}` is **empty** — likely a silent failure."
+            )
+        for e in skipped:
+            reason = e["reason"] or "skipped"
+            lines.append(f"- ⏭️ **{e['cid']}** (P{e['phase']}): {reason}.")
+        lines.append("")
+
+    # --- Per-phase detail tables (uniform columns) -------------------------
+    by_phase: dict[int, list[dict]] = {}
+    for e in enriched:
+        by_phase.setdefault(e["phase"], []).append(e)
+
+    for pn in sorted(k for k in by_phase if k):
+        pe = by_phase[pn]
+        # Drop the redundant idmc/skipped row when idmc_helix (or idmc) succeeded.
+        if pn == 1 and any(e["cid"] in ("idmc", "idmc_helix") and e["status"] == "ok" for e in pe):
+            pe = [e for e in pe if not (e["cid"] == "idmc" and e["status"] == "skipped")]
+        lines.append(f"\n## {_PHASE_NAMES.get(pn, f'Phase {pn}')}\n")
+        lines.append("| Source | Status | Rows in DB | Δ this run | Countries | Duration |")
+        lines.append("|--------|:------:|-----------:|-----------:|----------:|---------:|")
+        for e in sorted(pe, key=lambda x: x["cid"]):
+            lines.append(
+                f"| {e['cid']} | {_status_icon(e['status'])} | {_fmt_int(e['rows_db'])} "
+                f"| {_fmt_int(e['rows_run'])} | {_fmt_int(e['countries'])} "
+                f"| {_fmt_duration(e['duration_ms'])} |"
+            )
+
+    # Unknown-phase connectors (defensive — should be empty)
+    unknown = by_phase.get(0)
+    if unknown:
+        lines.append("\n## Other (unmapped connectors)\n")
+        lines.append("| Source | Status | Δ this run | Duration |")
+        lines.append("|--------|:------:|-----------:|---------:|")
+        for e in sorted(unknown, key=lambda x: x["cid"]):
+            lines.append(
+                f"| {e['cid']} | {_status_icon(e['status'])} "
+                f"| {_fmt_int(e['rows_run'])} | {_fmt_duration(e['duration_ms'])} |"
+            )
+
+    # --- CrisisWatch edition ----------------------------------------------
+    cw = _crisiswatch_edition(con)
+    lines.append("\n## ICG CrisisWatch\n")
+    if cw["state"] in ("current", "stale"):
+        icon = "✅" if cw["state"] == "current" else "⚠️"
+        lines.append(
+            f"- {icon} Latest edition **{cw['edition']}** "
+            f"({_fmt_int(cw['rows'])} rows, ~{cw['months_old']} month(s) old)."
+        )
+    elif cw["state"] == "empty":
+        lines.append("- ⚠️ `crisiswatch_entries` is **empty** — check the CrisisWatch refresh.")
+    elif cw["state"] == "missing":
+        lines.append("- ❌ `crisiswatch_entries` table **not found**.")
+    else:
+        lines.append("- CrisisWatch status unavailable (DB not queryable).")
+
+    lines.append(
+        "\n_Rows in DB = authoritative count in the target table after this run. "
+        "Δ this run = rows written this cycle (self-storing/direct sources only). "
+        "Countries = distinct iso3 in the table._"
+    )
     lines.append("")
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# CLI
 # ---------------------------------------------------------------------------
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Produce a consolidated multi-phase pipeline summary",
+        description="Produce the consolidated Resolver Update run summary",
     )
     parser.add_argument(
         "--report",
@@ -360,19 +409,26 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--db",
         default=None,
-        help="Path to resolver.duckdb for CrisisWatch check (auto-detected if not set)",
+        help="Path to resolver.duckdb for authoritative counts (auto-detected if unset)",
     )
     parser.add_argument(
         "--format",
         choices=["markdown", "github-step-summary"],
         default="markdown",
-        help="Output format",
+        help="Output format (both emit Markdown; retained for compatibility)",
     )
     args = parser.parse_args(argv)
 
     entries = _load_jsonl(args.report)
-    cw_status = _check_crisiswatch_inject(args.db)
-    summary = build_phase_summary(entries, crisiswatch_status=cw_status)
+    con = _open_db(args.db)
+    try:
+        summary = build_phase_summary(entries, con=con)
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
 
     print(summary)
 
