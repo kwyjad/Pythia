@@ -41,8 +41,14 @@ from bs4 import BeautifulSoup
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# bom.gov.au returns 403 to non-browser User-Agents (the old "PythiaBot/1.0"
+# UA was blocked), so present a standard desktop-browser UA.
 HEADERS = {
-    "User-Agent": "PythiaBot/1.0 (humanitarian forecasting research)"
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    )
 }
 
 

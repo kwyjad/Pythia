@@ -116,7 +116,9 @@ class SeasonalForecast:
                 norm_parts.append(f"{v} {k}")
             lines.append("30-yr climate norm (1991-2020): " + ", ".join(norm_parts) + ".")
         
-        if self.tercile_above is not None:
+        # Require all three terciles — some PDFs report a partial set, and
+        # formatting a None with :.0% raises TypeError.
+        if None not in (self.tercile_above, self.tercile_near, self.tercile_below):
             lines.append(
                 f"Tercile probabilities (ACE): {self.tercile_above:.0%} above-normal, "
                 f"{self.tercile_near:.0%} near-normal, {self.tercile_below:.0%} below-normal."
@@ -433,7 +435,7 @@ def extract_forecast(text: str, pdf_url: str = "", pdf_path: str = "") -> Season
     forecast.tercile_above = terciles["above"]
     forecast.tercile_near = terciles["near"]
     forecast.tercile_below = terciles["below"]
-    if forecast.tercile_above is not None:
+    if None not in (forecast.tercile_above, forecast.tercile_near, forecast.tercile_below):
         logger.info(f"  Terciles: above={forecast.tercile_above:.0%}, "
                      f"near={forecast.tercile_near:.0%}, below={forecast.tercile_below:.0%}")
     
@@ -547,6 +549,10 @@ def discover_and_extract(year: int) -> list[SeasonalForecast]:
                 logger.debug(f"  Not found ({resp.status_code}): {url}")
         except requests.RequestException as e:
             logger.debug(f"  Error checking {url}: {e}")
+        except Exception as e:
+            # A parse/format error on one PDF must not discard the forecasts
+            # already extracted from the others — skip this URL and continue.
+            logger.warning(f"  Skipping {url} — extraction failed: {e}")
     
     return results
 
