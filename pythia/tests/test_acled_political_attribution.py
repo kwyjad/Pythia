@@ -44,6 +44,33 @@ def test_filter_returns_empty_when_nothing_matches():
     assert kept == []
 
 
+# The live ACLED API does not reliably return the code under the literal key
+# ``iso3`` — it may use the HXL tag ``#country+code``, the underscore variant
+# ``country_iso3``, or only the ``country`` name. The July-2026 contamination
+# fix read a single ``ev.get("iso3")`` key, so in production every event
+# resolved to "" and was discarded (5,257 events / 182 countries, 0 stored).
+# These fixtures pin the real response shapes so the guard can't silently
+# over-reject again.
+REAL_SHAPE_EVENTS = [
+    {"event_id_cnty": "NGA1", "#country+code": "NGA", "event_type": "Riots"},
+    {"event_id_cnty": "NGA2", "country_iso3": "NGA", "event_type": "Protests"},
+    {"event_id_cnty": "NGA3", "country": "Nigeria", "event_type": "Protests"},
+    {"event_id_cnty": "RUS1", "country": "Russia", "event_type": "Protests"},
+    {"event_id_cnty": "IRN1", "iso3": "IRN", "event_type": "Protests"},
+]
+
+
+def test_filter_resolves_iso3_from_alternate_keys():
+    """HXL tag / underscore variant / country name all attribute correctly."""
+    kept = _filter_events_to_country(REAL_SHAPE_EVENTS, "NGA")
+    assert [e["event_id_cnty"] for e in kept] == ["NGA1", "NGA2", "NGA3"]
+
+
+def test_filter_resolves_iso3_from_country_name_only():
+    kept = _filter_events_to_country(REAL_SHAPE_EVENTS, "RUS")
+    assert [e["event_id_cnty"] for e in kept] == ["RUS1"]
+
+
 def test_store_guard_drops_misattributed_events(tmp_path, monkeypatch):
     db_path = tmp_path / "acled_pol.duckdb"
     monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")

@@ -40,6 +40,10 @@ _TIMEOUT = 90
 _PAGE_SIZE = 5000
 _MAX_PAGES = 20  # safety valve: 100,000 rows max
 _MAX_LEAD_MONTHS = 6
+# Warn loudly when the newest fetched forecast is older than this. CAST is
+# issued monthly (first/second Thursday), so a healthy feed is < ~35 days old;
+# 45 mirrors the conflict-forecast staleness threshold used elsewhere.
+_STALENESS_WARN_DAYS = 45
 
 _MONTH_MAP: Dict[str, int] = {
     "january": 1,
@@ -108,7 +112,19 @@ class AcledCastConnector:
         forecast_issue_date, target_month, model_version.
         """
         try:
-            records = self._fetch_all_records()
+            # Prefer the current calendar year's forecasts (ACLED's documented
+            # `year` filter). This is defensive: if the no-param default view
+            # is ever stale/truncated, the year filter surfaces the latest
+            # issue. Falls back to an unfiltered pull when the year filter
+            # returns nothing, so we never regress to zero data.
+            current_year = date.today().year
+            records = self._fetch_all_records(year=current_year)
+            if not records:
+                LOG.info(
+                    "[acled_cast] no records for year=%d — retrying unfiltered",
+                    current_year,
+                )
+                records = self._fetch_all_records()
         except Exception as exc:
             LOG.error(
                 "[acled_cast] fetch failed — CAST forecasts will be MISSING "
@@ -121,6 +137,17 @@ class AcledCastConnector:
             return pd.DataFrame()
 
         issue_date = self._derive_issue_date(records)
+        age_days = (date.today() - issue_date).days
+        if age_days > _STALENESS_WARN_DAYS:
+            LOG.warning(
+                "[acled_cast] latest forecast issue date %s is %d days old "
+                "(> %d) — the ACLED CAST API may not be serving current "
+                "forecasts. conflict_forecasts will carry a stale CAST "
+                "vintage; if this persists, escalate to ACLED (the connector "
+                "and auth are working — it fetched %d records).",
+                issue_date.isoformat(), age_days, _STALENESS_WARN_DAYS,
+                len(records),
+            )
         aggregated = self._aggregate_to_country(records)
 
         if aggregated.empty:
@@ -141,8 +168,16 @@ class AcledCastConnector:
     # API interaction
     # ------------------------------------------------------------------
 
-    def _fetch_all_records(self) -> List[Dict[str, Any]]:
-        """Paginate through the ACLED CAST endpoint."""
+    def _fetch_all_records(
+        self, year: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Paginate through the ACLED CAST endpoint.
+
+        When *year* is provided, ACLED's documented ``year`` filter restricts
+        the response to that forecast year. Note ``year`` filters the forecast
+        *target* year, so a persistently stale ``forecast_issue_date`` even
+        with the filter set indicates upstream staleness, not a query bug.
+        """
         from resolver.ingestion.acled_auth import get_auth_header
 
         headers = get_auth_header()
@@ -155,6 +190,8 @@ class AcledCastConnector:
                 "limit": _PAGE_SIZE,
                 "page": page,
             }
+            if year is not None:
+                params["year"] = year
             resp = requests.get(
                 _API_URL,
                 params=params,
