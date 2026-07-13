@@ -61,6 +61,14 @@ jobs:
           python -m scripts.retire_blocked_hazard_questions
           echo "=== retire_blocked_hazard_questions completed ==="
 
+      - name: Reconcile llm_calls.is_test with run test status
+        env:
+          PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+        run: |
+          echo "=== Reconciling llm_calls.is_test (repair test-run cost leakage) ==="
+          python -m scripts.reconcile_llm_calls_is_test
+          echo "=== reconcile_llm_calls_is_test completed ==="
+
       - name: Seed and update bucket centroids
         env:
           PYTHIA_CONFIG_YAML: "pythia/config.yaml"

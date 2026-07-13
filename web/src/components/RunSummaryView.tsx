@@ -533,6 +533,21 @@ function CostBreakdown({ data }: Props) {
 
 // ---- Main component ----
 export default function RunSummaryView({ data }: Props) {
+  // No run matched the current Test filter (e.g. Test OFF but only test runs
+  // exist in the DB). Render an explicit empty state rather than a misleading
+  // all-zero KPI row with leaked costs.
+  if (data.has_run === false) {
+    return (
+      <div className="rounded-lg border border-fred-border bg-fred-surface px-4 py-6 text-sm text-fred-muted">
+        <p className="font-medium text-fred-text">No production runs to show.</p>
+        <p className="mt-1">
+          The latest pipeline run(s) were produced in test mode. Toggle{" "}
+          <span className="font-medium">Test ON</span> in the navigation bar to
+          view test-mode runs, or run a production (non-test) pipeline.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="space-y-4">
       <KpiRow data={data} />

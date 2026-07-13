@@ -134,6 +134,8 @@ export type RunSummaryRcByHazard = {
 export type RunSummaryResponse = {
   run_id: string | null;
   hs_run_id: string | null;
+  /** False when no run matched the current include_test filter (empty state). */
+  has_run?: boolean;
   updated_at: string | null;
   coverage: {
     countries_scanned: number;

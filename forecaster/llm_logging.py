@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from pythia.db.schema import connect, ensure_schema
+from pythia.test_mode import is_test_mode
 from pythia.db.util import (
     derive_error_message,
     derive_error_type,
@@ -54,7 +55,7 @@ async def log_forecaster_llm_call(
     response_text: Optional[str] = None,
     usage: Optional[Dict[str, Any]] = None,
     error_text: Optional[str] = None,
-    is_test: bool = False,
+    is_test: Optional[bool] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     Wrap a Forecaster LLM call and log it to the llm_calls table.
@@ -65,6 +66,14 @@ async def log_forecaster_llm_call(
     `usage` (e.g., when the LLM call was already executed) by omitting
     `low_level_call`.
     """
+
+    # When the caller doesn't pass is_test explicitly, inherit the process
+    # test-mode flag (PYTHIA_TEST_MODE). Previously this defaulted to False, so
+    # forecaster spd_v2/binary_v2/scenario_v2 llm_calls in a test run were
+    # stamped is_test=False even though their forecast outputs were is_test=True
+    # — leaking test costs into non-test cost views.
+    if is_test is None:
+        is_test = is_test_mode()
 
     low_level_kwargs = low_level_kwargs or {}
     t_start = time.time()
