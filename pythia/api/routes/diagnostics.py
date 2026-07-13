@@ -1048,15 +1048,24 @@ def diagnostics_run_summary(
     if forecaster_run_id:
         run_id = forecaster_run_id
     else:
-        # Find latest forecaster run_id from forecasts_ensemble for the month
+        # Find latest forecaster run_id from forecasts_ensemble for the month.
+        # The run selection MUST respect include_test: with Test OFF, picking the
+        # latest run regardless of is_test would select a test run and then zero
+        # out its coverage while leaking its cost (the "0 forecasts but $X cost"
+        # bug). When no matching run exists, run_id stays None → empty summary.
         if _table_exists(con, "forecasts_ensemble"):
             fe_ts = _pick_timestamp_column(con, "forecasts_ensemble", ["created_at", "timestamp"])
             if fe_ts:
                 sql = f"SELECT DISTINCT run_id FROM forecasts_ensemble"
                 params: list = []
+                where: list = []
                 if year_month:
-                    sql += f" WHERE strftime({fe_ts}, '%Y-%m') = ?"
+                    where.append(f"strftime({fe_ts}, '%Y-%m') = ?")
                     params.append(year_month)
+                if not include_test and "is_test" in _table_columns(con, "forecasts_ensemble"):
+                    where.append("COALESCE(is_test, FALSE) = FALSE")
+                if where:
+                    sql += " WHERE " + " AND ".join(where)
                 sql += f" ORDER BY run_id DESC LIMIT 1"
                 try:
                     row = con.execute(sql, params).fetchone()
@@ -1079,16 +1088,21 @@ def diagnostics_run_summary(
         except Exception:
             pass
 
-    # If still no hs_run_id, try hs_triage directly
+    # If still no hs_run_id, try hs_triage directly (same include_test rule).
     if not hs_run_id and _table_exists(con, "hs_triage"):
         try:
             sql = "SELECT DISTINCT run_id FROM hs_triage"
             params = []
+            where = []
             if year_month:
                 ht_ts = _pick_timestamp_column(con, "hs_triage", ["created_at", "timestamp"])
                 if ht_ts:
-                    sql += f" WHERE strftime({ht_ts}, '%Y-%m') = ?"
+                    where.append(f"strftime({ht_ts}, '%Y-%m') = ?")
                     params.append(year_month)
+            if not include_test and "is_test" in _table_columns(con, "hs_triage"):
+                where.append("COALESCE(is_test, FALSE) = FALSE")
+            if where:
+                sql += " WHERE " + " AND ".join(where)
             sql += " ORDER BY run_id DESC LIMIT 1"
             row = con.execute(sql, params).fetchone()
             if row:
@@ -1563,6 +1577,10 @@ def diagnostics_run_summary(
     return {
         "run_id": run_id,
         "hs_run_id": hs_run_id,
+        # has_run is False when no run matched the current include_test filter
+        # (e.g. Test OFF but only test runs exist) so the dashboard can render an
+        # explicit empty state instead of a misleading all-zero KPI row.
+        "has_run": bool(run_id or hs_run_id),
         "updated_at": updated_at,
         "coverage": coverage,
         "metrics": metrics_list,

@@ -384,3 +384,80 @@ def test_kpi_scopes_fatalities_nonzero(api_env: None) -> None:
     assert selected["forecasts"] >= 2, (
         f"FATALITIES forecasts should be >= 2, got {selected['forecasts']}"
     )
+
+
+@pytest.fixture()
+def api_env_test_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Generator[None, None, None]:
+    """DB whose only run is a test-mode run (is_test=TRUE everywhere)."""
+    db_path = tmp_path / "api-run-summary-testonly.duckdb"
+    con = duckdb.connect(str(db_path), read_only=False)
+    con.execute(
+        "CREATE TABLE hs_triage (run_id TEXT, iso3 TEXT, hazard_code TEXT, tier TEXT, "
+        "triage_score DOUBLE, regime_change_likelihood DOUBLE, regime_change_level INTEGER, "
+        "data_quality_json TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+        "is_test BOOLEAN DEFAULT FALSE)"
+    )
+    con.execute(
+        "CREATE TABLE forecasts_ensemble (question_id TEXT, run_id TEXT, month_index INTEGER, "
+        "bucket_index INTEGER, probability DOUBLE, model_name TEXT, "
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_test BOOLEAN DEFAULT FALSE)"
+    )
+    con.execute(
+        "CREATE TABLE llm_calls (run_id TEXT, hs_run_id TEXT, phase TEXT, cost_usd DOUBLE, "
+        "total_tokens INTEGER, error_text TEXT, status TEXT, "
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_test BOOLEAN DEFAULT FALSE)"
+    )
+    # A test forecaster run whose forecast outputs are is_test=TRUE, but whose
+    # spd_v2 llm_call was mis-stamped is_test=FALSE (the historical stamping bug).
+    con.execute(
+        "INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, "
+        "regime_change_likelihood, regime_change_level, data_quality_json, is_test) "
+        "VALUES ('hs_t', 'AAA', 'ACE', 'priority', 0.8, 0.45, 2, '{}', TRUE)"
+    )
+    con.execute(
+        "INSERT INTO forecasts_ensemble (question_id, run_id, month_index, bucket_index, "
+        "probability, model_name, is_test) VALUES ('q1', 'fc_t', 1, 1, 0.5, 'ensemble_bayesmc_v2', TRUE)"
+    )
+    con.execute(
+        "INSERT INTO llm_calls (run_id, hs_run_id, phase, cost_usd, total_tokens, "
+        "error_text, status, is_test) VALUES ('fc_t', 'hs_t', 'spd_v2', 4.11, 12000, '', 'ok', FALSE)"
+    )
+    con.close()
+
+    config_path = _write_config(tmp_path, db_path)
+    monkeypatch.setenv("PYTHIA_CONFIG_PATH", str(config_path))
+    pythia_config.load.cache_clear()
+    import pythia.api.app as _app_mod
+    _app_mod._READ_CON = None
+    try:
+        yield
+    finally:
+        _app_mod._READ_CON = None
+        pythia_config.load.cache_clear()
+
+
+def test_run_summary_test_off_hides_test_run(api_env_test_only: None) -> None:
+    """Test OFF + only test runs → empty summary (no leaked cost, has_run False)."""
+    client = TestClient(app)
+    resp = client.get("/v1/diagnostics/run_summary")  # include_test defaults False
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["has_run"] is False
+    assert data["run_id"] is None
+    assert data["coverage"]["countries_scanned"] == 0
+    # The mis-stamped spd_v2 cost must NOT leak into the non-test view.
+    assert data["cost"]["total_usd"] == 0.0
+    assert data["llm_health"]["total_calls"] == 0
+
+
+def test_run_summary_test_on_shows_test_run(api_env_test_only: None) -> None:
+    """Test ON → the test run is selected and populated."""
+    client = TestClient(app)
+    resp = client.get("/v1/diagnostics/run_summary", params={"include_test": "true"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["has_run"] is True
+    assert data["run_id"] == "fc_t"
+    assert data["coverage"]["countries_scanned"] == 1
