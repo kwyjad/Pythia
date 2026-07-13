@@ -360,21 +360,45 @@ def _render_triage_prompt(hazard_code: str, country_name: str, iso3: str,
         return f"(Triage prompt rendering failed: {e})"
 
 
+def _load_structured_data_for_artifact(
+    iso3: str,
+    hazard_code: str,
+    run_id: str | None,
+    rc_level: int | None,
+) -> Optional[Dict[str, Any]]:
+    """Load the SPD structured-data injects exactly as the pipeline does.
+
+    Reuses the forecaster's ``_load_structured_data`` so the rendered artifact
+    contains the same conflict-forecast / adversarial / HS-grounding / GDACS /
+    CrisisWatch / food-security context the live SPD prompt receives.
+
+    IMPORTANT: several of these sub-loaders (``pythia/ipc_phases.py``,
+    ``pythia/acaps.py``) call ``resolver.db.duckdb_io.get_db()`` — a cache HIT
+    returns the artifact's own shared connection — and then ``close_db()`` it,
+    which closes AND evicts that shared handle. The caller must therefore
+    reopen its connection after calling this function (``get_db`` returns a
+    fresh connection once the cached one is closed/evicted). Returns None on
+    failure so the SPD prompt still renders (without injects) rather than being
+    blanked.
+    """
+    try:
+        from forecaster.cli import _load_structured_data
+        return _load_structured_data(iso3, hazard_code, run_id, rc_level)
+    except Exception as exc:
+        LOG.warning(
+            "snapshot_prompt_artifact: structured-data load failed for %s/%s "
+            "— SPD prompt will render without injects: %s",
+            iso3, hazard_code, exc,
+        )
+        return None
+
+
 def _render_spd_prompt(question: Dict[str, Any],
                        history_summary: Dict[str, Any],
                        hs_triage_entry: Dict[str, Any],
-                       research_json: Dict[str, Any]) -> str:
-    """Render the SPD forecast prompt.
-
-    NOTE: the full forecaster ``structured_data`` injects (conflict forecasts,
-    adversarial checks, HS grounding evidence, GDACS, CrisisWatch, food
-    security, …) are NOT wired in here because ``_load_structured_data`` opens
-    its own pooled DB connection which closes the artifact's shared connection
-    mid-loop (dual connection-pool conflict between ``resolver.db.duckdb_io``
-    and ``pythia.db.schema``). Wiring them in is tracked as a follow-up; it
-    needs the render loop refactored to pre-load structured data before any
-    artifact-connection reads.
-    """
+                       research_json: Dict[str, Any],
+                       structured_data: Optional[Dict[str, Any]] = None) -> str:
+    """Render the SPD forecast prompt with the full structured-data injects."""
     try:
         from forecaster.prompts import build_spd_prompt_v2
         return build_spd_prompt_v2(
@@ -382,6 +406,7 @@ def _render_spd_prompt(question: Dict[str, Any],
             history_summary=history_summary,
             hs_triage_entry=hs_triage_entry,
             research_json=research_json,
+            structured_data=structured_data,
         )
     except Exception as e:
         return f"(SPD prompt rendering failed: {e})"
@@ -506,13 +531,33 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
                 }
                 hs_triage_entry = dict(sample)
 
+                # Load the full structured-data injects the pipeline feeds the
+                # SPD prompt (conflict forecasts, adversarial checks, HS
+                # grounding evidence, GDACS, CrisisWatch, food security, …) so
+                # the artifact shows exactly what the LLM sees. Its sub-loaders
+                # close+evict the shared duckdb_io connection (see
+                # _load_structured_data_for_artifact), so reopen ``con``
+                # immediately afterwards — this MUST run after all con-based
+                # reads for this hazard (sample/features/evidence/question/
+                # calibration) and before the scenario block / next iteration.
+                try:
+                    rc_level_raw = sample.get("regime_change_level")
+                    rc_level = int(rc_level_raw) if rc_level_raw is not None else None
+                except (TypeError, ValueError):
+                    rc_level = None
+                structured_data = _load_structured_data_for_artifact(
+                    iso3, hazard_code, run_id, rc_level
+                )
+                con = _connect(db_url)  # reopen: loaders closed the shared con
+
                 lines.append("<details>")
                 lines.append(f"<summary>Full SPD Forecast prompt for {hazard_code}/{metric} — "
                              f"{country_name} ({iso3})</summary>")
                 lines.append("")
                 lines.append("```")
                 spd_prompt = _render_spd_prompt(question, history_summary,
-                                               hs_triage_entry, research_json)
+                                               hs_triage_entry, research_json,
+                                               structured_data=structured_data)
                 lines.append(spd_prompt)
                 lines.append("```")
                 lines.append("")
