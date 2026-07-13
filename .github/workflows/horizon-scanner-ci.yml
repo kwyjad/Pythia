@@ -1,0 +1,61 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+name: Horizon Scanner CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "horizon_scanner/**"
+      - "scripts/ci/snapshot_prompt_artifact.py"
+      - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
+      - "pythia/db/schema.py"
+      - "pythia/buckets.py"
+      - ".github/workflows/horizon-scanner-ci.yml"
+  pull_request:
+    paths:
+      - "horizon_scanner/**"
+      - "scripts/ci/snapshot_prompt_artifact.py"
+      - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
+      - "pythia/db/schema.py"
+      - "pythia/buckets.py"
+      - ".github/workflows/horizon-scanner-ci.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  horizon-scanner-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (minimal, via python_library_requirements.txt)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+          pip install pytest pytest-timeout
+
+      - name: Run Horizon Scanner unit tests (network-excluded, deterministic)
+        run: |
+          # Excludes the live-API tests (markers: allow_network / network) so
+          # the suite is deterministic and offline in CI. This closes the
+          # documented gap where no workflow ran horizon_scanner/** tests —
+          # e.g. the seasonal-TC tercile-safety guard and the prompt-artifact
+          # question-loader regression test.
+          pytest -vv \
+            horizon_scanner/ \
+            scripts/ci/tests/test_snapshot_prompt_artifact.py \
+            -m "not allow_network and not network"

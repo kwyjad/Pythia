@@ -253,6 +253,10 @@ def _load_calibration_advice(con, hazard_code: str, metric: str) -> str:
 def _load_question_for_hazard(con, iso3: str, hazard_code: str) -> Optional[Dict[str, Any]]:
     """Load a sample question for SPD/scenario prompt rendering."""
     try:
+        # NOTE: the ``questions`` table has no ``created_at`` column — ordering
+        # by it raises a DuckDB BinderException that a bare except would swallow,
+        # blanking the SPD/Scenario sections for every hazard. Order by the epoch
+        # (window_start_date) with question_id as a deterministic tiebreak.
         row = con.execute(
             """
             SELECT question_id, hs_run_id, iso3, hazard_code, metric,
@@ -260,12 +264,17 @@ def _load_question_for_hazard(con, iso3: str, hazard_code: str) -> Optional[Dict
                    wording, track
             FROM questions
             WHERE iso3 = ? AND hazard_code = ? AND status = 'active'
-            ORDER BY created_at DESC
+            ORDER BY window_start_date DESC, question_id
             LIMIT 1
             """,
             [iso3, hazard_code],
         ).fetchone()
-    except Exception:
+    except Exception as exc:
+        LOG.warning(
+            "snapshot_prompt_artifact: failed to load sample question for "
+            "%s/%s — SPD/Scenario prompt will not render: %s",
+            iso3, hazard_code, exc,
+        )
         return None
 
     if not row:
@@ -355,7 +364,17 @@ def _render_spd_prompt(question: Dict[str, Any],
                        history_summary: Dict[str, Any],
                        hs_triage_entry: Dict[str, Any],
                        research_json: Dict[str, Any]) -> str:
-    """Render the SPD forecast prompt."""
+    """Render the SPD forecast prompt.
+
+    NOTE: the full forecaster ``structured_data`` injects (conflict forecasts,
+    adversarial checks, HS grounding evidence, GDACS, CrisisWatch, food
+    security, …) are NOT wired in here because ``_load_structured_data`` opens
+    its own pooled DB connection which closes the artifact's shared connection
+    mid-loop (dual connection-pool conflict between ``resolver.db.duckdb_io``
+    and ``pythia.db.schema``). Wiring them in is tracked as a follow-up; it
+    needs the render loop refactored to pre-load structured data before any
+    artifact-connection reads.
+    """
     try:
         from forecaster.prompts import build_spd_prompt_v2
         return build_spd_prompt_v2(

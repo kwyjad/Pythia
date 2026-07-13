@@ -242,6 +242,11 @@ class TestBuildRcPromptAceConflictForecasts:
         assert "Compare these forward-looking estimates" in prompt
 
     def test_includes_icg_section(self):
+        # The CrisisWatch refactor moved the section header into
+        # format_crisiswatch_for_prompt (the crisiswatch_context path); the
+        # deprecated icg_on_the_horizon raw-text param is injected verbatim
+        # without a synthetic header. The contract is that the text reaches the
+        # prompt.
         icg_text = "Somalia is at risk of renewed clan conflict in the south."
         prompt = build_rc_prompt_ace(
             country_name="Somalia",
@@ -249,7 +254,6 @@ class TestBuildRcPromptAceConflictForecasts:
             resolver_features=_minimal_resolver_features(),
             icg_on_the_horizon=icg_text,
         )
-        assert "ON THE HORIZON" in prompt
         assert icg_text in prompt
 
     def test_none_conflict_forecasts_no_crash(self):
@@ -265,13 +269,15 @@ class TestBuildRcPromptAceConflictForecasts:
         assert "Compare these forward-looking estimates" not in prompt
 
     def test_none_icg_no_section(self):
+        icg_text = "Somalia is at risk of renewed clan conflict in the south."
         prompt = build_rc_prompt_ace(
             country_name="Somalia",
             iso3="SOM",
             resolver_features=_minimal_resolver_features(),
             icg_on_the_horizon=None,
         )
-        assert "ON THE HORIZON" not in prompt
+        # With no CrisisWatch/ICG context, the injected text must be absent.
+        assert icg_text not in prompt
 
 
 # ---------------------------------------------------------------------------
