@@ -102,3 +102,36 @@ def test_load_question_for_hazard_none_when_absent(tmp_path: Path) -> None:
         con.close()
 
     assert result is None
+
+
+def test_connect_reopens_after_shared_connection_closed(tmp_path: Path) -> None:
+    """Guards the structured-data connection fix.
+
+    ``_load_structured_data``'s sub-loaders (ipc_phases / acaps) call
+    ``duckdb_io.get_db()`` (a cache HIT returns the artifact's own shared
+    connection) then ``close_db()`` it, which closes AND evicts the shared
+    handle. The artifact reopens via ``_connect(db_url)`` afterwards; this test
+    asserts that reopen returns a usable connection even after the cached one
+    was closed+evicted (mirroring the loader behaviour).
+    """
+    from resolver.db import duckdb_io
+    from scripts.ci.snapshot_prompt_artifact import _connect
+
+    db_path = tmp_path / "reopen.duckdb"
+    url = f"duckdb:///{db_path}"
+
+    # Seed a table via a throwaway connection so the file exists with content.
+    seed = duckdb_io.get_db(url)
+    seed.execute("CREATE TABLE t AS SELECT 1 AS x")
+    duckdb_io.close_db(seed)
+
+    con = _connect(url)
+    assert con.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 1
+
+    # Simulate what a structured-data sub-loader does to the SHARED connection.
+    duckdb_io.close_db(con)
+
+    # The artifact's reopen must yield a working connection.
+    con2 = _connect(url)
+    assert con2.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 1
+    duckdb_io.close_db(con2)
