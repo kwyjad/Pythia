@@ -3950,12 +3950,17 @@ async def _run_binary_forecast_for_question(
         current_alerts: list[dict] = []
         try:
             alert_con = connect(read_only=True)
+            # Only Orange/Red event months: the binary question's own
+            # definition says Green does not count, so surfacing Green/zero
+            # rows as "alerts" was pure noise that biased models upward.
             alert_rows = alert_con.execute(
                 """
                 SELECT ym, value, alertlevel
                 FROM facts_resolved
                 WHERE upper(iso3) = ? AND upper(hazard_code) = ?
                   AND lower(metric) = 'event_occurrence'
+                  AND COALESCE(value, 0) >= 1
+                  AND upper(COALESCE(alertlevel, '')) IN ('ORANGE', 'RED')
                 ORDER BY ym DESC LIMIT 6
                 """,
                 [iso3, hz],

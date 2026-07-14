@@ -170,8 +170,15 @@ def _section_base_rate(country: str, hazard_name: str, base_rate: dict) -> str:
     seasonal_row1 = "  ".join(seasonal_lines[:6])
     seasonal_row2 = "  ".join(seasonal_lines[6:])
 
+    coverage_start = base_rate.get("coverage_start")
+    coverage_end = base_rate.get("coverage_end")
+    if coverage_start and coverage_end:
+        coverage_label = f"{coverage_start} to {coverage_end}"
+    else:
+        coverage_label = "coverage window unknown"
+
     return f"""\
-HISTORICAL BASE RATE (GDACS, 2015\u2013present):
+HISTORICAL BASE RATE (GDACS, {coverage_label}):
 {country} has had significant {hazard_name} events in {event_months} of \
 {total_months} months ({base_rate_pct:.1f}%).
 
@@ -192,16 +199,19 @@ def _section_current_situation(
 ) -> str:
     parts = ["CURRENT SITUATION"]
 
-    # Current GDACS alerts
+    # Recent significant GDACS event months (Orange/Red only — Green does
+    # not count per the question definition). facts_resolved has no event
+    # name for these monthly rows, so render level + month only.
     if current_alerts:
-        parts.append(f"\nActive GDACS alerts for {country}:")
+        parts.append(
+            f"\nRecent significant GDACS event months for {country} (Orange/Red alerts):"
+        )
         for alert in current_alerts[:10]:
-            level = alert.get("alertlevel", "?")
-            event = alert.get("event_name", alert.get("event_id", "?"))
+            level = alert.get("alertlevel") or "?"
             ym = alert.get("ym", "?")
-            parts.append(f"  - [{level}] {event} ({ym})")
+            parts.append(f"  - [{level}] {ym}")
     else:
-        parts.append(f"\nNo active GDACS alerts for {country}.")
+        parts.append(f"\nNo recent Orange/Red GDACS event months for {country}.")
 
     # Structured data injection (reuse existing formatted data where possible)
     if structured_data:
@@ -244,10 +254,14 @@ def _section_current_situation(
             if isinstance(reliefweb, str):
                 parts.append(f"\nRECENT RELIEFWEB REPORTS:\n{reliefweb}")
             elif isinstance(reliefweb, list):
-                for rpt in reliefweb[:5]:
-                    title = rpt.get("title", "")
-                    if title:
-                        parts.append(f"  - {title}")
+                titles = [rpt.get("title", "") for rpt in reliefweb[:5]]
+                titles = [t for t in titles if t]
+                if titles:
+                    # Header required: without it the bullets render visually
+                    # nested under whatever section preceded (ENSO STATE in
+                    # the July 2026 test run).
+                    parts.append("\nRECENT RELIEFWEB REPORTS:")
+                    parts.extend(f"  - {t}" for t in titles)
 
     # HS triage context
     if hs_triage_entry:
@@ -489,6 +503,8 @@ def _query_base_rate(conn, iso3: str, hazard_code: str) -> dict:
             "recent_12m_events": 0,
             "recent_12m_rate": 0.0,
             "trend": "unknown",
+            "coverage_start": None,
+            "coverage_end": None,
         }
 
     total_months = len(rows)
@@ -538,6 +554,10 @@ def _query_base_rate(conn, iso3: str, hazard_code: str) -> dict:
         "recent_12m_events": recent_12m_events,
         "recent_12m_rate": recent_12m_rate,
         "trend": trend,
+        # Actual coverage window (rows are ORDER BY ym) — the header renders
+        # this instead of a hardcoded era label.
+        "coverage_start": str(rows[0][0])[:7],
+        "coverage_end": str(rows[-1][0])[:7],
     }
 
 
