@@ -16,7 +16,7 @@ import duckdb
 import pytest
 
 from scripts.create_questions_from_triage import (
-    _build_dr_fewsnet_question_wording,
+    _build_dr_phase3_question_wording,
     _is_fewsnet_country,
     _FEWSNET_COUNTRIES_FILE,
     create_questions_from_triage,
@@ -46,51 +46,51 @@ def _setup_test_db(db_path: str, triage_rows: list[tuple]):
 
 
 # ---------------------------------------------------------------------------
-# Unit tests: _build_dr_fewsnet_question_wording
+# Unit tests: _build_dr_phase3_question_wording
 # ---------------------------------------------------------------------------
 
 class TestBuildDrFewsnetQuestionWording:
     def test_mentions_ipc_phase3(self):
-        wording = _build_dr_fewsnet_question_wording(
+        wording = _build_dr_phase3_question_wording(
             "ETH", date(2026, 4, 1), date(2026, 9, 30)
         )
         assert "IPC Phase 3+" in wording
 
     def test_mentions_crisis_or_worse(self):
-        wording = _build_dr_fewsnet_question_wording(
+        wording = _build_dr_phase3_question_wording(
             "ETH", date(2026, 4, 1), date(2026, 9, 30)
         )
         assert "Crisis or worse" in wording
 
     def test_mentions_fewsnet(self):
-        wording = _build_dr_fewsnet_question_wording(
+        wording = _build_dr_phase3_question_wording(
             "ETH", date(2026, 4, 1), date(2026, 9, 30)
         )
         assert "FEWS NET" in wording
 
     def test_includes_country_name(self):
-        wording = _build_dr_fewsnet_question_wording(
+        wording = _build_dr_phase3_question_wording(
             "ETH", date(2026, 4, 1), date(2026, 9, 30)
         )
         # ETH is in COUNTRY_NAMES -> "Ethiopia"
         assert "Ethiopia" in wording
 
     def test_includes_dates(self):
-        wording = _build_dr_fewsnet_question_wording(
+        wording = _build_dr_phase3_question_wording(
             "SOM", date(2026, 4, 1), date(2026, 9, 30)
         )
         assert "2026-04-01" in wording
         assert "2026-09-30" in wording
 
     def test_unknown_country_uses_iso3(self):
-        wording = _build_dr_fewsnet_question_wording(
-            "KEN", date(2026, 4, 1), date(2026, 9, 30)
+        wording = _build_dr_phase3_question_wording(
+            "XXX", date(2026, 4, 1), date(2026, 9, 30)
         )
-        # KEN is not in COUNTRY_NAMES, so falls back to ISO3
-        assert "KEN" in wording
+        # An ISO3 with no registry entry falls back to the code itself.
+        assert "XXX" in wording
 
     def test_mentions_current_situation(self):
-        wording = _build_dr_fewsnet_question_wording(
+        wording = _build_dr_phase3_question_wording(
             "ETH", date(2026, 4, 1), date(2026, 9, 30)
         )
         assert "Current Situation" in wording

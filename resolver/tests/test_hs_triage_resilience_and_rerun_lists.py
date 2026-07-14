@@ -75,6 +75,7 @@ def test_hs_triage_fallback_used(monkeypatch):
         prompt_version: str | None = None,
         component: str = "",
         run_id: str | None = None,
+        log_call: bool = True,
     ) -> tuple[str, dict[str, Any], str]:
         if ms.provider == "google":
             return "", {"total_tokens": 0}, "timeout after 60s"
@@ -122,6 +123,7 @@ def test_hs_triage_json_repair(monkeypatch, tmp_path):
         prompt_version: str | None = None,
         component: str = "",
         run_id: str | None = None,
+        log_call: bool = True,
     ) -> tuple[str, dict[str, Any], str]:
         if "json_repair" in prompt_key:
             if "regime_change" in prompt_key:
