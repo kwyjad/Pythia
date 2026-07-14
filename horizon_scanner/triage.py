@@ -73,6 +73,21 @@ logger = logging.getLogger(__name__)
 
 HS_TEMPERATURE = float(os.getenv("HS_TEMPERATURE", "0.0"))
 
+
+def _triage_pass_count() -> int:
+    """Number of triage LLM passes per hazard (default 1, max 2).
+
+    Mirrors regime_change_llm._rc_pass_count: two passes only add signal
+    when pass 2 differs (model/temperature); with the default config they
+    are deterministic duplicates and the mean merge is a no-op.
+    """
+    try:
+        n = int(os.getenv("PYTHIA_HS_TRIAGE_PASSES", "1"))
+    except ValueError:
+        n = 1
+    return max(1, min(2, n))
+
+
 # All triage-eligible hazard codes (DI excluded).
 _TRIAGE_HAZARDS = {"ACE", "DR", "FL", "TC"}
 
@@ -781,7 +796,7 @@ def _run_triage_for_single_hazard(
 
     pass_extracts: list[Dict[str, Any]] = []
 
-    for pass_idx in (1, 2):
+    for pass_idx in range(1, _triage_pass_count() + 1):
         call_start = time.time()
         text, usage, error, model_spec = asyncio.run(
             _call_triage_model(prompt, run_id=run_id, fallback_specs=fallback_specs, pass_idx=pass_idx)
@@ -873,8 +888,14 @@ def _run_triage_for_single_hazard(
 
         pass_extracts.append(triage_pass)
 
-    # Merge two passes for this hazard
-    merged = _merge_single_triage_passes(pass_extracts[0], pass_extracts[1])
+    # Merge the passes for this hazard. With a single pass this reduces to
+    # merge(p, p), which is idempotent for score/status/drivers; blank the
+    # pass-2 diagnostics so the data_quality blob doesn't read as two
+    # independently-agreeing passes.
+    merged = _merge_single_triage_passes(pass_extracts[0], pass_extracts[-1])
+    if len(pass_extracts) == 1:
+        merged["data_quality"]["score_pass2"] = None
+        merged["data_quality"]["pass2"] = {}
     return merged
 
 
