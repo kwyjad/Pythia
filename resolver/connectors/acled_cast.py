@@ -115,14 +115,36 @@ class AcledCastConnector:
             # Prefer the current calendar year's forecasts (ACLED's documented
             # `year` filter). This is defensive: if the no-param default view
             # is ever stale/truncated, the year filter surfaces the latest
-            # issue. Falls back to an unfiltered pull when the year filter
-            # returns nothing, so we never regress to zero data.
+            # issue. Falls back to an unfiltered pull when the year filters
+            # return nothing, so we never regress to zero data.
+            #
+            # `year` filters the forecast TARGET year, and CAST issues
+            # 6-month-ahead forecasts — so late in the year the freshest
+            # issue's target months spill into next year. Fetch BOTH target
+            # years and merge; otherwise a non-empty-but-stale current-year
+            # response would mask the new issue and skip the fallback.
             current_year = date.today().year
             records = self._fetch_all_records(year=current_year)
+            try:
+                next_records = self._fetch_all_records(year=current_year + 1)
+            except Exception as exc:  # pragma: no cover - defensive
+                next_records = []
+                LOG.warning(
+                    "[acled_cast] year=%d pull failed (%s) — continuing with "
+                    "year=%d records only",
+                    current_year + 1, exc, current_year,
+                )
+            # Never trust an ACLED request-side filter — verify by each
+            # record's OWN year field so an ignored/buggy `year` param can't
+            # double-count the same rows across the two pulls.
+            records += [
+                rec for rec in next_records
+                if str(rec.get("year", "")).strip() == str(current_year + 1)
+            ]
             if not records:
                 LOG.info(
-                    "[acled_cast] no records for year=%d — retrying unfiltered",
-                    current_year,
+                    "[acled_cast] no records for year in (%d, %d) — retrying unfiltered",
+                    current_year, current_year + 1,
                 )
                 records = self._fetch_all_records()
         except Exception as exc:
