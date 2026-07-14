@@ -21,7 +21,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict
 
-from forecaster.providers import ModelSpec, call_chat_ms
+from forecaster.providers import ModelSpec, call_chat_ms, estimate_cost_usd
 from horizon_scanner._utils import parse_json_response, resolve_hs_model
 from horizon_scanner.regime_change import compute_level, compute_score, coerce_regime_change
 from pythia.web_research import fetch_evidence_pack
@@ -283,6 +283,7 @@ async def _synthesize_counter_evidence(
         purpose="hs_adversarial_check",
     )
 
+    call_start = time.time()
     text, usage, error = await call_chat_ms(
         spec,
         prompt,
@@ -291,7 +292,38 @@ async def _synthesize_counter_evidence(
         prompt_version="1.0.0",
         component="HorizonScanner",
         run_id=run_id,
+        log_call=False,  # rich-logged below with run/hazard linkage
     )
+
+    # Rich-log the synthesis call: the generic providers row had no
+    # phase/iso3/hazard/run linkage, so these calls were invisible in the
+    # debug bundle, run cost attribution, and health report.
+    try:
+        from horizon_scanner.llm_logging import log_hs_llm_call
+        from pythia.test_mode import is_test_mode
+
+        usage_for_log = dict(usage or {})
+        usage_for_log.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
+        if (usage_for_log.get("cost_usd") in (None, 0, 0.0)) and (
+            usage_for_log.get("total_tokens") or 0
+        ):
+            usage_for_log["cost_usd"] = estimate_cost_usd(model_id, usage_for_log)
+        log_hs_llm_call(
+            hs_run_id=run_id,
+            iso3=iso3,
+            hazard_code=f"ADVERSARIAL_SYNTH_{hazard_code}",
+            model_spec=spec,
+            prompt_text=prompt,
+            response_text=text or "",
+            usage=usage_for_log,
+            error_text=str(error) if error else None,
+            is_test=is_test_mode(),
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "Failed to log adversarial synthesis call for %s %s",
+            iso3, hazard_code, exc_info=True,
+        )
 
     if error or not text:
         raise ValueError(f"LLM synthesis failed: {error or 'empty response'}")

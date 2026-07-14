@@ -67,6 +67,25 @@ logger = logging.getLogger(__name__)
 
 HS_TEMPERATURE = float(os.getenv("HS_TEMPERATURE", "0.0"))
 
+
+def _rc_pass_count() -> int:
+    """Number of RC LLM passes per hazard (default 1, max 2).
+
+    Two passes only add signal when pass 2 is configured for diversity
+    (a different `PYTHIA_RC_MODEL_PASS2` model or a nonzero temperature).
+    With the default config — same model, same prompt, temperature 0.0 —
+    the passes are deterministic duplicates and the mean-based merge is a
+    no-op, so pass 2 doubles cost and latency for zero information
+    (verified verbatim-identical outputs, July 2026 two-country run).
+    Read at call time so tests and workflows can override per run.
+    """
+    try:
+        n = int(os.getenv("PYTHIA_HS_RC_PASSES", "1"))
+    except ValueError:
+        n = 1
+    return max(1, min(2, n))
+
+
 # All RC-eligible hazard codes (DI excluded).
 _RC_HAZARDS = {"ACE", "DR", "FL", "TC"}
 
@@ -133,6 +152,7 @@ async def _call_rc_model(
             prompt_version="2.0.0",
             component="HorizonScanner",
             run_id=run_id,
+            log_call=False,  # rich-logged via log_hs_llm_call in the pass loop
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -158,6 +178,7 @@ async def _call_rc_model(
                 prompt_version="2.0.0",
                 component="HorizonScanner",
                 run_id=run_id,
+                log_call=False,  # rich-logged via log_hs_llm_call in the pass loop
             )
         except Exception as exc:  # noqa: BLE001
             fallback_error = f"provider call error: {exc}"
@@ -677,7 +698,7 @@ def _run_rc_for_single_hazard(
     pass_rcs: list[Dict[str, Any]] = []
     pass_results: list[dict[str, Any]] = []
 
-    for pass_idx in (1, 2):
+    for pass_idx in range(1, _rc_pass_count() + 1):
         call_start = time.time()
         text, usage, error, model_spec = asyncio.run(
             _call_rc_model(prompt, run_id=run_id, fallback_specs=fallback_specs, pass_idx=pass_idx)
@@ -781,8 +802,11 @@ def _run_rc_for_single_hazard(
             "model_selected": usage_for_log.get("model_selected"),
         })
 
-    # Merge two passes for this hazard
-    merged = _merge_single_hazard_passes(pass_rcs[0], pass_rcs[1])
+    # Merge the passes for this hazard. With a single pass this reduces to
+    # merge(p, p), which is exactly idempotent (mean(x, x) = x, equal
+    # direction/window, deduped bullets) and keeps the status semantics:
+    # valid -> "ok", invalid -> "error".
+    merged = _merge_single_hazard_passes(pass_rcs[0], pass_rcs[-1])
     return merged
 
 

@@ -110,9 +110,13 @@ class ENSOForecast:
 
     def to_prompt_context(self) -> str:
         """Generate a concise text block for injection into any hazard prompt."""
-        lines = [
-            f"## ENSO State and Forecast (IRI/CPC, published {self.publication_date})"
-        ]
+        # publication_date is regex-scraped and often empty — an unguarded
+        # f-string rendered "published )" in prompts.
+        if self.publication_date:
+            header = f"## ENSO State and Forecast (IRI/CPC, published {self.publication_date})"
+        else:
+            header = "## ENSO State and Forecast (IRI/CPC)"
+        lines = [header]
 
         if self.current_state:
             state_line = f"Current state: {self.current_state}"

@@ -512,14 +512,45 @@ class TestYearFilterAndStaleness:
             [_make_cast_record(month="March", year=2026)]
         )
         full.raise_for_status = MagicMock()
-        # First call (year-filtered) returns empty → second call (unfiltered) has data.
-        mock_get.side_effect = [empty, full]
+        # Both year-filtered pulls (current, current+1) return empty → the
+        # third call (unfiltered) has data.
+        mock_get.side_effect = [empty, empty, full]
 
         df = AcledCastConnector().fetch_forecasts()
         assert not df.empty
-        # Second request must NOT carry the year filter.
-        _args, kwargs = mock_get.call_args_list[1]
+        # Third request must NOT carry the year filter.
+        _args, kwargs = mock_get.call_args_list[2]
         assert "year" not in kwargs["params"]
+
+    @patch("resolver.ingestion.utils.iso_normalize.to_iso3", return_value="NGA")
+    @patch("resolver.connectors.acled_cast.requests.get")
+    @patch("resolver.ingestion.acled_auth.get_auth_header",
+           return_value={"Authorization": "Bearer test"})
+    def test_next_year_targets_are_fetched_and_merged(self, mock_auth, mock_get, mock_iso3):
+        """Year-boundary regression: in Nov/Dec a fresh issue's targets fall
+        mostly in the NEXT calendar year. A non-empty-but-stale current-year
+        response must not mask them — both target years are fetched and
+        merged, and no unfiltered fallback is needed."""
+        this_year = date.today().year
+        cur = MagicMock()
+        cur.json.return_value = _make_api_response(
+            [_make_cast_record(month="December", year=this_year)]
+        )
+        cur.raise_for_status = MagicMock()
+        nxt = MagicMock()
+        nxt.json.return_value = _make_api_response(
+            [_make_cast_record(month="March", year=this_year + 1)]
+        )
+        nxt.raise_for_status = MagicMock()
+        mock_get.side_effect = [cur, nxt]
+
+        AcledCastConnector().fetch_forecasts()
+
+        assert len(mock_get.call_args_list) == 2
+        _args, kwargs0 = mock_get.call_args_list[0]
+        _args, kwargs1 = mock_get.call_args_list[1]
+        assert kwargs0["params"]["year"] == this_year
+        assert kwargs1["params"]["year"] == this_year + 1
 
     @patch("resolver.ingestion.utils.iso_normalize.to_iso3", return_value="NGA")
     @patch("resolver.connectors.acled_cast.requests.get")

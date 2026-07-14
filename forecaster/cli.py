@@ -2631,6 +2631,7 @@ async def _call_spd_model_for_spec(
             prompt_version="1.0.0",
             component="Forecaster",
             run_id=run_id,
+            log_call=False,  # rich-logged via log_forecaster_llm_call (spd_v2)
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -2671,6 +2672,7 @@ async def _call_spd_model_for_spec(
                 prompt_version="1.0.0",
                 component="Forecaster",
                 run_id=run_id,
+                log_call=False,  # usage merged into the rich spd_v2 row
             )
         except Exception:
             return text, usage, error or "self_search_disabled", ms
@@ -2719,6 +2721,7 @@ async def _call_spd_model_for_spec(
             prompt_version="1.0.0",
             component="Forecaster",
             run_id=run_id,
+            log_call=False,  # usage merged into the rich spd_v2 row
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -3950,12 +3953,17 @@ async def _run_binary_forecast_for_question(
         current_alerts: list[dict] = []
         try:
             alert_con = connect(read_only=True)
+            # Only Orange/Red event months: the binary question's own
+            # definition says Green does not count, so surfacing Green/zero
+            # rows as "alerts" was pure noise that biased models upward.
             alert_rows = alert_con.execute(
                 """
                 SELECT ym, value, alertlevel
                 FROM facts_resolved
                 WHERE upper(iso3) = ? AND upper(hazard_code) = ?
                   AND lower(metric) = 'event_occurrence'
+                  AND COALESCE(value, 0) >= 1
+                  AND upper(COALESCE(alertlevel, '')) IN ('ORANGE', 'RED')
                 ORDER BY ym DESC LIMIT 6
                 """,
                 [iso3, hz],

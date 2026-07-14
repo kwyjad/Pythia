@@ -87,7 +87,7 @@ def _get_risk_index_binary(
             "normalize": normalize, "rows": [], "metric_type": "binary",
         }
 
-    run_cte, run_join = _run_filter_cte(con, forecaster_run_id)
+    run_cte, run_join = _run_filter_cte(con, forecaster_run_id, include_test=include_test)
     run_cte_sql = f", {run_cte}" if run_cte else ""
 
     model_name_available = _table_has_columns(con, "forecasts_ensemble", ["model_name"])
@@ -447,7 +447,7 @@ def get_risk_index(
         )
         centroid_expr = eiv_sql.fallback_centroid_expr(":metric", bucket_index_expr)
 
-    run_cte, run_join = _run_filter_cte(con, forecaster_run_id)
+    run_cte, run_join = _run_filter_cte(con, forecaster_run_id, include_test=include_test)
     run_cte_sql = f", {run_cte}" if run_cte else ""
 
     model_name_available = _table_has_columns(con, "forecasts_ensemble", ["model_name"])
@@ -731,7 +731,7 @@ def rankings(
     include_test: bool = Query(False),
 ):
     con = _con()
-    run_cte, run_join = _run_filter_cte(con, forecaster_run_id)
+    run_cte, run_join = _run_filter_cte(con, forecaster_run_id, include_test=include_test)
     run_cte_sql = f"{run_cte}," if run_cte else ""
     # Fallback centroid CASE derived from the canonical BUCKET_SPECS (labels
     # are code-controlled constants, not user input). PA specs cover the

@@ -430,6 +430,7 @@ async def run_ensemble_spd(
                     prompt_text,
                     temperature=kwargs.get("temperature", 0.2),
                     run_id=run_id,
+                    log_call=False,  # wrapped by log_forecaster_llm_call (rich row)
                 )
                 # Attach provider error text into usage so we can surface it downstream
                 if err:

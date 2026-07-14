@@ -3409,13 +3409,19 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
         lines.append("")
         lines.append("| Question | Wall (s) | ISO3 | Hazard |")
         lines.append("|----------|----------|------|--------|")
+        # Track-2 questions have no wall_ms (single-model path); fall back to
+        # compute_ms so they rank meaningfully instead of rendering 0.0.
+        def _wall_or_compute_ms(r: dict) -> float:
+            return float(r.get("wall_ms") or r.get("compute_ms") or 0.0)
+
         for row in sorted(
             data.question_run_metrics,
-            key=lambda r: -(float(r.get("wall_ms") or 0.0)),
+            key=lambda r: -_wall_or_compute_ms(r),
         )[:10]:
-            wall_s = float(row.get("wall_ms") or 0) / 1000.0
+            wall_s = _wall_or_compute_ms(row) / 1000.0
+            suffix = "" if row.get("wall_ms") else " (compute)"
             lines.append(
-                f"| {row.get('question_id')} | {wall_s:.1f} | {row.get('iso3') or ''} "
+                f"| {row.get('question_id')} | {wall_s:.1f}{suffix} | {row.get('iso3') or ''} "
                 f"| {row.get('hazard_code') or ''} |"
             )
         lines.append("")
@@ -4035,7 +4041,7 @@ def emit_question_metrics_csv(
                 "metric": q.get("metric") or "",
                 "target_month": q.get("target_month") or "",
                 "triage_tier": scenario.get("triage_tier") or "",
-                "spd_status": "",  # Filled later if available
+                "spd_status": _load_spd_status(con, data.forecaster_run_id, qid) or "",
                 "scenario_status": scenario.get("status") or "",
                 "wall_ms": metrics.get("wall_ms") or "",
                 "compute_ms": metrics.get("compute_ms") or "",

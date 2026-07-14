@@ -93,11 +93,16 @@ class SeasonalForecast:
         if parts:
             lines.append("Forecast range: " + ", ".join(parts) + ".")
         
-        if self.prob_above_normal is not None:
+        # Guard ALL three terciles: they are parsed by independent regexes, so a
+        # partial parse leaves some None and a bare format spec would raise
+        # (same failure mode as the July 2026 TSR tercile fix).
+        if None not in (self.prob_above_normal, self.prob_near_normal, self.prob_below_normal):
             lines.append(
                 f"Season probabilities: {self.prob_above_normal:.0%} above-normal, "
                 f"{self.prob_near_normal:.0%} near-normal, {self.prob_below_normal:.0%} below-normal."
             )
+        elif self.prob_above_normal is not None:
+            lines.append(f"Season probabilities: {self.prob_above_normal:.0%} above-normal.")
         
         if self.enso_context:
             lines.append(f"ENSO context: {self.enso_context}")
@@ -397,8 +402,10 @@ def _log_forecast(f: SeasonalForecast):
         logger.info(f"    Major hurricanes: {f.major_hurricanes_range}")
     if f.tropical_cyclones_range:
         logger.info(f"    Tropical cyclones: {f.tropical_cyclones_range}")
-    if f.prob_above_normal is not None:
+    if None not in (f.prob_above_normal, f.prob_near_normal, f.prob_below_normal):
         logger.info(f"    Probs: above={f.prob_above_normal:.0%}, near={f.prob_near_normal:.0%}, below={f.prob_below_normal:.0%}")
+    elif f.prob_above_normal is not None:
+        logger.info(f"    Probs: above={f.prob_above_normal:.0%} (near/below not parsed)")
 
 
 # ---------------------------------------------------------------------------

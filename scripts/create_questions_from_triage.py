@@ -343,10 +343,15 @@ def _upsert_question(
         # JSON embeds hs_run_id/tier/triage_score from its run, so refresh it
         # together with the column — otherwise the blob keeps pointing at the
         # first run while the column points at the latest.
+        # is_test transitions one way only (TRUE -> FALSE): a production run
+        # adopting a same-epoch test question clears the flag (otherwise its
+        # forecasts stay hidden and excluded from calibration), while a test
+        # run can never taint an existing production question.
         con.execute(
-            "UPDATE questions SET hs_run_id = ?, track = ?, pythia_metadata_json = ? "
+            "UPDATE questions SET hs_run_id = ?, track = ?, pythia_metadata_json = ?, "
+            "is_test = (COALESCE(is_test, FALSE) AND ?) "
             "WHERE question_id = ?",
-            [hs_run_id, track, meta_json, question_id],
+            [hs_run_id, track, meta_json, is_test, question_id],
         )
         return False  # signal: no new row inserted
     con.execute(

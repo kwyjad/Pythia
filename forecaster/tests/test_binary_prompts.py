@@ -59,7 +59,10 @@ def test_prompt_contains_all_sections():
 
 
 def test_prompt_with_current_alerts():
-    """Prompt should include current GDACS alerts."""
+    """Prompt should include recent Orange/Red GDACS event months.
+
+    facts_resolved rows carry no event name, so the section renders
+    [level] ym only (the old event-name slot always printed '?')."""
     question = {
         "iso3": "BGD",
         "hazard_code": "FL",
@@ -68,7 +71,7 @@ def test_prompt_with_current_alerts():
         "window_start_date": "2026-04",
     }
     alerts = [
-        {"alertlevel": "Orange", "event_name": "Flood-2026-001", "ym": "2026-03"},
+        {"alertlevel": "Orange", "ym": "2026-03"},
     ]
     prompt = build_binary_event_prompt(
         question=question,
@@ -77,8 +80,10 @@ def test_prompt_with_current_alerts():
         structured_data={},
         today="2026-03-21",
     )
-    assert "Orange" in prompt
-    assert "Flood-2026-001" in prompt
+    assert "[Orange] 2026-03" in prompt
+    assert "Orange/Red alerts" in prompt
+    alert_lines = [l for l in prompt.splitlines() if l.strip().startswith("- [")]
+    assert alert_lines and all("?" not in l for l in alert_lines)
 
 
 def test_prompt_with_structured_data():
@@ -308,3 +313,66 @@ def test_base_rate_trend_detection():
     con.close()
 
     assert result["trend"] == "increasing"
+
+def test_base_rate_coverage_window_captured():
+    """The base rate carries the ACTUAL coverage window (the header used to
+    hardcode '2015-present' regardless of the data)."""
+    con = duckdb.connect(":memory:")
+    rows = [
+        (f"{y:04d}-{m:02d}", "IRN", "DR", "event_occurrence", 0.0)
+        for y in (2021, 2022)
+        for m in range(10, 13)
+    ]
+    _setup_facts_resolved(con, rows)
+    result = build_binary_base_rate("IRN", "DR", conn=con)
+    con.close()
+
+    assert result["coverage_start"] == "2021-10"
+    assert result["coverage_end"] == "2022-12"
+
+
+def test_base_rate_section_renders_dynamic_coverage():
+    from forecaster.binary_prompts import _section_base_rate
+
+    base_rate = {
+        "total_months": 54,
+        "event_months": 0,
+        "base_rate_pct": 0.0,
+        "seasonal_pattern": {str(m): 0.0 for m in range(1, 13)},
+        "recent_12m_events": 0,
+        "recent_12m_rate": 0.0,
+        "trend": "stable",
+        "coverage_start": "2021-10",
+        "coverage_end": "2026-05",
+    }
+    text = _section_base_rate("Iran", "drought", base_rate)
+    assert "GDACS, 2021-10 to 2026-05" in text
+    assert "2015" not in text
+
+
+def test_reliefweb_list_renders_with_header():
+    """ReliefWeb titles must carry their own section header — headerless
+    bullets rendered visually nested under ENSO STATE (July 2026 run)."""
+    question = {
+        "iso3": "IRN",
+        "hazard_code": "DR",
+        "metric": "EVENT_OCCURRENCE",
+        "country_name": "Iran",
+        "window_start_date": "2026-08",
+    }
+    prompt = build_binary_event_prompt(
+        question=question,
+        base_rate={},
+        current_alerts=[],
+        structured_data={
+            "enso_context": "## ENSO State and Forecast (IRI/CPC)\nCurrent state: Neutral.",
+            "reliefweb_reports": [
+                {"title": "Situation Report 1"},
+                {"title": "Situation Report 2"},
+            ],
+        },
+        today="2026-07-14",
+    )
+    assert "RECENT RELIEFWEB REPORTS:" in prompt
+    # Header must precede the first title.
+    assert prompt.index("RECENT RELIEFWEB REPORTS:") < prompt.index("Situation Report 1")

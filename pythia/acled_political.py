@@ -75,13 +75,19 @@ def _db_url() -> str:
     return DEFAULT_DB_URL
 
 
-def _iso_numeric(iso3: str) -> Optional[int]:
-    """Numeric ISO 3166-1 code for the ACLED API's documented `iso` filter."""
+def _iso_numeric(iso3: str) -> Optional[str]:
+    """Numeric ISO 3166-1 code for the ACLED API's documented `iso` filter.
+
+    Returned as pycountry's zero-padded string (e.g. Afghanistan -> "004"):
+    coercing through int() strips the leading zeros, and if ACLED matches the
+    padded form a bare `iso=4` silently filters to nothing. Client-side
+    attribution is unaffected either way; this only protects coverage.
+    """
     try:
         import pycountry
 
         country = pycountry.countries.get(alpha_3=(iso3 or "").upper())
-        return int(country.numeric) if country else None
+        return str(country.numeric) if country else None
     except Exception:
         return None
 
