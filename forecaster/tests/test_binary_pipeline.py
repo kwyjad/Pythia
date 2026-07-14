@@ -222,3 +222,15 @@ def test_write_binary_outputs_roundtrip(tmp_path):
         assert len(ens_rows) == 30  # 6 months × 5 buckets
     finally:
         con.close()
+
+def test_binary_question_dict_resolves_country_name():
+    """The binary prompt's question dict must carry the resolved country
+    name, not the raw ISO3 — prompts previously read "will affect IRN"
+    (July 2026 run-2 review). Pinned at source level because the enclosing
+    function has no light test seam."""
+    import inspect
+    from forecaster import cli
+
+    src = inspect.getsource(cli._run_binary_forecast_for_question)
+    assert '"country_name": _load_country_names().get(iso3, iso3)' in src
+    assert '"country_name": iso3,' not in src

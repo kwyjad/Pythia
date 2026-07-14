@@ -188,8 +188,6 @@ def get_seasonal_tc_context_for_country(iso3: str) -> str:
         return ""
 
     forecasts = _load_forecasts()
-    if not forecasts:
-        return ""
 
     blocks = []
     seen = set()
@@ -202,6 +200,20 @@ def get_seasonal_tc_context_for_country(iso3: str) -> str:
             if key not in seen:
                 seen.add(key)
                 blocks.append(ctx)
+
+    # Final fallback for NIO countries: the climatology block needs zero
+    # network, so serve it in-process when neither the DB cache nor the JSON
+    # file has anything for the basin (e.g. the DB artifact predates the
+    # last ingest). SWI has no equivalent — its outlook is a real forecast.
+    if "NIO" in basins and not any("North Indian" in b for b in blocks):
+        try:
+            from .imd_nio_scraper import build_nio_context
+
+            nio = build_nio_context(fetch_live=False)
+            if nio:
+                blocks.append(nio[0].to_prompt_context())
+        except Exception as exc:  # noqa: BLE001
+            log.debug("NIO climatology fallback failed for %s: %s", iso3, exc)
 
     return "\n\n".join(blocks)
 

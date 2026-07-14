@@ -3990,7 +3990,9 @@ async def _run_binary_forecast_for_question(
                 "iso3": iso3,
                 "hazard_code": hz,
                 "metric": metric,
-                "country_name": iso3,
+                # Resolve the human-readable name (the SPD path already does);
+                # passing the ISO3 made prompts read "will affect IRN".
+                "country_name": _load_country_names().get(iso3, iso3),
                 "window_start_date": window_start,
                 "wording": wording,
             },
