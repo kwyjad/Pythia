@@ -210,3 +210,109 @@ def test_create_questions_honors_blocked_need_full_spd(tmp_path: Path) -> None:
     assert ("SOM", "ACE") not in rows, "gated priority hazard must not produce questions"
     assert ("ETH", "FL") in rows, "need_full_spd=TRUE hazard must still produce questions"
     assert created > 0
+
+def _seed_ace_triage(db_path: Path, hs_run_id: str) -> None:
+    con = duckdb.connect(str(db_path))
+    try:
+        ensure_schema(con)
+        con.execute(
+            """
+            INSERT INTO hs_runs (hs_run_id, generated_at, git_sha, config_profile, countries_json)
+            VALUES (?, CURRENT_TIMESTAMP, 'abc123', 'default', '[]')
+            """,
+            [hs_run_id],
+        )
+        con.execute(
+            """
+            INSERT INTO hs_triage (
+                run_id, iso3, hazard_code, tier, triage_score, need_full_spd,
+                drivers_json, regime_shifts_json, data_quality_json, scenario_stub
+            ) VALUES (?, 'SOM', 'ACE', 'priority', 0.85, TRUE, '[]', '[]', '{}', '')
+            """,
+            [hs_run_id],
+        )
+    finally:
+        con.close()
+
+
+def _question_is_test_flags(db_path: Path) -> set[bool]:
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute("SELECT COALESCE(is_test, FALSE) FROM questions").fetchall()
+    finally:
+        con.close()
+    return {bool(r[0]) for r in rows}
+
+
+def test_same_epoch_production_rerun_clears_test_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A production run adopting same-epoch test questions must clear is_test,
+    otherwise its forecasts stay hidden on the dashboard and excluded from
+    resolution/scoring/calibration (which all inherit questions.is_test)."""
+    db_path = tmp_path / "triage_istest.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    _seed_ace_triage(db_path, "hs_run_test")
+    monkeypatch.setenv("PYTHIA_TEST_MODE", "1")
+    assert create_questions_from_triage(db_url, hs_run_id="hs_run_test") == 2
+    assert _question_is_test_flags(db_path) == {True}
+
+    # Same-epoch production re-run: UPDATE path must flip is_test to FALSE.
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(
+            """
+            INSERT INTO hs_runs (hs_run_id, generated_at, git_sha, config_profile, countries_json)
+            VALUES ('hs_run_prod', CURRENT_TIMESTAMP, 'abc123', 'default', '[]')
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO hs_triage (
+                run_id, iso3, hazard_code, tier, triage_score, need_full_spd,
+                drivers_json, regime_shifts_json, data_quality_json, scenario_stub
+            ) VALUES ('hs_run_prod', 'SOM', 'ACE', 'priority', 0.85, TRUE, '[]', '[]', '{}', '')
+            """
+        )
+    finally:
+        con.close()
+    monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+    assert create_questions_from_triage(db_url, hs_run_id="hs_run_prod") == 0  # updated, not inserted
+    assert _question_is_test_flags(db_path) == {False}
+
+
+def test_same_epoch_test_rerun_never_taints_production_question(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The is_test transition is one-way (TRUE -> FALSE): a later test-mode
+    re-run must not flip an existing production question back to test."""
+    db_path = tmp_path / "triage_istest_rev.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    _seed_ace_triage(db_path, "hs_run_prod")
+    monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+    assert create_questions_from_triage(db_url, hs_run_id="hs_run_prod") == 2
+    assert _question_is_test_flags(db_path) == {False}
+
+    con = duckdb.connect(str(db_path))
+    try:
+        con.execute(
+            """
+            INSERT INTO hs_runs (hs_run_id, generated_at, git_sha, config_profile, countries_json)
+            VALUES ('hs_run_test2', CURRENT_TIMESTAMP, 'abc123', 'default', '[]')
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO hs_triage (
+                run_id, iso3, hazard_code, tier, triage_score, need_full_spd,
+                drivers_json, regime_shifts_json, data_quality_json, scenario_stub
+            ) VALUES ('hs_run_test2', 'SOM', 'ACE', 'priority', 0.85, TRUE, '[]', '[]', '{}', '')
+            """
+        )
+    finally:
+        con.close()
+    monkeypatch.setenv("PYTHIA_TEST_MODE", "1")
+    assert create_questions_from_triage(db_url, hs_run_id="hs_run_test2") == 0
+    assert _question_is_test_flags(db_path) == {False}

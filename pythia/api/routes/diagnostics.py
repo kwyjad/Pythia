@@ -120,12 +120,21 @@ def diagnostics_summary(include_test: bool = Query(False)):
             )
             if hs_id_col and hs_time_col:
                 meta_select = f"{hs_meta_col} AS meta" if hs_meta_col else "NULL AS meta"
+                # Respect the test filter: with Test OFF and only test runs
+                # present, the latest *production* run is what should surface
+                # (same class of gap as the #796 run_summary fix).
+                test_clause = (
+                    "WHERE COALESCE(is_test, FALSE) = FALSE"
+                    if not include_test and "is_test" in hs_cols
+                    else ""
+                )
                 hs_row = con.execute(
                     f"""
                     SELECT {hs_id_col} AS run_id,
                            {hs_time_col} AS created_at,
                            {meta_select}
                     FROM hs_runs
+                    {test_clause}
                     ORDER BY {hs_time_col} DESC NULLS LAST
                     LIMIT 1
                     """

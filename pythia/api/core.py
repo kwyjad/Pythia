@@ -710,11 +710,16 @@ def _resolve_forecaster_run_id(
 def _run_filter_cte(
     con: duckdb.DuckDBPyConnection,
     forecaster_run_id: Optional[str] = None,
+    include_test: bool = False,
 ) -> tuple[str, str]:
     """Return (cte_sql, join_sql) to filter forecasts_ensemble to one run per question.
 
-    If *forecaster_run_id* is given, filter to that exact run.
-    Otherwise, pick the latest run per question via MAX(run_id).
+    If *forecaster_run_id* is given, filter to that exact run (an explicit
+    run id is an operator override and is not test-filtered).
+    Otherwise, pick the latest run per question via MAX(run_id); with
+    include_test=False, test-run forecasts are excluded so a production
+    question later re-forecast by a test run still serves its latest
+    production ensemble.
     Returns ("", "") if the table lacks a run_id column (backward compat).
     """
     # NOTE(code-motion): this function historically lived in pythia.api.app,
@@ -746,11 +751,17 @@ def _run_filter_cte(
         )
         join = "JOIN fc_run_filter fr ON fr.question_id = fe.question_id AND fr.run_id = fe.run_id"
     else:
+        test_clause = ""
+        if not include_test and _table_has_columns_impl(
+            con, "forecasts_ensemble", ["is_test"]
+        ):
+            test_clause = "              AND COALESCE(is_test, FALSE) = FALSE\n"
         cte = (
             "fc_run_filter AS (\n"
             "            SELECT question_id, MAX(run_id) AS run_id\n"
             "            FROM forecasts_ensemble\n"
             "            WHERE run_id IS NOT NULL\n"
+            f"{test_clause}"
             "            GROUP BY question_id\n"
             "        )"
         )
