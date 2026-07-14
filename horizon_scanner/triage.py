@@ -232,6 +232,7 @@ async def _call_triage_model(
             prompt_version="1.0.0",
             component="HorizonScanner",
             run_id=run_id,
+            log_call=False,  # rich-logged via log_hs_llm_call in the pass loop
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -257,6 +258,7 @@ async def _call_triage_model(
                 prompt_version="1.0.0",
                 component="HorizonScanner",
                 run_id=run_id,
+                log_call=False,  # rich-logged via log_hs_llm_call in the pass loop
             )
         except Exception as exc:  # noqa: BLE001
             fallback_error = f"provider call error: {exc}"

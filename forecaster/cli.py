@@ -2631,6 +2631,7 @@ async def _call_spd_model_for_spec(
             prompt_version="1.0.0",
             component="Forecaster",
             run_id=run_id,
+            log_call=False,  # rich-logged via log_forecaster_llm_call (spd_v2)
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -2671,6 +2672,7 @@ async def _call_spd_model_for_spec(
                 prompt_version="1.0.0",
                 component="Forecaster",
                 run_id=run_id,
+                log_call=False,  # usage merged into the rich spd_v2 row
             )
         except Exception:
             return text, usage, error or "self_search_disabled", ms
@@ -2719,6 +2721,7 @@ async def _call_spd_model_for_spec(
             prompt_version="1.0.0",
             component="Forecaster",
             run_id=run_id,
+            log_call=False,  # usage merged into the rich spd_v2 row
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)

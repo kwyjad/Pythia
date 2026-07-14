@@ -1118,8 +1118,16 @@ async def call_chat_ms(
     prompt_version: Optional[str] = None,
     component: str = "Forecaster",
     run_id: str | None = None,
+    log_call: bool = True,
 ) -> tuple[str, Dict[str, int], str]:
-    """Call the configured provider for a model spec and return (text, usage, error)."""
+    """Call the configured provider for a model spec and return (text, usage, error).
+
+    log_call: pass False from call sites that write their own rich llm_calls
+    row (log_hs_llm_call / log_forecaster_llm_call). The generic row written
+    here has no phase/iso3/run linkage, so leaving it on next to a rich row
+    double-counts the call's cost in phase-less aggregations (the Costs page
+    "other" bucket) — see the July 2026 telemetry fix.
+    """
 
     if not ms.active:
         return "", usage_to_dict(None), f"provider {ms.provider} inactive"
@@ -1341,16 +1349,17 @@ async def call_chat_ms(
     if hs_usage:
         usage.update(hs_usage)
     cost = result.cost_usd if result.cost_usd else estimate_cost_usd(ms.model_id, usage)
-    _log_llm_call(
-        component=component,
-        model=ms.model_id,
-        prompt_key=prompt_key,
-        prompt_version=prompt_version or _FORECASTER_PROMPT_VERSION,
-        usage=usage,
-        cost=cost,
-        latency_ms=elapsed_ms,
-        success=not bool(error),
-    )
+    if log_call:
+        _log_llm_call(
+            component=component,
+            model=ms.model_id,
+            prompt_key=prompt_key,
+            prompt_version=prompt_version or _FORECASTER_PROMPT_VERSION,
+            usage=usage,
+            cost=cost,
+            latency_ms=elapsed_ms,
+            success=not bool(error),
+        )
 
     if error:
         if spd_google and _is_timeout_error(error):

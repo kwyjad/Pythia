@@ -33,6 +33,7 @@ def ensure_llm_calls_columns(conn: duckdb.DuckDBPyConnection) -> None:
         ("response_format", "TEXT"),
         ("hazard_scores_json", "TEXT"),
         ("hazard_scores_parse_ok", "BOOLEAN"),
+        ("is_test", "BOOLEAN"),
     ]
     for name, col_type in columns:
         conn.execute(f"ALTER TABLE llm_calls ADD COLUMN IF NOT EXISTS {name} {col_type}")
@@ -94,8 +95,22 @@ def write_llm_call(
     hs_run_id: str | None = None,
     ui_run_id: str | None = None,
     forecaster_run_id: str | None = None,
+    is_test: bool | None = None,
 ) -> None:
-    """Insert a single LLM call record into the llm_calls table."""
+    """Insert a single LLM call record into the llm_calls table.
+
+    is_test defaults to the pipeline test-mode flag so generic rows written
+    by the providers layer can't leak test-run cost into non-test views
+    (same class as the #796 forecaster llm_logging fix).
+    """
+
+    if is_test is None:
+        try:
+            from pythia.test_mode import is_test_mode
+
+            is_test = is_test_mode()
+        except Exception:  # noqa: BLE001
+            is_test = False
 
     ensure_llm_calls_columns(conn)
     tokens_in = int(usage.get("prompt_tokens", 0)) if isinstance(usage, Mapping) else 0
@@ -116,8 +131,9 @@ def write_llm_call(
             llm_profile,
             hs_run_id,
             ui_run_id,
-            forecaster_run_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            forecaster_run_id,
+            is_test
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             str(uuid.uuid4()),
@@ -134,6 +150,7 @@ def write_llm_call(
             hs_run_id,
             ui_run_id,
             forecaster_run_id,
+            bool(is_test),
         ],
     )
 

@@ -229,6 +229,7 @@ async def _run_scenario_for_question(
             prompt_version="1.0.0",
             component="ScenarioWriter",
             run_id=run_id,
+            log_call=False,  # rich-logged via log_forecaster_llm_call
         )
 
     text: str = ""
@@ -322,6 +323,7 @@ async def _run_scenario_for_question(
                 prompt_version="1.0.0",
                 component="ScenarioWriter",
                 run_id=run_id,
+                log_call=False,  # rich-logged via log_forecaster_llm_call
             )
             usage2 = dict(usage2 or {})
             usage2.setdefault("elapsed_ms", int((time.time() - start) * 1000))
@@ -390,6 +392,7 @@ async def _run_scenario_for_question(
                     prompt_version="1.0.0",
                     component="ScenarioWriter",
                     run_id=run_id,
+                    log_call=False,  # rich-logged via log_forecaster_llm_call
                 ),
                 timeout=SCENARIO_TIMEOUT_SECONDS,
             )
