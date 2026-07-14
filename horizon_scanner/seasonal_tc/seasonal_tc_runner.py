@@ -2,7 +2,8 @@
 """
 Seasonal TC Forecast Runner
 ============================
-Orchestrates all three scrapers (TSR, NOAA CPC, BoM) to produce a single
+Orchestrates all five sources (TSR, NOAA CPC, BoM, Météo-France La Réunion,
+IMD/NIO climatology) to produce a single
 unified JSON file of seasonal tropical cyclone forecasts for all covered basins.
 
 This is the entry point for Pythia's TC prompt grounding pipeline.
@@ -23,6 +24,8 @@ Directory layout expected:
         tsr_seasonal_extractor.py
         noaa_cpc_scraper.py
         bom_scraper.py
+        mfr_swio_scraper.py
+        imd_nio_scraper.py
         output/
             seasonal_tc_forecasts.json
             prompt_context.txt       (optional, human-readable)
@@ -53,6 +56,8 @@ from bom_scraper import (
     extract_australian_outlook as bom_aus_extract,
     extract_south_pacific_outlook as bom_sp_extract,
 )
+from mfr_swio_scraper import process_all as mfr_process
+from imd_nio_scraper import build_nio_context as nio_process
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -151,6 +156,40 @@ def collect_bom() -> list[dict]:
     return results
 
 
+def collect_mfr() -> list[dict]:
+    """Collect the Météo-France La Réunion SWI seasonal outlook."""
+    logger.info("=== Météo-France La Réunion: Fetching SWI outlook ===")
+    results = []
+    try:
+        forecasts = mfr_process(fetch_live=True)
+        for f in forecasts:
+            d = f.to_dict()
+            d["prompt_context"] = f.to_prompt_context()
+            d["_source_module"] = "mfr_swio_scraper"
+            results.append(d)
+        logger.info(f"  MFR: collected {len(results)} forecasts")
+    except Exception as e:
+        logger.error(f"  MFR failed: {e}")
+    return results
+
+
+def collect_nio() -> list[dict]:
+    """Collect the NIO climatology context (+ best-effort IMD enrichment)."""
+    logger.info("=== NIO: Building climatology context (IMD enrichment) ===")
+    results = []
+    try:
+        forecasts = nio_process(fetch_live=True)
+        for f in forecasts:
+            d = f.to_dict()
+            d["prompt_context"] = f.to_prompt_context()
+            d["_source_module"] = "imd_nio_scraper"
+            results.append(d)
+        logger.info(f"  NIO: collected {len(results)} context blocks")
+    except Exception as e:
+        logger.error(f"  NIO failed: {e}")
+    return results
+
+
 def collect_all(year: int) -> list[dict]:
     """Run all scrapers and combine results."""
     all_forecasts = []
@@ -163,6 +202,12 @@ def collect_all(year: int) -> list[dict]:
 
     # BoM (AUS + SP)
     all_forecasts.extend(collect_bom())
+
+    # Météo-France La Réunion (SWI)
+    all_forecasts.extend(collect_mfr())
+
+    # IMD/RSMC New Delhi climatology context (NIO)
+    all_forecasts.extend(collect_nio())
 
     return all_forecasts
 
@@ -295,7 +340,7 @@ def generate_prompt_context_file(forecasts: list[dict]) -> str:
     lines = [
         "# Seasonal Tropical Cyclone Forecasts",
         f"# Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
-        f"# Sources: TSR, NOAA CPC, BoM",
+        f"# Sources: TSR, NOAA CPC, BoM, Météo-France La Réunion, IMD/NIO climatology",
         f"# Forecasts: {len(forecasts)}",
         "",
     ]
@@ -367,6 +412,8 @@ def main():
         if not noaa_urls:
             logger.info(f"  NOAA: no known URLs for {year} — add them to KNOWN_URLS in noaa_cpc_scraper.py")
         logger.info(f"  BoM: current Australian + South Pacific outlook pages")
+        logger.info(f"  MFR: Météo-France La Réunion SWI outlook (candidate slugs + discovery)")
+        logger.info(f"  NIO: climatology context + RSMC New Delhi extended-range enrichment")
         logger.info(f"Output: {output_dir}/")
         return
 

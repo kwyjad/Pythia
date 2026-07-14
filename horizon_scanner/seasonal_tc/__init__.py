@@ -103,6 +103,7 @@ _BASIN_TO_COUNTRIES: dict[str, list[str]] = {
         "IND", "BGD", "MMR", "LKA",
         "OMN", "YEM", "PAK",
         "MDV", "SOM",
+        "IRN",  # Makran coast; rare Arabian Sea landfalls (Gonu 2007, Shaheen 2021)
     ],
 }
 
@@ -213,7 +214,8 @@ def format_seasonal_tc_for_spd(context: str) -> Optional[str]:
     if not context:
         return None
     return (
-        "SEASONAL TC FORECASTS (pre-scraped from TSR, NOAA CPC, BoM):\n"
+        "SEASONAL TC FORECASTS (pre-scraped from TSR, NOAA CPC, BoM, "
+        "M\u00e9t\u00e9o-France La R\u00e9union, IMD/NIO climatology):\n"
         + context
     )
 
