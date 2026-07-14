@@ -191,9 +191,10 @@ def select_top_questions(
     ]
 
     if len(questions) < n:
-        # Fail loudly, proceed with what exists — never pad with binary
-        # (EVENT_OCCURRENCE) questions.
-        logger.error(
+        # Loud but expected (small runs legitimately have < N eligible
+        # questions), so WARNING not ERROR: proceed with what exists —
+        # never pad with binary (EVENT_OCCURRENCE) questions.
+        logger.warning(
             "sibyl.select_questions: only %d of %d requested eligible "
             "affected/fatalities questions exist for hs_run_id=%s; "
             "proceeding without padding.",

@@ -85,3 +85,33 @@ def test_nio_basin_fanout_contract():
     assert "NIO" in COUNTRY_TO_BASINS.get("SOM", [])
     assert "SWI" in COUNTRY_TO_BASINS.get("MDG", [])
     assert "SWI" in COUNTRY_TO_BASINS.get("MOZ", [])
+
+def test_country_context_falls_back_to_nio_climatology(monkeypatch, tmp_path):
+    """With an empty DB cache and no JSON file, NIO countries still get the
+    zero-network climatology block; non-NIO countries stay empty."""
+    import horizon_scanner.seasonal_tc as st
+
+    monkeypatch.setattr(st, "load_seasonal_tc_context_from_db", lambda iso3: "")
+    monkeypatch.setattr(st, "_load_forecasts", lambda: [])
+
+    som = st.get_seasonal_tc_context_for_country("SOM")
+    assert "Bay of Bengal" in som and "North Indian" in som
+
+    # MDG is SWI-only — no zero-network fallback exists for a real forecast.
+    assert st.get_seasonal_tc_context_for_country("MDG") == ""
+
+
+def test_country_context_prefers_real_data_over_fallback(monkeypatch):
+    """When the JSON cache HAS an NIO block, the fallback must not duplicate it."""
+    import horizon_scanner.seasonal_tc as st
+
+    monkeypatch.setattr(st, "load_seasonal_tc_context_from_db", lambda iso3: "")
+    monkeypatch.setattr(
+        st, "_load_forecasts",
+        lambda: [{"basin": "NIO", "source": "IMD_RSMC_NewDelhi",
+                  "forecast_type": "climatology_context",
+                  "prompt_context": "## North Indian Ocean — cached block"}],
+    )
+    ctx = st.get_seasonal_tc_context_for_country("BGD")
+    assert ctx.count("North Indian") == 1
+    assert "cached block" in ctx

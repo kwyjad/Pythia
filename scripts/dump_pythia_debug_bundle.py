@@ -368,6 +368,11 @@ def _load_grounding_subsystem_stats(
     # RC grounding rows must exclude triage grounding rows when using 'GROUNDING_%'
     if hazard_code_filter == "GROUNDING_%":
         predicate_parts.append("UPPER(hazard_code) NOT LIKE 'TRIAGE_GROUNDING_%'")
+    # Adversarial SEARCH stats must exclude the synthesis LLM rows
+    # (ADVERSARIAL_SYNTH_%): those are generation calls with no sources and
+    # would read as failed/empty grounding (false WARN, July 2026 run 2).
+    if hazard_code_filter == "ADVERSARIAL_%":
+        predicate_parts.append("UPPER(hazard_code) NOT LIKE 'ADVERSARIAL_SYNTH_%'")
 
     scope_parts: list[str] = []
     if forecaster_run_id:
@@ -471,6 +476,9 @@ def _load_grounding_call_stats(
         # Exclude triage grounding when matching generic 'GROUNDING_%'
         if hazard_code_filter == "GROUNDING_%":
             predicate_parts.append("UPPER(hazard_code) NOT LIKE 'TRIAGE_GROUNDING_%'")
+        # Exclude synthesis generation rows from adversarial SEARCH stats.
+        if hazard_code_filter == "ADVERSARIAL_%":
+            predicate_parts.append("UPPER(hazard_code) NOT LIKE 'ADVERSARIAL_SYNTH_%'")
 
     scope_parts: list[str] = []
     if forecaster_run_id:
@@ -526,6 +534,55 @@ def _load_grounding_call_stats(
             n_errors += 1
 
     return {"n_calls": n_calls, "n_errors": n_errors, "source_counts": source_counts}
+
+
+def _load_adversarial_synth_stats(
+    con: duckdb.DuckDBPyConnection,
+    forecaster_run_id: str | None,
+    hs_run_id: str | None,
+) -> dict[str, Any]:
+    """Stats for the adversarial synthesis LLM calls (ADVERSARIAL_SYNTH_%).
+
+    These are generation calls (devil's-advocate synthesis), not searches —
+    reported separately so they never pollute the grounding source stats.
+    Returns {n_calls, n_errors, cost_usd}.
+    """
+    predicate_parts = [
+        "phase = 'hs_triage'",
+        "UPPER(hazard_code) LIKE 'ADVERSARIAL_SYNTH_%'",
+    ]
+    params: list[Any] = []
+    scope_parts: list[str] = []
+    if forecaster_run_id:
+        scope_parts.append("run_id = ?")
+        params.append(forecaster_run_id)
+    if hs_run_id:
+        scope_parts.append("hs_run_id = ?")
+        params.append(hs_run_id)
+    if scope_parts:
+        predicate_parts.append(f"({' OR '.join(scope_parts)})")
+    predicate = " AND ".join(predicate_parts)
+
+    try:
+        row = con.execute(
+            f"""
+            SELECT COUNT(*),
+                   COALESCE(SUM(CASE WHEN COALESCE(error_text, '') <> '' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(COALESCE(cost_usd, 0)), 0)
+            FROM llm_calls
+            WHERE {predicate}
+            """,
+            params,
+        ).fetchone()
+    except Exception:
+        return {"n_calls": 0, "n_errors": 0, "cost_usd": 0.0}
+    if not row:
+        return {"n_calls": 0, "n_errors": 0, "cost_usd": 0.0}
+    return {
+        "n_calls": int(row[0] or 0),
+        "n_errors": int(row[1] or 0),
+        "cost_usd": float(row[2] or 0.0),
+    }
 
 
 def _extract_urls(sources: Any, limit: int = 5) -> list[str]:
@@ -2659,6 +2716,9 @@ class BundleData:
     rc_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
     triage_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
     adversarial_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
+    # Adversarial synthesis (ADVERSARIAL_SYNTH_% generation calls) — tracked
+    # separately from the search stats above: {n_calls, n_errors, cost_usd}.
+    adversarial_synth_stats: dict[str, Any] = field(default_factory=dict)
     hs_triage_detail_rows: list[dict[str, Any]] = field(default_factory=list)
     structured_data_coverage: dict[str, tuple[int, int, list[str]]] = field(default_factory=dict)
     food_security_no_data_countries: list[str] = field(default_factory=list)
@@ -2787,6 +2847,9 @@ def _load_bundle_data(
         "n_errors": _adv_web.get("n_errors", 0) + _adv_brave.get("n_errors", 0),
         "source_counts": (_adv_web.get("source_counts") or []) + (_adv_brave.get("source_counts") or []),
     }
+    data.adversarial_synth_stats = _load_adversarial_synth_stats(
+        con, forecaster_run_id, manifest_hs_run_id
+    )
 
     # HS triage detail rows (RC levels, screen-outs, tiers)
     if manifest_hs_run_id:
@@ -3135,6 +3198,24 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         g_status = "OK"
         g_detail = "disabled"
     checks.append({"subsystem": "Adversarial Checks", "status": g_status, "detail": g_detail})
+
+    # Adversarial synthesis health (generation calls — separate from search)
+    _synth = data.adversarial_synth_stats or {}
+    _synth_calls = int(_synth.get("n_calls") or 0)
+    _synth_errors = int(_synth.get("n_errors") or 0)
+    _synth_cost = float(_synth.get("cost_usd") or 0.0)
+    if _synth_calls == 0:
+        synth_status = "OK"
+        synth_detail = "no synthesis calls in this run (no RC L1+ hazards or checks disabled)"
+    elif _synth_errors == 0:
+        synth_status = "OK"
+        synth_detail = f"{_synth_calls} calls, ${_synth_cost:.2f}"
+    else:
+        synth_status = "WARN"
+        synth_detail = f"{_synth_calls} calls, {_synth_errors} errors, ${_synth_cost:.2f}"
+    checks.append(
+        {"subsystem": "Adversarial Synthesis", "status": synth_status, "detail": synth_detail}
+    )
 
     # Grounding health — Research
     # The question-level web research pipeline is deprecated; when the retriever
@@ -3496,6 +3577,14 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
             f"- {label}: {n_calls} calls, "
             f"{with_sources} with sources, {empty} empty, "
             f"sources min/{s['min']} max/{s['max']} avg/{s['avg']:.1f} median/{s['median']}"
+        )
+    _synth = data.adversarial_synth_stats or {}
+    if int(_synth.get("n_calls") or 0) > 0:
+        lines.append(
+            f"- Adversarial Synthesis (generation, not search): "
+            f"{int(_synth.get('n_calls') or 0)} calls, "
+            f"{int(_synth.get('n_errors') or 0)} errors, "
+            f"${float(_synth.get('cost_usd') or 0.0):.2f}"
         )
     lines.append("")
 
@@ -4952,7 +5041,11 @@ def emit_grounding_detail_csv(
                 phase IN ('hs_web_research', 'research_web_research')
                 OR phase LIKE '%web_research%'
                 OR LOWER(hazard_code) LIKE '%grounding%'
-                OR UPPER(hazard_code) LIKE 'ADVERSARIAL_%'
+                OR (
+                  UPPER(hazard_code) LIKE 'ADVERSARIAL_%'
+                  -- synthesis rows are generation calls, not searches
+                  AND UPPER(hazard_code) NOT LIKE 'ADVERSARIAL_SYNTH_%'
+                )
               )
             ORDER BY iso3, hazard_code, timestamp
             """,
