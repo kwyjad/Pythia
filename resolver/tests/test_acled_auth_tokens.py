@@ -100,6 +100,9 @@ def test_password_grant_fetches_when_no_refresh(monkeypatch):
     assert captured["data"]["client_id"] == module.OAUTH_CLIENT_ID
     assert captured["data"]["username"] == "user@example.com"
     assert captured["data"]["password"] == "secret"
+    # ACLED's token endpoint requires scope=authenticated on the password grant;
+    # omitting it makes the gateway respond with a non-standard HTTP 415.
+    assert captured["data"]["scope"] == "authenticated"
 
 
 def test_password_grant_raises_on_non_200(monkeypatch):

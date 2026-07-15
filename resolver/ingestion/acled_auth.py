@@ -78,6 +78,15 @@ def _describe_token(token: Optional[str], expiry: Optional[int]) -> Dict[str, Op
     }
 
 
+def _body_snippet(resp: requests.Response, *, limit: int = 300) -> str:
+    """Return a short, single-line snippet of the response body for error messages."""
+    try:
+        text = (resp.text or "").strip().replace("\n", " ")
+    except Exception:  # pragma: no cover - defensive
+        return "<unable to read body>"
+    return text[:limit]
+
+
 def _log_token_http(resp: requests.Response, *, flow: str) -> None:
     try:
         body = resp.text[:400]
@@ -96,11 +105,15 @@ def _log_token_http(resp: requests.Response, *, flow: str) -> None:
 
 
 def _password_grant(username: str, password: str) -> Dict[str, str]:
+    # ``scope=authenticated`` is required by ACLED's OAuth token endpoint (see the
+    # documented password-grant example at acleddata.com/api-documentation/getting-started).
+    # Omitting it makes the gateway reject the request with a non-standard HTTP 415.
     data = {
         "username": username,
         "password": password,
         "grant_type": "password",
         "client_id": OAUTH_CLIENT_ID,
+        "scope": "authenticated",
     }
     _LOG.debug("ACLED password grant for username=%s", data["username"])
     resp = requests.post(
@@ -111,7 +124,9 @@ def _password_grant(username: str, password: str) -> Dict[str, str]:
     )
     _log_token_http(resp, flow="password")
     if resp.status_code != 200:
-        raise RuntimeError(f"ACLED OAuth password grant failed: status={resp.status_code}")
+        raise RuntimeError(
+            f"ACLED OAuth password grant failed: status={resp.status_code} body={_body_snippet(resp)}"
+        )
     return resp.json()
 
 
@@ -129,7 +144,9 @@ def _refresh_grant(refresh_token: str) -> Dict[str, str]:
     )
     _log_token_http(resp, flow="refresh")
     if resp.status_code != 200:
-        raise RuntimeError(f"ACLED OAuth refresh grant failed: status={resp.status_code}")
+        raise RuntimeError(
+            f"ACLED OAuth refresh grant failed: status={resp.status_code} body={_body_snippet(resp)}"
+        )
     return resp.json()
 
 
