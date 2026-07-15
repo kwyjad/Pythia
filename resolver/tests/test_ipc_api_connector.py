@@ -191,6 +191,17 @@ class TestCountryList:
         data = json.loads(json_path.read_text())
         assert data == ["AFG", "GTM", "PAK"]  # sorted, deduplicated
 
+    def test_merges_with_existing_never_shrinks(self, tmp_path):
+        json_path = tmp_path / "ipc_countries.json"
+        json_path.write_text(json.dumps(["COL", "LBN"]))
+        with patch(
+            "resolver.connectors.ipc_api._IPC_COUNTRIES_JSON", json_path
+        ):
+            _write_country_list(["AFG", "LBN"])
+
+        data = json.loads(json_path.read_text())
+        assert data == ["AFG", "COL", "LBN"]  # union, never shrinks
+
 
 # ---------------------------------------------------------------------------
 # Full connector integration test (mocked HTTP)

@@ -38,6 +38,28 @@ DEFAULT_ALIAS_SOURCE: Mapping[str, str] = {
     "Lao People's Democratic Republic": "LAO",
     "Lao Peoples Democratic Republic": "LAO",
     "Laos": "LAO",
+    # ACLED name forms that differ from countries.csv labels. Without these,
+    # per-country attribution by event country name resolves to nothing and
+    # whole countries are silently dropped (July 2026: GIN/COG/BIH/KOR/TLS
+    # and others stored 0 political events).
+    "United Kingdom": "GBR",
+    "United Kingdom of Great Britain and Northern Ireland": "GBR",
+    "Republic of Congo": "COG",
+    "Republic of the Congo": "COG",
+    "Congo-Brazzaville": "COG",
+    "North Macedonia": "MKD",
+    "Slovakia": "SVK",
+    "South Korea": "KOR",
+    "Republic of Korea": "KOR",
+    "Korea, Republic of": "KOR",
+    "Democratic People's Republic of Korea": "PRK",
+    "Bosnia and Herzegovina": "BIH",
+    "Guinea": "GIN",
+    "East Timor": "TLS",
+    "Vatican City": "VAT",
+    "Turks and Caicos Islands": "TCA",
+    "Saint-Martin (French Republic)": "MAF",
+    "Saint Martin (French part)": "MAF",
 }
 
 

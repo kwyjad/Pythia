@@ -94,9 +94,51 @@ def _is_ipc_country(iso3: str) -> bool:
         return False  # fail-closed
 
 
-def _is_food_security_country(iso3: str) -> bool:
-    """Check if a country is monitored by FEWS NET or IPC."""
-    return _is_fewsnet_country(iso3) or _is_ipc_country(iso3)
+_FOOD_SECURITY_DB_CACHE: Dict[int, set] = {}
+
+
+def _db_food_security_countries(con) -> set:
+    """Countries with resolvable IPC Phase 3+ data in facts_resolved.
+
+    Fallback for when the runtime country-list JSONs are absent or stale: the
+    IPC list (`ipc_countries.json`) is written by the connector at ingest time
+    and never committed, so at question-generation time it typically does not
+    exist — without this fallback IPC-only countries could never get DR
+    Phase 3+ questions. A country with `phase3plus_in_need` rows in the last
+    36 months is resolvable regardless of which list it appears on (resolution
+    queries the metric publisher-agnostically).
+    """
+    if con is None:
+        return set()
+    key = id(con)
+    if key in _FOOD_SECURITY_DB_CACHE:
+        return _FOOD_SECURITY_DB_CACHE[key]
+    try:
+        today = date.today()
+        cutoff_ym = f"{today.year - 3:04d}-{today.month:02d}"
+        rows = con.execute(
+            """
+            SELECT DISTINCT upper(iso3)
+            FROM facts_resolved
+            WHERE lower(metric) = 'phase3plus_in_need'
+              AND iso3 IS NOT NULL AND iso3 <> ''
+              AND ym >= ?
+            """,
+            [cutoff_ym],
+        ).fetchall()
+        countries = {r[0] for r in rows if r and r[0]}
+    except Exception as exc:
+        LOG.warning("food-security DB fallback query failed: %s", exc)
+        countries = set()
+    _FOOD_SECURITY_DB_CACHE[key] = countries
+    return countries
+
+
+def _is_food_security_country(iso3: str, con=None) -> bool:
+    """Check if a country is monitored by FEWS NET or IPC (files first, DB fallback)."""
+    if _is_fewsnet_country(iso3) or _is_ipc_country(iso3):
+        return True
+    return iso3.upper() in _db_food_security_countries(con)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -463,7 +505,7 @@ def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -
 
             for mt in metrics:
                 if th.hazard_code == "DR" and mt == "PA":
-                    if not _is_food_security_country(th.iso3):
+                    if not _is_food_security_country(th.iso3, con):
                         LOG.info(
                             "Skipping DR/PA (PHASE3PLUS_IN_NEED) for %s: not monitored by "
                             "FEWS NET or IPC. Binary DR/EVENT_OCCURRENCE still generated.",

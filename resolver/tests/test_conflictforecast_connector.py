@@ -672,3 +672,44 @@ class TestFetchForecastsIntegration:
 
         assert isinstance(result, pd.DataFrame)
         assert result.empty
+
+
+# ---------------------------------------------------------------------------
+# Staleness warning
+# ---------------------------------------------------------------------------
+
+class TestStalenessWarning:
+    """A stale file vintage must warn loudly (mirrors ACLED CAST / VIEWS)."""
+
+    @patch.object(ConflictForecastOrgConnector, "_download_csv")
+    @patch.object(ConflictForecastOrgConnector, "_get_file_listing")
+    def test_stale_vintage_warns(
+        self, mock_listing: MagicMock, mock_download: MagicMock, caplog
+    ) -> None:
+        mock_listing.return_value = _make_listing(
+            "conflictforecast_ons_armedconf_03_01-2025.csv",
+        )
+        mock_download.return_value = pd.DataFrame()
+        with caplog.at_level(
+            "WARNING", logger="resolver.connectors.conflictforecast"
+        ):
+            ConflictForecastOrgConnector().fetch_forecasts()
+        assert any("days old" in r.message for r in caplog.records)
+
+    @patch.object(ConflictForecastOrgConnector, "_download_csv")
+    @patch.object(ConflictForecastOrgConnector, "_get_file_listing")
+    def test_fresh_vintage_does_not_warn(
+        self, mock_listing: MagicMock, mock_download: MagicMock, caplog
+    ) -> None:
+        from datetime import date
+
+        today = date.today()
+        mock_listing.return_value = _make_listing(
+            f"conflictforecast_ons_armedconf_03_{today.month:02d}-{today.year}.csv",
+        )
+        mock_download.return_value = pd.DataFrame()
+        with caplog.at_level(
+            "WARNING", logger="resolver.connectors.conflictforecast"
+        ):
+            ConflictForecastOrgConnector().fetch_forecasts()
+        assert not any("days old" in r.message for r in caplog.records)

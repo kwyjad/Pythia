@@ -40,6 +40,11 @@ _API_BASE = (
 )
 _TIMEOUT = 60
 
+# Warn loudly when the newest served file vintage is older than this.
+# conflictforecast.org publishes monthly; 45 mirrors the conflict-forecast
+# staleness threshold used by the ACLED CAST / VIEWS connectors.
+_STALENESS_WARN_DAYS = 45
+
 # File name patterns to match (case-insensitive).
 # These map to (metric_name, lead_months).
 _FILE_PATTERNS: List[Tuple[str, str, int]] = [
@@ -72,6 +77,14 @@ class ConflictForecastOrgConnector:
             return pd.DataFrame()
 
         issue_date = self._derive_issue_date(file_listing)
+        age_days = (date.today() - issue_date).days
+        if age_days > _STALENESS_WARN_DAYS:
+            LOG.warning(
+                "[conflictforecast_org] latest file vintage %s is %d days old "
+                "(> %d) — conflictforecast.org may not be publishing current "
+                "forecasts. conflict_forecasts will carry a stale vintage.",
+                issue_date.isoformat(), age_days, _STALENESS_WARN_DAYS,
+            )
         all_rows: List[Dict[str, Any]] = []
 
         for pattern, metric, lead_months in _FILE_PATTERNS:

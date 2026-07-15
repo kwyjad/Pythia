@@ -316,3 +316,110 @@ def test_same_epoch_test_rerun_never_taints_production_question(
     monkeypatch.setenv("PYTHIA_TEST_MODE", "1")
     assert create_questions_from_triage(db_url, hs_run_id="hs_run_test2") == 0
     assert _question_is_test_flags(db_path) == {False}
+
+
+_FACTS_RESOLVED_DDL = """
+CREATE TABLE IF NOT EXISTS facts_resolved (
+    ym TEXT NOT NULL,
+    iso3 TEXT NOT NULL,
+    hazard_code TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    series_semantics TEXT NOT NULL DEFAULT '',
+    value DOUBLE
+)
+"""
+
+
+def _write_country_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fewsnet: list[str]) -> None:
+    """Point the generator at a real FEWS NET list and a MISSING IPC list."""
+    import scripts.create_questions_from_triage as cq
+
+    fewsnet_file = tmp_path / "fewsnet_countries.json"
+    fewsnet_file.write_text(json.dumps(fewsnet))
+    monkeypatch.setattr(cq, "_FEWSNET_COUNTRIES_FILE", fewsnet_file)
+    monkeypatch.setattr(cq, "_IPC_COUNTRIES_FILE", tmp_path / "ipc_countries.json")
+
+
+def test_food_security_db_fallback_covers_ipc_only_country(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A country absent from both JSON lists but with recent phase3plus_in_need
+    rows in facts_resolved must count as food-security eligible (the IPC list
+    is written at ingest time and never exists at question-generation time)."""
+    import scripts.create_questions_from_triage as cq
+
+    _write_country_files(monkeypatch, tmp_path, ["ETH"])
+    cq._FOOD_SECURITY_DB_CACHE.clear()
+
+    con = duckdb.connect(str(tmp_path / "fs.duckdb"))
+    try:
+        con.execute(_FACTS_RESOLVED_DDL)
+        from datetime import date
+
+        recent_ym = f"{date.today().year:04d}-{date.today().month:02d}"
+        con.execute(
+            "INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value) VALUES (?, 'COL', 'DR', 'phase3plus_in_need', 100000)",
+            [recent_ym],
+        )
+        con.execute(
+            "INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value) VALUES ('2019-01', 'XKX', 'DR', 'phase3plus_in_need', 5000)"
+        )
+
+        assert cq._is_food_security_country("ETH", con) is True  # FEWS NET file
+        assert cq._is_food_security_country("COL", con) is True  # DB fallback
+        # Older than the 36-month lookback: not resurrected
+        assert cq._is_food_security_country("XKX", con) is False
+        # No data anywhere
+        assert cq._is_food_security_country("ZZZ", con) is False
+    finally:
+        cq._FOOD_SECURITY_DB_CACHE.clear()
+        con.close()
+
+
+def test_dr_phase3_question_generated_for_ipc_only_country(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import scripts.create_questions_from_triage as cq
+
+    _write_country_files(monkeypatch, tmp_path, ["ETH"])
+    cq._FOOD_SECURITY_DB_CACHE.clear()
+
+    db_path = tmp_path / "triage.duckdb"
+    db_url = f"duckdb:///{db_path}"
+    con = duckdb.connect(str(db_path))
+    try:
+        ensure_schema(con)
+        con.execute(_FACTS_RESOLVED_DDL)
+        from datetime import date
+
+        recent_ym = f"{date.today().year:04d}-{date.today().month:02d}"
+        con.execute(
+            "INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value) VALUES (?, 'COL', 'DR', 'phase3plus_in_need', 100000)",
+            [recent_ym],
+        )
+        con.execute(
+            """
+            INSERT INTO hs_triage (
+                run_id, iso3, hazard_code, tier, triage_score, need_full_spd,
+                drivers_json, regime_shifts_json, data_quality_json, scenario_stub
+            ) VALUES ('hs_run_fs', 'COL', 'DR', 'priority', 0.7, TRUE, '[]', '[]', '{}', '')
+            """
+        )
+    finally:
+        con.close()
+
+    created = create_questions_from_triage(db_url, hs_run_id="hs_run_fs")
+    assert created == 2  # PHASE3PLUS_IN_NEED + EVENT_OCCURRENCE
+
+    con = duckdb.connect(str(db_path))
+    try:
+        metrics = {
+            r[0]
+            for r in con.execute(
+                "SELECT metric FROM questions WHERE iso3 = 'COL'"
+            ).fetchall()
+        }
+    finally:
+        cq._FOOD_SECURITY_DB_CACHE.clear()
+        con.close()
+    assert metrics == {"PHASE3PLUS_IN_NEED", "EVENT_OCCURRENCE"}

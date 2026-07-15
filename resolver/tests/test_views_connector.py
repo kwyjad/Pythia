@@ -573,3 +573,45 @@ class TestExtractModelVersion:
 
     def test_empty_string(self):
         assert ViewsConnector._extract_model_version("") == ""
+
+
+# ---------------------------------------------------------------------------
+# Staleness warning
+# ---------------------------------------------------------------------------
+
+class TestStalenessWarning:
+    """A stale served vintage must warn loudly (mirrors ACLED CAST)."""
+
+    def _run_fetch(self, mock_get, records):
+        page_response = MagicMock()
+        page_response.status_code = 200
+        page_response.json.return_value = _make_api_page(records)
+        page_response.raise_for_status = MagicMock()
+
+        root_response = MagicMock()
+        root_response.status_code = 200
+        root_response.json.return_value = ["fatalities003_2026_01_t01"]
+        root_response.raise_for_status = MagicMock()
+
+        mock_get.side_effect = [root_response, page_response]
+        return ViewsConnector().fetch_forecasts()
+
+    @patch("resolver.connectors.views.requests.get")
+    def test_stale_vintage_warns(self, mock_get, caplog):
+        # Earliest target month = 2025-01 -> issue date 2024-12, ancient.
+        records = [_make_record(isoab="KEN", year=2025, month=1)]
+        with caplog.at_level("WARNING", logger="resolver.connectors.views"):
+            df = self._run_fetch(mock_get, records)
+        assert not df.empty  # stale data is still ingested
+        assert any("days old" in r.message for r in caplog.records)
+
+    @patch("resolver.connectors.views.requests.get")
+    def test_fresh_vintage_does_not_warn(self, mock_get, caplog):
+        from datetime import date
+
+        nxt = date.today().replace(day=1)
+        nxt = date(nxt.year + (nxt.month // 12), (nxt.month % 12) + 1, 1)
+        records = [_make_record(isoab="KEN", year=nxt.year, month=nxt.month)]
+        with caplog.at_level("WARNING", logger="resolver.connectors.views"):
+            self._run_fetch(mock_get, records)
+        assert not any("days old" in r.message for r in caplog.records)

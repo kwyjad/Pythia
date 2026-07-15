@@ -981,7 +981,7 @@ def _ensure_unique_index(
     target_name = existing_name or index_name
     if current and _canonicalize_columns(current) != normalized_target:
         index_ident = _quote_identifier(target_name)
-        LOGGER.info(
+        LOGGER.debug(
             "duckdb.schema.unique_index_recreate | table=%s index=%s from=%s to=%s",
             table,
             target_name,
@@ -1005,7 +1005,7 @@ def _ensure_unique_index(
         [statement],
         label=f"unique_index:{table}:{target_name}",
     )
-    LOGGER.info(
+    LOGGER.debug(
         "duckdb.schema.unique_index_ensured | table=%s index=%s columns=%s",
         table,
         target_name,
@@ -1402,8 +1402,8 @@ def init_schema(
         row[0]
         for row in conn.execute("PRAGMA show_tables").fetchall()
     }
-    if LOGGER.isEnabledFor(logging.INFO):
-        LOGGER.info(
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.debug(
             "duckdb.schema.inspect | existing_tables=%s",
             ", ".join(sorted(existing_tables)) or "<none>",
         )

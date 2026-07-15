@@ -391,13 +391,15 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
             if not resolved or len(resolved) != 3:
                 failed_details[abbr] = rgn_name
         if failed_details:
-            log.info(
+            # DEBUG: repeats per (variable x lead) — the one-time region dump
+            # above already surfaces failures at INFO.
+            log.debug(
                 "NMME actually-failed abbreviations (abbrev -> country_name): %s",
                 dict(list(failed_details.items())[:20]),
             )
     if rows:
         iso3s = sorted(set(r["iso3"] for r in rows))
-        log.info("NMME resolved %d countries: %s", len(iso3s), iso3s[:30])
+        log.debug("NMME resolved %d countries: %s", len(iso3s), iso3s[:30])
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["iso3", "anomaly_value"])
 

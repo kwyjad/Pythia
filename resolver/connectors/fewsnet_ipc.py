@@ -105,14 +105,34 @@ def _build_session() -> requests.Session:
 
 
 def _write_country_list(iso3_codes: list[str]) -> None:
-    """Write the list of ISO3 codes with FEWS NET IPC data."""
+    """Merge the fetched ISO3 codes into the FEWS NET country list (union, never shrink).
+
+    A short fetch window (e.g. FEWSNET_MONTHS=3) only sees countries with a
+    recent analysis cycle; overwriting the file with that subset would drop
+    monitored countries and corrupt downstream consumers (the IPC connector's
+    FEWS NET exclusion set, the question generator's DR eligibility).
+    """
     try:
-        codes = sorted(set(iso3_codes))
+        new_codes = {str(c).strip().upper() for c in iso3_codes if str(c).strip()}
+        existing: set[str] = set()
+        try:
+            with open(_FEWSNET_COUNTRIES_JSON, encoding="utf-8") as fh:
+                existing = {str(c).strip().upper() for c in json.load(fh)}
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            LOG.warning(
+                "[fewsnet_ipc] could not read existing country list (%s); merging into empty",
+                exc,
+            )
+        codes = sorted(existing | new_codes)
         _FEWSNET_COUNTRIES_JSON.parent.mkdir(parents=True, exist_ok=True)
         with open(_FEWSNET_COUNTRIES_JSON, "w", encoding="utf-8") as fh:
             json.dump(codes, fh, indent=2)
         LOG.info(
-            "[fewsnet_ipc] wrote %d countries to %s",
+            "[fewsnet_ipc] country list: %d existing ∪ %d fetched → %d total in %s",
+            len(existing),
+            len(new_codes),
             len(codes),
             _FEWSNET_COUNTRIES_JSON,
         )
