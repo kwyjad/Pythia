@@ -30,6 +30,8 @@ on:
       - "resolver/requirements*.txt"
       - "pyproject.toml"
       - "scripts/ci/collect_diagnostics.py"
+      - "scripts/ci/inspect_resolver_db.py"
+      - "scripts/ci/tests/test_inspect_resolver_db.py"
       - "scripts/ci/make_ai_summary.py"
       - "scripts/ci/run_and_capture.sh"
       - "scripts/ci/validate_python_syntax.py"
@@ -55,6 +57,8 @@ on:
       - "resolver/requirements*.txt"
       - "pyproject.toml"
       - "scripts/ci/collect_diagnostics.py"
+      - "scripts/ci/inspect_resolver_db.py"
+      - "scripts/ci/tests/test_inspect_resolver_db.py"
       - "scripts/ci/make_ai_summary.py"
       - "scripts/ci/run_and_capture.sh"
       - "scripts/ci/validate_python_syntax.py"
@@ -182,7 +186,7 @@ jobs:
           fi
 
           # Real run with JUnit
-          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest resolver/tests resolver/ingestion/tests -q -n auto --dist=worksteal --junitxml $ART_DIR/pytest-junit.xml"
+          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest resolver/tests resolver/ingestion/tests scripts/ci/tests/test_inspect_resolver_db.py -q -n auto --dist=worksteal --junitxml $ART_DIR/pytest-junit.xml"
 
           # Mirror to legacy root filename for collectors that still look there
           if [ -f "$ART_DIR/pytest-junit.xml" ]; then

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
@@ -30,6 +31,25 @@ from typing import Any, Optional
 import requests
 
 log = logging.getLogger(__name__)
+
+# Per-run attribution-drop bookkeeping: iso3 -> number of returned events that
+# failed client-side attribution when NONE matched (whole country dropped).
+# Surfaced in the ingest diagnostics so silent per-country coverage loss is
+# visible in the run summary instead of only in scattered warnings.
+_ATTRIBUTION_DROPS: dict[str, int] = {}
+_ATTRIBUTION_DROPS_LOCK = threading.Lock()
+
+
+def reset_attribution_drop_stats() -> None:
+    """Clear the per-run attribution-drop counters (call at bulk-fetch start)."""
+    with _ATTRIBUTION_DROPS_LOCK:
+        _ATTRIBUTION_DROPS.clear()
+
+
+def get_attribution_drop_stats() -> dict[str, int]:
+    """iso3 -> dropped-event count for countries where 0/N events attributed."""
+    with _ATTRIBUTION_DROPS_LOCK:
+        return dict(_ATTRIBUTION_DROPS)
 
 ACLED_API_BASE_URL = "https://acleddata.com/api/acled/read"
 
@@ -75,6 +95,13 @@ def _db_url() -> str:
     return DEFAULT_DB_URL
 
 
+# Codes ACLED covers that pycountry cannot map to an ISO 3166-1 numeric.
+# ACLED assigns Kosovo iso=0 in its dataset. A wrong override is harmless:
+# the client-side attribution guard drops any events whose own country does
+# not resolve to the requested iso3.
+_ISO_NUMERIC_OVERRIDES: dict[str, str] = {"RKS": "0", "XKX": "0"}
+
+
 def _iso_numeric(iso3: str) -> Optional[str]:
     """Numeric ISO 3166-1 code for the ACLED API's documented `iso` filter.
 
@@ -83,10 +110,13 @@ def _iso_numeric(iso3: str) -> Optional[str]:
     padded form a bare `iso=4` silently filters to nothing. Client-side
     attribution is unaffected either way; this only protects coverage.
     """
+    code = (iso3 or "").upper()
+    if code in _ISO_NUMERIC_OVERRIDES:
+        return _ISO_NUMERIC_OVERRIDES[code]
     try:
         import pycountry
 
-        country = pycountry.countries.get(alpha_3=(iso3 or "").upper())
+        country = pycountry.countries.get(alpha_3=code)
         return str(country.numeric) if country else None
     except Exception:
         return None
@@ -143,6 +173,8 @@ def _filter_events_to_country(events: list[dict], iso3: str) -> list[dict]:
             "storing nothing rather than misattributed events.",
             len(events), iso3_up,
         )
+        with _ATTRIBUTION_DROPS_LOCK:
+            _ATTRIBUTION_DROPS[iso3_up] = len(events)
     elif len(matched) < len(events):
         log.info(
             "ACLED political: kept %d/%d events matching iso3=%s",
@@ -250,15 +282,19 @@ def fetch_acled_political_events(
         "_format": "json",
     }
     iso_num = _iso_numeric(iso3)
-    if iso_num is not None:
-        params["iso"] = iso_num
-    else:
-        log.warning(
-            "ACLED political: could not resolve numeric ISO code for %s — "
-            "no server-side country filter; relying on client-side "
-            "attribution only.",
+    if iso_num is None:
+        # An unfiltered fetch returns an arbitrary global page whose events
+        # the client-side attribution guard would discard anyway — the call
+        # is pure waste (July 2026: ANT/CHI pulled 50 global events each,
+        # stored 0). Skip instead.
+        log.info(
+            "ACLED political: no numeric ISO code for %s — skipping fetch "
+            "(an unfiltered request returns global events that client-side "
+            "attribution would discard).",
             iso3,
         )
+        return []
+    params["iso"] = iso_num
 
     headers = {"Authorization": f"Bearer {token}"}
 

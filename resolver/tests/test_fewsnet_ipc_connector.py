@@ -146,6 +146,34 @@ class TestCountryList:
         data = json.loads(json_path.read_text())
         assert data == ["ETH", "KEN", "SOM"]  # sorted, deduplicated
 
+    def test_merges_with_existing_never_shrinks(self, tmp_path):
+        """A short fetch window must not shrink the on-disk country list.
+
+        Regression: a months_back=3 run saw only 27 of the 48 monitored
+        countries and overwrote the curated list, corrupting the IPC
+        connector's FEWS NET exclusion set in the same run.
+        """
+        json_path = tmp_path / "fewsnet_countries.json"
+        json_path.write_text(json.dumps(["AFG", "ETH", "YEM"]))
+        with patch(
+            "resolver.connectors.fewsnet_ipc._FEWSNET_COUNTRIES_JSON", json_path
+        ):
+            _write_country_list(["ETH", "SOM"])
+
+        data = json.loads(json_path.read_text())
+        assert data == ["AFG", "ETH", "SOM", "YEM"]  # union, never shrinks
+
+    def test_merge_survives_corrupt_existing_file(self, tmp_path):
+        json_path = tmp_path / "fewsnet_countries.json"
+        json_path.write_text("{not json")
+        with patch(
+            "resolver.connectors.fewsnet_ipc._FEWSNET_COUNTRIES_JSON", json_path
+        ):
+            _write_country_list(["som", " ETH "])
+
+        data = json.loads(json_path.read_text())
+        assert data == ["ETH", "SOM"]  # normalized, corrupt file replaced
+
 
 # ---------------------------------------------------------------------------
 # Full connector integration test (mocked HTTP)

@@ -14,7 +14,7 @@ concurrency:
   workflow_dispatch:
     inputs:
       months_back:
-        description: "Number of months to backfill"
+        description: "ACLED/IDMC backfill window in months (does NOT affect FEWS NET / IPC API / GDACS — those have their own inputs below)"
         required: true
         default: "3"
       reset_db:
@@ -57,12 +57,12 @@ concurrency:
         default: "3"
         type: string
       fewsnet_months:
-        description: "Months of FEWS NET IPC data to fetch (default 12; use 120 for full backfill to 2016)"
+        description: "Months of FEWS NET IPC data to fetch (default 12; 120 for full backfill to 2016). Leave the default: short windows only see countries with a recent analysis cycle."
         required: false
         default: "12"
         type: string
       ipc_api_months:
-        description: "Months of IPC API data to fetch (default 24; IPC analyses are infrequent)"
+        description: "Months of IPC API data to fetch (default 24 — IPC analyses are infrequent; 120 for full backfill). Leave the default: short windows only see countries with a recent analysis."
         required: false
         default: "24"
         type: string
@@ -146,6 +146,35 @@ jobs:
             set -x
           fi
           python -m scripts.ci.compute_backfill_window
+
+      # Surface the effective ingest windows at the top of the step summary so
+      # non-default dispatch inputs (e.g. fewsnet_months=3) are never invisible
+      # — a short FEWS NET/IPC window only sees countries with a recent
+      # analysis cycle.
+      - name: Echo effective ingest windows
+        run: |
+          FEWSNET_NOTE=""
+          if [ "${FEWSNET_MONTHS}" -lt 12 ] 2>/dev/null; then
+            FEWSNET_NOTE=" ⚠️ below default 12 — partial country coverage in this window"
+          fi
+          IPC_NOTE=""
+          if [ "${IPC_API_MONTHS}" -lt 24 ] 2>/dev/null; then
+            IPC_NOTE=" ⚠️ below default 24 — partial country coverage in this window"
+          fi
+          {
+            echo "### Effective ingest windows"
+            echo ""
+            echo "| Setting | Value |"
+            echo "| --- | --- |"
+            echo "| ACLED/IDMC window | ${{ steps.window.outputs.start_iso }} → ${{ steps.window.outputs.end_iso }} (months_back=${MONTHS_BACK_IN:-3}) |"
+            echo "| FEWSNET_MONTHS | ${FEWSNET_MONTHS}${FEWSNET_NOTE} |"
+            echo "| IPC_API_MONTHS | ${IPC_API_MONTHS}${IPC_NOTE} |"
+            echo "| GDACS_MONTHS | ${GDACS_MONTHS} |"
+            echo "| reset_db | ${{ inputs.reset_db }} |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          MONTHS_BACK_IN: ${{ inputs.months_back }}
 
       # Canonical discovery via the shared composite action (single home of
       # the candidate list). Per-candidate signature validation rejects DBs
@@ -437,7 +466,7 @@ jobs:
           from horizon_scanner.enso.enso_module import fetch_and_store_enso
           ok = fetch_and_store_enso()
           print('ok' if ok else 'error')
-          " 2>&1 | tail -1) || RESULT="error"
+          " 2>&1 | tee diagnostics/phase4_enso.log | tail -1) || RESULT="error"
           if [ "$RESULT" = "ok" ]; then
             python -m pythia.tools.emit_phase4_diag enso ok --rows 1
             echo "[enso] OK"
@@ -456,7 +485,7 @@ jobs:
           from horizon_scanner.seasonal_tc.seasonal_tc_runner import fetch_and_store_seasonal_tc
           ok = fetch_and_store_seasonal_tc()
           print('ok' if ok else 'error')
-          " 2>&1 | tail -1) || RESULT="error"
+          " 2>&1 | tee diagnostics/phase4_seasonal_tc.log | tail -1) || RESULT="error"
           if [ "$RESULT" = "ok" ]; then
             python -m pythia.tools.emit_phase4_diag seasonal_tc ok --rows 1
             echo "[seasonal_tc] OK"
@@ -475,7 +504,7 @@ jobs:
           from horizon_scanner.hdx_signals import bulk_fetch_and_store_hdx_signals
           n = bulk_fetch_and_store_hdx_signals()
           print(n)
-          " 2>&1 | tail -1) || ROWS="0"
+          " 2>&1 | tee diagnostics/phase4_hdx_signals.log | tail -1) || ROWS="0"
           if ! echo "$ROWS" | grep -qE '^[0-9]+$'; then
             ROWS="0"
           fi
@@ -497,7 +526,7 @@ jobs:
           from horizon_scanner.crisiswatch import bulk_store_crisiswatch
           n = bulk_store_crisiswatch()
           print(n)
-          " 2>&1 | tail -1) || ROWS="0"
+          " 2>&1 | tee diagnostics/phase4_crisiswatch.log | tail -1) || ROWS="0"
           if ! echo "$ROWS" | grep -qE '^[0-9]+$'; then
             ROWS="0"
           fi

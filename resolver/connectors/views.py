@@ -37,6 +37,10 @@ _API_BASE = "https://api.viewsforecasting.org"
 _TIMEOUT = 60
 _PAGESIZE = 1000
 _MAX_LEAD_MONTHS = 6
+# Warn loudly when the newest served vintage is older than this. VIEWS is
+# issued monthly; 45 mirrors the conflict-forecast staleness threshold used
+# by the ACLED CAST connector and the inspect report.
+_STALENESS_WARN_DAYS = 45
 
 
 class ViewsConnector:
@@ -64,6 +68,17 @@ class ViewsConnector:
 
         model_version = self._extract_model_version(run_id)
         issue_date = self._derive_issue_date(records)
+        age_days = (date.today() - issue_date).days
+        if age_days > _STALENESS_WARN_DAYS:
+            LOG.warning(
+                "[views] latest forecast issue date %s is %d days old (> %d) — "
+                "the VIEWS API may not be serving a current vintage (run_id=%s). "
+                "conflict_forecasts will carry a stale VIEWS vintage; if this "
+                "persists across cycles, escalate to VIEWS (the connector is "
+                "working — it fetched %d records).",
+                issue_date.isoformat(), age_days, _STALENESS_WARN_DAYS,
+                run_id, len(records),
+            )
 
         rows = self._transform(records, issue_date, model_version)
 

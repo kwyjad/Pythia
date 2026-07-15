@@ -182,14 +182,33 @@ def _parse_period_dates(date_str: str) -> tuple[str, str]:
 
 
 def _write_country_list(iso3_codes: list[str]) -> None:
-    """Write the list of ISO3 codes with IPC API data."""
+    """Merge the fetched ISO3 codes into the IPC country list (union, never shrink).
+
+    A short fetch window (e.g. IPC_API_MONTHS=3) only sees countries with a
+    recent IPC analysis; overwriting the file with that subset would drop
+    countries whose analyses are older but still valid.
+    """
     try:
-        codes = sorted(set(iso3_codes))
+        new_codes = {str(c).strip().upper() for c in iso3_codes if str(c).strip()}
+        existing: set[str] = set()
+        try:
+            with open(_IPC_COUNTRIES_JSON, encoding="utf-8") as fh:
+                existing = {str(c).strip().upper() for c in json.load(fh)}
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            LOG.warning(
+                "[ipc_api] could not read existing country list (%s); merging into empty",
+                exc,
+            )
+        codes = sorted(existing | new_codes)
         _IPC_COUNTRIES_JSON.parent.mkdir(parents=True, exist_ok=True)
         with open(_IPC_COUNTRIES_JSON, "w", encoding="utf-8") as fh:
             json.dump(codes, fh, indent=2)
         LOG.info(
-            "[ipc_api] wrote %d countries to %s",
+            "[ipc_api] country list: %d existing ∪ %d fetched → %d total in %s",
+            len(existing),
+            len(new_codes),
             len(codes),
             _IPC_COUNTRIES_JSON,
         )

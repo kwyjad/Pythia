@@ -99,3 +99,93 @@ def test_graceful_without_db():
 def test_empty_entries():
     out = build_phase_summary([], con=None)
     assert "No connector diagnostics" in out
+
+
+# ---------------------------------------------------------------------------
+# Cross-cutting checks (July 2026): vintage staleness, list shrink, drops
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def db_with_vintages(tmp_path):
+    path = tmp_path / "v.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute("CREATE TABLE facts_resolved (iso3 VARCHAR, publisher VARCHAR)")
+    con.execute(
+        "CREATE TABLE conflict_forecasts (iso3 VARCHAR, source VARCHAR, forecast_issue_date DATE)"
+    )
+    con.execute(
+        "INSERT INTO conflict_forecasts VALUES "
+        "('SOM','VIEWS', CURRENT_DATE - INTERVAL 10 DAY),"
+        "('SOM','ACLED_CAST', CURRENT_DATE - INTERVAL 200 DAY)"
+    )
+    con.close()
+    return duckdb.connect(str(path), read_only=True)
+
+
+OK_ENTRIES = [
+    {"connector_id": "acled_client", "status": "ok",
+     "counts": {"fetched": 2, "normalized": 2, "written": 2}, "duration_ms": 1000},
+]
+
+
+def test_stale_conflict_forecast_vintage_flagged(db_with_vintages):
+    out = build_phase_summary(OK_ENTRIES, con=db_with_vintages)
+    assert "## Conflict Forecast Vintages" in out
+    assert "⚠️ **ACLED_CAST** conflict forecast vintage is" in out
+    # Fresh VIEWS vintage is listed but not warned about.
+    assert "⚠️ **VIEWS** conflict forecast vintage" not in out
+    # Warnings (no hard errors) → ⚠️ verdict.
+    assert "Result: ⚠️" in out
+    assert "stale forecast vintage" in out
+
+
+def test_attribution_drops_flagged():
+    entries = OK_ENTRIES + [
+        {"connector_id": "acled_political_events", "status": "ok",
+         "counts": {"fetched": 141, "written": 141, "empty": 111},
+         "extras": {"attribution_dropped_countries": ["GIN", "COG"],
+                    "attribution_dropped_events": 27},
+         "duration_ms": 48000},
+    ]
+    out = build_phase_summary(entries, con=None)
+    assert "attributed NONE" in out
+    assert "COG, GIN" in out
+    assert "27" in out
+
+
+def test_ingest_windows_line(monkeypatch):
+    monkeypatch.setenv("FEWSNET_MONTHS", "3")
+    monkeypatch.delenv("IPC_API_MONTHS", raising=False)
+    monkeypatch.delenv("GDACS_MONTHS", raising=False)
+    out = build_phase_summary(OK_ENTRIES, con=None)
+    assert "FEWSNET_MONTHS=3" in out
+    assert "IPC_API_MONTHS=24 (default)" in out
+
+
+def test_country_list_shrink_detected(tmp_path):
+    import json as _json
+    import subprocess
+
+    from pythia.tools.summarize_all_phases import _country_list_shrink
+
+    root = tmp_path / "repo"
+    (root / "resolver" / "data").mkdir(parents=True)
+    f = root / "resolver" / "data" / "fewsnet_countries.json"
+    f.write_text(_json.dumps([f"C{i:02d}" for i in range(48)]))
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        cwd=root, check=True,
+    )
+    # Simulate the short-window overwrite.
+    f.write_text(_json.dumps([f"C{i:02d}" for i in range(27)]))
+
+    res = _country_list_shrink(repo_root=root)
+    assert res == {"on_disk": 27, "in_git": 48, "shrunk": True}
+
+    # Restored file → not shrunk.
+    f.write_text(_json.dumps([f"C{i:02d}" for i in range(48)]))
+    res = _country_list_shrink(repo_root=root)
+    assert res["shrunk"] is False

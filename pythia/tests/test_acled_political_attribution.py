@@ -20,7 +20,10 @@ pytest.importorskip("duckdb")
 
 from pythia.acled_political import (
     _filter_events_to_country,
+    _iso_numeric,
+    get_attribution_drop_stats,
     purge_contaminated_events,
+    reset_attribution_drop_stats,
     store_acled_political_events,
 )
 
@@ -69,6 +72,55 @@ def test_filter_resolves_iso3_from_alternate_keys():
 def test_filter_resolves_iso3_from_country_name_only():
     kept = _filter_events_to_country(REAL_SHAPE_EVENTS, "RUS")
     assert [e["event_id_cnty"] for e in kept] == ["RUS1"]
+
+
+# ACLED name forms that differ from countries.csv labels ("United Kingdom"
+# vs "Great Britain", "Guinea" vs "Guinea Conakry", ...). The July-2026 run
+# stored ZERO events for GIN/COG/BIH/KOR/TLS because these names had no
+# aliases and the name-fallback path resolved to nothing.
+ACLED_NAME_FORM_EVENTS = [
+    {"event_id_cnty": "GIN1", "country": "Guinea", "event_type": "Protests"},
+    {"event_id_cnty": "COG1", "country": "Republic of Congo", "event_type": "Riots"},
+    {"event_id_cnty": "BIH1", "country": "Bosnia and Herzegovina", "event_type": "Protests"},
+    {"event_id_cnty": "KOR1", "country": "South Korea", "event_type": "Protests"},
+    {"event_id_cnty": "TLS1", "country": "East Timor", "event_type": "Protests"},
+    {"event_id_cnty": "GBR1", "country": "United Kingdom", "event_type": "Protests"},
+]
+
+
+@pytest.mark.parametrize(
+    "iso3,expected_id",
+    [
+        ("GIN", "GIN1"),
+        ("COG", "COG1"),
+        ("BIH", "BIH1"),
+        ("KOR", "KOR1"),
+        ("TLS", "TLS1"),
+        ("GBR", "GBR1"),
+    ],
+)
+def test_filter_resolves_acled_name_forms(iso3, expected_id):
+    kept = _filter_events_to_country(ACLED_NAME_FORM_EVENTS, iso3)
+    assert [e["event_id_cnty"] for e in kept] == [expected_id]
+
+
+def test_attribution_drop_stats_track_whole_country_drops():
+    reset_attribution_drop_stats()
+    try:
+        _filter_events_to_country(MIXED_EVENTS, "KEN")  # 0/5 match -> recorded
+        _filter_events_to_country(MIXED_EVENTS, "SOM")  # matches -> not recorded
+        assert get_attribution_drop_stats() == {"KEN": 5}
+    finally:
+        reset_attribution_drop_stats()
+
+
+def test_iso_numeric_override_for_kosovo():
+    # pycountry has no Kosovo; ACLED assigns iso=0. Wrong values are harmless
+    # (the attribution guard drops non-matching events) but absent values used
+    # to trigger a wasteful unfiltered global fetch.
+    assert _iso_numeric("RKS") == "0"
+    assert _iso_numeric("AFG") == "004"  # zero-padded pycountry passthrough
+    assert _iso_numeric("ZZZ") is None
 
 
 def test_store_guard_drops_misattributed_events(tmp_path, monkeypatch):

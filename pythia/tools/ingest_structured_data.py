@@ -954,8 +954,12 @@ def _bulk_fetch_acled_political(
     """Fetch ACLED political events — per-country, concurrent."""
     from pythia.acled_political import (
         fetch_acled_political_events,
+        get_attribution_drop_stats,
         purge_contaminated_events,
+        reset_attribution_drop_stats,
     )
+
+    reset_attribution_drop_stats()
 
     # Self-heal: wipe rows written by the pre-July-2026 fetcher, which stored
     # the same GLOBAL events under every country (iso3 filter param ignored).
@@ -983,6 +987,14 @@ def _bulk_fetch_acled_political(
                 results[iso3] = data
 
     LOG.info("ACLED political: data for %d countries", len(results))
+    drops = get_attribution_drop_stats()
+    if drops:
+        LOG.warning(
+            "ACLED political: %d countries returned events but attributed NONE "
+            "(stored nothing): %s",
+            len(drops),
+            ", ".join(f"{k}({v})" for k, v in sorted(drops.items())),
+        )
     return results
 
 
@@ -1468,6 +1480,18 @@ def ingest(
         # Conflict sources: stash row count
         if lbl in _CONFLICT_SOURCE_MAP and data:
             extras["conflict_rows"] = data.get("__conflict_rows__", 0)
+        # ACLED political: surface whole-country attribution drops so the
+        # run summary can flag silent per-country coverage loss.
+        if lbl == "acled_political_events":
+            try:
+                from pythia.acled_political import get_attribution_drop_stats
+
+                drops = get_attribution_drop_stats()
+                if drops:
+                    extras["attribution_dropped_countries"] = sorted(drops)
+                    extras["attribution_dropped_events"] = sum(drops.values())
+            except Exception:  # pragma: no cover - diagnostics only
+                pass
 
         # For self-storing sources, use pipeline result's total_facts as fetched count
         if lbl in _SELF_STORING_LABELS and data:

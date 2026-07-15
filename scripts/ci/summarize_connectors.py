@@ -1039,8 +1039,13 @@ def _render_idmc_manifest_section(
     network_mode = run_block.get("network_mode") or run_block.get("mode") or "unknown"
     rows_fetched = _coerce_int(normalize_block.get("rows_fetched"))
     rows_normalized = _coerce_int(normalize_block.get("rows_normalized"))
-    rows_written = _coerce_int(
-        normalize_block.get("rows_written") or normalize_block.get("rows_staged")
+    # The IDMC HELIX step only STAGES rows to CSV — the facts_resolved write
+    # happens later in load_and_derive. Label these "staged" (falling back to
+    # the manifest export count) so a healthy run doesn't read as "written 0".
+    rows_staged = _coerce_int(
+        normalize_block.get("rows_written")
+        or normalize_block.get("rows_staged")
+        or _ensure_dict(manifest.get("export")).get("rows")
     )
     zero_rows_block = _ensure_dict(notes_block.get("zero_rows"))
     zero_reason = (
@@ -1053,7 +1058,11 @@ def _render_idmc_manifest_section(
     if helix_endpoint:
         lines.append(f"- **HELIX endpoint:** {helix_endpoint}")
     lines.append(
-        f"- **Rows (fetched/normalized/written):** {rows_fetched}/{rows_normalized}/{rows_written}"
+        f"- **Rows (fetched/normalized/staged):** {rows_fetched}/{rows_normalized}/{rows_staged}"
+    )
+    lines.append(
+        "- _IDMC HELIX stages rows to CSV in this step; the `facts_resolved` "
+        "write happens in the Phase 1 `load_and_derive` step._"
     )
 
     requests_count = _coerce_int(http_block.get("requests"))
@@ -2404,8 +2413,13 @@ def build_markdown(
     for entry in sorted_entries:
         if entry.get("connector_id") == "idmc" and idmc_manifest_data:
             manifest_normalize = _ensure_dict(idmc_manifest_data.get("normalize"))
-            manifest_rows_written = manifest_normalize.get("rows_written") or manifest_normalize.get(
-                "rows_staged"
+            # Fall back to the manifest export count: the HELIX step stages to
+            # CSV (DB write happens in load_and_derive), so a bare normalize
+            # block would overlay written=0 onto a healthy run.
+            manifest_rows_written = (
+                manifest_normalize.get("rows_written")
+                or manifest_normalize.get("rows_staged")
+                or _ensure_dict(idmc_manifest_data.get("export")).get("rows")
             )
             counts_overlay = _ensure_dict(entry.get("counts"))
             counts_overlay = dict(counts_overlay)
@@ -2442,6 +2456,13 @@ def build_markdown(
     lines.append(f"* **Rows fetched:** {total_fetched}{footnote}")
     lines.append(f"* **Rows normalized:** {total_normalized}{footnote}")
     lines.append(f"* **Rows written:** {total_written}{footnote}")
+    lines.append(
+        "* _Caveat: these totals sum per-connector counters with MIXED semantics "
+        "(per-country sources count countries, self-storing sources count rows, "
+        "staged sources count staged CSV rows) — they are not comparable across "
+        "connectors. Authoritative per-table row counts are in the consolidated "
+        "pipeline status step summary._"
+    )
     lines.append("")
 
     export_error = export_info.get("error")
