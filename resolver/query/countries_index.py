@@ -26,6 +26,22 @@ def _info_once(key: str, message: str) -> None:
     LOGGER.info(message)
 
 
+def _test_clause(conn, table: str, alias: str, include_test: bool) -> str:
+    """AND-able condition excluding test rows; '' when not applicable.
+
+    Every sub-query in this module must apply this to each test-stampable
+    table it touches (questions, hs_runs, hs_triage, forecasts_ensemble) —
+    before July 2026 only ``_base_rows`` filtered ``is_test``, so the
+    Countries page leaked test-run countries/dates with the Test toggle OFF.
+    """
+    if include_test:
+        return ""
+    if "is_test" not in _table_columns(conn, table):
+        return ""
+    prefix = f"{alias}." if alias else ""
+    return f" AND COALESCE({prefix}is_test, FALSE) = FALSE"
+
+
 def _base_rows(
     conn,
     metric_scope: str | None = None,
@@ -106,6 +122,7 @@ def _add_hs_country_list(
     base: dict[str, dict[str, Any]],
     hs_run_id: str | None = None,
     forecaster_run_id: str | None = None,
+    include_test: bool = False,
 ) -> None:
     """Add countries from ``hs_triage`` that are in the HS country list but
     don't yet appear in *base* (e.g. countries with no questions for the
@@ -120,6 +137,9 @@ def _add_hs_country_list(
     if not (run_col and iso_col):
         return
 
+    ht_test = _test_clause(conn, "hs_triage", "ht", include_test)
+    q_test = _test_clause(conn, "questions", "q", include_test)
+    fe_test = _test_clause(conn, "forecasts_ensemble", "fe", include_test)
     try:
         if forecaster_run_id:
             rows = conn.execute(
@@ -131,19 +151,19 @@ def _add_hs_country_list(
                     FROM questions q
                     JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
                     WHERE fe.run_id = ?
-                      AND q.hs_run_id IS NOT NULL
+                      AND q.hs_run_id IS NOT NULL{q_test}{fe_test}
                 )
-                AND ht.{iso_col} IS NOT NULL
+                AND ht.{iso_col} IS NOT NULL{ht_test}
                 """,
                 [forecaster_run_id],
             ).fetchall()
         elif hs_run_id:
             rows = conn.execute(
                 f"""
-                SELECT DISTINCT UPPER({iso_col}) AS iso3
-                FROM hs_triage
-                WHERE {run_col} = ?
-                  AND {iso_col} IS NOT NULL
+                SELECT DISTINCT UPPER(ht.{iso_col}) AS iso3
+                FROM hs_triage ht
+                WHERE ht.{run_col} = ?
+                  AND ht.{iso_col} IS NOT NULL{ht_test}
                 """,
                 [hs_run_id],
             ).fetchall()
@@ -177,7 +197,9 @@ def _add_hs_country_list(
             base[key]["in_country_list"] = True  # has questions → in list
 
 
-def _update_last_triaged(conn, base: dict[str, dict[str, Any]]) -> None:
+def _update_last_triaged(
+    conn, base: dict[str, dict[str, Any]], include_test: bool = False
+) -> None:
     if not base:
         return
     if not _table_exists(conn, "hs_runs"):
@@ -200,6 +222,8 @@ def _update_last_triaged(conn, base: dict[str, dict[str, Any]]) -> None:
         LOGGER.info("Skipping last_triaged; hs_runs join columns missing.")
         return
 
+    q_test = _test_clause(conn, "questions", "q", include_test)
+    h_test = _test_clause(conn, "hs_runs", "h", include_test)
     try:
         rows = conn.execute(
             f"""
@@ -208,6 +232,7 @@ def _update_last_triaged(conn, base: dict[str, dict[str, Any]]) -> None:
               STRFTIME(MAX({ts_expr}), '%Y-%m-%d') AS last_triaged
             FROM questions q
             JOIN hs_runs h ON q.{q_run_col} = h.{h_run_col}
+            WHERE 1=1{q_test}{h_test}
             GROUP BY 1
             ORDER BY 1
             """
@@ -226,6 +251,7 @@ def _update_forecasts(
     conn,
     base: dict[str, dict[str, Any]],
     forecaster_run_id: str | None = None,
+    include_test: bool = False,
 ) -> None:
     if not base:
         return
@@ -263,6 +289,10 @@ def _update_forecasts(
     if forecaster_run_id and "run_id" in fe_cols:
         run_filter = " AND fe.run_id = ?"
         run_params = [forecaster_run_id]
+    # Test-run forecasts go in the JOIN condition (not WHERE) so a question
+    # whose only forecasts are test rows still appears with n_forecasted=0.
+    run_filter += _test_clause(conn, "forecasts_ensemble", "fe", include_test)
+    q_test = _test_clause(conn, "questions", "q", include_test)
 
     try:
         rows = conn.execute(
@@ -273,6 +303,7 @@ def _update_forecasts(
               {last_expr}
             FROM questions q
             LEFT JOIN forecasts_ensemble fe ON fe.question_id = q.question_id{run_filter}
+            WHERE 1=1{q_test}
             GROUP BY 1
             ORDER BY 1
             """,
@@ -289,7 +320,7 @@ def _update_forecasts(
             base[key]["last_forecasted"] = last_forecasted
 
 
-def _hs_run_id_for_month(conn, year_month: str) -> str | None:
+def _hs_run_id_for_month(conn, year_month: str, include_test: bool = False) -> str | None:
     """Return the HS run ID whose timestamp falls within *year_month* (YYYY-MM).
 
     Prefers ``hs_runs``; falls back to ``hs_triage.created_at``.
@@ -312,7 +343,7 @@ def _hs_run_id_for_month(conn, year_month: str) -> str | None:
                     f"""
                     SELECT {run_col}
                     FROM hs_runs
-                    WHERE STRFTIME({ts_expr}, '%Y-%m') = ?
+                    WHERE STRFTIME({ts_expr}, '%Y-%m') = ?{_test_clause(conn, "hs_runs", "", include_test)}
                     ORDER BY {ts_expr} DESC NULLS LAST
                     LIMIT 1
                     """,
@@ -329,7 +360,7 @@ def _hs_run_id_for_month(conn, year_month: str) -> str | None:
                 f"""
                 SELECT DISTINCT {run_col}
                 FROM hs_triage
-                WHERE STRFTIME(created_at, '%Y-%m') = ?
+                WHERE STRFTIME(created_at, '%Y-%m') = ?{_test_clause(conn, "hs_triage", "", include_test)}
                 ORDER BY created_at DESC NULLS LAST
                 LIMIT 1
                 """,
@@ -341,7 +372,7 @@ def _hs_run_id_for_month(conn, year_month: str) -> str | None:
     return None
 
 
-def _latest_hs_run_id(conn) -> str | None:
+def _latest_hs_run_id(conn, include_test: bool = False) -> str | None:
     if _table_exists(conn, "hs_runs"):
         hs_cols = _table_columns(conn, "hs_runs")
         run_col = _pick_column(hs_cols, ["hs_run_id", "run_id"])
@@ -359,6 +390,7 @@ def _latest_hs_run_id(conn) -> str | None:
                     f"""
                     SELECT {run_col}
                     FROM hs_runs
+                    WHERE 1=1{_test_clause(conn, "hs_runs", "", include_test)}
                     ORDER BY {ts_expr} DESC NULLS LAST
                     LIMIT 1
                     """
@@ -381,6 +413,7 @@ def _latest_hs_run_id(conn) -> str | None:
         f"""
         SELECT {run_col}
         FROM hs_triage
+        WHERE 1=1{_test_clause(conn, "hs_triage", "", include_test)}
         ORDER BY {order_expr}
         LIMIT 1
         """
@@ -395,6 +428,7 @@ def _update_highest_rc(
     base: dict[str, dict[str, Any]],
     hs_run_id: str | None = None,
     forecaster_run_id: str | None = None,
+    include_test: bool = False,
 ) -> None:
     """Populate ``highest_rc_level`` / ``highest_rc_score`` in *base*.
 
@@ -423,6 +457,9 @@ def _update_highest_rc(
         )
         return
 
+    ht_test = _test_clause(conn, "hs_triage", "ht", include_test)
+    q_test = _test_clause(conn, "questions", "q", include_test)
+    fe_test = _test_clause(conn, "forecasts_ensemble", "fe", include_test)
     try:
         if forecaster_run_id:
             # Forecaster-run mode: scope RC data to the HS run(s) associated
@@ -439,7 +476,7 @@ def _update_highest_rc(
                  AND UPPER(q.iso3) = UPPER(ht.{iso_col})
                 JOIN forecasts_ensemble fe
                   ON fe.question_id = q.question_id
-                WHERE fe.run_id = ?
+                WHERE fe.run_id = ?{ht_test}{q_test}{fe_test}
                 GROUP BY 1
                 ORDER BY 1
                 """,
@@ -450,11 +487,11 @@ def _update_highest_rc(
             rows = conn.execute(
                 f"""
                 SELECT
-                  UPPER({iso_col}) AS iso3,
-                  MAX({level_col}) AS highest_rc_level,
-                  MAX({score_col}) AS highest_rc_score
-                FROM hs_triage
-                WHERE {run_col} = ?
+                  UPPER(ht.{iso_col}) AS iso3,
+                  MAX(ht.{level_col}) AS highest_rc_level,
+                  MAX(ht.{score_col}) AS highest_rc_score
+                FROM hs_triage ht
+                WHERE ht.{run_col} = ?{ht_test}
                 GROUP BY 1
                 ORDER BY 1
                 """,
@@ -475,6 +512,7 @@ def _update_highest_rc(
                 JOIN questions q
                   ON q.hs_run_id = ht.{run_col}
                  AND UPPER(q.iso3) = UPPER(ht.{iso_col})
+                WHERE 1=1{ht_test}{q_test}
                 GROUP BY 1
                 ORDER BY 1
                 """,
@@ -515,34 +553,34 @@ def compute_countries_index(
     if forecaster_run_id:
         base = _base_rows(conn, metric_scope=metric_scope, forecaster_run_id=forecaster_run_id, include_test=include_test)
         # Add HS country list countries (may have 0 questions for this metric).
-        _add_hs_country_list(conn, base, forecaster_run_id=forecaster_run_id)
+        _add_hs_country_list(conn, base, forecaster_run_id=forecaster_run_id, include_test=include_test)
         if not base:
             return []
-        _update_last_triaged(conn, base)
-        _update_forecasts(conn, base, forecaster_run_id=forecaster_run_id)
-        _update_highest_rc(conn, base, forecaster_run_id=forecaster_run_id)
+        _update_last_triaged(conn, base, include_test=include_test)
+        _update_forecasts(conn, base, forecaster_run_id=forecaster_run_id, include_test=include_test)
+        _update_highest_rc(conn, base, forecaster_run_id=forecaster_run_id, include_test=include_test)
         return [base[key] for key in sorted(base)]
 
     # Resolve the HS run for the requested month (or latest).
     hs_run_id: str | None = None
     if year_month:
-        hs_run_id = _hs_run_id_for_month(conn, year_month)
+        hs_run_id = _hs_run_id_for_month(conn, year_month, include_test=include_test)
     if not hs_run_id:
-        hs_run_id = _latest_hs_run_id(conn)
+        hs_run_id = _latest_hs_run_id(conn, include_test=include_test)
 
     # Filter base rows by metric and run.
     run_filter = hs_run_id if year_month else None
     base = _base_rows(conn, metric_scope=metric_scope, hs_run_id=run_filter, include_test=include_test)
     # Add HS country list countries (may have 0 questions for this metric).
-    _add_hs_country_list(conn, base, hs_run_id=hs_run_id)
+    _add_hs_country_list(conn, base, hs_run_id=hs_run_id, include_test=include_test)
     if not base:
         return []
 
-    _update_last_triaged(conn, base)
-    _update_forecasts(conn, base)
+    _update_last_triaged(conn, base, include_test=include_test)
+    _update_forecasts(conn, base, include_test=include_test)
     # When a specific month is requested, use that run's RC data.
     # Otherwise let _update_highest_rc join through questions so each
     # country's RC comes from the run(s) that produced its questions.
-    _update_highest_rc(conn, base, hs_run_id=hs_run_id if year_month else None)
+    _update_highest_rc(conn, base, hs_run_id=hs_run_id if year_month else None, include_test=include_test)
 
     return [base[key] for key in sorted(base)]

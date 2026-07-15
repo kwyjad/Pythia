@@ -374,6 +374,7 @@ def get_questions(
             metric=metric,
             target_month=target_month,
             status=status,
+            include_test=include_test,
         )
         sql = cte + """
         SELECT *
@@ -392,7 +393,9 @@ def get_questions(
     triage_summary: dict[str, dict[str, Any]] = {}
     try:
         question_ids = [row["question_id"] for row in rows if row.get("question_id")]
-        summary = compute_questions_forecast_summary(con, question_ids=question_ids)
+        summary = compute_questions_forecast_summary(
+            con, question_ids=question_ids, include_test=include_test
+        )
         if not summary:
             logger.warning("Forecast summary empty; EIV will be null for questions page.")
         for row in rows:

@@ -22,6 +22,7 @@ def compute_questions_forecast_summary(
     conn,
     *,
     question_ids: list[str] | None = None,
+    include_test: bool = False,
 ) -> dict[str, dict[str, Any]]:
     if conn is None:
         return {}
@@ -71,6 +72,12 @@ def compute_questions_forecast_summary(
         filter_bits.append(f"fe.{horizon_col} IS NOT NULL")
     if bucket_col:
         filter_bits.append(f"fe.{bucket_col} IS NOT NULL")
+    # Exclude test-run forecasts by default: a production question can carry
+    # forecast rows from an earlier (or later) test run for the same epoch,
+    # and without this filter those rows could drive forecast_date/EIV with
+    # the dashboard's Test toggle OFF.
+    if not include_test and "is_test" in fe_cols:
+        filter_bits.append("COALESCE(fe.is_test, FALSE) = FALSE")
     if not filter_bits:
         _log_summary_context("no usable filters")
         return {}

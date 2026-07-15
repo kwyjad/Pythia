@@ -302,25 +302,56 @@ def health():
     }
 
 
-# Staleness probes (full-column MAX scans over 5 tables) are cached per DB
+# Staleness probes (full-column MAX scans over 6 tables) are cached per DB
 # version: the dashboard homepage is force-dynamic and calls /v1/version on
-# every page view, which used to re-run all 6 scans each time. The DB only
+# every page view, which used to re-run all the scans each time. The DB only
 # changes when the sync layer os.replace()s the file, which advances its
 # mtime — the same freshness signal _maybe_refresh_db trusts.
 _VERSION_PROBE_LOCK = threading.Lock()
-_VERSION_PROBE_CACHE: Optional[tuple] = None  # (db_mtime, probes dict)
+# {include_test: (db_mtime, probes dict)} — at most two entries. Tests reset
+# it by assigning None.
+_VERSION_PROBE_CACHE: Optional[Dict[bool, tuple]] = None
+
+# Probe keys carrying data (used for the "don't cache an all-None result"
+# check; excludes the _hs_probe_ok bookkeeping flag).
+_PROBE_DATA_KEYS = (
+    "latest_forecast_month",
+    "latest_forecast_run_id",
+    "latest_scores_at",
+    "latest_calibration_at",
+    "latest_resolutions_at",
+    "latest_advice_at",
+    "latest_forecast_at",
+    "latest_hs_run_id",
+    "latest_hs_created_at",
+)
 
 
-def _compute_staleness_probes() -> Dict[str, Any]:
+def _compute_staleness_probes(include_test: bool = False) -> Dict[str, Any]:
+    def _probe_test_filter(table: str) -> str:
+        """Test-exclusion clause for a probe query ('' when include_test or
+        the table has no is_test column — old DBs and minimal test fixtures)."""
+        if include_test:
+            return ""
+        try:
+            if _table_has_columns(_con(), table, ["is_test"]):
+                return " AND COALESCE(is_test, FALSE) = FALSE"
+        except Exception:
+            return ""
+        return ""
+
     probes: Dict[str, Any] = {}
     try:
         con = _con()
+        fe_tf = _probe_test_filter("forecasts_ensemble")
         row = con.execute(
-            "SELECT MAX(strftime(created_at, '%Y-%m')) FROM forecasts_ensemble WHERE created_at IS NOT NULL"
+            "SELECT MAX(strftime(created_at, '%Y-%m')) FROM forecasts_ensemble "
+            f"WHERE created_at IS NOT NULL{fe_tf}"
         ).fetchone()
         probes["latest_forecast_month"] = row[0] if row and row[0] else None
         run_row = con.execute(
-            "SELECT run_id FROM forecasts_ensemble WHERE run_id IS NOT NULL ORDER BY run_id DESC LIMIT 1"
+            f"SELECT run_id FROM forecasts_ensemble WHERE run_id IS NOT NULL{fe_tf} "
+            "ORDER BY run_id DESC LIMIT 1"
         ).fetchone()
         probes["latest_forecast_run_id"] = run_row[0] if run_row and run_row[0] else None
     except Exception:
@@ -332,7 +363,7 @@ def _compute_staleness_probes() -> Dict[str, Any]:
             con_local = _con()
             r = con_local.execute(
                 f"SELECT strftime(MAX(created_at), '%Y-%m-%dT%H:%M:%S') "
-                f"FROM {table} WHERE created_at IS NOT NULL"
+                f"FROM {table} WHERE created_at IS NOT NULL{_probe_test_filter(table)}"
             ).fetchone()
             return r[0] if r and r[0] else None
         except Exception as exc:
@@ -346,10 +377,48 @@ def _compute_staleness_probes() -> Dict[str, Any]:
     probes["latest_resolutions_at"] = _max_created_at("resolutions")
     probes["latest_advice_at"] = _max_created_at("calibration_advice")
     probes["latest_forecast_at"] = _max_created_at("forecasts_ensemble")
+
+    # Test-aware latest-HS probe. The manifest's latest_hs_run_id /
+    # latest_hs_created_at (and the sync layer's DB introspection) have no
+    # is_test concept, so with the test filter active /v1/version overrides
+    # them with these values — a test-mode publish must not advance the
+    # dashboard's "Last updated"/"Latest forecast scan" when Test is OFF.
+    # _hs_probe_ok=True means the probe ran against a usable hs_runs table
+    # (None values then mean "no matching runs", not "probe unavailable").
+    probes["latest_hs_run_id"] = None
+    probes["latest_hs_created_at"] = None
+    probes["_hs_probe_ok"] = False
+    try:
+        con = _con()
+        if _table_exists(con, "hs_runs"):
+            cols = {
+                r[0]
+                for r in con.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'hs_runs'"
+                ).fetchall()
+            }
+            id_col = next((c for c in ("hs_run_id", "run_id") if c in cols), None)
+            ts_col = next(
+                (c for c in ("created_at", "finished_at", "started_at", "generated_at") if c in cols),
+                None,
+            )
+            if id_col and ts_col:
+                r = con.execute(
+                    f"SELECT {id_col}, strftime({ts_col}, '%Y-%m-%dT%H:%M:%S') FROM hs_runs "
+                    f"WHERE {ts_col} IS NOT NULL{_probe_test_filter('hs_runs')} "
+                    f"ORDER BY {ts_col} DESC LIMIT 1"
+                ).fetchone()
+                probes["_hs_probe_ok"] = True
+                if r:
+                    probes["latest_hs_run_id"] = r[0]
+                    probes["latest_hs_created_at"] = r[1]
+    except Exception as exc:
+        logger.warning("staleness probe failed for hs_runs: %r", exc)
     return probes
 
 
-def _staleness_probes() -> Dict[str, Any]:
+def _staleness_probes(include_test: bool = False) -> Dict[str, Any]:
     global _VERSION_PROBE_CACHE
     # Cache key = the DB mtime captured when the read connection was OPENED
     # (core._READ_CON_MTIME), not the raw on-disk mtime. Right after a publish
@@ -366,24 +435,24 @@ def _staleness_probes() -> Dict[str, Any]:
         logger.warning("staleness probe connection setup failed: %r", exc)
     mtime = _core._READ_CON_MTIME
     with _VERSION_PROBE_LOCK:
-        if (
-            _VERSION_PROBE_CACHE is not None
-            and mtime is not None
-            and _VERSION_PROBE_CACHE[0] == mtime
-        ):
-            return _VERSION_PROBE_CACHE[1]
-    probes = _compute_staleness_probes()
+        cache = _VERSION_PROBE_CACHE or {}
+        entry = cache.get(include_test)
+        if entry is not None and mtime is not None and entry[0] == mtime:
+            return entry[1]
+    probes = _compute_staleness_probes(include_test)
     # Don't cache an all-None result: it usually means a transient connection
     # failure, and caching it would blank the staleness fields until the next
     # DB refresh. (A genuinely empty DB re-probes each call — it's cheap there.)
-    if mtime is not None and any(v is not None for v in probes.values()):
+    if mtime is not None and any(probes.get(k) is not None for k in _PROBE_DATA_KEYS):
         with _VERSION_PROBE_LOCK:
-            _VERSION_PROBE_CACHE = (mtime, probes)
+            if _VERSION_PROBE_CACHE is None:
+                _VERSION_PROBE_CACHE = {}
+            _VERSION_PROBE_CACHE[include_test] = (mtime, probes)
     return probes
 
 
 @app.get("/v1/version")
-def api_version() -> Dict[str, Any]:
+def api_version(include_test: bool = Query(False)) -> Dict[str, Any]:
     try:
         manifest = maybe_sync_latest_db()
     except DbSyncError as exc:
@@ -397,9 +466,20 @@ def api_version() -> Dict[str, Any]:
     result["sync_status"] = get_sync_status()
     # Add DB staleness diagnostics so operators can verify the API has the
     # latest data. Probes are cached per DB version (see _staleness_probes).
-    probes = _staleness_probes()
+    probes = _staleness_probes(include_test)
     result["latest_forecast_month"] = probes["latest_forecast_month"]
     result["latest_forecast_run_id"] = probes["latest_forecast_run_id"]
+
+    # With the test filter active (the default), the manifest-derived latest-HS
+    # fields are replaced by the test-aware hs_runs probe: the manifest and the
+    # sync layer's introspection have no is_test concept, so a test-mode
+    # publish would otherwise advance "Last updated"/"Latest forecast scan"
+    # while the dashboard (Test OFF) shows no new data — the July 2026
+    # "dashboard stuck on yesterday's test run" confusion. When the probe
+    # cannot run (hs_runs missing/unusable), the manifest values stand.
+    if not include_test and probes.get("_hs_probe_ok"):
+        result["latest_hs_run_id"] = probes["latest_hs_run_id"]
+        result["latest_hs_created_at"] = probes["latest_hs_created_at"]
 
     # "Last updated" should reflect the most recent *pipeline activity*, not just
     # the last Horizon Scanner run. The scoring/calibration loop updates the data
@@ -511,20 +591,28 @@ def get_countries(
     if not _table_exists(con, "questions"):
         return {"rows": []}
 
-    metric_filter = ""
+    where_bits: list[str] = []
     params: list[str] = []
     if metric_scope:
-        metric_filter = "WHERE UPPER(q.metric) = ?"
+        where_bits.append("UPPER(q.metric) = ?")
         params = [metric_scope.upper()]
+    if not include_test and _table_has_columns(con, "questions", ["is_test"]):
+        where_bits.append("COALESCE(q.is_test, FALSE) = FALSE")
+    metric_filter = f"WHERE {' AND '.join(where_bits)}" if where_bits else ""
 
     if _table_exists(con, "forecasts_ensemble"):
+        fe_test = (
+            " AND COALESCE(fe.is_test, FALSE) = FALSE"
+            if not include_test and _table_has_columns(con, "forecasts_ensemble", ["is_test"])
+            else ""
+        )
         sql = f"""
           SELECT
             q.iso3,
             COUNT(DISTINCT q.question_id) AS n_questions,
             COUNT(DISTINCT fe.question_id) AS n_forecasted
           FROM questions q
-          LEFT JOIN forecasts_ensemble fe ON fe.question_id = q.question_id
+          LEFT JOIN forecasts_ensemble fe ON fe.question_id = q.question_id{fe_test}
           {metric_filter}
           GROUP BY q.iso3
           ORDER BY q.iso3
