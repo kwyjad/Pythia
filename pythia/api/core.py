@@ -891,6 +891,7 @@ def _latest_questions_view(
     metric: Optional[str] = None,
     target_month: Optional[str] = None,
     status: Optional[str] = None,
+    include_test: bool = False,
 ) -> tuple[str, Optional[str]]:
     """
     Returns a SQL string for a 'latest questions' CTE called latest_q, parameterised
@@ -900,6 +901,11 @@ def _latest_questions_view(
       - For each concept, pick the question with the latest hs_runs.created_at
         (i.e. latest HS run).
       - Join questions q with hs_runs h to get run timestamps.
+
+    ``include_test=False`` (the default) excludes test-run questions inside the
+    CTE — callers using latest_only semantics get the test filter for free
+    (before July 2026 this CTE had no test filter, so the Forecasts page showed
+    test questions with the Test toggle OFF).
 
     NOTE: This helper builds only the CTE string; you still need to bind the same
     filter parameters to the main query.
@@ -919,6 +925,8 @@ def _latest_questions_view(
         where_bits.append("q.target_month = :target_month")
     if status:
         where_bits.append("q.status = :status")
+    if not include_test and _table_has_columns(con, "questions", ["is_test"]):
+        where_bits.append("COALESCE(q.is_test, FALSE) = FALSE")
 
     where_clause = ""
     if where_bits:

@@ -61,9 +61,9 @@ def test_version_probes_cached_until_db_mtime_changes(api_env: Path, monkeypatch
     calls = {"n": 0}
     real = _app_mod._compute_staleness_probes
 
-    def _counting():
+    def _counting(include_test: bool = False):
         calls["n"] += 1
-        return real()
+        return real(include_test)
 
     monkeypatch.setattr(_app_mod, "_compute_staleness_probes", _counting)
     client = TestClient(app)

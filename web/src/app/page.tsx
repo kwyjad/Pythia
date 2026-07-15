@@ -33,7 +33,11 @@ export default async function OverviewPage({
     console.log("[page] dynamic=force-dynamic", { route: "/" });
   }
   const [version, kpiScopes] = await Promise.all([
-    apiGet<VersionResponse>("/version"),
+    // include_test keeps "Last updated"/"Latest forecast scan" consistent
+    // with the Test toggle: with Test OFF they reflect production data only.
+    apiGet<VersionResponse>("/version", {
+      include_test: includeTest || undefined,
+    }),
     apiGet<DiagnosticsKpiScopesResponse>("/diagnostics/kpi_scopes", {
       metric_scope: "PA",
       include_test: includeTest || undefined,

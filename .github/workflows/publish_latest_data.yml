@@ -547,3 +547,35 @@ jobs:
             data_out/resolver.duckdb \
             data_out/manifest.json \
             --clobber
+
+      # Close the publish→dashboard loop: tell the API to sync NOW instead of
+      # waiting for its periodic (60s) release poll. Without this, "the
+      # dashboard doesn't show the run we just published" is indistinguishable
+      # from a real sync failure for up to a couple of minutes after every
+      # publish. Best-effort and secrets-gated: if PYTHIA_API_BASE_URL /
+      # FRED_DEBUG_TOKEN are not configured (or the API is asleep), the
+      # publish still succeeds — the periodic poll remains the fallback.
+      - name: Poke API to sync the fresh release (best-effort)
+        if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
+        env:
+          PYTHIA_API_BASE_URL: ${{ secrets.PYTHIA_API_BASE_URL }}
+          FRED_DEBUG_TOKEN: ${{ secrets.FRED_DEBUG_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${PYTHIA_API_BASE_URL:-}" ] || [ -z "${FRED_DEBUG_TOKEN:-}" ]; then
+            echo "PYTHIA_API_BASE_URL / FRED_DEBUG_TOKEN not configured; skipping API sync poke."
+            exit 0
+          fi
+          url="${PYTHIA_API_BASE_URL%/}/v1/admin/force_sync?token=${FRED_DEBUG_TOKEN}"
+          echo "POST ${PYTHIA_API_BASE_URL%/}/v1/admin/force_sync"
+          # Two attempts: a Render free/idle instance can need one request to wake.
+          for attempt in 1 2; do
+            body="$(curl -sS -X POST -m 90 "${url}" 2>&1)" && {
+              echo "force_sync response: ${body}"
+              exit 0
+            }
+            echo "Attempt ${attempt} failed: ${body}"
+            sleep 15
+          done
+          echo "::warning::API sync poke failed twice; the API will pick up the release on its periodic poll."
+          exit 0

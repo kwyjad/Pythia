@@ -77,6 +77,7 @@ def get_forecasts_ensemble(
             metric=metric,
             target_month=target_month,
             status=None,
+            include_test=include_test,
         )
         sql = cte + """
         SELECT
