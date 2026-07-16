@@ -1,7 +1,21 @@
+// Aggregate / track slugs that are not base models. Kept here so every surface
+// (Costs, Performance) renders them the same way.
+const AGGREGATE_LABELS: Record<string, string> = {
+  sibyl: "Sibyl (deep research)",
+  ensemble_bayesmc_v2: "Ensemble (BayesMC)",
+  ensemble_mean_v2: "Ensemble (mean)",
+  ensemble: "Ensemble",
+  track2_flash: "Track 2 (flash)",
+};
+
 export function formatModelName(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return raw;
   const lowered = trimmed.toLowerCase();
+
+  if (AGGREGATE_LABELS[lowered]) {
+    return AGGREGATE_LABELS[lowered];
+  }
 
   if (lowered.startsWith("gemini-")) {
     const parts = lowered.replace(/^gemini-/, "").split("-");
