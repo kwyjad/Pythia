@@ -2,7 +2,9 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import InfoTooltip from "../../components/InfoTooltip";
 import { apiGet } from "../../lib/api";
+import SibylMetricsAbout from "./SibylMetricsAbout";
 import type {
   SibylQuestionDetailResponse,
   SibylQuestionRow,
@@ -36,6 +38,23 @@ type SortKey =
   | "cost_usd";
 
 const QUANTILE_ORDER = ["0.1", "0.25", "0.5", "0.75", "0.9", "0.95", "0.99"];
+
+// Concise tooltips for the per-question table headers. The "About these
+// metrics" tab carries the full technical + plain-language explanations.
+const TOOLTIP_JSD_STANDARD =
+  "Jensen–Shannon divergence between Sibyl's pooled distribution and the " +
+  "standard pipeline's aggregate SPD (averaged over the 6 window months). " +
+  "A disagreement signal, not an accuracy score. 0 = identical; higher " +
+  "(toward ~0.69) = the two methods disagree. See the About these metrics tab.";
+const TOOLTIP_JSD_INTER_TRIAL =
+  "Mean pairwise Jensen–Shannon divergence across Sibyl's K independent " +
+  "research trials for this question. Low = trials converged (robust); high " +
+  "= trials scattered (ambiguous/thin evidence). 0 → ~0.69.";
+const TOOLTIP_VOLATILITY =
+  "The Horizon Scanner regime-change score (likelihood × magnitude of a " +
+  "departure from base rate) that selected this question for deep research. " +
+  "Higher = more turbulent situation. A prioritization value, not a " +
+  "performance score. Range ~0–1.";
 
 const QuantileRow = ({
   label,
@@ -360,6 +379,7 @@ const SibylClient = ({
   const [sortKey, setSortKey] = useState<SortKey>("js_divergence_vs_standard");
   const [sortDesc, setSortDesc] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [tab, setTab] = useState<"questions" | "about">("questions");
 
   const run = summary.run;
   const rows = questions.rows;
@@ -391,27 +411,72 @@ const SibylClient = ({
     router.push(`/sibyl?${params.toString()}`);
   };
 
-  const sortHeader = (key: SortKey, label: string) => (
-    <th
-      className="cursor-pointer px-3 py-2 text-right text-xs font-semibold text-fred-muted hover:text-fred-primary"
-      onClick={() => toggleSort(key)}
-    >
-      {label}
-      {sortKey === key ? (sortDesc ? " ↓" : " ↑") : ""}
+  const sortHeader = (key: SortKey, label: string, tooltip?: string) => (
+    <th className="px-3 py-2 text-right text-xs font-semibold text-fred-muted">
+      <span className="inline-flex items-center justify-end gap-1">
+        <span
+          className="cursor-pointer hover:text-fred-primary"
+          onClick={() => toggleSort(key)}
+        >
+          {label}
+          {sortKey === key ? (sortDesc ? " ↓" : " ↑") : ""}
+        </span>
+        {tooltip ? <InfoTooltip text={tooltip} /> : null}
+      </span>
     </th>
   );
 
+  // Top-level tab bar — always rendered so the metric explanations stay
+  // reachable even before the first Sibyl run exists.
+  const tabBar = (
+    <div className="flex gap-1 rounded-lg border border-fred-secondary bg-fred-bg/40 p-1">
+      {(
+        [
+          { key: "questions", label: "Questions" },
+          { key: "about", label: "About these metrics" },
+        ] as { key: "questions" | "about"; label: string }[]
+      ).map(({ key, label }) => (
+        <button
+          key={key}
+          type="button"
+          className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+            tab === key
+              ? "bg-fred-primary text-white"
+              : "text-fred-text hover:bg-fred-bg/60"
+          }`}
+          onClick={() => setTab(key)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (tab === "about") {
+    return (
+      <div className="space-y-6">
+        {tabBar}
+        <SibylMetricsAbout />
+      </div>
+    );
+  }
+
   if (!run) {
     return (
-      <div className="rounded-lg border border-fred-secondary bg-fred-surface px-4 py-6 text-sm text-fred-muted">
-        No Sibyl runs yet. The Sibyl workflow runs after each Horizon Scanner
-        pipeline completes.
+      <div className="space-y-6">
+        {tabBar}
+        <div className="rounded-lg border border-fred-secondary bg-fred-surface px-4 py-6 text-sm text-fred-muted">
+          No Sibyl runs yet. The Sibyl workflow runs after each Horizon Scanner
+          pipeline completes.
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
+      {tabBar}
+
       {runs.rows.length > 1 ? (
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="text-fred-muted">Run:</span>
@@ -479,9 +544,17 @@ const SibylClient = ({
               <th className="px-3 py-2 text-left text-xs font-semibold text-fred-muted">
                 Status
               </th>
-              {sortHeader("js_divergence_vs_standard", "JSD vs standard")}
-              {sortHeader("js_divergence_inter_trial", "Inter-trial JSD")}
-              {sortHeader("volatility_score", "Volatility")}
+              {sortHeader(
+                "js_divergence_vs_standard",
+                "JSD vs standard",
+                TOOLTIP_JSD_STANDARD,
+              )}
+              {sortHeader(
+                "js_divergence_inter_trial",
+                "Inter-trial JSD",
+                TOOLTIP_JSD_INTER_TRIAL,
+              )}
+              {sortHeader("volatility_score", "Volatility", TOOLTIP_VOLATILITY)}
               {sortHeader("cost_usd", "Cost")}
             </tr>
           </thead>
