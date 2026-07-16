@@ -12,18 +12,21 @@ from resolver.query.costs import (
     build_costs_total,
     build_latencies_runs,
     build_run_runtimes,
+    phase_group,
 )
 
 
-def _seed_llm_calls(con: duckdb.DuckDBPyConnection) -> None:
+def _create_llm_calls(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(
         """
         CREATE TABLE llm_calls (
             run_id VARCHAR,
             hs_run_id VARCHAR,
+            forecaster_run_id VARCHAR,
             question_id VARCHAR,
             iso3 VARCHAR,
             phase VARCHAR,
+            component VARCHAR,
             model_id VARCHAR,
             model_name VARCHAR,
             cost_usd DOUBLE,
@@ -33,6 +36,10 @@ def _seed_llm_calls(con: duckdb.DuckDBPyConnection) -> None:
         )
         """
     )
+
+
+def _seed_llm_calls(con: duckdb.DuckDBPyConnection) -> None:
+    _create_llm_calls(con)
     con.execute(
         """
         INSERT INTO llm_calls (run_id, hs_run_id, question_id, iso3, phase, model_id, model_name, cost_usd, elapsed_ms, created_at) VALUES
@@ -183,3 +190,102 @@ def test_run_runtimes_aggregation():
     assert run_hs["question_p90_ms"] == pytest.approx(400.0)
     assert run_hs["country_p50_ms"] == pytest.approx(400.0)
     assert run_hs["country_p90_ms"] == pytest.approx(400.0)
+
+
+def _seed_attribution_cases(con: duckdb.DuckDBPyConnection) -> None:
+    """Rows exercising Sibyl phase, component-fallback attribution, and run linkage."""
+    _create_llm_calls(con)
+    con.execute(
+        """
+        INSERT INTO llm_calls
+            (run_id, hs_run_id, forecaster_run_id, question_id, iso3, phase, component,
+             model_id, model_name, cost_usd, elapsed_ms, created_at) VALUES
+            -- Sibyl: one Opus row + one Brave row, both phase='sibyl'
+            ('run-1', NULL, NULL, 'q1', 'USA', 'sibyl', NULL,
+             'claude-opus-4-8', 'sibyl', 6.0, 700, '2024-03-01 00:00:00'),
+            ('run-1', NULL, NULL, 'q1', 'USA', 'sibyl', NULL,
+             'brave-web-search', 'sibyl', 2.0, 50, '2024-03-01 00:00:00'),
+            -- Phase-less generic row attributed via component
+            ('run-1', NULL, NULL, 'q2', 'CAN', NULL, 'prediction_markets',
+             NULL, 'gpt-4', 3.0, 120, '2024-03-02 00:00:00'),
+            ('run-1', NULL, NULL, 'q2', 'CAN', NULL, 'HorizonScanner',
+             NULL, 'gpt-4', 1.0, 80, '2024-03-02 00:00:00'),
+            -- Run linkage only via forecaster_run_id (run_id + hs_run_id NULL)
+            (NULL, NULL, 'fc-1', 'q3', 'MEX', 'spd_forecast', 'Forecaster',
+             'gpt-4', 'gpt-4', 4.0, 400, '2024-03-03 00:00:00')
+        """
+    )
+
+
+def test_sibyl_and_component_attribution():
+    con = duckdb.connect(":memory:")
+    _seed_attribution_cases(con)
+
+    tables = build_costs_total(con)
+    by_phase = tables["by_phase"]
+
+    # Sum across phases equals the grand total (invariant must hold).
+    assert by_phase["total_cost_usd"].sum() == pytest.approx(16.0)
+
+    phase_totals = {row["phase"]: row["total_cost_usd"] for _, row in by_phase.iterrows()}
+    # Sibyl is a first-class phase: Opus (6) + Brave (2) = 8.
+    assert phase_totals["sibyl"] == pytest.approx(8.0)
+    # Component fallback attributes phase-less rows — no stray "other".
+    assert phase_totals["prediction_markets"] == pytest.approx(3.0)
+    assert phase_totals["hs"] == pytest.approx(1.0)
+    assert phase_totals["forecast"] == pytest.approx(4.0)
+    assert "other" not in phase_totals
+
+    # By-model still splits Sibyl Opus vs Brave credits.
+    by_model = tables["by_model"]
+    model_totals = {row["model"]: row["total_cost_usd"] for _, row in by_model.iterrows()}
+    assert model_totals["claude-opus-4-8"] == pytest.approx(6.0)
+    assert model_totals["brave-web-search"] == pytest.approx(2.0)
+
+    # Run linkage: the forecaster-only row is attributed to fc-1.
+    runs = build_costs_runs(con)["summary"]
+    fc_run = _summary_row(runs, run_id="fc-1")
+    assert fc_run["total_cost_usd"] == pytest.approx(4.0)
+
+
+def test_run_runtimes_itemizes_sibyl_and_pm():
+    con = duckdb.connect(":memory:")
+    _seed_attribution_cases(con)
+
+    runtimes = build_run_runtimes(con)
+    run_1 = _summary_row(runtimes, run_id="run-1")
+    # sibyl_ms is now projected and populated (was always 0 / dropped before).
+    assert run_1["sibyl_ms"] == pytest.approx(750.0)  # 700 + 50
+    assert run_1["prediction_markets_ms"] == pytest.approx(120.0)
+    assert run_1["hs_ms"] == pytest.approx(80.0)
+
+
+def test_phase_group_canonical_mapping():
+    assert phase_group("sibyl") == "sibyl"
+    assert phase_group("sibyl_trial0_step1") == "sibyl"
+    assert phase_group("prediction_markets") == "prediction_markets"
+    assert phase_group("pm") == "prediction_markets"
+    assert phase_group("HorizonScanner") == "hs"
+    assert phase_group("hs_triage") == "hs"
+    assert phase_group("Researcher") == "research"
+    assert phase_group("web_research") == "web_search"
+    assert phase_group("Forecaster") == "forecast"
+    assert phase_group("spd_forecast") == "forecast"
+    assert phase_group("ScenarioWriter") == "scenario"
+    assert phase_group(None) == "other"
+    assert phase_group("") == "other"
+    assert phase_group("misc") == "other"
+
+
+def test_phase_group_live_pipeline_values():
+    """The exact phase/call_type strings the live loggers write must never fall to
+    'other'. These are the values passed at forecaster/cli.py, scenario_writer.py,
+    and sibyl/cost.py call sites — a rename there without a phase_group branch would
+    silently regress the Costs page."""
+    assert phase_group("spd_v2") == "forecast"
+    assert phase_group("binary_v2") == "forecast"
+    assert phase_group("scenario_v2") == "scenario"
+    assert phase_group("forecast_web_research") == "web_search"
+    assert phase_group("sibyl") == "sibyl"
+    # hs loggers hardcode phase='hs_triage'
+    assert phase_group("hs_triage") == "hs"
