@@ -16,11 +16,16 @@ import type {
   ScoreFamily,
   SibylComparisonResponse,
 } from "../../lib/types";
+import AboutScores from "./AboutScores";
 import SibylComparison from "./SibylComparison";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+// Top-level page tabs: the live scoring dashboard vs. the scoring-methodology
+// reference. Kept distinct from `ViewMode` (the Detailed Scores sub-tabs).
+type PageTab = "dashboard" | "about";
 
 type ViewMode = "total" | "by_hazard" | "by_run" | "by_model";
 
@@ -472,6 +477,7 @@ export default function PerformancePanel({
   initialSibyl,
   includeTest,
 }: PerformancePanelProps) {
+  const [pageTab, setPageTab] = useState<PageTab>("dashboard");
   const [view, setView] = useState<ViewMode>("total");
   const [metric, setMetric] = useState<string | null>(null);
   const [track, setTrack] = useState<number | null>(null);
@@ -742,6 +748,33 @@ export default function PerformancePanel({
 
   return (
     <div className="space-y-6">
+      {/* Top-level page tabs: live dashboard vs. scoring methodology */}
+      <div className="flex gap-1 rounded-lg border border-fred-secondary bg-fred-bg/40 p-1">
+        {(
+          [
+            { key: "dashboard", label: "Dashboard" },
+            { key: "about", label: "About performance scores" },
+          ] as { key: PageTab; label: string }[]
+        ).map(({ key, label }) => (
+          <button
+            key={key}
+            type="button"
+            className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+              pageTab === key
+                ? "bg-fred-primary text-fred-bg"
+                : "text-fred-text hover:bg-fred-bg/60"
+            }`}
+            onClick={() => setPageTab(key)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {pageTab === "about" ? <AboutScores /> : null}
+
+      {pageTab === "dashboard" ? (
+        <>
       {/* Summary KPI cards */}
       <section className="rounded-lg border border-fred-secondary bg-fred-surface/50 p-4">
         <div className="mb-3 flex items-baseline justify-between">
@@ -1061,6 +1094,8 @@ export default function PerformancePanel({
           </div>
         )}
       </section>
+        </>
+      ) : null}
     </div>
   );
 }
