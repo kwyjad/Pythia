@@ -8,8 +8,15 @@ on:
     # pre-resolution DB (stale resolutions/scores, empty calibration_*). The
     # calibration workflow now dispatches publish explicitly at the end of that
     # chain (see compute_calibration_pythia.yml), so the terminus DB always wins.
+    #
+    # NOTE: "Horizon Scanner Triage" is also intentionally NOT a trigger here.
+    # HS Triage completion fires Sibyl Deep Research (run_sibyl.yml); Sibyl
+    # dispatches publish at the end of its run (always, on success). So the
+    # forecast-pipeline release is pythia → Sibyl → publish (a single release),
+    # not a publish racing HS completion in parallel with Sibyl. The forecast
+    # release therefore depends on Sibyl reaching its end — if a Sibyl run breaks,
+    # recover by manually dispatching this workflow (workflow_dispatch).
     workflows:
-      - "Horizon Scanner Triage"
       - "Pythia — Compute Calibration Weights & Advice"
     types: [completed]
   workflow_dispatch:
@@ -547,6 +554,27 @@ jobs:
             data_out/resolver.duckdb \
             data_out/manifest.json \
             --clobber
+
+      # Inspect the DB we just published, mirroring the inspection that runs
+      # after Resolver Update (inspect_resolver_duckdb.yml). Reuses the same
+      # entry point (scripts/ci/inspect_resolver_db.py, stdlib + duckdb only).
+      # The DB is already on disk at data_out/resolver.duckdb and duckdb was
+      # pip-installed by the regression-guard step earlier in this job.
+      - name: Inspect published DB
+        if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
+        run: |
+          set -euo pipefail
+          rm -f data_out/resolver.duckdb.wal
+          python -m scripts.ci.inspect_resolver_db \
+            --db data_out/resolver.duckdb \
+            --out resolver_inspect.md
+
+      - name: Upload resolver inspection artifact
+        if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-inspect
+          path: resolver_inspect.md
 
       # Close the publish→dashboard loop: tell the API to sync NOW instead of
       # waiting for its periodic (60s) release poll. Without this, "the
