@@ -57,29 +57,57 @@ RUN_RUNTIME_COLUMNS = [
     "research_ms",
     "forecast_ms",
     "scenario_ms",
+    "prediction_markets_ms",
+    "sibyl_ms",
     "other_ms",
     "total_ms",
 ]
 
 logger = logging.getLogger(__name__)
 
+# Canonical phase buckets. Every llm_calls row is mapped to exactly one of these by
+# phase_group(); anything that cannot be classified lands in "other" (surfaced by the
+# diagnostic in _load_llm_calls so "other" means genuinely unmapped, not un-recovered).
+CANONICAL_PHASES = [
+    "web_search",
+    "hs",
+    "research",
+    "forecast",
+    "scenario",
+    "prediction_markets",
+    "sibyl",
+    "other",
+]
+
 
 def phase_group(phase: str | None) -> str:
+    """Map a raw ``phase`` (or ``component``) string to a canonical phase bucket.
+
+    Ordered most-specific first. Recognizes both real ``phase`` values (e.g.
+    ``"sibyl"``, ``"spd_forecast"``) and known ``component`` values (e.g.
+    ``"HorizonScanner"``, ``"prediction_markets"``, ``"Researcher"``) so that
+    phase-less generic rows can be attributed via their component (see
+    ``_load_llm_calls``).
+    """
     if not phase:
         return "other"
     value = str(phase).strip().lower()
     if not value:
         return "other"
-    if "web" in value:
+    if "sibyl" in value:
+        return "sibyl"
+    if "prediction_market" in value or value in {"pm", "market"}:
+        return "prediction_markets"
+    if "web" in value:  # web_search, web_research
         return "web_search"
-    if value.startswith("hs"):
-        return "hs"
-    if "research" in value:
+    if value.startswith("hs") or "horizon" in value or "triage" in value:
+        return "hs"  # HorizonScanner, hs.json_repair, hs_triage
+    if "research" in value:  # Researcher, research_step
         return "research"
-    if "spd" in value or "forecast" in value:
-        return "forecast"
-    if "scenario" in value:
+    if "scenario" in value:  # ScenarioWriter, scenario_build
         return "scenario"
+    if "spd" in value or "forecast" in value or "ensemble" in value or "binary" in value:
+        return "forecast"  # Forecaster, spd_v2, binary_v2, run_ensemble_*
     return "other"
 
 
@@ -113,6 +141,8 @@ def _load_llm_calls(conn, track: int | None = None, include_test: bool = False) 
     iso3_col = _pick_column(cols, ["iso3"])
     hazard_code_col = _pick_column(cols, ["hazard_code"])
     phase_col = _pick_column(cols, ["phase"])
+    component_col = _pick_column(cols, ["component"])
+    fc_run_id_col = _pick_column(cols, ["forecaster_run_id"])
     model_id_col = _pick_column(cols, ["model_id"])
     model_name_col = _pick_column(cols, ["model_name"])
     cost_col = _pick_column(cols, ["cost_usd"])
@@ -130,6 +160,16 @@ def _load_llm_calls(conn, track: int | None = None, include_test: bool = False) 
     )
     iso3_expr = f"CAST(lc.{iso3_col} AS VARCHAR) AS iso3" if iso3_col else "NULL AS iso3"
     phase_expr = f"CAST(lc.{phase_col} AS VARCHAR) AS phase" if phase_col else "NULL AS phase"
+    component_expr = (
+        f"CAST(lc.{component_col} AS VARCHAR) AS component"
+        if component_col
+        else "NULL AS component"
+    )
+    fc_run_expr = (
+        f"CAST(lc.{fc_run_id_col} AS VARCHAR) AS forecaster_run_id"
+        if fc_run_id_col
+        else "NULL AS forecaster_run_id"
+    )
     model_id_expr = (
         f"CAST(lc.{model_id_col} AS VARCHAR) AS model_id" if model_id_col else "NULL AS model_id"
     )
@@ -208,6 +248,8 @@ def _load_llm_calls(conn, track: int | None = None, include_test: bool = False) 
             {question_expr},
             {iso3_expr},
             {phase_expr},
+            {component_expr},
+            {fc_run_expr},
             {model_id_expr},
             {model_name_expr},
             {cost_expr},
@@ -221,7 +263,17 @@ def _load_llm_calls(conn, track: int | None = None, include_test: bool = False) 
     if df.empty:
         return df
 
-    for col in ["run_id", "hs_run_id", "question_id", "iso3", "phase", "model_id", "model_name"]:
+    for col in [
+        "run_id",
+        "hs_run_id",
+        "forecaster_run_id",
+        "question_id",
+        "iso3",
+        "phase",
+        "component",
+        "model_id",
+        "model_name",
+    ]:
         df[col] = _normalize_string(df[col])
 
     df["cost_usd"] = pd.to_numeric(df["cost_usd"], errors="coerce").fillna(0.0)
@@ -234,9 +286,16 @@ def _load_llm_calls(conn, track: int | None = None, include_test: bool = False) 
     model = model.fillna("unknown")
     df["model"] = model
 
-    df["phase"] = df["phase"].map(phase_group)
+    # Attribute phase-less generic rows via their `component` (e.g. HorizonScanner,
+    # prediction_markets, Researcher) before collapsing to canonical buckets. The
+    # attribution data already exists in the DB — the old code just discarded it.
+    phase_source = df["phase"].where(df["phase"].notna(), df["component"])
+    df["phase"] = phase_source.map(phase_group)
 
+    # Run linkage: prefer run_id, then hs_run_id, then forecaster_run_id (generic
+    # rows write the forecaster run to forecaster_run_id, not run_id).
     run_key = df["run_id"].where(df["run_id"].notna(), df["hs_run_id"])
+    run_key = run_key.where(run_key.notna(), df["forecaster_run_id"])
     df["run_id"] = run_key
 
     has_country_instance = df["run_id"].notna() & df["iso3"].notna()
@@ -251,6 +310,20 @@ def _load_llm_calls(conn, track: int | None = None, include_test: bool = False) 
     df["year"] = created_at.dt.year.astype("Int64")
     df["month"] = created_at.dt.month.astype("Int64")
     df["created_at"] = created_at
+
+    # Diagnostic: surface the components still landing in "other" so that bucket
+    # means "genuinely unmapped", not "un-recovered". A non-empty breakdown here is
+    # a signal to add a phase_group branch (or a real phase at the call site).
+    other_mask = df["phase"] == "other"
+    if bool(other_mask.any()):
+        unmapped = (
+            df.loc[other_mask, "component"].fillna("<null>").value_counts().head(10).to_dict()
+        )
+        logger.info(
+            "costs: %d rows in 'other' phase; top components=%s",
+            int(other_mask.sum()),
+            unmapped,
+        )
 
     return df[
         [
@@ -518,7 +591,7 @@ def build_run_runtimes(conn, track: int | None = None, include_test: bool = Fals
     )
     pivot = phase_totals.pivot(index="run_id", columns="phase", values="elapsed_ms")
     pivot = pivot.fillna(0.0)
-    known_phases = {"web_search", "hs", "research", "forecast", "scenario", "sibyl", "other"}
+    known_phases = set(CANONICAL_PHASES)
     other_cols = [col for col in pivot.columns if col not in known_phases]
     if other_cols:
         pivot["other"] = pivot.get("other", 0.0) + pivot[other_cols].sum(axis=1)
@@ -533,6 +606,7 @@ def build_run_runtimes(conn, track: int | None = None, include_test: bool = Fals
         "research": "research_ms",
         "forecast": "forecast_ms",
         "scenario": "scenario_ms",
+        "prediction_markets": "prediction_markets_ms",
         "sibyl": "sibyl_ms",
         "other": "other_ms",
     }

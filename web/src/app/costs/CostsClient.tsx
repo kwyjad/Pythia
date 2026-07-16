@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 import { apiGet } from "../../lib/api";
+import { formatModelName } from "../../lib/model_names";
 
 import SortableTable, { SortableColumn } from "../../components/SortableTable";
 
@@ -63,6 +64,7 @@ export type RunRuntimeRow = {
   research_ms: number | null;
   forecast_ms: number | null;
   scenario_ms: number | null;
+  prediction_markets_ms: number | null;
   sibyl_ms: number | null;
   other_ms: number | null;
   total_ms: number | null;
@@ -128,6 +130,226 @@ const sortYearMonth = (row: { year: number | null; month: number | null }) => {
   return row.year * 100 + row.month;
 };
 
+// Canonical phase order + friendly labels (mirrors CANONICAL_PHASES in
+// resolver/query/costs.py). Keep in sync — the phase_group backend never emits a
+// value outside this set.
+export const PHASE_ORDER = [
+  "web_search",
+  "hs",
+  "research",
+  "forecast",
+  "scenario",
+  "prediction_markets",
+  "sibyl",
+  "other",
+] as const;
+
+export const PHASE_LABELS: Record<string, string> = {
+  web_search: "Web search",
+  hs: "Horizon scan",
+  research: "Research",
+  forecast: "Forecast",
+  scenario: "Scenario",
+  prediction_markets: "Prediction markets",
+  sibyl: "Sibyl",
+  other: "Other",
+};
+
+// Validated categorical palette (dataviz skill, light surface #fcfcfb). One fixed
+// hue per phase, assigned by entity (never by rank), so a track filter that drops
+// phases never repaints the survivors.
+export const PHASE_COLORS: Record<string, string> = {
+  web_search: "#2a78d6",
+  hs: "#008300",
+  research: "#e87ba4",
+  forecast: "#eda100",
+  scenario: "#1baf7a",
+  prediction_markets: "#eb6834",
+  sibyl: "#4a3aa7",
+  other: "#e34948",
+};
+
+const phaseRank = (phase: string | null) =>
+  phase ? PHASE_ORDER.indexOf(phase as (typeof PHASE_ORDER)[number]) : -1;
+
+const formatPhase = (phase: string | null | undefined) => {
+  if (!phase) return "—";
+  return PHASE_LABELS[phase] ?? phase;
+};
+
+const phaseColor = (phase: string | null) =>
+  (phase && PHASE_COLORS[phase]) || PHASE_COLORS.other;
+
+const formatModel = (model: string | null | undefined) =>
+  model ? formatModelName(model) : "—";
+
+const PhaseLegend = () => (
+  <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-fred-muted" aria-hidden>
+    {PHASE_ORDER.map((phase) => (
+      <li key={phase} className="flex items-center gap-1.5">
+        <span
+          className="inline-block h-2.5 w-2.5 rounded-sm"
+          style={{ backgroundColor: PHASE_COLORS[phase] }}
+        />
+        {PHASE_LABELS[phase]}
+      </li>
+    ))}
+  </ul>
+);
+
+// Horizontal spend-by-phase bar. Direct labels ($ + %) satisfy the relief rule for
+// the low-contrast light-mode hues; the adjacent "By phase" table is the a11y view.
+const PhaseSpendBar = ({ rows }: { rows: CostsRow[] }) => {
+  const byPhase = new Map<string, number>();
+  for (const row of rows) {
+    const phase = row.phase ?? "other";
+    byPhase.set(phase, (byPhase.get(phase) ?? 0) + (row.total_cost_usd ?? 0));
+  }
+  const entries = PHASE_ORDER.filter((p) => byPhase.has(p)).map((p) => ({
+    phase: p,
+    value: byPhase.get(p) ?? 0,
+  }));
+  const total = entries.reduce((acc, e) => acc + e.value, 0);
+  if (!entries.length || total <= 0) {
+    return <p className="text-sm text-fred-muted">No phase spend to chart.</p>;
+  }
+  return (
+    <div className="space-y-2">
+      {entries.map(({ phase, value }) => {
+        const pct = (value / total) * 100;
+        return (
+          <div key={phase} className="flex items-center gap-3 text-xs">
+            <span className="w-32 shrink-0 text-fred-text">{formatPhase(phase)}</span>
+            <div
+              className="h-4 flex-1 overflow-hidden rounded-sm bg-fred-bg"
+              role="img"
+              aria-label={`${formatPhase(phase)}: ${formatCurrency(value)} (${pct.toFixed(1)}%)`}
+            >
+              <div
+                className="h-full rounded-sm"
+                style={{ width: `${Math.max(pct, 0.5)}%`, backgroundColor: phaseColor(phase) }}
+                title={`${formatPhase(phase)}: ${formatCurrency(value)} (${pct.toFixed(1)}%)`}
+              />
+            </div>
+            <span className="w-28 shrink-0 text-right tabular-nums text-fred-text">
+              {formatCurrency(value)}
+            </span>
+            <span className="w-12 shrink-0 text-right tabular-nums text-fred-muted">
+              {pct.toFixed(1)}%
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+// Monthly spend-over-time, stacked by phase. Inline SVG (no chart dependency);
+// segments carry native <title> hover tooltips. One axis (USD), one column per month.
+const MonthlySpendTrend = ({ rows }: { rows: CostsRow[] }) => {
+  const monthMap = new Map<string, { year: number; month: number; byPhase: Map<string, number> }>();
+  for (const row of rows) {
+    if (!row.year || !row.month) continue;
+    const key = `${row.year}-${String(row.month).padStart(2, "0")}`;
+    let entry = monthMap.get(key);
+    if (!entry) {
+      entry = { year: row.year, month: row.month, byPhase: new Map() };
+      monthMap.set(key, entry);
+    }
+    const phase = row.phase ?? "other";
+    entry.byPhase.set(phase, (entry.byPhase.get(phase) ?? 0) + (row.total_cost_usd ?? 0));
+  }
+  const months = Array.from(monthMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([key, entry]) => ({ key, ...entry }));
+  if (!months.length) {
+    return <p className="text-sm text-fred-muted">No monthly spend to chart.</p>;
+  }
+  const monthTotals = months.map((m) =>
+    Array.from(m.byPhase.values()).reduce((acc, v) => acc + v, 0)
+  );
+  const maxTotal = Math.max(...monthTotals, 0);
+  if (maxTotal <= 0) {
+    return <p className="text-sm text-fred-muted">No monthly spend to chart.</p>;
+  }
+
+  const width = Math.max(months.length * 56 + 60, 320);
+  const height = 220;
+  const padLeft = 52;
+  const padBottom = 28;
+  const padTop = 8;
+  const plotH = height - padBottom - padTop;
+  const bandW = (width - padLeft) / months.length;
+  const barW = Math.min(bandW * 0.62, 40);
+  const gap = 2; // surface gap between stacked segments
+
+  return (
+    <div className="overflow-x-auto">
+      <svg
+        width="100%"
+        viewBox={`0 0 ${width} ${height}`}
+        preserveAspectRatio="xMinYMin meet"
+        role="img"
+        aria-label="Monthly LLM spend, stacked by phase"
+        style={{ maxWidth: "100%", minWidth: Math.min(width, 320) }}
+      >
+        {/* y-axis reference lines + labels */}
+        {[0, 0.5, 1].map((frac) => {
+          const y = padTop + plotH * (1 - frac);
+          return (
+            <g key={frac}>
+              <line x1={padLeft} y1={y} x2={width} y2={y} stroke="#E5E5E5" strokeWidth={1} />
+              <text x={padLeft - 6} y={y + 3} textAnchor="end" fontSize={10} fill="#6B7280">
+                ${currencyFormatter.format(maxTotal * frac)}
+              </text>
+            </g>
+          );
+        })}
+        {months.map((m, i) => {
+          const x = padLeft + i * bandW + (bandW - barW) / 2;
+          let cursorY = padTop + plotH;
+          const segments = PHASE_ORDER.filter((p) => (m.byPhase.get(p) ?? 0) > 0).map((phase) => {
+            const value = m.byPhase.get(phase) ?? 0;
+            const segH = (value / maxTotal) * plotH;
+            const top = cursorY - segH;
+            const rect = (
+              <rect
+                key={phase}
+                x={x}
+                y={top}
+                width={barW}
+                height={Math.max(segH - gap, 0)}
+                rx={2}
+                fill={phaseColor(phase)}
+              >
+                <title>
+                  {`${m.key} · ${formatPhase(phase)}: ${formatCurrency(value)}`}
+                </title>
+              </rect>
+            );
+            cursorY = top;
+            return rect;
+          });
+          return (
+            <g key={m.key}>
+              {segments}
+              <text
+                x={x + barW / 2}
+                y={height - padBottom + 14}
+                textAnchor="middle"
+                fontSize={9}
+                fill="#6B7280"
+              >
+                {`${String(m.month).padStart(2, "0")}/${String(m.year).slice(2)}`}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+};
+
 const buildCostsColumns = (
   visibility: CostsTableVisibility
 ): Array<SortableColumn<CostsRow>> => [
@@ -156,8 +378,8 @@ const buildCostsColumns = (
     label: "Model",
     headerClassName: "text-left",
     cellClassName: "text-left",
-    sortValue: (row) => row.model ?? "",
-    render: (row) => row.model ?? "—",
+    sortValue: (row) => formatModel(row.model),
+    render: (row) => formatModel(row.model),
     isVisible: visibility.showModel,
     defaultSortDirection: "asc",
   },
@@ -166,8 +388,8 @@ const buildCostsColumns = (
     label: "Phase",
     headerClassName: "text-left",
     cellClassName: "text-left",
-    sortValue: (row) => row.phase ?? "",
-    render: (row) => row.phase ?? "—",
+    sortValue: (row) => phaseRank(row.phase),
+    render: (row) => formatPhase(row.phase),
     isVisible: visibility.showPhase,
     defaultSortDirection: "asc",
   },
@@ -312,8 +534,8 @@ const LatencyTable = ({
         label: "Model",
         headerClassName: "text-left",
         cellClassName: "text-left",
-        sortValue: (row) => row.model ?? "",
-        render: (row) => row.model ?? "—",
+        sortValue: (row) => formatModel(row.model),
+        render: (row) => formatModel(row.model),
         defaultSortDirection: "asc",
       },
       {
@@ -321,8 +543,8 @@ const LatencyTable = ({
         label: "Phase",
         headerClassName: "text-left",
         cellClassName: "text-left",
-        sortValue: (row) => row.phase ?? "",
-        render: (row) => row.phase ?? "—",
+        sortValue: (row) => phaseRank(row.phase),
+        render: (row) => formatPhase(row.phase),
         defaultSortDirection: "asc",
       },
       {
@@ -506,6 +728,15 @@ const RunRuntimesTable = ({
         defaultSortDirection: "desc",
       },
       {
+        key: "prediction_markets_ms",
+        label: "Pred. markets",
+        headerClassName: "text-right",
+        cellClassName: "text-right tabular-nums",
+        sortValue: (row) => row.prediction_markets_ms,
+        render: (row) => formatDurationMs(row.prediction_markets_ms),
+        defaultSortDirection: "desc",
+      },
+      {
         key: "sibyl_ms",
         label: "Sibyl",
         headerClassName: "text-right",
@@ -675,6 +906,14 @@ export default function CostsClient({
             showPhase: false,
           }}
         />
+        <div className="space-y-3 rounded-lg border border-fred-secondary bg-fred-surface p-4">
+          <h3 className="text-sm font-semibold">Spend by phase</h3>
+          <PhaseSpendBar rows={total.by_phase} />
+          <p className="text-xs text-fred-muted">
+            Sibyl = Opus reasoning + Brave web search. Other = spend that could not be
+            attributed to a known phase.
+          </p>
+        </div>
         <div className="grid gap-6 lg:grid-cols-2">
           <div className="space-y-2">
             <h3 className="text-sm font-semibold">By model</h3>
@@ -717,6 +956,11 @@ export default function CostsClient({
             showPhase: false,
           }}
         />
+        <div className="space-y-3 rounded-lg border border-fred-secondary bg-fred-surface p-4">
+          <h3 className="text-sm font-semibold">Spend over time, by phase</h3>
+          <MonthlySpendTrend rows={monthly.by_phase} />
+          <PhaseLegend />
+        </div>
         <details className="space-y-3 rounded-lg border border-fred-secondary bg-fred-surface p-4">
           <summary className="cursor-pointer text-sm font-semibold text-fred-secondary">
             View monthly breakdowns by model and phase
