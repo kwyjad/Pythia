@@ -123,8 +123,14 @@ jobs:
           name: pythia-resolver-db
           path: data/resolver.duckdb
 
+      # This is the forecast pipeline's SOLE release trigger: HS Triage no longer
+      # triggers publish directly (see publish_latest_data.yml), so publishing
+      # runs here at the end of Sibyl. Dispatched on success even when Sibyl found
+      # 0 eligible questions — the "Upload canonical resolver DB" step above still
+      # uploads the (HS-produced) canonical DB, so the forecast cycle always
+      # produces exactly one release. publish then inspects the published DB.
       - name: Publish post-Sibyl DB to release
-        if: success() && steps.gate.outputs.eligible != '0'
+        if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
