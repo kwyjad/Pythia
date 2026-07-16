@@ -72,14 +72,16 @@ describe("RiskIndexPanel", () => {
 
     await waitFor(() => expect(apiGetMock).toHaveBeenCalled());
 
+    // Per-capita views are first-class options in VIEW_OPTIONS and are never
+    // disabled — switching to a fatalities view must not remove or disable them.
     expect(
       screen.getByRole("option", {
-        name: "People Affected (PA) per capita EIV",
+        name: "People affected (per capita)",
       })
     ).not.toBeDisabled();
     expect(
       screen.getByRole("option", {
-        name: "Armed Conflict (ACE) fatalities per capita EIV",
+        name: "Fatalities (per capita)",
       })
     ).not.toBeDisabled();
   });

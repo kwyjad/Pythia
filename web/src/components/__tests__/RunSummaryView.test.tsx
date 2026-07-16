@@ -168,19 +168,25 @@ describe("RunSummaryView", () => {
   it("shows metric question counts", () => {
     render(<RunSummaryView data={MOCK_DATA} />);
 
-    // The metric grid should show correct question counts
-    expect(screen.getByText("47")).toBeDefined(); // Fatalities
-    expect(screen.getByText("89")).toBeDefined(); // PA
-    expect(screen.getByText("73")).toBeDefined(); // EVENT_OCCURRENCE
-    expect(screen.getByText("20")).toBeDefined(); // PHASE3PLUS_IN_NEED
+    // The metric grid should show each question count. Some counts (47, 20, 73)
+    // legitimately appear more than once in the rendered summary (e.g. 73 is
+    // both the EVENT_OCCURRENCE question count and the coverage funnel's
+    // countries-with-forecasts), so assert presence via getAllByText.
+    expect(screen.getAllByText("47").length).toBeGreaterThan(0); // Fatalities
+    expect(screen.getAllByText("89").length).toBeGreaterThan(0); // PA
+    expect(screen.getAllByText("73").length).toBeGreaterThan(0); // EVENT_OCCURRENCE
+    expect(screen.getAllByText("20").length).toBeGreaterThan(0); // PHASE3PLUS_IN_NEED
   });
 
   it("shows hazard pills", () => {
     render(<RunSummaryView data={MOCK_DATA} />);
 
-    // Should show hazard pills like "Armed Conflict (47)"
-    expect(screen.getByText("Armed Conflict (47)")).toBeDefined();
-    expect(screen.getByText("Flood (36)")).toBeDefined();
+    // Hazard pills like "Armed Conflict (47)". A hazard can contribute to more
+    // than one metric (ACE has 47 both as Fatalities and as People affected;
+    // FL has 36 under both PA and Event occurrence), so the pill legitimately
+    // renders in multiple metric cards — assert via getAllByText.
+    expect(screen.getAllByText("Armed Conflict (47)").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Flood (36)").length).toBeGreaterThan(0);
   });
 
   it("shows cost per phase", () => {
