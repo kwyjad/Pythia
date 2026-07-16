@@ -6,6 +6,7 @@ import InfoTooltip from "../../components/InfoTooltip";
 import KpiCard from "../../components/KpiCard";
 import SortableTable, { SortableColumn } from "../../components/SortableTable";
 import { apiGet } from "../../lib/api";
+import { formatModelName } from "../../lib/model_names";
 import type {
   PerformanceRunRow,
   PerformanceScoresResponse,
@@ -13,7 +14,9 @@ import type {
   ResolutionRateRow,
   ResolutionRatesResponse,
   ScoreFamily,
+  SibylComparisonResponse,
 } from "../../lib/types";
+import SibylComparison from "./SibylComparison";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -23,6 +26,7 @@ type ViewMode = "total" | "by_hazard" | "by_run" | "by_model";
 
 type PerformancePanelProps = {
   initialData: PerformanceScoresResponse;
+  initialSibyl?: SibylComparisonResponse;
   includeTest?: boolean;
 };
 
@@ -146,7 +150,9 @@ const displayModelName = (name: string | null): string => {
     // Future external benchmarks: strip prefix and capitalize
     return name.replace("__ext_", "").replace(/_/g, " ") + " (external)";
   }
-  return name;
+  // Delegates to the shared prettifier, which maps sibyl + the ensemble/track2
+  // aggregate slugs to friendly labels (and base model ids to product names).
+  return formatModelName(name);
 };
 
 const formatScore = (value: number | null | undefined) => {
@@ -242,11 +248,20 @@ const PIVOTED_COLUMNS: Array<SortableColumn<PivotedRow>> = [
     defaultSortDirection: "asc",
     render: (row) => {
       const isExternal = row.key.startsWith("__ext_");
+      const isSibyl = row.key === "sibyl";
       return (
         <span className={`font-medium ${isExternal ? "text-amber-400" : "text-fred-text"}`}>
           {row.label}
           {isExternal ? (
             <InfoTooltip text={TOOLTIP_EXTERNAL_BENCHMARK} />
+          ) : null}
+          {isSibyl ? (
+            <span
+              className="ml-2 rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white"
+              style={{ backgroundColor: "#4a3aa7" }}
+            >
+              deep research
+            </span>
           ) : null}
         </span>
       );
@@ -454,6 +469,7 @@ const RUN_COLUMNS: Array<SortableColumn<RunPivotedRow>> = [
 
 export default function PerformancePanel({
   initialData,
+  initialSibyl,
   includeTest,
 }: PerformancePanelProps) {
   const [view, setView] = useState<ViewMode>("total");
@@ -897,6 +913,11 @@ export default function PerformancePanel({
           </div>
         </section>
       )}
+
+      {/* Sibyl deep-research track: understand it + head-to-head vs the ensemble */}
+      {initialSibyl ? (
+        <SibylComparison data={initialSibyl} includeTest={includeTest} />
+      ) : null}
 
       {/* Detailed Scores: filters + table grouped together */}
       <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4">

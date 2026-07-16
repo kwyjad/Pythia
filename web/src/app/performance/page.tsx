@@ -1,9 +1,22 @@
 import { apiGet } from "../../lib/api";
-import type { PerformanceScoresResponse } from "../../lib/types";
+import type {
+  PerformanceScoresResponse,
+  SibylComparisonResponse,
+} from "../../lib/types";
 import PerformancePanel from "./PerformancePanel";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+
+const EMPTY_SIBYL: SibylComparisonResponse = {
+  has_sibyl: false,
+  baseline_used: null,
+  available_baselines: [],
+  pairs: [],
+  aggregate: {},
+  by_hazard_metric: [],
+  runs: [],
+};
 
 export default async function PerformancePage({
   searchParams,
@@ -13,12 +26,22 @@ export default async function PerformancePage({
   const includeTest = searchParams?.include_test === "true";
 
   let data: PerformanceScoresResponse = { summary_rows: [], run_rows: [] };
+  let sibyl: SibylComparisonResponse = EMPTY_SIBYL;
   let loadError: string | null = null;
 
   try {
-    data = await apiGet<PerformanceScoresResponse>("/performance/scores", {
-      include_test: includeTest || undefined,
-    });
+    [data, sibyl] = await Promise.all([
+      apiGet<PerformanceScoresResponse>("/performance/scores", {
+        include_test: includeTest || undefined,
+      }),
+      apiGet<SibylComparisonResponse>("/performance/sibyl_comparison", {
+        include_test: includeTest || undefined,
+      }).catch((error) => {
+        // Sibyl comparison is additive — never block the page on it.
+        console.warn("Failed to load Sibyl comparison:", error);
+        return EMPTY_SIBYL;
+      }),
+    ]);
   } catch (error) {
     loadError = "Unable to load performance scores right now.";
     console.warn("Failed to load performance scores:", error);
@@ -46,7 +69,11 @@ export default async function PerformancePage({
           {loadError}
         </div>
       ) : (
-        <PerformancePanel initialData={data} includeTest={includeTest} />
+        <PerformancePanel
+          initialData={data}
+          initialSibyl={sibyl}
+          includeTest={includeTest}
+        />
       )}
     </div>
   );

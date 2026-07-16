@@ -297,6 +297,83 @@ export type PerformanceScoresResponse = {
   };
 };
 
+// ---------------------------------------------------------------------------
+// Sibyl vs. main-pipeline head-to-head (Performance page)
+// ---------------------------------------------------------------------------
+
+/** One paired (question × horizon × score_type) comparison row. */
+export type SibylComparisonPair = {
+  question_id: string;
+  iso3: string | null;
+  hazard_code: string;
+  metric: string;
+  score_family: ScoreFamily;
+  horizon_m: number;
+  score_type: string;
+  sibyl_value: number | null;
+  standard_value: number | null;
+  standard_model_name: string | null;
+  js_divergence_vs_standard: number | null;
+  js_divergence_inter_trial: number | null;
+  volatility_score: number | null;
+  cost_usd: number | null;
+};
+
+/** Aggregate stats for one score_type within a family. Lower is better, so a
+ *  negative ``mean_delta`` (= sibyl − standard) means Sibyl won. */
+export type SibylComparisonStat = {
+  n_pairs: number;
+  n_questions: number;
+  sibyl_mean: number | null;
+  standard_mean: number | null;
+  mean_delta: number | null;
+  median_delta: number | null;
+  sibyl_wins: number;
+  standard_wins: number;
+  ties: number;
+  win_rate: number | null;
+};
+
+/** aggregate[family][score_type] -> stats. Families never blend. */
+export type SibylComparisonAggregate = Record<
+  string,
+  Record<string, SibylComparisonStat>
+>;
+
+export type SibylComparisonHazardMetricRow = {
+  hazard_code: string;
+  metric: string;
+  score_family: ScoreFamily;
+  n_questions: number;
+  sibyl_brier: number | null;
+  standard_brier: number | null;
+  delta: number | null;
+};
+
+export type SibylComparisonRunRow = {
+  sibyl_run_id: string;
+  hs_run_id: string | null;
+  created_at: string | null;
+  n_selected: number | null;
+  n_forecast: number | null;
+  n_skipped: number | null;
+  budget_capped: boolean | null;
+  run_cost_usd: number | null;
+  opus_cost_usd: number | null;
+  brave_cost_usd: number | null;
+  run_hard_cap_usd: number | null;
+};
+
+export type SibylComparisonResponse = {
+  has_sibyl: boolean;
+  baseline_used: string | null;
+  available_baselines: string[];
+  pairs: SibylComparisonPair[];
+  aggregate: SibylComparisonAggregate;
+  by_hazard_metric: SibylComparisonHazardMetricRow[];
+  runs: SibylComparisonRunRow[];
+};
+
 export type QuestionBundleResponse = {
   question: Record<string, unknown>;
   hs?:

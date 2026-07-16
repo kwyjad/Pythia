@@ -11,7 +11,8 @@ decomposition); shared helpers come from pythia.api.core.
 """
 
 import logging
-from typing import Optional
+import statistics
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Query
 
@@ -27,6 +28,16 @@ from pythia.api.core import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Single-sourced from sibyl.config (import-light: os only — safe for the
+# memory-constrained API process; see test_api_lazy_pipeline_import.py). This is
+# the same preference the /v1/sibyl endpoints use to pick the standard-track
+# baseline, so the head-to-head compares Sibyl against the same reference model.
+from sibyl.config import STANDARD_MODEL_PREFERENCE as _STANDARD_MODEL_PREFERENCE
+
+# The stable model_name under which Sibyl writes its pooled SPD into
+# forecasts_raw / forecasts_ensemble (and therefore scores).
+_SIBYL_MODEL_NAME = "sibyl"
 
 @router.get("/v1/calibration/weights")
 def get_calibration_weights(
@@ -381,3 +392,317 @@ def performance_scores(
         "run_rows": run_rows,
         "track_counts": track_counts,
     }
+
+
+# ---------------------------------------------------------------------------
+# Sibyl vs. main-pipeline head-to-head comparison
+# ---------------------------------------------------------------------------
+
+
+def _family_of(metric: Optional[str]) -> str:
+    """Brier family for a metric — 'binary' for EVENT_OCCURRENCE, else 'spd'.
+
+    The two families are on different scales (binary Brier 0-1, multiclass SPD
+    Brier 0-2) and must never be averaged together.
+    """
+    return "binary" if (metric or "").upper() == "EVENT_OCCURRENCE" else "spd"
+
+
+def _mean(values: List[float]) -> Optional[float]:
+    vals = [v for v in values if v is not None]
+    return statistics.fmean(vals) if vals else None
+
+
+def _median(values: List[float]) -> Optional[float]:
+    vals = [v for v in values if v is not None]
+    return statistics.median(vals) if vals else None
+
+
+def _aggregate_pairs(pairs: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Aggregate paired scores into {score_family: {score_type: stats}}.
+
+    Never blends score families. For each (family, score_type) group we report
+    the paired means/deltas across all (question, horizon) samples, plus a
+    question-level win rate (each side's score averaged per question first, so
+    long-window questions don't dominate). All three score types are
+    lower-is-better, so a negative ``mean_delta`` (= sibyl − standard) means
+    Sibyl is better.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    # group pairs by (family, score_type)
+    groups: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    for p in pairs:
+        fam = p["score_family"]
+        st = p["score_type"]
+        groups.setdefault(fam, {}).setdefault(st, []).append(p)
+
+    for fam, by_type in groups.items():
+        out[fam] = {}
+        for st, rows in by_type.items():
+            deltas = [
+                r["sibyl_value"] - r["standard_value"]
+                for r in rows
+                if r["sibyl_value"] is not None and r["standard_value"] is not None
+            ]
+            # Question-level win rate: average each side per question first.
+            per_q: Dict[str, Dict[str, List[float]]] = {}
+            for r in rows:
+                q = per_q.setdefault(r["question_id"], {"s": [], "b": []})
+                if r["sibyl_value"] is not None:
+                    q["s"].append(r["sibyl_value"])
+                if r["standard_value"] is not None:
+                    q["b"].append(r["standard_value"])
+            sibyl_wins = standard_wins = ties = 0
+            for q in per_q.values():
+                s_avg = _mean(q["s"])
+                b_avg = _mean(q["b"])
+                if s_avg is None or b_avg is None:
+                    continue
+                if s_avg < b_avg:
+                    sibyl_wins += 1
+                elif b_avg < s_avg:
+                    standard_wins += 1
+                else:
+                    ties += 1
+            decided = sibyl_wins + standard_wins + ties
+            out[fam][st] = {
+                "n_pairs": len(rows),
+                "n_questions": len({r["question_id"] for r in rows}),
+                "sibyl_mean": _mean([r["sibyl_value"] for r in rows]),
+                "standard_mean": _mean([r["standard_value"] for r in rows]),
+                "mean_delta": _mean(deltas),
+                "median_delta": _median(deltas),
+                "sibyl_wins": sibyl_wins,
+                "standard_wins": standard_wins,
+                "ties": ties,
+                "win_rate": (sibyl_wins / decided) if decided else None,
+            }
+    return out
+
+
+def _by_hazard_metric(pairs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per (hazard, metric) Brier rollup on the covered set (Brier only)."""
+    groups: Dict[tuple, List[Dict[str, Any]]] = {}
+    for p in pairs:
+        if p["score_type"] != "brier":
+            continue
+        key = (p["hazard_code"], p["metric"], p["score_family"])
+        groups.setdefault(key, []).append(p)
+    rows: List[Dict[str, Any]] = []
+    for (hz, metric, fam), rs in sorted(groups.items(), key=lambda kv: kv[0]):
+        sibyl_brier = _mean([r["sibyl_value"] for r in rs])
+        standard_brier = _mean([r["standard_value"] for r in rs])
+        rows.append({
+            "hazard_code": hz,
+            "metric": metric,
+            "score_family": fam,
+            "n_questions": len({r["question_id"] for r in rs}),
+            "sibyl_brier": sibyl_brier,
+            "standard_brier": standard_brier,
+            "delta": (sibyl_brier - standard_brier)
+            if (sibyl_brier is not None and standard_brier is not None)
+            else None,
+        })
+    return rows
+
+
+@router.get("/v1/performance/sibyl_comparison")
+def sibyl_comparison(
+    include_test: bool = Query(False),
+    baseline: Optional[str] = Query(
+        None,
+        description="Standard model_name to compare Sibyl against; default is "
+        "best-available per question (bayesmc > mean > track2_flash).",
+    ),
+    sibyl_run_id: Optional[str] = Query(
+        None, description="Restrict to questions from one Sibyl run."
+    ),
+):
+    """Fair head-to-head between the Sibyl deep-research track and the main
+    pipeline, restricted to the exact (question, horizon, score_type) set that
+    Sibyl actually forecast (Sibyl only covers the top-volatility subset, so an
+    all-questions average would be unfair).
+
+    Tolerates pre-Sibyl / empty DBs and the current post-DB-reset state where no
+    scores exist yet: returns ``has_sibyl:false`` with an empty ``pairs`` list
+    but still populates ``runs`` (from ``sibyl_runs``) so the UI can show a
+    "Sibyl ran, awaiting resolutions" state.
+    """
+    con = _con()
+
+    empty: Dict[str, Any] = {
+        "has_sibyl": False,
+        "baseline_used": None,
+        "available_baselines": [],
+        "pairs": [],
+        "aggregate": {},
+        "by_hazard_metric": [],
+        "runs": [],
+    }
+
+    # runs are useful even with zero scores (coverage/cost/budget KPIs).
+    runs = _load_sibyl_runs(con, include_test, sibyl_run_id)
+    empty["runs"] = runs
+
+    if not _table_exists(con, "scores") or not _table_exists(con, "questions"):
+        return empty
+
+    _tf_s = _test_filter(include_test, "s")
+    pref = list(_STANDARD_MODEL_PREFERENCE)
+    # Trusted, code-controlled constants — safe to inline. Kept single-sourced
+    # from sibyl.config so the baseline set never drifts from the Sibyl track.
+    pref_in = ", ".join("'" + m.replace("'", "''") + "'" for m in pref)
+
+    # Which standard aggregates actually have scores? Only offer real baselines.
+    avail = {
+        r[0]
+        for r in _execute(
+            con,
+            f"SELECT DISTINCT model_name FROM scores s "
+            f"WHERE s.model_name IN ({pref_in}){_tf_s}",
+        ).fetchall()
+        if r and r[0]
+    }
+    available_baselines = [m for m in pref if m in avail]
+
+    # Is Sibyl scored at all?
+    has_sibyl = bool(
+        _execute(
+            con,
+            f"SELECT 1 FROM scores s WHERE s.model_name = '{_SIBYL_MODEL_NAME}'"
+            f"{_tf_s} LIMIT 1",
+        ).fetchall()
+    )
+    if not has_sibyl or not available_baselines:
+        return empty
+
+    # Resolve the baseline the caller asked for (must be a real, available one).
+    baseline_used: Optional[str] = None
+    baseline_filter = ""
+    params: Dict[str, Any] = {}
+    if baseline and baseline in avail:
+        baseline_used = baseline
+        baseline_filter = "AND s.model_name = :baseline"
+        params["baseline"] = baseline
+    else:
+        baseline_used = "best_available"
+
+    # Optional restriction to one Sibyl run's question set.
+    sib_run_filter = ""
+    if sibyl_run_id and _table_exists(con, "sibyl_forecasts"):
+        sib_run_filter = (
+            "AND s.question_id IN (SELECT question_id FROM sibyl_forecasts "
+            "WHERE sibyl_run_id = :srid)"
+        )
+        params["srid"] = sibyl_run_id
+
+    # Per-question Sibyl metadata (one row per question; latest run, or the
+    # requested run) for the divergence / cost / volatility visuals.
+    has_sf = _table_exists(con, "sibyl_forecasts")
+    if has_sf:
+        _tf_sf = _test_filter(include_test, "sf")
+        sf_run_filter = "AND sf.sibyl_run_id = :srid" if sibyl_run_id else ""
+        meta_cte = f"""
+        , sf_pick AS (
+          SELECT sf.question_id,
+                 sf.js_divergence_vs_standard,
+                 sf.js_divergence_inter_trial,
+                 sf.volatility_score,
+                 sf.cost_usd,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY sf.question_id ORDER BY sf.created_at DESC
+                 ) AS rn
+          FROM sibyl_forecasts sf
+          WHERE 1=1 {sf_run_filter}{_tf_sf}
+        )
+        """
+        meta_select = (
+            "sf.js_divergence_vs_standard, sf.js_divergence_inter_trial, "
+            "sf.volatility_score, sf.cost_usd"
+        )
+        meta_join = "LEFT JOIN sf_pick sf ON sf.question_id = sib.question_id AND sf.rn = 1"
+    else:
+        meta_cte = ""
+        meta_select = (
+            "NULL AS js_divergence_vs_standard, NULL AS js_divergence_inter_trial, "
+            "NULL AS volatility_score, NULL AS cost_usd"
+        )
+        meta_join = ""
+
+    sql = f"""
+    WITH sib AS (
+      SELECT s.question_id, s.horizon_m, s.score_type, s.value AS sibyl_value
+      FROM scores s
+      WHERE s.model_name = '{_SIBYL_MODEL_NAME}'{_tf_s} {sib_run_filter}
+    ),
+    std_ranked AS (
+      SELECT s.question_id, s.horizon_m, s.score_type, s.model_name, s.value,
+             ROW_NUMBER() OVER (
+               PARTITION BY s.question_id, s.horizon_m, s.score_type
+               ORDER BY CASE s.model_name
+                 {" ".join(f"WHEN '{m}' THEN {i}" for i, m in enumerate(pref))}
+                 ELSE 99 END
+             ) AS rn
+      FROM scores s
+      WHERE s.model_name IN ({pref_in}) {baseline_filter}{_tf_s}
+    ),
+    std AS (SELECT * FROM std_ranked WHERE rn = 1)
+    {meta_cte}
+    SELECT
+      sib.question_id, q.iso3, q.hazard_code, UPPER(q.metric) AS metric,
+      CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END AS score_family,
+      sib.horizon_m, sib.score_type,
+      sib.sibyl_value, std.value AS standard_value, std.model_name AS standard_model_name,
+      {meta_select}
+    FROM sib
+    JOIN std ON std.question_id = sib.question_id
+            AND std.horizon_m = sib.horizon_m
+            AND std.score_type = sib.score_type
+    JOIN questions q ON q.question_id = sib.question_id
+    {meta_join}
+    ORDER BY q.hazard_code, sib.question_id, sib.score_type, sib.horizon_m
+    """
+    pairs = _rows_from_cursor(_execute(con, sql, params if params else None))
+
+    return {
+        "has_sibyl": True,
+        "baseline_used": baseline_used,
+        "available_baselines": available_baselines,
+        "pairs": pairs,
+        "aggregate": _aggregate_pairs(pairs),
+        "by_hazard_metric": _by_hazard_metric(pairs),
+        "runs": runs,
+    }
+
+
+def _load_sibyl_runs(
+    con, include_test: bool, sibyl_run_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    """Coverage / cost / budget rows from sibyl_runs (empty if the table is
+    absent). Used for KPIs even when no scores exist yet."""
+    if not _table_exists(con, "sibyl_runs"):
+        return []
+    _tf = _test_filter(include_test, "")
+    where = "WHERE 1=1" + _tf
+    params: Dict[str, Any] = {}
+    if sibyl_run_id:
+        where += " AND sibyl_run_id = :srid"
+        params["srid"] = sibyl_run_id
+    try:
+        return _rows_from_cursor(
+            _execute(
+                con,
+                f"""
+                SELECT sibyl_run_id, hs_run_id, created_at,
+                       n_selected, n_forecast, n_skipped, budget_capped,
+                       run_cost_usd, opus_cost_usd, brave_cost_usd, run_hard_cap_usd
+                FROM sibyl_runs
+                {where}
+                ORDER BY created_at DESC
+                """,
+                params if params else None,
+            )
+        )
+    except Exception:
+        logger.debug("Failed to load sibyl_runs for comparison", exc_info=True)
+        return []
