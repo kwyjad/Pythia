@@ -49,6 +49,63 @@ def build_compact_grounding_log(pack: dict) -> str:
     return json.dumps(log_pack, default=str)
 
 
+# A grounding attempt that never reached a backend has no model id to report. Writing
+# a bare "unknown" into llm_calls.model_id made these rows surface on the Costs page as
+# if "unknown" were a model; they are actually country-hazard pairs that got NO
+# grounding evidence. These sentinels name the reason instead. They are deliberately
+# absent from pythia/model_costs.json — they are not models, and resolve_price_per_1m
+# returning None (cost $0) is the correct outcome.
+GROUNDING_FAILED_MODEL_ID = "grounding-failed"
+GROUNDING_BREAKER_MODEL_ID = "grounding-breaker-tripped"
+GROUNDING_UNAVAILABLE_MODEL_ID = "grounding-unavailable"
+
+# pack["debug"]["grounding_backend"] value -> sentinel. The RC/triage chains log only
+# the FINAL pack, so these are the backend markers that survive a fully failed chain.
+_GROUNDING_BACKEND_SENTINELS: Dict[str, str] = {
+    "all_failed": GROUNDING_FAILED_MODEL_ID,
+    "brave_circuit_breaker_tripped": GROUNDING_BREAKER_MODEL_ID,
+}
+
+# Error types that mean "no backend was ever reachable", as opposed to "a backend ran
+# and found nothing" (the latter carries a real model id and a real cost).
+_GROUNDING_UNAVAILABLE_ERRORS = {"missing_api_key", "no_backend_available"}
+
+
+def resolve_grounding_model_id(pack: dict) -> str:
+    """Resolve the ``model_id`` to log for a grounding pack.
+
+    Returns the backend's own model id when one exists (e.g. ``brave-web-search``,
+    ``gpt-4.1``, ``gemini-2.5-flash``) — including for a backend that ran and returned
+    zero results, since that call was still made and still cost money.
+
+    When no backend produced a model id, returns a ``grounding-*`` sentinel naming the
+    reason instead of an opaque ``"unknown"``. Shared by the RC and triage grounding
+    log sites, which are otherwise copy-paste twins.
+    """
+    debug = pack.get("debug") if isinstance(pack, dict) else None
+    if not isinstance(debug, dict):
+        debug = {}
+
+    model_id = debug.get("model_id") or debug.get("selected_model_id")
+    if model_id:
+        return str(model_id)
+
+    backend = str(debug.get("grounding_backend") or "").strip()
+    sentinel = _GROUNDING_BACKEND_SENTINELS.get(backend)
+    if sentinel:
+        return sentinel
+
+    # The missing-key pack carries no grounding_backend at all, only debug["error"].
+    error_types = {str(debug.get("error") or "").strip()}
+    pack_error = pack.get("error") if isinstance(pack, dict) else None
+    if isinstance(pack_error, dict):
+        error_types.add(str(pack_error.get("type") or "").strip())
+    if error_types & _GROUNDING_UNAVAILABLE_ERRORS:
+        return GROUNDING_UNAVAILABLE_MODEL_ID
+
+    return GROUNDING_FAILED_MODEL_ID
+
+
 def _safe_get(d: Dict[str, Any], key: str, default: Any = 0) -> Any:
     """Safe dict getter that tolerates missing or None values."""
     try:

@@ -8,6 +8,15 @@ const AGGREGATE_LABELS: Record<string, string> = {
   track2_flash: "Track 2 (flash)",
 };
 
+// Not models: sentinels written by the HS grounding log sites when no backend produced
+// a model id, so a grounding failure reads as a failure instead of a mystery model.
+// Keep in sync with the GROUNDING_*_MODEL_ID constants in horizon_scanner/llm_logging.py.
+const GROUNDING_SENTINEL_LABELS: Record<string, string> = {
+  "grounding-failed": "Grounding failed (no backend)",
+  "grounding-breaker-tripped": "Grounding unavailable (breaker)",
+  "grounding-unavailable": "Grounding unavailable (no API key)",
+};
+
 export function formatModelName(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return raw;
@@ -15,6 +24,10 @@ export function formatModelName(raw: string): string {
 
   if (AGGREGATE_LABELS[lowered]) {
     return AGGREGATE_LABELS[lowered];
+  }
+
+  if (GROUNDING_SENTINEL_LABELS[lowered]) {
+    return GROUNDING_SENTINEL_LABELS[lowered];
   }
 
   if (lowered.startsWith("gemini-")) {

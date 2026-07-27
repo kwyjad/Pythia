@@ -411,11 +411,15 @@ def _run_triage_grounding_for_hazard(
 
         # Log triage grounding call to llm_calls for cost tracking
         try:
-            from horizon_scanner.llm_logging import build_compact_grounding_log, log_hs_llm_call
+            from horizon_scanner.llm_logging import (
+                build_compact_grounding_log,
+                log_hs_llm_call,
+                resolve_grounding_model_id,
+            )
             from forecaster.providers import ModelSpec, estimate_cost_usd
 
             usage_info = dict(pack.get("debug", {}).get("usage", {}))
-            model_id = pack.get("debug", {}).get("model_id", "unknown")
+            model_id = resolve_grounding_model_id(pack)
             provider = pack.get("debug", {}).get("grounding_backend", "unknown")
             if "brave" in provider:
                 provider = "brave"
