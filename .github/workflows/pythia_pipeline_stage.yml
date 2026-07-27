@@ -26,19 +26,27 @@
 #   fc_submit              HS sync → questions → forecaster --phase submit
 #                          (then fc_collect_finalize as above)
 #
-# The legacy single-job path (run_horizon_scanner.yml) remains fully
-# functional as the sync fallback and still owns the monthly cron; move the
-# cron here (stage=hs_submit) only after the batch path is validated.
+# PRODUCTION ENTRY (since 2026-07-27): this workflow owns the monthly cron
+# — a scheduled run enters at hs_submit and the poller carries the pipeline
+# through to the canonical upload + Sibyl dispatch. The legacy single-job
+# path (run_horizon_scanner.yml) remains fully functional as the
+# manual-dispatch synchronous fallback.
 
 name: Pythia Pipeline Stage
 
-run-name: "Pythia Pipeline Stage: ${{ inputs.pipeline_id }} — ${{ inputs.stage }}"
+run-name: "Pythia Pipeline Stage: ${{ inputs.pipeline_id }} — ${{ inputs.stage || 'hs_submit (cron)' }}"
 
 concurrency:
   group: pythia-resolver-db
   cancel-in-progress: false
 
 on:
+  schedule:
+    # Monthly production run at 00:00 UTC on the 1st (moved here from
+    # run_horizon_scanner.yml). Scheduled runs enter at stage hs_submit
+    # with empty inputs: pipeline_id is minted by the HS run, the canonical
+    # DB comes from discovery, and test_mode is false.
+    - cron: "0 0 1 * *"
   workflow_dispatch:
     inputs:
       stage:
@@ -94,6 +102,11 @@ env:
   PYTHIA_BATCH_API_ENABLED: "1"
   PYTHIA_BATCH_PROVIDERS: "openai,anthropic,google"
   PYTHIA_BATCH_MAX_WAIT_H: "24"
+  # Prompt-cost switches (production since 2026-07-27): static-first prompt
+  # assembly (multi-KB shared prefixes → OpenAI automatic / Gemini implicit
+  # caching) + Anthropic cache_control / OpenAI prompt_cache_key.
+  PYTHIA_PROMPT_V3_ORDER: "1"
+  PYTHIA_PROMPT_CACHE_ENABLED: "1"
   BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH: "low"
@@ -110,7 +123,8 @@ jobs:
   # submitted as the hs_rc batch. Triage does not run (needs RC results).
   # ────────────────────────────────────────────────────────────────────
   hs-submit:
-    if: inputs.stage == 'hs_submit'
+    # Scheduled (cron) runs carry no inputs — they enter here.
+    if: inputs.stage == 'hs_submit' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 330
     steps:

@@ -48,6 +48,12 @@ jobs:
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      # Prompt-cost switches (production since 2026-07-27): Sibyl's
+      # sequential step prompts use the 4-block static-first template with
+      # Anthropic cache_control breakpoints — repeated per-question context
+      # is billed at the 0.1x cached-read rate instead of full price.
+      PYTHIA_PROMPT_V3_ORDER: "1"
+      PYTHIA_PROMPT_CACHE_ENABLED: "1"
 
     steps:
       - name: Checkout repository
