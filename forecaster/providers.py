@@ -1328,6 +1328,57 @@ def call_google(
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
+def resolve_request_params(ms: "ModelSpec", temperature: float) -> tuple[float, Optional[str]]:
+    """Resolve (effective_temperature, thinking_level) for a model spec.
+
+    The single source of the per-model param rules used by call_chat_ms AND
+    the Batch API layer (build_body_for_spec): ModelSpec.thinking from
+    config wins; Google SPD members fall back to the
+    PYTHIA_GOOGLE_SPD_THINKING_LEVEL_* env vars; empty/off/none → None;
+    ModelSpec.temperature overrides the call-site temperature.
+    """
+
+    spd_google = ms.provider == "google" and ms.purpose == "spd_v2"
+    thinking_level: Optional[str] = None
+    if ms.thinking and ms.thinking not in ("off", "none"):
+        thinking_level = ms.thinking
+    elif spd_google:
+        google_family = _google_model_family(ms.model_id)
+        if google_family == "flash":
+            thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH", "low") or "").strip()
+        elif google_family == "pro":
+            thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO", "") or "").strip()
+    if thinking_level in ("", "off", "none"):
+        thinking_level = None
+    effective_temperature = ms.temperature if ms.temperature is not None else temperature
+    return effective_temperature, thinking_level
+
+
+def build_body_for_spec(ms: "ModelSpec", prompt: str, temperature: float = 0.2) -> dict:
+    """Build the exact provider request body a sync call_chat_ms would send.
+
+    Single entry point for the Batch API layer: dispatches to the shared
+    per-provider body builders with the same resolved params as the sync
+    path, so a batch item's body is byte-identical to the sync request.
+    """
+
+    effective_temperature, thinking_level = resolve_request_params(ms, temperature)
+    provider = (ms.provider or "").lower()
+    if provider == "openai":
+        return build_openai_body(
+            prompt, ms.model_id, effective_temperature, reasoning_effort=thinking_level
+        )
+    if provider == "anthropic":
+        return build_anthropic_body(
+            prompt, ms.model_id, effective_temperature, purpose=ms.purpose
+        )
+    if provider in {"google", "gemini"}:
+        return build_google_body(
+            prompt, ms.model_id, effective_temperature, thinking_level=thinking_level
+        )
+    raise ValueError(f"unsupported provider for batch body: {ms.provider}")
+
+
 def _call_provider_sync(
     provider: str,
     prompt: str,
@@ -1554,7 +1605,6 @@ async def call_chat_ms(
     start = time.time()
     spd_google = ms.provider == "google" and ms.purpose == "spd_v2"
     hs_triage = ms.purpose == "hs_triage"
-    thinking_level: Optional[str] = None
     timeout_sec: Optional[float] = None
     hs_timeout_sec: Optional[float] = None
     hs_max_retry_after_sec: Optional[float] = None
@@ -1563,23 +1613,9 @@ async def call_chat_ms(
     hs_usage: Dict[str, Any] = {}
     backoffs_sec: list[float] = []
 
-    # --- Per-model thinking level ---
-    # 1) ModelSpec.thinking from config.yaml takes precedence
-    if ms.thinking and ms.thinking not in ("off", "none"):
-        thinking_level = ms.thinking
-    # 2) Env var fallback for Google SPD models (backward compat)
-    elif spd_google:
-        google_family = _google_model_family(ms.model_id)
-        if google_family == "flash":
-            thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH", "low") or "").strip()
-        elif google_family == "pro":
-            thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO", "") or "").strip()
-    # 3) Normalize empty/off/none to None
-    if thinking_level in ("", "off", "none"):
-        thinking_level = None
-
-    # --- Per-model temperature override ---
-    effective_temperature = ms.temperature if ms.temperature is not None else temperature
+    # Per-model temperature/thinking resolution — shared with the Batch API
+    # layer via resolve_request_params so batch bodies can't drift.
+    effective_temperature, thinking_level = resolve_request_params(ms, temperature)
 
     if spd_google:
         google_family = _google_model_family(ms.model_id)

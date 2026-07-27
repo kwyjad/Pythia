@@ -877,6 +877,33 @@ def collect_batch(con, batch_id: str) -> Dict[str, int]:
     return counts
 
 
+def cancel_batch(con, batch_id: str) -> None:
+    """Cancel a provider batch and mark it canceled locally.
+
+    Used when a batch exceeds PYTHIA_BATCH_MAX_WAIT_H: canceling before the
+    sync fallback runs avoids paying for both the late batch results AND the
+    fallback calls. collect_batch afterwards flips the outstanding items to
+    'expired' so consumers take the sync path.
+    """
+
+    row = con.execute(
+        "SELECT provider, provider_batch_id FROM llm_batches WHERE batch_id = ?",
+        [batch_id],
+    ).fetchone()
+    if not row:
+        return
+    provider, provider_batch_id = row
+    if provider_batch_id:
+        try:
+            _adapter(provider).cancel(provider_batch_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("llm_batch: cancel failed for %s: %s", batch_id, exc)
+    con.execute(
+        "UPDATE llm_batches SET status = 'canceled', ended_at = COALESCE(ended_at, ?) WHERE batch_id = ?",
+        [_now(), batch_id],
+    )
+
+
 def get_result(
     con,
     family: str,
