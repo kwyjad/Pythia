@@ -81,6 +81,10 @@ Pythia/
 - `resolver/db/schema.sql` — Resolver DuckDB schema (facts_resolved, facts_deltas, snapshots)
 - `pythia/buckets.py` — SPD bucket definitions (PA, FATALITIES, PHASE3PLUS_IN_NEED) and the **`NUM_HORIZONS = 6` forecast-window constant** (single-sourced; imported by `compute_resolutions.py` and by `forecaster/cli.py`'s month-label window checks — do not redefine locally). `BUCKET_SPECS` maps metric names to `BucketSpec` tuples. **Every SPD metric leads with a dedicated "0" bucket** (exactly zero impact, centroid 0, range [0,1)) so the next bucket starts at 1. PA has 6 buckets (0, 1-<10k, 10k-<50k, 50k-<250k, 250k-<500k, >=500k), FATALITIES has 7 (0, 1-<5, 5-<25, 25-<100, 100-<500, 500-<1000, >=1000), DR_PHASE3_BUCKETS has 6 for IPC Phase 3+ population (0, 1-<100k, 100k-<1M, 1M-<5M, 5M-<15M, >=15M). Helpers: `n_buckets_for`, `max_bucket_count` (=7, drives the wide SPD_1..SPD_7 CSV export), `centroids_for`, `label_index_map(lowercase=...)`, and `bucket_schema_version(metric)` (12-hex digest over the ordered bucket BOUNDARIES; stamps `bucket_centroids.schema_version` so EMA centroids learned under an old boundary layout are refused by `compute_scores._load_centroids` — NULL rows grandfathered; retuning centroid seeds/labels does NOT change the version, changing any boundary does) alongside the existing `thresholds_for`/`interior_thresholds_for`/`labels_for`.
 - `pythia/config.yaml` — Central configuration (LLM profiles, hazards, bucket specs)
+- `pythia/llm_batch.py` — Provider Batch-API execution layer (OpenAI/Anthropic/Gemini adapters, enqueue/submit/poll/collect/replay; see the Batch-API staged pipeline section)
+- `horizon_scanner/hs_batch.py` — Staged-HS stage state + batch seam (family modes, enqueue/replay, grounding-pack reload, hs_stage_state carry, run-id/pipeline resolution)
+- `scripts/ci/emit_batch_state.py` / `scripts/ci/poll_llm_batches.py` — Batch-state artifact emitter (submit stages) + the 15-min poller that dispatches the next pipeline stage
+- `scripts/compare_prompt_order_runs.py` — A/B harness for the V3 prompt-order validation gate (test-mode run vs baseline: SPD JS-divergence, parse failures, RC/triage distributions)
 - `horizon_scanner/horizon_scanner.py` — HS main entrypoint (~1700 LOC)
 - `horizon_scanner/regime_change.py` — RC scoring (score = likelihood x magnitude, 4 levels)
 - `horizon_scanner/regime_change_llm.py` — Per-hazard RC LLM pipeline (single pass by default since July 2026; `PYTHIA_HS_RC_PASSES=2` restores 2-pass, pair with a distinct `PYTHIA_RC_MODEL_PASS2` — two identical passes at temperature 0 are deterministic duplicates and the mean merge is a no-op)
@@ -171,6 +175,8 @@ Two DuckDB databases:
 - `seasonal_tc_outlooks` — Seasonal TC forecasts from TSR/NOAA CPC/BoM (PK: basin, source, fetched_at)
 - `seasonal_tc_context_cache` — Pre-formatted per-country TC context text (PK: iso3)
 - `llm_calls` — Full telemetry (cost, tokens, latency, errors)
+- `llm_batches`, `llm_batch_requests` — Provider Batch-API state (batch ids, per-request bodies/results); the cross-stage state of the staged pipeline (see the Batch-API section)
+- `hs_stage_state` — Staged-HS carry state (merged RC results per country, hs_rc_collect → hs_finalize)
 
 **Resolver DB** (`resolver/db/schema.sql`): fact ingestion
 - `facts_resolved` — Precedence-resolved facts (unique on ym, iso3, hazard_code, metric, series_semantics). Includes `alertlevel` column (GDACS-specific, NULL for other sources).
@@ -308,6 +314,24 @@ Sibyl (`sibyl/` package, July 2026) is a parallel forecasting harness that indep
 
 **Tests**: `tests/test_sibyl_*.py` + `tests/sibyl_test_utils.py`, run by `sibyl-ci.yml` (no other CI workflow covers the top-level `tests/` directory). The smoke test is fully deterministic (model call + Brave mocked).
 
+## Batch-API staged pipeline + prompt caching (July 2026)
+
+Provider Batch APIs (OpenAI `/v1/batches`, Anthropic `/v1/messages/batches`, Gemini `batchGenerateContent`) process independent requests asynchronously at **50% off input AND output tokens** (≤24h completion). The pipeline's LLM families are mutually independent within a wave, so an alternative **staged** execution mode submits them as provider batches and resumes when they finish. **All flags default OFF — `--phase full` / `--stage full` / the legacy `run_horizon_scanner.yml` remain byte-for-byte today's synchronous behavior.**
+
+**Batch layer** (`pythia/llm_batch.py`): provider adapters (submit/poll/fetch/cancel, raw `requests`), custom-id encoding (`^[A-Za-z0-9_-]{1,64}$`; forecaster families key by (question_id, model_key), HS families by (iso3, hazard_code, pass_idx)), conservative chunking, idempotent `collect_batch` (stamps `usage.service_tier="batch"` so the shared cost helper halves the price), `get_result`/`mark_fallback_sync` for per-item replay. State lives in two DuckDB tables (`llm_batches`, `llm_batch_requests`) — **the DB travels in the artifact, so the DB IS the cross-stage state**. `clear_request_bodies` nulls stored bodies after collect (artifact size). Request bodies come from `forecaster/providers.py::build_body_for_spec` → `resolve_request_params` (the SAME param-resolution the sync `call_chat_ms` uses — never rebuild bodies elsewhere; batch payloads must stay byte-identical to sync payloads).
+
+**Forecaster phases** (`forecaster/cli.py --phase {full,submit,collect} --pipeline-id pl_X`): `submit` runs the normal per-question flow but `_try_batch_phase` intercepts each member call (spd_v2 / binary_v2 / track2_spd families), enqueues the body and returns a sentinel; then `submit_pending` creates provider batches and main() prints `BATCH_PIPELINE_ID=` / `FC_RUN_ID=` and exits. `collect` reuses the submit run_id (from `llm_batches.run_id`), ingests finished batches (canceling stragglers past `PYTHIA_BATCH_MAX_WAIT_H`), replays each member call from `llm_batch_requests`, and **falls back to the sync `call_chat_ms` path on any miss** (marking `fallback_sync`) — parsing, aggregation, calibration weights and DB writers are the unmodified downstream code. A provider excluded via `PYTHIA_BATCH_PROVIDERS` is deferred at submit (never called) and runs sync at collect.
+
+**HS stages** (`horizon_scanner/horizon_scanner.py --stage {full,hs_submit,hs_rc_collect,hs_finalize} --pipeline-id pl_X`, seam module `horizon_scanner/hs_batch.py`): RC→triage dependency forces two waves. `hs_submit` mints the hs_run_id + hs_runs row, runs RC grounding (sync Brave, persisted to hs_hazard_tail_packs), builds RC prompts and enqueues/submits the `hs_rc` family (triage skipped). `hs_rc_collect` replays RC (sync fallback per miss), **reloads RC grounding packs from the DB** (never re-fetches/re-persists), saves each country's merged RC dict to the `hs_stage_state` table, then runs triage grounding + enqueues/submits `hs_triage`. `hs_finalize` loads RC from `hs_stage_state` (batch replay as fallback), replays triage, and runs the unmodified `_write_hs_triage` + adversarial checks + coverage/stdout contract. Invariants: replayed results rich-log to `llm_calls` exactly once (existence guard keyed on the UPPERCASED label `RC_{hz}_PASS_{n}`); the seasonal-filter `run_date` derives from the run id (`run_date_from_run_id`) so a month boundary between stages can't flip a hazard's active set; `_rc_model_spec`/`_triage_model_spec` are the single pass-model resolvers shared by sync + enqueue. The collect-stage run_id resolves from `llm_batches.hs_run_id` by pipeline_id (forecaster collect uses `run_id IS NOT NULL`, HS uses `hs_run_id IS NOT NULL` — no cross-talk; both families share one pipeline_id per cycle).
+
+**Workflow orchestration**: `pythia_pipeline_stage.yml` ("Pythia Pipeline Stage", workflow_dispatch, inputs stage/pipeline_id/db_run_id/test_mode, same `pythia-resolver-db` concurrency group, timeout 330, run-name embeds `{pipeline_id} — {stage}` which the poller's dispatch-once guard matches on). Stage chain: `hs_submit → hs_rc_collect → hs_finalize_fc_submit → fc_collect_finalize`; alternate entry `fc_submit` (sync HS in-job, forecaster batching only). Stages S1–S3 upload the DB as **`pythia-resolver-db-staged`** (deliberately NOT the canonical name — canonical discovery must never pick up a half-finished pipeline DB) + a tiny `pythia-batch-state` JSON (`scripts/ci/emit_batch_state.py`); the final stage uploads canonical `pythia-resolver-db` and dispatches Sibyl (`gh workflow run run_sibyl.yml -f db_run_id=<its own run>`), preserving the pythia → Sibyl → publish release chain. Collect stages download the staged DB via `force-run-id` (fatal if missing — a stage never guesses its DB); each stage writes/compares its own db_signature and gates its upload on it. The workflow sets `PYTHIA_BATCH_API_ENABLED=1` in its env (the staged path is the opt-in). `poll_llm_batches.yml` (cron `*/15`, timeout 15, NOT in the DB concurrency group) runs `scripts/ci/poll_llm_batches.py`: reads the newest batch-state per pipeline from Actions artifacts, polls provider batches (needs the 3 provider secrets), and dispatches the next stage when all are terminal or older than `PYTHIA_BATCH_MAX_WAIT_H` — convergent by design (missed ticks delay, never lose, a pipeline; collects are idempotent so double-fires are harmless). **The monthly cron stays on `run_horizon_scanner.yml` until the batch path is validated** (test-mode staged run first); "Pythia Pipeline Stage" is in all three canonical-DB candidate lists.
+
+**Prompt V3 order + caching** (Phase 1, flags `PYTHIA_PROMPT_V3_ORDER` / `PYTHIA_PROMPT_CACHE_ENABLED`, both default OFF): the SPD (`build_spd_prompt_v2`, `return_parts=True` → (prefix, suffix)), binary, RC and triage prompt builders have a static-first assembly (role/task/buckets/hazard guidance/method+schema first, per-question data last) that creates multi-KB shared prefixes for OpenAI automatic caching (+ `prompt_cache_key`), Gemini implicit caching, and Anthropic `cache_control` (via `call_chat_ms(cache_segments=...)`; Sibyl's step prompts use a 4-block template with breakpoints). Legacy assembly is byte-identical to the pre-refactor prompts (verified against HEAD; guarded by `forecaster/tests/test_prompt_v3_order.py`). **Do not enable V3 order in production before an A/B validation run** — `scripts/compare_prompt_order_runs.py` compares a `PYTHIA_TEST_MODE=1` run against a baseline (SPD JS-divergence, parse failures, RC/triage distributions). Cost telemetry (Phase 0): `usage_to_dict` passes through `cache_read_input_tokens`/`cache_creation_input_tokens`/`cached_tokens`/`service_tier`/`batch_id`; `pythia/model_costs.json` supports object-form entries with cached rates; `compute_cost_split_usd` is the single cost formula (used by both `estimate_cost_usd` and `llm_logging`) applying cached rates and the 0.5× batch multiplier.
+
+**Env flags**: `PYTHIA_BATCH_API_ENABLED` (0), `PYTHIA_BATCH_PROVIDERS` (openai,anthropic,google), `PYTHIA_BATCH_MAX_WAIT_H` (24), `PYTHIA_BATCH_MAX_REQUESTS`/`PYTHIA_BATCH_MAX_BYTES`/`PYTHIA_BATCH_HTTP_TIMEOUT_SEC` (chunking/HTTP), `PYTHIA_PROMPT_V3_ORDER` (0), `PYTHIA_PROMPT_CACHE_ENABLED` (0).
+
+**Tests**: `pythia/tests/test_llm_batch.py` (adapters mocked, state machine, custom-id charset, batch-tier pricing, body parity), `forecaster/tests/test_batch_phase.py` (submit/collect/fallback via the `forecaster.cli.*` seams), `horizon_scanner/tests/test_hs_stages.py` (mode matrix, enqueue body parity, replay + log-once, grounding/stage-state round-trips), `forecaster/tests/test_prompt_v3_order.py`.
+
 ## Testing
 
 ```bash
@@ -391,6 +415,11 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `PYTHIA_RC_MODEL_PASS1` / `PYTHIA_RC_MODEL_PASS2` | Override RC LLM model per pass |
 | `PYTHIA_CREDIT_RETRY_PAUSE_{PROVIDER}` | Credit-retry pause in seconds per provider (default: OpenAI=900, Anthropic=300, Google=600) |
 | `PYTHIA_CREDIT_RETRY_MAX_{PROVIDER}` | Credit-retry max attempts per provider (default: 3 for all) |
+| `PYTHIA_BATCH_API_ENABLED` | Master switch for provider Batch-API submission (0/1, default 0) |
+| `PYTHIA_BATCH_PROVIDERS` | Providers allowed to batch (default "openai,anthropic,google"; others stay sync) |
+| `PYTHIA_BATCH_MAX_WAIT_H` | Max hours to wait on a provider batch before cancel + sync fallback (default 24) |
+| `PYTHIA_PROMPT_V3_ORDER` | Static-first prompt assembly for cache-friendly prefixes (0/1, default 0 — enable only after A/B validation) |
+| `PYTHIA_PROMPT_CACHE_ENABLED` | Anthropic cache_control blocks + OpenAI prompt_cache_key (0/1, default 0) |
 
 Provider API keys: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`.
 
@@ -647,12 +676,13 @@ Thread-safe circuit breaker (`pythia/web_research/brave_circuit_breaker.py`) tha
 The `pythia-resolver-db` DuckDB artifact is shared across multiple workflows. **Discovery is centralized in the composite action `.github/actions/download-canonical-db`** (July 2026) — it is the single home of the candidate list:
 
 1. **Horizon Scanner Triage** (`run_horizon_scanner.yml`)
-2. **Sibyl Deep Research** (`run_sibyl.yml`)
-3. **Resolver Update** (primary ingestion: single-job workflow with 5 phases)
-4. **Ingest Structured Data** (`ingest-structured-data.yml`) (mid-cycle refresh for fast-changing sources)
-5. **Pythia — Compute Resolutions** (`compute_resolutions.yml`)
-6. **Pythia — Compute SPD Scores** (`compute_scores.yml`)
-7. **Pythia — Compute Calibration Weights & Advice** (`compute_calibration_pythia.yml`)
+2. **Pythia Pipeline Stage** (`pythia_pipeline_stage.yml`) — only its final stage uploads the canonical artifact; other stage runs upload `pythia-resolver-db-staged` and are skipped naturally when the canonical download fails
+3. **Sibyl Deep Research** (`run_sibyl.yml`)
+4. **Resolver Update** (primary ingestion: single-job workflow with 5 phases)
+5. **Ingest Structured Data** (`ingest-structured-data.yml`) (mid-cycle refresh for fast-changing sources)
+6. **Pythia — Compute Resolutions** (`compute_resolutions.yml`)
+7. **Pythia — Compute SPD Scores** (`compute_scores.yml`)
+8. **Pythia — Compute Calibration Weights & Advice** (`compute_calibration_pythia.yml`)
 
 Candidates are sorted by `createdAt` descending; the first one that downloads successfully (and passes the optional per-candidate `validate-cmd`, used for the db_signature check) is used. The action supports: **forced mode** (`force-run-id` from an operator input — exact run or fail, no fallback), **Path A** (`run-id` = the triggering `workflow_run.id` — tried first, falls back to discovery when empty/expired; this is why manual `workflow_dispatch` of Compute Resolutions/Scores/Calibration works), **Path B** (canonical discovery), and `extra-workflows` (self-inclusion for maintenance workflows like Purge HS Run). Migrated consumers: compute_resolutions, compute_scores, compute_calibration_pythia, run_sibyl, resolver_update, ingest-structured-data, purge_hs_run. **Two consumers are intentionally bespoke** (marked with comments): `run_horizon_scanner.yml` (entangled with db_run_id/db_artifact_name overrides, DB_SOURCE mapping, bootstrap-reset ensure_schema) and `publish_latest_data.yml` (resolve outputs feed the regression guard). **When a new workflow starts producing `pythia-resolver-db`, add it to the composite action's list AND the two bespoke blocks.**
 
@@ -741,6 +771,8 @@ Track 2's stored `model_name` stays `track2_flash` regardless of which model bac
 | `build_dashboard_data.yml` | Dashboard data build | Triggered |
 | `publish_latest_data.yml` | Publish latest data (release) + inline DB inspection | After Sibyl (forecast pipeline) / after Calibration / manual |
 | `purge_hs_run.yml` | Delete an HS run | Manual |
+| `pythia_pipeline_stage.yml` | Batch-API staged pipeline (hs_submit → hs_rc_collect → hs_finalize_fc_submit → fc_collect_finalize; alt entry fc_submit) | Dispatched (manual entry + poller-chained) |
+| `poll_llm_batches.yml` | Poll provider batches, dispatch next pipeline stage | Cron */15 min |
 
 ## Supported hazards and metrics
 
