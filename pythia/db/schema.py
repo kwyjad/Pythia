@@ -1901,6 +1901,35 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
             },
         )
 
+        # Cross-stage carry state for the staged Horizon Scanner (Phase 4 of
+        # the Batch-API pipeline): the hs_rc_collect stage persists each
+        # country's merged RC result here so hs_finalize reuses the exact
+        # dicts (triage rc_promoted decisions + hs_triage writes) instead of
+        # re-deriving them (JSON-repair re-runs could drift). Keyed by
+        # (run_id, iso3, stage_key); missing rows fall back to batch replay.
+        _ensure_table_and_columns(
+            con,
+            "hs_stage_state",
+            """
+            CREATE TABLE IF NOT EXISTS hs_stage_state (
+                run_id TEXT,
+                iso3 TEXT,
+                stage_key TEXT,
+                payload_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_test BOOLEAN DEFAULT FALSE
+            );
+            """,
+            {
+                "run_id": "TEXT",
+                "iso3": "TEXT",
+                "stage_key": "TEXT",
+                "payload_json": "TEXT",
+                "created_at": "TIMESTAMP",
+                "is_test": "BOOLEAN DEFAULT FALSE",
+            },
+        )
+
         _ensure_table_and_columns(
             con,
             "pm_checks",

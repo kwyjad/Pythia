@@ -1119,26 +1119,68 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str, crisiswatch_d
     iso3_up = (iso3 or "").upper()
     logger.info("Running HS pipeline for %s (%s): RC → Triage", country_name, iso3_up)
 
+    from horizon_scanner import hs_batch
+
     # 1. Build shared inputs (once per country)
     resolver_features = _build_resolver_features_for_country(iso3)
     hazard_catalog = _build_hazard_catalog()
     evidence_pack = None  # Country-level pack retired; per-hazard grounding provides evidence
     expected_hazards = sorted(hazard_catalog.keys())
     fallback_specs = _HS_FALLBACK_SPECS or _resolve_hs_fallback_specs()
+    # In staged mode, anchor the seasonal-filter date to the run id so a
+    # calendar-month boundary between stages cannot flip a hazard's
+    # active/inactive set (which would desync batch replay lookups). In
+    # full mode the run id was minted moments ago, so this is identical to
+    # datetime.now().date().
+    run_date = hs_batch.run_date_from_run_id(run_id)
 
-    # 2. Run REGIME CHANGE first (per-hazard with seasonal filtering)
-    rc_result = run_rc_for_country(
-        run_id=run_id,
-        iso3=iso3_up,
-        country_name=country_name,
-        hazard_catalog=hazard_catalog,
-        resolver_features=resolver_features,
-        evidence_pack=evidence_pack,
-        fallback_specs=fallback_specs,
-        expected_hazards=expected_hazards,
-        run_date=datetime.now().date(),
-        crisiswatch_data=crisiswatch_data,
-    )
+    # 2. Run REGIME CHANGE first (per-hazard with seasonal filtering). In
+    # hs_finalize the merged RC dicts saved by hs_rc_collect are reused so
+    # rc_promoted decisions and hs_triage writes can't drift from what the
+    # triage prompts embedded; batch replay is the fallback when the saved
+    # state is missing (e.g. hs_rc_collect crashed mid-country).
+    rc_result: Dict[str, Any] | None = None
+    if hs_batch.stage() == "hs_finalize":
+        rc_result = hs_batch.load_stage_state(run_id, iso3_up, "rc_result")
+    if rc_result is None:
+        rc_result = run_rc_for_country(
+            run_id=run_id,
+            iso3=iso3_up,
+            country_name=country_name,
+            hazard_catalog=hazard_catalog,
+            resolver_features=resolver_features,
+            evidence_pack=evidence_pack,
+            fallback_specs=fallback_specs,
+            expected_hazards=expected_hazards,
+            run_date=run_date,
+            crisiswatch_data=crisiswatch_data,
+        )
+    if hs_batch.stage() == "hs_rc_collect":
+        try:
+            hs_batch.save_stage_state(run_id, iso3_up, "rc_result", rc_result)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to save RC stage state for %s: %s", iso3_up, exc)
+
+    if not hs_batch.triage_enabled():
+        # hs_submit: RC prompts are enqueued; triage needs RC results and
+        # runs in the next stages.
+        return {
+            "iso3": iso3_up,
+            "error_text": None,
+            "response_text": "",
+            "pass_results": [],
+            "final_status": "submitted",
+            "pass1_status": rc_result.get("status", "pending_batch"),
+            "pass2_status": "pending_batch",
+            "pass1_valid": True,
+            "pass2_valid": True,
+            "primary_model_id": _resolve_hs_model(),
+            "fallback_model_id": fallback_specs[0].model_id if fallback_specs else None,
+            "triage_status": "pending_batch",
+            "rc_status": rc_result.get("status", "pending_batch"),
+            "triage_result": {},
+            "rc_result": rc_result,
+        }
 
     # 3. Run TRIAGE second, feeding RC results as context (per-hazard with seasonal filtering)
     triage_result = run_triage_for_country(
@@ -1151,8 +1193,29 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str, crisiswatch_d
         fallback_specs=fallback_specs,
         rc_results=rc_result,
         expected_hazards=expected_hazards,
-        run_date=datetime.now().date(),
+        run_date=run_date,
     )
+
+    if not hs_batch.finalize_enabled():
+        # hs_rc_collect: triage prompts are enqueued; the DB write,
+        # adversarial checks and coverage reporting run in hs_finalize.
+        return {
+            "iso3": iso3_up,
+            "error_text": None,
+            "response_text": "",
+            "pass_results": [],
+            "final_status": "submitted",
+            "pass1_status": rc_result.get("status", "failed"),
+            "pass2_status": "pending_batch",
+            "pass1_valid": rc_result.get("status") != "failed",
+            "pass2_valid": True,
+            "primary_model_id": _resolve_hs_model(),
+            "fallback_model_id": fallback_specs[0].model_id if fallback_specs else None,
+            "triage_status": "pending_batch",
+            "rc_status": rc_result.get("status", "failed"),
+            "triage_result": triage_result,
+            "rc_result": rc_result,
+        }
 
     # 4. Combine into unified triage dict for DB write
     combined_hazards: Dict[str, Any] = {}
@@ -1302,14 +1365,40 @@ def _load_country_list(
     return resolved, skipped_entries, raw_countries
 
 
-def main(countries: list[str] | None = None):
-    logger.info("Starting Horizon Scanner triage run...")
+def main(
+    countries: list[str] | None = None,
+    stage: str = "full",
+    pipeline_id: str | None = None,
+):
+    from horizon_scanner import hs_batch
+
+    hs_batch.set_stage(stage, pipeline_id)
+    logger.info(
+        "Starting Horizon Scanner triage run... (%s)", hs_batch.batch_flags_summary()
+    )
     ensure_schema()
 
     _is_test = is_test_mode()
 
     start_time = datetime.now(timezone.utc).replace(tzinfo=None)
-    run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
+    if stage in ("hs_rc_collect", "hs_finalize"):
+        # Collect stages continue the run minted by hs_submit — the run id
+        # travels in llm_batches (the DB is the cross-stage state).
+        if not hs_batch.pipeline_id():
+            raise SystemExit(f"--pipeline-id is required for --stage {stage}")
+        resolved = hs_batch.resolve_run_id_for_pipeline(hs_batch.pipeline_id())
+        if not resolved:
+            raise SystemExit(
+                f"No hs_run_id found in llm_batches for pipeline "
+                f"{hs_batch.pipeline_id()!r}; did hs_submit run against this DB?"
+            )
+        run_id = resolved
+        # Ingest any provider batches the poller hasn't collected yet
+        # (idempotent; stragglers past the wait cap are canceled so their
+        # items take the per-item sync fallback).
+        hs_batch.collect_pending_batches(hs_batch.pipeline_id())
+    else:
+        run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
     os.environ["PYTHIA_HS_RUN_ID"] = run_id
     reset_provider_failures_for_run(run_id)
     from pythia.web_research.brave_circuit_breaker import reset as reset_brave_breaker
@@ -1401,20 +1490,41 @@ def main(countries: list[str] | None = None):
                         )
 
         iso3_list = [iso3 for (_name, iso3) in country_entries]
-        try:
-            git_sha = os.getenv("GITHUB_SHA") or ""
-            config_profile = os.getenv("PYTHIA_CONFIG_PROFILE", "default")
-            log_hs_run_to_db(
-                run_id,
-                iso3_list,
-                git_sha=git_sha,
-                config_profile=config_profile,
-                requested_countries=requested_countries,
-                skipped_entries=skipped_entries,
-                is_test=_is_test,
+        if stage in ("full", "hs_submit"):
+            # The hs_runs row is written once, when the run is minted —
+            # collect stages continue the same run.
+            try:
+                git_sha = os.getenv("GITHUB_SHA") or ""
+                config_profile = os.getenv("PYTHIA_CONFIG_PROFILE", "default")
+                log_hs_run_to_db(
+                    run_id,
+                    iso3_list,
+                    git_sha=git_sha,
+                    config_profile=config_profile,
+                    requested_countries=requested_countries,
+                    skipped_entries=skipped_entries,
+                    is_test=_is_test,
+                )
+            except Exception as exc:  # pragma: no cover - best-effort logging
+                logger.warning("Failed to log hs_run %s: %s", run_id, exc)
+
+        if stage in ("hs_submit", "hs_rc_collect"):
+            # Submit this stage's enqueued family as provider batches and
+            # stop — the poller dispatches the next stage when they finish.
+            family = "hs_rc" if stage == "hs_submit" else "hs_triage"
+            created = hs_batch.submit_family(family, run_id=run_id, stage_name=stage)
+            pid = hs_batch.pipeline_id() or run_id
+            logger.info(
+                "HS stage %s: submitted %d %s batch(es): %s",
+                stage, len(created), family, created,
             )
-        except Exception as exc:  # pragma: no cover - best-effort logging
-            logger.warning("Failed to log hs_run %s: %s", run_id, exc)
+            print(f"HS_RUN_ID={run_id}", flush=True)
+            print(f"BATCH_PIPELINE_ID={pid}", flush=True)
+            print(f"HS_RESOLVED_ISO3S={','.join(sorted({i for i in iso3_list}))}", flush=True)
+            print(f"HS_BATCHES_SUBMITTED={len(created)}", flush=True)
+            sys.stdout.flush()
+            _hs_id_emitted = True
+            return
 
         logger.info(
             "Horizon Scanner triage run complete for %d countries (skipped %d unknown/invalid entries)",
@@ -1556,5 +1666,32 @@ def main(countries: list[str] | None = None):
                 pass
 
 
+def _parse_cli_args():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Pythia Horizon Scanner")
+    parser.add_argument(
+        "--stage",
+        default="full",
+        choices=["full", "hs_submit", "hs_rc_collect", "hs_finalize"],
+        help=(
+            "Staged Batch-API mode: 'full' (default) runs the whole RC+triage "
+            "pipeline synchronously as before; 'hs_submit' grounds + enqueues "
+            "RC prompts as a provider batch and exits; 'hs_rc_collect' replays "
+            "RC results, grounds + enqueues triage prompts and exits; "
+            "'hs_finalize' replays triage results and writes hs_triage + "
+            "adversarial checks + coverage. Collect stages require "
+            "--pipeline-id and the DB written by the previous stage."
+        ),
+    )
+    parser.add_argument(
+        "--pipeline-id",
+        default="",
+        help="Staged-pipeline id shared across stages (minted by hs_submit when omitted).",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    _cli_args = _parse_cli_args()
+    main(stage=_cli_args.stage, pipeline_id=(_cli_args.pipeline_id or None))
