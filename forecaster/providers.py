@@ -276,7 +276,7 @@ _forecaster_cfg = _cfg.get("forecaster", {}) if isinstance(_cfg, dict) else {}
 def _provider_display_name(provider: str, model_id: str, cfg: Dict[str, Any] | None = None) -> str:
     """Return the display name stored as ``model_name`` in forecasts_raw / scores / llm_calls.
 
-    Uses the specific model id (e.g. ``gemini-3.5-flash``, ``gpt-5.4``) so
+    Uses the specific model id (e.g. ``gemini-3.5-flash``, ``gpt-5.6-sol``) so
     dashboards, downloads, and calibration weights always reference a clear,
     unambiguous model — never a generic family label like "Gemini" or
     "Gemini Flash". An explicit ``display_name`` in config still wins.
@@ -538,7 +538,7 @@ _GEMINI_API_KEY = _GEMINI_STATE.get("api_key", "")
 _OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
 
 # OpenAI models that reject a custom temperature (HTTP 400 if sent): the
-# GPT-5 reasoning family (gpt-5, gpt-5-mini, gpt-5.4, gpt-5.4-mini, ...).
+# GPT-5 reasoning family (gpt-5, gpt-5.4, gpt-5.6-sol, gpt-5.6-luna, ...).
 # Prefix-matched so a lineup bump (e.g. gpt-5.5) can't silently reintroduce
 # temperature on a path that doesn't set reasoning_effort (the hs_fallback
 # JSON-repair spec carries no thinking value).
@@ -549,9 +549,14 @@ def _openai_drops_temperature(model: str) -> bool:
     return (model or "").startswith(_OPENAI_NO_TEMPERATURE_PREFIXES)
 # Anthropic models that reject sampling params outright (HTTP 400 if sent):
 # the Opus 4.7+/Sonnet 5+/Fable family removed temperature/top_p/top_k.
+#
+# These are LITERAL id prefixes, not families: "claude-opus-4-8" does NOT cover
+# "claude-opus-5". Every Anthropic lineup bump must add its own entry here, or
+# the SPD Claude member AND every Sibyl step 400 on the first call.
 _ANTHROPIC_NO_TEMPERATURE_PREFIXES = (
     "claude-opus-4-7",
     "claude-opus-4-8",
+    "claude-opus-5",
     "claude-sonnet-5",
     "claude-fable",
 )
@@ -561,7 +566,15 @@ _GEMINI_TIMEOUT = _resolve_timeout("GEMINI_CALL_TIMEOUT_SEC", GEMINI_CALL_TIMEOU
 
 _ANTHROPIC_VERSION = os.getenv("ANTHROPIC_API_VERSION", "2023-06-01")
 _ANTHROPIC_MAX_OUTPUT = int(os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS", "16384") or 16384)
-_ANTHROPIC_SPD_MAX_OUTPUT = int(os.getenv("PYTHIA_ANTHROPIC_SPD_MAX_TOKENS", str(_ANTHROPIC_MAX_OUTPUT)) or _ANTHROPIC_MAX_OUTPUT)
+# SPD/binary ceiling. Opus 5 runs adaptive thinking BY DEFAULT (Opus 4.8 did not
+# unless asked), and thinking tokens are charged against the same max_tokens
+# budget as the answer — so a 16k cap that comfortably held an SPD JSON on 4.8
+# can now truncate mid-object, which surfaces only as a parse failure.
+_ANTHROPIC_SPD_MAX_OUTPUT_DEFAULT = 32768
+_ANTHROPIC_SPD_MAX_OUTPUT = int(
+    os.getenv("PYTHIA_ANTHROPIC_SPD_MAX_TOKENS", str(max(_ANTHROPIC_MAX_OUTPUT, _ANTHROPIC_SPD_MAX_OUTPUT_DEFAULT)))
+    or _ANTHROPIC_SPD_MAX_OUTPUT_DEFAULT
+)
 
 
 def _get_or_client() -> httpx.AsyncClient:
@@ -810,6 +823,40 @@ def call_openai(
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
+def _anthropic_stop_reason_error(payload: Any) -> Optional[str]:
+    """Return an error string when Anthropic's ``stop_reason`` means "no usable answer".
+
+    Two HTTP-200 outcomes produce empty or partial content and would otherwise be
+    indistinguishable from a successful empty response:
+
+    * ``refusal`` — a safety classifier declined the request. ``stop_details``
+      carries the category (e.g. ``cyber``), which is worth logging: Pythia
+      forecasts armed conflict and fatalities, so this is a plausible outcome
+      rather than a theoretical one.
+    * ``max_tokens`` — the answer hit the output ceiling. From Opus 5 adaptive
+      thinking shares that ceiling, so this is the truncation signal.
+
+    Returns ``None`` for every other stop reason (including ``end_turn``).
+    """
+
+    if not isinstance(payload, dict):
+        return None
+    stop_reason = payload.get("stop_reason")
+    if stop_reason == "refusal":
+        category = ""
+        details = payload.get("stop_details")
+        if isinstance(details, dict):
+            category = str(details.get("category") or "").strip()
+        suffix = f" (category={category})" if category else ""
+        return f"Anthropic refusal: request declined by safety classifiers{suffix}"
+    if stop_reason == "max_tokens":
+        return (
+            "Anthropic response truncated at max_tokens "
+            "(raise PYTHIA_ANTHROPIC_SPD_MAX_TOKENS; adaptive thinking shares this budget)"
+        )
+    return None
+
+
 def call_anthropic(prompt: str, model: str, temperature: float, *, purpose: str | None = None) -> ProviderResult:
     if not _ANTHROPIC_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing ANTHROPIC_API_KEY")
@@ -866,9 +913,13 @@ def call_anthropic(prompt: str, model: str, temperature: float, *, purpose: str 
         if isinstance(content, list) and content:
             parts = []
             for part in content:
+                # Only "text" blocks are the answer. Adaptive thinking (on by
+                # default from Opus 5) also emits "thinking" blocks — skipping
+                # them here is deliberate, not an oversight.
                 if isinstance(part, dict) and part.get("type") == "text":
                     parts.append(str(part.get("text", "")))
             text = "".join(parts).strip()
+
     usage_raw = {}
     if isinstance(payload, dict):
         usage_raw = payload.get("usage") or {}
@@ -877,6 +928,16 @@ def call_anthropic(prompt: str, model: str, temperature: float, *, purpose: str 
         "completion_tokens": usage_raw.get("output_tokens", 0),
         "total_tokens": usage_raw.get("input_tokens", 0) + usage_raw.get("output_tokens", 0),
     })
+
+    # A safety refusal or a thinking-induced truncation both come back as HTTP 200
+    # with empty or partial content. Without naming them, the member simply drops
+    # out of the ensemble with no error recorded anywhere. Usage is preserved on
+    # the error result — a truncated call still burned tokens and must still be
+    # costed.
+    stop_error = _anthropic_stop_reason_error(payload)
+    if stop_error:
+        return ProviderResult("", usage, 0.0, model, error=stop_error)
+
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 

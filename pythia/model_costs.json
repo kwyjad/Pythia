@@ -1,5 +1,5 @@
 {
-  "_comment": "Cost per 1,000,000 (1M) tokens [input, output] in USD. One entry per model_id — lookup normalizes provider-prefixed forms like 'openai/gpt-5.4' automatically (see forecaster.providers.resolve_price_per_1m). When swapping a model in pythia/config.yaml llm.models, add its cost entry here; pythia/tests/test_model_registry.py enforces the sync. brave-web-search cost is per-query ($0.005), injected directly in usage dict — zero here to avoid double-counting. Prices verified 2026-07 against provider pricing pages.",
+  "_comment": "Cost per 1,000,000 (1M) tokens [input, output] in USD. One entry per model_id — lookup normalizes provider-prefixed forms like 'openai/gpt-5.4' automatically (see forecaster.providers.resolve_price_per_1m). When swapping a model in pythia/config.yaml llm.models, add its cost entry here; pythia/tests/test_model_registry.py enforces the sync. brave-web-search cost is per-query ($0.005), injected directly in usage dict — zero here to avoid double-counting. Superseded model ids are kept so a rollback via PYTHIA_SPD_ENSEMBLE_SPECS / SIBYL_MODEL still prices correctly. Prices verified 2026-07-27 against provider pricing pages.",
 
   "brave-web-search":          [0.0, 0.0],
 
@@ -7,11 +7,14 @@
   "gpt-4.1-mini":              [0.40, 1.60],
   "gpt-5.4":                   [2.50, 15.00],
   "gpt-5.4-mini":              [0.75, 4.50],
+  "gpt-5.6-sol":               [5.00, 30.00],
+  "gpt-5.6-luna":              [1.00, 6.00],
 
   "gemini-2.5-flash":          [0.30, 2.50],
   "gemini-3.1-pro-preview":    [2.00, 12.00],
   "gemini-3.5-flash":          [1.50, 9.00],
 
   "claude-haiku-4-5-20251001": [1.00, 5.00],
-  "claude-opus-4-8":           [5.00, 25.00]
+  "claude-opus-4-8":           [5.00, 25.00],
+  "claude-opus-5":             [5.00, 25.00]
 }

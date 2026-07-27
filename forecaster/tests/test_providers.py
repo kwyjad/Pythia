@@ -179,3 +179,174 @@ def test_call_openai_gpt54_body_never_contains_temperature(
     result = providers.call_openai("hi", "gpt-4.1", 0.2)
     assert result.error is None
     assert captured["body"]["temperature"] == 0.2
+
+
+def test_anthropic_temperature_guard_covers_every_reachable_anthropic_model() -> None:
+    """Every Anthropic model the pipeline can call must be in the no-temperature tuple.
+
+    The tuple holds LITERAL id prefixes, not families: "claude-opus-4-8" does not
+    cover "claude-opus-5". Sending `temperature` to an Opus 4.7+ model is an HTTP
+    400, which would take out the SPD Claude member and every Sibyl step at once.
+    Derived from the live config + Sibyl default so a future swap that forgets to
+    extend the tuple fails here rather than in production.
+    """
+    from forecaster import providers
+    from forecaster.providers import _load_ensemble_from_config
+    import sibyl.config as sibyl_config
+
+    reachable = {
+        ms.model_id for ms in _load_ensemble_from_config() if ms.provider == "anthropic"
+    }
+    reachable.add(sibyl_config.MODEL)
+    assert reachable, "expected at least one reachable Anthropic model"
+
+    unguarded = [
+        m for m in sorted(reachable)
+        if not m.lower().startswith(providers._ANTHROPIC_NO_TEMPERATURE_PREFIXES)
+    ]
+    assert not unguarded, (
+        "Anthropic models missing from _ANTHROPIC_NO_TEMPERATURE_PREFIXES "
+        f"(their calls would 400): {unguarded}"
+    )
+
+
+def test_call_anthropic_body_omits_temperature_for_opus5(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from forecaster import providers
+
+    captured: dict = {}
+
+    class _FakeResponse:
+        ok = True
+        status_code = 200
+        headers: dict = {}
+        text = ""
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+
+    def _fake_post(url, headers=None, json=None, timeout=None):  # noqa: A002
+        captured["body"] = json
+        return _FakeResponse()
+
+    monkeypatch.setattr(providers, "_ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(providers.requests, "post", _fake_post)
+
+    result = providers.call_anthropic("hi", "claude-opus-5", 0.2)
+    assert result.error is None
+    assert result.text == "ok"
+    assert "temperature" not in captured["body"]
+
+    # The cheap grounding tier still accepts sampling params — don't over-guard.
+    providers.call_anthropic("hi", "claude-haiku-4-5-20251001", 0.2)
+    assert captured["body"]["temperature"] == 0.2
+
+
+def test_call_anthropic_skips_thinking_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adaptive thinking (on by default from Opus 5) must not leak into the answer."""
+    from forecaster import providers
+
+    class _FakeResponse:
+        ok = True
+        status_code = 200
+        headers: dict = {}
+        text = ""
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "content": [
+                    {"type": "thinking", "thinking": "internal reasoning"},
+                    {"type": "text", "text": '{"answer": 1}'},
+                ],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+
+    monkeypatch.setattr(providers, "_ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(providers.requests, "post", lambda *a, **k: _FakeResponse())
+
+    result = providers.call_anthropic("hi", "claude-opus-5", 0.2)
+    assert result.text == '{"answer": 1}'
+    assert "internal reasoning" not in result.text
+
+
+def test_anthropic_stop_reason_names_refusal_and_truncation() -> None:
+    """Refusal and max_tokens are HTTP 200 with empty/partial content."""
+    from forecaster import providers
+
+    assert providers._anthropic_stop_reason_error({"stop_reason": "end_turn"}) is None
+    assert providers._anthropic_stop_reason_error({}) is None
+    assert providers._anthropic_stop_reason_error(None) is None
+
+    refusal = providers._anthropic_stop_reason_error(
+        {"stop_reason": "refusal", "stop_details": {"category": "cyber"}}
+    )
+    assert refusal is not None and "refusal" in refusal.lower()
+    assert "cyber" in refusal
+
+    # stop_details is optional — must not raise or lose the signal.
+    bare = providers._anthropic_stop_reason_error({"stop_reason": "refusal"})
+    assert bare is not None and "refusal" in bare.lower()
+
+    truncated = providers._anthropic_stop_reason_error({"stop_reason": "max_tokens"})
+    assert truncated is not None and "max_tokens" in truncated
+
+
+def test_call_anthropic_reports_refusal_but_keeps_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused call still burned input tokens and must still be costed."""
+    from forecaster import providers
+
+    class _FakeResponse:
+        ok = True
+        status_code = 200
+        headers: dict = {}
+        text = ""
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "content": [],
+                "stop_reason": "refusal",
+                "stop_details": {"category": "cyber"},
+                "usage": {"input_tokens": 1200, "output_tokens": 0},
+            }
+
+    monkeypatch.setattr(providers, "_ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(providers.requests, "post", lambda *a, **k: _FakeResponse())
+
+    result = providers.call_anthropic("hi", "claude-opus-5", 0.2, purpose="spd_v2")
+    assert result.error is not None and "refusal" in result.error.lower()
+    assert result.text == ""
+    assert result.usage["prompt_tokens"] == 1200
+
+
+def test_spd_anthropic_budget_exceeds_default_output_cap() -> None:
+    """Thinking shares the max_tokens budget from Opus 5, so SPD needs headroom."""
+    from forecaster import providers
+
+    assert providers._ANTHROPIC_SPD_MAX_OUTPUT >= 32768
+    assert providers._ANTHROPIC_SPD_MAX_OUTPUT > providers._ANTHROPIC_MAX_OUTPUT
+
+
+def test_current_lineup_models_are_priced() -> None:
+    """A missing cost entry silently logs $0 and breaks Sibyl's budget cap."""
+    from forecaster import providers
+
+    for model_id in ("gpt-5.6-sol", "gpt-5.6-luna", "claude-opus-5"):
+        assert providers.resolve_price_per_1m(model_id) is not None, model_id
+
+
+def test_openai_drops_temperature_for_gpt56_lineup() -> None:
+    from forecaster import providers
+
+    assert providers._openai_drops_temperature("gpt-5.6-sol")
+    assert providers._openai_drops_temperature("gpt-5.6-luna")

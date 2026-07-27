@@ -47,6 +47,13 @@ jobs:
         run: |
           echo "Next.js cache hit: ${{ steps.nextjs-cache.outputs.cache-hit }}"
 
+      - name: Unit tests
+        working-directory: web
+        # vitest suites (model-name prettifier, costs phase drift guard,
+        # component tests) previously ran in no workflow at all, so a stale
+        # assertion or a broken renderer reached main green.
+        run: npm run test
+
       - name: Build
         working-directory: web
         run: npm run build

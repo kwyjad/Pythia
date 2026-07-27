@@ -42,7 +42,7 @@ from collections import Counter
 from urllib.parse import urlparse
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 import inspect
@@ -2437,14 +2437,14 @@ async def _call_spd_model_for_spec(
     """Async wrapper for the SPD LLM call for a given model spec with self-search support."""
 
     if ms.purpose != "spd_v2":
-        ms = ModelSpec(
-            name=ms.name,
-            provider=ms.provider,
-            model_id=ms.model_id,
-            weight=ms.weight,
-            active=ms.active,
-            purpose="spd_v2",
-        )
+        # Stamp the purpose WITHOUT dropping the per-model params. This used to
+        # rebuild the spec field-by-field and silently omit temperature/thinking,
+        # so every `thinking:`/`temperature:` in config.yaml's ensemble block was
+        # discarded before the provider call — config-derived specs always carry
+        # purpose=None, so the branch fires for all of them. Google members were
+        # masked by the PYTHIA_GOOGLE_SPD_THINKING_LEVEL_* env fallback; the
+        # OpenAI members simply ran at the provider default effort.
+        ms = replace(ms, purpose="spd_v2")
 
     prompt_with_evidence = prompt
     if (
