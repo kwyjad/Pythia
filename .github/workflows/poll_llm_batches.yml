@@ -38,10 +38,49 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Cheap activity gate: the pipeline is active only a few days per
+      # month, but this cron fires every 15 minutes year-round. One API
+      # call decides whether a pythia-batch-state artifact was produced
+      # recently (72h covers the worst-case stage cadence — each submit
+      # stage refreshes it, and the 24h PYTHIA_BATCH_MAX_WAIT_H forces
+      # progression well within the window). Idle ticks exit here in
+      # seconds instead of paying checkout + Python setup ~2,800 times a
+      # month. Manual dispatch always polls (recovery valve).
+      - name: Check for active pipelines
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "Manual dispatch — polling unconditionally."
+            echo "active=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LATEST=$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=pythia-batch-state&per_page=1" \
+            --jq '.artifacts[0].created_at // empty' || true)
+          if [ -z "${LATEST}" ]; then
+            echo "No pythia-batch-state artifacts — no pipeline has ever run. Idle."
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LATEST_EPOCH=$(date -d "${LATEST}" +%s)
+          NOW_EPOCH=$(date +%s)
+          AGE_H=$(( (NOW_EPOCH - LATEST_EPOCH) / 3600 ))
+          if [ "${AGE_H}" -le 72 ]; then
+            echo "Newest batch state is ${AGE_H}h old — pipeline window active."
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Newest batch state is ${AGE_H}h old (>72h) — idle."
+            echo "active=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check out code
+        if: steps.gate.outputs.active == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python 3.11
+        if: steps.gate.outputs.active == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -50,11 +89,13 @@ jobs:
       # needs requests (provider batch polling) — pythia.llm_batch's other
       # imports are stdlib or lazy.
       - name: Install minimal dependencies
+        if: steps.gate.outputs.active == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install requests
 
       - name: Poll batches and dispatch ready stages
+        if: steps.gate.outputs.active == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

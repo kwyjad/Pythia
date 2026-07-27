@@ -5,6 +5,14 @@
 
 ---
 # This workflow runs the Pythia Horizon Scanner triage stage.
+#
+# LEGACY / SYNC FALLBACK (since 2026-07): the production monthly run moved
+# to the Batch-API staged pipeline (pythia_pipeline_stage.yml, cron on the
+# 1st, entry stage hs_submit — 50% provider batch discount). This workflow
+# is kept fully functional as the synchronous fallback path: dispatch it
+# manually if the staged pipeline is broken or a same-day synchronous run
+# is needed. Do NOT re-add the monthly cron here while the staged pipeline
+# owns it — two entry crons would double-run the pipeline.
 
 name: Horizon Scanner Triage
 
@@ -43,9 +51,9 @@ on:
         type: boolean
         default: false
         required: false
-  schedule:
-    # Run at 00:00 UTC on the 1st of each month (= 03:00 Europe/Istanbul)
-    - cron: "0 0 1 * *"
+  # The monthly cron moved to pythia_pipeline_stage.yml (staged Batch-API
+  # pipeline, entry stage hs_submit) on 2026-07-27. This workflow is now
+  # manual-dispatch only — the legacy synchronous fallback.
 
 permissions:
   contents: read
@@ -77,6 +85,12 @@ jobs:
       PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED: "1"
       PYTHIA_ADVERSARIAL_CHECK_ENABLED: "1"
       PYTHIA_PREDICTION_MARKETS_ENABLED: "0"
+      # Prompt-cost switches (production since 2026-07-27, same as the
+      # staged pipeline): static-first prompt assembly + provider prompt
+      # caching. Keep in lockstep with pythia_pipeline_stage.yml so the
+      # sync fallback produces the same prompts as the staged path.
+      PYTHIA_PROMPT_V3_ORDER: "1"
+      PYTHIA_PROMPT_CACHE_ENABLED: "1"
       BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       # HS models come from the llm.models registry + roles in pythia/config.yaml.
