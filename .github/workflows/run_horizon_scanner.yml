@@ -55,6 +55,9 @@ permissions:
 jobs:
   build-report:
     runs-on: ubuntu-latest
+    # Self-imposed ceiling below GitHub's 360-min hard cap so a hung run
+    # fails visibly instead of being killed at the platform limit.
+    timeout-minutes: 350
     env:
       PYTHIA_TEST_MODE: ${{ github.event.inputs.test_mode == 'true' && '1' || '0' }}
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -248,6 +251,15 @@ jobs:
               --status success \
               --json databaseId,createdAt \
               --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
+            # Staged pipeline: only its fc_collect_finalize runs upload the
+            # canonical artifact; other stage runs are skipped naturally when
+            # the artifact download fails and the loop moves on.
+            gh run list \
+              --workflow "Pythia Pipeline Stage" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia Pipeline Stage"' >>"${CANDIDATES_FILE}" || true
             gh run list \
               --workflow "Sibyl Deep Research" \
               --branch main \
@@ -303,6 +315,8 @@ jobs:
               DB_RUN_ID="$RUN_ID"
               DB_CREATED_AT="$CREATED"
               if [ "$LABEL" = "Horizon Scanner Triage" ]; then
+                DB_SOURCE="pipeline"
+              elif [ "$LABEL" = "Pythia Pipeline Stage" ]; then
                 DB_SOURCE="pipeline"
               elif [ "$LABEL" = "Ingest Structured Data" ]; then
                 DB_SOURCE="ingest"

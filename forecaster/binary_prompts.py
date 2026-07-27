@@ -65,6 +65,53 @@ def build_binary_event_prompt(
     window_start = question.get("window_start_date")
     forecast_months = _derive_forecast_months(window_start)
 
+    # GDACS event history block (seasonal frequency context) — shared by both
+    # section orders below.
+    gdacs_block = ""
+    if gdacs_event_history:
+        try:
+            from forecaster.prompts import _format_gdacs_event_history_for_prompt
+            cal_months = []
+            for fm in forecast_months:
+                try:
+                    cal_months.append(int(fm.split("-")[1]))
+                except (IndexError, ValueError):
+                    pass
+            gdacs_block = _format_gdacs_event_history_for_prompt(
+                gdacs_event_history, cal_months
+            ) or ""
+        except Exception:
+            gdacs_block = ""
+
+    from forecaster.prompts import _prompt_v3_order_enabled
+
+    if _prompt_v3_order_enabled():
+        # V3 (static-first) order: role/task (country-generic), hazard
+        # reasoning, output instructions lead — identical across every
+        # country of the same hazard — and the per-question data trails.
+        sections = [
+            _section_role_and_task_generic(hazard_name),
+            get_binary_hazard_reasoning_block(hazard_code),
+            _section_output_instructions(forecast_months),
+            (
+                "The QUESTION DATA follows below.\n\n"
+                f"QUESTION: Will a significant {hazard_name} event "
+                f"(GDACS Orange/Red alert) affect {country} ({iso3}) in each "
+                "of the 6 forecast months?"
+            ),
+            _section_base_rate(country, hazard_name, base_rate),
+            _section_current_situation(
+                current_alerts, structured_data, hs_triage_entry, country, hazard_code
+            ),
+            gdacs_block,
+            (
+                "END OF QUESTION DATA.\n"
+                "Now apply the reasoning guidance above and produce ONLY the "
+                "JSON object specified in OUTPUT INSTRUCTIONS."
+            ),
+        ]
+        return "\n\n".join(s for s in sections if s)
+
     sections = []
 
     # Section 1: Role and task
@@ -79,22 +126,8 @@ def build_binary_event_prompt(
     ))
 
     # Section 3b: GDACS event history (seasonal frequency context)
-    if gdacs_event_history:
-        try:
-            from forecaster.prompts import _format_gdacs_event_history_for_prompt
-            cal_months = []
-            for fm in forecast_months:
-                try:
-                    cal_months.append(int(fm.split("-")[1]))
-                except (IndexError, ValueError):
-                    pass
-            gdacs_block = _format_gdacs_event_history_for_prompt(
-                gdacs_event_history, cal_months
-            )
-            if gdacs_block:
-                sections.append(gdacs_block)
-        except Exception:
-            pass
+    if gdacs_block:
+        sections.append(gdacs_block)
 
     # Section 4: Hazard-specific reasoning
     sections.append(get_binary_hazard_reasoning_block(hazard_code))
@@ -139,6 +172,33 @@ the next 6 months.
 
 A "significant event" is defined as: GDACS reports an Orange or Red alert \
 level {hazard_name} event with {country} in the affected countries list.
+- Orange alert: "Potential need for international assistance"
+- Red alert: "Likely need for international assistance"
+- Green alerts (minor events) do NOT count.
+
+You are being scored with the Brier score: (your_probability - outcome)^2
+Lower is better. A well-calibrated forecaster assigns 10% to events that \
+happen 10% of the time."""
+
+
+def _section_role_and_task_generic(hazard_name: str) -> str:
+    """Country-generic role/task section for the V3 (static-first) order.
+
+    Same text as _section_role_and_task with the country references
+    generalized so the section is byte-identical across all countries of a
+    hazard (the country is named in the QUESTION line of the dynamic tail).
+    """
+    return f"""\
+ROLE AND TASK
+
+You are a careful probabilistic forecaster specializing in humanitarian \
+event prediction. Your task is to estimate the probability that a \
+significant {hazard_name} event will affect the target country (named in \
+the QUESTION DATA below) during each of the next 6 months.
+
+A "significant event" is defined as: GDACS reports an Orange or Red alert \
+level {hazard_name} event with the target country in the affected countries \
+list.
 - Orange alert: "Potential need for international assistance"
 - Red alert: "Likely need for international assistance"
 - Green alerts (minor events) do NOT count.

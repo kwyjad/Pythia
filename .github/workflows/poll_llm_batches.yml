@@ -1,0 +1,66 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Poll provider Batch-API jobs and advance the staged pipeline.
+#
+# Every 15 minutes: read the tiny pythia-batch-state artifacts uploaded by
+# submit stages (never the DB), poll the pending provider batches, and when
+# a pipeline's batches are all terminal (or past PYTHIA_BATCH_MAX_WAIT_H)
+# dispatch its next Pythia Pipeline Stage. Convergent by design: a missed
+# cron tick or crashed poller run only delays a pipeline, never loses it,
+# and the collect stages are idempotent so a rare double-dispatch is
+# harmless.
+#
+# Deliberately NOT in the pythia-resolver-db concurrency group — the poller
+# never touches the DB, and sitting in that group would let a long stage
+# run starve the polling cadence.
+
+name: Poll LLM Batches
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write  # dispatches pythia_pipeline_stage.yml
+
+concurrency:
+  group: poll-llm-batches
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Minimal deps on purpose: this runs every 15 minutes. The poller only
+      # needs requests (provider batch polling) — pythia.llm_batch's other
+      # imports are stdlib or lazy.
+      - name: Install minimal dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Poll batches and dispatch ready stages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PYTHIA_BATCH_MAX_WAIT_H: "24"
+        run: |
+          set -e
+          python -m scripts.ci.poll_llm_batches

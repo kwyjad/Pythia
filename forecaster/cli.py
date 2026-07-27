@@ -124,6 +124,108 @@ MAX_SPD_WORKERS = int(os.getenv("FORECASTER_SPD_MAX_WORKERS", "6"))
 _DEFAULT_ENSEMBLE_LOGGED = False
 _IS_TEST = False  # set in main()
 
+# --- Batch-phase state (set by main() from --phase; default "full" = today's
+# fully synchronous behavior). In "submit" the per-question flows build
+# prompts as usual but member calls are enqueued as provider Batch-API
+# requests (pythia.llm_batch) instead of executed; in "collect" member calls
+# replay collected batch results and fall back to the sync path on miss.
+_FORECAST_PHASE = "full"
+_BATCH_PIPELINE_ID: str | None = None
+_BATCH_CON = None  # lazy DuckDB connection for llm_batch state
+
+# Sentinel errors for submit-phase member "calls" (never parsed/logged as
+# real calls — the submit early-returns right after the members fan-out).
+_BATCH_SENTINEL_SUBMITTED = "batch_pending_submit"
+_BATCH_SENTINEL_DEFERRED = "batch_deferred_sync"
+
+
+def _batch_submit_active() -> bool:
+    return _FORECAST_PHASE == "submit"
+
+
+def _batch_collect_active() -> bool:
+    return _FORECAST_PHASE == "collect"
+
+
+def _batch_con():
+    """Lazy shared connection for batch state (uses the patchable connect)."""
+
+    global _BATCH_CON
+    if _BATCH_CON is None:
+        _BATCH_CON = connect(read_only=False)
+        ensure_schema(_BATCH_CON)
+    return _BATCH_CON
+
+
+def _batch_model_key(ms: "ModelSpec") -> str:
+    from pythia.llm_batch import _sanitize_token
+
+    return _sanitize_token(getattr(ms, "model_id", "") or "primary", 24)
+
+
+def _try_batch_phase(
+    ms: "ModelSpec",
+    prompt: str,
+    *,
+    batch_family: str,
+    question_id: str | None,
+    iso3: str | None,
+    hazard_code: str | None,
+    metric: str | None,
+    anchor_month: str | None,
+) -> tuple[str, dict, str | None, "ModelSpec"] | None:
+    """Submit-phase enqueue or collect-phase replay for one member call.
+
+    Returns a (text, usage, error, ms) short-circuit, or None to proceed
+    with the normal synchronous provider call (which in collect phase IS the
+    per-item fallback, inheriting retries/credit-retry/circuit-breaker).
+    """
+
+    if _FORECAST_PHASE == "full" or not batch_family or not question_id:
+        return None
+
+    from pythia import llm_batch
+    from forecaster.providers import build_body_for_spec
+
+    if _FORECAST_PHASE == "submit":
+        if not llm_batch.provider_batchable(ms.provider):
+            # Excluded providers run in the collect stage (sync), never in
+            # submit — otherwise their cost would double when collect re-runs.
+            return "", {"batch_phase": "submit"}, _BATCH_SENTINEL_DEFERRED, ms
+        body = build_body_for_spec(ms, prompt, 0.2)
+        llm_batch.enqueue_request(
+            _batch_con(),
+            family=batch_family,
+            provider=ms.provider,
+            model_id=ms.model_id,
+            request_body=body,
+            prompt_text=prompt,
+            question_id=question_id,
+            model_key=_batch_model_key(ms),
+            iso3=iso3,
+            hazard_code=hazard_code,
+            metric=metric,
+            anchor_month=anchor_month,
+        )
+        return "", {"batch_phase": "submit"}, _BATCH_SENTINEL_SUBMITTED, ms
+
+    # collect phase: replay a collected batch result when available.
+    hit = llm_batch.get_result(
+        _batch_con(),
+        batch_family,
+        question_id=question_id,
+        model_key=_batch_model_key(ms),
+    )
+    if hit is not None:
+        usage = dict(hit.get("usage") or {})
+        usage.setdefault("elapsed_ms", 0)
+        return hit.get("text") or "", usage, (hit.get("error") or None), ms
+    # Miss / errored / expired → sync fallback via the normal call path.
+    llm_batch.mark_fallback_sync(
+        _batch_con(), batch_family, question_id=question_id, model_key=_batch_model_key(ms)
+    )
+    return None
+
 
 def _maybe_log_default_ensemble() -> None:
     global _DEFAULT_ENSEMBLE_LOGGED
@@ -2432,6 +2534,7 @@ async def _call_spd_model_for_spec(
     metric: str | None = None,
     anchor_month: str | None = None,
     wording: str | None = None,
+    batch_family: str | None = None,
     **_kwargs,
 ) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
     """Async wrapper for the SPD LLM call for a given model spec with self-search support."""
@@ -2445,6 +2548,23 @@ async def _call_spd_model_for_spec(
         # masked by the PYTHIA_GOOGLE_SPD_THINKING_LEVEL_* env fallback; the
         # OpenAI members simply ran at the provider default effort.
         ms = replace(ms, purpose="spd_v2")
+
+    # Batch phases: enqueue (submit) or replay (collect) instead of calling.
+    # A None return falls through to the normal sync call — in collect phase
+    # that IS the per-item fallback for missing/errored batch results.
+    if batch_family:
+        batch_short = _try_batch_phase(
+            ms,
+            prompt,
+            batch_family=batch_family,
+            question_id=question_id,
+            iso3=iso3,
+            hazard_code=hazard_code,
+            metric=metric,
+            anchor_month=anchor_month,
+        )
+        if batch_short is not None:
+            return batch_short
 
     prompt_with_evidence = prompt
     if (
@@ -2750,6 +2870,7 @@ async def _call_spd_members_v2(
     metric: str | None = None,
     anchor_month: str | None = None,
     wording: str | None = None,
+    batch_family: str | None = None,
 ) -> tuple[
     list[dict[str, list[float]]],
     dict[str, object],
@@ -2794,6 +2915,7 @@ async def _call_spd_members_v2(
             metric=metric,
             anchor_month=anchor_month,
             wording=wording,
+            batch_family=batch_family,
         )
         for ms in specs_used
     ]
@@ -2923,6 +3045,7 @@ async def _call_spd_members_v2_compat(
     metric: str | None = None,
     anchor_month: str | None = None,
     wording: str | None = None,
+    batch_family: str | None = None,
 ) -> tuple[list[dict[str, list[float]]], dict[str, object], list[dict[str, object]], dict[str, object]]:
     """
     Compatibility wrapper to avoid passing unsupported kwargs to monkeypatched callables in tests.
@@ -2946,6 +3069,8 @@ async def _call_spd_members_v2_compat(
             kwargs["anchor_month"] = anchor_month
         if "wording" in sig.parameters:
             kwargs["wording"] = wording
+        if "batch_family" in sig.parameters:
+            kwargs["batch_family"] = batch_family
         return await fn(prompt, specs, **kwargs)
     except Exception:
         return await fn(prompt, specs, run_id=run_id)
@@ -4034,8 +4159,12 @@ async def _run_binary_forecast_for_question(
                 metric=metric,
                 anchor_month=anchor_month,
                 wording=wording,
+                batch_family="binary_v2",
             )
         )
+        if _batch_submit_active():
+            # Members enqueued as Batch-API requests; parse/write in collect.
+            return
 
         # Log LLM calls
         for call in raw_calls:
@@ -4273,8 +4402,12 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
                 metric=metric,
                 anchor_month=anchor_month,
                 wording=wording,
+                batch_family="track2_spd",
             )
         )
+        if _batch_submit_active():
+            # Member enqueued as a Batch-API request; parse/write in collect.
+            return
 
         # Log LLM calls
         for call in raw_calls:
@@ -4660,7 +4793,12 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 metric=metric,
                 anchor_month=anchor_month,
                 wording=wording,
+                batch_family="spd_v2",
             )
+            if _batch_submit_active():
+                # Members were enqueued as Batch-API requests; parsing,
+                # aggregation and writes happen in the collect phase.
+                return
             if member_spds_snapshot is None:
                 member_spds_snapshot = per_model_spds
                 member_specs_snapshot = specs_active
@@ -5482,15 +5620,42 @@ def _parse_args() -> argparse.Namespace:
             "If omitted, the latest hs_run_id in hs_runs/hs_triage is used."
         ),
     )
+    p.add_argument(
+        "--phase",
+        default="full",
+        choices=["full", "submit", "collect"],
+        help=(
+            "Batch-API phasing: 'full' (default) runs everything synchronously "
+            "as before; 'submit' builds prompts and submits provider Batch-API "
+            "requests then exits; 'collect' replays collected batch results "
+            "(sync fallback per missing item) and writes forecasts. submit/"
+            "collect also require PYTHIA_BATCH_API_ENABLED=1 to batch anything."
+        ),
+    )
+    p.add_argument(
+        "--pipeline-id",
+        type=str,
+        default="",
+        help=(
+            "Staged-pipeline id shared by the submit and collect phases "
+            "(minted as pl_<epoch-seconds> by submit when omitted)."
+        ),
+    )
     return p.parse_args()
 
 def main() -> None:
-    global _IS_TEST
+    global _IS_TEST, _FORECAST_PHASE, _BATCH_PIPELINE_ID
     _IS_TEST = is_test_mode()
 
     args = _parse_args()
+    _FORECAST_PHASE = getattr(args, "phase", "full") or "full"
+    _BATCH_PIPELINE_ID = (getattr(args, "pipeline_id", "") or "").strip() or None
+    if _FORECAST_PHASE == "submit" and not _BATCH_PIPELINE_ID:
+        _BATCH_PIPELINE_ID = f"pl_{int(time.time())}"
     print("🚀 Forecaster ensemble starting…")
     print(f"Mode: {args.mode} | Limit: {args.limit} | Purpose: {args.purpose}")
+    if _FORECAST_PHASE != "full":
+        print(f"[batch] phase={_FORECAST_PHASE} pipeline_id={_BATCH_PIPELINE_ID}")
 
     def _run_v2_pipeline():
         ensure_schema()
@@ -5594,6 +5759,53 @@ def main() -> None:
             return
 
         run_id = f"fc_{int(time.time())}"
+        if _batch_collect_active() and _BATCH_PIPELINE_ID:
+            # Reuse the forecaster run identity minted by the submit phase so
+            # batch results, llm_calls and forecasts share one run_id.
+            from pythia import llm_batch  # noqa: PLC0415
+
+            con_b = _batch_con()
+            prior = con_b.execute(
+                """
+                SELECT run_id FROM llm_batches
+                WHERE pipeline_id = ? AND run_id IS NOT NULL
+                ORDER BY submitted_at DESC LIMIT 1
+                """,
+                [_BATCH_PIPELINE_ID],
+            ).fetchone()
+            if prior and prior[0]:
+                run_id = str(prior[0])
+                print(f"[batch] collect reusing run_id={run_id}")
+            # Ingest any batches the poller hasn't collected yet: poll each,
+            # collect terminal ones, cancel-and-expire ones past the wait cap
+            # (their items then take the sync fallback path below).
+            for binfo in llm_batch.pending_batches(con_b, _BATCH_PIPELINE_ID):
+                status = llm_batch.poll_batch(con_b, binfo["batch_id"])
+                state = status.state if status else "unknown"
+                if state == "ended" or (status and status.terminal):
+                    counts = llm_batch.collect_batch(con_b, binfo["batch_id"])
+                    print(f"[batch] collected {binfo['batch_id']}: {counts}")
+                else:
+                    age_h = 0.0
+                    try:
+                        age_h = (
+                            datetime.now(timezone.utc).replace(tzinfo=None)
+                            - binfo["submitted_at"]
+                        ).total_seconds() / 3600.0
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if age_h >= llm_batch.max_wait_hours():
+                        print(
+                            f"[batch][warn] {binfo['batch_id']} still {state} after "
+                            f"{age_h:.1f}h — canceling; items fall back to sync"
+                        )
+                        llm_batch.cancel_batch(con_b, binfo["batch_id"])
+                        llm_batch.collect_batch(con_b, binfo["batch_id"])
+                    else:
+                        print(
+                            f"[batch][warn] {binfo['batch_id']} not finished ({state}); "
+                            "its items fall back to sync this collect"
+                        )
         os.environ["PYTHIA_FORECASTER_RUN_ID"] = run_id
         reset_provider_failures_for_run(run_id)
         n_track1 = sum(1 for q in questions if q.get("track") == 1)
@@ -5737,6 +5949,28 @@ def main() -> None:
                 await asyncio.gather(*(_spd_task(q) for q in batch))
 
         asyncio.run(_run_v2_pipeline_async())
+
+        if _batch_submit_active():
+            # Submit the enqueued member calls as provider batches and stop —
+            # the poller dispatches the collect phase when they finish.
+            from pythia import llm_batch  # noqa: PLC0415
+
+            con_b = _batch_con()
+            created: list[str] = []
+            for family in ("spd_v2", "binary_v2", "track2_spd"):
+                created += llm_batch.submit_pending(
+                    con_b,
+                    family=family,
+                    pipeline_id=_BATCH_PIPELINE_ID or run_id,
+                    stage="fc_submit",
+                    run_id=run_id,
+                    hs_run_id=hs_run_id,
+                )
+            print(f"[batch] submitted {len(created)} provider batch(es): {created}")
+            # Machine-readable markers for the workflow step.
+            print(f"BATCH_PIPELINE_ID={_BATCH_PIPELINE_ID or run_id}")
+            print(f"FC_RUN_ID={run_id}")
+            return
 
         run_scenarios_for_run(run_id)
 

@@ -1498,21 +1498,6 @@ def _build_base_rate_text(
     return _format_base_rate_for_prompt(history_summary, forecast_keys, iso3=iso3, hazard_code=hazard_code)
 
 
-def _prompt_v3_order_enabled() -> bool:
-    """Static-first prompt section ordering (PYTHIA_PROMPT_V3_ORDER).
-
-    Legacy order puts per-question data first and the big static method/schema
-    blocks last, which caps the cacheable prompt prefix at ~84 bytes. V3 order
-    puts the static blocks first so requests within a (hazard, metric, track)
-    group share a multi-KB prefix — the enabler for OpenAI automatic caching,
-    Gemini implicit caching, and Anthropic cache_control. Section TEXT is
-    identical in both orders (only positional referents like "above"/"below"
-    change); default OFF until the test-mode A/B validation run passes.
-    """
-
-    return os.getenv("PYTHIA_PROMPT_V3_ORDER", "0").strip().lower() in ("1", "true", "yes")
-
-
 def build_spd_prompt_v2(
     question: Dict[str, Any],
     history_summary: Dict[str, Any],
@@ -1521,19 +1506,12 @@ def build_spd_prompt_v2(
     structured_data: Optional[Dict[str, Any]] = None,
     model_name: Optional[str] = None,
     track: int = 1,
-    return_parts: bool = False,
-):
+) -> str:
     """Assemble the SPD v2 forecasting prompt with structured context.
 
     research_json is now a minimal dict containing only prediction market
     signals, NMME seasonal outlook, and/or hazard tail pack data. The full
     research narrative is no longer produced (Researcher component removed).
-
-    With ``return_parts=True`` returns ``(stable_prefix, dynamic_suffix)``
-    (joined they equal the normal return value). The prefix is byte-identical
-    across all questions of the same (hazard, metric, track) group under V3
-    order, so callers can hang provider cache markers on it; under legacy
-    order the prefix is "" (nothing usefully cacheable — skip caching).
     """
 
     iso3 = (question.get("iso3") or "").upper()
@@ -1885,28 +1863,11 @@ def build_spd_prompt_v2(
             "```\n\n"
         )
 
-    v3_order = _prompt_v3_order_enabled()
-    # Positional referents differ by order: under V3 the method block precedes
-    # the question data, so "above" flips to "below" (and vice versa). This is
-    # the ONLY text difference between the two orders.
-    history_ref = "below" if v3_order else "above"
-    # base_rate_note travels with the base-rate data under V3 (data tail),
-    # and stays inline in STEP 1 under legacy order.
-    base_rate_note_in_data = (base_rate_note + "\n") if (v3_order and base_rate_note) else ""
-    base_rate_note_in_method = "" if v3_order else base_rate_note
-    # The per-question self-search escape (contains iso3/hazard) moves to the
-    # dynamic tail under V3 so it can't split the static prefix.
-    rc_self_search_in_method = "" if v3_order else rc_self_search_line
-    rc_self_search_in_data = rc_self_search_line if v3_order else ""
-
     # --- PROMPT_EXCERPT: spd_v2_start ---
-    role_line = (
+    return (
         "You are a careful probabilistic forecaster on a humanitarian early warning panel.\n\n"
-    )
-    task_line = (
+        f"{calibration_section}"
         f"Your task is to produce a six-month PROBABILITY DISTRIBUTION over {n_buckets_lower} impact buckets for the question below, where each month’s probabilities sum to 1.0.\n\n"
-    )
-    question_data_block = (
         "Natural-language question:\n"
         f"\"{wording}\"\n\n"
         "Question metadata:\n"
@@ -1915,7 +1876,6 @@ def build_spd_prompt_v2(
         "```\n\n"
         f"{horizon_note}"
         f"{_build_base_rate_text(history_summary, forecast_keys, iso3, hazard)}\n\n"
-        f"{base_rate_note_in_data}"
         "HS triage output:\n"
         "```json\n"
         f"{_json_dumps_for_prompt(hs_triage_entry, indent=2)}\n"
@@ -1925,23 +1885,19 @@ def build_spd_prompt_v2(
         f"{pm_signals_section}"
         f"{seasonal_outlook_section}"
         f"{structured_data_section}"
-    )
-    buckets_block = (
         "Buckets:\n"
         f"- These buckets represent {unit_phrase} at the country level.\n"
         f"- Bucket labels: {bucket_list_str}\n\n"
-    )
-    hazard_block = f"{hazard_reasoning_block}\n\n"
-    method_and_output_block = (
+        f"{hazard_reasoning_block}\n\n"
         "FORECASTING METHOD: STRUCTURED BAYESIAN UPDATING\n\n"
         "You must follow these steps IN ORDER. Do not skip steps. Show your work for each step.\n\n"
         "STEP 1 — DECLARE YOUR PRIOR SPD\n"
         "Before considering ANY evidence, state your prior (base-rate) SPD for each month. "
-        f"Derive this prior from the Resolver history summary {history_ref}. "
+        "Derive this prior from the Resolver history summary above. "
         "If Resolver history is available, convert the historical distribution into bucket probabilities. "
         "If history is missing or sparse, state an uninformative prior (e.g. heavy weight on the \"0\" "
         "bucket for countries with no recent events) and explain your reasoning.\n"
-        f"{base_rate_note_in_method}"
+        f"{base_rate_note}"
         "Write out the prior explicitly:\n"
         f"  Prior SPD: {prob_ph} for each month (or a single prior if months are similar).\n"
         "  Prior rationale: 1–2 sentences explaining why this is the right starting point.\n\n"
@@ -2005,7 +1961,7 @@ def build_spd_prompt_v2(
         "Only after completing Steps 1–6, produce the JSON output specified below. "
         "Your JSON probabilities must match the posterior SPD from Step 5 (with any adjustments "
         "from the stress test). Do not change the numbers at this stage.\n\n"
-        f"{rc_self_search_in_method}"
+        f"{rc_self_search_line}"
         f"{need_evidence_block}"
         "Output instructions:\n"
         "- Return ONLY a single JSON object with this schema (no extra commentary):\n\n"
@@ -2063,46 +2019,6 @@ def build_spd_prompt_v2(
         "Do not include any text outside the JSON.\n"
     )
     # --- PROMPT_EXCERPT: spd_v2_end ---
-
-    if not v3_order:
-        # Legacy assembly — byte-identical to the pre-V3 prompt.
-        prompt = (
-            role_line
-            + calibration_section
-            + task_line
-            + question_data_block
-            + buckets_block
-            + hazard_block
-            + method_and_output_block
-        )
-        if return_parts:
-            # No usefully cacheable prefix under legacy order.
-            return "", prompt
-        return prompt
-
-    # V3 (static-first) assembly: everything stable within a
-    # (hazard, metric, track) group leads; per-question data trails. The
-    # calibration section is placed after the fully-static blocks so its
-    # monthly refresh can't invalidate their cached span.
-    prefix = (
-        role_line
-        + task_line
-        + buckets_block
-        + hazard_block
-        + method_and_output_block
-        + calibration_section
-        + "The QUESTION DATA to forecast follows below.\n\n"
-    )
-    suffix = (
-        question_data_block
-        + rc_self_search_in_data
-        + "END OF QUESTION DATA.\n"
-        "Now apply the FORECASTING METHOD above (Steps 1–7) to the question data and "
-        "produce ONLY the JSON object specified in the Output instructions.\n"
-    )
-    if return_parts:
-        return prefix, suffix
-    return prefix + suffix
 
 
 def build_scenario_prompt(

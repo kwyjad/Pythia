@@ -1,0 +1,954 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Staged HS + forecaster pipeline built around provider Batch APIs (50% off
+# input AND output tokens). Each stage runs the synchronous work it can,
+# submits provider batches, uploads the DuckDB as `pythia-resolver-db-staged`
+# (NEVER the canonical name — a half-finished pipeline DB must not win
+# canonical discovery) plus a tiny `pythia-batch-state` JSON, and exits. The
+# poller workflow (poll_llm_batches.yml) watches the provider batches and
+# dispatches the next stage when they finish. The final stage uploads the
+# canonical `pythia-resolver-db` artifact and dispatches Sibyl, preserving
+# the existing pythia → Sibyl → publish release chain.
+#
+# Fully-staged pipeline (HS RC + triage waves batched too):
+#   hs_submit              RC grounding + RC prompts → hs_rc batch
+#   hs_rc_collect          RC collect → triage grounding + prompts → hs_triage batch
+#   hs_finalize_fc_submit  triage collect → hs_triage write + adversarial →
+#                          questions → forecaster --phase submit
+#   fc_collect_finalize    forecaster --phase collect → scenarios → canonical
+#                          upload → Sibyl dispatch
+#
+# Alternate entry (forecaster-only batching, HS synchronous in-job):
+#   fc_submit              HS sync → questions → forecaster --phase submit
+#                          (then fc_collect_finalize as above)
+#
+# The legacy single-job path (run_horizon_scanner.yml) remains fully
+# functional as the sync fallback and still owns the monthly cron; move the
+# cron here (stage=hs_submit) only after the batch path is validated.
+
+name: Pythia Pipeline Stage
+
+run-name: "Pythia Pipeline Stage: ${{ inputs.pipeline_id }} — ${{ inputs.stage }}"
+
+concurrency:
+  group: pythia-resolver-db
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "Pipeline stage to run"
+        required: true
+        type: choice
+        options:
+          - hs_submit
+          - hs_rc_collect
+          - hs_finalize_fc_submit
+          - fc_submit
+          - fc_collect_finalize
+      pipeline_id:
+        description: "Pipeline id (pl_...). Leave empty on fc_submit to mint one; REQUIRED for collect stages."
+        required: false
+        default: ""
+        type: string
+      db_run_id:
+        description: "fc_submit: optional canonical-DB override run id. Collect stages: REQUIRED — the prior stage's run id (its pythia-resolver-db-staged artifact)."
+        required: false
+        default: ""
+        type: string
+      test_mode:
+        description: "Run in test mode (stamps all outputs as test data)"
+        type: boolean
+        default: false
+        required: false
+
+permissions:
+  contents: read
+  actions: write  # fc_collect_finalize dispatches run_sibyl.yml
+
+env:
+  PYTHIA_TEST_MODE: ${{ inputs.test_mode && '1' || '0' }}
+  RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+  PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+  PYTHIA_LLM_CONCURRENCY: "32"
+  HS_MAX_WORKERS: "8"
+  HS_TEMPERATURE: "0.0"
+  FORECASTER_RESEARCH_MAX_WORKERS: "8"
+  FORECASTER_SPD_MAX_WORKERS: "8"
+  # Deprecated flags kept at "0" (same as run_horizon_scanner.yml).
+  PYTHIA_WEB_RESEARCH_ENABLED: "0"
+  PYTHIA_RETRIEVER_ENABLED: "0"
+  PYTHIA_MODEL_SELF_SEARCH_ENABLED: "0"
+  PYTHIA_SPD_WEB_SEARCH_ENABLED: "0"
+  PYTHIA_FORECASTER_SELF_SEARCH: "0"
+  PYTHIA_HS_RESEARCH_WEB_SEARCH_ENABLED: "1"
+  PYTHIA_ADVERSARIAL_CHECK_ENABLED: "1"
+  PYTHIA_PREDICTION_MARKETS_ENABLED: "0"
+  # Batch-API switches: the staged pipeline is the opt-in path (the code
+  # defaults stay OFF so --phase full / the legacy workflow are unchanged).
+  PYTHIA_BATCH_API_ENABLED: "1"
+  PYTHIA_BATCH_PROVIDERS: "openai,anthropic,google"
+  PYTHIA_BATCH_MAX_WAIT_H: "24"
+  BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH: "low"
+  PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO: ""
+  PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC: "300"
+  PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC: "300"
+  PYTHIA_GOOGLE_SPD_RETRIES: "1"
+  SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
+  SIGNATURE_OPTIONAL_TABLES: scenarios
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────
+  # Stage: hs_submit — RC grounding (sync Brave) + RC prompts enqueued and
+  # submitted as the hs_rc batch. Triage does not run (needs RC results).
+  # ────────────────────────────────────────────────────────────────────
+  hs-submit:
+    if: inputs.stage == 'hs_submit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+
+      - name: Download canonical resolver DB
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+          validate-cmd: >-
+            mkdir -p diagnostics &&
+            python -m scripts.ci.db_signature write
+            --db data/resolver.duckdb
+            --required "${SIGNATURE_REQUIRED_TABLES}"
+            --optional "${SIGNATURE_OPTIONAL_TABLES}"
+            --out diagnostics/db_signature_before.json
+
+      - name: Run Horizon Scanner — stage hs_submit
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -eo pipefail
+          mkdir -p diagnostics
+          python -m horizon_scanner.horizon_scanner \
+            --stage hs_submit \
+            --pipeline-id "${{ inputs.pipeline_id }}" 2>&1 | tee diagnostics/hs_stdout.txt
+          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          BATCH_PIPELINE_ID=$(grep -E '^BATCH_PIPELINE_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          if [ -z "${HS_RUN_ID}" ]; then
+            echo "ERROR: HS_RUN_ID not found in Horizon Scanner output."
+            exit 1
+          fi
+          if [ -z "${BATCH_PIPELINE_ID}" ]; then
+            BATCH_PIPELINE_ID="${{ inputs.pipeline_id }}"
+          fi
+          {
+            echo "HS_RUN_ID=${HS_RUN_ID}"
+            echo "BATCH_PIPELINE_ID=${BATCH_PIPELINE_ID}"
+          } >> "$GITHUB_ENV"
+
+      - name: Compare DB signature after stage
+        id: signature_after
+        run: |
+          set -euo pipefail
+          signature_ok="true"
+          if [ -f diagnostics/db_signature_before.json ]; then
+            set +e
+            python -m scripts.ci.db_signature compare \
+              --before diagnostics/db_signature_before.json \
+              --after-db data/resolver.duckdb \
+              --required "${SIGNATURE_REQUIRED_TABLES}" \
+              --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+              --out diagnostics/db_signature_after.json || signature_ok="false"
+            set -e
+          fi
+          echo "signature_ok=${signature_ok}" >> "$GITHUB_OUTPUT"
+
+      - name: Emit batch state for the poller
+        run: |
+          set -e
+          python -m scripts.ci.emit_batch_state \
+            --db "${PYTHIA_DB_URL}" \
+            --pipeline-id "${BATCH_PIPELINE_ID}" \
+            --stage hs_submit \
+            --next-stage hs_rc_collect \
+            --db-run-id "${GITHUB_RUN_ID}" \
+            --hs-run-id "${HS_RUN_ID}" \
+            --out diagnostics/batch_state.json
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### hs_submit"
+              echo "- pipeline_id: ${BATCH_PIPELINE_ID}"
+              echo "- hs_run_id: ${HS_RUN_ID}"
+              echo "- next stage (poller-dispatched): hs_rc_collect"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload batch state
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-batch-state
+          path: diagnostics/batch_state.json
+          retention-days: 14
+
+      - name: Upload staged resolver DB
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db-staged
+          path: data/resolver.duckdb
+          retention-days: 14
+
+      - name: Upload stage diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-stage-diagnostics
+          path: diagnostics/hs_stdout.txt
+          if-no-files-found: warn
+
+  # ────────────────────────────────────────────────────────────────────
+  # Stage: hs_rc_collect — replay collected RC results (sync fallback per
+  # miss), persist merged RC state, run triage grounding, enqueue + submit
+  # the hs_triage batch.
+  # ────────────────────────────────────────────────────────────────────
+  hs-rc-collect:
+    if: inputs.stage == 'hs_rc_collect'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Validate inputs
+        run: |
+          set -e
+          if [ -z "${{ inputs.pipeline_id }}" ]; then
+            echo "ERROR: pipeline_id is required for hs_rc_collect."
+            exit 1
+          fi
+          if [ -z "${{ inputs.db_run_id }}" ]; then
+            echo "ERROR: db_run_id (the hs_submit run id) is required for hs_rc_collect."
+            exit 1
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+
+      - name: Download staged resolver DB
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+          artifact-name: pythia-resolver-db-staged
+          validate-cmd: >-
+            mkdir -p diagnostics &&
+            python -m scripts.ci.db_signature write
+            --db data/resolver.duckdb
+            --required "${SIGNATURE_REQUIRED_TABLES}"
+            --optional "${SIGNATURE_OPTIONAL_TABLES}"
+            --out diagnostics/db_signature_before.json
+
+      - name: Run Horizon Scanner — stage hs_rc_collect
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -eo pipefail
+          mkdir -p diagnostics
+          python -m horizon_scanner.horizon_scanner \
+            --stage hs_rc_collect \
+            --pipeline-id "${{ inputs.pipeline_id }}" 2>&1 | tee diagnostics/hs_stdout.txt
+          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          if [ -z "${HS_RUN_ID}" ]; then
+            echo "ERROR: HS_RUN_ID not found in Horizon Scanner output."
+            exit 1
+          fi
+          echo "HS_RUN_ID=${HS_RUN_ID}" >> "$GITHUB_ENV"
+
+      - name: Compare DB signature after stage
+        id: signature_after
+        run: |
+          set -euo pipefail
+          signature_ok="true"
+          if [ -f diagnostics/db_signature_before.json ]; then
+            set +e
+            python -m scripts.ci.db_signature compare \
+              --before diagnostics/db_signature_before.json \
+              --after-db data/resolver.duckdb \
+              --required "${SIGNATURE_REQUIRED_TABLES}" \
+              --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+              --out diagnostics/db_signature_after.json || signature_ok="false"
+            set -e
+          fi
+          echo "signature_ok=${signature_ok}" >> "$GITHUB_OUTPUT"
+
+      - name: Emit batch state for the poller
+        run: |
+          set -e
+          python -m scripts.ci.emit_batch_state \
+            --db "${PYTHIA_DB_URL}" \
+            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --stage hs_rc_collect \
+            --next-stage hs_finalize_fc_submit \
+            --db-run-id "${GITHUB_RUN_ID}" \
+            --hs-run-id "${HS_RUN_ID}" \
+            --out diagnostics/batch_state.json
+
+      - name: Upload batch state
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-batch-state
+          path: diagnostics/batch_state.json
+          retention-days: 14
+
+      - name: Upload staged resolver DB
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db-staged
+          path: data/resolver.duckdb
+          retention-days: 14
+
+      - name: Upload stage diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-stage-diagnostics
+          path: diagnostics/hs_stdout.txt
+          if-no-files-found: warn
+
+  # ────────────────────────────────────────────────────────────────────
+  # Stage: hs_finalize_fc_submit — replay collected triage results, write
+  # hs_triage + adversarial checks + coverage, create questions, then
+  # forecaster --phase submit for the SPD/binary/track2 batches.
+  # ────────────────────────────────────────────────────────────────────
+  hs-finalize-fc-submit:
+    if: inputs.stage == 'hs_finalize_fc_submit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Validate inputs
+        run: |
+          set -e
+          if [ -z "${{ inputs.pipeline_id }}" ]; then
+            echo "ERROR: pipeline_id is required for hs_finalize_fc_submit."
+            exit 1
+          fi
+          if [ -z "${{ inputs.db_run_id }}" ]; then
+            echo "ERROR: db_run_id (the hs_rc_collect run id) is required for hs_finalize_fc_submit."
+            exit 1
+          fi
+
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+
+      - name: Download staged resolver DB
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+          artifact-name: pythia-resolver-db-staged
+          validate-cmd: >-
+            mkdir -p diagnostics &&
+            python -m scripts.ci.db_signature write
+            --db data/resolver.duckdb
+            --required "${SIGNATURE_REQUIRED_TABLES}"
+            --optional "${SIGNATURE_OPTIONAL_TABLES}"
+            --out diagnostics/db_signature_before.json
+
+      - name: Run Horizon Scanner — stage hs_finalize
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -eo pipefail
+          mkdir -p diagnostics
+          python -m horizon_scanner.horizon_scanner \
+            --stage hs_finalize \
+            --pipeline-id "${{ inputs.pipeline_id }}" 2>&1 | tee diagnostics/hs_stdout.txt
+          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_RESOLVED_ISO3S=$(grep -E '^HS_RESOLVED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          if [ -z "${HS_RUN_ID}" ]; then
+            echo "ERROR: HS_RUN_ID not found in Horizon Scanner output."
+            exit 1
+          fi
+          {
+            echo "HS_RUN_ID=${HS_RUN_ID}"
+            echo "HS_RESOLVED_ISO3S=${HS_RESOLVED_ISO3S}"
+          } >> "$GITHUB_ENV"
+
+      - name: Assert HS triage outputs
+        run: |
+          set -e
+          python -m scripts.ci.assert_hs_outputs --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --stage triage
+
+      - name: Create questions from HS triage run
+        run: |
+          set -e
+          python -m scripts.create_questions_from_triage --db "${PYTHIA_DB_URL}"
+
+      - name: Assert HS questions outputs
+        run: |
+          set -e
+          python -m scripts.ci.assert_hs_outputs --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --stage questions
+
+      - name: Run Forecaster — phase submit
+        env:
+          PYTHIA_LLM_PROFILE: prod
+          PYTHIA_SPD_V2_WRITE_BOTH: "1"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -eo pipefail
+          mkdir -p diagnostics
+          python -m forecaster.cli \
+            --mode pythia \
+            --limit 0 \
+            --batch-size 100 \
+            --purpose hs_pipeline \
+            --phase submit \
+            --pipeline-id "${{ inputs.pipeline_id }}" | tee diagnostics/forecaster_submit_stdout.txt
+          FC_RUN_ID=$(grep -E '^FC_RUN_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2-)
+          echo "FC_RUN_ID=${FC_RUN_ID}" >> "$GITHUB_ENV"
+
+      - name: Compare DB signature after stage
+        id: signature_after
+        run: |
+          set -euo pipefail
+          signature_ok="true"
+          if [ -f diagnostics/db_signature_before.json ]; then
+            set +e
+            python -m scripts.ci.db_signature compare \
+              --before diagnostics/db_signature_before.json \
+              --after-db data/resolver.duckdb \
+              --required "${SIGNATURE_REQUIRED_TABLES}" \
+              --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+              --out diagnostics/db_signature_after.json || signature_ok="false"
+            set -e
+          fi
+          echo "signature_ok=${signature_ok}" >> "$GITHUB_OUTPUT"
+
+      - name: Emit batch state for the poller
+        run: |
+          set -e
+          python -m scripts.ci.emit_batch_state \
+            --db "${PYTHIA_DB_URL}" \
+            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --stage hs_finalize_fc_submit \
+            --next-stage fc_collect_finalize \
+            --db-run-id "${GITHUB_RUN_ID}" \
+            --fc-run-id "${FC_RUN_ID}" \
+            --hs-run-id "${HS_RUN_ID}" \
+            --out diagnostics/batch_state.json
+
+      - name: Upload batch state
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-batch-state
+          path: diagnostics/batch_state.json
+          retention-days: 14
+
+      - name: Upload staged resolver DB
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db-staged
+          path: data/resolver.duckdb
+          retention-days: 14
+
+      - name: Upload stage diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-stage-diagnostics
+          path: |
+            diagnostics/hs_stdout.txt
+            diagnostics/forecaster_submit_stdout.txt
+            diagnostics/hs_triage_coverage__*.csv
+            diagnostics/hs_triage_failures__*.json
+          if-no-files-found: warn
+
+  # ────────────────────────────────────────────────────────────────────
+  # Stage: fc_submit — HS (sync, legacy in-job) → questions →
+  # forecaster --phase submit (enqueue + submit provider batches) → upload
+  # staged DB + batch state.
+  # ────────────────────────────────────────────────────────────────────
+  fc-submit:
+    if: inputs.stage == 'fc_submit'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+
+      - name: Download canonical resolver DB
+        id: canonical_download
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+          validate-cmd: >-
+            mkdir -p diagnostics &&
+            python -m scripts.ci.db_signature write
+            --db data/resolver.duckdb
+            --required "${SIGNATURE_REQUIRED_TABLES}"
+            --optional "${SIGNATURE_OPTIONAL_TABLES}"
+            --out diagnostics/db_signature_before.json
+
+      - name: Run Horizon Scanner (sync)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -eo pipefail
+          mkdir -p diagnostics
+          python -m horizon_scanner.horizon_scanner 2>&1 | tee diagnostics/hs_stdout.txt
+          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_RESOLVED_ISO3S=$(grep -E '^HS_RESOLVED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          if [ -z "${HS_RUN_ID}" ]; then
+            echo "ERROR: HS_RUN_ID not found in Horizon Scanner output."
+            exit 1
+          fi
+          {
+            echo "HS_RUN_ID=${HS_RUN_ID}"
+            echo "HS_RESOLVED_ISO3S=${HS_RESOLVED_ISO3S}"
+          } >> "$GITHUB_ENV"
+
+      - name: Assert HS triage outputs
+        run: |
+          set -e
+          python -m scripts.ci.assert_hs_outputs --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --stage triage
+
+      - name: Create questions from HS triage run
+        run: |
+          set -e
+          python -m scripts.create_questions_from_triage --db "${PYTHIA_DB_URL}"
+
+      - name: Assert HS questions outputs
+        run: |
+          set -e
+          python -m scripts.ci.assert_hs_outputs --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --stage questions
+
+      - name: Run Forecaster — phase submit
+        env:
+          PYTHIA_LLM_PROFILE: prod
+          PYTHIA_SPD_V2_WRITE_BOTH: "1"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -eo pipefail
+          mkdir -p diagnostics
+          python -m forecaster.cli \
+            --mode pythia \
+            --limit 0 \
+            --batch-size 100 \
+            --purpose hs_pipeline \
+            --phase submit \
+            --pipeline-id "${{ inputs.pipeline_id }}" | tee diagnostics/forecaster_submit_stdout.txt
+          BATCH_PIPELINE_ID=$(grep -E '^BATCH_PIPELINE_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2-)
+          FC_RUN_ID=$(grep -E '^FC_RUN_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2-)
+          # No questions → no markers printed; the pipeline still proceeds to
+          # the finalize stage (which finds nothing to collect) so the
+          # canonical DB is still published at the end of the cycle.
+          if [ -z "${BATCH_PIPELINE_ID}" ]; then
+            BATCH_PIPELINE_ID="${{ inputs.pipeline_id }}"
+          fi
+          if [ -z "${BATCH_PIPELINE_ID}" ]; then
+            BATCH_PIPELINE_ID="pl_${GITHUB_RUN_ID}"
+          fi
+          {
+            echo "BATCH_PIPELINE_ID=${BATCH_PIPELINE_ID}"
+            echo "FC_RUN_ID=${FC_RUN_ID}"
+          } >> "$GITHUB_ENV"
+
+      - name: Compare DB signature after submit stage
+        id: signature_after
+        run: |
+          set -euo pipefail
+          signature_ok="true"
+          if [ -f diagnostics/db_signature_before.json ]; then
+            set +e
+            python -m scripts.ci.db_signature compare \
+              --before diagnostics/db_signature_before.json \
+              --after-db data/resolver.duckdb \
+              --required "${SIGNATURE_REQUIRED_TABLES}" \
+              --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+              --out diagnostics/db_signature_after.json || signature_ok="false"
+            set -e
+          fi
+          echo "signature_ok=${signature_ok}" >> "$GITHUB_OUTPUT"
+
+      - name: Emit batch state for the poller
+        run: |
+          set -e
+          python -m scripts.ci.emit_batch_state \
+            --db "${PYTHIA_DB_URL}" \
+            --pipeline-id "${BATCH_PIPELINE_ID}" \
+            --stage fc_submit \
+            --next-stage fc_collect_finalize \
+            --db-run-id "${GITHUB_RUN_ID}" \
+            --fc-run-id "${FC_RUN_ID}" \
+            --hs-run-id "${HS_RUN_ID}" \
+            --out diagnostics/batch_state.json
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### fc_submit"
+              echo "- pipeline_id: ${BATCH_PIPELINE_ID}"
+              echo "- hs_run_id: ${HS_RUN_ID}"
+              echo "- fc_run_id: ${FC_RUN_ID}"
+              echo "- next stage (poller-dispatched): fc_collect_finalize"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload batch state
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-batch-state
+          path: diagnostics/batch_state.json
+          retention-days: 14
+
+      - name: Upload staged resolver DB
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db-staged
+          path: data/resolver.duckdb
+          retention-days: 14
+
+      - name: Upload stage diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-stage-diagnostics
+          path: |
+            diagnostics/hs_stdout.txt
+            diagnostics/forecaster_submit_stdout.txt
+            diagnostics/hs_triage_coverage__*.csv
+            diagnostics/hs_triage_failures__*.json
+          if-no-files-found: warn
+
+  # ────────────────────────────────────────────────────────────────────
+  # Stage: fc_collect_finalize — replay collected batch results (sync
+  # fallback per miss), write forecasts + scenarios, publish the canonical
+  # artifact, dispatch Sibyl.
+  # ────────────────────────────────────────────────────────────────────
+  fc-collect-finalize:
+    if: inputs.stage == 'fc_collect_finalize'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        run: |
+          set -e
+          if [ -z "${{ inputs.pipeline_id }}" ]; then
+            echo "ERROR: pipeline_id is required for fc_collect_finalize."
+            exit 1
+          fi
+          if [ -z "${{ inputs.db_run_id }}" ]; then
+            echo "ERROR: db_run_id (the fc_submit run id) is required for fc_collect_finalize."
+            exit 1
+          fi
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+
+      # A collect stage must never guess its DB: forced mode is fatal when
+      # the staged artifact from the named submit run is missing.
+      - name: Download staged resolver DB
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+          artifact-name: pythia-resolver-db-staged
+          validate-cmd: >-
+            mkdir -p diagnostics &&
+            python -m scripts.ci.db_signature write
+            --db data/resolver.duckdb
+            --required "${SIGNATURE_REQUIRED_TABLES}"
+            --optional "${SIGNATURE_OPTIONAL_TABLES}"
+            --out diagnostics/db_signature_before.json
+
+      - name: Read pipeline context from DB
+        env:
+          PIPELINE_ID: ${{ inputs.pipeline_id }}
+        run: |
+          set -e
+          python - <<'PY'
+          import os
+          import duckdb
+
+          path = os.environ["PYTHIA_DB_URL"].replace("duckdb:///", "")
+          pid = os.environ["PIPELINE_ID"]
+          con = duckdb.connect(path, read_only=True)
+          try:
+              row = con.execute(
+                  """
+                  SELECT run_id, hs_run_id FROM llm_batches
+                  WHERE pipeline_id = ? AND run_id IS NOT NULL
+                  ORDER BY submitted_at DESC LIMIT 1
+                  """,
+                  [pid],
+              ).fetchone()
+              hs_run_id = (row[1] if row else None) or ""
+              fc_run_id = (row[0] if row else None) or ""
+              if not hs_run_id:
+                  r2 = con.execute(
+                      "SELECT hs_run_id FROM hs_runs ORDER BY generated_at DESC LIMIT 1"
+                  ).fetchone()
+                  hs_run_id = (r2[0] if r2 else None) or ""
+          finally:
+              con.close()
+          print(f"pipeline context: hs_run_id={hs_run_id} fc_run_id={fc_run_id}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write(f"HS_RUN_ID={hs_run_id}\n")
+              fh.write(f"FC_RUN_ID={fc_run_id}\n")
+          PY
+
+      - name: Run Forecaster — phase collect
+        env:
+          PYTHIA_LLM_PROFILE: prod
+          PYTHIA_SPD_V2_WRITE_BOTH: "1"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -eo pipefail
+          mkdir -p diagnostics
+          python -m forecaster.cli \
+            --mode pythia \
+            --limit 0 \
+            --batch-size 100 \
+            --purpose hs_pipeline \
+            --phase collect \
+            --pipeline-id "${{ inputs.pipeline_id }}" | tee diagnostics/forecaster_stdout.txt
+          FORECASTER_RUN_ID=$(grep -Eo 'run_id=fc_[0-9]+' diagnostics/forecaster_stdout.txt | tail -n 1 | cut -d= -f2)
+          if [ -n "${FORECASTER_RUN_ID}" ]; then
+            echo "FORECASTER_RUN_ID=${FORECASTER_RUN_ID}" >> "$GITHUB_ENV"
+          else
+            echo "WARNING: Forecaster run id not detected in output."
+          fi
+
+      - name: Clear collected batch request bodies
+        env:
+          PIPELINE_ID: ${{ inputs.pipeline_id }}
+        run: |
+          set -e
+          python - <<'PY'
+          import os
+          import duckdb
+          from pythia.llm_batch import clear_request_bodies
+
+          path = os.environ["PYTHIA_DB_URL"].replace("duckdb:///", "")
+          pid = os.environ["PIPELINE_ID"]
+          con = duckdb.connect(path)
+          try:
+              rows = con.execute(
+                  "SELECT batch_id FROM llm_batches WHERE pipeline_id = ?", [pid]
+              ).fetchall()
+              for (bid,) in rows:
+                  clear_request_bodies(con, bid)
+              print(f"cleared request bodies for {len(rows)} batch(es)")
+          finally:
+              con.close()
+          PY
+
+      - name: Post-run diagnostics
+        run: |
+          set -e
+          python scripts/post_run_diagnostics.py --db "${PYTHIA_DB_URL}"
+          python -m scripts.dump_pythia_v2_run_summary
+
+      - name: Compare DB signature after collect stage
+        if: always()
+        id: signature_after
+        run: |
+          set -euo pipefail
+          if [ ! -f data/resolver.duckdb ]; then
+            echo "No resolver.duckdb found; skipping signature after."
+            exit 0
+          fi
+          signature_ok="true"
+          if [ -f diagnostics/db_signature_before.json ]; then
+            set +e
+            python -m scripts.ci.db_signature compare \
+              --before diagnostics/db_signature_before.json \
+              --after-db data/resolver.duckdb \
+              --required "${SIGNATURE_REQUIRED_TABLES}" \
+              --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+              --out diagnostics/db_signature_after.json || signature_ok="false"
+            set -e
+          else
+            python -m scripts.ci.db_signature write \
+              --db data/resolver.duckdb \
+              --required "${SIGNATURE_REQUIRED_TABLES}" \
+              --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+              --out diagnostics/db_signature_after.json
+          fi
+          echo "SIGNATURE_OK=${signature_ok}" >> "$GITHUB_ENV"
+          echo "signature_ok=${signature_ok}" >> "$GITHUB_OUTPUT"
+
+      - name: Dump Pythia v2 debug artifacts
+        if: ${{ success() }}
+        run: |
+          set -e
+          mkdir -p debug diagnostics
+          if [ -n "${FORECASTER_RUN_ID:-}" ]; then
+            python -m scripts.dump_pythia_debug_bundle --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --forecaster-run-id "${FORECASTER_RUN_ID}"
+          else
+            python -m scripts.dump_pythia_debug_bundle --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}"
+          fi
+          SUMMARY_PATH=$(find debug -maxdepth 1 -type f -name "executive_summary__*.md" -print | sort | tail -n 1 || true)
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f "${SUMMARY_PATH}" ]; then
+            cat "${SUMMARY_PATH}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Snapshot LLM prompt artifact
+        if: always()
+        run: |
+          set -e
+          mkdir -p diagnostics
+          python -m scripts.ci.snapshot_prompt_artifact \
+            --db "${PYTHIA_DB_URL}" \
+            --out diagnostics/prompt_artifact.md || {
+            echo "WARNING: prompt artifact generation failed (non-fatal)"
+            exit 0
+          }
+
+      - name: Upload health report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-health-report
+          path: |
+            debug/executive_summary__*.md
+            debug/health_report__*.json
+            diagnostics/db_signature_before.json
+            diagnostics/db_signature_after.json
+          if-no-files-found: warn
+
+      - name: Upload LLM prompt artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-llm-prompts
+          path: diagnostics/prompt_artifact.md
+          if-no-files-found: warn
+
+      - name: Upload question metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-question-metrics
+          path: debug/question_metrics__*.csv
+          if-no-files-found: warn
+
+      - name: Upload LLM call detail
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-llm-calls-detail
+          path: debug/llm_calls_detail__*.jsonl.gz
+          if-no-files-found: warn
+
+      - name: Upload SPD tables
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-spd-tables
+          path: debug/spd_tables__*.csv
+          if-no-files-found: warn
+
+      - name: Upload debug bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-debug-bundle
+          path: debug/pythia_debug_bundle__*.zip
+          if-no-files-found: warn
+
+      - name: Upload stage diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-stage-diagnostics
+          path: diagnostics/forecaster_stdout.txt
+          if-no-files-found: warn
+
+      - name: Upload canonical resolver DB
+        if: success() && steps.signature_after.outputs.signature_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb
+
+      # Preserve the release chain: pythia → Sibyl → publish. Sibyl's
+      # workflow_run trigger only fires for the legacy HS workflow, so the
+      # staged pipeline dispatches it explicitly, pointing db_run_id at this
+      # run's just-uploaded canonical artifact.
+      - name: Dispatch Sibyl Deep Research
+        if: success() && steps.signature_after.outputs.signature_ok == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          gh workflow run run_sibyl.yml --ref main -f db_run_id="${GITHUB_RUN_ID}"
+          echo "Dispatched run_sibyl.yml with db_run_id=${GITHUB_RUN_ID}"

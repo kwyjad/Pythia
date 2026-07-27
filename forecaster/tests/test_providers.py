@@ -350,3 +350,207 @@ def test_openai_drops_temperature_for_gpt56_lineup() -> None:
 
     assert providers._openai_drops_temperature("gpt-5.6-sol")
     assert providers._openai_drops_temperature("gpt-5.6-luna")
+
+
+# ---------------------------------------------------------------------------
+# Cache/batch telemetry + pricing (Phase 0 of the cost-optimization work)
+# ---------------------------------------------------------------------------
+
+
+def test_usage_to_dict_preserves_cache_and_batch_fields() -> None:
+    """Provider cache/batch usage fields must survive usage_to_dict.
+
+    Before this passthrough existed, cache_read_input_tokens etc. were silently
+    dropped, so cache hits were invisible AND overbilled in the ledger.
+    """
+    from forecaster import providers
+
+    usage = providers.usage_to_dict(
+        {
+            "prompt_tokens": 5000,
+            "completion_tokens": 700,
+            "total_tokens": 5700,
+            "cache_read_input_tokens": 3000,
+            "cache_creation_input_tokens": 1000,
+            "cached_tokens": 0,
+            "service_tier": "batch",
+            "batch_id": "b_x",
+            "provider_batch_id": "msgbatch_1",
+        }
+    )
+    assert usage["prompt_tokens"] == 5000
+    assert usage["cache_read_input_tokens"] == 3000
+    assert usage["cache_creation_input_tokens"] == 1000
+    assert usage["service_tier"] == "batch"
+    assert usage["batch_id"] == "b_x"
+    assert usage["provider_batch_id"] == "msgbatch_1"
+    # Zero-valued int fields are not required to persist; core keys always do.
+    assert usage["total_tokens"] == 5700
+
+
+def test_anthropic_usage_normalizes_prompt_tokens_to_total() -> None:
+    """Anthropic input_tokens EXCLUDES cache reads/writes; ours must not."""
+    from forecaster import providers
+
+    usage = providers._anthropic_usage_from_payload(
+        {
+            "usage": {
+                "input_tokens": 400,
+                "output_tokens": 900,
+                "cache_read_input_tokens": 2500,
+                "cache_creation_input_tokens": 100,
+            }
+        }
+    )
+    assert usage["prompt_tokens"] == 3000
+    assert usage["cache_read_input_tokens"] == 2500
+    assert usage["cache_creation_input_tokens"] == 100
+    assert usage["completion_tokens"] == 900
+    assert usage["total_tokens"] == 3900
+
+
+def test_openai_and_google_usage_extract_cached_tokens() -> None:
+    from forecaster import providers
+
+    openai_usage = providers._openai_usage_from_payload(
+        {
+            "usage": {
+                "prompt_tokens": 4000,
+                "completion_tokens": 500,
+                "total_tokens": 4500,
+                "prompt_tokens_details": {"cached_tokens": 2048},
+            }
+        }
+    )
+    assert openai_usage["prompt_tokens"] == 4000
+    assert openai_usage["cached_tokens"] == 2048
+
+    google_usage = providers._google_usage_from_payload(
+        {
+            "usageMetadata": {
+                "promptTokenCount": 6000,
+                "candidatesTokenCount": 800,
+                "totalTokenCount": 6800,
+                "cachedContentTokenCount": 4096,
+            }
+        }
+    )
+    assert google_usage["prompt_tokens"] == 6000
+    assert google_usage["cached_tokens"] == 4096
+
+
+def test_compute_cost_split_prices_cached_tokens_at_cached_rate() -> None:
+    """Cached portions bill at the cached rate, writes at the write premium."""
+    from forecaster import providers
+
+    # claude-opus-5 object entry: input 5, output 25, cached 0.50, write_5m 6.25
+    usage = {
+        "prompt_tokens": 1_000_000,
+        "completion_tokens": 0,
+        "cache_read_input_tokens": 500_000,
+        "cache_creation_input_tokens": 100_000,
+    }
+    input_cost, output_cost, total = providers.compute_cost_split_usd("claude-opus-5", usage)
+    # 400k uncached * $5 + 500k cache-read * $0.50 + 100k write * $6.25 (per 1M)
+    assert input_cost == pytest.approx(0.4 * 5.0 + 0.5 * 0.50 + 0.1 * 6.25)
+    assert output_cost == 0.0
+    assert total == pytest.approx(input_cost)
+
+
+def test_compute_cost_split_applies_batch_discount() -> None:
+    from forecaster import providers
+
+    usage = {
+        "prompt_tokens": 1_000_000,
+        "completion_tokens": 1_000_000,
+        "service_tier": "batch",
+    }
+    # gemini-3.5-flash: $1.50 in / $9.00 out, halved by the batch tier.
+    _, _, total = providers.compute_cost_split_usd("gemini-3.5-flash", usage)
+    assert total == pytest.approx((1.50 + 9.00) * 0.5)
+
+    # Sync pricing is unchanged by the helper.
+    usage_sync = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
+    _, _, total_sync = providers.compute_cost_split_usd("gemini-3.5-flash", usage_sync)
+    assert total_sync == pytest.approx(10.50)
+
+
+def test_resolve_price_detail_defaults_for_legacy_array_entries() -> None:
+    """2-array entries get provider-default cached rates (never None)."""
+    from forecaster import providers
+
+    detail = providers.resolve_price_detail("claude-opus-4-8")
+    assert detail is not None
+    assert detail["input"] == pytest.approx(5.00)
+    assert detail["cached_input"] == pytest.approx(0.50)   # 0.1x default
+    assert detail["cache_write_5m"] == pytest.approx(6.25)  # 1.25x default
+
+    gem = providers.resolve_price_detail("gemini-2.5-flash")
+    assert gem is not None
+    assert gem["cached_input"] == pytest.approx(0.30 * 0.25)
+
+
+def test_body_builders_match_sync_call_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Batch payloads must be byte-identical to sync payloads.
+
+    The sync callers and the batch layer share the same body builders; this
+    pins that the sync path actually sends the builder output unmodified.
+    """
+    import json as _json
+
+    from forecaster import providers
+
+    captured: dict = {}
+
+    class _FakeResp:
+        ok = True
+        status_code = 200
+        headers: dict = {}
+        text = "{}"
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        captured["body"] = json
+        return _FakeResp()
+
+    monkeypatch.setattr(providers, "_OPENAI_API_KEY", "k")
+    monkeypatch.setattr(providers.requests, "post", _fake_post)
+    providers.call_openai("p", "gpt-5.6-sol", 0.3, reasoning_effort="high")
+    assert captured["body"] == providers.build_openai_body(
+        "p", "gpt-5.6-sol", 0.3, reasoning_effort="high"
+    )
+    assert "temperature" not in captured["body"]
+    assert captured["body"]["reasoning_effort"] == "high"
+
+    class _FakeAnthropicResp(_FakeResp):
+        def json(self):
+            return {"content": [{"type": "text", "text": "ok"}], "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+    def _fake_post_anthropic(url, headers=None, json=None, timeout=None):
+        captured["body"] = json
+        return _FakeAnthropicResp()
+
+    monkeypatch.setattr(providers, "_ANTHROPIC_API_KEY", "k")
+    monkeypatch.setattr(providers.requests, "post", _fake_post_anthropic)
+    providers.call_anthropic("p", "claude-opus-5", 0.7, purpose="spd_v2")
+    assert captured["body"] == providers.build_anthropic_body("p", "claude-opus-5", 0.7, purpose="spd_v2")
+    assert captured["body"]["max_tokens"] == providers._ANTHROPIC_SPD_MAX_OUTPUT
+    assert "temperature" not in captured["body"]
+
+    class _FakeGoogleResp(_FakeResp):
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}], "usageMetadata": {}}
+
+    def _fake_post_google(url, json=None, timeout=None):
+        captured["body"] = json
+        return _FakeGoogleResp()
+
+    monkeypatch.setattr(providers, "_GEMINI_API_KEY", "k")
+    monkeypatch.setattr(providers.requests, "post", _fake_post_google)
+    providers.call_google("p", "gemini-3.5-flash", 0.2, thinking_level="low")
+    assert captured["body"] == providers.build_google_body("p", "gemini-3.5-flash", 0.2, thinking_level="low")
+    assert captured["body"]["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "low"}
+    # Round-trip sanity: bodies are JSON-serializable deterministically.
+    _json.dumps(captured["body"], sort_keys=True)

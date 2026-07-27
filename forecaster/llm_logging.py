@@ -140,16 +140,9 @@ async def log_forecaster_llm_call(
 
     if total_cost_usd <= 0.0:
         if cost_usd <= 0.0:
-            total_cost_usd = float(
-                estimate_cost_usd(
-                    model_id,
-                    {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": total_tokens,
-                    },
-                )
-            )
+            # Pass the full usage dict so cache/batch fields keep their pricing
+            # effect even on this fallback path.
+            total_cost_usd = float(estimate_cost_usd(model_id, call_usage))
         else:
             total_cost_usd = cost_usd
 
@@ -289,16 +282,8 @@ def _compute_costs_for_usage(
     if not model_id:
         return 0.0, 0.0, 0.0
 
-    from forecaster.providers import resolve_price_per_1m
+    from forecaster.providers import compute_cost_split_usd
 
-    prices = resolve_price_per_1m(model_id)
-    if not prices:
-        return 0.0, 0.0, 0.0
-
-    prompt_tokens = float(_safe_get(usage, "prompt_tokens", 0.0))
-    completion_tokens = float(_safe_get(usage, "completion_tokens", 0.0))
-
-    input_cost = (prompt_tokens / 1_000_000.0) * prices[0]
-    output_cost = (completion_tokens / 1_000_000.0) * prices[1]
-    total_cost = input_cost + output_cost
-    return input_cost, output_cost, total_cost
+    # Single shared formula (cache-aware + batch-aware) — see
+    # providers.compute_cost_split_usd. Do not re-implement pricing here.
+    return compute_cost_split_usd(model_id, usage if isinstance(usage, dict) else {})

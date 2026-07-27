@@ -25,21 +25,7 @@ RC results feed downstream into:
 from __future__ import annotations
 
 import json
-import os
 from typing import Any, Dict, List, Optional
-
-
-def _hs_prompt_v3_order_enabled() -> bool:
-    """Static-first prompt ordering for HS prompts (PYTHIA_PROMPT_V3_ORDER).
-
-    Same flag as the forecaster's SPD/binary builders. Under V3 order the
-    per-hazard static guidance + output schema lead the prompt (byte-identical
-    across all ~120 countries of a hazard → Gemini implicit caching), and the
-    per-country data trails. Section text is unchanged; only the order and the
-    country reference in the preamble's first sentence differ.
-    """
-
-    return os.getenv("PYTHIA_PROMPT_V3_ORDER", "0").strip().lower() in ("1", "true", "yes")
 
 
 # ---------------------------------------------------------------------------
@@ -62,18 +48,9 @@ _RC_SCHEMA = {
     "confidence_note": "...",
 }
 
-# First sentence of the preamble — country-specific (legacy order) vs
-# country-generic (V3 order, where the country is named in the data tail so
-# the preamble stays byte-identical across countries).
-_RC_PREAMBLE_OPENING = """You are assessing REGIME CHANGE for {country_name} ({iso3}) — specifically \
+_RC_CALIBRATION_PREAMBLE = """You are assessing REGIME CHANGE for {country_name} ({iso3}) — specifically \
 for the hazard: {hazard_name} ({hazard_code}).
-"""
 
-_RC_PREAMBLE_OPENING_GENERIC = """You are assessing REGIME CHANGE for the country identified in the COUNTRY \
-DATA below — specifically for the hazard: {hazard_name} ({hazard_code}).
-"""
-
-_RC_PREAMBLE_BODY = """
 Regime change means a DEPARTURE FROM the country's OWN HISTORICAL BASELINE \
 for this specific hazard. It is NOT a measure of absolute risk level. \
 A country with severe ongoing crisis but stable trends has LOW regime change. \
@@ -107,12 +84,6 @@ major escalation), assign the likelihood that the evidence supports regardless o
 many other countries in this run are also elevated.
 """
 
-# Legacy-order preamble (country-specific first sentence) — unchanged text.
-_RC_CALIBRATION_PREAMBLE = _RC_PREAMBLE_OPENING + _RC_PREAMBLE_BODY
-
-# V3-order preamble (country-generic first sentence, same body).
-_RC_CALIBRATION_PREAMBLE_GENERIC = _RC_PREAMBLE_OPENING_GENERIC + _RC_PREAMBLE_BODY
-
 _RC_OUTPUT_INSTRUCTIONS = """
 OUTPUT: Return a single JSON object only. No prose. No markdown fences.
 Match this schema exactly:
@@ -131,69 +102,6 @@ deny the regime change. These should be concrete and monitorable.
 - confidence_note: one sentence on how confident you are in this assessment \
 and what data gaps limit your confidence.
 """
-
-
-def _assemble_rc_prompt(
-    *,
-    country_name: str,
-    iso3: str,
-    hazard_name: str,
-    hazard_code: str,
-    preamble: str,
-    guidance_label: str,
-    intro_block: str,
-    data_block: str,
-    guidance_static: str,
-    additional_section: str,
-    schema_text: str,
-) -> str:
-    """Assemble an RC prompt in legacy or V3 (static-first) section order.
-
-    Legacy order reproduces the historical prompt byte-for-byte. V3 order
-    leads with the per-hazard static blocks (generic preamble, guidance,
-    output schema) — identical across every country of the hazard — and
-    trails with the per-country data, enabling provider prefix caching.
-    """
-
-    output_instructions = _RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)
-    guidance_open = f"=== {guidance_label}-SPECIFIC GUIDANCE ==="
-
-    if not _hs_prompt_v3_order_enabled():
-        return (
-            preamble
-            + f"\n\n{guidance_open}\n\n"
-            + intro_block
-            + "\n"
-            + data_block
-            + "\n"
-            + guidance_static
-            + "\n"
-            + additional_section
-            + "\n"
-            + output_instructions
-        )
-
-    prefix = (
-        _RC_CALIBRATION_PREAMBLE_GENERIC.format(
-            hazard_name=hazard_name, hazard_code=hazard_code
-        )
-        + f"\n\n{guidance_open}\n\n"
-        + intro_block
-        + "\n"
-        + guidance_static
-        + "\n"
-        + output_instructions
-        + "\nThe COUNTRY DATA follows below.\n\n"
-    )
-    suffix = (
-        f"COUNTRY: {country_name} ({iso3})\n\n"
-        + data_block
-        + additional_section
-        + "\nEND OF COUNTRY DATA.\n"
-        "Now assess regime change for this country per the guidance above and "
-        "return ONLY the JSON object matching the schema.\n"
-    )
-    return prefix + suffix
 
 
 # ---------------------------------------------------------------------------
@@ -441,11 +349,15 @@ If forecasts are consistent with base rates, this supports stability.
 """
 
     # --- PROMPT_EXCERPT: rc_ace_start ---
-    intro_block = """You are looking for signals that conflict patterns are CHANGING — not simply
+    return f"""{preamble}
+
+=== ACE-SPECIFIC GUIDANCE ===
+
+You are looking for signals that conflict patterns are CHANGING — not simply
 that conflict exists. The question is: "Will the next 6 months look
 meaningfully different from the last 12 months?"
-"""
-    data_block = f"""ACLED BASE RATE DATA:
+
+ACLED BASE RATE DATA:
 {acled_text}
 {forecast_section}
 {icg_section}
@@ -454,8 +366,8 @@ RESOLVER FEATURES (historical context):
 
 EVIDENCE PACK (from recent web search — prioritize recent signals):
 {evidence_text}
-"""
-    guidance_static = """WHAT CONSTITUTES ACE REGIME CHANGE (likelihood > 0.10):
+
+WHAT CONSTITUTES ACE REGIME CHANGE (likelihood > 0.10):
 - New armed group emerging or entering the country
 - Breakdown of ceasefire, peace agreement, or political settlement
 - Coup, attempted coup, or military takeover
@@ -518,22 +430,10 @@ MAGNITUDE CALIBRATION:
 - 0.6–1.0: Transformative break (e.g., full-scale war onset in previously
   peaceful country, genocide/mass atrocity risk, state collapse).
 
-=== END ACE-SPECIFIC GUIDANCE ==="""
+=== END ACE-SPECIFIC GUIDANCE ===
+{additional_section}
+{_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
     # --- PROMPT_EXCERPT: rc_ace_end ---
-
-    return _assemble_rc_prompt(
-        country_name=country_name,
-        iso3=iso3,
-        hazard_name="Armed Conflict Events",
-        hazard_code="ACE",
-        preamble=preamble,
-        guidance_label="ACE",
-        intro_block=intro_block,
-        data_block=data_block,
-        guidance_static=guidance_static,
-        additional_section=additional_section,
-        schema_text=schema_text,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -599,11 +499,15 @@ def build_rc_prompt_dr(
     )
 
     # --- PROMPT_EXCERPT: rc_dr_start ---
-    intro_block = """Drought is slow-onset and often predictable months in advance from climate
+    return f"""{preamble}
+
+=== DR-SPECIFIC GUIDANCE ===
+
+Drought is slow-onset and often predictable months in advance from climate
 data. The key question is: "Are rainfall and vegetation patterns departing
 from what is normal for THIS country at THIS time of year?"
-"""
-    data_block = f"""CLIMATE DATA (structured observations and forecasts):
+
+CLIMATE DATA (structured observations and forecasts):
 {climate_text}
 {enso_section}
 RESOLVER FEATURES (historical context):
@@ -611,8 +515,8 @@ RESOLVER FEATURES (historical context):
 
 EVIDENCE PACK (from recent web search):
 {evidence_text}
-"""
-    guidance_static = """WHAT CONSTITUTES DR REGIME CHANGE (likelihood > 0.10):
+
+WHAT CONSTITUTES DR REGIME CHANGE (likelihood > 0.10):
 - Cumulative rainfall for the current season significantly below normal
   (below 20th percentile of historical distribution for this point in the
   season), AND this is not a normal dry-year fluctuation for this country.
@@ -655,22 +559,10 @@ MAGNITUDE CALIBRATION:
 - 0.6–1.0: Exceptional/unprecedented drought, multi-season failure,
   potential famine conditions, mass displacement from agricultural areas.
 
-=== END DR-SPECIFIC GUIDANCE ==="""
+=== END DR-SPECIFIC GUIDANCE ===
+{additional_section}
+{_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
     # --- PROMPT_EXCERPT: rc_dr_end ---
-
-    return _assemble_rc_prompt(
-        country_name=country_name,
-        iso3=iso3,
-        hazard_name="Drought",
-        hazard_code="DR",
-        preamble=preamble,
-        guidance_label="DR",
-        intro_block=intro_block,
-        data_block=data_block,
-        guidance_static=guidance_static,
-        additional_section=additional_section,
-        schema_text=schema_text,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -725,11 +617,15 @@ def build_rc_prompt_fl(
     )
 
     # --- PROMPT_EXCERPT: rc_fl_start ---
-    intro_block = """Flood regime change means flooding at a scale or timing that departs from
+    return f"""{preamble}
+
+=== FL-SPECIFIC GUIDANCE ===
+
+Flood regime change means flooding at a scale or timing that departs from
 the country's historical pattern. Many countries experience annual flooding
 — that is the BASELINE, not a regime change.
-"""
-    data_block = f"""CLIMATE DATA (structured observations and forecasts):
+
+CLIMATE DATA (structured observations and forecasts):
 {climate_text}
 {enso_section}
 RESOLVER FEATURES (historical context):
@@ -737,8 +633,8 @@ RESOLVER FEATURES (historical context):
 
 EVIDENCE PACK (from recent web search):
 {evidence_text}
-"""
-    guidance_static = """WHAT CONSTITUTES FL REGIME CHANGE (likelihood > 0.10):
+
+WHAT CONSTITUTES FL REGIME CHANGE (likelihood > 0.10):
 - GloFAS showing elevated flood probability (>50% of exceeding 5-year
   return period) on major river systems, especially outside the typical
   peak flood months.
@@ -780,22 +676,10 @@ MAGNITUDE CALIBRATION:
   emergency, massive displacement. A 1-in-100+ year event or entirely
   novel pattern.
 
-=== END FL-SPECIFIC GUIDANCE ==="""
+=== END FL-SPECIFIC GUIDANCE ===
+{additional_section}
+{_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
     # --- PROMPT_EXCERPT: rc_fl_end ---
-
-    return _assemble_rc_prompt(
-        country_name=country_name,
-        iso3=iso3,
-        hazard_name="Flood",
-        hazard_code="FL",
-        preamble=preamble,
-        guidance_label="FL",
-        intro_block=intro_block,
-        data_block=data_block,
-        guidance_static=guidance_static,
-        additional_section=additional_section,
-        schema_text=schema_text,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -969,14 +853,18 @@ def build_rc_prompt_tc(
     )
 
     # --- PROMPT_EXCERPT: rc_tc_start ---
-    intro_block = """Tropical cyclone regime change means TC activity that departs from the
+    return f"""{preamble}
+
+=== TC-SPECIFIC GUIDANCE ===
+
+Tropical cyclone regime change means TC activity that departs from the
 country's historical exposure pattern. Many countries experience cyclones
 annually during their TC season — that is the baseline.
 
 TC risk is highly seasonal and geographically constrained. ENSO phase is
 one of the strongest predictors of seasonal TC activity.
-"""
-    data_block = f"""CLIMATE DATA (structured observations and forecasts):
+
+CLIMATE DATA (structured observations and forecasts):
 {climate_text}
 {enso_section}{seasonal_tc_section}
 
@@ -985,8 +873,8 @@ RESOLVER FEATURES (historical context):
 
 EVIDENCE PACK (from recent web search):
 {evidence_text}
-"""
-    guidance_static = """WHAT CONSTITUTES TC REGIME CHANGE (likelihood > 0.10):
+
+WHAT CONSTITUTES TC REGIME CHANGE (likelihood > 0.10):
 - Seasonal outlook from NOAA, Tropical Storm Risk, or regional agencies
   indicating well-above-normal TC activity for the relevant basin.
 - ENSO phase shift that historically amplifies cyclone risk in this
@@ -1025,22 +913,10 @@ MAGNITUDE CALIBRATION:
   (Note: this level is rare in an RC assessment made weeks/months ahead;
   it is more typical of a near-real-time assessment with an active storm.)
 
-=== END TC-SPECIFIC GUIDANCE ==="""
+=== END TC-SPECIFIC GUIDANCE ===
+{additional_section}
+{_RC_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
     # --- PROMPT_EXCERPT: rc_tc_end ---
-
-    return _assemble_rc_prompt(
-        country_name=country_name,
-        iso3=iso3,
-        hazard_name="Tropical Cyclone",
-        hazard_code="TC",
-        preamble=preamble,
-        guidance_label="TC",
-        intro_block=intro_block,
-        data_block=data_block,
-        guidance_static=guidance_static,
-        additional_section=additional_section,
-        schema_text=schema_text,
-    )
 
 
 # ---------------------------------------------------------------------------

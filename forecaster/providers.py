@@ -597,8 +597,17 @@ def _get_or_client() -> httpx.AsyncClient:
 # pythia/model_costs.json so that adding a new model's cost only requires
 # editing a JSON file, not Python code.
 
-def _load_model_costs_json() -> Dict[str, tuple[float, float]]:
-    """Load model cost data from ``pythia/model_costs.json`` (per-1M rates)."""
+def _load_model_costs_raw() -> Dict[str, Any]:
+    """Load the raw ``pythia/model_costs.json`` mapping (per-1M USD rates).
+
+    Two value forms are accepted per model id (backward compatible):
+
+    * legacy 2-array: ``[input, output]``
+    * object form:    ``{"input": .., "output": .., "cached_input": ..,
+                         "cache_write_5m": .., "cache_write_1h": ..}``
+      (cache fields optional — provider defaults fill the gaps, see
+      ``resolve_price_detail``)
+    """
     import pathlib
 
     try:
@@ -611,19 +620,42 @@ def _load_model_costs_json() -> Dict[str, tuple[float, float]]:
             raw = json.load(f)
     except Exception:
         return {}
-    result: Dict[str, tuple[float, float]] = {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _parse_model_costs(raw: Dict[str, Any]) -> tuple[Dict[str, tuple[float, float]], Dict[str, Dict[str, float]]]:
+    """Split the raw cost table into (input, output) tuples + full detail records."""
+
+    pairs: Dict[str, tuple[float, float]] = {}
+    details: Dict[str, Dict[str, float]] = {}
     for key, value in raw.items():
         if key.startswith("_"):
             continue
-        if isinstance(value, (list, tuple)) and len(value) == 2:
-            try:
-                result[key] = (float(value[0]), float(value[1]))
-            except (ValueError, TypeError):
-                continue
-    return result
+        try:
+            if isinstance(value, (list, tuple)) and len(value) == 2:
+                pairs[key] = (float(value[0]), float(value[1]))
+            elif isinstance(value, dict) and "input" in value and "output" in value:
+                pairs[key] = (float(value["input"]), float(value["output"]))
+                detail: Dict[str, float] = {}
+                for field in ("cached_input", "cache_write_5m", "cache_write_1h"):
+                    if value.get(field) is not None:
+                        detail[field] = float(value[field])
+                if detail:
+                    details[key] = detail
+        except (ValueError, TypeError):
+            continue
+    return pairs, details
 
 
-MODEL_PRICES_PER_1M: Dict[str, tuple[float, float]] = _load_model_costs_json()
+def _load_model_costs_json() -> Dict[str, tuple[float, float]]:
+    """Load model cost data from ``pythia/model_costs.json`` (per-1M rates)."""
+
+    pairs, _ = _parse_model_costs(_load_model_costs_raw())
+    return pairs
+
+
+_MODEL_PRICE_PAIRS, _MODEL_PRICE_CACHE_DETAILS = _parse_model_costs(_load_model_costs_raw())
+MODEL_PRICES_PER_1M: Dict[str, tuple[float, float]] = _MODEL_PRICE_PAIRS
 
 _MODEL_PRICES: Optional[Dict[str, Dict[str, float]]] = None
 
@@ -643,8 +675,25 @@ def _load_model_prices() -> Dict[str, Dict[str, float]]:
     return _MODEL_PRICES
 
 
-def usage_to_dict(usage_obj: Any) -> Dict[str, int]:
-    base = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+# Cache/batch usage fields preserved by usage_to_dict beyond the three core
+# token counts. Int-valued keys are coerced; string keys pass through verbatim.
+# These flow into llm_calls.usage_json via the loggers' passthrough and are
+# priced by compute_cost_split_usd — dropping one here silently overbills the
+# ledger (cached tokens billed at the full input rate).
+_USAGE_PASSTHROUGH_INT_KEYS = (
+    "cache_read_input_tokens",      # Anthropic: tokens served from prompt cache
+    "cache_creation_input_tokens",  # Anthropic: tokens written to prompt cache
+    "cached_tokens",                # OpenAI prompt_tokens_details / Gemini cachedContentTokenCount
+)
+_USAGE_PASSTHROUGH_STR_KEYS = (
+    "service_tier",                 # "batch" marks Batch-API results (50% pricing)
+    "batch_id",
+    "provider_batch_id",
+)
+
+
+def usage_to_dict(usage_obj: Any) -> Dict[str, Any]:
+    base: Dict[str, Any] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     if usage_obj is None:
         return base
     try:
@@ -660,6 +709,17 @@ def usage_to_dict(usage_obj: Any) -> Dict[str, int]:
         if total_tokens is None:
             total_tokens = base["prompt_tokens"] + base["completion_tokens"]
         base["total_tokens"] = int(total_tokens or 0)
+        if isinstance(usage_obj, dict):
+            for key in _USAGE_PASSTHROUGH_INT_KEYS:
+                if usage_obj.get(key) is not None:
+                    try:
+                        base[key] = int(usage_obj[key] or 0)
+                    except (TypeError, ValueError):
+                        continue
+            for key in _USAGE_PASSTHROUGH_STR_KEYS:
+                value = usage_obj.get(key)
+                if value:
+                    base[key] = str(value)
     except Exception:
         return base
     return base
@@ -709,26 +769,112 @@ def resolve_price_per_1m(model_id: str) -> Optional[tuple[float, float]]:
         return None
 
 
-def estimate_cost_usd(model_id: str, usage: Dict[str, int]) -> float:
+# Provider-default cache pricing multipliers (fraction of the input rate),
+# used when model_costs.json has no explicit cached-rate fields. Verified
+# against provider pricing pages 2026-07: Anthropic cache reads 0.1x, 5-min
+# cache writes 1.25x, 1h writes 2x; OpenAI gpt-5-family cached input 0.1x
+# (no write premium — caching is automatic); Gemini implicit cached tokens
+# 0.25x (no write premium).
+_CACHE_RATE_DEFAULTS = (
+    ("claude", {"cached_input": 0.10, "cache_write_5m": 1.25, "cache_write_1h": 2.0}),
+    ("gpt", {"cached_input": 0.10, "cache_write_5m": 1.0, "cache_write_1h": 1.0}),
+    ("gemini", {"cached_input": 0.25, "cache_write_5m": 1.0, "cache_write_1h": 1.0}),
+)
+
+# Batch API discount: flat 50% off all token charges on OpenAI, Anthropic and
+# Gemini batch endpoints alike. Applied when usage carries service_tier="batch".
+BATCH_PRICE_MULTIPLIER = 0.5
+
+
+def resolve_price_detail(model_id: str) -> Optional[Dict[str, float]]:
+    """Return the full per-1M price record for *model_id*.
+
+    Keys: ``input``, ``output``, ``cached_input``, ``cache_write_5m``,
+    ``cache_write_1h`` (all USD per 1M tokens). Cache fields come from the
+    object form in model_costs.json when present, otherwise from
+    provider-default multipliers on the input rate. Returns None when the
+    model has no cost entry at all (same semantics as resolve_price_per_1m).
+    """
+
+    pair = resolve_price_per_1m(model_id)
+    if not pair:
+        return None
+    input_rate, output_rate = pair
+
+    normalized = str(model_id or "").strip().lower()
+    detail: Dict[str, float] = {}
+    for key in (normalized, normalized.replace("/", "-"), normalized.split("/", 1)[-1]):
+        if key in _MODEL_PRICE_CACHE_DETAILS:
+            detail = dict(_MODEL_PRICE_CACHE_DETAILS[key])
+            break
+
+    bare_model = normalized.split("/", 1)[-1]
+    multipliers: Dict[str, float] = {"cached_input": 1.0, "cache_write_5m": 1.0, "cache_write_1h": 1.0}
+    for prefix, defaults in _CACHE_RATE_DEFAULTS:
+        if bare_model.startswith(prefix):
+            multipliers = dict(defaults)
+            break
+
+    return {
+        "input": input_rate,
+        "output": output_rate,
+        "cached_input": detail.get("cached_input", input_rate * multipliers["cached_input"]),
+        "cache_write_5m": detail.get("cache_write_5m", input_rate * multipliers["cache_write_5m"]),
+        "cache_write_1h": detail.get("cache_write_1h", input_rate * multipliers["cache_write_1h"]),
+    }
+
+
+def compute_cost_split_usd(model_id: str, usage: Dict[str, Any]) -> tuple[float, float, float]:
+    """Return (input_cost, output_cost, total_cost) USD for a usage dict.
+
+    The single cost formula shared by ``estimate_cost_usd`` (providers) and
+    ``_compute_costs_for_usage`` (llm_logging) so the two can never drift.
+
+    Invariant: ``prompt_tokens`` is the TOTAL prompt size (adapters normalize
+    Anthropic's cache-exclusive ``input_tokens`` back to the total). Cached
+    portions are priced at the cached rate, Anthropic cache writes at the
+    write-premium rate (5-min TTL assumed — the only TTL Pythia requests),
+    and ``service_tier == "batch"`` halves everything.
+    """
+
     if not usage or not isinstance(usage, dict):
-        return 0.0
+        return 0.0, 0.0, 0.0
+
+    prices = resolve_price_detail(model_id)
+    if not prices:
+        return 0.0, 0.0, 0.0
 
     prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
     completion_tokens = int(usage.get("completion_tokens", 0) or 0)
-    total_tokens = int(usage.get("total_tokens", prompt_tokens + completion_tokens) or 0)
+    cache_read = int(usage.get("cache_read_input_tokens", 0) or 0)
+    cache_creation = int(usage.get("cache_creation_input_tokens", 0) or 0)
+    cached = int(usage.get("cached_tokens", 0) or 0)
 
-    price_tuple = resolve_price_per_1m(model_id)
-    if not price_tuple:
-        return 0.0
+    if not (prompt_tokens or completion_tokens):
+        total_tokens = int(usage.get("total_tokens", 0) or 0)
+        total = (total_tokens / 1_000_000.0) * prices["input"]
+        if str(usage.get("service_tier") or "") == "batch":
+            total *= BATCH_PRICE_MULTIPLIER
+        return float(total), 0.0, float(total)
 
-    input_cost_per_1m, output_cost_per_1m = price_tuple
+    uncached = max(0, prompt_tokens - cache_read - cache_creation - cached)
+    input_cost = (
+        (uncached / 1_000_000.0) * prices["input"]
+        + ((cached + cache_read) / 1_000_000.0) * prices["cached_input"]
+        + (cache_creation / 1_000_000.0) * prices["cache_write_5m"]
+    )
+    output_cost = (completion_tokens / 1_000_000.0) * prices["output"]
 
-    if prompt_tokens or completion_tokens:
-        input_cost = (prompt_tokens / 1_000_000.0) * input_cost_per_1m
-        output_cost = (completion_tokens / 1_000_000.0) * output_cost_per_1m
-        return float(input_cost + output_cost)
+    if str(usage.get("service_tier") or "") == "batch":
+        input_cost *= BATCH_PRICE_MULTIPLIER
+        output_cost *= BATCH_PRICE_MULTIPLIER
 
-    return float((total_tokens / 1_000_000.0) * input_cost_per_1m)
+    return float(input_cost), float(output_cost), float(input_cost + output_cost)
+
+
+def estimate_cost_usd(model_id: str, usage: Dict[str, int]) -> float:
+    _, _, total = compute_cost_split_usd(model_id, usage)
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -760,15 +906,21 @@ def _google_model_family(model_id: str) -> Optional[str]:
     return None
 
 
-def call_openai(
+def build_openai_body(
     prompt: str,
     model: str,
     temperature: float,
     *,
     reasoning_effort: Optional[str] = None,
-) -> ProviderResult:
-    if not _OPENAI_API_KEY:
-        return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing OPENAI_API_KEY")
+    prompt_cache_key: Optional[str] = None,
+) -> dict:
+    """Build the exact /v1/chat/completions request body.
+
+    Shared by the sync path (call_openai) and the Batch API layer
+    (pythia.llm_batch) so batch payloads are byte-identical to sync payloads.
+    Never rebuild this dict at a call site — params silently drop at that seam.
+    """
+
     body: dict = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -777,6 +929,45 @@ def call_openai(
         body["reasoning_effort"] = reasoning_effort
     elif not _openai_drops_temperature(model):
         body["temperature"] = float(temperature)
+    # Routing hint only (caching itself is automatic for >=1024-token
+    # prefixes); gated so legacy requests stay byte-identical when off.
+    if prompt_cache_key and _prompt_cache_enabled():
+        body["prompt_cache_key"] = prompt_cache_key
+    return body
+
+
+def _openai_usage_from_payload(payload: Any) -> Dict[str, Any]:
+    """Normalize an OpenAI chat-completions usage payload (incl. cached tokens)."""
+
+    usage_raw = payload.get("usage") if isinstance(payload, dict) else None
+    usage = usage_to_dict(usage_raw)
+    if isinstance(usage_raw, dict):
+        details = usage_raw.get("prompt_tokens_details")
+        if isinstance(details, dict) and details.get("cached_tokens"):
+            try:
+                usage["cached_tokens"] = int(details["cached_tokens"] or 0)
+            except (TypeError, ValueError):
+                pass
+    return usage
+
+
+def call_openai(
+    prompt: str,
+    model: str,
+    temperature: float,
+    *,
+    reasoning_effort: Optional[str] = None,
+    prompt_cache_key: Optional[str] = None,
+) -> ProviderResult:
+    if not _OPENAI_API_KEY:
+        return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing OPENAI_API_KEY")
+    body = build_openai_body(
+        prompt,
+        model,
+        temperature,
+        reasoning_effort=reasoning_effort,
+        prompt_cache_key=prompt_cache_key,
+    )
     try:
         resp = requests.post(
             f"{_OPENAI_BASE_URL.rstrip('/')}/chat/completions",
@@ -819,7 +1010,7 @@ def call_openai(
             message = choices[0].get("message") or {}
             if isinstance(message, dict):
                 text = str(message.get("content", "")).strip()
-    usage = usage_to_dict(payload.get("usage") if isinstance(payload, dict) else {})
+    usage = _openai_usage_from_payload(payload)
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
@@ -857,7 +1048,120 @@ def _anthropic_stop_reason_error(payload: Any) -> Optional[str]:
     return None
 
 
-def call_anthropic(prompt: str, model: str, temperature: float, *, purpose: str | None = None) -> ProviderResult:
+def _prompt_cache_enabled() -> bool:
+    """Gate for explicit prompt-cache markers (PYTHIA_PROMPT_CACHE_ENABLED).
+
+    Only affects Anthropic cache_control blocks and the OpenAI
+    prompt_cache_key routing hint; Gemini implicit caching is automatic and
+    has no request knob. Default OFF (byte-identical legacy requests).
+    """
+
+    return os.getenv("PYTHIA_PROMPT_CACHE_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+
+
+# Minimum estimated tokens (chars/4) a cache-marked span must reach before we
+# attach cache_control — shorter prefixes silently don't cache but still pay
+# the 1.25x write intent, so skip the marker entirely. 512 tokens is the
+# claude-opus-5 minimum; most other Anthropic models need 1024+.
+_ANTHROPIC_CACHE_MIN_CHARS = int(os.getenv("PYTHIA_ANTHROPIC_CACHE_MIN_CHARS", "4096") or 4096)
+
+
+def build_anthropic_body(
+    prompt: str,
+    model: str,
+    temperature: float,
+    *,
+    purpose: str | None = None,
+    cache_segments: Optional[List[tuple]] = None,
+) -> dict:
+    """Build the exact /v1/messages request body.
+
+    Shared by the sync path (call_anthropic) and the Batch API layer
+    (pythia.llm_batch: each batch item's ``params`` is exactly this body) so
+    batch payloads are byte-identical to sync payloads. Carries the SPD/binary
+    max_tokens switch and the no-sampling-params model rule.
+
+    ``cache_segments`` is an ordered list of ``(text, is_breakpoint)`` tuples
+    whose concatenation must equal ``prompt``. When provided AND
+    PYTHIA_PROMPT_CACHE_ENABLED is on, the user message is sent as multiple
+    text blocks with ``cache_control: {type: ephemeral}`` on breakpoint blocks
+    (max 4 per request, enforced here). Otherwise the plain single-string
+    message is sent — byte-identical to the legacy request.
+    """
+
+    # Use higher max_tokens for SPD/binary forecast calls to avoid truncation
+    max_tokens = _ANTHROPIC_MAX_OUTPUT
+    if purpose in ("spd_v2", "binary_v2"):
+        max_tokens = _ANTHROPIC_SPD_MAX_OUTPUT
+
+    content: Any = prompt
+    if cache_segments and _prompt_cache_enabled():
+        blocks: List[dict] = []
+        marked = 0
+        chars_so_far = 0
+        for seg in cache_segments:
+            text, is_breakpoint = seg[0], bool(seg[1])
+            if not text:
+                continue
+            chars_so_far += len(text)
+            block: dict = {"type": "text", "text": text}
+            # Only mark breakpoints where the cumulative prefix is plausibly
+            # above the model's cacheable minimum, and never more than 4.
+            if is_breakpoint and marked < 4 and chars_so_far >= _ANTHROPIC_CACHE_MIN_CHARS:
+                block["cache_control"] = {"type": "ephemeral"}
+                marked += 1
+            blocks.append(block)
+        if blocks:
+            content = blocks
+
+    body: dict = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": float(temperature),
+        "messages": [{"role": "user", "content": content}],
+    }
+    # Opus 4.7+ family models reject sampling params with HTTP 400.
+    if model.lower().startswith(_ANTHROPIC_NO_TEMPERATURE_PREFIXES):
+        body.pop("temperature", None)
+    return body
+
+
+def _anthropic_usage_from_payload(payload: Any) -> Dict[str, Any]:
+    """Normalize an Anthropic usage payload.
+
+    Anthropic's ``input_tokens`` EXCLUDES cache reads/writes; Pythia's invariant
+    is that ``prompt_tokens`` = total prompt size, so the cache counts are added
+    back and preserved as separate fields for cache-aware pricing.
+    """
+
+    usage_raw = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage_raw, dict):
+        usage_raw = {}
+    input_tokens = int(usage_raw.get("input_tokens") or 0)
+    output_tokens = int(usage_raw.get("output_tokens") or 0)
+    cache_read = int(usage_raw.get("cache_read_input_tokens") or 0)
+    cache_creation = int(usage_raw.get("cache_creation_input_tokens") or 0)
+    prompt_tokens = input_tokens + cache_read + cache_creation
+    usage_dict: Dict[str, Any] = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": prompt_tokens + output_tokens,
+    }
+    if cache_read:
+        usage_dict["cache_read_input_tokens"] = cache_read
+    if cache_creation:
+        usage_dict["cache_creation_input_tokens"] = cache_creation
+    return usage_to_dict(usage_dict)
+
+
+def call_anthropic(
+    prompt: str,
+    model: str,
+    temperature: float,
+    *,
+    purpose: str | None = None,
+    cache_segments: Optional[List[tuple]] = None,
+) -> ProviderResult:
     if not _ANTHROPIC_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing ANTHROPIC_API_KEY")
     url = "https://api.anthropic.com/v1/messages"
@@ -866,19 +1170,9 @@ def call_anthropic(prompt: str, model: str, temperature: float, *, purpose: str 
         "anthropic-version": _ANTHROPIC_VERSION,
         "content-type": "application/json",
     }
-    # Use higher max_tokens for SPD/binary forecast calls to avoid truncation
-    max_tokens = _ANTHROPIC_MAX_OUTPUT
-    if purpose in ("spd_v2", "binary_v2"):
-        max_tokens = _ANTHROPIC_SPD_MAX_OUTPUT
-    body = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "temperature": float(temperature),
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    # Opus 4.7+ family models reject sampling params with HTTP 400.
-    if model.lower().startswith(_ANTHROPIC_NO_TEMPERATURE_PREFIXES):
-        body.pop("temperature", None)
+    body = build_anthropic_body(
+        prompt, model, temperature, purpose=purpose, cache_segments=cache_segments
+    )
     try:
         resp = requests.post(url, headers=headers, json=body, timeout=_ANTHROPIC_TIMEOUT)
     except Exception as exc:
@@ -920,14 +1214,7 @@ def call_anthropic(prompt: str, model: str, temperature: float, *, purpose: str 
                     parts.append(str(part.get("text", "")))
             text = "".join(parts).strip()
 
-    usage_raw = {}
-    if isinstance(payload, dict):
-        usage_raw = payload.get("usage") or {}
-    usage = usage_to_dict({
-        "prompt_tokens": usage_raw.get("input_tokens", 0),
-        "completion_tokens": usage_raw.get("output_tokens", 0),
-        "total_tokens": usage_raw.get("input_tokens", 0) + usage_raw.get("output_tokens", 0),
-    })
+    usage = _anthropic_usage_from_payload(payload)
 
     # A safety refusal or a thinking-induced truncation both come back as HTTP 200
     # with empty or partial content. Without naming them, the member simply drops
@@ -939,6 +1226,49 @@ def call_anthropic(prompt: str, model: str, temperature: float, *, purpose: str 
         return ProviderResult("", usage, 0.0, model, error=stop_error)
 
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
+
+
+def build_google_body(
+    prompt: str,
+    model: str,
+    temperature: float,
+    *,
+    thinking_level: Optional[str] = None,
+) -> dict:
+    """Build the exact generateContent request body.
+
+    Shared by the sync path (call_google) and the Batch API layer
+    (pythia.llm_batch) so batch payloads are byte-identical to sync payloads.
+    Carries the Gemini-3.x-only thinkingConfig gate.
+    """
+
+    api_model = model.split("/", 1)[-1] if "/" in model else model
+    generation_config: Dict[str, Any] = {"temperature": float(temperature)}
+    # thinkingLevel is supported by the Gemini 3.x families (gemini-3-*,
+    # gemini-3.1-*, gemini-3.5-*); older 2.5 models use a different knob
+    # (thinkingBudget) and would reject this config.
+    if thinking_level and _is_gemini_3_family(api_model):
+        generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
+    return {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": generation_config,
+    }
+
+
+def _google_usage_from_payload(payload: Any) -> Dict[str, Any]:
+    """Normalize a Gemini usageMetadata payload (incl. implicit-cache tokens)."""
+
+    usage_meta = payload.get("usageMetadata") if isinstance(payload, dict) else None
+    if not isinstance(usage_meta, dict):
+        usage_meta = {}
+    usage_dict: Dict[str, Any] = {
+        "prompt_tokens": usage_meta.get("promptTokenCount", 0),
+        "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
+        "total_tokens": usage_meta.get("totalTokenCount", 0),
+    }
+    if usage_meta.get("cachedContentTokenCount"):
+        usage_dict["cached_tokens"] = usage_meta.get("cachedContentTokenCount")
+    return usage_to_dict(usage_dict)
 
 
 def call_google(
@@ -953,16 +1283,7 @@ def call_google(
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing GEMINI_API_KEY")
     api_model = model.split("/", 1)[-1] if "/" in model else model
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={_GEMINI_API_KEY}"
-    generation_config: Dict[str, Any] = {"temperature": float(temperature)}
-    # thinkingLevel is supported by the Gemini 3.x families (gemini-3-*,
-    # gemini-3.1-*, gemini-3.5-*); older 2.5 models use a different knob
-    # (thinkingBudget) and would reject this config.
-    if thinking_level and _is_gemini_3_family(api_model):
-        generation_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": generation_config,
-    }
+    body = build_google_body(prompt, model, temperature, thinking_level=thinking_level)
     try:
         resp = requests.post(
             url,
@@ -1003,13 +1324,59 @@ def call_google(
             text = payload["candidates"][0]["content"]["parts"][0].get("text", "").strip()
         except Exception:
             text = payload.get("text", "") or ""
-    usage_meta = payload.get("usageMetadata") if isinstance(payload, dict) else {}
-    usage = usage_to_dict({
-        "prompt_tokens": usage_meta.get("promptTokenCount", 0),
-        "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
-        "total_tokens": usage_meta.get("totalTokenCount", 0),
-    })
+    usage = _google_usage_from_payload(payload)
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
+
+
+def resolve_request_params(ms: "ModelSpec", temperature: float) -> tuple[float, Optional[str]]:
+    """Resolve (effective_temperature, thinking_level) for a model spec.
+
+    The single source of the per-model param rules used by call_chat_ms AND
+    the Batch API layer (build_body_for_spec): ModelSpec.thinking from
+    config wins; Google SPD members fall back to the
+    PYTHIA_GOOGLE_SPD_THINKING_LEVEL_* env vars; empty/off/none → None;
+    ModelSpec.temperature overrides the call-site temperature.
+    """
+
+    spd_google = ms.provider == "google" and ms.purpose == "spd_v2"
+    thinking_level: Optional[str] = None
+    if ms.thinking and ms.thinking not in ("off", "none"):
+        thinking_level = ms.thinking
+    elif spd_google:
+        google_family = _google_model_family(ms.model_id)
+        if google_family == "flash":
+            thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH", "low") or "").strip()
+        elif google_family == "pro":
+            thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO", "") or "").strip()
+    if thinking_level in ("", "off", "none"):
+        thinking_level = None
+    effective_temperature = ms.temperature if ms.temperature is not None else temperature
+    return effective_temperature, thinking_level
+
+
+def build_body_for_spec(ms: "ModelSpec", prompt: str, temperature: float = 0.2) -> dict:
+    """Build the exact provider request body a sync call_chat_ms would send.
+
+    Single entry point for the Batch API layer: dispatches to the shared
+    per-provider body builders with the same resolved params as the sync
+    path, so a batch item's body is byte-identical to the sync request.
+    """
+
+    effective_temperature, thinking_level = resolve_request_params(ms, temperature)
+    provider = (ms.provider or "").lower()
+    if provider == "openai":
+        return build_openai_body(
+            prompt, ms.model_id, effective_temperature, reasoning_effort=thinking_level
+        )
+    if provider == "anthropic":
+        return build_anthropic_body(
+            prompt, ms.model_id, effective_temperature, purpose=ms.purpose
+        )
+    if provider in {"google", "gemini"}:
+        return build_google_body(
+            prompt, ms.model_id, effective_temperature, thinking_level=thinking_level
+        )
+    raise ValueError(f"unsupported provider for batch body: {ms.provider}")
 
 
 def _call_provider_sync(
@@ -1021,12 +1388,18 @@ def _call_provider_sync(
     timeout_sec: Optional[float] = None,
     thinking_level: Optional[str] = None,
     purpose: str | None = None,
+    cache_segments: Optional[List[tuple]] = None,
+    prompt_cache_key: Optional[str] = None,
 ) -> ProviderResult:
     p = (provider or "").lower()
     if p == "openai":
-        return call_openai(prompt, model, temperature, reasoning_effort=thinking_level)
+        return call_openai(
+            prompt, model, temperature,
+            reasoning_effort=thinking_level,
+            prompt_cache_key=prompt_cache_key,
+        )
     if p == "anthropic":
-        return call_anthropic(prompt, model, temperature, purpose=purpose)
+        return call_anthropic(prompt, model, temperature, purpose=purpose, cache_segments=cache_segments)
     if p in {"google", "gemini"}:
         return call_google(prompt, model, temperature, timeout_sec=timeout_sec, thinking_level=thinking_level)
     return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"unsupported provider {provider}")
@@ -1180,6 +1553,8 @@ async def call_chat_ms(
     component: str = "Forecaster",
     run_id: str | None = None,
     log_call: bool = True,
+    cache_segments: Optional[List[tuple]] = None,
+    prompt_cache_key: Optional[str] = None,
 ) -> tuple[str, Dict[str, int], str]:
     """Call the configured provider for a model spec and return (text, usage, error).
 
@@ -1188,6 +1563,12 @@ async def call_chat_ms(
     here has no phase/iso3/run linkage, so leaving it on next to a rich row
     double-counts the call's cost in phase-less aggregations (the Costs page
     "other" bucket) — see the July 2026 telemetry fix.
+
+    cache_segments / prompt_cache_key: optional prompt-cache plumbing
+    (Anthropic cache_control content blocks / OpenAI routing hint). Both are
+    inert unless PYTHIA_PROMPT_CACHE_ENABLED=1; providers that don't use a
+    given knob ignore it. ``"".join(seg[0] for seg in cache_segments)`` must
+    equal ``prompt`` — the plain string is what retries and logging use.
     """
 
     if not ms.active:
@@ -1224,7 +1605,6 @@ async def call_chat_ms(
     start = time.time()
     spd_google = ms.provider == "google" and ms.purpose == "spd_v2"
     hs_triage = ms.purpose == "hs_triage"
-    thinking_level: Optional[str] = None
     timeout_sec: Optional[float] = None
     hs_timeout_sec: Optional[float] = None
     hs_max_retry_after_sec: Optional[float] = None
@@ -1233,23 +1613,9 @@ async def call_chat_ms(
     hs_usage: Dict[str, Any] = {}
     backoffs_sec: list[float] = []
 
-    # --- Per-model thinking level ---
-    # 1) ModelSpec.thinking from config.yaml takes precedence
-    if ms.thinking and ms.thinking not in ("off", "none"):
-        thinking_level = ms.thinking
-    # 2) Env var fallback for Google SPD models (backward compat)
-    elif spd_google:
-        google_family = _google_model_family(ms.model_id)
-        if google_family == "flash":
-            thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH", "low") or "").strip()
-        elif google_family == "pro":
-            thinking_level = (os.getenv("PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO", "") or "").strip()
-    # 3) Normalize empty/off/none to None
-    if thinking_level in ("", "off", "none"):
-        thinking_level = None
-
-    # --- Per-model temperature override ---
-    effective_temperature = ms.temperature if ms.temperature is not None else temperature
+    # Per-model temperature/thinking resolution — shared with the Batch API
+    # layer via resolve_request_params so batch bodies can't drift.
+    effective_temperature, thinking_level = resolve_request_params(ms, temperature)
 
     if spd_google:
         google_family = _google_model_family(ms.model_id)
@@ -1314,6 +1680,8 @@ async def call_chat_ms(
                         timeout_sec=timeout_sec,
                         thinking_level=thinking_level,
                         purpose=ms.purpose,
+                        cache_segments=cache_segments,
+                        prompt_cache_key=prompt_cache_key,
                     )
                     if timeout_sec is not None:
                         result = await asyncio.wait_for(call_task, timeout=timeout_sec)

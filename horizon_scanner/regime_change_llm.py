@@ -111,6 +111,31 @@ _RC_DEFAULTS: Dict[str, Any] = {
 # Model call (unchanged from previous version)
 # ---------------------------------------------------------------------------
 
+def _rc_model_spec(pass_idx: int = 1) -> ModelSpec:
+    """Resolve the primary RC ModelSpec for a pass (env > config role).
+
+    Single source of the pass-model rule, shared by the sync call path and
+    the staged pipeline's batch enqueue (hs_batch.enqueue_hazard_call) so
+    batch request bodies match the sync ones.
+    """
+
+    from pythia.llm_profiles import get_role_model, split_model_ref
+
+    if pass_idx == 2:
+        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS2") or get_role_model("rc_pass2")
+    else:
+        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS1") or get_role_model("rc_pass1")
+
+    provider, model_id = split_model_ref(model_spec_str)
+    return ModelSpec(
+        name=model_id,  # specific model id — never a generic family label
+        provider=provider,
+        model_id=model_id,
+        active=True,
+        purpose="hs_regime_change",
+    )
+
+
 async def _call_rc_model(
     prompt_text: str,
     *,
@@ -130,22 +155,7 @@ async def _call_rc_model(
     Returns (text, usage, error, model_spec).
     """
 
-    from pythia.llm_profiles import get_role_model, split_model_ref
-
-    if pass_idx == 2:
-        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS2") or get_role_model("rc_pass2")
-    else:
-        model_spec_str = os.getenv("PYTHIA_RC_MODEL_PASS1") or get_role_model("rc_pass1")
-
-    provider, model_id = split_model_ref(model_spec_str)
-
-    spec = ModelSpec(
-        name=model_id,  # specific model id — never a generic family label
-        provider=provider,
-        model_id=model_id,
-        active=True,
-        purpose="hs_regime_change",
-    )
+    spec = _rc_model_spec(pass_idx)
     start = time.time()
     try:
         text, usage, error = await call_chat_ms(
@@ -699,14 +709,46 @@ def _run_rc_for_single_hazard(
         **new_data_kwargs,
     )
 
+    from horizon_scanner import hs_batch
+
+    rc_mode = hs_batch.family_mode("hs_rc")
+    if rc_mode == "submit":
+        # Staged pipeline hs_submit: enqueue the pass calls as Batch-API
+        # requests and stop — parsing/merging happens in the collect stage.
+        # A non-batchable provider is simply not enqueued; its replay miss
+        # routes the call down the sync path in the collect stage.
+        for pass_idx in range(1, _rc_pass_count() + 1):
+            hs_batch.enqueue_hazard_call(
+                "hs_rc",
+                prompt,
+                spec=_rc_model_spec(pass_idx),
+                iso3=iso3,
+                hazard_code=hazard_code,
+                pass_idx=pass_idx,
+                temperature=HS_TEMPERATURE,
+            )
+        return {**_RC_DEFAULTS, "valid": False, "status": "pending_batch"}
+
     pass_rcs: list[Dict[str, Any]] = []
     pass_results: list[dict[str, Any]] = []
 
     for pass_idx in range(1, _rc_pass_count() + 1):
         call_start = time.time()
-        text, usage, error, model_spec = asyncio.run(
-            _call_rc_model(prompt, run_id=run_id, fallback_specs=fallback_specs, pass_idx=pass_idx)
-        )
+        replayed = None
+        if rc_mode == "collect":
+            replayed = hs_batch.replay_hazard_call(
+                "hs_rc", iso3=iso3, hazard_code=hazard_code, pass_idx=pass_idx
+            )
+            if replayed is None:
+                hs_batch.mark_fallback(
+                    "hs_rc", iso3=iso3, hazard_code=hazard_code, pass_idx=pass_idx
+                )
+        if replayed is not None:
+            text, usage, error, model_spec = replayed
+        else:
+            text, usage, error, model_spec = asyncio.run(
+                _call_rc_model(prompt, run_id=run_id, fallback_specs=fallback_specs, pass_idx=pass_idx)
+            )
         usage = usage or {}
         usage.setdefault("elapsed_ms", int((time.time() - call_start) * 1000))
 
@@ -777,21 +819,25 @@ def _run_rc_for_single_hazard(
             if model_id_for_cost:
                 usage_for_log["cost_usd"] = estimate_cost_usd(str(model_id_for_cost), usage_for_log)
 
-        log_hs_llm_call(
-            hs_run_id=run_id,
-            iso3=iso3,
-            hazard_code=f"rc_{hazard_code}_pass_{pass_idx}",
-            model_spec=model_spec,
-            prompt_text=prompt,
-            response_text=text or "",
-            usage=usage_for_log,
-            error_text=log_error_text,
-            is_test=is_test_mode(),
-        )
-        logger.info(
-            "RC logged call: hs_run_id=%s iso3=%s hazard=rc_%s_pass_%s",
-            run_id, iso3, hazard_code, pass_idx,
-        )
+        # Replayed batch results log exactly once across (re-)collect stages;
+        # sync calls always log (a real provider call happened just now).
+        _rc_label = f"rc_{hazard_code}_pass_{pass_idx}"
+        if replayed is None or not hs_batch.llm_call_already_logged(run_id, iso3, _rc_label):
+            log_hs_llm_call(
+                hs_run_id=run_id,
+                iso3=iso3,
+                hazard_code=_rc_label,
+                model_spec=model_spec,
+                prompt_text=prompt,
+                response_text=text or "",
+                usage=usage_for_log,
+                error_text=log_error_text,
+                is_test=is_test_mode(),
+            )
+            logger.info(
+                "RC logged call: hs_run_id=%s iso3=%s hazard=rc_%s_pass_%s",
+                run_id, iso3, hazard_code, pass_idx,
+            )
 
         pass_rcs.append(rc_obj)
         pass_results.append({
@@ -862,10 +908,21 @@ def run_rc_for_country(
     )
 
     # Phase 1: Parallel grounding calls for active hazards.
+    # In a staged collect stage the grounding already ran (and was persisted)
+    # during hs_submit — reload the packs from the DB instead of re-fetching
+    # (and re-paying for) Brave/OpenAI/Gemini searches.
+    from horizon_scanner import hs_batch
+
+    _rc_collect = hs_batch.family_mode("hs_rc") == "collect"
     hazards_to_ground = [hz for hz in expected_hazards if hz in active and hz in _RC_HAZARDS]
     grounding_results: Dict[str, dict[str, Any] | None] = {}
 
-    if hazards_to_ground:
+    if hazards_to_ground and _rc_collect:
+        for hz in hazards_to_ground:
+            grounding_results[hz] = hs_batch.load_grounding_pack(
+                run_id, iso3_up, hz, prefer_prefix="rc_grounding"
+            )
+    elif hazards_to_ground:
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(5, len(hazards_to_ground))) as executor:
             futures = {
                 executor.submit(
@@ -885,31 +942,33 @@ def run_rc_for_country(
                     logger.warning("RC grounding future failed for %s %s: %s", iso3_up, hz, exc)
                     grounding_results[hz] = None
 
-    # Persist grounding packs so the forecaster can inject them into SPD prompts.
-    for hz, pack in grounding_results.items():
-        if pack is None:
-            continue
-        try:
-            log_hs_hazard_tail_packs_to_db(
-                run_id,
-                [{
-                    "iso3": iso3_up,
-                    "hazard_code": hz,
-                    "rc_level": 0,
-                    "rc_score": 0.0,
-                    "rc_direction": "unknown",
-                    "rc_window": "",
-                    "query": f"rc_grounding: {pack.get('query', '')}",
-                    "markdown": pack.get("markdown", ""),
-                    "sources": pack.get("sources", []),
-                    "grounded": pack.get("grounded", False),
-                    "grounding_debug": pack.get("debug", {}),
-                    "structural_context": pack.get("structural_context", ""),
-                    "recent_signals": pack.get("recent_signals", []),
-                }],
-            )
-        except Exception as exc:
-            logger.warning("Failed to persist RC grounding for %s %s: %s", iso3_up, hz, exc)
+    # Persist grounding packs so the forecaster can inject them into SPD
+    # prompts (skipped on collect — already persisted by hs_submit).
+    if not _rc_collect:
+        for hz, pack in grounding_results.items():
+            if pack is None:
+                continue
+            try:
+                log_hs_hazard_tail_packs_to_db(
+                    run_id,
+                    [{
+                        "iso3": iso3_up,
+                        "hazard_code": hz,
+                        "rc_level": 0,
+                        "rc_score": 0.0,
+                        "rc_direction": "unknown",
+                        "rc_window": "",
+                        "query": f"rc_grounding: {pack.get('query', '')}",
+                        "markdown": pack.get("markdown", ""),
+                        "sources": pack.get("sources", []),
+                        "grounded": pack.get("grounded", False),
+                        "grounding_debug": pack.get("debug", {}),
+                        "structural_context": pack.get("structural_context", ""),
+                        "recent_signals": pack.get("recent_signals", []),
+                    }],
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist RC grounding for %s %s: %s", iso3_up, hz, exc)
 
     # Phase 2: Sequential RC calls per active hazard (2-pass each).
     merged_hazards: Dict[str, Dict[str, Any]] = {}
