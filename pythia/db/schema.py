@@ -1783,6 +1783,124 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
             },
         )
 
+        # Provider Batch-API state (pythia/llm_batch.py). The DB travels in
+        # the pythia-resolver-db(-staged) artifact between pipeline stages, so
+        # these two tables ARE the cross-stage batch state: a submit stage
+        # enqueues rows + provider batch ids here, the poller reads pending
+        # batches, and a collect stage replays results out of
+        # llm_batch_requests instead of re-hitting the provider.
+        _ensure_table_and_columns(
+            con,
+            "llm_batches",
+            """
+            CREATE TABLE IF NOT EXISTS llm_batches (
+                batch_id TEXT PRIMARY KEY,
+                provider TEXT,
+                provider_batch_id TEXT,
+                family TEXT,
+                run_id TEXT,
+                hs_run_id TEXT,
+                pipeline_id TEXT,
+                stage TEXT,
+                model_id TEXT,
+                status TEXT,
+                n_requests INTEGER,
+                n_succeeded INTEGER,
+                n_errored INTEGER,
+                n_expired INTEGER,
+                n_fallback_sync INTEGER,
+                input_file_id TEXT,
+                output_file_id TEXT,
+                error_file_id TEXT,
+                results_url TEXT,
+                submitted_at TIMESTAMP,
+                ended_at TIMESTAMP,
+                collected_at TIMESTAMP,
+                error_text TEXT,
+                is_test BOOLEAN DEFAULT FALSE
+            );
+            """,
+            {
+                "batch_id": "TEXT",
+                "provider": "TEXT",
+                "provider_batch_id": "TEXT",
+                "family": "TEXT",
+                "run_id": "TEXT",
+                "hs_run_id": "TEXT",
+                "pipeline_id": "TEXT",
+                "stage": "TEXT",
+                "model_id": "TEXT",
+                "status": "TEXT",
+                "n_requests": "INTEGER",
+                "n_succeeded": "INTEGER",
+                "n_errored": "INTEGER",
+                "n_expired": "INTEGER",
+                "n_fallback_sync": "INTEGER",
+                "input_file_id": "TEXT",
+                "output_file_id": "TEXT",
+                "error_file_id": "TEXT",
+                "results_url": "TEXT",
+                "submitted_at": "TIMESTAMP",
+                "ended_at": "TIMESTAMP",
+                "collected_at": "TIMESTAMP",
+                "error_text": "TEXT",
+                "is_test": "BOOLEAN DEFAULT FALSE",
+            },
+        )
+
+        _ensure_table_and_columns(
+            con,
+            "llm_batch_requests",
+            """
+            CREATE TABLE IF NOT EXISTS llm_batch_requests (
+                custom_id TEXT PRIMARY KEY,
+                batch_id TEXT,
+                provider TEXT,
+                model_id TEXT,
+                family TEXT,
+                question_id TEXT,
+                iso3 TEXT,
+                hazard_code TEXT,
+                metric TEXT,
+                model_key TEXT,
+                pass_idx INTEGER,
+                anchor_month TEXT,
+                prompt_sha256 TEXT,
+                request_body_json TEXT,
+                status TEXT,
+                response_text TEXT,
+                usage_json TEXT,
+                error_text TEXT,
+                created_at TIMESTAMP,
+                completed_at TIMESTAMP,
+                is_test BOOLEAN DEFAULT FALSE
+            );
+            """,
+            {
+                "custom_id": "TEXT",
+                "batch_id": "TEXT",
+                "provider": "TEXT",
+                "model_id": "TEXT",
+                "family": "TEXT",
+                "question_id": "TEXT",
+                "iso3": "TEXT",
+                "hazard_code": "TEXT",
+                "metric": "TEXT",
+                "model_key": "TEXT",
+                "pass_idx": "INTEGER",
+                "anchor_month": "TEXT",
+                "prompt_sha256": "TEXT",
+                "request_body_json": "TEXT",
+                "status": "TEXT",
+                "response_text": "TEXT",
+                "usage_json": "TEXT",
+                "error_text": "TEXT",
+                "created_at": "TIMESTAMP",
+                "completed_at": "TIMESTAMP",
+                "is_test": "BOOLEAN DEFAULT FALSE",
+            },
+        )
+
         _ensure_table_and_columns(
             con,
             "pm_checks",
