@@ -74,9 +74,9 @@ llm:
   # pythia/tests/test_model_registry.py enforces registry <-> cost-table sync.
   # ==========================================================================
   models:
-    gpt:          openai:gpt-5.4                  # OpenAI frontier
-    gpt_mini:     openai:gpt-5.4-mini             # OpenAI small
-    claude:       anthropic:claude-opus-4-8       # Anthropic frontier (ensemble + Sibyl)
+    gpt:          openai:gpt-5.6-sol              # OpenAI frontier
+    gpt_mini:     openai:gpt-5.6-luna             # OpenAI small
+    claude:       anthropic:claude-opus-5         # Anthropic frontier (ensemble + Sibyl)
     gemini_pro:   google:gemini-3.1-pro-preview   # Google frontier
     gemini_flash: google:gemini-3.5-flash         # Google fast (thinking) — HS triage/RC, Track 2, scenarios
     gemini_lite:  google:gemini-2.5-flash         # Google cheap tier (grounding/scraping fallbacks)
@@ -92,15 +92,19 @@ llm:
       # carry per-model params. Legacy formats ("provider:model_id" strings or
       # {provider, model_id} dicts) still work.
       ensemble:
-        # GPT: reasoning model — temperature not supported (API rejects it).
-        # High effort reserved for the frontier member (main reasoning depth).
+        # GPT (Sol): reasoning model — temperature not supported (API rejects it).
+        # `high` is the frontier member's reasoning depth. GPT-5.6 also offers
+        # `xhigh`, which is aimed at agentic/coding loops; a single-shot SPD call
+        # is not one, so `high` stays the sweet spot.
         - model: gpt
           thinking: high            # maps to reasoning_effort=high
 
         # Claude Opus: rejects sampling params (the provider adapter drops
-        # temperature for the opus-4-7+/sonnet-5+/fable family). Uses the
-        # API's default (adaptive) thinking — no thinking knob is wired for
-        # Anthropic in providers.py.
+        # temperature for the opus-4-7+/opus-5/sonnet-5+/fable family). Left
+        # with no thinking key on purpose — Opus 5 runs adaptive thinking by
+        # default, and no Anthropic thinking knob is wired in providers.py.
+        # Thinking shares the max_tokens budget, hence the raised SPD ceiling
+        # in providers.py (_ANTHROPIC_SPD_MAX_OUTPUT_DEFAULT).
         - model: claude
 
         # Gemini Pro: thinking model — medium thinking for analytical depth
@@ -115,8 +119,8 @@ llm:
           temperature: 0.2
           thinking: low
 
-        # GPT mini: smaller reasoning model — medium effort is the sweet spot
-        # (low degrades SPD quality; high costs nearly as much as full GPT).
+        # GPT mini (Luna): smaller reasoning model — medium effort is the sweet
+        # spot (low degrades SPD quality; high costs nearly as much as full GPT).
         - model: gpt_mini
           thinking: medium           # maps to reasoning_effort=medium
 

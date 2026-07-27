@@ -142,6 +142,19 @@ jobs:
           echo "=== Running Forecaster SPD unit tests ==="
           pytest -vv forecaster/tests/test_spd.py
 
+      - name: === Running model registry + provider guards ===
+        run: |
+          # The model registry / cost-table sync guard previously ran in NO
+          # workflow, so a lineup swap that forgot a model_costs.json entry
+          # (silent $0 cost logging + a broken Sibyl budget cap) or forgot to
+          # extend _ANTHROPIC_NO_TEMPERATURE_PREFIXES (HTTP 400 on every Claude
+          # and Sibyl call) reached main green.
+          echo "=== Running model registry + provider guards ==="
+          pytest -vv \
+            pythia/tests/test_model_registry.py \
+            forecaster/tests/test_providers.py \
+            forecaster/tests/test_spd_model_params.py
+
       - name: Run SPD experimental mode (dual/bayesmc)
         if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'bayesmc_write' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') }}
         env:

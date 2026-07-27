@@ -42,7 +42,7 @@ export function formatModelName(raw: string): string {
     }
   }
 
-  // GPT models: gpt-5.4, gpt-5.4-mini, etc.
+  // GPT models: gpt-5.6-sol, gpt-5.6-luna, gpt-5.4-mini, etc.
   const gptMatch = lowered.match(/^gpt-([\d.]+)(?:-(.+))?$/);
   if (gptMatch) {
     const version = gptMatch[1];

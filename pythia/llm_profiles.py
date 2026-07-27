@@ -8,7 +8,7 @@
 All model choices flow through this module:
 
 - ``llm.models`` in config.yaml is the MODEL REGISTRY: one alias per model
-  family (e.g. ``gpt: openai:gpt-5.4``). Swapping a family means editing that
+  family (e.g. ``gpt: openai:gpt-5.6-sol``). Swapping a family means editing that
   one line (plus a cost entry in pythia/model_costs.json).
 - ``llm.profiles.<profile>.ensemble`` lists SPD ensemble members, each
   referencing a registry alias via ``model:`` (legacy ``provider:model_id``
@@ -38,7 +38,7 @@ _ROLE_FALLBACKS: Dict[str, str] = {
     "hs_triage_pass2": "google:gemini-3.5-flash",
     "rc_pass1": "google:gemini-3.5-flash",
     "rc_pass2": "google:gemini-3.5-flash",
-    "hs_fallback": "openai:gpt-5.4",
+    "hs_fallback": "openai:gpt-5.6-sol",
     "track2_spd": "google:gemini-3.5-flash",
     "scenario_writer": "google:gemini-3.5-flash",
     "grounding_gemini": "google:gemini-2.5-flash",
@@ -207,8 +207,8 @@ def get_current_models() -> Dict[str, str]:
     provider in the ensemble).
 
     Example return:
-      {"openai": "gpt-5.4", "google": "gemini-3.1-pro-preview",
-       "anthropic": "claude-opus-4-8"}
+      {"openai": "gpt-5.6-sol", "google": "gemini-3.1-pro-preview",
+       "anthropic": "claude-opus-5"}
     """
 
     models: Dict[str, str] = {}

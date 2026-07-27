@@ -16,7 +16,7 @@ step's prompt carries only the question, the outside-view anchor, the
 current belief state, and the LAST tool result. The belief state is the
 running memory.
 
-Trial diversity: ``claude-opus-4-8`` rejects sampling parameters
+Trial diversity: ``claude-opus-5`` rejects sampling parameters
 (temperature returns HTTP 400), so the K trials are differentiated by
 explicit perspective seeds in the prompt rather than temperature.
 """

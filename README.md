@@ -212,9 +212,9 @@ All model choices are centralized in [`pythia/config.yaml`](pythia/config.yaml) 
 ```yaml
 llm:
   models:                # THE single place to swap a model family
-    gpt:          openai:gpt-5.4
-    gpt_mini:     openai:gpt-5.4-mini
-    claude:       anthropic:claude-opus-4-8
+    gpt:          openai:gpt-5.6-sol
+    gpt_mini:     openai:gpt-5.6-luna
+    claude:       anthropic:claude-opus-5
     gemini_pro:   google:gemini-3.1-pro-preview
     gemini_flash: google:gemini-3.5-flash
     gemini_lite:  google:gemini-2.5-flash
@@ -238,7 +238,7 @@ llm:
 
 ### Changing models
 
-- **Upgrade a model family** (e.g. GPT-5.4 → GPT-5.5): change the id on one line in `llm.models`, then add a cost entry in `pythia/model_costs.json`. Every ensemble member and role that references the alias picks up the new model.
+- **Upgrade a model family** (e.g. GPT-5.4 → GPT-5.6): change the id on one line in `llm.models`, then add a cost entry in `pythia/model_costs.json`. Every ensemble member and role that references the alias picks up the new model.
 - **Add/remove an ensemble member**: add or delete a `- model: <alias>` entry (define the alias in `llm.models` first). Multiple members from the same provider are supported.
 - **Point a role at a different model**: edit the `roles:` block. Values are registry aliases or explicit `provider:model_id` refs.
 - **Add a new provider**: requires a `call_<provider>()` function and dispatch branch in `forecaster/providers.py`, plus an entry in `_PROVIDER_ENV_KEYS`.
@@ -419,9 +419,9 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
   - `PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH`, `PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO`
   - `PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC`, `PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC`
   - `PYTHIA_GOOGLE_SPD_RETRIES`
-- **SPD ensemble override**: `PYTHIA_SPD_ENSEMBLE_SPECS` (e.g. `openai:gpt-5.4,google:gemini-3.5-flash`).
+- **SPD ensemble override**: `PYTHIA_SPD_ENSEMBLE_SPECS` (e.g. `openai:gpt-5.6-sol,google:gemini-3.5-flash`).
 - **HS triage resilience**:
-  - `PYTHIA_HS_FALLBACK_MODEL_SPECS` (defaults to `hs_fallback` from the active profile, then `openai:gpt-5.4`; keeps HS triage running when Gemini fails).
+  - `PYTHIA_HS_FALLBACK_MODEL_SPECS` (defaults to `hs_fallback` from the active profile, then `openai:gpt-5.6-sol`; keeps HS triage running when Gemini fails).
   - `PYTHIA_HS_ONLY_COUNTRIES` (comma-separated ISO3s/names to rerun HS triage for a subset).
   - `PYTHIA_PROVIDER_FAILURE_THRESHOLD`, `PYTHIA_PROVIDER_COOLDOWN_SECONDS`, `PYTHIA_PROVIDER_RESET_ON_SUCCESS`
   - `PYTHIA_LLM_RETRY_TIMEOUTS` (set `0` to opt out of timeout retries outside HS triage)
