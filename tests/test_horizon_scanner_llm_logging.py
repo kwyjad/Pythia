@@ -12,7 +12,13 @@ import pytest
 
 duckdb = pytest.importorskip("duckdb")
 
-from horizon_scanner.llm_logging import log_hs_llm_call
+from horizon_scanner.llm_logging import (
+    GROUNDING_BREAKER_MODEL_ID,
+    GROUNDING_FAILED_MODEL_ID,
+    GROUNDING_UNAVAILABLE_MODEL_ID,
+    log_hs_llm_call,
+    resolve_grounding_model_id,
+)
 from pythia.db.schema import connect, ensure_schema
 
 
@@ -129,3 +135,87 @@ def test_run_hs_logs_single_llm_call_per_country(monkeypatch: pytest.MonkeyPatch
     hazard_codes = {row[0] for row in triage_rows}
     assert "DR" in hazard_codes
     assert "FL" in hazard_codes
+
+
+class TestResolveGroundingModelId:
+    """A grounding attempt that never reached a backend must not be logged as a model.
+
+    Before this, both grounding log sites defaulted ``model_id`` to the bare string
+    "unknown", which surfaced on the Costs page as if "unknown" were a model when it
+    actually meant "this country-hazard pair got no grounding evidence at all".
+
+    The pack shapes below mirror the real producers — keep them in sync with
+    ``pythia/web_research/backends/brave_search.py`` and the ``all_failed`` fallback
+    packs in ``regime_change_llm.py`` / ``triage.py``.
+    """
+
+    def test_real_backend_model_id_passes_through(self) -> None:
+        # brave_search.py success path — including a run that found 0 sources, which
+        # still cost money and must stay attributed to the backend that ran.
+        pack = {
+            "sources": [],
+            "grounded": False,
+            "error": {"type": "no_results", "message": "Brave Search returned no results"},
+            "debug": {
+                "provider": "brave",
+                "model_id": "brave-web-search",
+                "selected_model_id": "brave-web-search",
+                "grounding_backend": "brave_search",
+            },
+        }
+        assert resolve_grounding_model_id(pack) == "brave-web-search"
+
+    def test_selected_model_id_is_used_when_model_id_absent(self) -> None:
+        pack = {"debug": {"selected_model_id": "gemini-2.5-flash", "grounding_backend": "gemini"}}
+        assert resolve_grounding_model_id(pack) == "gemini-2.5-flash"
+
+    def test_all_backends_failed(self) -> None:
+        # The synthetic pack built when brave, openai AND gemini all returned nothing.
+        pack = {
+            "sources": [],
+            "grounded": False,
+            "markdown": "",
+            "debug": {"grounding_backend": "all_failed"},
+        }
+        assert resolve_grounding_model_id(pack) == GROUNDING_FAILED_MODEL_ID
+
+    def test_brave_circuit_breaker_tripped(self) -> None:
+        pack = {
+            "sources": [],
+            "grounded": False,
+            "error": {
+                "type": "circuit_breaker_tripped",
+                "message": "Brave Search circuit breaker is open — budget likely exhausted",
+            },
+            "debug": {"grounding_backend": "brave_circuit_breaker_tripped"},
+        }
+        assert resolve_grounding_model_id(pack) == GROUNDING_BREAKER_MODEL_ID
+
+    def test_missing_api_key(self) -> None:
+        # This pack carries no grounding_backend at all — only debug["error"].
+        pack = {
+            "sources": [],
+            "error": {"type": "missing_api_key", "message": "BRAVE_SEARCH_API_KEY not set"},
+            "debug": {"error": "missing_api_key"},
+        }
+        assert resolve_grounding_model_id(pack) == GROUNDING_UNAVAILABLE_MODEL_ID
+
+    def test_no_backend_available(self) -> None:
+        pack = {"error": {"type": "no_backend_available", "message": "no backend attempts"}, "debug": {}}
+        assert resolve_grounding_model_id(pack) == GROUNDING_UNAVAILABLE_MODEL_ID
+
+    def test_degenerate_packs_never_raise(self) -> None:
+        assert resolve_grounding_model_id({}) == GROUNDING_FAILED_MODEL_ID
+        assert resolve_grounding_model_id({"debug": None}) == GROUNDING_FAILED_MODEL_ID
+        assert resolve_grounding_model_id({"debug": "not-a-dict"}) == GROUNDING_FAILED_MODEL_ID
+
+    def test_sentinels_are_not_priced_as_models(self) -> None:
+        # These are not models: a cost-table entry would silently invent spend.
+        from forecaster.providers import resolve_price_per_1m
+
+        for sentinel in (
+            GROUNDING_FAILED_MODEL_ID,
+            GROUNDING_BREAKER_MODEL_ID,
+            GROUNDING_UNAVAILABLE_MODEL_ID,
+        ):
+            assert resolve_price_per_1m(sentinel) is None

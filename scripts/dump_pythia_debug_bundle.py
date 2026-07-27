@@ -25,6 +25,11 @@ from typing import Any, Dict, List, Set, Tuple
 import duckdb
 import pandas as pd
 from forecaster.providers import SPD_ENSEMBLE, estimate_cost_usd, parse_ensemble_specs
+from horizon_scanner.llm_logging import (
+    GROUNDING_BREAKER_MODEL_ID,
+    GROUNDING_FAILED_MODEL_ID,
+    GROUNDING_UNAVAILABLE_MODEL_ID,
+)
 from pythia.db import schema as pythia_schema
 from resolver.db import duckdb_io
 from scripts.ci.llm_latency_summary import render_latency_markdown
@@ -3872,15 +3877,32 @@ def emit_health_report_json(data: BundleData, out_dir: Path) -> None:
             ],
         }
 
-    # RC grounding health (from llm_calls with hazard_code like GROUNDING_*)
+    # RC grounding health (from llm_calls with hazard_code like GROUNDING_*).
+    #
+    # model_id sentinels written when a grounding attempt never reached a backend.
+    # A non-zero count here means those country-hazard pairs got NO grounding
+    # evidence at all — a breaker-tripped count is the Brave budget gate firing.
+    _GROUNDING_NO_BACKEND_REASONS = {
+        GROUNDING_FAILED_MODEL_ID: "all_backends_failed",
+        GROUNDING_BREAKER_MODEL_ID: "brave_circuit_breaker_tripped",
+        GROUNDING_UNAVAILABLE_MODEL_ID: "backend_unavailable",
+    }
+
     def _grounding_subsystem_health(rows: list[dict[str, Any]]) -> dict[str, Any]:
         total_calls = sum(int(r.get("n_calls") or 0) for r in (rows or []))
         total_errors = sum(int(r.get("n_errors") or 0) for r in (rows or []))
         total_verified = sum(int(r.get("n_verified_sources") or 0) for r in (rows or []))
+        no_backend: dict[str, int] = {}
+        for r in rows or []:
+            reason = _GROUNDING_NO_BACKEND_REASONS.get(str(r.get("model_id") or "").strip())
+            if reason:
+                no_backend[reason] = no_backend.get(reason, 0) + int(r.get("n_calls") or 0)
         return {
             "n_calls": total_calls,
             "n_errors": total_errors,
             "n_verified_sources": total_verified,
+            "n_no_backend": sum(no_backend.values()),
+            "no_backend_by_reason": no_backend,
             "by_provider_model": [
                 {
                     "provider": r.get("provider"),

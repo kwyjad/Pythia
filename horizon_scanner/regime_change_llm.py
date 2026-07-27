@@ -52,7 +52,11 @@ from horizon_scanner._utils import (
     status_from_error,
 )
 from horizon_scanner.db_writer import log_hs_hazard_tail_packs_to_db
-from horizon_scanner.llm_logging import build_compact_grounding_log, log_hs_llm_call
+from horizon_scanner.llm_logging import (
+    build_compact_grounding_log,
+    log_hs_llm_call,
+    resolve_grounding_model_id,
+)
 from pythia.test_mode import is_test_mode
 from horizon_scanner.rc_grounding_prompts import (
     build_grounding_prompt,
@@ -319,7 +323,7 @@ def _run_grounding_for_hazard(
         # Log grounding call to llm_calls for cost tracking
         try:
             usage_info = dict(pack.get("debug", {}).get("usage", {}))
-            model_id = pack.get("debug", {}).get("model_id", "unknown")
+            model_id = resolve_grounding_model_id(pack)
             provider = pack.get("debug", {}).get("grounding_backend", "unknown")
             if "brave" in provider:
                 provider = "brave"
