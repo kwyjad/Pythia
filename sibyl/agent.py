@@ -150,6 +150,84 @@ Rules for quantiles:
 {parse_feedback}"""
 
 
+# --- V3 (static-first) segment templates -----------------------------------
+#
+# Same content as SIBYL_STEP_PROMPT_TEMPLATE, reordered so the stable spans
+# lead and the per-step churn trails:
+#   B1 run-static (head + as-of + task/action rules + JSON schema)  — stable
+#      across every step/trial/question of a run (modulo {metric})
+#   B2 per-question (question block + outside-view base rate)       — stable
+#      across all K trials x MAX_STEPS steps of a question  → cache breakpoint
+#   B3 per-trial (perspective seed)                                 — stable
+#      across the trial's steps                             → cache breakpoint
+#   B4 per-step (belief state, last tool result, parse feedback)    — churns
+# Anthropic cache_control on B2/B3 turns ~29 of the ~30 Opus reads per
+# question into 0.1x cache reads on the stable span. Active only when both
+# PYTHIA_PROMPT_V3_ORDER and PYTHIA_PROMPT_CACHE_ENABLED are on.
+
+SIBYL_STEP_RUN_STATIC_V3 = """You are a superforecaster running a deep-research investigation to produce a probabilistic forecast. You reason like the best geopolitical forecasters: you start from the OUTSIDE VIEW (the historical base rate below), gather INSIDE-VIEW evidence from the open web, and explicitly reconcile the two at every step.
+
+FORECAST AS-OF DATE: {as_of}. Treat this as "today". You must not use, cite, or rely on any information published after this date.{backtest_note}
+
+=== YOUR TASK EACH STEP ===
+Decide your next action and update your belief state.
+
+Actions:
+- "brave_search": run a web search. action_input = the query (natural language, include the country name; searches are date-filtered to the as-of date).
+- "fetch_url": read a page found in earlier search results. action_input = the URL.
+- "submit": finalize your forecast. Use this as soon as further research would not materially change your quantiles — do not burn steps for their own sake. You MUST submit by step {max_steps}.
+
+Respond with ONLY a JSON object, no prose outside it:
+{{
+  "action": "brave_search" | "fetch_url" | "submit",
+  "action_input": "<query or url; empty string for submit>",
+  "belief_state": {{
+    "quantiles": {{{quantile_keys}}},
+    "confidence": "low" | "medium" | "high",
+    "evidence_higher": ["evidence found so far that pushes the estimate HIGHER"],
+    "evidence_lower": ["evidence found so far that pushes the estimate LOWER"],
+    "open_questions": ["what you still need to find out"],
+    "baserate_reconciliation": "how your current estimate relates to the outside-view anchor and why it departs (or does not)",
+    "step_rationale": "what THIS step's information changed and why"
+  }}
+}}
+
+Rules for quantiles:
+- values are {metric} counts for one month, in raw units (people/fatalities), NOT thousands;
+- non-decreasing across levels (q0.1 <= q0.25 <= ... <= q0.99);
+- this data is right-skewed and heavy-tailed: keep q0.95/q0.99 honest — for this class of data q0.99 is typically several multiples of the median;
+- 0 is a legitimate value (many country-months have zero impact);
+- update the belief state EVERY step, even when the action is another search.
+"""
+
+SIBYL_STEP_QUESTION_V3 = """
+=== QUESTION ===
+{wording}
+
+Country: {country} ({iso3}) | Hazard: {hazard_code} | Metric: {metric}
+Metric definition: {metric_definition}
+Forecast window (6 calendar months): {forecast_months}
+You are forecasting the distribution of the MONTHLY value of this metric over the window months. Your quantiles must describe a single month drawn from this window — account for both month-to-month variation (seasonality, escalation) and your own uncertainty.
+
+=== OUTSIDE VIEW (base-rate anchor — reason from it and away from it, never treat it as a target) ===
+{base_rate_block}
+"""
+
+SIBYL_STEP_TRIAL_V3 = """
+=== YOUR TRIAL PERSPECTIVE ===
+{perspective}
+"""
+
+SIBYL_STEP_STEP_V3 = """
+=== CURRENT BELIEF STATE (step {step} of {max_steps}) ===
+{belief_json}
+
+=== RESULT OF YOUR LAST ACTION ===
+{last_tool_result}
+{parse_feedback}
+Now decide your next action per "YOUR TASK EACH STEP" above and respond with ONLY the JSON object."""
+
+
 @dataclass
 class TrialStepRecord:
     step: int
@@ -228,7 +306,18 @@ def build_step_prompt(
     last_tool_result: str,
     country_name: str,
     parse_feedback: str = "",
-) -> str:
+    return_segments: bool = False,
+):
+    """Build the step prompt (legacy or V3 section order).
+
+    With ``return_segments=True`` returns an ordered list of
+    ``(text, is_cache_breakpoint)`` tuples whose concatenation is the prompt;
+    under legacy order that's a single unmarked segment (nothing usefully
+    cacheable), under V3 order the per-question and per-trial spans carry
+    breakpoints for Anthropic cache_control.
+    """
+    from forecaster.prompts import _prompt_v3_order_enabled  # noqa: PLC0415
+
     backtest_note = ""
     if is_backtest(as_of):
         backtest_note = (
@@ -236,7 +325,7 @@ def build_step_prompt(
             "date-capped, and any knowledge you have of events after this "
             "date must be ignored."
         )
-    return SIBYL_STEP_PROMPT_TEMPLATE.format(
+    common = dict(
         as_of=as_of.isoformat(),
         backtest_note=backtest_note,
         wording=question.wording or "(no wording stored)",
@@ -258,16 +347,38 @@ def build_step_prompt(
         parse_feedback=parse_feedback,
     )
 
+    if not _prompt_v3_order_enabled():
+        prompt = SIBYL_STEP_PROMPT_TEMPLATE.format(**common)
+        if return_segments:
+            return [(prompt, False)]
+        return prompt
 
-def _call_model(prompt: str) -> tuple[str, Dict[str, Any], str]:
+    segments = [
+        (SIBYL_STEP_RUN_STATIC_V3.format(**common), False),
+        (SIBYL_STEP_QUESTION_V3.format(**common), True),   # cache breakpoint 1
+        (SIBYL_STEP_TRIAL_V3.format(**common), True),      # cache breakpoint 2
+        (SIBYL_STEP_STEP_V3.format(**common), False),
+    ]
+    if return_segments:
+        return segments
+    return "".join(text for text, _ in segments)
+
+
+def _call_model(
+    prompt: str, *, cache_segments: Optional[List[tuple]] = None
+) -> tuple[str, Dict[str, Any], str]:
     """One Opus call through the repo's provider layer.
 
     Returns (text, usage_with_cost, error). Cost is estimated from
-    pythia/model_costs.json via the provider helpers.
+    pythia/model_costs.json via the provider helpers (cache-aware since the
+    Phase-0 telemetry work — cache reads bill at the cached rate, which also
+    keeps the Sibyl budget cap honest when caching is on).
     """
     from forecaster.providers import call_anthropic, estimate_cost_usd  # noqa: PLC0415
 
-    result = call_anthropic(prompt, MODEL, 1.0, purpose="sibyl_step")
+    result = call_anthropic(
+        prompt, MODEL, 1.0, purpose="sibyl_step", cache_segments=cache_segments
+    )
     usage = dict(result.usage or {})
     if not usage.get("cost_usd"):
         usage["cost_usd"] = estimate_cost_usd(MODEL, usage)
@@ -318,7 +429,7 @@ def run_trial(
         decision: Optional[StepDecision] = None
         parse_feedback = ""
         for attempt in range(1, ANTHROPIC_MAX_ATTEMPTS + 1):
-            prompt = build_step_prompt(
+            segments = build_step_prompt(
                 question,
                 base_rate,
                 belief,
@@ -329,8 +440,15 @@ def run_trial(
                 last_tool_result=last_tool_result,
                 country_name=country_name,
                 parse_feedback=parse_feedback,
+                return_segments=True,
             )
-            text, usage, error = call(prompt)
+            prompt = "".join(text for text, _ in segments)
+            # The injectable test seam takes a plain prompt string; the
+            # default path passes the segments so cache_control can apply.
+            if model_call is not None:
+                text, usage, error = call(prompt)
+            else:
+                text, usage, error = _call_model(prompt, cache_segments=segments)
             cost = float(usage.get("cost_usd") or 0.0)
             result.cost.add(COST_KIND_OPUS, cost)
             tracker.add(question.question_id, COST_KIND_OPUS, cost)

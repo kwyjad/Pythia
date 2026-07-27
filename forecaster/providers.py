@@ -929,7 +929,9 @@ def build_openai_body(
         body["reasoning_effort"] = reasoning_effort
     elif not _openai_drops_temperature(model):
         body["temperature"] = float(temperature)
-    if prompt_cache_key:
+    # Routing hint only (caching itself is automatic for >=1024-token
+    # prefixes); gated so legacy requests stay byte-identical when off.
+    if prompt_cache_key and _prompt_cache_enabled():
         body["prompt_cache_key"] = prompt_cache_key
     return body
 
@@ -1046,12 +1048,31 @@ def _anthropic_stop_reason_error(payload: Any) -> Optional[str]:
     return None
 
 
+def _prompt_cache_enabled() -> bool:
+    """Gate for explicit prompt-cache markers (PYTHIA_PROMPT_CACHE_ENABLED).
+
+    Only affects Anthropic cache_control blocks and the OpenAI
+    prompt_cache_key routing hint; Gemini implicit caching is automatic and
+    has no request knob. Default OFF (byte-identical legacy requests).
+    """
+
+    return os.getenv("PYTHIA_PROMPT_CACHE_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+
+
+# Minimum estimated tokens (chars/4) a cache-marked span must reach before we
+# attach cache_control — shorter prefixes silently don't cache but still pay
+# the 1.25x write intent, so skip the marker entirely. 512 tokens is the
+# claude-opus-5 minimum; most other Anthropic models need 1024+.
+_ANTHROPIC_CACHE_MIN_CHARS = int(os.getenv("PYTHIA_ANTHROPIC_CACHE_MIN_CHARS", "4096") or 4096)
+
+
 def build_anthropic_body(
     prompt: str,
     model: str,
     temperature: float,
     *,
     purpose: str | None = None,
+    cache_segments: Optional[List[tuple]] = None,
 ) -> dict:
     """Build the exact /v1/messages request body.
 
@@ -1059,17 +1080,45 @@ def build_anthropic_body(
     (pythia.llm_batch: each batch item's ``params`` is exactly this body) so
     batch payloads are byte-identical to sync payloads. Carries the SPD/binary
     max_tokens switch and the no-sampling-params model rule.
+
+    ``cache_segments`` is an ordered list of ``(text, is_breakpoint)`` tuples
+    whose concatenation must equal ``prompt``. When provided AND
+    PYTHIA_PROMPT_CACHE_ENABLED is on, the user message is sent as multiple
+    text blocks with ``cache_control: {type: ephemeral}`` on breakpoint blocks
+    (max 4 per request, enforced here). Otherwise the plain single-string
+    message is sent — byte-identical to the legacy request.
     """
 
     # Use higher max_tokens for SPD/binary forecast calls to avoid truncation
     max_tokens = _ANTHROPIC_MAX_OUTPUT
     if purpose in ("spd_v2", "binary_v2"):
         max_tokens = _ANTHROPIC_SPD_MAX_OUTPUT
+
+    content: Any = prompt
+    if cache_segments and _prompt_cache_enabled():
+        blocks: List[dict] = []
+        marked = 0
+        chars_so_far = 0
+        for seg in cache_segments:
+            text, is_breakpoint = seg[0], bool(seg[1])
+            if not text:
+                continue
+            chars_so_far += len(text)
+            block: dict = {"type": "text", "text": text}
+            # Only mark breakpoints where the cumulative prefix is plausibly
+            # above the model's cacheable minimum, and never more than 4.
+            if is_breakpoint and marked < 4 and chars_so_far >= _ANTHROPIC_CACHE_MIN_CHARS:
+                block["cache_control"] = {"type": "ephemeral"}
+                marked += 1
+            blocks.append(block)
+        if blocks:
+            content = blocks
+
     body: dict = {
         "model": model,
         "max_tokens": max_tokens,
         "temperature": float(temperature),
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": content}],
     }
     # Opus 4.7+ family models reject sampling params with HTTP 400.
     if model.lower().startswith(_ANTHROPIC_NO_TEMPERATURE_PREFIXES):
@@ -1105,7 +1154,14 @@ def _anthropic_usage_from_payload(payload: Any) -> Dict[str, Any]:
     return usage_to_dict(usage_dict)
 
 
-def call_anthropic(prompt: str, model: str, temperature: float, *, purpose: str | None = None) -> ProviderResult:
+def call_anthropic(
+    prompt: str,
+    model: str,
+    temperature: float,
+    *,
+    purpose: str | None = None,
+    cache_segments: Optional[List[tuple]] = None,
+) -> ProviderResult:
     if not _ANTHROPIC_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing ANTHROPIC_API_KEY")
     url = "https://api.anthropic.com/v1/messages"
@@ -1114,7 +1170,9 @@ def call_anthropic(prompt: str, model: str, temperature: float, *, purpose: str 
         "anthropic-version": _ANTHROPIC_VERSION,
         "content-type": "application/json",
     }
-    body = build_anthropic_body(prompt, model, temperature, purpose=purpose)
+    body = build_anthropic_body(
+        prompt, model, temperature, purpose=purpose, cache_segments=cache_segments
+    )
     try:
         resp = requests.post(url, headers=headers, json=body, timeout=_ANTHROPIC_TIMEOUT)
     except Exception as exc:
@@ -1279,12 +1337,18 @@ def _call_provider_sync(
     timeout_sec: Optional[float] = None,
     thinking_level: Optional[str] = None,
     purpose: str | None = None,
+    cache_segments: Optional[List[tuple]] = None,
+    prompt_cache_key: Optional[str] = None,
 ) -> ProviderResult:
     p = (provider or "").lower()
     if p == "openai":
-        return call_openai(prompt, model, temperature, reasoning_effort=thinking_level)
+        return call_openai(
+            prompt, model, temperature,
+            reasoning_effort=thinking_level,
+            prompt_cache_key=prompt_cache_key,
+        )
     if p == "anthropic":
-        return call_anthropic(prompt, model, temperature, purpose=purpose)
+        return call_anthropic(prompt, model, temperature, purpose=purpose, cache_segments=cache_segments)
     if p in {"google", "gemini"}:
         return call_google(prompt, model, temperature, timeout_sec=timeout_sec, thinking_level=thinking_level)
     return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"unsupported provider {provider}")
@@ -1438,6 +1502,8 @@ async def call_chat_ms(
     component: str = "Forecaster",
     run_id: str | None = None,
     log_call: bool = True,
+    cache_segments: Optional[List[tuple]] = None,
+    prompt_cache_key: Optional[str] = None,
 ) -> tuple[str, Dict[str, int], str]:
     """Call the configured provider for a model spec and return (text, usage, error).
 
@@ -1446,6 +1512,12 @@ async def call_chat_ms(
     here has no phase/iso3/run linkage, so leaving it on next to a rich row
     double-counts the call's cost in phase-less aggregations (the Costs page
     "other" bucket) — see the July 2026 telemetry fix.
+
+    cache_segments / prompt_cache_key: optional prompt-cache plumbing
+    (Anthropic cache_control content blocks / OpenAI routing hint). Both are
+    inert unless PYTHIA_PROMPT_CACHE_ENABLED=1; providers that don't use a
+    given knob ignore it. ``"".join(seg[0] for seg in cache_segments)`` must
+    equal ``prompt`` — the plain string is what retries and logging use.
     """
 
     if not ms.active:
@@ -1572,6 +1644,8 @@ async def call_chat_ms(
                         timeout_sec=timeout_sec,
                         thinking_level=thinking_level,
                         purpose=ms.purpose,
+                        cache_segments=cache_segments,
+                        prompt_cache_key=prompt_cache_key,
                     )
                     if timeout_sec is not None:
                         result = await asyncio.wait_for(call_task, timeout=timeout_sec)

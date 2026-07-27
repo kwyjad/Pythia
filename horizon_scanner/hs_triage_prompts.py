@@ -57,10 +57,21 @@ _TRIAGE_SCHEMA = {
 # Shared triage preamble
 # ---------------------------------------------------------------------------
 
-_TRIAGE_PREAMBLE = """You are a humanitarian risk analyst assessing {country_name} ({iso3}).
+# Opening lines — country-specific (legacy order) vs country-generic (V3
+# order, where the country and RC context are named in the data tail so the
+# preamble stays byte-identical across countries).
+_TRIAGE_PREAMBLE_OPENING = """You are a humanitarian risk analyst assessing {country_name} ({iso3}).
 Your task: estimate the OVERALL HUMANITARIAN RISK LEVEL for {hazard_name} \
 ({hazard_code}) over the next 1–6 months.
+"""
 
+_TRIAGE_PREAMBLE_OPENING_GENERIC = """You are a humanitarian risk analyst assessing the country identified in \
+the COUNTRY DATA below.
+Your task: estimate the OVERALL HUMANITARIAN RISK LEVEL for {hazard_name} \
+({hazard_code}) over the next 1–6 months.
+"""
+
+_TRIAGE_PREAMBLE_BODY = """
 This is a triage assessment, not a precise forecast. You are producing a \
 coarse risk score that determines how much analytical attention this \
 hazard-country pair receives downstream.
@@ -73,10 +84,15 @@ ONLY whether the pattern is breaking. Severe but steady conflict = LOW RC.
 - These two scores are PARTIALLY INDEPENDENT. Do not simply copy RC into \
 triage_score. A high RC should nudge triage_score upward (emerging risk), \
 but a low RC does NOT mean low triage_score (chronic crises continue).
+"""
 
+_TRIAGE_RC_CONTEXT_BLOCK = """
 REGIME CHANGE CONTEXT (from prior RC assessment):
 {rc_context}
 """
+
+# Legacy-order preamble — unchanged text.
+_TRIAGE_PREAMBLE = _TRIAGE_PREAMBLE_OPENING + _TRIAGE_PREAMBLE_BODY + _TRIAGE_RC_CONTEXT_BLOCK
 
 _TRIAGE_SCORING_RUBRIC = """
 SCORING RUBRIC:
@@ -144,6 +160,74 @@ Field rules:
 - confidence_note: one sentence on how confident you are and what data
   gaps limit your assessment.
 """
+
+
+def _assemble_triage_prompt(
+    *,
+    country_name: str,
+    iso3: str,
+    hazard_name: str,
+    hazard_code: str,
+    preamble: str,
+    guidance_label: str,
+    rc_text: str,
+    data_block: str,
+    guidance_static: str,
+    additional_section: str,
+    schema_text: str,
+) -> str:
+    """Assemble a triage prompt in legacy or V3 (static-first) section order.
+
+    Legacy order reproduces the historical prompt byte-for-byte. V3 order
+    leads with the per-hazard static blocks (generic preamble, scoring
+    anchors, rubric, output schema) and trails with the per-country data
+    (COUNTRY line, RC context, evidence), enabling provider prefix caching.
+    """
+
+    from horizon_scanner.rc_prompts import _hs_prompt_v3_order_enabled
+
+    output_instructions = _TRIAGE_OUTPUT_INSTRUCTIONS.format(schema=schema_text)
+    guidance_open = f"=== {guidance_label}-SPECIFIC TRIAGE GUIDANCE ==="
+
+    if not _hs_prompt_v3_order_enabled():
+        return (
+            preamble
+            + f"\n\n{guidance_open}\n\n"
+            + data_block
+            + "\n"
+            + guidance_static
+            + "\n"
+            + additional_section
+            + "\n"
+            + _TRIAGE_SCORING_RUBRIC
+            + "\n"
+            + output_instructions
+        )
+
+    prefix = (
+        _TRIAGE_PREAMBLE_OPENING_GENERIC.format(
+            hazard_name=hazard_name, hazard_code=hazard_code
+        )
+        + _TRIAGE_PREAMBLE_BODY
+        + f"\n{guidance_open}\n\n"
+        + guidance_static
+        + "\n"
+        + _TRIAGE_SCORING_RUBRIC
+        + "\n"
+        + output_instructions
+        + "\nThe COUNTRY DATA follows below.\n\n"
+    )
+    suffix = (
+        f"COUNTRY: {country_name} ({iso3})\n"
+        + _TRIAGE_RC_CONTEXT_BLOCK.format(rc_context=rc_text)
+        + "\n"
+        + data_block
+        + additional_section
+        + "\nEND OF COUNTRY DATA.\n"
+        "Now score this country-hazard pair per the rubric above and return "
+        "ONLY the JSON object matching the schema.\n"
+    )
+    return prefix + suffix
 
 
 # ---------------------------------------------------------------------------
@@ -333,11 +417,7 @@ def build_triage_prompt_ace(
 {crisiswatch_context}
 """
 
-    return f"""{preamble}
-
-=== ACE-SPECIFIC TRIAGE GUIDANCE ===
-
-ACLED BASE RATE DATA:
+    data_block = f"""ACLED BASE RATE DATA:
 {acled_text}
 {forecast_section}{crisiswatch_section}
 RESOLVER FEATURES (historical context):
@@ -345,8 +425,8 @@ RESOLVER FEATURES (historical context):
 
 EVIDENCE PACK (current situation — from triage-focused web research):
 {evidence_text}
-
-ACE TRIAGE SCORING ANCHORS:
+"""
+    guidance_static = """ACE TRIAGE SCORING ANCHORS:
 
 Use ACLED trailing-12-month fatalities as the primary quantitative anchor:
 
@@ -383,10 +463,21 @@ RESOLUTION DATA: ACLED is the primary source. Note ACLED coverage gaps
 in data_quality — some countries have systematically lower reporting.
 EM-DAT may capture large discrete events that ACLED misses.
 
-=== END ACE-SPECIFIC GUIDANCE ===
-{additional_section}
-{_TRIAGE_SCORING_RUBRIC}
-{_TRIAGE_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
+=== END ACE-SPECIFIC GUIDANCE ==="""
+
+    return _assemble_triage_prompt(
+        country_name=country_name,
+        iso3=iso3,
+        hazard_name="Armed Conflict Events",
+        hazard_code="ACE",
+        preamble=preamble,
+        guidance_label="ACE",
+        rc_text=rc_text,
+        data_block=data_block,
+        guidance_static=guidance_static,
+        additional_section=additional_section,
+        schema_text=schema_text,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -451,11 +542,7 @@ def build_triage_prompt_dr(
         rc_context=rc_text,
     )
 
-    return f"""{preamble}
-
-=== DR-SPECIFIC TRIAGE GUIDANCE ===
-
-CLIMATE DATA (structured observations and forecasts):
+    data_block = f"""CLIMATE DATA (structured observations and forecasts):
 {climate_text}
 {season_block}{enso_section}
 RESOLVER FEATURES (historical context):
@@ -463,8 +550,8 @@ RESOLVER FEATURES (historical context):
 
 EVIDENCE PACK (current situation — from triage-focused web research):
 {evidence_text}
-
-DR TRIAGE SCORING ANCHORS:
+"""
+    guidance_static = """DR TRIAGE SCORING ANCHORS:
 
 Use the combination of current food security status (IPC/FEWS NET), climate
 conditions, and seasonal forecast as primary anchors:
@@ -503,10 +590,21 @@ RESOLUTION DATA: EM-DAT for large drought events. FEWS NET IPC phases
 are the gold standard for food security status. Note in data_quality
 if IPC/FEWS NET coverage is absent for this country.
 
-=== END DR-SPECIFIC GUIDANCE ===
-{additional_section}
-{_TRIAGE_SCORING_RUBRIC}
-{_TRIAGE_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
+=== END DR-SPECIFIC GUIDANCE ==="""
+
+    return _assemble_triage_prompt(
+        country_name=country_name,
+        iso3=iso3,
+        hazard_name="Drought",
+        hazard_code="DR",
+        preamble=preamble,
+        guidance_label="DR",
+        rc_text=rc_text,
+        data_block=data_block,
+        guidance_static=guidance_static,
+        additional_section=additional_section,
+        schema_text=schema_text,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -566,11 +664,7 @@ def build_triage_prompt_fl(
         rc_context=rc_text,
     )
 
-    return f"""{preamble}
-
-=== FL-SPECIFIC TRIAGE GUIDANCE ===
-
-CLIMATE DATA (structured observations and forecasts):
+    data_block = f"""CLIMATE DATA (structured observations and forecasts):
 {climate_text}
 {season_block}{enso_section}
 RESOLVER FEATURES (historical context):
@@ -578,8 +672,8 @@ RESOLVER FEATURES (historical context):
 
 EVIDENCE PACK (current situation — from triage-focused web research):
 {evidence_text}
-
-FL TRIAGE SCORING ANCHORS:
+"""
+    guidance_static = """FL TRIAGE SCORING ANCHORS:
 
 Use the combination of current flood activity, seasonal position, and
 forward-looking climate signals:
@@ -619,10 +713,21 @@ RESOLUTION DATA: EM-DAT is the primary source for historical flood
 events. GloFAS provides real-time and forecast flood signals. Note in
 data_quality if the country has limited hydrological monitoring.
 
-=== END FL-SPECIFIC GUIDANCE ===
-{additional_section}
-{_TRIAGE_SCORING_RUBRIC}
-{_TRIAGE_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
+=== END FL-SPECIFIC GUIDANCE ==="""
+
+    return _assemble_triage_prompt(
+        country_name=country_name,
+        iso3=iso3,
+        hazard_name="Flood",
+        hazard_code="FL",
+        preamble=preamble,
+        guidance_label="FL",
+        rc_text=rc_text,
+        data_block=data_block,
+        guidance_static=guidance_static,
+        additional_section=additional_section,
+        schema_text=schema_text,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -803,11 +908,7 @@ def build_triage_prompt_tc(
         rc_context=rc_text,
     )
 
-    return f"""{preamble}
-
-=== TC-SPECIFIC TRIAGE GUIDANCE ===
-
-CLIMATE DATA (structured observations and forecasts):
+    data_block = f"""CLIMATE DATA (structured observations and forecasts):
 {climate_text}
 {season_block}{enso_section}{seasonal_tc_section}
 RESOLVER FEATURES (historical context):
@@ -815,8 +916,8 @@ RESOLVER FEATURES (historical context):
 
 EVIDENCE PACK (current situation — from triage-focused web research):
 {evidence_text}
-
-TC TRIAGE SCORING ANCHORS:
+"""
+    guidance_static = """TC TRIAGE SCORING ANCHORS:
 
 TC risk is highly seasonal, geographically constrained, and event-driven.
 Scoring depends heavily on whether the country is in its TC season and
@@ -863,10 +964,21 @@ RESOLUTION DATA: EM-DAT for historical TC impact. IBTrACS for historical
 TC tracks and frequency. Note if the country has limited historical TC
 records in EM-DAT (small island states may have sparse data).
 
-=== END TC-SPECIFIC GUIDANCE ===
-{additional_section}
-{_TRIAGE_SCORING_RUBRIC}
-{_TRIAGE_OUTPUT_INSTRUCTIONS.format(schema=schema_text)}"""
+=== END TC-SPECIFIC GUIDANCE ==="""
+
+    return _assemble_triage_prompt(
+        country_name=country_name,
+        iso3=iso3,
+        hazard_name="Tropical Cyclone",
+        hazard_code="TC",
+        preamble=preamble,
+        guidance_label="TC",
+        rc_text=rc_text,
+        data_block=data_block,
+        guidance_static=guidance_static,
+        additional_section=additional_section,
+        schema_text=schema_text,
+    )
 
 
 # ---------------------------------------------------------------------------
