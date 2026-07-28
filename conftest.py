@@ -130,3 +130,36 @@ def pytest_configure(config):  # pragma: no cover - runtime hook
     elif base_url:
         # Preserve empty strings to avoid inheriting stale URLs.
         os.environ.pop("RESOLVER_DB_URL", None)
+
+
+# ---------------------------------------------------------------------------
+# API read-connection isolation
+# ---------------------------------------------------------------------------
+#
+# pythia.api.core caches ONE DuckDB read connection per process, keyed on the
+# DB file's mtime (production swaps the file at a fixed path, so mtime is the
+# right signal). Tests instead point the API at a NEW tmp_path DB per test, and
+# mtime is not comparable across paths — so a test whose fixture forgot the
+# documented `pythia.api.app._READ_CON = None` reset silently served the
+# PREVIOUS test's database. Several API suites passed alone and failed in a
+# full run for exactly this reason, which is the kind of noise that hides real
+# regressions. Reset the singleton around every test instead of relying on each
+# fixture to remember.
+if pytest is not None:
+
+    @pytest.fixture(autouse=True)
+    def _reset_api_read_connection():
+        def _reset():
+            app_mod = sys.modules.get("pythia.api.app")
+            if app_mod is None:
+                return
+            try:
+                app_mod._READ_CON = None
+                app_mod._READ_CON_MTIME = None
+                app_mod._LAST_SYNC_CHECK = 0.0
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        _reset()
+        yield
+        _reset()

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date, timedelta
 
 import pytest
 
@@ -91,7 +92,10 @@ class TestComputeTrend:
 
 class TestStaleness:
     def test_recent_not_stale(self):
-        assert _is_stale("2026-01-15") is False
+        # Anchor to today: a hardcoded date silently rots into a failure once
+        # the staleness window passes it (this test started failing in 2026).
+        recent = (date.today() - timedelta(days=7)).isoformat()
+        assert _is_stale(recent) is False
 
     def test_old_is_stale(self):
         assert _is_stale("2020-01-15") is True

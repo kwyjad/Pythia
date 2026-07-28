@@ -100,7 +100,13 @@ permissions:
   actions: write  # fc_collect_finalize dispatches run_sibyl.yml
 
 env:
-  PYTHIA_TEST_MODE: ${{ inputs.test_mode && '1' || '0' }}
+  # Compared against BOTH the boolean and the string form on purpose. Stages
+  # 2..N are dispatched by the poller through the REST API, where a
+  # workflow_dispatch boolean input can arrive as the STRING "false" — and a
+  # bare `inputs.test_mode && '1'` treats any non-empty string as truthy, which
+  # would stamp a whole production month as test data (invisible on the
+  # dashboard, excluded from calibration).
+  PYTHIA_TEST_MODE: ${{ (inputs.test_mode == true || inputs.test_mode == 'true') && '1' || '0' }}
   RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
   PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
   PYTHIA_LLM_CONCURRENCY: "32"
@@ -139,7 +145,11 @@ env:
   # NB the negated form is load-bearing: `x && '' || y` always yields y in
   # GitHub expressions because the empty-string "true" branch is falsy and
   # falls through the || — the truthy value must sit in the true branch.
-  BRAVE_SEARCH_API_KEY: ${{ !inputs.disable_brave && secrets.BRAVE_SEARCH_API_KEY || '' }}
+  # Both forms are tested for the same reason as PYTHIA_TEST_MODE above: the
+  # poller now forwards disable_brave over the REST API, and `!inputs.x` on the
+  # string "false" is FALSE (non-empty strings are truthy), which would withhold
+  # the Brave key from every poller-dispatched stage.
+  BRAVE_SEARCH_API_KEY: ${{ inputs.disable_brave != true && inputs.disable_brave != 'true' && secrets.BRAVE_SEARCH_API_KEY || '' }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH: "low"
   PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO: ""

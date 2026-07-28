@@ -29,6 +29,26 @@ jobs:
           file_or_dir: |
             .github/workflows
 
+      # These checks live in resolver/tests/ but guard .github/workflows/**,
+      # and resolver-ci-fast has no workflow path trigger — so a workflow-only
+      # PR never ran them and could (and did) land a violation on main. This
+      # job runs on every PR, and the checks are stdlib-only (pathlib + re).
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # --noconftest: the test file itself is stdlib-only (pathlib + re), but
+      # resolver/tests/conftest.py pulls in the fast-export fixtures (pandas /
+      # duckdb / pyarrow). Skipping conftest keeps this job at "pip install
+      # pytest" instead of the full resolver dependency set.
+      - name: Workflow shell/YAML sanity checks
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install pytest
+          pytest -vv --noconftest resolver/tests/test_ci_shell_sanity.py
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

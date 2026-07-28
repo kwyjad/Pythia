@@ -78,5 +78,6 @@ def test_build_resolver_features_handles_acled_month(monkeypatch, tmp_path):
 
     nat = feats["natural_hazards"]
     assert nat["FL"]["history_length"] == 1
-    assert nat["HW"]["history_length"] == 1
+    # HW is a blocked hazard (BLOCKED_HAZARDS) and is absent from the catalog.
+    assert "HW" not in nat
     assert nat["DR"]["history_length"] == 0

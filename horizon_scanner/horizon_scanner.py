@@ -1397,8 +1397,9 @@ def main(
         resolved = hs_batch.resolve_run_id_for_pipeline(hs_batch.pipeline_id())
         if not resolved:
             raise SystemExit(
-                f"No hs_run_id found in llm_batches for pipeline "
-                f"{hs_batch.pipeline_id()!r}; did hs_submit run against this DB?"
+                f"No hs_run_id found for pipeline {hs_batch.pipeline_id()!r} in "
+                "either llm_batches or hs_stage_state; did hs_submit run against "
+                "this DB (check the --db-run-id the stage downloaded)?"
             )
         run_id = resolved
         # Ingest any provider batches the poller hasn't collected yet
@@ -1413,6 +1414,14 @@ def main(
             # enqueue — default it to the run id (same convention
             # submit_family already uses for llm_batches.pipeline_id).
             hs_batch.set_stage(stage, run_id)
+        if stage == "hs_submit":
+            # Durable pipeline -> hs_run_id mapping, written BEFORE any model
+            # work. llm_batches only gets a row when a provider batch is
+            # actually created, so a submit stage that creates none (provider
+            # outage, rejected batch payload, provider excluded from
+            # PYTHIA_BATCH_PROVIDERS) would otherwise leave the collect stages
+            # unable to resolve their run id — see save_pipeline_run_id.
+            hs_batch.save_pipeline_run_id(hs_batch.pipeline_id() or run_id, run_id)
     os.environ["PYTHIA_HS_RUN_ID"] = run_id
     reset_provider_failures_for_run(run_id)
     from pythia.web_research.brave_circuit_breaker import reset as reset_brave_breaker

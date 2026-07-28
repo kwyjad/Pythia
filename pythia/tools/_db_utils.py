@@ -44,32 +44,72 @@ def rollback_quietly(conn: Any) -> None:
         pass
 
 
-def table_exists(conn: Any, name: str) -> bool:
+def _is_aborted_txn_error(exc: Exception) -> bool:
+    """True for DuckDB's "current transaction is aborted" state error.
+
+    That error says nothing about the object being probed — it says the
+    PREVIOUS statement failed. Answering the probe from it is how a live
+    `scores` table got reported as missing.
+    """
+
+    message = str(exc).lower()
+    return "transaction is aborted" in message or "please rollback" in message
+
+
+def _probe(conn: Any, sql: str, on_error: Any, label: str, *, warn: bool = False) -> Any:
+    """Run a read-only probe, retrying ONCE after scrubbing an aborted txn.
+
+    Rolling back without re-running the probe still returns the fallback for
+    THIS call — which is exactly the silent no-op the scrub was meant to
+    prevent (compute_calibration_pythia reads `_table_exists(conn, "scores")`
+    once and skips the whole run on False). The retry makes the helpers
+    answer about the object rather than about the connection's state.
+    """
+
     try:
-        conn.execute(f"PRAGMA table_info('{name}')").fetchall()
-        return True
+        return conn.execute(sql).fetchall()
     except Exception as exc:
-        LOGGER.debug("table_exists(%s) returned False: %s", name, exc)
+        aborted = _is_aborted_txn_error(exc)
         rollback_quietly(conn)
-        return False
+        if aborted:
+            try:
+                return conn.execute(sql).fetchall()
+            except Exception as retry_exc:  # noqa: BLE001
+                # Expected on the retry when the object genuinely is absent —
+                # log at the caller's level, not unconditionally at WARNING.
+                log = LOGGER.warning if warn else LOGGER.debug
+                log("%s failed after ROLLBACK retry: %s", label, retry_exc)
+                rollback_quietly(conn)
+                return on_error
+        if warn:
+            LOGGER.warning("%s failed: %s", label, exc)
+        else:
+            LOGGER.debug("%s failed: %s", label, exc)
+        return on_error
+
+
+_MISSING = object()
+
+
+def table_exists(conn: Any, name: str) -> bool:
+    result = _probe(conn, f"PRAGMA table_info('{name}')", _MISSING, f"table_exists({name})")
+    return result is not _MISSING
 
 
 def row_count(conn: Any, name: str) -> int:
-    try:
-        return conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0] or 0
-    except Exception as exc:
-        LOGGER.warning("row_count(%s) failed, returning 0: %s", name, exc)
-        rollback_quietly(conn)
+    rows = _probe(
+        conn, f"SELECT COUNT(*) FROM {name}", _MISSING, f"row_count({name})", warn=True
+    )
+    if rows is _MISSING or not rows:
         return 0
+    return rows[0][0] or 0
 
 
 def column_exists(conn: Any, table: str, column: str) -> bool:
-    try:
-        rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
-        return any(str(r[1]).lower() == column.lower() for r in rows)
-    except Exception:
-        rollback_quietly(conn)
+    rows = _probe(conn, f"PRAGMA table_info('{table}')", _MISSING, f"column_exists({table}.{column})")
+    if rows is _MISSING:
         return False
+    return any(str(r[1]).lower() == column.lower() for r in rows)
 
 
 def add_column_if_missing(conn: Any, table: str, column: str, col_type: str) -> None:

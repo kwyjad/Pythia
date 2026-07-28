@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -157,9 +157,13 @@ def test_db_roundtrip_and_format(temp_db):
 
     con = _get_connection()
     try:
-        # Insert 10 days of synthetic data for IRQ
+        # Insert 10 days of synthetic data for IRQ, anchored to TODAY.
+        # Hardcoded dates rot: format_gdelt_for_prompt loads with the default
+        # lookback window, so a fixed 2026-03 fixture silently fell outside it
+        # and the format assertions below started failing against an empty
+        # string instead of testing the renderer.
         for i in range(10):
-            d = date(2026, 3, 10 + i)
+            d = date.today() - timedelta(days=10 - i)
             indicators = {
                 "IRQ": {
                     "total_events": 100,

@@ -435,6 +435,9 @@ def load_stage_state(run_id: str, iso3: str, stage_key: str) -> Optional[dict[st
 # Run-scoped stage-state rows (not per-country) use this sentinel iso3.
 _RUN_SCOPE_ISO3 = "__RUN__"
 _BREAKER_STATE_KEY = "brave_breaker"
+# Pipeline-scoped row (keyed by pipeline_id, not hs_run_id) that records
+# which hs_run_id a pipeline minted — see save_pipeline_run_id.
+_PIPELINE_RUN_ID_KEY = "pipeline_run_id"
 
 
 def save_breaker_state(run_id: str) -> None:
@@ -475,8 +478,37 @@ def restore_breaker_state(run_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def save_pipeline_run_id(pipe_id: str, run_id: str) -> None:
+    """Record which hs_run_id a pipeline minted, independent of llm_batches.
+
+    ``llm_batches`` only gets a row when a provider batch is actually
+    CREATED. If every submit fails (a provider outage, a rejected batch
+    payload, or PYTHIA_BATCH_PROVIDERS excluding the RC/triage provider),
+    hs_submit still succeeds — its rows simply stay pending and every
+    collect-stage replay misses, which is the designed degradation to the
+    synchronous path. Without this row the collect stage could not find its
+    run id at all and hard-exited, killing the whole month's pipeline
+    instead of running it at full price.
+    """
+
+    if not (pipe_id and run_id):
+        return
+    try:
+        save_stage_state(pipe_id, _RUN_SCOPE_ISO3, _PIPELINE_RUN_ID_KEY, {"hs_run_id": run_id})
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "save_pipeline_run_id failed for pipeline=%s run=%s — a collect stage "
+            "may not be able to resolve its run id", pipe_id, run_id, exc_info=True,
+        )
+
+
 def resolve_run_id_for_pipeline(pipe_id: str) -> Optional[str]:
-    """The hs_run_id minted by this pipeline's hs_submit stage."""
+    """The hs_run_id minted by this pipeline's hs_submit stage.
+
+    Primary source is ``llm_batches`` (written when a provider batch is
+    created); the ``hs_stage_state`` row written by save_pipeline_run_id is
+    the fallback for a pipeline that created no batches at all.
+    """
 
     with _DB_LOCK:
         row = batch_con().execute(
@@ -487,7 +519,18 @@ def resolve_run_id_for_pipeline(pipe_id: str) -> Optional[str]:
             """,
             [pipe_id],
         ).fetchone()
-    return str(row[0]) if row and row[0] else None
+    if row and row[0]:
+        return str(row[0])
+    payload = load_stage_state(pipe_id, _RUN_SCOPE_ISO3, _PIPELINE_RUN_ID_KEY)
+    if payload and payload.get("hs_run_id"):
+        logger.warning(
+            "hs_batch: pipeline %s has no llm_batches row — resolving hs_run_id=%s "
+            "from stage state; this stage's model calls run SYNCHRONOUSLY "
+            "(no batch discount) because nothing was submitted.",
+            pipe_id, payload["hs_run_id"],
+        )
+        return str(payload["hs_run_id"])
+    return None
 
 
 def run_date_from_run_id(run_id: str) -> date_type:

@@ -52,6 +52,31 @@ RUNS_PER_WORKFLOW = 30
 # attempt for the stall cap.
 FAILED_CONCLUSIONS = ("failure", "cancelled", "timed_out", "startup_failure")
 
+# Run-shaping workflow_dispatch inputs that must survive a stage hand-off.
+# A schedule event carries none of them, so a production pipeline sees the
+# workflow defaults either way; a smoke run (only_countries=IRN,SOM,
+# disable_brave, a single batch provider) would otherwise quietly revert to
+# full production settings the moment the poller dispatched stage 2.
+CARRIED_INPUTS = ("batch_providers", "only_countries", "grounding_primary", "disable_brave")
+
+
+def _dispatch_input_args(state: dict) -> list[str]:
+    """`gh workflow run` -f args for the inputs carried by *state*.
+
+    Only keys the state actually carries are forwarded, so a state artifact
+    written before this field existed dispatches exactly as it used to.
+    """
+
+    carried = state.get("dispatch_inputs") or {}
+    if not isinstance(carried, dict):
+        return []
+    args: list[str] = []
+    for key in CARRIED_INPUTS:
+        if key not in carried:
+            continue
+        args += ["-f", f"{key}={carried.get(key) or ''}"]
+    return args
+
 
 def _max_dispatch_attempts() -> int:
     try:
@@ -269,6 +294,7 @@ def main() -> int:
                 "-f", f"pipeline_id={pid}",
                 "-f", f"db_run_id={state.get('db_run_id') or ''}",
                 "-f", f"test_mode={'true' if state.get('test_mode') else 'false'}",
+                *_dispatch_input_args(state),
             )
             summary_lines.append(f"{pid}: dispatched {next_stage} (db_run_id={state.get('db_run_id')})")
         except Exception as exc:  # noqa: BLE001

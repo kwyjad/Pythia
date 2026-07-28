@@ -16,7 +16,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from scripts.ci.poll_llm_batches import _dispatch_decision
+from scripts.ci.emit_batch_state import dispatch_inputs_from_env
+from scripts.ci.poll_llm_batches import _dispatch_decision, _dispatch_input_args
 
 NOW = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
 PID = "pl_123"
@@ -95,3 +96,73 @@ def test_other_pipeline_failures_do_not_count():
     runs = [_run(conclusion="failure", title=other)] * 3
     dispatch, _ = _decide(runs)
     assert dispatch
+
+
+# ---------------------------------------------------------------------------
+# Run-shaping input carry-forward (smoke runs must survive a stage hand-off)
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_inputs_are_forwarded_verbatim():
+    state = {
+        "dispatch_inputs": {
+            "batch_providers": "google",
+            "only_countries": "IRN,SOM",
+            "grounding_primary": "openai",
+            "disable_brave": "true",
+        }
+    }
+    args = _dispatch_input_args(state)
+    assert args == [
+        "-f", "batch_providers=google",
+        "-f", "only_countries=IRN,SOM",
+        "-f", "grounding_primary=openai",
+        "-f", "disable_brave=true",
+    ]
+
+
+def test_empty_input_values_still_forward_as_empty_strings():
+    # An empty only_countries is meaningful: it says "full country list",
+    # which is what the workflow default resolves to anyway.
+    args = _dispatch_input_args({"dispatch_inputs": {"only_countries": ""}})
+    assert args == ["-f", "only_countries="]
+
+
+def test_state_without_dispatch_inputs_forwards_nothing():
+    # Back-compat: a batch-state artifact written before this field existed
+    # must dispatch exactly as it did before.
+    assert _dispatch_input_args({}) == []
+    assert _dispatch_input_args({"dispatch_inputs": None}) == []
+    assert _dispatch_input_args({"dispatch_inputs": "nonsense"}) == []
+
+
+def test_dispatch_inputs_from_env_reflects_effective_settings():
+    inputs = dispatch_inputs_from_env(
+        {
+            "PYTHIA_BATCH_PROVIDERS": "google",
+            "PYTHIA_HS_ONLY_COUNTRIES": "IRN,SOM",
+            "PYTHIA_GROUNDING_PRIMARY_BACKEND": "openai",
+            "BRAVE_SEARCH_API_KEY": "",
+        }
+    )
+    assert inputs == {
+        "batch_providers": "google",
+        "only_countries": "IRN,SOM",
+        "grounding_primary": "openai",
+        # An empty Brave key IS the disable_brave input — re-supplying the
+        # secret on the next stage would let a 402ing key trip the breaker.
+        "disable_brave": "true",
+    }
+
+
+def test_dispatch_inputs_from_env_production_defaults():
+    inputs = dispatch_inputs_from_env(
+        {
+            "PYTHIA_BATCH_PROVIDERS": "openai,anthropic,google",
+            "PYTHIA_HS_ONLY_COUNTRIES": "",
+            "PYTHIA_GROUNDING_PRIMARY_BACKEND": "brave",
+            "BRAVE_SEARCH_API_KEY": "sk-live",
+        }
+    )
+    assert inputs["only_countries"] == ""
+    assert inputs["disable_brave"] == "false"

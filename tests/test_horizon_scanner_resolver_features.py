@@ -79,6 +79,7 @@ def test_build_resolver_features_handles_month_column(monkeypatch):
     assert displacement["source"] == "IDMC/DTM"
 
     natural = features["natural_hazards"]
-    assert set(natural.keys()) == {"FL", "DR", "TC", "HW"}
+    # HW is a blocked hazard (BLOCKED_HAZARDS) and no longer in the catalog.
+    assert set(natural.keys()) == {"FL", "DR", "TC"}
     assert natural["FL"]["history_length"] == 2
     assert natural["DR"]["history_length"] == 1
