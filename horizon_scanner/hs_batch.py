@@ -42,9 +42,12 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Country workers (HS_MAX_WORKERS threads) enqueue through the shared
-# connection; serialize the multi-statement write sequences.
-_WRITE_LOCK = threading.Lock()
+# Country workers (HS_MAX_WORKERS threads) share one DuckDB connection.
+# duckdb-python stores the pending result set ON the connection, so even a
+# lone execute(...).fetchone() is not atomic against a concurrent execute —
+# ALL DB access through batch_con() must hold this lock, reads included
+# (an unlocked read can return another country's row).
+_DB_LOCK = threading.Lock()
 
 STAGES = ("full", "hs_submit", "hs_rc_collect", "hs_finalize")
 
@@ -155,7 +158,7 @@ def enqueue_hazard_call(
     if not llm_batch.provider_batchable(spec.provider):
         return False
     body = build_body_for_spec(spec, prompt, temperature)
-    with _WRITE_LOCK:
+    with _DB_LOCK:
         llm_batch.enqueue_request(
             batch_con(),
             family=family,
@@ -166,6 +169,7 @@ def enqueue_hazard_call(
             iso3=iso3,
             hazard_code=hazard_code,
             pass_idx=pass_idx,
+            pipeline_id=_PIPELINE_ID,
         )
     return True
 
@@ -186,13 +190,15 @@ def replay_hazard_call(
 
     from pythia import llm_batch
 
-    hit = llm_batch.get_result(
-        batch_con(),
-        family,
-        iso3=iso3,
-        hazard_code=hazard_code,
-        pass_idx=pass_idx,
-    )
+    with _DB_LOCK:
+        hit = llm_batch.get_result(
+            batch_con(),
+            family,
+            iso3=iso3,
+            hazard_code=hazard_code,
+            pass_idx=pass_idx,
+            pipeline_id=_PIPELINE_ID,
+        )
     if hit is None:
         return None
 
@@ -217,17 +223,23 @@ def replay_hazard_call(
 def mark_fallback(family: str, *, iso3: str, hazard_code: str, pass_idx: int) -> None:
     from pythia import llm_batch
 
-    with _WRITE_LOCK:
+    with _DB_LOCK:
         llm_batch.mark_fallback_sync(
-            batch_con(), family, iso3=iso3, hazard_code=hazard_code, pass_idx=pass_idx
+            batch_con(),
+            family,
+            iso3=iso3,
+            hazard_code=hazard_code,
+            pass_idx=pass_idx,
+            pipeline_id=_PIPELINE_ID,
         )
 
 
 def _request_row(custom_id: str):
-    return batch_con().execute(
-        "SELECT provider, model_id FROM llm_batch_requests WHERE custom_id = ?",
-        [custom_id],
-    ).fetchone()
+    with _DB_LOCK:
+        return batch_con().execute(
+            "SELECT provider, model_id FROM llm_batch_requests WHERE custom_id = ?",
+            [custom_id],
+        ).fetchone()
 
 
 def _request_provider(custom_id: str) -> Optional[str]:
@@ -251,16 +263,21 @@ def llm_call_already_logged(run_id: str, iso3: str, hazard_label: str) -> bool:
 
     try:
         # log_hs_llm_call uppercases both iso3 and the hazard label on write.
-        row = batch_con().execute(
-            """
-            SELECT 1 FROM llm_calls
-            WHERE hs_run_id = ? AND UPPER(iso3) = UPPER(?) AND UPPER(hazard_code) = UPPER(?)
-            LIMIT 1
-            """,
-            [run_id, iso3, hazard_label],
-        ).fetchone()
+        with _DB_LOCK:
+            row = batch_con().execute(
+                """
+                SELECT 1 FROM llm_calls
+                WHERE hs_run_id = ? AND UPPER(iso3) = UPPER(?) AND UPPER(hazard_code) = UPPER(?)
+                LIMIT 1
+                """,
+                [run_id, iso3, hazard_label],
+            ).fetchone()
         return row is not None
     except Exception:  # noqa: BLE001
+        logger.warning(
+            "llm_call_already_logged guard failed for %s/%s — a duplicate "
+            "llm_calls row may be written", iso3, hazard_label, exc_info=True,
+        )
         return False
 
 
@@ -285,16 +302,17 @@ def load_grounding_pack(
     """
 
     try:
-        rows = batch_con().execute(
-            """
-            SELECT query, report_markdown, sources_json, grounded,
-                   grounding_debug_json, structural_context, recent_signals_json
-            FROM hs_hazard_tail_packs
-            WHERE hs_run_id = ? AND UPPER(iso3) = ? AND UPPER(hazard_code) = ?
-            ORDER BY created_at DESC
-            """,
-            [run_id, (iso3 or "").upper(), (hazard_code or "").upper()],
-        ).fetchall()
+        with _DB_LOCK:
+            rows = batch_con().execute(
+                """
+                SELECT query, report_markdown, sources_json, grounded,
+                       grounding_debug_json, structural_context, recent_signals_json
+                FROM hs_hazard_tail_packs
+                WHERE hs_run_id = ? AND UPPER(iso3) = ? AND UPPER(hazard_code) = ?
+                ORDER BY created_at DESC
+                """,
+                [run_id, (iso3 or "").upper(), (hazard_code or "").upper()],
+            ).fetchall()
     except Exception as exc:  # noqa: BLE001
         logger.warning("load_grounding_pack failed for %s %s: %s", iso3, hazard_code, exc)
         return None
@@ -339,7 +357,7 @@ def load_grounding_pack(
 def save_stage_state(run_id: str, iso3: str, stage_key: str, payload: dict[str, Any]) -> None:
     from pythia.test_mode import is_test_mode
 
-    with _WRITE_LOCK:
+    with _DB_LOCK:
         con = batch_con()
         con.execute(
             "DELETE FROM hs_stage_state WHERE run_id = ? AND iso3 = ? AND stage_key = ?",
@@ -363,14 +381,15 @@ def save_stage_state(run_id: str, iso3: str, stage_key: str, payload: dict[str, 
 
 def load_stage_state(run_id: str, iso3: str, stage_key: str) -> Optional[dict[str, Any]]:
     try:
-        row = batch_con().execute(
-            """
-            SELECT payload_json FROM hs_stage_state
-            WHERE run_id = ? AND iso3 = ? AND stage_key = ?
-            ORDER BY created_at DESC LIMIT 1
-            """,
-            [run_id, (iso3 or "").upper(), stage_key],
-        ).fetchone()
+        with _DB_LOCK:
+            row = batch_con().execute(
+                """
+                SELECT payload_json FROM hs_stage_state
+                WHERE run_id = ? AND iso3 = ? AND stage_key = ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                [run_id, (iso3 or "").upper(), stage_key],
+            ).fetchone()
     except Exception as exc:  # noqa: BLE001
         logger.warning("load_stage_state failed for %s %s: %s", iso3, stage_key, exc)
         return None
@@ -383,6 +402,44 @@ def load_stage_state(run_id: str, iso3: str, stage_key: str) -> Optional[dict[st
     return payload if isinstance(payload, dict) else None
 
 
+# Run-scoped stage-state rows (not per-country) use this sentinel iso3.
+_RUN_SCOPE_ISO3 = "__RUN__"
+_BREAKER_STATE_KEY = "brave_breaker"
+
+
+def save_breaker_state(run_id: str) -> None:
+    """Persist the Brave circuit-breaker stats for cross-stage carry.
+
+    The breaker is a per-process object; without this, a trip during
+    hs_submit/hs_rc_collect is invisible to hs_finalize (which does no
+    grounding), so _write_hs_triage's blocked-no-grounding safety gate
+    could never fire in staged mode.
+    """
+
+    try:
+        from pythia.web_research.brave_circuit_breaker import get_breaker
+
+        save_stage_state(run_id, _RUN_SCOPE_ISO3, _BREAKER_STATE_KEY, get_breaker().stats())
+    except Exception:  # noqa: BLE001
+        logger.warning("save_breaker_state failed for %s", run_id, exc_info=True)
+
+
+def restore_breaker_state(run_id: str) -> bool:
+    """Restore persisted breaker stats into this process's breaker."""
+
+    payload = load_stage_state(run_id, _RUN_SCOPE_ISO3, _BREAKER_STATE_KEY)
+    if not payload:
+        return False
+    try:
+        from pythia.web_research.brave_circuit_breaker import get_breaker
+
+        get_breaker().restore(payload)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning("restore_breaker_state failed for %s", run_id, exc_info=True)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Run identity + submission helpers (used by horizon_scanner.main)
 # ---------------------------------------------------------------------------
@@ -391,14 +448,15 @@ def load_stage_state(run_id: str, iso3: str, stage_key: str) -> Optional[dict[st
 def resolve_run_id_for_pipeline(pipe_id: str) -> Optional[str]:
     """The hs_run_id minted by this pipeline's hs_submit stage."""
 
-    row = batch_con().execute(
-        """
-        SELECT hs_run_id FROM llm_batches
-        WHERE pipeline_id = ? AND hs_run_id IS NOT NULL
-        ORDER BY submitted_at DESC LIMIT 1
-        """,
-        [pipe_id],
-    ).fetchone()
+    with _DB_LOCK:
+        row = batch_con().execute(
+            """
+            SELECT hs_run_id FROM llm_batches
+            WHERE pipeline_id = ? AND hs_run_id IS NOT NULL
+            ORDER BY submitted_at DESC LIMIT 1
+            """,
+            [pipe_id],
+        ).fetchone()
     return str(row[0]) if row and row[0] else None
 
 

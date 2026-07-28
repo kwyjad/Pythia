@@ -48,7 +48,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
@@ -131,12 +131,19 @@ def make_custom_id(
     iso3: Optional[str] = None,
     hazard_code: Optional[str] = None,
     pass_idx: Optional[int] = None,
+    pipeline_id: Optional[str] = None,
 ) -> str:
     """Encode a compact, Anthropic-safe custom id.
 
     The id is a lookup key only — the authoritative reassembly metadata is
     the ``llm_batch_requests`` row (question_id, iso3, hazard, model_key,
     ...), which always travels with the batch in the DB artifact.
+
+    ``pipeline_id`` scopes the id to one staged-pipeline execution: the DB
+    artifact carries llm_batch_requests forward month to month, and custom_id
+    is the sole replay key — without the scope segment, month 2's enqueue
+    would find month 1's succeeded row and silently replay last month's
+    model output (and a same-epoch forecaster re-run would do the same).
     """
 
     slug = _FAMILY_SLUGS.get(family)
@@ -154,6 +161,9 @@ def make_custom_id(
             f"{slug}-{_sanitize_token(iso3, 3)}-{_sanitize_token(hazard_code, 8)}"
             f"-p{int(pass_idx or 1)}"
         )
+    if pipeline_id:
+        phash = hashlib.sha1(str(pipeline_id).encode("utf-8")).hexdigest()[:8]
+        custom_id = f"{custom_id}-{phash}"
     if not _CUSTOM_ID_RE.match(custom_id):
         raise ValueError(f"custom id fails provider constraints: {custom_id!r}")
     return custom_id
@@ -179,12 +189,15 @@ def enqueue_request(
     metric: Optional[str] = None,
     pass_idx: Optional[int] = None,
     anchor_month: Optional[str] = None,
+    pipeline_id: Optional[str] = None,
 ) -> str:
     """Insert (or refresh) one pending batch request row; returns custom_id.
 
     Re-enqueueing an id that already holds a terminal result (succeeded /
     fallback_sync) is a no-op so a re-run submit stage cannot clobber
-    collected results.
+    collected results. The no-clobber rule is safe ONLY because custom ids
+    are pipeline-scoped (see make_custom_id) — a different pipeline gets a
+    different id and therefore a fresh row.
     """
 
     custom_id = make_custom_id(
@@ -194,6 +207,7 @@ def enqueue_request(
         iso3=iso3,
         hazard_code=hazard_code,
         pass_idx=pass_idx,
+        pipeline_id=pipeline_id,
     )
     existing = con.execute(
         "SELECT status FROM llm_batch_requests WHERE custom_id = ?", [custom_id]
@@ -207,8 +221,9 @@ def enqueue_request(
         INSERT INTO llm_batch_requests (
             custom_id, batch_id, provider, model_id, family, question_id,
             iso3, hazard_code, metric, model_key, pass_idx, anchor_month,
-            prompt_sha256, request_body_json, status, created_at, is_test
-        ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            pipeline_id, prompt_sha256, request_body_json, status, created_at,
+            is_test
+        ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
         """,
         [
             custom_id,
@@ -222,6 +237,7 @@ def enqueue_request(
             model_key,
             pass_idx,
             anchor_month,
+            (pipeline_id or None),
             hashlib.sha256((prompt_text or "").encode("utf-8")).hexdigest(),
             json.dumps(request_body, ensure_ascii=False),
             _now(),
@@ -652,6 +668,62 @@ def _chunk_rows(
         yield chunk
 
 
+def expire_and_purge_stale(
+    con,
+    *,
+    current_pipeline_id: str,
+    keep_days: int = 45,
+) -> Dict[str, int]:
+    """Neutralize batch-request rows left behind by OTHER pipelines.
+
+    1. Stale in-flight rows (pending/submitted, not this pipeline, older
+       than the max batch wait) are flipped to 'expired' so nothing can
+       ever submit or replay them.
+    2. Terminal rows older than *keep_days* from other pipelines are
+       deleted outright — the canonical DB artifact travels between runs
+       and this table would otherwise grow without bound.
+
+    Rows with pipeline_id NULL are pre-scoping legacy rows and are treated
+    as foreign (their in-flight collection is still honored via
+    get_result's llm_batches JOIN fallback, which reads terminal rows).
+    """
+
+    counts = {"expired": 0, "purged": 0}
+    stale_cutoff = _now() - timedelta(hours=max_wait_hours())
+    purge_cutoff = _now() - timedelta(days=keep_days)
+    cur = con.execute(
+        """
+        UPDATE llm_batch_requests SET status = 'expired', completed_at = ?
+        WHERE status IN ('pending', 'submitted')
+          AND (pipeline_id IS NULL OR pipeline_id <> ?)
+          AND created_at < ?
+        """,
+        [_now(), current_pipeline_id, stale_cutoff],
+    )
+    try:
+        counts["expired"] = int(cur.fetchall()[0][0]) if cur else 0
+    except Exception:
+        pass
+    cur = con.execute(
+        """
+        DELETE FROM llm_batch_requests
+        WHERE (pipeline_id IS NULL OR pipeline_id <> ?)
+          AND created_at < ?
+        """,
+        [current_pipeline_id, purge_cutoff],
+    )
+    try:
+        counts["purged"] = int(cur.fetchall()[0][0]) if cur else 0
+    except Exception:
+        pass
+    if counts["expired"] or counts["purged"]:
+        LOGGER.info(
+            "llm_batch: stale-row sweep expired=%d purged=%d (pipeline=%s)",
+            counts["expired"], counts["purged"], current_pipeline_id,
+        )
+    return counts
+
+
 def submit_pending(
     con,
     *,
@@ -661,22 +733,28 @@ def submit_pending(
     run_id: Optional[str] = None,
     hs_run_id: Optional[str] = None,
 ) -> List[str]:
-    """Submit all pending rows of *family* as provider batches.
+    """Submit all pending rows of *family* for THIS pipeline as provider batches.
 
     Returns the list of created ``llm_batches.batch_id``. Providers outside
     ``PYTHIA_BATCH_PROVIDERS`` keep their rows pending — the collect stage's
     get_result miss then routes those calls down the sync path.
+
+    Only rows enqueued under *pipeline_id* are submitted: the DB artifact
+    carries llm_batch_requests forward between pipelines, and sweeping a
+    stale pipeline's leftover pending rows into a fresh batch would bill
+    last month's prompts again.
     """
 
     created: List[str] = []
+    expire_and_purge_stale(con, current_pipeline_id=pipeline_id)
     providers_rows = con.execute(
         """
         SELECT provider, model_id, custom_id, request_body_json
         FROM llm_batch_requests
-        WHERE family = ? AND status = 'pending'
+        WHERE family = ? AND status = 'pending' AND pipeline_id = ?
         ORDER BY provider, model_id, custom_id
         """,
-        [family],
+        [family, pipeline_id],
     ).fetchall()
     if not providers_rows:
         return created
@@ -815,9 +893,8 @@ def collect_batch(con, batch_id: str) -> Dict[str, int]:
         return {}
     provider, provider_batch_id, status = row
     counts = {"succeeded": 0, "errored": 0, "skipped_terminal": 0}
-    if status in ("failed", "expired", "canceled") or not provider_batch_id:
-        # Whole-batch failure: flip still-submitted items to expired so the
-        # consumers' get_result miss routes them to the sync fallback.
+    salvage = status in ("failed", "expired", "canceled")
+    if not provider_batch_id:
         con.execute(
             """
             UPDATE llm_batch_requests SET status = 'expired', completed_at = ?
@@ -827,10 +904,23 @@ def collect_batch(con, batch_id: str) -> Dict[str, int]:
         )
         return counts
 
+    # Even for failed/expired/canceled batches, attempt the fetch first:
+    # OpenAI and Anthropic both preserve the items completed BEFORE the
+    # terminal event, and those results were paid for — discarding them
+    # means paying a second time on the sync fallback (the exact double
+    # charge cancel_batch exists to avoid).
     try:
         results = list(_adapter(provider).fetch(provider_batch_id))
     except Exception as exc:  # noqa: BLE001
         LOGGER.error("llm_batch: fetch failed for %s: %s", batch_id, exc)
+        if salvage:
+            con.execute(
+                """
+                UPDATE llm_batch_requests SET status = 'expired', completed_at = ?
+                WHERE batch_id = ? AND status IN ('pending', 'submitted')
+                """,
+                [_now(), batch_id],
+            )
         return counts
 
     for cid, ok, text, usage, error in results:
@@ -866,14 +956,48 @@ def collect_batch(con, batch_id: str) -> Dict[str, int]:
         )
         counts["succeeded" if ok else "errored"] += 1
 
-    con.execute(
+    # Items the provider did not return (partial output, or the untouched
+    # remainder of a salvaged batch) flip to expired so every row reaches a
+    # terminal state and the consumer takes the sync fallback.
+    cur = con.execute(
         """
-        UPDATE llm_batches
-        SET status = 'collected', collected_at = ?, n_succeeded = ?, n_errored = ?
-        WHERE batch_id = ?
+        UPDATE llm_batch_requests SET status = 'expired', completed_at = ?
+        WHERE batch_id = ? AND status IN ('pending', 'submitted')
         """,
-        [_now(), counts["succeeded"], counts["errored"], batch_id],
+        [_now(), batch_id],
     )
+    n_expired = 0
+    try:
+        n_expired = int(cur.fetchall()[0][0]) if cur else 0
+    except Exception:  # noqa: BLE001
+        pass
+    counts["expired"] = n_expired
+
+    if not (counts["succeeded"] or counts["errored"] or n_expired) and counts["skipped_terminal"]:
+        # Pure re-collect of an already-collected batch (poller double-fire):
+        # keep the original telemetry counters instead of zeroing them.
+        return counts
+
+    if salvage:
+        # Keep the terminal status (canceled/failed/expired) — record what
+        # was salvaged without pretending the batch completed normally.
+        con.execute(
+            """
+            UPDATE llm_batches
+            SET collected_at = ?, n_succeeded = ?, n_errored = ?, n_expired = ?
+            WHERE batch_id = ?
+            """,
+            [_now(), counts["succeeded"], counts["errored"], n_expired, batch_id],
+        )
+    else:
+        con.execute(
+            """
+            UPDATE llm_batches
+            SET status = 'collected', collected_at = ?, n_succeeded = ?, n_errored = ?, n_expired = ?
+            WHERE batch_id = ?
+            """,
+            [_now(), counts["succeeded"], counts["errored"], n_expired, batch_id],
+        )
     return counts
 
 
@@ -913,12 +1037,19 @@ def get_result(
     iso3: Optional[str] = None,
     hazard_code: Optional[str] = None,
     pass_idx: Optional[int] = None,
+    pipeline_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Look up a collected batch result; None = caller should run sync.
 
-    Returns a dict with keys text / usage / error / custom_id when the item
-    reached a terminal batch outcome (succeeded OR errored — an errored item
-    is returned so the caller can decide to fall back and mark it).
+    Returns a dict with keys text / usage / error / custom_id only for a
+    *succeeded* item. Errored/expired items return None so the caller takes
+    the sync fallback (their usage is still costed by the collect stage).
+
+    When ``pipeline_id`` is given, the lookup uses the scoped id. A legacy
+    (unscoped) row is accepted ONLY when its batch provably belongs to this
+    pipeline (JOIN on llm_batches.pipeline_id) — deploy-time continuity for
+    a pipeline that submitted under pre-scoping code, without ever replaying
+    another pipeline's result.
     """
 
     custom_id = make_custom_id(
@@ -928,6 +1059,7 @@ def get_result(
         iso3=iso3,
         hazard_code=hazard_code,
         pass_idx=pass_idx,
+        pipeline_id=pipeline_id,
     )
     row = con.execute(
         """
@@ -936,6 +1068,26 @@ def get_result(
         """,
         [custom_id],
     ).fetchone()
+    if not row and pipeline_id:
+        legacy_id = make_custom_id(
+            family,
+            question_id=question_id,
+            model_key=model_key,
+            iso3=iso3,
+            hazard_code=hazard_code,
+            pass_idx=pass_idx,
+        )
+        row = con.execute(
+            """
+            SELECT r.status, r.response_text, r.usage_json, r.error_text
+            FROM llm_batch_requests r
+            JOIN llm_batches b ON r.batch_id = b.batch_id
+            WHERE r.custom_id = ? AND b.pipeline_id = ?
+            """,
+            [legacy_id, pipeline_id],
+        ).fetchone()
+        if row:
+            custom_id = legacy_id
     if not row:
         return None
     status, text, usage_json, error = row

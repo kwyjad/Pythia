@@ -37,10 +37,87 @@ import tempfile
 from datetime import datetime, timezone
 
 # Workflows whose successful runs may carry a pythia-batch-state artifact.
-SUBMIT_WORKFLOWS = ("Horizon Scanner Triage", "Pythia Pipeline Stage")
+# Only pythia_pipeline_stage.yml calls emit_batch_state — listing other
+# workflows here just wastes one artifact-download attempt per run per tick.
+SUBMIT_WORKFLOWS = ("Pythia Pipeline Stage",)
 STAGE_WORKFLOW_FILE = "pythia_pipeline_stage.yml"
 STAGE_WORKFLOW_NAME = "Pythia Pipeline Stage"
-RUNS_PER_WORKFLOW = 15
+# 30 (not 15): the failure-attempt count below is derived from this window;
+# a shorter window would both under-count failures and let repeated failed
+# re-dispatches push the submit run (the one carrying the batch-state
+# artifact) out of discovery, silently dropping the pipeline.
+RUNS_PER_WORKFLOW = 30
+
+# A stage run that ended one of these ways counts as a spent dispatch
+# attempt for the stall cap.
+FAILED_CONCLUSIONS = ("failure", "cancelled", "timed_out", "startup_failure")
+
+
+def _max_dispatch_attempts() -> int:
+    try:
+        return int(os.getenv("PYTHIA_STAGE_MAX_DISPATCH_ATTEMPTS", "3") or 3)
+    except ValueError:
+        return 3
+
+
+def _retry_cooldown_minutes() -> float:
+    try:
+        return float(os.getenv("PYTHIA_STAGE_RETRY_COOLDOWN_MIN", "60") or 60)
+    except ValueError:
+        return 60.0
+
+
+def _dispatch_decision(
+    pid: str,
+    next_stage: str,
+    stage_runs: list[dict],
+    now: datetime,
+    *,
+    max_attempts: int,
+    min_retry_minutes: float,
+) -> tuple[bool, str]:
+    """(dispatch?, reason) for one pipeline's next stage.
+
+    The marker "{pid} — {next_stage}" is embedded in the stage workflow's
+    run-name. Rules, in order:
+      1. queued/in_progress/success marker run → skip (already handled).
+      2. >= max_attempts failed marker runs → STALLED: never re-dispatch
+         (before this cap existed, a red stage was re-dispatched every 15
+         minutes forever).
+      3. newest failed marker run younger than the cooldown → wait a tick.
+      4. otherwise → dispatch.
+    """
+
+    marker = f"{pid} — {next_stage}"
+    with_marker = [r for r in stage_runs if marker in str(r.get("displayTitle") or "")]
+    active_or_done = [
+        r for r in with_marker
+        if r.get("status") in ("queued", "in_progress")
+        or r.get("conclusion") == "success"
+    ]
+    if active_or_done:
+        return False, "already running/done"
+
+    failed = [r for r in with_marker if r.get("conclusion") in FAILED_CONCLUSIONS]
+    if len(failed) >= max_attempts:
+        return False, "STALLED"
+    if failed:
+        def _age_min(r: dict) -> float:
+            try:
+                ts = datetime.fromisoformat(str(r.get("createdAt") or "").replace("Z", "+00:00"))
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                return (now - ts).total_seconds() / 60.0
+            except ValueError:
+                return float("inf")
+
+        newest_age_min = min(_age_min(r) for r in failed)
+        if newest_age_min < min_retry_minutes:
+            return False, (
+                f"cooling down after failure ({len(failed)}/{max_attempts} attempts, "
+                f"last {newest_age_min:.0f}m ago)"
+            )
+    return True, f"dispatch (attempt {len(failed) + 1}/{max_attempts})"
 
 
 def _gh(*args: str) -> str:
@@ -141,14 +218,24 @@ def main() -> int:
     summary_lines: list[str] = []
     for pid, state in sorted(states.items()):
         next_stage = str(state["next_stage"])
-        marker = f"{pid} — {next_stage}"
-        already = [
-            r for r in stage_runs
-            if marker in str(r.get("displayTitle") or "")
-            and (r.get("status") in ("queued", "in_progress") or r.get("conclusion") == "success")
-        ]
-        if already:
-            summary_lines.append(f"{pid}: {next_stage} already running/done — skip")
+        dispatch, reason = _dispatch_decision(
+            pid,
+            next_stage,
+            stage_runs,
+            datetime.now(timezone.utc),
+            max_attempts=_max_dispatch_attempts(),
+            min_retry_minutes=_retry_cooldown_minutes(),
+        )
+        if not dispatch:
+            if reason == "STALLED":
+                print(
+                    f"::error title=Pythia pipeline stalled::{pid}: stage "
+                    f"{next_stage} failed {_max_dispatch_attempts()}x — the poller "
+                    f"will NOT re-dispatch. Recover by re-running 'Pythia Pipeline "
+                    f"Stage' manually with stage={next_stage} pipeline_id={pid} "
+                    f"db_run_id={state.get('db_run_id') or ''}."
+                )
+            summary_lines.append(f"{pid}: {next_stage} — {reason}")
             continue
 
         pending = state.get("pending") or []

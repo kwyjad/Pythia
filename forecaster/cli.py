@@ -206,6 +206,7 @@ def _try_batch_phase(
             hazard_code=hazard_code,
             metric=metric,
             anchor_month=anchor_month,
+            pipeline_id=_BATCH_PIPELINE_ID,
         )
         return "", {"batch_phase": "submit"}, _BATCH_SENTINEL_SUBMITTED, ms
 
@@ -215,6 +216,7 @@ def _try_batch_phase(
         batch_family,
         question_id=question_id,
         model_key=_batch_model_key(ms),
+        pipeline_id=_BATCH_PIPELINE_ID,
     )
     if hit is not None:
         usage = dict(hit.get("usage") or {})
@@ -222,7 +224,11 @@ def _try_batch_phase(
         return hit.get("text") or "", usage, (hit.get("error") or None), ms
     # Miss / errored / expired → sync fallback via the normal call path.
     llm_batch.mark_fallback_sync(
-        _batch_con(), batch_family, question_id=question_id, model_key=_batch_model_key(ms)
+        _batch_con(),
+        batch_family,
+        question_id=question_id,
+        model_key=_batch_model_key(ms),
+        pipeline_id=_BATCH_PIPELINE_ID,
     )
     return None
 
@@ -3076,26 +3082,31 @@ async def _call_spd_members_v2_compat(
     fn = _call_spd_members_v2
     try:
         sig = inspect.signature(fn)
-        kwargs: dict[str, object] = {}
-        if "run_id" in sig.parameters:
-            kwargs["run_id"] = run_id
-        if "question_id" in sig.parameters:
-            kwargs["question_id"] = question_id
-        if "iso3" in sig.parameters:
-            kwargs["iso3"] = iso3
-        if "hazard_code" in sig.parameters:
-            kwargs["hazard_code"] = hazard_code
-        if "metric" in sig.parameters:
-            kwargs["metric"] = metric
-        if "anchor_month" in sig.parameters:
-            kwargs["anchor_month"] = anchor_month
-        if "wording" in sig.parameters:
-            kwargs["wording"] = wording
-        if "batch_family" in sig.parameters:
-            kwargs["batch_family"] = batch_family
-        return await fn(prompt, specs, **kwargs)
-    except Exception:
+    except (TypeError, ValueError):
+        # Non-introspectable test double — call with the legacy minimal args.
+        # Only signature inspection is guarded: a broad except around the
+        # awaited call itself would retry WITHOUT batch_family on any real
+        # error inside the fan-out, silently un-batching every member
+        # (full-price sync calls whose results the submit phase discards).
         return await fn(prompt, specs, run_id=run_id)
+    kwargs: dict[str, object] = {}
+    if "run_id" in sig.parameters:
+        kwargs["run_id"] = run_id
+    if "question_id" in sig.parameters:
+        kwargs["question_id"] = question_id
+    if "iso3" in sig.parameters:
+        kwargs["iso3"] = iso3
+    if "hazard_code" in sig.parameters:
+        kwargs["hazard_code"] = hazard_code
+    if "metric" in sig.parameters:
+        kwargs["metric"] = metric
+    if "anchor_month" in sig.parameters:
+        kwargs["anchor_month"] = anchor_month
+    if "wording" in sig.parameters:
+        kwargs["wording"] = wording
+    if "batch_family" in sig.parameters:
+        kwargs["batch_family"] = batch_family
+    return await fn(prompt, specs, **kwargs)
 
 
 async def _call_spd_model_compat(
@@ -3116,21 +3127,23 @@ async def _call_spd_model_compat(
     fn = _call_spd_model
     try:
         sig = inspect.signature(fn)
-        kwargs: dict[str, object] = {}
-        for key, value in {
-            "run_id": run_id,
-            "question_id": question_id,
-            "iso3": iso3,
-            "hazard_code": hazard_code,
-            "metric": metric,
-            "anchor_month": anchor_month,
-            "wording": wording,
-        }.items():
-            if key in sig.parameters:
-                kwargs[key] = value
-        return await fn(prompt, **kwargs)
-    except Exception:
+    except (TypeError, ValueError):
+        # Non-introspectable test double — legacy minimal call. Real errors
+        # inside the call must propagate (see _call_spd_members_v2_compat).
         return await fn(prompt)
+    kwargs: dict[str, object] = {}
+    for key, value in {
+        "run_id": run_id,
+        "question_id": question_id,
+        "iso3": iso3,
+        "hazard_code": hazard_code,
+        "metric": metric,
+        "anchor_month": anchor_month,
+        "wording": wording,
+    }.items():
+        if key in sig.parameters:
+            kwargs[key] = value
+    return await fn(prompt, **kwargs)
 
 
 async def _call_spd_ensemble_v2(
@@ -5677,6 +5690,12 @@ def main() -> None:
     _BATCH_PIPELINE_ID = (getattr(args, "pipeline_id", "") or "").strip() or None
     if _FORECAST_PHASE == "submit" and not _BATCH_PIPELINE_ID:
         _BATCH_PIPELINE_ID = f"pl_{int(time.time())}"
+    if _FORECAST_PHASE == "collect" and not _BATCH_PIPELINE_ID:
+        # Custom ids are pipeline-scoped; a collect without the pipeline id
+        # would miss every replay and silently re-run the whole ensemble
+        # synchronously at full price.
+        print("[fatal] --phase collect requires --pipeline-id")
+        return
     print("🚀 Forecaster ensemble starting…")
     print(f"Mode: {args.mode} | Limit: {args.limit} | Purpose: {args.purpose}")
     if _FORECAST_PHASE != "full":
@@ -5922,6 +5941,14 @@ def main() -> None:
                 try:
                     con = connect(read_only=False)
                     ensure_schema(con)
+                    # Delete-first: the staged pipeline runs this task in BOTH
+                    # the submit and collect phases under the same run_id (and
+                    # a re-dispatched collect runs it again) — a bare INSERT
+                    # accumulates duplicate placeholder rows.
+                    con.execute(
+                        "DELETE FROM question_research WHERE run_id = ? AND question_id = ?",
+                        [run_id, qid],
+                    )
                     con.execute(
                         """
                         INSERT INTO question_research
