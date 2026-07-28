@@ -15,6 +15,8 @@ const GROUNDING_SENTINEL_LABELS: Record<string, string> = {
   "grounding-failed": "Grounding failed (no backend)",
   "grounding-breaker-tripped": "Grounding unavailable (breaker)",
   "grounding-unavailable": "Grounding unavailable (no API key)",
+  "grounding-disabled": "Grounding disabled (flag off)",
+  "grounding-budget-exceeded": "Grounding skipped (budget)",
 };
 
 export function formatModelName(raw: string): string {

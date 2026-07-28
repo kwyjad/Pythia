@@ -555,16 +555,36 @@ def log_hs_hazard_tail_packs_to_db(hs_run_id: str, packs: list[dict], is_test: b
         rc_direction = pack.get("rc_direction")
         rc_window = pack.get("rc_window")
 
-        logging.debug(
-            "Deleting hs_hazard_tail_packs row for hs_run_id=%s iso3=%s hazard_code=%s",
-            hs_run_id,
-            iso3,
-            hazard_code,
-        )
-        con.execute(
-            "DELETE FROM hs_hazard_tail_packs WHERE hs_run_id = ? AND iso3 = ? AND hazard_code = ?;",
-            [hs_run_id, iso3, hazard_code],
-        )
+        # Scope the idempotency delete by the pack KIND (the query carries a
+        # "rc_grounding: " / "triage_grounding: " prefix): the triage-
+        # grounding write used to delete the RC pack, so at most one pack
+        # per (run, iso3, hazard) ever survived — Track-2 hazards lost
+        # their RC grounding evidence entirely (SPD injects + the AI
+        # analysis bundle both promise BOTH packs), and an hs_finalize RC
+        # re-replay could only rebuild its prompt from the triage pack.
+        # Prefix-less legacy packs keep the broad delete.
+        prefix = str(query).split(":", 1)[0] if ":" in str(query) else ""
+        if prefix in ("rc_grounding", "triage_grounding"):
+            logging.debug(
+                "Deleting %s hs_hazard_tail_packs row for hs_run_id=%s iso3=%s hazard_code=%s",
+                prefix, hs_run_id, iso3, hazard_code,
+            )
+            con.execute(
+                "DELETE FROM hs_hazard_tail_packs "
+                "WHERE hs_run_id = ? AND iso3 = ? AND hazard_code = ? AND query LIKE ?;",
+                [hs_run_id, iso3, hazard_code, f"{prefix}:%"],
+            )
+        else:
+            logging.debug(
+                "Deleting hs_hazard_tail_packs row for hs_run_id=%s iso3=%s hazard_code=%s",
+                hs_run_id,
+                iso3,
+                hazard_code,
+            )
+            con.execute(
+                "DELETE FROM hs_hazard_tail_packs WHERE hs_run_id = ? AND iso3 = ? AND hazard_code = ?;",
+                [hs_run_id, iso3, hazard_code],
+            )
         logging.debug(
             "Inserting hs_hazard_tail_packs row for hs_run_id=%s iso3=%s hazard_code=%s rc_level=%s rc_score=%s sources=%d signals=%d markdown_len=%d",
             hs_run_id,

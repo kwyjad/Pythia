@@ -1066,7 +1066,7 @@ def get_result(
     )
     row = con.execute(
         """
-        SELECT status, response_text, usage_json, error_text
+        SELECT status, response_text, usage_json, error_text, request_body_json
         FROM llm_batch_requests WHERE custom_id = ?
         """,
         [custom_id],
@@ -1082,7 +1082,8 @@ def get_result(
         )
         row = con.execute(
             """
-            SELECT r.status, r.response_text, r.usage_json, r.error_text
+            SELECT r.status, r.response_text, r.usage_json, r.error_text,
+                   r.request_body_json
             FROM llm_batch_requests r
             JOIN llm_batches b ON r.batch_id = b.batch_id
             WHERE r.custom_id = ? AND b.pipeline_id = ?
@@ -1093,7 +1094,7 @@ def get_result(
             custom_id = legacy_id
     if not row:
         return None
-    status, text, usage_json, error = row
+    status, text, usage_json, error, body_json = row
     if status not in ("succeeded", "errored"):
         return None
     try:
@@ -1106,7 +1107,41 @@ def get_result(
         "text": text or "",
         "usage": usage,
         "error": error or "",
+        # The prompt the provider ACTUALLY received (extracted from the
+        # stored request body — still present at replay time; bodies are
+        # cleared only after the collect stage). The collect stage runs up
+        # to 24h after submit and prompts embed today's date, so the
+        # rebuilt prompt can differ from what was sent.
+        "sent_prompt": _prompt_from_body_json(body_json),
     }
+
+
+def _prompt_from_body_json(body_json: Optional[str]) -> str:
+    """Extract the user prompt text from a stored provider request body."""
+
+    if not body_json:
+        return ""
+    try:
+        body = json.loads(body_json)
+    except json.JSONDecodeError:
+        return ""
+    try:
+        if isinstance(body, dict) and body.get("messages"):
+            content = (body["messages"][0] or {}).get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):  # Anthropic cache_control blocks
+                return "".join(
+                    str(b.get("text") or "") for b in content if isinstance(b, dict)
+                )
+        if isinstance(body, dict) and body.get("contents"):
+            parts = (body["contents"][0] or {}).get("parts") or []
+            return "".join(
+                str(p.get("text") or "") for p in parts if isinstance(p, dict)
+            )
+    except (KeyError, IndexError, TypeError):
+        pass
+    return ""
 
 
 def mark_fallback_sync(con, family: str, **key_kwargs: Any) -> None:

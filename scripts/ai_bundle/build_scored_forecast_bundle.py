@@ -24,6 +24,7 @@ fail the calibration workflow — wire it with continue-on-error.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import shutil
 import sys
@@ -58,6 +59,9 @@ RANKING_MODEL_PREFERENCE = ("ensemble_mean_v2", "ensemble_bayesmc_v2", "track2_f
 
 DIGEST_BUDGET_KB = 200
 BRIEFING_BUDGET_KB = 300
+# Warn-only ceiling for the whole zip (GitHub artifact limits are the real
+# constraint; the per-file guards only cover digest/briefing).
+_ZIP_WARN_MB = 500
 
 
 def _score_family(metric: str | None) -> str:
@@ -838,6 +842,23 @@ def _write_digest(
     size_guard(path, DIGEST_BUDGET_KB)
 
 
+def _load_staged_record(staging: Path, qid: str) -> dict[str, Any] | None:
+    """Re-read a per-question record from staging (case studies only).
+
+    Records are streamed to disk during the build and never all retained in
+    memory — this is the read-back path for the ≤2N case-study ids.
+    """
+
+    path = staging / "questions" / f"{qid}.json"
+    try:
+        with path.open(encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        return loaded if isinstance(loaded, dict) else None
+    except (OSError, json.JSONDecodeError) as exc:
+        LOGGER.warning("Could not re-read staged record for %s: %s", qid, exc)
+        return None
+
+
 def _write_briefing(
     out_dir: Path,
     records_by_id: dict[str, dict[str, Any]],
@@ -974,8 +995,12 @@ def build_bundle(
 
         qids = [str(q["question_id"]) for q in questions]
 
-        # Per-question records (streamed one at a time).
-        records_by_id: dict[str, dict[str, Any]] = {}
+        # Per-question records: genuinely streamed — each record is written
+        # to staging and RELEASED. Records inline untruncated grounding
+        # packs, full prompts and member responses (100s of KB each), so
+        # retaining all of them (as an earlier version did via a
+        # records_by_id dict) OOMs at production scale; only the ≤2N case
+        # studies are re-read from staging after selection.
         summaries: list[dict[str, Any]] = []
         include_all_trials = include_sibyl_trials == "all"
         for q in questions:
@@ -991,8 +1016,8 @@ def build_bundle(
                 LOGGER.warning("Failed to build record for %s: %s", qid, exc)
                 continue
             write_json(staging / "questions" / f"{qid}.json", record)
-            records_by_id[qid] = record
             summaries.append(_question_summary(record))
+            del record
 
         write_csv(
             staging / "questions_index.csv",
@@ -1013,8 +1038,9 @@ def build_bundle(
 
         case_selection = _select_case_studies(summaries, n_case_studies)
         case_dir = staging / "case_studies"
+        case_records: dict[str, dict[str, Any]] = {}
         for qid in case_selection.get("worst", []) + case_selection.get("best", []):
-            record = records_by_id.get(qid)
+            record = _load_staged_record(staging, qid)
             if not record:
                 continue
             if include_sibyl_trials in ("case-studies", "all") and "sibyl" in record:
@@ -1028,12 +1054,13 @@ def build_bundle(
                     if sib:
                         record["sibyl"]["trials"] = safe_json_loads(sib[0].get("trials_json"))
             write_json(case_dir / f"{qid}.json", record)
+            case_records[qid] = record
 
         _write_digest(
             staging, summaries, rollups, weight_movement, case_selection,
             months_back=months_back,
         )
-        _write_briefing(staging, records_by_id, case_selection)
+        _write_briefing(staging, case_records, case_selection)
 
         guide = build_analyst_guide(
             {"n_questions": len(summaries), "months_back": months_back}
@@ -1065,7 +1092,15 @@ def build_bundle(
         write_bundle_zip(staging, zip_path)
         if not keep_staging:
             shutil.rmtree(staging, ignore_errors=True)
-        LOGGER.info("Bundle written: %s (%.1f MB)", zip_path, zip_path.stat().st_size / 1e6)
+        zip_mb = zip_path.stat().st_size / 1e6
+        LOGGER.info("Bundle written: %s (%.1f MB)", zip_path, zip_mb)
+        if zip_mb > _ZIP_WARN_MB:
+            # The digest/briefing guards cover the chat-uploadable files;
+            # the ZIP itself is what can blow past Actions artifact limits.
+            LOGGER.warning(
+                "Bundle zip is %.0f MB (warn threshold %d MB) — consider a "
+                "shorter --months-back or fewer case studies", zip_mb, _ZIP_WARN_MB,
+            )
         return zip_path
     finally:
         try:

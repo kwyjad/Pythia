@@ -95,6 +95,7 @@ HS_DIRECT_TABLES = [
     ("hs_country_reports", "hs_run_id"),
     ("hs_scenarios", "hs_run_id"),
     ("hs_triage", "run_id"),  # uses run_id, not hs_run_id
+    ("hs_stage_state", "run_id"),  # staged-pipeline carry state
     ("llm_calls", "hs_run_id"),
     ("run_provenance", "hs_run_id"),
 ]
@@ -108,7 +109,43 @@ QUESTION_CASCADE_TABLES = [
     "forecasts_ensemble",
     "question_research",
     "question_run_metrics",
+    # Forecaster batch-request rows are question-keyed; the HS-family rows
+    # (question_id NULL) are removed via the llm_batches join below.
+    "llm_batch_requests",
 ]
+
+
+def _purge_batch_state(con, hs_run_id: str, *, execute: bool) -> list[tuple[str, int]]:
+    """Count/delete llm_batches + the HS-family llm_batch_requests they own.
+
+    Without this, a purged run leaves replayable batch state behind — a
+    later collect stage against the same DB could serve the purged run's
+    model outputs.
+    """
+
+    rows: list[tuple[str, int]] = []
+    try:
+        n_req = con.execute(
+            "SELECT COUNT(*) FROM llm_batch_requests WHERE batch_id IN "
+            "(SELECT batch_id FROM llm_batches WHERE hs_run_id = ?)",
+            [hs_run_id],
+        ).fetchone()[0]
+        n_bat = con.execute(
+            "SELECT COUNT(*) FROM llm_batches WHERE hs_run_id = ?", [hs_run_id]
+        ).fetchone()[0]
+        if execute:
+            con.execute(
+                "DELETE FROM llm_batch_requests WHERE batch_id IN "
+                "(SELECT batch_id FROM llm_batches WHERE hs_run_id = ?)",
+                [hs_run_id],
+            )
+            con.execute("DELETE FROM llm_batches WHERE hs_run_id = ?", [hs_run_id])
+        rows.append(("llm_batch_requests (via batch)", int(n_req)))
+        rows.append(("llm_batches", int(n_bat)))
+    except Exception:
+        # Pre-batch-pipeline DBs don't have these tables.
+        pass
+    return rows
 
 
 def purge(hs_run_id: str, *, execute: bool = False) -> bool:
@@ -155,6 +192,9 @@ def purge(hs_run_id: str, *, execute: bool = False) -> bool:
         count = _count(con, table, col, hs_run_id)
         summary.append((table, count))
 
+    # Batch-API state owned by this run's batches
+    summary.extend(_purge_batch_state(con, hs_run_id, execute=False))
+
     # hs_runs itself
     summary.append(("hs_runs", 1))
 
@@ -194,6 +234,10 @@ def purge(hs_run_id: str, *, execute: bool = False) -> bool:
         for table, col in HS_DIRECT_TABLES:
             n = _delete(con, table, col, hs_run_id)
             deleted.append((table, n))
+
+        # Phase 4b: batch-API state owned by this run's batches (before the
+        # llm_batches rows are gone the request rows are still joinable)
+        deleted.extend(_purge_batch_state(con, hs_run_id, execute=True))
 
         # Phase 5: hs_runs
         n = _delete(con, "hs_runs", "hs_run_id", hs_run_id)

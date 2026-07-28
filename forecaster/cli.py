@@ -227,6 +227,14 @@ def _try_batch_phase(
     if hit is not None and hit.get("status", "succeeded") == "succeeded":
         usage = dict(hit.get("usage") or {})
         usage.setdefault("elapsed_ms", 0)
+        sent_prompt = hit.get("sent_prompt") or ""
+        if sent_prompt and sent_prompt != prompt:
+            # Collect-stage prompts are REBUILT and can differ from what was
+            # submitted (e.g. the embedded 'Today' date across a 24h batch
+            # wait). Stash the true sent prompt so the spd_v2/binary_v2
+            # llm_calls row stays byte-exact — the existing pop pattern in
+            # _call_spd_members_v2 routes it to the log sites.
+            usage["sent_prompt_text"] = sent_prompt
         return hit.get("text") or "", usage, (hit.get("error") or None), ms
     if hit is not None:
         # Errored batch item: the provider still billed its tokens (e.g. an
@@ -1560,14 +1568,18 @@ def _write_spd_members_v2_to_db(
             except Exception:
                 pass
 
-            # Extract reasoning trace from raw_calls for this model.
+            # Extract reasoning trace + human explanation from raw_calls.
             _rc_reasoning_trace = None
+            _rc_explanation = None
             try:
                 _rc_entry = raw_calls[idx]
                 if isinstance(_rc_entry, dict):
                     _rt = _rc_entry.get("reasoning_trace")
                     if _rt:
                         _rc_reasoning_trace = json.dumps(_rt, default=str)
+                    _he = _rc_entry.get("human_explanation")
+                    if isinstance(_he, str) and _he.strip():
+                        _rc_explanation = _he.strip()
             except Exception as exc:
                 LOG.warning(
                     "Discarding unserializable reasoning trace for model #%d: %r",
@@ -1627,7 +1639,7 @@ def _write_spd_members_v2_to_db(
                             probability, ok, elapsed_ms, cost_usd, prompt_tokens,
                             completion_tokens, total_tokens, status, spd_json, human_explanation,
                             horizon_m, class_bin, p, is_test, reasoning_trace_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, NULL, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
                             run_id,
@@ -1643,6 +1655,7 @@ def _write_spd_members_v2_to_db(
                             completion_tokens,
                             total_tokens,
                             json.dumps(spd_json_payload),
+                            _rc_explanation,
                             month_index,
                             cb,
                             float(prob),

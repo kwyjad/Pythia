@@ -343,8 +343,13 @@ jobs:
               rm -rf data/pythia-resolver-db
               rm -f data/resolver.duckdb data/resolver.duckdb.wal
 
-              if ! download_artifact_with_retries "$DB_RUN_ID" "$DB_ARTIFACT_NAME" data 6; then
-                echo "Download failed for run ${DB_RUN_ID}; trying next candidate."
+              # Discovery probes ONE attempt per candidate (like the
+              # composite action): 3 of 4 "Pythia Pipeline Stage" runs never
+              # carry the canonical artifact, and 6 backoff attempts per
+              # such candidate wasted ~7.6 minutes each. The explicit
+              # operator-override download below keeps its full retries.
+              if ! download_artifact_with_retries "$DB_RUN_ID" "$DB_ARTIFACT_NAME" data 1; then
+                echo "No canonical artifact on run ${DB_RUN_ID}; trying next candidate."
                 continue
               fi
 

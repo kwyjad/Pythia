@@ -33,9 +33,24 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+def _llm_calls_columns(con) -> set[str]:
+    try:
+        return {r[0] for r in _execute(con, "DESCRIBE llm_calls", []).fetchall()}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _first_present(cols: set[str], *candidates: str) -> Optional[str]:
+    for c in candidates:
+        if c in cols:
+            return c
+    return None
+
+
 @router.get("/v1/llm/costs")
 def llm_costs(
-    component: str | None = Query(None),
+    phase: str | None = Query(None, description="Filter by phase (e.g. 'spd_v2', 'hs_triage', 'sibyl')"),
+    component: str | None = Query(None, description="Legacy alias for phase"),
     model: str | None = Query(None),
     since: str | None = Query(None),
     limit: int = Query(200, ge=1, le=5000),
@@ -44,26 +59,37 @@ def llm_costs(
     """
     Return recent LLM call cost/usage rows from llm_calls.
 
-    Optional filters:
-      - component: "HS" | "Researcher" | "Forecaster" | etc.
-      - model: model_name (exact match)
-      - since: ISO timestamp (created_at >= since)
+    Column names are resolved against the live table: the canonical schema
+    uses timestamp/phase/prompt_tokens (the legacy created_at/component/
+    tokens_in set no longer exists — the unresolved references made this
+    endpoint 500 on every production DB). Legacy DBs still work via the
+    fallback candidates. The multi-KB prompt/response text columns are
+    excluded from the row payload.
     """
     con = _con()
-    sql = f"SELECT * FROM llm_calls WHERE 1=1{_test_filter(include_test)}"
+    cols = _llm_calls_columns(con)
+    ts_col = _first_present(cols, "timestamp", "created_at") or "timestamp"
+    phase_col = _first_present(cols, "phase", "component")
+
+    select_cols = [
+        c for c in cols
+        if c not in ("prompt_text", "response_text", "parsed_json", "usage_json")
+    ] or ["*"]
+    sql = f"SELECT {', '.join(sorted(select_cols))} FROM llm_calls WHERE 1=1{_test_filter(include_test)}"
     params: list = []
 
-    if component:
-        sql += " AND component = ?"
-        params.append(component)
+    phase_value = phase or component
+    if phase_value and phase_col:
+        sql += f" AND {phase_col} = ?"
+        params.append(phase_value)
     if model:
         sql += " AND model_name = ?"
         params.append(model)
     if since:
-        sql += " AND created_at >= ?"
+        sql += f" AND {ts_col} >= ?"
         params.append(since)
 
-    sql += " ORDER BY created_at DESC LIMIT ?"
+    sql += f" ORDER BY {ts_col} DESC LIMIT ?"
     params.append(limit)
 
     return {"rows": _rows_from_cursor(_execute(con, sql, params))}
@@ -84,8 +110,13 @@ def llm_costs_summary(
         description="Filter by created_at >= since (ISO date or datetime string). If omitted, no time filter.",
     ),
     group_by: str = Query(
-        "component,model_name,llm_profile",
-        description="Comma-separated list of grouping fields: any of 'component','model_name','llm_profile','hs_run_id','ui_run_id','forecaster_run_id'",
+        "phase,model_name",
+        description=(
+            "Comma-separated grouping fields: 'phase' (alias 'component'),"
+            "'model_name','provider','run_id','hs_run_id' — plus the legacy "
+            "'llm_profile'/'ui_run_id'/'forecaster_run_id' on DBs that carry "
+            "those columns"
+        ),
     ),
     limit: int = Query(1000, ge=1, le=5000),
     include_test: bool = Query(False),
@@ -104,63 +135,80 @@ def llm_costs_summary(
       - cost_usd
     """
     con = _con()
+    cols = _llm_calls_columns(con)
+    ts_col = _first_present(cols, "timestamp", "created_at") or "timestamp"
 
-    # Parse and validate group_by
-    allowed_fields = {
-        "component",
-        "model_name",
-        "llm_profile",
-        "hs_run_id",
-        "ui_run_id",
-        "forecaster_run_id",
+    # Requested field → the column that actually exists on this DB (the
+    # canonical schema has phase/run_id; legacy DBs had component/
+    # forecaster_run_id/llm_profile). Unknown-to-this-DB fields are
+    # rejected explicitly rather than 500ing in the binder.
+    field_candidates = {
+        "phase": ("phase", "component"),
+        "component": ("phase", "component"),
+        "model_name": ("model_name",),
+        "provider": ("provider",),
+        "llm_profile": ("llm_profile",),
+        "hs_run_id": ("hs_run_id",),
+        "run_id": ("run_id",),
+        "ui_run_id": ("ui_run_id",),
+        "forecaster_run_id": ("forecaster_run_id", "run_id"),
     }
+
+    def _resolve_field(name: str) -> Optional[str]:
+        return _first_present(cols, *field_candidates.get(name, ()))
+
     group_fields: List[str] = [f.strip() for f in group_by.split(",") if f.strip()]
     if not group_fields:
-        group_fields = ["component", "model_name", "llm_profile"]
+        group_fields = ["phase", "model_name"]
 
-    invalid = [f for f in group_fields if f not in allowed_fields]
+    invalid = [f for f in group_fields if f not in field_candidates]
     if invalid:
         raise HTTPException(status_code=400, detail=f"Invalid group_by fields: {', '.join(invalid)}")
+    resolved_group = []
+    for f in group_fields:
+        col = _resolve_field(f)
+        if col is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"group_by field {f!r} has no matching column on this DB",
+            )
+        if col not in resolved_group:
+            resolved_group.append(col)
 
-    # Build WHERE clause
     where_bits = ["1=1"]
     params: dict = {}
 
-    if component:
-        where_bits.append("component = :component")
-        params["component"] = component
-    if model:
-        where_bits.append("model_name = :model_name")
-        params["model_name"] = model
-    if llm_profile:
-        where_bits.append("llm_profile = :llm_profile")
-        params["llm_profile"] = llm_profile
-    if hs_run_id:
-        where_bits.append("hs_run_id = :hs_run_id")
-        params["hs_run_id"] = hs_run_id
-    if ui_run_id:
-        where_bits.append("ui_run_id = :ui_run_id")
-        params["ui_run_id"] = ui_run_id
-    if forecaster_run_id:
-        where_bits.append("forecaster_run_id = :forecaster_run_id")
-        params["forecaster_run_id"] = forecaster_run_id
+    def _add_filter(name: str, value: Optional[str]) -> None:
+        if not value:
+            return
+        col = _resolve_field(name)
+        if col is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"filter {name!r} has no matching column on this DB",
+            )
+        where_bits.append(f"{col} = :{name}")
+        params[name] = value
+
+    _add_filter("component", component)
+    _add_filter("model_name", model)
+    _add_filter("llm_profile", llm_profile)
+    _add_filter("hs_run_id", hs_run_id)
+    _add_filter("ui_run_id", ui_run_id)
+    _add_filter("forecaster_run_id", forecaster_run_id)
     if since:
-        where_bits.append("created_at >= :since")
+        where_bits.append(f"{ts_col} >= :since")
         params["since"] = since
 
     where_clause = " AND ".join(where_bits)
+    group_select = ", ".join(resolved_group)
+    group_by_clause = "GROUP BY " + ", ".join(resolved_group)
 
-    # Build SELECT and GROUP BY
-    group_select = ", ".join(group_fields) if group_fields else ""
-    group_by_clause = ""
-    if group_fields:
-        group_by_clause = "GROUP BY " + ", ".join(group_fields)
-
-    select_fields = group_select + (", " if group_select else "")
+    select_fields = group_select + ", "
     select_fields += """
         COUNT(*) AS calls,
-        SUM(tokens_in) AS tokens_in,
-        SUM(tokens_out) AS tokens_out,
+        SUM(prompt_tokens) AS tokens_in,
+        SUM(completion_tokens) AS tokens_out,
         SUM(cost_usd) AS cost_usd
     """
 
@@ -175,7 +223,7 @@ def llm_costs_summary(
     params["limit"] = limit
 
     return {
-        "group_by": group_fields,
+        "group_by": resolved_group,
         "filters": {
             "component": component,
             "model": model,

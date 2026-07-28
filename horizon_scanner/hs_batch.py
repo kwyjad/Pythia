@@ -305,11 +305,12 @@ def load_grounding_pack(
 ) -> Optional[dict[str, Any]]:
     """Load a persisted grounding pack from hs_hazard_tail_packs.
 
-    ``prefer_prefix`` is "rc_grounding" or "triage_grounding". The tail-pack
-    writer keeps one row per (run, iso3, hazard) — triage grounding
-    overwrites the RC pack (existing production behavior) — so a
-    non-preferred pack may be all that exists; it is still returned (the
-    pack only feeds prompt rebuild/logging in collect stages).
+    ``prefer_prefix`` is "rc_grounding" or "triage_grounding". Since the
+    July 2026 audit the writer's idempotency delete is scoped by pack kind,
+    so BOTH packs coexist per (run, iso3, hazard) and the preferred one is
+    normally found. A non-preferred pack may still be all that exists
+    (pre-fix rows, or a hazard whose triage grounding was skipped); it is
+    returned as a fallback.
     """
 
     try:
