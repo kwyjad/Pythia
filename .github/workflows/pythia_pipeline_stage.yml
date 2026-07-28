@@ -89,6 +89,11 @@ on:
         required: false
         default: ""
         type: string
+      disable_brave:
+        description: "Withhold BRAVE_SEARCH_API_KEY so Brave is skipped entirely (missing-key fall-through, no breaker trips). Use when Brave is 402ing — a tripped breaker blocks ungrounded hazards from forecasting."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -128,7 +133,10 @@ env:
   # caching) + Anthropic cache_control / OpenAI prompt_cache_key.
   PYTHIA_PROMPT_V3_ORDER: "1"
   PYTHIA_PROMPT_CACHE_ENABLED: "1"
-  BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
+  # disable_brave: a missing key makes the Brave backend fall through
+  # gracefully WITHOUT recording breaker failures (a 402ing key trips the
+  # breaker, and the safety gate then blocks every ungrounded hazard).
+  BRAVE_SEARCH_API_KEY: ${{ inputs.disable_brave && '' || secrets.BRAVE_SEARCH_API_KEY }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH: "low"
   PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO: ""

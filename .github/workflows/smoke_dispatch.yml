@@ -5,9 +5,11 @@
 
 ---
 # ONE-SHOT helper (branch-only, deleted after use): dispatches the Gemini
-# batch smoke run with GITHUB_TOKEN. Attempt 2: openai-primary grounding —
-# Brave is returning HTTP 402 (out of credit), which tripped the breaker
-# and (correctly) blocked every hazard from forecasting on attempt 1.
+# batch smoke run with GITHUB_TOKEN. Attempt 3: disable_brave — even with
+# openai primary, Brave stays in the fallback chain, and its HTTP 402s
+# (account out of credit) trip the breaker whose gate then blocks every
+# ungrounded RC-promoted hazard. Withholding the key makes Brave fall
+# through without breaker trips.
 name: Smoke Dispatch (one-shot)
 
 on:
@@ -36,5 +38,6 @@ jobs:
             -f test_mode=true \
             -f batch_providers=google \
             -f only_countries=IRN,SOM \
-            -f grounding_primary=openai
-          echo "Dispatched pythia_pipeline_stage.yml (fc_submit, test_mode, google-only, IRN+SOM, openai grounding)"
+            -f grounding_primary=openai \
+            -f disable_brave=true
+          echo "Dispatched pythia_pipeline_stage.yml (fc_submit, test_mode, google-only, IRN+SOM, openai grounding, brave disabled)"
