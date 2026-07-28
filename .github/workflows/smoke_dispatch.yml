@@ -1,0 +1,36 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# ONE-SHOT helper (branch-only, deleted after use): forces a Poll LLM
+# Batches tick on main. The */15 cron is being scheduled by GitHub every
+# 1.5-3h in practice, and pipeline pl_1785235246's four Gemini batches
+# (submitted 10:41Z) are waiting on a tick to dispatch fc_collect_finalize.
+# Manual dispatch bypasses the poller's activity gate by design.
+name: Smoke Dispatch (one-shot)
+
+on:
+  push:
+    branches: [claude/pythia-code-audit-wc4ndb]
+    paths: ['.github/workflows/smoke_dispatch.yml']
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Force a poller tick on main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          gh workflow run poll_llm_batches.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref main
+          echo "Dispatched poll_llm_batches.yml on main"
