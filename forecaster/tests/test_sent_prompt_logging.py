@@ -10,6 +10,10 @@ _call_spd_model_for_spec can send a prompt that differs from the base prompt
 The true sent prompt travels via usage["sent_prompt_text"], which
 _call_spd_members_v2 pops into raw_call_entry["sent_prompt"] so the multi-KB
 text never lands in usage_json.
+
+NOTE: tests are synchronous and wrap the async entry points in asyncio.run()
+— forecaster-ci.yml installs plain pytest without pytest-asyncio (same
+convention as test_spd.py).
 """
 
 from __future__ import annotations
@@ -24,8 +28,7 @@ import forecaster.cli as cli  # type: ignore
 from forecaster.providers import ModelSpec
 
 
-@pytest.mark.asyncio
-async def test_self_search_stashes_sent_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_self_search_stashes_sent_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts: list[str] = []
 
     async def fake_call_chat_ms(ms, prompt, **_kwargs):
@@ -51,13 +54,15 @@ async def test_self_search_stashes_sent_prompt(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("PYTHIA_MODEL_SELF_SEARCH_ENABLED", "1")
     monkeypatch.setenv("PYTHIA_FORECASTER_SELF_SEARCH_MAX_CALLS_PER_MODEL", "1")
 
-    text, usage, error, _ = await cli._call_spd_model_for_spec(
-        ModelSpec(name="Test", provider="google", model_id="gpt-test", active=True),
-        "PROMPT",
-        run_id="run1",
-        question_id="Q1",
-        iso3="KEN",
-        hazard_code="FL",
+    text, usage, error, _ = asyncio.run(
+        cli._call_spd_model_for_spec(
+            ModelSpec(name="Test", provider="google", model_id="gpt-test", active=True),
+            "PROMPT",
+            run_id="run1",
+            question_id="Q1",
+            iso3="KEN",
+            hazard_code="FL",
+        )
     )
 
     assert error is None
@@ -68,8 +73,7 @@ async def test_self_search_stashes_sent_prompt(monkeypatch: pytest.MonkeyPatch) 
     assert usage["sent_prompt_text"] != "PROMPT"
 
 
-@pytest.mark.asyncio
-async def test_disabled_retry_stashes_retry_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_disabled_retry_stashes_retry_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts: list[str] = []
 
     async def fake_call_chat_ms(ms, prompt, **_kwargs):
@@ -90,13 +94,15 @@ async def test_disabled_retry_stashes_retry_prompt(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("PYTHIA_FORECASTER_SELF_SEARCH", "0")
     monkeypatch.setenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0")
 
-    text, usage, error, _ = await cli._call_spd_model_for_spec(
-        ModelSpec(name="Test", provider="google", model_id="gpt-test", active=True),
-        "PROMPT",
-        run_id="run2",
-        question_id="Q2",
-        iso3="KEN",
-        hazard_code="FL",
+    text, usage, error, _ = asyncio.run(
+        cli._call_spd_model_for_spec(
+            ModelSpec(name="Test", provider="google", model_id="gpt-test", active=True),
+            "PROMPT",
+            run_id="run2",
+            question_id="Q2",
+            iso3="KEN",
+            hazard_code="FL",
+        )
     )
 
     assert "spds" in text
@@ -106,8 +112,7 @@ async def test_disabled_retry_stashes_retry_prompt(monkeypatch: pytest.MonkeyPat
     assert "WEB EVIDENCE IS UNAVAILABLE THIS RUN" in usage["sent_prompt_text"]
 
 
-@pytest.mark.asyncio
-async def test_plain_call_has_no_sent_prompt_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_plain_call_has_no_sent_prompt_key(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_call_chat_ms(ms, prompt, **_kwargs):
         return (
             '{"spds": {"month_1": {"probs": [0.1,0.1,0.2,0.2,0.2,0.2]}}}',
@@ -119,23 +124,22 @@ async def test_plain_call_has_no_sent_prompt_key(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("PYTHIA_FORECASTER_SELF_SEARCH", "0")
     monkeypatch.setenv("PYTHIA_SPD_WEB_SEARCH_ENABLED", "0")
 
-    _text, usage, error, _ = await cli._call_spd_model_for_spec(
-        ModelSpec(name="Test", provider="google", model_id="gpt-test", active=True),
-        "PROMPT",
-        run_id="run3",
-        question_id="Q3",
-        iso3="KEN",
-        hazard_code="FL",
+    _text, usage, error, _ = asyncio.run(
+        cli._call_spd_model_for_spec(
+            ModelSpec(name="Test", provider="google", model_id="gpt-test", active=True),
+            "PROMPT",
+            run_id="run3",
+            question_id="Q3",
+            iso3="KEN",
+            hazard_code="FL",
+        )
     )
 
     assert error is None
     assert "sent_prompt_text" not in usage
 
 
-@pytest.mark.asyncio
-async def test_members_v2_pops_sent_prompt_out_of_usage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_members_v2_pops_sent_prompt_out_of_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     spec = ModelSpec(name="Test", provider="google", model_id="gpt-test", active=True)
 
     async def fake_call_spd_model_for_spec(ms, prompt, **_kwargs):
@@ -148,12 +152,14 @@ async def test_members_v2_pops_sent_prompt_out_of_usage(
 
     monkeypatch.setattr(cli, "_call_spd_model_for_spec", fake_call_spd_model_for_spec)
 
-    _spds, _usage, raw_calls, _meta = await cli._call_spd_members_v2(
-        "BASE PROMPT",
-        [spec],
-        run_id="run4",
-        question_id="Q4",
-        metric="PA",
+    _spds, _usage, raw_calls, _meta = asyncio.run(
+        cli._call_spd_members_v2(
+            "BASE PROMPT",
+            [spec],
+            run_id="run4",
+            question_id="Q4",
+            metric="PA",
+        )
     )
 
     assert len(raw_calls) == 1
