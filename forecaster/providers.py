@@ -1369,14 +1369,42 @@ def resolve_request_params(ms: "ModelSpec", temperature: float) -> tuple[float, 
     return effective_temperature, thinking_level
 
 
-def build_body_for_spec(ms: "ModelSpec", prompt: str, temperature: float = 0.2) -> dict:
+def _batch_prompt_cache_enabled() -> bool:
+    """Gate for cache_control blocks in BATCH bodies (default OFF).
+
+    Batch items already get the 50% batch discount; Anthropic cache hits in
+    a batch are best-effort (items fan out across nodes) while the 1.25x
+    cache-write premium is charged per-miss — so batch caching is opt-in,
+    to be enabled only once telemetry shows reads materialize. OpenAI's
+    automatic-cache discount does not apply to its Batch API at all, so
+    prompt_cache_key is never emitted in batch bodies.
+    """
+
+    return os.getenv("PYTHIA_BATCH_PROMPT_CACHE", "0").strip().lower() in ("1", "true", "yes")
+
+
+def build_body_for_spec(
+    ms: "ModelSpec",
+    prompt: str,
+    temperature: float = 0.2,
+    *,
+    cache_prefix: Optional[str] = None,
+    prompt_cache_key: Optional[str] = None,
+) -> dict:
     """Build the exact provider request body a sync call_chat_ms would send.
 
     Single entry point for the Batch API layer: dispatches to the shared
     per-provider body builders with the same resolved params as the sync
     path, so a batch item's body is byte-identical to the sync request.
+
+    The cache args keep sync/batch parity now that the sync SPD path sends
+    cache_control segments: with PYTHIA_BATCH_PROMPT_CACHE unset (default)
+    batch bodies stay plain-string (see _batch_prompt_cache_enabled);
+    ``prompt_cache_key`` is accepted for signature parity but deliberately
+    never emitted (no OpenAI batch discount exists for it).
     """
 
+    del prompt_cache_key  # never emitted in batch bodies — see docstring
     effective_temperature, thinking_level = resolve_request_params(ms, temperature)
     provider = (ms.provider or "").lower()
     if provider == "openai":
@@ -1384,8 +1412,16 @@ def build_body_for_spec(ms: "ModelSpec", prompt: str, temperature: float = 0.2) 
             prompt, ms.model_id, effective_temperature, reasoning_effort=thinking_level
         )
     if provider == "anthropic":
+        cache_segments = None
+        if (
+            _batch_prompt_cache_enabled()
+            and cache_prefix
+            and prompt.startswith(cache_prefix)
+        ):
+            cache_segments = [(cache_prefix, True), (prompt[len(cache_prefix):], False)]
         return build_anthropic_body(
-            prompt, ms.model_id, effective_temperature, purpose=ms.purpose
+            prompt, ms.model_id, effective_temperature, purpose=ms.purpose,
+            cache_segments=cache_segments,
         )
     if provider in {"google", "gemini"}:
         return build_google_body(

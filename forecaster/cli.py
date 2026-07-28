@@ -174,6 +174,8 @@ def _try_batch_phase(
     metric: str | None,
     anchor_month: str | None,
     run_id: str | None = None,
+    cache_prefix: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> tuple[str, dict, str | None, "ModelSpec"] | None:
     """Submit-phase enqueue or collect-phase replay for one member call.
 
@@ -193,7 +195,10 @@ def _try_batch_phase(
             # Excluded providers run in the collect stage (sync), never in
             # submit — otherwise their cost would double when collect re-runs.
             return "", {"batch_phase": "submit"}, _BATCH_SENTINEL_DEFERRED, ms
-        body = build_body_for_spec(ms, prompt, 0.2)
+        body = build_body_for_spec(
+            ms, prompt, 0.2,
+            cache_prefix=cache_prefix, prompt_cache_key=prompt_cache_key,
+        )
         llm_batch.enqueue_request(
             _batch_con(),
             family=batch_family,
@@ -2595,9 +2600,19 @@ async def _call_spd_model_for_spec(
     anchor_month: str | None = None,
     wording: str | None = None,
     batch_family: str | None = None,
+    cache_prefix: str | None = None,
+    prompt_cache_key: str | None = None,
     **_kwargs,
 ) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
-    """Async wrapper for the SPD LLM call for a given model spec with self-search support."""
+    """Async wrapper for the SPD LLM call for a given model spec with self-search support.
+
+    ``cache_prefix`` is the V3 static prompt prefix (from
+    ``build_spd_prompt_v2(return_parts=True)``): when the prompt still starts
+    with it at call time, it is sent as an Anthropic ``cache_control``
+    breakpoint segment. ``prompt_cache_key`` is the OpenAI cache-routing
+    hint. Both are inert unless PYTHIA_PROMPT_CACHE_ENABLED=1 (checked in
+    the body builders).
+    """
 
     if ms.purpose != "spd_v2":
         # Stamp the purpose WITHOUT dropping the per-model params. This used to
@@ -2623,6 +2638,8 @@ async def _call_spd_model_for_spec(
             metric=metric,
             anchor_month=anchor_month,
             run_id=run_id,
+            cache_prefix=cache_prefix,
+            prompt_cache_key=prompt_cache_key,
         )
         if batch_short is not None:
             return batch_short
@@ -2802,6 +2819,16 @@ async def _call_spd_model_for_spec(
                 call_type="forecast_web_research",
             )
 
+    # Segments are derived HERE, against the prompt actually being sent, so
+    # tail appends (web/retriever evidence) can never break the invariant
+    # that the segments join to the sent prompt.
+    cache_segments = None
+    if cache_prefix and prompt_with_evidence.startswith(cache_prefix):
+        cache_segments = [
+            (cache_prefix, True),
+            (prompt_with_evidence[len(cache_prefix):], False),
+        ]
+
     start = time.time()
     try:
         text, usage, error = await call_chat_ms(
@@ -2813,6 +2840,8 @@ async def _call_spd_model_for_spec(
             component="Forecaster",
             run_id=run_id,
             log_call=False,  # rich-logged via log_forecaster_llm_call (spd_v2)
+            cache_segments=cache_segments,
+            prompt_cache_key=prompt_cache_key,
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -2949,6 +2978,8 @@ async def _call_spd_members_v2(
     anchor_month: str | None = None,
     wording: str | None = None,
     batch_family: str | None = None,
+    cache_prefix: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> tuple[
     list[dict[str, list[float]]],
     dict[str, object],
@@ -2994,6 +3025,8 @@ async def _call_spd_members_v2(
             anchor_month=anchor_month,
             wording=wording,
             batch_family=batch_family,
+            cache_prefix=cache_prefix,
+            prompt_cache_key=prompt_cache_key,
         )
         for ms in specs_used
     ]
@@ -3129,6 +3162,8 @@ async def _call_spd_members_v2_compat(
     anchor_month: str | None = None,
     wording: str | None = None,
     batch_family: str | None = None,
+    cache_prefix: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> tuple[list[dict[str, list[float]]], dict[str, object], list[dict[str, object]], dict[str, object]]:
     """
     Compatibility wrapper to avoid passing unsupported kwargs to monkeypatched callables in tests.
@@ -3161,6 +3196,10 @@ async def _call_spd_members_v2_compat(
         kwargs["wording"] = wording
     if "batch_family" in sig.parameters:
         kwargs["batch_family"] = batch_family
+    if "cache_prefix" in sig.parameters:
+        kwargs["cache_prefix"] = cache_prefix
+    if "prompt_cache_key" in sig.parameters:
+        kwargs["prompt_cache_key"] = prompt_cache_key
     return await fn(prompt, specs, **kwargs)
 
 
@@ -3400,6 +3439,8 @@ async def _call_spd_bayesmc_v2(
     metric: str | None = None,
     wording: str | None = None,
     batch_family: str | None = None,
+    cache_prefix: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> tuple[
     dict[str, object],
     dict[str, object],
@@ -3445,6 +3486,8 @@ async def _call_spd_bayesmc_v2(
         anchor_month=anchor_month,
         wording=wording,
         batch_family=batch_family,
+        cache_prefix=cache_prefix,
+        prompt_cache_key=prompt_cache_key,
     )
     member_raw_by_model_id: dict[str, str] = {}
     for rc in raw_calls:
@@ -4239,7 +4282,10 @@ async def _run_binary_forecast_for_question(
 
         anchor_month = _anchor_month_for_question(rec)
 
-        # Call models — reuse the same model calling infrastructure
+        # Call models — reuse the same model calling infrastructure.
+        # Binary prompts have no prefix/suffix split (no cache_segments);
+        # the OpenAI routing hint alone is zero-risk and helps automatic
+        # caching group the shared static sections.
         per_model_spds, usage, raw_calls, ensemble_meta = (
             await _call_spd_members_v2_compat(
                 prompt,
@@ -4252,6 +4298,7 @@ async def _run_binary_forecast_for_question(
                 anchor_month=anchor_month,
                 wording=wording,
                 batch_family="binary_v2",
+                prompt_cache_key=f"pythia:binary_v2:{hz}:{metric}:t{track}",
             )
         )
         if _batch_submit_active():
@@ -4461,7 +4508,7 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
 
         question_evidence_pack = _load_question_evidence_pack(run_id, qid) if qid else None
         structured_data = _load_structured_data(iso3, hz, hs_run_id=hs_run_id)
-        prompt = build_spd_prompt_v2(
+        prompt_prefix, prompt_suffix = build_spd_prompt_v2(
             question={
                 "question_id": qid,
                 "iso3": iso3,
@@ -4478,7 +4525,9 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
             structured_data=structured_data,
             model_name=TRACK2_MODEL_SPEC.name,
             track=2,
+            return_parts=True,
         )
+        prompt = prompt_prefix + prompt_suffix
         if question_evidence_pack:
             prompt = append_retriever_evidence_to_prompt(prompt, question_evidence_pack)
 
@@ -4495,6 +4544,8 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
                 anchor_month=anchor_month,
                 wording=wording,
                 batch_family="track2_spd",
+                cache_prefix=prompt_prefix or None,
+                prompt_cache_key=f"pythia:track2_spd:{hz}:{metric}:t2",
             )
         )
         if _batch_submit_active():
@@ -4686,7 +4737,11 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         structured_data = _load_structured_data(
             iso3, hz, hs_run_id=hs_run_id, rc_level=rc_level,
         )
-        prompt = build_spd_prompt_v2(
+        # return_parts: under V3 order the prefix is the static block shared
+        # by every question of this (hazard, metric, track) group — the
+        # Anthropic cache_control anchor. Under legacy order it is "" and
+        # caching stays off. Evidence appends below only touch the tail.
+        prompt_prefix, prompt_suffix = build_spd_prompt_v2(
             question={
                 "question_id": qid,
                 "iso3": iso3,
@@ -4701,7 +4756,11 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             hs_triage_entry=hs_entry,
             research_json=research_json,
             structured_data=structured_data,
+            return_parts=True,
         )
+        prompt = prompt_prefix + prompt_suffix
+        spd_cache_prefix = prompt_prefix or None
+        spd_prompt_cache_key = f"pythia:spd_v2:{hz}:{metric}:t1"
         if question_evidence_pack:
             prompt = append_retriever_evidence_to_prompt(prompt, question_evidence_pack)
 
@@ -4886,6 +4945,8 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 anchor_month=anchor_month,
                 wording=wording,
                 batch_family="spd_v2",
+                cache_prefix=spd_cache_prefix,
+                prompt_cache_key=spd_prompt_cache_key,
             )
             if _batch_submit_active():
                 # Members were enqueued as Batch-API requests; parsing,
@@ -5161,6 +5222,8 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 metric=metric,
                 wording=wording,
                 batch_family="spd_v2",
+                cache_prefix=spd_cache_prefix,
+                prompt_cache_key=spd_prompt_cache_key,
             )
             if _batch_submit_active():
                 # Members were enqueued as Batch-API requests; parsing,
