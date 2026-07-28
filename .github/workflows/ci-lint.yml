@@ -38,12 +38,16 @@ jobs:
         with:
           python-version: '3.11'
 
+      # --noconftest: the test file itself is stdlib-only (pathlib + re), but
+      # resolver/tests/conftest.py pulls in the fast-export fixtures (pandas /
+      # duckdb / pyarrow). Skipping conftest keeps this job at "pip install
+      # pytest" instead of the full resolver dependency set.
       - name: Workflow shell/YAML sanity checks
         run: |
           set -e
           python -m pip install --upgrade pip
           pip install pytest
-          pytest -vv resolver/tests/test_ci_shell_sanity.py
+          pytest -vv --noconftest resolver/tests/test_ci_shell_sanity.py
 
       - name: Set up Go
         uses: actions/setup-go@v5
