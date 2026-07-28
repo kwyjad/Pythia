@@ -341,6 +341,12 @@ python -m scripts.dump_pythia_debug_bundle \
 - **SPD compare JSON**: `debug/spd_compare_smoke` or `debug/spd_compare_tests`
 - **Diagnostics**: `diagnostics/` (DB signatures, compare JSON, latency summaries)
 - **HS triage coverage**: `diagnostics/hs_triage_coverage__<HS_RUN_ID>.csv` and `diagnostics/hs_triage_failures__<HS_RUN_ID>.json`
+- **AI analysis bundle**: `pythia-ai-analysis-bundle` (calibration workflow) — one zip per scoring round joining forecast reasoning to realized outcomes for every scored question; hand it to an AI analyst. Build locally with:
+```bash
+python -m scripts.ai_bundle.build_scored_forecast_bundle --db duckdb:///data/resolver.duckdb --out-dir ai_bundle
+# options: --months-back 12, --n-case-studies 10, --include-test,
+#          --include-sibyl-trials {case-studies|all|none}, --keep-staging
+```
 
 ### DB migrations
 ```bash

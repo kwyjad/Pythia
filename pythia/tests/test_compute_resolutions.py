@@ -13,6 +13,7 @@ import pytest
 duckdb = pytest.importorskip("duckdb")
 
 from pythia.tools.compute_resolutions import (
+    _ensure_resolutions_table,
     _resolve_value,
     _try_facts_deltas,
     _try_facts_resolved,
@@ -1469,5 +1470,130 @@ def test_event_occurrence_with_gdacs_data_resolves_to_one(tmp_path: Path, monkey
         # h2 (2025-08) should be 0.0 (no event)
         h2 = [r for r in rows if r[0] == 2]
         assert len(h2) == 1 and h2[0][1] == 0.0, f"h2 should be 0.0, got {h2}"
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------------------
+# source_desc persistence (July 2026): the winning source per resolution used
+# to exist only in a log line — the scored-forecast analysis bundle needs it
+# in the row.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.db
+def test_source_desc_persisted_for_real_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    db_path = tmp_path / "e2e_source_desc.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_SRC', 'run1', 'MLI', 'FL', 'PA', '2025-12', '2025-07-01', 'active')
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value)
+            VALUES ('2025-07', 'MLI', 'FL', 'affected', 5000.0)
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT horizon_m, value, source_desc FROM resolutions "
+            "WHERE question_id = 'Q_SRC'"
+        ).fetchall()
+        assert len(rows) == 1, f"Expected 1 row, got {rows}"
+        _h, val, source_desc = rows[0]
+        assert val == 5000.0
+        assert source_desc and source_desc.startswith("facts_resolved:"), (
+            f"source_desc should name the winning source, got {source_desc!r}"
+        )
+    finally:
+        con.close()
+
+
+@pytest.mark.db
+def test_source_desc_zero_default_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    db_path = tmp_path / "e2e_source_desc_zero.duckdb"
+    db_url = f"duckdb:///{db_path}"
+
+    def _fake_load_cfg():
+        return {"app": {"db_url": db_url}}
+    monkeypatch.setattr("pythia.tools.compute_resolutions.load_cfg", _fake_load_cfg)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        _setup_e2e_db(con)
+        con.execute(
+            """
+            INSERT INTO questions
+                (question_id, hs_run_id, iso3, hazard_code, metric,
+                 target_month, window_start_date, status)
+            VALUES ('Q_SRCZ', 'run1', 'SOM', 'ACE', 'FATALITIES', '2025-12', '2025-07-01', 'active')
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO acled_monthly_fatalities (iso3, month, fatalities, updated_at)
+            VALUES ('ETH', '2025-08-01', 50, '2025-09-15 00:00:00'),
+                   ('SOM', '2020-01-01', 5, '2020-02-15 00:00:00')
+            """
+        )
+    finally:
+        con.close()
+
+    compute_resolutions(db_url=db_url)
+
+    con = duckdb.connect(str(db_path))
+    try:
+        rows = con.execute(
+            "SELECT value, source_desc FROM resolutions WHERE question_id = 'Q_SRCZ'"
+        ).fetchall()
+        assert len(rows) == 1, f"Expected 1 zero-default row, got {rows}"
+        val, source_desc = rows[0]
+        assert val == 0.0
+        assert source_desc == "zero_default"
+    finally:
+        con.close()
+
+
+def test_ensure_resolutions_table_migrates_source_desc(tmp_path: Path):
+    """A pre-source_desc resolutions table gains the column; idempotent."""
+    con = duckdb.connect(str(tmp_path / "legacy.duckdb"))
+    try:
+        con.execute(
+            """
+            CREATE TABLE resolutions (
+              question_id TEXT,
+              horizon_m INTEGER,
+              observed_month TEXT,
+              value DOUBLE,
+              source_snapshot_ym TEXT,
+              created_at TIMESTAMP DEFAULT now(),
+              is_test BOOLEAN DEFAULT FALSE,
+              PRIMARY KEY (question_id, horizon_m)
+            )
+            """
+        )
+        _ensure_resolutions_table(con)
+        _ensure_resolutions_table(con)  # idempotent
+        cols = {str(r[1]).lower() for r in con.execute("PRAGMA table_info('resolutions')").fetchall()}
+        assert "source_desc" in cols
     finally:
         con.close()

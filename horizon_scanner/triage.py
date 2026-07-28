@@ -452,6 +452,7 @@ def _run_triage_grounding_for_hazard(
                 usage=usage_info,
                 error_text=str(pack["error"]["message"]) if pack.get("error") and isinstance(pack["error"], dict) else None,
                 is_test=is_test_mode(),
+                call_type="triage_grounding",
             )
         except Exception:
             logger.debug("Failed to log triage grounding call for %s %s", iso3, hazard_code, exc_info=True)
@@ -937,6 +938,7 @@ def _run_triage_for_single_hazard(
                 usage=usage_for_log,
                 error_text=log_error_text,
                 is_test=is_test_mode(),
+                call_type=f"triage_pass_{pass_idx}",
             )
             logger.info(
                 "Triage logged call: hs_run_id=%s iso3=%s hazard=triage_%s_pass_%s",

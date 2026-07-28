@@ -69,6 +69,75 @@ def test_log_hs_llm_call_records_hs_triage(monkeypatch: pytest.MonkeyPatch, tmp_
     assert usage_loaded.get("elapsed_ms") == 42
 
 
+def test_log_hs_llm_call_records_call_type_purpose(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """call_type carries the call's purpose; the default stays 'chat'.
+
+    phase must remain 'hs_triage' for every HS row (the costs page groups by
+    phase) — the purpose lives in call_type, making HS calls queryable without
+    string-parsing the synthetic hazard_code encoding.
+    """
+    db_path = tmp_path / "hs_call_type.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")
+
+    con = connect(read_only=False)
+    try:
+        ensure_schema(con)
+    finally:
+        con.close()
+
+    usage = {"total_tokens": 3}
+    log_hs_llm_call(
+        hs_run_id="hs_ct",
+        iso3="ETH",
+        hazard_code="rc_ACE_pass_1",
+        model_spec=_DummySpec(),
+        prompt_text="P",
+        response_text="R",
+        usage=usage,
+        error_text=None,
+        call_type="rc_pass_1",
+    )
+    log_hs_llm_call(
+        hs_run_id="hs_ct",
+        iso3="ETH",
+        hazard_code="grounding_ACE",
+        model_spec=_DummySpec(),
+        prompt_text="P",
+        response_text="R",
+        usage=usage,
+        error_text=None,
+        call_type="rc_grounding",
+    )
+    # A call site that doesn't pass call_type keeps the historical default.
+    log_hs_llm_call(
+        hs_run_id="hs_ct",
+        iso3="ETH",
+        hazard_code="ACE",
+        model_spec=_DummySpec(),
+        prompt_text="P",
+        response_text="R",
+        usage=usage,
+        error_text=None,
+    )
+
+    con = connect(read_only=False)
+    try:
+        rows = con.execute(
+            "SELECT hazard_code, call_type, phase FROM llm_calls WHERE hs_run_id = 'hs_ct' "
+            "ORDER BY hazard_code"
+        ).fetchall()
+    finally:
+        con.close()
+
+    # The writer uppercases hazard_code (the synthetic-label convention).
+    by_hazard = {r[0]: (r[1], r[2]) for r in rows}
+    assert by_hazard["RC_ACE_PASS_1"] == ("rc_pass_1", "hs_triage")
+    assert by_hazard["GROUNDING_ACE"] == ("rc_grounding", "hs_triage")
+    assert by_hazard["ACE"] == ("chat", "hs_triage")
+
+
 def test_run_hs_logs_single_llm_call_per_country(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     db_path = tmp_path / "hs_llm_call.duckdb"
     monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{db_path}")

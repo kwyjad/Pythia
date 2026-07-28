@@ -126,6 +126,7 @@ def log_hs_llm_call(
     usage: Dict[str, Any],
     error_text: Optional[str],
     is_test: bool = False,
+    call_type: str = "chat",
 ) -> None:
     """
     Log a Horizon Scanner triage LLM call into llm_calls with phase='hs_triage'.
@@ -133,6 +134,13 @@ def log_hs_llm_call(
     - Uses the shared llm_calls schema defined in pythia.db.schema.ensure_schema.
     - Populates hs_run_id and (iso3, hazard_code); leaves run_id empty because HS
       runs are decoupled from Forecaster runs.
+    - ``call_type`` carries the call's purpose (rc_pass_{n}, rc_grounding,
+      triage_pass_{n}, triage_grounding, adversarial_search,
+      adversarial_synthesis). ``phase`` stays 'hs_triage' for every HS call —
+      the costs page groups by phase — and the synthetic hazard_code encoding
+      (rc_{hz}_pass_{n}, grounding_{hz}, ...) is unchanged because the debug
+      bundle parses it; call_type is the queryable purpose column. Rows written
+      before July 2026 all carry call_type='chat'.
     - Never raises on logging failure; errors are logged as warnings.
     """
 
@@ -274,7 +282,7 @@ def log_hs_llm_call(
                 "",  # HS runs don't have a Forecaster run_id
                 hs_run_id,
                 None,  # No per-question ID yet at HS stage
-                "chat",
+                call_type or "chat",
                 "hs_triage",
                 model_name,
                 provider,
