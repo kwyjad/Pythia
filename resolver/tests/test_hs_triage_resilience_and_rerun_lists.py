@@ -27,6 +27,7 @@ def test_hs_triage_retries_timeouts(monkeypatch):
         timeout_sec: float | None = None,
         thinking_level: str | None = None,
         purpose: str | None = None,
+        **kwargs: Any,  # future call-site kwargs (cache_segments, ...) must not break the mock
     ) -> providers.ProviderResult:
         calls["count"] += 1
         if calls["count"] == 1:
