@@ -103,3 +103,40 @@ def test_compute_calibration_pythia_creates_calibration_advice_with_4col_pk(tmp_
         "The legacy 3-column PK is still in compute_calibration_pythia.py — "
         "see CLAUDE.md Known Failure Modes."
     )
+
+
+@pytest.mark.parametrize("module", [cc, gca], ids=["compute_calibration_pythia", "generate_calibration_advice"])
+def test_probes_answer_about_the_object_not_the_txn_state(db_with_scores, module):
+    """An aborted transaction must not turn into a wrong answer.
+
+    Rolling back without re-running the probe still returned the fallback for
+    THAT call, which is the silent no-op the scrub was supposed to prevent:
+    compute_calibration_pythia reads `_table_exists(conn, "scores")` exactly
+    once and skips the entire run on False.
+    """
+    con = duckdb.connect(db_with_scores)
+
+    def _poison():
+        try:
+            con.execute("ALTER TABLE questions ADD COLUMN is_test BOOLEAN DEFAULT FALSE")
+        except Exception:
+            pass
+
+    _poison()
+    assert module._table_exists(con, "scores") is True
+
+    _poison()
+    assert module._row_count(con, "scores") == 2
+
+    _poison()
+    assert module._column_exists(con, "scores", "model_name") is True
+
+    # A genuinely absent table/column still answers False after the retry.
+    _poison()
+    assert module._table_exists(con, "definitely_not_a_table") is False
+    _poison()
+    assert module._column_exists(con, "scores", "definitely_not_a_column") is False
+
+    # The connection is left usable for the next statement either way.
+    assert con.execute("SELECT COUNT(*) FROM scores").fetchone()[0] == 2
+    con.close()

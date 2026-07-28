@@ -2783,9 +2783,11 @@ def fetch_idu_json(
                                 fallback_diag_entry["type"] = (
                                     "helix" if fallback_source_tag_inner == "idmc_gidd" else "hdx"
                                 )
-                                fallback_scope = (
-                                    only_countries if only_countries is not None else countries
-                                )
+                                # NB: `countries` is not in scope here — the
+                                # caller's country list arrives as
+                                # only_countries, and referencing `countries`
+                                # raised NameError whenever it was None.
+                                fallback_scope = only_countries
                                 _, filter_note = _apply_iso3_filter(
                                     fallback_frame,
                                     fallback_scope or [],
@@ -3000,7 +3002,8 @@ def fetch_idu_json(
         diagnostics["fallback"] = fallback_entry
         diagnostics["fallback_used"] = True
         iso_batches = iso_batches or []
-        fallback_scope = only_countries if only_countries is not None else countries
+        # See the note above: `countries` is not a local here (NameError).
+        fallback_scope = only_countries
         _, filter_note = _apply_iso3_filter(
             fallback_frame,
             fallback_scope or [],

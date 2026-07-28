@@ -15,9 +15,17 @@ batch ids — so each submit stage also uploads this KB-sized JSON:
       "db_run_id": <the submit stage's own Actions run id>,
       "test_mode": bool, "fc_run_id": ..., "hs_run_id": ...,
       "created_at": iso8601,
+      "dispatch_inputs": {"batch_providers", "only_countries",
+                          "grounding_primary", "disable_brave"},
       "pending": [{"batch_id", "provider", "provider_batch_id", "family",
                     "status", "submitted_at"}]
     }
+
+``dispatch_inputs`` mirrors the run-shaping workflow_dispatch inputs as this
+stage ACTUALLY resolved them (read back out of the env the workflow set), so
+the poller can re-supply them when it dispatches the next stage. Without it a
+smoke run (e.g. only_countries=IRN,SOM + disable_brave) silently reverted to
+full production settings from stage 2 onwards.
 
 Usage:
     python -m scripts.ci.emit_batch_state --db data/resolver.duckdb \
@@ -32,6 +40,28 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+
+
+def _truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes")
+
+
+def dispatch_inputs_from_env(env: dict[str, str]) -> dict[str, str]:
+    """Effective run-shaping inputs, as strings a `gh workflow run -f` accepts.
+
+    Derived from the env the stage workflow set (not from the raw inputs), so
+    what carries forward is what this stage actually ran with. ``disable_brave``
+    is inferred from an empty BRAVE_SEARCH_API_KEY — the workflow implements
+    that input by withholding the secret, and re-supplying it on the next stage
+    would let a 402ing key trip the breaker and block ungrounded hazards.
+    """
+
+    return {
+        "batch_providers": (env.get("PYTHIA_BATCH_PROVIDERS") or "").strip(),
+        "only_countries": (env.get("PYTHIA_HS_ONLY_COUNTRIES") or "").strip(),
+        "grounding_primary": (env.get("PYTHIA_GROUNDING_PRIMARY_BACKEND") or "").strip(),
+        "disable_brave": "true" if not (env.get("BRAVE_SEARCH_API_KEY") or "").strip() else "false",
+    }
 
 
 def main() -> int:
@@ -64,10 +94,11 @@ def main() -> int:
         "stage": args.stage,
         "next_stage": args.next_stage,
         "db_run_id": str(args.db_run_id),
-        "test_mode": os.getenv("PYTHIA_TEST_MODE", "0").strip().lower() in ("1", "true", "yes"),
+        "test_mode": _truthy(os.getenv("PYTHIA_TEST_MODE", "0")),
         "fc_run_id": args.fc_run_id,
         "hs_run_id": args.hs_run_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "dispatch_inputs": dispatch_inputs_from_env(dict(os.environ)),
         "pending": [
             {
                 "batch_id": p["batch_id"],

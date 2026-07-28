@@ -362,6 +362,39 @@ def test_stage_state_roundtrip(staged_env) -> None:
     assert hs_batch.load_stage_state("hs_x", "TST", "missing") is None
 
 
+def test_pipeline_run_id_resolves_without_any_llm_batches_row(staged_env) -> None:
+    """A submit stage that created NO provider batch still hands off its run id.
+
+    llm_batches only gets a row when a batch is actually created. If every
+    submit fails (provider outage / rejected payload / provider excluded),
+    hs_submit still succeeds and the collect stages are supposed to degrade to
+    the synchronous path — before the stage-state fallback they instead
+    hard-exited with "No hs_run_id found", killing the month's pipeline.
+    """
+
+    hs_batch.set_stage("hs_submit", "pl_nobatch")
+    assert hs_batch.resolve_run_id_for_pipeline("pl_nobatch") is None
+
+    hs_batch.save_pipeline_run_id("pl_nobatch", "hs_20260801T000000")
+    assert hs_batch.resolve_run_id_for_pipeline("pl_nobatch") == "hs_20260801T000000"
+    # Scoped to the pipeline that wrote it.
+    assert hs_batch.resolve_run_id_for_pipeline("pl_other") is None
+
+
+def test_llm_batches_wins_over_stage_state_for_run_id(staged_env) -> None:
+    hs_batch.set_stage("hs_submit", "pl_both")
+    hs_batch.save_pipeline_run_id("pl_both", "hs_from_state")
+    hs_batch.batch_con().execute(
+        """
+        INSERT INTO llm_batches (batch_id, provider, provider_batch_id, family,
+                                 hs_run_id, pipeline_id, stage, status, submitted_at)
+        VALUES ('b1', 'google', 'pb1', 'hs_rc', 'hs_from_batches', 'pl_both',
+                'hs_submit', 'submitted', now())
+        """
+    )
+    assert hs_batch.resolve_run_id_for_pipeline("pl_both") == "hs_from_batches"
+
+
 def test_grounding_pack_roundtrip(staged_env) -> None:
     from horizon_scanner.db_writer import log_hs_hazard_tail_packs_to_db
 
