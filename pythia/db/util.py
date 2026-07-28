@@ -99,6 +99,19 @@ def write_llm_call(
 ) -> None:
     """Insert a single LLM call record into the llm_calls table.
 
+    .. deprecated:: July 2026
+        This writer targets the legacy ``schema.sql`` column set (``component``,
+        ``prompt_key``, ``tokens_in``, ...) which the live ``llm_calls`` table
+        built by ``pythia.db.schema.ensure_schema`` does NOT have. On production
+        DBs the INSERT raises a Binder error, and its only production caller
+        (``forecaster.providers._log_llm_call``) swallows it with a bare
+        ``except`` — so any call site that relies on this path is silently
+        unlogged. Rich call sites already opt out via
+        ``call_chat_ms(log_call=False)`` and log through
+        ``log_forecaster_llm_call`` / ``log_hs_llm_call`` instead; new call
+        sites should do the same. Kept only for legacy DBs that still carry the
+        old columns.
+
     is_test defaults to the pipeline test-mode flag so generic rows written
     by the providers layer can't leak test-run cost into non-test views
     (same class as the #796 forecaster llm_logging fix).

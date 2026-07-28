@@ -356,6 +356,7 @@ def _run_grounding_for_hazard(
                 usage=usage_info,
                 error_text=str(pack["error"]["message"]) if pack.get("error") and isinstance(pack["error"], dict) else None,
                 is_test=is_test_mode(),
+                call_type="rc_grounding",
             )
         except Exception:  # noqa: BLE001
             logger.debug("Failed to log grounding call for %s %s", iso3, hazard_code, exc_info=True)
@@ -833,6 +834,7 @@ def _run_rc_for_single_hazard(
                 usage=usage_for_log,
                 error_text=log_error_text,
                 is_test=is_test_mode(),
+                call_type=f"rc_pass_{pass_idx}",
             )
             logger.info(
                 "RC logged call: hs_run_id=%s iso3=%s hazard=rc_%s_pass_%s",

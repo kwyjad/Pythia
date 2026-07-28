@@ -57,6 +57,7 @@ def _log_adversarial_brave_call(
             usage=usage_info,
             error_text=str(pack["error"]["message"]) if pack.get("error") and isinstance(pack["error"], dict) else None,
             is_test=is_test_mode(),
+            call_type="adversarial_search",
         )
     except Exception:  # noqa: BLE001
         logger.debug("Failed to log adversarial Brave call for %s %s", iso3, hazard_code, exc_info=True)
@@ -318,6 +319,7 @@ async def _synthesize_counter_evidence(
             usage=usage_for_log,
             error_text=str(error) if error else None,
             is_test=is_test_mode(),
+            call_type="adversarial_synthesis",
         )
     except Exception:  # noqa: BLE001
         logger.debug(

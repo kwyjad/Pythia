@@ -593,6 +593,7 @@ def _ensure_resolutions_table(conn) -> None:
           observed_month TEXT,
           value DOUBLE,
           source_snapshot_ym TEXT,
+          source_desc TEXT,
           created_at TIMESTAMP DEFAULT now(),
           is_test BOOLEAN DEFAULT FALSE,
           PRIMARY KEY (question_id, horizon_m)
@@ -614,6 +615,11 @@ def _ensure_resolutions_table(conn) -> None:
     if "is_test" not in existing:
         try:
             conn.execute("ALTER TABLE resolutions ADD COLUMN is_test BOOLEAN DEFAULT FALSE")
+        except Exception:
+            pass
+    if "source_desc" not in existing:
+        try:
+            conn.execute("ALTER TABLE resolutions ADD COLUMN source_desc TEXT")
         except Exception:
             pass
 
@@ -848,9 +854,10 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                       observed_month,
                       value,
                       source_snapshot_ym,
+                      source_desc,
                       created_at,
                       is_test
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         question_id,
@@ -858,6 +865,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                         cal_month,
                         float(value),
                         source_ts,
+                        source_desc,
                         _utcnow_naive(),
                         is_test_val,
                     ],

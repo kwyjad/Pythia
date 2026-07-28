@@ -2759,6 +2759,12 @@ async def _call_spd_model_for_spec(
 
     usage = dict(usage or {})
     usage.setdefault("elapsed_ms", int((time.time() - start) * 1000))
+    if prompt_with_evidence != prompt:
+        # The model's true input differs from the base prompt (appended web
+        # evidence). Stash it so the spd_v2/binary_v2 llm_calls row records the
+        # exact sent prompt — consumers MUST pop this key before serializing
+        # usage into usage_json (see _call_spd_members_v2).
+        usage["sent_prompt_text"] = prompt_with_evidence
 
     query = extract_self_search_query(text or "")
     max_calls, max_sources = self_search_limits()
@@ -2799,6 +2805,9 @@ async def _call_spd_model_for_spec(
         if retry_text and not extract_self_search_query(retry_text):
             merged_usage = combine_usage(usage, dict(retry_usage or {}))
             merged_usage["self_search"] = dict(usage["self_search"], retried_without_evidence=True)
+            # The returned text came from the retry call, so the retry prompt
+            # is the true sent prompt (overrides any earlier stash).
+            merged_usage["sent_prompt_text"] = retry_prompt
             return retry_text, merged_usage, retry_error, ms
         return text, usage, error or "self_search_disabled", ms
 
@@ -2852,11 +2861,19 @@ async def _call_spd_model_for_spec(
     usage2.setdefault("elapsed_ms", int((time.time() - start) * 1000))
     usage2["self_search"] = self_search_meta
 
+    combined_usage = combine_usage(usage, usage2)
+    # text2 came from the prompt rebuilt with self-search evidence at line
+    # ~2833; the first call's stash (if any) is stale for this return.
+    if prompt_with_evidence != prompt:
+        combined_usage["sent_prompt_text"] = prompt_with_evidence
+    else:
+        combined_usage.pop("sent_prompt_text", None)
+
     query_second = extract_self_search_query(text2 or "")
     if query_second:
-        return text2, combine_usage(usage, usage2), "self_search_second_request", ms
+        return text2, combined_usage, "self_search_second_request", ms
 
-    return text2, combine_usage(usage, usage2), error2, ms
+    return text2, combined_usage, error2, ms
 
 
 async def _call_spd_members_v2(
@@ -2934,6 +2951,10 @@ async def _call_spd_members_v2(
 
     for text, usage, error, ms_val in call_results:
         usage = usage or {}
+        # The pop is load-bearing: the multi-KB sent prompt must never be
+        # serialized into usage_json — it travels to the log sites via the
+        # raw-call entry instead.
+        sent_prompt = usage.pop("sent_prompt_text", None) if isinstance(usage, dict) else None
         # Placeholders — populated after JSON parsing below.
         reasoning_trace = None
         human_explanation = ""
@@ -2942,6 +2963,7 @@ async def _call_spd_members_v2(
             "text": text or "",
             "usage": usage,
             "error": error,
+            "sent_prompt": sent_prompt,
             "reasoning_trace": None,
             "human_explanation": "",
         }
@@ -4178,7 +4200,7 @@ async def _run_binary_forecast_for_question(
                 hazard_code=hz,
                 metric=metric,
                 model_spec=ms,
-                prompt_text=prompt,
+                prompt_text=call.get("sent_prompt") or prompt,
                 response_text=str(call.get("text") or ""),
                 usage=call.get("usage") or {},
                 error_text=str(call.get("error")) if call.get("error") else None,
@@ -4421,7 +4443,7 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
                 hazard_code=hz,
                 metric=metric,
                 model_spec=ms,
-                prompt_text=prompt,
+                prompt_text=call.get("sent_prompt") or prompt,
                 response_text=str(call.get("text") or ""),
                 usage=call.get("usage") or {},
                 error_text=str(call.get("error")) if call.get("error") else None,
@@ -4867,7 +4889,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     hazard_code=hz,
                     metric=metric,
                     model_spec=ms,
-                    prompt_text=prompt,
+                    prompt_text=call.get("sent_prompt") or prompt,
                     response_text=str(call.get("text") or ""),
                     usage=call.get("usage") or {},
                     error_text=str(call.get("error")) if call.get("error") else None,
@@ -4888,7 +4910,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     model_spec=fallback.get("model_spec")
                     if isinstance(fallback.get("model_spec"), ModelSpec)
                     else None,
-                    prompt_text=prompt,
+                    prompt_text=fallback.get("sent_prompt") or prompt,
                     response_text=str(fallback.get("text") or ""),
                     usage=fallback.get("usage") or {},
                     error_text=(
@@ -5179,7 +5201,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     hazard_code=hz,
                     metric=metric,
                     model_spec=ms,
-                    prompt_text=prompt,
+                    prompt_text=call.get("sent_prompt") or prompt,
                     response_text=str(call.get("text") or ""),
                     usage=call.get("usage") or {},
                     error_text=str(call.get("error")) if call.get("error") else None,
@@ -5200,7 +5222,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     model_spec=fallback.get("model_spec")
                     if isinstance(fallback.get("model_spec"), ModelSpec)
                     else None,
-                    prompt_text=prompt,
+                    prompt_text=fallback.get("sent_prompt") or prompt,
                     response_text=str(fallback.get("text") or ""),
                     usage=fallback.get("usage") or {},
                     error_text=(
@@ -5224,6 +5246,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 wording=wording,
             )
 
+            sent_prompt_direct = (
+                usage.pop("sent_prompt_text", None) if isinstance(usage, dict) else None
+            )
             await log_forecaster_llm_call(
                 run_id=run_id,
                 question_id=qid,
@@ -5231,7 +5256,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 hazard_code=hz,
                 metric=metric,
                 model_spec=ms,
-                prompt_text=prompt,
+                prompt_text=sent_prompt_direct or prompt,
                 response_text=text or "",
                 usage=usage,
                 error_text=str(error) if error else None,

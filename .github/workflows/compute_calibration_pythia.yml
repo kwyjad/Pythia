@@ -100,6 +100,28 @@ jobs:
           python -m pythia.tools.generate_calibration_advice --db-url "${RESOLVER_DB_URL}"
           echo "=== generate_calibration_advice completed ==="
 
+      # One self-describing zip an AI analyst can consume: for every scored
+      # question, the forecast-time reasoning (exact prompt, member responses,
+      # traces, RC/triage rationale, grounding evidence) joined to its realized
+      # outcome and scores. Non-fatal by construction — a bundle bug must never
+      # block calibration or the publish chain.
+      - name: Build scored-forecast analysis bundle
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p ai_bundle
+          python -m scripts.ai_bundle.build_scored_forecast_bundle \
+            --db "${RESOLVER_DB_URL}" --out-dir ai_bundle
+
+      - name: Upload AI analysis bundle
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-ai-analysis-bundle
+          path: ai_bundle/scored_forecast_analysis__*.zip
+          if-no-files-found: warn
+
       - name: Emit calibration summary
         if: always()
         run: |

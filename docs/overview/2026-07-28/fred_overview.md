@@ -584,9 +584,7 @@ New in March 2026, the system generates human-readable calibration advice per ha
 
 The calibration workflow chain runs in a specific order: Resolver backfill, then Compute Resolutions, then Compute Scores, then Calibration (including advice generation). This ordering was fixed in February 2026 to prevent scores from running before resolutions were available.
 
-### The scored-forecast analysis bundle
-
-At the end of every calibration round, the system packages a single downloadable report bundle designed to be handed to an AI analyst (added July 2026). For every question that has been scored, the bundle pairs everything that went into the forecast with what actually happened: the exact prompt each model received (which contains all the injected data), each model's full written response and step-by-step reasoning, the Horizon Scanner's regime-change rationale and the web evidence it gathered, and then the realized outcome, the source that resolved it, and every score. It also includes flat score tables, the calibration weight movements and advice, and a set of pre-selected "case studies" — the best and worst scored questions — so reasoning patterns behind good and bad forecasts are easy to compare side by side. A built-in analyst guide explains the file layout, the scoring scales, and known caveats, so an AI reading the bundle needs no other context. A small "briefing" folder inside the bundle holds condensed versions sized for pasting into a chat conversation. The goal is a repeatable improvement loop: after each scoring round, download one file, give it to an AI, and get back concrete suggestions about where the forecasting process is systematically going wrong.
+## 15. The dashboard: how users consume outputs
 
 Fred's dashboard is designed for two audiences: forecasters (who need to inspect evidence and produce forecasts) and decision-makers (who need a summary of risk and tail conditions).
 

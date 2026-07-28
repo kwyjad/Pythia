@@ -21,6 +21,7 @@ on:
       - "pythia/llm_profiles.py"
       - "pythia/config.yaml"
       - "python_library_requirements.txt"
+      - "scripts/ai_bundle/**"
 
   workflow_dispatch:
     inputs:
@@ -154,6 +155,13 @@ jobs:
             pythia/tests/test_model_registry.py \
             forecaster/tests/test_providers.py \
             forecaster/tests/test_spd_model_params.py
+
+      - name: Run AI analysis bundle + sent-prompt logging tests
+        run: |
+          echo "=== Running scored-forecast bundle builder tests ==="
+          pytest -vv \
+            scripts/ai_bundle/tests/ \
+            forecaster/tests/test_sent_prompt_logging.py
 
       - name: Run SPD experimental mode (dual/bayesmc)
         if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'bayesmc_write' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') }}
