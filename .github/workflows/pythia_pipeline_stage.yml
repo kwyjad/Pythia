@@ -74,6 +74,26 @@ on:
         type: boolean
         default: false
         required: false
+      batch_providers:
+        description: "Override PYTHIA_BATCH_PROVIDERS for this run (e.g. 'google' for a Gemini-only batch smoke run). Empty = all three."
+        required: false
+        default: ""
+        type: string
+      only_countries:
+        description: "Comma-separated ISO3 list for PYTHIA_HS_ONLY_COUNTRIES (smoke runs, e.g. 'IRN,SOM'). Empty = full hs_country_list.txt."
+        required: false
+        default: ""
+        type: string
+      grounding_primary:
+        description: "Override PYTHIA_GROUNDING_PRIMARY_BACKEND (brave/openai/gemini). Use 'openai' when Brave is down/out of credit."
+        required: false
+        default: ""
+        type: string
+      disable_brave:
+        description: "Withhold BRAVE_SEARCH_API_KEY so Brave is skipped entirely (missing-key fall-through, no breaker trips). Use when Brave is 402ing — a tripped breaker blocks ungrounded hazards from forecasting."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -100,14 +120,26 @@ env:
   # Batch-API switches: the staged pipeline is the opt-in path (the code
   # defaults stay OFF so --phase full / the legacy workflow are unchanged).
   PYTHIA_BATCH_API_ENABLED: "1"
-  PYTHIA_BATCH_PROVIDERS: "openai,anthropic,google"
+  # Dispatch input override for smoke runs; schedule events carry no inputs
+  # so the cron always gets the full default set.
+  PYTHIA_BATCH_PROVIDERS: ${{ inputs.batch_providers || 'openai,anthropic,google' }}
+  # Empty = full hs_country_list.txt (HS treats blank as unset).
+  PYTHIA_HS_ONLY_COUNTRIES: ${{ inputs.only_countries || '' }}
+  # Grounding-backend override (code default is brave when unset).
+  PYTHIA_GROUNDING_PRIMARY_BACKEND: ${{ inputs.grounding_primary || 'brave' }}
   PYTHIA_BATCH_MAX_WAIT_H: "24"
   # Prompt-cost switches (production since 2026-07-27): static-first prompt
   # assembly (multi-KB shared prefixes → OpenAI automatic / Gemini implicit
   # caching) + Anthropic cache_control / OpenAI prompt_cache_key.
   PYTHIA_PROMPT_V3_ORDER: "1"
   PYTHIA_PROMPT_CACHE_ENABLED: "1"
-  BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
+  # disable_brave: a missing key makes the Brave backend fall through
+  # gracefully WITHOUT recording breaker failures (a 402ing key trips the
+  # breaker, and the safety gate then blocks every ungrounded hazard).
+  # NB the negated form is load-bearing: `x && '' || y` always yields y in
+  # GitHub expressions because the empty-string "true" branch is falsy and
+  # falls through the || — the truthy value must sit in the true branch.
+  BRAVE_SEARCH_API_KEY: ${{ !inputs.disable_brave && secrets.BRAVE_SEARCH_API_KEY || '' }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH: "low"
   PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO: ""
