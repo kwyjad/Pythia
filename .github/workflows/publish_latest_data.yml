@@ -55,6 +55,15 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
+      # The inline DB inspection (python -m scripts.ci.inspect_resolver_db)
+      # needs the repo on disk — without this checkout it dies with
+      # ModuleNotFoundError AFTER the release upload, turning every publish
+      # red even though the publish itself succeeded (first observed on the
+      # 2026-07-28 publish; the step landed in #803 the day after the
+      # previous publish, so it had never actually run before).
+      - name: Check out code
+        uses: actions/checkout@v4
+
       - name: Resolve source run_id (input → workflow_run → canonical discovery)
         id: resolve_run
         env:
@@ -565,6 +574,7 @@ jobs:
         if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
         run: |
           set -euo pipefail
+          python -c "import duckdb" 2>/dev/null || pip install duckdb >/dev/null
           rm -f data_out/resolver.duckdb.wal
           python -m scripts.ci.inspect_resolver_db \
             --db data_out/resolver.duckdb \
