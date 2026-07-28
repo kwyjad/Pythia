@@ -229,6 +229,7 @@ def _seed_rc_result(response: str) -> str:
         iso3="TST",
         hazard_code="FL",
         pass_idx=1,
+        pipeline_id="pl_test",
     )
     hs_batch.batch_con().execute(
         "UPDATE llm_batch_requests SET status='succeeded', response_text=?, usage_json=? "
@@ -315,6 +316,7 @@ def test_triage_collect_replays_stored_result(staged_env, monkeypatch) -> None:
         iso3="TST",
         hazard_code="FL",
         pass_idx=1,
+        pipeline_id="pl_test",
     )
     hs_batch.batch_con().execute(
         "UPDATE llm_batch_requests SET status='succeeded', response_text=?, usage_json=? "
@@ -391,3 +393,86 @@ def test_grounding_pack_roundtrip(staged_env) -> None:
     assert pack["grounded"] is True
     assert pack["recent_signals"] == ["signal-1"]
     assert hs_batch.load_grounding_pack("hs_x", "TST", "TC", prefer_prefix="rc_grounding") is None
+
+
+# ---------------------------------------------------------------------------
+# hs_triage write idempotency (re-dispatched hs_finalize)
+# ---------------------------------------------------------------------------
+
+
+def test_write_hs_triage_rerun_does_not_duplicate_rows(staged_env, monkeypatch):
+    """hs_finalize reuses the hs_submit run_id, and the poller can dispatch a
+    finalize twice (double-fire / retry after failure) — the writer must be
+    delete-first like its sibling writers, not append a second row set."""
+
+    from horizon_scanner import horizon_scanner as hs
+
+    triage = {
+        "country": "TST",
+        "hazards": {
+            "FL": {
+                "triage_score": 0.4,
+                "drivers": ["d"],
+                "data_quality": {"status": "ok"},
+                "scenario_stub": "s",
+                "regime_change": {"likelihood": 0.1, "magnitude": 0.1},
+            }
+        },
+    }
+    monkeypatch.setattr(hs, "_build_hazard_catalog", lambda: {"FL": {}, "ACE": {}, "DR": {}, "TC": {}})
+    monkeypatch.setattr(hs, "get_expected_hs_hazards", lambda: ["FL"])
+
+    con = hs_batch.batch_con()  # ensures the schema exists on the tmp DB
+
+    hs._write_hs_triage("hs_rerun_test", "TST", triage, is_test=True)
+    hs._write_hs_triage("hs_rerun_test", "TST", triage, is_test=True)
+    n = con.execute(
+        "SELECT COUNT(*) FROM hs_triage WHERE run_id = 'hs_rerun_test' AND iso3 = 'TST'"
+    ).fetchone()[0]
+    assert n == 1
+
+
+# ---------------------------------------------------------------------------
+# Grounding pack coexistence (RC + triage packs per country-hazard)
+# ---------------------------------------------------------------------------
+
+
+def test_rc_and_triage_grounding_packs_coexist(staged_env):
+    """The triage-grounding write must not clobber the RC pack: the writer's
+    idempotency delete is scoped by pack kind (query prefix). Before this,
+    at most one pack survived per (run, iso3, hazard) — Track-2 hazards lost
+    their RC grounding evidence and an hs_finalize RC re-replay could only
+    rebuild its prompt from the triage pack."""
+
+    from horizon_scanner.db_writer import log_hs_hazard_tail_packs_to_db
+
+    hs_batch.batch_con()  # ensure schema on the tmp DB
+
+    rc_pack = {
+        "iso3": "TST", "hazard_code": "FL",
+        "query": "rc_grounding: Testland flood signals",
+        "markdown": "RC EVIDENCE", "sources": ["http://a"], "grounded": True,
+    }
+    triage_pack = {
+        "iso3": "TST", "hazard_code": "FL",
+        "query": "triage_grounding: Testland flood situation",
+        "markdown": "TRIAGE EVIDENCE", "sources": ["http://b"], "grounded": True,
+    }
+    log_hs_hazard_tail_packs_to_db("hs_pack_test", [rc_pack])
+    log_hs_hazard_tail_packs_to_db("hs_pack_test", [triage_pack])
+    # Idempotent re-write of the same kind replaces, never accumulates.
+    log_hs_hazard_tail_packs_to_db("hs_pack_test", [triage_pack])
+
+    rows = hs_batch.batch_con().execute(
+        "SELECT query FROM hs_hazard_tail_packs WHERE hs_run_id = 'hs_pack_test'"
+    ).fetchall()
+    queries = sorted(str(r[0]) for r in rows)
+    assert len(queries) == 2
+    assert queries[0].startswith("rc_grounding:")
+    assert queries[1].startswith("triage_grounding:")
+
+    # And the stage-seam loader now finds the PREFERRED pack for each kind.
+    rc_loaded = hs_batch.load_grounding_pack("hs_pack_test", "TST", "FL", "rc_grounding")
+    tr_loaded = hs_batch.load_grounding_pack("hs_pack_test", "TST", "FL", "triage_grounding")
+    assert rc_loaded["markdown"] == "RC EVIDENCE"
+    assert tr_loaded["markdown"] == "TRIAGE EVIDENCE"

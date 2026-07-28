@@ -1179,6 +1179,54 @@ def build_report(
         L("_Table does not exist._")
     L()
 
+    # --- llm_batches / llm_batch_requests / hs_stage_state (staged pipeline) ---
+    L("### Batch-API staged-pipeline state")
+    if table_exists(con, "llm_batches"):
+        rows = safe_query(con, """
+            SELECT pipeline_id, family, provider,
+                   COALESCE(status, '(null)') AS status,
+                   COUNT(*) AS n, SUM(COALESCE(n_requests, 0)) AS reqs
+            FROM llm_batches
+            GROUP BY 1, 2, 3, 4
+            ORDER BY 1, 2, 3, 4
+        """)
+        if rows:
+            L("| pipeline | family | provider | status | batches | requests |")
+            L("|----------|--------|----------|--------|--------:|---------:|")
+            for pid, fam, prov, st, n, reqs in rows:
+                L(f"| {pid} | {fam} | {prov} | {st} | {fmt_num(n)} | {fmt_num(reqs)} |")
+            L()
+        else:
+            L("_No provider batches recorded (sync-only runs)._")
+            L()
+        # A stuck batch or a pile of never-terminal request rows was
+        # previously invisible in this report — surface it as a warning.
+        stuck = safe_query(con, """
+            SELECT COUNT(*) FROM llm_batches
+            WHERE status IN ('submitted', 'in_progress')
+              AND submitted_at < now() - INTERVAL 2 DAY
+        """)
+        if stuck and stuck[0] and int(stuck[0][0] or 0) > 0:
+            L(f"⚠️ **{fmt_num(stuck[0][0])} batch(es) stuck non-terminal for >2 days** — "
+              "check poll_llm_batches / re-dispatch the pending stage.")
+            L()
+        if table_exists(con, "llm_batch_requests"):
+            req_rows = safe_query(con, """
+                SELECT COALESCE(status, '(null)') AS status, COUNT(*) AS n
+                FROM llm_batch_requests GROUP BY 1 ORDER BY 1
+            """)
+            if req_rows:
+                L("Request rows by status: " + ", ".join(
+                    f"{st}={fmt_num(n)}" for st, n in req_rows
+                ))
+                L()
+        if table_exists(con, "hs_stage_state"):
+            L(f"hs_stage_state rows: **{fmt_num(row_count(con, 'hs_stage_state'))}**")
+            L()
+    else:
+        L("_Tables do not exist (pre-batch-pipeline DB)._")
+    L()
+
     # --- question_run_metrics ---
     L("### question_run_metrics")
     if table_exists(con, "question_run_metrics"):

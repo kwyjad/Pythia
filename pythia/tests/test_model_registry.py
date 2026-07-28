@@ -102,6 +102,26 @@ def test_all_reachable_models_have_cost_entries():
         reachable[split_model_ref(get_role_model(role))[1]] = f"role {role!r}"
     for entry in get_ensemble_resolved():
         reachable[entry["model_id"]] = "ensemble member"
+    # Config literals that bypass the registry (audit M8): the prediction-
+    # markets block carries raw model ids, so a gemini_flash lineup swap
+    # would leave them pointing at a retired model with no test failure.
+    # Until they move to registry aliases, pin them here.
+    try:
+        from pythia.config import load as _load_config
+
+        pm = (_load_config() or {}).get("prediction_markets") or {}
+        for section in ("query_generation", "relevance_filter"):
+            mid = ((pm.get(section) or {}).get("model") or "").strip()
+            if mid:
+                reachable[mid] = f"prediction_markets.{section}.model (config literal)"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from sibyl.config import MODEL as _SIBYL_MODEL
+
+        reachable[_SIBYL_MODEL] = "sibyl/config.py MODEL"
+    except Exception:  # noqa: BLE001
+        pass
 
     missing = {
         model_id: origin

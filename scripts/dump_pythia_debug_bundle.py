@@ -3149,10 +3149,26 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
             fs_detail = f"{' + '.join(parts)} countries with data"
         checks.append({"subsystem": "Food Security", "status": fs_status, "detail": fs_detail})
 
+    # No-backend sentinel counter (model_id in the #808 sentinel set): each
+    # such call is a country-hazard pair that got ZERO grounding evidence.
+    # Written to the health JSON since #808 but previously rendered nowhere
+    # — a fully breaker-tripped run still read clean in the markdown report.
+    _NO_BACKEND_IDS = {
+        "grounding-failed", "grounding-breaker-tripped", "grounding-unavailable",
+    }
+
+    def _no_backend_calls(rows: list) -> int:
+        return sum(
+            int(r.get("n_calls") or 0)
+            for r in (rows or [])
+            if str(r.get("model_id") or "").strip() in _NO_BACKEND_IDS
+        )
+
     # RC Grounding health (hazard_code like GROUNDING_ACE, GROUNDING_FL, etc.)
     _rc_g_calls = sum(int(r.get("n_calls") or 0) for r in (data.rc_grounding_rows or []))
     _rc_g_errors = sum(int(r.get("n_errors") or 0) for r in (data.rc_grounding_rows or []))
     _rc_g_verified = sum(int(r.get("n_verified_sources") or 0) for r in (data.rc_grounding_rows or []))
+    _rc_g_no_backend = _no_backend_calls(data.rc_grounding_rows)
     if _rc_g_calls > 0 and _rc_g_errors == 0:
         rc_g_status = "OK"
         rc_g_detail = f"{_rc_g_calls} calls, {_rc_g_verified} verified sources"
@@ -3165,6 +3181,13 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     else:
         rc_g_status = "OK"
         rc_g_detail = "no RC grounding calls in this run"
+    if _rc_g_no_backend > 0:
+        if rc_g_status == "OK":
+            rc_g_status = "WARN"
+        rc_g_detail += (
+            f"; {_rc_g_no_backend} call(s) never reached ANY backend "
+            "(grounding-* sentinels — those hazards got zero evidence)"
+        )
     checks.append({"subsystem": "RC Grounding", "status": rc_g_status, "detail": rc_g_detail})
 
     # Triage Grounding health (hazard_code like TRIAGE_GROUNDING_ACE, etc.)
@@ -3183,6 +3206,14 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     else:
         tg_status = "OK"
         tg_detail = "no triage grounding calls in this run"
+    _tg_no_backend = _no_backend_calls(data.triage_grounding_rows)
+    if _tg_no_backend > 0:
+        if tg_status == "OK":
+            tg_status = "WARN"
+        tg_detail += (
+            f"; {_tg_no_backend} call(s) never reached ANY backend "
+            "(grounding-* sentinels — those hazards got zero evidence)"
+        )
     checks.append({"subsystem": "Triage Grounding", "status": tg_status, "detail": tg_detail})
 
     # Adversarial Checks health (hs_web_research + Brave ADVERSARIAL_% rows)

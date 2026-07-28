@@ -11,6 +11,10 @@ const GROUNDING_SENTINELS = [
   "grounding-failed",
   "grounding-breaker-tripped",
   "grounding-unavailable",
+  // Written by pythia/web_research/web_research.py's log site (the third
+  // grounding logger, fixed after #808 missed it).
+  "grounding-disabled",
+  "grounding-budget-exceeded",
 ];
 
 describe("formatModelName", () => {

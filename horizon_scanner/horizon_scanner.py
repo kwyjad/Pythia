@@ -862,6 +862,14 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                     normalized_hazards[key] = hdata
 
         iso3_up = (iso3 or "").upper().strip()
+        # Idempotent like the sibling writers (hs_runs / tail packs /
+        # adversarial checks all delete-first): hs_finalize reuses the
+        # hs_submit run_id, so a re-dispatched finalize would otherwise
+        # append a second full row set under the same run_id.
+        con.execute(
+            "DELETE FROM hs_triage WHERE run_id = ? AND iso3 = ?",
+            [run_id, iso3_up],
+        )
         for hz_code in expected_hazards:
             hz_up = (hz_code or "").upper().strip()
             if hz_up == "ACO":
@@ -1399,10 +1407,21 @@ def main(
         hs_batch.collect_pending_batches(hs_batch.pipeline_id())
     else:
         run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
+        if hs_batch.staged() and not hs_batch.pipeline_id():
+            # Cron entry mints the run id with no --pipeline-id. Custom ids
+            # are pipeline-scoped, so the scope must be fixed BEFORE any
+            # enqueue — default it to the run id (same convention
+            # submit_family already uses for llm_batches.pipeline_id).
+            hs_batch.set_stage(stage, run_id)
     os.environ["PYTHIA_HS_RUN_ID"] = run_id
     reset_provider_failures_for_run(run_id)
     from pythia.web_research.brave_circuit_breaker import reset as reset_brave_breaker
     reset_brave_breaker()
+    if stage in ("hs_rc_collect", "hs_finalize"):
+        # Carry breaker state across stages: a trip during an earlier
+        # grounding stage must still drive the blocked-no-grounding gate
+        # (and HS_BRAVE_BREAKER_TRIPPED) in this process.
+        hs_batch.restore_breaker_state(run_id)
 
     _hs_id_emitted = False
     try:
@@ -1513,6 +1532,9 @@ def main(
             # stop — the poller dispatches the next stage when they finish.
             family = "hs_rc" if stage == "hs_submit" else "hs_triage"
             created = hs_batch.submit_family(family, run_id=run_id, stage_name=stage)
+            # Persist breaker state (cumulative — restore above seeded this
+            # stage's counters from the previous stage) for the next stage.
+            hs_batch.save_breaker_state(run_id)
             pid = hs_batch.pipeline_id() or run_id
             logger.info(
                 "HS stage %s: submitted %d %s batch(es): %s",
@@ -1649,7 +1671,18 @@ def main(
         raise
     except Exception:
         logger.exception("Horizon Scanner main() crashed")
+        if hs_batch.staged():
+            # In a staged stage a swallowed crash is catastrophic: the
+            # finally-block emits empty markers, the workflow greps succeed,
+            # the stage goes green, and hs_finalize proceeds to question
+            # creation over a PARTIAL hs_triage — a silently truncated
+            # month. Fail the process so the stage turns red instead.
+            raise SystemExit(1)
     finally:
+        # Checkpoint the staged batch/stage-state writes before the workflow
+        # uploads the DB (the artifact excludes the .wal file).
+        if hs_batch.staged():
+            hs_batch.close_con()
         if not _hs_id_emitted:
             # Guarantee HS_RUN_ID is always emitted so the workflow can parse it,
             # even when the process crashes mid-run.

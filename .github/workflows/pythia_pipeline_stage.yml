@@ -165,8 +165,8 @@ jobs:
           python -m horizon_scanner.horizon_scanner \
             --stage hs_submit \
             --pipeline-id "${{ inputs.pipeline_id }}" 2>&1 | tee diagnostics/hs_stdout.txt
-          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
-          BATCH_PIPELINE_ID=$(grep -E '^BATCH_PIPELINE_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
+          BATCH_PIPELINE_ID=$(grep -E '^BATCH_PIPELINE_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           if [ -z "${HS_RUN_ID}" ]; then
             echo "ERROR: HS_RUN_ID not found in Horizon Scanner output."
             exit 1
@@ -216,19 +216,23 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Upload batch state
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-batch-state
-          path: diagnostics/batch_state.json
-          retention-days: 14
-
+      # DB before state, BOTH gated on the signature check: a batch-state
+      # artifact without its staged DB green-lights the poller to dispatch a
+      # successor stage whose forced DB download then fatally fails.
       - name: Upload staged resolver DB
         if: steps.signature_after.outputs.signature_ok == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db-staged
           path: data/resolver.duckdb
+          retention-days: 14
+
+      - name: Upload batch state
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-batch-state
+          path: diagnostics/batch_state.json
           retention-days: 14
 
       - name: Upload stage diagnostics
@@ -238,6 +242,14 @@ jobs:
           name: pythia-stage-diagnostics
           path: diagnostics/hs_stdout.txt
           if-no-files-found: warn
+
+      # Without this step a signature regression leaves the job green with
+      # no uploads — the pipeline stalls silently behind a success mark.
+      - name: Fail stage on DB signature regression
+        if: always() && steps.signature_after.outputs.signature_ok != 'true'
+        run: |
+          echo "::error::DB signature regressed after this stage; the staged DB and batch state were withheld (see diagnostics/db_signature_after.json)."
+          exit 1
 
   # ────────────────────────────────────────────────────────────────────
   # Stage: hs_rc_collect — replay collected RC results (sync fallback per
@@ -299,7 +311,7 @@ jobs:
           python -m horizon_scanner.horizon_scanner \
             --stage hs_rc_collect \
             --pipeline-id "${{ inputs.pipeline_id }}" 2>&1 | tee diagnostics/hs_stdout.txt
-          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           if [ -z "${HS_RUN_ID}" ]; then
             echo "ERROR: HS_RUN_ID not found in Horizon Scanner output."
             exit 1
@@ -335,19 +347,23 @@ jobs:
             --hs-run-id "${HS_RUN_ID}" \
             --out diagnostics/batch_state.json
 
-      - name: Upload batch state
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-batch-state
-          path: diagnostics/batch_state.json
-          retention-days: 14
-
+      # DB before state, BOTH gated on the signature check: a batch-state
+      # artifact without its staged DB green-lights the poller to dispatch a
+      # successor stage whose forced DB download then fatally fails.
       - name: Upload staged resolver DB
         if: steps.signature_after.outputs.signature_ok == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db-staged
           path: data/resolver.duckdb
+          retention-days: 14
+
+      - name: Upload batch state
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-batch-state
+          path: diagnostics/batch_state.json
           retention-days: 14
 
       - name: Upload stage diagnostics
@@ -357,6 +373,14 @@ jobs:
           name: pythia-stage-diagnostics
           path: diagnostics/hs_stdout.txt
           if-no-files-found: warn
+
+      # Without this step a signature regression leaves the job green with
+      # no uploads — the pipeline stalls silently behind a success mark.
+      - name: Fail stage on DB signature regression
+        if: always() && steps.signature_after.outputs.signature_ok != 'true'
+        run: |
+          echo "::error::DB signature regressed after this stage; the staged DB and batch state were withheld (see diagnostics/db_signature_after.json)."
+          exit 1
 
   # ────────────────────────────────────────────────────────────────────
   # Stage: hs_finalize_fc_submit — replay collected triage results, write
@@ -418,8 +442,8 @@ jobs:
           python -m horizon_scanner.horizon_scanner \
             --stage hs_finalize \
             --pipeline-id "${{ inputs.pipeline_id }}" 2>&1 | tee diagnostics/hs_stdout.txt
-          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
-          HS_RESOLVED_ISO3S=$(grep -E '^HS_RESOLVED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
+          HS_RESOLVED_ISO3S=$(grep -E '^HS_RESOLVED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           if [ -z "${HS_RUN_ID}" ]; then
             echo "ERROR: HS_RUN_ID not found in Horizon Scanner output."
             exit 1
@@ -460,7 +484,7 @@ jobs:
             --purpose hs_pipeline \
             --phase submit \
             --pipeline-id "${{ inputs.pipeline_id }}" | tee diagnostics/forecaster_submit_stdout.txt
-          FC_RUN_ID=$(grep -E '^FC_RUN_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2-)
+          FC_RUN_ID=$(grep -E '^FC_RUN_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           echo "FC_RUN_ID=${FC_RUN_ID}" >> "$GITHUB_ENV"
 
       - name: Compare DB signature after stage
@@ -493,19 +517,23 @@ jobs:
             --hs-run-id "${HS_RUN_ID}" \
             --out diagnostics/batch_state.json
 
-      - name: Upload batch state
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-batch-state
-          path: diagnostics/batch_state.json
-          retention-days: 14
-
+      # DB before state, BOTH gated on the signature check: a batch-state
+      # artifact without its staged DB green-lights the poller to dispatch a
+      # successor stage whose forced DB download then fatally fails.
       - name: Upload staged resolver DB
         if: steps.signature_after.outputs.signature_ok == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db-staged
           path: data/resolver.duckdb
+          retention-days: 14
+
+      - name: Upload batch state
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-batch-state
+          path: diagnostics/batch_state.json
           retention-days: 14
 
       - name: Upload stage diagnostics
@@ -519,6 +547,14 @@ jobs:
             diagnostics/hs_triage_coverage__*.csv
             diagnostics/hs_triage_failures__*.json
           if-no-files-found: warn
+
+      # Without this step a signature regression leaves the job green with
+      # no uploads — the pipeline stalls silently behind a success mark.
+      - name: Fail stage on DB signature regression
+        if: always() && steps.signature_after.outputs.signature_ok != 'true'
+        run: |
+          echo "::error::DB signature regressed after this stage; the staged DB and batch state were withheld (see diagnostics/db_signature_after.json)."
+          exit 1
 
   # ────────────────────────────────────────────────────────────────────
   # Stage: fc_submit — HS (sync, legacy in-job) → questions →
@@ -566,8 +602,8 @@ jobs:
           set -eo pipefail
           mkdir -p diagnostics
           python -m horizon_scanner.horizon_scanner 2>&1 | tee diagnostics/hs_stdout.txt
-          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
-          HS_RESOLVED_ISO3S=$(grep -E '^HS_RESOLVED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2-)
+          HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
+          HS_RESOLVED_ISO3S=$(grep -E '^HS_RESOLVED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           if [ -z "${HS_RUN_ID}" ]; then
             echo "ERROR: HS_RUN_ID not found in Horizon Scanner output."
             exit 1
@@ -608,8 +644,8 @@ jobs:
             --purpose hs_pipeline \
             --phase submit \
             --pipeline-id "${{ inputs.pipeline_id }}" | tee diagnostics/forecaster_submit_stdout.txt
-          BATCH_PIPELINE_ID=$(grep -E '^BATCH_PIPELINE_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2-)
-          FC_RUN_ID=$(grep -E '^FC_RUN_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2-)
+          BATCH_PIPELINE_ID=$(grep -E '^BATCH_PIPELINE_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2- || true)
+          FC_RUN_ID=$(grep -E '^FC_RUN_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           # No questions → no markers printed; the pipeline still proceeds to
           # the finalize stage (which finds nothing to collect) so the
           # canonical DB is still published at the end of the cycle.
@@ -663,19 +699,23 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Upload batch state
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-batch-state
-          path: diagnostics/batch_state.json
-          retention-days: 14
-
+      # DB before state, BOTH gated on the signature check: a batch-state
+      # artifact without its staged DB green-lights the poller to dispatch a
+      # successor stage whose forced DB download then fatally fails.
       - name: Upload staged resolver DB
         if: steps.signature_after.outputs.signature_ok == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db-staged
           path: data/resolver.duckdb
+          retention-days: 14
+
+      - name: Upload batch state
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-batch-state
+          path: diagnostics/batch_state.json
           retention-days: 14
 
       - name: Upload stage diagnostics
@@ -689,6 +729,14 @@ jobs:
             diagnostics/hs_triage_coverage__*.csv
             diagnostics/hs_triage_failures__*.json
           if-no-files-found: warn
+
+      # Without this step a signature regression leaves the job green with
+      # no uploads — the pipeline stalls silently behind a success mark.
+      - name: Fail stage on DB signature regression
+        if: always() && steps.signature_after.outputs.signature_ok != 'true'
+        run: |
+          echo "::error::DB signature regressed after this stage; the staged DB and batch state were withheld (see diagnostics/db_signature_after.json)."
+          exit 1
 
   # ────────────────────────────────────────────────────────────────────
   # Stage: fc_collect_finalize — replay collected batch results (sync
@@ -787,14 +835,20 @@ jobs:
         run: |
           set -eo pipefail
           mkdir -p diagnostics
+          # --hs-run-id pins the question epoch to THIS pipeline's HS run
+          # (resolved from llm_batches above). Without it, an HS run landing
+          # between fc_submit and this collect would flip the auto-selected
+          # epoch: every batch replay would miss and the whole forecast
+          # would silently re-run synchronously at full price.
           python -m forecaster.cli \
             --mode pythia \
             --limit 0 \
             --batch-size 100 \
             --purpose hs_pipeline \
             --phase collect \
-            --pipeline-id "${{ inputs.pipeline_id }}" | tee diagnostics/forecaster_stdout.txt
-          FORECASTER_RUN_ID=$(grep -Eo 'run_id=fc_[0-9]+' diagnostics/forecaster_stdout.txt | tail -n 1 | cut -d= -f2)
+            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --hs-run-id "${HS_RUN_ID}" | tee diagnostics/forecaster_stdout.txt
+          FORECASTER_RUN_ID=$(grep -Eo 'run_id=fc_[0-9]+' diagnostics/forecaster_stdout.txt | tail -n 1 | cut -d= -f2 || true)
           if [ -n "${FORECASTER_RUN_ID}" ]; then
             echo "FORECASTER_RUN_ID=${FORECASTER_RUN_ID}" >> "$GITHUB_ENV"
           else
@@ -966,3 +1020,12 @@ jobs:
           set -e
           gh workflow run run_sibyl.yml --ref main -f db_run_id="${GITHUB_RUN_ID}"
           echo "Dispatched run_sibyl.yml with db_run_id=${GITHUB_RUN_ID}"
+
+      # The canonical upload + Sibyl dispatch above are signature-gated;
+      # when the gate fires, the whole month's pipeline output goes
+      # unpublished — that must be a RED run, not a quiet green one.
+      - name: Fail if canonical DB was not published
+        if: always() && steps.signature_after.outputs.signature_ok != 'true'
+        run: |
+          echo "::error::fc_collect_finalize finished WITHOUT uploading the canonical pythia-resolver-db (DB signature regression) — the pipeline's output is unpublished and Sibyl was not dispatched. Inspect diagnostics/db_signature_after.json, then re-run this stage or publish manually."
+          exit 1

@@ -102,10 +102,28 @@ def run_self_search(
 
 def combine_usage(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
     combined = dict(base or {})
-    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+    for key in (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        # Cache fields must sum too: compute_cost_split_usd derives the
+        # uncached span as prompt_tokens − cache fields, so summing prompt
+        # tokens while inheriting only the base call's cache counts prices
+        # the second call's cached span at the full input rate.
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "cached_tokens",
+    ):
+        if base.get(key) is None and extra.get(key) is None:
+            continue
         combined[key] = int(base.get(key) or 0) + int(extra.get(key) or 0)
     combined["cost_usd"] = float(base.get("cost_usd") or 0.0) + float(extra.get("cost_usd") or 0.0)
     combined["elapsed_ms"] = max(int(base.get("elapsed_ms") or 0), int(extra.get("elapsed_ms") or 0))
+    # service_tier applies a 0.5x batch multiplier in the cost formula; a
+    # merged usage may only keep it when BOTH parts were batch-tier —
+    # inheriting it from the base would halve the sync part's price.
+    if base.get("service_tier") != extra.get("service_tier"):
+        combined.pop("service_tier", None)
     if "self_search" in extra:
         combined["self_search"] = extra["self_search"]
     return combined

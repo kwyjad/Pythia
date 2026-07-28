@@ -173,6 +173,9 @@ def _try_batch_phase(
     hazard_code: str | None,
     metric: str | None,
     anchor_month: str | None,
+    run_id: str | None = None,
+    cache_prefix: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> tuple[str, dict, str | None, "ModelSpec"] | None:
     """Submit-phase enqueue or collect-phase replay for one member call.
 
@@ -192,7 +195,10 @@ def _try_batch_phase(
             # Excluded providers run in the collect stage (sync), never in
             # submit — otherwise their cost would double when collect re-runs.
             return "", {"batch_phase": "submit"}, _BATCH_SENTINEL_DEFERRED, ms
-        body = build_body_for_spec(ms, prompt, 0.2)
+        body = build_body_for_spec(
+            ms, prompt, 0.2,
+            cache_prefix=cache_prefix, prompt_cache_key=prompt_cache_key,
+        )
         llm_batch.enqueue_request(
             _batch_con(),
             family=batch_family,
@@ -206,6 +212,7 @@ def _try_batch_phase(
             hazard_code=hazard_code,
             metric=metric,
             anchor_month=anchor_month,
+            pipeline_id=_BATCH_PIPELINE_ID,
         )
         return "", {"batch_phase": "submit"}, _BATCH_SENTINEL_SUBMITTED, ms
 
@@ -215,16 +222,82 @@ def _try_batch_phase(
         batch_family,
         question_id=question_id,
         model_key=_batch_model_key(ms),
+        pipeline_id=_BATCH_PIPELINE_ID,
     )
-    if hit is not None:
+    if hit is not None and hit.get("status", "succeeded") == "succeeded":
         usage = dict(hit.get("usage") or {})
         usage.setdefault("elapsed_ms", 0)
+        sent_prompt = hit.get("sent_prompt") or ""
+        if sent_prompt and sent_prompt != prompt:
+            # Collect-stage prompts are REBUILT and can differ from what was
+            # submitted (e.g. the embedded 'Today' date across a 24h batch
+            # wait). Stash the true sent prompt so the spd_v2/binary_v2
+            # llm_calls row stays byte-exact — the existing pop pattern in
+            # _call_spd_members_v2 routes it to the log sites.
+            usage["sent_prompt_text"] = sent_prompt
         return hit.get("text") or "", usage, (hit.get("error") or None), ms
+    if hit is not None:
+        # Errored batch item: the provider still billed its tokens (e.g. an
+        # Anthropic max_tokens truncation burned thinking+output). Cost it
+        # before the sync fallback re-runs the call — otherwise this spend
+        # never reaches llm_calls.
+        _log_errored_batch_item(
+            ms, hit, batch_family=batch_family, question_id=question_id,
+            iso3=iso3, hazard_code=hazard_code, metric=metric, run_id=run_id,
+        )
     # Miss / errored / expired → sync fallback via the normal call path.
     llm_batch.mark_fallback_sync(
-        _batch_con(), batch_family, question_id=question_id, model_key=_batch_model_key(ms)
+        _batch_con(),
+        batch_family,
+        question_id=question_id,
+        model_key=_batch_model_key(ms),
+        pipeline_id=_BATCH_PIPELINE_ID,
     )
     return None
+
+
+def _log_errored_batch_item(
+    ms: "ModelSpec",
+    hit: dict,
+    *,
+    batch_family: str,
+    question_id: str | None,
+    iso3: str | None,
+    hazard_code: str | None,
+    metric: str | None,
+    run_id: str | None = None,
+) -> None:
+    """Rich-log an errored batch item's usage so its cost is in the ledger."""
+
+    try:
+        from forecaster.llm_logging import log_forecaster_llm_call
+
+        usage = dict(hit.get("usage") or {})
+        usage.setdefault("elapsed_ms", 0)
+        coro = log_forecaster_llm_call(
+            run_id=run_id or "",
+            question_id=question_id or "",
+            prompt_text="",
+            model_spec=ms,
+            phase=batch_family,
+            call_type="batch_item_errored",
+            iso3=iso3,
+            hazard_code=hazard_code,
+            metric=metric,
+            response_text="",
+            usage=usage,
+            error_text=f"batch item errored: {hit.get('error') or 'unknown'}",
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(coro)
+        else:
+            asyncio.run(coro)
+    except Exception:  # noqa: BLE001
+        LOG.debug("failed to log errored batch item for %s", question_id, exc_info=True)
 
 
 def _maybe_log_default_ensemble() -> None:
@@ -1495,14 +1568,18 @@ def _write_spd_members_v2_to_db(
             except Exception:
                 pass
 
-            # Extract reasoning trace from raw_calls for this model.
+            # Extract reasoning trace + human explanation from raw_calls.
             _rc_reasoning_trace = None
+            _rc_explanation = None
             try:
                 _rc_entry = raw_calls[idx]
                 if isinstance(_rc_entry, dict):
                     _rt = _rc_entry.get("reasoning_trace")
                     if _rt:
                         _rc_reasoning_trace = json.dumps(_rt, default=str)
+                    _he = _rc_entry.get("human_explanation")
+                    if isinstance(_he, str) and _he.strip():
+                        _rc_explanation = _he.strip()
             except Exception as exc:
                 LOG.warning(
                     "Discarding unserializable reasoning trace for model #%d: %r",
@@ -1562,7 +1639,7 @@ def _write_spd_members_v2_to_db(
                             probability, ok, elapsed_ms, cost_usd, prompt_tokens,
                             completion_tokens, total_tokens, status, spd_json, human_explanation,
                             horizon_m, class_bin, p, is_test, reasoning_trace_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, NULL, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
                             run_id,
@@ -1578,6 +1655,7 @@ def _write_spd_members_v2_to_db(
                             completion_tokens,
                             total_tokens,
                             json.dumps(spd_json_payload),
+                            _rc_explanation,
                             month_index,
                             cb,
                             float(prob),
@@ -2535,9 +2613,19 @@ async def _call_spd_model_for_spec(
     anchor_month: str | None = None,
     wording: str | None = None,
     batch_family: str | None = None,
+    cache_prefix: str | None = None,
+    prompt_cache_key: str | None = None,
     **_kwargs,
 ) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
-    """Async wrapper for the SPD LLM call for a given model spec with self-search support."""
+    """Async wrapper for the SPD LLM call for a given model spec with self-search support.
+
+    ``cache_prefix`` is the V3 static prompt prefix (from
+    ``build_spd_prompt_v2(return_parts=True)``): when the prompt still starts
+    with it at call time, it is sent as an Anthropic ``cache_control``
+    breakpoint segment. ``prompt_cache_key`` is the OpenAI cache-routing
+    hint. Both are inert unless PYTHIA_PROMPT_CACHE_ENABLED=1 (checked in
+    the body builders).
+    """
 
     if ms.purpose != "spd_v2":
         # Stamp the purpose WITHOUT dropping the per-model params. This used to
@@ -2562,6 +2650,9 @@ async def _call_spd_model_for_spec(
             hazard_code=hazard_code,
             metric=metric,
             anchor_month=anchor_month,
+            run_id=run_id,
+            cache_prefix=cache_prefix,
+            prompt_cache_key=prompt_cache_key,
         )
         if batch_short is not None:
             return batch_short
@@ -2741,6 +2832,16 @@ async def _call_spd_model_for_spec(
                 call_type="forecast_web_research",
             )
 
+    # Segments are derived HERE, against the prompt actually being sent, so
+    # tail appends (web/retriever evidence) can never break the invariant
+    # that the segments join to the sent prompt.
+    cache_segments = None
+    if cache_prefix and prompt_with_evidence.startswith(cache_prefix):
+        cache_segments = [
+            (cache_prefix, True),
+            (prompt_with_evidence[len(cache_prefix):], False),
+        ]
+
     start = time.time()
     try:
         text, usage, error = await call_chat_ms(
@@ -2752,6 +2853,8 @@ async def _call_spd_model_for_spec(
             component="Forecaster",
             run_id=run_id,
             log_call=False,  # rich-logged via log_forecaster_llm_call (spd_v2)
+            cache_segments=cache_segments,
+            prompt_cache_key=prompt_cache_key,
         )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
@@ -2839,7 +2942,10 @@ async def _call_spd_model_for_spec(
 
     usage["self_search"] = self_search_meta
 
-    prompt_with_evidence = append_evidence_to_prompt(prompt, evidence_pack or {})
+    # Append to the prompt the FIRST call actually used — rebuilding from the
+    # base `prompt` silently discarded the provider web-search evidence the
+    # first call paid for.
+    prompt_with_evidence = append_evidence_to_prompt(prompt_with_evidence, evidence_pack or {})
 
     try:
         text2, usage2, error2 = await call_chat_ms(
@@ -2888,6 +2994,8 @@ async def _call_spd_members_v2(
     anchor_month: str | None = None,
     wording: str | None = None,
     batch_family: str | None = None,
+    cache_prefix: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> tuple[
     list[dict[str, list[float]]],
     dict[str, object],
@@ -2933,6 +3041,8 @@ async def _call_spd_members_v2(
             anchor_month=anchor_month,
             wording=wording,
             batch_family=batch_family,
+            cache_prefix=cache_prefix,
+            prompt_cache_key=prompt_cache_key,
         )
         for ms in specs_used
     ]
@@ -3068,6 +3178,8 @@ async def _call_spd_members_v2_compat(
     anchor_month: str | None = None,
     wording: str | None = None,
     batch_family: str | None = None,
+    cache_prefix: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> tuple[list[dict[str, list[float]]], dict[str, object], list[dict[str, object]], dict[str, object]]:
     """
     Compatibility wrapper to avoid passing unsupported kwargs to monkeypatched callables in tests.
@@ -3076,26 +3188,35 @@ async def _call_spd_members_v2_compat(
     fn = _call_spd_members_v2
     try:
         sig = inspect.signature(fn)
-        kwargs: dict[str, object] = {}
-        if "run_id" in sig.parameters:
-            kwargs["run_id"] = run_id
-        if "question_id" in sig.parameters:
-            kwargs["question_id"] = question_id
-        if "iso3" in sig.parameters:
-            kwargs["iso3"] = iso3
-        if "hazard_code" in sig.parameters:
-            kwargs["hazard_code"] = hazard_code
-        if "metric" in sig.parameters:
-            kwargs["metric"] = metric
-        if "anchor_month" in sig.parameters:
-            kwargs["anchor_month"] = anchor_month
-        if "wording" in sig.parameters:
-            kwargs["wording"] = wording
-        if "batch_family" in sig.parameters:
-            kwargs["batch_family"] = batch_family
-        return await fn(prompt, specs, **kwargs)
-    except Exception:
+    except (TypeError, ValueError):
+        # Non-introspectable test double — call with the legacy minimal args.
+        # Only signature inspection is guarded: a broad except around the
+        # awaited call itself would retry WITHOUT batch_family on any real
+        # error inside the fan-out, silently un-batching every member
+        # (full-price sync calls whose results the submit phase discards).
         return await fn(prompt, specs, run_id=run_id)
+    kwargs: dict[str, object] = {}
+    if "run_id" in sig.parameters:
+        kwargs["run_id"] = run_id
+    if "question_id" in sig.parameters:
+        kwargs["question_id"] = question_id
+    if "iso3" in sig.parameters:
+        kwargs["iso3"] = iso3
+    if "hazard_code" in sig.parameters:
+        kwargs["hazard_code"] = hazard_code
+    if "metric" in sig.parameters:
+        kwargs["metric"] = metric
+    if "anchor_month" in sig.parameters:
+        kwargs["anchor_month"] = anchor_month
+    if "wording" in sig.parameters:
+        kwargs["wording"] = wording
+    if "batch_family" in sig.parameters:
+        kwargs["batch_family"] = batch_family
+    if "cache_prefix" in sig.parameters:
+        kwargs["cache_prefix"] = cache_prefix
+    if "prompt_cache_key" in sig.parameters:
+        kwargs["prompt_cache_key"] = prompt_cache_key
+    return await fn(prompt, specs, **kwargs)
 
 
 async def _call_spd_model_compat(
@@ -3116,132 +3237,24 @@ async def _call_spd_model_compat(
     fn = _call_spd_model
     try:
         sig = inspect.signature(fn)
-        kwargs: dict[str, object] = {}
-        for key, value in {
-            "run_id": run_id,
-            "question_id": question_id,
-            "iso3": iso3,
-            "hazard_code": hazard_code,
-            "metric": metric,
-            "anchor_month": anchor_month,
-            "wording": wording,
-        }.items():
-            if key in sig.parameters:
-                kwargs[key] = value
-        return await fn(prompt, **kwargs)
-    except Exception:
+    except (TypeError, ValueError):
+        # Non-introspectable test double — legacy minimal call. Real errors
+        # inside the call must propagate (see _call_spd_members_v2_compat).
         return await fn(prompt)
+    kwargs: dict[str, object] = {}
+    for key, value in {
+        "run_id": run_id,
+        "question_id": question_id,
+        "iso3": iso3,
+        "hazard_code": hazard_code,
+        "metric": metric,
+        "anchor_month": anchor_month,
+        "wording": wording,
+    }.items():
+        if key in sig.parameters:
+            kwargs[key] = value
+    return await fn(prompt, **kwargs)
 
-
-async def _call_spd_ensemble_v2(
-    prompt: str,
-    *,
-    specs: list[ModelSpec] | None = None,
-    metric: str = "PA",
-) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
-    """Thin wrapper around the current SPD v2 call path for diagnostics."""
-
-    specs = specs or SPD_ENSEMBLE
-    bucket_count = _n_buckets_for_metric(metric)
-
-    tasks = [_call_spd_model_for_spec(ms, prompt) for ms in specs if ms.active]
-    if not tasks:
-        return {}, {}, []
-
-    call_results = await asyncio.gather(*tasks)
-
-    raw_calls = [
-        {
-            "model_spec": ms_val,
-            "text": text_val or "",
-            "usage": usage_val,
-            "error": error_val,
-        }
-        for text_val, usage_val, error_val, ms_val in call_results
-    ]
-
-    total_prompt_tokens = 0
-    total_completion_tokens = 0
-    total_tokens = 0
-    total_cost = 0.0
-    max_elapsed_ms = 0
-
-    month_sums: dict[str, list[float]] = {}
-    month_counts: dict[str, int] = {}
-
-    for text, usage, error, _ms in call_results:
-        usage = usage or {}
-
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or 0)
-        total_tokens_val = int(usage.get("total_tokens") or 0)
-        cost_usd_val = float(usage.get("cost_usd") or 0.0)
-        elapsed_ms_val = int(usage.get("elapsed_ms") or 0)
-
-        total_prompt_tokens += prompt_tokens
-        total_completion_tokens += completion_tokens
-        total_tokens += total_tokens_val
-        total_cost += cost_usd_val
-        max_elapsed_ms = max(max_elapsed_ms, elapsed_ms_val)
-
-        if error or not text or not str(text).strip():
-            continue
-
-        try:
-            spd_obj = _safe_json_loads(text)
-        except Exception:  # noqa: BLE001
-            continue
-
-        if not isinstance(spd_obj, dict):
-            continue
-
-        spds = spd_obj.get("spds")
-        if not isinstance(spds, dict):
-            continue
-
-        for month, payload in spds.items():
-            if not isinstance(payload, dict):
-                continue
-            probs = payload.get("probs")
-            if not isinstance(probs, list):
-                continue
-
-            if len(probs) != bucket_count:
-                continue
-            vec = sanitize_mcq_vector(list(probs), n_options=bucket_count)
-            if month not in month_sums:
-                month_sums[month] = [0.0 for _ in vec]
-                month_counts[month] = 0
-
-            if len(vec) != len(month_sums[month]):
-                vec = vec[: len(month_sums[month])]
-
-            for idx, val in enumerate(vec):
-                month_sums[month][idx] += float(val)
-            month_counts[month] += 1
-
-    aggregated_usage: dict[str, object] = {
-        "prompt_tokens": total_prompt_tokens,
-        "completion_tokens": total_completion_tokens,
-        "total_tokens": total_tokens or (total_prompt_tokens + total_completion_tokens),
-        "cost_usd": total_cost,
-        "elapsed_ms": max_elapsed_ms,
-    }
-
-    if not month_sums:
-        return {}, aggregated_usage, raw_calls
-
-    spds_v2: dict[str, dict[str, object]] = {}
-    for month, sums in month_sums.items():
-        count = month_counts.get(month, 0)
-        if count <= 0:
-            continue
-        avg_vec = [val / float(count) for val in sums]
-        spds_v2[str(month)] = {"probs": sanitize_mcq_vector(avg_vec, n_options=len(avg_vec))}
-
-    spd_obj: dict[str, object] = {"spds": spds_v2}
-
-    return spd_obj, aggregated_usage, raw_calls
 
 
 def _build_bayesmc_spd_obj(
@@ -3331,6 +3344,9 @@ async def _call_spd_bayesmc_v2(
     hazard_code: str | None = None,
     metric: str | None = None,
     wording: str | None = None,
+    batch_family: str | None = None,
+    cache_prefix: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> tuple[
     dict[str, object],
     dict[str, object],
@@ -3375,6 +3391,9 @@ async def _call_spd_bayesmc_v2(
         metric=metric,
         anchor_month=anchor_month,
         wording=wording,
+        batch_family=batch_family,
+        cache_prefix=cache_prefix,
+        prompt_cache_key=prompt_cache_key,
     )
     member_raw_by_model_id: dict[str, str] = {}
     for rc in raw_calls:
@@ -4169,7 +4188,10 @@ async def _run_binary_forecast_for_question(
 
         anchor_month = _anchor_month_for_question(rec)
 
-        # Call models — reuse the same model calling infrastructure
+        # Call models — reuse the same model calling infrastructure.
+        # Binary prompts have no prefix/suffix split (no cache_segments);
+        # the OpenAI routing hint alone is zero-risk and helps automatic
+        # caching group the shared static sections.
         per_model_spds, usage, raw_calls, ensemble_meta = (
             await _call_spd_members_v2_compat(
                 prompt,
@@ -4182,6 +4204,7 @@ async def _run_binary_forecast_for_question(
                 anchor_month=anchor_month,
                 wording=wording,
                 batch_family="binary_v2",
+                prompt_cache_key=f"pythia:binary_v2:{hz}:{metric}:t{track}",
             )
         )
         if _batch_submit_active():
@@ -4391,7 +4414,7 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
 
         question_evidence_pack = _load_question_evidence_pack(run_id, qid) if qid else None
         structured_data = _load_structured_data(iso3, hz, hs_run_id=hs_run_id)
-        prompt = build_spd_prompt_v2(
+        prompt_prefix, prompt_suffix = build_spd_prompt_v2(
             question={
                 "question_id": qid,
                 "iso3": iso3,
@@ -4408,7 +4431,9 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
             structured_data=structured_data,
             model_name=TRACK2_MODEL_SPEC.name,
             track=2,
+            return_parts=True,
         )
+        prompt = prompt_prefix + prompt_suffix
         if question_evidence_pack:
             prompt = append_retriever_evidence_to_prompt(prompt, question_evidence_pack)
 
@@ -4425,6 +4450,8 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
                 anchor_month=anchor_month,
                 wording=wording,
                 batch_family="track2_spd",
+                cache_prefix=prompt_prefix or None,
+                prompt_cache_key=f"pythia:track2_spd:{hz}:{metric}:t2",
             )
         )
         if _batch_submit_active():
@@ -4616,7 +4643,11 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
         structured_data = _load_structured_data(
             iso3, hz, hs_run_id=hs_run_id, rc_level=rc_level,
         )
-        prompt = build_spd_prompt_v2(
+        # return_parts: under V3 order the prefix is the static block shared
+        # by every question of this (hazard, metric, track) group — the
+        # Anthropic cache_control anchor. Under legacy order it is "" and
+        # caching stays off. Evidence appends below only touch the tail.
+        prompt_prefix, prompt_suffix = build_spd_prompt_v2(
             question={
                 "question_id": qid,
                 "iso3": iso3,
@@ -4631,7 +4662,11 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             hs_triage_entry=hs_entry,
             research_json=research_json,
             structured_data=structured_data,
+            return_parts=True,
         )
+        prompt = prompt_prefix + prompt_suffix
+        spd_cache_prefix = prompt_prefix or None
+        spd_prompt_cache_key = f"pythia:spd_v2:{hz}:{metric}:t1"
         if question_evidence_pack:
             prompt = append_retriever_evidence_to_prompt(prompt, question_evidence_pack)
 
@@ -4816,6 +4851,8 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 anchor_month=anchor_month,
                 wording=wording,
                 batch_family="spd_v2",
+                cache_prefix=spd_cache_prefix,
+                prompt_cache_key=spd_prompt_cache_key,
             )
             if _batch_submit_active():
                 # Members were enqueued as Batch-API requests; parsing,
@@ -5090,7 +5127,17 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 hazard_code=hz,
                 metric=metric,
                 wording=wording,
+                batch_family="spd_v2",
+                cache_prefix=spd_cache_prefix,
+                prompt_cache_key=spd_prompt_cache_key,
             )
+            if _batch_submit_active():
+                # Members were enqueued as Batch-API requests; parsing,
+                # aggregation and writes happen in the collect phase. Without
+                # this guard the bayesmc-only path ran every member SYNC at
+                # full price in the submit phase and the collect phase then
+                # paid for the whole ensemble a second time.
+                return
             if member_spds_snapshot is None:
                 member_spds_snapshot = per_model_spds_bm
                 member_specs_snapshot = specs_used_bm
@@ -5677,6 +5724,12 @@ def main() -> None:
     _BATCH_PIPELINE_ID = (getattr(args, "pipeline_id", "") or "").strip() or None
     if _FORECAST_PHASE == "submit" and not _BATCH_PIPELINE_ID:
         _BATCH_PIPELINE_ID = f"pl_{int(time.time())}"
+    if _FORECAST_PHASE == "collect" and not _BATCH_PIPELINE_ID:
+        # Custom ids are pipeline-scoped; a collect without the pipeline id
+        # would miss every replay and silently re-run the whole ensemble
+        # synchronously at full price.
+        print("[fatal] --phase collect requires --pipeline-id")
+        return
     print("🚀 Forecaster ensemble starting…")
     print(f"Mode: {args.mode} | Limit: {args.limit} | Purpose: {args.purpose}")
     if _FORECAST_PHASE != "full":
@@ -5922,6 +5975,14 @@ def main() -> None:
                 try:
                     con = connect(read_only=False)
                     ensure_schema(con)
+                    # Delete-first: the staged pipeline runs this task in BOTH
+                    # the submit and collect phases under the same run_id (and
+                    # a re-dispatched collect runs it again) — a bare INSERT
+                    # accumulates duplicate placeholder rows.
+                    con.execute(
+                        "DELETE FROM question_research WHERE run_id = ? AND question_id = ?",
+                        [run_id, qid],
+                    )
                     con.execute(
                         """
                         INSERT INTO question_research
@@ -6006,6 +6067,16 @@ def main() -> None:
     except Exception as e:
         print(f"[fatal] {type(e).__name__}: {str(e)[:200]}")
         raise
+    finally:
+        # Checkpoint the batch-state writes before the workflow uploads the
+        # DB (the staged artifact excludes the .wal file).
+        global _BATCH_CON
+        if _BATCH_CON is not None:
+            try:
+                _BATCH_CON.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _BATCH_CON = None
 
 
 if __name__ == "__main__":

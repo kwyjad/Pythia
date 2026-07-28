@@ -518,6 +518,22 @@ def _log_web_research(
         if isinstance(pack.debug, dict):
             provider = str(pack.debug.get("provider") or provider)
             model_id = str(pack.debug.get("selected_model_id") or pack.debug.get("model_id") or model_id)
+        # Same class of defect #808 fixed at the two HS grounding log sites:
+        # a no-backend outcome must log a NAMING SENTINEL, not the literal
+        # string "unknown" (which surfaced on the Costs page as a mystery
+        # model) or a bare backend label pretending to be a model id. The
+        # sentinels are deliberately absent from model_costs.json — $0 is
+        # correct; do not add cost entries for them.
+        if model_id in ("unknown", "", None) or (
+            pack.error and not (isinstance(pack.debug, dict) and pack.debug.get("model_id"))
+        ):
+            err_type = str((pack.error or {}).get("type") or "")
+            if err_type == "disabled":
+                model_id = model_name = "grounding-disabled"
+            elif err_type in ("budget_exceeded", "budget_error"):
+                model_id = model_name = "grounding-budget-exceeded"
+            elif err_type == "no_backend_available" or model_id in ("unknown", "", None):
+                model_id = model_name = "grounding-unavailable"
         if not provider:
             provider = "google" if pack.backend in {"gemini", "google"} else pack.backend or "unknown"
         if os.getenv("PYTHIA_RETRIEVER_ENABLED", "0") == "1" and pack.backend in {"gemini", "google"}:

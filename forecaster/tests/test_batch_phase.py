@@ -121,6 +121,7 @@ def test_collect_phase_replays_batch_result(batch_env, monkeypatch):
         iso3="SOM",
         hazard_code="ACE",
         metric="FATALITIES",
+        pipeline_id="pl_test",
     )
     batch_env.execute(
         "UPDATE llm_batch_requests SET status='succeeded', response_text=?, usage_json=? "
@@ -153,6 +154,7 @@ def test_collect_phase_miss_falls_back_to_sync(batch_env, monkeypatch):
         iso3="SOM",
         hazard_code="ACE",
         metric="FATALITIES",
+        pipeline_id="pl_test",
     )
     batch_env.execute(
         "UPDATE llm_batch_requests SET status='errored', error_text='boom' WHERE custom_id = ?",
@@ -175,3 +177,65 @@ def test_full_phase_never_touches_batch_state(batch_env, monkeypatch):
     assert len(sync_calls) == 1
     assert text == "sync text"
     assert batch_env.execute("SELECT COUNT(*) FROM llm_batch_requests").fetchone()[0] == 0
+
+
+def test_collect_under_different_pipeline_misses(batch_env, monkeypatch):
+    # A terminal result from ANOTHER pipeline (e.g. last month's run, still
+    # in the traveling DB artifact) must never replay into this pipeline —
+    # the collect misses and takes the sync fallback instead.
+    cid = llm_batch.enqueue_request(
+        batch_env,
+        family="spd_v2",
+        provider="anthropic",
+        model_id="claude-opus-5",
+        request_body={"model": "claude-opus-5"},
+        prompt_text="the spd prompt",
+        question_id="SOM_ACE_FATALITIES_2026-08",
+        model_key=cli._batch_model_key(_MS),
+        iso3="SOM",
+        hazard_code="ACE",
+        metric="FATALITIES",
+        pipeline_id="pl_last_month",
+    )
+    batch_env.execute(
+        "UPDATE llm_batch_requests SET status='succeeded', response_text='stale output' "
+        "WHERE custom_id = ?", [cid],
+    )
+    (text, usage, error, ms), sync_calls = _call(
+        monkeypatch, "collect", sync_response=("fresh sync text", {"prompt_tokens": 10}, None)
+    )
+    assert len(sync_calls) == 1
+    assert text == "fresh sync text"
+    assert "stale output" not in text
+
+
+def test_collect_replay_restores_submitted_prompt(batch_env, monkeypatch):
+    # The collect stage rebuilds prompts (which embed today's date) up to
+    # 24h after submit — the llm_calls row must record the prompt the
+    # provider ACTUALLY received, extracted from the stored request body.
+    submitted_prompt = "the spd prompt AS SUBMITTED (Today: 2026-08-01)"
+    cid = llm_batch.enqueue_request(
+        batch_env,
+        family="spd_v2",
+        provider="anthropic",
+        model_id="claude-opus-5",
+        request_body={
+            "model": "claude-opus-5",
+            "messages": [{"role": "user", "content": submitted_prompt}],
+        },
+        prompt_text=submitted_prompt,
+        question_id="SOM_ACE_FATALITIES_2026-08",
+        model_key=cli._batch_model_key(_MS),
+        iso3="SOM",
+        hazard_code="ACE",
+        metric="FATALITIES",
+        pipeline_id="pl_test",
+    )
+    batch_env.execute(
+        "UPDATE llm_batch_requests SET status='succeeded', response_text='ok' "
+        "WHERE custom_id = ?", [cid],
+    )
+    # The collect stage rebuilds a DIFFERENT prompt ("the spd prompt").
+    (text, usage, error, ms), sync_calls = _call(monkeypatch, "collect")
+    assert not sync_calls
+    assert usage["sent_prompt_text"] == submitted_prompt

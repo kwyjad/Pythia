@@ -69,6 +69,27 @@ class BraveCircuitBreaker:
                     status_code or "?",
                 )
 
+    def restore(self, stats: dict) -> None:
+        """Seed state from a persisted stats() dict.
+
+        The staged pipeline runs each HS stage in a separate process; the
+        breaker state is persisted at the end of the grounding stages and
+        restored here so hs_finalize's blocked-no-grounding gate still sees
+        a trip that happened during hs_submit/hs_rc_collect (and the Brave
+        budget stays cumulative across the run instead of resetting 3x).
+        """
+        with self._lock:
+            self._consecutive_failures = int(stats.get("consecutive_failures") or 0)
+            self._total_failures = int(stats.get("total_failures") or 0)
+            self._total_successes = int(stats.get("total_successes") or 0)
+            self._tripped = bool(stats.get("tripped"))
+        if self._tripped:
+            LOG.error(
+                "[BRAVE_CIRCUIT_BREAKER] Restored TRIPPED state from a previous "
+                "pipeline stage — Brave calls stay short-circuited and ungrounded "
+                "hazards will be blocked from forecasting."
+            )
+
     def stats(self) -> dict:
         with self._lock:
             return {

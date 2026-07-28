@@ -38,7 +38,7 @@ def batch_enabled(monkeypatch: pytest.MonkeyPatch):
 
 
 def _enqueue_spd(con, question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5",
-                 provider="anthropic", model_id="claude-opus-5"):
+                 provider="anthropic", model_id="claude-opus-5", pipeline_id="pl_1"):
     return llm_batch.enqueue_request(
         con,
         family="spd_v2",
@@ -53,6 +53,7 @@ def _enqueue_spd(con, question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5
         hazard_code="ACE",
         metric="FATALITIES",
         anchor_month="2026-08",
+        pipeline_id=pipeline_id,
     )
 
 
@@ -235,7 +236,8 @@ class TestPollCollect:
         counts = llm_batch.collect_batch(con, batch_id)
         assert counts["succeeded"] == 1
         result = llm_batch.get_result(
-            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5"
+            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5",
+            pipeline_id="pl_1",
         )
         assert result is not None
         assert result["text"] == '{"spds": {}}'
@@ -257,19 +259,30 @@ class TestPollCollect:
         counts = llm_batch.collect_batch(con, batch_id)
         assert counts["skipped_terminal"] == 1
         assert llm_batch.get_result(
-            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5"
+            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5",
+            pipeline_id="pl_1",
         )["text"] == "first"
 
-    def test_errored_item_returns_none_for_fallback(self, con, fake_adapters, batch_enabled):
+    def test_errored_item_returned_with_usage_for_costing(self, con, fake_adapters, batch_enabled):
         cid, batch_id = self._submit_one(con, fake_adapters)
-        _FakeAdapter.fetch_results = [(cid, False, "", {}, "boom")]
+        _FakeAdapter.fetch_results = [
+            (cid, False, "", {"prompt_tokens": 5000, "completion_tokens": 100}, "boom"),
+        ]
         counts = llm_batch.collect_batch(con, batch_id)
         assert counts["errored"] == 1
-        assert llm_batch.get_result(
-            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5"
-        ) is None
+        # An errored item comes back WITH status + usage so the caller can
+        # cost the burned tokens before taking the sync fallback.
+        hit = llm_batch.get_result(
+            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5",
+            pipeline_id="pl_1",
+        )
+        assert hit is not None
+        assert hit["status"] == "errored"
+        assert hit["usage"]["prompt_tokens"] == 5000
+        assert "boom" in hit["error"]
         llm_batch.mark_fallback_sync(
-            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5"
+            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5",
+            pipeline_id="pl_1",
         )
         assert con.execute(
             "SELECT status FROM llm_batch_requests WHERE custom_id = ?", [cid]
@@ -285,7 +298,8 @@ class TestPollCollect:
             "SELECT status FROM llm_batch_requests WHERE custom_id = ?", [cid]
         ).fetchone()[0] == "expired"
         assert llm_batch.get_result(
-            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5"
+            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5",
+            pipeline_id="pl_1",
         ) is None
 
     def test_pending_batches_lists_uncollected(self, con, fake_adapters, batch_enabled):
@@ -351,3 +365,184 @@ class TestBodyParity:
             "url": "/v1/chat/completions",
             "body": {"model": "gpt-5.6-sol", "messages": []},
         }
+
+
+class TestPipelineScoping:
+    """Custom ids and state queries are scoped to one pipeline execution.
+
+    The DB artifact carries llm_batch_requests forward month to month —
+    without scoping, month 2's enqueue would find month 1's succeeded rows,
+    submit ZERO provider batches, and replay last month's model outputs.
+    """
+
+    def test_custom_id_scoped_by_pipeline(self):
+        a = llm_batch.make_custom_id(
+            "spd_v2", question_id="Q1", model_key="m1", pipeline_id="pl_A"
+        )
+        b = llm_batch.make_custom_id(
+            "spd_v2", question_id="Q1", model_key="m1", pipeline_id="pl_A"
+        )
+        c = llm_batch.make_custom_id(
+            "spd_v2", question_id="Q1", model_key="m1", pipeline_id="pl_B"
+        )
+        legacy = llm_batch.make_custom_id("spd_v2", question_id="Q1", model_key="m1")
+        assert a == b
+        assert a != c
+        assert a != legacy
+        # Worst case: full-length model key + scope hash stays in-charset.
+        worst = llm_batch.make_custom_id(
+            "spd_v2",
+            question_id="SOM_ACE_FATALITIES_2026-08",
+            model_key="gemini-3.1-pro-preview-xxxx",
+            pipeline_id="pl_12345678901234567890",
+        )
+        assert re.match(r"^[A-Za-z0-9_-]{1,64}$", worst), worst
+
+    def test_second_pipeline_never_replays_first(self, con, fake_adapters, batch_enabled):
+        # Pipeline A submits and collects a result.
+        cid_a = _enqueue_spd(con, pipeline_id="pl_A")
+        [batch_a] = llm_batch.submit_pending(
+            con, family="spd_v2", pipeline_id="pl_A", stage="s3"
+        )
+        _FakeAdapter.fetch_results = [(cid_a, True, "month-1 output", {}, "")]
+        llm_batch.collect_batch(con, batch_a)
+
+        # Pipeline B (same question, same model — e.g. next month after a
+        # same-epoch re-run) must NOT see pipeline A's result...
+        assert llm_batch.get_result(
+            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08",
+            model_key="opus5", pipeline_id="pl_B",
+        ) is None
+        # ...and its enqueue must create a FRESH pending row, not no-op.
+        cid_b = _enqueue_spd(con, pipeline_id="pl_B")
+        assert cid_b != cid_a
+        assert con.execute(
+            "SELECT status FROM llm_batch_requests WHERE custom_id = ?", [cid_b]
+        ).fetchone()[0] == "pending"
+        created = llm_batch.submit_pending(
+            con, family="spd_v2", pipeline_id="pl_B", stage="s3"
+        )
+        assert len(created) == 1
+        # Pipeline A's collected result is untouched.
+        assert llm_batch.get_result(
+            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08",
+            model_key="opus5", pipeline_id="pl_A",
+        )["text"] == "month-1 output"
+
+    def test_submit_pending_skips_foreign_and_null_pipeline_rows(
+        self, con, fake_adapters, batch_enabled
+    ):
+        _enqueue_spd(con, question_id="Q_old", pipeline_id="pl_old")
+        llm_batch.enqueue_request(  # legacy pre-scoping row (pipeline_id NULL)
+            con, family="spd_v2", provider="anthropic", model_id="claude-opus-5",
+            request_body={}, prompt_text="p", question_id="Q_legacy", model_key="m",
+        )
+        _enqueue_spd(con, question_id="Q_new", pipeline_id="pl_new")
+        created = llm_batch.submit_pending(
+            con, family="spd_v2", pipeline_id="pl_new", stage="s3"
+        )
+        assert len(created) == 1
+        [(rows, _)] = _FakeAdapter.submitted
+        assert len(rows) == 1  # only pl_new's row went out
+
+    def test_legacy_row_fallback_requires_batch_join(self, con):
+        # A pre-scoping row (unscoped id) whose batch belongs to pl_A: an
+        # in-flight pipeline that submitted under old code must still
+        # collect after deploy — but ONLY its own pipeline.
+        legacy_cid = llm_batch.enqueue_request(
+            con, family="spd_v2", provider="anthropic", model_id="claude-opus-5",
+            request_body={}, prompt_text="p", question_id="Q_legacy", model_key="m",
+        )
+        con.execute(
+            """
+            INSERT INTO llm_batches (batch_id, provider, family, pipeline_id, status)
+            VALUES ('b_legacy', 'anthropic', 'spd_v2', 'pl_A', 'collected')
+            """
+        )
+        con.execute(
+            "UPDATE llm_batch_requests SET batch_id='b_legacy', status='succeeded', "
+            "response_text='legacy result' WHERE custom_id = ?", [legacy_cid],
+        )
+        hit = llm_batch.get_result(
+            con, "spd_v2", question_id="Q_legacy", model_key="m", pipeline_id="pl_A"
+        )
+        assert hit is not None and hit["text"] == "legacy result"
+        assert llm_batch.get_result(
+            con, "spd_v2", question_id="Q_legacy", model_key="m", pipeline_id="pl_B"
+        ) is None
+
+    def test_expire_and_purge_stale(self, con):
+        cid_old_pending = _enqueue_spd(con, question_id="Q_old", pipeline_id="pl_old")
+        cid_ancient = _enqueue_spd(con, question_id="Q_ancient", pipeline_id="pl_ancient")
+        cid_current = _enqueue_spd(con, question_id="Q_now", pipeline_id="pl_now")
+        con.execute(
+            "UPDATE llm_batch_requests SET created_at = now() - INTERVAL 30 HOUR "
+            "WHERE custom_id = ?", [cid_old_pending],
+        )
+        con.execute(
+            "UPDATE llm_batch_requests SET created_at = now() - INTERVAL 60 DAY, "
+            "status = 'succeeded' WHERE custom_id = ?", [cid_ancient],
+        )
+        counts = llm_batch.expire_and_purge_stale(con, current_pipeline_id="pl_now")
+        assert con.execute(
+            "SELECT status FROM llm_batch_requests WHERE custom_id = ?",
+            [cid_old_pending],
+        ).fetchone()[0] == "expired"
+        assert con.execute(
+            "SELECT COUNT(*) FROM llm_batch_requests WHERE custom_id = ?",
+            [cid_ancient],
+        ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT status FROM llm_batch_requests WHERE custom_id = ?",
+            [cid_current],
+        ).fetchone()[0] == "pending"
+        assert counts["expired"] >= 1
+        assert counts["purged"] >= 1
+
+
+class TestSalvageAndCounters:
+    def _submit_one(self, con):
+        cid = _enqueue_spd(con)
+        [batch_id] = llm_batch.submit_pending(
+            con, family="spd_v2", pipeline_id="pl_1", stage="s3"
+        )
+        return cid, batch_id
+
+    def test_canceled_batch_salvages_completed_results(
+        self, con, fake_adapters, batch_enabled
+    ):
+        cid, batch_id = self._submit_one(con)
+        cid2 = _enqueue_spd(con, question_id="Q_other")
+        con.execute(
+            "UPDATE llm_batch_requests SET batch_id = ?, status='submitted' "
+            "WHERE custom_id = ?", [batch_id, cid2],
+        )
+        con.execute(
+            "UPDATE llm_batches SET status = 'canceled' WHERE batch_id = ?", [batch_id]
+        )
+        # The provider preserved the item completed before cancellation.
+        _FakeAdapter.fetch_results = [(cid, True, "pre-cancel result", {}, "")]
+        counts = llm_batch.collect_batch(con, batch_id)
+        assert counts["succeeded"] == 1
+        assert counts["expired"] == 1  # the un-run remainder
+        assert llm_batch.get_result(
+            con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08",
+            model_key="opus5", pipeline_id="pl_1",
+        )["text"] == "pre-cancel result"
+        status, n_succ, n_exp = con.execute(
+            "SELECT status, n_succeeded, n_expired FROM llm_batches WHERE batch_id = ?",
+            [batch_id],
+        ).fetchone()
+        assert status == "canceled"  # terminal status preserved
+        assert (n_succ, n_exp) == (1, 1)
+
+    def test_recollect_preserves_counters(self, con, fake_adapters, batch_enabled):
+        cid, batch_id = self._submit_one(con)
+        _FakeAdapter.fetch_results = [(cid, True, "t", {}, "")]
+        llm_batch.collect_batch(con, batch_id)
+        _FakeAdapter.fetch_results = [(cid, True, "t2", {}, "")]
+        llm_batch.collect_batch(con, batch_id)  # poller double-fire
+        n_succ = con.execute(
+            "SELECT n_succeeded FROM llm_batches WHERE batch_id = ?", [batch_id]
+        ).fetchone()[0]
+        assert n_succ == 1  # not zeroed by the re-collect
