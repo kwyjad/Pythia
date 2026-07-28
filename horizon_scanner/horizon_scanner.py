@@ -1679,6 +1679,10 @@ def main(
             # month. Fail the process so the stage turns red instead.
             raise SystemExit(1)
     finally:
+        # Checkpoint the staged batch/stage-state writes before the workflow
+        # uploads the DB (the artifact excludes the .wal file).
+        if hs_batch.staged():
+            hs_batch.close_con()
         if not _hs_id_emitted:
             # Guarantee HS_RUN_ID is always emitted so the workflow can parse it,
             # even when the process crashes mid-run.

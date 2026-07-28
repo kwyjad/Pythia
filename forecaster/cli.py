@@ -2942,7 +2942,10 @@ async def _call_spd_model_for_spec(
 
     usage["self_search"] = self_search_meta
 
-    prompt_with_evidence = append_evidence_to_prompt(prompt, evidence_pack or {})
+    # Append to the prompt the FIRST call actually used — rebuilding from the
+    # base `prompt` silently discarded the provider web-search evidence the
+    # first call paid for.
+    prompt_with_evidence = append_evidence_to_prompt(prompt_with_evidence, evidence_pack or {})
 
     try:
         text2, usage2, error2 = await call_chat_ms(
@@ -3252,116 +3255,6 @@ async def _call_spd_model_compat(
             kwargs[key] = value
     return await fn(prompt, **kwargs)
 
-
-async def _call_spd_ensemble_v2(
-    prompt: str,
-    *,
-    specs: list[ModelSpec] | None = None,
-    metric: str = "PA",
-) -> tuple[dict[str, object], dict[str, object], list[dict[str, object]]]:
-    """Thin wrapper around the current SPD v2 call path for diagnostics."""
-
-    specs = specs or SPD_ENSEMBLE
-    bucket_count = _n_buckets_for_metric(metric)
-
-    tasks = [_call_spd_model_for_spec(ms, prompt) for ms in specs if ms.active]
-    if not tasks:
-        return {}, {}, []
-
-    call_results = await asyncio.gather(*tasks)
-
-    raw_calls = [
-        {
-            "model_spec": ms_val,
-            "text": text_val or "",
-            "usage": usage_val,
-            "error": error_val,
-        }
-        for text_val, usage_val, error_val, ms_val in call_results
-    ]
-
-    total_prompt_tokens = 0
-    total_completion_tokens = 0
-    total_tokens = 0
-    total_cost = 0.0
-    max_elapsed_ms = 0
-
-    month_sums: dict[str, list[float]] = {}
-    month_counts: dict[str, int] = {}
-
-    for text, usage, error, _ms in call_results:
-        usage = usage or {}
-
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or 0)
-        total_tokens_val = int(usage.get("total_tokens") or 0)
-        cost_usd_val = float(usage.get("cost_usd") or 0.0)
-        elapsed_ms_val = int(usage.get("elapsed_ms") or 0)
-
-        total_prompt_tokens += prompt_tokens
-        total_completion_tokens += completion_tokens
-        total_tokens += total_tokens_val
-        total_cost += cost_usd_val
-        max_elapsed_ms = max(max_elapsed_ms, elapsed_ms_val)
-
-        if error or not text or not str(text).strip():
-            continue
-
-        try:
-            spd_obj = _safe_json_loads(text)
-        except Exception:  # noqa: BLE001
-            continue
-
-        if not isinstance(spd_obj, dict):
-            continue
-
-        spds = spd_obj.get("spds")
-        if not isinstance(spds, dict):
-            continue
-
-        for month, payload in spds.items():
-            if not isinstance(payload, dict):
-                continue
-            probs = payload.get("probs")
-            if not isinstance(probs, list):
-                continue
-
-            if len(probs) != bucket_count:
-                continue
-            vec = sanitize_mcq_vector(list(probs), n_options=bucket_count)
-            if month not in month_sums:
-                month_sums[month] = [0.0 for _ in vec]
-                month_counts[month] = 0
-
-            if len(vec) != len(month_sums[month]):
-                vec = vec[: len(month_sums[month])]
-
-            for idx, val in enumerate(vec):
-                month_sums[month][idx] += float(val)
-            month_counts[month] += 1
-
-    aggregated_usage: dict[str, object] = {
-        "prompt_tokens": total_prompt_tokens,
-        "completion_tokens": total_completion_tokens,
-        "total_tokens": total_tokens or (total_prompt_tokens + total_completion_tokens),
-        "cost_usd": total_cost,
-        "elapsed_ms": max_elapsed_ms,
-    }
-
-    if not month_sums:
-        return {}, aggregated_usage, raw_calls
-
-    spds_v2: dict[str, dict[str, object]] = {}
-    for month, sums in month_sums.items():
-        count = month_counts.get(month, 0)
-        if count <= 0:
-            continue
-        avg_vec = [val / float(count) for val in sums]
-        spds_v2[str(month)] = {"probs": sanitize_mcq_vector(avg_vec, n_options=len(avg_vec))}
-
-    spd_obj: dict[str, object] = {"spds": spds_v2}
-
-    return spd_obj, aggregated_usage, raw_calls
 
 
 def _build_bayesmc_spd_obj(
@@ -6174,6 +6067,16 @@ def main() -> None:
     except Exception as e:
         print(f"[fatal] {type(e).__name__}: {str(e)[:200]}")
         raise
+    finally:
+        # Checkpoint the batch-state writes before the workflow uploads the
+        # DB (the staged artifact excludes the .wal file).
+        global _BATCH_CON
+        if _BATCH_CON is not None:
+            try:
+                _BATCH_CON.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _BATCH_CON = None
 
 
 if __name__ == "__main__":

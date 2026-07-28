@@ -22,6 +22,14 @@ on:
       - "pythia/config.yaml"
       - "python_library_requirements.txt"
       - "scripts/ai_bundle/**"
+      - "pythia/llm_batch.py"
+      - "pythia/model_costs.json"
+      - "pythia/tests/**"
+      - "pythia/api/routes/costs.py"
+      - "scripts/ci/poll_llm_batches.py"
+      - "scripts/ci/check_pipeline_active.py"
+      - "tests/test_poll_llm_batches_guard.py"
+      - "tests/test_check_pipeline_active.py"
 
   workflow_dispatch:
     inputs:
@@ -162,6 +170,21 @@ jobs:
           pytest -vv \
             scripts/ai_bundle/tests/ \
             forecaster/tests/test_sent_prompt_logging.py
+
+      - name: Run Batch-API + prompt-cache + orchestration tests
+        run: |
+          # These suites previously ran in NO workflow (forecaster-ci runs an
+          # explicit file list and nothing runs pythia/tests broadly), so the
+          # entire staged-pipeline seam could regress with green CI.
+          echo "=== Running Batch-API / prompt-cache / poller / gate tests ==="
+          pytest -vv \
+            pythia/tests/test_llm_batch.py \
+            pythia/tests/test_api_llm_costs.py \
+            forecaster/tests/test_batch_phase.py \
+            forecaster/tests/test_prompt_v3_order.py \
+            forecaster/tests/test_prompt_cache_wiring.py \
+            tests/test_poll_llm_batches_guard.py \
+            tests/test_check_pipeline_active.py
 
       - name: Run SPD experimental mode (dual/bayesmc)
         if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'bayesmc_write' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') }}

@@ -177,10 +177,16 @@ def _forecast_run_id_for_question(con, qid: str, include_test: bool) -> str | No
         if rows:
             return str(rows[0]["run_id"])
     if table_exists(con, "forecasts_ensemble"):
+        # Honor include_test in the fallback: a production question can carry
+        # a NEWER test-run forecast row (same-epoch reuse), and picking it
+        # would join the record's prompts/members to the wrong run.
+        test_clause = ""
+        if not include_test and column_exists(con, "forecasts_ensemble", "is_test"):
+            test_clause = " AND COALESCE(is_test, FALSE) = FALSE"
         rows = rows_as_dicts(
             con,
             "SELECT run_id FROM forecasts_ensemble WHERE question_id = ? "
-            "ORDER BY created_at DESC LIMIT 1",
+            f"{test_clause} ORDER BY created_at DESC LIMIT 1",
             [qid],
         )
         if rows:

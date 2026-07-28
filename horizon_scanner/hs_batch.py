@@ -128,6 +128,24 @@ def batch_con():
     return _CON
 
 
+def close_con() -> None:
+    """Explicitly close the shared connection (checkpoints the WAL).
+
+    Called at stage end: the staged DB artifact is uploaded WITHOUT its
+    .wal file, so any un-checkpointed tail would be silently dropped
+    between stages if the process died before interpreter-shutdown
+    finalization ran.
+    """
+
+    global _CON
+    if _CON is not None:
+        try:
+            _CON.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _CON = None
+
+
 # ---------------------------------------------------------------------------
 # Enqueue / replay (the model-call seam)
 # ---------------------------------------------------------------------------

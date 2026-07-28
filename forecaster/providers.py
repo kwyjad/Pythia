@@ -505,8 +505,15 @@ def _apply_spd_google_model_override(specs: List[ModelSpec]) -> List[ModelSpec]:
     seen: set[tuple[str, str]] = set()
     for ms in specs:
         if ms.provider == "google":
+            # NOTE: this rebuild drops temperature/thinking BY DESIGN (the
+            # PYTHIA_GOOGLE_SPD_THINKING_LEVEL_* env fallbacks cover
+            # override runs — documented in CLAUDE.md). The NAME must
+            # follow the override though: display names are the model id
+            # itself, and keeping the old name would attribute
+            # forecasts_raw/scores/calibration weights to a model that
+            # never ran.
             ms = ModelSpec(
-                name=ms.name,
+                name=override,
                 provider=ms.provider,
                 model_id=override,
                 weight=ms.weight,
@@ -865,6 +872,11 @@ def compute_cost_split_usd(model_id: str, usage: Dict[str, Any]) -> tuple[float,
     input_cost = (
         (uncached / 1_000_000.0) * prices["input"]
         + ((cached + cache_read) / 1_000_000.0) * prices["cached_input"]
+        # Writes are priced at the 5m rate BY DESIGN: Pythia only ever
+        # requests {"type": "ephemeral"} (5m TTL). If a 1h-TTL cache is
+        # ever added, this line must branch on the TTL or 1h writes will
+        # underbill 1.6x — cache_write_1h exists in model_costs.json /
+        # resolve_price_detail for that future, not for today's math.
         + (cache_creation / 1_000_000.0) * prices["cache_write_5m"]
     )
     output_cost = (completion_tokens / 1_000_000.0) * prices["output"]

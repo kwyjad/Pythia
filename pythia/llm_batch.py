@@ -57,14 +57,16 @@ LOGGER = logging.getLogger(__name__)
 
 # Batch families. Forecaster families key rows by (question_id, model_key);
 # HS families key rows by (iso3, hazard_code, pass_idx).
-FAMILIES = ("spd_v2", "binary_v2", "track2_spd", "scenario", "hs_rc", "hs_triage")
+# NOTE: no "scenario" family — scenarios run sequentially after the SPD
+# aggregation and are never batched; a declared-but-unused family here
+# would read as coverage that does not exist.
+FAMILIES = ("spd_v2", "binary_v2", "track2_spd", "hs_rc", "hs_triage")
 
 # Compact family slugs for custom ids (Anthropic: ^[A-Za-z0-9_-]{1,64}$).
 _FAMILY_SLUGS = {
     "spd_v2": "spd",
     "binary_v2": "bin",
     "track2_spd": "t2",
-    "scenario": "scn",
     "hs_rc": "hsrc",
     "hs_triage": "hstr",
 }
@@ -149,7 +151,7 @@ def make_custom_id(
     slug = _FAMILY_SLUGS.get(family)
     if slug is None:
         raise ValueError(f"unknown batch family: {family}")
-    if family in ("spd_v2", "binary_v2", "track2_spd", "scenario"):
+    if family in ("spd_v2", "binary_v2", "track2_spd"):
         if not question_id:
             raise ValueError(f"{family} custom id requires question_id")
         qhash = hashlib.sha1(str(question_id).encode("utf-8")).hexdigest()[:10]
