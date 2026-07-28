@@ -84,6 +84,11 @@ on:
         required: false
         default: ""
         type: string
+      grounding_primary:
+        description: "Override PYTHIA_GROUNDING_PRIMARY_BACKEND (brave/openai/gemini). Use 'openai' when Brave is down/out of credit."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -115,6 +120,8 @@ env:
   PYTHIA_BATCH_PROVIDERS: ${{ inputs.batch_providers || 'openai,anthropic,google' }}
   # Empty = full hs_country_list.txt (HS treats blank as unset).
   PYTHIA_HS_ONLY_COUNTRIES: ${{ inputs.only_countries || '' }}
+  # Grounding-backend override (code default is brave when unset).
+  PYTHIA_GROUNDING_PRIMARY_BACKEND: ${{ inputs.grounding_primary || 'brave' }}
   PYTHIA_BATCH_MAX_WAIT_H: "24"
   # Prompt-cost switches (production since 2026-07-27): static-first prompt
   # assembly (multi-KB shared prefixes → OpenAI automatic / Gemini implicit
