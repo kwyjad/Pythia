@@ -546,7 +546,10 @@ _OPENAI_NO_TEMPERATURE_PREFIXES = ("gpt-5",)
 
 
 def _openai_drops_temperature(model: str) -> bool:
-    return (model or "").startswith(_OPENAI_NO_TEMPERATURE_PREFIXES)
+    # Case-insensitive like the Anthropic guard: an env-supplied id with any
+    # capitalization ("GPT-5.6-sol" via PYTHIA_SPD_ENSEMBLE_SPECS) would
+    # otherwise send temperature and 400 on every call.
+    return (model or "").lower().startswith(_OPENAI_NO_TEMPERATURE_PREFIXES)
 # Anthropic models that reject sampling params outright (HTTP 400 if sent):
 # the Opus 4.7+/Sonnet 5+/Fable family removed temperature/top_p/top_k.
 #
@@ -684,6 +687,7 @@ _USAGE_PASSTHROUGH_INT_KEYS = (
     "cache_read_input_tokens",      # Anthropic: tokens served from prompt cache
     "cache_creation_input_tokens",  # Anthropic: tokens written to prompt cache
     "cached_tokens",                # OpenAI prompt_tokens_details / Gemini cachedContentTokenCount
+    "thoughts_tokens",              # Gemini thoughtsTokenCount (already folded into completion_tokens)
 )
 _USAGE_PASSTHROUGH_STR_KEYS = (
     "service_tier",                 # "batch" marks Batch-API results (50% pricing)
@@ -1089,9 +1093,12 @@ def build_anthropic_body(
     message is sent — byte-identical to the legacy request.
     """
 
-    # Use higher max_tokens for SPD/binary forecast calls to avoid truncation
+    # Use higher max_tokens for SPD/binary forecast calls to avoid truncation.
+    # sibyl_step gets the same raised ceiling: Sibyl runs Opus 5 (adaptive
+    # thinking shares max_tokens) and each step answer carries a full 7-level
+    # quantile JSON plus prose — the 16k default truncates exactly like SPD.
     max_tokens = _ANTHROPIC_MAX_OUTPUT
-    if purpose in ("spd_v2", "binary_v2"):
+    if purpose in ("spd_v2", "binary_v2", "sibyl_step"):
         max_tokens = _ANTHROPIC_SPD_MAX_OUTPUT
 
     content: Any = prompt
@@ -1261,11 +1268,19 @@ def _google_usage_from_payload(payload: Any) -> Dict[str, Any]:
     usage_meta = payload.get("usageMetadata") if isinstance(payload, dict) else None
     if not isinstance(usage_meta, dict):
         usage_meta = {}
+    # thoughtsTokenCount (thinking tokens) is billed at the OUTPUT rate but
+    # reported SEPARATELY from candidatesTokenCount — fold it into
+    # completion_tokens or every thinking call underbills its output spend
+    # (both Gemini SPD members and all HS RC/triage calls run thinking).
+    completion = int(usage_meta.get("candidatesTokenCount") or 0)
+    thoughts = int(usage_meta.get("thoughtsTokenCount") or 0)
     usage_dict: Dict[str, Any] = {
         "prompt_tokens": usage_meta.get("promptTokenCount", 0),
-        "completion_tokens": usage_meta.get("candidatesTokenCount", 0),
+        "completion_tokens": completion + thoughts,
         "total_tokens": usage_meta.get("totalTokenCount", 0),
     }
+    if thoughts:
+        usage_dict["thoughts_tokens"] = thoughts
     if usage_meta.get("cachedContentTokenCount"):
         usage_dict["cached_tokens"] = usage_meta.get("cachedContentTokenCount")
     return usage_to_dict(usage_dict)
@@ -1659,6 +1674,11 @@ async def call_chat_ms(
     credit_retries_used = 0
     credit_retry_pauses: list[float] = []
     billing_error_detected = False
+    # Token spend of attempts discarded by a retry — previously only the
+    # FINAL attempt's usage was costed, so N−1 retried calls were billed by
+    # the provider but never reached the ledger.
+    retried_prompt_tokens = 0
+    retried_completion_tokens = 0
 
     for credit_attempt in range(credit_max_retries + 1):
         # Reset inner loop state for each credit-retry attempt
@@ -1716,6 +1736,12 @@ async def call_chat_ms(
             if not should_retry or attempt >= max_attempts:
                 break
 
+            # This attempt's result is about to be discarded for a retry —
+            # bank its token usage so the final ledger row still counts it.
+            if result is not None and result.usage:
+                retried_prompt_tokens += int(result.usage.get("prompt_tokens") or 0)
+                retried_completion_tokens += int(result.usage.get("completion_tokens") or 0)
+
             if retry_after is not None:
                 backoff = min(20.0, float(retry_after))
             else:
@@ -1771,6 +1797,18 @@ async def call_chat_ms(
     usage = result.usage or usage_to_dict(None)
     usage["attempts_used"] = attempt
     usage["backoffs_sec"] = backoffs_sec
+    if retried_prompt_tokens or retried_completion_tokens:
+        # Fold discarded-attempt spend into the billed totals (the provider
+        # charged for those calls); keep the breakdown for diagnostics.
+        usage["retried_prompt_tokens"] = retried_prompt_tokens
+        usage["retried_completion_tokens"] = retried_completion_tokens
+        usage["prompt_tokens"] = int(usage.get("prompt_tokens") or 0) + retried_prompt_tokens
+        usage["completion_tokens"] = int(usage.get("completion_tokens") or 0) + retried_completion_tokens
+        usage["total_tokens"] = (
+            int(usage.get("total_tokens") or 0)
+            + retried_prompt_tokens
+            + retried_completion_tokens
+        )
     if credit_retries_used > 0 or billing_error_detected:
         usage["credit_retries_used"] = credit_retries_used
         usage["credit_retry_pauses_sec"] = credit_retry_pauses
@@ -1792,6 +1830,12 @@ async def call_chat_ms(
 
     if error:
         if spd_google and _is_timeout_error(error):
+            return "", usage, error
+        if "Anthropic refusal:" in error or "truncated at max_tokens" in error:
+            # Content-driven outcomes (safety classifier / output ceiling),
+            # not provider health — feeding them to the breaker would let 6
+            # consecutive refusals trip a whole-provider cooldown and drop
+            # the Claude member from unrelated questions.
             return "", usage, error
         state = _note_provider_failure(ms.provider, run_key)
         usage["provider_failures_in_run"] = int(state.get("consecutive_failures", 0))

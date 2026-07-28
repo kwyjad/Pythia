@@ -3,8 +3,8 @@
 
   "brave-web-search":          [0.0, 0.0],
 
-  "gpt-4.1":                   [2.00, 8.00],
-  "gpt-4.1-mini":              [0.40, 1.60],
+  "gpt-4.1":                   {"input": 2.00, "output": 8.00, "cached_input": 0.50},
+  "gpt-4.1-mini":              {"input": 0.40, "output": 1.60, "cached_input": 0.10},
   "gpt-5.4":                   [2.50, 15.00],
   "gpt-5.4-mini":              [0.75, 4.50],
   "gpt-5.6-sol":               {"input": 5.00, "output": 30.00, "cached_input": 0.50},

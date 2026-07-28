@@ -1041,9 +1041,12 @@ def get_result(
 ) -> Optional[Dict[str, Any]]:
     """Look up a collected batch result; None = caller should run sync.
 
-    Returns a dict with keys text / usage / error / custom_id only for a
-    *succeeded* item. Errored/expired items return None so the caller takes
-    the sync fallback (their usage is still costed by the collect stage).
+    Returns a dict with keys status / text / usage / error / custom_id for
+    an item that reached a terminal batch outcome (``status`` is
+    "succeeded" or "errored"). An errored item is returned WITH its stored
+    usage so the caller can cost the burned tokens (e.g. an Anthropic item
+    truncated at max_tokens still consumed thinking+output tokens) before
+    taking the sync fallback. Pending/expired items return None.
 
     When ``pipeline_id`` is given, the lookup uses the scoped id. A legacy
     (unscoped) row is accepted ONLY when its batch provably belongs to this
@@ -1091,13 +1094,19 @@ def get_result(
     if not row:
         return None
     status, text, usage_json, error = row
-    if status != "succeeded":
+    if status not in ("succeeded", "errored"):
         return None
     try:
         usage = json.loads(usage_json) if usage_json else {}
     except json.JSONDecodeError:
         usage = {}
-    return {"custom_id": custom_id, "text": text or "", "usage": usage, "error": error or ""}
+    return {
+        "custom_id": custom_id,
+        "status": status,
+        "text": text or "",
+        "usage": usage,
+        "error": error or "",
+    }
 
 
 def mark_fallback_sync(con, family: str, **key_kwargs: Any) -> None:

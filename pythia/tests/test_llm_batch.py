@@ -263,15 +263,23 @@ class TestPollCollect:
             pipeline_id="pl_1",
         )["text"] == "first"
 
-    def test_errored_item_returns_none_for_fallback(self, con, fake_adapters, batch_enabled):
+    def test_errored_item_returned_with_usage_for_costing(self, con, fake_adapters, batch_enabled):
         cid, batch_id = self._submit_one(con, fake_adapters)
-        _FakeAdapter.fetch_results = [(cid, False, "", {}, "boom")]
+        _FakeAdapter.fetch_results = [
+            (cid, False, "", {"prompt_tokens": 5000, "completion_tokens": 100}, "boom"),
+        ]
         counts = llm_batch.collect_batch(con, batch_id)
         assert counts["errored"] == 1
-        assert llm_batch.get_result(
+        # An errored item comes back WITH status + usage so the caller can
+        # cost the burned tokens before taking the sync fallback.
+        hit = llm_batch.get_result(
             con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5",
             pipeline_id="pl_1",
-        ) is None
+        )
+        assert hit is not None
+        assert hit["status"] == "errored"
+        assert hit["usage"]["prompt_tokens"] == 5000
+        assert "boom" in hit["error"]
         llm_batch.mark_fallback_sync(
             con, "spd_v2", question_id="SOM_ACE_FATALITIES_2026-08", model_key="opus5",
             pipeline_id="pl_1",

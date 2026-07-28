@@ -554,3 +554,114 @@ def test_body_builders_match_sync_call_bodies(monkeypatch: pytest.MonkeyPatch) -
     assert captured["body"]["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "low"}
     # Round-trip sanity: bodies are JSON-serializable deterministically.
     _json.dumps(captured["body"], sort_keys=True)
+
+
+def test_google_usage_bills_thinking_tokens() -> None:
+    """thoughtsTokenCount is billed at the output rate but reported separately
+    from candidatesTokenCount — it must fold into completion_tokens or every
+    thinking Gemini call (both SPD members + all HS RC/triage) underbills."""
+
+    from forecaster.providers import _google_usage_from_payload
+
+    payload = {
+        "usageMetadata": {
+            "promptTokenCount": 1000,
+            "candidatesTokenCount": 200,
+            "thoughtsTokenCount": 700,
+            "totalTokenCount": 1900,
+        }
+    }
+    usage = _google_usage_from_payload(payload)
+    assert usage["completion_tokens"] == 900  # 200 answer + 700 thinking
+    assert usage["thoughts_tokens"] == 700
+    assert usage["prompt_tokens"] == 1000
+
+
+def test_openai_temperature_guard_is_case_insensitive() -> None:
+    from forecaster.providers import _openai_drops_temperature
+
+    assert _openai_drops_temperature("GPT-5.6-sol")
+    assert _openai_drops_temperature("Gpt-5.6-Luna")
+    assert not _openai_drops_temperature("gpt-4.1")
+
+
+def test_sibyl_step_gets_raised_anthropic_ceiling() -> None:
+    """Sibyl runs Opus 5 (adaptive thinking shares max_tokens) and each step
+    answer carries a full quantile JSON — the 16k default truncates exactly
+    like SPD did, so sibyl_step must get the raised ceiling too."""
+
+    from forecaster.providers import (
+        _ANTHROPIC_SPD_MAX_OUTPUT,
+        build_anthropic_body,
+    )
+
+    body = build_anthropic_body("p", "claude-opus-5", 1.0, purpose="sibyl_step")
+    assert body["max_tokens"] == _ANTHROPIC_SPD_MAX_OUTPUT
+    assert _ANTHROPIC_SPD_MAX_OUTPUT >= 32768
+
+
+def test_combine_usage_sums_cache_fields_and_drops_mixed_tier() -> None:
+    """compute_cost_split_usd derives the uncached span as prompt_tokens −
+    cache fields; a merged usage that sums prompt tokens but inherits only
+    the base call's cache counts prices the second call's cached span at the
+    full input rate — and an inherited service_tier=batch would halve the
+    sync half's price."""
+
+    from forecaster.self_search import combine_usage
+
+    base = {
+        "prompt_tokens": 1000,
+        "completion_tokens": 100,
+        "total_tokens": 1100,
+        "cache_read_input_tokens": 800,
+        "service_tier": "batch",
+    }
+    extra = {
+        "prompt_tokens": 2000,
+        "completion_tokens": 300,
+        "total_tokens": 2300,
+        "cache_read_input_tokens": 1500,
+    }
+    combined = combine_usage(base, extra)
+    assert combined["prompt_tokens"] == 3000
+    assert combined["cache_read_input_tokens"] == 2300
+    assert "service_tier" not in combined  # mixed tiers never inherit batch
+
+    both_batch = combine_usage(base, {**extra, "service_tier": "batch"})
+    assert both_batch["service_tier"] == "batch"
+
+
+def test_stop_reason_errors_do_not_feed_provider_breaker(monkeypatch) -> None:
+    """Six consecutive refusals/truncations are content-driven outcomes, not
+    provider-health signals — they must not trip a whole-provider cooldown
+    that drops the Claude member from unrelated questions."""
+
+    import asyncio
+
+    import forecaster.providers as providers
+
+    ms = providers.ModelSpec(
+        name="claude-opus-5", provider="anthropic",
+        model_id="claude-opus-5", active=True, purpose="spd_v2",
+    )
+
+    def _fake_sync(*args, **kwargs):
+        return providers.ProviderResult(
+            "", providers.usage_to_dict({"prompt_tokens": 10, "completion_tokens": 5}),
+            0.0, "claude-opus-5",
+            error="Anthropic refusal: request declined by safety classifiers (category=cyber)",
+        )
+
+    monkeypatch.setattr(providers, "_call_provider_sync", _fake_sync)
+    noted: list = []
+    monkeypatch.setattr(
+        providers, "_note_provider_failure",
+        lambda *a, **k: noted.append(a) or {"consecutive_failures": 1, "cooldown_until_ts": 0.0},
+    )
+    text, usage, error = asyncio.run(
+        providers.call_chat_ms(ms, "p", log_call=False, run_id="r1")
+    )
+    assert "refusal" in (error or "")
+    assert noted == []  # breaker never fed
+    # Usage is preserved on the error result (the tokens were billed).
+    assert usage["prompt_tokens"] >= 10

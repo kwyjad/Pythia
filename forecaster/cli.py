@@ -173,6 +173,7 @@ def _try_batch_phase(
     hazard_code: str | None,
     metric: str | None,
     anchor_month: str | None,
+    run_id: str | None = None,
 ) -> tuple[str, dict, str | None, "ModelSpec"] | None:
     """Submit-phase enqueue or collect-phase replay for one member call.
 
@@ -218,10 +219,19 @@ def _try_batch_phase(
         model_key=_batch_model_key(ms),
         pipeline_id=_BATCH_PIPELINE_ID,
     )
-    if hit is not None:
+    if hit is not None and hit.get("status", "succeeded") == "succeeded":
         usage = dict(hit.get("usage") or {})
         usage.setdefault("elapsed_ms", 0)
         return hit.get("text") or "", usage, (hit.get("error") or None), ms
+    if hit is not None:
+        # Errored batch item: the provider still billed its tokens (e.g. an
+        # Anthropic max_tokens truncation burned thinking+output). Cost it
+        # before the sync fallback re-runs the call — otherwise this spend
+        # never reaches llm_calls.
+        _log_errored_batch_item(
+            ms, hit, batch_family=batch_family, question_id=question_id,
+            iso3=iso3, hazard_code=hazard_code, metric=metric, run_id=run_id,
+        )
     # Miss / errored / expired → sync fallback via the normal call path.
     llm_batch.mark_fallback_sync(
         _batch_con(),
@@ -231,6 +241,50 @@ def _try_batch_phase(
         pipeline_id=_BATCH_PIPELINE_ID,
     )
     return None
+
+
+def _log_errored_batch_item(
+    ms: "ModelSpec",
+    hit: dict,
+    *,
+    batch_family: str,
+    question_id: str | None,
+    iso3: str | None,
+    hazard_code: str | None,
+    metric: str | None,
+    run_id: str | None = None,
+) -> None:
+    """Rich-log an errored batch item's usage so its cost is in the ledger."""
+
+    try:
+        from forecaster.llm_logging import log_forecaster_llm_call
+
+        usage = dict(hit.get("usage") or {})
+        usage.setdefault("elapsed_ms", 0)
+        coro = log_forecaster_llm_call(
+            run_id=run_id or "",
+            question_id=question_id or "",
+            prompt_text="",
+            model_spec=ms,
+            phase=batch_family,
+            call_type="batch_item_errored",
+            iso3=iso3,
+            hazard_code=hazard_code,
+            metric=metric,
+            response_text="",
+            usage=usage,
+            error_text=f"batch item errored: {hit.get('error') or 'unknown'}",
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            loop.create_task(coro)
+        else:
+            asyncio.run(coro)
+    except Exception:  # noqa: BLE001
+        LOG.debug("failed to log errored batch item for %s", question_id, exc_info=True)
 
 
 def _maybe_log_default_ensemble() -> None:
@@ -2568,6 +2622,7 @@ async def _call_spd_model_for_spec(
             hazard_code=hazard_code,
             metric=metric,
             anchor_month=anchor_month,
+            run_id=run_id,
         )
         if batch_short is not None:
             return batch_short
@@ -3344,6 +3399,7 @@ async def _call_spd_bayesmc_v2(
     hazard_code: str | None = None,
     metric: str | None = None,
     wording: str | None = None,
+    batch_family: str | None = None,
 ) -> tuple[
     dict[str, object],
     dict[str, object],
@@ -3388,6 +3444,7 @@ async def _call_spd_bayesmc_v2(
         metric=metric,
         anchor_month=anchor_month,
         wording=wording,
+        batch_family=batch_family,
     )
     member_raw_by_model_id: dict[str, str] = {}
     for rc in raw_calls:
@@ -5103,7 +5160,15 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 hazard_code=hz,
                 metric=metric,
                 wording=wording,
+                batch_family="spd_v2",
             )
+            if _batch_submit_active():
+                # Members were enqueued as Batch-API requests; parsing,
+                # aggregation and writes happen in the collect phase. Without
+                # this guard the bayesmc-only path ran every member SYNC at
+                # full price in the submit phase and the collect phase then
+                # paid for the whole ensemble a second time.
+                return
             if member_spds_snapshot is None:
                 member_spds_snapshot = per_model_spds_bm
                 member_specs_snapshot = specs_used_bm

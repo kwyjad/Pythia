@@ -199,6 +199,17 @@ def replay_hazard_call(
             pass_idx=pass_idx,
             pipeline_id=_PIPELINE_ID,
         )
+    if hit is not None and hit.get("status", "succeeded") != "succeeded":
+        # Errored batch item: fall back to sync. The burned tokens are
+        # visible here but not rich-logged (HS logging is label-keyed per
+        # pass); surface them in the log at least.
+        usage = hit.get("usage") or {}
+        logger.warning(
+            "hs_batch: %s %s/%s p%d errored in batch (%s tokens in / %s out) — sync fallback",
+            family, iso3, hazard_code, pass_idx,
+            usage.get("prompt_tokens"), usage.get("completion_tokens"),
+        )
+        hit = None
     if hit is None:
         return None
 
