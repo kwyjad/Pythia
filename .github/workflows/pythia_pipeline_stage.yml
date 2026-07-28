@@ -136,7 +136,10 @@ env:
   # disable_brave: a missing key makes the Brave backend fall through
   # gracefully WITHOUT recording breaker failures (a 402ing key trips the
   # breaker, and the safety gate then blocks every ungrounded hazard).
-  BRAVE_SEARCH_API_KEY: ${{ inputs.disable_brave && '' || secrets.BRAVE_SEARCH_API_KEY }}
+  # NB the negated form is load-bearing: `x && '' || y` always yields y in
+  # GitHub expressions because the empty-string "true" branch is falsy and
+  # falls through the || — the truthy value must sit in the true branch.
+  BRAVE_SEARCH_API_KEY: ${{ !inputs.disable_brave && secrets.BRAVE_SEARCH_API_KEY || '' }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   PYTHIA_GOOGLE_SPD_THINKING_LEVEL_FLASH: "low"
   PYTHIA_GOOGLE_SPD_THINKING_LEVEL_PRO: ""
