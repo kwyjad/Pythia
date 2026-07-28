@@ -75,7 +75,10 @@ def _probe(conn: Any, sql: str, on_error: Any, label: str, *, warn: bool = False
             try:
                 return conn.execute(sql).fetchall()
             except Exception as retry_exc:  # noqa: BLE001
-                LOGGER.warning("%s failed after ROLLBACK retry: %s", label, retry_exc)
+                # Expected on the retry when the object genuinely is absent —
+                # log at the caller's level, not unconditionally at WARNING.
+                log = LOGGER.warning if warn else LOGGER.debug
+                log("%s failed after ROLLBACK retry: %s", label, retry_exc)
                 rollback_quietly(conn)
                 return on_error
         if warn:
