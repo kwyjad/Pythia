@@ -48,6 +48,11 @@ concurrency:
         required: false
         default: false
         type: boolean
+      force_during_pipeline:
+        description: "Run even while a staged pipeline is in flight (its final canonical upload will DISCARD this ingest's rows)"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # Weekly refresh of fast-changing sources (Sunday 03:00 UTC)
     - cron: "0 3 * * 0"
@@ -60,8 +65,37 @@ env:
   PYTHONUNBUFFERED: "1"
 
 jobs:
+  # The concurrency group only serializes individual runs — it cannot cover
+  # the MULTI-DAY staged pipeline (separate workflow runs per stage). An
+  # ingest landing between hs_submit and fc_collect_finalize would upload
+  # canonical rows that the pipeline's final upload (built from the
+  # pre-ingest staged fork) silently discards. Skip instead; the next
+  # weekly cron covers it (this workflow is supplementary freshness).
+  gate:
+    name: Skip if a staged pipeline is in flight
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check for in-flight staged pipeline
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force_during_pipeline && 'true' || 'false' }}
+        run: python -m scripts.ci.check_pipeline_active
+
   ingest:
     name: Ingest structured data sources
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     env:
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
