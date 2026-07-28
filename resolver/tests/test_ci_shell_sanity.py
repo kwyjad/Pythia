@@ -42,10 +42,20 @@ def test_no_echo_escape_sequences():
 
 
 def test_no_and_and_or_as_if_else():
+    """Reject the shell `A && B || C` if/else idiom (C also runs when B fails).
+
+    Comment lines are skipped: a `#` line is never executed, so prose that
+    happens to describe the idiom (or a GitHub-expression gotcha) is a false
+    positive — one such comment in pythia_pipeline_stage.yml failed this test
+    on main until the skip was added.
+    """
+
     offenders = []
     for path, text in _workflow_texts():
         for line in text.splitlines():
+            if line.lstrip().startswith("#"):
+                continue
             if "&&" in line and "||" in line and "${{" not in line:
-                offenders.append(str(path))
+                offenders.append(f"{path}: {line.strip()}")
                 break
     assert not offenders, "A && B || C found; replace with if/else: " + ", ".join(offenders)
