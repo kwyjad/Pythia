@@ -74,6 +74,16 @@ on:
         type: boolean
         default: false
         required: false
+      batch_providers:
+        description: "Override PYTHIA_BATCH_PROVIDERS for this run (e.g. 'google' for a Gemini-only batch smoke run). Empty = all three."
+        required: false
+        default: ""
+        type: string
+      only_countries:
+        description: "Comma-separated ISO3 list for PYTHIA_HS_ONLY_COUNTRIES (smoke runs, e.g. 'IRN,SOM'). Empty = full hs_country_list.txt."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -100,7 +110,11 @@ env:
   # Batch-API switches: the staged pipeline is the opt-in path (the code
   # defaults stay OFF so --phase full / the legacy workflow are unchanged).
   PYTHIA_BATCH_API_ENABLED: "1"
-  PYTHIA_BATCH_PROVIDERS: "openai,anthropic,google"
+  # Dispatch input override for smoke runs; schedule events carry no inputs
+  # so the cron always gets the full default set.
+  PYTHIA_BATCH_PROVIDERS: ${{ inputs.batch_providers || 'openai,anthropic,google' }}
+  # Empty = full hs_country_list.txt (HS treats blank as unset).
+  PYTHIA_HS_ONLY_COUNTRIES: ${{ inputs.only_countries || '' }}
   PYTHIA_BATCH_MAX_WAIT_H: "24"
   # Prompt-cost switches (production since 2026-07-27): static-first prompt
   # assembly (multi-KB shared prefixes → OpenAI automatic / Gemini implicit
