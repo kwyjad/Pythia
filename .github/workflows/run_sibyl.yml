@@ -80,6 +80,12 @@ jobs:
           force-run-id: ${{ github.event.inputs.db_run_id }}
           run-id: ${{ github.event.workflow_run.id }}
 
+      # stage_health windows its cost rollup on this. llm_calls accumulates in
+      # the travelling DB, so without a start marker the only thing reportable
+      # is the DB's cumulative spend, not what Sibyl actually cost.
+      - name: Record stage start
+        run: echo "STAGE_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+
       - name: Gate on eligible questions with volatility scores
         id: gate
         run: |
@@ -121,6 +127,67 @@ jobs:
           else
             python -m sibyl.run | tee sibyl_stdout.txt
           fi
+
+      # Sibyl ran 40+ minutes on Claude Opus under a $40 hard cap with NO
+      # telemetry of any kind — plausibly the most expensive stage in the
+      # pipeline and the only one whose spend was unmeasured. Same never-fail
+      # contract as the pipeline stages: a reporting bug must not cost a run
+      # its DB upload or its publish dispatch, both of which follow.
+      - name: Stage health (Sibyl)
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          # Pin on the sibyl_run_id THIS run printed. Taking the newest
+          # sibyl_runs row instead would report the previous day's run whenever
+          # Sibyl was gated out or died before persisting — verified against the
+          # reference DB, where that fallback resolved the wrong run.
+          SIBYL_RUN_ID=$(grep -oE 'sibyl_run_id=[A-Za-z0-9_]+' sibyl_stdout.txt 2>/dev/null \
+            | tail -n 1 | cut -d= -f2 || true)
+          HS_RUN_ID="${{ github.event.inputs.hs_run_id }}"
+          if [ -n "${SIBYL_RUN_ID}" ] && [ -z "${HS_RUN_ID}" ]; then
+            HS_RUN_ID=$(python - "${SIBYL_RUN_ID}" <<'EOF'
+          import os
+          import sys
+
+          import duckdb
+
+          db = os.environ["RESOLVER_DB_URL"]
+          db = db[len("duckdb:///"):] if db.startswith("duckdb:///") else db
+          try:
+              con = duckdb.connect(db, read_only=True)
+              row = con.execute(
+                  "SELECT hs_run_id FROM sibyl_runs WHERE sibyl_run_id = ?", [sys.argv[1]]
+              ).fetchone()
+              print((row[0] if row else "") or "")
+              con.close()
+          except Exception:
+              print("")
+          EOF
+          )
+          fi
+          echo "stage_health sibyl_run_id=${SIBYL_RUN_ID:-<none>} hs_run_id=${HS_RUN_ID:-<none>}"
+          python -m scripts.ci.stage_health \
+            --db "${RESOLVER_DB_URL}" \
+            --stage sibyl \
+            --hs-run-id "${HS_RUN_ID:-}" \
+            --sibyl-run-id "${SIBYL_RUN_ID:-}" \
+            --since "${STAGE_STARTED_AT:-}" \
+            --out diagnostics/stage_health__sibyl.json
+          exit 0
+
+      - name: Upload stage diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-stage-diagnostics-sibyl
+          path: |
+            diagnostics/stage_health__sibyl.json
+            sibyl_stdout.txt
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Upload canonical resolver DB
         if: success()
