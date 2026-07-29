@@ -295,6 +295,8 @@ jobs:
             --db "${PYTHIA_DB_URL}" \
             --pipeline-id "${BATCH_PIPELINE_ID}" \
             --stage hs_submit \
+            --hs-run-id "${HS_RUN_ID:-}" \
+            --fc-run-id "${FC_RUN_ID:-}" \
             --out diagnostics/batch_economics__hs_submit.json
           exit 0
 
@@ -478,6 +480,8 @@ jobs:
             --db "${PYTHIA_DB_URL}" \
             --pipeline-id "${{ inputs.pipeline_id }}" \
             --stage hs_rc_collect \
+            --hs-run-id "${HS_RUN_ID:-}" \
+            --fc-run-id "${FC_RUN_ID:-}" \
             --out diagnostics/batch_economics__hs_rc_collect.json
           exit 0
 
@@ -700,6 +704,8 @@ jobs:
             --db "${PYTHIA_DB_URL}" \
             --pipeline-id "${{ inputs.pipeline_id }}" \
             --stage hs_finalize_fc_submit \
+            --hs-run-id "${HS_RUN_ID:-}" \
+            --fc-run-id "${FC_RUN_ID:-}" \
             --out diagnostics/batch_economics__hs_finalize_fc_submit.json
           exit 0
 
@@ -932,6 +938,8 @@ jobs:
             --db "${PYTHIA_DB_URL}" \
             --pipeline-id "${BATCH_PIPELINE_ID}" \
             --stage fc_submit \
+            --hs-run-id "${HS_RUN_ID:-}" \
+            --fc-run-id "${FC_RUN_ID:-}" \
             --out diagnostics/batch_economics__fc_submit.json
           exit 0
 
@@ -1257,6 +1265,8 @@ jobs:
             --db "${PYTHIA_DB_URL}" \
             --pipeline-id "${{ inputs.pipeline_id }}" \
             --stage fc_collect_finalize \
+            --hs-run-id "${HS_RUN_ID:-}" \
+            --fc-run-id "${FC_RUN_ID:-}" \
             --out diagnostics/batch_economics__fc_collect_finalize.json
           exit 0
 

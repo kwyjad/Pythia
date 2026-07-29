@@ -38,6 +38,11 @@ DEFAULT_DB_URL = "duckdb:///data/resolver.duckdb"
 # batch discount is materially not being realised and the run is worth a look.
 DEFAULT_FALLBACK_WARN_PCT = 20.0
 
+# Above this share of BATCHABLE SPEND paying full price, the discount is
+# materially not being realised. Separate from the request-count threshold:
+# the reference run was 32% of requests but 67% of forecaster spend.
+DEFAULT_COST_WARN_PCT = 20.0
+
 # Terminal request states. 'succeeded' is the only one that was actually billed
 # at the batch rate; fallback_sync was re-run synchronously at full price.
 _TERMINAL = ("succeeded", "fallback_sync", "errored", "expired")
@@ -121,19 +126,36 @@ def _collect_request_states(con, pipeline_id: str) -> Dict[str, Dict[str, int]]:
     return out
 
 
-def _collect_batch_tier_calls(con, pipeline_id: str) -> Dict[str, Any]:
+def _collect_batch_tier_calls(
+    con,
+    hs_run_id: str = "",
+    fc_run_id: str = "",
+) -> Dict[str, Any]:
     """How much logged spend actually carried the batch service tier.
 
     ``collect_batch`` stamps ``usage.service_tier="batch"`` so the shared cost
     helper halves the price. Counting those rows is the end-to-end confirmation
     that the discount reached the ledger, not just the batch tables.
+
+    MUST be scoped by run id. ``llm_calls`` accumulates across the travelling
+    DB, so an unscoped query reports every pipeline that ever touched this file
+    — which is how this section once reported a meaningless "$1.37 of $65.26"
+    for a run that had spent $3.29.
     """
     if not _table_exists(con, "llm_calls"):
         return {"available": False}
+
+    where, params = _run_scope(hs_run_id, fc_run_id)
+    if not where:
+        return {
+            "available": False,
+            "reason": "no run id supplied; refusing to report unscoped cumulative spend",
+        }
+
     # json_extract_string keeps this robust to usage_json shape drift.
     rows = _rows(
         con,
-        """
+        f"""
         SELECT
             SUM(CASE WHEN json_extract_string(usage_json, '$.service_tier') = 'batch'
                      THEN 1 ELSE 0 END),
@@ -142,7 +164,9 @@ def _collect_batch_tier_calls(con, pipeline_id: str) -> Dict[str, Any]:
                      THEN COALESCE(cost_usd, 0) ELSE 0 END),
             SUM(COALESCE(cost_usd, 0))
         FROM llm_calls
+        WHERE {where}
         """,
+        params,
     )
     if not rows or rows[0][1] is None:
         return {"available": False}
@@ -153,7 +177,126 @@ def _collect_batch_tier_calls(con, pipeline_id: str) -> Dict[str, Any]:
         "n_calls_total": int(n_total or 0),
         "cost_batch_tier_usd": round(float(cost_batch or 0.0), 4),
         "cost_total_usd": round(float(cost_total or 0.0), 4),
-        "note": "llm_calls is cumulative across the travelling DB, not stage-scoped",
+        "scope": {"hs_run_id": hs_run_id or None, "fc_run_id": fc_run_id or None},
+    }
+
+
+def _run_scope(hs_run_id: str, fc_run_id: str):
+    """SQL predicate + params restricting llm_calls to this pipeline's runs."""
+    clauses: List[str] = []
+    params: List[str] = []
+    if hs_run_id:
+        clauses.append("hs_run_id = ?")
+        params.append(hs_run_id)
+    if fc_run_id:
+        clauses.append("run_id = ?")
+        params.append(fc_run_id)
+    if not clauses:
+        return "", []
+    return "(" + " OR ".join(clauses) + ")", params
+
+
+def _collect_cost_by_provider_tier(
+    con,
+    batches: List[Dict[str, Any]],
+    hs_run_id: str = "",
+    fc_run_id: str = "",
+) -> Dict[str, Any]:
+    """Cost-weighted view of the discount — the number that actually matters.
+
+    A request count understates a cost problem whenever the batched and
+    unbatched members differ in price, and they always do: on the reference run
+    the fallback rate was 32% of requests but **67% of forecaster spend**,
+    because the OpenAI members are the expensive ones. Reconstructing that took
+    a manual llm_calls analysis after the fact.
+
+    "Lost discount" is deliberately restricted to providers for which this
+    pipeline actually created a batch. Grounding (Brave), and any provider
+    excluded via PYTHIA_BATCH_PROVIDERS, were never going to be discounted;
+    counting them as losses would make the headline unactionable.
+    """
+    if not _table_exists(con, "llm_calls"):
+        return {"available": False}
+
+    where, params = _run_scope(hs_run_id, fc_run_id)
+    if not where:
+        return {
+            "available": False,
+            "reason": "no run id supplied; cost is only meaningful scoped to a run",
+        }
+
+    rows = _rows(
+        con,
+        f"""
+        SELECT
+            COALESCE(provider, '(none)'),
+            CASE WHEN json_extract_string(usage_json, '$.service_tier') = 'batch'
+                 THEN 'batch' ELSE 'full_price' END,
+            COUNT(*),
+            SUM(COALESCE(cost_usd, 0))
+        FROM llm_calls
+        WHERE {where}
+        GROUP BY 1, 2
+        ORDER BY 4 DESC
+        """,
+        params,
+    )
+    if not rows:
+        return {"available": False}
+
+    batched_providers = {
+        str(b["provider"]).lower() for b in batches if b.get("provider")
+    }
+
+    by_provider: Dict[str, Dict[str, Any]] = {}
+    run_total = 0.0
+    for provider, tier, n_calls, cost in rows:
+        cost = float(cost or 0.0)
+        run_total += cost
+        entry = by_provider.setdefault(
+            str(provider),
+            {
+                "batch_cost_usd": 0.0,
+                "full_price_cost_usd": 0.0,
+                "n_batch_calls": 0,
+                "n_full_price_calls": 0,
+                "batch_attempted": str(provider).lower() in batched_providers,
+            },
+        )
+        if tier == "batch":
+            entry["batch_cost_usd"] += cost
+            entry["n_batch_calls"] += int(n_calls or 0)
+        else:
+            entry["full_price_cost_usd"] += cost
+            entry["n_full_price_calls"] += int(n_calls or 0)
+
+    batched_spend = sum(e["batch_cost_usd"] for e in by_provider.values())
+    # Spend on providers we tried to batch, which nevertheless paid full price.
+    lost = sum(
+        e["full_price_cost_usd"] for e in by_provider.values() if e["batch_attempted"]
+    )
+    batchable_spend = lost + sum(
+        e["batch_cost_usd"] for e in by_provider.values() if e["batch_attempted"]
+    )
+
+    for entry in by_provider.values():
+        for key in ("batch_cost_usd", "full_price_cost_usd"):
+            entry[key] = round(entry[key], 4)
+
+    return {
+        "available": True,
+        "by_provider": by_provider,
+        "run_total_cost_usd": round(run_total, 4),
+        "batched_cost_usd": round(batched_spend, 4),
+        "batchable_cost_usd": round(batchable_spend, 4),
+        "lost_discount_cost_usd": round(lost, 4),
+        "lost_discount_pct_of_batchable": (
+            round(100.0 * lost / batchable_spend, 1) if batchable_spend else 0.0
+        ),
+        "lost_discount_pct_of_run": (
+            round(100.0 * lost / run_total, 1) if run_total else 0.0
+        ),
+        "scope": {"hs_run_id": hs_run_id or None, "fc_run_id": fc_run_id or None},
     }
 
 
@@ -238,14 +381,58 @@ def _markdown(report: Dict[str, Any]) -> str:
             lines.append(f"- `{b['batch_id']}` ({b['provider']}/{b['family']}): {b['error_text'] or 'no detail recorded'}")
         lines.append("")
 
+    # The cost view leads, because a request share understates a cost problem
+    # whenever the batched and unbatched members differ in price.
+    cost = report.get("cost", {})
+    if cost.get("available"):
+        lines.append("#### Cost")
+        lines.append("")
+        if cost["batchable_cost_usd"]:
+            lines.append(
+                f"**${cost['lost_discount_cost_usd']} of ${cost['batchable_cost_usd']} "
+                f"batchable spend paid full price "
+                f"({cost['lost_discount_pct_of_batchable']}% of batchable, "
+                f"{cost['lost_discount_pct_of_run']}% of the "
+                f"${cost['run_total_cost_usd']} run).**"
+            )
+        else:
+            lines.append(
+                f"No batchable spend recorded for this run "
+                f"(${cost['run_total_cost_usd']} total)."
+            )
+        lines.append("")
+        lines.append("| provider | batch attempted | batch $ | full-price $ | calls (batch/full) |")
+        lines.append("|---|---|--:|--:|---|")
+        for provider, e in sorted(
+            cost["by_provider"].items(),
+            key=lambda kv: -(kv[1]["batch_cost_usd"] + kv[1]["full_price_cost_usd"]),
+        ):
+            lines.append(
+                f"| {provider} | {'yes' if e['batch_attempted'] else 'no'} "
+                f"| {e['batch_cost_usd']} | {e['full_price_cost_usd']} "
+                f"| {e['n_batch_calls']}/{e['n_full_price_calls']} |"
+            )
+        lines.append("")
+        lines.append(
+            "_Full-price spend on a provider with `batch attempted = no` is expected "
+            "(grounding, or a provider excluded via `PYTHIA_BATCH_PROVIDERS`) and is "
+            "not counted as lost discount._"
+        )
+        lines.append("")
+    elif cost.get("reason"):
+        lines.append(f"_Cost section unavailable: {cost['reason']}._")
+        lines.append("")
+
     tier = report.get("ledger", {})
     if tier.get("available"):
         lines.append(
-            f"Ledger: {tier['n_batch_tier_calls']} of {tier['n_calls_total']} logged "
-            f"calls carry `service_tier=batch` "
-            f"(${tier['cost_batch_tier_usd']} of ${tier['cost_total_usd']} total). "
-            f"_{tier['note']}._"
+            f"Ledger: {tier['n_batch_tier_calls']} of {tier['n_calls_total']} calls "
+            f"logged for this run carry `service_tier=batch` "
+            f"(${tier['cost_batch_tier_usd']} of ${tier['cost_total_usd']})."
         )
+        lines.append("")
+    elif tier.get("reason"):
+        lines.append(f"_Ledger unavailable: {tier['reason']}._")
         lines.append("")
 
     return "\n".join(lines)
@@ -269,7 +456,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--stage", default=os.getenv("PIPELINE_STAGE", "unknown"))
     parser.add_argument("--out", default="")
     parser.add_argument("--fallback-warn-pct", type=float, default=DEFAULT_FALLBACK_WARN_PCT)
+    parser.add_argument(
+        "--cost-warn-pct",
+        type=float,
+        default=DEFAULT_COST_WARN_PCT,
+        help="Warn when this share of batchable SPEND paid full price.",
+    )
+    parser.add_argument(
+        "--hs-run-id",
+        default=os.getenv("HS_RUN_ID", ""),
+        help="Scopes the llm_calls cost sections. Without it they are omitted.",
+    )
+    parser.add_argument("--fc-run-id", default=os.getenv("FC_RUN_ID", ""))
     args = parser.parse_args(argv)
+
+    hs_run_id = (args.hs_run_id or "").strip()
+    fc_run_id = (args.fc_run_id or "").strip()
 
     pipeline_id = (args.pipeline_id or "").strip()
     if not pipeline_id:
@@ -291,7 +493,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         batches = _collect_batches(con, pipeline_id)
         requests = _collect_request_states(con, pipeline_id)
-        ledger = _collect_batch_tier_calls(con, pipeline_id)
+        ledger = _collect_batch_tier_calls(con, hs_run_id, fc_run_id)
+        cost = _collect_cost_by_provider_tier(con, batches, hs_run_id, fc_run_id)
     finally:
         try:
             con.close()
@@ -304,6 +507,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "batches": batches,
         "request_status_by_family": requests,
         "ledger": ledger,
+        "cost": cost,
         "summary": _summarize(batches, requests),
     }
 
@@ -327,6 +531,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"{b['batch_id']} ({b['family']}) yielded 0 of {b['n_requests']} results — "
                 f"those requests paid full price. {b['error_text'] or 'no detail recorded'}"
             )
+
+    c = report.get("cost", {})
+    if (
+        c.get("available")
+        and c.get("batchable_cost_usd")
+        and c["lost_discount_pct_of_batchable"] > args.cost_warn_pct
+    ):
+        print(
+            f"::warning title=Batch discount not realised (cost)::"
+            f"${c['lost_discount_cost_usd']} of ${c['batchable_cost_usd']} batchable "
+            f"spend paid full price in {pipeline_id} "
+            f"({c['lost_discount_pct_of_batchable']}% of batchable, "
+            f"{c['lost_discount_pct_of_run']}% of the ${c['run_total_cost_usd']} run) "
+            f"at stage {args.stage}."
+        )
 
     s = report["summary"]
     if s["n_terminal_requests"] and s["fallback_sync_pct"] > args.fallback_warn_pct:

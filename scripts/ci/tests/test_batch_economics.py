@@ -214,3 +214,173 @@ def test_healthy_batch_emits_no_empty_batch_warning(tmp_path, capsys):
     con.close()
     _run(path, tmp_path)
     assert "Batch returned no results" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# Cost weighting
+#
+# The reference run's fallback rate was 32% of requests but 67% of forecaster
+# spend, because the OpenAI members are the expensive ones. A request count
+# understates a cost problem by 2x, so the cost view is what the warning fires
+# on. The ledger was also unscoped, reporting the travelling DB's cumulative
+# spend ("$1.37 of $65.26") for a run that had spent $3.29.
+# --------------------------------------------------------------------------
+
+HS_RUN = "hs_20260729T071137"
+FC_RUN = "fc_1785315556"
+
+
+def _db_with_calls(tmp_path):
+    path = _db(tmp_path)
+    con = duckdb.connect(path)
+    con.execute(
+        """
+        CREATE TABLE llm_calls (
+            run_id TEXT, hs_run_id TEXT, provider TEXT,
+            cost_usd DOUBLE, usage_json TEXT
+        )
+        """
+    )
+    batch = '{"service_tier": "batch"}'
+    plain = "{}"
+
+    def add(run_id, hs_run_id, provider, cost, usage):
+        con.execute("INSERT INTO llm_calls VALUES (?,?,?,?,?)", [run_id, hs_run_id, provider, cost, usage])
+
+    # This run: openai batching failed (full price), google batched.
+    add(FC_RUN, None, "openai", 2.00, plain)
+    add(FC_RUN, None, "google", 1.00, batch)
+    # Grounding: never batchable, must not count as lost discount.
+    add(None, HS_RUN, "brave", 0.50, plain)
+    # A different pipeline in the same travelling DB — must be excluded.
+    add("fc_other", None, "openai", 60.00, plain)
+    con.close()
+    return path
+
+
+def _run_scoped(path, tmp_path, **extra):
+    out = str(tmp_path / "econ_cost.json")
+    argv = [
+        "--db", path, "--pipeline-id", PIPE, "--stage", "fc_collect_finalize",
+        "--out", out, "--hs-run-id", HS_RUN, "--fc-run-id", FC_RUN,
+    ]
+    for k, v in extra.items():
+        argv += [f"--{k.replace('_', '-')}", str(v)]
+    assert batch_economics.main(argv) == 0
+    return json.load(open(out))
+
+
+def test_cost_section_is_scoped_to_this_run(tmp_path):
+    path = _db_with_calls(tmp_path)
+    con = duckdb.connect(path)
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('bo','openai','spd_v2','fc','gpt','collected',?,4,0,0,4,0,NULL,NULL)",
+        [PIPE],
+    )
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('bg','google','spd_v2','fc','gemini','collected',?,4,4,0,0,0,NULL,NULL)",
+        [PIPE],
+    )
+    con.close()
+
+    cost = _run_scoped(path, tmp_path)["cost"]
+    # $60 from the foreign run must not appear anywhere.
+    assert cost["run_total_cost_usd"] == pytest.approx(3.50)
+    assert "fc_other" not in json.dumps(cost)
+
+
+def test_lost_discount_excludes_providers_we_never_tried_to_batch(tmp_path):
+    path = _db_with_calls(tmp_path)
+    con = duckdb.connect(path)
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('bo','openai','spd_v2','fc','gpt','collected',?,4,0,0,4,0,NULL,NULL)",
+        [PIPE],
+    )
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('bg','google','spd_v2','fc','gemini','collected',?,4,4,0,0,0,NULL,NULL)",
+        [PIPE],
+    )
+    con.close()
+
+    cost = _run_scoped(path, tmp_path)["cost"]
+    # Batchable = openai $2 (lost) + google $1 (batched). Brave's $0.50 is not
+    # batchable and must not inflate the loss.
+    assert cost["batchable_cost_usd"] == pytest.approx(3.00)
+    assert cost["lost_discount_cost_usd"] == pytest.approx(2.00)
+    assert cost["lost_discount_pct_of_batchable"] == pytest.approx(66.7)
+    assert cost["by_provider"]["brave"]["batch_attempted"] is False
+    assert cost["by_provider"]["openai"]["batch_attempted"] is True
+
+
+def test_cost_share_warning_fires_on_spend_not_request_count(tmp_path, capsys):
+    path = _db_with_calls(tmp_path)
+    con = duckdb.connect(path)
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('bo','openai','spd_v2','fc','gpt','collected',?,4,0,0,4,0,NULL,NULL)",
+        [PIPE],
+    )
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('bg','google','spd_v2','fc','gemini','collected',?,4,4,0,0,0,NULL,NULL)",
+        [PIPE],
+    )
+    # Requests split evenly, so the request-count rate alone reads as ~50%
+    # while the real cost impact is 67%.
+    for i in range(4):
+        con.execute("INSERT INTO llm_batch_requests VALUES (?, 'spd_v2', 'fallback_sync', ?)", [f"f{i}", PIPE])
+        con.execute("INSERT INTO llm_batch_requests VALUES (?, 'spd_v2', 'succeeded', ?)", [f"s{i}", PIPE])
+    con.close()
+
+    _run_scoped(path, tmp_path)
+    out = capsys.readouterr().out
+    assert "::warning title=Batch discount not realised (cost)::" in out
+    assert "$2.0 of $3.0" in out
+
+
+def test_no_cost_warning_when_everything_batched(tmp_path, capsys):
+    path = _db(tmp_path)
+    con = duckdb.connect(path)
+    con.execute(
+        """
+        CREATE TABLE llm_calls (
+            run_id TEXT, hs_run_id TEXT, provider TEXT,
+            cost_usd DOUBLE, usage_json TEXT
+        )
+        """
+    )
+    con.execute(
+        "INSERT INTO llm_calls VALUES (?, NULL, 'google', 1.0, '{\"service_tier\": \"batch\"}')",
+        [FC_RUN],
+    )
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('bg','google','spd_v2','fc','gemini','collected',?,4,4,0,0,0,NULL,NULL)",
+        [PIPE],
+    )
+    con.close()
+    report = _run_scoped(path, tmp_path)
+    assert report["cost"]["lost_discount_cost_usd"] == pytest.approx(0.0)
+    assert "not realised (cost)" not in capsys.readouterr().out
+
+
+def test_cost_section_omitted_rather_than_unscoped_without_run_ids(tmp_path):
+    """Better to report nothing than to report the travelling DB's total."""
+    path = _db_with_calls(tmp_path)
+    report = _run(path, tmp_path)
+    assert report["cost"]["available"] is False
+    assert "no run id" in report["cost"]["reason"]
+    assert report["ledger"]["available"] is False
+    md = batch_economics._markdown(report)
+    assert "Cost section unavailable" in md
+
+
+def test_missing_llm_calls_table_still_returns_zero(tmp_path):
+    """Never fail a stage: a DB with no llm_calls at all must still report."""
+    path = _db(tmp_path)
+    report = _run_scoped(path, tmp_path)
+    assert report["cost"]["available"] is False
