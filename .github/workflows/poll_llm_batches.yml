@@ -22,8 +22,19 @@ name: Poll LLM Batches
 
 on:
   schedule:
+    # Ignition only. GitHub throttles frequent schedules hard — in practice
+    # this fires roughly hourly, not every 15 minutes, which parked staged
+    # pipelines between stages for hours. Progress comes from the
+    # self-rescheduling chain at the end of this job; the cron just starts it
+    # (and backstops a chain that was broken by an infra failure).
     - cron: "*/15 * * * *"
   workflow_dispatch:
+    inputs:
+      chain_depth:
+        description: "Self-dispatch chain depth (internal; leave empty for manual runs)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -95,9 +106,11 @@ jobs:
           pip install requests
 
       - name: Poll batches and dispatch ready stages
+        id: poll
         if: steps.gate.outputs.active == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POLLER_CHAIN_DEPTH: ${{ inputs.chain_depth || '0' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -105,3 +118,28 @@ jobs:
         run: |
           set -e
           python -m scripts.ci.poll_llm_batches
+
+      - name: Upload poller decisions
+        if: always() && steps.gate.outputs.active == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-poller-decisions
+          path: diagnostics/poll_decision.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      # The self-rescheduling chain. `rearm` is true only while some pipeline
+      # is genuinely in flight (waiting on batches, mid-stage, or just
+      # dispatched) and under the chain cap — a completed or STALLED pipeline
+      # never re-arms, so this cannot spin. The sleep paces the chain well
+      # inside the job's 15-minute timeout.
+      - name: Reschedule next poll
+        if: steps.poll.outputs.rearm == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT_DEPTH: ${{ steps.poll.outputs.chain_depth_next }}
+        run: |
+          set -e
+          echo "Pipeline still in flight — chaining next poll (depth ${NEXT_DEPTH})."
+          sleep 300
+          gh workflow run poll_llm_batches.yml --ref main -f "chain_depth=${NEXT_DEPTH}"

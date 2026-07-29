@@ -166,3 +166,84 @@ def test_dispatch_inputs_from_env_production_defaults():
     )
     assert inputs["only_countries"] == ""
     assert inputs["disable_brave"] == "false"
+
+
+# ---------------------------------------------------------------------------
+# Self-rescheduling chain.
+#
+# The regression pinned here: the */15 cron is not honoured by GitHub (observed
+# firing roughly hourly), so staged pipelines sat parked between stages for
+# hours. Progress now comes from the poller chaining itself. The danger of a
+# chain is that it never stops, so most of these tests are about NOT re-arming.
+# ---------------------------------------------------------------------------
+
+import pytest
+
+from scripts.ci.poll_llm_batches import _should_rearm
+
+
+def _d(action, pid="pl_1"):
+    return {"pipeline_id": pid, "action": action}
+
+
+@pytest.mark.parametrize("action", ["waiting", "dispatched", "already running", "cooling down"])
+def test_rearms_while_a_pipeline_is_in_flight(action, monkeypatch):
+    monkeypatch.delenv("POLLER_CHAIN_DEPTH", raising=False)
+    rearm, why = _should_rearm([_d(action)])
+    assert rearm is True
+    assert action in why
+
+
+def test_does_not_rearm_when_stalled(monkeypatch):
+    """A STALLED pipeline is terminal — chaining would retry it forever."""
+    monkeypatch.delenv("POLLER_CHAIN_DEPTH", raising=False)
+    rearm, why = _should_rearm([_d("STALLED")])
+    assert rearm is False
+    assert "no pipeline" in why
+
+
+def test_does_not_rearm_when_pipeline_completed(monkeypatch):
+    """The final stage emits no batch state, so its last state lingers for the
+    artifact's 14-day retention. Re-arming on it would spin forever."""
+    monkeypatch.delenv("POLLER_CHAIN_DEPTH", raising=False)
+    assert _should_rearm([_d("already completed")])[0] is False
+
+
+def test_does_not_rearm_on_empty_decisions(monkeypatch):
+    monkeypatch.delenv("POLLER_CHAIN_DEPTH", raising=False)
+    assert _should_rearm([])[0] is False
+
+
+def test_does_not_rearm_on_failed_dispatch(monkeypatch):
+    monkeypatch.delenv("POLLER_CHAIN_DEPTH", raising=False)
+    assert _should_rearm([_d("dispatch failed")])[0] is False
+
+
+def test_chain_cap_stops_a_runaway_chain(monkeypatch):
+    monkeypatch.setenv("POLLER_CHAIN_DEPTH", "200")
+    monkeypatch.setenv("POLLER_MAX_CHAIN", "200")
+    rearm, why = _should_rearm([_d("waiting")])
+    assert rearm is False
+    assert "chain cap" in why
+
+
+def test_under_the_cap_still_rearms(monkeypatch):
+    monkeypatch.setenv("POLLER_CHAIN_DEPTH", "199")
+    monkeypatch.setenv("POLLER_MAX_CHAIN", "200")
+    assert _should_rearm([_d("waiting")])[0] is True
+
+
+def test_mixed_pipelines_rearm_if_any_is_live(monkeypatch):
+    monkeypatch.delenv("POLLER_CHAIN_DEPTH", raising=False)
+    assert _should_rearm([_d("STALLED", "pl_a"), _d("waiting", "pl_b")])[0] is True
+
+
+def test_malformed_chain_depth_does_not_crash(monkeypatch):
+    monkeypatch.setenv("POLLER_CHAIN_DEPTH", "not-a-number")
+    assert _should_rearm([_d("waiting")])[0] is True
+
+
+def test_completed_and_running_are_distinguishable():
+    """The chain keys off this split, so collapsing them would break it."""
+    assert _decide([_run(conclusion="success")])[1] == "already completed"
+    assert _decide([_run(status="in_progress", conclusion=None)])[1] == "already running"
