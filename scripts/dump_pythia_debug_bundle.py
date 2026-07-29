@@ -1653,6 +1653,108 @@ def _load_llm_call_counts(
     )
 
 
+def _load_batch_health(
+    con: duckdb.DuckDBPyConnection,
+    hs_run_id: str | None,
+    forecaster_run_id: str | None,
+    predicate: str | None,
+    params: list[Any],
+) -> dict[str, Any]:
+    """Whether this run realised the provider batch discount.
+
+    The bundle contained ZERO references to llm_batches or service_tier, so for
+    the 2026-07-29 reference run it reported "LLM Calls: OK, 80 calls, 0 errors"
+    for a run that had lost the discount on two thirds of its spend — and the
+    bundle is the artifact a human reads first. Mirrors the queries in
+    scripts/ci/batch_economics.py; everything is guarded, because a diagnostics
+    gap must never become a bundle failure.
+    """
+    out: dict[str, Any] = {"available": False}
+    ids = [i for i in (hs_run_id, forecaster_run_id) if i]
+    if not ids:
+        return out
+
+    try:
+        placeholders = ",".join("?" for _ in ids)
+        batches = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT batch_id, COALESCE(provider,'') AS provider,
+                   COALESCE(family,'') AS family, COALESCE(status,'') AS status,
+                   COALESCE(n_requests,0) AS n_requests,
+                   COALESCE(n_succeeded,0) AS n_succeeded,
+                   COALESCE(error_text,'') AS error_text
+            FROM llm_batches
+            WHERE hs_run_id IN ({placeholders}) OR run_id IN ({placeholders})
+            """,
+            ids + ids,
+        )
+    except Exception:
+        return out
+    if not batches:
+        return out
+
+    out["available"] = True
+    out["n_batches"] = len(batches)
+    # A batch that yielded nothing is WHY spend lost the discount; naming it
+    # turns an unexplained percentage into a cause.
+    out["empty_batches"] = [
+        {"batch_id": b["batch_id"], "provider": b["provider"],
+         "family": b["family"], "error_text": b["error_text"]}
+        for b in batches
+        if int(b["n_requests"] or 0) and not int(b["n_succeeded"] or 0)
+    ]
+
+    batch_ids = [b["batch_id"] for b in batches]
+    try:
+        ph = ",".join("?" for _ in batch_ids)
+        status_rows = _fetch_llm_rows(
+            con,
+            f"SELECT COALESCE(status,'') AS status, COUNT(*) AS n "
+            f"FROM llm_batch_requests WHERE batch_id IN ({ph}) GROUP BY 1",
+            batch_ids,
+        )
+        out["by_status"] = {r["status"]: int(r["n"]) for r in status_rows}
+    except Exception:
+        out["by_status"] = {}
+
+    terminal = sum(
+        out["by_status"].get(s, 0)
+        for s in ("succeeded", "fallback_sync", "errored", "expired")
+    )
+    fallback = out["by_status"].get("fallback_sync", 0)
+    out["n_terminal"] = terminal
+    out["fallback_pct"] = round(100.0 * fallback / terminal, 1) if terminal else 0.0
+
+    # Cost is the number that matters: on the reference run the fallback was 32%
+    # of requests but two thirds of spend, because the batched and unbatched
+    # members are not equally expensive.
+    if predicate:
+        try:
+            cost_rows = _fetch_llm_rows(
+                con,
+                f"""
+                SELECT
+                    SUM(CASE WHEN json_extract_string(usage_json, '$.service_tier') = 'batch'
+                             THEN COALESCE(cost_usd,0) ELSE 0 END) AS batch_cost,
+                    SUM(COALESCE(cost_usd,0)) AS total_cost
+                FROM llm_calls WHERE {predicate}
+                """,
+                params,
+            )
+            if cost_rows:
+                bc = float(cost_rows[0].get("batch_cost") or 0.0)
+                tc = float(cost_rows[0].get("total_cost") or 0.0)
+                out["batch_cost_usd"] = round(bc, 4)
+                out["total_cost_usd"] = round(tc, 4)
+                out["full_price_pct_of_spend"] = (
+                    round(100.0 * (tc - bc) / tc, 1) if tc else 0.0
+                )
+        except Exception:
+            pass
+    return out
+
+
 def _load_llm_error_summary(
     con: duckdb.DuckDBPyConnection,
     predicate: str | None,
@@ -2693,6 +2795,7 @@ class BundleData:
 
     # LLM call counts
     llm_call_counts: list[dict[str, Any]] = field(default_factory=list)
+    batch_health: dict[str, Any] = field(default_factory=dict)
     llm_error_rows: list[dict[str, Any]] = field(default_factory=list)
     llm_calls_skip_note: str | None = None
     self_search_stats: dict[str, int] = field(default_factory=dict)
@@ -2924,6 +3027,9 @@ def _load_bundle_data(
             row for row in data.llm_call_counts if int(row.get("n_errors") or 0) > 0
         ]
         data.self_search_stats = _load_self_search_stats(con, data.predicate, data.predicate_params)
+        data.batch_health = _load_batch_health(
+            con, hs_run_id, forecaster_run_id, data.predicate, data.predicate_params
+        )
     except Exception as exc:
         data.llm_calls_skip_note = f"Error loading llm_calls: {exc}"
     data.latency_block = render_latency_markdown(
@@ -3298,6 +3404,39 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
             llm_status = "FAIL"
             llm_detail = f"{total_calls} calls, {total_errors} errors ({error_rate:.1%})"
     checks.append({"subsystem": "LLM Calls", "status": llm_status, "detail": llm_detail})
+
+    # Batch economics. "LLM Calls: OK, 80 calls, 0 errors" was true and useless
+    # for the reference run, which had lost the batch discount on two thirds of
+    # its spend — an error-free run can still be an expensive one.
+    bh = data.batch_health or {}
+    if bh.get("available"):
+        parts = [f"{bh.get('n_batches', 0)} batches"]
+        if bh.get("n_terminal"):
+            parts.append(
+                f"{bh['fallback_pct']}% of {bh['n_terminal']} requests fell back to sync"
+            )
+        if bh.get("total_cost_usd"):
+            parts.append(
+                f"${bh['batch_cost_usd']} of ${bh['total_cost_usd']} discounted "
+                f"({bh['full_price_pct_of_spend']}% of spend at full price)"
+            )
+        empty = bh.get("empty_batches") or []
+        if empty:
+            b_status = "FAIL"
+            parts.append(
+                f"{len(empty)} batch(es) returned no results: "
+                + "; ".join(
+                    f"{e['provider']}/{e['family']} ({e['error_text'] or 'no detail recorded'})"
+                    for e in empty
+                )
+            )
+        elif bh.get("fallback_pct", 0.0) > 20.0:
+            b_status = "WARN"
+        else:
+            b_status = "OK"
+        checks.append(
+            {"subsystem": "Batch Economics", "status": b_status, "detail": " · ".join(parts)}
+        )
 
     # Ensemble completeness (forecaster only)
     if data.forecaster_run_id:

@@ -65,6 +65,8 @@ def _run(path, tmp_path, **kw):
             kw.pop("hs_run_id", RUN), "--out", out]
     if "since" in kw:
         argv += ["--since", kw.pop("since")]
+    if "sibyl_run_id" in kw:
+        argv += ["--sibyl-run-id", kw.pop("sibyl_run_id")]
     assert stage_health.main(argv) == 0
     return json.load(open(out))
 
@@ -277,3 +279,115 @@ def test_absent_grounding_is_explained_not_blank(tmp_path):
     con.close()
     md = stage_health._markdown(_run(path, tmp_path))
     assert "No grounding calls in" in md
+
+
+# --- sibyl -----------------------------------------------------------------------
+#
+# run_sibyl.yml emitted no diagnostics at all: Sibyl ran 40+ minutes on Claude
+# Opus under a $40 hard cap and its spend was the one unmeasured number in the
+# pipeline. On the reference DB it turned out to be $5.83 — larger than the
+# $3.29 forecast pipeline it accompanies.
+
+SIBYL_RUN = "sibyl_1785239977879"
+OLD_SIBYL_RUN = "sibyl_previous_day"
+
+
+def _sibyl_db(tmp_path, *, with_forecasts=True):
+    path = _db(tmp_path)
+    con = duckdb.connect(path)
+    con.execute(
+        """
+        CREATE TABLE sibyl_runs (
+            sibyl_run_id TEXT, hs_run_id TEXT, model TEXT, k INTEGER,
+            aggregation TEXT, run_hard_cap_usd DOUBLE, budget_capped BOOLEAN,
+            run_cost_usd DOUBLE, opus_cost_usd DOUBLE, brave_cost_usd DOUBLE,
+            n_selected INTEGER, n_forecast INTEGER, n_skipped INTEGER,
+            created_at TIMESTAMP
+        )
+        """
+    )
+    if with_forecasts:
+        con.execute("CREATE TABLE sibyl_forecasts (sibyl_run_id TEXT, status TEXT)")
+    con.close()
+    return path
+
+
+def _add_sibyl_run(con, sibyl_run_id, hs_run_id, created_at, **kw):
+    d = dict(
+        model="claude-opus-5", k=3, aggregation="linear_pool", cap=40.0,
+        capped=False, cost=5.8338, opus=5.4838, brave=0.35,
+        selected=4, forecast=4, skipped=0,
+    )
+    d.update(kw)
+    con.execute(
+        "INSERT INTO sibyl_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [sibyl_run_id, hs_run_id, d["model"], d["k"], d["aggregation"], d["cap"],
+         d["capped"], d["cost"], d["opus"], d["brave"], d["selected"],
+         d["forecast"], d["skipped"], created_at],
+    )
+
+
+def test_sibyl_section_reports_coverage_and_cost_split(tmp_path):
+    path = _sibyl_db(tmp_path)
+    con = duckdb.connect(path)
+    _add_sibyl_run(con, SIBYL_RUN, RUN, "2026-07-29 10:00:00")
+    for _ in range(4):
+        con.execute("INSERT INTO sibyl_forecasts VALUES (?, 'ok')", [SIBYL_RUN])
+    con.close()
+
+    sb = _run(path, tmp_path, stage="sibyl", sibyl_run_id=SIBYL_RUN)["sibyl"]
+    assert sb["available"] is True
+    assert sb["run_cost_usd"] == pytest.approx(5.8338)
+    assert sb["opus_cost_usd"] == pytest.approx(5.4838)
+    assert sb["brave_cost_usd"] == pytest.approx(0.35)
+    assert (sb["n_forecast"], sb["n_selected"]) == (4, 4)
+    assert sb["by_status"] == {"ok": 4}
+
+
+def test_sibyl_pins_on_run_id_rather_than_reporting_a_previous_run(tmp_path):
+    """The hs_run_id fallback resolved the PREVIOUS day's run on the real DB.
+
+    That is the stale-telemetry failure these diagnostics exist to catch, so a
+    pinned sibyl_run_id must win over 'newest row'.
+    """
+    path = _sibyl_db(tmp_path)
+    con = duckdb.connect(path)
+    _add_sibyl_run(con, SIBYL_RUN, RUN, "2026-07-29 10:00:00", cost=5.83)
+    # A later row for the same hs run — 'newest' would pick this one.
+    _add_sibyl_run(con, OLD_SIBYL_RUN, RUN, "2026-07-29 23:00:00", cost=99.0)
+    con.close()
+
+    sb = _run(path, tmp_path, stage="sibyl", sibyl_run_id=SIBYL_RUN)["sibyl"]
+    assert sb["sibyl_run_id"] == SIBYL_RUN
+    assert sb["run_cost_usd"] == pytest.approx(5.83)
+
+
+def test_sibyl_absent_rather_than_wrong_when_this_run_persisted_nothing(tmp_path):
+    """Gated-out or crashed Sibyl must report nothing, not someone else's run."""
+    path = _sibyl_db(tmp_path)
+    con = duckdb.connect(path)
+    _add_sibyl_run(con, OLD_SIBYL_RUN, "hs_yesterday", "2026-07-28 10:00:00")
+    con.close()
+
+    sb = _run(path, tmp_path, stage="sibyl", sibyl_run_id="sibyl_never_persisted")["sibyl"]
+    assert sb["available"] is False
+    assert OLD_SIBYL_RUN not in json.dumps(sb)
+
+
+def test_sibyl_budget_cap_is_called_out(tmp_path):
+    path = _sibyl_db(tmp_path)
+    con = duckdb.connect(path)
+    _add_sibyl_run(con, SIBYL_RUN, RUN, "2026-07-29 10:00:00",
+                   capped=True, cost=40.7, selected=10, forecast=6, skipped=4)
+    con.close()
+    rep = _run(path, tmp_path, stage="sibyl", sibyl_run_id=SIBYL_RUN)
+    md = stage_health._markdown(rep)
+    assert "**CAPPED**" in md
+    assert "6/10" in md
+
+
+def test_sibyl_section_absent_on_a_pre_sibyl_db(tmp_path):
+    """No sibyl tables at all must still exit 0 — never fail a stage."""
+    path = _db(tmp_path)
+    rep = _run(path, tmp_path, stage="sibyl", sibyl_run_id=SIBYL_RUN)
+    assert rep["sibyl"]["available"] is False

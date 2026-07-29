@@ -273,6 +273,75 @@ def _cost(con, hs_run_id: str, fc_run_id: str, since: Optional[str]) -> Dict[str
     }
 
 
+def _sibyl(con, hs_run_id: str, sibyl_run_id: str = "") -> Dict[str, Any]:
+    """Coverage, budget and cost split for the Sibyl deep-research track.
+
+    Sibyl runs 40+ minutes on Claude Opus under a $40 hard cap and was the only
+    stage in the pipeline with no telemetry of any kind — plausibly the most
+    expensive one, entirely unmeasured. Its llm_calls carry phase='sibyl' and
+    the run's hs_run_id, so the generic cost rollup already itemises the spend;
+    this adds what only sibyl_runs knows: whether the cap bit, and how much of
+    the selected set was actually covered.
+    """
+    if not _has_table(con, "sibyl_runs"):
+        return {"available": False}
+
+    # Prefer the sibyl_run_id this run printed. Selecting the newest row for an
+    # hs_run_id would silently report a PREVIOUS Sibyl run whenever this one was
+    # gated out or died before persisting — exactly the stale-telemetry failure
+    # these diagnostics exist to catch. Verified against the reference DB, where
+    # the hs_run_id fallback resolved the previous day's run.
+    if sibyl_run_id:
+        where, params = "sibyl_run_id = ?", [sibyl_run_id]
+    elif hs_run_id:
+        where, params = "hs_run_id = ?", [hs_run_id]
+    else:
+        return {"available": False, "reason": "no sibyl_run_id or hs_run_id supplied"}
+
+    rows = _q(
+        con,
+        f"""
+        SELECT sibyl_run_id, model, k, aggregation,
+               COALESCE(run_hard_cap_usd, 0), COALESCE(budget_capped, FALSE),
+               COALESCE(run_cost_usd, 0), COALESCE(opus_cost_usd, 0),
+               COALESCE(brave_cost_usd, 0), COALESCE(n_selected, 0),
+               COALESCE(n_forecast, 0), COALESCE(n_skipped, 0)
+        FROM sibyl_runs WHERE {where}
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        params,
+    )
+    if not rows:
+        return {"available": False, "reason": f"no sibyl_runs row matching {where}"}
+
+    r = rows[0]
+    out = {
+        "available": True,
+        "sibyl_run_id": r[0],
+        "model": r[1],
+        "k": int(r[2] or 0),
+        "aggregation": r[3],
+        "run_hard_cap_usd": round(float(r[4] or 0), 2),
+        "budget_capped": bool(r[5]),
+        "run_cost_usd": round(float(r[6] or 0), 4),
+        "opus_cost_usd": round(float(r[7] or 0), 4),
+        "brave_cost_usd": round(float(r[8] or 0), 4),
+        "n_selected": int(r[9] or 0),
+        "n_forecast": int(r[10] or 0),
+        "n_skipped": int(r[11] or 0),
+    }
+
+    if _has_table(con, "sibyl_forecasts"):
+        status_rows = _q(
+            con,
+            "SELECT COALESCE(status,'(null)'), COUNT(*) FROM sibyl_forecasts "
+            "WHERE sibyl_run_id = ? GROUP BY 1",
+            [out["sibyl_run_id"]],
+        )
+        out["by_status"] = {str(s): int(n) for s, n in status_rows}
+    return out
+
+
 def _markdown(rep: Dict[str, Any]) -> str:
     L: List[str] = [f"### Stage health — `{rep['stage']}`", ""]
     if rep.get("hs_run_id"):
@@ -328,6 +397,28 @@ def _markdown(rep: Dict[str, Any]) -> str:
             L.append(f"| {table} | " + " | ".join(str(counts.get(k, 0)) for k in keys) + " |")
         L.append("")
 
+    sb = rep.get("sibyl") or {}
+    if sb.get("available"):
+        cap = "**CAPPED**" if sb["budget_capped"] else "ok"
+        L.append(
+            f"**Sibyl** `{sb['sibyl_run_id']}` — {sb['model']}, K={sb['k']}, "
+            f"{sb['aggregation']}"
+        )
+        L.append("")
+        L.append(
+            f"Coverage {sb['n_forecast']}/{sb['n_selected']} selected "
+            f"({sb['n_skipped']} skipped) · budget {cap} "
+            f"(${sb['run_cost_usd']} of ${sb['run_hard_cap_usd']} cap) · "
+            f"opus ${sb['opus_cost_usd']} + brave ${sb['brave_cost_usd']}"
+        )
+        L.append("")
+        if sb.get("by_status"):
+            L.append("| status | questions |")
+            L.append("|---|--:|")
+            for status, n in sorted(sb["by_status"].items()):
+                L.append(f"| {status} | {n} |")
+            L.append("")
+
     c = rep.get("cost") or {}
     if c.get("available"):
         rt = c["run_total"]
@@ -372,6 +463,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--hs-run-id", default="")
     p.add_argument("--fc-run-id", default="")
     p.add_argument("--since", default="", help="ISO timestamp marking this stage's start")
+    p.add_argument(
+        "--sibyl-run-id",
+        default="",
+        help="Pin the Sibyl section to this run rather than the newest for the hs run.",
+    )
     p.add_argument("--out", default="")
     args = p.parse_args(argv)
 
@@ -399,6 +495,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "rc_levels": _rc_levels(con, hs_run_id),
             "is_test": _is_test_consistency(con, hs_run_id, _expected_is_test()),
             "cost": _cost(con, hs_run_id, args.fc_run_id.strip(), since),
+            "sibyl": _sibyl(con, hs_run_id, args.sibyl_run_id.strip()),
         }
     finally:
         try:
