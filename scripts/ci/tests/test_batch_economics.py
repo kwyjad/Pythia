@@ -34,7 +34,8 @@ def _db(tmp_path, *, with_requests=True, with_batches=True):
                 batch_id TEXT, provider TEXT, family TEXT, stage TEXT,
                 model_id TEXT, status TEXT, pipeline_id TEXT,
                 n_requests INTEGER, n_succeeded INTEGER, n_errored INTEGER,
-                n_expired INTEGER, n_fallback_sync INTEGER, submitted_at TIMESTAMP
+                n_expired INTEGER, n_fallback_sync INTEGER, submitted_at TIMESTAMP,
+                error_text TEXT
             )
             """
         )
@@ -64,7 +65,7 @@ def test_reports_fallback_rate_from_request_rows(tmp_path):
     con = duckdb.connect(path)
     con.execute(
         "INSERT INTO llm_batches VALUES "
-        "('b1','google','hs_rc','hs_submit','gemini','collected',?,10,7,1,0,2,NULL)",
+        "('b1','google','hs_rc','hs_submit','gemini','collected',?,10,7,1,0,2,NULL,NULL)",
         [PIPE],
     )
     for i in range(7):
@@ -89,7 +90,7 @@ def test_other_pipelines_are_excluded(tmp_path):
     con.execute("INSERT INTO llm_batch_requests VALUES ('a', 'hs_rc', 'succeeded', ?)", [PIPE])
     con.execute("INSERT INTO llm_batch_requests VALUES ('b', 'hs_rc', 'fallback_sync', 'pl_other')")
     con.execute(
-        "INSERT INTO llm_batches VALUES ('bx','google','hs_rc','s','m','collected','pl_other',9,0,0,0,9,NULL)"
+        "INSERT INTO llm_batches VALUES ('bx','google','hs_rc','s','m','collected','pl_other',9,0,0,0,9,NULL,NULL)"
     )
     con.close()
 
@@ -170,3 +171,46 @@ def test_zero_batches_is_called_out_explicitly(tmp_path):
     report = _run(path, tmp_path)
     md = batch_economics._markdown(report)
     assert "No provider batches recorded" in md
+
+
+def test_empty_batch_is_named_with_its_recorded_cause(tmp_path, capsys):
+    """A batch that yields nothing is WHY a fallback rate is high.
+
+    On 2026-07-29 both OpenAI batches returned zero results and the cause had
+    been discarded, so a 32% fallback rate had no explanation attached.
+    """
+    path = _db(tmp_path)
+    con = duckdb.connect(path)
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('bo','openai','spd_v2','fc','gpt-5.6-sol','collected',?,12,0,0,12,0,NULL,"
+        "'{\"provider_state\": \"failed\"}')",
+        [PIPE],
+    )
+    for i in range(12):
+        con.execute("INSERT INTO llm_batch_requests VALUES (?, 'spd_v2', 'fallback_sync', ?)", [f"f{i}", PIPE])
+    con.close()
+
+    report = _run(path, tmp_path)
+    assert report["batches"][0]["error_text"] == '{"provider_state": "failed"}'
+    md = batch_economics._markdown(report)
+    assert "returned no results" in md
+    assert "provider_state" in md
+    out = capsys.readouterr().out
+    assert "::warning title=Batch returned no results::" in out
+    assert "openai" in out
+
+
+def test_healthy_batch_emits_no_empty_batch_warning(tmp_path, capsys):
+    path = _db(tmp_path)
+    con = duckdb.connect(path)
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('bg','google','spd_v2','fc','gemini','collected',?,6,6,0,0,0,NULL,NULL)",
+        [PIPE],
+    )
+    for i in range(6):
+        con.execute("INSERT INTO llm_batch_requests VALUES (?, 'spd_v2', 'succeeded', ?)", [f"s{i}", PIPE])
+    con.close()
+    _run(path, tmp_path)
+    assert "Batch returned no results" not in capsys.readouterr().out

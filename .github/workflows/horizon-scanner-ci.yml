@@ -13,6 +13,7 @@ on:
       - "horizon_scanner/**"
       - "scripts/ci/snapshot_prompt_artifact.py"
       - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
+      - "resolver/tests/test_hs_hazard_tail_packs_schema_and_writer.py"
       - "pythia/db/schema.py"
       - "pythia/buckets.py"
       - ".github/workflows/horizon-scanner-ci.yml"
@@ -21,6 +22,7 @@ on:
       - "horizon_scanner/**"
       - "scripts/ci/snapshot_prompt_artifact.py"
       - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
+      - "resolver/tests/test_hs_hazard_tail_packs_schema_and_writer.py"
       - "pythia/db/schema.py"
       - "pythia/buckets.py"
       - ".github/workflows/horizon-scanner-ci.yml"
@@ -55,7 +57,12 @@ jobs:
           # documented gap where no workflow ran horizon_scanner/** tests —
           # e.g. the seasonal-TC tercile-safety guard and the prompt-artifact
           # question-loader regression test.
+          # The tail-packs writer test lives under resolver/tests but guards
+          # horizon_scanner/db_writer.py. resolver-ci-fast does not trigger on
+          # horizon_scanner/**, so without naming it here a change to the
+          # writer would run no test that covers it.
           pytest -vv \
             horizon_scanner/ \
             scripts/ci/tests/test_snapshot_prompt_artifact.py \
+            resolver/tests/test_hs_hazard_tail_packs_schema_and_writer.py \
             -m "not allow_network and not network"
