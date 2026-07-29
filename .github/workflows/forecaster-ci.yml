@@ -29,7 +29,9 @@ on:
       - "scripts/ci/poll_llm_batches.py"
       - "scripts/ci/check_pipeline_active.py"
       - "scripts/ci/batch_economics.py"
+      - "scripts/ci/stage_health.py"
       - "scripts/ci/tests/test_batch_economics.py"
+      - "scripts/ci/tests/test_stage_health.py"
       - ".github/workflows/pythia_pipeline_stage.yml"
       - "tests/test_poll_llm_batches_guard.py"
       - "tests/test_check_pipeline_active.py"
@@ -188,7 +190,8 @@ jobs:
             forecaster/tests/test_prompt_cache_wiring.py \
             tests/test_poll_llm_batches_guard.py \
             tests/test_check_pipeline_active.py \
-            scripts/ci/tests/test_batch_economics.py
+            scripts/ci/tests/test_batch_economics.py \
+            scripts/ci/tests/test_stage_health.py
 
       - name: Run base-rate history + rendering tests
         run: |
