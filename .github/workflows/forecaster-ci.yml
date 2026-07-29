@@ -25,7 +25,20 @@ on:
       - "pythia/llm_batch.py"
       - "pythia/model_costs.json"
       - "pythia/tests/**"
+      - "pythia/buckets.py"
+      - "pythia/api/app.py"
+      - "pythia/api/core.py"
+      - "pythia/api/routes/risk_index.py"
+      # resolver/tests files that guard forecaster/pythia code. resolver-ci-fast
+      # runs all of resolver/tests/ but triggers only on resolver/**, so without
+      # naming them here a PR touching only forecaster/ or pythia/ runs none of
+      # them. test_ci_shell_sanity.py enforces this wiring.
       - "resolver/tests/test_idmc_history_conflict_pa.py"
+      - "resolver/tests/test_hs_triage_resilience_and_rerun_lists.py"
+      - "resolver/tests/test_forecaster_llm_logging_inserts_row.py"
+      - "resolver/tests/test_conflict_forecasts_table.py"
+      - "resolver/tests/test_eiv_scoring.py"
+      - "resolver/tests/test_risk_index_prefers_bayesmc.py"
       - "pythia/api/routes/costs.py"
       - "scripts/ci/poll_llm_batches.py"
       - "scripts/ci/check_pipeline_active.py"
@@ -34,6 +47,9 @@ on:
       - "scripts/ci/tests/test_batch_economics.py"
       - "scripts/ci/tests/test_stage_health.py"
       - ".github/workflows/pythia_pipeline_stage.yml"
+      # Self-reference, as horizon-scanner-ci.yml already does: without it a PR
+      # editing this workflow's own test list never runs the list it edited.
+      - ".github/workflows/forecaster-ci.yml"
       - "tests/test_poll_llm_batches_guard.py"
       - "tests/test_check_pipeline_active.py"
 
@@ -209,6 +225,20 @@ jobs:
             forecaster/tests/test_history_summary.py \
             forecaster/tests/test_fewsnet_history.py \
             resolver/tests/test_idmc_history_conflict_pa.py
+
+      - name: Run resolver/tests suites that guard forecaster + pythia code
+        run: |
+          # Same class of gap as test_idmc_history_conflict_pa above: these
+          # files live under resolver/tests but import forecaster/ and pythia/.
+          # resolver-ci-fast runs them, but only triggers on resolver/**, so a
+          # PR touching only the code they guard re-ran nothing.
+          echo "=== Running cross-package resolver/tests suites ==="
+          pytest -vv \
+            resolver/tests/test_hs_triage_resilience_and_rerun_lists.py \
+            resolver/tests/test_forecaster_llm_logging_inserts_row.py \
+            resolver/tests/test_conflict_forecasts_table.py \
+            resolver/tests/test_eiv_scoring.py \
+            resolver/tests/test_risk_index_prefers_bayesmc.py
 
       - name: Run SPD experimental mode (dual/bayesmc)
         if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'bayesmc_write' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') }}
