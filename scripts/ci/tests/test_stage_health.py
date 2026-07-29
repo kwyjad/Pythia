@@ -247,3 +247,33 @@ def test_writes_step_summary(tmp_path, monkeypatch):
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(s))
     _run(path, tmp_path)
     assert "Stage health" in s.read_text()
+
+
+def test_is_test_breakdown_is_rendered_in_markdown(tmp_path, monkeypatch):
+    """The per-table counts must reach the LOG, not only the JSON artifact.
+
+    When this check first fired in production it reported INCONSISTENT but the
+    breakdown lived only in the artifact — unreadable from a restricted-network
+    session, so the finding was visible and undiagnosable at the same time.
+    """
+    monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+    path = _db(tmp_path)
+    con = duckdb.connect(path)
+    _call(con, call_id="c1", is_test=True)
+    con.execute("INSERT INTO hs_triage VALUES (?, 1, 1, FALSE)", [RUN])
+    con.close()
+
+    rep = _run(path, tmp_path)
+    md = stage_health._markdown(rep)
+    assert "| llm_calls |" in md
+    assert "| hs_triage |" in md
+
+
+def test_absent_grounding_is_explained_not_blank(tmp_path):
+    """A bare empty table can't distinguish 'failed' from 'happens elsewhere'."""
+    path = _db(tmp_path)
+    con = duckdb.connect(path)
+    _call(con, call_id="c1", hazard_code="SPD_ACE")  # not a grounding row
+    con.close()
+    md = stage_health._markdown(_run(path, tmp_path))
+    assert "No grounding calls in" in md

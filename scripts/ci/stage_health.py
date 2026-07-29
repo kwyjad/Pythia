@@ -283,12 +283,19 @@ def _markdown(rep: Dict[str, Any]) -> str:
     if g.get("available"):
         L.append("**Grounding**")
         L.append("")
-        L.append("| pass | calls | no-backend | % |")
-        L.append("|---|--:|--:|--:|")
-        for k in ("rc", "triage"):
-            s = g.get(k) or {}
-            if s.get("n_calls"):
+        rows = [(k, g.get(k) or {}) for k in ("rc", "triage")]
+        rows = [(k, s) for k, s in rows if s.get("n_calls")]
+        if rows:
+            L.append("| pass | calls | no-backend | % |")
+            L.append("|---|--:|--:|--:|")
+            for k, s in rows:
                 L.append(f"| {k} | {s['n_calls']} | {s['n_no_backend']} | {s['no_backend_pct']}% |")
+        else:
+            # An empty table is ambiguous between "grounding failed entirely"
+            # and "grounding happened in an earlier stage". Say which.
+            scope = "this stage's window" if rep.get("since") else "this run"
+            L.append(f"_No grounding calls in {scope} — grounding runs in the hs_submit "
+                     f"and hs_rc_collect stages._")
         L.append("")
         for k in ("rc", "triage"):
             for mid, v in ((g.get(k) or {}).get("no_backend_by_reason") or {}).items():
@@ -308,6 +315,17 @@ def _markdown(rep: Dict[str, Any]) -> str:
         exp = it.get("matches_expected")
         extra = "" if exp is None else (" · matches expected" if exp else " · **does NOT match expected**")
         L.append(f"**is_test**: {status} — values {it['distinct_values']}{extra}")
+        # Always render the per-table counts, not just on failure. When this
+        # first fired in production the summary said "INCONSISTENT" but the
+        # breakdown was only in the JSON artifact — and artifacts are exactly
+        # what a restricted-network reader cannot fetch, so the finding was
+        # visible but undiagnosable.
+        L.append("")
+        L.append("| table | " + " | ".join(sorted({k for c in it["per_table"].values() for k in c})) + " |")
+        keys = sorted({k for c in it["per_table"].values() for k in c})
+        L.append("|---|" + "--:|" * len(keys))
+        for table, counts in sorted(it["per_table"].items()):
+            L.append(f"| {table} | " + " | ".join(str(counts.get(k, 0)) for k in keys) + " |")
         L.append("")
 
     c = rep.get("cost") or {}
