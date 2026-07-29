@@ -277,12 +277,41 @@ jobs:
           path: diagnostics/batch_state.json
           retention-days: 14
 
+      # Additive diagnostics. `continue-on-error` is load-bearing: stages
+      # 2..N of a live pipeline run whatever is on main, so a reporting bug
+      # here must never take down real forecasting work.
+      - name: Batch economics
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.batch_economics \
+            --db "${PYTHIA_DB_URL}" \
+            --pipeline-id "${BATCH_PIPELINE_ID}" \
+            --stage hs_submit \
+            --out diagnostics/batch_economics__hs_submit.json
+          exit 0
+
+      - name: Post-run diagnostics (stage-scoped)
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python scripts/post_run_diagnostics.py --db "${PYTHIA_DB_URL}" \
+            2>&1 | tee diagnostics/post_run__hs_submit.txt
+          exit 0
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pythia-stage-diagnostics
-          path: diagnostics/hs_stdout.txt
+          path: |
+            diagnostics/hs_stdout.txt
+            diagnostics/batch_economics__*.json
+            diagnostics/post_run__*.txt
           if-no-files-found: warn
 
       # Without this step a signature regression leaves the job green with
@@ -408,12 +437,41 @@ jobs:
           path: diagnostics/batch_state.json
           retention-days: 14
 
+      # Additive diagnostics. `continue-on-error` is load-bearing: stages
+      # 2..N of a live pipeline run whatever is on main, so a reporting bug
+      # here must never take down real forecasting work.
+      - name: Batch economics
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.batch_economics \
+            --db "${PYTHIA_DB_URL}" \
+            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --stage hs_rc_collect \
+            --out diagnostics/batch_economics__hs_rc_collect.json
+          exit 0
+
+      - name: Post-run diagnostics (stage-scoped)
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python scripts/post_run_diagnostics.py --db "${PYTHIA_DB_URL}" \
+            2>&1 | tee diagnostics/post_run__hs_rc_collect.txt
+          exit 0
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pythia-stage-diagnostics
-          path: diagnostics/hs_stdout.txt
+          path: |
+            diagnostics/hs_stdout.txt
+            diagnostics/batch_economics__*.json
+            diagnostics/post_run__*.txt
           if-no-files-found: warn
 
       # Without this step a signature regression leaves the job green with
@@ -578,6 +636,32 @@ jobs:
           path: diagnostics/batch_state.json
           retention-days: 14
 
+      # Additive diagnostics. `continue-on-error` is load-bearing: stages
+      # 2..N of a live pipeline run whatever is on main, so a reporting bug
+      # here must never take down real forecasting work.
+      - name: Batch economics
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.batch_economics \
+            --db "${PYTHIA_DB_URL}" \
+            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --stage hs_finalize_fc_submit \
+            --out diagnostics/batch_economics__hs_finalize_fc_submit.json
+          exit 0
+
+      - name: Post-run diagnostics (stage-scoped)
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python scripts/post_run_diagnostics.py --db "${PYTHIA_DB_URL}" \
+            2>&1 | tee diagnostics/post_run__hs_finalize_fc_submit.txt
+          exit 0
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -588,6 +672,8 @@ jobs:
             diagnostics/forecaster_submit_stdout.txt
             diagnostics/hs_triage_coverage__*.csv
             diagnostics/hs_triage_failures__*.json
+            diagnostics/batch_economics__*.json
+            diagnostics/post_run__*.txt
           if-no-files-found: warn
 
       # Without this step a signature regression leaves the job green with
@@ -760,6 +846,32 @@ jobs:
           path: diagnostics/batch_state.json
           retention-days: 14
 
+      # Additive diagnostics. `continue-on-error` is load-bearing: stages
+      # 2..N of a live pipeline run whatever is on main, so a reporting bug
+      # here must never take down real forecasting work.
+      - name: Batch economics
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.batch_economics \
+            --db "${PYTHIA_DB_URL}" \
+            --pipeline-id "${BATCH_PIPELINE_ID}" \
+            --stage fc_submit \
+            --out diagnostics/batch_economics__fc_submit.json
+          exit 0
+
+      - name: Post-run diagnostics (stage-scoped)
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python scripts/post_run_diagnostics.py --db "${PYTHIA_DB_URL}" \
+            2>&1 | tee diagnostics/post_run__fc_submit.txt
+          exit 0
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -770,6 +882,8 @@ jobs:
             diagnostics/forecaster_submit_stdout.txt
             diagnostics/hs_triage_coverage__*.csv
             diagnostics/hs_triage_failures__*.json
+            diagnostics/batch_economics__*.json
+            diagnostics/post_run__*.txt
           if-no-files-found: warn
 
       # Without this step a signature regression leaves the job green with
@@ -1035,12 +1149,30 @@ jobs:
           path: debug/pythia_debug_bundle__*.zip
           if-no-files-found: warn
 
+      # Additive diagnostics. `continue-on-error` is load-bearing: stages
+      # 2..N of a live pipeline run whatever is on main, so a reporting bug
+      # here must never take down real forecasting work.
+      - name: Batch economics
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.batch_economics \
+            --db "${PYTHIA_DB_URL}" \
+            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --stage fc_collect_finalize \
+            --out diagnostics/batch_economics__fc_collect_finalize.json
+          exit 0
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pythia-stage-diagnostics
-          path: diagnostics/forecaster_stdout.txt
+          path: |
+            diagnostics/forecaster_stdout.txt
+            diagnostics/batch_economics__*.json
           if-no-files-found: warn
 
       - name: Upload canonical resolver DB
