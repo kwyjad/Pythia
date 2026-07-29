@@ -14,6 +14,15 @@ on:
       - "scripts/ci/snapshot_prompt_artifact.py"
       - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
       - "resolver/tests/test_hs_hazard_tail_packs_schema_and_writer.py"
+      # More resolver/tests files that guard horizon_scanner/. resolver-ci-fast
+      # runs them but triggers only on resolver/**, so a horizon_scanner-only PR
+      # re-ran none of them. test_ci_shell_sanity.py enforces this wiring.
+      - "resolver/tests/test_hs_prompt_imports.py"
+      - "resolver/tests/test_hs_rc_promoted_selection.py"
+      - "resolver/tests/test_hs_regime_change.py"
+      - "resolver/tests/test_hs_tail_trigger_query.py"
+      - "resolver/tests/test_rc_calibration.py"
+      - "resolver/tests/test_hs_triage_resilience_and_rerun_lists.py"
       - "pythia/db/schema.py"
       - "pythia/buckets.py"
       - ".github/workflows/horizon-scanner-ci.yml"
@@ -23,6 +32,15 @@ on:
       - "scripts/ci/snapshot_prompt_artifact.py"
       - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
       - "resolver/tests/test_hs_hazard_tail_packs_schema_and_writer.py"
+      # More resolver/tests files that guard horizon_scanner/. resolver-ci-fast
+      # runs them but triggers only on resolver/**, so a horizon_scanner-only PR
+      # re-ran none of them. test_ci_shell_sanity.py enforces this wiring.
+      - "resolver/tests/test_hs_prompt_imports.py"
+      - "resolver/tests/test_hs_rc_promoted_selection.py"
+      - "resolver/tests/test_hs_regime_change.py"
+      - "resolver/tests/test_hs_tail_trigger_query.py"
+      - "resolver/tests/test_rc_calibration.py"
+      - "resolver/tests/test_hs_triage_resilience_and_rerun_lists.py"
       - "pythia/db/schema.py"
       - "pythia/buckets.py"
       - ".github/workflows/horizon-scanner-ci.yml"
@@ -65,4 +83,10 @@ jobs:
             horizon_scanner/ \
             scripts/ci/tests/test_snapshot_prompt_artifact.py \
             resolver/tests/test_hs_hazard_tail_packs_schema_and_writer.py \
+            resolver/tests/test_hs_prompt_imports.py \
+            resolver/tests/test_hs_rc_promoted_selection.py \
+            resolver/tests/test_hs_regime_change.py \
+            resolver/tests/test_hs_tail_trigger_query.py \
+            resolver/tests/test_rc_calibration.py \
+            resolver/tests/test_hs_triage_resilience_and_rerun_lists.py \
             -m "not allow_network and not network"

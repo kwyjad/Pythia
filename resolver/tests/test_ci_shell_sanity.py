@@ -59,3 +59,62 @@ def test_no_and_and_or_as_if_else():
                 offenders.append(f"{path}: {line.strip()}")
                 break
     assert not offenders, "A && B || C found; replace with if/else: " + ", ".join(offenders)
+
+
+# --------------------------------------------------------------------------
+# Cross-package test wiring
+#
+# A test guards the directory it IMPORTS from, not the directory it lives in.
+# resolver-ci-fast.yml runs all of resolver/tests/ but triggers only on
+# resolver/**, so a resolver/tests file importing forecaster/, horizon_scanner/
+# or pythia/ is re-run by NOTHING when the code it guards changes. That gap let
+# test_idmc_history_conflict_pa.py sit red on main for days after #816.
+#
+# Wiring by hand is what failed; this makes it self-enforcing. Kept to stdlib
+# only (no yaml) because ci-lint.yml installs just pytest and runs this file
+# with --noconftest.
+# --------------------------------------------------------------------------
+
+REPO_PACKAGES = {"forecaster", "horizon_scanner", "pythia", "sibyl"}
+
+_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+([a-zA-Z_][a-zA-Z0-9_]*)", re.MULTILINE)
+
+
+def _foreign_packages(text):
+    """Top-level repo packages other than `resolver` that this file imports."""
+    return {m for m in _IMPORT_RE.findall(text) if m in REPO_PACKAGES}
+
+
+def test_cross_package_resolver_tests_are_wired_into_a_workflow():
+    workflows = list(_workflow_texts())
+    offenders = []
+
+    for test_path in sorted(pathlib.Path("resolver/tests").glob("test_*.py")):
+        text = test_path.read_text(encoding="utf-8", errors="replace")
+        packages = _foreign_packages(text)
+        if not packages:
+            continue
+
+        rel = test_path.as_posix()
+        # paths: entries are quoted list items; pytest arguments are bare. A
+        # workflow only counts when it does BOTH — a trigger without an
+        # invocation runs nothing, an invocation without a trigger never fires.
+        triggered = {p.name for p, t in workflows if f'- "{rel}"' in t}
+        invoked = {
+            p.name
+            for p, t in workflows
+            if re.search(r"(?<![\"'])" + re.escape(rel) + r"(?![\"'])", t)
+        }
+        if not (triggered & invoked):
+            offenders.append(
+                f"{rel} imports {sorted(packages)} but no workflow both triggers on it "
+                f"and runs it (triggered by: {sorted(triggered) or 'none'}; "
+                f"invoked by: {sorted(invoked) or 'none'}). "
+                "Add it to the paths: block AND the pytest call of the workflow that "
+                "owns the code it guards — horizon_scanner -> horizon-scanner-ci.yml, "
+                "forecaster/pythia -> forecaster-ci.yml."
+            )
+
+    assert not offenders, "Cross-package resolver/tests not wired into CI:\n" + "\n".join(
+        offenders
+    )
