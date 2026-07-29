@@ -332,7 +332,10 @@ jobs:
             diagnostics/batch_economics__*.json
             diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
-          if-no-files-found: warn
+          # error, not warn: hs_stdout.txt is the one file this stage is
+          # always expected to produce, and a silently-missing diagnostics
+          # upload inside a green run is exactly the blind spot being closed.
+          if-no-files-found: error
 
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
@@ -512,7 +515,10 @@ jobs:
             diagnostics/batch_economics__*.json
             diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
-          if-no-files-found: warn
+          # error, not warn: hs_stdout.txt is the one file this stage is
+          # always expected to produce, and a silently-missing diagnostics
+          # upload inside a green run is exactly the blind spot being closed.
+          if-no-files-found: error
 
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
@@ -734,7 +740,9 @@ jobs:
             diagnostics/batch_economics__*.json
             diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
-          if-no-files-found: warn
+          # error, not warn: hs_stdout.txt always exists once the stage ran,
+          # so this fires only when the whole diagnostics set went missing.
+          if-no-files-found: error
 
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
@@ -964,7 +972,9 @@ jobs:
             diagnostics/batch_economics__*.json
             diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
-          if-no-files-found: warn
+          # error, not warn: hs_stdout.txt always exists once the stage ran,
+          # so this fires only when the whole diagnostics set went missing.
+          if-no-files-found: error
 
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
@@ -1273,7 +1283,8 @@ jobs:
             diagnostics/forecaster_stdout.txt
             diagnostics/batch_economics__*.json
             diagnostics/stage_health__*.json
-          if-no-files-found: warn
+          # error, not warn: see the HS stages' upload.
+          if-no-files-found: error
 
       - name: Upload canonical resolver DB
         if: success() && steps.signature_after.outputs.signature_ok == 'true'

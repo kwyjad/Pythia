@@ -59,6 +59,8 @@ FAILED_CONCLUSIONS = ("failure", "cancelled", "timed_out", "startup_failure")
 # full production settings the moment the poller dispatched stage 2.
 CARRIED_INPUTS = ("batch_providers", "only_countries", "grounding_primary", "disable_brave")
 
+_DECISION_PATH = os.getenv("POLLER_DECISION_PATH", "diagnostics/poll_decision.json")
+
 
 def _dispatch_input_args(state: dict) -> list[str]:
     """`gh workflow run` -f args for the inputs carried by *state*.
@@ -115,13 +117,15 @@ def _dispatch_decision(
 
     marker = f"{pid} — {next_stage}"
     with_marker = [r for r in stage_runs if marker in str(r.get("displayTitle") or "")]
-    active_or_done = [
-        r for r in with_marker
-        if r.get("status") in ("queued", "in_progress")
-        or r.get("conclusion") == "success"
-    ]
-    if active_or_done:
-        return False, "already running/done"
+    # "completed" and "running" are split because the self-rescheduling chain
+    # keys off it: a running stage means come back later, a completed one means
+    # this pipeline is finished (the final stage emits no batch state, so its
+    # last state lingers for the artifact's 14-day retention and would
+    # otherwise re-arm the poller forever).
+    if any(r.get("conclusion") == "success" for r in with_marker):
+        return False, "already completed"
+    if any(r.get("status") in ("queued", "in_progress") for r in with_marker):
+        return False, "already running"
 
     failed = [r for r in with_marker if r.get("conclusion") in FAILED_CONCLUSIONS]
     if len(failed) >= max_attempts:
@@ -143,6 +147,84 @@ def _dispatch_decision(
                 f"last {newest_age_min:.0f}m ago)"
             )
     return True, f"dispatch (attempt {len(failed) + 1}/{max_attempts})"
+
+
+# Actions that mean this pipeline still needs another poll. Everything else
+# ("already completed", "STALLED", a failed dispatch) is terminal for the
+# self-rescheduling chain — see _should_rearm.
+REARM_ACTIONS = frozenset({"waiting", "dispatched", "already running", "cooling down"})
+
+
+def _chain_depth() -> int:
+    try:
+        return int(os.getenv("POLLER_CHAIN_DEPTH", "0") or "0")
+    except ValueError:
+        return 0
+
+
+def _max_chain() -> int:
+    """Backstop against a self-dispatch loop that a logic bug keeps alive.
+
+    At the workflow's ~7-minute cadence, 200 links is a little over 24h, which
+    is already past PYTHIA_BATCH_MAX_WAIT_H — so a healthy pipeline can never
+    reach it.
+    """
+    try:
+        return int(os.getenv("POLLER_MAX_CHAIN", "200") or "200")
+    except ValueError:
+        return 200
+
+
+def _should_rearm(decisions: list[dict]) -> tuple[bool, str]:
+    """(rearm?, why) — should the poller dispatch another tick of itself?
+
+    Exists because the */15 cron is not honoured: GitHub throttles frequent
+    schedules to roughly hourly, which left staged pipelines parked for hours
+    between stages. The chain makes the cron an ignition source rather than the
+    mechanism of progress.
+    """
+    live = [d for d in decisions if d.get("action") in REARM_ACTIONS]
+    if not live:
+        return False, "no pipeline needs another poll"
+    depth, cap = _chain_depth(), _max_chain()
+    if depth >= cap:
+        return False, f"chain cap reached ({depth}/{cap})"
+    return True, f"{len(live)} pipeline(s) still in flight: " + ", ".join(
+        f"{d['pipeline_id']}={d['action']}" for d in live[:5]
+    )
+
+
+def _write_decisions(decisions: list[dict], rearm: bool, why: str, path: str) -> None:
+    """Persist why the poller did what it did (gap G6).
+
+    Dispatch decisions previously existed only in job logs, which expire — so
+    "why did this pipeline stall?" had no durable evidence trail.
+    """
+    payload = {
+        "polled_at": datetime.now(timezone.utc).isoformat(),
+        "chain_depth": _chain_depth(),
+        "rearm": rearm,
+        "rearm_reason": why,
+        "decisions": decisions,
+    }
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, default=str)
+        print(f"wrote {path}")
+    except Exception as exc:  # noqa: BLE001 - diagnostics only
+        print(f"[warn] could not write {path}: {type(exc).__name__}: {exc}")
+
+
+def _write_output(name: str, value: str) -> None:
+    path = os.getenv("GITHUB_OUTPUT")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{name}={value}\n")
+    except Exception as exc:  # noqa: BLE001 - diagnostics only
+        print(f"[warn] could not write GITHUB_OUTPUT: {type(exc).__name__}: {exc}")
 
 
 def _gh(*args: str) -> str:
@@ -235,14 +317,25 @@ def main() -> int:
 
     if not states:
         print("No pending pipelines (no pythia-batch-state artifacts found).")
+        _write_output("rearm", "false")
+        _write_decisions([], False, "no batch-state artifacts", _DECISION_PATH)
         return 0
 
     # 3. Dispatch-once guard data: existing stage runs (any status).
     stage_runs = _list_runs(STAGE_WORKFLOW_NAME)
 
     summary_lines: list[str] = []
+    decisions: list[dict] = []
     for pid, state in sorted(states.items()):
         next_stage = str(state["next_stage"])
+        record: dict = {
+            "pipeline_id": pid,
+            "next_stage": next_stage,
+            "db_run_id": state.get("db_run_id"),
+            "state_created_at": state.get("created_at"),
+            "batches": [],
+        }
+        decisions.append(record)
         dispatch, reason = _dispatch_decision(
             pid,
             next_stage,
@@ -260,6 +353,8 @@ def main() -> int:
                     f"Stage' manually with stage={next_stage} pipeline_id={pid} "
                     f"db_run_id={state.get('db_run_id') or ''}."
                 )
+            record["action"] = reason
+            record["reason"] = reason
             summary_lines.append(f"{pid}: {next_stage} — {reason}")
             continue
 
@@ -269,11 +364,19 @@ def main() -> int:
             batch_state = _poll_provider(
                 str(batch.get("provider") or ""), str(batch.get("provider_batch_id") or "")
             )
+            record["batches"].append({
+                "batch_id": batch.get("batch_id"),
+                "provider": batch.get("provider"),
+                "state": batch_state,
+            })
             if batch_state not in ("ended", "failed", "expired", "canceled"):
                 unfinished.append(f"{batch.get('batch_id')}={batch_state}")
 
         age_h = _age_hours(state.get("created_at"))
+        record["age_hours"] = round(age_h, 2)
         if unfinished and age_h < _max_wait_hours():
+            record["action"] = "waiting"
+            record["reason"] = f"{len(unfinished)}/{len(pending)} batch(es) unfinished"
             summary_lines.append(
                 f"{pid}: waiting on {len(unfinished)}/{len(pending)} batch(es) "
                 f"(age {age_h:.1f}h): {', '.join(unfinished[:5])}"
@@ -296,19 +399,30 @@ def main() -> int:
                 "-f", f"test_mode={'true' if state.get('test_mode') else 'false'}",
                 *_dispatch_input_args(state),
             )
+            record["action"] = "dispatched"
+            record["reason"] = reason
             summary_lines.append(f"{pid}: dispatched {next_stage} (db_run_id={state.get('db_run_id')})")
         except Exception as exc:  # noqa: BLE001
+            record["action"] = "dispatch failed"
+            record["reason"] = str(exc)
             summary_lines.append(f"{pid}: dispatch FAILED: {exc}")
+
+    rearm, why = _should_rearm(decisions)
+    _write_output("rearm", "true" if rearm else "false")
+    _write_output("chain_depth_next", str(_chain_depth() + 1))
+    _write_decisions(decisions, rearm, why, _DECISION_PATH)
 
     print("=== poll_llm_batches summary ===")
     for line in summary_lines:
         print(f"  {line}")
+    print(f"  rearm={rearm} ({why})")
     step_summary = os.getenv("GITHUB_STEP_SUMMARY")
     if step_summary:
         with open(step_summary, "a", encoding="utf-8") as fh:
             fh.write("### LLM batch poller\n")
             for line in summary_lines:
                 fh.write(f"- {line}\n")
+            fh.write(f"- rearm: `{rearm}` — {why}\n")
     return 0
 
 
