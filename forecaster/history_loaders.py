@@ -38,7 +38,19 @@ def _load_idmc_conflict_flow_history_summary(
     hazard_code: str,
 ) -> Dict[str, Any]:
     """
-    Best-effort IDMC/DTM conflict displacement history for use in _build_history_summary.
+    Best-effort IDMC/DTM conflict displacement history.
+
+    NOT on the SPD base-rate path any more. ``_build_history_summary`` routed
+    ACE/PA here until July 2026; the dict below carries no ``type``, so
+    ``_format_base_rate_for_prompt`` fell through to its legacy JSON-dump
+    branch and ACE/PA prompts got a raw blob instead of a curated block. Both
+    conflict metrics now go through ``_build_conflict_base_rate``. Retained as
+    a re-export (``forecaster.cli`` still exposes the name).
+
+    Two caveats if you ever put it back on a prompt path: the query does NOT
+    exclude the current partial calendar month (see the conflict-base-rate
+    entry in CLAUDE.md's Known failure modes), and the shape needs a ``type``
+    plus a matching renderer branch.
 
     Reads per-month flows from facts_deltas for conflict hazards:
       - metric ∈ {new_displacements, idp_displacement_new_dtm, idp_displacement_flow_idmc}
@@ -333,15 +345,23 @@ def _format_base_rate_for_prompt(
     forecast_keys: list[str],
     iso3: str = "",
     hazard_code: str = "",
+    metric: str = "",
 ) -> str:
     """Format a base-rate dict into a human-readable prompt block.
 
-    Handles seasonal_profile, conflict_trajectory, no_base_rate, and
-    legacy dict formats (falls back to JSON dump).
+    Handles fewsnet_phase3, seasonal_profile, conflict_trajectory,
+    no_base_rate, and legacy dict formats (falls back to JSON dump).
+
+    ``metric`` is optional and only affects ``conflict_trajectory``, where the
+    same summary serves two questions: it puts the series the question actually
+    resolves against first and names it as the prior anchor (PA resolves on
+    IDMC displacement, FATALITIES on ACLED). Omitting it keeps the historical
+    fatalities-first order, so existing callers render exactly as before.
     """
     summary_type = history_summary.get("type", "")
     iso3_up = (iso3 or "").upper().strip()
     hz_up = (hazard_code or "").upper().strip()
+    metric_up = (metric or "").upper().strip()
 
     country_name = _load_country_names().get(iso3_up, iso3_up)
     hazard_display = _HAZARD_DISPLAY_NAMES.get(hz_up, hz_up)
@@ -476,53 +496,74 @@ def _format_base_rate_for_prompt(
         fat = history_summary.get("fatalities", {})
         disp = history_summary.get("displacements", {})
 
+        def _series_block(
+            series: Dict[str, Any],
+            *,
+            label: str,
+            default_source: str,
+            unit_suffix: str,
+            empty_note: str,
+            is_anchor: bool,
+        ) -> list[str]:
+            heading = f"{label} ({series.get('source', default_source)})"
+            if is_anchor:
+                heading += " — THIS QUESTION'S SERIES"
+            if series.get("last_month") is None:
+                return [f"{heading}: {series.get('note', empty_note)}"]
+
+            last = series["last_month"]
+            trend_pct = series.get("trend_pct")
+            trend_dir = series.get("trend_direction", "unknown")
+            if trend_pct == "new_activity":
+                trend_str = "new activity (no prior baseline)"
+            elif trend_pct is not None:
+                trend_str = (
+                    f"{trend_dir} ({'+' if trend_pct > 0 else ''}{trend_pct}% "
+                    "vs prior 3-month window)"
+                )
+            else:
+                trend_str = "insufficient data for trend"
+            return [
+                f"{heading}:",
+                f"  Last month ({last.get('ym', '?')}): {_fmt(last.get('value'))}{unit_suffix}",
+                f"  3-month avg: {_fmt(series.get('trailing_3m_avg'))}/month",
+                f"  Trend: {trend_str}",
+            ]
+
+        # PA resolves on displacement, FATALITIES on fatalities. Lead with the
+        # series the question is actually scored against; the other stays as
+        # conflict context. With no metric supplied, keep the legacy order.
+        anchor = "displacements" if metric_up == "PA" else "fatalities"
+        blocks = {
+            "fatalities": lambda: _series_block(
+                fat,
+                label="Fatalities",
+                default_source="ACLED",
+                unit_suffix="",
+                empty_note="No ACLED fatalities data available.",
+                is_anchor=(anchor == "fatalities" and bool(metric_up)),
+            ),
+            "displacements": lambda: _series_block(
+                disp,
+                label="Displacement",
+                default_source="IDMC",
+                unit_suffix=" new displacements",
+                empty_note="No IDMC displacement data available.",
+                is_anchor=(anchor == "displacements" and bool(metric_up)),
+            ),
+        }
+        order = (
+            ["displacements", "fatalities"]
+            if anchor == "displacements"
+            else ["fatalities", "displacements"]
+        )
+
         lines = [
             f"BASE RATE: {country_name} {hazard_display} ({hz_up}) — recent trajectory",
         ]
-
-        # Fatalities block
-        lines.append("")
-        if fat.get("last_month") is not None:
-            last_f = fat["last_month"]
-            trend_pct = fat.get("trend_pct")
-            trend_dir = fat.get("trend_direction", "unknown")
-
-            if trend_pct == "new_activity":
-                trend_str = "new activity (no prior baseline)"
-            elif trend_pct is not None:
-                trend_str = f"{trend_dir} ({'+' if trend_pct > 0 else ''}{trend_pct}% vs prior 3-month window)"
-            else:
-                trend_str = "insufficient data for trend"
-
-            lines.append(f"Fatalities ({fat.get('source', 'ACLED')}):")
-            lines.append(f"  Last month ({last_f.get('ym', '?')}): {_fmt(last_f.get('value'))}")
-            lines.append(f"  3-month avg: {_fmt(fat.get('trailing_3m_avg'))}/month")
-            lines.append(f"  Trend: {trend_str}")
-        else:
-            note = fat.get("note", "No ACLED fatalities data available.")
-            lines.append(f"Fatalities (ACLED): {note}")
-
-        # Displacements block
-        lines.append("")
-        if disp.get("last_month") is not None:
-            last_d = disp["last_month"]
-            trend_pct = disp.get("trend_pct")
-            trend_dir = disp.get("trend_direction", "unknown")
-
-            if trend_pct == "new_activity":
-                trend_str = "new activity (no prior baseline)"
-            elif trend_pct is not None:
-                trend_str = f"{trend_dir} ({'+' if trend_pct > 0 else ''}{trend_pct}% vs prior 3-month window)"
-            else:
-                trend_str = "insufficient data for trend"
-
-            lines.append(f"Displacement ({disp.get('source', 'IDMC')}):")
-            lines.append(f"  Last month ({last_d.get('ym', '?')}): {_fmt(last_d.get('value'))} new displacements")
-            lines.append(f"  3-month avg: {_fmt(disp.get('trailing_3m_avg'))}/month")
-            lines.append(f"  Trend: {trend_str}")
-        else:
-            note = disp.get("note", "No IDMC displacement data available.")
-            lines.append(f"Displacement (IDMC): {note}")
+        for key in order:
+            lines.append("")
+            lines.extend(blocks[key]())
 
         lines.append("")
         lines.append(
