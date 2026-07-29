@@ -378,8 +378,9 @@ def log_hs_run_to_db(
     config_profile: str,
     requested_countries: list[str] | None = None,
     skipped_entries: list[dict] | None = None,
-    is_test: bool = False,
+    is_test: bool | None = None,
 ) -> None:
+    is_test = is_test_mode() if is_test is None else bool(is_test)
     con = connect(read_only=False)
     ensure_schema(con)
 
@@ -417,7 +418,10 @@ def log_hs_run_to_db(
     con.close()
 
 
-def log_hs_scenarios_to_db(hs_run_id: str, scenarios: Iterable[dict], is_test: bool = False) -> None:
+def log_hs_scenarios_to_db(
+    hs_run_id: str, scenarios: Iterable[dict], is_test: bool | None = None
+) -> None:
+    is_test = is_test_mode() if is_test is None else bool(is_test)
     con = connect(read_only=False)
     ensure_schema(con)
 
@@ -488,7 +492,10 @@ def log_hs_scenarios_to_db(hs_run_id: str, scenarios: Iterable[dict], is_test: b
     con.close()
 
 
-def log_hs_country_reports_to_db(hs_run_id: str, reports: dict[str, dict], is_test: bool = False) -> None:
+def log_hs_country_reports_to_db(
+    hs_run_id: str, reports: dict[str, dict], is_test: bool | None = None
+) -> None:
+    is_test = is_test_mode() if is_test is None else bool(is_test)
     con = connect(read_only=False)
     ensure_schema(con)
 
@@ -530,7 +537,16 @@ def log_hs_country_reports_to_db(hs_run_id: str, reports: dict[str, dict], is_te
     con.close()
 
 
-def log_hs_hazard_tail_packs_to_db(hs_run_id: str, packs: list[dict], is_test: bool = False) -> None:
+def log_hs_hazard_tail_packs_to_db(
+    hs_run_id: str, packs: list[dict], is_test: bool | None = None
+) -> None:
+    # is_test defaults to None, not False, so a writer whose caller forgets the
+    # flag inherits the run's mode instead of silently stamping test data as
+    # production. hs_hazard_tail_packs shipped with `= False` and neither
+    # grounding caller passed it, so every test run's grounding packs were
+    # written as production rows (2026-07-29). Same fix as
+    # log_forecaster_llm_call (2026-07-13).
+    is_test = is_test_mode() if is_test is None else bool(is_test)
     con = connect(read_only=False)
     ensure_schema(con)
 
@@ -638,8 +654,11 @@ def log_hs_hazard_tail_packs_to_db(hs_run_id: str, packs: list[dict], is_test: b
     con.close()
 
 
-def log_hs_adversarial_checks_to_db(hs_run_id: str, checks: list[dict], is_test: bool = False) -> None:
+def log_hs_adversarial_checks_to_db(
+    hs_run_id: str, checks: list[dict], is_test: bool | None = None
+) -> None:
     """Persist adversarial evidence checks to ``hs_adversarial_checks``."""
+    is_test = is_test_mode() if is_test is None else bool(is_test)
     con = connect(read_only=False)
     ensure_schema(con)
 

@@ -546,3 +546,80 @@ class TestSalvageAndCounters:
             "SELECT n_succeeded FROM llm_batches WHERE batch_id = ?", [batch_id]
         ).fetchone()[0]
         assert n_succ == 1  # not zeroed by the re-collect
+
+
+class TestEmptyBatchDiagnosis:
+    """A batch that yields nothing must explain itself.
+
+    On 2026-07-29 both OpenAI batches returned zero results (succeeded=0,
+    errored=0, expired=12/4). Every request fell back to synchronous
+    full-price calls — 67% of that run's forecaster spend — and the run still
+    looked healthy, because the provider's terminal status and error payload
+    were never persisted. The cause was unrecoverable after the fact.
+    """
+
+    def _submitted_batch(self, con, fake_adapters, batch_enabled):
+        _enqueue_spd(con, question_id="Q1", model_key="m1")
+        _enqueue_spd(con, question_id="Q2", model_key="m2")
+        ids = llm_batch.submit_pending(
+            con, family="spd_v2", pipeline_id="pl_1", stage="fc_submit"
+        )
+        assert ids
+        return ids[0]
+
+    def test_zero_result_batch_records_provider_state(
+        self, con, fake_adapters, batch_enabled
+    ):
+        batch_id = self._submitted_batch(con, fake_adapters, batch_enabled)
+        fake_adapters.fetch_results = []          # provider returns nothing
+        fake_adapters.poll_state = "failed"
+
+        counts = llm_batch.collect_batch(con, batch_id)
+        assert counts["succeeded"] == 0 and counts["expired"] == 2
+
+        err = con.execute(
+            "SELECT error_text FROM llm_batches WHERE batch_id = ?", [batch_id]
+        ).fetchone()[0]
+        assert err, "a batch that returned nothing must record why"
+        assert "failed" in err          # the provider's terminal state
+        assert "n_expired" in err
+
+    def test_zero_result_batch_warns(self, con, fake_adapters, batch_enabled, capsys):
+        batch_id = self._submitted_batch(con, fake_adapters, batch_enabled)
+        fake_adapters.fetch_results = []
+        llm_batch.collect_batch(con, batch_id)
+        assert "::warning title=Batch returned no results::" in capsys.readouterr().out
+
+    def test_successful_batch_records_no_error(self, con, fake_adapters, batch_enabled):
+        batch_id = self._submitted_batch(con, fake_adapters, batch_enabled)
+        rows = con.execute(
+            "SELECT custom_id FROM llm_batch_requests WHERE batch_id = ?", [batch_id]
+        ).fetchall()
+        fake_adapters.fetch_results = [
+            (cid, True, '{"ok": 1}', {"prompt_tokens": 1, "completion_tokens": 1}, "")
+            for (cid,) in rows
+        ]
+        counts = llm_batch.collect_batch(con, batch_id)
+        assert counts["succeeded"] == len(rows)
+        err = con.execute(
+            "SELECT error_text FROM llm_batches WHERE batch_id = ?", [batch_id]
+        ).fetchone()[0]
+        assert not err
+
+    def test_poll_failure_does_not_break_collect(
+        self, con, fake_adapters, batch_enabled, monkeypatch
+    ):
+        """The sync fallback must still run even if the diagnosis fails."""
+        batch_id = self._submitted_batch(con, fake_adapters, batch_enabled)
+        fake_adapters.fetch_results = []
+
+        def _boom(self, provider_batch_id):
+            raise RuntimeError("provider unreachable")
+
+        monkeypatch.setattr(fake_adapters, "poll", _boom, raising=False)
+        counts = llm_batch.collect_batch(con, batch_id)   # must not raise
+        assert counts["expired"] == 2
+        err = con.execute(
+            "SELECT error_text FROM llm_batches WHERE batch_id = ?", [batch_id]
+        ).fetchone()[0]
+        assert "poll_error" in err

@@ -879,6 +879,40 @@ def pending_batches(con, pipeline_id: Optional[str] = None) -> List[Dict[str, An
     return [dict(zip(cols, r)) for r in rows]
 
 
+def _record_empty_batch(
+    con, batch_id: str, provider: str, provider_batch_id: str, n_expired: int
+) -> None:
+    """Persist why a batch yielded no results, and say so loudly.
+
+    DIAGNOSTIC ONLY — every failure path here is swallowed. The caller is
+    mid-collect and the sync fallback still has to run; losing the explanation
+    is bad, but losing the forecasts would be worse.
+    """
+
+    detail: Dict[str, Any] = {"provider_batch_id": provider_batch_id, "n_expired": n_expired}
+    try:
+        status = _adapter(provider).poll(provider_batch_id)
+        detail["provider_state"] = status.state
+        detail["counts"] = status.counts
+        detail["detail"] = status.detail
+    except Exception as exc:  # noqa: BLE001 - diagnostics only
+        detail["poll_error"] = f"{type(exc).__name__}: {exc}"
+
+    text = json.dumps(detail, default=str)[:4000]
+    try:
+        con.execute(
+            "UPDATE llm_batches SET error_text = ? WHERE batch_id = ?", [text, batch_id]
+        )
+    except Exception as exc:  # noqa: BLE001 - diagnostics only
+        LOGGER.warning("llm_batch: could not persist empty-batch detail for %s: %s", batch_id, exc)
+
+    LOGGER.error("llm_batch: batch %s returned NO results — %s", batch_id, text)
+    print(
+        f"::warning title=Batch returned no results::{provider} batch {batch_id} yielded 0 "
+        f"results; {n_expired} request(s) fall back to synchronous full-price calls. {text}"
+    )
+
+
 def collect_batch(con, batch_id: str) -> Dict[str, int]:
     """Fetch results for one batch into llm_batch_requests (idempotent).
 
@@ -979,6 +1013,16 @@ def collect_batch(con, batch_id: str) -> Dict[str, int]:
         # Pure re-collect of an already-collected batch (poller double-fire):
         # keep the original telemetry counters instead of zeroing them.
         return counts
+
+    # A batch that produced nothing is the expensive silent failure: every
+    # item falls back to sync at full price and the run still looks healthy.
+    # It happened on 2026-07-29 — both OpenAI batches returned zero results
+    # (succeeded=0, errored=0, expired=12/4), which cost the discount on 67%
+    # of forecaster spend, and the provider's own terminal status and error
+    # payload had been thrown away, so the cause was unrecoverable. Ask the
+    # provider once more and keep the answer.
+    if counts["succeeded"] == 0 and n_expired > 0:
+        _record_empty_batch(con, batch_id, provider, provider_batch_id, n_expired)
 
     if salvage:
         # Keep the terminal status (canceled/failed/expired) — record what

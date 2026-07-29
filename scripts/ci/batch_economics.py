@@ -69,7 +69,7 @@ def _collect_batches(con, pipeline_id: str) -> List[Dict[str, Any]]:
         SELECT batch_id, provider, family, stage, model_id, status,
                COALESCE(n_requests, 0), COALESCE(n_succeeded, 0),
                COALESCE(n_errored, 0), COALESCE(n_expired, 0),
-               COALESCE(n_fallback_sync, 0)
+               COALESCE(n_fallback_sync, 0), COALESCE(error_text, '')
         FROM llm_batches
         WHERE pipeline_id = ?
         ORDER BY submitted_at
@@ -89,6 +89,7 @@ def _collect_batches(con, pipeline_id: str) -> List[Dict[str, Any]]:
             "n_errored": int(r[8]),
             "n_expired": int(r[9]),
             "n_fallback_sync": int(r[10]),
+            "error_text": r[11],
         }
         for r in rows
     ]
@@ -227,6 +228,16 @@ def _markdown(report: Dict[str, Any]) -> str:
             lines.append(f"| {family} | " + " | ".join(cells) + f" | {other} |")
         lines.append("")
 
+    # A batch that yielded nothing is why a fallback rate is high. Naming it
+    # here turns an unexplained percentage into an actionable cause.
+    empty = [b for b in report["batches"] if b["n_requests"] and not b["n_succeeded"]]
+    if empty:
+        lines.append("**Batches that returned no results** (their requests paid full price):")
+        lines.append("")
+        for b in empty:
+            lines.append(f"- `{b['batch_id']}` ({b['provider']}/{b['family']}): {b['error_text'] or 'no detail recorded'}")
+        lines.append("")
+
     tier = report.get("ledger", {})
     if tier.get("available"):
         lines.append(
@@ -308,6 +319,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     md = _markdown(report)
     print(md)
     _emit_step_summary(md)
+
+    for b in report["batches"]:
+        if b["n_requests"] and not b["n_succeeded"]:
+            print(
+                f"::warning title=Batch returned no results::{b['provider']} batch "
+                f"{b['batch_id']} ({b['family']}) yielded 0 of {b['n_requests']} results — "
+                f"those requests paid full price. {b['error_text'] or 'no detail recorded'}"
+            )
 
     s = report["summary"]
     if s["n_terminal_requests"] and s["fallback_sync_pct"] > args.fallback_warn_pct:
