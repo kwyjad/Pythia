@@ -186,6 +186,17 @@ jobs:
             tests/test_poll_llm_batches_guard.py \
             tests/test_check_pipeline_active.py
 
+      - name: Run base-rate history + rendering tests
+        run: |
+          # _build_history_summary and _format_base_rate_for_prompt decide the
+          # prior anchor in every SPD prompt, and neither suite ran in any
+          # workflow — which is how ACE/PA sat on the legacy JSON-dump branch
+          # with test_history_summary red on main and nobody seeing it.
+          echo "=== Running base-rate history + rendering tests ==="
+          pytest -vv \
+            forecaster/tests/test_history_summary.py \
+            forecaster/tests/test_fewsnet_history.py
+
       - name: Run SPD experimental mode (dual/bayesmc)
         if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'bayesmc_write' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') }}
         env:

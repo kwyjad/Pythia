@@ -256,7 +256,9 @@ def load_base_rate(
         summary = {"type": "no_base_rate", "note": f"base rate unavailable: {exc}"}
 
     try:
-        rendered = _format_base_rate_for_prompt(summary, forecast_keys, iso3, hazard_code)
+        rendered = _format_base_rate_for_prompt(
+            summary, forecast_keys, iso3, hazard_code, metric
+        )
     except Exception as exc:
         logger.warning("sibyl.base_rates: formatting failed: %s", exc)
         rendered = "BASE RATE: unavailable."

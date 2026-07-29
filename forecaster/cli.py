@@ -917,18 +917,20 @@ def _build_history_summary(iso3: str, hazard_code: str, metric: str) -> Dict[str
         result.setdefault("source", "IFRC")
         return result
 
-    # Conflict hazards — PA uses IDMC displacement history
-    if hz == "ACE" and m == "PA":
-        con = connect(read_only=True)
-        try:
-            return _load_idmc_conflict_flow_history_summary(con, iso3, hz)
-        finally:
-            con.close()
-
-    # Conflict hazards — FATALITIES uses trajectory
-    if hz == "ACE" and m == "FATALITIES":
+    # Conflict hazards — one trajectory builder for both metrics. PA anchors on
+    # the IDMC displacement series and FATALITIES on the ACLED series; the
+    # builder returns both, and the renderer leads with whichever one the
+    # question resolves against (see _format_base_rate_for_prompt's `metric`).
+    #
+    # PA used to call _load_idmc_conflict_flow_history_summary instead, whose
+    # dict carries no "type" — so _format_base_rate_for_prompt fell through to
+    # its legacy JSON-dump branch and every ACE/PA prompt got a raw blob where
+    # every other hazard/metric gets a curated base-rate block. That loader also
+    # never excluded the current partial month, the exact bias
+    # _build_conflict_base_rate was fixed for in July 2026.
+    if hz == "ACE" and m in ("PA", "FATALITIES"):
         result = _build_conflict_base_rate(iso3, hz)
-        result.setdefault("source", "ACLED")
+        result.setdefault("source", "IDMC" if m == "PA" else "ACLED")
         return result
 
     return {

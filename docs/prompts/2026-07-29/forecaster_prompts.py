@@ -1491,14 +1491,11 @@ def _build_base_rate_text(
     forecast_keys: list[str],
     iso3: str,
     hazard_code: str,
-    metric: str = "",
 ) -> str:
     """Lazy-import wrapper to avoid circular imports between prompts and cli."""
     from .cli import _format_base_rate_for_prompt  # noqa: F811 — deferred to avoid cycle
 
-    return _format_base_rate_for_prompt(
-        history_summary, forecast_keys, iso3=iso3, hazard_code=hazard_code, metric=metric
-    )
+    return _format_base_rate_for_prompt(history_summary, forecast_keys, iso3=iso3, hazard_code=hazard_code)
 
 
 def _prompt_v3_order_enabled() -> bool:
@@ -1917,7 +1914,7 @@ def build_spd_prompt_v2(
         f"{_json_dumps_for_prompt(question, indent=2)}\n"
         "```\n\n"
         f"{horizon_note}"
-        f"{_build_base_rate_text(history_summary, forecast_keys, iso3, hazard, metric)}\n\n"
+        f"{_build_base_rate_text(history_summary, forecast_keys, iso3, hazard)}\n\n"
         f"{base_rate_note_in_data}"
         "HS triage output:\n"
         "```json\n"
