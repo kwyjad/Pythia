@@ -178,6 +178,11 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Windows the per-stage cost rollup. A bare `date` cannot fail, and
+      # without it stage_health can only report cumulative run spend.
+      - name: Record stage start
+        run: echo "STAGE_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: |
           set -e
@@ -303,6 +308,20 @@ jobs:
             2>&1 | tee diagnostics/post_run__hs_submit.txt
           exit 0
 
+      - name: Stage health
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.stage_health \
+            --db "${PYTHIA_DB_URL}" \
+            --stage hs_submit \
+            --hs-run-id "${HS_RUN_ID}" \
+            --since "${STAGE_STARTED_AT}" \
+            --out diagnostics/stage_health__hs_submit.json
+          exit 0
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -311,6 +330,7 @@ jobs:
           path: |
             diagnostics/hs_stdout.txt
             diagnostics/batch_economics__*.json
+            diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
           if-no-files-found: warn
 
@@ -351,6 +371,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # Windows the per-stage cost rollup. A bare `date` cannot fail, and
+      # without it stage_health can only report cumulative run spend.
+      - name: Record stage start
+        run: echo "STAGE_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: |
@@ -463,6 +488,20 @@ jobs:
             2>&1 | tee diagnostics/post_run__hs_rc_collect.txt
           exit 0
 
+      - name: Stage health
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.stage_health \
+            --db "${PYTHIA_DB_URL}" \
+            --stage hs_rc_collect \
+            --hs-run-id "${HS_RUN_ID}" \
+            --since "${STAGE_STARTED_AT}" \
+            --out diagnostics/stage_health__hs_rc_collect.json
+          exit 0
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -471,6 +510,7 @@ jobs:
           path: |
             diagnostics/hs_stdout.txt
             diagnostics/batch_economics__*.json
+            diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
           if-no-files-found: warn
 
@@ -511,6 +551,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # Windows the per-stage cost rollup. A bare `date` cannot fail, and
+      # without it stage_health can only report cumulative run spend.
+      - name: Record stage start
+        run: echo "STAGE_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: |
@@ -662,6 +707,20 @@ jobs:
             2>&1 | tee diagnostics/post_run__hs_finalize_fc_submit.txt
           exit 0
 
+      - name: Stage health
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.stage_health \
+            --db "${PYTHIA_DB_URL}" \
+            --stage hs_finalize_fc_submit \
+            --hs-run-id "${HS_RUN_ID}" \
+            --since "${STAGE_STARTED_AT}" \
+            --out diagnostics/stage_health__hs_finalize_fc_submit.json
+          exit 0
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -673,6 +732,7 @@ jobs:
             diagnostics/hs_triage_coverage__*.csv
             diagnostics/hs_triage_failures__*.json
             diagnostics/batch_economics__*.json
+            diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
           if-no-files-found: warn
 
@@ -701,6 +761,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # Windows the per-stage cost rollup. A bare `date` cannot fail, and
+      # without it stage_health can only report cumulative run spend.
+      - name: Record stage start
+        run: echo "STAGE_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: |
@@ -872,6 +937,20 @@ jobs:
             2>&1 | tee diagnostics/post_run__fc_submit.txt
           exit 0
 
+      - name: Stage health
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.stage_health \
+            --db "${PYTHIA_DB_URL}" \
+            --stage fc_submit \
+            --hs-run-id "${HS_RUN_ID}" \
+            --since "${STAGE_STARTED_AT}" \
+            --out diagnostics/stage_health__fc_submit.json
+          exit 0
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -883,6 +962,7 @@ jobs:
             diagnostics/hs_triage_coverage__*.csv
             diagnostics/hs_triage_failures__*.json
             diagnostics/batch_economics__*.json
+            diagnostics/stage_health__*.json
             diagnostics/post_run__*.txt
           if-no-files-found: warn
 
@@ -923,6 +1003,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      # Windows the per-stage cost rollup. A bare `date` cannot fail, and
+      # without it stage_health can only report cumulative run spend.
+      - name: Record stage start
+        run: echo "STAGE_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: |
@@ -1165,6 +1250,20 @@ jobs:
             --out diagnostics/batch_economics__fc_collect_finalize.json
           exit 0
 
+      - name: Stage health
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.stage_health \
+            --db "${PYTHIA_DB_URL}" \
+            --stage fc_collect_finalize \
+            --hs-run-id "${HS_RUN_ID}" \
+            --since "${STAGE_STARTED_AT}" \
+            --out diagnostics/stage_health__fc_collect_finalize.json
+          exit 0
+
       - name: Upload stage diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -1173,6 +1272,7 @@ jobs:
           path: |
             diagnostics/forecaster_stdout.txt
             diagnostics/batch_economics__*.json
+            diagnostics/stage_health__*.json
           if-no-files-found: warn
 
       - name: Upload canonical resolver DB
