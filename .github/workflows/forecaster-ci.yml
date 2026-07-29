@@ -226,6 +226,19 @@ jobs:
             forecaster/tests/test_fewsnet_history.py \
             resolver/tests/test_idmc_history_conflict_pa.py
 
+      - name: Run debug-bundle tests
+        run: |
+          # These ran in NO workflow — forecaster-ci executes an explicit file
+          # list, so a bundle change reached main with nothing covering it. That
+          # is how the bundle came to report "LLM Calls: OK" for a run that had
+          # lost the batch discount on two thirds of its spend.
+          echo "=== Running debug bundle tests ==="
+          pytest -vv \
+            forecaster/tests/test_debug_bundle.py \
+            forecaster/tests/test_debug_bundle_llm_calls.py \
+            forecaster/tests/test_debug_bundle_adversarial_stats.py \
+            forecaster/tests/test_debug_bundle_batch_economics.py
+
       - name: Run resolver/tests suites that guard forecaster + pythia code
         run: |
           # Same class of gap as test_idmc_history_conflict_pa above: these
