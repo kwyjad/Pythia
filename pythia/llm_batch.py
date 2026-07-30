@@ -335,12 +335,19 @@ class _OpenAIBatch:
         payload = resp.json()
         counts = payload.get("request_counts") or {}
         state = self._STATE_MAP.get(str(payload.get("status")), "in_progress")
-        detail = json.dumps(
-            {
-                "output_file_id": payload.get("output_file_id"),
-                "error_file_id": payload.get("error_file_id"),
-            }
-        )
+        # `errors` is the ONLY place an input-validation failure is reported:
+        # when OpenAI ingests zero requests there is no error_file_id and
+        # request_counts is all zeros, so recording just the two file ids —
+        # as this did on 2026-07-29 and 2026-07-30 — throws away the reason
+        # and leaves "0 of 8 results" permanently unexplained.
+        detail_obj: Dict[str, Any] = {
+            "output_file_id": payload.get("output_file_id"),
+            "error_file_id": payload.get("error_file_id"),
+        }
+        errors = payload.get("errors")
+        if errors:
+            detail_obj["errors"] = errors
+        detail = json.dumps(detail_obj)
         return BatchStatus(provider_batch_id, state, dict(counts), detail)
 
     def fetch(self, provider_batch_id: str) -> Iterator[Tuple[str, bool, str, Dict[str, Any], str]]:
@@ -766,9 +773,18 @@ def submit_pending(
         provider = (provider or "").lower()
         if provider not in batch_providers():
             continue
-        # Gemini batches are per model (model id is in the endpoint URL);
-        # OpenAI/Anthropic batches carry the model per item.
-        group_key = (provider, model_id if provider == "google" else None)
+        # ALWAYS group per model. Gemini needs it because the model id is in
+        # the endpoint URL, and OpenAI *requires* it: a batch containing more
+        # than one model is rejected wholesale at validation with
+        # `mismatched_model`, which surfaces as request_counts={total: 0} and no
+        # error file. That is exactly what happened on 2026-07-29 and
+        # 2026-07-30 — the ensemble's two OpenAI members (gpt-5.6-sol and
+        # gpt-5.6-luna) landed in one spd_v2 batch, every request fell back to
+        # synchronous full price, and it cost ~2/3 of forecaster spend twice.
+        # Anthropic does permit mixed models, but grouping it per model too is
+        # a no-op while there is one Anthropic member and removes the trap for
+        # whoever adds a second.
+        group_key = (provider, model_id)
         grouped.setdefault(group_key, []).append((custom_id, body_json))
 
     for (provider, group_model), rows in grouped.items():

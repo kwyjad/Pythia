@@ -35,6 +35,16 @@ on:
         required: false
         default: ""
         type: string
+      inspect_batches:
+        description: "Diagnostic: space-separated OpenAI batch ids to dump in full (incl. the errors field). Skips polling."
+        required: false
+        default: ""
+        type: string
+      inspect_recent:
+        description: "Diagnostic: also dump the N most recent OpenAI batches (e.g. 5). Skips polling."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -105,9 +115,38 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
+      # Diagnostic escape hatch. A failed OpenAI batch is retained
+      # provider-side, so its `errors` field can be read after the fact — but
+      # only from somewhere holding the API key, which no local session does.
+      # Read-only and free; skips polling so a diagnostic run cannot dispatch
+      # a pipeline stage as a side effect.
+      - name: Inspect OpenAI batches (diagnostic)
+        id: inspect
+        if: ${{ inputs.inspect_batches != '' || inputs.inspect_recent != '' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Passed as env rather than interpolated into the script body: these
+          # are free-text dispatch inputs, and `${{ }}` inside a run block is a
+          # shell-injection seam.
+          INSPECT_BATCHES: ${{ inputs.inspect_batches }}
+          INSPECT_RECENT: ${{ inputs.inspect_recent }}
+        run: |
+          set -e
+          # Built as an array so the batch-id list word-splits deliberately
+          # rather than by accident (shellcheck SC2086).
+          args=()
+          if [ -n "${INSPECT_BATCHES}" ]; then
+            read -r -a ids <<< "${INSPECT_BATCHES}"
+            args+=("${ids[@]}")
+          fi
+          if [ -n "${INSPECT_RECENT}" ]; then
+            args+=(--recent "${INSPECT_RECENT}")
+          fi
+          python -m scripts.ci.inspect_openai_batch "${args[@]}" --input-head 2
+
       - name: Poll batches and dispatch ready stages
         id: poll
-        if: steps.gate.outputs.active == 'true'
+        if: ${{ steps.gate.outputs.active == 'true' && inputs.inspect_batches == '' && inputs.inspect_recent == '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           POLLER_CHAIN_DEPTH: ${{ inputs.chain_depth || '0' }}
