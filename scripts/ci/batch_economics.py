@@ -196,6 +196,40 @@ def _run_scope(hs_run_id: str, fc_run_id: str):
     return "(" + " OR ".join(clauses) + ")", params
 
 
+def _has_column(con, table: str, column: str) -> bool:
+    try:
+        rows = con.execute(f"PRAGMA table_info('{table}')").fetchall()
+        return any(str(r[1]) == column for r in rows)
+    except Exception:
+        return False
+
+
+def _batchable_sql(con) -> str:
+    """SQL predicate for llm_calls rows that a batch family could have carried.
+
+    Only four families are ever batched: spd_v2, binary_v2 (keyed by `phase`)
+    and hs_rc / hs_triage (the RC and triage model passes, identifiable only by
+    `call_type` — every HS row shares phase='hs_triage', grounding included).
+
+    Everything else has no batch family at all: grounding (rc_grounding /
+    triage_grounding), adversarial_search / adversarial_synthesis, scenario_v2
+    and sibyl. Counting those as "lost discount" — which a provider-level flag
+    does, because Gemini serves both batched RC passes and unbatchable grounding
+    — inflates the loss and makes the headline unactionable. On the 2026-07-30
+    SOM run it reported google losing 41.6% of batchable spend when none of that
+    spend was batchable in the first place.
+    """
+    phase_part = "phase IN ('spd_v2', 'binary_v2')"
+    if _has_column(con, "llm_calls", "call_type"):
+        return (
+            f"({phase_part} OR call_type LIKE 'rc_pass_%' "
+            "OR call_type LIKE 'triage_pass_%')"
+        )
+    # Pre-call_type DBs: phase alone cannot separate an RC pass from grounding,
+    # so count only the forecaster families rather than over-claim.
+    return f"({phase_part})"
+
+
 def _collect_cost_by_provider_tier(
     con,
     batches: List[Dict[str, Any]],
@@ -225,6 +259,7 @@ def _collect_cost_by_provider_tier(
             "reason": "no run id supplied; cost is only meaningful scoped to a run",
         }
 
+    batchable = _batchable_sql(con)
     rows = _rows(
         con,
         f"""
@@ -232,12 +267,13 @@ def _collect_cost_by_provider_tier(
             COALESCE(provider, '(none)'),
             CASE WHEN json_extract_string(usage_json, '$.service_tier') = 'batch'
                  THEN 'batch' ELSE 'full_price' END,
+            CASE WHEN {batchable} THEN 1 ELSE 0 END,
             COUNT(*),
             SUM(COALESCE(cost_usd, 0))
         FROM llm_calls
         WHERE {where}
-        GROUP BY 1, 2
-        ORDER BY 4 DESC
+        GROUP BY 1, 2, 3
+        ORDER BY 5 DESC
         """,
         params,
     )
@@ -250,7 +286,7 @@ def _collect_cost_by_provider_tier(
 
     by_provider: Dict[str, Dict[str, Any]] = {}
     run_total = 0.0
-    for provider, tier, n_calls, cost in rows:
+    for provider, tier, is_batchable, n_calls, cost in rows:
         cost = float(cost or 0.0)
         run_total += cost
         entry = by_provider.setdefault(
@@ -258,6 +294,7 @@ def _collect_cost_by_provider_tier(
             {
                 "batch_cost_usd": 0.0,
                 "full_price_cost_usd": 0.0,
+                "non_batchable_cost_usd": 0.0,
                 "n_batch_calls": 0,
                 "n_full_price_calls": 0,
                 "batch_attempted": str(provider).lower() in batched_providers,
@@ -266,21 +303,28 @@ def _collect_cost_by_provider_tier(
         if tier == "batch":
             entry["batch_cost_usd"] += cost
             entry["n_batch_calls"] += int(n_calls or 0)
-        else:
+        elif int(is_batchable or 0):
+            # Could have been batched and was not — this is the real loss.
             entry["full_price_cost_usd"] += cost
             entry["n_full_price_calls"] += int(n_calls or 0)
+        else:
+            # Grounding, adversarial, scenario, sibyl: no batch family exists,
+            # so this is expected full-price spend, not a lost discount.
+            entry["non_batchable_cost_usd"] += cost
 
     batched_spend = sum(e["batch_cost_usd"] for e in by_provider.values())
-    # Spend on providers we tried to batch, which nevertheless paid full price.
+    # Batchable spend on providers we actually created a batch for, which
+    # nevertheless paid full price.
     lost = sum(
         e["full_price_cost_usd"] for e in by_provider.values() if e["batch_attempted"]
     )
     batchable_spend = lost + sum(
         e["batch_cost_usd"] for e in by_provider.values() if e["batch_attempted"]
     )
+    non_batchable = sum(e["non_batchable_cost_usd"] for e in by_provider.values())
 
     for entry in by_provider.values():
-        for key in ("batch_cost_usd", "full_price_cost_usd"):
+        for key in ("batch_cost_usd", "full_price_cost_usd", "non_batchable_cost_usd"):
             entry[key] = round(entry[key], 4)
 
     return {
@@ -289,6 +333,7 @@ def _collect_cost_by_provider_tier(
         "run_total_cost_usd": round(run_total, 4),
         "batched_cost_usd": round(batched_spend, 4),
         "batchable_cost_usd": round(batchable_spend, 4),
+        "non_batchable_cost_usd": round(non_batchable, 4),
         "lost_discount_cost_usd": round(lost, 4),
         "lost_discount_pct_of_batchable": (
             round(100.0 * lost / batchable_spend, 1) if batchable_spend else 0.0
@@ -401,22 +446,32 @@ def _markdown(report: Dict[str, Any]) -> str:
                 f"(${cost['run_total_cost_usd']} total)."
             )
         lines.append("")
-        lines.append("| provider | batch attempted | batch $ | full-price $ | calls (batch/full) |")
-        lines.append("|---|---|--:|--:|---|")
+        lines.append(
+            "| provider | batch attempted | batch $ | lost $ | not batchable $ "
+            "| calls (batch/lost) |"
+        )
+        lines.append("|---|---|--:|--:|--:|---|")
         for provider, e in sorted(
             cost["by_provider"].items(),
-            key=lambda kv: -(kv[1]["batch_cost_usd"] + kv[1]["full_price_cost_usd"]),
+            key=lambda kv: -(
+                kv[1]["batch_cost_usd"]
+                + kv[1]["full_price_cost_usd"]
+                + kv[1]["non_batchable_cost_usd"]
+            ),
         ):
             lines.append(
                 f"| {provider} | {'yes' if e['batch_attempted'] else 'no'} "
                 f"| {e['batch_cost_usd']} | {e['full_price_cost_usd']} "
+                f"| {e['non_batchable_cost_usd']} "
                 f"| {e['n_batch_calls']}/{e['n_full_price_calls']} |"
             )
         lines.append("")
         lines.append(
-            "_Full-price spend on a provider with `batch attempted = no` is expected "
-            "(grounding, or a provider excluded via `PYTHIA_BATCH_PROVIDERS`) and is "
-            "not counted as lost discount._"
+            "_`not batchable` is grounding, adversarial checks, scenarios and Sibyl — "
+            "no batch family exists for them, so that spend is expected at full price "
+            "and is NOT counted as lost discount. Full-price spend on a provider with "
+            "`batch attempted = no` (excluded via `PYTHIA_BATCH_PROVIDERS`) is likewise "
+            f"excluded. Not batchable this run: ${cost['non_batchable_cost_usd']}._"
         )
         lines.append("")
     elif cost.get("reason"):

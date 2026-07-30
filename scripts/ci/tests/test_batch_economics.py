@@ -237,23 +237,26 @@ def _db_with_calls(tmp_path):
         """
         CREATE TABLE llm_calls (
             run_id TEXT, hs_run_id TEXT, provider TEXT,
-            cost_usd DOUBLE, usage_json TEXT
+            cost_usd DOUBLE, usage_json TEXT, phase TEXT, call_type TEXT
         )
         """
     )
     batch = '{"service_tier": "batch"}'
     plain = "{}"
 
-    def add(run_id, hs_run_id, provider, cost, usage):
-        con.execute("INSERT INTO llm_calls VALUES (?,?,?,?,?)", [run_id, hs_run_id, provider, cost, usage])
+    def add(run_id, hs_run_id, provider, cost, usage, phase, call_type):
+        con.execute(
+            "INSERT INTO llm_calls VALUES (?,?,?,?,?,?,?)",
+            [run_id, hs_run_id, provider, cost, usage, phase, call_type],
+        )
 
     # This run: openai batching failed (full price), google batched.
-    add(FC_RUN, None, "openai", 2.00, plain)
-    add(FC_RUN, None, "google", 1.00, batch)
-    # Grounding: never batchable, must not count as lost discount.
-    add(None, HS_RUN, "brave", 0.50, plain)
+    add(FC_RUN, None, "openai", 2.00, plain, "spd_v2", "spd_v2")
+    add(FC_RUN, None, "google", 1.00, batch, "spd_v2", "spd_v2")
+    # Grounding: no batch family exists, so this must never count as a loss.
+    add(None, HS_RUN, "brave", 0.50, plain, "hs_triage", "rc_grounding")
     # A different pipeline in the same travelling DB — must be excluded.
-    add("fc_other", None, "openai", 60.00, plain)
+    add("fc_other", None, "openai", 60.00, plain, "spd_v2", "spd_v2")
     con.close()
     return path
 
@@ -349,12 +352,13 @@ def test_no_cost_warning_when_everything_batched(tmp_path, capsys):
         """
         CREATE TABLE llm_calls (
             run_id TEXT, hs_run_id TEXT, provider TEXT,
-            cost_usd DOUBLE, usage_json TEXT
+            cost_usd DOUBLE, usage_json TEXT, phase TEXT, call_type TEXT
         )
         """
     )
     con.execute(
-        "INSERT INTO llm_calls VALUES (?, NULL, 'google', 1.0, '{\"service_tier\": \"batch\"}')",
+        "INSERT INTO llm_calls VALUES (?, NULL, 'google', 1.0, "
+        "'{\"service_tier\": \"batch\"}', 'spd_v2', 'spd_v2')",
         [FC_RUN],
     )
     con.execute(
@@ -384,3 +388,77 @@ def test_missing_llm_calls_table_still_returns_zero(tmp_path):
     path = _db(tmp_path)
     report = _run_scoped(path, tmp_path)
     assert report["cost"]["available"] is False
+
+
+def test_non_batchable_phases_are_not_counted_as_lost_discount(tmp_path):
+    """Grounding on a provider that also batches is not a lost discount.
+
+    Found on the 2026-07-30 SOM run: google showed "lost $0.0556 (41.6% of
+    batchable)" when that spend was grounding and adversarial synthesis, for
+    which no batch family exists. `batch_attempted` is provider-level, so any
+    unbatchable phase on a batching provider was miscounted — the same
+    unactionable-denominator problem the cost view was built to fix.
+    """
+    path = _db(tmp_path)
+    con = duckdb.connect(path)
+    con.execute(
+        """
+        CREATE TABLE llm_calls (
+            run_id TEXT, hs_run_id TEXT, provider TEXT,
+            cost_usd DOUBLE, usage_json TEXT, phase TEXT, call_type TEXT
+        )
+        """
+    )
+    batch = '{"service_tier": "batch"}'
+    # Google batched its RC passes...
+    con.execute(
+        "INSERT INTO llm_calls VALUES (NULL, ?, 'google', 0.08, ?, 'hs_triage', 'rc_pass_1')",
+        [HS_RUN, batch],
+    )
+    # ...and also ran grounding + adversarial synthesis, which cannot be batched.
+    for call_type, cost in (("rc_grounding", 0.04), ("adversarial_synthesis", 0.02)):
+        con.execute(
+            "INSERT INTO llm_calls VALUES (NULL, ?, 'google', ?, '{}', 'hs_triage', ?)",
+            [HS_RUN, cost, call_type],
+        )
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('bg','google','hs_rc','hs_submit','gemini-3.5-flash','collected',?,4,4,0,0,0,NULL,NULL)",
+        [PIPE],
+    )
+    con.close()
+
+    cost = _run_scoped(path, tmp_path)["cost"]
+    assert cost["lost_discount_cost_usd"] == pytest.approx(0.0)
+    assert cost["lost_discount_pct_of_batchable"] == pytest.approx(0.0)
+    # The unbatchable spend is still reported — just not as a loss.
+    assert cost["non_batchable_cost_usd"] == pytest.approx(0.06)
+    assert cost["by_provider"]["google"]["non_batchable_cost_usd"] == pytest.approx(0.06)
+
+
+def test_batchable_spend_that_missed_a_batch_is_still_counted_as_lost(tmp_path):
+    """The narrowing must not hide a genuine loss: an unbatched SPD call."""
+    path = _db(tmp_path)
+    con = duckdb.connect(path)
+    con.execute(
+        """
+        CREATE TABLE llm_calls (
+            run_id TEXT, hs_run_id TEXT, provider TEXT,
+            cost_usd DOUBLE, usage_json TEXT, phase TEXT, call_type TEXT
+        )
+        """
+    )
+    con.execute(
+        "INSERT INTO llm_calls VALUES (?, NULL, 'openai', 1.50, '{}', 'spd_v2', 'spd_v2')",
+        [FC_RUN],
+    )
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('bo','openai','spd_v2','fc','gpt-5.6-sol','collected',?,4,0,0,4,0,NULL,NULL)",
+        [PIPE],
+    )
+    con.close()
+
+    cost = _run_scoped(path, tmp_path)["cost"]
+    assert cost["lost_discount_cost_usd"] == pytest.approx(1.50)
+    assert cost["lost_discount_pct_of_batchable"] == pytest.approx(100.0)
