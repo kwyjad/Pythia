@@ -773,9 +773,18 @@ def submit_pending(
         provider = (provider or "").lower()
         if provider not in batch_providers():
             continue
-        # Gemini batches are per model (model id is in the endpoint URL);
-        # OpenAI/Anthropic batches carry the model per item.
-        group_key = (provider, model_id if provider == "google" else None)
+        # ALWAYS group per model. Gemini needs it because the model id is in
+        # the endpoint URL, and OpenAI *requires* it: a batch containing more
+        # than one model is rejected wholesale at validation with
+        # `mismatched_model`, which surfaces as request_counts={total: 0} and no
+        # error file. That is exactly what happened on 2026-07-29 and
+        # 2026-07-30 — the ensemble's two OpenAI members (gpt-5.6-sol and
+        # gpt-5.6-luna) landed in one spd_v2 batch, every request fell back to
+        # synchronous full price, and it cost ~2/3 of forecaster spend twice.
+        # Anthropic does permit mixed models, but grouping it per model too is
+        # a no-op while there is one Anthropic member and removes the trap for
+        # whoever adds a second.
+        group_key = (provider, model_id)
         grouped.setdefault(group_key, []).append((custom_id, body_json))
 
     for (provider, group_model), rows in grouped.items():

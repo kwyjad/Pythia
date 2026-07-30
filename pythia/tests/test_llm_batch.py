@@ -194,6 +194,40 @@ class TestSubmit:
         ).fetchall()
         assert all(b == ("spd_v2", "fc_1", "pl_1", "s3", "submitted") for b in batches)
 
+    def test_submit_never_mixes_models_in_one_openai_batch(
+        self, con, fake_adapters, batch_enabled
+    ):
+        """OpenAI rejects a multi-model batch wholesale with `mismatched_model`.
+
+        The ensemble has TWO OpenAI members (gpt-5.6-sol, gpt-5.6-luna). Before
+        this, both landed in one spd_v2 batch and OpenAI failed the whole thing
+        at validation — request_counts={total: 0}, no error file, every request
+        silently re-run at full synchronous price. It cost roughly two thirds of
+        forecaster spend on 2026-07-29 and again on 2026-07-30.
+        """
+        _enqueue_spd(con, question_id="Q1", model_key="sol",
+                     provider="openai", model_id="gpt-5.6-sol")
+        _enqueue_spd(con, question_id="Q2", model_key="sol",
+                     provider="openai", model_id="gpt-5.6-sol")
+        _enqueue_spd(con, question_id="Q1", model_key="luna",
+                     provider="openai", model_id="gpt-5.6-luna")
+        created = llm_batch.submit_pending(
+            con, family="spd_v2", pipeline_id="pl_1", stage="s3", run_id="fc_1"
+        )
+        # One batch per model, never one batch with both.
+        assert len(created) == 2
+
+        # Every submitted chunk must be single-model. Read the model back out of
+        # the request bodies actually handed to the adapter — that is what
+        # OpenAI validates, not our grouping key.
+        for rows, _kwargs in fake_adapters.submitted:
+            models = set()
+            for _cid, body in rows:
+                if isinstance(body, str):
+                    body = json.loads(body)
+                models.add(body["model"])
+            assert len(models) == 1, f"batch mixed models: {models}"
+
     def test_chunking_respects_request_cap(self, con, fake_adapters, batch_enabled, monkeypatch):
         monkeypatch.setattr(llm_batch, "_MAX_REQUESTS_PER_BATCH", 2)
         for i in range(5):
