@@ -125,14 +125,24 @@ jobs:
         if: ${{ inputs.inspect_batches != '' || inputs.inspect_recent != '' }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Passed as env rather than interpolated into the script body: these
+          # are free-text dispatch inputs, and `${{ }}` inside a run block is a
+          # shell-injection seam.
+          INSPECT_BATCHES: ${{ inputs.inspect_batches }}
+          INSPECT_RECENT: ${{ inputs.inspect_recent }}
         run: |
           set -e
-          RECENT=""
-          if [ -n "${{ inputs.inspect_recent }}" ]; then
-            RECENT="--recent ${{ inputs.inspect_recent }}"
+          # Built as an array so the batch-id list word-splits deliberately
+          # rather than by accident (shellcheck SC2086).
+          args=()
+          if [ -n "${INSPECT_BATCHES}" ]; then
+            read -r -a ids <<< "${INSPECT_BATCHES}"
+            args+=("${ids[@]}")
           fi
-          python -m scripts.ci.inspect_openai_batch \
-            ${{ inputs.inspect_batches }} ${RECENT} --input-head 2
+          if [ -n "${INSPECT_RECENT}" ]; then
+            args+=(--recent "${INSPECT_RECENT}")
+          fi
+          python -m scripts.ci.inspect_openai_batch "${args[@]}" --input-head 2
 
       - name: Poll batches and dispatch ready stages
         id: poll
