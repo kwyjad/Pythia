@@ -335,12 +335,19 @@ class _OpenAIBatch:
         payload = resp.json()
         counts = payload.get("request_counts") or {}
         state = self._STATE_MAP.get(str(payload.get("status")), "in_progress")
-        detail = json.dumps(
-            {
-                "output_file_id": payload.get("output_file_id"),
-                "error_file_id": payload.get("error_file_id"),
-            }
-        )
+        # `errors` is the ONLY place an input-validation failure is reported:
+        # when OpenAI ingests zero requests there is no error_file_id and
+        # request_counts is all zeros, so recording just the two file ids —
+        # as this did on 2026-07-29 and 2026-07-30 — throws away the reason
+        # and leaves "0 of 8 results" permanently unexplained.
+        detail_obj: Dict[str, Any] = {
+            "output_file_id": payload.get("output_file_id"),
+            "error_file_id": payload.get("error_file_id"),
+        }
+        errors = payload.get("errors")
+        if errors:
+            detail_obj["errors"] = errors
+        detail = json.dumps(detail_obj)
         return BatchStatus(provider_batch_id, state, dict(counts), detail)
 
     def fetch(self, provider_batch_id: str) -> Iterator[Tuple[str, bool, str, Dict[str, Any], str]]:
