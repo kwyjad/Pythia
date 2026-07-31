@@ -16,6 +16,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
+from scripts.ci import poll_llm_batches
 from scripts.ci.emit_batch_state import dispatch_inputs_from_env
 from scripts.ci.poll_llm_batches import _dispatch_decision, _dispatch_input_args
 
@@ -247,3 +250,56 @@ def test_completed_and_running_are_distinguishable():
     """The chain keys off this split, so collapsing them would break it."""
     assert _decide([_run(conclusion="success")])[1] == "already completed"
     assert _decide([_run(status="in_progress", conclusion=None)])[1] == "already running"
+
+
+# --------------------------------------------------------------------------
+# Chain cap vs wait ceiling
+#
+# The self-dispatch chain exists to keep polling until PYTHIA_BATCH_MAX_WAIT_H
+# resolves a pipeline whose batches never finish. If the cap is reached first,
+# the chain dies while the batches are still legitimately in flight and the
+# pipeline parks until an hourly cron tick re-ignites it.
+#
+# That is not hypothetical: POLLER_MAX_CHAIN was hardcoded to 200 under a
+# comment claiming "~7-minute cadence, a little over 24h". 200 x 7min is 23.3h
+# — already under the 24h ceiling — and the measured cadence is ~5.4 min, giving
+# 18.0h. On 2026-07-30 a run with slow gpt-5.6-sol batches hit the cap at
+# exactly 18.16h with rearm=false while both batches were still in_progress.
+# --------------------------------------------------------------------------
+
+
+def _cap_hours(monkeypatch, wait_h: str) -> float:
+    monkeypatch.delenv("POLLER_MAX_CHAIN", raising=False)
+    monkeypatch.setenv("PYTHIA_BATCH_MAX_WAIT_H", wait_h)
+    return poll_llm_batches._max_chain() * poll_llm_batches.POLLER_TICK_MINUTES / 60.0
+
+
+@pytest.mark.parametrize("wait_h", ["12", "24", "36", "48"])
+def test_chain_cap_always_outlives_the_batch_wait_ceiling(monkeypatch, wait_h):
+    """The invariant: cap x tick interval MUST exceed the wait ceiling."""
+    covered = _cap_hours(monkeypatch, wait_h)
+    assert covered > float(wait_h), (
+        f"chain covers only {covered:.1f}h but PYTHIA_BATCH_MAX_WAIT_H={wait_h}h — "
+        "the chain would die while batches are still in flight"
+    )
+
+
+def test_chain_cap_never_shorter_than_the_historical_floor(monkeypatch):
+    """Deriving the cap must not shorten it for small wait ceilings."""
+    monkeypatch.delenv("POLLER_MAX_CHAIN", raising=False)
+    monkeypatch.setenv("PYTHIA_BATCH_MAX_WAIT_H", "1")
+    assert poll_llm_batches._max_chain() >= 200
+
+
+def test_explicit_poller_max_chain_still_wins(monkeypatch):
+    """Operators keep a hard stop for a runaway loop."""
+    monkeypatch.setenv("PYTHIA_BATCH_MAX_WAIT_H", "48")
+    monkeypatch.setenv("POLLER_MAX_CHAIN", "42")
+    assert poll_llm_batches._max_chain() == 42
+
+
+def test_malformed_wait_ceiling_falls_back_to_24h_basis(monkeypatch):
+    monkeypatch.delenv("POLLER_MAX_CHAIN", raising=False)
+    monkeypatch.setenv("PYTHIA_BATCH_MAX_WAIT_H", "not-a-number")
+    covered = poll_llm_batches._max_chain() * poll_llm_batches.POLLER_TICK_MINUTES / 60.0
+    assert covered > 24.0
