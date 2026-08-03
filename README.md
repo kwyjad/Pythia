@@ -126,7 +126,7 @@ Pythia ingests NMME (North American Multi-Model Ensemble) seasonal temperature a
 - **Storage**: `seasonal_forecasts` table in Pythia DuckDB (~2,700 rows per monthly update: 195 countries × 2 variables × 7 leads).
 - **Injection**: Automatically loaded into HS triage and RC prompts via the existing `climate_data` parameter for DR, FL, TC hazards. Also injected into forecaster research and SPD prompts via `research_json`.
 - **Run manually**: `python -m resolver.tools.ingest_nmme` (or `--year-month YYYYMM` for a specific month, `--dry-run` to preview).
-- **Automation**: NMME runs as the `nmme` source inside `resolver_update.yml` Phase 3 (15th monthly) and `ingest-structured-data.yml`. (The standalone `ingest-nmme.yml` workflow was removed July 2026.)
+- **Automation**: NMME runs as the `nmme` source inside `resolver_update.yml` Phase 3 (28th monthly) and `ingest-structured-data.yml`. (The standalone `ingest-nmme.yml` workflow was removed July 2026.)
 
 ## Conflict forecasts
 
@@ -320,7 +320,7 @@ python -m scripts.dump_pythia_debug_bundle \
 
 ### Workflows
 - **Production pipeline**: [`run_horizon_scanner.yml`](.github/workflows/run_horizon_scanner.yml) runs HS + forecaster end-to-end.
-- **Resolver Update (backfill)**: [`resolver_update.yml`](.github/workflows/resolver_update.yml) — primary data ingestion (15th monthly). Single-job workflow with 5 sequential phases: (1) Resolver connectors (fatal), (2) Resolution sources, (3) Structured data, (4) Context sources, (5) Verify + export artifact.
+- **Resolver Update (backfill)**: [`resolver_update.yml`](.github/workflows/resolver_update.yml) — primary data ingestion (28th monthly, just ahead of the 1st-of-month forecast pipeline). Single-job workflow with 5 sequential phases: (1) Resolver connectors (fatal), (2) Resolution sources, (3) Structured data, (4) Context sources, (5) Verify + export artifact.
 - **Structured data refresh**: [`ingest-structured-data.yml`](.github/workflows/ingest-structured-data.yml) — mid-cycle refresh for fast-changing sources (weekly Sunday 03:00 UTC): conflict forecasts, GDACS, ReliefWeb, ACLED political.
 - **Post-forecast pipeline**: [`compute_resolutions.yml`](.github/workflows/compute_resolutions.yml), [`compute_scores.yml`](.github/workflows/compute_scores.yml), [`compute_calibration_pythia.yml`](.github/workflows/compute_calibration_pythia.yml).
 - **Forecaster CI**: [`forecaster-ci.yml`](.github/workflows/forecaster-ci.yml) covers SPD unit tests and optional compare artifacts.

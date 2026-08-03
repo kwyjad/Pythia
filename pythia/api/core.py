@@ -61,8 +61,40 @@ _POPULATION_BY_ISO3: dict[str, int] = {}
 
 
 def _test_filter(include_test: bool, alias: str = "") -> str:
-    """Return a SQL AND clause to exclude test rows unless include_test is True."""
+    """Return a SQL AND clause to exclude test rows unless include_test is True.
+
+    Unguarded: emits the predicate whether or not the target table actually has
+    an ``is_test`` column. Prefer :func:`_test_filter_for` on any table whose
+    schema is not certain — see its docstring for why.
+    """
     if include_test:
+        return ""
+    prefix = f"{alias}." if alias else ""
+    return f" AND COALESCE({prefix}is_test, FALSE) = FALSE"
+
+
+def _test_filter_for(
+    con: duckdb.DuckDBPyConnection,
+    table: str,
+    include_test: bool,
+    alias: str = "",
+) -> str:
+    """Column-guarded :func:`_test_filter`: empty clause when ``is_test`` is absent.
+
+    The unguarded helper produces a query that RAISES against a table without
+    the column, and most diagnostics call sites swallow query exceptions and
+    return 0/[] (``_q``/``_q1`` in ``routes/diagnostics.py``). The result is a
+    dashboard that silently reports zeros **only when the Test toggle is OFF** —
+    with ``include_test=True`` the clause is empty, the same query binds fine,
+    and real numbers appear. That asymmetry is indistinguishable from "there is
+    no production data" and has cost real debugging time.
+
+    ``_probe_test_filter`` (app.py) and ``_run_filter_cte`` (below) already
+    guard this way; this is the shared version for everything else.
+    """
+    if include_test:
+        return ""
+    if not _table_has_columns(con, table, ["is_test"]):
         return ""
     prefix = f"{alias}." if alias else ""
     return f" AND COALESCE({prefix}is_test, FALSE) = FALSE"

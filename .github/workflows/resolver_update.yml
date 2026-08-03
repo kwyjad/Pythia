@@ -67,8 +67,23 @@ concurrency:
         default: "24"
         type: string
   schedule:
-    # Run at 03:00 UTC on the 15th of each month
-    - cron: "0 3 15 * *"
+    # Run at 03:00 UTC on the 28th of each month.
+    #
+    # Deliberately just BEFORE the forecast pipeline's 1st-of-month cron
+    # (pythia_pipeline_stage.yml), not two weeks after it. This workflow is the
+    # only refresh for the tier-0 resolution sources (ACLED monthly fatalities,
+    # IFRC, IDMC, FEWS NET / IPC) — the weekly ingest-structured-data.yml run
+    # covers only the fast-changing supplementary sources. While this ran on the
+    # 15th, every monthly forecast reasoned over core data ~17 days stale (the
+    # 2026-08-01 run carried a 2026-07-15 ingest vintage).
+    #
+    # The 28th also puts the resolutions -> scores -> calibration chain that
+    # hangs off this workflow immediately before the forecast that consumes its
+    # calibration weights. Cost of the move, accepted knowingly: each month's
+    # ground truth is resolved ~13 days later than under the 15th cadence.
+    #
+    # Do not move this back past the 1st without re-reading the above.
+    - cron: "0 3 28 * *"
 
 permissions:
   contents: read
