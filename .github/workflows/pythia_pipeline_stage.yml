@@ -298,8 +298,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
-          gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0
-          if [ $? -eq 0 ]; then
+          if gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0; then
             echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
           else
             echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
@@ -507,8 +506,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
-          gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0
-          if [ $? -eq 0 ]; then
+          if gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0; then
             echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
           else
             echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
@@ -755,8 +753,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
-          gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0
-          if [ $? -eq 0 ]; then
+          if gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0; then
             echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
           else
             echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
@@ -1013,8 +1010,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
-          gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0
-          if [ $? -eq 0 ]; then
+          if gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0; then
             echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
           else
             echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
