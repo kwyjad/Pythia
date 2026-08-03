@@ -162,17 +162,45 @@ def _chain_depth() -> int:
         return 0
 
 
+# Measured minutes per chain link: the workflow sleeps 300s and the job itself
+# takes ~25s. Timed over a real 200-link chain on 2026-07-30/31 (146 links in
+# 13.16h, 200 in 18.16h) => ~5.4 min. Kept slightly high so the derived cap errs
+# long rather than short.
+POLLER_TICK_MINUTES = 5.5
+
+
 def _max_chain() -> int:
     """Backstop against a self-dispatch loop that a logic bug keeps alive.
 
-    At the workflow's ~7-minute cadence, 200 links is a little over 24h, which
-    is already past PYTHIA_BATCH_MAX_WAIT_H — so a healthy pipeline can never
-    reach it.
+    The cap MUST outlive PYTHIA_BATCH_MAX_WAIT_H, because that ceiling is what
+    resolves a pipeline whose provider batches never finish: the chain has to
+    survive long enough for the poller to cancel the stragglers and dispatch the
+    collect stage. A cap shorter than the ceiling means the chain dies while the
+    batches are still legitimately in flight.
+
+    It was hardcoded to 200 with a comment asserting "~7-minute cadence, a little
+    over 24h". Both halves were wrong: 200 x 7min is 23.3h, already UNDER the 24h
+    ceiling, and the real cadence is ~5.4 min, giving 18.0h. On 2026-07-30 a run
+    whose gpt-5.6-sol batches took >18h hit the cap at exactly 18.16h and parked
+    until an hourly cron tick re-ignited it.
+
+    So it is now DERIVED from the ceiling rather than asserted about it, with 1.5x
+    headroom for cadence drift. An explicit POLLER_MAX_CHAIN still wins, for
+    operators who want a hard stop.
     """
+    raw = (os.getenv("POLLER_MAX_CHAIN") or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
     try:
-        return int(os.getenv("POLLER_MAX_CHAIN", "200") or "200")
+        wait_h = float(os.getenv("PYTHIA_BATCH_MAX_WAIT_H", "24") or "24")
     except ValueError:
-        return 200
+        wait_h = 24.0
+    links_to_cover_wait = (wait_h * 60.0) / POLLER_TICK_MINUTES
+    # Floor at the historical 200 so this can never shorten the chain.
+    return max(200, int(links_to_cover_wait * 1.5) + 1)
 
 
 def _should_rearm(decisions: list[dict]) -> tuple[bool, str]:
