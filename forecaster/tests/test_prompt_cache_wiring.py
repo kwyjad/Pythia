@@ -28,10 +28,15 @@ _MS_ANTHROPIC = ModelSpec(
     model_id="claude-opus-5", active=True, purpose="spd_v2",
 )
 
-# Above the builder's _ANTHROPIC_CACHE_MIN_CHARS floor (4096), like the
-# real V3 static block.
-_PREFIX = "STATIC ROLE/TASK/BUCKETS BLOCK " * 160
+# Above every model's cacheable minimum (the table tops out at 4096 tokens
+# ≈ 16k chars), like the real V3 static block.
+_PREFIX = "STATIC ROLE/TASK/BUCKETS BLOCK " * 600
 _SUFFIX = "per-question data block"
+
+# ~600 tokens: over claude-opus-5's 512-token minimum, under the 1024 the
+# single old constant assumed. This is the size band the real binary_v2
+# prefixes (~760 tokens) sit in.
+_SHORT_PREFIX = "SHORT STATIC BLOCK " * 130
 
 
 def _capture_call(monkeypatch):
@@ -142,6 +147,98 @@ def test_batch_body_cache_opt_in_emits_anthropic_blocks_only(monkeypatch):
         cache_prefix=_PREFIX, prompt_cache_key="pythia:spd_v2:ACE:FATALITIES:t1",
     )
     assert "prompt_cache_key" not in oai_body
+
+
+def _cache_controls(body: dict) -> list[dict]:
+    content = body["messages"][0]["content"]
+    if not isinstance(content, list):
+        return []
+    return [b["cache_control"] for b in content if isinstance(b, dict) and b.get("cache_control")]
+
+
+def test_batch_bodies_buy_an_hour_ttl_but_sync_bodies_do_not(monkeypatch):
+    """A batch outlives the 5-minute default TTL — the 2026-08-01 SPD batch
+    ran 41 minutes — so an unqualified `ephemeral` marker in a batch body
+    expires before most of the batch is scheduled and the write premium buys
+    nothing. Sync calls are answered immediately and keep the 5m default.
+    """
+
+    from forecaster.providers import build_anthropic_body, build_body_for_spec
+
+    monkeypatch.setenv("PYTHIA_PROMPT_CACHE_ENABLED", "1")
+    monkeypatch.setenv("PYTHIA_BATCH_PROMPT_CACHE", "1")
+
+    batch = build_body_for_spec(
+        _MS_ANTHROPIC, _PREFIX + _SUFFIX, 0.2, cache_prefix=_PREFIX,
+    )
+    assert [c.get("ttl") for c in _cache_controls(batch)] == ["1h"]
+
+    sync = build_anthropic_body(
+        _PREFIX + _SUFFIX, "claude-opus-5", 0.2, purpose="spd_v2",
+        cache_segments=[(_PREFIX, True), (_SUFFIX, False)],
+    )
+    sync_controls = _cache_controls(sync)
+    assert sync_controls and all("ttl" not in c for c in sync_controls)
+
+    # The TTL is the ONLY divergence: the prompt bytes a batch item carries
+    # must still equal the sync prompt, or a replayed result answers a
+    # different question than the sync fallback would have asked.
+    def _text(body: dict) -> str:
+        content = body["messages"][0]["content"]
+        return content if isinstance(content, str) else "".join(b["text"] for b in content)
+
+    assert _text(batch) == _text(sync) == _PREFIX + _SUFFIX
+
+    # PYTHIA_BATCH_CACHE_TTL=none is the escape hatch back to the 5m default.
+    monkeypatch.setenv("PYTHIA_BATCH_CACHE_TTL", "none")
+    reverted = build_body_for_spec(
+        _MS_ANTHROPIC, _PREFIX + _SUFFIX, 0.2, cache_prefix=_PREFIX,
+    )
+    assert all("ttl" not in c for c in _cache_controls(reverted))
+
+
+def test_cache_minimum_is_per_model_not_one_constant(monkeypatch):
+    """claude-opus-5 caches from 512 tokens; Haiku 4.5 needs 4096. A single
+    constant sized for 1024 left every binary_v2 prefix (~760 tokens)
+    unmarked on the model that would have cached it.
+    """
+
+    from forecaster.providers import build_anthropic_body
+
+    monkeypatch.setenv("PYTHIA_PROMPT_CACHE_ENABLED", "1")
+    monkeypatch.delenv("PYTHIA_ANTHROPIC_CACHE_MIN_CHARS", raising=False)
+    segments = [(_SHORT_PREFIX, True), (_SUFFIX, False)]
+
+    opus = build_anthropic_body(
+        _SHORT_PREFIX + _SUFFIX, "claude-opus-5", 0.2,
+        purpose="spd_v2", cache_segments=segments,
+    )
+    assert _cache_controls(opus), "opus-5 must mark a ~600-token prefix (512 minimum)"
+
+    haiku = build_anthropic_body(
+        _SHORT_PREFIX + _SUFFIX, "claude-haiku-4-5", 0.2,
+        purpose="spd_v2", cache_segments=segments,
+    )
+    assert not _cache_controls(haiku), "haiku-4-5 needs 4096 tokens — do not mark"
+
+    # An unlisted model falls back to the most conservative minimum.
+    unknown = build_anthropic_body(
+        _SHORT_PREFIX + _SUFFIX, "claude-something-99", 0.2,
+        purpose="spd_v2", cache_segments=segments,
+    )
+    assert not _cache_controls(unknown)
+
+
+def test_cache_minimum_env_override_wins(monkeypatch):
+    from forecaster.providers import build_anthropic_body
+
+    monkeypatch.setenv("PYTHIA_PROMPT_CACHE_ENABLED", "1")
+    monkeypatch.setenv("PYTHIA_ANTHROPIC_CACHE_MIN_CHARS", "1")
+    body = build_anthropic_body(
+        _SHORT_PREFIX + _SUFFIX, "claude-haiku-4-5", 0.2,
+        purpose="spd_v2", cache_segments=[(_SHORT_PREFIX, True), (_SUFFIX, False)],
+    )
+    assert _cache_controls(body)
 
 
 @pytest.mark.parametrize("track", [1, 2])
