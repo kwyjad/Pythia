@@ -827,6 +827,53 @@ def _check_staleness(
         sys.exit(1)
 
 
+def _expected_edition(now: datetime) -> tuple[int, int]:
+    """The edition that should be on disk: the previous complete month."""
+    if now.month == 1:
+        return (now.year - 1, 12)
+    return (now.year, now.month - 1)
+
+
+def _check_edition_currency(
+    edition: tuple[int, int] | None,
+    expect_by_day: int,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """exit(1) when a whole monthly edition has been missed.
+
+    ``--max-age-days`` measures the age of the edition's END date, so on a
+    monthly publication it cannot see a single missed edition for two months:
+    on 2026-08-03 the on-disk June edition was 34 days old and sailed past a
+    60-day threshold while July was simply absent. This guard asks the
+    question that actually matters — is the previous month's edition here? —
+    and gives ICG until ``expect_by_day`` of the month to publish before
+    turning the run red.
+    """
+    if expect_by_day <= 0 or edition is None:
+        return
+    now = now or datetime.now(timezone.utc)
+    expected = _expected_edition(now)
+    if edition >= expected:
+        return
+    if now.day <= expect_by_day:
+        log.warning(
+            "On-disk CrisisWatch edition is %04d-%02d but %04d-%02d is "
+            "expected; still within the day-%d grace period for ICG to "
+            "publish.",
+            edition[0], edition[1], expected[0], expected[1], expect_by_day,
+        )
+        return
+    log.error(
+        "On-disk CrisisWatch edition is %04d-%02d but %04d-%02d was expected "
+        "by day %d of the month — an edition has been missed. Check Wayback "
+        "snapshot availability for crisisgroup.org/crisiswatch, or run a "
+        "manual local refresh (--source live).",
+        edition[0], edition[1], expected[0], expected[1], expect_by_day,
+    )
+    sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # HTML parsing
 # ---------------------------------------------------------------------------
@@ -1088,6 +1135,7 @@ def run(
     spn: bool = True,
     spn_wait_sec: int = 240,
     max_age_days: int = 0,
+    expect_edition_by_day: int = 0,
 ) -> dict[str, Any]:
     """Fetch and parse CrisisWatch, write JSON, return the data dict."""
 
@@ -1180,6 +1228,7 @@ def run(
                 candidate[0], candidate[1], existing[0], existing[1],
             )
             _check_staleness(existing, max_age_days)
+            _check_edition_currency(existing, expect_edition_by_day)
             return {}
 
     # Build output dict (compatible with _load_fallback_json).
@@ -1221,6 +1270,7 @@ def run(
     # Staleness alarm (trivially passes right after a fresh write unless
     # even the newest available edition is old).
     _check_staleness(_edition_key(month_str, year), max_age_days)
+    _check_edition_currency(_edition_key(month_str, year), expect_edition_by_day)
 
     # Auto-push: git add, commit, push the output JSON.
     if auto_push:
@@ -1295,6 +1345,12 @@ def main() -> None:
         help="Exit non-zero when the resulting on-disk edition is older "
              "than this many days (0 = disabled)",
     )
+    parser.add_argument(
+        "--expect-edition-by-day", type=int, default=0,
+        help="Exit non-zero when the previous month's edition is still "
+             "missing after this day of the month. Catches a single missed "
+             "edition, which --max-age-days cannot (0 = disabled)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -1315,6 +1371,7 @@ def main() -> None:
         spn=not args.no_spn,
         spn_wait_sec=args.spn_wait,
         max_age_days=args.max_age_days,
+        expect_edition_by_day=args.expect_edition_by_day,
     )
 
 

@@ -292,3 +292,63 @@ def test_gulf_states_resolve():
     assert _resolve_iso3("Kuwait") == "KWT"
     assert _resolve_iso3("Oman") == "OMN"
     assert _resolve_iso3("Qatar") == "QAT"
+
+
+# ---------------------------------------------------------------------------
+# Edition currency (--expect-edition-by-day)
+#
+# --max-age-days measures the age of the edition's END date, so on a monthly
+# publication it cannot see a single missed edition for two months. On
+# 2026-08-03 the on-disk June edition was 34 days old and sailed past the
+# 60-day threshold while the July edition was simply absent.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime as _dt, timezone as _tz  # noqa: E402
+
+
+def _utc(y, m, d):
+    return _dt(y, m, d, tzinfo=_tz.utc)
+
+
+def test_expected_edition_is_the_previous_complete_month():
+    from scripts.refresh_crisiswatch import _expected_edition
+
+    assert _expected_edition(_utc(2026, 8, 3)) == (2026, 7)
+    assert _expected_edition(_utc(2026, 1, 15)) == (2025, 12)
+
+
+def test_current_edition_passes():
+    from scripts.refresh_crisiswatch import _check_edition_currency
+
+    _check_edition_currency((2026, 7), 7, now=_utc(2026, 8, 10))
+
+
+def test_missing_edition_is_tolerated_inside_the_grace_period():
+    from scripts.refresh_crisiswatch import _check_edition_currency
+
+    # ICG publishes in the first days of the month; the cron fires on the 3rd.
+    _check_edition_currency((2026, 6), 7, now=_utc(2026, 8, 3))
+
+
+def test_missing_edition_turns_the_run_red_after_the_grace_period():
+    from scripts.refresh_crisiswatch import _check_edition_currency
+
+    with pytest.raises(SystemExit) as exc:
+        _check_edition_currency((2026, 6), 7, now=_utc(2026, 8, 10))
+    assert exc.value.code == 1
+
+
+def test_the_day_age_guard_alone_would_have_missed_it():
+    """The exact 2026-08-03 state: June on disk, July absent, 60-day guard green."""
+    from scripts.refresh_crisiswatch import _check_edition_currency, _check_staleness
+
+    _check_staleness((2026, 6), 60, now=_utc(2026, 8, 3))  # green — the gap
+    with pytest.raises(SystemExit):
+        _check_edition_currency((2026, 6), 7, now=_utc(2026, 8, 10))
+
+
+def test_guard_is_disabled_at_zero():
+    from scripts.refresh_crisiswatch import _check_edition_currency
+
+    _check_edition_currency((2020, 1), 0, now=_utc(2026, 8, 10))
+    _check_edition_currency(None, 7, now=_utc(2026, 8, 10))

@@ -64,8 +64,25 @@ def _query_latency(
     con: duckdb.DuckDBPyConnection,
     predicate: str,
     params: Sequence[Any],
-) -> List[Tuple[str, str, str, int, float, float, float]]:
+    *,
+    has_usage_json: bool = False,
+) -> List[Tuple[str, str, str, int, int, float, float, float]]:
+    """Latency per (phase, provider, model), with batched calls held apart.
+
+    A batch replay records ``elapsed_ms = 0`` — the provider did the work
+    asynchronously and there is no client-side duration to measure. Averaging
+    those in makes a fully-batched run report ``p50 = p95 = 0.00`` for every
+    SPD model, which is what the 2026-08-01 debug bundle showed: a latency
+    table that described nothing. Percentiles are therefore computed over
+    SYNCHRONOUS calls only, and the batched count is reported alongside.
+    """
     predicate_sql = predicate or "1=1"
+    if has_usage_json:
+        is_batch = (
+            "COALESCE(json_extract_string(usage_json, '$.service_tier'), '') = 'batch'"
+        )
+    else:
+        is_batch = "FALSE"
     return con.execute(
         f"""
         SELECT
@@ -73,9 +90,10 @@ def _query_latency(
           COALESCE(provider, '') AS provider,
           COALESCE(model_id, '') AS model_id,
           COUNT(*) AS n_calls,
-          quantile_cont(elapsed_ms, 0.5) AS p50_ms,
-          quantile_cont(elapsed_ms, 0.95) AS p95_ms,
-          avg(elapsed_ms) AS avg_ms
+          SUM(CASE WHEN {is_batch} THEN 1 ELSE 0 END) AS n_batched,
+          quantile_cont(CASE WHEN {is_batch} THEN NULL ELSE elapsed_ms END, 0.5) AS p50_ms,
+          quantile_cont(CASE WHEN {is_batch} THEN NULL ELSE elapsed_ms END, 0.95) AS p95_ms,
+          avg(CASE WHEN {is_batch} THEN NULL ELSE elapsed_ms END) AS avg_ms
         FROM llm_calls
         WHERE elapsed_ms IS NOT NULL
           AND (error_text IS NULL OR error_text = '')
@@ -167,22 +185,40 @@ def render_latency_markdown(
         if predicate
         else total_rows
     )
-    rows = _query_latency(con, predicate_sql, params)
+    has_usage_json = _has_columns(con, "llm_calls", {"usage_json"})
+    rows = _query_latency(con, predicate_sql, params, has_usage_json=has_usage_json)
     slow_rows = _top_slow_calls(con, predicate_sql, params)
     if strategy_label:
         lines.append(f"_Filter strategy: {strategy_label}_")
         lines.append("")
 
-    lines.append("| phase | provider | model_id | n_calls | p50_ms | p95_ms | avg_ms |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    if has_usage_json:
+        lines.append(
+            "_p50/p95/avg cover SYNCHRONOUS calls only. A batch replay records "
+            "elapsed_ms=0 (the provider worked asynchronously), so batched "
+            "calls are counted separately rather than deflating the "
+            "percentiles to zero._"
+        )
+        lines.append("")
+
+    lines.append(
+        "| phase | provider | model_id | n_calls | n_batched | p50_ms | p95_ms | avg_ms |"
+    )
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
     if rows:
-        for phase, provider, model_id, n_calls, p50_ms, p95_ms, avg_ms in rows:
+        for phase, provider, model_id, n_calls, n_batched, p50_ms, p95_ms, avg_ms in rows:
+            # All calls in this group were batched: there is no synchronous
+            # latency to report, and "0.00" would be a lie.
+            def _ms(v: Any) -> str:
+                return "—" if v is None else f"{float(v):.2f}"
+
             lines.append(
                 f"| {phase} | {provider} | {model_id} | "
-                f"{int(n_calls)} | {p50_ms:.2f} | {p95_ms:.2f} | {avg_ms:.2f} |"
+                f"{int(n_calls)} | {int(n_batched or 0)} | "
+                f"{_ms(p50_ms)} | {_ms(p95_ms)} | {_ms(avg_ms)} |"
             )
     else:
-        lines.append("| (none) | (none) | (none) | 0 | 0 | 0 | 0 |")
+        lines.append("| (none) | (none) | (none) | 0 | 0 | 0 | 0 | 0 |")
         lines.append("")
         lines.append(
             "_Note: No llm_calls rows matched; see diagnostics below for context and schema._"
