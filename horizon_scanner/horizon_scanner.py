@@ -1591,8 +1591,11 @@ def main(
             coverage_rows.append(
                 {
                     "iso3": result.get("iso3"),
-                    "pass1_status": result.get("pass1_status"),
-                    "pass2_status": result.get("pass2_status"),
+                    # The internal keys are historical: pass1/pass2 have not
+                    # meant "two passes of one model" since RC and triage were
+                    # split into separate stages. Emit what they actually hold.
+                    "rc_status": result.get("pass1_status"),
+                    "triage_status": result.get("pass2_status"),
                     "primary_model_id": result.get("primary_model_id"),
                     "fallback_model_id": result.get("fallback_model_id"),
                     "final_status": result.get("final_status"),
@@ -1603,10 +1606,10 @@ def main(
                     {
                         "iso3": result.get("iso3"),
                         "final_status": result.get("final_status"),
-                        "pass1_status": result.get("pass1_status"),
-                        "pass2_status": result.get("pass2_status"),
-                        "pass1_valid": result.get("pass1_valid"),
-                        "pass2_valid": result.get("pass2_valid"),
+                        "rc_status": result.get("pass1_status"),
+                        "triage_status": result.get("pass2_status"),
+                        "rc_valid": result.get("pass1_valid"),
+                        "triage_valid": result.get("pass2_valid"),
                         "primary_model_id": result.get("primary_model_id"),
                         "fallback_model_id": result.get("fallback_model_id"),
                         "pass_results": result.get("pass_results", []),
@@ -1620,8 +1623,8 @@ def main(
                     f,
                     fieldnames=[
                         "iso3",
-                        "pass1_status",
-                        "pass2_status",
+                        "rc_status",
+                        "triage_status",
                         "primary_model_id",
                         "fallback_model_id",
                         "final_status",
