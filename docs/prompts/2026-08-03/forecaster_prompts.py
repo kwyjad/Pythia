@@ -2015,7 +2015,7 @@ def build_spd_prompt_v2(
         "- `human_explanation` MUST include a sentence starting with \"RC:\" stating what HS RC flagged, whether you accepted it, and how it changed the SPD (widened/shifted/rebutted).\n"
         + (
             "- `reasoning_trace.prior.spd` MUST match your Step 1 prior SPD (the base-rate-only distribution before any evidence updates).\n"
-            "- `reasoning_trace.updates` MUST contain at least your top 2 update signals from Step 2, with numeric `delta` arrays showing how each signal shifted the distribution. Positive values in `delta` mean probability mass added to that bucket; negative means removed. Each `delta` array must sum to approximately 0. Write positive numbers plainly (`0.25`), never with a leading plus sign (`+0.25`) — a leading `+` is not valid JSON and makes the whole response unparseable.\n"
+            "- `reasoning_trace.updates` MUST contain at least your top 2 update signals from Step 2, with numeric `delta` arrays showing how each signal shifted the distribution. Positive values in `delta` mean probability mass added to that bucket; negative means removed. Each `delta` array must sum to approximately 0.\n"
             "- `reasoning_trace.updates[].post_update_spd` is the running SPD after applying that signal — it must equal the previous SPD plus the delta (within rounding).\n"
             "- `reasoning_trace.point_estimate` and `point_estimate_bucket` must be consistent with your Step 6 check.\n"
             "- `reasoning_trace.rc_assessment` must state whether you accepted, rebutted, or partially accepted the HS regime change flag.\n\n"

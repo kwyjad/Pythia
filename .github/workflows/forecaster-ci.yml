@@ -171,7 +171,9 @@ jobs:
           PYTHIA_SPD_V2_USE_BAYESMC: "0"
         run: |
           echo "=== Running Forecaster SPD unit tests ==="
-          pytest -vv forecaster/tests/test_spd.py
+          pytest -vv \
+            forecaster/tests/test_spd.py \
+            forecaster/tests/test_spd_json_repair.py
 
       - name: === Running model registry + provider guards ===
         run: |
