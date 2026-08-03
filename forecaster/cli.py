@@ -320,6 +320,57 @@ def _maybe_log_default_ensemble() -> None:
         LOG.exception("[debug] Failed to summarize DEFAULT_ENSEMBLE")
 
 
+def strip_unary_plus_outside_strings(s: str) -> str:
+    """Drop JSON-invalid unary ``+`` number prefixes (``+0.25`` -> ``0.25``).
+
+    JSON has no unary plus, but models routinely write one in signed delta
+    arrays (``"delta": [-0.07, -0.13, +0.25]``) because the prompt talks about
+    positive and negative values. ``json.loads`` then rejects the WHOLE object,
+    discarding an otherwise complete — and already paid for — SPD.
+
+    The scan tracks string state so a literal ``+`` inside a string value is
+    never touched, and only strips a ``+`` that sits in a value position
+    (directly after ``[``, ``,`` or ``:``) and prefixes a number.
+    """
+    out: list[str] = []
+    in_str = False
+    esc = False
+    last_significant = ""
+    n = len(s)
+    for i, ch in enumerate(s):
+        if in_str:
+            out.append(ch)
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+                last_significant = '"'
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            continue
+        if ch == "+" and last_significant in ("[", ",", ":"):
+            nxt = s[i + 1] if i + 1 < n else ""
+            nxt2 = s[i + 2] if i + 2 < n else ""
+            if nxt.isdigit():
+                # Skip the '+'; last_significant is deliberately unchanged so
+                # the number that follows still reads as being in value position.
+                continue
+            if nxt == "." and nxt2.isdigit():
+                # '+.5' -> '0.5': dropping the '+' alone would leave '.5',
+                # which JSON also rejects (it requires a leading digit).
+                out.append("0")
+                last_significant = "0"
+                continue
+        out.append(ch)
+        if not ch.isspace():
+            last_significant = ch
+    return "".join(out)
+
+
 def _safe_json_loads(text: str) -> Any:
     """
     Best-effort JSON loader for LLM responses.
@@ -327,6 +378,8 @@ def _safe_json_loads(text: str) -> Any:
     - Strips ``` / ```json fences if present.
     - Tries to parse the whole string.
     - If that fails, tries the first {...} block.
+    - If that fails, retries both with JSON-invalid unary ``+`` prefixes
+      stripped (see :func:`strip_unary_plus_outside_strings`).
     Raises json.JSONDecodeError if all attempts fail.
     """
     if text is None:
@@ -345,17 +398,29 @@ def _safe_json_loads(text: str) -> Any:
             lines = lines[:-1]
         s = "\n".join(lines).strip()
 
-    # First attempt: whole string
+    def _attempt(payload: str) -> Any:
+        """Whole string, then the first {...} block."""
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            start = payload.find("{")
+            end = payload.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                return json.loads(payload[start : end + 1])
+            raise
+
     try:
-        return json.loads(s)
+        return _attempt(s)
     except json.JSONDecodeError:
-        # Second attempt: first {...} block
-        start = s.find("{")
-        end = s.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            candidate = s[start : end + 1]
-            return json.loads(candidate)
-        # Re-raise original error
+        # Repair pass, last resort only: a successful parse above never reaches
+        # here, so well-formed responses are byte-identical to before.
+        repaired = strip_unary_plus_outside_strings(s)
+        if repaired != s:
+            try:
+                return _attempt(repaired)
+            except json.JSONDecodeError:
+                pass
+        # Re-raise the original error, not the repaired one.
         raise
 
 
@@ -3102,12 +3167,29 @@ async def _call_spd_members_v2(
 
         try:
             spd_obj = _safe_json_loads(text)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Never swallow this silently: the call succeeded and was billed,
+            # so a discarded member is invisible in llm_calls (status='ok') and
+            # only shows up as a quietly smaller ensemble.
+            LOG.warning(
+                "SPD member response failed to parse for %s / %s: %s "
+                "(response %d chars, discarded)",
+                question_id,
+                getattr(ms_val, "model_id", "") or getattr(ms_val, "name", ""),
+                exc,
+                len(str(text)),
+            )
             per_model_spds.append(model_spd)
             model_success.append((getattr(ms_val, "provider", ""), False))
             continue
 
         if not isinstance(spd_obj, dict):
+            LOG.warning(
+                "SPD member response parsed to %s (not an object) for %s / %s; discarded",
+                type(spd_obj).__name__,
+                question_id,
+                getattr(ms_val, "model_id", "") or getattr(ms_val, "name", ""),
+            )
             per_model_spds.append(model_spd)
             model_success.append((getattr(ms_val, "provider", ""), False))
             continue
