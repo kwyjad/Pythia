@@ -553,6 +553,46 @@ def _try_gemini_triage_grounding(
 # Single-hazard 2-pass merge
 # ---------------------------------------------------------------------------
 
+def _scored_hazards(
+    expected_hazards: list[str],
+    active: Set[str],
+    rc_promoted: Set[str],
+    ace_low_activity: bool,
+) -> list[str]:
+    """The hazards triage actually scores for this country this run.
+
+    SINGLE SOURCE OF TRUTH for both the grounding list and the country-level
+    status roll-up. They were duplicated, drifted apart, and the roll-up ended
+    up counting the deliberate ACE low-activity skip: on the 2026-08-01 run
+    that reported 49 of 122 countries as ``degraded`` — and put all 49 on the
+    rerun list — while every one of the 261 triage calls had succeeded.
+    """
+    return [
+        hz
+        for hz in expected_hazards
+        if hz in active
+        and hz in _TRIAGE_HAZARDS
+        and not (hz == "ACE" and ace_low_activity)
+        and hz not in rc_promoted
+    ]
+
+
+def combine_hazard_statuses(statuses: list[str]) -> str:
+    """Roll per-hazard triage statuses up to one country-level status.
+
+    Only statuses for hazards triage actually SCORED belong here — skip
+    markers (``seasonal_skip`` / ``acled_low_activity`` / ``rc_promoted``) are
+    not failures and must be filtered out by :func:`_scored_hazards` first.
+    """
+    if not statuses:
+        return "ok"
+    if all(s == "error" for s in statuses):
+        return "failed"
+    if all(s == "ok" for s in statuses):
+        return "ok"
+    return "degraded"
+
+
 def _merge_single_triage_passes(
     p1: Dict[str, Any],
     p2: Dict[str, Any],
@@ -1027,12 +1067,9 @@ def run_triage_for_country(
 
     # Phase 1: Parallel triage grounding calls for active hazards.
     # Exclude ACE if ACLED shows low activity; exclude RC-promoted hazards.
-    hazards_to_ground = [
-        hz for hz in expected_hazards
-        if hz in active and hz in _TRIAGE_HAZARDS
-        and not (hz == "ACE" and ace_low_activity)
-        and hz not in rc_promoted
-    ]
+    hazards_to_ground = _scored_hazards(
+        expected_hazards, active, rc_promoted, ace_low_activity
+    )
     grounding_results: Dict[str, dict[str, Any] | None] = {}
 
     # In a staged collect stage (hs_finalize) the triage grounding already
@@ -1132,21 +1169,15 @@ def run_triage_for_country(
         )
         merged_hazards[hz_code] = hazard_triage
 
-    # Determine overall status across active hazards (exclude RC-promoted).
+    # Roll up over the hazards triage actually SCORED — the same list that
+    # drove grounding, so a skip can never again read as a failure.
     active_statuses = [
         merged_hazards[hz].get("status", "error")
-        for hz in expected_hazards
-        if hz in active and hz in _TRIAGE_HAZARDS
-        and hz not in rc_promoted
+        for hz in _scored_hazards(
+            expected_hazards, active, rc_promoted, ace_low_activity
+        )
     ]
-    if not active_statuses:
-        status = "ok"
-    elif all(s == "error" for s in active_statuses):
-        status = "failed"
-    elif all(s == "ok" for s in active_statuses):
-        status = "ok"
-    else:
-        status = "degraded"
+    status = combine_hazard_statuses(active_statuses)
 
     total_elapsed = int((time.time() - triage_start) * 1000)
     logger.info(

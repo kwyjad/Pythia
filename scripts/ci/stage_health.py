@@ -90,6 +90,14 @@ def _has_table(con, table: str) -> bool:
         return False
 
 
+def _has_column(con, table: str, column: str) -> bool:
+    try:
+        con.execute(f"SELECT {column} FROM {table} LIMIT 1")
+        return True
+    except Exception:
+        return False
+
+
 def _grounding(con, hs_run_id: str, since: Optional[str]) -> Dict[str, Any]:
     """RC + triage grounding health, keyed off the synthetic hazard_code encoding."""
     if not _has_table(con, "llm_calls"):
@@ -158,10 +166,39 @@ def _rc_levels(con, hs_run_id: str) -> Dict[str, Any]:
         f"SELECT COALESCE(CAST(track AS VARCHAR),'(null)'), COUNT(*) FROM hs_triage {clause} GROUP BY 1 ORDER BY 1",
         params,
     )
+    # hs_triage holds one row per country-hazard INCLUDING seasonal
+    # screen-outs, which never reach the RC LLM and default to level 0. Rolling
+    # them into by_level made stage_health report 435 level-0 rows for a run
+    # whose debug bundle correctly said 310 assessed at level 0 (+125 not
+    # assessed). Report the assessed distribution and the skipped count apart.
+    n_not_assessed = 0
+    if _has_column(con, "hs_triage", "data_quality_json"):
+        skip_clause = "AND" if clause else "WHERE"
+        skipped = _q(
+            con,
+            f"""
+            SELECT COUNT(*) FROM hs_triage {clause}
+            {skip_clause} COALESCE(
+                json_extract_string(data_quality_json, '$.status'), ''
+            ) = 'seasonal_skip'
+            """,
+            params,
+        )
+        n_not_assessed = int(skipped[0][0]) if skipped else 0
+    by_level = {str(r[0]): int(r[1]) for r in rows}
+    n_rows = sum(int(r[1]) for r in rows)
+    by_level_assessed = dict(by_level)
+    if n_not_assessed and "0" in by_level_assessed:
+        by_level_assessed["0"] = max(0, by_level_assessed["0"] - n_not_assessed)
     return {
         "available": True,
-        "n_rows": sum(int(r[1]) for r in rows),
-        "by_level": {str(r[0]): int(r[1]) for r in rows},
+        "n_rows": n_rows,
+        "n_not_assessed": n_not_assessed,
+        "n_assessed": n_rows - n_not_assessed,
+        # Every row, seasonal screen-outs included (level 0 by default).
+        "by_level": by_level,
+        # Only the country-hazard pairs the RC LLM actually scored.
+        "by_level_assessed": by_level_assessed,
         "by_track": {str(r[0]): int(r[1]) for r in tracks},
     }
 

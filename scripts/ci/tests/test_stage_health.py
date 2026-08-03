@@ -391,3 +391,50 @@ def test_sibyl_section_absent_on_a_pre_sibyl_db(tmp_path):
     path = _db(tmp_path)
     rep = _run(path, tmp_path, stage="sibyl", sibyl_run_id=SIBYL_RUN)
     assert rep["sibyl"]["available"] is False
+
+
+def test_rc_levels_separate_seasonal_screen_outs_from_assessed_level_0(tmp_path):
+    """hs_triage holds a row per country-hazard INCLUDING seasonal screen-outs.
+
+    Those never reach the RC LLM and default to level 0, so folding them into
+    by_level made stage_health report 435 level-0 rows for the 2026-08-01 run
+    whose debug bundle correctly said 310 assessed at level 0 (+125 skipped).
+    """
+    path = str(tmp_path / "seasonal.duckdb")
+    con = duckdb.connect(path)
+    con.execute(
+        """
+        CREATE TABLE hs_triage (
+            run_id TEXT, regime_change_level INTEGER, track INTEGER,
+            is_test BOOLEAN, data_quality_json TEXT
+        )
+        """
+    )
+    for _ in range(3):  # assessed, level 0
+        con.execute("INSERT INTO hs_triage VALUES (?, 0, 2, TRUE, ?)",
+                    [RUN, '{"status": "ok"}'])
+    for _ in range(5):  # seasonal screen-outs, never assessed
+        con.execute("INSERT INTO hs_triage VALUES (?, 0, NULL, TRUE, ?)",
+                    [RUN, '{"status": "seasonal_skip"}'])
+    con.execute("INSERT INTO hs_triage VALUES (?, 2, 1, TRUE, ?)",
+                [RUN, '{"status": "rc_promoted"}'])
+    con.close()
+
+    rc = _run(path, tmp_path)["rc_levels"]
+    assert rc["n_rows"] == 9
+    assert rc["n_not_assessed"] == 5
+    assert rc["n_assessed"] == 4
+    assert rc["by_level"]["0"] == 8            # every row, screen-outs included
+    assert rc["by_level_assessed"]["0"] == 3   # only what RC actually scored
+    assert rc["by_level_assessed"]["2"] == 1
+
+
+def test_rc_levels_degrade_cleanly_without_data_quality_json(tmp_path):
+    """A DB predating the column must not warn or mis-report."""
+    path = _db(tmp_path)  # hs_triage here has no data_quality_json
+    con = duckdb.connect(path)
+    con.execute("INSERT INTO hs_triage VALUES (?, 0, 2, TRUE)", [RUN])
+    con.close()
+    rc = _run(path, tmp_path)["rc_levels"]
+    assert rc["n_not_assessed"] == 0
+    assert rc["by_level_assessed"] == rc["by_level"]
