@@ -73,6 +73,7 @@ jobs:
             --source wayback \
             --only-if-newer \
             --max-age-days 60 \
+            --expect-edition-by-day 7 \
             $FORCE_FLAG \
             --verbose
 

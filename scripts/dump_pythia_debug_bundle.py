@@ -1747,7 +1747,13 @@ def _load_batch_health(
                 tc = float(cost_rows[0].get("total_cost") or 0.0)
                 out["batch_cost_usd"] = round(bc, 4)
                 out["total_cost_usd"] = round(tc, 4)
-                out["full_price_pct_of_spend"] = (
+                # NOT the same as "lost discount": search-API spend (Brave)
+                # and the synchronous phases (scenarios, adversarial
+                # synthesis) are never batch-eligible, so a healthy run still
+                # shows a non-zero share here. batch_economics.py owns the
+                # real lost-discount figure, which counts only providers this
+                # pipeline actually created a batch for.
+                out["non_batch_tier_pct_of_spend"] = (
                     round(100.0 * (tc - bc) / tc, 1) if tc else 0.0
                 )
         except Exception:
@@ -3417,8 +3423,9 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
             )
         if bh.get("total_cost_usd"):
             parts.append(
-                f"${bh['batch_cost_usd']} of ${bh['total_cost_usd']} discounted "
-                f"({bh['full_price_pct_of_spend']}% of spend at full price)"
+                f"${bh['batch_cost_usd']} of ${bh['total_cost_usd']} at batch tier "
+                f"({bh['non_batch_tier_pct_of_spend']}% not batch-eligible: "
+                f"search APIs + synchronous phases)"
             )
         empty = bh.get("empty_batches") or []
         if empty:

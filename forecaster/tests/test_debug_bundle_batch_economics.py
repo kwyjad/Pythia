@@ -91,7 +91,10 @@ def test_empty_batch_and_cost_share_are_surfaced(tmp_path):
     assert bh["available"] is True
     assert bh["fallback_pct"] == pytest.approx(32.0)
     # The cost share is the point: a request count understates it by 2x.
-    assert bh["full_price_pct_of_spend"] > bh["fallback_pct"]
+    # Named "non_batch_tier" and not "full price": search APIs and the
+    # synchronous phases are never batch-eligible, so this is not the same
+    # thing as lost discount (batch_economics.py owns that figure).
+    assert bh["non_batch_tier_pct_of_spend"] > bh["fallback_pct"]
     assert [e["provider"] for e in bh["empty_batches"]] == ["openai"]
 
 
@@ -112,7 +115,7 @@ def test_healthy_run_reports_no_empty_batches(tmp_path):
     bh = _load_batch_health(con, HS_RUN, FC_RUN, PRED, PARAMS)
     assert bh["empty_batches"] == []
     assert bh["fallback_pct"] == pytest.approx(0.0)
-    assert bh["full_price_pct_of_spend"] == pytest.approx(0.0)
+    assert bh["non_batch_tier_pct_of_spend"] == pytest.approx(0.0)
 
 
 def test_other_runs_in_the_travelling_db_are_excluded(tmp_path):

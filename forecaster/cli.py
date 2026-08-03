@@ -4093,6 +4093,14 @@ def _write_binary_outputs(
     Convention: bucket_1 = P(yes), bucket_2 = P(no) = 1 - P(yes),
     buckets 3-5 = 0.  This avoids schema changes while keeping binary
     forecasts readable by the scoring pipeline.
+
+    The width of 5 is a deliberate constant, NOT the SPD bucket count:
+    EVENT_OCCURRENCE is absent from ``BUCKET_SPECS`` and this writer is
+    independent of the July-2026 per-metric restructure (PA/PHASE3PLUS 6,
+    FATALITIES 7). ``compute_scores`` reads binary forecasts via
+    ``bucket_index = 1`` only, so the padding is inert — do not "fix" it to
+    match a metric's bucket count, and do not apply the SPD bucket-set guard
+    (``{1..K}``) to these rows.
     """
     rec = _normalize_question_row_for_spd(question_row)
     qid = rec["question_id"]
