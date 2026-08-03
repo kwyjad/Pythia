@@ -282,6 +282,30 @@ jobs:
           path: diagnostics/batch_state.json
           retention-days: 14
 
+      # Ignite the poller chain now instead of waiting for its cron.
+      # poll_llm_batches.yml asks for */15, but GitHub throttles scheduled
+      # workflows hard: on 2026-08-01 this stage emitted batch state at
+      # 02:59 and the next scheduled tick was 03:50 — a 3h38m gap between
+      # ticks, 51 min of it dead pipeline time. Once ignited the poller
+      # self-re-arms every ~5.5 min and that chain is reliable, so ignition
+      # is the only fragile part. workflow_dispatch also bypasses the
+      # poller's activity gate. Never fatal — the cron stays the backstop,
+      # and a duplicate tick is harmless (collects are idempotent).
+      - name: Ignite batch poller
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0
+          if [ $? -eq 0 ]; then
+            echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
+          else
+            echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
+          fi
+          exit 0
+
       # Additive diagnostics. `continue-on-error` is load-bearing: stages
       # 2..N of a live pipeline run whatever is on main, so a reporting bug
       # here must never take down real forecasting work.
@@ -466,6 +490,30 @@ jobs:
           name: pythia-batch-state
           path: diagnostics/batch_state.json
           retention-days: 14
+
+      # Ignite the poller chain now instead of waiting for its cron.
+      # poll_llm_batches.yml asks for */15, but GitHub throttles scheduled
+      # workflows hard: on 2026-08-01 this stage emitted batch state at
+      # 02:59 and the next scheduled tick was 03:50 — a 3h38m gap between
+      # ticks, 51 min of it dead pipeline time. Once ignited the poller
+      # self-re-arms every ~5.5 min and that chain is reliable, so ignition
+      # is the only fragile part. workflow_dispatch also bypasses the
+      # poller's activity gate. Never fatal — the cron stays the backstop,
+      # and a duplicate tick is harmless (collects are idempotent).
+      - name: Ignite batch poller
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0
+          if [ $? -eq 0 ]; then
+            echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
+          else
+            echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
+          fi
+          exit 0
 
       # Additive diagnostics. `continue-on-error` is load-bearing: stages
       # 2..N of a live pipeline run whatever is on main, so a reporting bug
@@ -690,6 +738,30 @@ jobs:
           name: pythia-batch-state
           path: diagnostics/batch_state.json
           retention-days: 14
+
+      # Ignite the poller chain now instead of waiting for its cron.
+      # poll_llm_batches.yml asks for */15, but GitHub throttles scheduled
+      # workflows hard: on 2026-08-01 this stage emitted batch state at
+      # 02:59 and the next scheduled tick was 03:50 — a 3h38m gap between
+      # ticks, 51 min of it dead pipeline time. Once ignited the poller
+      # self-re-arms every ~5.5 min and that chain is reliable, so ignition
+      # is the only fragile part. workflow_dispatch also bypasses the
+      # poller's activity gate. Never fatal — the cron stays the backstop,
+      # and a duplicate tick is harmless (collects are idempotent).
+      - name: Ignite batch poller
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0
+          if [ $? -eq 0 ]; then
+            echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
+          else
+            echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
+          fi
+          exit 0
 
       # Additive diagnostics. `continue-on-error` is load-bearing: stages
       # 2..N of a live pipeline run whatever is on main, so a reporting bug
@@ -925,6 +997,30 @@ jobs:
           path: diagnostics/batch_state.json
           retention-days: 14
 
+      # Ignite the poller chain now instead of waiting for its cron.
+      # poll_llm_batches.yml asks for */15, but GitHub throttles scheduled
+      # workflows hard: on 2026-08-01 this stage emitted batch state at
+      # 02:59 and the next scheduled tick was 03:50 — a 3h38m gap between
+      # ticks, 51 min of it dead pipeline time. Once ignited the poller
+      # self-re-arms every ~5.5 min and that chain is reliable, so ignition
+      # is the only fragile part. workflow_dispatch also bypasses the
+      # poller's activity gate. Never fatal — the cron stays the backstop,
+      # and a duplicate tick is harmless (collects are idempotent).
+      - name: Ignite batch poller
+        if: steps.signature_after.outputs.signature_ok == 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          gh workflow run poll_llm_batches.yml --ref main -f chain_depth=0
+          if [ $? -eq 0 ]; then
+            echo "Ignited poll_llm_batches.yml for ${BATCH_PIPELINE_ID:-this pipeline}"
+          else
+            echo "::warning::could not ignite poll_llm_batches.yml; the cron backstop will pick this pipeline up"
+          fi
+          exit 0
+
       # Additive diagnostics. `continue-on-error` is load-bearing: stages
       # 2..N of a live pipeline run whatever is on main, so a reporting bug
       # here must never take down real forecasting work.
@@ -1138,11 +1234,22 @@ jobs:
               con.close()
           PY
 
+      # Teed and uploaded like the HS stages': this is the ONLY stage that
+      # makes SPD/binary calls, so its prompt-cache and forecast-coverage
+      # check is the one that matters — and it lived solely in job logs,
+      # which expire. `continue-on-error` matches the other stages: a
+      # reporting bug must never take down real forecasting work.
       - name: Post-run diagnostics
+        if: always()
+        continue-on-error: true
         run: |
-          set -e
-          python scripts/post_run_diagnostics.py --db "${PYTHIA_DB_URL}"
-          python -m scripts.dump_pythia_v2_run_summary
+          set +e
+          mkdir -p diagnostics
+          {
+            python scripts/post_run_diagnostics.py --db "${PYTHIA_DB_URL}"
+            python -m scripts.dump_pythia_v2_run_summary
+          } 2>&1 | tee diagnostics/post_run__fc_collect_finalize.txt
+          exit 0
 
       - name: Compare DB signature after collect stage
         if: always()
@@ -1280,6 +1387,7 @@ jobs:
             --db "${PYTHIA_DB_URL}" \
             --stage fc_collect_finalize \
             --hs-run-id "${HS_RUN_ID}" \
+            --fc-run-id "${FC_RUN_ID:-}" \
             --since "${STAGE_STARTED_AT}" \
             --out diagnostics/stage_health__fc_collect_finalize.json
           exit 0
@@ -1293,6 +1401,7 @@ jobs:
             diagnostics/forecaster_stdout.txt
             diagnostics/batch_economics__*.json
             diagnostics/stage_health__*.json
+            diagnostics/post_run__*.txt
           # error, not warn: see the HS stages' upload.
           if-no-files-found: error
 
