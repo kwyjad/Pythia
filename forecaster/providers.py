@@ -1075,11 +1075,60 @@ def _prompt_cache_enabled() -> bool:
     return os.getenv("PYTHIA_PROMPT_CACHE_ENABLED", "0").strip().lower() in ("1", "true", "yes")
 
 
-# Minimum estimated tokens (chars/4) a cache-marked span must reach before we
-# attach cache_control — shorter prefixes silently don't cache but still pay
-# the 1.25x write intent, so skip the marker entirely. 512 tokens is the
-# claude-opus-5 minimum; most other Anthropic models need 1024+.
-_ANTHROPIC_CACHE_MIN_CHARS = int(os.getenv("PYTHIA_ANTHROPIC_CACHE_MIN_CHARS", "4096") or 4096)
+# Minimum prompt-prefix size a cache-marked span must reach before we attach
+# cache_control. Anthropic silently declines to cache a shorter prefix (no
+# error, just cache_creation_input_tokens: 0), so a marker below the minimum
+# is dead weight rather than a cost — but refusing to mark a span that WOULD
+# have cached is lost money, which is what a single conservative constant was
+# doing: it was set for a 1024-token minimum while claude-opus-5 (the only
+# Anthropic model on the forecast path) caches from 512, so every binary_v2
+# prefix (~760 tokens) was silently left unmarked.
+#
+# The minimum is per-model and NOT monotonic across generations — 512 on the
+# newest models, still 4096 on Opus 4.6/4.5 and Haiku 4.5 — so one constant is
+# wrong in one direction or the other for every model it doesn't describe.
+# Keyed by literal id prefix, like the sampling-param guards above; a new
+# Anthropic model matching nothing falls back to the most conservative value,
+# which caches less but never mis-marks.
+_ANTHROPIC_CACHE_MIN_TOKENS: tuple[tuple[str, int], ...] = (
+    ("claude-opus-5", 512),
+    ("claude-fable-5", 512),
+    ("claude-mythos-5", 512),
+    ("claude-opus-4-8", 1024),
+    ("claude-sonnet-5", 1024),
+    ("claude-sonnet-4-6", 1024),
+    ("claude-sonnet-4-5", 1024),
+    ("claude-opus-4-7", 2048),
+    ("claude-opus-4-6", 4096),
+    ("claude-opus-4-5", 4096),
+    ("claude-haiku-4-5", 4096),
+)
+_ANTHROPIC_CACHE_MIN_TOKENS_DEFAULT = 4096
+
+# ~4 chars/token. The comparison is on characters because the body is built
+# before any tokenizer runs and count_tokens would be a network round trip per
+# request on the hot path.
+_ANTHROPIC_CHARS_PER_TOKEN = 4
+
+
+def _anthropic_cache_min_chars(model: str) -> int:
+    """Smallest cache-marked span worth a breakpoint, in characters.
+
+    ``PYTHIA_ANTHROPIC_CACHE_MIN_CHARS`` overrides the table outright — the
+    escape hatch for a model we don't yet list.
+    """
+
+    override = os.getenv("PYTHIA_ANTHROPIC_CACHE_MIN_CHARS", "").strip()
+    if override:
+        try:
+            return int(override)
+        except ValueError:
+            pass
+    model_l = (model or "").lower()
+    for prefix, min_tokens in _ANTHROPIC_CACHE_MIN_TOKENS:
+        if model_l.startswith(prefix):
+            return min_tokens * _ANTHROPIC_CHARS_PER_TOKEN
+    return _ANTHROPIC_CACHE_MIN_TOKENS_DEFAULT * _ANTHROPIC_CHARS_PER_TOKEN
 
 
 def build_anthropic_body(
@@ -1089,6 +1138,7 @@ def build_anthropic_body(
     *,
     purpose: str | None = None,
     cache_segments: Optional[List[tuple]] = None,
+    cache_ttl: Optional[str] = None,
 ) -> dict:
     """Build the exact /v1/messages request body.
 
@@ -1103,6 +1153,14 @@ def build_anthropic_body(
     text blocks with ``cache_control: {type: ephemeral}`` on breakpoint blocks
     (max 4 per request, enforced here). Otherwise the plain single-string
     message is sent — byte-identical to the legacy request.
+
+    ``cache_ttl`` sets the cache entry's lifetime: ``None`` (default) leaves
+    the bare ``{"type": "ephemeral"}`` marker, i.e. Anthropic's 5-minute TTL
+    and 1.25x write premium; ``"1h"`` buys an hour at a 2x write premium. The
+    batch path passes "1h" because a provider batch routinely outlives five
+    minutes — the 2026-08-01 SPD batch ran 41 — so an entry written by the
+    first item is gone long before the last item is processed. Only the TTL
+    differs between sync and batch bodies; the prompt bytes are identical.
     """
 
     # Use higher max_tokens for SPD/binary forecast calls to avoid truncation.
@@ -1115,6 +1173,10 @@ def build_anthropic_body(
 
     content: Any = prompt
     if cache_segments and _prompt_cache_enabled():
+        min_chars = _anthropic_cache_min_chars(model)
+        cache_control: dict = {"type": "ephemeral"}
+        if cache_ttl:
+            cache_control["ttl"] = cache_ttl
         blocks: List[dict] = []
         marked = 0
         chars_so_far = 0
@@ -1125,9 +1187,9 @@ def build_anthropic_body(
             chars_so_far += len(text)
             block: dict = {"type": "text", "text": text}
             # Only mark breakpoints where the cumulative prefix is plausibly
-            # above the model's cacheable minimum, and never more than 4.
-            if is_breakpoint and marked < 4 and chars_so_far >= _ANTHROPIC_CACHE_MIN_CHARS:
-                block["cache_control"] = {"type": "ephemeral"}
+            # above THIS model's cacheable minimum, and never more than 4.
+            if is_breakpoint and marked < 4 and chars_so_far >= min_chars:
+                block["cache_control"] = dict(cache_control)
                 marked += 1
             blocks.append(block)
         if blocks:
@@ -1382,17 +1444,43 @@ def resolve_request_params(ms: "ModelSpec", temperature: float) -> tuple[float, 
 
 
 def _batch_prompt_cache_enabled() -> bool:
-    """Gate for cache_control blocks in BATCH bodies (default OFF).
+    """Gate for cache_control blocks in BATCH bodies (code default OFF).
 
-    Batch items already get the 50% batch discount; Anthropic cache hits in
-    a batch are best-effort (items fan out across nodes) while the 1.25x
-    cache-write premium is charged per-miss — so batch caching is opt-in,
-    to be enabled only once telemetry shows reads materialize. OpenAI's
-    automatic-cache discount does not apply to its Batch API at all, so
-    prompt_cache_key is never emitted in batch bodies.
+    Anthropic cache hits inside a batch are best-effort — items fan out
+    across nodes, and a cache entry only becomes readable once the first
+    response has begun, so co-scheduled items cannot share one. The write
+    premium, by contrast, is charged whether or not a read ever lands. That
+    asymmetry is why this is a flag rather than always-on.
+
+    Set to "1" in pythia_pipeline_stage.yml since 2026-08-03: with it off the
+    hit rate on the batched path was 0% BY CONSTRUCTION (the 2026-08-01 run
+    logged zero cache reads across all 99 Anthropic calls), so the caution
+    could never be tested. The downside if reads don't materialize is the
+    write premium on the shared prefix alone — ~20.6k tokens, about $0.06 per
+    cycle. Verify with batch_economics.py / post_run_diagnostics.py, both of
+    which already read cache_read_input_tokens; revert this flag to "0" if
+    reads stay at zero.
+
+    OpenAI's automatic-cache discount does not apply to its Batch API at all,
+    so prompt_cache_key is never emitted in batch bodies regardless.
     """
 
     return os.getenv("PYTHIA_BATCH_PROMPT_CACHE", "0").strip().lower() in ("1", "true", "yes")
+
+
+# A provider batch routinely outlives Anthropic's 5-minute default TTL (the
+# 2026-08-01 SPD batch ran 41 minutes end to end), which would leave the
+# prefix written by the first item expired before the last item is scheduled.
+# 1h costs a 2x write premium instead of 1.25x — ~$0.04 more per cycle at
+# current prefix sizes, against a read that would otherwise never land.
+# Set PYTHIA_BATCH_CACHE_TTL=none to fall back to the 5-minute default.
+# Read per call, not at import, so it stays monkeypatchable and can't be
+# frozen by import order — same contract as _batch_prompt_cache_enabled().
+def _batch_cache_ttl() -> Optional[str]:
+    raw = (os.getenv("PYTHIA_BATCH_CACHE_TTL", "") or "").strip()
+    if raw.lower() == "none":
+        return None
+    return raw or "1h"
 
 
 def build_body_for_spec(
@@ -1410,10 +1498,13 @@ def build_body_for_spec(
     path, so a batch item's body is byte-identical to the sync request.
 
     The cache args keep sync/batch parity now that the sync SPD path sends
-    cache_control segments: with PYTHIA_BATCH_PROMPT_CACHE unset (default)
-    batch bodies stay plain-string (see _batch_prompt_cache_enabled);
+    cache_control segments: with PYTHIA_BATCH_PROMPT_CACHE unset (code
+    default) batch bodies stay plain-string (see _batch_prompt_cache_enabled);
     ``prompt_cache_key`` is accepted for signature parity but deliberately
-    never emitted (no OpenAI batch discount exists for it).
+    never emitted (no OpenAI batch discount exists for it). When batch caching
+    IS on, the only divergence from the sync body is the cache_control TTL —
+    the prompt bytes are unchanged, so a replayed batch result is still the
+    answer to the same prompt a sync call would have sent.
     """
 
     del prompt_cache_key  # never emitted in batch bodies — see docstring
@@ -1434,6 +1525,7 @@ def build_body_for_spec(
         return build_anthropic_body(
             prompt, ms.model_id, effective_temperature, purpose=ms.purpose,
             cache_segments=cache_segments,
+            cache_ttl=_batch_cache_ttl() if cache_segments else None,
         )
     if provider in {"google", "gemini"}:
         return build_google_body(

@@ -139,6 +139,15 @@ env:
   # caching) + Anthropic cache_control / OpenAI prompt_cache_key.
   PYTHIA_PROMPT_V3_ORDER: "1"
   PYTHIA_PROMPT_CACHE_ENABLED: "1"
+  # Anthropic cache_control inside BATCH bodies. Off by default in code
+  # because batch cache hits are best-effort while the write premium is
+  # certain — but with it off the batched path's hit rate is 0% BY
+  # CONSTRUCTION, which is what the 2026-08-01 run measured (zero cache reads
+  # across all 99 Anthropic calls). Downside if reads don't land is the write
+  # premium on the shared prefix only, ~$0.06/cycle. Check the cache-read
+  # counts in batch_economics / post_run_diagnostics after each cycle and set
+  # this back to "0" if they stay at zero.
+  PYTHIA_BATCH_PROMPT_CACHE: "1"
   # disable_brave: a missing key makes the Brave backend fall through
   # gracefully WITHOUT recording breaker failures (a 402ing key trips the
   # breaker, and the safety gate then blocks every ungrounded hazard).
