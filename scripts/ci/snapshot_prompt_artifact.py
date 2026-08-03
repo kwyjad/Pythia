@@ -5,7 +5,7 @@
 
 """Generate a markdown artifact showing the full rendered prompts seen by LLMs.
 
-For each hazard type (ACE, DR, FL, HW, TC) this script renders one complete
+For each active hazard type (ACE, DR, FL, TC) this script renders one complete
 example of each prompt stage:
   1. Regime Change (RC) prompt
   2. Triage prompt
@@ -55,6 +55,29 @@ def _close(con):
     duckdb_io.close_db(con)
 
 
+def _ensure_live(con, db_url: str):
+    """Return a usable connection, reopening if the shared handle was closed.
+
+    Anything that calls into the forecaster/pythia loaders can close AND evict
+    the shared ``duckdb_io`` connection out from under us — see
+    :func:`_load_structured_data_for_artifact`. The hazard loop must therefore
+    never assume the handle it started an iteration with is still open: on the
+    2026-08-01 production run the ACE section rendered fully and then DR, FL
+    and TC all reported "No HS triage data found" against a database that had
+    122 rows for each of them, because the first hazard's structured-data load
+    closed the connection and every later query raised into a bare
+    ``except Exception: return None``.
+    """
+    try:
+        con.execute("SELECT 1").fetchone()
+        return con
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning(
+            "shared DB connection is no longer usable (%s); reopening", exc
+        )
+        return _connect(db_url)
+
+
 def _load_sample_country_for_hazard(
     con, hazard_code: str, run_id: str | None = None,
 ) -> Optional[Dict[str, Any]]:
@@ -90,7 +113,13 @@ def _load_sample_country_for_hazard(
             """,
             [hazard_code, run_id],
         ).fetchone()
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # Never silent: a dead connection used to be indistinguishable from
+        # "this hazard has no triage rows", which hid three of four hazards.
+        LOG.warning(
+            "sample-country lookup failed for %s (run_id=%s): %s",
+            hazard_code, run_id, exc,
+        )
         return None
 
     if not row:
@@ -317,7 +346,9 @@ HAZARD_CATALOG = {
     "TC": "Tropical Cyclone — hurricanes, typhoons, cyclones causing wind/storm surge/flooding damage",
 }
 
-ACTIVE_HAZARDS = ["ACE", "DR", "FL", "HW", "TC"]
+# HW is in BLOCKED_HAZARDS (db_writer.py): it never enters RC, triage or
+# question generation, so it could only ever render a skip line here.
+ACTIVE_HAZARDS = ["ACE", "DR", "FL", "TC"]
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +483,12 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
             lines.append(f"# Hazard: {hazard_code} — {HAZARD_CATALOG.get(hazard_code, '')}")
             lines.append("")
 
+            # The previous iteration called into _load_structured_data, whose
+            # sub-loaders close+evict the shared connection. Re-acquire before
+            # the first query of every hazard rather than trusting that the
+            # single reopen further down was the only one needed.
+            con = _ensure_live(con, db_url)
+
             # Find a sample country
             sample = _load_sample_country_for_hazard(con, hazard_code, run_id=run_id)
             if not sample:
@@ -548,7 +585,7 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
                 structured_data = _load_structured_data_for_artifact(
                     iso3, hazard_code, run_id, rc_level
                 )
-                con = _connect(db_url)  # reopen: loaders closed the shared con
+                con = _ensure_live(con, db_url)  # loaders closed the shared con
 
                 lines.append("<details>")
                 lines.append(f"<summary>Full SPD Forecast prompt for {hazard_code}/{metric} — "
