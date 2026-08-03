@@ -22,6 +22,21 @@ import pytest
 from bs4 import BeautifulSoup
 
 import scripts.refresh_crisiswatch as rc
+
+
+class _NoSleepTime:
+    """Stand-in for the module's ``time`` so poll loops don't really sleep."""
+
+    def __init__(self):
+        self._t = 0.0
+
+    def sleep(self, seconds):
+        self._t += float(seconds) or 0.5
+
+    def monotonic(self):
+        self._t += 0.1
+        return self._t
+
 from horizon_scanner.crisiswatch import _resolve_iso3
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "crisiswatch_wayback_sample.html"
@@ -352,3 +367,114 @@ def test_guard_is_disabled_at_zero():
 
     _check_edition_currency((2020, 1), 0, now=_utc(2026, 8, 10))
     _check_edition_currency(None, 7, now=_utc(2026, 8, 10))
+
+
+# ---------------------------------------------------------------------------
+# Fresh SPN capture: patient on refusal, immediate on a challenge page
+#
+# On 2026-08-03 the scheduled run triggered a fresh capture, archive.org
+# refused to serve it 3x ("connection refused"), and the run fell back to a
+# 20-July snapshot that still carried the JUNE edition — then went green.
+# Falling back is not equivalent to one more retry: older snapshots carry
+# older monthly EDITIONS.
+# ---------------------------------------------------------------------------
+
+
+def test_fresh_capture_is_retried_more_patiently_than_the_walk(
+    fixture_html, monkeypatch
+):
+    """A capture indexed but not yet servable must not cost us an edition."""
+    cdx_before = [
+        ["timestamp", "statuscode", "mimetype"],
+        ["20260720094902", "200", "text/html"],
+    ]
+    cdx_after = cdx_before + [["20260803100550", "200", "text/html"]]
+
+    state = {"cdx_calls": 0, "fresh_attempts": 0}
+
+    def fake_get(url, *, params=None, max_attempts=3, **kw):
+        if url == rc._WAYBACK_CDX_URL:
+            state["cdx_calls"] += 1
+            # First listing is the baseline; later ones see the fresh capture.
+            return _StubResponse(
+                json_data=cdx_before if state["cdx_calls"] == 1 else cdx_after
+            )
+        if "20260803100550" in url:
+            # Refused for the first few attempts, then servable — exactly the
+            # observed archive.org behaviour.
+            state["fresh_attempts"] += 1
+            if state["fresh_attempts"] <= 4:
+                return None
+            return _StubResponse(content=fixture_html.encode("utf-8"))
+        if "20260720094902" in url:
+            raise AssertionError(
+                "walked back to the older snapshot instead of waiting for "
+                "the fresh capture — this is the edition-losing regression"
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+    # _get_with_retries is stubbed, so drive its retry loop ourselves.
+    def retrying_get(url, *, params=None, timeout_sec=60, max_attempts=3,
+                     backoff_sec=15):
+        for _ in range(max_attempts):
+            resp = fake_get(url, params=params, max_attempts=max_attempts)
+            if resp is not None:
+                return resp
+        return None
+
+    monkeypatch.setattr(rc, "_get_with_retries", retrying_get)
+    monkeypatch.setattr(rc, "_MIN_ENTRY_COUNT", 2)
+    monkeypatch.setattr(rc, "_trigger_save_page_now", lambda **kw: True)
+    monkeypatch.setattr(rc, "_SPN_POLL_INTERVAL_SEC", 0)
+    monkeypatch.setattr(rc, "time", _NoSleepTime())
+
+    html, timestamp = rc._fetch_wayback_html(spn=True, spn_wait_sec=5)
+    assert timestamp == "20260803100550", "should have used the fresh capture"
+    assert "c-crisiswatch-entry" in html
+    assert state["fresh_attempts"] == 5
+
+
+def test_fresh_capture_that_is_challenged_falls_back_immediately(
+    fixture_html, monkeypatch
+):
+    """A served-but-invalid capture will never improve — don't burn retries."""
+    challenge_bytes = b"<html><title>Just a moment...</title></html>"
+    cdx_before = [
+        ["timestamp", "statuscode", "mimetype"],
+        ["20260720094902", "200", "text/html"],
+    ]
+    cdx_after = cdx_before + [["20260803100550", "200", "text/html"]]
+    state = {"cdx_calls": 0, "fresh_attempts": 0}
+
+    def fake_get(url, *, params=None, **kw):
+        if url == rc._WAYBACK_CDX_URL:
+            state["cdx_calls"] += 1
+            return _StubResponse(
+                json_data=cdx_before if state["cdx_calls"] == 1 else cdx_after
+            )
+        if "20260803100550" in url:
+            state["fresh_attempts"] += 1
+            return _StubResponse(content=challenge_bytes)
+        if "20260720094902" in url:
+            return _StubResponse(content=fixture_html.encode("utf-8"))
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(rc, "_get_with_retries", fake_get)
+    monkeypatch.setattr(rc, "_MIN_ENTRY_COUNT", 2)
+    monkeypatch.setattr(rc, "_trigger_save_page_now", lambda **kw: True)
+    monkeypatch.setattr(rc, "_SPN_POLL_INTERVAL_SEC", 0)
+    monkeypatch.setattr(rc, "time", _NoSleepTime())
+
+    html, timestamp = rc._fetch_wayback_html(spn=True, spn_wait_sec=5)
+    assert timestamp == "20260720094902", "challenged capture must fall back"
+    assert state["fresh_attempts"] == 1, (
+        "a Cloudflare-challenged capture must not be retried 6 times"
+    )
+
+
+def test_download_and_validation_failures_are_distinguishable(monkeypatch):
+    monkeypatch.setattr(rc, "_get_with_retries", lambda url, **kw: None)
+    assert rc._download_snapshot_html("20260803100550") is None
+
+    monkeypatch.setattr(rc, "_MIN_ENTRY_COUNT", 2)
+    assert rc._accept_snapshot_html("<html>Just a moment...</html>", "ts") is None

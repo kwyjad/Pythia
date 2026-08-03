@@ -129,6 +129,22 @@ _DEFAULT_LOOKBACK_DAYS = 120
 # capture to be indexed.
 _SPN_POLL_INTERVAL_SEC = 30
 
+# A freshly-created SPN capture is routinely INDEXED in CDX before it is
+# SERVABLE — archive.org answers the id_ endpoint with "connection refused"
+# for a minute or two afterwards. Falling back to an older snapshot is not
+# equivalent to one more retry: older snapshots carry older monthly EDITIONS,
+# so a transient refusal silently costs a whole month of CrisisWatch data.
+# Observed 2026-08-03: the fresh 3-Aug capture was refused 3x, the run fell
+# back to a 20-July snapshot still carrying the June edition, and went green.
+# Be much more patient with the fresh capture than with the walk.
+_FRESH_CAPTURE_ATTEMPTS = 6
+_FRESH_CAPTURE_BACKOFF_SEC = 20
+# Bounded per-attempt timeout so the extra patience cannot blow the job's
+# wall clock: 6 x 45s + 5 x 20s backoff = 370s worst case. The observed
+# failure mode (connection refused) returns immediately, so the realistic
+# cost is ~100s of backoff. The snapshot is ~1.6 MB; 45s is ample.
+_FRESH_CAPTURE_TIMEOUT_SEC = 45
+
 # SVG xlink:href value → (arrow, alert_type) mapping.
 # The CrisisWatch page encodes status via SVG <use xlink:href="#...">
 # icons inside the <h3> heading of each country entry.
@@ -617,16 +633,37 @@ def _list_wayback_snapshots(
     return timestamps
 
 
-def _fetch_snapshot_html(
-    timestamp: str, *, timeout_sec: int = 120,
+def _download_snapshot_html(
+    timestamp: str,
+    *,
+    timeout_sec: int = 120,
+    max_attempts: int = 3,
+    backoff_sec: int = 15,
 ) -> str | None:
-    """Download and validate one raw snapshot; ``None`` on rejection."""
+    """Raw snapshot text; ``None`` when the DOWNLOAD itself failed.
+
+    Kept separate from validation so callers can distinguish "archive.org
+    would not serve it yet" (retryable — the capture may become available
+    shortly) from "it served us a Cloudflare challenge" (not retryable).
+    """
     url = _WAYBACK_SNAPSHOT_URL.format(timestamp=timestamp)
-    resp = _get_with_retries(url, timeout_sec=timeout_sec)
+    resp = _get_with_retries(
+        url,
+        timeout_sec=timeout_sec,
+        max_attempts=max_attempts,
+        backoff_sec=backoff_sec,
+    )
     if resp is None:
-        log.warning("Snapshot %s download failed", timestamp)
+        log.warning(
+            "Snapshot %s download failed after %d attempt(s)",
+            timestamp, max_attempts,
+        )
         return None
-    html = _maybe_gunzip(resp.content).decode("utf-8", errors="replace")
+    return _maybe_gunzip(resp.content).decode("utf-8", errors="replace")
+
+
+def _accept_snapshot_html(html: str, timestamp: str) -> str | None:
+    """Validate downloaded snapshot text; ``None`` on rejection."""
     reason = _validate_snapshot_html(html)
     if reason:
         log.warning("Snapshot %s rejected: %s", timestamp, reason)
@@ -636,6 +673,25 @@ def _fetch_snapshot_html(
         timestamp, len(html), html.count("c-crisiswatch-entry"),
     )
     return html
+
+
+def _fetch_snapshot_html(
+    timestamp: str,
+    *,
+    timeout_sec: int = 120,
+    max_attempts: int = 3,
+    backoff_sec: int = 15,
+) -> str | None:
+    """Download and validate one raw snapshot; ``None`` on rejection."""
+    html = _download_snapshot_html(
+        timestamp,
+        timeout_sec=timeout_sec,
+        max_attempts=max_attempts,
+        backoff_sec=backoff_sec,
+    )
+    if html is None:
+        return None
+    return _accept_snapshot_html(html, timestamp)
 
 
 def _trigger_save_page_now(*, timeout_sec: int = 120) -> bool:
@@ -735,15 +791,31 @@ def _fetch_wayback_html(
             )
         fresh_ts = _wait_for_new_snapshot(baseline, wait_sec=spn_wait_sec)
         if fresh_ts:
-            # The fresh capture goes through the same validation — SPN
-            # captures can themselves be Cloudflare-challenged.
-            html = _fetch_snapshot_html(fresh_ts, timeout_sec=timeout_sec)
-            if html is not None:
-                return html, fresh_ts
-            log.warning(
-                "Fresh SPN capture %s invalid — walking existing snapshots",
+            # Two failure modes, two responses. A capture archive.org will
+            # not serve YET is worth waiting for (see
+            # _FRESH_CAPTURE_ATTEMPTS); a capture it serves but that fails
+            # validation is Cloudflare-challenged and will never improve.
+            raw = _download_snapshot_html(
                 fresh_ts,
+                timeout_sec=min(timeout_sec, _FRESH_CAPTURE_TIMEOUT_SEC),
+                max_attempts=_FRESH_CAPTURE_ATTEMPTS,
+                backoff_sec=_FRESH_CAPTURE_BACKOFF_SEC,
             )
+            if raw is None:
+                log.warning(
+                    "Fresh SPN capture %s could not be downloaded after %d "
+                    "attempts — walking existing snapshots, which may carry "
+                    "an OLDER edition",
+                    fresh_ts, _FRESH_CAPTURE_ATTEMPTS,
+                )
+            else:
+                html = _accept_snapshot_html(raw, fresh_ts)
+                if html is not None:
+                    return html, fresh_ts
+                log.warning(
+                    "Fresh SPN capture %s invalid — walking existing snapshots",
+                    fresh_ts,
+                )
 
     for timestamp in snapshots:
         html = _fetch_snapshot_html(timestamp, timeout_sec=timeout_sec)
