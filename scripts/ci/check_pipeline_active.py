@@ -5,6 +5,16 @@
 
 """Gate: is a staged Batch-API pipeline currently in flight?
 
+Two consumers, opposite senses of the same question (see ``main``):
+
+* ``--emit proceed`` (default) — ingest-structured-data.yml, before touching
+  the canonical ``pythia-resolver-db`` artifact.
+* ``--emit active`` — poll_llm_batches.yml's activity gate. That gate used to
+  be a weaker inline shell copy implementing only step 1 below, so for ~72h
+  after every pipeline finished, each hourly cron tick paid a full checkout +
+  pip install + provider poll only to conclude "already completed" for every
+  pipeline. Sharing this decision core keeps the two gates from drifting again.
+
 Used by ingest-structured-data.yml before touching the canonical
 ``pythia-resolver-db`` artifact. The staged pipeline forks the DB at
 hs_submit into ``pythia-resolver-db-staged`` and re-uploads the CANONICAL
@@ -25,9 +35,10 @@ Detection (mirrors the poller's activity gate):
 3. Else → in flight; the ingest should skip (next Sunday's cron covers it,
    and this workflow is documented as supplementary freshness).
 
-Writes ``proceed=true|false`` to $GITHUB_OUTPUT. FORCE=true (the
-force_during_pipeline dispatch input) always proceeds. Fails OPEN on gh
-errors — a broken gate must not silence the weekly refresh forever.
+Writes ``proceed=true|false`` (or ``active=true|false``) to $GITHUB_OUTPUT.
+FORCE=true (the force_during_pipeline dispatch input) bypasses the gate. Fails
+OPEN on gh errors in BOTH modes — a broken gate must neither silence the weekly
+refresh forever nor stop the poller advancing a live pipeline.
 """
 
 from __future__ import annotations
@@ -92,13 +103,36 @@ def _gh_json(*args: str) -> object:
     return json.loads(out or "null")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # Two consumers, opposite senses of the same question:
+    #
+    #   --emit proceed (default)  ingest-structured-data.yml — "is it safe to
+    #                             touch the canonical artifact?"  proceed = NOT
+    #                             in flight.
+    #   --emit active             poll_llm_batches.yml — "does any pipeline
+    #                             still need polling?"  active = in flight.
+    #
+    # The fail-open VALUE is True for both, but note it means different things:
+    # a broken gate must never silence the weekly refresh, and must never stop
+    # the poller advancing a live pipeline. Both errors resolve to "do the
+    # normal work"; do not simplify this into a single negation.
+    emit = "proceed"
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--emit" in args:
+        idx = args.index("--emit")
+        if idx + 1 >= len(args) or args[idx + 1] not in ("proceed", "active"):
+            print("usage: check_pipeline_active.py [--emit proceed|active]", file=sys.stderr)
+            return 2
+        emit = args[idx + 1]
+
     force = (os.getenv("FORCE", "false") or "false").strip().lower() in ("1", "true", "yes")
-    proceed = True
+    in_flight = False
     reason = "no in-flight pipeline detected"
+    forced = False
 
     if force:
-        reason = "force_during_pipeline set — skipping the gate"
+        forced = True
+        reason = "FORCE set — skipping the gate"
     else:
         try:
             repo = os.environ["GITHUB_REPOSITORY"]
@@ -115,28 +149,47 @@ def main() -> int:
                 latest_created, runs, datetime.now(timezone.utc),
                 window_hours=_window_hours(),
             ):
-                proceed = False
+                in_flight = True
                 reason = (
                     f"staged pipeline in flight (batch-state artifact from "
-                    f"{latest_created}, no newer successful {FINAL_STAGE_MARKER}) — "
-                    "an ingest now would be silently discarded by the pipeline's "
-                    "final canonical upload"
+                    f"{latest_created}, no newer successful {FINAL_STAGE_MARKER})"
+                )
+            else:
+                reason = (
+                    f"no pipeline in flight (newest batch-state artifact "
+                    f"{latest_created or 'absent'}, superseded by a successful "
+                    f"{FINAL_STAGE_MARKER} or outside the window)"
                 )
         except Exception as exc:  # noqa: BLE001
-            # Fail OPEN: a broken gate must not silence the weekly refresh.
-            print(f"[warn] pipeline-active check failed ({exc}); proceeding")
+            forced = True
+            reason = f"gate check failed ({exc}) — failing open"
+            print(f"[warn] pipeline-active check failed ({exc}); failing open")
 
-    print(f"proceed={proceed} — {reason}")
-    if not proceed:
-        print(f"::notice title=Ingest skipped::{reason}")
+    if emit == "active":
+        key = "active"
+        value = True if forced else in_flight
+        if not value:
+            reason += " — nothing to poll, exiting early"
+            print(f"::notice title=Poller idle::{reason}")
+    else:
+        key = "proceed"
+        value = True if forced else not in_flight
+        if not value:
+            reason += (
+                " — an ingest now would be silently discarded by the pipeline's "
+                "final canonical upload"
+            )
+            print(f"::notice title=Ingest skipped::{reason}")
+
+    print(f"{key}={value} — {reason}")
     out_path = os.getenv("GITHUB_OUTPUT")
     if out_path:
         with open(out_path, "a", encoding="utf-8") as fh:
-            fh.write(f"proceed={'true' if proceed else 'false'}\n")
+            fh.write(f"{key}={'true' if value else 'false'}\n")
     summary = os.getenv("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as fh:
-            fh.write(f"### Pipeline-active gate\n- proceed: {proceed}\n- {reason}\n")
+            fh.write(f"### Pipeline-active gate\n- {key}: {value}\n- {reason}\n")
     return 0
 
 

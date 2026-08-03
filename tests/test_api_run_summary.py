@@ -175,8 +175,14 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, 
             [qid, fc_run],
         )
 
-    # Forecasts raw (for model counting)
-    for model in ["model_a", "model_b", "model_c"]:
+    # Forecasts raw (for model counting). The three real ensemble members are
+    # seeded alongside the aggregate/pseudo-model rows that share the table and
+    # the same Track 1 questions — 'sibyl' in particular used to be counted as
+    # an extra member, so the dashboard reported "6 / 5" for a 5-model lineup.
+    for model in [
+        "model_a", "model_b", "model_c",
+        "sibyl", "ensemble_mean_v2", "ensemble_bayesmc_v2", "track2_flash",
+    ]:
         con.execute(
             "INSERT INTO forecasts_raw (run_id, question_id, model_name, "
             "month_index, bucket_index, probability, ok) VALUES (?, 'q_aaa_ace_fat', ?, 1, 1, 0.5, TRUE)",
@@ -321,7 +327,11 @@ def test_run_summary_tracks(api_env: None) -> None:
 
     assert tracks["track1"]["questions"] == 6
     assert tracks["track2"]["questions"] == 4
-    assert tracks["track1"]["models"] == 3  # model_a, model_b, model_c
+    # model_a/b/c only: 'sibyl' and the ensemble_*/track2_* aggregation rows
+    # live in the same table on the same Track 1 question and must not inflate
+    # the member count (regression: this reported 6 against a 5-model lineup).
+    assert tracks["track1"]["models"] == 3
+    assert resp.json()["ensemble"]["ok"] == 3
 
 
 def test_run_summary_cost(api_env: None) -> None:
@@ -424,6 +434,26 @@ def api_env_test_only(
         "INSERT INTO llm_calls (run_id, hs_run_id, phase, cost_usd, total_tokens, "
         "error_text, status, is_test) VALUES ('fc_t', 'hs_t', 'spd_v2', 4.11, 12000, '', 'ok', FALSE)"
     )
+    # A test-run Sibyl record. The run_summary Sibyl query used to carry no
+    # is_test filter AND to drop its WHERE clause entirely when no run id
+    # resolved, degrading to "newest sibyl_runs row in the table" — so this
+    # $9.99 would surface next to an otherwise all-zero Test OFF summary.
+    con.execute(
+        "CREATE TABLE sibyl_runs (sibyl_run_id TEXT, hs_run_id TEXT, budget_capped BOOLEAN, "
+        "run_cost_usd DOUBLE, opus_cost_usd DOUBLE, brave_cost_usd DOUBLE, n_selected INTEGER, "
+        "n_forecast INTEGER, n_skipped INTEGER, k INTEGER, aggregation TEXT, "
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_test BOOLEAN DEFAULT FALSE)"
+    )
+    con.execute(
+        "CREATE TABLE sibyl_forecasts (sibyl_run_id TEXT, question_id TEXT, status TEXT, "
+        "skip_reason TEXT, is_test BOOLEAN DEFAULT FALSE)"
+    )
+    con.execute(
+        "INSERT INTO sibyl_runs (sibyl_run_id, hs_run_id, budget_capped, run_cost_usd, "
+        "opus_cost_usd, brave_cost_usd, n_selected, n_forecast, n_skipped, k, aggregation, "
+        "is_test) VALUES ('sib_t', 'hs_t', FALSE, 9.99, 9.50, 0.49, 10, 10, 0, 3, "
+        "'linear_pool', TRUE)"
+    )
     con.close()
 
     config_path = _write_config(tmp_path, db_path)
@@ -461,3 +491,29 @@ def test_run_summary_test_on_shows_test_run(api_env_test_only: None) -> None:
     assert data["has_run"] is True
     assert data["run_id"] == "fc_t"
     assert data["coverage"]["countries_scanned"] == 1
+
+
+def test_run_summary_test_off_hides_sibyl_run(api_env_test_only: None) -> None:
+    """Test OFF + only test runs → no Sibyl block, not a leaked test-run cost.
+
+    Two separate defects met here: the Sibyl query had no is_test filter, and
+    when no hs_run_id resolved its WHERE clause vanished, so it fell back to the
+    newest row in the whole table. The result was an all-zero summary with a
+    fully populated Sibyl cost block sitting next to it.
+    """
+    client = TestClient(app)
+    data = client.get("/v1/diagnostics/run_summary").json()
+    assert data["has_run"] is False
+    assert data.get("sibyl") is None
+
+
+def test_run_summary_test_on_shows_sibyl_run(api_env_test_only: None) -> None:
+    """Test ON → the test run's Sibyl block is selected, pinned to its hs_run_id."""
+    client = TestClient(app)
+    data = client.get(
+        "/v1/diagnostics/run_summary", params={"include_test": "true"}
+    ).json()
+    assert data["has_run"] is True
+    assert data["sibyl"] is not None
+    assert data["sibyl"]["sibyl_run_id"] == "sib_t"
+    assert data["sibyl"]["run_cost_usd"] == 9.99

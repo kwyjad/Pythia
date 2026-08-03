@@ -36,6 +36,7 @@ from pythia.api.core import (
     _table_exists,
     _table_has_columns,
     _test_filter,
+    _test_filter_for,
 )
 from pythia.api.db_sync import get_cached_latest_hs
 from resolver.query.debug_ui import (
@@ -51,6 +52,31 @@ from resolver.query.kpi_scopes import compute_countries_triaged_for_month_with_s
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Aggregate/pseudo-model names that must never be counted as ensemble MEMBERS.
+# Kept in lockstep with the calibration module's weight-softmax exclusion set
+# (the same names are excluded there for the same reason). Imported lazily and
+# defensively so the API process never hard-depends on the tools package —
+# mirrors the get_ensemble_resolved() import in diagnostics_run_summary.
+_AGGREGATE_MODEL_NAMES_FALLBACK = (
+    "ensemble_mean_v2",
+    "ensemble_bayesmc_v2",
+    "track2_flash",
+    "ensemble",
+    "sibyl",
+)
+
+
+def _aggregate_model_names() -> List[str]:
+    try:
+        from pythia.tools.compute_calibration_pythia import AGGREGATE_MODEL_NAMES
+
+        names = sorted(AGGREGATE_MODEL_NAMES)
+        if names:
+            return names
+    except Exception:  # noqa: BLE001 - never let a diagnostics import break the API
+        logger.debug("AGGREGATE_MODEL_NAMES import failed; using fallback", exc_info=True)
+    return list(_AGGREGATE_MODEL_NAMES_FALLBACK)
 
 @router.get("/v1/diagnostics/memory")
 def diagnostics_memory():
@@ -91,7 +117,7 @@ def diagnostics_summary(include_test: bool = Query(False)):
     """
     con = _con()
 
-    _tf = _test_filter(include_test)
+    _tf = _test_filter_for(con, "questions", include_test)
     try:
         # questions_by_status is still grouped by status (including 'retired'),
         # so the count of retired questions remains visible/auditable here.
@@ -339,12 +365,12 @@ def resolution_rates(
     has_window_start = _table_has_columns(con, "questions", ["window_start_date"])
 
     # Total questions by (hazard_code, metric)
-    _tf = _test_filter(include_test, "r")
+    _tf = _test_filter_for(con, "resolutions", include_test, "r")
     total_sql = f"""
         SELECT q.hazard_code, UPPER(q.metric) AS metric,
                COUNT(DISTINCT q.question_id) AS total_questions
         FROM questions q
-        WHERE 1=1 {hazard_filter} {run_filter} {retired_filter} {blocked_filter}{_test_filter(include_test, "q")}
+        WHERE 1=1 {hazard_filter} {run_filter} {retired_filter} {blocked_filter}{_test_filter_for(con, "questions", include_test, "q")}
         GROUP BY q.hazard_code, UPPER(q.metric)
     """
     try:
@@ -361,7 +387,7 @@ def resolution_rates(
             SELECT q.hazard_code, UPPER(q.metric) AS metric,
                    COUNT(DISTINCT q.question_id) AS pending
             FROM questions q
-            WHERE 1=1 {hazard_filter} {run_filter} {retired_filter} {blocked_filter}{_test_filter(include_test, "q")}
+            WHERE 1=1 {hazard_filter} {run_filter} {retired_filter} {blocked_filter}{_test_filter_for(con, "questions", include_test, "q")}
               AND CAST(q.window_start_date AS DATE)
                   > DATE_TRUNC('month', CURRENT_DATE - INTERVAL 1 MONTH)
             GROUP BY q.hazard_code, UPPER(q.metric)
@@ -510,7 +536,11 @@ def diagnostics_kpi_scopes(
 
     available_months: List[str] = []
     if month_source_table and month_source_ts:
-        _tf_months = _test_filter(include_test)
+        # Column-guarded: an unguarded predicate here raises on a table without
+        # is_test, the except below swallows it, and the run-month dropdown goes
+        # blank ONLY when the Test toggle is OFF — which then blanks
+        # selected_month, available_runs and selected_run_id with it.
+        _tf_months = _test_filter_for(con, month_source_table, include_test)
         sql = (
             f"SELECT DISTINCT strftime({month_source_ts}, '%Y-%m') AS year_month "
             f"FROM {month_source_table} WHERE {month_source_ts} IS NOT NULL{_tf_months}"
@@ -758,7 +788,15 @@ def diagnostics_kpi_scopes(
         if status_filter:
             status_sql, status_params = status_clause(status_filter)
 
-        base_sql = f"FROM questions q WHERE 1=1{metric_sql}{status_sql}"
+        # This helper never referenced include_test at all, so the "Total
+        # active" / "Total active + inactive" scopes always counted test rows —
+        # regardless of the dashboard toggle.
+        tf_sq = _test_filter_for(con, "questions", include_test, "q")
+        tf_sr = _test_filter_for(con, "resolutions", include_test, "r")
+        tf_sf = _test_filter_for(con, "forecasts_ensemble", include_test, "f")
+        tf_sl = _test_filter_for(con, "llm_calls", include_test, "l")
+
+        base_sql = f"FROM questions q WHERE 1=1{metric_sql}{status_sql}{tf_sq}"
         scope["questions"] = _count(
             f"SELECT COUNT(DISTINCT q.question_id) {base_sql}",
             metric_params + status_params,
@@ -778,7 +816,7 @@ def diagnostics_kpi_scopes(
             scope["resolved_questions"] = _count(
                 f"SELECT COUNT(DISTINCT r.question_id) FROM resolutions r "
                 f"JOIN questions q ON r.question_id = q.question_id "
-                f"WHERE 1=1{metric_sql}",
+                f"WHERE 1=1{metric_sql}{tf_sq}{tf_sr}",
                 metric_params,
                 "scope_resolutions_failed",
             )
@@ -797,7 +835,7 @@ def diagnostics_kpi_scopes(
             if forecast_source_table == "forecasts_ensemble":
                 forecast_join = (
                     "FROM questions q JOIN forecasts_ensemble f ON f.question_id = q.question_id "
-                    f"WHERE 1=1{metric_sql}{status_sql}"
+                    f"WHERE 1=1{metric_sql}{status_sql}{tf_sq}{tf_sf}"
                 )
                 scope["forecasts"] = _count(
                     f"SELECT COUNT(DISTINCT q.question_id) {forecast_join}",
@@ -827,7 +865,7 @@ def diagnostics_kpi_scopes(
                 placeholders = ", ".join(["?"] * len(forecast_source_phase))
                 forecast_join = (
                     "FROM questions q JOIN llm_calls l ON l.question_id = q.question_id "
-                    f"WHERE l.phase IN ({placeholders}){metric_sql}{status_sql}"
+                    f"WHERE l.phase IN ({placeholders}){metric_sql}{status_sql}{tf_sq}{tf_sl}"
                 )
                 params = list(forecast_source_phase) + forecast_base_params
                 scope["forecasts"] = _count(
@@ -872,7 +910,7 @@ def diagnostics_kpi_scopes(
         if parsed_sel and fe_ts:
             sel_start, sel_end = _month_window(parsed_sel[0], parsed_sel[1])
             try:
-                _tf_fe = _test_filter(include_test, "fe")
+                _tf_fe = _test_filter_for(con, "forecasts_ensemble", include_test, "fe")
                 _has_is_test = _table_has_columns(con, "forecasts_ensemble", ["is_test"])
                 _is_test_expr = "COALESCE(fe.is_test, FALSE)" if _has_is_test else "FALSE"
                 runs_rows = con.execute(
@@ -1044,9 +1082,14 @@ def diagnostics_run_summary(
 ):
     """Return aggregate run-level KPIs for the summary dashboard view."""
     con = _con()
-    tf_q = _test_filter(include_test, "q")
-    tf_ht = _test_filter(include_test, "ht")
-    tf_lc = _test_filter(include_test, "lc")
+    # Column-guarded: these clauses are spliced into ~25 queries whose
+    # exceptions are swallowed by _q/_q1, so an unguarded predicate against a
+    # table missing is_test would silently zero the whole dashboard — but only
+    # with the Test toggle OFF. See core._test_filter_for.
+    tf_q = _test_filter_for(con, "questions", include_test, "q")
+    tf_ht = _test_filter_for(con, "hs_triage", include_test, "ht")
+    tf_lc = _test_filter_for(con, "llm_calls", include_test, "lc")
+    tf_fr = _test_filter_for(con, "forecasts_raw", include_test, "fr")
 
     # ---- Discover run ids ------------------------------------------------
     hs_run_id: Optional[str] = None
@@ -1395,7 +1438,16 @@ def diagnostics_run_summary(
     if run_id and _table_exists(con, "forecasts_raw"):
         model_col = "model_name" if "model_name" in _table_columns(con, "forecasts_raw") else None
         if model_col:
-            # Count distinct models for Track 1 questions only (exclude track2_flash, ensemble aggregation)
+            # Count distinct ENSEMBLE MEMBERS for Track 1 questions. The LIKE
+            # patterns exclude the aggregation rows (ensemble_mean_v2,
+            # ensemble_bayesmc_v2, track2_flash) but Sibyl writes its pooled SPD
+            # to forecasts_raw under the flat name 'sibyl' on the SAME Track 1
+            # questions, so it used to be counted as a sixth member and the
+            # dashboard reported "6 / 5". Reuse the calibration module's
+            # aggregate set so the exclusion list stays single-sourced.
+            aggregate_names = _aggregate_model_names()
+            name_placeholders = ", ".join(["?"] * len(aggregate_names))
+            exclude_sql = f"AND fr.{model_col} NOT IN ({name_placeholders}) "
             if q_filter and _table_exists(con, "questions") and "track" in _table_columns(con, "questions"):
                 tracks["track1"]["models"] = _q1(
                     f"SELECT COUNT(DISTINCT fr.{model_col}) FROM forecasts_raw fr "
@@ -1403,14 +1455,19 @@ def diagnostics_run_summary(
                     f"WHERE fr.run_id = ? AND COALESCE(fr.ok, TRUE) = TRUE "
                     f"AND q.track = 1 "
                     f"AND fr.{model_col} NOT LIKE 'ensemble_%' "
-                    f"AND fr.{model_col} NOT LIKE 'track2_%'",
-                    [run_id],
+                    f"AND fr.{model_col} NOT LIKE 'track2_%' "
+                    + exclude_sql
+                    + tf_fr
+                    + tf_q,
+                    [run_id, *aggregate_names],
                 ) or 0
             else:
                 tracks["track1"]["models"] = _q1(
                     f"SELECT COUNT(DISTINCT fr.{model_col}) FROM forecasts_raw fr "
-                    f"WHERE fr.run_id = ? AND COALESCE(fr.ok, TRUE) = TRUE",
-                    [run_id],
+                    f"WHERE fr.run_id = ? AND COALESCE(fr.ok, TRUE) = TRUE "
+                    + exclude_sql
+                    + tf_fr,
+                    [run_id, *aggregate_names],
                 ) or 0
 
     # ---- Ensemble health --------------------------------------------------
@@ -1550,15 +1607,23 @@ def diagnostics_run_summary(
                 }
 
     # ---- Sibyl parallel track coverage -------------------------------------
+    #
+    # Pinned to THIS run's hs_run_id, and test-filtered like every other block.
+    # Previously neither: with no hs_run_id the WHERE clause disappeared
+    # entirely and the query degraded to "newest sibyl_runs row in the table",
+    # so a Test-OFF view with no production run returned has_run=false and
+    # all-zero KPIs *alongside a fully populated Sibyl cost block belonging to
+    # some other (possibly test) run. No run id => no Sibyl block.
     sibyl_block: Optional[Dict[str, Any]] = None
-    if _table_exists(con, "sibyl_runs"):
+    if hs_run_id and _table_exists(con, "sibyl_runs"):
+        tf_sr = _test_filter_for(con, "sibyl_runs", include_test)
         sibyl_run = _q(
             "SELECT sibyl_run_id, budget_capped, run_cost_usd, opus_cost_usd, "
             "brave_cost_usd, n_selected, n_forecast, n_skipped, k, aggregation "
             "FROM sibyl_runs "
-            + ("WHERE hs_run_id = ? " if hs_run_id else "")
-            + "ORDER BY created_at DESC LIMIT 1",
-            [hs_run_id] if hs_run_id else [],
+            "WHERE hs_run_id = ?" + tf_sr + " "
+            "ORDER BY created_at DESC LIMIT 1",
+            [hs_run_id],
         )
         if sibyl_run:
             (s_run_id, s_capped, s_cost, s_opus, s_brave,
@@ -1566,7 +1631,8 @@ def diagnostics_run_summary(
             skipped_by_cap = _q1(
                 "SELECT COUNT(*) FROM sibyl_forecasts "
                 "WHERE sibyl_run_id = ? AND status = 'skipped' "
-                "AND skip_reason = 'run budget cap'",
+                "AND skip_reason = 'run budget cap'"
+                + _test_filter_for(con, "sibyl_forecasts", include_test),
                 [s_run_id],
             ) or 0
             sibyl_block = {

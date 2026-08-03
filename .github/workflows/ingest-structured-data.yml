@@ -4,7 +4,7 @@
 # See the LICENSE file in the project root for details.
 
 # Mid-cycle data refresh. The primary ingestion happens in resolver_update.yml
-# (15th monthly). This workflow provides supplementary freshness for fast-changing sources
+# (28th monthly). This workflow provides supplementary freshness for fast-changing sources
 # between monthly backfills. Its DB artifact is available to the HS workflow as a candidate.
 
 ---

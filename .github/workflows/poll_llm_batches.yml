@@ -59,46 +59,37 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Checked out before the gate so the gate itself can be the shared,
+      # unit-tested decision core rather than a second inline copy of it.
+      # Checkout is ~2s; the expensive part the gate protects is the pip
+      # install + provider polling below.
+      - name: Check out code
+        uses: actions/checkout@v4
+
       # Cheap activity gate: the pipeline is active only a few days per
-      # month, but this cron fires every 15 minutes year-round. One API
-      # call decides whether a pythia-batch-state artifact was produced
-      # recently (72h covers the worst-case stage cadence — each submit
-      # stage refreshes it, and the 24h PYTHIA_BATCH_MAX_WAIT_H forces
-      # progression well within the window). Idle ticks exit here in
-      # seconds instead of paying checkout + Python setup ~2,800 times a
-      # month. Manual dispatch always polls (recovery valve).
+      # month, but this cron fires year-round. scripts/ci/check_pipeline_active.py
+      # answers "is a staged pipeline in flight?" with TWO conditions — a recent
+      # pythia-batch-state artifact AND no newer successful fc_collect_finalize.
+      #
+      # This step used to inline only the first condition. Because the final
+      # stage emits no batch state, its predecessor's artifact lingers for the
+      # artifact retention window, so for ~72h after every pipeline finished
+      # each tick paid a full checkout + pip install + provider poll only to
+      # decide "already completed" for every pipeline (~70 wasted runs per
+      # cycle). Sharing the script keeps this gate and the ingest gate from
+      # drifting apart again.
+      #
+      # Manual dispatch always polls (recovery valve). Fails open to
+      # active=true, so a broken gate delays nothing.
       - name: Check for active pipelines
         id: gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            echo "Manual dispatch — polling unconditionally."
-            echo "active=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          LATEST=$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=pythia-batch-state&per_page=1" \
-            --jq '.artifacts[0].created_at // empty' || true)
-          if [ -z "${LATEST}" ]; then
-            echo "No pythia-batch-state artifacts — no pipeline has ever run. Idle."
-            echo "active=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          LATEST_EPOCH=$(date -d "${LATEST}" +%s)
-          NOW_EPOCH=$(date +%s)
-          AGE_H=$(( (NOW_EPOCH - LATEST_EPOCH) / 3600 ))
-          if [ "${AGE_H}" -le 72 ]; then
-            echo "Newest batch state is ${AGE_H}h old — pipeline window active."
-            echo "active=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Newest batch state is ${AGE_H}h old (>72h) — idle."
-            echo "active=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Check out code
-        if: steps.gate.outputs.active == 'true'
-        uses: actions/checkout@v4
+          PYTHIA_PIPELINE_ACTIVE_WINDOW_H: "72"
+          FORCE: ${{ github.event_name == 'workflow_dispatch' }}
+        # python3, not python: this runs BEFORE setup-python. The script is
+        # stdlib + gh only, so no pip install is needed to reach a verdict.
+        run: python3 -m scripts.ci.check_pipeline_active --emit active
 
       - name: Set up Python 3.11
         if: steps.gate.outputs.active == 'true'

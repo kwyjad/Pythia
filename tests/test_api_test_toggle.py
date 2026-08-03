@@ -306,3 +306,41 @@ def test_version_last_updated_includes_test_runs_when_opted_in(api_env: Path) ->
     # With Test ON the newest activity is the test run's 12:00 score write.
     assert payload["latest_data_at"] == "2026-07-14T12:00:00"
     assert payload["latest_forecast_run_id"] == "fc_test"
+
+
+# ---------------------------------------------------------------------------
+# core._test_filter_for — the column guard
+# ---------------------------------------------------------------------------
+
+def test_test_filter_for_is_empty_when_the_column_is_absent(tmp_path: Path) -> None:
+    """A table without is_test must yield an empty clause, not a broken query.
+
+    The unguarded _test_filter emits the predicate regardless, so the query
+    RAISES — and most diagnostics call sites swallow query exceptions and return
+    0/[]. The visible result is a dashboard reporting zeros ONLY when the Test
+    toggle is OFF (with include_test=True the clause is empty and the same query
+    binds fine), which is indistinguishable from "there is no production data".
+    """
+    from pythia.api.core import _test_filter, _test_filter_for
+
+    con = duckdb.connect(str(tmp_path / "guard.duckdb"), read_only=False)
+    con.execute("CREATE TABLE with_flag (id INTEGER, is_test BOOLEAN)")
+    con.execute("CREATE TABLE without_flag (id INTEGER)")
+    try:
+        # Present → same clause the unguarded helper produces.
+        assert _test_filter_for(con, "with_flag", False) == _test_filter(False)
+        assert _test_filter_for(con, "with_flag", False, "w") == _test_filter(False, "w")
+        # Absent → empty, and the resulting query is executable.
+        assert _test_filter_for(con, "without_flag", False) == ""
+        con.execute(f"SELECT COUNT(*) FROM without_flag WHERE 1=1"
+                    f"{_test_filter_for(con, 'without_flag', False)}").fetchone()
+        # Absent + unguarded → exactly the failure mode being guarded against.
+        with pytest.raises(Exception):
+            con.execute(
+                f"SELECT COUNT(*) FROM without_flag WHERE 1=1{_test_filter(False)}"
+            ).fetchone()
+        # include_test always short-circuits, present or not.
+        assert _test_filter_for(con, "with_flag", True) == ""
+        assert _test_filter_for(con, "without_flag", True) == ""
+    finally:
+        con.close()
