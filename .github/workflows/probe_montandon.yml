@@ -1,0 +1,106 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Read-only evaluation spike: can Pythia consume the Montandon STAC API?
+#
+# Deliberately NOT in the pythia-resolver-db concurrency group — this reads the
+# canonical DB and writes nothing back, so it must never queue behind (or block)
+# a live pipeline stage.
+name: Probe Montandon STAC
+
+on:
+  workflow_dispatch:
+    inputs:
+      endpoint:
+        description: "Montandon STAC root (blank = production)"
+        required: false
+        default: ""
+        type: string
+      months_back:
+        description: "Months of history to sample for coverage and latency"
+        required: false
+        default: "36"
+        type: string
+      hazards:
+        description: "Comma-separated hazard codes for the coverage baseline"
+        required: false
+        default: "FL,DR,TC"
+        type: string
+      db_run_id:
+        description: "Optional: force the canonical DB from a specific Actions run ID"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests duckdb
+
+      # The G3 coverage gate compares Montandon against what our IFRC ingest
+      # already holds. Without the DB the probe reports the baseline as
+      # unavailable rather than inventing one, so a download failure degrades
+      # the report instead of failing the run.
+      - name: Download canonical resolver DB
+        id: db
+        continue-on-error: true
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+
+      - name: Probe Montandon
+        run: |
+          set -euo pipefail
+          DB=""
+          if [ -f data/resolver.duckdb ]; then
+            DB="--db data/resolver.duckdb"
+          else
+            echo "::warning::No canonical DB available; the G3 coverage baseline will be reported as unavailable."
+          fi
+          ENDPOINT=""
+          if [ -n "${{ inputs.endpoint }}" ]; then
+            ENDPOINT="--endpoint ${{ inputs.endpoint }}"
+          fi
+          python -m tools.probe_montandon_stac \
+            $ENDPOINT $DB \
+            --months-back "${{ inputs.months_back }}" \
+            --hazards "${{ inputs.hazards }}" \
+            --out-dir diagnostics \
+            --verbose
+
+      - name: Render the verdict into the step summary
+        if: always()
+        run: |
+          if [ -f diagnostics/montandon_probe.md ]; then
+            cat diagnostics/montandon_probe.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The probe produced no report — check the previous step's log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload probe artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: montandon-probe
+          path: |
+            diagnostics/montandon_probe.json
+            diagnostics/montandon_probe.md
+          if-no-files-found: warn
+          retention-days: 30

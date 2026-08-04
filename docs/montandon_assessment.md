@@ -253,6 +253,15 @@ Ranked by value to a downstream forecasting consumer.
   ingests GDACS, so any connector must filter by upstream source and admit only
   reported-impact records — otherwise we import modelled exposure into the same column as
   reported impact.
+  *Tooling ready, August 2026:* `tools/probe_montandon_stac.py` answers eight gates (G0
+  reachability, **G1 source attribution — the kill gate**, G2 impact taxonomy, G3 coverage
+  delta vs our IFRC ingest, G4 latency vs the resolution cutoff, G5 agreement, G6 revision
+  visibility, G7 historical depth) and recommends one of four outcomes: replace IFRC GO,
+  supplement it within `PA_REPORTED`, use it for base rates only, or reject. Run it via the
+  `Probe Montandon STAC` workflow (`workflow_dispatch`); it needs egress to `*.ifrc.org`,
+  which the development sandbox denies, so **it has not yet been executed against the live
+  API** — G0 is unanswered. G4 is the gate most likely to bite: Montandon leans on EM-DAT,
+  which is slow, and Pythia resolves against the previous complete month.
 - **Fix the month collapse.** *Half done, August 2026.* `resolve_sources` no longer lets
   the earliest report beat the latest revision — the tiebreak is now source priority, then
   non-null value, then most-recent publication, matching the policy
