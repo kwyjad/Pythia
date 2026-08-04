@@ -50,6 +50,12 @@ CANONICAL_COLUMNS: list[str] = [
     "source",
 ]
 
+# Columns an adapter MAY supply that are not part of the required canonical
+# contract. They are carried through to facts_resolved rather than dropped,
+# but never required of an adapter and never written to facts_raw (whose
+# CREATE TABLE IF NOT EXISTS predates them).
+_OPTIONAL_PASSTHROUGH_COLUMNS: tuple[str, ...] = ("publication_date",)
+
 
 @dataclass(frozen=True)
 class PeriodMonths:
@@ -140,7 +146,8 @@ def _read_canonical_dir(canonical_dir: Path) -> pd.DataFrame:
         raise ValueError(
             f"Canonical data missing required columns: {missing}"
         )
-    extra = [col for col in combined.columns if col not in CANONICAL_COLUMNS]
+    keep = set(CANONICAL_COLUMNS) | set(_OPTIONAL_PASSTHROUGH_COLUMNS)
+    extra = [col for col in combined.columns if col not in keep]
     if extra:
         combined = combined.drop(columns=extra)
     combined["series_semantics"] = (
@@ -219,6 +226,20 @@ def _load_into_db(
     stock = canonical[canonical["series_semantics"] == "stock"].copy()
     new = canonical[canonical["series_semantics"] == "new"].copy()
 
+    def _publication_date(frame: pd.DataFrame) -> pd.Series:
+        """Real publication date where the adapter supplied one, else as_of_date.
+
+        This used to be unconditionally ``as_of_date``. For IFRC that is snapped
+        to month-end, so every record in a month shared a publication_date and
+        resolve_sources had nothing left to order revisions by — the first field
+        report and its later corrections were indistinguishable.
+        """
+        fallback = frame["as_of_date"]
+        if "publication_date" not in frame.columns:
+            return fallback
+        supplied = frame["publication_date"].fillna("").astype(str).str.strip()
+        return supplied.where(supplied != "", fallback)
+
     # ── Build resolved DataFrames for both stock and new series ────────
     resolved_frames: list[pd.DataFrame] = []
 
@@ -236,7 +257,7 @@ def _load_into_db(
             "unit": stock["unit"],
             "as_of": stock["as_of_ts"].dt.date.astype(str),
             "as_of_date": stock["as_of_date"],
-            "publication_date": stock["as_of_date"],
+            "publication_date": _publication_date(stock),
             "publisher": stock_publisher,
             "source_id": stock["source"],
             "doc_title": stock["source"],
@@ -261,7 +282,7 @@ def _load_into_db(
             "unit": new["unit"],
             "as_of": new["as_of_ts"].dt.date.astype(str),
             "as_of_date": new["as_of_date"],
-            "publication_date": new["as_of_date"],
+            "publication_date": _publication_date(new),
             "publisher": new_publisher,
             "source_id": new["source"],
             "doc_title": new["source"],

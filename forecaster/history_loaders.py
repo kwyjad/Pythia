@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Tuple
 import duckdb
 
 from pythia.db.schema import connect
+from pythia.tools._db_utils import column_exists
 
 from .aggregators import _pythia_db_path_from_config
 from .month_utils import _parse_month_key, _sanitize_month_series
@@ -589,6 +590,47 @@ def _format_base_rate_for_prompt(
     )
 
 
+# Publisher slug -> display name, for labelling a base rate with the source
+# that actually produced it. Mirrors the publisher tiers in
+# pythia/tools/compute_resolutions.py::_PUBLISHER_TIER_CASE.
+_PA_PUBLISHER_LABELS: Dict[str, str] = {
+    "ifrc": "IFRC",
+    "ifrc_go": "IFRC",
+    "ifrc_montandon": "IFRC",
+    "idmc": "IDMC",
+    "acled": "ACLED",
+}
+
+
+def _pa_metric_in_clause(column: str = "metric") -> str:
+    """SQL ``lower(col) IN (...)`` over the PA metrics the resolver will score.
+
+    Single-sourced from ``compute_resolutions`` — imported defensively with a
+    literal fallback, matching how ``AGGREGATE_MODEL_NAMES`` is shared — so a
+    base rate can never drift wider than the resolver that scores it. Pinned by
+    forecaster/tests/test_base_rate_matches_resolution_source.py.
+    """
+    try:
+        from pythia.tools.compute_resolutions import PA_FACTS_RESOLVED_METRICS as metrics
+    except Exception:  # pragma: no cover - defensive, mirrors the literal above
+        metrics = ("affected", "people_affected", "pa", "displaced")
+    joined = ",".join(f"'{m}'" for m in metrics)
+    return f"lower({column}) IN ({joined})"
+
+
+def _seasonal_profile_source_label(publishers: set[str]) -> str:
+    """Human-readable source label for the publishers behind a base rate.
+
+    Falls back to "IFRC" only when no row carried a publisher — legacy rows
+    predate the column being populated, and IFRC is the tier-0 natural-hazard
+    PA source.
+    """
+    if not publishers:
+        return "IFRC"
+    names = {_PA_PUBLISHER_LABELS.get(p, p.upper()) for p in publishers}
+    return ", ".join(sorted(names))
+
+
 def _load_ifrc_pa_history(
     iso3: str,
     hazard_code: str,
@@ -596,32 +638,59 @@ def _load_ifrc_pa_history(
     months: int = 36,
 ) -> Tuple[str, Dict[str, Any]]:
     """
-    Load a 36-month IFRC Montandon 'people affected' history for a given
+    Load a 36-month reported 'people affected' history for a given
     ISO3 + Pythia hazard code.
 
-    Queries facts_resolved (where IFRC Montandon connector data lands)
-    for natural hazard PA metrics.
+    Queries facts_resolved over the SAME metrics the resolver will use to score
+    a PA question, so the history can never anchor a model on a series it will
+    not be scored against. ``in_need`` is deliberately excluded: GDACS writes it
+    for FL/DR/TC and it is modelled population exposure, not reported impact
+    (see docs/montandon_assessment.md).
+
+    NOTE: this loader is currently unreached in production. Its only caller is
+    :func:`_load_pa_history_block`, which nothing invokes —
+    ``_build_history_summary`` routes natural-hazard PA to
+    ``_build_natural_hazard_seasonal_profile`` instead. It is kept correct
+    rather than deleted so wiring it back up cannot reintroduce the leak.
     """
 
     hz = (hazard_code or "").upper()
 
     try:
-        con = duckdb.connect(_pythia_db_path_from_config(), read_only=True)
+        con = connect(read_only=True)
     except Exception:
         return "", {"error": "missing_db", "history_rows_detail": [], "summary_text": ""}
 
+    metric_clause = _pa_metric_in_clause()
+    # Legacy DBs / minimal fixtures may lack the publisher column.
+    publisher_expr = (
+        "lower(COALESCE(f.publisher, ''))"
+        if column_exists(con, "facts_resolved", "publisher")
+        else "''"
+    )
     try:
+        # LIMIT over distinct months, not rows: several metrics can land in one
+        # month, and a row-limited query silently returns fewer than `months`
+        # months of history.
         rows = con.execute(
-            """
-            SELECT ym, value, COALESCE(source_id, '') AS source_id
-            FROM facts_resolved
-            WHERE iso3 = ?
-              AND hazard_code = ?
-              AND lower(metric) IN ('affected', 'in_need', 'pa')
-            ORDER BY ym DESC
-            LIMIT ?
+            f"""
+            WITH recent_months AS (
+                SELECT DISTINCT ym
+                FROM facts_resolved
+                WHERE iso3 = ? AND hazard_code = ? AND {metric_clause}
+                ORDER BY ym DESC
+                LIMIT ?
+            )
+            SELECT f.ym,
+                   f.value,
+                   COALESCE(f.source_id, '') AS source_id,
+                   {publisher_expr} AS publisher_slug
+            FROM facts_resolved f
+            JOIN recent_months m ON f.ym = m.ym
+            WHERE f.iso3 = ? AND f.hazard_code = ? AND {metric_clause}
+            ORDER BY f.ym DESC
             """,
-            [iso3, hz, months],
+            [iso3, hz, months, iso3, hz],
         ).fetchall()
     except Exception as exc:
         con.close()
@@ -638,14 +707,19 @@ def _load_ifrc_pa_history(
 
     history: List[Dict[str, Any]] = []
     values: List[float] = []
-    for ym, pa_val, source_id in rows:
+    for ym, pa_val, source_id, publisher in rows:
         ym_str = str(ym)
         v = float(pa_val or 0.0)
         history.append(
             {
                 "ym": ym_str,
                 "value": v,
-                "source": "IFRC",
+                # Report the publisher that actually produced the row. Legacy
+                # rows predate the column being populated; IFRC is the tier-0
+                # natural-hazard PA source, so it is the right fallback.
+                "source": _PA_PUBLISHER_LABELS.get(
+                    publisher, publisher.upper() if publisher else "IFRC"
+                ),
                 "source_id": source_id,
             }
         )

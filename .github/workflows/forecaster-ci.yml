@@ -223,9 +223,16 @@ jobs:
           # forecaster's ACE/PA base rate. resolver-ci-fast does not trigger on
           # forecaster/**, which is how it sat red on main after #816 re-routed
           # ACE/PA without anything re-running it.
+          # test_base_rate_matches_resolution_source pins the base rate to the
+          # metrics the resolver will actually score. It exists because the
+          # natural-hazard PA profile matched 'in_need' — GDACS modelled
+          # population exposure — and served it to models as IFRC reported
+          # impact, a figure orders of magnitude larger that the resolver would
+          # never use. See docs/montandon_assessment.md.
           pytest -vv \
             forecaster/tests/test_history_summary.py \
             forecaster/tests/test_fewsnet_history.py \
+            forecaster/tests/test_base_rate_matches_resolution_source.py \
             resolver/tests/test_idmc_history_conflict_pa.py
 
       - name: Run debug-bundle tests

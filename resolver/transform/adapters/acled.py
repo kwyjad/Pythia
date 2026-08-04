@@ -95,6 +95,9 @@ class ACLEDAdapter(BaseAdapter):
                 "value": df["value"],
                 "series_semantics": "new",
                 "source": self.canonical_slug,
+                # ACLED aggregates are monthly with no separate publication
+                # date; as_of_date already carries the only date there is.
+                "publication_date": "",
             }
         )
 

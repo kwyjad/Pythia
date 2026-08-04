@@ -108,6 +108,11 @@ class IFRCAdapter(BaseAdapter):
                 "value": df.get("value"),
                 "series_semantics": df.get("series_semantics", ""),
                 "source": self.canonical_slug,
+                # as_of_date above has been snapped to month-end, which puts
+                # every GO record for a country-month into one dedup group.
+                # This is the only column that can still order them, so the
+                # connector's real publication date has to survive here.
+                "publication_date": df.get("publication_date", ""),
             }
         )
 
