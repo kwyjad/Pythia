@@ -66,24 +66,33 @@ jobs:
           force-run-id: ${{ inputs.db_run_id }}
 
       - name: Probe Montandon
+        # Inputs go through the environment rather than being interpolated into
+        # the script body, so a value containing shell metacharacters is data,
+        # not code.
+        env:
+          PROBE_ENDPOINT: ${{ inputs.endpoint }}
+          PROBE_MONTHS_BACK: ${{ inputs.months_back }}
+          PROBE_HAZARDS: ${{ inputs.hazards }}
         run: |
           set -euo pipefail
-          DB=""
+          # An array, not a string: the optional flags carry their own values,
+          # and relying on word-splitting to separate them is what shellcheck
+          # (correctly) objects to.
+          args=(
+            --months-back "${PROBE_MONTHS_BACK}"
+            --hazards "${PROBE_HAZARDS}"
+            --out-dir diagnostics
+            --verbose
+          )
           if [ -f data/resolver.duckdb ]; then
-            DB="--db data/resolver.duckdb"
+            args+=(--db data/resolver.duckdb)
           else
             echo "::warning::No canonical DB available; the G3 coverage baseline will be reported as unavailable."
           fi
-          ENDPOINT=""
-          if [ -n "${{ inputs.endpoint }}" ]; then
-            ENDPOINT="--endpoint ${{ inputs.endpoint }}"
+          if [ -n "${PROBE_ENDPOINT}" ]; then
+            args+=(--endpoint "${PROBE_ENDPOINT}")
           fi
-          python -m tools.probe_montandon_stac \
-            $ENDPOINT $DB \
-            --months-back "${{ inputs.months_back }}" \
-            --hazards "${{ inputs.hazards }}" \
-            --out-dir diagnostics \
-            --verbose
+          python -m tools.probe_montandon_stac "${args[@]}"
 
       - name: Render the verdict into the step summary
         if: always()
