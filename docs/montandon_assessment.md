@@ -253,8 +253,13 @@ Ranked by value to a downstream forecasting consumer.
   ingests GDACS, so any connector must filter by upstream source and admit only
   reported-impact records — otherwise we import modelled exposure into the same column as
   reported impact.
-- **Fix the month collapse.** Add `ym` / `event_id` to the `resolve_sources` dedup key, or
-  aggregate explicitly, and stop letting the earliest report beat the latest revision.
+- **Fix the month collapse.** *Half done, August 2026.* `resolve_sources` no longer lets
+  the earliest report beat the latest revision — the tiebreak is now source priority, then
+  non-null value, then most-recent publication, matching the policy
+  `precedence_config.yml` already declared. **Still open:** the collapse yields one row per
+  country-month, so a month holding genuinely distinct events keeps only one rather than
+  summing them. Deciding between sum and max needs evidence on how often multi-event months
+  occur versus revision chains of a single event — measure before choosing.
 - **Keep modelled exposure and reported impact apart.** GDACS `in_need` is population
   inside a hazard footprint; IFRC `affected` is reported impact. They differ by orders of
   magnitude and in kind, and the switch between them is severity-correlated — a larger

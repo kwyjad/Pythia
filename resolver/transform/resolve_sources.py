@@ -167,16 +167,48 @@ def resolve_sources(
         out_of_scope_frame = None
         working = frame
 
+    # Within a group the winner is: best source tier, then a non-null value,
+    # then the MOST RECENT publication.
+    #
+    # That last clause used to be reversed. The sort was ascending on every
+    # column, so `keep="first"` kept the EARLIEST published row — and because
+    # IFRCAdapter snaps as_of_date to month-end, every IFRC record for a
+    # country-hazard-metric-month lands in one group. The initial field report
+    # therefore beat every later revision of the same disaster, which is
+    # backwards: later reports are the informed ones. This now matches the
+    # `tiebreak: [as_of_desc, value_nonnull, source_alpha]` policy already
+    # declared in resolver/tools/precedence_config.yml, so the repo's two
+    # precedence implementations agree.
+    #
+    # NOTE: this still collapses a country-month to a SINGLE row. Where that
+    # month held genuinely distinct events (rather than revisions of one), the
+    # others are dropped rather than summed. Choosing between sum and max needs
+    # evidence on how often multi-event months occur versus revision chains —
+    # see docs/montandon_assessment.md.
+    date_col = (
+        "publication_date" if "publication_date" in working.columns else "as_of_date"
+    )
+    working = working.copy()
+    working["_value_is_null"] = working["value"].isna() if "value" in working.columns else False
+
     sort_columns: list[str] = list(_REQUIRED_GROUP_COLS) + [
         "provenance_rank",
-        "publication_date" if "publication_date" in working.columns else "ym",
+        "_value_is_null",
+        date_col,
         source_col,
     ]
+    ascending_by_col = {date_col: False}
     existing_sort = [col for col in sort_columns if col in working.columns]
-    working = working.sort_values(existing_sort)
+    working = working.sort_values(
+        existing_sort,
+        ascending=[ascending_by_col.get(col, True) for col in existing_sort],
+        na_position="last",
+    )
 
     dedup_keys = [col for col in _REQUIRED_GROUP_COLS if col in working.columns]
     prioritized = working.drop_duplicates(subset=dedup_keys, keep="first")
+    working = working.drop(columns=["_value_is_null"])
+    prioritized = prioritized.drop(columns=["_value_is_null"])
 
     target_table = output_table or input_table
     cols = list(working.columns)
