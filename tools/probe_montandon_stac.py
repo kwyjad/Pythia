@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import logging
 import statistics
 import sys
@@ -97,12 +98,24 @@ class Stac:
     dependency to python_library_requirements before we know the answer.
     """
 
-    def __init__(self, root: str) -> None:
+    def __init__(self, root: str, token: str = "", scheme: str = "bearer") -> None:
         self.root = root.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update(
             {"Accept": "application/json", "User-Agent": "pythia-montandon-probe/1.0"}
         )
+        # The service's auth scheme is undocumented in anything we can reach,
+        # so make it selectable rather than guessing one and reporting the
+        # resulting 401 as if it were the service's fault.
+        if token:
+            if scheme == "basic":
+                self.session.headers["Authorization"] = f"Basic {token}"
+            elif scheme == "token":
+                self.session.headers["Authorization"] = f"Token {token}"
+            elif scheme == "header":
+                self.session.headers["X-API-Key"] = token
+            else:
+                self.session.headers["Authorization"] = f"Bearer {token}"
 
     def get(self, path: str, **params: Any) -> tuple[int, Any]:
         url = path if path.startswith("http") else f"{self.root}/{path.lstrip('/')}"
@@ -175,28 +188,75 @@ def _parse_date(value: Any) -> date | None:
 # ---------------------------------------------------------------------------
 
 
-def gate_g0(endpoint: str) -> dict:
-    """Does a production endpoint exist and respond?"""
-    result: dict[str, Any] = {"gate": "G0", "question": "production endpoint responds"}
+def _classify_probe(status: int, body: Any) -> str:
+    """Turn an HTTP outcome into the distinction that changes what we do next.
+
+    "Did not return 200" is not one condition. A DNS failure, a 401 and a 404
+    call for three different next steps — get network access, get credentials,
+    fix the path — and collapsing them into "unreachable" produces a verdict
+    that is not merely vague but wrong.
+    """
+    if status == 0:
+        return "unreachable"
+    if status == 200:
+        return "ok"
+    if status in (401, 403):
+        return "auth_required"
+    if status == 404:
+        return "not_found"
+    return "http_error"
+
+
+def gate_g0(endpoint: str, token: str = "", scheme: str = "bearer") -> dict:
+    """Does an endpoint exist, and can we actually get in?"""
+    result: dict[str, Any] = {"gate": "G0", "question": "endpoint responds and admits us"}
+    result["authenticated"] = bool(token)
     probes = {}
     for label, root in (("requested", endpoint), ("prod", PROD_ENDPOINT), ("stage", STAGE_ENDPOINT)):
-        status, body = Stac(root).get("/")
+        status, body = Stac(root, token=token, scheme=scheme).get("/")
+        kind = _classify_probe(status, body)
+        # Keep a snippet of whatever the server said. On a 401 this is the only
+        # place the reason can come from, and it is what tells us which auth
+        # scheme the service wants.
+        detail = None
+        if isinstance(body, dict):
+            detail = body.get("error") or body.get("detail") or body.get("message")
+            if detail is None and kind != "ok":
+                detail = json.dumps(body)[:200]
         probes[label] = {
             "url": root,
             "status": status,
+            "kind": kind,
             "title": (body or {}).get("title") if isinstance(body, dict) else None,
-            "error": (body or {}).get("error") if isinstance(body, dict) else None,
+            "detail": detail,
         }
     result["probes"] = probes
-    prod_ok = probes["prod"]["status"] == 200
-    stage_ok = probes["stage"]["status"] == 200
-    result["pass"] = bool(prod_ok or probes["requested"]["status"] == 200)
-    if prod_ok:
+
+    kinds = {label: p["kind"] for label, p in probes.items()}
+    any_ok = "ok" in kinds.values()
+    any_auth = "auth_required" in kinds.values()
+
+    result["pass"] = bool(any_ok)
+    result["blocked_by_auth"] = bool(any_auth and not any_ok)
+
+    if probes["prod"]["kind"] == "ok":
         result["verdict"] = "production endpoint responds"
-    elif stage_ok:
+    elif any_ok:
         result["verdict"] = (
-            "ONLY the staging endpoint responds. Usable for a base-rate "
+            "only the staging endpoint responds. Usable for a base-rate "
             "evaluation; must not become a production resolution dependency."
+        )
+    elif any_auth:
+        result["verdict"] = (
+            "endpoints are UP but require credentials (HTTP "
+            f"{probes['prod']['status'] or probes['stage']['status']}). This is "
+            "an access problem, not an availability one — supply a token via "
+            "MONTANDON_TOKEN and re-run."
+        )
+    elif "not_found" in kinds.values():
+        result["verdict"] = (
+            "host responds but the STAC root is not at this path — check the "
+            "endpoint URL before concluding anything about the service"
         )
     else:
         result["verdict"] = "no endpoint reachable — every later gate is unanswerable"
@@ -404,12 +464,14 @@ def gate_g3_g5_local(db_path: Path | None, months_back: int, hazards: list[str])
             "no resolver DB supplied — run with --db to get the coverage "
             "baseline the G3 gate compares against"
         )
+        out["verdict"] = "no DB supplied — baseline not computed"
         return out
     try:
         import duckdb
     except ImportError:
         out["available"] = False
         out["note"] = "duckdb not installed"
+        out["verdict"] = "duckdb not installed — baseline not computed"
         return out
 
     since_ym = (date.today() - timedelta(days=30 * months_back)).strftime("%Y-%m")
@@ -434,6 +496,7 @@ def gate_g3_g5_local(db_path: Path | None, months_back: int, hazards: list[str])
     except Exception as exc:  # pragma: no cover - defensive
         out["available"] = False
         out["note"] = f"query failed: {type(exc).__name__}: {exc}"
+        out["verdict"] = f"baseline query failed: {type(exc).__name__}"
         return out
     finally:
         con.close()
@@ -444,7 +507,12 @@ def gate_g3_g5_local(db_path: Path | None, months_back: int, hazards: list[str])
         r[0]: {"country_months": r[1], "countries": r[2], "first_ym": r[3], "last_ym": r[4]}
         for r in rows
     }
-    out["ifrc_country_months_total"] = sum(r[1] for r in rows)
+    total = sum(r[1] for r in rows)
+    out["ifrc_country_months_total"] = total
+    out["verdict"] = (
+        f"{total} IFRC PA country-months since {since_ym} across "
+        f"{', '.join(r[0] for r in rows) or 'no hazards'}"
+    )
     return out
 
 
@@ -478,6 +546,54 @@ def render_markdown(report: dict) -> str:
             f"{gate.get('verdict', '').replace('|', '/')} |"
         )
     lines.append("")
+
+    # What each endpoint actually said. Without this the summary cannot
+    # distinguish "the service is down" from "we are not authorised", which
+    # are entirely different problems with entirely different next steps.
+    g0 = next((g for g in report["gates"] if g.get("gate") == "G0"), None)
+    if g0 and g0.get("probes"):
+        lines.append("### Endpoint probes")
+        lines.append("")
+        lines.append(f"_Token supplied: {'yes' if g0.get('authenticated') else 'no'}_")
+        lines.append("")
+        lines.append("| Endpoint | URL | HTTP | Interpretation | Server said |")
+        lines.append("|---|---|---|---|---|")
+        for label, probe in g0["probes"].items():
+            status = probe.get("status")
+            lines.append(
+                f"| {label} | `{probe.get('url')}` | "
+                f"{status if status else 'no response'} | {probe.get('kind')} | "
+                f"{str(probe.get('detail') or '—').replace('|', '/')[:120]} |"
+            )
+        lines.append("")
+
+    baseline = next(
+        (g for g in report["gates"] if str(g.get("gate", "")).startswith("G3/G5")), None
+    )
+    if baseline:
+        lines.append("### Our current IFRC coverage (the G3 comparison baseline)")
+        lines.append("")
+        if not baseline.get("available"):
+            lines.append(f"Unavailable — {baseline.get('note', 'no reason recorded')}.")
+        else:
+            lines.append(
+                f"IFRC PA country-months since {baseline.get('since_ym')}: "
+                f"**{baseline.get('ifrc_country_months_total')}**"
+            )
+            lines.append("")
+            lines.append("| Hazard | Country-months | Countries | First | Last |")
+            lines.append("|---|---|---|---|---|")
+            for hz, stats in (baseline.get("ifrc_country_months_by_hazard") or {}).items():
+                lines.append(
+                    f"| {hz} | {stats.get('country_months')} | {stats.get('countries')} | "
+                    f"{stats.get('first_ym')} | {stats.get('last_ym')} |"
+                )
+            lines.append("")
+            lines.append(
+                f"Montandon must beat this by ≥{COVERAGE_MULTIPLE_MIN}× to be worth a "
+                f"connector, and ≥{COVERAGE_MULTIPLE_GOOD}× to be a clear win."
+            )
+        lines.append("")
 
     colls = report.get("collections", {})
     if colls.get("collections"):
@@ -515,6 +631,18 @@ def decide(gates: list[dict]) -> dict:
     g0, g1 = by_id.get("G0", {}), by_id.get("G1", {})
     g2, g4 = by_id.get("G2", {}), by_id.get("G4", {})
 
+    if g0.get("blocked_by_auth"):
+        who = "with the token supplied" if g0.get("authenticated") else "and we have no token"
+        return {
+            "outcome": "BLOCKED — credentials required",
+            "verdict": (
+                f"The Montandon STAC endpoints are UP but returned 401/403 {who}. "
+                "This is an access problem, not an availability one, and nothing "
+                "below G0 is answerable until it is resolved. Next step is to ask "
+                "IFRC for API access and the auth scheme — not to draw any "
+                "conclusion about the data itself."
+            ),
+        }
     if g0.get("pass") is False:
         return {
             "outcome": "UNKNOWN — endpoint unreachable",
@@ -570,8 +698,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--months-back", type=int, default=36)
     parser.add_argument("--hazards", default="FL,DR,TC")
     parser.add_argument("--out-dir", default="diagnostics")
+    parser.add_argument(
+        "--auth-scheme",
+        default="bearer",
+        choices=["bearer", "token", "basic", "header"],
+        help="How to present MONTANDON_TOKEN (the service's scheme is undocumented)",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
+
+    # Never a CLI flag: a token on the command line lands in the process table
+    # and in CI logs.
+    token = os.environ.get("MONTANDON_TOKEN", "").strip()
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -581,8 +719,8 @@ def main(argv: list[str] | None = None) -> int:
     hazards = [h.strip().upper() for h in args.hazards.split(",") if h.strip()]
     gates: list[dict] = []
 
-    LOG.info("G0: probing endpoints")
-    g0 = gate_g0(args.endpoint)
+    LOG.info("G0: probing endpoints (token supplied: %s)", "yes" if token else "no")
+    g0 = gate_g0(args.endpoint, token=token, scheme=args.auth_scheme)
     gates.append(g0)
 
     endpoint = args.endpoint
@@ -594,7 +732,7 @@ def main(argv: list[str] | None = None) -> int:
                 LOG.warning("falling back to the %s endpoint: %s", label, endpoint)
                 break
 
-    stac = Stac(endpoint)
+    stac = Stac(endpoint, token=token, scheme=args.auth_scheme)
     collections_report: dict = {"status": None, "n_collections": 0, "collections": []}
     impact_collections: list[str] = []
 
