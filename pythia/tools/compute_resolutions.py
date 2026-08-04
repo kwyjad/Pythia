@@ -55,6 +55,30 @@ _PA_METRIC_PREFERENCE = [
     "displaced",
 ]
 
+# The PA metrics that can actually resolve, per source table. Exported (not
+# underscore-private) because the forecaster's base-rate builders must never
+# show a model a series the resolver will not use to score it — the two are
+# pinned together by forecaster/tests/test_base_rate_matches_resolution_source.py.
+#
+# Note what is deliberately ABSENT: 'in_need'. GDACS writes 'in_need' for
+# FL/DR/TC, and it is modelled population exposure (hazard footprint x
+# population), not reported impact. It is orders of magnitude larger than an
+# IFRC 'affected' figure and is a different quantity in kind, so it must never
+# enter a PA series. See docs/montandon_assessment.md.
+PA_FACTS_RESOLVED_METRICS: tuple[str, ...] = (
+    "affected",
+    "people_affected",
+    "pa",
+    "displaced",
+)
+PA_FACTS_DELTAS_METRICS: tuple[str, ...] = ("new_displacements",) + PA_FACTS_RESOLVED_METRICS
+
+
+def _metric_in_clause(metrics: tuple[str, ...], column: str = "metric") -> str:
+    """SQL ``lower(col) IN (...)`` over a metric tuple."""
+    joined = ",".join(f"'{m}'" for m in metrics)
+    return f"lower({column}) IN ({joined})"
+
 # Preference 2 — publisher tier, mirroring
 # resolver/tools/precedence_config.yml (tier 0: IFRC Montandon + ACLED;
 # tier 1: IDMC; everything else tier 2). facts_resolved stores publisher
@@ -210,11 +234,8 @@ def _data_freshness_cutoff(conn, metric: str) -> Optional[str]:
 
     if metric == "PA":
         for table, filt in [
-            ("facts_resolved",
-             "lower(metric) IN ('affected','people_affected','pa','displaced')"),
-            ("facts_deltas",
-             "lower(metric) IN "
-             "('new_displacements','affected','people_affected','pa','displaced')"),
+            ("facts_resolved", _metric_in_clause(PA_FACTS_RESOLVED_METRICS)),
+            ("facts_deltas", _metric_in_clause(PA_FACTS_DELTAS_METRICS)),
         ]:
             if _table_exists(conn, table):
                 try:
@@ -338,7 +359,7 @@ def _try_facts_resolved(
     if not _table_exists(conn, "facts_resolved"):
         return None
     if metric == "PA":
-        metric_filter = "lower(metric) IN ('affected','people_affected','pa','displaced')"
+        metric_filter = _metric_in_clause(PA_FACTS_RESOLVED_METRICS)
     elif metric == "FATALITIES":
         metric_filter = "lower(metric) = 'fatalities'"
     else:
@@ -377,10 +398,7 @@ def _try_facts_deltas(
     if not _table_exists(conn, "facts_deltas"):
         return None
     if metric == "PA":
-        metric_filter = (
-            "lower(metric) IN "
-            "('new_displacements','affected','people_affected','pa','displaced')"
-        )
+        metric_filter = _metric_in_clause(PA_FACTS_DELTAS_METRICS)
     elif metric == "FATALITIES":
         metric_filter = "lower(metric) = 'fatalities'"
     else:

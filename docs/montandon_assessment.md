@@ -267,9 +267,19 @@ Ranked by value to a downstream forecasting consumer.
 - **Stop replicating the full value across countries** on multi-country GO records.
 - **Make soft failures visible** — surface the connector's drop counters and row counts in
   the Phase 1 CI summary rather than behind `RESOLVER_DEBUG`.
-- **Fix `_load_ifrc_pa_history`** (`forecaster/history_loaders.py`): it has no publisher
-  filter and matches `in_need`, so GDACS rows already enter the "IFRC Montandon 36-month
-  history" injected into SPD prompts, labelled `"source": "IFRC"`. Its `LIMIT months` also
-  counts rows, not months.
+- ~~**Stop GDACS exposure entering the PA base rate.**~~ **Fixed, August 2026.**
+  `_build_natural_hazard_seasonal_profile` (`forecaster/cli.py`) — the live builder for
+  natural-hazard PA base rates — matched `('affected', 'in_need', 'pa')` with no publisher
+  filter and labelled the result `"source": "IFRC"`. GDACS writes `in_need` for FL/DR/TC,
+  so modelled exposure figures were presented to models as IFRC reported-affected history
+  on exactly the hazards where IFRC coverage is weakest, while `compute_resolutions`
+  excluded `in_need` and would never score against them. The PA metric list is now
+  single-sourced from `compute_resolutions.PA_FACTS_RESOLVED_METRICS`, the profile reports
+  the publishers actually behind its rows, and
+  `forecaster/tests/test_base_rate_matches_resolution_source.py` pins the base rate to a
+  subset of what the resolver scores. The same leak was fixed in the latent
+  `_load_ifrc_pa_history` (`forecaster/history_loaders.py`), which additionally used the
+  raw read-only `duckdb.connect` the codebase forbids and whose `LIMIT months` counted rows
+  rather than months.
 - **Wire `diagnose_pa_resolution_coverage.py` into CI** and widen it to `facts_deltas`.
 - **Set `GO_API_TOKEN`** if authenticated access lifts rate or field limits.

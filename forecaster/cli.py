@@ -54,6 +54,7 @@ from pathlib import Path
 from pythia.buckets import labels_for as bucket_labels_for
 from pythia.buckets import NUM_HORIZONS, n_buckets_for
 from pythia.db.schema import connect, ensure_schema
+from pythia.tools._db_utils import column_exists
 from pythia.db.schema import connect as pythia_connect
 from pythia.test_mode import is_test_mode
 from pythia.web_research import fetch_evidence_pack
@@ -105,6 +106,7 @@ from forecaster.history_loaders import (  # noqa: F401 - backward-compat re-expo
     IDMC_HZ_MAP,
     NATURAL_HAZARD_CODES,
     _HAZARD_DISPLAY_NAMES,
+    _PA_PUBLISHER_LABELS,
     _build_gdacs_event_history,
     _format_base_rate_for_prompt,
     _load_acled_fatalities_history,
@@ -113,6 +115,8 @@ from forecaster.history_loaders import (  # noqa: F401 - backward-compat re-expo
     _load_idmc_pa_history,
     _load_ifrc_pa_history,
     _load_pa_history_block,
+    _pa_metric_in_clause,
+    _seasonal_profile_source_label,
 )
 
 LOG = logging.getLogger(__name__)
@@ -557,9 +561,21 @@ def _build_natural_hazard_seasonal_profile(
 ) -> Dict[str, Any]:
     """Build a calendar-month seasonal profile from facts_resolved for natural hazards.
 
-    Queries ALL available data for the given iso3 + hazard_code where
-    metric IN ('affected', 'in_need', 'pa'). Groups by calendar month (1-12)
-    and computes min/max/mean/median across all available years.
+    Queries ALL available data for the given iso3 + hazard_code over the SAME
+    metrics the resolver will use to score the question
+    (``PA_FACTS_RESOLVED_METRICS``). That coupling is the point: a base rate
+    drawn from a wider set than the resolver anchors the model on a series it
+    will never be scored against.
+
+    This used to match ``('affected', 'in_need', 'pa')``. ``in_need`` is what
+    GDACS writes for FL/DR/TC — modelled population exposure (hazard footprint
+    x population), not reported impact — so GDACS exposure figures, orders of
+    magnitude larger than an IFRC reported-affected figure, were entering the
+    seasonal profile and being presented to the model as IFRC history, while
+    the resolver's PA filter excluded them. See docs/montandon_assessment.md.
+
+    Groups by calendar month (1-12) and computes min/max/mean/median across all
+    available years.
     """
     iso3_up = (iso3 or "").upper().strip()
     hz_up = (hazard_code or "").upper().strip()
@@ -577,14 +593,22 @@ def _build_natural_hazard_seasonal_profile(
 
     con = connect(read_only=True)
     try:
+        # Legacy DBs and minimal test fixtures may lack the publisher column;
+        # degrade to an unlabelled profile rather than failing the base rate
+        # (same guard compute_resolutions._try_facts_resolved applies).
+        publisher_expr = (
+            "lower(COALESCE(publisher, ''))"
+            if column_exists(con, "facts_resolved", "publisher")
+            else "''"
+        )
         try:
             rows = con.execute(
-                """
-                SELECT ym, value
+                f"""
+                SELECT ym, value, {publisher_expr} AS publisher_slug
                 FROM facts_resolved
                 WHERE iso3 = ?
                   AND hazard_code = ?
-                  AND lower(metric) IN ('affected', 'in_need', 'pa')
+                  AND {_pa_metric_in_clause()}
                 ORDER BY ym
                 """,
                 [iso3_up, hz_up],
@@ -602,8 +626,9 @@ def _build_natural_hazard_seasonal_profile(
         now_month = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m")
         by_cal_month: Dict[int, list[float]] = {m: [] for m in range(1, 13)}
         all_yms: list[str] = []
+        publishers: set[str] = set()
 
-        for ym_raw, value in rows:
+        for ym_raw, value, publisher in rows:
             parsed = _parse_month_key(str(ym_raw))
             if parsed is None:
                 continue
@@ -616,6 +641,8 @@ def _build_natural_hazard_seasonal_profile(
                 v = 0.0
             by_cal_month[parsed.month].append(v)
             all_yms.append(month_key)
+            if publisher:
+                publishers.add(str(publisher))
 
         if not all_yms:
             return empty
@@ -646,7 +673,10 @@ def _build_natural_hazard_seasonal_profile(
 
         return {
             "type": "seasonal_profile",
-            "source": "IFRC",
+            # Report the publishers actually behind these rows rather than
+            # asserting "IFRC". The prompt tells the model where its base rate
+            # came from, so that label must not be a guess.
+            "source": _seasonal_profile_source_label(publishers),
             "data_range": data_range,
             "years_of_data": years_of_data,
             "months": months_result,
