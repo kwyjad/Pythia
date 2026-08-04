@@ -266,9 +266,14 @@ Ranked by value to a downstream forecasting consumer.
   event is likelier to attract an IFRC report — so blending them would change scale as a
   function of the thing being forecast. They must be separate metrics, never a single
   metric with a precedence rule spanning both.
-- **Stop discarding `method` / `confidence`** at `load_and_derive`, and record which
-  provenance branch won (`resolutions.source_desc` exists for this), so appeal-beneficiary
-  and derived-sum rows are separable at scoring time.
+- **Stop discarding `method` / `confidence`.** Still open, and larger than it looks: the
+  loss happens at the **adapter**, not at `load_and_derive`. `IFRCAdapter.map` emits only
+  the 12 required canonical columns, so `method`, `confidence`, `publisher`, `source_url`
+  and `doc_title` are gone before `load_and_derive` sets `confidence = None`. Carrying them
+  means extending the canonical contract (as `publication_date` was in August 2026) and
+  then tiering the three `affected` provenance branches — real figure, appeal beneficiaries,
+  derived sum — inside `PA_REPORTED` precedence. Record which branch won via
+  `resolutions.source_desc`.
 - **Stop replicating the full value across countries** on multi-country GO records.
 - **Make soft failures visible** — surface the connector's drop counters and row counts in
   the Phase 1 CI summary rather than behind `RESOLVER_DEBUG`.

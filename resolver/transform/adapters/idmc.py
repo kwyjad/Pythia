@@ -105,6 +105,8 @@ class IDMCAdapter(BaseAdapter):
                 "value": df["value"],
                 "series_semantics": df.get("series_semantics", "new"),
                 "source": self.canonical_slug,
+                # IDMC flows carry no publication date distinct from as_of_date.
+                "publication_date": "",
             },
             index=df.index,
         )

@@ -29,6 +29,13 @@ CANONICAL_COLUMNS: Final[list[str]] = [
     "value",
     "series_semantics",
     "source",
+    # When the source actually published this figure, as distinct from the
+    # period it describes. Adapters that snap as_of_date to a period boundary
+    # (IFRC snaps to month-end) MUST carry the real publication date here, or
+    # every revision of one fact becomes indistinguishable and
+    # resolve_sources cannot tell the first field report from the last.
+    # Adapters with no meaningful publication date emit "".
+    "publication_date",
 ]
 
 

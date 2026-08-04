@@ -126,3 +126,69 @@ def test_ifrc_normalization_creates_canonical_csv(tmp_path: Path, monkeypatch) -
 
     assert canonical["source"].unique().tolist() == ["ifrc_go"]
     assert canonical["series_semantics"].tolist() == ["new", "stock", "new"]
+
+
+def test_publication_date_survives_the_month_end_snap(tmp_path: Path, monkeypatch) -> None:
+    """as_of_date is snapped to month-end; publication_date must NOT be.
+
+    The snap puts every GO record for a country-month into a single
+    resolve_sources dedup group, so publication_date is the only column left
+    that can order a first field report against its later revisions. The
+    adapter used to drop it entirely, which made the two indistinguishable and
+    left the revision tiebreak with nothing to work on.
+    """
+    raw_dir = tmp_path / "raw"
+    out_dir = tmp_path / "canonical"
+    raw_dir.mkdir()
+
+    pd.DataFrame(
+        [
+            {
+                "event_id": "PHL-TC-affected-ifrcgo-1",
+                "country_name": "Philippines",
+                "iso3": "PHL",
+                "hazard_code": "TC",
+                "hazard_label": "Tropical Cyclone",
+                "hazard_class": "natural",
+                "metric": "affected",
+                "unit": "persons",
+                "series_semantics": "stock",
+                "value": "5000",
+                "as_of_date": "2025-08-04",
+                "publication_date": "2025-08-04",
+            },
+            {
+                "event_id": "PHL-TC-affected-ifrcgo-2",
+                "country_name": "Philippines",
+                "iso3": "PHL",
+                "hazard_code": "TC",
+                "hazard_label": "Tropical Cyclone",
+                "hazard_class": "natural",
+                "metric": "affected",
+                "unit": "persons",
+                "series_semantics": "stock",
+                "value": "80000",
+                "as_of_date": "2025-08-19",
+                "publication_date": "2025-08-19",
+            },
+        ]
+    ).to_csv(raw_dir / "ifrc_go.csv", index=False)
+
+    monkeypatch.setenv("RESOLVER_START_ISO", "2025-08-01")
+    monkeypatch.setenv("RESOLVER_END_ISO", "2025-08-31")
+
+    assert normalize.main(
+        ["--in", str(raw_dir), "--out", str(out_dir),
+         "--period", "2025Q3", "--sources", "ifrc_go"]
+    ) == 0
+
+    canonical = pd.read_csv(out_dir / "ifrc_go.csv", dtype=str)
+
+    assert "publication_date" in canonical.columns, (
+        "the adapter dropped publication_date; revisions of one fact become "
+        "indistinguishable once as_of_date is snapped to month-end"
+    )
+    # Both rows snap to the same month-end...
+    assert set(canonical["as_of_date"]) == {"2025-08-31"}
+    # ...but remain individually datable.
+    assert sorted(canonical["publication_date"]) == ["2025-08-04", "2025-08-19"]
