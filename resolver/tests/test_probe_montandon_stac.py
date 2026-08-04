@@ -25,6 +25,7 @@ import pytest
 from tools.probe_montandon_stac import (
     MODELLED_EXPOSURE_SOURCES,
     REPORTED_IMPACT_SOURCES,
+    _classify_probe,
     _classify_source,
     _parse_date,
     decide,
@@ -71,6 +72,53 @@ def test_unreachable_endpoint_yields_unknown_not_rejection():
     verdict = decide([_gate("G0", False)])
     assert verdict["outcome"].startswith("UNKNOWN")
     assert "unreachable" in verdict["outcome"].lower()
+
+
+# ---------------------------------------------------------------------------
+# "Not 200" is not one condition
+#
+# The first live run against the real API returned HTTP 401 from all three
+# endpoints. The probe reported "no endpoint reachable — every later gate is
+# unanswerable", which was wrong in a way that mattered: the service was up and
+# the actual finding was that it needs credentials. These pin the distinction.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_rejection_is_not_reported_as_unreachable(status):
+    assert _classify_probe(status, {}) == "auth_required"
+
+
+def test_a_401_yields_blocked_on_credentials_not_unknown():
+    g0 = {
+        "gate": "G0",
+        "question": "endpoint responds and admits us",
+        "pass": False,
+        "blocked_by_auth": True,
+        "authenticated": False,
+    }
+    verdict = decide([g0])
+    assert verdict["outcome"].startswith("BLOCKED")
+    assert "credential" in verdict["outcome"].lower()
+    # And it must not be mistaken for a judgement on the data.
+    assert "access problem, not an availability one" in verdict["verdict"]
+
+
+def test_blocked_says_whether_a_token_was_even_tried():
+    """A 401 with a token means the token is wrong; without, we never had one."""
+    with_token = decide([{"gate": "G0", "pass": False, "blocked_by_auth": True,
+                          "authenticated": True}])
+    without = decide([{"gate": "G0", "pass": False, "blocked_by_auth": True,
+                       "authenticated": False}])
+    assert "with the token supplied" in with_token["verdict"]
+    assert "no token" in without["verdict"]
+
+
+def test_connection_failure_and_404_stay_distinct():
+    assert _classify_probe(0, {"error": "ConnectionError"}) == "unreachable"
+    assert _classify_probe(404, {}) == "not_found"
+    assert _classify_probe(200, {}) == "ok"
+    assert _classify_probe(500, {}) == "http_error"
 
 
 def test_failing_the_source_attribution_gate_rejects_outright():

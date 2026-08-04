@@ -34,6 +34,12 @@ on:
         required: false
         default: ""
         type: string
+      auth_scheme:
+        description: "How to present MONTANDON_TOKEN (the service's scheme is undocumented)"
+        required: false
+        default: "bearer"
+        type: choice
+        options: ["bearer", "token", "basic", "header"]
 
 permissions:
   contents: read
@@ -73,6 +79,14 @@ jobs:
           PROBE_ENDPOINT: ${{ inputs.endpoint }}
           PROBE_MONTHS_BACK: ${{ inputs.months_back }}
           PROBE_HAZARDS: ${{ inputs.hazards }}
+          PROBE_AUTH_SCHEME: ${{ inputs.auth_scheme }}
+          # The live endpoints answer 401, so the probe needs a credential to
+          # get past G0. This is a DIFFERENT secret from GO_API_TOKEN: the GO
+          # operational API and the Montandon STAC API are separate services,
+          # and a stored credential for one is not silently forwarded to the
+          # other. Unset until IFRC grants access — the probe then reports
+          # "BLOCKED — credentials required" rather than guessing.
+          MONTANDON_TOKEN: ${{ secrets.MONTANDON_TOKEN }}
         run: |
           set -euo pipefail
           # An array, not a string: the optional flags carry their own values,
@@ -81,6 +95,7 @@ jobs:
           args=(
             --months-back "${PROBE_MONTHS_BACK}"
             --hazards "${PROBE_HAZARDS}"
+            --auth-scheme "${PROBE_AUTH_SCHEME}"
             --out-dir diagnostics
             --verbose
           )

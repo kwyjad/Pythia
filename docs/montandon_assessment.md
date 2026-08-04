@@ -239,7 +239,14 @@ Ranked by value to a downstream forecasting consumer.
    appeals incident above is what inconsistency costs downstream.
 9. **Data-quality flags** — estimate vs confirmed, order-of-magnitude confidence, inclusion
    notes. Consumers currently infer confidence from which field happened to be populated.
-10. **Make Montandon production-grade for programmatic consumers** — a stable production
+10. **Document how to get access, and publish the auth scheme.** Measured 2026-08-04 from a
+    GitHub runner: `montandon-eoapi.ifrc.org/stac` and `montandon-eoapi-stage.ifrc.org/stac`
+    are both **up and both return HTTP 401**. The service is real and running; it is simply
+    closed. Nothing in the reachable documentation says credentials are needed, how to
+    request them, or which scheme the API expects — so the first thing an evaluating
+    consumer learns is a bare 401. An "about the data" page that omits "and here is how to
+    get in" costs every prospective user the same wasted cycle.
+11. **Make Montandon production-grade for programmatic consumers** — a stable production
     STAC endpoint, versioned collection names, a changelog, and documentation reachable by
     non-browser clients. As of this writing the documented endpoint is a staging host and
     the Monty documentation pages refuse non-browser requests.
@@ -258,9 +265,15 @@ Ranked by value to a downstream forecasting consumer.
   delta vs our IFRC ingest, G4 latency vs the resolution cutoff, G5 agreement, G6 revision
   visibility, G7 historical depth) and recommends one of four outcomes: replace IFRC GO,
   supplement it within `PA_REPORTED`, use it for base rates only, or reject. Run it via the
-  `Probe Montandon STAC` workflow (`workflow_dispatch`); it needs egress to `*.ifrc.org`,
-  which the development sandbox denies, so **it has not yet been executed against the live
-  API** — G0 is unanswered. G4 is the gate most likely to bite: Montandon leans on EM-DAT,
+  `Probe Montandon STAC` workflow (`workflow_dispatch`).
+  **First live run, 2026-08-04: BLOCKED — credentials required.** Both
+  `montandon-eoapi.ifrc.org/stac` and `montandon-eoapi-stage.ifrc.org/stac` responded with
+  **HTTP 401**. The service is up; we are not authorised. Every gate below G0 remains
+  unanswered, and nothing about the data can be concluded from this — the next step is to
+  request API access and the auth scheme from IFRC, then set the `MONTANDON_TOKEN` secret
+  (deliberately separate from `GO_API_TOKEN`: the GO operational API and the Montandon STAC
+  API are different services, and a credential for one is not forwarded to the other) and
+  re-run. G4 remains the gate most likely to bite once we are in: Montandon leans on EM-DAT,
   which is slow, and Pythia resolves against the previous complete month.
 - **Fix the month collapse.** *Half done, August 2026.* `resolve_sources` no longer lets
   the earliest report beat the latest revision — the tiebreak is now source priority, then
