@@ -56,5 +56,8 @@ dev = ["ipykernel"]
 test = ["duckdb", "httpx", "pytest", "pytest-xdist", "jinja2", "pandas"]
 ingestion = ["pandas", "python-dateutil", "jinja2", "pycountry", "pyarrow", "xarray", "netCDF4", "regionmask", "geopandas", "shapely"]
 
+[tool.poetry.scripts]
+resolve-hazards = "resolver.resolution_machine.cli:main"
+
 [tool.poe.tasks]
 test-idmc-cli = "pytest -q resolver/tests/test_idmc_cli_*"

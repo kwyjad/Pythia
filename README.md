@@ -205,6 +205,7 @@ Key tables (see [`pythia/db/schema.py`](pythia/db/schema.py) and [`SCHEMAS.md`](
 - **Calibration**: `calibration_weights`, `calibration_advice`, `bucket_centroids`, `bucket_definitions`
 - **Diagnostics**: `llm_calls`, `question_run_metrics`
 - **Resolver**: `facts_resolved`, `facts_deltas`, `snapshots`, `manifests`, `meta_runs`
+- **Resolution machine** (Phase 1 — cyclone detection + zeros): `haz_raw_ibtracs`, `haz_triggers`, `pa_resolutions`, `pa_resolution_revisions` — see [`resolver/resolution_machine/README.md`](resolver/resolution_machine/README.md) for the detection rule, the geometry choice (vendored Natural Earth 1:50m boundaries + AEQD point-to-territory distances), the ReliefWeb silence sweep, and the `resolve-hazards` CLI (`python -m resolver.resolution_machine.cli --hazard cyclone --month YYYY-MM`)
 
 ## Model management
 

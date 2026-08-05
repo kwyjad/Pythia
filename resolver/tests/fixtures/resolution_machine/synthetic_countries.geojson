@@ -1,0 +1,22 @@
+{
+  "type": "FeatureCollection",
+  "name": "resolution_machine_synthetic_countries",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"iso3": "AAA", "name": "Squareland"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[10.0, -2.0], [15.0, -2.0], [15.0, 2.0], [10.0, 2.0], [10.0, -2.0]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"iso3": "BBB", "name": "Farawaya"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[100.0, 30.0], [105.0, 30.0], [105.0, 34.0], [100.0, 34.0], [100.0, 30.0]]]
+      }
+    }
+  ]
+}
