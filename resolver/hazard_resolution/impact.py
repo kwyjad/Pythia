@@ -40,7 +40,7 @@ from resolver.hazard_resolution import reconcile as reconcile_mod
 from resolver.hazard_resolution import reliefweb_docs as docs_mod
 from resolver.hazard_resolution import resolutions as res_mod
 from resolver.hazard_resolution.rulebook import Rulebook
-from resolver.hazard_resolution.schema import ensure_haz_schema
+from resolver.hazard_resolution.schema import RUN_TYPE_LIVE, ensure_haz_schema
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import duckdb
@@ -294,6 +294,7 @@ def resolve_triggered_cells(
     fetch_documents: bool = True,
     call: "extract_mod.CallFn | None" = None,
     post: Any = None,
+    run_type: str = RUN_TYPE_LIVE,
 ) -> LadderRun:
     """Walk the ladder for every triggered cell in ``iso3s``."""
 
@@ -368,7 +369,9 @@ def resolve_triggered_cells(
 
         if dry_run:
             continue
-        outcome = res_mod.write_reconciliation(con, verdict, rulebook, today=today)
+        outcome = res_mod.write_reconciliation(
+            con, verdict, rulebook, today=today, run_type=run_type
+        )
         if outcome == res_mod.WRITE_FROZEN_SKIP:
             run.frozen_skipped += 1
 

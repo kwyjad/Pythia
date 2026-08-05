@@ -309,3 +309,121 @@ def golden_call_fn(documents: list[dict[str, Any]] | None = None):
         return '{"figures": []}', {"prompt_tokens": 10, "completion_tokens": 5}, ""
 
     return call, calls
+
+
+def seed_trigger(
+    con,
+    *,
+    iso3: str,
+    ym: str,
+    hazard: str = "FL",
+    triggered: bool = False,
+    run_type: str = "live",
+    trigger_source: str | None = None,
+):
+    """One ``haz_triggers`` row — the unit the resolution rate divides by."""
+    from resolver.hazard_resolution.schema import ensure_haz_schema
+
+    ensure_haz_schema(con)
+    year, month = (int(p) for p in ym.split("-"))
+    con.execute(
+        """
+        INSERT OR REPLACE INTO haz_triggers
+            (iso3, year, month, hazard, triggered, trigger_source,
+             trigger_detail_json, evidence_of_absence_json, run_type)
+        VALUES (?, ?, ?, ?, ?, ?, '{}', NULL, ?)
+        """,
+        [iso3.upper(), year, month, hazard, triggered, trigger_source, run_type],
+    )
+
+
+def seed_resolution(
+    con,
+    *,
+    iso3: str,
+    ym: str,
+    hazard: str = "FL",
+    status: str = "RESOLVED_VALUE",
+    value: float | None = 1000.0,
+    source: str = "emdat",
+    flagged: bool = False,
+    flags: list[str] | None = None,
+    run_type: str = "live",
+    lower_bound: bool = False,
+    provisional: bool = False,
+    frozen_at: str | None = None,
+    with_trigger: bool = True,
+):
+    """One ``haz_resolutions`` row (and, by default, its trigger row).
+
+    ``with_trigger`` defaults on because a resolution without a trigger row
+    is not a state the machine produces — every resolution follows a
+    detection verdict — and a test that seeded one would be measuring a
+    denominator that cannot occur.
+    """
+    from resolver.hazard_resolution.schema import ensure_haz_schema
+
+    ensure_haz_schema(con)
+    year, month = (int(p) for p in ym.split("-"))
+    if with_trigger:
+        seed_trigger(
+            con,
+            iso3=iso3,
+            ym=ym,
+            hazard=hazard,
+            triggered=status != "RESOLVED_ZERO",
+            run_type=run_type,
+        )
+    provenance = {
+        "source": source,
+        "source_record_ids": [f"{source}-{iso3}-{ym}"],
+        "source_urls": [f"https://example.test/{source}/{iso3}/{ym}"],
+        "retrieved_at": "2026-01-01T00:00:00+00:00",
+        "rule_fired": f"ladder:{source}",
+        "value_is_lower_bound": lower_bound,
+        "decision": {"flags": list(flags or ([] if not flagged else ["unspecified"]))},
+    }
+    if status == "RESOLVED_ZERO":
+        provenance["evidence_of_absence"] = {
+            "reliefweb": {"total_hits": 0, "silent": True},
+            "gdacs": {"total_records": 12, "query": {"n_events_qualifying_global": 0}},
+        }
+    con.execute(
+        """
+        INSERT OR REPLACE INTO haz_resolutions
+            (iso3, year, month, hazard, status, value, provenance_json,
+             rule_fired, flagged, provisional, run_type, frozen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            iso3.upper(), year, month, hazard, status, value,
+            json.dumps(provenance), f"ladder:{source}", flagged, provisional,
+            run_type, frozen_at,
+        ],
+    )
+
+
+def seed_candidate(
+    con,
+    *,
+    iso3: str,
+    ym: str,
+    hazard: str = "FL",
+    source: str = "ifrc_go",
+    value: float = 1000.0,
+    value_type: str = "affected",
+):
+    """One ``haz_impact_candidates`` row (the acceptance baseline reads these)."""
+    from resolver.hazard_resolution.schema import ensure_haz_schema
+
+    ensure_haz_schema(con)
+    year, month = (int(p) for p in ym.split("-"))
+    con.execute(
+        """
+        INSERT OR REPLACE INTO haz_impact_candidates
+            (iso3, year, month, hazard, value, value_type, source, source_ref)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [iso3.upper(), year, month, hazard, value, value_type, source,
+         f"{source}-{iso3}-{ym}"],
+    )

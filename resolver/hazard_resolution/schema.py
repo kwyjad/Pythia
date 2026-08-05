@@ -42,14 +42,45 @@ RAW_SOURCES = (
     "reliefweb_docs",
     "ipc",
     "drought_indicators",
+    # Dartmouth Flood Observatory archive. CALIBRATION ONLY — it is cached
+    # here so the backcast's flood occurrence rates can be cross-checked
+    # against an independent record, and it is never read by detection,
+    # by the ladder, or by any resolution. See dfo.py.
+    "dfo",
     "population",
 )
 
 #: Hazards in scope for the resolution machine (repo hazard codes).
 RESOLVABLE_HAZARDS = ("FL", "DR", "TC")
 
+#: How a row was produced. ``live`` is the ordinary forward run over a
+#: recent month; ``backcast`` is the historical replay of the identical
+#: rulebook and code over frozen history (see backcast.py). The two share
+#: one table and one primary key — there is only ever one answer per cell —
+#: so this column records which kind of run last wrote the row, not a
+#: second dimension of the key.
+RUN_TYPE_LIVE = "live"
+RUN_TYPE_BACKCAST = "backcast"
+RUN_TYPES = (RUN_TYPE_LIVE, RUN_TYPE_BACKCAST)
+
 _HAZARD_CHECK = "CHECK (hazard IN ('FL','DR','TC'))"
 _MONTH_CHECK = "CHECK (month BETWEEN 1 AND 12)"
+_RUN_TYPE_CHECK = "CHECK (run_type IN ('live','backcast'))"
+
+
+def validate_run_type(run_type: str) -> str:
+    """Return ``run_type`` if the machine knows it; raise otherwise.
+
+    The DDL carries a CHECK constraint for freshly created tables, but the
+    ALTER that migrates an existing DB cannot add one (see
+    ``_COLUMN_MIGRATIONS``). Writers therefore validate here, so a live DB
+    and a fresh DB reject the same bad value at the same moment.
+    """
+
+    text = str(run_type)
+    if text not in RUN_TYPES:
+        raise ValueError(f"run_type must be one of {list(RUN_TYPES)}, got {run_type!r}")
+    return text
 
 
 def raw_table_name(source: str) -> str:
@@ -107,6 +138,7 @@ _CORE_TABLE_DDL: dict[str, str] = {
         trigger_source TEXT,
         trigger_detail_json TEXT,
         evidence_of_absence_json TEXT,
+        run_type TEXT NOT NULL DEFAULT 'live' {_RUN_TYPE_CHECK},
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (iso3, year, month, hazard)
     )
@@ -195,6 +227,7 @@ _CORE_TABLE_DDL: dict[str, str] = {
         rule_fired TEXT NOT NULL,
         flagged BOOLEAN NOT NULL DEFAULT FALSE,
         provisional BOOLEAN NOT NULL DEFAULT FALSE,
+        run_type TEXT NOT NULL DEFAULT 'live' {_RUN_TYPE_CHECK},
         frozen_at TIMESTAMP,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (iso3, year, month, hazard)
@@ -214,6 +247,30 @@ _CORE_TABLE_DDL: dict[str, str] = {
         new_value DOUBLE,
         detail_json TEXT,
         observed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # Backcast bookkeeping: one row per (hazard, month) the historical
+    # replay has completed. A backcast spans decades and runs for hours;
+    # without a resume ledger an interrupted run must start over, and a
+    # re-run would re-walk months that are already answered — writing a
+    # haz_revisions row for every frozen cell it re-decides, which buries
+    # the genuine post-freeze revisions this audit table exists for.
+    "haz_backcast_progress": f"""
+    CREATE TABLE IF NOT EXISTS haz_backcast_progress (
+        hazard TEXT NOT NULL {_HAZARD_CHECK},
+        ym TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('ok','failed')),
+        cells INTEGER NOT NULL DEFAULT 0,
+        resolved_value INTEGER NOT NULL DEFAULT 0,
+        resolved_zero INTEGER NOT NULL DEFAULT 0,
+        no_data INTEGER NOT NULL DEFAULT 0,
+        frozen_skipped INTEGER NOT NULL DEFAULT 0,
+        extraction_calls INTEGER NOT NULL DEFAULT 0,
+        extraction_cost_usd DOUBLE NOT NULL DEFAULT 0.0,
+        duration_sec DOUBLE,
+        error TEXT,
+        ran_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (hazard, ym)
     )
     """,
     "haz_base_rates_occurrence": f"""
@@ -261,10 +318,17 @@ _CORE_TABLE_DDL: dict[str, str] = {
 #: carries meaning and must not be overwritten. ``preference_rank`` is such
 #: a column: NULL means "this rung has no internal precedence rule", which
 #: is a different statement from any integer rank.
+#: The migrated column additionally loses its CHECK constraint, so
+#: ``run_type`` is enforced in Python by :func:`validate_run_type` at every
+#: writer — otherwise a migrated DB would silently accept a value a freshly
+#: created one rejects. The backfill is ``'live'`` because every row that
+#: predates the column was written by the ordinary forward path.
 _COLUMN_MIGRATIONS: tuple[tuple[str, str, str, str | None], ...] = (
     ("haz_resolutions", "provisional", "BOOLEAN DEFAULT FALSE", "FALSE"),
     ("haz_impact_candidates", "preference_rank", "INTEGER", None),
     ("haz_impact_candidates", "detail_json", "TEXT", None),
+    ("haz_resolutions", "run_type", "TEXT DEFAULT 'live'", "'live'"),
+    ("haz_triggers", "run_type", "TEXT DEFAULT 'live'", "'live'"),
 )
 
 _INDEX_DDL = (
