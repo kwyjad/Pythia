@@ -93,7 +93,9 @@ env:
   PYTHONUNBUFFERED: "1"
   BACKFILL_DB_PATH: data/resolver.duckdb
   SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
-  SIGNATURE_OPTIONAL_TABLES: scenarios,hdx_signals,enso_state,seasonal_tc_outlooks,seasonal_tc_context_cache
+  # haz_* tables are optional: they exist only once the PA resolution machine
+  # (Phase 2.5) has run at least once, and pre-machine DBs must still pass.
+  SIGNATURE_OPTIONAL_TABLES: scenarios,hdx_signals,enso_state,seasonal_tc_outlooks,seasonal_tc_context_cache,haz_triggers,haz_resolutions,haz_base_rates_occurrence,haz_base_rates_severity
 
 jobs:
   backfill:
@@ -101,8 +103,12 @@ jobs:
     runs-on: ubuntu-latest
     # Self-imposed budget (GitHub's hard cap is 360 min/job on hosted runners).
     # Reset/backfill runs pull 10+ years of GDACS + 12 months of ACLED and need
-    # far more headroom than the scheduled monthly incremental run.
-    timeout-minutes: ${{ inputs.reset_db && 300 || 150 }}
+    # far more headroom than the scheduled monthly incremental run. The
+    # non-reset budget rose 150 -> 240 when Phase 2.5 (the PA resolution
+    # machine) was added: its ReliefWeb silence sweeps are paced at ~0.5 s per
+    # country and cover ~250 countries x 3 trailing months per hazard, which
+    # is 60-90 min of deliberate patience, not slack to trim.
+    timeout-minutes: ${{ inputs.reset_db && 300 || 240 }}
     env:
       RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -127,6 +133,17 @@ jobs:
       IPC_API_KEY: ${{ secrets.IPC_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
+      # --- PA resolution machine (Phase 2.5) ---
+      # ANTHROPIC_API_KEY backs the hazard_extraction role (ladder rung 2,
+      # Haiku-class transcription). RELIEFWEB_APPNAME identifies the silence
+      # sweep + document fetches to ReliefWeb (code falls back to
+      # 'pythia-resolution-machine' with a warning when unset). IDMC_API_KEY is
+      # the IDU key sent as client_id — a DIFFERENT credential from
+      # IDMC_API_TOKEN (the HELIX token above); when the secret is unset the
+      # IDU lower-bound rung reports UNAVAILABLE, which the rows record.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
+      IDMC_API_KEY: ${{ secrets.IDMC_API_KEY }}
       FEWSNET_MONTHS: ${{ inputs.reset_db && '120' || inputs.fewsnet_months || '12' }}
       IPC_API_MONTHS: ${{ inputs.reset_db && '120' || inputs.ipc_api_months || '24' }}
       GDACS_MONTHS: ${{ inputs.reset_db && '135' || inputs.gdacs_months || '3' }}
@@ -413,6 +430,75 @@ jobs:
         run: |
           echo "::group::GDACS"
           python -m pythia.tools.ingest_structured_data --sources gdacs 2>&1 | tee diagnostics/phase2_gdacs.log || echo "WARNING: GDACS ingest failed (non-fatal)"
+          echo "::endgroup::"
+
+      # === PHASE 2.5: PA RESOLUTION MACHINE (non-fatal, SHADOW MODE) ===
+      # resolver/hazard_resolution/ resolves people-affected per
+      # country-month-hazard (detection + the impact ladder) into the haz_*
+      # tables, then refreshes the base-rate tables the SPD prompt block
+      # reads (forecaster/prompts.py::_load_haz_base_rate_block) — so the
+      # 1st-of-month forecast picks them up from this same DB artifact.
+      # SHADOW MODE: nothing here feeds compute_resolutions yet; the flip to
+      # scoring is a separate deliberate change, gated on the acceptance
+      # report this phase publishes into backfill-diagnostics.
+      #
+      # The trailing three months are re-run each cycle: answers stay
+      # provisional until month-end + freeze_days (60), so each monthly run
+      # revises the still-open months and the freeze guard protects the rest.
+      - name: "Phase 2.5: Compute machine months (trailing unfrozen window)"
+        id: haz_months
+        if: ${{ inputs.only_connector == '' }}
+        run: |
+          MONTHS=$(python -c "
+          import datetime as dt
+          today = dt.date.today()
+          year, month = today.year, today.month
+          months = []
+          for _ in range(3):
+              months.append(f'{year:04d}-{month:02d}')
+              month -= 1
+              if month == 0:
+                  month, year = 12, year - 1
+          print(' '.join(reversed(months)))
+          ")
+          echo "months=$MONTHS" >> "$GITHUB_OUTPUT"
+          echo "PA resolution machine months: $MONTHS"
+
+      - name: "Phase 2.5: PA machine — flood"
+        timeout-minutes: 60
+        if: ${{ inputs.only_connector == '' }}
+        continue-on-error: true
+        run: |
+          echo "::group::PA machine (flood)"
+          python -m resolver.hazard_resolution.cli --hazard flood --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_flood.json 2>&1 | tee diagnostics/phase25_haz_flood.log || echo "WARNING: flood resolution machine failed (non-fatal)"
+          echo "::endgroup::"
+
+      - name: "Phase 2.5: PA machine — cyclone"
+        timeout-minutes: 75
+        if: ${{ inputs.only_connector == '' }}
+        continue-on-error: true
+        run: |
+          echo "::group::PA machine (cyclone)"
+          python -m resolver.hazard_resolution.cli --hazard cyclone --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_cyclone.json 2>&1 | tee diagnostics/phase25_haz_cyclone.log || echo "WARNING: cyclone resolution machine failed (non-fatal)"
+          echo "::endgroup::"
+
+      - name: "Phase 2.5: PA machine — drought"
+        timeout-minutes: 20
+        if: ${{ inputs.only_connector == '' }}
+        continue-on-error: true
+        run: |
+          echo "::group::PA machine (drought)"
+          python -m resolver.hazard_resolution.cli --hazard drought --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_drought.json 2>&1 | tee diagnostics/phase25_haz_drought.log || echo "WARNING: drought resolution machine failed (non-fatal)"
+          echo "::endgroup::"
+
+      - name: "Phase 2.5: Refresh machine base rates + acceptance report"
+        timeout-minutes: 15
+        if: ${{ inputs.only_connector == '' }}
+        continue-on-error: true
+        run: |
+          echo "::group::PA machine base rates + acceptance"
+          python -m resolver.hazard_resolution.base_rates 2>&1 | tee diagnostics/phase25_haz_base_rates.log || echo "WARNING: base-rate refresh failed (non-fatal)"
+          python -m resolver.hazard_resolution.acceptance --out diagnostics/haz_acceptance_report.md 2>&1 | tee diagnostics/phase25_haz_acceptance.log || echo "WARNING: acceptance report failed (non-fatal)"
           echo "::endgroup::"
 
       # === PHASE 3: STRUCTURED DATA — Pythia tables (non-fatal) ===

@@ -106,7 +106,8 @@ jobs:
             "Pythia — Compute Calibration Weights & Advice" \
             "Pythia — Compute SPD Scores" \
             "Pythia — Compute Resolutions" \
-            "Ingest Structured Data"
+            "Ingest Structured Data" \
+            "Hazard Backcast"
           do
             gh run list \
               --workflow "${WF}" \

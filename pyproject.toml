@@ -14,7 +14,12 @@ packages = [
 ]
 include = [
     { path = "resolver/config/series_semantics.yml" },
-    { path = "resolver/hazard_resolution/rulebook.yaml" }
+    { path = "resolver/hazard_resolution/rulebook.yaml" },
+    # The vendored Natural Earth boundary layer the cyclone detector loads —
+    # poetry-core packages only .py by default, so without this a built
+    # wheel/sdist ships a machine with no coastlines (editable installs are
+    # unaffected, which is why CI never noticed).
+    { path = "resolver/hazard_resolution/data/*.geojson.gz" }
 ]
 
 [tool.poetry.dependencies]
@@ -62,6 +67,7 @@ resolve-hazards = "resolver.hazard_resolution.cli:main"
 haz-backcast = "resolver.hazard_resolution.backcast:main"
 haz-base-rates = "resolver.hazard_resolution.base_rates:main"
 haz-acceptance = "resolver.hazard_resolution.acceptance:main"
+haz-migrate = "resolver.hazard_resolution.migrate:main"
 
 [tool.poe.tasks]
 test-idmc-cli = "pytest -q resolver/tests/test_idmc_cli_*"
