@@ -39,6 +39,12 @@ on:
       - "resolver/tests/test_conflict_forecasts_table.py"
       - "resolver/tests/test_eiv_scoring.py"
       - "resolver/tests/test_risk_index_prefers_bayesmc.py"
+      # The PA resolution machine's base-rate block is rendered into every
+      # PA SPD prompt from rulebook.yaml at prompt-build time. A rulebook or
+      # renderer change therefore changes forecaster prompt text, so the
+      # assembled-prompt snapshots have to re-run on it.
+      - "resolver/hazard_resolution/prompt_block.py"
+      - "resolver/hazard_resolution/rulebook.yaml"
       - "pythia/api/routes/costs.py"
       - "scripts/ci/poll_llm_batches.py"
       - "scripts/ci/check_pipeline_active.py"
@@ -229,10 +235,18 @@ jobs:
           # population exposure — and served it to models as IFRC reported
           # impact, a figure orders of magnitude larger that the resolver would
           # never use. See docs/montandon_assessment.md.
+          # test_haz_base_rate_prompt asserts the PA resolution machine's
+          # base-rate block actually reaches the assembled SPD prompt. A
+          # loader whose text nobody renders costs money and changes nothing
+          # — the repo has lost CrisisWatch and the HS grounding packs that
+          # way — and only an assembled-prompt assertion catches it. It also
+          # pins that a rulebook.yaml change moves the prompt with no code
+          # change, which is why rulebook.yaml is in this workflow's paths.
           pytest -vv \
             forecaster/tests/test_history_summary.py \
             forecaster/tests/test_fewsnet_history.py \
             forecaster/tests/test_base_rate_matches_resolution_source.py \
+            forecaster/tests/test_haz_base_rate_prompt.py \
             resolver/tests/test_idmc_history_conflict_pa.py
 
       - name: Run debug-bundle tests
