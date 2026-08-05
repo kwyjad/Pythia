@@ -92,14 +92,138 @@ flood:
     request_delay_sec: 0.5
 
 drought:
-  # Drought skips the impact ladder and resolves against IPC data.
-  # The exact rule is specified in Phase 4 of the build; the threshold keys
-  # below are placeholders — loaded and validated, but not yet consumed by
-  # any resolution code.
+  # Drought skips the impact ladder — there is no discrete event to walk
+  # rungs for — and resolves against IPC/CH food-security analyses:
+  #
+  #   people affected(country, month)
+  #       = max(0, Phase3+(analysis covering the month)
+  #                - Phase3+(previous current-period analysis))
+  #
+  # admitted as DROUGHT impact only when the indicators below show drought
+  # conditions. IPC's structured feeds state Phase 3+ population but not its
+  # DRIVER (drought vs conflict vs economic shock) — that lives in narrative
+  # PDFs — so the indicators are what attributes a deterioration to drought.
+  # Without them the machine would file conflict-driven food insecurity as
+  # drought impact.
   rule: ipc_phase3plus_delta
-  ipc_phase_threshold: 3      # placeholder — IPC phase whose population the rule reads
-  min_delta_people: 0         # placeholder — absolute Phase 3+ increase to count as drought impact
-  min_delta_pct: 0.0          # placeholder — relative Phase 3+ increase to count as drought impact
+
+  # The IPC phase whose population the rule reads. 3 = "Crisis or worse",
+  # i.e. the Phase 3+ aggregate every IPC/CH product publishes.
+  ipc_phase_threshold: 3
+
+  # How large an increase counts as drought impact. min_delta_pct is a
+  # PERCENTAGE of the previous analysis's Phase 3+ population. At 0/0.0 any
+  # increase counts; raise either to require a material deterioration.
+  # A qualifying increase resolves to a value; a non-qualifying one resolves
+  # to a credible ZERO (the analyses were read, and they state no increase).
+  min_delta_people: 0
+  min_delta_pct: 0.0
+
+  # WHICH MONTHS a delta resolves.
+  #
+  # An IPC current-period analysis is valid over several months but states
+  # ONE Phase 3+ figure, so the delta carries no monthly breakdown and the
+  # machine is not allowed to invent one.
+  #
+  #   analysis_window — every month the analysis window covers resolves to
+  #                     the delta. The newly-Phase-3+ population is treated
+  #                     as persisting through the window the analysis
+  #                     declares it for, which is what a slow-onset hazard
+  #                     does.
+  #   start_month     — only the window's first month carries the delta; the
+  #                     remaining covered months resolve to zero ("the
+  #                     analysis covering this month reported no NEW
+  #                     deterioration"), mirroring event_attribution.figure.
+  #
+  # WARNING, analysis_window: the same people appear in every month of a
+  # window. These values answer "how many people were affected by drought
+  # IN this month" — a stock — and must never be SUMMED across months.
+  month_attribution: analysis_window
+
+  ipc:
+    # IPC public API. Auth is the IPC_API_KEY environment variable, sent as
+    # the documented `key=` query parameter — never stored here.
+    api_url: "https://api.ipcinfo.org/population"
+    request_timeout_sec: 120
+    # IPC publishes sparsely (one to three analyses a year per country), so
+    # the window has to be wide enough to contain the PREVIOUS analysis as
+    # well as the covering one — the rule is a difference, and with no
+    # baseline there is no answer.
+    lookback_months: 36
+    lookahead_months: 6
+    # Second acquisition path: the Phase 3+ rows the repo's existing FEWS NET
+    # and IPC connectors already write to facts_resolved. It needs no key and
+    # covers the FEWS NET countries the IPC API connector deliberately
+    # excludes, so the drought path still works where those countries are
+    # monitored. Analyses found by both paths are deduplicated by window,
+    # preferring the source listed first in source_priority.
+    use_facts_resolved: true
+    facts_resolved_metric: phase3plus_in_need
+    facts_resolved_publishers: ["IPC", "FEWS NET"]
+    source_priority: [ipc_api, facts_resolved]
+
+  # ---------------------------------------------------------------------
+  # DROUGHT INDICATORS — the attribution gate, and the gate in front of
+  # every drought zero.
+  #
+  # Each entry is fetched once per run as a global feed and cached in
+  # haz_raw_drought_indicators as VALUES, not verdicts: the thresholds below
+  # are applied at evaluation time, so changing them changes behaviour
+  # without a re-fetch.
+  #
+  # An entry with an empty url is not consulted. An entry that cannot be
+  # read is UNAVAILABLE — and an unavailable REQUIRED indicator suppresses
+  # zeros for that month, because "we could not check" and "there was no
+  # drought" are different facts and only the second can justify a zero.
+  # ---------------------------------------------------------------------
+  indicators:
+    # any = one indicator showing drought is enough; all = every consulted
+    # indicator must agree before the month counts as drought.
+    combine: any
+    # How stale a feed observation may be and still speak for a month. Feeds
+    # that publish a "latest" snapshot with no date are stamped with their
+    # retrieval month, so backcast months fall outside this window and
+    # correctly resolve to nothing rather than to a false zero. Point an
+    # entry's url at a per-month archive (it may contain {ym}, {year} and
+    # {month}) to backcast properly.
+    max_observation_age_months: 1
+    entries:
+      # JRC ASAP agricultural hotspot classification. Free, no key,
+      # country-level. Absence from the feed means "no warning issued",
+      # which is what makes it usable as evidence of absence.
+      - name: asap
+        provider: asap
+        url: "https://agricultural-production-hotspots.ec.europa.eu/data/asap_warnings/asap_warning_countries.json"
+        required: true
+        request_timeout_sec: 60
+        # Classes that count as drought conditions, matched
+        # case-insensitively against whatever the feed states (ASAP has used
+        # both numeric levels and words across versions).
+        drought_classes: ["2", "3", "4", "warning", "alarm", "drought"]
+      # Country-aggregated rainfall / water-balance anomaly feeds. CHIRPS and
+      # SPEI are gridded rasters; turning them into a country number needs
+      # zonal statistics, which does not belong in the resolution path. The
+      # tabular provider instead reads a pre-computed (iso3, ym, value) feed
+      # — CSV or JSON — so a maintainer can point it at whatever
+      # country-level anomaly product they already produce.
+      #
+      # Unlike ASAP, a country ABSENT from an anomaly feed is unknown, not
+      # dry: these entries are required: false so their absence cannot
+      # suppress zeros everywhere.
+      - name: chirps_spi3
+        provider: tabular
+        url: ""
+        required: false
+        request_timeout_sec: 60
+        threshold: -1.0
+        direction: below
+      - name: spei3
+        provider: tabular
+        url: ""
+        required: false
+        request_timeout_sec: 60
+        threshold: -1.0
+        direction: below
 
 # Resolutions freeze at month-end + freeze_days and are never reopened.
 # Later revisions are logged to haz_revisions but do not alter resolved values.

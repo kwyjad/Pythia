@@ -23,8 +23,10 @@ country-month-hazard cells resolve to a number (including zero) rather than
    the GDACS exposed-population estimate (a ceiling — exposure is never used
    as the answer itself) and against national population. If the freeze date
    passes with no figure, the cell resolves to **"no data"** and is flagged
-   for human review. Drought skips the ladder entirely and resolves from IPC
-   data by a fixed rule.
+   for human review. Drought skips the ladder entirely: it resolves as the
+   increase in IPC Phase 3+ population between consecutive analyses,
+   attributed to drought only where independent drought indicators agree
+   (Phase 4, below).
 
 **The rulebook.** Every threshold and policy switch lives in
 [`rulebook.yaml`](rulebook.yaml) — cyclone wind/distance thresholds, the
@@ -66,6 +68,9 @@ python -m resolver.hazard_resolution.population
 # One month, one hazard — detection, zeros, and the impact ladder
 resolve-hazards --hazard cyclone --month 2026-06
 resolve-hazards --hazard flood   --month 2026-06
+
+# Drought: IPC Phase 3+ delta, gated by drought indicators (no ladder, no spend)
+resolve-hazards --hazard drought --month 2026-06
 
 # Three months in one run (each month is independent)
 resolve-hazards --hazard flood --months 2026-04 2026-05 2026-06
@@ -365,4 +370,144 @@ machine is free.
 **Environment.** `RELIEFWEB_APPNAME` and the provider key for whichever
 model backs `hazard_extraction` (`ANTHROPIC_API_KEY` by default).
 
-Later phases add the IPC drought rule and the backcast.
+## Phase 4: drought via IPC (implemented)
+
+Drought is the one hazard with no event. Nothing makes landfall, no alert
+goes orange, and there is no day on which a situation report counts the
+affected. What there is, is a food-security analysis cycle — so drought
+skips the ladder entirely and resolves as:
+
+    people affected(country, month)
+        = max(0, Phase3+(analysis covering the month)
+                 − Phase3+(previous current-period analysis))
+
+admitted as **drought** impact only where the drought indicators say the
+country was in drought. No model is called anywhere on this path, so a
+drought run costs nothing.
+
+**Why the indicators are load-bearing.** IPC's structured feeds state how
+many people are in Phase 3+; they do not state *why*. Driver attribution —
+drought vs conflict vs economic shock — lives in narrative PDFs. Without an
+independent signal, the rule would file South Sudan's conflict-driven food
+insecurity as drought impact, which is the same definitional blending the
+resolver's base-rate rule forbids. The indicators are what closes that gap,
+and they do the same work at the other end: a drought zero rests on two
+statements (no indicator signal **and** no IPC deterioration), so an
+indicator that could not be *read* suppresses the zero rather than
+permitting it.
+
+**Where the figures come from** ([`ipc.py`](ipc.py)). Two acquisition
+paths into one cache:
+
+- **`ipc_api`** — the IPC public API, authenticated with the `key=` query
+  parameter the repo's existing IPC connector already uses. It states the
+  current-period window explicitly.
+- **`facts_resolved`** — the `phase3plus_in_need` rows the repo's FEWS NET
+  and IPC connectors already write, where `ym` is the window's first month
+  and `as_of_date` its last. Needs no key, and covers the FEWS NET
+  countries that `resolver/connectors/ipc_api.py` deliberately *excludes*
+  to avoid double-writing facts_resolved — which are exactly the countries
+  where drought resolution matters most.
+
+An analysis seen by both paths is one analysis: they collapse per validity
+window, preferring whatever `drought.ipc.source_priority` lists first. Only
+the CURRENT period is cached; the projection is a forecast, and a forecast
+is not a resolution source. Period-date parsing is *borrowed* from the
+existing connector rather than re-implemented, with a guard test — two
+parsers for one free-text format would eventually disagree about which
+months an analysis covers.
+
+**Where the drought signal comes from**
+([`drought_indicators.py`](drought_indicators.py)). Each entry in
+`drought.indicators.entries` is fetched once per run as a global feed and
+cached as **values, not verdicts** — thresholds are applied at evaluation
+time, so retuning one changes behaviour on the next run with no re-fetch
+and no code change. Two providers:
+
+| provider | shape | absence of a country means |
+|---|---|---|
+| `asap` | JRC ASAP agricultural hotspot classes, free, no key | **no warning issued** — which is what makes it usable as evidence of absence |
+| `tabular` | a pre-computed `(iso3, ym, value)` CSV/JSON anomaly feed compared against a threshold | **unknown** — an anomaly feed that omits a country says nothing about it |
+
+CHIRPS and SPEI are gridded rasters, and turning those into a country
+number needs zonal statistics that have no business running inside the
+resolution path; the `tabular` provider is how a maintainer points the
+machine at whatever country-level anomaly product they already produce.
+Both entries ship with an empty `url` (not consulted) and
+`required: false`, so their absence cannot suppress zeros everywhere.
+
+Three guards, each learned from a failure mode elsewhere in the repo:
+
+- **0-of-N resolution refuses the feed.** If no record resolves to a
+  country, the feed's shape changed — that is not evidence the world is
+  drought-free, and the snapshot is rejected rather than cached.
+- **Staleness is bounded** by `max_observation_age_months`. A feed with no
+  date is stamped with its *retrieval* month, so a backcast month falls
+  outside the window and correctly resolves to nothing instead of a false
+  zero. Point an entry's `url` at a per-month archive (it may contain
+  `{ym}`, `{year}`, `{month}`) to backcast properly.
+- **A later snapshot is never read backwards.** A September warning is not
+  evidence about March.
+
+**Which months a delta resolves.** An analysis is valid over several
+months but states ONE figure, so the delta has no monthly breakdown and the
+machine may not invent one. `drought.month_attribution` decides:
+
+- `analysis_window` (shipped) — every month the window covers resolves to
+  the delta. The newly-Phase-3+ population is treated as persisting through
+  the window the analysis declares it for, which is what a slow-onset
+  hazard does. **These values must never be summed across months**: each
+  answers "how many people were affected in this month", a stock, and the
+  same people appear in every month of the window. The resolution says so
+  in its own provenance note.
+- `start_month` — only the window's first month carries the delta;
+  the rest resolve to zero ("no NEW deterioration reported"), mirroring
+  `event_attribution.figure`.
+
+**The five outcomes** ([`drought.py`](drought.py) — `decide_drought` is a
+pure function of analyses, indicator verdict, rulebook, population and
+today, exactly as `reconcile.reconcile` is for the ladder):
+
+| outcome | when |
+|---|---|
+| `RESOLVED_VALUE` | indicators dry, two analyses in hand, increase clears `min_delta_people` / `min_delta_pct` |
+| `RESOLVED_ZERO` | *nothing happened* (no signal **and** no deterioration) — or the analyses were read and state no qualifying increase. **Two different zeros, two different `rule_fired` strings**, because "we know it was quiet" and "the number came out at zero" are different findings |
+| `NO_DATA` | indicators dry but no IPC analysis covers the month by the freeze deadline; or no previous analysis to difference against; or a deterioration the indicators do not attribute to drought. All flagged |
+| `PENDING` | the same situations *before* the freeze deadline. IPC publishes months late, so nothing is written |
+| `INCONCLUSIVE` | a required indicator could not be read. Fail-closed, exactly as a failed ReliefWeb sweep is — nothing is written, and the trigger row keeps the evidence |
+
+Two of those deserve their own note. A covering analysis with **no
+baseline** resolves to NO_DATA rather than to its own Phase 3+ population:
+that figure is a *stock*, and publishing it as people-affected-this-month
+would overstate by the entire pre-existing caseload. And a **deterioration
+without a drought signal** publishes no figure at all — the increase is
+real, but it is not drought's.
+
+**Same tables, same freeze logic.** Triggers land in `haz_triggers`
+(carrying the indicator readings, and the evidence of absence for a zero),
+the delta lands in `haz_impact_candidates` with `source='ipc'` and
+`value_type='affected'` — so a drought answer is auditable through the same
+table as every other hazard's — and the resolution goes through the same
+writer, and therefore the same freeze guard and revision log, as the
+ladder's. The rule replaces the ladder, not the bookkeeping. Every
+resolution's provenance names the analysis window it rests on.
+
+**Sanity checks.** The national-population cap applies and flags without
+rewriting, as everywhere else. The GDACS exposure ceiling deliberately does
+*not*: GDACS drought exposure is an agricultural-footprint quantity, and
+the drought value is a *delta* rather than a stock, so the two are not
+comparable and bounding one by the other would flag noise.
+
+**Environment.** `IPC_API_KEY` (optional — without it the machine falls
+back to the Phase 3+ rows already in `facts_resolved`). ASAP needs no
+credentials.
+
+**One thing to verify on the first live run.** Egress to the JRC ASAP host
+was blocked from the environment this was built in, so `asap.url` in the
+rulebook is a best-known endpoint and the parser is deliberately tolerant
+of field naming. If the live feed differs, the failure is loud and safe —
+the snapshot is refused, the indicator reads UNAVAILABLE, and no zeros are
+written — and the fix is a URL in YAML plus, at worst, a key name in
+`_CLASS_KEYS`. It is not a redesign.
+
+Later phases add the backcast.

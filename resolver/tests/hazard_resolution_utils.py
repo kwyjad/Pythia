@@ -150,6 +150,80 @@ def seed_gdacs_event(
     return store_raw_records(con, "gdacs", [record])
 
 
+def seed_ipc_analysis(
+    con,
+    *,
+    iso3: str,
+    window_start: str,
+    window_end: str,
+    value: float,
+    path: str = "ipc_api",
+    analysis_date: str | None = None,
+):
+    """One IPC current-period analysis in ``haz_raw_ipc``.
+
+    Written through the connector's own record builder so the cached shape
+    is the one the drought rule reads in production — a test that seeded a
+    hand-built payload could pass against a cache the connector never
+    produces.
+    """
+    import datetime as dt
+
+    from resolver.hazard_resolution.ipc import SOURCE, _analysis_record
+    from resolver.hazard_resolution.sources import store_raw_records
+
+    record = _analysis_record(
+        iso3=iso3.upper(),
+        path=path,
+        window_start=dt.date.fromisoformat(window_start),
+        window_end=dt.date.fromisoformat(window_end),
+        value=float(value),
+        analysis_date=analysis_date or window_start,
+        source_url=f"https://example.test/ipc/{iso3.lower()}/{window_start}",
+    )
+    return store_raw_records(con, SOURCE, [record])
+
+
+def seed_indicator_snapshot(
+    con,
+    *,
+    name: str = "asap",
+    provider: str = "asap",
+    observed_ym: str = "2024-03",
+    values: dict[str, Any] | None = None,
+    url: str = "https://example.test/asap.json",
+):
+    """One cached drought-indicator feed snapshot.
+
+    ``values`` maps ISO3 to whatever the feed states — a class label for
+    ASAP, a number for an anomaly feed. Thresholds are applied at
+    evaluation time, so the snapshot carries no verdict.
+    """
+    from resolver.hazard_resolution.drought_indicators import SOURCE
+    from resolver.hazard_resolution.sources import RawRecord, store_raw_records
+
+    payload_values = dict(values or {})
+    record = RawRecord(
+        record_id=f"{name}-{observed_ym}",
+        payload={
+            "name": name,
+            "provider": provider,
+            "url": url,
+            "values": payload_values,
+            "observed_ym": observed_ym,
+            "observed_ym_source": "feed",
+            "n_records": len(payload_values),
+            "n_countries": len(payload_values),
+            "n_unresolved": 0,
+            "fetched_at": "2024-04-01T00:00:00+00:00",
+        },
+        ym=observed_ym,
+        hazard="DR",
+        source_url=url,
+    )
+    return store_raw_records(con, SOURCE, [record])
+
+
 def silent_sweep_evidence(iso3: str, ym: str) -> dict[str, Any]:
     """A well-formed silent ReliefWeb sweep record (as the sweep returns)."""
     return {

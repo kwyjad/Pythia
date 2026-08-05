@@ -50,6 +50,37 @@ def flood_alert_qualifies(alert_level: str, rulebook: Rulebook) -> bool:
     return GDACS_ALERT_LEVELS.index(level) >= GDACS_ALERT_LEVELS.index(threshold)
 
 
+def drought_delta_qualifies(
+    delta: float, baseline: float | None, rulebook: Rulebook
+) -> bool:
+    """True when an IPC Phase 3+ increase counts as drought people-affected.
+
+    An increase qualifies when it is strictly positive and clears both
+    ``drought.min_delta_people`` (absolute) and ``drought.min_delta_pct``
+    (a PERCENTAGE of the previous analysis's Phase 3+ population). At the
+    shipped 0 / 0.0 any increase qualifies.
+
+    A delta that does not qualify is not missing data — the two analyses
+    were read and they state no material increase — so the caller resolves
+    it as a credible zero rather than as NO_DATA.
+    """
+
+    value = float(delta)
+    if value <= 0:
+        return False
+    if value < float(rulebook.get("drought.min_delta_people")):
+        return False
+    min_pct = float(rulebook.get("drought.min_delta_pct"))
+    if min_pct > 0:
+        if baseline is None or float(baseline) <= 0:
+            # No denominator: the absolute test is all there is to apply.
+            # Refusing here would drop a real increase for want of a ratio.
+            return True
+        if (value / float(baseline)) * 100.0 < min_pct:
+            return False
+    return True
+
+
 def freeze_deadline(year: int, month: int, rulebook: Rulebook) -> dt.date:
     """The date a (year, month) cell freezes: month-end + ``freeze_days``.
 
