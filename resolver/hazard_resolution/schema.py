@@ -41,6 +41,7 @@ RAW_SOURCES = (
     "ifrc_go",
     "reliefweb_docs",
     "ipc",
+    "drought_indicators",
     "population",
 )
 

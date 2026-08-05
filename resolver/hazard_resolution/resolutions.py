@@ -58,6 +58,11 @@ ZERO_RULE_FIRED = "cyclone_zero:no_ibtracs_trigger+reliefweb_silent"
 ZERO_RULE_BY_HAZARD = {
     "TC": ZERO_RULE_FIRED,
     "FL": "flood_zero:no_gdacs_trigger+reliefweb_silent",
+    # Drought has no ReliefWeb sweep: it is not an event anyone files a
+    # report about on the day. Its absence evidence is the pair of
+    # statements the rule needs — the indicators saw no drought, and IPC
+    # recorded no qualifying Phase 3+ increase.
+    "DR": "drought_zero:no_indicator_signal+no_ipc_deterioration",
 }
 
 
@@ -102,11 +107,21 @@ def _log_revision(
 def _collect_urls(evidence: dict[str, Any]) -> list[str]:
     """Pull every URL the evidence cites (queries + samples + sources)."""
     urls: list[str] = []
-    # Detection evidence: IBTrACS for cyclones, GDACS for floods.
-    for detector in ("ibtracs", "gdacs"):
+    # Detection evidence: IBTrACS for cyclones, GDACS for floods, the IPC
+    # analyses for droughts.
+    for detector in ("ibtracs", "gdacs", "ipc"):
         for url in (evidence.get(detector) or {}).get("source_urls") or []:
             if url:
                 urls.append(str(url))
+    # Drought: the analysis windows the zero rests on, and every indicator
+    # feed consulted. A zero has to cite what it checked.
+    for key in ("covering", "previous"):
+        analysis = (evidence.get("ipc") or {}).get(key) or {}
+        if analysis.get("source_url"):
+            urls.append(str(analysis["source_url"]))
+    for reading in (evidence.get("indicators") or {}).get("readings") or []:
+        if reading.get("source_url"):
+            urls.append(str(reading["source_url"]))
     sweep = evidence.get("reliefweb") or {}
     for q in sweep.get("queries") or []:
         if q.get("url"):

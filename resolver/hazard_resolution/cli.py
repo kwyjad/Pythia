@@ -13,6 +13,7 @@ ReliefWeb documents.
 Usage:
     resolve-hazards --hazard cyclone --month 2026-06
     resolve-hazards --hazard flood   --month 2026-06
+    resolve-hazards --hazard drought --month 2026-06
     resolve-hazards --hazard flood   --months 2026-04 2026-05 2026-06
     resolve-hazards --hazard cyclone --month 2013-11 --scope ALL --countries PHL
     resolve-hazards --hazard flood   --month 2026-06 --no-extract  # spend nothing
@@ -41,6 +42,14 @@ Pipeline for one (hazard, month):
        rungs are empty, ReliefWeb documents are fetched and a cheap model
        transcribes the figures they state. Never for a non-triggered cell,
        and never past extraction.max_calls_per_month.
+
+Drought does none of that. It has no discrete event, so it skips the
+ladder and resolves against IPC/CH food-security analyses: people affected
+is the increase in Phase 3+ population between consecutive analyses,
+admitted as DROUGHT impact only where the drought indicators say the
+country was in drought. Detection, zeros and freezing work exactly as
+above; only the figure's source differs. No LLM call is involved, so a
+drought run is free.
 
 Answers written before month-end + freeze_days are marked provisional;
 from the deadline on they are final and immutable.
@@ -72,6 +81,8 @@ _HAZARD_ALIASES = {
     "tc": "cyclone",
     "flood": "flood",
     "fl": "flood",
+    "drought": "drought",
+    "dr": "drought",
 }
 
 # Months younger than this many days are guaranteed inside the IBTrACS
@@ -518,6 +529,122 @@ def run_flood_month(
     return 0
 
 
+def _log_drought_summary(ym: str, run, dry: str) -> None:
+    LOG.info("--- resolve-hazards summary (drought %s) ---", ym)
+    LOG.info("  countries assessed:        %d", run.cells)
+    LOG.info("  drought detected:          %d", run.triggered)
+    LOG.info("  resolved value:            %d%s", run.resolved_value, dry)
+    LOG.info("  resolved zero:             %d%s", run.resolved_zero, dry)
+    LOG.info("  no data (flagged):         %d", run.no_data)
+    LOG.info("  pending (pre-freeze):      %d", run.pending)
+    LOG.info("  inconclusive (no row):     %d", run.inconclusive)
+    LOG.info("  flagged for review:        %d", run.flagged)
+    LOG.info("  provisional (pre-freeze):  %d", run.provisional)
+    LOG.info("  frozen (skipped, logged):  %d", run.frozen_skipped)
+    if run.unavailable_sources:
+        LOG.warning(
+            "  sources UNAVAILABLE: %s (their answers are unread, not empty)",
+            ",".join(run.unavailable_sources),
+        )
+
+
+def run_drought_month(
+    *,
+    ym: str,
+    db_url: str | None,
+    countries_filter: list[str] | None,
+    skip_fetch: bool,
+    dry_run: bool,
+    no_ladder: bool = False,
+    no_extract: bool = False,
+    no_sweep: bool = False,
+    rulebook=None,
+    con=None,
+) -> int:
+    """Run the drought path for one month.  Returns an exit code.
+
+    Drought skips the impact ladder, so ``--no-ladder`` / ``--no-extract``
+    are accepted and ignored: there is no ladder to skip and nothing to
+    spend. ``--no-sweep`` is likewise inapplicable — drought's evidence of
+    absence is the indicator feeds plus IPC, not a ReliefWeb sweep.
+    """
+    from resolver.db.duckdb_io import get_db
+    from resolver.hazard_resolution import drought as drought_mod
+    from resolver.hazard_resolution import drought_indicators as ind_mod
+    from resolver.hazard_resolution import ipc as ipc_mod
+    from resolver.hazard_resolution.rulebook import load_rulebook
+    from resolver.hazard_resolution.schema import ensure_haz_schema
+
+    rulebook = rulebook or load_rulebook()
+    con = con if con is not None else get_db(db_url)
+    ensure_haz_schema(con)
+
+    for flag, name in ((no_ladder, "--no-ladder"), (no_extract, "--no-extract")):
+        if flag:
+            LOG.info(
+                "[cli] %s has no effect on drought: it resolves from IPC, not "
+                "from the impact ladder, and makes no model calls",
+                name,
+            )
+    if no_sweep:
+        LOG.info(
+            "[cli] --no-sweep has no effect on drought: its evidence of absence "
+            "is the drought indicators plus IPC, not a ReliefWeb sweep"
+        )
+
+    # --- Step 1: fetch IPC analyses and the indicator feeds ---
+    if dry_run and not skip_fetch:
+        LOG.info("[cli] --dry-run implies --skip-fetch (no DB writes at all)")
+        skip_fetch = True
+
+    if skip_fetch:
+        LOG.info("[cli] --skip-fetch: using the existing IPC and indicator caches")
+        fetches = {
+            name: {"ok": True, "skipped": True} for name in ("ipc", "drought_indicators")
+        }
+    else:
+        outcomes = {
+            "ipc": ipc_mod.fetch_ipc(con, ym, rulebook),
+            "drought_indicators": ind_mod.fetch_indicators(con, ym, rulebook),
+        }
+        for name, outcome in outcomes.items():
+            if not outcome.ok:
+                LOG.error(
+                    "[cli] drought source %s unavailable for %s: %s",
+                    name, ym, outcome.error,
+                )
+        fetches = {name: outcome.as_provenance() for name, outcome in outcomes.items()}
+        # Without IPC there is no figure and no baseline for ANY country, so
+        # a whole-month run would write nothing but pendings. The caches may
+        # still carry earlier analyses, though, so this is only fatal when
+        # the store is empty too.
+        if not outcomes["ipc"].ok and ipc_mod.store_summary(con)["total_records"] == 0:
+            LOG.error(
+                "[cli] IPC fetch failed and the analysis store is empty: %s",
+                outcomes["ipc"].error,
+            )
+            return 1
+
+    # --- Step 2: the country universe ---
+    universe = _load_universe()
+    if countries_filter:
+        wanted = {c.strip().upper() for c in countries_filter}
+        unknown = sorted(wanted - set(universe))
+        if unknown:
+            LOG.warning("[cli] --countries not in the universe: %s", ",".join(unknown))
+        universe = [c for c in universe if c in wanted]
+    if not universe:
+        LOG.error("[cli] country universe is empty after filters")
+        return 1
+
+    # --- Step 3: decide and persist every country-month ---
+    run = drought_mod.run_month(
+        con, ym=ym, iso3s=universe, rulebook=rulebook, fetches=fetches, dry_run=dry_run
+    )
+    _log_drought_summary(ym, run, " (dry-run)" if dry_run else "")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="resolve-hazards",
@@ -531,7 +658,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         required=True,
         choices=sorted(_HAZARD_ALIASES),
         type=str.lower,
-        help="Hazard to resolve: cyclone/tc or flood/fl",
+        help="Hazard to resolve: cyclone/tc, flood/fl or drought/dr",
     )
     months = parser.add_mutually_exclusive_group(required=True)
     months.add_argument(
@@ -624,6 +751,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     for ym in target_months:
         if hazard == "cyclone":
             rc = run_cyclone_month(ym=ym, scope=args.scope, **common)
+        elif hazard == "drought":
+            rc = run_drought_month(ym=ym, **common)
         else:
             rc = run_flood_month(ym=ym, **common)
         if rc != 0:

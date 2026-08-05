@@ -312,7 +312,7 @@ def write_triggers(
                 INSERT INTO haz_triggers
                     (iso3, year, month, hazard, triggered, trigger_source,
                      trigger_detail_json, evidence_of_absence_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     row.iso3,
@@ -322,6 +322,14 @@ def write_triggers(
                     row.triggered,
                     row.trigger_source,
                     json.dumps(row.detail),
+                    # Detectors that establish absence in the same pass as
+                    # detection (drought) carry their evidence here. The
+                    # cyclone and flood paths leave it None and attach the
+                    # sweep afterwards via record_sweep_on_trigger, so this
+                    # is a no-op for them.
+                    json.dumps(row.sweep_evidence)
+                    if row.sweep_evidence is not None
+                    else None,
                 ],
             )
         con.execute("COMMIT")

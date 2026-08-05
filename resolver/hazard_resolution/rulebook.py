@@ -55,6 +55,19 @@ RULEBOOK_NAME_BY_HAZARD_CODE = {
 SWEEP_HAZARD_KEYS = ("cyclone", "flood")
 
 _KNOWN_DROUGHT_RULES = ("ipc_phase3plus_delta",)
+
+#: How a drought delta maps onto the months its IPC analysis window covers.
+_KNOWN_DROUGHT_MONTH_ATTRIBUTION = ("analysis_window", "start_month")
+
+#: Acquisition paths for IPC analyses, in the order ``source_priority`` may
+#: list them. ``ipc_api`` is the IPC public API; ``facts_resolved`` reuses the
+#: Phase 3+ rows the repo's FEWS NET / IPC connectors already write.
+_KNOWN_IPC_SOURCES = ("ipc_api", "facts_resolved")
+
+#: Drought-indicator feed shapes the machine knows how to parse.
+_KNOWN_INDICATOR_PROVIDERS = ("asap", "tabular")
+_KNOWN_INDICATOR_COMBINE = ("any", "all")
+_KNOWN_INDICATOR_DIRECTIONS = ("below", "above")
 _KNOWN_CEILING_SOURCES = ("gdacs_exposed",)
 _KNOWN_CONFLICT_RULES = ("ladder_with_flag",)
 _KNOWN_DETECTION_ATTRIBUTION = ("overlap",)
@@ -379,11 +392,123 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     _require_int_in("extraction.max_calls_per_month", 0, 1_000_000)
     _require_bool("extraction.skip_when_higher_rung_populated")
 
-    # Drought rule (thresholds are Phase 4 placeholders but must be well-typed)
+    # Drought rule: IPC Phase 3+ delta, gated by drought indicators.
     _require_choice("drought.rule", _KNOWN_DROUGHT_RULES)
     _require_int_in("drought.ipc_phase_threshold", 1, 5)
     _require_non_negative_number("drought.min_delta_people")
     _require_non_negative_number("drought.min_delta_pct")
+    _require_choice("drought.month_attribution", _KNOWN_DROUGHT_MONTH_ATTRIBUTION)
+
+    ipc_url = _require("drought.ipc.api_url")
+    if ipc_url is not _MISSING and (
+        not isinstance(ipc_url, str) or not ipc_url.startswith("https://")
+    ):
+        problems.append(f"drought.ipc.api_url must be an https:// URL, got {ipc_url!r}")
+    _require_positive_number("drought.ipc.request_timeout_sec")
+    _require_fetch_window("drought.ipc")
+    _require_bool("drought.ipc.use_facts_resolved")
+    metric = _require("drought.ipc.facts_resolved_metric")
+    if metric is not _MISSING and (not isinstance(metric, str) or not metric.strip()):
+        problems.append(
+            f"drought.ipc.facts_resolved_metric must be a non-empty string, got {metric!r}"
+        )
+    _require_str_list("drought.ipc.facts_resolved_publishers")
+    _require_str_list("drought.ipc.source_priority", _KNOWN_IPC_SOURCES)
+    # The rule is a DIFFERENCE between two analyses, so the fetch window has
+    # to be able to contain both. IPC publishes one to three analyses a year;
+    # a window shorter than a year routinely holds only the covering analysis,
+    # which yields no baseline and therefore no answer — silently.
+    lookback = _get("drought.ipc.lookback_months")
+    if isinstance(lookback, int) and not isinstance(lookback, bool) and lookback < 12:
+        problems.append(
+            f"drought.ipc.lookback_months must be >= 12, got {lookback} — the rule "
+            "diffs against the PREVIOUS analysis, and IPC publishes too sparsely "
+            "for a shorter window to reliably contain one"
+        )
+
+    # Drought indicators: the attribution gate and the zero gate.
+    _require_choice("drought.indicators.combine", _KNOWN_INDICATOR_COMBINE)
+    _require_int_in("drought.indicators.max_observation_age_months", 0, 60)
+    entries = _require("drought.indicators.entries")
+    if entries is not _MISSING:
+        if not isinstance(entries, list) or not entries:
+            problems.append(
+                f"drought.indicators.entries must be a non-empty list, got {entries!r}"
+            )
+        else:
+            names: list[str] = []
+            any_required = False
+            for index, entry in enumerate(entries):
+                where = f"drought.indicators.entries[{index}]"
+                if not isinstance(entry, Mapping):
+                    problems.append(f"{where} must be a mapping, got {entry!r}")
+                    continue
+                name = entry.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    problems.append(f"{where}.name must be a non-empty string, got {name!r}")
+                else:
+                    names.append(name)
+                provider = entry.get("provider")
+                if provider not in _KNOWN_INDICATOR_PROVIDERS:
+                    problems.append(
+                        f"{where}.provider must be one of "
+                        f"{list(_KNOWN_INDICATOR_PROVIDERS)}, got {provider!r}"
+                    )
+                url = entry.get("url")
+                if not isinstance(url, str):
+                    problems.append(
+                        f"{where}.url must be a string (empty means 'not consulted'), got {url!r}"
+                    )
+                elif url.strip() and not url.startswith("https://"):
+                    problems.append(f"{where}.url must be an https:// URL, got {url!r}")
+                required = entry.get("required")
+                if not isinstance(required, bool):
+                    problems.append(f"{where}.required must be a boolean, got {required!r}")
+                else:
+                    any_required = any_required or required
+                timeout = entry.get("request_timeout_sec")
+                if not _is_number(timeout) or timeout <= 0:
+                    problems.append(
+                        f"{where}.request_timeout_sec must be a number > 0, got {timeout!r}"
+                    )
+                # A required entry with no url can never be read, so it would
+                # suppress every zero for as long as it stayed misconfigured.
+                if required is True and isinstance(url, str) and not url.strip():
+                    problems.append(
+                        f"{where} is required: true but has an empty url — it could "
+                        "never be read, and an unreadable required indicator "
+                        "suppresses every drought zero"
+                    )
+                if provider == "asap":
+                    classes = entry.get("drought_classes")
+                    if (
+                        not isinstance(classes, list)
+                        or not classes
+                        or not all(str(c).strip() for c in classes)
+                    ):
+                        problems.append(
+                            f"{where}.drought_classes must be a non-empty list, got {classes!r}"
+                        )
+                if provider == "tabular":
+                    if not _is_number(entry.get("threshold")):
+                        problems.append(
+                            f"{where}.threshold must be a number, got {entry.get('threshold')!r}"
+                        )
+                    if entry.get("direction") not in _KNOWN_INDICATOR_DIRECTIONS:
+                        problems.append(
+                            f"{where}.direction must be one of "
+                            f"{list(_KNOWN_INDICATOR_DIRECTIONS)}, got {entry.get('direction')!r}"
+                        )
+            if len(set(names)) != len(names):
+                problems.append(f"drought.indicators.entries has duplicate names: {names}")
+            # With nothing required, an outage in every feed reads as "no
+            # drought anywhere" and the machine would zero the whole world.
+            if not any_required:
+                problems.append(
+                    "drought.indicators.entries must mark at least one entry "
+                    "required: true — with none, a total indicator outage would "
+                    "be indistinguishable from a quiet month and zero every country"
+                )
 
     # Freeze policy
     freeze_days = _require("freeze_days")
