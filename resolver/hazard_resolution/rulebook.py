@@ -44,9 +44,21 @@ KNOWN_IBTRACS_SCOPES = ("last3years", "ALL")
 #: Rulebook hazard names -> repo hazard codes (resolver/data/shocks.csv).
 HAZARD_CODE_BY_RULEBOOK_NAME = {"cyclone": "TC", "flood": "FL", "drought": "DR"}
 
+#: Repo hazard codes -> rulebook hazard names (the inverse; connectors and
+#: the reconciler address the rulebook by hazard CODE).
+RULEBOOK_NAME_BY_HAZARD_CODE = {
+    code: name for name, code in HAZARD_CODE_BY_RULEBOOK_NAME.items()
+}
+
+#: Hazards whose detection layer runs a ReliefWeb silence sweep before a
+#: zero. Drought resolves from IPC instead (Phase 4), so it has no sweep.
+SWEEP_HAZARD_KEYS = ("cyclone", "flood")
+
 _KNOWN_DROUGHT_RULES = ("ipc_phase3plus_delta",)
 _KNOWN_CEILING_SOURCES = ("gdacs_exposed",)
 _KNOWN_CONFLICT_RULES = ("ladder_with_flag",)
+_KNOWN_DETECTION_ATTRIBUTION = ("overlap",)
+_KNOWN_FIGURE_ATTRIBUTION = ("start_month",)
 
 #: Key-name fragments that indicate a credential. Keys come from environment
 #: variables only — a rulebook carrying one is always a mistake.
@@ -190,11 +202,48 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
         if len(set(value)) != len(value):
             problems.append(f"{dotted} contains duplicates: {value}")
 
+    def _require_hazard_keyed_str_lists(dotted: str) -> None:
+        """A mapping of repo hazard code -> non-empty list of strings."""
+        value = _require(dotted)
+        if value is _MISSING:
+            return
+        if not isinstance(value, Mapping) or not value:
+            problems.append(f"{dotted} must be a non-empty mapping, got {value!r}")
+            return
+        known = set(HAZARD_CODE_BY_RULEBOOK_NAME.values())
+        unknown = sorted(set(value) - known)
+        if unknown:
+            problems.append(
+                f"{dotted} has unknown hazard codes {unknown}; known: {sorted(known)}"
+            )
+        for hazard, items in value.items():
+            if (
+                not isinstance(items, list)
+                or not items
+                or not all(isinstance(i, str) and i.strip() for i in items)
+            ):
+                problems.append(
+                    f"{dotted}.{hazard} must be a non-empty list of strings, got {items!r}"
+                )
+
+    def _require_fetch_window(prefix: str) -> None:
+        """lookback/lookahead month counts framing a source's fetch window."""
+        _require_int_in(f"{prefix}.lookback_months", 0, 120)
+        _require_int_in(f"{prefix}.lookahead_months", 0, 120)
+
     # Detection thresholds
     _require_positive_number("cyclone.buffer_km")
     _require_positive_number("cyclone.min_wind_kt")
     _require_str_list("cyclone.wind_source_priority", KNOWN_WIND_SOURCES)
     _require_choice("flood.gdacs_trigger_level", GDACS_ALERT_LEVELS)
+
+    # GDACS usage (flood detection input; also the sanity ceiling source).
+    # Endpoints belong to resolver/connectors/gdacs.py — see the rulebook
+    # comment; what is configured here is window, pacing and zero safety.
+    _require_non_negative_number("flood.gdacs.request_delay_sec")
+    _require_int_in("flood.gdacs.enrich_workers", 1, 32)
+    _require_fetch_window("flood.gdacs")
+    _require_int_in("flood.gdacs.coverage_grace_days", 0, 60)
 
     # IBTrACS connector (cyclone detection input)
     url_template = _require("cyclone.ibtracs.url_template")
@@ -208,14 +257,17 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     _require_positive_number("cyclone.ibtracs.request_timeout_sec")
     _require_int_in("cyclone.ibtracs.coverage_grace_days", 0, 60)
 
-    # ReliefWeb silence sweep (zero-resolution gate)
-    _require_str_list("cyclone.reliefweb_sweep.disaster_types")
-    _require_str_list("cyclone.reliefweb_sweep.keywords")
-    _require_int_in("cyclone.reliefweb_sweep.publication_pad_days", 0, 90)
-    _require_int_in("cyclone.reliefweb_sweep.max_hits_for_silence", 0, 100)
-    _require_int_in("cyclone.reliefweb_sweep.sample_size", 1, 50)
-    _require_positive_number("cyclone.reliefweb_sweep.request_timeout_sec")
-    _require_non_negative_number("cyclone.reliefweb_sweep.request_delay_sec")
+    # ReliefWeb silence sweep (zero-resolution gate) — every sweeping hazard
+    # carries the same block, so a new hazard cannot be half-configured.
+    for hazard_key in SWEEP_HAZARD_KEYS:
+        sweep = f"{hazard_key}.reliefweb_sweep"
+        _require_str_list(f"{sweep}.disaster_types")
+        _require_str_list(f"{sweep}.keywords")
+        _require_int_in(f"{sweep}.publication_pad_days", 0, 90)
+        _require_int_in(f"{sweep}.max_hits_for_silence", 0, 100)
+        _require_int_in(f"{sweep}.sample_size", 1, 50)
+        _require_positive_number(f"{sweep}.request_timeout_sec")
+        _require_non_negative_number(f"{sweep}.request_delay_sec")
     api_base_url = _require("reliefweb.api_base_url")
     if api_base_url is not _MISSING and (
         not isinstance(api_base_url, str) or not api_base_url.startswith("https://")
@@ -237,6 +289,10 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     ):
         problems.append(f"freeze_days must be a positive integer, got {freeze_days!r}")
 
+    # Event-to-month attribution
+    _require_choice("event_attribution.detection", _KNOWN_DETECTION_ATTRIBUTION)
+    _require_choice("event_attribution.figure", _KNOWN_FIGURE_ATTRIBUTION)
+
     # Ladder
     ladder = _require("ladder")
     if ladder is not _MISSING:
@@ -251,6 +307,29 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
             if len(set(ladder)) != len(ladder):
                 problems.append(f"ladder contains duplicate rungs: {ladder}")
 
+    # Lower-bound rungs must be rungs the ladder actually walks, otherwise a
+    # displacement figure could be published as a people-affected figure.
+    lower_bound = _require("lower_bound_rungs")
+    if lower_bound is not _MISSING:
+        if not isinstance(lower_bound, list):
+            problems.append(f"lower_bound_rungs must be a list, got {lower_bound!r}")
+        else:
+            unknown = [r for r in lower_bound if r not in KNOWN_LADDER_RUNGS]
+            if unknown:
+                problems.append(
+                    f"lower_bound_rungs contains unknown rungs {unknown}; "
+                    f"known rungs are {list(KNOWN_LADDER_RUNGS)}"
+                )
+            if len(set(lower_bound)) != len(lower_bound):
+                problems.append(f"lower_bound_rungs contains duplicates: {lower_bound}")
+            if isinstance(ladder, list):
+                orphans = [r for r in lower_bound if r not in ladder]
+                if orphans:
+                    problems.append(
+                        f"lower_bound_rungs entries {orphans} are not in the ladder; "
+                        "a lower-bound rung the ladder never walks is a no-op"
+                    )
+
     # Sanity checks
     _require_choice("sanity.ceiling_source", _KNOWN_CEILING_SOURCES)
     _require_positive_number("sanity.ceiling_multiplier")
@@ -258,6 +337,49 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
 
     # Conflict handling
     _require_choice("conflict_rule", _KNOWN_CONFLICT_RULES)
+    oom = _require("conflict_detection.order_of_magnitude_factor")
+    if oom is not _MISSING and (not _is_number(oom) or oom <= 1):
+        problems.append(
+            "conflict_detection.order_of_magnitude_factor must be a number > 1, "
+            f"got {oom!r} (a factor <= 1 would flag every pair of rungs)"
+        )
+
+    # Ladder source connectors. Endpoints live here; credentials never do
+    # (the credential guard below rejects any key that looks like one).
+    emdat_url = _require("emdat.api_url")
+    if emdat_url is not _MISSING and (
+        not isinstance(emdat_url, str) or not emdat_url.startswith("https://")
+    ):
+        problems.append(f"emdat.api_url must be an https:// URL, got {emdat_url!r}")
+    _require_positive_number("emdat.request_timeout_sec")
+    _require_int_in("emdat.page_limit", 1, 10000)
+    _require_int_in("emdat.max_pages", 1, 1000)
+    _require_hazard_keyed_str_lists("emdat.classif_keys")
+    _require_fetch_window("emdat")
+
+    go_url = _require("ifrc_go.api_base_url")
+    if go_url is not _MISSING and (
+        not isinstance(go_url, str) or not go_url.startswith("https://")
+    ):
+        problems.append(f"ifrc_go.api_base_url must be an https:// URL, got {go_url!r}")
+    go_path = _require("ifrc_go.field_report_path")
+    if go_path is not _MISSING and (not isinstance(go_path, str) or not go_path.strip()):
+        problems.append(f"ifrc_go.field_report_path must be a non-empty string, got {go_path!r}")
+    _require_int_in("ifrc_go.page_size", 1, 1000)
+    _require_int_in("ifrc_go.max_pages", 1, 1000)
+    _require_positive_number("ifrc_go.request_timeout_sec")
+    _require_str_list("ifrc_go.affected_fields")
+    _require_fetch_window("ifrc_go")
+
+    idu_url = _require("idmc_idu.api_url")
+    if idu_url is not _MISSING and (
+        not isinstance(idu_url, str) or not idu_url.startswith("https://")
+    ):
+        problems.append(f"idmc_idu.api_url must be an https:// URL, got {idu_url!r}")
+    _require_positive_number("idmc_idu.request_timeout_sec")
+    _require_str_list("idmc_idu.displacement_types")
+    _require_hazard_keyed_str_lists("idmc_idu.hazard_keywords")
+    _require_fetch_window("idmc_idu")
 
     # Base-rate + backcast windows
     _require_int_in("severity_base_rate_window_start", 1950, 2100)

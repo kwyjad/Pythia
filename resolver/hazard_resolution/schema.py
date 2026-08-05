@@ -23,6 +23,7 @@ Conventions carried over from the rest of the repo:
 from __future__ import annotations
 
 import logging
+import weakref
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -134,6 +135,13 @@ _CORE_TABLE_DDL: dict[str, str] = {
     # ids / doc URLs, retrieval timestamps and the rule that fired (hard rule
     # 1). frozen_at is stamped at month-end + freeze_days; frozen rows are
     # never reopened (hard rule 4).
+    #
+    # provisional marks an answer written BEFORE its freeze deadline: real,
+    # usable, and still subject to change on the next run. It flips to FALSE
+    # on the first run at or after the deadline, which is also the moment the
+    # row becomes immutable. The core resolver tables have no equivalent
+    # concept (facts_resolved.confidence describes source quality, not
+    # finality), so this column is the machine's own.
     "haz_resolutions": f"""
     CREATE TABLE IF NOT EXISTS haz_resolutions (
         iso3 TEXT NOT NULL,
@@ -146,6 +154,7 @@ _CORE_TABLE_DDL: dict[str, str] = {
         provenance_json TEXT NOT NULL,
         rule_fired TEXT NOT NULL,
         flagged BOOLEAN NOT NULL DEFAULT FALSE,
+        provisional BOOLEAN NOT NULL DEFAULT FALSE,
         frozen_at TIMESTAMP,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (iso3, year, month, hazard)
@@ -198,6 +207,19 @@ _CORE_TABLE_DDL: dict[str, str] = {
     """,
 }
 
+#: Columns added to tables that already exist in a live DB. ``CREATE TABLE
+#: IF NOT EXISTS`` cannot widen an existing table, so every column added
+#: after a table first shipped needs an entry here as well as in the DDL
+#: above. ``(table, column, definition, backfill_value)``.
+#:
+#: The ALTER deliberately omits NOT NULL — DuckDB will not add a NOT NULL
+#: column to a populated table — so a migrated column is nullable where a
+#: freshly created one is not. Readers must therefore treat these columns
+#: with COALESCE rather than trusting NOT NULL.
+_COLUMN_MIGRATIONS: tuple[tuple[str, str, str, str], ...] = (
+    ("haz_resolutions", "provisional", "BOOLEAN DEFAULT FALSE", "FALSE"),
+)
+
 _INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_haz_triggers_lookup ON haz_triggers (iso3, hazard, year, month)",
     "CREATE INDEX IF NOT EXISTS idx_haz_impact_candidates_lookup ON haz_impact_candidates (iso3, hazard, year, month)",
@@ -211,8 +233,47 @@ def haz_table_names() -> tuple[str, ...]:
     return tuple(raw_table_name(source) for source in RAW_SOURCES) + tuple(_CORE_TABLE_DDL)
 
 
-def ensure_haz_schema(conn: "duckdb.DuckDBPyConnection") -> tuple[str, ...]:
+def _apply_column_migrations(conn: "duckdb.DuckDBPyConnection") -> None:
+    """Widen tables that predate a column, idempotently.
+
+    ``ADD COLUMN IF NOT EXISTS`` makes the ALTER a no-op on an already
+    migrated DB; the backfill then removes the NULLs the ALTER leaves
+    behind in existing rows.
+    """
+
+    for table, column, definition, backfill in _COLUMN_MIGRATIONS:
+        conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}"
+        )
+        conn.execute(
+            f"UPDATE {table} SET {column} = {backfill} WHERE {column} IS NULL"
+        )
+
+
+#: Connections whose schema has already been ensured this process.
+#:
+#: Every entry point calls ``ensure_haz_schema`` defensively, so on a
+#: country-by-country run it fires once per cell — ~200 times a month.
+#: The DDL is idempotent and cheap, but the migration's backfill UPDATE
+#: scans ``haz_resolutions`` each time, and the INFO line drowns the log.
+#:
+#: A ``WeakSet`` keyed on the connection OBJECT, deliberately not a set of
+#: ``id(conn)``: ids are recycled once a connection is garbage-collected,
+#: and an aliased id would skip the migration on a genuinely new
+#: connection — which is not a harmless missed no-op but a missing column.
+#: A weak reference cannot alias a dead object, and entries drop out on
+#: their own when a connection is closed.
+_ENSURED_CONNECTIONS: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def ensure_haz_schema(
+    conn: "duckdb.DuckDBPyConnection", *, force: bool = False
+) -> tuple[str, ...]:
     """Idempotently create every ``haz_*`` table and index; return the table names."""
+
+    tables = haz_table_names()
+    if not force and conn in _ENSURED_CONNECTIONS:
+        return tables
 
     for source in RAW_SOURCES:
         table = raw_table_name(source)
@@ -222,9 +283,11 @@ def ensure_haz_schema(conn: "duckdb.DuckDBPyConnection") -> tuple[str, ...]:
     for ddl in _CORE_TABLE_DDL.values():
         conn.execute(ddl)
 
+    _apply_column_migrations(conn)
+
     for ddl in _INDEX_DDL:
         conn.execute(ddl)
 
-    tables = haz_table_names()
+    _ENSURED_CONNECTIONS.add(conn)
     LOG.info("haz schema ensured | tables=%s", ", ".join(tables))
     return tables
