@@ -471,3 +471,45 @@ def test_cli_inconclusive_sweep_never_writes_zero(tmp_path, monkeypatch):
     assert rc == 0
     n = con.execute("SELECT COUNT(*) FROM haz_resolutions").fetchone()[0]
     assert n == 0
+
+
+def test_write_run_summary_is_a_durable_json_artifact(tmp_path):
+    """--summary-out captures per-month counts read back from the tables."""
+
+    from datetime import datetime, timezone
+
+    from resolver.hazard_resolution.schema import ensure_haz_schema
+
+    db = tmp_path / "haz.duckdb"
+    con = duckdb.connect(str(db))
+    ensure_haz_schema(con)
+    con.execute(
+        "INSERT INTO haz_triggers (iso3, year, month, hazard, triggered) VALUES "
+        "('PHL', 2026, 6, 'FL', TRUE), ('VNM', 2026, 6, 'FL', FALSE)"
+    )
+    con.execute(
+        "INSERT INTO haz_resolutions (iso3, year, month, hazard, status, value, "
+        "provenance_json, rule_fired) VALUES "
+        "('PHL', 2026, 6, 'FL', 'RESOLVED_VALUE', 12345, '{}', 'ladder:emdat')"
+    )
+    con.close()
+
+    out = tmp_path / "diag" / "summary.json"
+    cli_mod._write_run_summary(
+        str(out),
+        hazard_name="flood",
+        months=["2026-06"],
+        month_rcs={"2026-06": 0},
+        failures=0,
+        started=datetime.now(timezone.utc),
+        db_url=f"duckdb:///{db}",
+        dry_run=False,
+    )
+
+    payload = json.loads(out.read_text())
+    assert payload["hazard"] == "FL"
+    assert payload["failures"] == 0
+    month = payload["months"]["2026-06"]
+    assert month["rc"] == 0
+    assert month["cells"] == 2
+    assert month["resolved_value"] == 1

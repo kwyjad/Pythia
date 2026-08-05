@@ -173,14 +173,18 @@ _CORE_TABLE_DDL: dict[str, str] = {
         UNIQUE (iso3, year, month, hazard, source, source_ref, value_type)
     )
     """,
-    # One row per (document, model, prompt version) the extractor has read.
-    # This is BOTH the extraction cache and the cost ledger: a document is
-    # never read twice for the same model and prompt version, and
-    # extraction.max_calls_per_month is enforced by counting rows created in
-    # the current calendar month. figures_json holds everything the model
-    # reported, INCLUDING figures the deterministic post-processing later
-    # discarded — the audit trail has to show what was rejected, not only
-    # what survived.
+    # One row per (document, model, prompt version, CELL) the extractor has
+    # read. This is BOTH the extraction cache and the cost ledger: a
+    # document is never read twice for the same cell, model and prompt
+    # version, and extraction.max_calls_per_month is enforced by counting
+    # billed rows created in the current calendar month. The cell (iso3,
+    # hazard, target month) is part of the key because it is part of the
+    # PROMPT — a typhoon-plus-flooding sitrep is returned by both hazards'
+    # queries, and an answer to "people affected by flooding" must never be
+    # served as the answer to "people affected by a tropical cyclone".
+    # figures_json holds everything the model reported, INCLUDING figures
+    # the deterministic post-processing later discarded — the audit trail
+    # has to show what was rejected, not only what survived.
     "haz_doc_extractions": f"""
     CREATE TABLE IF NOT EXISTS haz_doc_extractions (
         doc_id TEXT NOT NULL,
@@ -200,7 +204,7 @@ _CORE_TABLE_DDL: dict[str, str] = {
         doc_url TEXT,
         error TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE (doc_id, model, prompt_version)
+        UNIQUE (doc_id, model, prompt_version, iso3, hazard, year, month)
     )
     """,
     # The machine's answer per cell. provenance_json carries source, record

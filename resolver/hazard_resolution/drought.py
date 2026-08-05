@@ -541,6 +541,9 @@ class DroughtRun:
     provisional: int = 0
     frozen_skipped: int = 0
     fetches: dict[str, Any] = field(default_factory=dict)
+    # Countries whose decision raised — undecided this run, everyone else's
+    # answer stands. "iso3: error" strings, mirrored from LadderRun.
+    failed_cells: list[str] = field(default_factory=list)
 
     @property
     def unavailable_sources(self) -> list[str]:
@@ -609,9 +612,14 @@ def run_month(
     decisions: list[DroughtDecision] = []
 
     for iso3 in sorted({c.upper() for c in iso3s}):
-        decision = resolve_country_month(
-            con, iso3=iso3, ym=ym, rulebook=rulebook, today=today
-        )
+        try:
+            decision = resolve_country_month(
+                con, iso3=iso3, ym=ym, rulebook=rulebook, today=today
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad cell must not end the month
+            run.failed_cells.append(f"{iso3}: {type(exc).__name__}: {exc}")
+            LOG.exception("[drought] %s %s: decision raised", iso3, ym)
+            continue
         decisions.append(decision)
         result.rows.append(
             detect_mod.CountryTrigger(
@@ -704,6 +712,12 @@ def _log_run(run: DroughtRun, unavailable: list[str]) -> None:
             "indicator could not be read — those cells have no row, which is not "
             "the same as a zero",
             run.ym, run.inconclusive,
+        )
+    if run.failed_cells:
+        LOG.error(
+            "[drought] %s: %d cell(s) raised and were NOT decided this run "
+            "(re-run to retry them): %s",
+            run.ym, len(run.failed_cells), "; ".join(run.failed_cells[:10]),
         )
     if unavailable:
         LOG.warning(

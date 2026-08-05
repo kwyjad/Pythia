@@ -1,0 +1,243 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+# Nightly, self-converging backcast of the PA resolution machine
+# (resolver/hazard_resolution/). Each run downloads the canonical DB, replays
+# a TIME-BOXED chunk of each hazard's history through the identical live-run
+# code (run_type='backcast'), refreshes the base-rate tables the SPD prompt
+# reads, and re-uploads the canonical DB. The haz_backcast_progress resume
+# ledger makes this convergent: every night continues exactly where the last
+# stopped, and once the window is covered the run becomes a seconds-long
+# no-op (it also rolls forward naturally as new months freeze).
+#
+# This workflow PRODUCES pythia-resolver-db, so it is listed in the
+# canonical-DB candidate list (.github/actions/download-canonical-db) and in
+# the two bespoke discovery blocks (run_horizon_scanner.yml,
+# publish_latest_data.yml) — and it includes ITSELF via extra-workflows so a
+# night's progress is never lost to discovery picking an older artifact.
+
+---
+name: Hazard Backcast
+
+concurrency:
+  group: pythia-resolver-db
+  cancel-in-progress: false
+
+"on":
+  workflow_dispatch:
+    inputs:
+      hazards:
+        description: "Hazards to backcast, in order (space-separated: flood cyclone drought)"
+        required: false
+        default: "flood cyclone drought"
+        type: string
+      from_ym:
+        description: "Start later than the rulebook's backcast year (YYYY-MM, never earlier)"
+        required: false
+        default: ""
+        type: string
+      to_ym:
+        description: "Stop earlier than the last frozen month (YYYY-MM, never later)"
+        required: false
+        default: ""
+        type: string
+      no_extract:
+        description: "Skip ladder rung 2 (no LLM calls, nothing spent)"
+        required: false
+        default: false
+        type: boolean
+      time_budget_min:
+        description: "Total wall-clock budget in minutes, split across the hazards"
+        required: false
+        default: "300"
+        type: string
+      force_during_pipeline:
+        description: "Run even while a staged pipeline is in flight (its final canonical upload will DISCARD this run's rows)"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    # Nightly at 22:00 UTC — clear of the 1st-of-month forecast cron
+    # (00:00 UTC) and the 28th resolver update (03:00 UTC).
+    - cron: "0 22 * * *"
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  # Same rationale as ingest-structured-data.yml: the concurrency group only
+  # serializes single runs and cannot cover the multi-day staged pipeline. A
+  # backcast landing mid-pipeline would upload canonical rows the pipeline's
+  # final upload silently discards — skip, and tomorrow's cron continues.
+  gate:
+    name: Skip if a staged pipeline is in flight
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check for in-flight staged pipeline
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Boolean inputs are compared against BOTH the boolean and the
+          # string form — a REST-dispatched run can deliver them as strings
+          # (the pythia_pipeline_stage.yml lesson).
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && (inputs.force_during_pipeline == true || inputs.force_during_pipeline == 'true') && 'true' || 'false' }}
+        run: python -m scripts.ci.check_pipeline_active
+
+  backcast:
+    name: Time-boxed backcast chunk
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    # Budget (default 300 min) + download/upload/setup headroom, under the
+    # 360-min hard cap.
+    timeout-minutes: 350
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      # Ladder sources. Unset secrets degrade per rung (the rows record
+      # UNAVAILABLE), they never fail the run.
+      EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
+      IDMC_API_KEY: ${{ secrets.IDMC_API_KEY }}
+      IPC_API_KEY: ${{ secrets.IPC_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
+      SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
+      SIGNATURE_OPTIONAL_TABLES: scenarios,hdx_signals,enso_state,seasonal_tc_outlooks,seasonal_tc_context_cache,haz_triggers,haz_resolutions,haz_base_rates_occurrence,haz_base_rates_severity
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -c constraints-ci.txt -e '.[db,ingestion]'
+
+      # Self-inclusion via extra-workflows is load-bearing: without it, each
+      # night would start from the newest OTHER producer's DB and silently
+      # discard every previous night's backcast progress.
+      - name: Download canonical resolver DB
+        id: canonical_download
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          extra-workflows: |
+            Hazard Backcast
+          validate-cmd: >-
+            python -m scripts.ci.db_signature write
+            --db data/resolver.duckdb
+            --required "${SIGNATURE_REQUIRED_TABLES}"
+            --optional "${SIGNATURE_OPTIONAL_TABLES}"
+            --out data/db_signature_before.json
+
+      - name: Prepare diagnostics directory
+        run: mkdir -p diagnostics
+
+      # The total budget is split evenly across the requested hazards, and a
+      # hazard whose window is already covered exits in seconds — so once
+      # flood converges its share flows to cyclone on the clock, not by
+      # configuration. Per-hazard failures are recorded and do not stop the
+      # remaining hazards; the job fails at the end if any hazard failed.
+      - name: Run time-boxed backcast chunks
+        env:
+          HAZARDS: ${{ inputs.hazards || 'flood cyclone drought' }}
+          FROM_YM: ${{ inputs.from_ym || '' }}
+          TO_YM: ${{ inputs.to_ym || '' }}
+          NO_EXTRACT: ${{ github.event_name == 'workflow_dispatch' && (inputs.no_extract == true || inputs.no_extract == 'true') && 'true' || 'false' }}
+          TIME_BUDGET_MIN: ${{ inputs.time_budget_min || '300' }}
+        run: |
+          set -uo pipefail
+          # Re-assigning from the env (with the same default the env mapping
+          # declares) keeps shellcheck aware the variable exists (SC2153).
+          HAZARDS="${HAZARDS:-flood cyclone drought}"
+          N_HAZARDS=$(echo "${HAZARDS}" | wc -w)
+          PER_HAZARD=$(( TIME_BUDGET_MIN / N_HAZARDS ))
+          echo "Backcasting: ${HAZARDS} | ${PER_HAZARD} min each of ${TIME_BUDGET_MIN} total"
+          FAILED=0
+          for HZ in ${HAZARDS}; do
+            CMD="python -m resolver.hazard_resolution.backcast --hazard ${HZ} --time-budget-min ${PER_HAZARD} --summary-out diagnostics/haz_backcast_${HZ}.json"
+            if [ -n "${FROM_YM}" ]; then
+              CMD="${CMD} --from ${FROM_YM}"
+            fi
+            if [ -n "${TO_YM}" ]; then
+              CMD="${CMD} --to ${TO_YM}"
+            fi
+            if [ "${NO_EXTRACT}" = "true" ]; then
+              CMD="${CMD} --no-extract"
+            fi
+            echo "::group::backcast ${HZ}"
+            if ${CMD} 2>&1 | tee "diagnostics/haz_backcast_${HZ}.log"; then
+              echo "backcast ${HZ}: ok"
+            else
+              echo "::warning::backcast ${HZ} reported failed months (see diagnostics/haz_backcast_${HZ}.log)"
+              FAILED=1
+            fi
+            echo "::endgroup::"
+          done
+          echo "BACKCAST_FAILED=${FAILED}" >> "$GITHUB_ENV"
+
+      - name: Refresh base rates
+        run: |
+          set -euo pipefail
+          python -m resolver.hazard_resolution.base_rates 2>&1 | tee diagnostics/haz_base_rates.log
+
+      - name: Verify DB did not regress
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.db_signature compare \
+            --before data/db_signature_before.json \
+            --after-db data/resolver.duckdb \
+            --required "${SIGNATURE_REQUIRED_TABLES}" \
+            --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+            --out diagnostics/db_signature_after.json
+
+      - name: Upload canonical resolver DB
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb
+          retention-days: 90
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: haz-backcast-diagnostics
+          path: |
+            diagnostics/
+          retention-days: 30
+          if-no-files-found: warn
+
+      # A hazard with failed months is retried by the next night's resume
+      # (failed months are not marked complete), but the run must still show
+      # red so the failure is visible in the Actions list.
+      - name: Fail if any hazard failed
+        run: |
+          set -euo pipefail
+          if [ "${BACKCAST_FAILED:-0}" = "1" ]; then
+            echo "::error::one or more hazards reported failed months — the nightly resume will retry them"
+            exit 1
+          fi

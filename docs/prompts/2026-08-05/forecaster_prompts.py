@@ -7,7 +7,6 @@
 from __future__ import annotations
 import importlib
 import importlib.util
-import logging
 import os
 import re
 from datetime import date
@@ -17,8 +16,6 @@ from pythia.buckets import labels_for, n_buckets_for
 
 from .config import CALIBRATION_PATH, ist_date
 from .hazard_prompts import get_hazard_reasoning_block
-
-LOG = logging.getLogger(__name__)
 
 
 def _json_dumps_for_prompt(obj: Any, **kwargs: Any) -> str:
@@ -1400,11 +1397,7 @@ def _load_haz_base_rate_block(
 
         from resolver.db import duckdb_io
 
-        # Env-first, matching duckdb_io._normalize_duckdb_target — the
-        # machine's own CLIs (migrate, haz-base-rates) resolve their DB
-        # env-first, and a reader that resolves config-first can silently
-        # read a different file from the one the writer wrote.
-        db_url = os.getenv("RESOLVER_DB_URL", "").strip() or _pythia_db_url_from_config()
+        db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
         db_url = db_url or duckdb_io.DEFAULT_DB_URL
         con = duckdb_io.get_db(db_url)
         try:
@@ -1425,13 +1418,7 @@ def _load_haz_base_rate_block(
             )
         finally:
             duckdb_io.close_db(con)
-    except Exception as exc:
-        # Degrade to a prompt without the block, but never silently: this
-        # seam is exactly where "loaded but never rendered" failures hide.
-        LOG.warning(
-            "[prompts] haz base-rate block unavailable for %s/%s/%s: %s",
-            iso3, hazard_code, metric, exc,
-        )
+    except Exception:
         return ""
 
 

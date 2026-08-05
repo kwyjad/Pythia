@@ -1139,6 +1139,7 @@ def build_anthropic_body(
     purpose: str | None = None,
     cache_segments: Optional[List[tuple]] = None,
     cache_ttl: Optional[str] = None,
+    max_tokens_override: Optional[int] = None,
 ) -> dict:
     """Build the exact /v1/messages request body.
 
@@ -1170,6 +1171,11 @@ def build_anthropic_body(
     max_tokens = _ANTHROPIC_MAX_OUTPUT
     if purpose in ("spd_v2", "binary_v2", "sibyl_step"):
         max_tokens = _ANTHROPIC_SPD_MAX_OUTPUT
+    # An explicit caller budget wins over the purpose-derived defaults —
+    # the hazard-extraction path passes the rulebook's
+    # extraction.max_output_tokens here, so that knob is config, not prose.
+    if max_tokens_override:
+        max_tokens = int(max_tokens_override)
 
     content: Any = prompt
     if cache_segments and _prompt_cache_enabled():
@@ -1242,6 +1248,8 @@ def call_anthropic(
     *,
     purpose: str | None = None,
     cache_segments: Optional[List[tuple]] = None,
+    max_tokens_override: Optional[int] = None,
+    timeout_sec: Optional[float] = None,
 ) -> ProviderResult:
     if not _ANTHROPIC_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing ANTHROPIC_API_KEY")
@@ -1252,10 +1260,13 @@ def call_anthropic(
         "content-type": "application/json",
     }
     body = build_anthropic_body(
-        prompt, model, temperature, purpose=purpose, cache_segments=cache_segments
+        prompt, model, temperature, purpose=purpose, cache_segments=cache_segments,
+        max_tokens_override=max_tokens_override,
     )
     try:
-        resp = requests.post(url, headers=headers, json=body, timeout=_ANTHROPIC_TIMEOUT)
+        resp = requests.post(
+            url, headers=headers, json=body, timeout=timeout_sec or _ANTHROPIC_TIMEOUT
+        )
     except Exception as exc:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"Anthropic request error: {exc}")
 
@@ -1545,6 +1556,7 @@ def _call_provider_sync(
     purpose: str | None = None,
     cache_segments: Optional[List[tuple]] = None,
     prompt_cache_key: Optional[str] = None,
+    max_tokens_override: Optional[int] = None,
 ) -> ProviderResult:
     p = (provider or "").lower()
     if p == "openai":
@@ -1554,7 +1566,10 @@ def _call_provider_sync(
             prompt_cache_key=prompt_cache_key,
         )
     if p == "anthropic":
-        return call_anthropic(prompt, model, temperature, purpose=purpose, cache_segments=cache_segments)
+        return call_anthropic(
+            prompt, model, temperature, purpose=purpose, cache_segments=cache_segments,
+            max_tokens_override=max_tokens_override, timeout_sec=timeout_sec,
+        )
     if p in {"google", "gemini"}:
         return call_google(prompt, model, temperature, timeout_sec=timeout_sec, thinking_level=thinking_level)
     return ProviderResult("", usage_to_dict(None), 0.0, model, error=f"unsupported provider {provider}")
@@ -1710,6 +1725,8 @@ async def call_chat_ms(
     log_call: bool = True,
     cache_segments: Optional[List[tuple]] = None,
     prompt_cache_key: Optional[str] = None,
+    timeout_sec: Optional[float] = None,
+    max_output_tokens: Optional[int] = None,
 ) -> tuple[str, Dict[str, int], str]:
     """Call the configured provider for a model spec and return (text, usage, error).
 
@@ -1724,6 +1741,14 @@ async def call_chat_ms(
     inert unless PYTHIA_PROMPT_CACHE_ENABLED=1; providers that don't use a
     given knob ignore it. ``"".join(seg[0] for seg in cache_segments)`` must
     equal ``prompt`` — the plain string is what retries and logging use.
+
+    timeout_sec / max_output_tokens: explicit per-call overrides. A caller
+    timeout wins over the purpose-derived defaults below and is enforced
+    both at the async layer (asyncio.wait_for) and, for Anthropic, at the
+    transport. max_output_tokens currently applies to Anthropic bodies only
+    (the hazard-extraction path passes the rulebook's declared budget so
+    that knob is real config, not prose); other providers keep their
+    purpose-derived ceilings.
     """
 
     if not ms.active:
@@ -1760,7 +1785,7 @@ async def call_chat_ms(
     start = time.time()
     spd_google = ms.provider == "google" and ms.purpose == "spd_v2"
     hs_triage = ms.purpose == "hs_triage"
-    timeout_sec: Optional[float] = None
+    caller_timeout = timeout_sec is not None
     hs_timeout_sec: Optional[float] = None
     hs_max_retry_after_sec: Optional[float] = None
     hs_fail_fast_on_retry_after = False
@@ -1774,10 +1799,11 @@ async def call_chat_ms(
 
     if spd_google:
         google_family = _google_model_family(ms.model_id)
-        if google_family == "flash":
-            timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC", None, 300.0)
-        elif google_family == "pro":
-            timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC", None, 300.0)
+        if not caller_timeout:
+            if google_family == "flash":
+                timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_FLASH_SEC", None, 300.0)
+            elif google_family == "pro":
+                timeout_sec = _resolve_timeout("PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC", None, 300.0)
         try:
             max_attempts = max(1, int(os.getenv("PYTHIA_GOOGLE_SPD_RETRIES", "1") or 1))
         except Exception:
@@ -1798,7 +1824,8 @@ async def call_chat_ms(
         hs_fail_fast_on_retry_after = os.getenv("PYTHIA_HS_LLM_FAIL_FAST_ON_RETRY_AFTER", "1") == "1"
         if ms.provider == "google":
             hs_timeout_sec = _resolve_timeout("PYTHIA_HS_GEMINI_TIMEOUT_SEC", None, 120.0)
-            timeout_sec = hs_timeout_sec
+            if not caller_timeout:
+                timeout_sec = hs_timeout_sec
         if hs_max_attempts is not None:
             max_attempts = min(max_attempts, hs_max_attempts)
         if hs_timeout_sec is not None:
@@ -1842,6 +1869,7 @@ async def call_chat_ms(
                         purpose=ms.purpose,
                         cache_segments=cache_segments,
                         prompt_cache_key=prompt_cache_key,
+                        max_tokens_override=max_output_tokens,
                     )
                     if timeout_sec is not None:
                         result = await asyncio.wait_for(call_task, timeout=timeout_sec)

@@ -14,6 +14,7 @@ const CANONICAL_PHASES = [
   "scenario",
   "prediction_markets",
   "sibyl",
+  "resolution",
   "other",
 ];
 

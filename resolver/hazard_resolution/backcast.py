@@ -246,12 +246,19 @@ def record_month(
         raise
 
 
-def month_counts(con, hazard: str, ym: str) -> dict[str, int]:
+def month_counts(con, hazard: str, ym: str) -> dict[str, Any]:
     """What the resolution tables now hold for this cell-month.
 
     Read back from the tables rather than threaded out of the run objects:
     the cyclone, flood and drought runners return three different shapes,
     and the ledger should record what was actually written either way.
+
+    The extraction and revision numbers are cumulative for the TARGET
+    month, which for a backcast month is the same thing as "this run" —
+    the resume ledger means each month is walked once, and frozen history
+    has no live-run extractions to blur into. (Before this read-back the
+    two extraction columns in ``haz_backcast_progress`` were always zero:
+    ``record_month`` read keys ``month_counts`` never produced.)
     """
 
     year, month = (int(p) for p in ym.split("-"))
@@ -270,11 +277,30 @@ def month_counts(con, hazard: str, ym: str) -> dict[str, int]:
             [hazard, year, month],
         ).fetchone()[0]
     )
+    extraction = con.execute(
+        """
+        SELECT COUNT(*), COALESCE(SUM(cost_usd), 0.0)
+        FROM haz_doc_extractions
+        WHERE hazard = ? AND year = ? AND month = ?
+          AND (status = 'ok'
+               OR COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) > 0)
+        """,
+        [hazard, year, month],
+    ).fetchone()
+    frozen_skipped = int(
+        con.execute(
+            "SELECT COUNT(*) FROM haz_revisions WHERE hazard = ? AND year = ? AND month = ?",
+            [hazard, year, month],
+        ).fetchone()[0]
+    )
     return {
         "cells": cells,
         "resolved_value": by_status.get("RESOLVED_VALUE", 0),
         "resolved_zero": by_status.get("RESOLVED_ZERO", 0),
         "no_data": by_status.get("NO_DATA", 0),
+        "frozen_skipped": frozen_skipped,
+        "extraction_calls": int(extraction[0] or 0),
+        "extraction_cost_usd": float(extraction[1] or 0.0),
     }
 
 
@@ -293,6 +319,9 @@ class BackcastRun:
     months_run: int = 0
     months_skipped_done: int = 0
     months_failed: int = 0
+    #: Months left unrun because the time budget was spent — not failures:
+    #: the resume ledger picks them up on the next run.
+    months_deferred: int = 0
     resolved_value: int = 0
     resolved_zero: int = 0
     no_data: int = 0
@@ -363,12 +392,20 @@ def run_backcast(
     no_ladder: bool = False,
     dry_run: bool = False,
     resume: bool = True,
+    time_budget_min: float | None = None,
     today: dt.date | None = None,
     rulebook: Rulebook | None = None,
     con=None,
     runner: Callable[..., int] | None = None,
 ) -> BackcastRun:
-    """Replay one hazard over its full backcast window."""
+    """Replay one hazard over its full backcast window.
+
+    ``time_budget_min`` bounds the run's wall clock: once spent, the run
+    stops CLEANLY between months (never mid-month) and the remaining months
+    are deferred, not failed — the resume ledger continues exactly where
+    this run stopped. This is what lets a scheduled job chew through a
+    multi-decade backcast one bounded chunk at a time and converge.
+    """
 
     from resolver.db.duckdb_io import get_db
     from resolver.hazard_resolution import cli as cli_mod
@@ -430,7 +467,19 @@ def run_backcast(
         con=con,
     )
 
+    deadline = None
+    if time_budget_min is not None and float(time_budget_min) > 0:
+        deadline = time.monotonic() + float(time_budget_min) * 60.0
+
     for index, ym in enumerate(todo, start=1):
+        if deadline is not None and time.monotonic() >= deadline:
+            run.months_deferred = len(todo) - index + 1
+            LOG.info(
+                "[backcast] %s: time budget of %.0f min spent — %d month(s) "
+                "deferred to the next run (the resume ledger continues from %s)",
+                hazard_name, float(time_budget_min), run.months_deferred, ym,
+            )
+            break
         started = time.monotonic()
         LOG.info("[backcast] %s %s (%d/%d)", hazard_name, ym, index, len(todo))
         try:
@@ -474,10 +523,10 @@ def run_backcast(
             )
 
     LOG.info(
-        "[backcast] %s finished: %d months run, %d already done, %d failed | "
-        "%d values, %d zeros, %d no-data",
+        "[backcast] %s finished: %d months run, %d already done, %d failed, "
+        "%d deferred | %d values, %d zeros, %d no-data",
         hazard_name, run.months_run, run.months_skipped_done, run.months_failed,
-        run.resolved_value, run.resolved_zero, run.no_data,
+        run.months_deferred, run.resolved_value, run.resolved_zero, run.no_data,
     )
     if run.failures:
         LOG.error(
@@ -526,6 +575,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--time-budget-min", type=float, default=None, metavar="MIN",
+        help=(
+            "Stop cleanly between months once this many minutes have elapsed; "
+            "remaining months are deferred (exit 0) and the resume ledger "
+            "continues on the next run. For scheduled chunked backcasts"
+        ),
+    )
+    parser.add_argument(
+        "--summary-out", default=None, metavar="PATH",
+        help="Write a JSON summary of this run (months run/deferred/failed, counts) to PATH",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Plan and log the months without writing anything",
     )
@@ -548,11 +609,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         no_ladder=args.no_ladder,
         dry_run=args.dry_run,
         resume=not args.no_resume,
+        time_budget_min=args.time_budget_min,
     )
 
     print(
         f"[backcast] {run.hazard_name}: {run.months_run} months run, "
-        f"{run.months_skipped_done} already complete, {run.months_failed} failed"
+        f"{run.months_skipped_done} already complete, {run.months_failed} failed, "
+        f"{run.months_deferred} deferred"
     )
     print(
         f"[backcast] wrote {run.resolved_value} values, {run.resolved_zero} zeros, "
@@ -560,6 +623,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     for warning in run.warnings:
         print(f"[backcast] WARNING: {warning}")
+
+    if args.summary_out:
+        # The durable diagnostic — a summary that exists only in a job log
+        # does not exist. Never fatal.
+        try:
+            import json
+            from pathlib import Path
+
+            payload = {
+                "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "hazard": run.hazard,
+                "hazard_name": run.hazard_name,
+                "months_planned": run.months_planned,
+                "months_run": run.months_run,
+                "months_already_complete": run.months_skipped_done,
+                "months_failed": run.months_failed,
+                "months_deferred": run.months_deferred,
+                "resolved_value": run.resolved_value,
+                "resolved_zero": run.resolved_zero,
+                "no_data": run.no_data,
+                "failures": run.failures,
+                "warnings": run.warnings,
+            }
+            Path(args.summary_out).parent.mkdir(parents=True, exist_ok=True)
+            with open(args.summary_out, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+            LOG.info("[backcast] run summary written to %s", args.summary_out)
+        except Exception as exc:  # noqa: BLE001 - diagnostics never fail a run
+            LOG.warning(
+                "[backcast] could not write the run summary to %s: %s",
+                args.summary_out, exc,
+            )
+
     return 1 if run.months_failed else 0
 
 

@@ -292,6 +292,14 @@ jobs:
               --status success \
               --json databaseId,createdAt \
               --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
+            # Nightly PA-machine backcast — re-uploads the canonical DB with
+            # haz_* progress; usually the newest artifact on any given day.
+            gh run list \
+              --workflow "Hazard Backcast" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Hazard Backcast"' >>"${CANDIDATES_FILE}" || true
             # Include the post-pipeline chain so HS Triage starts from the
             # most-complete DB (calibration is the chain terminus and carries
             # all prior tables). Without this, calibration's artifact never

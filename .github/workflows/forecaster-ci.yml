@@ -42,9 +42,14 @@ on:
       # The PA resolution machine's base-rate block is rendered into every
       # PA SPD prompt from rulebook.yaml at prompt-build time. A rulebook or
       # renderer change therefore changes forecaster prompt text, so the
-      # assembled-prompt snapshots have to re-run on it.
+      # assembled-prompt snapshots have to re-run on it. rulebook.py is the
+      # LOADER those two go through — a loader change can move rendered
+      # prompt text just as surely as a YAML edit.
       - "resolver/hazard_resolution/prompt_block.py"
       - "resolver/hazard_resolution/rulebook.yaml"
+      - "resolver/hazard_resolution/rulebook.py"
+      - "resolver/hazard_resolution/extract.py"
+      - "resolver/tests/test_hazard_resolution_extraction.py"
       - "pythia/api/routes/costs.py"
       - "scripts/ci/poll_llm_batches.py"
       - "scripts/ci/check_pipeline_active.py"
@@ -242,12 +247,17 @@ jobs:
           # way — and only an assembled-prompt assertion catches it. It also
           # pins that a rulebook.yaml change moves the prompt with no code
           # change, which is why rulebook.yaml is in this workflow's paths.
+          # test_hazard_resolution_extraction guards the machine's one PAID
+          # step and now asserts its llm_calls telemetry lands (it imports
+          # pythia for the end-to-end row check), so it runs here as well as
+          # in resolver-ci-fast — duplicate execution is cheap, a gap is not.
           pytest -vv \
             forecaster/tests/test_history_summary.py \
             forecaster/tests/test_fewsnet_history.py \
             forecaster/tests/test_base_rate_matches_resolution_source.py \
             forecaster/tests/test_haz_base_rate_prompt.py \
-            resolver/tests/test_idmc_history_conflict_pa.py
+            resolver/tests/test_idmc_history_conflict_pa.py \
+            resolver/tests/test_hazard_resolution_extraction.py
 
       - name: Run debug-bundle tests
         run: |

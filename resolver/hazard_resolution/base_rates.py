@@ -204,6 +204,7 @@ def compute_occurrence(
         ).fetchall()
 
         written = 0
+        skipped_before = run.rows_skipped_thin
         payload: list[list[Any]] = []
         for iso3, month, n_years, n_triggered in rows:
             if int(n_years) < min_years:
@@ -243,7 +244,7 @@ def compute_occurrence(
         LOG.info(
             "[base_rates] occurrence %s: %d rows over %s (%d cells below "
             "min_years=%d were not published)",
-            hazard, written, window, run.rows_skipped_thin, min_years,
+            hazard, written, window, run.rows_skipped_thin - skipped_before, min_years,
         )
 
     return run
@@ -311,11 +312,16 @@ def compute_severity(
 
     for hazard in targets:
         run.windows[hazard] = f"{window_start}..{window_end}"
+        # Provisional rows are excluded: a pre-freeze value is real but
+        # still revisable, and a quantile that moves when a live month is
+        # revised is not a base rate — the stored window claims a frozen
+        # record, so only frozen (non-provisional) values may enter it.
         rows = con.execute(
             """
             SELECT iso3, year, value, provenance_json
             FROM haz_resolutions
             WHERE hazard = ? AND status = ? AND year >= ? AND value IS NOT NULL
+              AND COALESCE(provisional, FALSE) = FALSE
             ORDER BY iso3, year
             """,
             [hazard, STATUS_RESOLVED_VALUE, window_start],
@@ -337,6 +343,7 @@ def compute_severity(
             )
 
         written = 0
+        skipped_before = run.rows_skipped_thin
         payload: list[list[Any]] = []
         for iso3, entries in sorted(per_country.items()):
             if len(entries) < min_events:
@@ -382,7 +389,7 @@ def compute_severity(
             "[base_rates] severity %s: %d countries over %d..%d (%d below "
             "min_events=%d were not published)",
             hazard, written, window_start, window_end,
-            run.rows_skipped_thin, min_events,
+            run.rows_skipped_thin - skipped_before, min_events,
         )
 
     return run

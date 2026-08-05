@@ -301,19 +301,38 @@ def fetch_documents(
 
 
 def documents_for_country_month(
-    con: "duckdb.DuckDBPyConnection", iso3: str, ym: str, hazard: str
+    con: "duckdb.DuckDBPyConnection",
+    iso3: str,
+    ym: str,
+    hazard: str,
+    rulebook: Rulebook | None = None,
 ) -> list[dict[str, Any]]:
     """Cached documents for a cell, in the order they should be read.
 
     Attribution scope: a document is stored against the month whose figures
     it was fetched for, so this filters on the stored ``ym`` exactly as the
     record-based rungs do.
+
+    When a ``rulebook`` is given, the result is re-capped to
+    ``max_docs_per_cell`` AFTER ranking. The cap at selection time is not
+    enough on its own: successive fetches of a still-publishing emergency
+    select different top-N sets that accumulate in the cache, and without a
+    read-time cap the per-cell spend bound quietly stops being one.
     """
 
     documents = load_raw_records(
         con, SOURCE, iso3=iso3.upper(), hazard=hazard, ym=ym
     )
     sort_documents(documents)
+    if rulebook is not None:
+        cap = int(rulebook.get("reliefweb.documents.max_docs_per_cell"))
+        if len(documents) > cap:
+            LOG.info(
+                "[reliefweb_docs] %s %s %s: %d cached documents exceed "
+                "max_docs_per_cell=%d — reading the top %d by authority/recency",
+                iso3.upper(), hazard, ym, len(documents), cap, cap,
+            )
+            documents = documents[:cap]
     return documents
 
 

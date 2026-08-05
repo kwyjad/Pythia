@@ -15,11 +15,13 @@ people, many figures into one — happens deterministically afterwards, in
 
 Three mechanisms enforce that, and none of them trust the prompt alone:
 
-* **Quote verification.** Every figure must arrive with a quote, and the
-  quote must appear in the document text that was actually sent. A figure
-  whose quote cannot be found is dropped with a reason. A model that
-  invents a number has to invent a sentence that is already in the
-  document, which is a much harder thing to do by accident.
+* **Quote verification.** Every figure must arrive with a quote, the
+  quote must appear in the document text that was actually sent, AND the
+  figure's value must appear in the quote (as digits, with any grouping,
+  or as an "N million/thousand" phrasing). A figure whose quote cannot be
+  found — or whose quote does not state the number being claimed — is
+  dropped with a reason. A model that invents a number would have to find
+  a sentence in the document that already states it.
 * **A closed schema.** Values must be numbers and units must be one of
   ``people`` / ``households``. Anything else is dropped, not coerced.
 * **No arithmetic.** The parser never adds, scales or reconciles. It
@@ -34,8 +36,15 @@ already has a figure is skipped entirely when
 sits below EM-DAT and cannot win those cells.
 
 Extractions are cached in ``haz_doc_extractions`` keyed by (document,
-model, prompt version), which makes a re-run free and makes the monthly
-cap count real spend rather than repeated work.
+model, prompt version, **cell**), which makes a re-run free and makes the
+monthly cap count real spend rather than repeated work. The cell — iso3,
+hazard, target month — is part of the key because it is part of the
+PROMPT: a typhoon-plus-flooding sitrep is returned by both hazards'
+document queries, and a cached answer to "people affected by flooding"
+must never be served as the answer to "people affected by a tropical
+cyclone". Only ``status='ok'`` rows are cache hits — an error row is
+overwritten by the next attempt, so a transient outage never permanently
+blinds a document.
 
 The model is addressed by ROLE (``extraction.model_role``), resolved
 through the repo's model registry — the rulebook owns the policy,
@@ -81,7 +90,9 @@ document.
 
 TASK
 Read the document below and find every explicitly stated figure for the \
-number of PEOPLE AFFECTED by {hazard_label} in {country}.
+number of PEOPLE AFFECTED by {hazard_label} in {country}. The impact of \
+interest occurred in {period}. A document published later may restate \
+figures for that event; those still count.
 
 WHAT COUNTS
 Count a figure only if the document states it as people (or persons, or \
@@ -103,7 +114,8 @@ them.
 character for character from the document. A figure without a verbatim \
 quote will be discarded.
 5. Report figures for {country} and {hazard_label} only. Ignore figures \
-about other countries, other hazards, or other time periods.
+about other countries, other hazards, or events outside {period} (a later \
+report restating a {period} event's figures still counts).
 6. If the document states no qualifying figure, return an empty list. An \
 empty list is a correct and expected answer.
 
@@ -309,11 +321,68 @@ def _default_call(model_ref: str, prompt: str, rulebook: Rulebook) -> tuple[str,
                 prompt_key="resolver.hazard_extraction",
                 component="HazardResolution",
                 log_call=False,
+                # The rulebook's declared budgets, actually enforced: the
+                # timeout at both the async layer and the Anthropic
+                # transport, the token ceiling in the request body.
+                timeout_sec=float(rulebook.get("extraction.request_timeout_sec")),
+                max_output_tokens=int(rulebook.get("extraction.max_output_tokens")),
             )
         )
     except Exception as exc:  # pragma: no cover - network/runtime failures
         LOG.warning("[extract] model call failed: %s", exc)
         return "", {}, str(exc)
+
+
+def _log_llm_call(
+    *,
+    model_ref: str,
+    prompt: str,
+    response: str,
+    usage: dict[str, Any],
+    error: str,
+    iso3: str,
+    hazard: str,
+    ym: str,
+) -> None:
+    """One rich ``llm_calls`` telemetry row per REAL extraction call.
+
+    ``haz_doc_extractions`` is the machine's cache and per-document ledger;
+    ``llm_calls`` is the repo-wide cost telemetry the Costs page, the debug
+    bundle and every diagnostic read. A paid call that writes no
+    ``llm_calls`` row is invisible spend — this is the repo's
+    ``log_call=False`` contract: the generic row is suppressed at
+    ``call_chat_ms`` and a rich one (phase + iso3 + hazard, ``is_test``
+    inherited) is written here instead. Never raises; a telemetry failure
+    must not cost a resolution.
+    """
+
+    try:
+        import asyncio
+
+        from forecaster.llm_logging import log_forecaster_llm_call
+        from pythia.llm_profiles import split_model_ref
+
+        provider, model_id = split_model_ref(model_ref)
+        asyncio.run(
+            log_forecaster_llm_call(
+                run_id=f"hazres_{ym}",
+                question_id="",
+                prompt_text=prompt,
+                model_name=model_id,
+                provider=provider,
+                model_id=model_id,
+                phase="hazard_extraction",
+                call_type="hazard_extraction",
+                iso3=iso3.upper(),
+                hazard_code=hazard,
+                metric="PA",
+                response_text=response,
+                usage=usage or {},
+                error_text=(error or None),
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - telemetry must never break a run
+        LOG.warning("[extract] llm_calls telemetry row not written: %s", exc)
 
 
 #: Memoised (pricer, splitter) or the sentinel False once pricing has been
@@ -367,12 +436,42 @@ def _cost_usd(model_ref: str, usage: dict[str, Any]) -> float:
 # ---------------------------------------------------------------------------
 
 
-def build_prompt(document: dict[str, Any], iso3: str, hazard: str, country: str | None = None) -> str:
-    """The extraction prompt for one document. Pure function."""
+_MONTH_NAMES = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+
+def _period_label(ym: str | None) -> str:
+    """``2026-06`` -> ``June 2026``; anything unparseable -> a safe fallback."""
+
+    try:
+        year, month = str(ym).split("-")
+        return f"{_MONTH_NAMES[int(month) - 1]} {int(year)}"
+    except Exception:
+        return "the period this document reports on"
+
+
+def build_prompt(
+    document: dict[str, Any],
+    iso3: str,
+    hazard: str,
+    country: str | None = None,
+    ym: str | None = None,
+) -> str:
+    """The extraction prompt for one document. Pure function.
+
+    ``ym`` names the target month IN the prompt — the model is told to
+    ignore other time periods, and an instruction to filter by period is
+    meaningless unless the period is stated. ``country`` should be the
+    human-readable name; the model is reading humanitarian prose that says
+    "the Philippines", not "PHL".
+    """
 
     return _PROMPT_TEMPLATE.format(
         hazard_label=_HAZARD_LABEL.get(hazard, hazard),
         country=country or iso3,
+        period=_period_label(ym),
         title=document.get("title") or "(untitled)",
         published=document.get("date_created") or "(undated)",
         source=", ".join(document.get("sources") or []) or "(unattributed)",
@@ -397,6 +496,57 @@ def _normalise_for_match(text: str) -> str:
     ):
         text = text.replace(fancy, plain)
     return re.sub(r"\s+", " ", text).strip().lower()
+
+
+#: Number tokens a quote can state a figure with: a grouped integer
+#: ("12,345", "5 000", "12.345"), or a plain integer/decimal ("8300",
+#: "1.2"), optionally scaled by a word multiplier ("1.2 million").
+_QUOTE_NUMBER_RE = re.compile(
+    r"(\d{1,3}(?:[,. ]\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?:\s*(million|mn|thousand)\b)?",
+    re.IGNORECASE,
+)
+
+_NUMBER_SUFFIX_MULTIPLIERS = {"million": 1_000_000.0, "mn": 1_000_000.0, "thousand": 1_000.0}
+
+
+def _numbers_in_text(text: str) -> set[float]:
+    """Every number the text states, under each plausible reading.
+
+    Grouping is ambiguous in the wild — "12.345" is twelve-point-three in
+    one report and twelve thousand in another — so both readings are
+    admitted. Permissive on AMBIGUITY, never on ABSENCE: a quote with no
+    digits yields the empty set, and a stated "1.2 million" yields
+    1,200,000, not 1.2.
+    """
+
+    out: set[float] = set()
+    for match in _QUOTE_NUMBER_RE.finditer(text):
+        raw, suffix = match.group(1), (match.group(2) or "").lower()
+        multiplier = _NUMBER_SUFFIX_MULTIPLIERS.get(suffix, 1.0)
+        compact = raw.replace(",", "").replace(" ", "")
+        readings: set[float] = set()
+        try:
+            readings.add(float(compact))
+        except ValueError:  # pragma: no cover - regex guarantees digits
+            continue
+        if "." in compact:
+            try:
+                readings.add(float(compact.replace(".", "")))
+            except ValueError:  # pragma: no cover - defensive
+                pass
+        out.update(value * multiplier for value in readings)
+    return out
+
+
+def _value_stated_in_quote(value: float, quote: str) -> bool:
+    """Does the quote actually state this figure?
+
+    The quote-in-body check alone lets a model pair a fabricated value with
+    any real sentence — verification must tie the NUMBER to the sentence,
+    not just the sentence to the document.
+    """
+
+    return any(abs(n - float(value)) < 0.5 for n in _numbers_in_text(_normalise_for_match(quote)))
 
 
 def _strip_fences(text: str) -> str:
@@ -478,6 +628,9 @@ def parse_response(
         if _normalise_for_match(quote) not in body:
             rejected.append({**where, "reason": "quote_not_found_in_document"})
             continue
+        if not _value_stated_in_quote(float(value), quote):
+            rejected.append({**where, "reason": "value_not_found_in_quote"})
+            continue
 
         cumulative = str(raw.get("cumulative_or_new") or "unstated").strip().lower()
         if cumulative not in _CUMULATIVE_VALUES:
@@ -521,6 +674,9 @@ def calls_this_calendar_month(
 
     Counts ``haz_doc_extractions`` rows by creation time, not by target
     month: the cap guards SPEND, and spend happens when the call is made.
+    Error rows count only when the provider actually billed tokens — a
+    call that never left the process (missing API key, circuit-breaker
+    cooldown) spent nothing and must not consume the allowance.
     """
 
     ensure_haz_schema(con)
@@ -529,6 +685,8 @@ def calls_this_calendar_month(
         """
         SELECT COUNT(*) FROM haz_doc_extractions
         WHERE CAST(strftime(created_at, '%Y-%m') AS VARCHAR) = ?
+          AND (status = 'ok'
+               OR COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) > 0)
         """,
         [f"{reference.year:04d}-{reference.month:02d}"],
     ).fetchone()
@@ -553,18 +711,35 @@ def load_budget(
 
 
 def load_cached_extraction(
-    con: "duckdb.DuckDBPyConnection", doc_id: str, model: str, prompt_version: str
+    con: "duckdb.DuckDBPyConnection",
+    doc_id: str,
+    model: str,
+    prompt_version: str,
+    *,
+    iso3: str,
+    hazard: str,
+    ym: str,
 ) -> dict[str, Any] | None:
-    """A previous extraction of this document, or None."""
+    """A previous USABLE extraction of this document for this cell, or None.
+
+    Scoped to the cell because the prompt is: it names the country, the
+    hazard and the target month, so an answer produced for one cell is not
+    an answer for another even when the document is shared. Only
+    ``status='ok'`` rows are hits — an error row means the call failed, and
+    the next run should try again rather than inherit the failure forever.
+    """
 
     ensure_haz_schema(con)
+    year, month = _year_month(ym)
     row = con.execute(
         """
         SELECT status, figures_json, n_rejected, cost_usd
         FROM haz_doc_extractions
         WHERE doc_id = ? AND model = ? AND prompt_version = ?
+          AND iso3 = ? AND hazard = ? AND year = ? AND month = ?
+          AND status = 'ok'
         """,
-        [str(doc_id), str(model), str(prompt_version)],
+        [str(doc_id), str(model), str(prompt_version), iso3.upper(), hazard, year, month],
     ).fetchone()
     if row is None:
         return None
@@ -678,7 +853,9 @@ def extract_for_cell(
         return result
 
     if documents is None:
-        documents = docs_mod.documents_for_country_month(con, iso3, ym, hazard)
+        documents = docs_mod.documents_for_country_month(
+            con, iso3, ym, hazard, rulebook=rulebook
+        )
     if not documents:
         result.skipped_reason = "no_documents"
         return result
@@ -692,6 +869,10 @@ def extract_for_cell(
         result.skipped_reason = f"model_unresolved: {exc}"
         return result
 
+    # The rich llm_calls telemetry row is written only for the REAL model
+    # seam: an injected test seam makes no billable call and must not write
+    # telemetry (network-free tests would otherwise reach for the Pythia DB).
+    using_default_call = call is None
     call = call or _default_call
 
     for document in documents:
@@ -699,31 +880,49 @@ def extract_for_cell(
         if not doc_id:
             continue
 
-        cached = load_cached_extraction(con, doc_id, model_ref, prompt_version)
+        cached = load_cached_extraction(
+            con, doc_id, model_ref, prompt_version, iso3=iso3, hazard=hazard, ym=ym
+        )
         if cached is not None:
             result.docs_cached += 1
-            if cached["status"] == "ok":
-                result.figures.extend(_figures_from_cache(cached, model_ref))
+            result.figures.extend(_figures_from_cache(cached, model_ref))
             budget.cached_hits += 1
             continue
 
         if budget.exhausted:
             # The cap is a hard stop, and a stop is not a finding: the
-            # remaining documents are UNREAD, which the cell's provenance
-            # records so nobody later mistakes it for "ReliefWeb was silent".
-            result.budget_capped = True
-            budget.note_capped(f"{iso3}/{hazard}/{ym}")
-            LOG.warning(
-                "[extract] monthly extraction cap (%d) reached — %s %s %s has "
-                "unread documents; the rung is UNREAD, not empty",
-                budget.max_calls_per_month, iso3, hazard, ym,
-            )
-            break
+            # remaining UNCACHED documents are UNREAD, which the cell's
+            # provenance records so nobody later mistakes it for "ReliefWeb
+            # was silent". Cached documents are already paid for, so the
+            # loop keeps walking to collect them — only fresh reads stop.
+            if not result.budget_capped:
+                result.budget_capped = True
+                budget.note_capped(f"{iso3}/{hazard}/{ym}")
+                LOG.warning(
+                    "[extract] monthly extraction cap (%d) reached — %s %s %s has "
+                    "unread documents; the rung is UNREAD, not empty",
+                    budget.max_calls_per_month, iso3, hazard, ym,
+                )
+            continue
 
-        prompt = build_prompt(document, iso3, hazard, country_name)
+        prompt = build_prompt(document, iso3, hazard, country_name, ym=ym)
         text, usage, error = call(model_ref, prompt, rulebook)
-        budget.calls_this_run += 1
-        result.calls_made += 1
+        if using_default_call:
+            _log_llm_call(
+                model_ref=model_ref, prompt=prompt, response=text,
+                usage=usage, error=error, iso3=iso3, hazard=hazard, ym=ym,
+            )
+        # A call that never reached the provider — missing API key, circuit
+        # breaker cooldown, a local exception — billed nothing and must not
+        # consume the monthly allowance. Anything that billed tokens, or
+        # succeeded, counts.
+        billed_tokens = int((usage or {}).get("prompt_tokens") or 0) + int(
+            (usage or {}).get("completion_tokens") or 0
+        )
+        attempted = bool(billed_tokens) or not error
+        if attempted:
+            budget.calls_this_run += 1
+            result.calls_made += 1
 
         cost = _cost_usd(model_ref, usage)
         budget.cost_this_run_usd += cost

@@ -63,6 +63,9 @@ class LadderRun:
     provisional: int = 0
     frozen_skipped: int = 0
     fetches: dict[str, Any] = field(default_factory=dict)
+    # Countries whose ladder walk raised — their cells are unresolved this
+    # run, every other country's answer stands. "iso3: error" strings.
+    failed_cells: list[str] = field(default_factory=list)
     # Rung-2 extraction, aggregated over the month's cells.
     cells_extracted: int = 0
     cells_extraction_skipped: int = 0
@@ -76,6 +79,31 @@ class LadderRun:
         return sorted(
             name for name, meta in self.fetches.items() if not meta.get("ok", False)
         )
+
+
+def _load_country_names() -> dict[str, str]:
+    """iso3 -> human-readable name from the resolver country registry.
+
+    The extraction prompt reads humanitarian prose that says "the
+    Philippines", not "PHL" — so the prompt should too. stdlib csv, not
+    pandas: this runs inside the ladder walk and must stay import-light.
+    """
+
+    import csv
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "data" / "countries.csv"
+    names: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                iso3 = str(row.get("iso3") or "").strip().upper()
+                name = str(row.get("country_name") or "").strip()
+                if iso3 and name:
+                    names[iso3] = name
+    except Exception as exc:  # pragma: no cover - registry always ships
+        LOG.warning("[impact] could not load country names (%s) — prompts fall back to ISO3", exc)
+    return names
 
 
 def national_population(
@@ -210,6 +238,7 @@ def extract_rung_for_cell(
     fetch_documents: bool = True,
     call: "extract_mod.CallFn | None" = None,
     post: Any = None,
+    country_name: str | None = None,
 ) -> tuple[list[Any], dict[str, Any]]:
     """Produce ladder rung 2 for ONE triggered cell. Returns (candidates, provenance).
 
@@ -261,6 +290,7 @@ def extract_rung_for_cell(
         rulebook=rulebook,
         budget=budget,
         call=call,
+        country_name=country_name,
     )
     ceiling = cand_mod.exposure_ceiling(con, iso3, ym, hazard)
     candidates, rejected = figures_mod.build_candidates(
@@ -303,77 +333,89 @@ def resolve_triggered_cells(
     year = int(ym.split("-")[0])
     unavailable = run.unavailable_sources
     budget = extract_mod.load_budget(con, rulebook, today=today) if extract else None
+    country_names = _load_country_names()
 
+    # One country's exception must not cost the rest of the month their
+    # answers: the walk is per-cell, each cell's writes are transactional,
+    # and a failed cell is recorded on the run (and in the exit code) so a
+    # re-run can retry exactly what is missing.
     for iso3 in sorted(iso3s):
-        extracted: list[Any] = []
-        extraction_provenance: dict[str, Any] = {"ran": False}
-        if extract and not dry_run:
-            extracted, extraction_provenance = extract_rung_for_cell(
-                con,
+        try:
+            extracted: list[Any] = []
+            extraction_provenance: dict[str, Any] = {"ran": False}
+            if extract and not dry_run:
+                extracted, extraction_provenance = extract_rung_for_cell(
+                    con,
+                    iso3=iso3,
+                    ym=ym,
+                    hazard=hazard,
+                    rulebook=rulebook,
+                    budget=budget,
+                    fetch_documents=fetch_documents,
+                    call=call,
+                    post=post,
+                    country_name=country_names.get(iso3.upper()),
+                )
+                extraction_provenance["ran"] = "skipped_reason" not in extraction_provenance
+                stats = extraction_provenance.get("extraction") or {}
+                run.cells_extracted += int(
+                    bool(stats.get("docs_read") or stats.get("docs_cached"))
+                )
+                run.cells_extraction_skipped += int("skipped_reason" in extraction_provenance)
+                run.docs_read += int(stats.get("docs_read") or 0)
+                run.extraction_calls += int(stats.get("calls_made") or 0)
+                run.extraction_cost_usd += float(stats.get("cost_usd") or 0.0)
+                run.extraction_budget_capped |= bool(stats.get("budget_capped"))
+
+            found = cand_mod.build_candidates(
+                con, iso3, ym, hazard, rulebook, extracted=extracted
+            )
+            if not dry_run:
+                cand_mod.write_candidates(con, found, iso3, ym, hazard)
+
+            verdict = reconcile_mod.reconcile(
                 iso3=iso3,
                 ym=ym,
                 hazard=hazard,
+                candidates=found,
                 rulebook=rulebook,
-                budget=budget,
-                fetch_documents=fetch_documents,
-                call=call,
-                post=post,
+                national_population=national_population(con, iso3, year),
+                today=today,
             )
-            extraction_provenance["ran"] = "skipped_reason" not in extraction_provenance
-            stats = extraction_provenance.get("extraction") or {}
-            run.cells_extracted += int(bool(stats.get("docs_read")))
-            run.cells_extraction_skipped += int("skipped_reason" in extraction_provenance)
-            run.docs_read += int(stats.get("docs_read") or 0)
-            run.extraction_calls += int(stats.get("calls_made") or 0)
-            run.extraction_cost_usd += float(stats.get("cost_usd") or 0.0)
-            run.extraction_budget_capped |= bool(stats.get("budget_capped"))
+            # A rung that could not be READ is not a rung that was empty. Record
+            # the difference on the row itself so a NO_DATA can be re-litigated.
+            if unavailable:
+                verdict.provenance.setdefault("decision", {})[
+                    "sources_unavailable"
+                ] = unavailable
+            verdict.provenance["source_fetches"] = run.fetches
+            # Rung 2's own story travels with the row: how many documents were
+            # read, what the extractor discarded and why, and whether the cost
+            # guard cut the reading short. A budget-capped cell has UNREAD
+            # documents, which must never be mistaken for ReliefWeb silence.
+            verdict.provenance["reliefweb_extraction"] = extraction_provenance
 
-        found = cand_mod.build_candidates(
-            con, iso3, ym, hazard, rulebook, extracted=extracted
-        )
-        if not dry_run:
-            cand_mod.write_candidates(con, found, iso3, ym, hazard)
+            run.cells += 1
+            if verdict.status == reconcile_mod.STATUS_RESOLVED_VALUE:
+                run.resolved_value += 1
+                run.provisional += int(verdict.provisional)
+            elif verdict.status == reconcile_mod.STATUS_PENDING:
+                run.pending += 1
+            else:
+                run.no_data += 1
+            run.flagged += int(verdict.flagged)
+            run.lower_bound += int(verdict.lower_bound)
 
-        verdict = reconcile_mod.reconcile(
-            iso3=iso3,
-            ym=ym,
-            hazard=hazard,
-            candidates=found,
-            rulebook=rulebook,
-            national_population=national_population(con, iso3, year),
-            today=today,
-        )
-        # A rung that could not be READ is not a rung that was empty. Record
-        # the difference on the row itself so a NO_DATA can be re-litigated.
-        if unavailable:
-            verdict.provenance.setdefault("decision", {})[
-                "sources_unavailable"
-            ] = unavailable
-        verdict.provenance["source_fetches"] = run.fetches
-        # Rung 2's own story travels with the row: how many documents were
-        # read, what the extractor discarded and why, and whether the cost
-        # guard cut the reading short. A budget-capped cell has UNREAD
-        # documents, which must never be mistaken for ReliefWeb silence.
-        verdict.provenance["reliefweb_extraction"] = extraction_provenance
-
-        run.cells += 1
-        if verdict.status == reconcile_mod.STATUS_RESOLVED_VALUE:
-            run.resolved_value += 1
-            run.provisional += int(verdict.provisional)
-        elif verdict.status == reconcile_mod.STATUS_PENDING:
-            run.pending += 1
-        else:
-            run.no_data += 1
-        run.flagged += int(verdict.flagged)
-        run.lower_bound += int(verdict.lower_bound)
-
-        if dry_run:
-            continue
-        outcome = res_mod.write_reconciliation(
-            con, verdict, rulebook, today=today, run_type=run_type
-        )
-        if outcome == res_mod.WRITE_FROZEN_SKIP:
-            run.frozen_skipped += 1
+            if dry_run:
+                continue
+            outcome = res_mod.write_reconciliation(
+                con, verdict, rulebook, today=today, run_type=run_type
+            )
+            if outcome == res_mod.WRITE_FROZEN_SKIP:
+                run.frozen_skipped += 1
+        except Exception as exc:  # noqa: BLE001 - one bad cell must not end the month
+            run.failed_cells.append(f"{iso3}: {type(exc).__name__}: {exc}")
+            LOG.exception("[impact] %s %s %s: ladder walk raised", iso3, hazard, ym)
 
     LOG.info(
         "[impact] %s %s ladder: %d cells -> %d values (%d lower-bound), "
@@ -386,6 +428,12 @@ def resolve_triggered_cells(
             "[impact] %s %s: ladder ran with unavailable sources %s — NO_DATA "
             "rows from this run record that those rungs were unreadable, not empty",
             hazard, ym, ",".join(unavailable),
+        )
+    if run.failed_cells:
+        LOG.error(
+            "[impact] %s %s: %d cell(s) raised and were NOT resolved this run "
+            "(re-run to retry them): %s",
+            hazard, ym, len(run.failed_cells), "; ".join(run.failed_cells[:10]),
         )
     if budget is not None:
         LOG.info(

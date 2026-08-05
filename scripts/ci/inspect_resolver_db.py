@@ -603,6 +603,150 @@ def build_report(
     L()
 
     # =====================================================================
+    # 2.5 PA RESOLUTION MACHINE (haz_* tables)
+    # =====================================================================
+    L("## 2.5 PA Resolution Machine (haz_* tables)")
+    L()
+    if not table_exists(con, "haz_triggers"):
+        L(
+            "_The machine has not run against this DB (no haz_* tables). "
+            "It is populated by resolver_update.yml Phase 2.5 (live months) "
+            "and the nightly Hazard Backcast workflow._"
+        )
+        L()
+    else:
+        # --- Detection: cells assessed vs triggered, last 12 months ---
+        L("### Detection (haz_triggers, last 12 months)")
+        rows = safe_query(
+            con,
+            """
+            SELECT hazard,
+                   COUNT(*) AS cells_assessed,
+                   SUM(CASE WHEN triggered THEN 1 ELSE 0 END) AS triggered,
+                   MIN(printf('%04d-%02d', year, month)) AS first_ym,
+                   MAX(printf('%04d-%02d', year, month)) AS last_ym
+            FROM haz_triggers
+            WHERE (year * 12 + month) >= (
+                SELECT COALESCE(MAX(year * 12 + month), 0) - 11 FROM haz_triggers
+            )
+            GROUP BY hazard ORDER BY hazard
+            """,
+        )
+        if rows:
+            L()
+            L("| hazard | cells assessed | triggered | window |")
+            L("|--------|---------------:|----------:|--------|")
+            for hz, cells, trig, first_ym, last_ym in rows:
+                L(f"| {hz} | {fmt_num(cells)} | {fmt_num(trig)} | {first_ym} → {last_ym} |")
+        else:
+            L("_No trigger rows._")
+        L()
+
+        # --- Resolutions: status mix per hazard, last 12 months ---
+        L("### Resolutions (haz_resolutions, last 12 months)")
+        if table_exists(con, "haz_resolutions"):
+            rows = safe_query(
+                con,
+                """
+                SELECT hazard, status,
+                       COUNT(*) AS n,
+                       SUM(CASE WHEN flagged THEN 1 ELSE 0 END) AS flagged,
+                       SUM(CASE WHEN COALESCE(provisional, FALSE) THEN 1 ELSE 0 END) AS provisional
+                FROM haz_resolutions
+                WHERE (year * 12 + month) >= (
+                    SELECT COALESCE(MAX(year * 12 + month), 0) - 11 FROM haz_resolutions
+                )
+                GROUP BY hazard, status ORDER BY hazard, status
+                """,
+            )
+            if rows:
+                L()
+                L("| hazard | status | rows | flagged | provisional |")
+                L("|--------|--------|-----:|--------:|------------:|")
+                for hz, status, n, flagged, prov in rows:
+                    L(f"| {hz} | {status} | {fmt_num(n)} | {fmt_num(flagged)} | {fmt_num(prov)} |")
+            else:
+                L("_No resolution rows._")
+        else:
+            L("_Table does not exist._")
+        L()
+
+        # --- Base rates the SPD prompt block reads ---
+        L("### Base rates (what the forecaster prompt can see)")
+        for table, label in (
+            ("haz_base_rates_occurrence", "occurrence"),
+            ("haz_base_rates_severity", "severity"),
+        ):
+            if table_exists(con, table):
+                rows = safe_query(
+                    con,
+                    f"SELECT hazard, COUNT(DISTINCT iso3) FROM {table} GROUP BY hazard ORDER BY hazard",
+                )
+                summary = ", ".join(f"{hz}: {fmt_num(n)} countries" for hz, n in rows) or "empty"
+                L(f"- `{table}` ({label}): {summary}")
+            else:
+                L(f"- `{table}` ({label}): _table does not exist_")
+        L(
+            "- An empty occurrence table means NO base-rate block reaches any "
+            "SPD prompt — run the backcast, then haz-base-rates."
+        )
+        L()
+
+        # --- Extraction ledger (the machine's only paid step) ---
+        L("### LLM extraction ledger (haz_doc_extractions)")
+        if table_exists(con, "haz_doc_extractions"):
+            rows = safe_query(
+                con,
+                """
+                SELECT COUNT(*),
+                       SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END),
+                       SUM(COALESCE(cost_usd, 0.0)),
+                       SUM(CASE WHEN CAST(strftime(created_at, '%Y-%m') AS VARCHAR)
+                                     = CAST(strftime(CURRENT_DATE, '%Y-%m') AS VARCHAR)
+                                AND (status = 'ok' OR COALESCE(prompt_tokens, 0)
+                                     + COALESCE(completion_tokens, 0) > 0)
+                                THEN 1 ELSE 0 END)
+                FROM haz_doc_extractions
+                """,
+            )
+            if rows and rows[0]:
+                total, ok, spend, this_month = rows[0]
+                L(
+                    f"- {fmt_num(total)} extraction rows ({fmt_num(ok)} ok), "
+                    f"total recorded spend ${fmt_float(spend, 2)}; "
+                    f"{fmt_num(this_month)} billed calls this calendar month "
+                    "(counts toward extraction.max_calls_per_month)"
+                )
+        else:
+            L("_Table does not exist._")
+        L()
+
+        # --- Backcast progress ---
+        L("### Backcast progress (haz_backcast_progress)")
+        if table_exists(con, "haz_backcast_progress"):
+            rows = safe_query(
+                con,
+                """
+                SELECT hazard,
+                       SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END) AS ok,
+                       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                       MIN(ym), MAX(ym)
+                FROM haz_backcast_progress GROUP BY hazard ORDER BY hazard
+                """,
+            )
+            if rows:
+                L()
+                L("| hazard | months ok | months failed | window covered |")
+                L("|--------|----------:|--------------:|----------------|")
+                for hz, ok, failed, first_ym, last_ym in rows:
+                    L(f"| {hz} | {fmt_num(ok)} | {fmt_num(failed)} | {first_ym} → {last_ym} |")
+            else:
+                L("_No backcast has run._")
+        else:
+            L("_Table does not exist._")
+        L()
+
+    # =====================================================================
     # 3. HORIZON SCANNER TABLES
     # =====================================================================
     L("## 3. Horizon Scanner Tables")

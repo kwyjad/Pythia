@@ -204,3 +204,50 @@ def test_inject_readiness_skipped_without_country_list(fixture_paths, tmp_path):
     assert "## Inject Readiness" not in out
     # Rest of the report still renders.
     assert "## Data Freshness — At a Glance" in out
+
+
+def test_haz_machine_section_reports_not_run(report):
+    """A DB the machine never touched says so, instead of rendering nothing."""
+    assert "## 2.5 PA Resolution Machine" in report
+    assert "The machine has not run against this DB" in report
+
+
+def test_haz_machine_section_renders_counts(tmp_path):
+    from resolver.hazard_resolution.schema import ensure_haz_schema
+
+    db = tmp_path / "haz.duckdb"
+    con = duckdb.connect(str(db))
+    ensure_haz_schema(con)
+    con.execute(
+        "INSERT INTO haz_triggers (iso3, year, month, hazard, triggered) VALUES "
+        "('PHL', 2026, 6, 'FL', TRUE), ('VNM', 2026, 6, 'FL', FALSE)"
+    )
+    con.execute(
+        "INSERT INTO haz_resolutions (iso3, year, month, hazard, status, value, "
+        "provenance_json, rule_fired) VALUES "
+        "('PHL', 2026, 6, 'FL', 'RESOLVED_VALUE', 12345, '{}', 'ladder:emdat'), "
+        "('VNM', 2026, 6, 'FL', 'RESOLVED_ZERO', 0, '{}', 'flood_zero:x')"
+    )
+    con.execute(
+        "INSERT INTO haz_base_rates_occurrence "
+        "(iso3, hazard, calendar_month, p_occurrence, n_years) "
+        "VALUES ('PHL', 'FL', 6, 0.25, 16)"
+    )
+    con.execute(
+        "INSERT INTO haz_doc_extractions (doc_id, iso3, year, month, hazard, model, "
+        "prompt_version, status, figures_json, prompt_tokens, completion_tokens, cost_usd) "
+        "VALUES ('d1', 'PHL', 2026, 6, 'FL', 'm', 'v2', 'ok', '{}', 6000, 200, 0.01)"
+    )
+    con.execute(
+        "INSERT INTO haz_backcast_progress (hazard, ym, status) VALUES ('FL', '2015-01', 'ok')"
+    )
+    con.close()
+
+    out = build_report(db)
+    assert "## 2.5 PA Resolution Machine" in out
+    assert "### Detection (haz_triggers, last 12 months)" in out
+    assert "| FL | 2 | 1 |" in out
+    assert "RESOLVED_VALUE" in out and "RESOLVED_ZERO" in out
+    assert "haz_base_rates_occurrence" in out and "FL: 1 countries" in out
+    assert "1 extraction rows" in out
+    assert "### Backcast progress" in out

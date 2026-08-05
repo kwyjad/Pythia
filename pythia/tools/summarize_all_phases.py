@@ -319,6 +319,78 @@ def _country_list_shrink(repo_root: Optional[Path] = None) -> Optional[dict]:
     }
 
 
+def _haz_machine_summary(con) -> Optional[dict]:
+    """Counts from the PA resolution machine's tables (Phase 2.5).
+
+    Returns None when the DB is unavailable, ``{"state": "missing"}`` when
+    the machine has never run against this DB, else per-hazard 12-month
+    detection/resolution counts plus base-rate coverage.
+    """
+
+    if con is None:
+        return None
+    try:
+        exists = con.execute(
+            "SELECT COUNT(*) FROM information_schema.tables "
+            "WHERE table_schema='main' AND table_name='haz_triggers'"
+        ).fetchone()
+        if not exists or not exists[0]:
+            return {"state": "missing"}
+
+        triggers = con.execute(
+            """
+            SELECT hazard, COUNT(*),
+                   SUM(CASE WHEN triggered THEN 1 ELSE 0 END)
+            FROM haz_triggers
+            WHERE (year * 12 + month) >= (
+                SELECT COALESCE(MAX(year * 12 + month), 0) - 11 FROM haz_triggers
+            )
+            GROUP BY hazard ORDER BY hazard
+            """
+        ).fetchall()
+        resolutions = {
+            row[0]: row[1:]
+            for row in con.execute(
+                """
+                SELECT hazard,
+                       SUM(CASE WHEN status = 'RESOLVED_VALUE' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status = 'RESOLVED_ZERO' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status = 'NO_DATA' THEN 1 ELSE 0 END)
+                FROM haz_resolutions
+                WHERE (year * 12 + month) >= (
+                    SELECT COALESCE(MAX(year * 12 + month), 0) - 11
+                    FROM haz_resolutions
+                )
+                GROUP BY hazard
+                """
+            ).fetchall()
+        }
+        base_rates = {
+            row[0]: row[1]
+            for row in con.execute(
+                "SELECT hazard, COUNT(DISTINCT iso3) "
+                "FROM haz_base_rates_occurrence GROUP BY hazard"
+            ).fetchall()
+        }
+        hazards = []
+        for hazard, cells, triggered in triggers:
+            values, zeros, no_data = resolutions.get(hazard, (0, 0, 0))
+            hazards.append(
+                {
+                    "hazard": hazard,
+                    "cells": int(cells or 0),
+                    "triggered": int(triggered or 0),
+                    "values": int(values or 0),
+                    "zeros": int(zeros or 0),
+                    "no_data": int(no_data or 0),
+                    "base_rate_countries": int(base_rates.get(hazard, 0)),
+                }
+            )
+        return {"state": "ok" if hazards else "empty", "hazards": hazards}
+    except Exception:
+        return None
+
+
 def _attribution_drops(entries: list[dict]) -> dict:
     """Whole-country ACLED political attribution drops, from the JSONL extras."""
     for e in entries:
@@ -523,6 +595,42 @@ def build_phase_summary(entries: list[dict], con=None) -> str:
         for v in cf_vintages:
             flag = " ⚠️" if v["stale"] else ""
             lines.append(f"| {v['source']} | {v['latest']} | {v['age_days']}d{flag} |")
+
+    # --- PA resolution machine (Phase 2.5, shadow mode) --------------------
+    haz = _haz_machine_summary(con)
+    if haz is not None:
+        lines.append("\n## PA Resolution Machine (Phase 2.5 — shadow mode)\n")
+        if haz["state"] == "missing":
+            lines.append(
+                "- The machine has not run against this DB (no haz_* tables). "
+                "Expected on the first cycle after wiring; investigate if it "
+                "persists."
+            )
+        elif haz["state"] == "empty":
+            lines.append(
+                "- haz_* tables exist but hold no trigger rows — the Phase 2.5 "
+                "steps ran without assessing any cell; check their logs."
+            )
+        else:
+            lines.append("| Hazard | Cells (12m) | Triggered | Values | Zeros | No data | Base-rate countries |")
+            lines.append("|--------|------------:|----------:|-------:|------:|--------:|--------------------:|")
+            for h in haz["hazards"]:
+                lines.append(
+                    f"| {h['hazard']} | {_fmt_int(h['cells'])} | {_fmt_int(h['triggered'])} "
+                    f"| {_fmt_int(h['values'])} | {_fmt_int(h['zeros'])} | {_fmt_int(h['no_data'])} "
+                    f"| {_fmt_int(h['base_rate_countries'])} |"
+                )
+            if all(h["base_rate_countries"] == 0 for h in haz["hazards"]):
+                lines.append(
+                    "\n- ⚠️ `haz_base_rates_occurrence` is **empty** — no SPD prompt "
+                    "carries a PA base-rate block yet. The nightly Hazard Backcast "
+                    "fills it; check that workflow if this persists."
+                )
+            lines.append(
+                "\n_Shadow mode: these answers do not feed compute_resolutions or "
+                "any score yet — the acceptance report in backfill-diagnostics is "
+                "the go/no-go evidence for that flip._"
+            )
 
     # --- CrisisWatch edition ----------------------------------------------
     cw = _crisiswatch_edition(con)

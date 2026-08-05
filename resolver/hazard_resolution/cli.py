@@ -439,7 +439,9 @@ def run_cyclone_month(
     _log_summary(
         result.hazard, ym, result, tally, ladder, " (dry-run)" if dry_run else ""
     )
-    return 0
+    # Failed cells left the month partially resolved: everything written
+    # stands, but the exit code says a re-run is needed to finish it.
+    return 1 if (ladder is not None and ladder.failed_cells) else 0
 
 
 def run_flood_month(
@@ -551,7 +553,7 @@ def run_flood_month(
         )
 
     _log_summary(hazard, ym, result, tally, ladder, " (dry-run)" if dry_run else "")
-    return 0
+    return 1 if (ladder is not None and ladder.failed_cells) else 0
 
 
 def _log_drought_summary(ym: str, run, dry: str) -> None:
@@ -674,7 +676,70 @@ def run_drought_month(
         run_type=run_type,
     )
     _log_drought_summary(ym, run, " (dry-run)" if dry_run else "")
-    return 0
+    return 1 if run.failed_cells else 0
+
+
+def _write_run_summary(
+    path: str,
+    *,
+    hazard_name: str,
+    months: list[str],
+    month_rcs: dict[str, int],
+    failures: int,
+    started: datetime,
+    db_url: str | None,
+    dry_run: bool,
+) -> None:
+    """Write the run's JSON summary — the durable diagnostic artifact.
+
+    Read back from the tables (via ``backcast.month_counts``) rather than
+    threaded out of the runners, for the same reason the backcast ledger is:
+    the three runners return different shapes, and the summary should record
+    what the tables actually hold. Never fatal — a summary failure must not
+    fail a run that resolved its cells.
+    """
+
+    import json
+
+    try:
+        from resolver.db.duckdb_io import close_db, get_db
+        from resolver.hazard_resolution.backcast import month_counts
+        from resolver.hazard_resolution.rulebook import HAZARD_CODE_BY_RULEBOOK_NAME
+
+        hazard_code = HAZARD_CODE_BY_RULEBOOK_NAME[hazard_name]
+        payload: dict = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "hazard": hazard_code,
+            "hazard_name": hazard_name,
+            "dry_run": bool(dry_run),
+            "months_run": len(months),
+            "failures": failures,
+            "duration_sec": round(
+                (datetime.now(timezone.utc) - started).total_seconds(), 1
+            ),
+            "months": {},
+        }
+        if not dry_run:
+            con = get_db(db_url)
+            try:
+                for ym in months:
+                    payload["months"][ym] = {
+                        "rc": int(month_rcs.get(ym, 1)),
+                        **month_counts(con, hazard_code, ym),
+                    }
+            finally:
+                close_db(con)
+        else:
+            payload["months"] = {
+                ym: {"rc": int(month_rcs.get(ym, 1))} for ym in months
+            }
+
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+        LOG.info("[cli] run summary written to %s", path)
+    except Exception as exc:  # noqa: BLE001 - diagnostics never fail a run
+        LOG.warning("[cli] could not write the run summary to %s: %s", path, exc)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -752,6 +817,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Detect and sweep but write nothing (implies --skip-fetch)",
     )
     parser.add_argument(
+        "--summary-out",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write a JSON run summary (per-month cells/statuses/extraction "
+            "spend) to PATH. A diagnostic that exists only in a job log "
+            "does not exist — this is the durable artifact"
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default=os.getenv("RESOLVER_LOG_LEVEL", "INFO"),
         help="Logging level (default: INFO)",
@@ -778,15 +853,23 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
 
     # Months are independent: one bad month must not cost the others their
-    # run, so a non-zero month is recorded and the loop continues.
+    # run, so a non-zero month — or one that RAISES — is recorded and the
+    # loop continues. The guard has to catch exceptions too: a traceback in
+    # month 1 of a 12-month run would otherwise cost the other 11.
     failures = 0
+    month_rcs: dict[str, int] = {}
     for ym in target_months:
-        if hazard == "cyclone":
-            rc = run_cyclone_month(ym=ym, scope=args.scope, **common)
-        elif hazard == "drought":
-            rc = run_drought_month(ym=ym, **common)
-        else:
-            rc = run_flood_month(ym=ym, **common)
+        try:
+            if hazard == "cyclone":
+                rc = run_cyclone_month(ym=ym, scope=args.scope, **common)
+            elif hazard == "drought":
+                rc = run_drought_month(ym=ym, **common)
+            else:
+                rc = run_flood_month(ym=ym, **common)
+        except Exception:  # noqa: BLE001 - one bad month must not end the run
+            rc = 1
+            LOG.exception("[cli] %s %s raised", hazard, ym)
+        month_rcs[ym] = rc
         if rc != 0:
             failures += 1
             LOG.error("[cli] %s %s failed (exit %d)", hazard, ym, rc)
@@ -795,6 +878,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         LOG.info(
             "[cli] ran %d months for %s: %d ok, %d failed",
             len(target_months), hazard, len(target_months) - failures, failures,
+        )
+    if args.summary_out:
+        _write_run_summary(
+            args.summary_out,
+            hazard_name=hazard,
+            months=target_months,
+            month_rcs=month_rcs,
+            failures=failures,
+            started=started,
+            db_url=args.db or None,
+            dry_run=args.dry_run,
         )
     LOG.info(
         "resolve-hazards finished in %.1fs (exit %d)",

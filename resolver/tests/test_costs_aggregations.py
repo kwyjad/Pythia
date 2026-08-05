@@ -272,6 +272,8 @@ def test_phase_group_canonical_mapping():
     assert phase_group("Forecaster") == "forecast"
     assert phase_group("spd_forecast") == "forecast"
     assert phase_group("ScenarioWriter") == "scenario"
+    assert phase_group("hazard_extraction") == "resolution"
+    assert phase_group("HazardResolution") == "resolution"
     assert phase_group(None) == "other"
     assert phase_group("") == "other"
     assert phase_group("misc") == "other"
@@ -289,3 +291,6 @@ def test_phase_group_live_pipeline_values():
     assert phase_group("sibyl") == "sibyl"
     # hs loggers hardcode phase='hs_triage'
     assert phase_group("hs_triage") == "hs"
+    # the PA resolution machine's extraction logger writes
+    # phase='hazard_extraction' (resolver/hazard_resolution/extract.py)
+    assert phase_group("hazard_extraction") == "resolution"
