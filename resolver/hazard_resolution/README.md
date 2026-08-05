@@ -740,3 +740,34 @@ Tests: [`resolver/tests/test_hazard_resolution_prompt_block.py`](../tests/test_h
 question). The second file exists because the failure mode at this seam is
 silent: a loader whose text nobody renders costs money and changes nothing,
 which is how CrisisWatch and the HS grounding packs were both lost.
+
+## Production wiring (Aug 2026 — shadow mode)
+
+The machine runs in two workflows, and its answers grade nothing yet:
+
+- **`resolver_update.yml` Phase 2.5** (28th monthly): `resolve-hazards` over
+  the trailing three months for flood, cyclone and drought (provisional
+  answers are revised each cycle until their 60-day freeze), then
+  `haz-base-rates` so the 1st-of-month forecast reads fresh base rates from
+  the same DB artifact, then `haz-acceptance` into the `backfill-diagnostics`
+  artifact. Non-fatal end to end: a machine failure never blocks the ingest.
+- **`haz_backcast.yml`** (nightly 22:00 UTC): a time-boxed chunk of the
+  historical replay per hazard (`haz-backcast --time-budget-min`), resumed
+  from the `haz_backcast_progress` ledger, then a base-rate refresh and a
+  canonical-DB re-upload. Self-converging: once the window is covered the
+  run is a near-instant no-op that rolls forward as months freeze.
+
+**Shadow mode** means `pythia/tools/compute_resolutions.py` still resolves PA
+questions from `facts_resolved` (IFRC first) — nothing reads
+`haz_resolutions` outside this package except the Phase 6 prompt block. The
+flip to scoring is a deliberate follow-up change, taken only after the
+monthly acceptance reports show the machine meeting its ≥80% target with
+credible provenance.
+
+**Telemetry**: every real extraction call writes a rich `llm_calls` row
+(`phase='hazard_extraction'`, mapped to the Costs page's "PA resolution"
+bucket) in addition to the `haz_doc_extractions` cache/ledger row. The
+extraction cache is scoped to the CELL (doc, model, prompt version, iso3,
+hazard, month) — the prompt names all three, so one cell's answer is never
+served for another's question — and error rows are retried on the next run
+rather than cached forever.
