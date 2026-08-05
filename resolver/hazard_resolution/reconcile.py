@@ -110,11 +110,21 @@ def _best_on_rung(candidates: list[Candidate], rung: str) -> Candidate | None:
     assessment proceeds — the same reasoning behind the resolver's
     "latest informed report wins" rule. Ties break on source_ref so the
     choice is stable across runs.
+
+    A rung whose candidates carry ``preference_rank`` has already ordered
+    itself and that order wins — ``reliefweb_extracted`` is the case: the
+    rulebook ranks its figures by attributed authority then recency, and
+    "largest wins" would quietly overrule that with whichever body quoted
+    the biggest number. Still deterministic, still rulebook-driven; the
+    rank was computed upstream by a pure function.
     """
 
     on_rung = [c for c in candidates if c.source == rung]
     if not on_rung:
         return None
+    ranked = [c for c in on_rung if c.preference_rank is not None]
+    if ranked:
+        return min(ranked, key=lambda c: (int(c.preference_rank), str(c.source_ref)))
     return max(on_rung, key=lambda c: (c.value, str(c.source_ref)))
 
 

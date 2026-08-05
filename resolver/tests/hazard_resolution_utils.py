@@ -3,11 +3,12 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""Shared helpers for the hazard-resolution Phase 1 test suites."""
+"""Shared helpers for the hazard-resolution test suites."""
 
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from resolver.hazard_resolution.rulebook import DEFAULT_RULEBOOK_PATH, Rulebook
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "hazard_resolution"
 IBTRACS_SAMPLE_CSV = FIXTURES / "ibtracs_sample.csv"
 SYNTHETIC_COUNTRIES_GEOJSON = FIXTURES / "synthetic_countries.geojson"
+RELIEFWEB_GOLDEN_SET = FIXTURES / "reliefweb_golden_set.json"
 
 
 def _deep_merge(base: dict, overrides: dict) -> dict:
@@ -176,3 +178,60 @@ def silent_sweep_evidence(iso3: str, ym: str) -> dict[str, Any]:
         "retrieved_at": "2026-01-15T00:00:00+00:00",
         "error": None,
     }
+
+
+def load_golden_set() -> dict[str, Any]:
+    """The ReliefWeb extraction golden set (documents + expected output)."""
+    with open(RELIEFWEB_GOLDEN_SET, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def golden_documents() -> list[dict[str, Any]]:
+    """Just the ``doc`` payloads, in fixture order."""
+    return [case["doc"] for case in load_golden_set()["documents"]]
+
+
+def seed_reliefweb_docs(
+    con,
+    documents: list[dict[str, Any]],
+    *,
+    iso3: str = "PHL",
+    ym: str = "2024-03",
+    hazard: str = "FL",
+):
+    """Store documents in ``haz_raw_reliefweb_docs`` as the connector would."""
+    from resolver.hazard_resolution.sources import RawRecord, store_raw_records
+
+    records = [
+        RawRecord(
+            record_id=f"rw-{doc['doc_id']}",
+            payload={**doc, "iso3": iso3, "ym": ym, "hazard": hazard},
+            iso3=iso3,
+            ym=ym,
+            hazard=hazard,
+            source_url=doc.get("url"),
+        )
+        for doc in documents
+    ]
+    return store_raw_records(con, "reliefweb_docs", records)
+
+
+def golden_call_fn(documents: list[dict[str, Any]] | None = None):
+    """A model seam that replays the golden set's recorded responses.
+
+    Returns ``(call, calls)`` where ``calls`` is the list of prompts sent —
+    so a test can assert not only what came back but that nothing was
+    called at all.
+    """
+    cases = {case["doc"]["doc_id"]: case for case in load_golden_set()["documents"]}
+    calls: list[str] = []
+
+    def call(model_ref: str, prompt: str, rulebook) -> tuple[str, dict, str]:
+        calls.append(prompt)
+        for doc_id, case in cases.items():
+            # The prompt embeds the document's URL, which is unique per case.
+            if case["doc"]["url"] in prompt:
+                return case["response"], {"prompt_tokens": 6000, "completion_tokens": 200}, ""
+        return '{"figures": []}', {"prompt_tokens": 10, "completion_tokens": 5}, ""
+
+    return call, calls

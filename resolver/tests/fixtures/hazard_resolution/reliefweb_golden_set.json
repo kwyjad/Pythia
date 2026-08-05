@@ -1,0 +1,199 @@
+{
+  "_readme": [
+    "GOLDEN SET for the ReliefWeb figure extractor (Phase 3 acceptance).",
+    "",
+    "Ten documents modelled on real ReliefWeb reporting for a March 2024",
+    "flood in the Philippines, each paired with the model response it should",
+    "produce and with what the deterministic post-processing must then do",
+    "with it. Bodies are shortened but every `quote` below appears in its",
+    "document VERBATIM — that is the property the extractor's quote verifier",
+    "checks, so a fixture that got it wrong would fail the suite rather than",
+    "quietly weaken it.",
+    "",
+    "The set deliberately covers the awkward cases: a document that states no",
+    "qualifying figure at all, a figure given in households, a cumulative",
+    "figure, a figure repeated verbatim across two reports, a figure larger",
+    "than modelled exposure, a quote the document does not contain, and a",
+    "report that breaks one event into per-province figures that must not be",
+    "summed.",
+    "",
+    "`expected` is what parse_response must return for that document;",
+    "`expected_rejected` lists the reasons it must report."
+  ],
+  "cell": {
+    "iso3": "PHL",
+    "ym": "2024-03",
+    "hazard": "FL",
+    "gdacs_exposed_population": 500000
+  },
+  "documents": [
+    {
+      "name": "ocha_situation_report",
+      "doc": {
+        "doc_id": "4001",
+        "title": "Philippines: Floods - Situation Report No. 3",
+        "url": "https://reliefweb.int/report/philippines/floods-sitrep-3",
+        "date_created": "2024-03-14T09:00:00+00:00",
+        "sources": ["OCHA", "United Nations"],
+        "source_rank": 0,
+        "body": "PHILIPPINES: FLOODS\nSituation Report No. 3\n\nHeavy monsoon rains continued across Luzon this week. OCHA reports that 145,000 people have been affected across four provinces as of 13 March 2024. Response operations are ongoing and 12 evacuation centres remain open. Damage to agriculture is still being assessed."
+      },
+      "response": "{\"figures\": [{\"value\": 145000, \"unit\": \"people\", \"quote\": \"OCHA reports that 145,000 people have been affected across four provinces as of 13 March 2024.\", \"stated_by\": \"OCHA\", \"area\": \"four provinces\", \"date\": \"2024-03-13\", \"cumulative_or_new\": \"unstated\"}]}",
+      "expected": [
+        {"value": 145000.0, "unit": "people", "stated_by": "OCHA", "date": "2024-03-13"}
+      ],
+      "expected_rejected": []
+    },
+    {
+      "name": "government_ndrrmc_bulletin",
+      "doc": {
+        "doc_id": "4002",
+        "title": "NDRRMC Situational Report for Southwest Monsoon",
+        "url": "https://reliefweb.int/report/philippines/ndrrmc-sitrep-12",
+        "date_created": "2024-03-19T02:00:00+00:00",
+        "sources": ["Government of the Philippines", "NDRRMC"],
+        "source_rank": 1,
+        "body": "NATIONAL DISASTER RISK REDUCTION AND MANAGEMENT COUNCIL\nSituational Report No. 12\n\nThe NDRRMC reports a total of 152,340 persons affected in Regions III and IV-A as of 18 March 2024. A total of 31 deaths have been confirmed. Assistance amounting to PHP 42 million has been provided to affected families."
+      },
+      "response": "```json\n{\"figures\": [{\"value\": 152340, \"unit\": \"people\", \"quote\": \"The NDRRMC reports a total of 152,340 persons affected in Regions III and IV-A as of 18 March 2024.\", \"stated_by\": \"NDRRMC\", \"area\": \"Regions III and IV-A\", \"date\": \"2024-03-18\", \"cumulative_or_new\": \"unstated\"}]}\n```",
+      "expected": [
+        {"value": 152340.0, "unit": "people", "stated_by": "NDRRMC", "date": "2024-03-18"}
+      ],
+      "expected_rejected": []
+    },
+    {
+      "name": "households_figure",
+      "doc": {
+        "doc_id": "4003",
+        "title": "Philippine Red Cross operational update",
+        "url": "https://reliefweb.int/report/philippines/prc-operational-update",
+        "date_created": "2024-03-16T12:00:00+00:00",
+        "sources": ["International Federation of Red Cross And Red Crescent Societies", "Red Cross"],
+        "source_rank": 4,
+        "body": "OPERATIONAL UPDATE\n\nThe Philippine Red Cross reports that 30,000 households have been affected by flooding in the worst-hit municipalities. Volunteers have distributed hygiene kits and hot meals. Water levels have begun to recede in low-lying areas."
+      },
+      "response": "{\"figures\": [{\"value\": 30000, \"unit\": \"households\", \"quote\": \"The Philippine Red Cross reports that 30,000 households have been affected by flooding in the worst-hit municipalities.\", \"stated_by\": \"Philippine Red Cross\", \"area\": \"worst-hit municipalities\", \"date\": \"\", \"cumulative_or_new\": \"unstated\"}]}",
+      "expected": [
+        {"value": 30000.0, "unit": "households", "stated_by": "Philippine Red Cross", "date": ""}
+      ],
+      "expected_rejected": []
+    },
+    {
+      "name": "no_qualifying_figure",
+      "doc": {
+        "doc_id": "4004",
+        "title": "Philippines flooding: damage assessment note",
+        "url": "https://reliefweb.int/report/philippines/damage-assessment",
+        "date_created": "2024-03-12T08:00:00+00:00",
+        "sources": ["OCHA"],
+        "source_rank": 0,
+        "body": "DAMAGE ASSESSMENT NOTE\n\nInitial assessments indicate that 1,240 houses were totally damaged and 3,800 partially damaged. Eleven people were killed and four remain missing. Road access to three municipalities is cut. No consolidated figure for people affected is available at this time."
+      },
+      "response": "{\"figures\": []}",
+      "expected": [],
+      "expected_rejected": []
+    },
+    {
+      "name": "cumulative_figure",
+      "doc": {
+        "doc_id": "4005",
+        "title": "Philippines: Floods - Situation Report No. 5",
+        "url": "https://reliefweb.int/report/philippines/floods-sitrep-5",
+        "date_created": "2024-03-21T09:00:00+00:00",
+        "sources": ["OCHA", "United Nations"],
+        "source_rank": 0,
+        "body": "PHILIPPINES: FLOODS\nSituation Report No. 5\n\nA cumulative total of 210,000 people have been affected since the onset of flooding on 3 March 2024. The figure includes populations affected in earlier phases of the emergency. Humanitarian partners continue to scale up the response."
+      },
+      "response": "{\"figures\": [{\"value\": 210000, \"unit\": \"people\", \"quote\": \"A cumulative total of 210,000 people have been affected since the onset of flooding on 3 March 2024.\", \"stated_by\": \"OCHA\", \"area\": \"national\", \"date\": \"2024-03-20\", \"cumulative_or_new\": \"cumulative\"}]}",
+      "expected": [
+        {"value": 210000.0, "unit": "people", "stated_by": "OCHA", "date": "2024-03-20", "cumulative_or_new": "cumulative"}
+      ],
+      "expected_rejected": []
+    },
+    {
+      "name": "duplicate_of_sitrep_3",
+      "doc": {
+        "doc_id": "4006",
+        "title": "Humanitarian Bulletin: Philippines, March 2024",
+        "url": "https://reliefweb.int/report/philippines/humanitarian-bulletin-march",
+        "date_created": "2024-03-15T09:00:00+00:00",
+        "sources": ["OCHA"],
+        "source_rank": 0,
+        "body": "HUMANITARIAN BULLETIN\n\nFlooding continues to affect Luzon. OCHA reports that 145,000 people have been affected across four provinces as of 13 March 2024. Partners are prioritising shelter and WASH assistance."
+      },
+      "response": "{\"figures\": [{\"value\": 145000, \"unit\": \"people\", \"quote\": \"OCHA reports that 145,000 people have been affected across four provinces as of 13 March 2024.\", \"stated_by\": \"OCHA\", \"area\": \"four provinces\", \"date\": \"2024-03-13\", \"cumulative_or_new\": \"unstated\"}]}",
+      "expected": [
+        {"value": 145000.0, "unit": "people", "stated_by": "OCHA", "date": "2024-03-13"}
+      ],
+      "expected_rejected": []
+    },
+    {
+      "name": "media_report",
+      "doc": {
+        "doc_id": "4007",
+        "title": "Philippines floods leave tens of thousands displaced",
+        "url": "https://reliefweb.int/report/philippines/media-report",
+        "date_created": "2024-03-13T18:00:00+00:00",
+        "sources": ["Thomson Reuters Foundation", "Media"],
+        "source_rank": 6,
+        "body": "MANILA - At least 100,000 people have been affected by days of flooding in the northern Philippines, local media reported on Wednesday. Rescue teams used boats to reach stranded residents."
+      },
+      "response": "{\"figures\": [{\"value\": 100000, \"unit\": \"people\", \"quote\": \"At least 100,000 people have been affected by days of flooding in the northern Philippines, local media reported on Wednesday.\", \"stated_by\": \"local media\", \"area\": \"northern Philippines\", \"date\": \"\", \"cumulative_or_new\": \"unstated\"}]}",
+      "expected": [
+        {"value": 100000.0, "unit": "people", "stated_by": "local media", "date": ""}
+      ],
+      "expected_rejected": []
+    },
+    {
+      "name": "figure_above_exposure_ceiling",
+      "doc": {
+        "doc_id": "4008",
+        "title": "Regional overview: Southeast Asia monsoon season",
+        "url": "https://reliefweb.int/report/philippines/regional-overview",
+        "date_created": "2024-03-17T09:00:00+00:00",
+        "sources": ["OCHA Regional Office for Asia and the Pacific"],
+        "source_rank": 0,
+        "body": "REGIONAL OVERVIEW\n\nAcross the region, 9,000,000 people have been affected by monsoon flooding since the start of the season. Country-level breakdowns are provided in the annex."
+      },
+      "response": "{\"figures\": [{\"value\": 9000000, \"unit\": \"people\", \"quote\": \"Across the region, 9,000,000 people have been affected by monsoon flooding since the start of the season.\", \"stated_by\": \"OCHA\", \"area\": \"region\", \"date\": \"\", \"cumulative_or_new\": \"cumulative\"}]}",
+      "expected": [
+        {"value": 9000000.0, "unit": "people", "stated_by": "OCHA", "date": ""}
+      ],
+      "expected_rejected": []
+    },
+    {
+      "name": "quote_not_in_document",
+      "doc": {
+        "doc_id": "4009",
+        "title": "Philippines: flash update",
+        "url": "https://reliefweb.int/report/philippines/flash-update",
+        "date_created": "2024-03-11T06:00:00+00:00",
+        "sources": ["OCHA"],
+        "source_rank": 0,
+        "body": "FLASH UPDATE\n\nFlooding was reported in three municipalities overnight. Assessments are under way and figures are expected later today."
+      },
+      "response": "{\"figures\": [{\"value\": 75000, \"unit\": \"people\", \"quote\": \"A total of 75,000 people have been affected in the three municipalities.\", \"stated_by\": \"OCHA\", \"area\": \"three municipalities\", \"date\": \"2024-03-11\", \"cumulative_or_new\": \"unstated\"}]}",
+      "expected": [],
+      "expected_rejected": ["quote_not_found_in_document"]
+    },
+    {
+      "name": "per_province_figures_not_summed",
+      "doc": {
+        "doc_id": "4010",
+        "title": "Provincial disaster offices report on flood impact",
+        "url": "https://reliefweb.int/report/philippines/provincial-report",
+        "date_created": "2024-03-10T09:00:00+00:00",
+        "sources": ["Government of the Philippines"],
+        "source_rank": 1,
+        "body": "PROVINCIAL REPORTS\n\nThe provincial government of Rizal reports 12,000 people affected. In Bulacan, the provincial disaster office reports 8,500 people affected. The provincial government of Pampanga reports 21,300 people affected. Consolidation at national level is pending."
+      },
+      "response": "{\"figures\": [{\"value\": 12000, \"unit\": \"people\", \"quote\": \"The provincial government of Rizal reports 12,000 people affected.\", \"stated_by\": \"provincial government of Rizal\", \"area\": \"Rizal\", \"date\": \"2024-03-10\", \"cumulative_or_new\": \"unstated\"}, {\"value\": 8500, \"unit\": \"people\", \"quote\": \"In Bulacan, the provincial disaster office reports 8,500 people affected.\", \"stated_by\": \"provincial disaster office\", \"area\": \"Bulacan\", \"date\": \"2024-03-10\", \"cumulative_or_new\": \"unstated\"}, {\"value\": 21300, \"unit\": \"people\", \"quote\": \"The provincial government of Pampanga reports 21,300 people affected.\", \"stated_by\": \"provincial government of Pampanga\", \"area\": \"Pampanga\", \"date\": \"2024-03-10\", \"cumulative_or_new\": \"unstated\"}]}",
+      "expected": [
+        {"value": 12000.0, "unit": "people", "stated_by": "provincial government of Rizal", "date": "2024-03-10"},
+        {"value": 8500.0, "unit": "people", "stated_by": "provincial disaster office", "date": "2024-03-10"},
+        {"value": 21300.0, "unit": "people", "stated_by": "provincial government of Pampanga", "date": "2024-03-10"}
+      ],
+      "expected_rejected": []
+    }
+  ]
+}

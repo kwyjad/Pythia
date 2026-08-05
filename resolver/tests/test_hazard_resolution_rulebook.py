@@ -324,3 +324,111 @@ def test_changing_the_conflict_factor_changes_flagging(tmp_path):
 
     assert orders_of_magnitude_apart(10_000, 50_000, strict) is True
     assert orders_of_magnitude_apart(10_000, 50_000, load_rulebook()) is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: document selection, figure precedence, extraction policy
+# ---------------------------------------------------------------------------
+
+
+def test_shipped_rulebook_carries_phase3_keys():
+    """Everything Phase 3 reads must be present and correctly typed."""
+    rb = load_rulebook()
+
+    # Document selection.
+    assert rb.get("reliefweb.documents.formats")
+    assert rb.get("reliefweb.documents.max_docs_per_cell") >= 1
+    assert rb.get("reliefweb.documents.candidate_pool_size") >= rb.get(
+        "reliefweb.documents.max_docs_per_cell"
+    )
+    assert rb.get("reliefweb.documents.source_priority")[0].lower() == "ocha"
+    assert rb.get("reliefweb.documents.body_char_limit") > 0
+
+    # Figure precedence: the spec's order, top to bottom.
+    tiers = [entry["tier"] for entry in rb.get("reliefweb.authority_precedence")]
+    assert tiers == ["government", "un_agency", "ifrc_ngo", "media"]
+
+    # Households conversion.
+    assert rb.get("reliefweb.household_conversion.default_multiplier") > 0
+    assert rb.get("reliefweb.household_conversion.by_iso3")["PHL"] > 0
+
+    # Extraction policy — a ROLE, never a model id.
+    assert rb.get("extraction.enabled") is True
+    assert ":" not in rb.get("extraction.model_role")
+    assert rb.get("extraction.max_calls_per_month") >= 0
+    assert rb.get("extraction.skip_when_higher_rung_populated") is True
+
+
+def test_a_model_ref_in_place_of_a_role_fails_validation(tmp_path):
+    """Model ids live in the model registry; the rulebook names a role."""
+    data = _shipped_data()
+    data["extraction"]["model_role"] = "anthropic:claude-haiku-4-5-20251001"
+    with pytest.raises(RulebookError, match="ROLE name"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_a_candidate_pool_smaller_than_the_cap_fails_validation(tmp_path):
+    """Otherwise 'most authoritative first' silently becomes 'most recent'."""
+    data = _shipped_data()
+    data["reliefweb"]["documents"]["candidate_pool_size"] = 5
+    data["reliefweb"]["documents"]["max_docs_per_cell"] = 30
+    with pytest.raises(RulebookError, match="candidate_pool_size"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_a_duplicate_authority_tier_fails_validation(tmp_path):
+    data = _shipped_data()
+    data["reliefweb"]["authority_precedence"].append(
+        {"tier": "government", "keywords": ["another"]}
+    )
+    with pytest.raises(RulebookError, match="duplicate tiers"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_a_non_positive_household_multiplier_fails_validation(tmp_path):
+    data = _shipped_data()
+    data["reliefweb"]["household_conversion"]["by_iso3"]["PHL"] = 0
+    with pytest.raises(RulebookError, match="by_iso3.PHL"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_a_numeric_token_budget_is_config_not_a_credential():
+    """The credential guard fires on secrets, not on settings named *_tokens.
+
+    `extraction.max_output_tokens` is a token BUDGET. Rejecting it would
+    push the next person to rename the setting to satisfy a check that was
+    wrong, which costs the rulebook its readability.
+    """
+    data = _shipped_data()
+    assert isinstance(data["extraction"]["max_output_tokens"], int)
+    assert validate_rulebook(data) == []
+
+
+def test_a_string_valued_credential_key_is_still_rejected(tmp_path):
+    """The refinement must not open a hole: a real key is still refused."""
+    data = _shipped_data()
+    data["extraction"]["api_token"] = "sk-ant-not-a-real-key"
+    with pytest.raises(RulebookError, match="looks like a credential"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_changing_the_authority_order_changes_the_preferred_figure(tmp_path):
+    """Change the YAML, change the answer — no code edit."""
+    from resolver.hazard_resolution.figures import authority_tier
+
+    rb = load_rulebook()
+    assert authority_tier("NDRRMC", rb)[0] < authority_tier("OCHA", rb)[0]
+
+    data = _shipped_data()
+    data["reliefweb"]["authority_precedence"].reverse()
+    flipped = load_rulebook(_write_rulebook(tmp_path, data))
+    assert authority_tier("NDRRMC", flipped)[0] > authority_tier("OCHA", flipped)[0]
+
+
+def test_changing_the_household_multiplier_changes_the_conversion(tmp_path):
+    from resolver.hazard_resolution.figures import household_multiplier
+
+    data = _shipped_data()
+    data["reliefweb"]["household_conversion"]["by_iso3"]["PHL"] = 9.0
+    changed = load_rulebook(_write_rulebook(tmp_path, data))
+    assert household_multiplier("PHL", changed) == (9.0, "by_iso3")

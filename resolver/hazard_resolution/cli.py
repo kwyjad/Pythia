@@ -6,14 +6,16 @@
 
 """``resolve-hazards`` — the resolution machine's CLI.
 
-Phases 1-2: cyclone and flood detection, zero resolutions, and the
-deterministic impact ladder.
+Phases 1-3: cyclone and flood detection, zero resolutions, the
+deterministic impact ladder, and LLM extraction of stated figures from
+ReliefWeb documents.
 
 Usage:
     resolve-hazards --hazard cyclone --month 2026-06
     resolve-hazards --hazard flood   --month 2026-06
     resolve-hazards --hazard flood   --months 2026-04 2026-05 2026-06
     resolve-hazards --hazard cyclone --month 2013-11 --scope ALL --countries PHL
+    resolve-hazards --hazard flood   --month 2026-06 --no-extract  # spend nothing
 
 Pipeline for one (hazard, month):
 
@@ -34,6 +36,11 @@ Pipeline for one (hazard, month):
        highest rung with a figure, label IDU values as lower bounds, apply
        the GDACS exposure ceiling and national population cap, and flag
        (never rewrite) on conflict. No candidate → NO_DATA, flagged.
+
+       Rung 2 is the only paid step: for a TRIGGERED cell whose higher
+       rungs are empty, ReliefWeb documents are fetched and a cheap model
+       transcribes the figures they state. Never for a non-triggered cell,
+       and never past extraction.max_calls_per_month.
 
 Answers written before month-end + freeze_days are marked provisional;
 from the deadline on they are final and immutable.
@@ -209,7 +216,8 @@ def sweep_and_resolve_zeros(
 
 
 def run_impact_ladder(
-    con, ym: str, hazard: str, rulebook, *, skip_fetch: bool, dry_run: bool
+    con, ym: str, hazard: str, rulebook, *, skip_fetch: bool, dry_run: bool,
+    no_extract: bool = False,
 ):
     """Fetch the ladder's sources and resolve every triggered cell."""
     from resolver.hazard_resolution import impact as impact_mod
@@ -222,6 +230,11 @@ def run_impact_ladder(
     fetches = impact_mod.fetch_ladder_sources(
         con, ym, hazard, rulebook, skip_fetch=skip_fetch or dry_run
     )
+    if no_extract:
+        LOG.info(
+            "[cli] --no-extract: ladder rung 2 (ReliefWeb extraction) is skipped; "
+            "no LLM calls will be made"
+        )
     return impact_mod.resolve_triggered_cells(
         con,
         ym=ym,
@@ -230,6 +243,11 @@ def run_impact_ladder(
         rulebook=rulebook,
         fetches=fetches,
         dry_run=dry_run,
+        extract=not no_extract,
+        # --skip-fetch means "reuse the stores"; for rung 2 that is the
+        # cached documents, and the extraction cache makes re-reading them
+        # free anyway.
+        fetch_documents=not skip_fetch,
     )
 
 
@@ -253,6 +271,16 @@ def _log_summary(hazard: str, ym: str, result, tally: SweepTally, ladder, dry: s
         LOG.info("  flagged for review:        %d", ladder.flagged)
         LOG.info("  provisional (pre-freeze):  %d", ladder.provisional)
         LOG.info("  frozen (skipped, logged):  %d", ladder.frozen_skipped)
+        LOG.info("  --- rung 2: ReliefWeb extraction ---")
+        LOG.info("  cells read:                %d", ladder.cells_extracted)
+        LOG.info("  cells skipped:             %d", ladder.cells_extraction_skipped)
+        LOG.info("  documents read:            %d", ladder.docs_read)
+        LOG.info("  LLM calls:                 %d", ladder.extraction_calls)
+        LOG.info("  extraction spend:          $%.4f", ladder.extraction_cost_usd)
+        if ladder.extraction_budget_capped:
+            LOG.warning(
+                "  extraction BUDGET CAPPED — some cells have unread documents"
+            )
         if ladder.unavailable_sources:
             LOG.warning(
                 "  ladder sources UNAVAILABLE: %s (their rungs are unread, not empty)",
@@ -270,6 +298,7 @@ def run_cyclone_month(
     no_sweep: bool,
     dry_run: bool,
     no_ladder: bool = False,
+    no_extract: bool = False,
     rulebook=None,
     con=None,
 ) -> int:
@@ -369,7 +398,8 @@ def run_cyclone_month(
         LOG.info("[cli] --no-ladder: skipping the impact ladder")
     elif not dry_run:
         ladder = run_impact_ladder(
-            con, ym, result.hazard, rulebook, skip_fetch=skip_fetch, dry_run=dry_run
+            con, ym, result.hazard, rulebook, skip_fetch=skip_fetch,
+            dry_run=dry_run, no_extract=no_extract,
         )
 
     _log_summary(
@@ -387,6 +417,7 @@ def run_flood_month(
     no_sweep: bool,
     dry_run: bool,
     no_ladder: bool = False,
+    no_extract: bool = False,
     rulebook=None,
     con=None,
 ) -> int:
@@ -479,7 +510,8 @@ def run_flood_month(
         LOG.info("[cli] --no-ladder: skipping the impact ladder")
     elif not dry_run:
         ladder = run_impact_ladder(
-            con, ym, hazard, rulebook, skip_fetch=skip_fetch, dry_run=dry_run
+            con, ym, hazard, rulebook, skip_fetch=skip_fetch,
+            dry_run=dry_run, no_extract=no_extract,
         )
 
     _log_summary(hazard, ym, result, tally, ladder, " (dry-run)" if dry_run else "")
@@ -548,6 +580,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Skip the impact ladder (detection and zeros only)",
     )
     parser.add_argument(
+        "--no-extract",
+        action="store_true",
+        help=(
+            "Skip ladder rung 2 (LLM extraction from ReliefWeb documents). "
+            "No model is called and nothing is spent"
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Detect and sweep but write nothing (implies --skip-fetch)",
@@ -574,6 +614,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         skip_fetch=args.skip_fetch,
         no_sweep=args.no_sweep,
         no_ladder=args.no_ladder,
+        no_extract=args.no_extract,
         dry_run=args.dry_run,
     )
 

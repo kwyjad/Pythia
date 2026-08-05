@@ -48,7 +48,8 @@ credential (API keys come from environment variables only).
 **Where the data lives.** All tables sit in the resolver DuckDB alongside
 the existing `facts_resolved`: thin raw caches per source (`haz_raw_*`),
 detection verdicts (`haz_triggers`), candidate figures
-(`haz_impact_candidates`), final answers (`haz_resolutions`), the post-freeze
+(`haz_impact_candidates`), the document-extraction cache and cost ledger
+(`haz_doc_extractions`), final answers (`haz_resolutions`), the post-freeze
 audit log (`haz_revisions`), and historical base rates
 (`haz_base_rates_occurrence`, `haz_base_rates_severity`). See
 [`schema.py`](schema.py).
@@ -77,6 +78,9 @@ resolve-hazards --hazard cyclone --month 2026-06 --skip-fetch
 
 # Detection and zeros only, no ladder
 resolve-hazards --hazard flood --month 2026-06 --no-ladder
+
+# Run the ladder but skip the one paid step (no model calls, no spend)
+resolve-hazards --hazard flood --month 2026-06 --no-extract
 ```
 
 ## Phase 1: the cyclone path (implemented)
@@ -189,8 +193,8 @@ collected into `haz_impact_candidates` and the reconciler walks
 
 1. **EM-DAT** — curated, definitionally stable, and slow (hence the freeze
    window).
-2. **ReliefWeb-extracted** — arrives in Phase 3; until then the rung is
-   simply empty, which the ladder already handles.
+2. **ReliefWeb-extracted** — figures a cheap model transcribed out of
+   humanitarian reporting (Phase 3, below).
 3. **IFRC GO** — a real stated `num_affected`, thin coverage.
 4. **IDMC IDU** — displacement, i.e. a **lower bound**.
 
@@ -251,7 +255,114 @@ upstream rename fails loudly in CI rather than at runtime in production.
 vendored boundaries need no credentials. Keys are read from the
 environment only; the rulebook loader rejects any key that looks like one.
 
-Later phases add the ReliefWeb LLM extraction step (rung 2), the IPC
-drought rule, and the backcast. Costs stay well under USD 50/month: every
-data source is free; the only spend is the cheap-model document
-extraction.
+## Phase 3: reading the documents (implemented)
+
+Rung 2 is the machine's only paid step, and the only place a model
+touches a resolution. It exists because most floods are never written up
+in EM-DAT and never reach an IFRC field report — but somebody, somewhere,
+published a sentence with a number in it.
+
+**What the model does.** One call per document, with a single job:
+transcribe every people-affected figure the document explicitly states,
+each with the sentence it came from. It is forbidden to estimate, to
+convert units, to sum across areas, or to use anything it knows that the
+document does not say. If the document states nothing, an empty list is
+the right answer.
+
+**Why that holds.** Not because the prompt says so. Three mechanisms:
+
+- **Quote verification** — every figure must arrive with a quote, and the
+  quote must be found in the document text that was actually sent (after
+  whitespace/typography normalisation only, so no words are dropped from
+  either side). A figure whose quote cannot be found is discarded with a
+  reason. To fabricate a number, a model would have to fabricate a
+  sentence that is already in the document.
+- **A closed schema** — values must be numbers, units must be `people` or
+  `households`. Anything else is rejected, never coerced. A households
+  figure silently read as people understates by about five.
+- **No arithmetic anywhere near the model** — everything a figure could
+  be *turned into* happens afterwards, deterministically, in
+  [`figures.py`](figures.py).
+
+**Document selection** ([`reliefweb_docs.py`](reliefweb_docs.py)). For
+**triggered country-months only**: one ReliefWeb query per cell filtered
+on country, the hazard's disaster types (the same taxonomy the silence
+sweep uses, so detection and extraction cannot disagree about what a flood
+is), the content formats in `reliefweb.documents.formats`, and the month
+window plus `publication_pad_days`. Hits are ranked by
+`documents.source_priority` (OCHA, then governments, then UN agencies…),
+ties broken by recency then document id, and the top
+`max_docs_per_cell` (default 30) are cached in `haz_raw_reliefweb_docs`.
+Bodies are stored **already truncated** to `body_char_limit`, because the
+quote verifier checks against the text that was sent.
+
+**Deterministic post-processing** ([`figures.py`](figures.py)), in order:
+
+1. **Households → people**, and only when the document said households.
+   The multiplier comes from `reliefweb.household_conversion`
+   (per-country, with a declared default) and the whole conversion —
+   stated value, multiplier, where the multiplier came from — is recorded
+   on the candidate, so a reader can undo it.
+2. **Ceiling rejection.** A figure above `sanity.ceiling_multiplier` ×
+   GDACS exposed population is **rejected** here, with a logged reason.
+   This is deliberately stricter than the reconciler, which flags a
+   ceiling breach and keeps the value: there, a curated source
+   disagreeing with modelled exposure is a finding worth a human's time;
+   here, it is far more likely a mis-transcription — a regional total, or
+   a figure about a different emergency in the same document — and
+   admitting it would let a transcription error outrank an EM-DAT record.
+3. **Deduplication.** The same sentence republished across five situation
+   reports is one statement; the same figure for the same area worded
+   differently is one figure. Both collapse, and what was dropped is
+   recorded.
+4. **Precedence.** `reliefweb.authority_precedence` orders attributions —
+   government > UN agency > IFRC/NGO > media — and within a tier the
+   latest-dated figure wins. Unrecognised attributions rank last but are
+   **not** discarded: an unattributed figure in an OCHA sitrep is still
+   the best evidence in the room when nothing else is available.
+
+Survivors are written to `haz_impact_candidates` with the quote, the
+document URL, the extraction model, and a `preference_rank` — 0 being the
+figure the rulebook prefers. The reconciler reads that rank instead of
+its usual "largest stated figure wins", because when several bodies quote
+different assessments of one flood, the biggest number is not the right
+answer.
+
+**Cost control.** Three guards, because this is the only line item:
+
+- documents are capped per cell (`documents.max_docs_per_cell`);
+- calls are capped per **calendar month across every run**
+  (`extraction.max_calls_per_month`), counted from the
+  `haz_doc_extractions` ledger — so three CLI invocations in one month
+  share one allowance rather than each spending it;
+- a cell whose **higher** rung already has a figure is skipped entirely
+  (`extraction.skip_when_higher_rung_populated`, on by default).
+  `reliefweb_extracted` sits below EM-DAT and cannot win those cells, so
+  reading them buys only adjacent-rung conflict flags — at roughly a
+  quarter of a dollar per cell. Turn it off to buy them anyway.
+
+Extractions are cached in `haz_doc_extractions` keyed by (document, model,
+prompt version), so **a re-run costs nothing** and the monthly cap counts
+real spend rather than repeated work. Bumping `extraction.prompt_version`
+is what invalidates the cache.
+
+A cell that ran out of budget records `budget_capped` in its provenance:
+its remaining documents are **unread**, which must never be mistaken for
+ReliefWeb having been silent.
+
+**Model choice.** The rulebook names a *role* (`extraction.model_role:
+hazard_extraction`), not a model id; `pythia/config.yaml` maps that role
+to a Haiku-class model. The rulebook owns the policy, the model registry
+owns the model — putting an id in the rulebook would fork the repo's
+single source of truth for model choice.
+
+**Budget arithmetic.** A Haiku-class call over a 24,000-character document
+is roughly 6k input + 500 output tokens, about USD 0.009. At
+`max_calls_per_month: 1500` that is near USD 14/month — comfortably inside
+the USD 50 ceiling, with room for a backcast. Every other source in the
+machine is free.
+
+**Environment.** `RELIEFWEB_APPNAME` and the provider key for whichever
+model backs `hazard_extraction` (`ANTHROPIC_API_KEY` by default).
+
+Later phases add the IPC drought rule and the backcast.
