@@ -522,8 +522,10 @@ extraction:
   enabled: true
   model_role: hazard_extraction
   # Bumping this invalidates the extraction cache: a document is re-read
-  # when the prompt version or the model changes, and only then.
-  prompt_version: v1
+  # when the prompt version or the model changes, and only then. v2: the
+  # prompt now names the target month and the country by name, and the
+  # parser additionally requires the figure's value to appear in its quote.
+  prompt_version: v2
   temperature: 0.0
   max_output_tokens: 2000
   request_timeout_sec: 120

@@ -421,3 +421,68 @@ def test_run_with_no_months_in_range_is_not_a_failure(con, rulebook):
     )
     assert run.months_planned == 0
     assert run.months_failed == 0
+
+
+def test_the_ledger_records_extraction_spend_and_frozen_skips(con, rulebook):
+    """The extraction/frozen columns are read back, not left at zero.
+
+    Regression: ``record_month`` wrote extraction_calls / extraction_cost_usd
+    / frozen_skipped from keys ``month_counts`` never produced, so the
+    backcast's only durable cost record was always 0.
+    """
+
+    runner, _ = _writing_runner(status="RESOLVED_VALUE")
+    _writing_runner.con, _writing_runner.rulebook = con, rulebook
+
+    # Ledger rows the extraction step would have written for this target month.
+    con.execute(
+        """
+        INSERT INTO haz_doc_extractions
+            (doc_id, iso3, year, month, hazard, model, prompt_version, status,
+             figures_json, prompt_tokens, completion_tokens, cost_usd)
+        VALUES
+            ('d1', 'PHL', 2015, 1, 'FL', 'm', 'v2', 'ok', '{}', 6000, 200, 0.01),
+            ('d2', 'PHL', 2015, 1, 'FL', 'm', 'v2', 'ok', '{}', 6000, 200, 0.02),
+            ('d3', 'PHL', 2015, 1, 'FL', 'm', 'v2', 'error', '{}', 0, 0, 0.0)
+        """
+    )
+
+    bc.run_backcast(
+        hazard_name="flood", rulebook=rulebook, con=con, today=TODAY,
+        from_ym="2015-01", to_ym="2015-01", runner=runner,
+    )
+
+    calls, cost = con.execute(
+        """
+        SELECT extraction_calls, extraction_cost_usd
+        FROM haz_backcast_progress WHERE hazard = 'FL' AND ym = '2015-01'
+        """
+    ).fetchone()
+    assert calls == 2, "billed rows count; the zero-token error row does not"
+    assert cost == pytest.approx(0.03)
+
+
+def test_time_budget_defers_cleanly_and_resumes(con, rulebook):
+    """A spent time budget defers months (exit-0 semantics), never fails them."""
+
+    runner, calls = _writing_runner(status="RESOLVED_ZERO")
+    _writing_runner.con, _writing_runner.rulebook = con, rulebook
+
+    # A budget that is already spent when the loop starts: every month defers.
+    run = bc.run_backcast(
+        hazard_name="flood", rulebook=rulebook, con=con, today=TODAY,
+        from_ym="2015-01", to_ym="2015-03", runner=runner,
+        time_budget_min=1e-9,
+    )
+    assert run.months_run == 0
+    assert run.months_failed == 0
+    assert run.months_deferred == 3
+    assert calls == [], "no month may start after the budget is spent"
+
+    # The next (unbudgeted) run picks up exactly where the last stopped.
+    run2 = bc.run_backcast(
+        hazard_name="flood", rulebook=rulebook, con=con, today=TODAY,
+        from_ym="2015-01", to_ym="2015-03", runner=runner,
+    )
+    assert run2.months_run == 3
+    assert run2.months_deferred == 0

@@ -653,7 +653,8 @@ def test_a_new_prompt_version_invalidates_the_cache(con, rulebook):
     budget = extract_mod.ExtractionBudget(max_calls_per_month=1000)
     _extract_all(con, rulebook, documents=documents, budget=budget)
 
-    bumped = make_rulebook({"extraction": {"prompt_version": "v2"}})
+    current = str(rulebook.get("extraction.prompt_version"))
+    bumped = make_rulebook({"extraction": {"prompt_version": current + "-bumped"}})
     _, calls = _extract_all(con, bumped, documents=documents, budget=budget)
     assert len(calls) == 2
 
@@ -670,7 +671,7 @@ def test_every_call_is_recorded_in_the_ledger(con, rulebook):
     assert len(rows) == 2
     for row in rows:
         assert row[1] == MODEL
-        assert row[2] == "v1"
+        assert row[2] == str(rulebook.get("extraction.prompt_version"))
         assert row[3] == "ok"
         assert row[5] == 6000  # the seam's reported prompt tokens
         assert row[7]
@@ -694,6 +695,244 @@ def test_a_failed_call_is_recorded_as_an_error_not_as_silence(con, rulebook):
     ).fetchone()
     assert row[0] == "error"
     assert "timeout" in row[1]
+
+
+def test_a_failed_call_is_retried_on_the_next_run(con, rulebook):
+    """An error row is not a cache entry — the next run reads the document.
+
+    This is the poisoned-cache regression: before the fix, a transient
+    outage wrote status='error' rows that load_cached_extraction served
+    forever, so a document that failed once was never read again.
+    """
+
+    documents = golden_documents()[:1]
+
+    def failing(model_ref, prompt, rulebook_):
+        return "", {"prompt_tokens": 100, "completion_tokens": 0}, "provider timeout"
+
+    first = extract_mod.extract_for_cell(
+        con, iso3=ISO3, ym=YM, hazard=HAZARD, rulebook=rulebook,
+        budget=extract_mod.ExtractionBudget(max_calls_per_month=10),
+        documents=documents, call=failing, model_ref=MODEL,
+    )
+    assert first.docs_failed == 1
+
+    good, calls = golden_call_fn()
+    second = extract_mod.extract_for_cell(
+        con, iso3=ISO3, ym=YM, hazard=HAZARD, rulebook=rulebook,
+        budget=extract_mod.ExtractionBudget(max_calls_per_month=10),
+        documents=documents, call=good, model_ref=MODEL,
+    )
+    assert len(calls) == 1, "the errored document must be re-read, not served from cache"
+    assert second.docs_cached == 0
+    assert second.figures, "the retry's figures must land"
+    row = con.execute("SELECT status FROM haz_doc_extractions").fetchone()
+    assert row[0] == "ok", "the retry replaces the error row"
+
+
+def test_a_call_that_never_reached_the_provider_costs_no_budget(con, rulebook):
+    """Missing API key / breaker cooldown must not burn the monthly cap.
+
+    Those calls return instantly with zero token usage; charging them wrote
+    poison rows AND consumed the 1500-call allowance on calls that never
+    left the process.
+    """
+
+    def unreached(model_ref, prompt, rulebook_):
+        return "", {}, "missing ANTHROPIC_API_KEY"
+
+    budget = extract_mod.ExtractionBudget(max_calls_per_month=10)
+    extraction = extract_mod.extract_for_cell(
+        con, iso3=ISO3, ym=YM, hazard=HAZARD, rulebook=rulebook,
+        budget=budget, documents=golden_documents()[:3], call=unreached, model_ref=MODEL,
+    )
+    assert extraction.docs_failed == 3
+    assert extraction.calls_made == 0
+    assert budget.calls_this_run == 0
+    # The error rows exist for the audit trail but count nothing toward the
+    # calendar-month spend cap — no tokens were ever billed.
+    assert extract_mod.calls_this_calendar_month(con) == 0
+
+
+def test_the_extraction_cache_is_scoped_to_the_cell(con, rulebook):
+    """A document shared across cells is answered per cell, never reused.
+
+    The prompt names the country, the hazard and the target month, so a
+    cached answer to one cell's question is not an answer to another's — a
+    typhoon-plus-flooding sitrep must be read once per hazard.
+    """
+
+    documents = golden_documents()[:1]
+
+    first_call, first_calls = golden_call_fn()
+    extract_mod.extract_for_cell(
+        con, iso3=ISO3, ym=YM, hazard="FL", rulebook=rulebook,
+        budget=extract_mod.ExtractionBudget(max_calls_per_month=10),
+        documents=documents, call=first_call, model_ref=MODEL,
+    )
+    assert len(first_calls) == 1
+
+    second_call, second_calls = golden_call_fn()
+    second = extract_mod.extract_for_cell(
+        con, iso3=ISO3, ym=YM, hazard="TC", rulebook=rulebook,
+        budget=extract_mod.ExtractionBudget(max_calls_per_month=10),
+        documents=documents, call=second_call, model_ref=MODEL,
+    )
+    assert len(second_calls) == 1, "the other hazard's cell must make its own call"
+    assert second.docs_cached == 0
+
+    third_call, third_calls = golden_call_fn()
+    third = extract_mod.extract_for_cell(
+        con, iso3=ISO3, ym=YM, hazard="FL", rulebook=rulebook,
+        budget=extract_mod.ExtractionBudget(max_calls_per_month=10),
+        documents=documents, call=third_call, model_ref=MODEL,
+    )
+    assert len(third_calls) == 0, "the SAME cell's re-run is still free"
+    assert third.docs_cached == 1
+
+
+def test_a_fabricated_value_paired_with_a_real_sentence_is_rejected():
+    """Quote-in-body alone is not verification — the value must be IN the quote."""
+
+    case = _case("ocha_situation_report")
+    doc = case["doc"]
+    real_sentence = doc["body"].split(".")[0] + "."
+    response = json.dumps(
+        {
+            "figures": [
+                {
+                    "value": 987_654,
+                    "unit": "people",
+                    "quote": real_sentence,
+                    "stated_by": "",
+                    "area": "",
+                    "date": "",
+                    "cumulative_or_new": "unstated",
+                }
+            ]
+        }
+    )
+    figures, rejected = extract_mod.parse_response(response, doc, MODEL)
+    if any(f.value == 987_654 for f in figures):  # the sentence really states it?
+        raise AssertionError("test fixture invalid: pick a sentence without the value")
+    assert figures == []
+    assert any(r.get("reason") == "value_not_found_in_quote" for r in rejected)
+
+
+def test_value_matching_reads_grouped_and_worded_numbers():
+    assert extract_mod._value_stated_in_quote(12345, "some 12,345 people were affected")
+    assert extract_mod._value_stated_in_quote(1_200_000, "about 1.2 million people affected")
+    assert extract_mod._value_stated_in_quote(5000, "5 000 persons affected")
+    assert not extract_mod._value_stated_in_quote(500_000, "heavy rains continued for days.")
+    assert not extract_mod._value_stated_in_quote(500_000, "assistance reached 3,000 people")
+
+
+def test_the_prompt_names_the_period_and_the_country():
+    doc = _case("ocha_situation_report")["doc"]
+    prompt = extract_mod.build_prompt(doc, ISO3, HAZARD, "the Philippines", ym="2024-03")
+    assert "March 2024" in prompt
+    assert "the Philippines" in prompt
+
+
+def test_real_calls_write_llm_calls_telemetry_and_seam_calls_do_not(con, rulebook, monkeypatch):
+    """The production seam writes cost telemetry; an injected test seam never does.
+
+    The machine's spend must reach ``llm_calls`` (the Costs page reads
+    nothing else), and network-free tests must not reach for the Pythia DB.
+    """
+
+    logged: list[dict] = []
+    fake_call, _ = golden_call_fn()
+    monkeypatch.setattr(extract_mod, "_default_call", fake_call)
+    monkeypatch.setattr(
+        extract_mod, "_log_llm_call", lambda **kw: logged.append(kw)
+    )
+
+    extract_mod.extract_for_cell(
+        con, iso3=ISO3, ym=YM, hazard=HAZARD, rulebook=rulebook,
+        budget=extract_mod.ExtractionBudget(max_calls_per_month=10),
+        documents=golden_documents()[:2], call=None, model_ref=MODEL,
+    )
+    assert len(logged) == 2
+    assert logged[0]["iso3"] == ISO3
+    assert logged[0]["hazard"] == HAZARD
+
+    logged.clear()
+    seam, _ = golden_call_fn()
+    extract_mod.extract_for_cell(
+        con, iso3="VNM", ym=YM, hazard=HAZARD, rulebook=rulebook,
+        budget=extract_mod.ExtractionBudget(max_calls_per_month=10),
+        documents=golden_documents()[:2], call=seam, model_ref=MODEL,
+    )
+    assert logged == [], "an injected seam is not a billable call"
+
+
+def test_the_telemetry_row_lands_in_llm_calls_with_the_resolution_phase(
+    tmp_path, monkeypatch
+):
+    """End to end: _log_llm_call writes a costed row phase='hazard_extraction'.
+
+    That phase maps to the Costs page's 'resolution' bucket
+    (resolver/query/costs.py::phase_group) — the pairing that keeps the
+    machine's spend out of 'other'.
+    """
+
+    pythia_db = tmp_path / "pythia.duckdb"
+    monkeypatch.setenv("PYTHIA_DB_URL", f"duckdb:///{pythia_db}")
+
+    from pythia.db import schema as pythia_schema
+
+    con = pythia_schema.connect(read_only=False)
+    pythia_schema.ensure_schema(con)
+
+    extract_mod._log_llm_call(
+        model_ref=MODEL,
+        prompt="extract the figures",
+        response='{"figures": []}',
+        usage={"prompt_tokens": 6000, "completion_tokens": 200},
+        error="",
+        iso3=ISO3,
+        hazard=HAZARD,
+        ym=YM,
+    )
+
+    row = con.execute(
+        """
+        SELECT phase, iso3, hazard_code, model_id, cost_usd
+        FROM llm_calls WHERE phase = 'hazard_extraction'
+        """
+    ).fetchone()
+    assert row is not None, "the rich telemetry row must be written"
+    assert row[1] == ISO3
+    assert row[2] == HAZARD
+    assert "haiku" in str(row[3])
+    assert row[4] and row[4] > 0, "the row must carry a non-zero cost"
+
+    from resolver.query.costs import phase_group
+
+    assert phase_group(row[0]) == "resolution"
+
+
+def test_the_cap_still_collects_already_paid_cached_figures(con, rulebook):
+    """Budget exhaustion stops FRESH reads only — cached figures still land."""
+
+    documents = golden_documents()[:3]
+    call, _ = golden_call_fn()
+    # Pay for all three documents first.
+    first = extract_mod.extract_for_cell(
+        con, iso3=ISO3, ym=YM, hazard=HAZARD, rulebook=rulebook,
+        budget=extract_mod.ExtractionBudget(max_calls_per_month=10),
+        documents=documents, call=call, model_ref=MODEL,
+    )
+    # Now the month's cap is spent: a re-run must still return every cached
+    # figure rather than abandoning them at the first uncached document.
+    capped = extract_mod.ExtractionBudget(max_calls_per_month=3, used_this_month=3)
+    second = extract_mod.extract_for_cell(
+        con, iso3=ISO3, ym=YM, hazard=HAZARD, rulebook=rulebook,
+        budget=capped, documents=documents, call=call, model_ref=MODEL,
+    )
+    assert second.docs_cached == 3
+    assert [f.value for f in second.figures] == [f.value for f in first.figures]
 
 
 # ---------------------------------------------------------------------------

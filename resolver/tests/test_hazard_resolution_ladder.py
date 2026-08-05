@@ -477,3 +477,45 @@ def test_reconcile_is_deterministic(rulebook):
     ]
     runs = [_reconcile(candidates, rulebook) for _ in range(5)]
     assert len({(r.status, r.value, r.rule_fired, tuple(r.flags)) for r in runs}) == 1
+
+
+def test_one_countrys_exception_does_not_kill_the_month(con, rulebook, monkeypatch):
+    """A cell that raises is recorded and skipped; every other cell resolves.
+
+    The invariant the CLI comment states — one bad month must not cost the
+    others their run — holds one level down too: one bad COUNTRY must not
+    cost the rest of the month their answers.
+    """
+
+    from resolver.hazard_resolution import impact as impact_mod
+    from resolver.tests.hazard_resolution_utils import seed_trigger
+
+    for iso3 in ("AAA", "BBB", "CCC"):
+        seed_trigger(con, iso3=iso3, ym=YM, hazard="FL", triggered=True)
+
+    real = impact_mod.national_population
+
+    def explode_for_bbb(con_, iso3, year):
+        if iso3.upper() == "BBB":
+            raise RuntimeError("synthetic per-country failure")
+        return real(con_, iso3, year)
+
+    monkeypatch.setattr(impact_mod, "national_population", explode_for_bbb)
+
+    run = impact_mod.resolve_triggered_cells(
+        con,
+        ym=YM,
+        hazard="FL",
+        iso3s=["AAA", "BBB", "CCC"],
+        rulebook=rulebook,
+        extract=False,
+        today=AFTER_FREEZE,
+    )
+
+    assert run.cells == 2, "AAA and CCC must still be walked"
+    assert len(run.failed_cells) == 1 and run.failed_cells[0].startswith("BBB:")
+    resolved = {
+        row[0]
+        for row in con.execute("SELECT iso3 FROM haz_resolutions").fetchall()
+    }
+    assert resolved == {"AAA", "CCC"}, "the failed cell writes nothing; the others stand"

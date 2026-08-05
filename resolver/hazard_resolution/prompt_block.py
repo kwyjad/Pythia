@@ -71,10 +71,6 @@ MACHINE_HAZARDS: frozenset[str] = frozenset(HAZARD_CODE_BY_RULEBOOK_NAME.values(
 #: people-affected figures; nothing else may be anchored on them.
 MACHINE_METRIC = "PA"
 
-#: Hazards that walk the impact ladder. Drought resolves from IPC instead and
-#: gets its own two sentences (and its own caveat).
-_LADDER_HAZARDS = frozenset({"TC", "FL"})
-
 _MONTH_ABBR = {
     1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
     7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
@@ -340,30 +336,50 @@ def resolution_process_text(rulebook: Rulebook, hazard: str) -> str:
     )
 
 
-def _hazard_caveat(rulebook: Rulebook, hazard: str, severity: SeverityRow | None) -> str:
+def _window_end_year(window: str) -> int | None:
+    """The end year of a ``YYYY-MM..YYYY-MM`` source window, or None."""
+
+    try:
+        end = str(window).split("..")[1]
+        return int(end.split("-")[0])
+    except (IndexError, ValueError, AttributeError):
+        return None
+
+
+def _hazard_caveat(
+    rulebook: Rulebook,
+    hazard: str,
+    severity: SeverityRow | None,
+    occurrence_window: str = "",
+) -> str:
     """The one-line health warning a hazard's record needs, if it needs one."""
 
     hazard_up = (hazard or "").upper().strip()
     parts: list[str] = []
 
     name = RULEBOOK_NAME_BY_HAZARD_CODE.get(hazard_up)
-    if name:
+    # The backcast lookup lives INSIDE the DR branch: only drought's caveat
+    # uses it, and a missing backcast key must not be able to take down the
+    # whole TC/FL block through the loader's blanket handler.
+    if name and hazard_up == "DR":
         first_year = int(rulebook.get(f"backcast.{name}"))
-        window_end = None
-        if severity is not None and severity.window_end:
+        # Record depth ends where the OCCURRENCE record ends (the backcast
+        # window), not where the severity window does — the two differ, and
+        # severity may be absent entirely.
+        window_end = _window_end_year(occurrence_window)
+        if window_end is None and severity is not None and severity.window_end:
             window_end = int(severity.window_end)
-        if hazard_up == "DR":
-            depth = f" (~{window_end - first_year + 1}y)" if window_end else ""
+        depth = f" (~{window_end - first_year + 1}y)" if window_end else ""
+        parts.append(
+            f"CAVEAT: the drought record starts {first_year}{depth} and IPC "
+            "coverage is partial by country — a low rate here is weak "
+            "evidence of a low rate in the world."
+        )
+        if str(rulebook.get("drought.month_attribution")) == "analysis_window":
             parts.append(
-                f"CAVEAT: the drought record starts {first_year}{depth} and IPC "
-                "coverage is partial by country — a low rate here is weak "
-                "evidence of a low rate in the world."
+                "Values repeat across the months an analysis window covers; "
+                "never sum them."
             )
-            if str(rulebook.get("drought.month_attribution")) == "analysis_window":
-                parts.append(
-                    "Values repeat across the months an analysis window covers; "
-                    "never sum them."
-                )
 
     lower_bound_share = 0.0
     if severity is not None:
@@ -421,7 +437,6 @@ def render_base_rate_block(
             ordered.append(month)
 
     by_month = {row.calendar_month: row for row in occurrence}
-    window = next((row.source_window for row in occurrence if row.source_window), "")
 
     lines = [
         f"PA RESOLUTION BASE RATES — {hazard_word} people affected, {where}",
@@ -433,27 +448,44 @@ def render_base_rate_block(
     # denominator is unreadable, and that is not a saving worth making.
     shown = [by_month[m] for m in ordered if m in by_month]
     shared_years = shown[0].n_years if shown and len({r.n_years for r in shown}) == 1 else None
+    # The header's window comes from the months actually SHOWN (falling back
+    # to any published month) — a header must not describe rows it isn't
+    # rendering.
+    window = next(
+        (row.source_window for row in shown if row.source_window),
+        next((row.source_window for row in occurrence if row.source_window), ""),
+    )
 
-    header = "P(qualifying event)"
-    if window:
-        header += f", {window} backcast"
-    if shared_years is not None:
-        header += f", {shared_years}y assessed"
-    lines.append(f"{header}:")
-    cells = []
-    for month in ordered:
-        row = by_month.get(month)
-        if row is None:
-            # Published only above base_rates.occurrence.min_years: a rate
-            # withheld for a thin denominator must not read as a low rate.
-            cells.append(f"{_MONTH_ABBR[month]} n/a")
-        elif shared_years is not None:
-            cells.append(f"{_MONTH_ABBR[month]} {terse_pct(row.p_occurrence)}")
-        else:
-            cells.append(
-                f"{_MONTH_ABBR[month]} {terse_pct(row.p_occurrence)}(n={row.n_years}y)"
-            )
-    lines.append("  " + "  ".join(cells))
+    if not shown:
+        # Every forecast-window month was withheld by the min_years floor.
+        # A table of six n/a cells under a bare header would read as an
+        # assertion of a table that carries no rate — one sentence says the
+        # same thing honestly.
+        lines.append(
+            "P(qualifying event): no month in this forecast window has a "
+            "published rate (denominator below base_rates.occurrence.min_years)."
+        )
+    else:
+        header = "P(qualifying event)"
+        if window:
+            header += f", {window} backcast"
+        if shared_years is not None:
+            header += f", {shared_years}y assessed"
+        lines.append(f"{header}:")
+        cells = []
+        for month in ordered:
+            row = by_month.get(month)
+            if row is None:
+                # Published only above base_rates.occurrence.min_years: a rate
+                # withheld for a thin denominator must not read as a low rate.
+                cells.append(f"{_MONTH_ABBR[month]} n/a")
+            elif shared_years is not None:
+                cells.append(f"{_MONTH_ABBR[month]} {terse_pct(row.p_occurrence)}")
+            else:
+                cells.append(
+                    f"{_MONTH_ABBR[month]} {terse_pct(row.p_occurrence)}(n={row.n_years}y)"
+                )
+        lines.append("  " + "  ".join(cells))
 
     if severity is None or severity.n_events <= 0:
         lines.append(
@@ -497,7 +529,7 @@ def render_base_rate_block(
             + ", ".join(f"{source} {terse_pct(share)}" for source, share in shares)
         )
 
-    caveat = _hazard_caveat(rulebook, hazard_up, severity)
+    caveat = _hazard_caveat(rulebook, hazard_up, severity, occurrence_window=window)
     if caveat:
         lines.append(caveat)
 

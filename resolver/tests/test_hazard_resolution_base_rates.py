@@ -348,3 +348,27 @@ def test_compute_all_rebuilds_both_tables(con, rulebook):
 
     assert runs["occurrence"].rows_written == 1
     assert runs["severity"].rows_written == 1
+
+
+def test_severity_excludes_provisional_values(con, rulebook):
+    """A pre-freeze value is still revisable and must not enter the quantiles.
+
+    The stored window claims a frozen record; a quantile that moves when a
+    live month is revised is not a base rate.
+    """
+
+    for ym in ("2020-01", "2020-02", "2020-03"):
+        seed_resolution(con, iso3="PHL", ym=ym, status="RESOLVED_VALUE", value=10_000.0)
+    # A live, still-revisable answer with a wildly different value.
+    seed_resolution(
+        con, iso3="PHL", ym="2026-07", status="RESOLVED_VALUE",
+        value=9_000_000.0, provisional=True,
+    )
+
+    br.compute_severity(con, rulebook, hazards=["FL"], today=TODAY)
+    row = con.execute(
+        "SELECT n_events, q90 FROM haz_base_rates_severity WHERE iso3 = 'PHL' AND hazard = 'FL'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 3, "the provisional row must not be counted"
+    assert row[1] == 10_000.0, "the provisional value must not move the quantiles"
