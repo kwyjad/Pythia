@@ -60,6 +60,36 @@ flood:
   # GDACS alert colour that counts as a detected flood. Ordering is
   # green < orange < red; the configured level and anything above it trigger.
   gdacs_trigger_level: orange
+  gdacs:
+    # NOTE ON ENDPOINTS: the GDACS HTTP endpoints are deliberately NOT
+    # repeated here. Event discovery and per-event enrichment reuse
+    # resolver/connectors/gdacs.py, which owns those URLs; duplicating
+    # them into the rulebook would create two sources of truth for one
+    # address. What the rulebook owns is how the machine USES that
+    # connector — window, pacing, and the zero-safety coverage gate.
+    request_delay_sec: 1.0
+    enrich_workers: 6
+    # How many months of GDACS events to pull around the target month.
+    # Events are discovered over [month_start - lookback, month_end +
+    # lookahead] so a long-running flood that began earlier still lands
+    # in the store for its start-month attribution.
+    lookback_months: 3
+    lookahead_months: 1
+    # Zeros are only written when GDACS demonstrably covers the target
+    # month: the newest stored event must reach month_end -
+    # coverage_grace_days. An ingestion gap must never read as a quiet
+    # month (same principle as cyclone.ibtracs.coverage_grace_days).
+    coverage_grace_days: 7
+  reliefweb_sweep:
+    # Silence check for non-triggered flood country-months. Same two-query
+    # shape as the cyclone sweep — taxonomy filter, then keywords.
+    disaster_types: ["Flood", "Flash Flood"]
+    keywords: ["flood", "flooding", "flash flood", "inundation", "landslide"]
+    publication_pad_days: 14
+    max_hits_for_silence: 0
+    sample_size: 5
+    request_timeout_sec: 30
+    request_delay_sec: 0.5
 
 drought:
   # Drought skips the impact ladder and resolves against IPC data.
@@ -73,7 +103,26 @@ drought:
 
 # Resolutions freeze at month-end + freeze_days and are never reopened.
 # Later revisions are logged to haz_revisions but do not alter resolved values.
+# Before the deadline the machine still writes its answer, marked
+# provisional (haz_resolutions.provisional = TRUE); on or after it the row
+# is written final and becomes immutable.
 freeze_days: 60
+
+# EVENT-TO-MONTH ATTRIBUTION.
+# A source event carries a date RANGE, and a reported figure describes the
+# whole event, not a month of it. Two separate decisions:
+#
+#   detection  — an event is DETECTED in every month its range overlaps,
+#                so a flood running 28 Jan .. 4 Feb triggers both months.
+#   attribution — its people-affected FIGURE is attributed WHOLLY to the
+#                START month. Figures are never split across months:
+#                splitting would invent a monthly breakdown no source
+#                stated, which the machine is not allowed to do. The full
+#                span is recorded in provenance (event_span) so a reader
+#                can see the figure covers more than the month it sits in.
+event_attribution:
+  detection: overlap        # every overlapped month detects the event
+  figure: start_month       # the figure lands wholly in the start month
 
 # Impact precedence ladder, highest rung first. When a hazard is detected,
 # the machine takes the people-affected figure from the highest rung that
@@ -84,6 +133,13 @@ ladder:
   - ifrc_go
   - idmc_idu
 
+# Rungs whose figures are DISPLACEMENT, not people-affected. These resolve
+# as a lower bound: the value stands, and both the provenance and the
+# rule_fired say so, because displacement counts a strict subset of the
+# people a hazard affects.
+lower_bound_rungs:
+  - idmc_idu
+
 sanity:
   # No accepted figure may exceed ceiling_multiplier x the GDACS exposed
   # population for the event, nor (when population_cap is true) the national
@@ -92,9 +148,18 @@ sanity:
   ceiling_multiplier: 1.0
   population_cap: true
 
-# In conflict-affected settings the ladder still decides the number, but the
-# resolution row is flagged for review.
+# When rungs disagree wildly the ladder still decides the number, but the
+# row is flagged for human review. "Wildly" is defined, not judged:
+#
+#   * the ladder's chosen figure exceeds the sanity ceiling, OR
+#   * figures on ADJACENT populated rungs differ by more than
+#     order_of_magnitude_factor.
+#
+# ladder_with_flag = keep the ladder's answer, set flagged = TRUE. The
+# machine never silently substitutes a different rung's number.
 conflict_rule: ladder_with_flag
+conflict_detection:
+  order_of_magnitude_factor: 10.0
 
 # First calendar year included when computing severity base rates
 # (haz_base_rates_severity quantiles).
@@ -110,3 +175,59 @@ reliefweb:
   # Public ReliefWeb API base URL (free; the required appname parameter
   # comes from the RELIEFWEB_APPNAME environment variable).
   api_base_url: "https://api.reliefweb.int/v2"
+
+# ---------------------------------------------------------------------------
+# LADDER SOURCE CONNECTORS
+#
+# Endpoints and window/pacing only. Every one of these services is free;
+# the two that need authentication read their key from the environment
+# (EMDAT_API_KEY, IDMC_API_KEY) and never from this file.
+# ---------------------------------------------------------------------------
+
+emdat:
+  # EM-DAT public GraphQL API. Auth: Authorization: Bearer $EMDAT_API_KEY.
+  api_url: "https://api.emdat.be/v1"
+  request_timeout_sec: 120
+  page_limit: 1000
+  max_pages: 50
+  # EM-DAT classification keys per repo hazard code. EM-DAT keys are
+  # "<group>-<subgroup>-<type>-<subtype>"; a prefix matches all subtypes.
+  classif_keys:
+    FL: ["nat-hyd-flo"]
+    TC: ["nat-met-sto-tro"]
+    DR: ["nat-cli-dro"]
+  # EM-DAT publishes historical records with a lag and revises them. Pull a
+  # window around the target month wide enough to catch late entries.
+  lookback_months: 3
+  lookahead_months: 1
+
+ifrc_go:
+  # IFRC GO public API (no key required for the read endpoints used here).
+  api_base_url: "https://goadmin.ifrc.org/api/v2/"
+  field_report_path: "field-report/"
+  page_size: 500
+  max_pages: 20
+  request_timeout_sec: 60
+  # GO field-report fields that state a people-affected figure, best first.
+  affected_fields:
+    - num_affected
+    - gov_num_affected
+    - other_num_affected
+  lookback_months: 3
+  lookahead_months: 2
+
+idmc_idu:
+  # IDMC IDU (Internal Displacement Updates). The endpoint URL is supplied
+  # by IDMC alongside the key; the key itself is $IDMC_API_KEY, sent as the
+  # client_id query parameter.
+  api_url: "https://helix-tools-api.idmcdb.org/external-api/idus/all/"
+  request_timeout_sec: 120
+  # IDU displacement_type values that count as disaster displacement.
+  displacement_types: ["Disaster"]
+  # IDU hazard sub-type text -> repo hazard code (lowercase substring match).
+  hazard_keywords:
+    FL: ["flood", "flash flood", "riverine flood"]
+    TC: ["cyclone", "typhoon", "hurricane", "tropical storm", "storm"]
+    DR: ["drought"]
+  lookback_months: 3
+  lookahead_months: 1

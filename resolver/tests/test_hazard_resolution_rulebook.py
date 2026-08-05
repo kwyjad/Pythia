@@ -202,3 +202,125 @@ def test_missing_sweep_keywords_fail_validation(tmp_path):
     del data["cyclone"]["reliefweb_sweep"]["keywords"]
     with pytest.raises(RulebookError, match="keywords"):
         load_rulebook(_write_rulebook(tmp_path, data))
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: flood detection, the ladder's sources, and conflict handling
+# ---------------------------------------------------------------------------
+
+
+def test_shipped_rulebook_carries_phase2_keys():
+    """Everything Phase 2 reads must be present and correctly typed."""
+    rb = load_rulebook()
+
+    # Flood detection + its own silence sweep.
+    assert rb.get("flood.gdacs.coverage_grace_days") >= 0
+    assert rb.get("flood.reliefweb_sweep.keywords")
+    assert rb.get("flood.reliefweb_sweep.disaster_types")
+
+    # Ladder semantics.
+    assert rb.get("ladder")[0] == "emdat"
+    assert "idmc_idu" in rb.get("lower_bound_rungs")
+    assert rb.get("conflict_detection.order_of_magnitude_factor") > 1
+    assert rb.get("event_attribution.figure") == "start_month"
+    assert rb.get("event_attribution.detection") == "overlap"
+
+    # Source connectors.
+    for prefix in ("emdat", "ifrc_go", "idmc_idu"):
+        assert rb.get(f"{prefix}.lookback_months") >= 0
+        assert rb.get(f"{prefix}.lookahead_months") >= 0
+    assert rb.get("emdat.api_url").startswith("https://")
+    assert rb.get("ifrc_go.api_base_url").startswith("https://")
+    assert rb.get("idmc_idu.api_url").startswith("https://")
+
+
+def test_every_sweeping_hazard_has_a_complete_sweep_block():
+    """A half-configured hazard must fail loudly, not sweep with defaults."""
+    from resolver.hazard_resolution.rulebook import SWEEP_HAZARD_KEYS
+
+    rb = load_rulebook()
+    for hazard_key in SWEEP_HAZARD_KEYS:
+        for key in (
+            "disaster_types", "keywords", "publication_pad_days",
+            "max_hits_for_silence", "sample_size", "request_timeout_sec",
+            "request_delay_sec",
+        ):
+            assert rb.get(f"{hazard_key}.reliefweb_sweep.{key}") is not None
+
+
+def test_missing_flood_sweep_block_fails_validation(tmp_path):
+    data = _shipped_data()
+    del data["flood"]["reliefweb_sweep"]
+    with pytest.raises(RulebookError, match="flood.reliefweb_sweep"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_lower_bound_rung_outside_the_ladder_fails_validation(tmp_path):
+    """A lower-bound rung the ladder never walks is a silent no-op."""
+    data = _shipped_data()
+    data["ladder"] = ["emdat", "ifrc_go"]
+    data["lower_bound_rungs"] = ["idmc_idu"]
+    with pytest.raises(RulebookError, match="not in the ladder"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_unknown_lower_bound_rung_fails_validation(tmp_path):
+    data = _shipped_data()
+    data["lower_bound_rungs"] = ["gdacs"]
+    with pytest.raises(RulebookError, match="lower_bound_rungs"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+@pytest.mark.parametrize("factor", [1.0, 0.5, 0, "ten"])
+def test_conflict_factor_must_exceed_one(tmp_path, factor):
+    """A factor <= 1 would flag every pair of rungs."""
+    data = _shipped_data()
+    data["conflict_detection"]["order_of_magnitude_factor"] = factor
+    with pytest.raises(RulebookError, match="order_of_magnitude_factor"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_unknown_hazard_code_in_a_source_map_fails_validation(tmp_path):
+    data = _shipped_data()
+    data["emdat"]["classif_keys"]["XX"] = ["nat-xxx"]
+    with pytest.raises(RulebookError, match="classif_keys"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_non_https_source_endpoint_fails_validation(tmp_path):
+    data = _shipped_data()
+    data["idmc_idu"]["api_url"] = "http://insecure.example/idus"
+    with pytest.raises(RulebookError, match="idmc_idu.api_url"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_a_credential_in_a_source_block_is_rejected(tmp_path):
+    """API keys come from the environment; the rulebook must refuse one."""
+    data = _shipped_data()
+    data["emdat"]["api_key"] = "sk-not-allowed-here"
+    with pytest.raises(RulebookError, match="looks like a credential"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_changing_the_ladder_changes_the_winner(tmp_path):
+    """The acceptance guarantee, for Phase 2's central decision."""
+    from resolver.hazard_resolution.rules import ladder_rank
+
+    data = _shipped_data()
+    data["ladder"] = ["ifrc_go", "emdat", "reliefweb_extracted", "idmc_idu"]
+    rb = load_rulebook(_write_rulebook(tmp_path, data))
+
+    assert ladder_rank("ifrc_go", rb) == 0
+    assert ladder_rank("emdat", rb) == 1
+    assert ladder_rank("gdacs", rb) is None  # never a rung
+
+
+def test_changing_the_conflict_factor_changes_flagging(tmp_path):
+    from resolver.hazard_resolution.rules import orders_of_magnitude_apart
+
+    data = _shipped_data()
+    data["conflict_detection"]["order_of_magnitude_factor"] = 2.0
+    strict = load_rulebook(_write_rulebook(tmp_path, data))
+
+    assert orders_of_magnitude_apart(10_000, 50_000, strict) is True
+    assert orders_of_magnitude_apart(10_000, 50_000, load_rulebook()) is False

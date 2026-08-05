@@ -62,15 +62,21 @@ python -m resolver.hazard_resolution.migrate
 # Load national population denominators into haz_raw_population
 python -m resolver.hazard_resolution.population
 
-# Phase 1 — cyclone detection + zero resolutions for one month
-python -m resolver.hazard_resolution.cli --hazard cyclone --month 2026-06
-resolve-hazards --hazard cyclone --month 2026-06            # poetry script form
+# One month, one hazard — detection, zeros, and the impact ladder
+resolve-hazards --hazard cyclone --month 2026-06
+resolve-hazards --hazard flood   --month 2026-06
+
+# Three months in one run (each month is independent)
+resolve-hazards --hazard flood --months 2026-04 2026-05 2026-06
 
 # Backcast an old month from the full IBTrACS archive, limited countries
 resolve-hazards --hazard cyclone --month 2013-11 --scope ALL --countries PHL MDG
 
-# Re-run on the existing store without downloading
+# Re-run on the existing stores without downloading
 resolve-hazards --hazard cyclone --month 2026-06 --skip-fetch
+
+# Detection and zeros only, no ladder
+resolve-hazards --hazard flood --month 2026-06 --no-ladder
 ```
 
 ## Phase 1: the cyclone path (implemented)
@@ -150,7 +156,102 @@ always reads the newest revision.
 `pythia-resolution-machine` with a warning). IBTrACS and the vendored
 boundaries need no credentials.
 
-Later phases add the remaining detection connectors (GDACS floods, IPC
-droughts), the ReliefWeb extraction step, the reconciliation engine,
-and the backcast. Costs stay well under USD 50/month: every data source
-is free; the only spend is the cheap-model document extraction.
+## Phase 2: floods and the impact ladder (implemented)
+
+Phase 2 adds the second detector and the whole of Layer 2 — the ladder
+that turns "a hazard happened here" into a number.
+
+**Flood detection.** A country-month triggers when a GDACS flood event
+naming that country, overlapping that month, carries an alert level at or
+above `flood.gdacs_trigger_level` (green &lt; orange &lt; red). Non-triggered
+country-months get the same ReliefWeb silence sweep, the same fail-closed
+handling and the same coverage gate as cyclones — zeros are suppressed
+unless the newest stored GDACS event reaches `month_end −
+flood.gdacs.coverage_grace_days`.
+
+**Event-to-month attribution.** Two decisions, deliberately different:
+
+| | rule | rulebook key |
+|---|---|---|
+| **Detection** | an event is detected in **every** month its date range overlaps | `event_attribution.detection: overlap` |
+| **Figure** | its people-affected figure is attributed **wholly to the start month** | `event_attribution.figure: start_month` |
+
+So a flood running 28 Jan – 4 Feb triggers *both* months, while its
+reported figure lands entirely in January. Figures are **never split**
+across months: a source states one number for the event, and
+apportioning it would invent a monthly breakdown nobody reported. The
+full span travels with the figure in provenance (`event_span`), so a
+reader can always see that it covers more than the month it sits in.
+
+**The ladder.** For each triggered country-month, candidate figures are
+collected into `haz_impact_candidates` and the reconciler walks
+`rulebook.ladder`:
+
+1. **EM-DAT** — curated, definitionally stable, and slow (hence the freeze
+   window).
+2. **ReliefWeb-extracted** — arrives in Phase 3; until then the rung is
+   simply empty, which the ladder already handles.
+3. **IFRC GO** — a real stated `num_affected`, thin coverage.
+4. **IDMC IDU** — displacement, i.e. a **lower bound**.
+
+The first populated rung wins. Nothing below it can overturn that: a
+lower rung that disagrees is a reason to **flag**, never to substitute.
+
+**Sanity checks bound the answer; they never rewrite it.** The figure is
+checked against `sanity.ceiling_multiplier` × the GDACS exposed
+population and against national population (`sanity.population_cap`). A
+breach is kept and flagged — `conflict_rule: ladder_with_flag`. So is a
+"wild conflict", defined deterministically as adjacent populated rungs
+differing by more than `conflict_detection.order_of_magnitude_factor`.
+
+**Lower bounds are labelled at every layer.** An IDU figure resolves with
+`value_type='displaced_lower_bound'`, `rule_fired='ladder:idmc_idu:lower_bound'`,
+and an explicit note in provenance. Displaced people are a strict subset
+of affected people, and losing that label would silently turn a floor
+into an answer.
+
+**GDACS is still never a value.** Its exposure enters
+`haz_impact_candidates` only as `value_type='exposed_ceiling'`, which
+`ladder_candidates()` filters out of the ladder's view. It is recorded as
+a candidate so the ceiling that applied to a decision is visible in the
+record.
+
+**When no rung has a figure**, the answer depends on the clock:
+
+- **before** the freeze deadline → **pending**: no row is written at all.
+  EM-DAT alone routinely lands weeks after an event, so declaring "no
+  data" the week of a flood would record our impatience as a fact about
+  the world.
+- **on or after** it → `NO_DATA`, flagged for human review, with the
+  rungs consulted recorded so the gap is legible.
+
+**Provisional vs. final.** The core resolver tables have no concept of
+provisional data (`facts_resolved.confidence` describes source quality,
+not finality), so `haz_resolutions` carries its own `provisional BOOLEAN`.
+An answer written before month-end + `freeze_days` is real and usable but
+may still change; from the deadline on it is written final and becomes
+immutable, and a later re-run logs to `haz_revisions` instead.
+
+**A rung that could not be read is not a rung that was empty.** Every
+source connector returns an outcome rather than raising, and a failure
+(missing key, API outage) is recorded on the resolution row under
+`decision.sources_unavailable`. Only "the source answered and said
+nothing" can justify a zero.
+
+**Reuse.** GDACS event discovery and per-event enrichment come from
+`resolver/connectors/gdacs.py`, and IFRC GO paging/country resolution from
+`resolver/ingestion/ifrc_go_client.py`, rather than being re-implemented.
+Consequently the GDACS endpoints live in that connector and **not** in
+`rulebook.yaml` — duplicating a URL would create two sources of truth for
+one address. A test asserts the borrowed helpers still exist, so an
+upstream rename fails loudly in CI rather than at runtime in production.
+
+**Environment.** `EMDAT_API_KEY` (EM-DAT), `IDMC_API_KEY` (sent as the IDU
+`client_id`), `RELIEFWEB_APPNAME`. GDACS, IFRC GO, IBTrACS and the
+vendored boundaries need no credentials. Keys are read from the
+environment only; the rulebook loader rejects any key that looks like one.
+
+Later phases add the ReliefWeb LLM extraction step (rung 2), the IPC
+drought rule, and the backcast. Costs stay well under USD 50/month: every
+data source is free; the only spend is the cheap-model document
+extraction.

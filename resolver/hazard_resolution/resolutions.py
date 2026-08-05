@@ -28,7 +28,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from resolver.hazard_resolution.rulebook import Rulebook
-from resolver.hazard_resolution.rules import freeze_deadline
+from resolver.hazard_resolution.rules import freeze_deadline, is_provisional
 from resolver.hazard_resolution.schema import ensure_haz_schema
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -42,9 +42,23 @@ STATUS_NO_DATA = "NO_DATA"
 
 WRITE_WRITTEN = "written"
 WRITE_FROZEN_SKIP = "frozen_skip"
+WRITE_PENDING = "pending_skip"
+
+#: reconcile.STATUS_PENDING, duplicated as a literal to keep this module
+#: free of an import cycle (reconcile imports candidates, which imports the
+#: source connectors). Pinned by a test so the two cannot drift.
+WRITE_PENDING_STATUS = "PENDING"
 
 ZERO_SOURCE = "detection:absence"
 ZERO_RULE_FIRED = "cyclone_zero:no_ibtracs_trigger+reliefweb_silent"
+
+#: Per-hazard zero rules. A zero means different evidence for each hazard
+#: (no qualifying storm track vs. no qualifying GDACS alert), and the
+#: resolution must say which, so the two are never conflated in analysis.
+ZERO_RULE_BY_HAZARD = {
+    "TC": ZERO_RULE_FIRED,
+    "FL": "flood_zero:no_gdacs_trigger+reliefweb_silent",
+}
 
 
 def _today() -> dt.date:
@@ -88,10 +102,11 @@ def _log_revision(
 def _collect_urls(evidence: dict[str, Any]) -> list[str]:
     """Pull every URL the evidence cites (queries + samples + sources)."""
     urls: list[str] = []
-    ibtracs = evidence.get("ibtracs") or {}
-    for url in ibtracs.get("source_urls") or []:
-        if url:
-            urls.append(str(url))
+    # Detection evidence: IBTrACS for cyclones, GDACS for floods.
+    for detector in ("ibtracs", "gdacs"):
+        for url in (evidence.get(detector) or {}).get("source_urls") or []:
+            if url:
+                urls.append(str(url))
     sweep = evidence.get("reliefweb") or {}
     for q in sweep.get("queries") or []:
         if q.get("url"):
@@ -106,6 +121,177 @@ def _collect_urls(evidence: dict[str, Any]) -> list[str]:
             seen.add(u)
             out.append(u)
     return out
+
+
+def _frozen_row(
+    con,
+    *,
+    iso3: str,
+    year: int,
+    month: int,
+    hazard: str,
+    rulebook: Rulebook,
+    today: dt.date,
+) -> tuple[bool, tuple | None]:
+    """Is there an EXISTING resolution for this cell past its freeze date?
+
+    Hard rule 4, in one place: freezing protects answers that already
+    exist. Writing the FIRST resolution for an old cell is always allowed
+    — that is the backcast path.
+    """
+
+    existing = con.execute(
+        """
+        SELECT status, value, frozen_at FROM haz_resolutions
+        WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ?
+        """,
+        [iso3, year, month, hazard],
+    ).fetchone()
+    if existing is None:
+        return False, None
+
+    frozen_at = existing[2]
+    deadline = (
+        frozen_at.date()
+        if isinstance(frozen_at, dt.datetime)
+        else freeze_deadline(year, month, rulebook)
+    )
+    return today > deadline, existing
+
+
+def _write_row(
+    con,
+    *,
+    iso3: str,
+    year: int,
+    month: int,
+    hazard: str,
+    status: str,
+    value: float | None,
+    provenance: dict[str, Any],
+    rule_fired: str,
+    flagged: bool,
+    provisional: bool,
+    rulebook: Rulebook,
+) -> None:
+    """Replace this cell's resolution row inside one transaction."""
+
+    frozen_at = dt.datetime.combine(freeze_deadline(year, month, rulebook), dt.time.min)
+    try:
+        con.execute("BEGIN TRANSACTION")
+        con.execute(
+            """
+            DELETE FROM haz_resolutions
+            WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ?
+            """,
+            [iso3, year, month, hazard],
+        )
+        con.execute(
+            """
+            INSERT INTO haz_resolutions
+                (iso3, year, month, hazard, status, value,
+                 provenance_json, rule_fired, flagged, provisional, frozen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                iso3,
+                year,
+                month,
+                hazard,
+                status,
+                value,
+                json.dumps(provenance),
+                rule_fired,
+                flagged,
+                provisional,
+                frozen_at,
+            ],
+        )
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+
+
+def write_reconciliation(
+    con: "duckdb.DuckDBPyConnection",
+    reconciliation,
+    rulebook: Rulebook,
+    *,
+    today: dt.date | None = None,
+) -> str:
+    """Persist a :class:`~resolver.hazard_resolution.reconcile.Reconciliation`.
+
+    The ladder's verdict is written verbatim — this function makes no
+    decision of its own beyond the freeze guard. A cell already frozen is
+    left untouched and the attempt is logged to ``haz_revisions``, so a
+    post-freeze upstream revision is visible without ever altering the
+    resolved value (hard rule 4).
+
+    A ``PENDING`` verdict writes nothing: the cell is triggered but no rung
+    has reported yet and it has not frozen, so there is no answer to record.
+    """
+
+    ensure_haz_schema(con)
+    today = today or _today()
+
+    if reconciliation.status == WRITE_PENDING_STATUS:
+        LOG.debug(
+            "[resolutions] %s/%s/%s pending — no rung has reported and the cell "
+            "has not frozen; nothing written",
+            reconciliation.iso3, reconciliation.hazard, reconciliation.ym,
+        )
+        return WRITE_PENDING
+
+    iso3 = reconciliation.iso3
+    year, month = (int(p) for p in reconciliation.ym.split("-"))
+    hazard = reconciliation.hazard
+
+    frozen, existing = _frozen_row(
+        con, iso3=iso3, year=year, month=month, hazard=hazard,
+        rulebook=rulebook, today=today,
+    )
+    if frozen:
+        LOG.warning(
+            "[resolutions] %s/%s/%d-%02d frozen — skip, logging revision",
+            iso3, hazard, year, month,
+        )
+        _log_revision(
+            con,
+            iso3=iso3,
+            year=year,
+            month=month,
+            hazard=hazard,
+            source=(reconciliation.winner.source if reconciliation.winner else "ladder"),
+            source_ref=(
+                reconciliation.winner.source_ref if reconciliation.winner else "post-freeze re-run"
+            ),
+            old_value=existing[1] if existing else None,
+            new_value=reconciliation.value,
+            detail={
+                "note": "re-run after freeze; resolved value not altered",
+                "observed_status": reconciliation.status,
+                "observed_rule_fired": reconciliation.rule_fired,
+                "provenance": reconciliation.provenance,
+            },
+        )
+        return WRITE_FROZEN_SKIP
+
+    _write_row(
+        con,
+        iso3=iso3,
+        year=year,
+        month=month,
+        hazard=hazard,
+        status=reconciliation.status,
+        value=reconciliation.value,
+        provenance=reconciliation.provenance,
+        rule_fired=reconciliation.rule_fired,
+        flagged=reconciliation.flagged,
+        provisional=reconciliation.provisional,
+        rulebook=rulebook,
+    )
+    return WRITE_WRITTEN
 
 
 def write_zero_resolution(
@@ -135,48 +321,37 @@ def write_zero_resolution(
     """
     ensure_haz_schema(con)
     today = today or _today()
+    rule_fired = ZERO_RULE_BY_HAZARD.get(hazard, ZERO_RULE_FIRED)
 
-    existing = con.execute(
-        """
-        SELECT status, value, frozen_at FROM haz_resolutions
-        WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ?
-        """,
-        [iso3, year, month, hazard],
-    ).fetchone()
-
-    if existing is not None:
-        frozen_at = existing[2]
-        deadline = (
-            frozen_at.date()
-            if isinstance(frozen_at, dt.datetime)
-            else freeze_deadline(year, month, rulebook)
+    frozen, existing = _frozen_row(
+        con, iso3=iso3, year=year, month=month, hazard=hazard,
+        rulebook=rulebook, today=today,
+    )
+    if frozen:
+        LOG.warning(
+            "[resolutions] %s/%s/%d-%02d frozen — skip, logging revision",
+            iso3,
+            hazard,
+            year,
+            month,
         )
-        if today > deadline:
-            LOG.warning(
-                "[resolutions] %s/%s/%d-%02d frozen since %s — skip, logging revision",
-                iso3,
-                hazard,
-                year,
-                month,
-                deadline.isoformat(),
-            )
-            _log_revision(
-                con,
-                iso3=iso3,
-                year=year,
-                month=month,
-                hazard=hazard,
-                source=ZERO_SOURCE,
-                source_ref="post-freeze re-run",
-                old_value=existing[1],
-                new_value=0.0,
-                detail={
-                    "note": "re-run after freeze; resolved value not altered",
-                    "observed_status": STATUS_RESOLVED_ZERO,
-                    "evidence_of_absence": evidence_of_absence,
-                },
-            )
-            return WRITE_FROZEN_SKIP
+        _log_revision(
+            con,
+            iso3=iso3,
+            year=year,
+            month=month,
+            hazard=hazard,
+            source=ZERO_SOURCE,
+            source_ref="post-freeze re-run",
+            old_value=existing[1] if existing else None,
+            new_value=0.0,
+            detail={
+                "note": "re-run after freeze; resolved value not altered",
+                "observed_status": STATUS_RESOLVED_ZERO,
+                "evidence_of_absence": evidence_of_absence,
+            },
+        )
+        return WRITE_FROZEN_SKIP
 
     retrieved_at = str(evidence_of_absence.get("retrieved_at") or "")
     provenance = {
@@ -184,42 +359,21 @@ def write_zero_resolution(
         "source_record_ids": [],  # a zero rests on absence — no source records
         "source_urls": _collect_urls(evidence_of_absence),
         "retrieved_at": retrieved_at,
-        "rule_fired": ZERO_RULE_FIRED,
+        "rule_fired": rule_fired,
         "evidence_of_absence": evidence_of_absence,
     }
-    frozen_at = dt.datetime.combine(
-        freeze_deadline(year, month, rulebook), dt.time.min
+    _write_row(
+        con,
+        iso3=iso3,
+        year=year,
+        month=month,
+        hazard=hazard,
+        status=STATUS_RESOLVED_ZERO,
+        value=0.0,
+        provenance=provenance,
+        rule_fired=rule_fired,
+        flagged=False,
+        provisional=is_provisional(year, month, rulebook, today=today),
+        rulebook=rulebook,
     )
-    try:
-        con.execute("BEGIN TRANSACTION")
-        con.execute(
-            """
-            DELETE FROM haz_resolutions
-            WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ?
-            """,
-            [iso3, year, month, hazard],
-        )
-        con.execute(
-            """
-            INSERT INTO haz_resolutions
-                (iso3, year, month, hazard, status, value,
-                 provenance_json, rule_fired, flagged, frozen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, FALSE, ?)
-            """,
-            [
-                iso3,
-                year,
-                month,
-                hazard,
-                STATUS_RESOLVED_ZERO,
-                0.0,
-                json.dumps(provenance),
-                ZERO_RULE_FIRED,
-                frozen_at,
-            ],
-        )
-        con.execute("COMMIT")
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
     return WRITE_WRITTEN

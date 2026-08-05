@@ -32,7 +32,11 @@ from typing import TYPE_CHECKING
 
 from resolver.hazard_resolution import ibtracs as ibtracs_mod
 from resolver.hazard_resolution.geometry import Country, distance_km, point_near_bounds
-from resolver.hazard_resolution.rulebook import HAZARD_CODE_BY_RULEBOOK_NAME, Rulebook
+from resolver.hazard_resolution.rulebook import (
+    GDACS_ALERT_LEVELS,
+    HAZARD_CODE_BY_RULEBOOK_NAME,
+    Rulebook,
+)
 from resolver.hazard_resolution.rules import cyclone_track_qualifies
 from resolver.hazard_resolution.schema import ensure_haz_schema
 
@@ -42,6 +46,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 LOG = logging.getLogger(__name__)
 
 TRIGGER_SOURCE_IBTRACS = "ibtracs"
+TRIGGER_SOURCE_GDACS = "gdacs"
 TRIGGER_SOURCE_RELIEFWEB = "reliefweb_sweep"
 TRIGGER_SOURCE_NONE = "none"
 
@@ -330,6 +335,126 @@ def write_triggers(
         result.ym,
     )
     return len(result.rows)
+
+
+def detect_flood_month(
+    con: "duckdb.DuckDBPyConnection",
+    ym: str,
+    rulebook: Rulebook,
+    iso3_filter: list[str] | None = None,
+) -> DetectionResult:
+    """Run flood detection for one month from the cached GDACS events.
+
+    A country-month triggers when any GDACS flood event naming that
+    country, overlapping that month, carries an alert level at or above
+    ``flood.gdacs_trigger_level`` (green < orange < red) — the decision
+    itself goes through :func:`rules.flood_alert_qualifies`, so changing
+    the rulebook colour changes behaviour with no code change.
+
+    Unlike cyclone detection there is no geometry step: GDACS already
+    attributes each event to countries. What is shared is the shape — a
+    row for EVERY country in the universe, triggered or not, and the same
+    coverage gate in front of any zero.
+    """
+
+    from resolver.hazard_resolution import gdacs as gdacs_mod
+    from resolver.hazard_resolution.rules import flood_alert_qualifies
+
+    ensure_haz_schema(con)
+    hazard = HAZARD_CODE_BY_RULEBOOK_NAME["flood"]
+    threshold = str(rulebook.get("flood.gdacs_trigger_level"))
+
+    coverage_ok, coverage_note = gdacs_mod.coverage(con, ym, hazard, rulebook)
+
+    # Index the cached events by country once, rather than re-scanning the
+    # store per country (the universe is ~200 countries).
+    events = load_raw_events_for_month(con, hazard, ym)
+    by_country: dict[str, list[dict]] = {}
+    for event in events:
+        for iso3 in event.get("iso3_list") or []:
+            by_country.setdefault(str(iso3).upper(), []).append(event)
+
+    universe = sorted(iso3_filter) if iso3_filter else sorted(by_country)
+    result = DetectionResult(
+        hazard=hazard,
+        ym=ym,
+        coverage_ok=coverage_ok,
+        coverage_note=coverage_note,
+        n_points_month=len(events),
+        n_points_qualifying=0,
+        max_point_time=max((e.get("end_date") or "") for e in events) if events else None,
+    )
+
+    qualifying_total = 0
+    for iso3 in universe:
+        country_events = by_country.get(iso3, [])
+        qualifying: list[dict] = []
+        below: list[dict] = []
+        for event in country_events:
+            summary = {
+                "event_id": event.get("event_id"),
+                "alert_level": event.get("alert_level"),
+                "exposed_population": event.get("exposed_population"),
+                "start_date": event.get("start_date"),
+                "end_date": event.get("end_date"),
+                "source_url": event.get("_source_url"),
+            }
+            try:
+                qualifies = flood_alert_qualifies(event.get("alert_level"), rulebook)
+            except ValueError as exc:
+                # An unrecognised colour is a data problem, not a silent
+                # non-trigger: record it and treat the event as below
+                # threshold rather than inventing a verdict.
+                LOG.warning("[detect] %s %s: %s", iso3, ym, exc)
+                summary["alert_level_error"] = str(exc)
+                below.append(summary)
+                continue
+            (qualifying if qualifies else below).append(summary)
+
+        qualifying_total += len(qualifying)
+        result.rows.append(
+            CountryTrigger(
+                iso3=iso3,
+                triggered=bool(qualifying),
+                trigger_source=TRIGGER_SOURCE_GDACS if qualifying else TRIGGER_SOURCE_NONE,
+                detail={
+                    "params": {
+                        "gdacs_trigger_level": threshold,
+                        "alert_order": list(GDACS_ALERT_LEVELS),
+                    },
+                    "gdacs": {
+                        "n_events_month_global": len(events),
+                        "coverage_ok": coverage_ok,
+                        "coverage_note": coverage_note,
+                    },
+                    "events_qualifying": qualifying,
+                    "events_below_threshold": below,
+                },
+            )
+        )
+
+    result.n_points_qualifying = qualifying_total
+    n_triggered = sum(1 for r in result.rows if r.triggered)
+    LOG.info(
+        "[detect] %s %s: %d/%d countries triggered "
+        "(%d qualifying events of %d in month; coverage_ok=%s)",
+        hazard, ym, n_triggered, len(result.rows), qualifying_total, len(events), coverage_ok,
+    )
+    return result
+
+
+def load_raw_events_for_month(
+    con: "duckdb.DuckDBPyConnection", hazard: str, ym: str
+) -> list[dict]:
+    """Cached GDACS events whose span overlaps ``ym`` (newest revision each)."""
+
+    from resolver.hazard_resolution.sources import load_raw_records
+
+    return [
+        event
+        for event in load_raw_records(con, "gdacs", hazard=hazard)
+        if ym in (event.get("months_overlapped") or [])
+    ]
 
 
 def flip_trigger_from_sweep(

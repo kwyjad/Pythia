@@ -340,11 +340,18 @@ def test_cli_landfall_and_quiet_month_end_to_end(tmp_path, monkeypatch):
     assert triggers == {"PHL": True, "MDG": False}
 
     # The landfall country must NOT get a zero; the quiet country must.
+    # Since Phase 2 the landfall country also walks the impact ladder: with
+    # no ladder source seeded and 2013-11 long past its freeze deadline, it
+    # resolves NO_DATA (flagged), which is the ladder correctly reporting a
+    # gap rather than inventing a figure.
     resolutions = con.execute(
-        "SELECT iso3, status, value FROM haz_resolutions "
+        "SELECT iso3, status, value, flagged FROM haz_resolutions "
         "WHERE hazard='TC' AND year=2013 AND month=11 ORDER BY iso3"
     ).fetchall()
-    assert resolutions == [("MDG", "RESOLVED_ZERO", 0.0)]
+    assert resolutions == [
+        ("MDG", "RESOLVED_ZERO", 0.0, False),
+        ("PHL", "NO_DATA", None, True),
+    ]
 
     provenance = json.loads(
         con.execute(
@@ -395,11 +402,19 @@ def test_cli_sweep_hits_promote_to_ladder(tmp_path, monkeypatch):
         "WHERE hazard='TC' AND iso3='PHL' AND year=2013 AND month=1"
     ).fetchone()
     assert row == (True, TRIGGER_SOURCE_RELIEFWEB)
-    # Promoted to the ladder — never a zero.
-    n_zero = con.execute(
-        "SELECT COUNT(*) FROM haz_resolutions WHERE iso3='PHL' AND year=2013 AND month=1"
-    ).fetchone()[0]
-    assert n_zero == 0
+    # Promoted to the ladder — and never a zero. Since Phase 2 the ladder
+    # runs on the promoted cell; with no source seeded and the month long
+    # past its freeze deadline it reports NO_DATA. What must never happen
+    # is a RESOLVED_ZERO: reports exist, so absence is disproven.
+    statuses = [
+        r[0]
+        for r in con.execute(
+            "SELECT status FROM haz_resolutions "
+            "WHERE iso3='PHL' AND year=2013 AND month=1"
+        ).fetchall()
+    ]
+    assert "RESOLVED_ZERO" not in statuses
+    assert statuses == ["NO_DATA"]
 
 
 def test_cli_coverage_gate_suppresses_zeros(tmp_path, monkeypatch):
