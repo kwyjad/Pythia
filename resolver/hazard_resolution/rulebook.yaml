@@ -318,6 +318,34 @@ base_rates:
     # to suppress thin rows instead of labelling them.
     min_events: 1
 
+  # -------------------------------------------------------------------------
+  # THE PROMPT BLOCK — what a forecaster is actually shown (Phase 6).
+  #
+  # The base rates above are also injected into the SPD prompt of every PA
+  # question the machine resolves, so the forecaster reasons against the
+  # generating process it will be scored by. Rendering is generated from
+  # this file at prompt-build time, so a threshold change here moves the
+  # prompt text with no code change — the prompt and the rulebook cannot
+  # drift apart.
+  # -------------------------------------------------------------------------
+  prompt:
+    # How many resolved events a country needs before its severity
+    # QUANTILES are rendered. This is deliberately stricter than
+    # severity.min_events (1), which governs what is STORED: a stored row
+    # carries n_events beside its quantiles, so an analyst can see the
+    # distribution is thin. A prompt has no such margin — five quantiles
+    # read as a distribution whatever the header says, and anchoring a
+    # forecast on the spread of two events is worse than anchoring on
+    # nothing. Below this the block states the event count instead.
+    min_events_for_quantiles: 3
+    # Declared size budget for the rendered block, in characters
+    # (roughly 4 characters per token, so 1200 is ~300 tokens; the shipped
+    # blocks render at 800-1000, which is the headroom this leaves).
+    # Exceeding it is LOGGED and fails a test; it is never silently
+    # truncated. A base rate cut off mid-table is a worse prompt than a
+    # long one, and a silent truncation is invisible in the artifact.
+    max_chars: 1200
+
 # ---------------------------------------------------------------------------
 # DARTMOUTH FLOOD OBSERVATORY — CALIBRATION CROSS-CHECK ONLY.
 #

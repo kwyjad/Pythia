@@ -659,3 +659,84 @@ The sample is seeded (`--seed`, default fixed) rather than
 `ORDER BY random()`, so a reviewer who queries a row can regenerate the
 same page — a report whose sample changes on every run cannot be cited in a
 review.
+
+## Phase 6: what the forecaster is told (implemented)
+
+[`prompt_block.py`](prompt_block.py) closes the loop. Everything above
+decides what a question resolves to; this renders that knowledge into the
+SPD prompt of every PA question the machine resolves, so the forecaster
+reasons about the generating process it will be scored against rather than
+guessing at both the world and the target.
+
+`forecaster/prompts.py::build_spd_prompt_v2` calls
+`_load_haz_base_rate_block`, which injects the block immediately after the
+Resolver history — the other prior anchor in that prompt, and the one STEP 1
+tells the model to build its prior from.
+
+```
+PA RESOLUTION BASE RATES — flood people affected, Pakistan (PAK)
+P(qualifying event), 2010-01..2026-05 backcast, 16y assessed:
+  Jun 44%  Jul 69%  Aug 75%  Sep 50%  Oct 19%  Nov 6%
+Severity | people affected in months WITH an event (n=21 events, 2015-2026):
+  q10 12k  q25 48k  q50 210k  q75 900k  q90 3.1M
+Figure sources: emdat 48%, ifrc_go 29%, reliefweb_extracted 14%, idmc_idu 9%
+9% of the severity record is displacement counts — LOWER BOUNDS, so those quantiles sit below the truth.
+HOW THIS RESOLVES: a flood month = a GDACS flood alert at orange+ over the country; no
+qualifying event plus a silent ReliefWeb sweep resolves ZERO, not missing. A detected
+month takes the first figure on the fixed ladder EM-DAT > ReliefWeb docs > IFRC GO >
+IDMC displacement (lower bound), capped by GDACS exposure and national population;
+answers freeze 60d after month end and never reopen.
+```
+
+**Every parameter in that last paragraph is read from `rulebook.yaml` at
+prompt-build time** — the buffer and wind threshold for cyclones, the GDACS
+alert level for floods, the Phase 3+ rule and its delta floor for drought,
+the ladder order, the sanity ceiling, `freeze_days`. Change a threshold and
+the prompt changes on the next run with no code edit. This is the whole
+reason the text is generated rather than written: a prompt that describes
+last quarter's rules is confidently wrong, which is worse than one that
+describes none. Tests pin the propagation for `freeze_days`,
+`flood.gdacs_trigger_level`, `ladder`, `cyclone.buffer_km` and
+`cyclone.min_wind_kt`.
+
+**Eligibility is deliberately narrow.** `is_eligible` admits the machine's
+three hazards and the metric `PA`, nothing else. Pythia's drought questions
+usually resolve on `PHASE3PLUS_IN_NEED` — a *stock* of people already in
+Phase 3+ — while this machine's drought value is the monthly *increase* in
+that stock; `EVENT_OCCURRENCE` resolves from GDACS alert levels for all
+three hazards, whereas the machine detects cyclones from IBTrACS track
+geometry. Same sources, different quantities, and putting one where the
+other belongs is the failure the repo already paid for once when GDACS
+modelled exposure reached models as IFRC reported impact.
+
+**Three states, three renderings.** A country-hazard with occurrence rows
+but no severity row was assessed across the backcast and never resolved to a
+value — "no historical events in record" is true of it. One with too few
+events for `base_rates.prompt.min_events_for_quantiles` (3) gets its event
+count instead of quantiles, because five quantiles read as a distribution
+whatever the header says. One with *no rows at all* was never assessed and
+gets **no block**: claiming an empty record would state as fact something
+nothing was ever checked for.
+
+**Token discipline.** The shipped blocks render at 800–1000 characters
+(~200–250 tokens) against a declared `base_rates.prompt.max_chars` budget of
+1200. A block over budget is logged and fails a test; it is never
+truncated, because a base rate cut off mid-table still reads as a complete
+one. Empty quantile rows are omitted rather than padded, a shared occurrence
+denominator is stated once instead of six times, and a rate that is small
+but non-zero renders `<1%` rather than rounding to `0%`.
+
+**Drought carries an explicit caveat**, generated from `backcast.drought`:
+the record starts 2017 (~10 years) and IPC coverage is partial by country,
+so a low rate is weak evidence of a low rate in the world. Under
+`month_attribution: analysis_window` it adds the warning the provenance
+already carries — the same deterioration repeats across every month its
+analysis window covers, and these values must never be summed.
+
+Tests: [`resolver/tests/test_hazard_resolution_prompt_block.py`](../tests/test_hazard_resolution_prompt_block.py)
+(rendering, eligibility, rulebook propagation, budget) and
+[`forecaster/tests/test_haz_base_rate_prompt.py`](../../forecaster/tests/test_haz_base_rate_prompt.py)
+(assembled-prompt snapshots for one cyclone, one flood and one drought PA
+question). The second file exists because the failure mode at this seam is
+silent: a loader whose text nobody renders costs money and changes nothing,
+which is how CrisisWatch and the HS grounding packs were both lost.

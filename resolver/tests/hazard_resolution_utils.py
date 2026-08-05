@@ -427,3 +427,51 @@ def seed_candidate(
         [iso3.upper(), year, month, hazard, value, value_type, source,
          f"{source}-{iso3}-{ym}"],
     )
+
+
+def seed_base_rates(
+    con,
+    *,
+    iso3: str,
+    hazard: str,
+    occurrence: dict[int, tuple[float, int]] | None = None,
+    quantiles: tuple[float, float, float, float, float] | None = None,
+    n_events: int = 0,
+    window: str = "2010-01..2026-05",
+    window_start: int = 2015,
+    window_end: int = 2026,
+    provenance_mix: dict[str, Any] | None = None,
+):
+    """Seed published base rates for one country-hazard.
+
+    ``occurrence`` maps calendar month -> (p_occurrence, n_years). A severity
+    row is written only when ``quantiles`` is given, so a test can build the
+    ASSESSED-BUT-NEVER-RESOLVED state (occurrence rows, no severity row) that
+    the prompt block renders as "no historical events in record".
+    """
+    from resolver.hazard_resolution.schema import ensure_haz_schema
+
+    ensure_haz_schema(con)
+    for month, (probability, n_years) in sorted((occurrence or {}).items()):
+        con.execute(
+            """
+            INSERT INTO haz_base_rates_occurrence
+                (iso3, hazard, calendar_month, p_occurrence, n_years, source_window)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [iso3.upper(), hazard, int(month), float(probability), int(n_years), window],
+        )
+    if quantiles is not None:
+        con.execute(
+            """
+            INSERT INTO haz_base_rates_severity
+                (iso3, hazard, q10, q25, q50, q75, q90,
+                 n_events, window_start, window_end, provenance_mix_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                iso3.upper(), hazard, *[float(q) for q in quantiles],
+                int(n_events), int(window_start), int(window_end),
+                json.dumps(provenance_mix or {}),
+            ],
+        )

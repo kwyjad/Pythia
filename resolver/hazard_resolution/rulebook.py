@@ -634,6 +634,12 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     _require_int_in("base_rates.occurrence.min_years", 1, 200)
     _require_int_in("base_rates.severity.min_events", 1, 10_000)
 
+    # Prompt-block rendering (Phase 6). The block is generated from this
+    # file, so these are the only two knobs that change what a forecaster
+    # sees without a code change.
+    _require_int_in("base_rates.prompt.min_events_for_quantiles", 1, 10_000)
+    _require_int_in("base_rates.prompt.max_chars", 200, 20_000)
+
     # Dartmouth Flood Observatory cross-check (calibration only).
     _require_bool("dfo.enabled")
     dfo_url = _require("dfo.url")

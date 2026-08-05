@@ -1356,72 +1356,6 @@ def _load_fewsnet_projection(
         return ""
 
 
-def _load_haz_base_rate_block(
-    iso3: str,
-    hazard_code: str,
-    metric: str,
-    forecast_keys: list[str],
-) -> str:
-    """Load the PA resolution machine's base-rate block for this question.
-
-    The machine (``resolver/hazard_resolution/``) resolves PA from a detection
-    layer plus a fixed reporting ladder, and derives occurrence and severity
-    base rates from its own backcast. This injects those rates together with a
-    rulebook-generated description of the process — so the forecaster reasons
-    about the target it will actually be scored against.
-
-    Eligibility is decided by ``prompt_block.is_eligible``, not here: the rates
-    describe people-affected figures for the machine's three hazards, and no
-    other metric may be anchored on them. Returns "" whenever there is nothing
-    to say — the tables are absent (the machine is not yet wired into a
-    workflow), the country-hazard was never assessed, or the load failed.
-    Shaped after ``_load_fewsnet_projection`` above, including its connection
-    handling.
-    """
-    if not iso3 or not forecast_keys:
-        return ""
-    try:
-        from resolver.hazard_resolution.prompt_block import (
-            build_base_rate_block,
-            is_eligible,
-        )
-
-        if not is_eligible(hazard_code, metric):
-            return ""
-
-        forecast_months: list[int] = []
-        for key in forecast_keys:
-            match = re.match(r"^\d{4}-(\d{2})", str(key))
-            if match:
-                forecast_months.append(int(match.group(1)))
-
-        from resolver.db import duckdb_io
-
-        db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
-        db_url = db_url or duckdb_io.DEFAULT_DB_URL
-        con = duckdb_io.get_db(db_url)
-        try:
-            country_name = ""
-            try:
-                from forecaster.history_loaders import _load_country_names
-
-                country_name = _load_country_names().get((iso3 or "").upper(), "")
-            except Exception:
-                country_name = ""
-            return build_base_rate_block(
-                iso3,
-                hazard_code,
-                metric,
-                forecast_months,
-                con=con,
-                country_name=country_name,
-            )
-        finally:
-            duckdb_io.close_db(con)
-    except Exception:
-        return ""
-
-
 def _forecast_month_keys_from_question(
     question: Dict[str, Any],
     horizon_months: int = 6,
@@ -1916,16 +1850,6 @@ def build_spd_prompt_v2(
 
     structured_data_section = "\n\n".join(structured_sections) + "\n\n" if structured_sections else ""
 
-    # PA resolution machine base rates + the process this forecast will be
-    # scored by. Rendered immediately after the Resolver history rather than
-    # among the structured injects, because it is the same kind of thing —
-    # a prior anchor — and STEP 1 tells the model to build its prior from
-    # what it finds there. Self-gating: "" for every hazard/metric the
-    # machine does not resolve (see prompt_block.is_eligible), so questions
-    # outside its scope assemble byte-identically to before.
-    _haz_base_rates = _load_haz_base_rate_block(iso3, hazard, metric, forecast_keys)
-    haz_base_rate_section = f"{_haz_base_rates}\n\n" if _haz_base_rates else ""
-
     # SPD self-driven web search instruction. Gated on the SAME check the
     # executor uses (forecaster.self_search.self_search_enabled) — the prompt
     # must never invite a NEED_WEB_EVIDENCE request the pipeline will refuse
@@ -1994,7 +1918,6 @@ def build_spd_prompt_v2(
         "```\n\n"
         f"{horizon_note}"
         f"{_build_base_rate_text(history_summary, forecast_keys, iso3, hazard, metric)}\n\n"
-        f"{haz_base_rate_section}"
         f"{base_rate_note_in_data}"
         "HS triage output:\n"
         "```json\n"
