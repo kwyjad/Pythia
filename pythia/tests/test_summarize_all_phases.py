@@ -189,3 +189,38 @@ def test_country_list_shrink_detected(tmp_path):
     f.write_text(_json.dumps([f"C{i:02d}" for i in range(48)]))
     res = _country_list_shrink(repo_root=root)
     assert res["shrunk"] is False
+
+
+def test_haz_machine_section_missing_and_populated(tmp_path):
+    """The Phase 2.5 section reports 'not run' vs real per-hazard counts."""
+
+    # DB without haz tables -> explicit "not run" line.
+    bare = tmp_path / "bare.duckdb"
+    con = duckdb.connect(str(bare))
+    con.execute("CREATE TABLE facts_resolved (iso3 VARCHAR, publisher VARCHAR)")
+    con.close()
+    out = build_phase_summary(ENTRIES, con=duckdb.connect(str(bare), read_only=True))
+    assert "PA Resolution Machine" in out
+    assert "has not run against this DB" in out
+
+    # DB with machine rows -> the per-hazard table renders.
+    from resolver.hazard_resolution.schema import ensure_haz_schema
+
+    haz = tmp_path / "haz.duckdb"
+    con = duckdb.connect(str(haz))
+    con.execute("CREATE TABLE facts_resolved (iso3 VARCHAR, publisher VARCHAR)")
+    ensure_haz_schema(con)
+    con.execute(
+        "INSERT INTO haz_triggers (iso3, year, month, hazard, triggered) VALUES "
+        "('PHL', 2026, 6, 'FL', TRUE), ('VNM', 2026, 6, 'FL', FALSE)"
+    )
+    con.execute(
+        "INSERT INTO haz_resolutions (iso3, year, month, hazard, status, value, "
+        "provenance_json, rule_fired) VALUES "
+        "('PHL', 2026, 6, 'FL', 'RESOLVED_VALUE', 12345, '{}', 'ladder:emdat')"
+    )
+    con.close()
+    out = build_phase_summary(ENTRIES, con=duckdb.connect(str(haz), read_only=True))
+    assert "| FL | 2 | 1 | 1 | 0 | 0 | 0 |" in out
+    assert "haz_base_rates_occurrence` is **empty**" in out
+    assert "Shadow mode" in out
