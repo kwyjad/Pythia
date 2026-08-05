@@ -164,3 +164,41 @@ def test_changing_ceiling_multiplier_changes_sanity_check(tmp_path):
     data["sanity"]["ceiling_multiplier"] = 1.5
     looser = load_rulebook(_write_rulebook(tmp_path, data))
     assert within_sanity_ceiling(120_000, exposed_population=100_000, rulebook=looser) is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 keys: IBTrACS connector + ReliefWeb silence sweep.
+# ---------------------------------------------------------------------------
+
+
+def test_shipped_rulebook_carries_phase1_detection_keys():
+    rb = load_rulebook()
+    assert rb.get("cyclone.wind_source_priority") == ["usa_wind", "wmo_wind"]
+    assert "{scope}" in rb.get("cyclone.ibtracs.url_template")
+    assert rb.get("cyclone.ibtracs.default_scope") == "last3years"
+    assert rb.get("cyclone.ibtracs.coverage_grace_days") == 7
+    assert rb.get("cyclone.reliefweb_sweep.disaster_types") == ["Tropical Cyclone"]
+    assert "cyclone" in rb.get("cyclone.reliefweb_sweep.keywords")
+    assert rb.get("cyclone.reliefweb_sweep.max_hits_for_silence") == 0
+    assert rb.get("reliefweb.api_base_url").startswith("https://")
+
+
+def test_unknown_wind_source_fails_validation(tmp_path):
+    data = _shipped_data()
+    data["cyclone"]["wind_source_priority"] = ["usa_wind", "jtwc_wind"]
+    with pytest.raises(RulebookError, match="wind_source_priority"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_url_template_without_scope_placeholder_fails_validation(tmp_path):
+    data = _shipped_data()
+    data["cyclone"]["ibtracs"]["url_template"] = "https://example.test/ibtracs.csv"
+    with pytest.raises(RulebookError, match="url_template"):
+        load_rulebook(_write_rulebook(tmp_path, data))
+
+
+def test_missing_sweep_keywords_fail_validation(tmp_path):
+    data = _shipped_data()
+    del data["cyclone"]["reliefweb_sweep"]["keywords"]
+    with pytest.raises(RulebookError, match="keywords"):
+        load_rulebook(_write_rulebook(tmp_path, data))

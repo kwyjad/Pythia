@@ -35,6 +35,12 @@ KNOWN_LADDER_RUNGS = ("emdat", "reliefweb_extracted", "ifrc_go", "idmc_idu")
 #: GDACS alert colours in ascending severity. Index order is meaningful.
 GDACS_ALERT_LEVELS = ("green", "orange", "red")
 
+#: IBTrACS wind columns detection may consult (rulebook order = priority).
+KNOWN_WIND_SOURCES = ("usa_wind", "wmo_wind")
+
+#: IBTrACS CSV files the connector knows how to fetch.
+KNOWN_IBTRACS_SCOPES = ("last3years", "ALL")
+
 #: Rulebook hazard names -> repo hazard codes (resolver/data/shocks.csv).
 HAZARD_CODE_BY_RULEBOOK_NAME = {"cyclone": "TC", "flood": "FL", "drought": "DR"}
 
@@ -164,10 +170,59 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     if not isinstance(data, Mapping):
         return [f"rulebook must be a mapping, got {type(data).__name__}"]
 
+    def _require_str_list(dotted: str, choices: tuple[str, ...] | None = None) -> None:
+        value = _require(dotted)
+        if value is _MISSING:
+            return
+        if (
+            not isinstance(value, list)
+            or not value
+            or not all(isinstance(item, str) and item.strip() for item in value)
+        ):
+            problems.append(f"{dotted} must be a non-empty list of strings, got {value!r}")
+            return
+        if choices is not None:
+            unknown = [item for item in value if item not in choices]
+            if unknown:
+                problems.append(
+                    f"{dotted} contains unknown entries {unknown}; known: {list(choices)}"
+                )
+        if len(set(value)) != len(value):
+            problems.append(f"{dotted} contains duplicates: {value}")
+
     # Detection thresholds
     _require_positive_number("cyclone.buffer_km")
     _require_positive_number("cyclone.min_wind_kt")
+    _require_str_list("cyclone.wind_source_priority", KNOWN_WIND_SOURCES)
     _require_choice("flood.gdacs_trigger_level", GDACS_ALERT_LEVELS)
+
+    # IBTrACS connector (cyclone detection input)
+    url_template = _require("cyclone.ibtracs.url_template")
+    if url_template is not _MISSING and (
+        not isinstance(url_template, str) or "{scope}" not in url_template
+    ):
+        problems.append(
+            f"cyclone.ibtracs.url_template must be a string containing '{{scope}}', got {url_template!r}"
+        )
+    _require_choice("cyclone.ibtracs.default_scope", KNOWN_IBTRACS_SCOPES)
+    _require_positive_number("cyclone.ibtracs.request_timeout_sec")
+    _require_int_in("cyclone.ibtracs.coverage_grace_days", 0, 60)
+
+    # ReliefWeb silence sweep (zero-resolution gate)
+    _require_str_list("cyclone.reliefweb_sweep.disaster_types")
+    _require_str_list("cyclone.reliefweb_sweep.keywords")
+    _require_int_in("cyclone.reliefweb_sweep.publication_pad_days", 0, 90)
+    _require_int_in("cyclone.reliefweb_sweep.max_hits_for_silence", 0, 100)
+    _require_int_in("cyclone.reliefweb_sweep.sample_size", 1, 50)
+    _require_positive_number("cyclone.reliefweb_sweep.request_timeout_sec")
+    _require_non_negative_number("cyclone.reliefweb_sweep.request_delay_sec")
+    api_base_url = _require("reliefweb.api_base_url")
+    if api_base_url is not _MISSING and (
+        not isinstance(api_base_url, str) or not api_base_url.startswith("https://")
+    ):
+        problems.append(
+            f"reliefweb.api_base_url must be an https:// URL, got {api_base_url!r}"
+        )
 
     # Drought rule (thresholds are Phase 4 placeholders but must be well-typed)
     _require_choice("drought.rule", _KNOWN_DROUGHT_RULES)
