@@ -169,8 +169,11 @@ jobs:
           TIME_BUDGET_MIN: ${{ inputs.time_budget_min || '300' }}
         run: |
           set -uo pipefail
+          # Re-assigning from the env (with the same default the env mapping
+          # declares) keeps shellcheck aware the variable exists (SC2153).
+          HAZARDS="${HAZARDS:-flood cyclone drought}"
           N_HAZARDS=$(echo "${HAZARDS}" | wc -w)
-          PER_HAZARD=$(( ${TIME_BUDGET_MIN} / N_HAZARDS ))
+          PER_HAZARD=$(( TIME_BUDGET_MIN / N_HAZARDS ))
           echo "Backcasting: ${HAZARDS} | ${PER_HAZARD} min each of ${TIME_BUDGET_MIN} total"
           FAILED=0
           for HZ in ${HAZARDS}; do
