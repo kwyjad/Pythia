@@ -59,6 +59,7 @@ RUN_RUNTIME_COLUMNS = [
     "scenario_ms",
     "prediction_markets_ms",
     "sibyl_ms",
+    "resolution_ms",
     "other_ms",
     "total_ms",
 ]
@@ -76,6 +77,7 @@ CANONICAL_PHASES = [
     "scenario",
     "prediction_markets",
     "sibyl",
+    "resolution",
     "other",
 ]
 
@@ -98,6 +100,13 @@ def phase_group(phase: str | None) -> str:
         return "sibyl"
     if "prediction_market" in value or value in {"pm", "market"}:
         return "prediction_markets"
+    # The PA resolution machine's document extraction (extract.py writes
+    # phase='hazard_extraction', component='HazardResolution'). Checked
+    # before the generic branches: "hazard_extraction" must not fall into
+    # a web/hs bucket by substring accident, and the machine's spend must
+    # never land in "other" — that is how Sibyl's went missing once.
+    if "hazard" in value or value == "resolution":
+        return "resolution"
     if "web" in value:  # web_search, web_research
         return "web_search"
     if value.startswith("hs") or "horizon" in value or "triage" in value:
@@ -608,6 +617,7 @@ def build_run_runtimes(conn, track: int | None = None, include_test: bool = Fals
         "scenario": "scenario_ms",
         "prediction_markets": "prediction_markets_ms",
         "sibyl": "sibyl_ms",
+        "resolution": "resolution_ms",
         "other": "other_ms",
     }
     pivot = pivot.rename(columns=phase_columns)

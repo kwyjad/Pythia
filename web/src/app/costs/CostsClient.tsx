@@ -141,6 +141,7 @@ export const PHASE_ORDER = [
   "scenario",
   "prediction_markets",
   "sibyl",
+  "resolution",
   "other",
 ] as const;
 
@@ -152,6 +153,7 @@ export const PHASE_LABELS: Record<string, string> = {
   scenario: "Scenario",
   prediction_markets: "Prediction markets",
   sibyl: "Sibyl",
+  resolution: "PA resolution",
   other: "Other",
 };
 
@@ -166,6 +168,7 @@ export const PHASE_COLORS: Record<string, string> = {
   scenario: "#1baf7a",
   prediction_markets: "#eb6834",
   sibyl: "#4a3aa7",
+  resolution: "#8a5a2b",
   other: "#e34948",
 };
 
