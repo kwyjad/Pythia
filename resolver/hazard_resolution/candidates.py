@@ -33,6 +33,7 @@ reader can see the figure covers more than the month it sits in.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -73,10 +74,21 @@ class Candidate:
     span_start: str | None = None
     span_end: str | None = None
     retrieved_at: str | None = None
+    #: Order WITHIN a rung when that rung has its own precedence rule
+    #: (0 = preferred). Only ``reliefweb_extracted`` sets it: the rulebook
+    #: orders its figures by attributed authority then recency, which is not
+    #: the "largest stated figure" rule the record-based rungs use. None
+    #: leaves that default alone.
+    preference_rank: int | None = None
+    #: Free-form per-source extras carried into provenance and stored as
+    #: ``detail_json``. For an extracted figure this is where the verbatim
+    #: quote, the stated unit and any household conversion live — the
+    #: evidence that the figure was transcribed rather than invented.
+    detail: dict[str, Any] | None = None
 
     def provenance(self) -> dict[str, Any]:
         """This candidate's audit trail, as embedded in a resolution."""
-        return {
+        record = {
             "source": self.source,
             "source_ref": self.source_ref,
             "value": self.value,
@@ -87,6 +99,11 @@ class Candidate:
             "event_span": {"start": self.span_start, "end": self.span_end},
             "retrieved_at": self.retrieved_at,
         }
+        if self.preference_rank is not None:
+            record["preference_rank"] = self.preference_rank
+        if self.detail:
+            record["detail"] = self.detail
+        return record
 
 
 def _year_month(ym: str) -> tuple[int, int]:
@@ -198,12 +215,17 @@ def build_candidates(
     ym: str,
     hazard: str,
     rulebook: Rulebook,
+    extracted: list[Candidate] | None = None,
 ) -> list[Candidate]:
     """Collect every candidate figure for one country-month-hazard.
 
-    ReliefWeb-extracted figures (ladder rung 2) arrive in Phase 3; the rung
-    is simply unpopulated until then, which the ladder already handles as
-    "no candidate on this rung".
+    ``extracted`` carries ladder rung 2 — the figures
+    :mod:`resolver.hazard_resolution.figures` built from LLM-transcribed
+    ReliefWeb documents. They are passed IN rather than read here because
+    producing them costs money and must therefore be an explicit decision
+    of the orchestrator, never a side effect of assembling candidates.
+    Omit it and the rung is simply unpopulated, which the ladder already
+    handles as "no candidate on this rung".
     """
 
     iso3 = iso3.upper()
@@ -211,6 +233,7 @@ def build_candidates(
     candidates += _from_emdat(
         emdat_mod.records_for_country_month(con, iso3, ym, hazard), iso3, ym, hazard
     )
+    candidates += list(extracted or [])
     candidates += _from_ifrc_go(
         go_mod.records_for_country_month(con, iso3, ym, hazard), iso3, ym, hazard
     )
@@ -223,6 +246,30 @@ def build_candidates(
         gdacs_mod.events_for_country_month(con, iso3, ym, hazard), iso3, ym, hazard
     )
     return candidates
+
+
+def exposure_ceiling(
+    con: "duckdb.DuckDBPyConnection", iso3: str, ym: str, hazard: str
+) -> float | None:
+    """The GDACS exposure ceiling for a cell, before candidates are built.
+
+    The extracted-figure pipeline needs the ceiling to reject implausible
+    transcriptions at candidate stage, which is upstream of the full
+    candidate set — so it is computed from the GDACS cache directly.
+    Mirrors :func:`reconcile._ceiling`: several overlapping events each
+    bound the month, and the largest is the binding one.
+    """
+
+    exposures = [
+        c.value
+        for c in _from_gdacs(
+            gdacs_mod.events_for_country_month(con, iso3.upper(), ym, hazard),
+            iso3.upper(),
+            ym,
+            hazard,
+        )
+    ]
+    return max(exposures) if exposures else None
 
 
 def write_candidates(
@@ -246,8 +293,9 @@ def write_candidates(
                 """
                 INSERT OR IGNORE INTO haz_impact_candidates
                     (iso3, year, month, hazard, value, value_type, source,
-                     source_ref, stated_by, doc_url, extraction_model)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     source_ref, stated_by, doc_url, extraction_model,
+                     preference_rank, detail_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     c.iso3,
@@ -261,6 +309,10 @@ def write_candidates(
                     c.stated_by,
                     c.doc_url,
                     c.extraction_model,
+                    c.preference_rank,
+                    json.dumps(c.detail, separators=(",", ":"), sort_keys=True)
+                    if c.detail
+                    else None,
                 ],
             )
         con.execute("COMMIT")

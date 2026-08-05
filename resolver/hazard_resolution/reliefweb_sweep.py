@@ -51,19 +51,29 @@ def _utcnow_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def _appname() -> str:
-    appname = os.getenv("RELIEFWEB_APPNAME", "").strip()
-    if not appname:
+def appname() -> str:
+    """The required ReliefWeb ``appname`` parameter, from the environment.
+
+    Public because :mod:`reliefweb_docs` sends the same parameter to the
+    same API — one identity for the machine's whole ReliefWeb footprint.
+    """
+
+    configured = os.getenv("RELIEFWEB_APPNAME", "").strip()
+    if not configured:
         LOG.warning(
             "[reliefweb_sweep] RELIEFWEB_APPNAME not set — using default '%s'",
             _DEFAULT_APPNAME,
         )
         return _DEFAULT_APPNAME
-    return appname
+    return configured
 
 
-def _default_post(url: str, payload: dict, params: dict, timeout: float) -> dict:
-    """POST with one 429 retry, mirroring horizon_scanner/reliefweb.py."""
+def default_post(url: str, payload: dict, params: dict, timeout: float) -> dict:
+    """POST with one 429 retry, mirroring horizon_scanner/reliefweb.py.
+
+    Shared with :mod:`reliefweb_docs`: both talk to the same API and must
+    back off the same way.
+    """
     for attempt in range(2):
         try:
             resp = requests.post(
@@ -140,8 +150,8 @@ def sweep_country_month(
     timeout = float(rulebook.get(f"{cfg}.request_timeout_sec"))
     api_url = str(rulebook.get("reliefweb.api_base_url")).rstrip("/") + "/reports"
 
-    post = post or _default_post
-    params = {"appname": _appname()}
+    post = post or default_post
+    params = {"appname": appname()}
     fields = {"include": ["title", "url", "date.created", "disaster_type.name"]}
 
     evidence: dict[str, Any] = {

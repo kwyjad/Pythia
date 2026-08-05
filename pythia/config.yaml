@@ -143,6 +143,12 @@ llm:
         grounding_openai_fallback: openai:gpt-4.1-mini  # retry model when the primary web-search call fails
         grounding_claude: anthropic:claude-haiku-4-5-20251001  # Claude web search backend — cheap tier; Opus is reserved for forecasts
         crisiswatch:      gemini_lite   # CrisisWatch Gemini grounding fallback
+        # --- Resolver: hazard-resolution machine ---
+        # Transcribes stated people-affected figures out of ReliefWeb
+        # documents (resolver/hazard_resolution/extract.py). Deliberately a
+        # Haiku-class model: the task is copying a number and its sentence,
+        # not judgement, and it is the machine's only paid step.
+        hazard_extraction: anthropic:claude-haiku-4-5-20251001
 
 forecaster:
   horizons: [1,2,3,4,5,6]

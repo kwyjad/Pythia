@@ -78,6 +78,30 @@ import pytest
 from scripts.ci import check_pipeline_active as cpa
 
 
+def _live_iso(hours_ago: float) -> str:
+    """A timestamp relative to the clock ``main()`` itself reads.
+
+    The pure-function tests above pass ``now`` explicitly and so are frozen
+    at :data:`NOW`. ``main()`` cannot be: it reads
+    ``datetime.now(timezone.utc)`` itself, so a fixture anchored to the
+    frozen NOW ages out of the 72h window as real time moves on — these
+    tests passed for exactly 72 hours after they were written and then
+    failed permanently, blocking an unrelated PR. What they actually guard
+    is the output SENSE (active vs proceed); the window arithmetic is
+    already covered above.
+
+    Deliberately ``cpa.datetime`` rather than this module's ``datetime``:
+    the fixture and the code under test must share one clock, or a test
+    that moves the clock moves only one of them.
+    """
+
+    return (cpa.datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+
+
+def _live_final_run(hours_ago: float, conclusion: str = "success") -> dict:
+    return {**_final_run(0, conclusion), "createdAt": _live_iso(hours_ago)}
+
+
 def _run(monkeypatch, tmp_path, argv, *, in_flight, gh_raises=False, force=None):
     """Drive main() with gh mocked out; return the parsed $GITHUB_OUTPUT."""
 
@@ -86,9 +110,9 @@ def _run(monkeypatch, tmp_path, argv, *, in_flight, gh_raises=False, force=None)
             raise RuntimeError("gh exploded")
         if "api" in args:
             # A batch-state artifact 3h old (inside the 72h window).
-            return {"artifacts": [{"created_at": _iso(3)}]}
+            return {"artifacts": [{"created_at": _live_iso(3)}]}
         # A successful final stage AFTER the artifact clears the gate.
-        return [_final_run(1)] if not in_flight else []
+        return [_live_final_run(1)] if not in_flight else []
 
     out = tmp_path / "gh_output"
     out.write_text("", encoding="utf-8")
@@ -142,3 +166,28 @@ def test_force_bypasses_the_gate_in_both_modes(monkeypatch, tmp_path, argv, key)
 
 def test_unknown_emit_mode_is_rejected():
     assert cpa.main(["--emit", "bogus"]) == 2
+
+
+def test_the_gate_still_decides_correctly_a_year_from_now(monkeypatch, tmp_path):
+    """The main()-driven tests must not be anchored to a wall-clock constant.
+
+    Regression guard for a fixture that was pinned to the frozen NOW while
+    main() read the real clock: it passed for exactly 72 hours after it was
+    written, then failed permanently and blocked an unrelated PR. Running
+    the same decision with the clock moved a year forward proves the
+    fixtures move with it.
+    """
+
+    class _FutureDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(days=365)
+
+    monkeypatch.setattr(cpa, "datetime", _FutureDatetime)
+    # A 3h-old artifact is 3h old whenever "now" is.
+    assert _run(monkeypatch, tmp_path, ["--emit", "active"], in_flight=True) == {
+        "active": "true"
+    }
+    assert _run(monkeypatch, tmp_path, ["--emit", "proceed"], in_flight=False) == {
+        "proceed": "true"
+    }

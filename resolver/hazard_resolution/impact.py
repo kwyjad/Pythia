@@ -31,10 +31,13 @@ from typing import TYPE_CHECKING, Any
 
 from resolver.hazard_resolution import candidates as cand_mod
 from resolver.hazard_resolution import emdat as emdat_mod
+from resolver.hazard_resolution import extract as extract_mod
+from resolver.hazard_resolution import figures as figures_mod
 from resolver.hazard_resolution import gdacs as gdacs_mod
 from resolver.hazard_resolution import idmc_idu as idu_mod
 from resolver.hazard_resolution import ifrc_go as go_mod
 from resolver.hazard_resolution import reconcile as reconcile_mod
+from resolver.hazard_resolution import reliefweb_docs as docs_mod
 from resolver.hazard_resolution import resolutions as res_mod
 from resolver.hazard_resolution.rulebook import Rulebook
 from resolver.hazard_resolution.schema import ensure_haz_schema
@@ -60,6 +63,13 @@ class LadderRun:
     provisional: int = 0
     frozen_skipped: int = 0
     fetches: dict[str, Any] = field(default_factory=dict)
+    # Rung-2 extraction, aggregated over the month's cells.
+    cells_extracted: int = 0
+    cells_extraction_skipped: int = 0
+    docs_read: int = 0
+    extraction_calls: int = 0
+    extraction_cost_usd: float = 0.0
+    extraction_budget_capped: bool = False
 
     @property
     def unavailable_sources(self) -> list[str]:
@@ -137,6 +147,139 @@ def fetch_ladder_sources(
     return {name: outcome.as_provenance() for name, outcome in outcomes.items()}
 
 
+#: Which reader answers "does this rung have a figure for the cell?", per
+#: ladder rung. Extraction consults it to avoid paying to read documents
+#: for a cell a higher rung has already answered.
+_RUNG_READERS = {
+    "emdat": emdat_mod.records_for_country_month,
+    "ifrc_go": go_mod.records_for_country_month,
+    "idmc_idu": idu_mod.records_for_country_month,
+}
+
+
+def higher_rungs_with_figures(
+    con: "duckdb.DuckDBPyConnection", iso3: str, ym: str, hazard: str, rulebook: Rulebook
+) -> list[str]:
+    """Ladder rungs ABOVE the extracted rung that already have a figure.
+
+    Derived from ``rulebook.ladder`` rather than hard-coded, so reordering
+    the ladder in YAML reorders this too.
+    """
+
+    ladder = [str(rung) for rung in rulebook.get("ladder")]
+    if extract_mod.SOURCE not in ladder:
+        return []
+    above = ladder[: ladder.index(extract_mod.SOURCE)]
+    return [
+        rung
+        for rung in above
+        if rung in _RUNG_READERS and _RUNG_READERS[rung](con, iso3.upper(), ym, hazard)
+    ]
+
+
+#: Wall-clock of the last ReliefWeb document request, so consecutive cells
+#: are spaced by ``reliefweb.documents.request_delay_sec`` without the
+#: caller having to thread a "was this the first cell?" flag through.
+_LAST_DOC_FETCH: list[float] = []
+
+
+def _pace_reliefweb(rulebook: Rulebook) -> None:
+    """Sleep just long enough to honour the configured request delay."""
+
+    import time
+
+    delay = float(rulebook.get("reliefweb.documents.request_delay_sec"))
+    if delay <= 0:
+        return
+    if _LAST_DOC_FETCH:
+        elapsed = time.monotonic() - _LAST_DOC_FETCH[-1]
+        if elapsed < delay:
+            time.sleep(delay - elapsed)
+    _LAST_DOC_FETCH.clear()
+    _LAST_DOC_FETCH.append(time.monotonic())
+
+
+def extract_rung_for_cell(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    iso3: str,
+    ym: str,
+    hazard: str,
+    rulebook: Rulebook,
+    budget: "extract_mod.ExtractionBudget",
+    fetch_documents: bool = True,
+    call: "extract_mod.CallFn | None" = None,
+    post: Any = None,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Produce ladder rung 2 for ONE triggered cell. Returns (candidates, provenance).
+
+    Fetch documents, transcribe their stated figures, then hand them to the
+    deterministic post-processing. Reached only for triggered cells, which
+    is what keeps the machine's one paid step off the cells that resolved
+    without it.
+    """
+
+    iso3 = iso3.upper()
+    cell = f"{iso3}/{hazard}/{ym}"
+
+    if not bool(rulebook.get("extraction.enabled")):
+        return [], {"skipped_reason": "extraction_disabled"}
+
+    if bool(rulebook.get("extraction.skip_when_higher_rung_populated")):
+        higher = higher_rungs_with_figures(con, iso3, ym, hazard, rulebook)
+        if higher:
+            LOG.info(
+                "[impact] %s: skipping extraction — higher rung(s) %s already have "
+                "a figure and cannot be outranked by rung 2",
+                cell, ",".join(higher),
+            )
+            return [], {
+                "skipped_reason": "higher_rung_populated",
+                "higher_rungs": higher,
+            }
+
+    provenance: dict[str, Any] = {}
+    if fetch_documents:
+        # One ReliefWeb request per triggered cell, paced by the rulebook —
+        # the silence sweep already paces itself the same way, and the two
+        # steps hit the same free API.
+        _pace_reliefweb(rulebook)
+        outcome = docs_mod.fetch_documents(con, iso3, ym, hazard, rulebook, post=post)
+        provenance["documents"] = outcome.as_provenance()
+        if not outcome.ok:
+            LOG.warning(
+                "[impact] %s: ReliefWeb document fetch failed (%s) — rung 2 is "
+                "UNREAD for this cell, not empty",
+                cell, outcome.error,
+            )
+
+    extraction = extract_mod.extract_for_cell(
+        con,
+        iso3=iso3,
+        ym=ym,
+        hazard=hazard,
+        rulebook=rulebook,
+        budget=budget,
+        call=call,
+    )
+    ceiling = cand_mod.exposure_ceiling(con, iso3, ym, hazard)
+    candidates, rejected = figures_mod.build_candidates(
+        extraction,
+        iso3=iso3,
+        ym=ym,
+        hazard=hazard,
+        rulebook=rulebook,
+        exposure_ceiling=ceiling,
+    )
+    provenance["extraction"] = {**extraction.as_provenance(), "rejected": rejected}
+    # Lift the extractor's own skip reason (no documents, unresolvable model)
+    # to the top level, so "was this cell read?" is one question with one
+    # answer rather than two places a caller has to remember to check.
+    if extraction.skipped_reason and not candidates:
+        provenance["skipped_reason"] = extraction.skipped_reason
+    return candidates, provenance
+
+
 def resolve_triggered_cells(
     con: "duckdb.DuckDBPyConnection",
     *,
@@ -147,6 +290,10 @@ def resolve_triggered_cells(
     fetches: dict[str, Any] | None = None,
     dry_run: bool = False,
     today: dt.date | None = None,
+    extract: bool = True,
+    fetch_documents: bool = True,
+    call: "extract_mod.CallFn | None" = None,
+    post: Any = None,
 ) -> LadderRun:
     """Walk the ladder for every triggered cell in ``iso3s``."""
 
@@ -154,9 +301,35 @@ def resolve_triggered_cells(
     run = LadderRun(hazard=hazard, ym=ym, fetches=fetches or {})
     year = int(ym.split("-")[0])
     unavailable = run.unavailable_sources
+    budget = extract_mod.load_budget(con, rulebook, today=today) if extract else None
 
     for iso3 in sorted(iso3s):
-        found = cand_mod.build_candidates(con, iso3, ym, hazard, rulebook)
+        extracted: list[Any] = []
+        extraction_provenance: dict[str, Any] = {"ran": False}
+        if extract and not dry_run:
+            extracted, extraction_provenance = extract_rung_for_cell(
+                con,
+                iso3=iso3,
+                ym=ym,
+                hazard=hazard,
+                rulebook=rulebook,
+                budget=budget,
+                fetch_documents=fetch_documents,
+                call=call,
+                post=post,
+            )
+            extraction_provenance["ran"] = "skipped_reason" not in extraction_provenance
+            stats = extraction_provenance.get("extraction") or {}
+            run.cells_extracted += int(bool(stats.get("docs_read")))
+            run.cells_extraction_skipped += int("skipped_reason" in extraction_provenance)
+            run.docs_read += int(stats.get("docs_read") or 0)
+            run.extraction_calls += int(stats.get("calls_made") or 0)
+            run.extraction_cost_usd += float(stats.get("cost_usd") or 0.0)
+            run.extraction_budget_capped |= bool(stats.get("budget_capped"))
+
+        found = cand_mod.build_candidates(
+            con, iso3, ym, hazard, rulebook, extracted=extracted
+        )
         if not dry_run:
             cand_mod.write_candidates(con, found, iso3, ym, hazard)
 
@@ -176,6 +349,11 @@ def resolve_triggered_cells(
                 "sources_unavailable"
             ] = unavailable
         verdict.provenance["source_fetches"] = run.fetches
+        # Rung 2's own story travels with the row: how many documents were
+        # read, what the extractor discarded and why, and whether the cost
+        # guard cut the reading short. A budget-capped cell has UNREAD
+        # documents, which must never be mistaken for ReliefWeb silence.
+        verdict.provenance["reliefweb_extraction"] = extraction_provenance
 
         run.cells += 1
         if verdict.status == reconcile_mod.STATUS_RESOLVED_VALUE:
@@ -206,6 +384,20 @@ def resolve_triggered_cells(
             "rows from this run record that those rungs were unreadable, not empty",
             hazard, ym, ",".join(unavailable),
         )
+    if budget is not None:
+        LOG.info(
+            "[impact] %s %s extraction: %d cells read, %d skipped, %d documents, "
+            "%d LLM calls, $%.4f (%d of %d monthly calls now used)",
+            hazard, ym, run.cells_extracted, run.cells_extraction_skipped,
+            run.docs_read, run.extraction_calls, run.extraction_cost_usd,
+            budget.used_this_month + budget.calls_this_run, budget.max_calls_per_month,
+        )
+        if budget.exhausted:
+            LOG.warning(
+                "[impact] extraction stopped at the monthly cap of %d calls; "
+                "cells with unread documents: %s",
+                budget.max_calls_per_month, ",".join(budget.capped_cells) or "(none)",
+            )
     return run
 
 

@@ -176,6 +176,153 @@ reliefweb:
   # comes from the RELIEFWEB_APPNAME environment variable).
   api_base_url: "https://api.reliefweb.int/v2"
 
+  # -------------------------------------------------------------------------
+  # DOCUMENT SELECTION for ladder rung 2 (LLM-extracted figures).
+  #
+  # Documents are only fetched for TRIGGERED country-months. Extraction is
+  # the machine's only paid step, and a non-triggered month has already
+  # resolved (to zero, or to nothing) before this code is reached.
+  # -------------------------------------------------------------------------
+  documents:
+    # ReliefWeb content formats worth reading for a stated figure. "Flash
+    # Update" is not a format of its own — ReliefWeb files flash updates
+    # under Situation Report, and government statements under News and
+    # Press Release.
+    formats: ["Situation Report", "News and Press Release", "Assessment", "UN Document"]
+    # How many documents are read per country-month. This is the per-cell
+    # extraction call count, so it is the first lever to pull if
+    # extraction.max_calls_per_month starts binding.
+    max_docs_per_cell: 30
+    # How many documents to ask the API for before ranking. Ranking is done
+    # over this pool and the top max_docs_per_cell are read, so the pool
+    # must be comfortably larger than the cap or "most authoritative first"
+    # degenerates into "most recent first".
+    candidate_pool_size: 100
+    # Publication window: month start .. month end + publication_pad_days
+    # (a report about a late-month flood publishes into the next month).
+    publication_pad_days: 14
+    # Document ranking for selection, best first. Each entry is matched
+    # case-insensitively against the document's source shortnames, source
+    # names and ReliefWeb source-type names; the first entry that matches
+    # gives the document its rank, and an unmatched document ranks after
+    # every listed one. Ties break on recency, then document id, so the
+    # selection is stable across runs.
+    source_priority:
+      - "OCHA"
+      - "Government"
+      - "United Nations"
+      - "International Organization"
+      - "Red Cross"
+      - "Non-governmental Organization"
+    # How much of a document body is sent to the extractor. Figures are
+    # stated in the first screens of a situation report, and the quote
+    # verifier only accepts a quote found in the text actually sent — so a
+    # truncated body cannot produce an unverifiable figure.
+    body_char_limit: 24000
+    request_timeout_sec: 60
+    request_delay_sec: 0.5
+
+  # -------------------------------------------------------------------------
+  # FIGURE PRECEDENCE (deterministic post-processing, no LLM).
+  #
+  # The extractor reports who a document ATTRIBUTES each figure to
+  # (stated_by, verbatim). This maps that free text onto a precedence order:
+  # government > UN agency > IFRC/NGO > media. Matching is a lowercase
+  # substring test against the keywords, first tier that matches wins, and
+  # an unrecognised attribution ranks after every listed tier (it is not
+  # discarded — an unattributed figure in an OCHA sitrep is still evidence).
+  # -------------------------------------------------------------------------
+  authority_precedence:
+    - tier: government
+      keywords: ["government", "ministry", "ministry of", "national disaster",
+                 "disaster management authority", "civil protection", "civil defence",
+                 "state authorities", "provincial", "district administration",
+                 "ndma", "ndrrmc", "bnpb", "nema", "dmha"]
+    - tier: un_agency
+      keywords: ["ocha", "united nations", "unicef", "undp", "unhcr", "unfpa",
+                 "wfp", "who", "fao", "iom", "unrwa", "un "]
+    - tier: ifrc_ngo
+      keywords: ["ifrc", "red cross", "red crescent", "national society",
+                 "ngo", "non-governmental", "oxfam", "save the children",
+                 "world vision", "care international", "msf",
+                 "medecins sans frontieres", "mercy corps", "caritas"]
+    - tier: media
+      keywords: ["media", "news", "reuters", "afp", "associated press", "bbc",
+                 "al jazeera", "press report", "local media", "newspaper"]
+
+  # -------------------------------------------------------------------------
+  # HOUSEHOLDS -> PEOPLE conversion.
+  #
+  # The extractor is forbidden from converting units: if a document says
+  # "12,000 households", it reports 12000 households and the machine
+  # converts here, deterministically, with a declared multiplier. Every
+  # converted figure records the multiplier and its origin in provenance,
+  # so a reader can undo the conversion.
+  #
+  # by_iso3 values are average household sizes (UN DESA Household Size and
+  # Composition database, rounded to one decimal). The map is deliberately
+  # partial: extend it for any country where the default is a poor fit.
+  # -------------------------------------------------------------------------
+  household_conversion:
+    default_multiplier: 5.0
+    by_iso3:
+      BGD: 4.1
+      COL: 3.1
+      ETH: 4.6
+      HTI: 4.0
+      IDN: 3.9
+      IND: 4.4
+      KEN: 3.9
+      LKA: 3.8
+      MDG: 4.5
+      MMR: 4.3
+      MOZ: 4.4
+      MWI: 4.4
+      NPL: 4.3
+      PAK: 6.3
+      PHL: 4.1
+      SOM: 6.2
+      VNM: 3.5
+      ZWE: 4.2
+
+# ---------------------------------------------------------------------------
+# LLM EXTRACTION (ladder rung 2) — the machine's only paid step.
+#
+# The model is addressed by ROLE, never by model id: model ids are
+# centralised in pythia/config.yaml's llm.models registry and roles block
+# (env override > config role > code fallback). The rulebook owns the
+# POLICY — which role, how many calls, how much text — and config.yaml owns
+# which model backs that role. Putting an id here would fork the repo's
+# single source of truth for model choice.
+#
+# Cost arithmetic at the shipped defaults: a Haiku-class call over a
+# 24,000-character document is roughly 6k input + 500 output tokens, about
+# USD 0.009. max_calls_per_month = 1500 therefore caps LLM spend near
+# USD 14/month, comfortably inside the USD 50 ceiling and leaving room for
+# a backcast. Every other source in the machine is free.
+# ---------------------------------------------------------------------------
+extraction:
+  enabled: true
+  model_role: hazard_extraction
+  # Bumping this invalidates the extraction cache: a document is re-read
+  # when the prompt version or the model changes, and only then.
+  prompt_version: v1
+  temperature: 0.0
+  max_output_tokens: 2000
+  request_timeout_sec: 120
+  # Hard cost guard. Counted over haz_doc_extractions rows created in the
+  # current CALENDAR month, across every run — so a re-run costs nothing
+  # (cached documents are never re-read) and a runaway backcast stops
+  # instead of quietly spending. Cells skipped by the cap record
+  # extraction_budget_capped in their provenance; they are never silently
+  # treated as "ReliefWeb had nothing".
+  max_calls_per_month: 1500
+  # Skip extraction for a cell whose HIGHER ladder rung already has a
+  # figure. reliefweb_extracted sits below emdat, so it cannot win those
+  # cells — reading them buys only adjacent-rung conflict flags, at roughly
+  # a quarter of a dollar per cell. Set false to buy those flags anyway.
+  skip_when_higher_rung_populated: true
+
 # ---------------------------------------------------------------------------
 # LADDER SOURCE CONNECTORS
 #

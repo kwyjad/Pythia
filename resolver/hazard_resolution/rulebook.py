@@ -276,6 +276,109 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
             f"reliefweb.api_base_url must be an https:// URL, got {api_base_url!r}"
         )
 
+    # ReliefWeb document selection (ladder rung 2 input).
+    _require_str_list("reliefweb.documents.formats")
+    _require_int_in("reliefweb.documents.max_docs_per_cell", 1, 200)
+    _require_int_in("reliefweb.documents.candidate_pool_size", 1, 1000)
+    _require_int_in("reliefweb.documents.publication_pad_days", 0, 90)
+    _require_str_list("reliefweb.documents.source_priority")
+    _require_int_in("reliefweb.documents.body_char_limit", 500, 500_000)
+    _require_positive_number("reliefweb.documents.request_timeout_sec")
+    _require_non_negative_number("reliefweb.documents.request_delay_sec")
+    # A pool no larger than the cap makes the source ranking a no-op: every
+    # document fetched is read, so "most authoritative first" degenerates
+    # into "most recent first" without anything failing.
+    pool = _get("reliefweb.documents.candidate_pool_size")
+    cap = _get("reliefweb.documents.max_docs_per_cell")
+    if isinstance(pool, int) and isinstance(cap, int) and pool < cap:
+        problems.append(
+            "reliefweb.documents.candidate_pool_size must be >= "
+            f"max_docs_per_cell, got {pool} < {cap} (ranking would never "
+            "choose between documents)"
+        )
+
+    # Figure attribution precedence: an ordered list of named tiers.
+    precedence = _require("reliefweb.authority_precedence")
+    if precedence is not _MISSING:
+        if not isinstance(precedence, list) or not precedence:
+            problems.append(
+                f"reliefweb.authority_precedence must be a non-empty list, got {precedence!r}"
+            )
+        else:
+            seen_tiers: list[str] = []
+            for index, entry in enumerate(precedence):
+                where = f"reliefweb.authority_precedence[{index}]"
+                if not isinstance(entry, Mapping):
+                    problems.append(f"{where} must be a mapping, got {entry!r}")
+                    continue
+                tier = entry.get("tier")
+                if not isinstance(tier, str) or not tier.strip():
+                    problems.append(f"{where}.tier must be a non-empty string, got {tier!r}")
+                else:
+                    seen_tiers.append(tier)
+                keywords = entry.get("keywords")
+                if (
+                    not isinstance(keywords, list)
+                    or not keywords
+                    or not all(isinstance(k, str) and k.strip() for k in keywords)
+                ):
+                    problems.append(
+                        f"{where}.keywords must be a non-empty list of strings, got {keywords!r}"
+                    )
+            if len(set(seen_tiers)) != len(seen_tiers):
+                problems.append(
+                    f"reliefweb.authority_precedence has duplicate tiers: {seen_tiers}"
+                )
+
+    # Households -> people conversion.
+    _require_positive_number("reliefweb.household_conversion.default_multiplier")
+    by_iso3 = _require("reliefweb.household_conversion.by_iso3")
+    if by_iso3 is not _MISSING:
+        if not isinstance(by_iso3, Mapping):
+            problems.append(
+                f"reliefweb.household_conversion.by_iso3 must be a mapping, got {by_iso3!r}"
+            )
+        else:
+            for iso3, multiplier in by_iso3.items():
+                if not isinstance(iso3, str) or len(iso3) != 3 or not iso3.isalpha():
+                    problems.append(
+                        f"reliefweb.household_conversion.by_iso3 key {iso3!r} is not an ISO3 code"
+                    )
+                if not _is_number(multiplier) or multiplier <= 0:
+                    problems.append(
+                        f"reliefweb.household_conversion.by_iso3.{iso3} must be a "
+                        f"number > 0, got {multiplier!r}"
+                    )
+
+    # LLM extraction policy. The MODEL is not configured here: the rulebook
+    # names a role and pythia/config.yaml resolves it, so model choice keeps
+    # one source of truth.
+    _require_bool("extraction.enabled")
+    model_role = _require("extraction.model_role")
+    if model_role is not _MISSING and (
+        not isinstance(model_role, str) or not model_role.strip()
+    ):
+        problems.append(
+            f"extraction.model_role must be a non-empty role name, got {model_role!r}"
+        )
+    elif isinstance(model_role, str) and ":" in model_role:
+        problems.append(
+            f"extraction.model_role must be a ROLE name, not a model ref ({model_role!r}); "
+            "model ids live in pythia/config.yaml's llm.models registry"
+        )
+    prompt_version = _require("extraction.prompt_version")
+    if prompt_version is not _MISSING and (
+        not isinstance(prompt_version, str) or not prompt_version.strip()
+    ):
+        problems.append(
+            f"extraction.prompt_version must be a non-empty string, got {prompt_version!r}"
+        )
+    _require_non_negative_number("extraction.temperature")
+    _require_int_in("extraction.max_output_tokens", 64, 32_000)
+    _require_positive_number("extraction.request_timeout_sec")
+    _require_int_in("extraction.max_calls_per_month", 0, 1_000_000)
+    _require_bool("extraction.skip_when_higher_rung_populated")
+
     # Drought rule (thresholds are Phase 4 placeholders but must be well-typed)
     _require_choice("drought.rule", _KNOWN_DROUGHT_RULES)
     _require_int_in("drought.ipc_phase_threshold", 1, 5)
@@ -400,9 +503,19 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
                     )
 
     # Credential guard: keys come from env vars only, never from the rulebook.
+    #
+    # The VALUE has to be a string for this to fire. A credential is always
+    # text; a numeric setting whose name happens to contain a credential
+    # fragment ("extraction.max_output_tokens") is a token BUDGET, not a
+    # token. Without the type test the guard rejects perfectly good config,
+    # and the fix people reach for is renaming the setting — which weakens
+    # the rulebook's readability to satisfy a check that was wrong.
     for dotted in _walk_keys(data):
         leaf = dotted.rsplit(".", 1)[-1].lower()
-        if any(fragment in leaf for fragment in _CREDENTIAL_KEY_FRAGMENTS):
+        if not any(fragment in leaf for fragment in _CREDENTIAL_KEY_FRAGMENTS):
+            continue
+        value = _get(dotted)
+        if isinstance(value, str):
             problems.append(
                 f"key {dotted!r} looks like a credential; API keys must come from "
                 "environment variables, never the rulebook"

@@ -47,6 +47,7 @@ CONSUMED_ROLES = [
     "grounding_openai_fallback",
     "grounding_claude",
     "crisiswatch",
+    "hazard_extraction",
 ]
 
 

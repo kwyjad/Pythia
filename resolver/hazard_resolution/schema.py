@@ -113,6 +113,13 @@ _CORE_TABLE_DDL: dict[str, str] = {
     # Layer 2 input: every candidate figure the ladder can choose from.
     # extraction_model is NULL unless the figure came from LLM extraction
     # (which only ever transcribes stated figures, never estimates).
+    #
+    # preference_rank orders the candidates WITHIN one rung when that rung
+    # has its own precedence rule (0 = the rung's preferred figure). Only
+    # reliefweb_extracted sets it today: the rulebook says its figures are
+    # ordered by attributed authority then recency, which is not the
+    # "largest stated figure" rule the record-based rungs use. NULL means
+    # "this rung has no internal precedence" and leaves that default alone.
     "haz_impact_candidates": f"""
     CREATE TABLE IF NOT EXISTS haz_impact_candidates (
         iso3 TEXT NOT NULL,
@@ -127,8 +134,40 @@ _CORE_TABLE_DDL: dict[str, str] = {
         stated_by TEXT,
         doc_url TEXT,
         extraction_model TEXT,
+        preference_rank INTEGER,
+        detail_json TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (iso3, year, month, hazard, source, source_ref, value_type)
+    )
+    """,
+    # One row per (document, model, prompt version) the extractor has read.
+    # This is BOTH the extraction cache and the cost ledger: a document is
+    # never read twice for the same model and prompt version, and
+    # extraction.max_calls_per_month is enforced by counting rows created in
+    # the current calendar month. figures_json holds everything the model
+    # reported, INCLUDING figures the deterministic post-processing later
+    # discarded — the audit trail has to show what was rejected, not only
+    # what survived.
+    "haz_doc_extractions": f"""
+    CREATE TABLE IF NOT EXISTS haz_doc_extractions (
+        doc_id TEXT NOT NULL,
+        iso3 TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        month INTEGER NOT NULL {_MONTH_CHECK},
+        hazard TEXT NOT NULL {_HAZARD_CHECK},
+        model TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('ok','error')),
+        figures_json TEXT NOT NULL,
+        n_figures INTEGER NOT NULL DEFAULT 0,
+        n_rejected INTEGER NOT NULL DEFAULT 0,
+        prompt_tokens INTEGER,
+        completion_tokens INTEGER,
+        cost_usd DOUBLE,
+        doc_url TEXT,
+        error TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (doc_id, model, prompt_version)
     )
     """,
     # The machine's answer per cell. provenance_json carries source, record
@@ -216,8 +255,15 @@ _CORE_TABLE_DDL: dict[str, str] = {
 #: column to a populated table — so a migrated column is nullable where a
 #: freshly created one is not. Readers must therefore treat these columns
 #: with COALESCE rather than trusting NOT NULL.
-_COLUMN_MIGRATIONS: tuple[tuple[str, str, str, str], ...] = (
+#:
+#: ``backfill_value`` is None for a genuinely nullable column, where NULL
+#: carries meaning and must not be overwritten. ``preference_rank`` is such
+#: a column: NULL means "this rung has no internal precedence rule", which
+#: is a different statement from any integer rank.
+_COLUMN_MIGRATIONS: tuple[tuple[str, str, str, str | None], ...] = (
     ("haz_resolutions", "provisional", "BOOLEAN DEFAULT FALSE", "FALSE"),
+    ("haz_impact_candidates", "preference_rank", "INTEGER", None),
+    ("haz_impact_candidates", "detail_json", "TEXT", None),
 )
 
 _INDEX_DDL = (
@@ -238,13 +284,16 @@ def _apply_column_migrations(conn: "duckdb.DuckDBPyConnection") -> None:
 
     ``ADD COLUMN IF NOT EXISTS`` makes the ALTER a no-op on an already
     migrated DB; the backfill then removes the NULLs the ALTER leaves
-    behind in existing rows.
+    behind in existing rows — unless the column's backfill is None, in
+    which case NULL is a meaningful value and is left in place.
     """
 
     for table, column, definition, backfill in _COLUMN_MIGRATIONS:
         conn.execute(
             f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}"
         )
+        if backfill is None:
+            continue
         conn.execute(
             f"UPDATE {table} SET {column} = {backfill} WHERE {column} IS NULL"
         )

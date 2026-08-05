@@ -1,0 +1,771 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+"""LLM extraction of STATED figures from ReliefWeb documents (ladder rung 2).
+
+**Hard rule 3 lives here.** The model's only job is transcription: find
+every people-affected figure a document explicitly states, and copy it out
+with the sentence it came from. It is forbidden to estimate, to convert
+units, to sum across areas, or to carry a figure over from its own
+knowledge. Everything a number could be *turned into* — households into
+people, many figures into one — happens deterministically afterwards, in
+:mod:`resolver.hazard_resolution.figures`.
+
+Three mechanisms enforce that, and none of them trust the prompt alone:
+
+* **Quote verification.** Every figure must arrive with a quote, and the
+  quote must appear in the document text that was actually sent. A figure
+  whose quote cannot be found is dropped with a reason. A model that
+  invents a number has to invent a sentence that is already in the
+  document, which is a much harder thing to do by accident.
+* **A closed schema.** Values must be numbers and units must be one of
+  ``people`` / ``households``. Anything else is dropped, not coerced.
+* **No arithmetic.** The parser never adds, scales or reconciles. It
+  returns what was said, and says what it discarded.
+
+**Cost.** This is the machine's only paid step, so it is guarded at three
+levels: documents are capped per cell (``documents.max_docs_per_cell``),
+calls are capped per calendar month across all runs
+(``extraction.max_calls_per_month``), and a cell whose higher ladder rung
+already has a figure is skipped entirely when
+``extraction.skip_when_higher_rung_populated`` is on — reliefweb_extracted
+sits below EM-DAT and cannot win those cells.
+
+Extractions are cached in ``haz_doc_extractions`` keyed by (document,
+model, prompt version), which makes a re-run free and makes the monthly
+cap count real spend rather than repeated work.
+
+The model is addressed by ROLE (``extraction.model_role``), resolved
+through the repo's model registry — the rulebook owns the policy,
+``pythia/config.yaml`` owns which model backs it.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable
+
+from resolver.hazard_resolution.rulebook import Rulebook
+from resolver.hazard_resolution.schema import ensure_haz_schema
+from resolver.hazard_resolution.sources import parse_number, utcnow_iso
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import duckdb
+
+LOG = logging.getLogger(__name__)
+
+#: The ladder rung these figures land on (``rulebook.ladder``).
+SOURCE = "reliefweb_extracted"
+
+UNIT_PEOPLE = "people"
+UNIT_HOUSEHOLDS = "households"
+KNOWN_UNITS = (UNIT_PEOPLE, UNIT_HOUSEHOLDS)
+
+#: Injectable model seam for tests: (model_id, prompt, rulebook) ->
+#: (text, usage, error). Mirrors ``forecaster.providers.call_chat_ms``'s
+#: return shape so the default implementation is a thin adapter.
+CallFn = Callable[[str, str, Rulebook], "tuple[str, dict, str]"]
+
+_CUMULATIVE_VALUES = ("cumulative", "new", "unstated")
+
+_PROMPT_TEMPLATE = """\
+You are a transcription tool. You extract figures that a document states. \
+You never estimate, infer, calculate, or use knowledge from outside the \
+document.
+
+TASK
+Read the document below and find every explicitly stated figure for the \
+number of PEOPLE AFFECTED by {hazard_label} in {country}.
+
+WHAT COUNTS
+Count a figure only if the document states it as people (or persons, or \
+individuals) affected, or as households/families affected. Related but \
+DIFFERENT quantities — displaced, evacuated, killed, injured, missing, \
+houses damaged, people in need, people targeted or reached by assistance \
+— are NOT people affected. Do not include them.
+
+RULES (all mandatory)
+1. Transcribe only. If a number is not written in the document, it does \
+not exist. Never estimate or infer one.
+2. Never convert units. If the document says households or families, \
+report the number of households and set "unit" to "households". Do not \
+multiply by an assumed household size.
+3. Never sum, total, or combine figures. If the document gives figures for \
+three provinces, report three figures, each with its own area. Do not add \
+them.
+4. Every figure must carry the exact sentence it came from, copied \
+character for character from the document. A figure without a verbatim \
+quote will be discarded.
+5. Report figures for {country} and {hazard_label} only. Ignore figures \
+about other countries, other hazards, or other time periods.
+6. If the document states no qualifying figure, return an empty list. An \
+empty list is a correct and expected answer.
+
+OUTPUT
+Return JSON only — no preamble, no explanation, no markdown fences:
+
+{{"figures": [
+  {{
+    "value": <number, digits only, no separators>,
+    "unit": "people" | "households",
+    "quote": "<the exact sentence from the document stating this figure>",
+    "stated_by": "<who the document attributes the figure to, verbatim; \
+empty string if the document does not say>",
+    "area": "<the area the figure covers, verbatim; empty string if not \
+stated>",
+    "date": "<the date the figure refers to, YYYY-MM-DD if stated, else \
+empty string>",
+    "cumulative_or_new": "cumulative" | "new" | "unstated"
+  }}
+]}}
+
+DOCUMENT
+Title: {title}
+Published: {published}
+Source: {source}
+URL: {url}
+
+{body}
+"""
+
+#: Hazard codes -> the wording used in the prompt. Plain language, because
+#: the model is reading humanitarian prose, not repo taxonomy.
+_HAZARD_LABEL = {
+    "FL": "flooding (including flash floods and landslides caused by rain)",
+    "TC": "a tropical cyclone (including hurricanes and typhoons)",
+    "DR": "drought",
+}
+
+
+@dataclass
+class ExtractedFigure:
+    """One figure a document STATES, as transcribed and verified."""
+
+    value: float
+    unit: str
+    quote: str
+    stated_by: str
+    area: str
+    date: str
+    cumulative_or_new: str
+    doc_id: str
+    doc_url: str
+    doc_title: str
+    doc_date: str
+    doc_source_rank: int
+    model: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "value": self.value,
+            "unit": self.unit,
+            "quote": self.quote,
+            "stated_by": self.stated_by,
+            "area": self.area,
+            "date": self.date,
+            "cumulative_or_new": self.cumulative_or_new,
+            "doc_id": self.doc_id,
+            "doc_url": self.doc_url,
+            "doc_title": self.doc_title,
+            "doc_date": self.doc_date,
+            "doc_source_rank": self.doc_source_rank,
+            "model": self.model,
+        }
+
+
+@dataclass
+class ExtractionBudget:
+    """The cost guard, shared across every cell in one run.
+
+    ``used_this_month`` is read from ``haz_doc_extractions`` at
+    construction, so the cap spans runs: three CLI invocations in one month
+    cannot each spend the monthly allowance.
+    """
+
+    max_calls_per_month: int
+    used_this_month: int = 0
+    calls_this_run: int = 0
+    cost_this_run_usd: float = 0.0
+    cached_hits: int = 0
+    capped_cells: list[str] = field(default_factory=list)
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.max_calls_per_month - self.used_this_month - self.calls_this_run)
+
+    @property
+    def exhausted(self) -> bool:
+        return self.remaining <= 0
+
+    def note_capped(self, cell: str) -> None:
+        if cell not in self.capped_cells:
+            self.capped_cells.append(cell)
+
+    def as_provenance(self) -> dict[str, Any]:
+        return {
+            "max_calls_per_month": self.max_calls_per_month,
+            "used_this_month_before_run": self.used_this_month,
+            "calls_this_run": self.calls_this_run,
+            "cached_hits": self.cached_hits,
+            "cost_this_run_usd": round(self.cost_this_run_usd, 4),
+            "remaining": self.remaining,
+            "capped": self.exhausted,
+        }
+
+
+@dataclass
+class CellExtraction:
+    """What extraction did for one country-month-hazard."""
+
+    iso3: str
+    ym: str
+    hazard: str
+    ok: bool = True
+    skipped_reason: str | None = None
+    docs_read: int = 0
+    docs_cached: int = 0
+    docs_failed: int = 0
+    calls_made: int = 0
+    cost_usd: float = 0.0
+    budget_capped: bool = False
+    figures: list[ExtractedFigure] = field(default_factory=list)
+    rejected: list[dict[str, Any]] = field(default_factory=list)
+
+    def as_provenance(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "skipped_reason": self.skipped_reason,
+            "docs_read": self.docs_read,
+            "docs_cached": self.docs_cached,
+            "docs_failed": self.docs_failed,
+            "calls_made": self.calls_made,
+            "cost_usd": round(self.cost_usd, 4),
+            "budget_capped": self.budget_capped,
+            "figures_extracted": len(self.figures),
+            "figures_rejected": self.rejected,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Model resolution
+# ---------------------------------------------------------------------------
+
+
+def resolve_extraction_model(rulebook: Rulebook) -> str:
+    """The ``provider:model_id`` backing ``extraction.model_role``.
+
+    Imported lazily: the resolver package must stay importable without the
+    forecaster's provider stack, and a role lookup is the only thing this
+    module needs from ``pythia``.
+    """
+
+    from pythia.llm_profiles import get_role_model
+
+    role = str(rulebook.get("extraction.model_role"))
+    ref = get_role_model(role)
+    if not ref:
+        raise RuntimeError(
+            f"extraction.model_role {role!r} does not resolve to a model; add it to "
+            "pythia/config.yaml's roles block and pythia/llm_profiles._ROLE_FALLBACKS"
+        )
+    return ref
+
+
+def _default_call(model_ref: str, prompt: str, rulebook: Rulebook) -> tuple[str, dict, str]:
+    """Call the extraction model once. Never raises.
+
+    Goes through ``forecaster.providers.call_chat_ms`` — the repo's single
+    provider path, so retries, circuit breakers and cost accounting are the
+    ones every other call site gets. ``log_call=False`` because this module
+    keeps its own ledger in ``haz_doc_extractions`` and the generic
+    ``llm_calls`` row would double-count the spend.
+    """
+
+    import asyncio
+
+    from forecaster.providers import ModelSpec, call_chat_ms
+    from pythia.llm_profiles import split_model_ref
+
+    provider, model_id = split_model_ref(model_ref)
+    spec = ModelSpec(
+        name=model_id,
+        provider=provider,
+        model_id=model_id,
+        purpose="hazard_extraction",
+        temperature=float(rulebook.get("extraction.temperature")),
+    )
+    try:
+        return asyncio.run(
+            call_chat_ms(
+                spec,
+                prompt,
+                temperature=float(rulebook.get("extraction.temperature")),
+                prompt_key="resolver.hazard_extraction",
+                component="HazardResolution",
+                log_call=False,
+            )
+        )
+    except Exception as exc:  # pragma: no cover - network/runtime failures
+        LOG.warning("[extract] model call failed: %s", exc)
+        return "", {}, str(exc)
+
+
+#: Memoised (pricer, splitter) or the sentinel False once pricing has been
+#: found unavailable. Resolved once per process: the import is lazy, and a
+#: sparse environment must not produce one warning per document read.
+_PRICER: Any = None
+
+
+def _pricer():
+    global _PRICER
+    if _PRICER is not None:
+        return _PRICER
+    try:
+        from forecaster.providers import estimate_cost_usd
+        from pythia.llm_profiles import split_model_ref
+
+        _PRICER = (estimate_cost_usd, split_model_ref)
+    except Exception as exc:  # pragma: no cover - sparse environments
+        LOG.warning(
+            "[extract] cost pricing unavailable (%s) — calls will still be made "
+            "and counted against the monthly cap, but the run's spend line will "
+            "read $0.00",
+            exc,
+        )
+        _PRICER = False
+    return _PRICER
+
+
+def _cost_usd(model_ref: str, usage: dict[str, Any]) -> float:
+    """Spend for one call, from the provider's own token counts.
+
+    Best-effort: pricing that cannot be resolved must not stop a run, and
+    the CALL CAP rather than the dollar figure is what actually bounds
+    spend — so a $0.00 spend line degrades the report, not the guard.
+    """
+
+    pricer = _pricer()
+    if not pricer:
+        return 0.0
+    estimate_cost_usd, split_model_ref = pricer
+    try:
+        _, model_id = split_model_ref(model_ref)
+        return float(estimate_cost_usd(model_id, usage or {}))
+    except Exception as exc:  # pragma: no cover - defensive
+        LOG.warning("[extract] could not price a call on %s: %s", model_ref, exc)
+        return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Prompt + strict parsing
+# ---------------------------------------------------------------------------
+
+
+def build_prompt(document: dict[str, Any], iso3: str, hazard: str, country: str | None = None) -> str:
+    """The extraction prompt for one document. Pure function."""
+
+    return _PROMPT_TEMPLATE.format(
+        hazard_label=_HAZARD_LABEL.get(hazard, hazard),
+        country=country or iso3,
+        title=document.get("title") or "(untitled)",
+        published=document.get("date_created") or "(undated)",
+        source=", ".join(document.get("sources") or []) or "(unattributed)",
+        url=document.get("url") or "(no url)",
+        body=document.get("body") or "",
+    )
+
+
+def _normalise_for_match(text: str) -> str:
+    """Collapse whitespace and case so a quote can be found in a body.
+
+    Deliberately conservative: it normalises only whitespace, case and the
+    typographic characters that differ between a JSON string and the HTML
+    a document was rendered from. It never removes words, so a quote that
+    does not appear in the document still fails to match.
+    """
+
+    text = str(text)
+    for fancy, plain in (
+        ("‘", "'"), ("’", "'"), ("“", '"'), ("”", '"'),
+        ("–", "-"), ("—", "-"), (" ", " "),
+    ):
+        text = text.replace(fancy, plain)
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _strip_fences(text: str) -> str:
+    """Remove a ```json fence if the model wrapped its JSON in one."""
+
+    stripped = str(text).strip()
+    if not stripped.startswith("```"):
+        return stripped
+    stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
+    if stripped.endswith("```"):
+        stripped = stripped[: -3]
+    return stripped.strip()
+
+
+def _loads(text: str) -> Any:
+    """Parse the model's JSON, tolerating a fence or surrounding prose."""
+
+    candidate = _strip_fences(text)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        pass
+    start, end = candidate.find("{"), candidate.rfind("}")
+    if start == -1 or end <= start:
+        raise ValueError("response contains no JSON object")
+    return json.loads(candidate[start : end + 1])
+
+
+def parse_response(
+    text: str, document: dict[str, Any], model: str
+) -> tuple[list[ExtractedFigure], list[dict[str, Any]]]:
+    """Parse and VERIFY one model response. Returns (figures, rejected).
+
+    Strict by construction — every rejection carries a reason, because a
+    silent drop and a document that genuinely stated nothing look identical
+    downstream, and only one of them is a bug.
+    """
+
+    rejected: list[dict[str, Any]] = []
+    figures: list[ExtractedFigure] = []
+
+    try:
+        payload = _loads(text)
+    except (ValueError, json.JSONDecodeError) as exc:
+        rejected.append({"reason": "unparseable_response", "detail": str(exc)})
+        return figures, rejected
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("figures"), list):
+        rejected.append(
+            {"reason": "unexpected_shape", "detail": "no 'figures' list in the response"}
+        )
+        return figures, rejected
+
+    body = _normalise_for_match(document.get("body") or "")
+
+    for index, raw in enumerate(payload["figures"]):
+        where = {"index": index, "raw": raw}
+        if not isinstance(raw, dict):
+            rejected.append({**where, "reason": "not_an_object"})
+            continue
+
+        value = parse_number(raw.get("value"))
+        if value is None:
+            rejected.append({**where, "reason": "value_not_a_number"})
+            continue
+
+        unit = str(raw.get("unit") or "").strip().lower()
+        if unit not in KNOWN_UNITS:
+            # Never coerced to "people": a households figure read as people
+            # understates by roughly five, and guessing which was meant is
+            # exactly the inference this module is not allowed to make.
+            rejected.append({**where, "reason": "unknown_unit", "detail": unit})
+            continue
+
+        quote = str(raw.get("quote") or "").strip()
+        if not quote:
+            rejected.append({**where, "reason": "missing_quote"})
+            continue
+        if _normalise_for_match(quote) not in body:
+            rejected.append({**where, "reason": "quote_not_found_in_document"})
+            continue
+
+        cumulative = str(raw.get("cumulative_or_new") or "unstated").strip().lower()
+        if cumulative not in _CUMULATIVE_VALUES:
+            cumulative = "unstated"
+
+        figures.append(
+            ExtractedFigure(
+                value=float(value),
+                unit=unit,
+                quote=quote,
+                stated_by=str(raw.get("stated_by") or "").strip(),
+                area=str(raw.get("area") or "").strip(),
+                date=str(raw.get("date") or "").strip(),
+                cumulative_or_new=cumulative,
+                doc_id=str(document.get("doc_id") or ""),
+                doc_url=str(document.get("url") or ""),
+                doc_title=str(document.get("title") or ""),
+                doc_date=str(document.get("date_created") or ""),
+                doc_source_rank=int(document.get("source_rank") or 0),
+                model=model,
+            )
+        )
+
+    return figures, rejected
+
+
+# ---------------------------------------------------------------------------
+# The extraction cache / cost ledger
+# ---------------------------------------------------------------------------
+
+
+def _year_month(ym: str) -> tuple[int, int]:
+    year, month = ym.split("-")
+    return int(year), int(month)
+
+
+def calls_this_calendar_month(
+    con: "duckdb.DuckDBPyConnection", today: dt.date | None = None
+) -> int:
+    """Extraction calls already billed in the current calendar month.
+
+    Counts ``haz_doc_extractions`` rows by creation time, not by target
+    month: the cap guards SPEND, and spend happens when the call is made.
+    """
+
+    ensure_haz_schema(con)
+    reference = today or dt.date.today()
+    row = con.execute(
+        """
+        SELECT COUNT(*) FROM haz_doc_extractions
+        WHERE CAST(strftime(created_at, '%Y-%m') AS VARCHAR) = ?
+        """,
+        [f"{reference.year:04d}-{reference.month:02d}"],
+    ).fetchone()
+    return int(row[0] or 0)
+
+
+def load_budget(
+    con: "duckdb.DuckDBPyConnection", rulebook: Rulebook, today: dt.date | None = None
+) -> ExtractionBudget:
+    """The run's cost guard, seeded from what this month already cost."""
+
+    budget = ExtractionBudget(
+        max_calls_per_month=int(rulebook.get("extraction.max_calls_per_month")),
+        used_this_month=calls_this_calendar_month(con, today=today),
+    )
+    LOG.info(
+        "[extract] budget: %d of %d extraction calls already made this calendar "
+        "month, %d remaining",
+        budget.used_this_month, budget.max_calls_per_month, budget.remaining,
+    )
+    return budget
+
+
+def load_cached_extraction(
+    con: "duckdb.DuckDBPyConnection", doc_id: str, model: str, prompt_version: str
+) -> dict[str, Any] | None:
+    """A previous extraction of this document, or None."""
+
+    ensure_haz_schema(con)
+    row = con.execute(
+        """
+        SELECT status, figures_json, n_rejected, cost_usd
+        FROM haz_doc_extractions
+        WHERE doc_id = ? AND model = ? AND prompt_version = ?
+        """,
+        [str(doc_id), str(model), str(prompt_version)],
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "status": row[0],
+        "payload": json.loads(row[1] or "{}"),
+        "n_rejected": int(row[2] or 0),
+        "cost_usd": float(row[3] or 0.0),
+    }
+
+
+def write_extraction(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    document: dict[str, Any],
+    iso3: str,
+    ym: str,
+    hazard: str,
+    model: str,
+    prompt_version: str,
+    status: str,
+    figures: list[ExtractedFigure],
+    rejected: list[dict[str, Any]],
+    usage: dict[str, Any],
+    cost_usd: float,
+    error: str | None,
+) -> None:
+    """Record one extraction call — the cache entry AND the ledger line."""
+
+    ensure_haz_schema(con)
+    year, month = _year_month(ym)
+    payload = {
+        "figures": [f.as_dict() for f in figures],
+        "rejected": rejected,
+        "extracted_at": utcnow_iso(),
+    }
+    con.execute(
+        """
+        INSERT OR REPLACE INTO haz_doc_extractions
+            (doc_id, iso3, year, month, hazard, model, prompt_version, status,
+             figures_json, n_figures, n_rejected, prompt_tokens,
+             completion_tokens, cost_usd, doc_url, error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            str(document.get("doc_id") or ""),
+            iso3.upper(),
+            year,
+            month,
+            hazard,
+            model,
+            prompt_version,
+            status,
+            json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            len(figures),
+            len(rejected),
+            int((usage or {}).get("prompt_tokens") or 0),
+            int((usage or {}).get("completion_tokens") or 0),
+            float(cost_usd),
+            str(document.get("url") or ""),
+            error,
+        ],
+    )
+
+
+def _figures_from_cache(cached: dict[str, Any], model: str) -> list[ExtractedFigure]:
+    out: list[ExtractedFigure] = []
+    for entry in cached["payload"].get("figures") or []:
+        fields = {k: v for k, v in entry.items() if k in ExtractedFigure.__annotations__}
+        fields.setdefault("model", model)
+        try:
+            out.append(ExtractedFigure(**fields))
+        except TypeError:  # pragma: no cover - a cache row from an older shape
+            LOG.warning("[extract] skipping an unreadable cached figure for %s", model)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Per-cell orchestration
+# ---------------------------------------------------------------------------
+
+
+def extract_for_cell(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    iso3: str,
+    ym: str,
+    hazard: str,
+    rulebook: Rulebook,
+    budget: ExtractionBudget,
+    documents: list[dict[str, Any]] | None = None,
+    call: CallFn | None = None,
+    model_ref: str | None = None,
+    country_name: str | None = None,
+) -> CellExtraction:
+    """Read this cell's cached documents and transcribe their figures.
+
+    Callers must only reach this for TRIGGERED country-months — the
+    acceptance criterion is that no extraction call is ever made for a cell
+    that resolved without one. :mod:`impact` enforces that by walking only
+    the triggered cells.
+    """
+
+    from resolver.hazard_resolution import reliefweb_docs as docs_mod
+
+    iso3 = iso3.upper()
+    result = CellExtraction(iso3=iso3, ym=ym, hazard=hazard)
+
+    if not bool(rulebook.get("extraction.enabled")):
+        result.skipped_reason = "extraction_disabled"
+        return result
+
+    if documents is None:
+        documents = docs_mod.documents_for_country_month(con, iso3, ym, hazard)
+    if not documents:
+        result.skipped_reason = "no_documents"
+        return result
+
+    prompt_version = str(rulebook.get("extraction.prompt_version"))
+    try:
+        model_ref = model_ref or resolve_extraction_model(rulebook)
+    except Exception as exc:
+        LOG.error("[extract] %s %s %s: %s", iso3, hazard, ym, exc)
+        result.ok = False
+        result.skipped_reason = f"model_unresolved: {exc}"
+        return result
+
+    call = call or _default_call
+
+    for document in documents:
+        doc_id = str(document.get("doc_id") or "")
+        if not doc_id:
+            continue
+
+        cached = load_cached_extraction(con, doc_id, model_ref, prompt_version)
+        if cached is not None:
+            result.docs_cached += 1
+            if cached["status"] == "ok":
+                result.figures.extend(_figures_from_cache(cached, model_ref))
+            budget.cached_hits += 1
+            continue
+
+        if budget.exhausted:
+            # The cap is a hard stop, and a stop is not a finding: the
+            # remaining documents are UNREAD, which the cell's provenance
+            # records so nobody later mistakes it for "ReliefWeb was silent".
+            result.budget_capped = True
+            budget.note_capped(f"{iso3}/{hazard}/{ym}")
+            LOG.warning(
+                "[extract] monthly extraction cap (%d) reached — %s %s %s has "
+                "unread documents; the rung is UNREAD, not empty",
+                budget.max_calls_per_month, iso3, hazard, ym,
+            )
+            break
+
+        prompt = build_prompt(document, iso3, hazard, country_name)
+        text, usage, error = call(model_ref, prompt, rulebook)
+        budget.calls_this_run += 1
+        result.calls_made += 1
+
+        cost = _cost_usd(model_ref, usage)
+        budget.cost_this_run_usd += cost
+        result.cost_usd += cost
+
+        if error or not str(text).strip():
+            result.docs_failed += 1
+            detail = error or "empty response"
+            LOG.warning(
+                "[extract] %s %s %s doc %s: call failed (%s)",
+                iso3, hazard, ym, doc_id, detail,
+            )
+            write_extraction(
+                con, document=document, iso3=iso3, ym=ym, hazard=hazard,
+                model=model_ref, prompt_version=prompt_version, status="error",
+                figures=[], rejected=[], usage=usage, cost_usd=cost, error=detail,
+            )
+            continue
+
+        figures, rejected = parse_response(text, document, model_ref)
+        result.docs_read += 1
+        result.figures.extend(figures)
+        result.rejected.extend(
+            {**entry, "doc_id": doc_id} for entry in rejected
+        )
+        if rejected:
+            LOG.info(
+                "[extract] %s %s %s doc %s: %d figure(s) kept, %d rejected (%s)",
+                iso3, hazard, ym, doc_id, len(figures), len(rejected),
+                ",".join(sorted({str(r.get("reason")) for r in rejected})),
+            )
+        write_extraction(
+            con, document=document, iso3=iso3, ym=ym, hazard=hazard,
+            model=model_ref, prompt_version=prompt_version, status="ok",
+            figures=figures, rejected=rejected, usage=usage, cost_usd=cost,
+            error=None,
+        )
+
+    LOG.info(
+        "[extract] %s %s %s: %d docs read (%d cached, %d failed), %d figures, "
+        "$%.4f this cell",
+        iso3, hazard, ym, result.docs_read, result.docs_cached,
+        result.docs_failed, len(result.figures), result.cost_usd,
+    )
+    return result
