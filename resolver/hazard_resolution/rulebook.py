@@ -41,6 +41,9 @@ KNOWN_WIND_SOURCES = ("usa_wind", "wmo_wind")
 #: IBTrACS CSV files the connector knows how to fetch.
 KNOWN_IBTRACS_SCOPES = ("last3years", "ALL")
 
+#: File shapes the Dartmouth Flood Observatory archive reader can parse.
+KNOWN_DFO_FORMATS = ("xlsx", "csv")
+
 #: Rulebook hazard names -> repo hazard codes (resolver/data/shocks.csv).
 HAZARD_CODE_BY_RULEBOOK_NAME = {"cyclone": "TC", "flood": "FL", "drought": "DR"}
 
@@ -626,6 +629,49 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
                     problems.append(
                         f"backcast.{hazard} must be an integer year in [1950, 2100], got {year!r}"
                     )
+
+    # Base-rate publication thresholds.
+    _require_int_in("base_rates.occurrence.min_years", 1, 200)
+    _require_int_in("base_rates.severity.min_events", 1, 10_000)
+
+    # Dartmouth Flood Observatory cross-check (calibration only).
+    _require_bool("dfo.enabled")
+    dfo_url = _require("dfo.url")
+    if dfo_url is not _MISSING and (
+        not isinstance(dfo_url, str) or not dfo_url.startswith("https://")
+    ):
+        problems.append(f"dfo.url must be an https:// URL, got {dfo_url!r}")
+    _require_choice("dfo.format", KNOWN_DFO_FORMATS)
+    _require_positive_number("dfo.request_timeout_sec")
+    _require_int_in("dfo.cross_check_end_year", 1950, 2100)
+    _require_int_in("dfo.min_years_for_comparison", 1, 200)
+    dfo_divergence = _require("dfo.divergence_factor")
+    if dfo_divergence is not _MISSING and (
+        not _is_number(dfo_divergence) or dfo_divergence <= 1
+    ):
+        problems.append(
+            "dfo.divergence_factor must be a number > 1, got "
+            f"{dfo_divergence!r} (a factor <= 1 would flag every country)"
+        )
+    # The cross-check earns its name by looking at years the machine did
+    # NOT backcast. Overlapping the windows would compare the machine's
+    # flood detection against an archive of the same floods it already
+    # resolved from, which confirms nothing.
+    dfo_end = _get("dfo.cross_check_end_year")
+    flood_start = _get("backcast.flood")
+    if (
+        isinstance(dfo_end, int)
+        and not isinstance(dfo_end, bool)
+        and isinstance(flood_start, int)
+        and not isinstance(flood_start, bool)
+        and dfo_end > flood_start
+    ):
+        problems.append(
+            f"dfo.cross_check_end_year ({dfo_end}) must be <= backcast.flood "
+            f"({flood_start}) — the cross-check compares the machine's era "
+            "against the years BEFORE it, and overlapping windows would "
+            "compare the machine against itself"
+        )
 
     # Credential guard: keys come from env vars only, never from the rulebook.
     #

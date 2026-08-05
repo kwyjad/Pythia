@@ -86,6 +86,19 @@ resolve-hazards --hazard flood --month 2026-06 --no-ladder
 
 # Run the ladder but skip the one paid step (no model calls, no spend)
 resolve-hazards --hazard flood --month 2026-06 --no-extract
+
+# --- Phase 5: history, base rates, and the acceptance report ---
+
+# Replay a hazard over its full backcast window (resumable; hours, not minutes)
+python -m resolver.hazard_resolution.backcast --hazard flood
+python -m resolver.hazard_resolution.backcast --hazard cyclone --to 2015-12
+python -m resolver.hazard_resolution.backcast --hazard flood --no-extract  # spend nothing
+
+# Rebuild the occurrence and severity base rates from what the backcast wrote
+python -m resolver.hazard_resolution.base_rates
+
+# The one-page acceptance report (last 12 fully frozen months)
+python -m resolver.hazard_resolution.acceptance --out acceptance.md
 ```
 
 ## Phase 1: the cyclone path (implemented)
@@ -510,4 +523,139 @@ the snapshot is refused, the indicator reads UNAVAILABLE, and no zeros are
 written — and the fix is a URL in YAML plus, at worst, a key name in
 `_CLASS_KEYS`. It is not a redesign.
 
-Later phases add the backcast.
+## Phase 5: backcast, base rates, and the acceptance report (implemented)
+
+### The backcast — the same machine, replayed over history
+
+[`backcast.py`](backcast.py) runs each hazard from `rulebook.backcast.<hazard>`
+(cyclone 2000, flood 2010, drought 2017) through the last month that has
+FROZEN, one month at a time, **through exactly the functions a live run
+uses**. There is no backcast-specific detection, no backcast-specific
+ladder, and no second copy of any rule. The only difference is the
+`run_type='backcast'` stamped on every `haz_resolutions` and `haz_triggers`
+row it writes.
+
+That sameness is the point rather than a convenience. Base rates drawn from
+a history the machine did not actually produce would describe a different
+machine — and if the backcast had its own path, a rulebook change could
+move the live answers without moving the base rates the forecaster compares
+them against, and nothing would fail.
+
+Each hazard's start year is set by when its **detector's** record begins,
+not by preference: IBTrACS best tracks run back decades, GDACS alerts only
+stabilise around 2010, IPC's structured feeds later still. Backcasting past
+a detector's coverage does not produce zeros — the coverage gate suppresses
+them — it produces empty months that cost real time.
+
+**A backcast fills gaps and never rewrites.** Every month it touches is
+frozen by definition, so the freeze guard applies in full: a cell that
+already has an answer keeps it, and the attempt is logged to
+`haz_revisions`. That also makes the resume ledger (`haz_backcast_progress`)
+more than a convenience — re-walking a completed month would write one
+revision row per already-answered cell, burying the genuine post-freeze
+revisions the audit table exists for. `--no-resume` re-walks anyway, for
+when that is what you want.
+
+**Two costs to know before starting one.** ReliefWeb silence sweeps run once
+per non-triggered country-month, so a 25-year cyclone backcast over ~200
+countries is on the order of half a million paced requests — the driver
+prints an estimate before it begins. And ladder rung 2 spends real money,
+bounded by `extraction.max_calls_per_month` counted per *calendar* month
+across all runs, so a long backcast accrues extraction gradually rather
+than in one bill. `--no-extract` turns it off entirely.
+
+**A known gap, deliberately not papered over.** The drought path's
+indicator feeds publish a *latest* snapshot with no observation date, so a
+backcast month falls outside `max_observation_age_months`, the required
+indicator reads UNAVAILABLE, and the month resolves INCONCLUSIVE rather
+than to a false zero. That is the correct behaviour and it means **a
+drought backcast produces almost nothing** until `drought.indicators`
+entries point at a per-month archive (their URLs accept `{ym}`, `{year}`
+and `{month}`). The driver's pre-flight check says so before the run
+starts rather than letting it look merely disappointing.
+
+### Base rates
+
+[`base_rates.py`](base_rates.py) rebuilds two tables from what is already on
+disk — drop them and a re-run reproduces them exactly.
+
+| table | grain | content |
+|---|---|---|
+| `haz_base_rates_occurrence` | iso3 × hazard × calendar month | share of backcast years that TRIGGERED, from `haz_triggers`, over the hazard's full depth |
+| `haz_base_rates_severity` | iso3 × hazard | q10/q25/q50/q75/q90 of RESOLVED_VALUE amounts from `severity_base_rate_window_start` (2015) on, with `n_events` and the provenance mix |
+
+**The occurrence denominator counts years ASSESSED, not years in the
+calendar.** A country-month with no trigger row was never looked at, and
+counting it as a quiet month would manufacture a low base rate out of an
+ingestion gap — the same mistake the coverage gate prevents one cell at a
+time. `n_years` travels with every row, and
+`base_rates.occurrence.min_years` (3) refuses to publish below a floor: one
+observed November is not a base rate, and a `p_occurrence` of 1.0 from a
+single year reads as certainty.
+
+**The severity provenance mix matters more than it looks.** A distribution
+assembled mostly from IDMC displacement figures is a distribution of *lower
+bounds*; one from EM-DAT is a distribution of settled assessments.
+`provenance_mix_json` carries the share by source **per year** (so a
+composition that drifted is visible rather than averaged away) plus
+`lower_bound_share`, which is what tells a consumer these quantiles sit
+below the truth.
+
+### The Dartmouth Flood Observatory cross-check
+
+[`dfo.py`](dfo.py) answers the question the backcast cannot ask about
+itself: *is the flood occurrence rate the machine derives from its own
+detector plausible?* DFO's manually curated archive reaches back to 1985,
+so the comparison runs against the years strictly **before** the GDACS era
+— the rulebook validator rejects a `cross_check_end_year` past
+`backcast.flood`, because comparing the machine against years it already
+resolved would confirm nothing. Countries whose DFO rate exceeds the
+machine's by more than `dfo.divergence_factor` are listed in the report as
+places flood detection is probably missing events.
+
+**It is calibration and nothing else.** DFO writes to `haz_raw_dfo` and to
+the report; it is never a trigger and never a resolution value. A test
+asserts it leaves `haz_triggers`, `haz_impact_candidates` and
+`haz_resolutions` untouched — because an archive built from press reporting
+is a different quantity from a resolved figure, and a source admitted "just
+for calibration" is one refactor away from being admitted as an answer.
+That is exactly how GDACS exposure once got into a people-affected series.
+
+> **Verify on first run.** `dfo.url` could not be reached from the
+> environment this was built in. A wrong URL or a changed sheet shape fails
+> loud and safe — the fetch reports unavailable, the report's cross-check
+> section says so, and no resolved row is affected, because nothing else
+> reads this source. The fix is a URL in YAML and at worst a column name in
+> `_COLUMN_ALIASES`.
+
+### The acceptance report
+
+[`acceptance.py`](acceptance.py) renders one page of markdown covering the
+last 12 fully frozen months: the resolution rate per hazard against the
+IFRC-GO-only baseline it replaces, the shortfall against the 80% target,
+flag counts by reason, the provenance mix, the DFO cross-check, and a
+reproducible random sample of 20 zeros and 20 values with their evidence.
+
+**The denominator is cells assessed** — every `haz_triggers` row in the
+window — not the rows the machine managed to write. Dividing resolutions by
+resolutions would score 100% against a machine that answered one cell.
+Cells that produced no row at all (a fail-closed INCONCLUSIVE, a
+coverage-gated zero) count against the rate and are reported in their own
+column so the reason stays visible. A hazard with *zero* assessed cells is
+reported as **not assessed**, never as 0% — an absence of evidence is not a
+failure to resolve.
+
+The baseline column is **recomputed from the database**: the share of
+assessed cells where the IFRC GO rung alone held a figure. The documented
+~4% is quoted for context, but the number in the table is one that can be
+audited.
+
+**The report measures; it never tunes.** If the machine falls short of 80%
+the report says so, per hazard, and says in as many words that moving a
+threshold until the target is met would change the number without changing
+what the machine knows.
+
+The sample is seeded (`--seed`, default fixed) rather than
+`ORDER BY random()`, so a reviewer who queries a row can regenerate the
+same page — a report whose sample changes on every run cannot be cited in a
+review.

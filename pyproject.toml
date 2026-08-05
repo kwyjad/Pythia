@@ -59,6 +59,9 @@ ingestion = ["pandas", "python-dateutil", "jinja2", "pycountry", "pyarrow", "xar
 
 [tool.poetry.scripts]
 resolve-hazards = "resolver.hazard_resolution.cli:main"
+haz-backcast = "resolver.hazard_resolution.backcast:main"
+haz-base-rates = "resolver.hazard_resolution.base_rates:main"
+haz-acceptance = "resolver.hazard_resolution.acceptance:main"
 
 [tool.poe.tasks]
 test-idmc-cli = "pytest -q resolver/tests/test_idmc_cli_*"

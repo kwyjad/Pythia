@@ -29,7 +29,11 @@ from typing import TYPE_CHECKING, Any
 
 from resolver.hazard_resolution.rulebook import Rulebook
 from resolver.hazard_resolution.rules import freeze_deadline, is_provisional
-from resolver.hazard_resolution.schema import ensure_haz_schema
+from resolver.hazard_resolution.schema import (
+    RUN_TYPE_LIVE,
+    ensure_haz_schema,
+    validate_run_type,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import duckdb
@@ -188,9 +192,11 @@ def _write_row(
     flagged: bool,
     provisional: bool,
     rulebook: Rulebook,
+    run_type: str,
 ) -> None:
     """Replace this cell's resolution row inside one transaction."""
 
+    run_type = validate_run_type(run_type)
     frozen_at = dt.datetime.combine(freeze_deadline(year, month, rulebook), dt.time.min)
     try:
         con.execute("BEGIN TRANSACTION")
@@ -204,9 +210,9 @@ def _write_row(
         con.execute(
             """
             INSERT INTO haz_resolutions
-                (iso3, year, month, hazard, status, value,
-                 provenance_json, rule_fired, flagged, provisional, frozen_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (iso3, year, month, hazard, status, value, provenance_json,
+                 rule_fired, flagged, provisional, run_type, frozen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 iso3,
@@ -219,6 +225,7 @@ def _write_row(
                 rule_fired,
                 flagged,
                 provisional,
+                run_type,
                 frozen_at,
             ],
         )
@@ -234,6 +241,7 @@ def write_reconciliation(
     rulebook: Rulebook,
     *,
     today: dt.date | None = None,
+    run_type: str = RUN_TYPE_LIVE,
 ) -> str:
     """Persist a :class:`~resolver.hazard_resolution.reconcile.Reconciliation`.
 
@@ -245,10 +253,15 @@ def write_reconciliation(
 
     A ``PENDING`` verdict writes nothing: the cell is triggered but no rung
     has reported yet and it has not frozen, so there is no answer to record.
+
+    ``run_type`` stamps HOW the row was produced (``live`` or ``backcast``).
+    It is provenance, not part of the key: a cell has one answer, and the
+    freeze guard below decides whether a later run may replace it.
     """
 
     ensure_haz_schema(con)
     today = today or _today()
+    run_type = validate_run_type(run_type)
 
     if reconciliation.status == WRITE_PENDING_STATUS:
         LOG.debug(
@@ -305,6 +318,7 @@ def write_reconciliation(
         flagged=reconciliation.flagged,
         provisional=reconciliation.provisional,
         rulebook=rulebook,
+        run_type=run_type,
     )
     return WRITE_WRITTEN
 
@@ -319,6 +333,7 @@ def write_zero_resolution(
     evidence_of_absence: dict[str, Any],
     rulebook: Rulebook,
     today: dt.date | None = None,
+    run_type: str = RUN_TYPE_LIVE,
 ) -> str:
     """Write a ``RESOLVED_ZERO`` row with full evidence of absence.
 
@@ -336,6 +351,7 @@ def write_zero_resolution(
     """
     ensure_haz_schema(con)
     today = today or _today()
+    run_type = validate_run_type(run_type)
     rule_fired = ZERO_RULE_BY_HAZARD.get(hazard, ZERO_RULE_FIRED)
 
     frozen, existing = _frozen_row(
@@ -390,5 +406,6 @@ def write_zero_resolution(
         flagged=False,
         provisional=is_provisional(year, month, rulebook, today=today),
         rulebook=rulebook,
+        run_type=run_type,
     )
     return WRITE_WRITTEN

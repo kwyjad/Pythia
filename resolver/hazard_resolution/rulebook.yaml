@@ -290,10 +290,75 @@ conflict_detection:
 severity_base_rate_window_start: 2015
 
 # How far back detection/resolution is backcast per hazard (first year).
+# Each hazard's depth is set by when its DETECTOR's record begins, not by
+# preference: IBTrACS best tracks are usable from well before 2000, GDACS
+# alerts only stabilise around 2010, and IPC's structured Phase 3+ feeds
+# start later still. Backcasting past a detector's coverage would not
+# produce zeros — the coverage gate suppresses them — it would produce a
+# long run of empty months that flatter nothing and cost real time.
 backcast:
   cyclone: 2000
   flood: 2010
   drought: 2017
+
+# ---------------------------------------------------------------------------
+# BASE RATES computed from the backcast (haz_base_rates_*).
+# ---------------------------------------------------------------------------
+base_rates:
+  occurrence:
+    # A (country, hazard, calendar month) cell needs this many backcast
+    # years of trigger evidence before an occurrence rate is published. One
+    # or two Novembers is not a base rate, and a p_occurrence of 1.0 from a
+    # single observed year would be read as certainty.
+    min_years: 3
+  severity:
+    # Severity quantiles are published from this many resolved values up.
+    # Kept at 1 deliberately: n_events travels with every row, so a thin
+    # distribution is visible to its consumer rather than absent. Raise it
+    # to suppress thin rows instead of labelling them.
+    min_events: 1
+
+# ---------------------------------------------------------------------------
+# DARTMOUTH FLOOD OBSERVATORY — CALIBRATION CROSS-CHECK ONLY.
+#
+# The DFO Global Active Archive of Large Flood Events is an independent,
+# manually curated record of large floods reaching back to 1985 — well
+# before GDACS, which is why the flood backcast starts at 2010.
+#
+# It is used for exactly one thing: asking whether the flood occurrence
+# rates the machine derives from its GDACS-era backcast look like the
+# occurrence rates an independent archive records for the years BEFORE
+# that era. A country whose DFO rate is far above the machine's rate is a
+# country where flood detection is probably missing events.
+#
+# It is NEVER a trigger and NEVER a resolution value. dfo.py writes only
+# to haz_raw_dfo and the acceptance report; a test asserts it touches
+# neither haz_triggers nor haz_impact_candidates nor haz_resolutions.
+# Keeping the comparison window strictly before the backcast era is what
+# makes it a cross-check rather than a circular self-confirmation.
+# ---------------------------------------------------------------------------
+dfo:
+  enabled: true
+  # NOTE: this endpoint could not be reached from the environment the
+  # module was built in. A wrong URL or a changed shape fails LOUD and
+  # SAFE — the fetch reports unavailable, the cross-check section of the
+  # report says so, and nothing else in the machine is affected, because
+  # nothing else reads this source.
+  url: "https://floodobservatory.colorado.edu/temp/FloodArchive.xlsx"
+  # How to parse what the URL returns: xlsx or csv.
+  format: xlsx
+  request_timeout_sec: 300
+  # Compare against DFO floods strictly BEFORE this year. It matches
+  # backcast.flood so the two windows do not overlap; a comparison against
+  # the same years the machine already resolved would confirm nothing.
+  cross_check_end_year: 2010
+  # Country-months need this many DFO years before their rate is compared.
+  min_years_for_comparison: 5
+  # Flag a country when its machine-era occurrence rate differs from the
+  # DFO-era rate by more than this factor in either direction. This is a
+  # REPORTING threshold — it flags a country for a human to look at and
+  # changes no resolution.
+  divergence_factor: 3.0
 
 reliefweb:
   # Public ReliefWeb API base URL (free; the required appname parameter

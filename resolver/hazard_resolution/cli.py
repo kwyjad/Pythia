@@ -71,6 +71,10 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+# schema is stdlib-only, so importing it at module scope keeps the CLI's
+# start-up as light as the deferred imports below intend.
+from resolver.hazard_resolution.schema import RUN_TYPE_LIVE
+
 LOG = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,6 +141,7 @@ def sweep_and_resolve_zeros(
     hazard_key: str,
     detector_evidence: dict,
     dry_run: bool,
+    run_type: str = RUN_TYPE_LIVE,
 ) -> SweepTally:
     """Sweep every non-triggered country-month and write the zeros.
 
@@ -212,6 +217,7 @@ def sweep_and_resolve_zeros(
             hazard=result.hazard,
             evidence_of_absence=evidence,
             rulebook=rulebook,
+            run_type=run_type,
         )
         if outcome == res_mod.WRITE_FROZEN_SKIP:
             tally.frozen += 1
@@ -228,7 +234,7 @@ def sweep_and_resolve_zeros(
 
 def run_impact_ladder(
     con, ym: str, hazard: str, rulebook, *, skip_fetch: bool, dry_run: bool,
-    no_extract: bool = False,
+    no_extract: bool = False, run_type: str = RUN_TYPE_LIVE,
 ):
     """Fetch the ladder's sources and resolve every triggered cell."""
     from resolver.hazard_resolution import impact as impact_mod
@@ -259,6 +265,7 @@ def run_impact_ladder(
         # cached documents, and the extraction cache makes re-reading them
         # free anyway.
         fetch_documents=not skip_fetch,
+        run_type=run_type,
     )
 
 
@@ -310,10 +317,19 @@ def run_cyclone_month(
     dry_run: bool,
     no_ladder: bool = False,
     no_extract: bool = False,
+    run_type: str = RUN_TYPE_LIVE,
+    skip_detector_fetch: bool = False,
     rulebook=None,
     con=None,
 ) -> int:
-    """Run the cyclone path for one month.  Returns an exit code."""
+    """Run the cyclone path for one month.  Returns an exit code.
+
+    ``skip_detector_fetch`` skips the IBTrACS download ONLY, leaving the
+    per-month ladder fetches alone. IBTrACS ships one file covering all of
+    history, so a backcast loads it once and then reuses it for every
+    month; ``skip_fetch`` would also skip the ladder's per-month windows,
+    which a backcast genuinely needs.
+    """
     from resolver.db.duckdb_io import get_db
     from resolver.hazard_resolution import detect as detect_mod
     from resolver.hazard_resolution import ibtracs as ibtracs_mod
@@ -329,7 +345,13 @@ def run_cyclone_month(
     if dry_run and not skip_fetch:
         LOG.info("[cli] --dry-run implies --skip-fetch (no DB writes at all)")
         skip_fetch = True
-    if not skip_fetch:
+    if skip_detector_fetch and not skip_fetch:
+        LOG.info(
+            "[cli] --skip-detector-fetch: reusing the IBTrACS store (%d storms) "
+            "and still fetching the ladder's per-month sources",
+            ibtracs_mod.store_summary(con)["total_storms"],
+        )
+    if not skip_fetch and not skip_detector_fetch:
         if scope == "auto":
             scope = _auto_scope(ym, rulebook)
         try:
@@ -375,7 +397,7 @@ def run_cyclone_month(
         con, ym, rulebook, geoms, iso3_filter=universe
     )
     if not dry_run:
-        detect_mod.write_triggers(con, result, rulebook)
+        detect_mod.write_triggers(con, result, rulebook, run_type=run_type)
 
     # --- Step 3: silence sweep + zero resolutions for non-triggered ---
     tally = SweepTally()
@@ -401,6 +423,7 @@ def run_cyclone_month(
             hazard_key="cyclone",
             detector_evidence=detector_evidence,
             dry_run=dry_run,
+            run_type=run_type,
         )
 
     # --- Step 4: impact ladder over the triggered cells ---
@@ -410,7 +433,7 @@ def run_cyclone_month(
     elif not dry_run:
         ladder = run_impact_ladder(
             con, ym, result.hazard, rulebook, skip_fetch=skip_fetch,
-            dry_run=dry_run, no_extract=no_extract,
+            dry_run=dry_run, no_extract=no_extract, run_type=run_type,
         )
 
     _log_summary(
@@ -429,6 +452,7 @@ def run_flood_month(
     dry_run: bool,
     no_ladder: bool = False,
     no_extract: bool = False,
+    run_type: str = RUN_TYPE_LIVE,
     rulebook=None,
     con=None,
 ) -> int:
@@ -489,7 +513,7 @@ def run_flood_month(
 
     result = detect_mod.detect_flood_month(con, ym, rulebook, iso3_filter=universe)
     if not dry_run:
-        detect_mod.write_triggers(con, result, rulebook)
+        detect_mod.write_triggers(con, result, rulebook, run_type=run_type)
 
     # --- Step 3: silence sweep + zero resolutions for non-triggered ---
     tally = SweepTally()
@@ -513,6 +537,7 @@ def run_flood_month(
             hazard_key="flood",
             detector_evidence=detector_evidence,
             dry_run=dry_run,
+            run_type=run_type,
         )
 
     # --- Step 4: impact ladder over the triggered cells ---
@@ -522,7 +547,7 @@ def run_flood_month(
     elif not dry_run:
         ladder = run_impact_ladder(
             con, ym, hazard, rulebook, skip_fetch=skip_fetch,
-            dry_run=dry_run, no_extract=no_extract,
+            dry_run=dry_run, no_extract=no_extract, run_type=run_type,
         )
 
     _log_summary(hazard, ym, result, tally, ladder, " (dry-run)" if dry_run else "")
@@ -558,6 +583,7 @@ def run_drought_month(
     no_ladder: bool = False,
     no_extract: bool = False,
     no_sweep: bool = False,
+    run_type: str = RUN_TYPE_LIVE,
     rulebook=None,
     con=None,
 ) -> int:
@@ -639,7 +665,13 @@ def run_drought_month(
 
     # --- Step 3: decide and persist every country-month ---
     run = drought_mod.run_month(
-        con, ym=ym, iso3s=universe, rulebook=rulebook, fetches=fetches, dry_run=dry_run
+        con,
+        ym=ym,
+        iso3s=universe,
+        rulebook=rulebook,
+        fetches=fetches,
+        dry_run=dry_run,
+        run_type=run_type,
     )
     _log_drought_summary(ym, run, " (dry-run)" if dry_run else "")
     return 0

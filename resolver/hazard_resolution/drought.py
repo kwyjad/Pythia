@@ -70,7 +70,7 @@ from resolver.hazard_resolution.rules import (
     is_provisional,
     within_population_cap,
 )
-from resolver.hazard_resolution.schema import ensure_haz_schema
+from resolver.hazard_resolution.schema import RUN_TYPE_LIVE, ensure_haz_schema
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import duckdb
@@ -583,6 +583,7 @@ def run_month(
     fetches: dict[str, Any] | None = None,
     dry_run: bool = False,
     today: dt.date | None = None,
+    run_type: str = RUN_TYPE_LIVE,
 ) -> DroughtRun:
     """Decide, and persist, every drought country-month in ``iso3s``.
 
@@ -641,7 +642,7 @@ def run_month(
         _log_run(run, unavailable)
         return run
 
-    detect_mod.write_triggers(con, result, rulebook)
+    detect_mod.write_triggers(con, result, rulebook, run_type=run_type)
 
     for decision in decisions:
         if decision.candidate is not None:
@@ -672,10 +673,15 @@ def run_month(
                 },
                 rulebook=rulebook,
                 today=today,
+                run_type=run_type,
             )
         else:
             outcome = res_mod.write_reconciliation(
-                con, decision.as_reconciliation(), rulebook, today=today
+                con,
+                decision.as_reconciliation(),
+                rulebook,
+                today=today,
+                run_type=run_type,
             )
         if outcome == res_mod.WRITE_FROZEN_SKIP:
             run.frozen_skipped += 1

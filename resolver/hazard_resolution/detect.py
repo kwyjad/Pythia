@@ -38,7 +38,11 @@ from resolver.hazard_resolution.rulebook import (
     Rulebook,
 )
 from resolver.hazard_resolution.rules import cyclone_track_qualifies
-from resolver.hazard_resolution.schema import ensure_haz_schema
+from resolver.hazard_resolution.schema import (
+    RUN_TYPE_LIVE,
+    ensure_haz_schema,
+    validate_run_type,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import duckdb
@@ -284,14 +288,21 @@ def detect_cyclone_month(
 
 
 def write_triggers(
-    con: "duckdb.DuckDBPyConnection", result: DetectionResult, rulebook: Rulebook
+    con: "duckdb.DuckDBPyConnection",
+    result: DetectionResult,
+    rulebook: Rulebook,
+    *,
+    run_type: str = RUN_TYPE_LIVE,
 ) -> int:
     """Upsert the month's trigger rows (idempotent per iso3/year/month/hazard).
 
     Same delete-then-insert transaction idiom as
-    ``population.load_population_into_db``.
+    ``population.load_population_into_db``. ``run_type`` records whether the
+    verdict came from the ordinary forward run or from the historical
+    backcast — provenance on the row, never part of its key.
     """
     ensure_haz_schema(con)
+    run_type = validate_run_type(run_type)
     year, month = ym_to_year_month(result.ym)
     iso3s = [row.iso3 for row in result.rows]
     if not iso3s:
@@ -311,8 +322,8 @@ def write_triggers(
                 """
                 INSERT INTO haz_triggers
                     (iso3, year, month, hazard, triggered, trigger_source,
-                     trigger_detail_json, evidence_of_absence_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     trigger_detail_json, evidence_of_absence_json, run_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     row.iso3,
@@ -330,6 +341,7 @@ def write_triggers(
                     json.dumps(row.sweep_evidence)
                     if row.sweep_evidence is not None
                     else None,
+                    run_type,
                 ],
             )
         con.execute("COMMIT")
