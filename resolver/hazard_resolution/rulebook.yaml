@@ -24,6 +24,37 @@ cyclone:
   # strength, the standard gale-force threshold).
   buffer_km: 200
   min_wind_kt: 34
+  # Which IBTrACS wind column to trust, in order (first non-null wins).
+  # usa_wind = 1-minute sustained (USA agencies); wmo_wind = the WMO
+  # reporting agency's value (often 10-minute sustained).
+  wind_source_priority: [usa_wind, wmo_wind]
+  ibtracs:
+    # NOAA NCEI IBTrACS v04r01 CSV endpoints. {scope} is one of
+    # "last3years" (rolling, provisional current season) or "ALL"
+    # (full archive, for backcast).
+    url_template: "https://www.ncei.noaa.gov/data/international-best-track-archive-for-climate-stewardship-ibtracs/v04r01/access/csv/ibtracs.{scope}.list.v04r01.csv"
+    default_scope: last3years
+    request_timeout_sec: 300
+    # Zeros are only written when IBTrACS demonstrably covers the target
+    # month: the newest track point in the store must be no earlier than
+    # month_end - coverage_grace_days.  Months inside ingestion gaps stay
+    # unresolved instead of becoming false zeros.
+    coverage_grace_days: 7
+  reliefweb_sweep:
+    # Silence check for non-triggered country-months.  Query 1 filters on
+    # the ReliefWeb disaster-type taxonomy; query 2 (only when query 1 is
+    # silent) does a full-text keyword search.
+    disaster_types: ["Tropical Cyclone"]
+    keywords: ["cyclone", "hurricane", "typhoon", "tropical storm"]
+    # Sweep window: month start .. month end + publication_pad_days
+    # (reports about a late-month landfall publish into the next month).
+    publication_pad_days: 14
+    # A sweep is "silent" when total hits <= max_hits_for_silence.
+    max_hits_for_silence: 0
+    # How many hit titles/URLs to keep as evidence.
+    sample_size: 5
+    request_timeout_sec: 30
+    request_delay_sec: 0.5
 
 flood:
   # GDACS alert colour that counts as a detected flood. Ordering is
@@ -74,3 +105,8 @@ backcast:
   cyclone: 2000
   flood: 2010
   drought: 2017
+
+reliefweb:
+  # Public ReliefWeb API base URL (free; the required appname parameter
+  # comes from the RELIEFWEB_APPNAME environment variable).
+  api_base_url: "https://api.reliefweb.int/v2"

@@ -24,7 +24,7 @@ Output: ``ne_50m_admin_0_countries.slim.geojson.gz`` next to this script —
         Northern Cyprus → CYP).
 
 Usage:
-    python resolver/resolution_machine/data/build_boundaries.py path/to/ne_50m_admin_0_countries.geojson
+    python resolver/hazard_resolution/data/build_boundaries.py path/to/ne_50m_admin_0_countries.geojson
 """
 
 from __future__ import annotations

@@ -23,8 +23,8 @@ from datetime import date
 import duckdb
 import pytest
 
-from resolver.resolution_machine import cli as cli_mod
-from resolver.resolution_machine.detect import (
+from resolver.hazard_resolution import cli as cli_mod
+from resolver.hazard_resolution.detect import (
     TRIGGER_SOURCE_IBTRACS,
     TRIGGER_SOURCE_NONE,
     TRIGGER_SOURCE_RELIEFWEB,
@@ -32,14 +32,14 @@ from resolver.resolution_machine.detect import (
     flip_trigger_from_sweep,
     write_triggers,
 )
-from resolver.resolution_machine.geometry import load_country_geometries
-from resolver.resolution_machine.resolutions import (
+from resolver.hazard_resolution.geometry import load_country_geometries
+from resolver.hazard_resolution.resolutions import (
     WRITE_FROZEN_SKIP,
     WRITE_WRITTEN,
-    freeze_date_for_ym,
     write_zero_resolution,
 )
-from resolver.tests.resolution_machine_utils import (
+from resolver.hazard_resolution.rules import freeze_deadline
+from resolver.tests.hazard_resolution_utils import (
     SYNTHETIC_COUNTRIES_GEOJSON,
     make_rulebook,
     seed_ibtracs,
@@ -98,7 +98,7 @@ def test_triggers_written_for_both_outcomes(con, real_geoms):
     write_triggers(con, result, rb)
     stored = con.execute(
         "SELECT iso3, triggered, trigger_source FROM haz_triggers "
-        "WHERE hazard_code = 'TC' AND ym = '2013-11' ORDER BY iso3"
+        "WHERE hazard = 'TC' AND year = 2013 AND month = 11 ORDER BY iso3"
     ).fetchall()
     assert stored == [("MDG", False, "none"), ("PHL", True, "ibtracs")]
     # Idempotent: re-running detection + write leaves one row per country.
@@ -107,7 +107,7 @@ def test_triggers_written_for_both_outcomes(con, real_geoms):
     )
     write_triggers(con, result2, rb)
     n = con.execute(
-        "SELECT COUNT(*) FROM haz_triggers WHERE hazard_code='TC' AND ym='2013-11'"
+        "SELECT COUNT(*) FROM haz_triggers WHERE hazard='TC' AND year=2013 AND month=11"
     ).fetchone()[0]
     assert n == 2
 
@@ -169,34 +169,38 @@ def test_wind_source_priority_falls_back_to_wmo(con, synthetic_geoms):
 # ---------------------------------------------------------------------------
 
 
-def test_quiet_month_zero_carries_complete_evidence(con):
-    rb = make_rulebook()
-    evidence = {
+def _zero_evidence(iso3: str, ym: str, rb) -> dict:
+    return {
         "ibtracs": {
-            "total_points": 10,
-            "max_iso_time": "2013-12-15 00:00:00",
-            "last_fetched_at": "2026-01-15T00:00:00+00:00",
+            "total_storms": 6,
+            "max_point_time": "2013-12-15 00:00:00",
+            "last_retrieved_at": "2026-01-15T00:00:00+00:00",
             "source_scopes": ["last3years"],
             "source_urls": ["https://example.test/ibtracs.csv"],
             "query": {
-                "ym": "2013-01",
-                "min_wind_kt": rb["cyclone.min_wind_kt"],
-                "buffer_km": rb["cyclone.buffer_km"],
+                "ym": ym,
+                "min_wind_kt": rb.get("cyclone.min_wind_kt"),
+                "buffer_km": rb.get("cyclone.buffer_km"),
                 "n_points_month_global": 0,
                 "n_points_qualifying_global": 0,
                 "n_storms_in_buffer": 0,
                 "coverage_note": "ok",
             },
         },
-        "reliefweb": silent_sweep_evidence("PHL", "2013-01"),
+        "reliefweb": silent_sweep_evidence(iso3, ym),
         "retrieved_at": "2026-01-15T00:00:00+00:00",
     }
+
+
+def test_quiet_month_zero_carries_complete_evidence(con):
+    rb = make_rulebook()
     outcome = write_zero_resolution(
         con,
         iso3="PHL",
-        hazard_code="TC",
-        ym="2013-01",
-        evidence_of_absence=evidence,
+        year=2013,
+        month=1,
+        hazard="TC",
+        evidence_of_absence=_zero_evidence("PHL", "2013-01", rb),
         rulebook=rb,
         today=date(2013, 2, 15),
     )
@@ -204,62 +208,69 @@ def test_quiet_month_zero_carries_complete_evidence(con):
 
     row = con.execute(
         """
-        SELECT status, value, unit, source, source_record_ids, source_urls,
-               rule_fired, evidence_json, retrieved_at, freeze_at
-        FROM pa_resolutions
-        WHERE iso3='PHL' AND hazard_code='TC' AND ym='2013-01'
+        SELECT status, value, provenance_json, rule_fired, flagged,
+               CAST(frozen_at AS VARCHAR)
+        FROM haz_resolutions
+        WHERE iso3='PHL' AND year=2013 AND month=1 AND hazard='TC'
         """
     ).fetchone()
     assert row is not None
-    status, value, unit, source, record_ids, urls, rule, ev_json, retrieved, freeze = row
+    status, value, provenance_json, rule, flagged, frozen_at = row
     # Hard rule 1: full provenance on every resolution row.
-    assert status == "RESOLVED_ZERO" and value == 0.0 and unit == "persons"
-    assert source == "resolution_machine:absence"
-    assert json.loads(record_ids) == []
-    assert "https://api.reliefweb.int/v2/reports" in json.loads(urls)
-    assert "no IBTrACS trigger and ReliefWeb sweep silent" in rule
-    assert retrieved
-    ev = json.loads(ev_json)
+    assert status == "RESOLVED_ZERO" and value == 0.0 and flagged is False
+    provenance = json.loads(provenance_json)
+    assert provenance["source"] == "detection:absence"
+    assert provenance["source_record_ids"] == []
+    assert "https://api.reliefweb.int/v2/reports" in provenance["source_urls"]
+    assert provenance["retrieved_at"]
+    assert rule == provenance["rule_fired"]
+    assert "reliefweb_silent" in rule
     # Evidence of absence: IBTrACS query summary + ReliefWeb queries with
     # hit counts + timestamps.
-    assert ev["ibtracs"]["query"]["buffer_km"] == rb["cyclone.buffer_km"]
+    ev = provenance["evidence_of_absence"]
+    assert ev["ibtracs"]["query"]["buffer_km"] == rb.get("cyclone.buffer_km")
     assert ev["reliefweb"]["total_hits"] == 0
     assert [q["hits"] for q in ev["reliefweb"]["queries"]] == [0, 0]
     assert ev["retrieved_at"]
-    assert freeze == freeze_date_for_ym("2013-01", rb).isoformat()
+    # frozen_at is the freeze deadline: month-end + freeze_days.
+    assert frozen_at.startswith(freeze_deadline(2013, 1, rb).isoformat())
 
 
 def test_freeze_is_immutable_and_logs_revisions(con):
     rb = make_rulebook()
-    evidence = {"ibtracs": {}, "reliefweb": silent_sweep_evidence("MDG", "2013-01"),
-                "retrieved_at": "2013-02-01T00:00:00+00:00"}
-    kwargs = dict(con=con, iso3="MDG", hazard_code="TC", ym="2013-01",
+    evidence = _zero_evidence("MDG", "2013-01", rb)
+    kwargs = dict(con=con, iso3="MDG", year=2013, month=1, hazard="TC",
                   evidence_of_absence=evidence, rulebook=rb)
 
     # Initial write and a pre-freeze re-run both succeed (idempotent).
     assert write_zero_resolution(**kwargs, today=date(2013, 2, 15)) == WRITE_WRITTEN
     assert write_zero_resolution(**kwargs, today=date(2013, 3, 20)) == WRITE_WRITTEN
     before = con.execute(
-        "SELECT resolved_at FROM pa_resolutions WHERE iso3='MDG' AND ym='2013-01'"
+        "SELECT CAST(created_at AS VARCHAR) FROM haz_resolutions "
+        "WHERE iso3='MDG' AND year=2013 AND month=1"
     ).fetchone()[0]
 
     # 2013-01 froze on 2013-04-01 (Jan 31 + 60d). After that: immutable.
     assert write_zero_resolution(**kwargs, today=date(2013, 6, 1)) == WRITE_FROZEN_SKIP
     after = con.execute(
-        "SELECT resolved_at FROM pa_resolutions WHERE iso3='MDG' AND ym='2013-01'"
+        "SELECT CAST(created_at AS VARCHAR) FROM haz_resolutions "
+        "WHERE iso3='MDG' AND year=2013 AND month=1"
     ).fetchone()[0]
     assert after == before  # resolved row untouched
 
     revisions = con.execute(
-        "SELECT observed_status, note FROM pa_resolution_revisions "
-        "WHERE iso3='MDG' AND ym='2013-01'"
+        "SELECT source, source_ref, new_value, detail_json FROM haz_revisions "
+        "WHERE iso3='MDG' AND year=2013 AND month=1"
     ).fetchall()
     assert len(revisions) == 1
-    assert revisions[0][0] == "RESOLVED_ZERO"
-    assert "freeze" in revisions[0][1]
+    source, source_ref, new_value, detail_json = revisions[0]
+    assert source == "detection:absence"
+    assert "freeze" in source_ref
+    assert new_value == 0.0
+    assert "not altered" in json.loads(detail_json)["note"]
 
     n_rows = con.execute(
-        "SELECT COUNT(*) FROM pa_resolutions WHERE iso3='MDG' AND ym='2013-01'"
+        "SELECT COUNT(*) FROM haz_resolutions WHERE iso3='MDG' AND year=2013 AND month=1"
     ).fetchone()[0]
     assert n_rows == 1
 
@@ -278,12 +289,11 @@ def test_sweep_hits_flip_trigger_for_the_ladder(con, real_geoms):
     sweep = silent_sweep_evidence("PHL", "2013-01")
     sweep.update({"silent": False, "total_hits": 4})
     flip_trigger_from_sweep(
-        con, hazard_code="TC", iso3="PHL", ym="2013-01",
-        sweep_evidence=sweep, rulebook=rb,
+        con, hazard="TC", iso3="PHL", ym="2013-01", sweep_evidence=sweep
     )
     row = con.execute(
-        "SELECT triggered, trigger_source, detail_json FROM haz_triggers "
-        "WHERE hazard_code='TC' AND iso3='PHL' AND ym='2013-01'"
+        "SELECT triggered, trigger_source, trigger_detail_json FROM haz_triggers "
+        "WHERE hazard='TC' AND iso3='PHL' AND year=2013 AND month=1"
     ).fetchone()
     assert row[0] is True
     assert row[1] == TRIGGER_SOURCE_RELIEFWEB
@@ -298,7 +308,7 @@ def test_sweep_hits_flip_trigger_for_the_ladder(con, real_geoms):
 def _seeded_file_db(tmp_path):
     from resolver.db.duckdb_io import get_db
 
-    db_path = str(tmp_path / "resolution_machine_test.duckdb")
+    db_path = str(tmp_path / "hazard_resolution_test.duckdb")
     con = get_db(db_path)
     seed_ibtracs(con)
     return db_path, con
@@ -307,7 +317,7 @@ def _seeded_file_db(tmp_path):
 def test_cli_landfall_and_quiet_month_end_to_end(tmp_path, monkeypatch):
     db_path, con = _seeded_file_db(tmp_path)
     monkeypatch.setattr(
-        "resolver.resolution_machine.reliefweb_sweep.sweep_country_month",
+        "resolver.hazard_resolution.reliefweb_sweep.sweep_country_month",
         lambda iso3, ym, rulebook, **kw: silent_sweep_evidence(iso3, ym),
     )
     rc = cli_mod.run_cyclone_month(
@@ -324,37 +334,39 @@ def test_cli_landfall_and_quiet_month_end_to_end(tmp_path, monkeypatch):
     triggers = dict(
         con.execute(
             "SELECT iso3, triggered FROM haz_triggers "
-            "WHERE hazard_code='TC' AND ym='2013-11'"
+            "WHERE hazard='TC' AND year=2013 AND month=11"
         ).fetchall()
     )
     assert triggers == {"PHL": True, "MDG": False}
 
     # The landfall country must NOT get a zero; the quiet country must.
     resolutions = con.execute(
-        "SELECT iso3, status, value FROM pa_resolutions "
-        "WHERE hazard_code='TC' AND ym='2013-11' ORDER BY iso3"
+        "SELECT iso3, status, value FROM haz_resolutions "
+        "WHERE hazard='TC' AND year=2013 AND month=11 ORDER BY iso3"
     ).fetchall()
     assert resolutions == [("MDG", "RESOLVED_ZERO", 0.0)]
 
-    ev = json.loads(
+    provenance = json.loads(
         con.execute(
-            "SELECT evidence_json FROM pa_resolutions "
-            "WHERE iso3='MDG' AND hazard_code='TC' AND ym='2013-11'"
+            "SELECT provenance_json FROM haz_resolutions "
+            "WHERE iso3='MDG' AND hazard='TC' AND year=2013 AND month=11"
         ).fetchone()[0]
     )
     # The CLI assembles evidence from the live store: IBTrACS provenance
     # and the sweep record must both be present.
-    assert ev["ibtracs"]["total_points"] == 10
+    ev = provenance["evidence_of_absence"]
+    assert ev["ibtracs"]["total_storms"] == 6
     assert ev["ibtracs"]["query"]["n_storms_in_buffer"] == 0
     assert ev["reliefweb"]["silent"] is True
-    # The non-triggered row also carries the sweep evidence.
-    detail = json.loads(
+    # The non-triggered row also carries the sweep evidence — in the
+    # trigger table's evidence_of_absence_json column.
+    absence = json.loads(
         con.execute(
-            "SELECT detail_json FROM haz_triggers "
-            "WHERE hazard_code='TC' AND iso3='MDG' AND ym='2013-11'"
+            "SELECT evidence_of_absence_json FROM haz_triggers "
+            "WHERE hazard='TC' AND iso3='MDG' AND year=2013 AND month=11"
         ).fetchone()[0]
     )
-    assert detail["reliefweb_sweep"]["silent"] is True
+    assert absence["silent"] is True
 
 
 def test_cli_sweep_hits_promote_to_ladder(tmp_path, monkeypatch):
@@ -366,7 +378,7 @@ def test_cli_sweep_hits_promote_to_ladder(tmp_path, monkeypatch):
         return ev
 
     monkeypatch.setattr(
-        "resolver.resolution_machine.reliefweb_sweep.sweep_country_month", noisy_sweep
+        "resolver.hazard_resolution.reliefweb_sweep.sweep_country_month", noisy_sweep
     )
     rc = cli_mod.run_cyclone_month(
         ym="2013-01",
@@ -380,12 +392,12 @@ def test_cli_sweep_hits_promote_to_ladder(tmp_path, monkeypatch):
     assert rc == 0
     row = con.execute(
         "SELECT triggered, trigger_source FROM haz_triggers "
-        "WHERE hazard_code='TC' AND iso3='PHL' AND ym='2013-01'"
+        "WHERE hazard='TC' AND iso3='PHL' AND year=2013 AND month=1"
     ).fetchone()
     assert row == (True, TRIGGER_SOURCE_RELIEFWEB)
     # Promoted to the ladder — never a zero.
     n_zero = con.execute(
-        "SELECT COUNT(*) FROM pa_resolutions WHERE iso3='PHL' AND ym='2013-01'"
+        "SELECT COUNT(*) FROM haz_resolutions WHERE iso3='PHL' AND year=2013 AND month=1"
     ).fetchone()[0]
     assert n_zero == 0
 
@@ -396,7 +408,7 @@ def test_cli_coverage_gate_suppresses_zeros(tmp_path, monkeypatch):
     # country stays UNRESOLVED instead of becoming a false zero.
     db_path, con = _seeded_file_db(tmp_path)
     monkeypatch.setattr(
-        "resolver.resolution_machine.reliefweb_sweep.sweep_country_month",
+        "resolver.hazard_resolution.reliefweb_sweep.sweep_country_month",
         lambda iso3, ym, rulebook, **kw: silent_sweep_evidence(iso3, ym),
     )
     rc = cli_mod.run_cyclone_month(
@@ -410,13 +422,13 @@ def test_cli_coverage_gate_suppresses_zeros(tmp_path, monkeypatch):
     )
     assert rc == 0
     n_zero = con.execute(
-        "SELECT COUNT(*) FROM pa_resolutions WHERE ym='2013-12'"
+        "SELECT COUNT(*) FROM haz_resolutions WHERE year=2013 AND month=12"
     ).fetchone()[0]
     assert n_zero == 0
     # But the trigger row still records the (non-)detection.
     row = con.execute(
         "SELECT triggered FROM haz_triggers "
-        "WHERE hazard_code='TC' AND iso3='MDG' AND ym='2013-12'"
+        "WHERE hazard='TC' AND iso3='MDG' AND year=2013 AND month=12"
     ).fetchone()
     assert row == (False,)
 
@@ -430,7 +442,7 @@ def test_cli_inconclusive_sweep_never_writes_zero(tmp_path, monkeypatch):
         return ev
 
     monkeypatch.setattr(
-        "resolver.resolution_machine.reliefweb_sweep.sweep_country_month", broken_sweep
+        "resolver.hazard_resolution.reliefweb_sweep.sweep_country_month", broken_sweep
     )
     rc = cli_mod.run_cyclone_month(
         ym="2013-11",
@@ -442,5 +454,5 @@ def test_cli_inconclusive_sweep_never_writes_zero(tmp_path, monkeypatch):
         dry_run=False,
     )
     assert rc == 0
-    n = con.execute("SELECT COUNT(*) FROM pa_resolutions").fetchone()[0]
+    n = con.execute("SELECT COUNT(*) FROM haz_resolutions").fetchone()[0]
     assert n == 0

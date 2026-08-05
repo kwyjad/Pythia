@@ -9,17 +9,18 @@
 Phase 1: cyclone detection and zero resolutions.
 
 Usage:
-    python -m resolver.resolution_machine.cli --hazard cyclone --month 2026-06
+    python -m resolver.hazard_resolution.cli --hazard cyclone --month 2026-06
     resolve-hazards --hazard cyclone --month 2026-06            # poetry script
     resolve-hazards --hazard cyclone --month 2013-11 --scope ALL --countries PHL
 
 Pipeline for one (hazard, month):
     1. fetch IBTrACS into haz_raw_ibtracs (idempotent; --skip-fetch reuses
        the store, --scope ALL backcasts)
-    2. detect: track point >= cyclone.min_wind_kt within cyclone.buffer_km
-       of territory → haz_triggers rows for EVERY country in the universe
+    2. detect: track point qualifying under rules.cyclone_track_qualifies
+       (>= cyclone.min_wind_kt within cyclone.buffer_km of territory)
+       → haz_triggers rows for EVERY country in the universe
     3. non-triggered country-months get a ReliefWeb silence sweep:
-       silent → RESOLVED_ZERO with evidence_of_absence;
+       silent → RESOLVED_ZERO in haz_resolutions with evidence_of_absence;
        hits   → triggered=true (trigger_source='reliefweb_sweep'),
                 left for the impact ladder (Phase 2+)
 
@@ -42,7 +43,8 @@ from typing import Sequence
 
 LOG = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
+COUNTRIES_CSV_PATH = ROOT / "data" / "countries.csv"
 
 _HAZARD_ALIASES = {
     "cyclone": "cyclone",
@@ -71,16 +73,15 @@ def _auto_scope(ym: str, rulebook) -> str:
     y, m = (int(p) for p in ym.split("-"))
     age_days = (date.today() - date(y, m, 1)).days
     if age_days <= _LAST3YEARS_SAFE_DAYS:
-        return str(rulebook["cyclone.ibtracs.default_scope"])
+        return str(rulebook.get("cyclone.ibtracs.default_scope"))
     return "ALL"
 
 
-def _load_universe(rulebook) -> list[str]:
+def _load_universe() -> list[str]:
     """ISO3 universe from the resolver country registry."""
     import pandas as pd
 
-    csv_path = REPO_ROOT / str(rulebook["universe.countries_csv"])
-    df = pd.read_csv(csv_path, usecols=["iso3"])
+    df = pd.read_csv(COUNTRIES_CSV_PATH, usecols=["iso3"], encoding="utf-8-sig")
     return sorted({str(c).strip().upper() for c in df["iso3"] if str(c).strip()})
 
 
@@ -97,17 +98,18 @@ def run_cyclone_month(
 ) -> int:
     """Run the Phase-1 cyclone path for one month.  Returns an exit code."""
     from resolver.db.duckdb_io import get_db
-    from resolver.resolution_machine import detect as detect_mod
-    from resolver.resolution_machine import ibtracs as ibtracs_mod
-    from resolver.resolution_machine import reliefweb_sweep as sweep_mod
-    from resolver.resolution_machine import resolutions as res_mod
-    from resolver.resolution_machine.geometry import load_country_geometries
-    from resolver.resolution_machine.rulebook import load_rulebook
-    from resolver.resolution_machine.schema import ensure_schema
+    from resolver.hazard_resolution import detect as detect_mod
+    from resolver.hazard_resolution import ibtracs as ibtracs_mod
+    from resolver.hazard_resolution import reliefweb_sweep as sweep_mod
+    from resolver.hazard_resolution import resolutions as res_mod
+    from resolver.hazard_resolution.geometry import load_country_geometries
+    from resolver.hazard_resolution.rulebook import load_rulebook
+    from resolver.hazard_resolution.schema import ensure_haz_schema
 
     rulebook = rulebook or load_rulebook()
     con = get_db(db_url)
-    ensure_schema(con)
+    ensure_haz_schema(con)
+    year, month = detect_mod.ym_to_year_month(ym)
 
     # --- Step 1: fetch (idempotent upsert) ---
     if dry_run and not skip_fetch:
@@ -121,14 +123,14 @@ def run_cyclone_month(
             ibtracs_mod.store_ibtracs(con, frame, scope, url)
         except Exception as exc:
             summary = ibtracs_mod.store_summary(con)
-            if summary["total_points"] > 0:
+            if summary["total_storms"] > 0:
                 LOG.error(
                     "[cli] IBTrACS fetch failed (%s) — continuing on the existing "
-                    "store (%d points, newest %s); the coverage gate decides "
+                    "store (%d storms, newest point %s); the coverage gate decides "
                     "whether zeros are safe",
                     exc,
-                    summary["total_points"],
-                    summary["max_iso_time"],
+                    summary["total_storms"],
+                    summary["max_point_time"],
                 )
             else:
                 LOG.error("[cli] IBTrACS fetch failed and the store is empty: %s", exc)
@@ -136,7 +138,7 @@ def run_cyclone_month(
 
     # --- Step 2: detection ---
     geoms = load_country_geometries()
-    universe = _load_universe(rulebook)
+    universe = _load_universe()
     if countries_filter:
         wanted = {c.strip().upper() for c in countries_filter}
         unknown = sorted(wanted - set(universe))
@@ -167,7 +169,7 @@ def run_cyclone_month(
     if no_sweep:
         LOG.info("[cli] --no-sweep: skipping ReliefWeb silence checks and zeros")
     else:
-        delay = float(rulebook["cyclone.reliefweb_sweep.request_delay_sec"])
+        delay = float(rulebook.get("cyclone.reliefweb_sweep.request_delay_sec"))
         ibtracs_summary = ibtracs_mod.store_summary(con)
         for idx, row in enumerate(non_triggered):
             sweep = sweep_mod.sweep_country_month(row.iso3, ym, rulebook)
@@ -178,7 +180,7 @@ def run_cyclone_month(
                 if not dry_run:
                     detect_mod.record_sweep_on_trigger(
                         con,
-                        hazard_code=result.hazard_code,
+                        hazard=result.hazard,
                         iso3=row.iso3,
                         ym=ym,
                         sweep_evidence=sweep,
@@ -198,18 +200,17 @@ def run_cyclone_month(
                 if not dry_run:
                     detect_mod.flip_trigger_from_sweep(
                         con,
-                        hazard_code=result.hazard_code,
+                        hazard=result.hazard,
                         iso3=row.iso3,
                         ym=ym,
                         sweep_evidence=sweep,
-                        rulebook=rulebook,
                     )
                 continue
             # Silent sweep — a zero, if IBTrACS coverage allows one.
             if not dry_run:
                 detect_mod.record_sweep_on_trigger(
                     con,
-                    hazard_code=result.hazard_code,
+                    hazard=result.hazard,
                     iso3=row.iso3,
                     ym=ym,
                     sweep_evidence=sweep,
@@ -221,8 +222,8 @@ def run_cyclone_month(
                     **ibtracs_summary,
                     "query": {
                         "ym": ym,
-                        "min_wind_kt": rulebook["cyclone.min_wind_kt"],
-                        "buffer_km": rulebook["cyclone.buffer_km"],
+                        "min_wind_kt": rulebook.get("cyclone.min_wind_kt"),
+                        "buffer_km": rulebook.get("cyclone.buffer_km"),
                         "n_points_month_global": result.n_points_month,
                         "n_points_qualifying_global": result.n_points_qualifying,
                         "n_storms_in_buffer": 0,
@@ -238,8 +239,9 @@ def run_cyclone_month(
             outcome = res_mod.write_zero_resolution(
                 con,
                 iso3=row.iso3,
-                hazard_code=result.hazard_code,
-                ym=ym,
+                year=year,
+                month=month,
+                hazard=result.hazard,
                 evidence_of_absence=evidence,
                 rulebook=rulebook,
             )
@@ -256,7 +258,7 @@ def run_cyclone_month(
 
     # --- Summary ---
     n_triggered = sum(1 for r in result.rows if r.triggered)
-    LOG.info("--- resolve-hazards summary (%s %s) ---", result.hazard_code, ym)
+    LOG.info("--- resolve-hazards summary (%s %s) ---", result.hazard, ym)
     LOG.info("  countries assessed:        %d", len(result.rows))
     LOG.info("  triggered (ibtracs):       %d", n_triggered)
     LOG.info("  flipped by sweep:          %d", n_flipped)

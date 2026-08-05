@@ -27,6 +27,7 @@ as the required ``appname`` parameter.  No key material is involved.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import os
 import time
@@ -35,9 +36,8 @@ from typing import Any, Callable
 
 import requests
 
-from resolver.resolution_machine.detect import month_bounds
-from resolver.resolution_machine.rulebook import Rulebook
-from resolver.resolution_machine.schema import utcnow_iso
+from resolver.hazard_resolution.detect import month_bounds
+from resolver.hazard_resolution.rulebook import Rulebook
 
 LOG = logging.getLogger(__name__)
 
@@ -45,6 +45,10 @@ _DEFAULT_APPNAME = "pythia-resolution-machine"
 
 # Injectable POST seam for tests: (url, json_payload, params, timeout) -> dict
 PostFn = Callable[[str, dict, dict, float], dict]
+
+
+def _utcnow_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 def _appname() -> str:
@@ -128,13 +132,13 @@ def sweep_country_month(
         }
     """
     cfg = f"{hazard_key}.reliefweb_sweep"
-    disaster_types = list(rulebook[f"{cfg}.disaster_types"])
-    keywords = [str(k) for k in rulebook[f"{cfg}.keywords"]]
-    pad_days = int(rulebook[f"{cfg}.publication_pad_days"])
-    max_hits = int(rulebook[f"{cfg}.max_hits_for_silence"])
-    sample_size = int(rulebook[f"{cfg}.sample_size"])
-    timeout = float(rulebook[f"{cfg}.request_timeout_sec"])
-    api_url = str(rulebook["reliefweb.api_base_url"]).rstrip("/") + "/reports"
+    disaster_types = list(rulebook.get(f"{cfg}.disaster_types"))
+    keywords = [str(k) for k in rulebook.get(f"{cfg}.keywords")]
+    pad_days = int(rulebook.get(f"{cfg}.publication_pad_days"))
+    max_hits = int(rulebook.get(f"{cfg}.max_hits_for_silence"))
+    sample_size = int(rulebook.get(f"{cfg}.sample_size"))
+    timeout = float(rulebook.get(f"{cfg}.request_timeout_sec"))
+    api_url = str(rulebook.get("reliefweb.api_base_url")).rstrip("/") + "/reports"
 
     post = post or _default_post
     params = {"appname": _appname()}
@@ -148,7 +152,7 @@ def sweep_country_month(
         "inconclusive": False,
         "total_hits": 0,
         "queries": [],
-        "retrieved_at": utcnow_iso(),
+        "retrieved_at": _utcnow_iso(),
         "error": None,
     }
 

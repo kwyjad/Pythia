@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from resolver.resolution_machine.geometry import (
+from resolver.hazard_resolution.geometry import (
     distance_km,
     load_country_geometries,
     point_near_bounds,
 )
-from resolver.tests.resolution_machine_utils import SYNTHETIC_COUNTRIES_GEOJSON
+from resolver.tests.hazard_resolution_utils import SYNTHETIC_COUNTRIES_GEOJSON
 
 # 1 degree of longitude at the equator (WGS84).
 _KM_PER_DEG_EQUATOR = 111.3195

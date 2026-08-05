@@ -1,6 +1,6 @@
 {
   "type": "FeatureCollection",
-  "name": "resolution_machine_synthetic_countries",
+  "name": "hazard_resolution_synthetic_countries",
   "features": [
     {
       "type": "Feature",

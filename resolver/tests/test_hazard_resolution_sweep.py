@@ -7,10 +7,8 @@
 
 from __future__ import annotations
 
-import pytest
-
-from resolver.resolution_machine.reliefweb_sweep import sweep_country_month
-from resolver.tests.resolution_machine_utils import make_rulebook
+from resolver.hazard_resolution.reliefweb_sweep import sweep_country_month
+from resolver.tests.hazard_resolution_utils import make_rulebook
 
 
 class _FakePost:
