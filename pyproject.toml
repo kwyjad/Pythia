@@ -13,7 +13,8 @@ packages = [
     { include = "resolver" }
 ]
 include = [
-    { path = "resolver/config/series_semantics.yml" }
+    { path = "resolver/config/series_semantics.yml" },
+    { path = "resolver/hazard_resolution/rulebook.yaml" }
 ]
 
 [tool.poetry.dependencies]

@@ -1,0 +1,76 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+#
+# ---------------------------------------------------------------------------
+# RULEBOOK — the single human-readable source of truth for how the hazard
+# resolution machine behaves.
+#
+# Every threshold, precedence order and policy switch the machine uses lives
+# in this file. Code reads these values at runtime via
+# resolver.hazard_resolution.rulebook.load_rulebook(); nothing here may be
+# duplicated as a hard-coded constant in Python. Changing a value here
+# changes the machine's behaviour on the next run — no code change needed.
+#
+# Never put credentials in this file. API keys come from environment
+# variables only (EMDAT_API_KEY, IDMC_API_KEY, RELIEFWEB_APPNAME, IPC key);
+# the loader rejects any key that looks like a secret.
+# ---------------------------------------------------------------------------
+
+cyclone:
+  # A storm track qualifies for a country-month when it passes within
+  # buffer_km of the country at or above min_wind_kt (34 kt = tropical-storm
+  # strength, the standard gale-force threshold).
+  buffer_km: 200
+  min_wind_kt: 34
+
+flood:
+  # GDACS alert colour that counts as a detected flood. Ordering is
+  # green < orange < red; the configured level and anything above it trigger.
+  gdacs_trigger_level: orange
+
+drought:
+  # Drought skips the impact ladder and resolves against IPC data.
+  # The exact rule is specified in Phase 4 of the build; the threshold keys
+  # below are placeholders — loaded and validated, but not yet consumed by
+  # any resolution code.
+  rule: ipc_phase3plus_delta
+  ipc_phase_threshold: 3      # placeholder — IPC phase whose population the rule reads
+  min_delta_people: 0         # placeholder — absolute Phase 3+ increase to count as drought impact
+  min_delta_pct: 0.0          # placeholder — relative Phase 3+ increase to count as drought impact
+
+# Resolutions freeze at month-end + freeze_days and are never reopened.
+# Later revisions are logged to haz_revisions but do not alter resolved values.
+freeze_days: 60
+
+# Impact precedence ladder, highest rung first. When a hazard is detected,
+# the machine takes the people-affected figure from the highest rung that
+# has one. GDACS is deliberately absent: it is detection + ceiling only.
+ladder:
+  - emdat
+  - reliefweb_extracted
+  - ifrc_go
+  - idmc_idu
+
+sanity:
+  # No accepted figure may exceed ceiling_multiplier x the GDACS exposed
+  # population for the event, nor (when population_cap is true) the national
+  # population. GDACS exposure is a ceiling, never a resolution value.
+  ceiling_source: gdacs_exposed
+  ceiling_multiplier: 1.0
+  population_cap: true
+
+# In conflict-affected settings the ladder still decides the number, but the
+# resolution row is flagged for review.
+conflict_rule: ladder_with_flag
+
+# First calendar year included when computing severity base rates
+# (haz_base_rates_severity quantiles).
+severity_base_rate_window_start: 2015
+
+# How far back detection/resolution is backcast per hazard (first year).
+backcast:
+  cyclone: 2000
+  flood: 2010
+  drought: 2017
