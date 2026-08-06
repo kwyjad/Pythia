@@ -119,6 +119,17 @@ class TestFilenames:
                "created_at": "2026-08-06 12:00:00", "scored_run_id": None}
         assert pdf.pdf_filename(row) == "report__2026-08__v3.pdf"
 
+    def test_backfilled_report_is_named_for_the_run_not_today(self):
+        # A July run interpreted in August must not be filed under August.
+        row = {"kind": "combined", "version": 1, "hs_run_id": "hs_20260715T103033",
+               "created_at": "2026-08-06 12:00:00", "scored_run_id": None}
+        assert pdf.pdf_filename(row) == "report__2026-07__v1.pdf"
+
+    def test_malformed_run_id_falls_back_to_creation_month(self):
+        row = {"kind": "combined", "version": 1, "hs_run_id": "not-a-run-id",
+               "created_at": "2026-08-06 12:00:00", "scored_run_id": None}
+        assert pdf.pdf_filename(row) == "report__2026-08__v1.pdf"
+
     def test_scored_rows_use_the_round_key(self):
         row = {"kind": "scored", "version": 1,
                "created_at": "2026-09-02 00:00:00", "scored_run_id": "2026-08"}

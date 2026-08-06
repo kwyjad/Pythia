@@ -224,6 +224,36 @@ own and upload the canonical DB (no new canonical-DB producer):
   `stage_health --stage calibration_interpreter` so the call's cost is
   windowed; outputs upload as **`pythia-interpreter-scored`**.
 
+### Backfill / recovery
+
+`interpreter_backfill.yml` (manual dispatch) runs the interpreter over
+already-completed forecast runs. Two uses: runs that finished before Phase 6
+wired the interpreter in, and recovery for a cycle whose interpreter step
+failed (every live step is `continue-on-error`, so a failure is silent by
+design). Nothing is special-cased — it rebuilds exactly what the live path
+would have had: `compute_deviation --run-id` (idempotent, delete-then-insert
+per run) and `build_current_run_bundle --run-id`, then the same model call.
+
+Inputs: `run_ids` (space/comma separated; blank = the latest production run),
+`kind`, `force`, `include_test`, `db_run_id`, `upload_canonical` (default
+true — without it the rows die with the runner), `publish` (default **false**,
+so a backfill is inspectable before it goes public), and
+`force_during_pipeline`. It is gated by `check_pipeline_active` and sits in
+the `pythia-resolver-db` concurrency group for the same reason the nightly
+backcast is: a run landing mid-pipeline would write rows the pipeline's final
+canonical upload discards.
+
+Because it re-uploads the canonical DB it **is a canonical-DB producer**, so
+it is named in all three discovery lists and includes itself via
+`extra-workflows` (otherwise a second backfill would start from a DB
+predating the first). Per-run PDFs land in the diagnostics artifact; one
+top-level render of the newest row goes to `pythia-interpreter-report` so the
+publish step finds exactly one `interpreter_report_latest.pdf`.
+
+Note on filenames: a backfilled report is named for the month it is ABOUT
+(parsed from `hs_run_id`), not the month it was generated in — otherwise
+July's report, generated in August, would be filed as August's.
+
 **Release + manifest** (`publish_latest_data.yml`): a best-effort step
 fetches `pythia-interpreter-report` from the source run (the Sibyl-chain
 publish has one; the calibration-chain publish does not, which is expected

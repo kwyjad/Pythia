@@ -1,0 +1,375 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+# Manual interpreter run over one or more ALREADY-COMPLETED forecast runs.
+#
+# Two uses:
+#   1. Backfill — runs that completed before the interpreter was wired in
+#      (Phase 6) have no interpretation. This generates one for each.
+#   2. Recovery — a cycle whose interpreter step failed (every step in
+#      run_sibyl.yml is continue-on-error, so a failure is silent by design).
+#
+# Everything the live path needs is rebuilt here from the canonical DB:
+# forecast_deviation rows (compute_deviation is idempotent per run) and the
+# current-run bundle (build_current_run_bundle takes an explicit --run-id).
+# The model call is identical to the live one; only the trigger differs.
+#
+# This workflow PRODUCES pythia-resolver-db (otherwise the interpretations
+# rows it writes would be discarded with the runner), so it is listed in the
+# canonical-DB candidate list (.github/actions/download-canonical-db) and in
+# the two bespoke discovery blocks (run_horizon_scanner.yml,
+# publish_latest_data.yml) — and it includes ITSELF via extra-workflows so a
+# second backfill never starts from a DB that predates the first.
+
+---
+name: Interpreter Backfill
+
+concurrency:
+  group: pythia-resolver-db
+  cancel-in-progress: false
+
+"on":
+  workflow_dispatch:
+    inputs:
+      run_ids:
+        description: "Forecaster run ids, space- or comma-separated (blank = the latest production run)"
+        required: false
+        default: ""
+        type: string
+      kind:
+        description: "Report kind (combined folds in the latest scored report if one exists)"
+        required: false
+        default: "combined"
+        type: choice
+        options:
+          - "combined"
+          - "current"
+      force:
+        description: "Write a new version even when an ok report already exists for the run"
+        required: false
+        default: false
+        type: boolean
+      include_test:
+        description: "Interpret test-mode runs too (their rows are stamped is_test)"
+        required: false
+        default: false
+        type: boolean
+      db_run_id:
+        description: "Force pythia-resolver-db from this workflow run id (blank = canonical discovery)"
+        required: false
+        default: ""
+        type: string
+      upload_canonical:
+        description: "Re-upload the canonical DB so the reports persist (turn OFF for a dry look)"
+        required: false
+        default: true
+        type: boolean
+      publish:
+        description: "Dispatch publish_latest_data.yml afterwards (release + dashboard)"
+        required: false
+        default: false
+        type: boolean
+      force_during_pipeline:
+        description: "Run even while a staged pipeline is in flight (its final canonical upload would DISCARD these rows)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write   # optional publish dispatch
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  # Same rationale as haz_backcast.yml: the concurrency group serializes
+  # single runs but cannot cover the multi-day staged pipeline, whose final
+  # canonical upload would silently discard whatever this run wrote.
+  gate:
+    name: Skip if a staged pipeline is in flight
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check for in-flight staged pipeline
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Boolean inputs are compared against BOTH forms — a REST-dispatched
+          # run can deliver them as strings (the pythia_pipeline_stage lesson).
+          FORCE: ${{ (inputs.force_during_pipeline == true || inputs.force_during_pipeline == 'true') && 'true' || 'false' }}
+        run: python -m scripts.ci.check_pipeline_active
+
+  interpret:
+    name: Interpret completed runs
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
+      SIGNATURE_OPTIONAL_TABLES: scenarios,hdx_signals,enso_state,seasonal_tc_outlooks,seasonal_tc_context_cache,forecast_deviation,interpretations
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+          pip install duckdb
+
+      # Self-inclusion is load-bearing here for the same reason as the
+      # nightly backcast: without it a second backfill would start from an
+      # older producer's DB and discard the first one's reports.
+      - name: Download canonical resolver DB
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+          extra-workflows: |
+            Interpreter Backfill
+          validate-cmd: >-
+            python -m scripts.ci.db_signature write
+            --db data/resolver.duckdb
+            --required "${SIGNATURE_REQUIRED_TABLES}"
+            --optional "${SIGNATURE_OPTIONAL_TABLES}"
+            --out data/db_signature_before.json
+
+      - name: Record stage start
+        run: echo "STAGE_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+
+      # Blank input → the newest run that actually has aggregate forecast
+      # rows, respecting the test filter. Explicit ids are used verbatim so
+      # an operator can name exactly the runs they mean.
+      - name: Resolve run ids
+        id: runs
+        env:
+          RUN_IDS_INPUT: ${{ inputs.run_ids }}
+          INCLUDE_TEST: ${{ (inputs.include_test == true || inputs.include_test == 'true') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          RESOLVED="$(python - <<'PY'
+          import os
+
+          import duckdb
+
+          raw = (os.environ.get("RUN_IDS_INPUT") or "").replace(",", " ").split()
+          if raw:
+              print(" ".join(raw))
+              raise SystemExit(0)
+
+          db = os.environ["RESOLVER_DB_URL"]
+          db = db[len("duckdb:///"):] if db.startswith("duckdb:///") else db
+          test_clause = (
+              "" if os.environ.get("INCLUDE_TEST") == "1"
+              else " AND COALESCE(is_test, FALSE) = FALSE"
+          )
+          con = duckdb.connect(db, read_only=True)
+          try:
+              row = con.execute(
+                  f"""
+                  SELECT run_id FROM forecasts_ensemble
+                  WHERE run_id IS NOT NULL{test_clause}
+                  GROUP BY run_id ORDER BY MAX(created_at) DESC LIMIT 1
+                  """
+              ).fetchone()
+          finally:
+              con.close()
+          print((row[0] if row else "") or "")
+          PY
+          )"
+          if [ -z "${RESOLVED}" ]; then
+            echo "::error::No forecaster run found to interpret."
+            exit 1
+          fi
+          echo "Runs to interpret: ${RESOLVED}"
+          echo "run_ids=${RESOLVED}" >> "$GITHUB_OUTPUT"
+
+      # One report per run: deviation rows (idempotent, delete-then-insert
+      # per run), then the pack, then the model call. A failure on one run is
+      # recorded and the remaining runs still run — one bad run must not cost
+      # the others their report.
+      - name: Generate reports
+        env:
+          RUN_IDS: ${{ steps.runs.outputs.run_ids }}
+          KIND: ${{ inputs.kind || 'combined' }}
+          FORCE: ${{ (inputs.force == true || inputs.force == 'true') && '1' || '0' }}
+          INCLUDE_TEST: ${{ (inputs.include_test == true || inputs.include_test == 'true') && '1' || '0' }}
+        run: |
+          set -uo pipefail
+          mkdir -p ai_bundle interpreter_out diagnostics
+          FAILED=0
+          for RUN in ${RUN_IDS}; do
+            echo "::group::interpret ${RUN}"
+            python -m pythia.tools.compute_deviation \
+              --db-url "${RESOLVER_DB_URL}" --run-id "${RUN}" \
+              2>&1 | tee "diagnostics/deviation_${RUN}.log" | tail -n 3
+
+            BUNDLE_ARGS=""
+            if [ "${INCLUDE_TEST}" = "1" ]; then
+              BUNDLE_ARGS="--include-test"
+            fi
+            # Per-run out-dir: the bundle is named for the forecast window, so
+            # two runs sharing a window would otherwise overwrite each other.
+            if ! python -m scripts.ai_bundle.build_current_run_bundle \
+                 --db "${RESOLVER_DB_URL}" --run-id "${RUN}" \
+                 --out-dir "ai_bundle/${RUN}" ${BUNDLE_ARGS} \
+                 2>&1 | tee "diagnostics/bundle_${RUN}.log" | tail -n 3; then
+              echo "::warning::bundle build failed for ${RUN}"
+              FAILED=1
+              echo "::endgroup::"
+              continue
+            fi
+            PACK="$(ls -1 "ai_bundle/${RUN}"/current_run_analysis__*.zip 2>/dev/null | tail -n 1)"
+            if [ -z "${PACK}" ]; then
+              echo "::warning::no bundle produced for ${RUN}"
+              FAILED=1
+              echo "::endgroup::"
+              continue
+            fi
+
+            RUN_ARGS=""
+            if [ "${FORCE}" = "1" ]; then
+              RUN_ARGS="--force"
+            fi
+            python -m interpreter.run \
+              --db "${RESOLVER_DB_URL}" \
+              --kind "${KIND}" \
+              --pack "${PACK}" \
+              --run-id "${RUN}" \
+              --out-dir "interpreter_out/${RUN}" ${RUN_ARGS} \
+              2>&1 | tee "diagnostics/interpreter_${RUN}.log" | tail -n 5
+            # main() always returns 0, so the RESULT line is the real verdict.
+            if ! grep -q '"status": "ok"' "diagnostics/interpreter_${RUN}.log"; then
+              echo "::warning::${RUN} did not produce an ok report (see diagnostics/interpreter_${RUN}.log)"
+            fi
+            echo "::endgroup::"
+          done
+          echo "BACKFILL_FAILED=${FAILED}" >> "$GITHUB_ENV"
+
+      # Per-run PDFs for the diagnostics artifact, then one top-level render
+      # of the NEWEST row so publish_latest_data.yml finds exactly one
+      # interpreter_report_latest.pdf where it expects it.
+      - name: Render PDFs
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 >/dev/null 2>&1
+          pip install weasyprint >/dev/null 2>&1
+          KIND="${{ inputs.kind || 'combined' }}"
+          TEST_ARG=""
+          if [ "${{ inputs.include_test }}" = "true" ]; then
+            TEST_ARG="--include-test"
+          fi
+          for RUN in ${{ steps.runs.outputs.run_ids }}; do
+            IID="$(grep -oE '"interpretation_id": "[^"]+"' "diagnostics/interpreter_${RUN}.log" 2>/dev/null | tail -n 1 | cut -d'"' -f4)"
+            if [ -n "${IID}" ]; then
+              python -m interpreter.pdf --db "${RESOLVER_DB_URL}" \
+                --interpretation-id "${IID}" --out-dir "interpreter_out/${RUN}"
+            fi
+          done
+          python -m interpreter.pdf --db "${RESOLVER_DB_URL}" \
+            --kind "${KIND}" ${TEST_ARG} --out-dir interpreter_out
+          exit 0
+
+      - name: Stage health (interpreter backfill)
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          python -m scripts.ci.stage_health \
+            --db "${RESOLVER_DB_URL}" \
+            --stage interpreter_backfill \
+            --since "${STAGE_STARTED_AT:-}" \
+            --out diagnostics/stage_health__interpreter_backfill.json
+          exit 0
+
+      - name: Verify DB did not regress
+        if: ${{ inputs.upload_canonical == true || inputs.upload_canonical == 'true' }}
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.db_signature compare \
+            --before data/db_signature_before.json \
+            --after-db data/resolver.duckdb \
+            --required "${SIGNATURE_REQUIRED_TABLES}" \
+            --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+            --out diagnostics/db_signature_after.json
+
+      # Named exactly as the live path's artifact so publish_latest_data.yml's
+      # best-effort fetch works unchanged when this run dispatches it.
+      - name: Upload interpreter report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-interpreter-report
+          path: |
+            interpreter_out/report__*.pdf
+            interpreter_out/interpreter_report_latest.pdf
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload backfill diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-interpreter-backfill
+          path: |
+            interpreter_out/
+            ai_bundle/
+            diagnostics/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload canonical resolver DB
+        if: ${{ success() && (inputs.upload_canonical == true || inputs.upload_canonical == 'true') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb
+          retention-days: 90
+
+      # Opt-in: puts the reports on the dashboard and the PDF on the release.
+      # Off by default so a backfill is inspectable before it goes public.
+      - name: Publish to release
+        if: ${{ success() && (inputs.publish == true || inputs.publish == 'true') && (inputs.upload_canonical == true || inputs.upload_canonical == 'true') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run publish_latest_data.yml \
+            -R "${{ github.repository }}" \
+            --ref main \
+            -f run_id=${{ github.run_id }}
+
+      - name: Fail if any run failed to produce a pack
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ "${BACKFILL_FAILED:-0}" = "1" ]; then
+            echo "::error::one or more runs could not be interpreted (see the backfill diagnostics artifact)"
+            exit 1
+          fi

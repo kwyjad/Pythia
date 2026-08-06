@@ -107,7 +107,8 @@ jobs:
             "Pythia — Compute SPD Scores" \
             "Pythia — Compute Resolutions" \
             "Ingest Structured Data" \
-            "Hazard Backcast"
+            "Hazard Backcast" \
+            "Interpreter Backfill"
           do
             gh run list \
               --workflow "${WF}" \

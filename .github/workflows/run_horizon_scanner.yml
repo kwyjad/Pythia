@@ -300,6 +300,13 @@ jobs:
               --status success \
               --json databaseId,createdAt \
               --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Hazard Backcast"' >>"${CANDIDATES_FILE}" || true
+            # Manual interpreter backfill/recovery — also re-uploads canonical.
+            gh run list \
+              --workflow "Interpreter Backfill" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Interpreter Backfill"' >>"${CANDIDATES_FILE}" || true
             # Include the post-pipeline chain so HS Triage starts from the
             # most-complete DB (calibration is the chain terminus and carries
             # all prior tables). Without this, calibration's artifact never
