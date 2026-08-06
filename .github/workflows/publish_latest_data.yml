@@ -447,6 +447,54 @@ jobs:
           sys.exit(1)
           PY
 
+      # The interpreter PDF (Phase 6): the forecast-chain publish is dispatched
+      # by Sibyl, whose run uploaded a pythia-interpreter-report artifact; the
+      # calibration-chain publish has none (expected — the release keeps the
+      # previous PDF). Best-effort by construction: a missing/expired artifact
+      # must never block the DB publish, and the dashboard's
+      # /interpreter/print + window.print() remains the fallback.
+      - name: Fetch interpreter report PDF (best-effort)
+        id: fetch_interpreter
+        if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
+        continue-on-error: true
+        env:
+          RUN_ID: ${{ steps.resolve_run.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p interpreter_report
+          HAVE_FRESH=0
+          JSON="$(gh api -H "Accept: application/vnd.github+json" "/repos/${GH_REPO}/actions/runs/${RUN_ID}/artifacts" 2>/dev/null || echo '{}')"
+          ART_URL="$(echo "${JSON}" | jq -r '.artifacts[]? | select(.name=="pythia-interpreter-report" and .expired==false) | .archive_download_url' | head -n 1)"
+          if [ -n "${ART_URL}" ] && [ "${ART_URL}" != "null" ]; then
+            if curl -sSL -H "Authorization: Bearer ${GH_TOKEN}" "${ART_URL}" -o interpreter_report.zip; then
+              if unzip -q interpreter_report.zip -d interpreter_report; then
+                if [ -f interpreter_report/interpreter_report_latest.pdf ]; then
+                  HAVE_FRESH=1
+                fi
+              fi
+            fi
+          fi
+          if [ "${HAVE_FRESH}" = "1" ]; then
+            echo "Fresh interpreter PDF found in run ${RUN_ID}."
+            cp -f interpreter_report/interpreter_report_latest.pdf data_out/
+            VERSIONED="$(ls -1 interpreter_report/report__*.pdf 2>/dev/null | head -n 1 || true)"
+            if [ -n "${VERSIONED}" ]; then
+              cp -f "${VERSIONED}" data_out/
+              echo "versioned_name=$(basename "${VERSIONED}")" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "No fresh interpreter PDF in run ${RUN_ID} (expected when publish was dispatched by the calibration chain)."
+          fi
+          echo "have_fresh=${HAVE_FRESH}" >> "$GITHUB_OUTPUT"
+          # Does the release already carry the constant-name asset? The
+          # manifest key must reflect what a reader can actually download
+          # AFTER this publish, fresh or carried over.
+          RELEASE_HAS=0
+          if gh release view "${RELEASE_TAG}" -R "${GH_REPO}" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "interpreter_report_latest.pdf"; then
+            RELEASE_HAS=1
+          fi
+          echo "release_has=${RELEASE_HAS}" >> "$GITHUB_OUTPUT"
+
       - name: Build manifest.json (best-effort hs_run_id)
         if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
         run: |
@@ -473,6 +521,29 @@ jobs:
             "latest_hs_created_at": None,
             "table_counts": {},
           }
+
+          # Interpreter report asset (Phase 6): the manifest key reflects
+          # what a reader can download AFTER this publish — a PDF fetched
+          # fresh from the source run OR one already carried on the release.
+          # These keys pass straight through /v1/version (result =
+          # dict(manifest)), which is how the dashboard's download button
+          # finds the URL.
+          have_fresh = os.environ.get("INTERPRETER_HAVE_FRESH") == "1"
+          release_has = os.environ.get("INTERPRETER_RELEASE_HAS") == "1"
+          repo = os.environ.get("GH_REPO", "")
+          tag = event["release_tag"]
+          if (have_fresh or release_has) and repo and tag:
+            event["interpreter_report_asset"] = "interpreter_report_latest.pdf"
+            event["interpreter_report_url"] = (
+              f"https://github.com/{repo}/releases/download/{tag}/"
+              "interpreter_report_latest.pdf"
+            )
+          else:
+            event["interpreter_report_asset"] = None
+            event["interpreter_report_url"] = None
+          event["interpreter_report_versioned_asset"] = (
+            os.environ.get("INTERPRETER_VERSIONED_NAME") or None
+          )
 
           # Try to read latest HS run from DB if table exists. Wrap each
           # block in its own try/except so a failure on hs_runs doesn't
@@ -537,6 +608,9 @@ jobs:
           DB_SHA256: ${{ steps.sha.outputs.sha256 }}
           GITHUB_EVENT_WORKFLOW_RUN_CREATED_AT: ${{ github.event.workflow_run.created_at }}
           GITHUB_EVENT_WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          INTERPRETER_HAVE_FRESH: ${{ steps.fetch_interpreter.outputs.have_fresh }}
+          INTERPRETER_RELEASE_HAS: ${{ steps.fetch_interpreter.outputs.release_has }}
+          INTERPRETER_VERSIONED_NAME: ${{ steps.fetch_interpreter.outputs.versioned_name }}
 
       - name: Ensure release exists (create if missing)
         if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
@@ -565,6 +639,25 @@ jobs:
             data_out/resolver.duckdb \
             data_out/manifest.json \
             --clobber
+
+      # Attach the interpreter PDF when the source run produced one. Its own
+      # step, continue-on-error: a PDF upload hiccup must never turn a
+      # successful DB publish red (the manifest was built from the fetch
+      # step's outputs, so a failure here at worst leaves the release's
+      # previous PDF behind the constant-name URL).
+      - name: Upload interpreter report PDF to release (best-effort)
+        if: ${{ steps.regression_guard.outputs.skip_publish != 'true' && steps.fetch_interpreter.outputs.have_fresh == '1' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          gh release upload "${RELEASE_TAG}" \
+            -R "${GH_REPO}" \
+            data_out/interpreter_report_latest.pdf \
+            --clobber
+          VERSIONED="$(ls -1 data_out/report__*.pdf 2>/dev/null | head -n 1 || true)"
+          if [ -n "${VERSIONED}" ]; then
+            gh release upload "${RELEASE_TAG}" -R "${GH_REPO}" "${VERSIONED}" --clobber
+          fi
 
       # Inspect the DB we just published, mirroring the inspection that runs
       # after Resolver Update (inspect_resolver_duckdb.yml). Reuses the same

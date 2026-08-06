@@ -5,6 +5,10 @@ export type VersionResponse = {
   latest_calibration_at?: string | null;
   latest_scores_at?: string | null;
   manifest?: Record<string, unknown> | null;
+  // Interpreter PDF on the release (Phase 6): the publish workflow stamps
+  // these into manifest.json, and /v1/version passes manifest keys through.
+  interpreter_report_url?: string | null;
+  interpreter_report_asset?: string | null;
 };
 
 export type DiagnosticsSummaryResponse = {

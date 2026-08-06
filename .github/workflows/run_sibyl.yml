@@ -167,11 +167,77 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
+      # The interpreter (Phase 6): one plain-language report per cycle,
+      # generated from the current-run bundle built above. Runs HERE — the
+      # last stage of the forecast chain, before the canonical DB upload and
+      # the publish dispatch — so the published DB already contains the
+      # interpretations row (release order stays pythia → Sibyl →
+      # interpreter → publish). The combined kind folds in the latest stored
+      # scored interpretation from the DB; no scored row → an explicit "no
+      # scored run available yet" section. Non-fatal like every diagnostic:
+      # a report bug must never cost the run its DB upload or its publish
+      # dispatch (interpreter.run's main() also always returns 0).
+      - name: Generate interpreter report (combined)
+        if: always()
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          PACK=$(ls -1 ai_bundle/current_run_analysis__*.zip 2>/dev/null | tail -n 1)
+          if [ -z "${PACK}" ]; then
+            echo "::warning::No current-run bundle found — skipping interpreter."
+            exit 0
+          fi
+          python -m interpreter.run \
+            --db "${RESOLVER_DB_URL}" \
+            --kind combined \
+            --pack "${PACK}" \
+            --out-dir interpreter_out
+          exit 0
+
+      # WeasyPrint renders the stored report to PDF (CI-side, never in the
+      # API container; /interpreter/print + window.print() stays the
+      # fallback when this asset is missing). The system pango libraries are
+      # usually preinstalled on ubuntu runners; the apt install is a
+      # best-effort top-up. A render failure keeps the HTML as evidence and
+      # still exits 0.
+      - name: Render interpreter PDF
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 >/dev/null 2>&1
+          pip install weasyprint >/dev/null 2>&1
+          python -m interpreter.pdf \
+            --db "${RESOLVER_DB_URL}" \
+            --kind combined \
+            --out-dir interpreter_out
+          exit 0
+
+      # publish_latest_data.yml fetches this artifact (best-effort) from the
+      # dispatching run and attaches the PDFs to the release.
+      - name: Upload interpreter report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-interpreter-report
+          path: |
+            interpreter_out/report__*.pdf
+            interpreter_out/interpreter_report_latest.pdf
+            interpreter_out/report_*_v*.md
+            interpreter_out/report__*.html
+          if-no-files-found: warn
+          retention-days: 90
+
       # Sibyl ran 40+ minutes on Claude Opus under a $40 hard cap with NO
       # telemetry of any kind — plausibly the most expensive stage in the
       # pipeline and the only one whose spend was unmeasured. Same never-fail
       # contract as the pipeline stages: a reporting bug must not cost a run
-      # its DB upload or its publish dispatch, both of which follow.
+      # its DB upload or its publish dispatch, both of which follow. (The
+      # interpreter call above lands inside the same STAGE_STARTED_AT window,
+      # so its cost shows in this rollup too — itemised by phase.)
       - name: Stage health (Sibyl)
         if: always()
         continue-on-error: true
