@@ -102,10 +102,17 @@ monthly cycle:
 6. **Scoring** — Brier / log loss / RPS per (question, horizon, model).
 7. **Calibration** — per-model weights + LLM-written advice per
    (hazard, metric), consumed by the next cycle's ensemble.
+"""
 
+_SCORED_BUNDLE_POSITION = """\
 This bundle is built at step 7, after a scoring round, and covers only
 **scored** questions — every record links forecast-time reasoning to a
 realized outcome.
+"""
+
+_CURRENT_BUNDLE_POSITION = """\
+This bundle is built between steps 4 and 5 — the run's forecasts (and
+Sibyl's, when present) exist, but none of its outcomes do yet.
 """
 
 _IDENTIFIERS = """\
@@ -139,6 +146,39 @@ Baseline intuition for SPD Brier: a uniform forecast over K buckets scores
 (K−1)/K (≈0.83 for 6 buckets); 0 is a perfect confident forecast; 2 is a
 maximally wrong confident forecast. For binary Brier: 0.25 = always saying
 50%; rare events forecast well score near 0.
+"""
+
+_SKILL_SEMANTICS = """\
+Two **reference forecasters** are scored beside the real models (rows in
+`scores` and `rollups.csv` under `run_id IS NULL`):
+
+- `__ext_climatology` — the base-rate SPD the forecaster was shown at prompt
+  time (built by `pythia.tools.base_rate_spd` from the same tables the
+  prompt's base-rate block queries, using only history strictly before the
+  question window). This is "what you would have said with no model".
+- `__ext_uniform` — flat across buckets (0.5 for binary questions). The
+  floor: any model losing to uniform is actively destroying information.
+
+Skill, wherever you compute it:
+
+    skill = 1 − (model_score / climatology_score)
+
+Positive = beat the base rate. Zero = matched it. Negative = lost to it.
+Compute per (score_family, score_type), NEVER across them — `rollups.csv`
+carries `climatology_mean` and `skill_vs_climatology` already grouped
+correctly.
+
+**The Track 1 vs Track 2 trap**: Track 1 questions are high regime-change,
+Track 2 questions are quiet — disjoint populations, and Track 2's are
+easier. A flat comparison of raw scores will "show" the cheap single model
+beating the expensive ensemble, and it will be teaching you something
+false. Compare each track's skill against ITS OWN climatology baseline,
+never raw scores across tracks. (Sibyl vs Track 1 is different: that
+comparison is already restricted to Sibyl's covered set.)
+
+Where a (hazard, metric) pair has no climatology row, the pair has no
+prompt-time base rate — skill cannot be computed there and the columns stay
+empty; do not substitute uniform as the denominator.
 """
 
 _RESOLUTION_SEMANTICS = """\
@@ -284,6 +324,7 @@ def build_analyst_guide(context: Mapping[str, Any]) -> str:
         "## The system",
         "",
         _PIPELINE_OVERVIEW,
+        _SCORED_BUNDLE_POSITION,
         "## Identifiers and join keys",
         "",
         _IDENTIFIERS,
@@ -297,6 +338,9 @@ def build_analyst_guide(context: Mapping[str, Any]) -> str:
         "## Score semantics",
         "",
         _SCORE_SEMANTICS,
+        "## Skill and the reference forecasters",
+        "",
+        _SKILL_SEMANTICS,
         "## Resolution semantics",
         "",
         _RESOLUTION_SEMANTICS,
@@ -312,6 +356,128 @@ def build_analyst_guide(context: Mapping[str, Any]) -> str:
         "## Known blind spots",
         "",
         _BLIND_SPOTS,
+    ]
+    return "\n".join(parts)
+
+
+_DEVIATION_SEMANTICS = """\
+The attention metrics (from the `forecast_deviation` table, computed by
+`pythia/tools/compute_deviation.py` — all arithmetic is SQL/Python, none of
+it model-generated):
+
+- `js_vs_baserate` — Jensen-Shannon divergence (natural log, range 0 to
+  ln 2 ≈ 0.693) between the published forecast SPD (averaged over the six
+  window months) and the base-rate anchor the forecaster was shown at
+  prompt time. 0 = the ensemble came back at the base rate; large = the
+  ensemble moved far from it.
+- `log_ev_ratio` — ln(EV_forecast / EV_baserate), signed so direction is
+  legible: positive = the forecast expects MORE impact than the base rate,
+  negative = less. Binary questions use ln(p_forecast / p_baserate).
+- `eiv_nominal` — expected impact value over the window (surge blend
+  `max + 0.1 × (sum − max)` over monthly EIVs, the same formula the
+  dashboard risk index uses; bucket centroids from pythia.buckets). NULL
+  for binary questions — event occurrence has no impact centroid.
+- `eiv_per_100k` — population-normalised.
+- `baserate_source` / the `baserate` block in each question record —
+  provenance of the anchor. A question with NO deviation row has no
+  prompt-time base rate; that is a statement about coverage, never invent
+  an anchor for it.
+
+`attention_index.csv` carries four 1-based rank columns (1 = most
+attention-worthy; empty = not rankable for that ordering):
+
+- `rank_deviation` — by `js_vs_baserate` descending.
+- `rank_impact_nominal` — by `eiv_nominal` descending (SPD questions only).
+- `rank_impact_per_capita` — by `eiv_per_100k` descending, restricted to
+  rows whose `eiv_nominal` clears an absolute floor
+  (`PYTHIA_INTERPRETER_PER_CAPITA_FLOOR`, default 10 000 — without it this
+  ordering returns the same small island states every cycle).
+- `rank_rc_disagreement` — by |rc_score − js_vs_baserate/ln 2| descending:
+  large where the Horizon Scanner flagged regime change but the ensemble
+  came back at the base rate, or the reverse. The most interesting list.
+
+`attention_rank` is the blend the pack is ordered (and, under the token
+budget, truncated) by: the mean of the available rank columns, missing
+orderings excluded. Top-ranked questions are never truncated.
+"""
+
+_CURRENT_BLIND_SPOTS = """\
+Honest limits of this pack — do not chase these:
+
+- **No outcomes yet.** This pack describes a run whose window has not
+  resolved; there are no scores or resolutions in it. Performance material
+  lives in the scored-forecast bundle, built at the calibration terminus.
+- Questions with no `forecast_deviation` row have no prompt-time base rate
+  (see `blind_spots.json` → `no_baserate_questions`); their attention rank
+  uses only the impact orderings.
+- `deltas.json` matches runs on (iso3, hazard_code, metric) — question ids
+  are epoch-suffixed and never match across months by design.
+- Sibyl covers only the top-volatility subset; absence of a `sibyl` section
+  in a record is normal. Sibyl rows in `forecast_deviation` exist only
+  when the pack is built after the Sibyl stage.
+- The PA resolution machine runs in shadow mode: its base rates inform
+  FL/TC PA prompts, but PA ground truth used for scoring still comes from
+  the legacy path with thin coverage (~4%) — treat PA "impacts" prose with
+  corresponding humility.
+- ACE inputs carry narrative-salience bias: heavily reported conflicts
+  produce more signal for the models to react to, independent of severity.
+- Blocked hazards (CU, DI, HW, ACO) are fully deactivated upstream — no
+  questions exist for them; their absence is policy, not a gap.
+"""
+
+
+def build_current_run_guide(context: Mapping[str, Any]) -> str:
+    """ANALYST_GUIDE.md for the current-run (pre-outcome) bundle."""
+    n_questions = context.get("n_questions", "?")
+    run_id = context.get("run_id", "?")
+    parts = [
+        "# ANALYST GUIDE — Pythia Current-Run Bundle",
+        "",
+        "You are reading the input pack for interpreting a Pythia forecast "
+        f"run ({run_id}: {n_questions} questions) BEFORE its outcomes exist. "
+        "It contains what the system forecast, how far each forecast moved "
+        "from its base-rate anchor, what the models were reacting to, and "
+        "what changed since the previous run. Your job is to explain what "
+        "deserves attention and why — in plain language, without computing "
+        "any number yourself: every figure you need is pre-computed here.",
+        "",
+        "## Reading order",
+        "",
+        "1. `MANIFEST.json` — run ids, window, counts, lineup, cost, and the "
+        "`pack_tokens` / truncation record.",
+        "2. `attention_index.csv` — one row per question with the deviation "
+        "and impact metrics and the four rank columns.",
+        "3. `deltas.json` — entries/exits vs the previous run, largest SPD "
+        "movements, and how the previous run's flagged risks are tracking.",
+        "4. `blind_spots.json` — what this run cannot see.",
+        "5. `questions/{question_id}.json` — the full record for one "
+        "question (present for the top-ranked questions; the low-ranked "
+        "tail may be truncated under the token budget — the manifest says "
+        "exactly which).",
+        "",
+        "## The system",
+        "",
+        _PIPELINE_OVERVIEW,
+        _CURRENT_BUNDLE_POSITION,
+        "## Identifiers and join keys",
+        "",
+        _IDENTIFIERS,
+        "## Impact buckets",
+        "",
+        _bucket_tables_md(),
+        "",
+        "## Model lineup",
+        "",
+        _model_lineup_md(),
+        "## Deviation and attention metrics",
+        "",
+        _DEVIATION_SEMANTICS,
+        "## Score semantics (for context — no scores in this pack)",
+        "",
+        _SCORE_SEMANTICS,
+        "## Known blind spots",
+        "",
+        _CURRENT_BLIND_SPOTS,
     ]
     return "\n".join(parts)
 

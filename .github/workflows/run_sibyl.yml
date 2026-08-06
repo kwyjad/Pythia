@@ -143,6 +143,30 @@ jobs:
           python -m pythia.tools.compute_deviation --db-url "${RESOLVER_DB_URL}"
           exit 0
 
+      # The interpreter's input pack: what this run forecast, deviation from
+      # base rates, deltas vs the previous run. Built here because this is
+      # the last stage of the forecast chain — the DB now holds the run's
+      # forecasts, Sibyl's rows AND the deviation rows computed above.
+      # Non-fatal, same contract as every diagnostic step.
+      - name: Build current-run bundle
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          python -m scripts.ai_bundle.build_current_run_bundle \
+            --db "${RESOLVER_DB_URL}" --out-dir ai_bundle
+          exit 0
+
+      - name: Upload current-run bundle
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-current-run-bundle
+          path: ai_bundle/current_run_analysis__*.zip
+          if-no-files-found: warn
+          retention-days: 90
+
       # Sibyl ran 40+ minutes on Claude Opus under a $40 hard cap with NO
       # telemetry of any kind — plausibly the most expensive stage in the
       # pipeline and the only one whose spend was unmeasured. Same never-fail
