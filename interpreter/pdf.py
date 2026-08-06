@@ -260,13 +260,25 @@ def select_row(
     return dict(zip(_ROW_COLUMNS, rows[0]))
 
 
+_HS_RUN_MONTH = re.compile(r"^hs_(\d{4})(\d{2})\d{2}T")
+
+
 def month_label(row: dict[str, Any]) -> str:
-    """YYYY-MM for the versioned filename: the scored round's key when the
-    row is a scored report, else the row's creation month."""
+    """YYYY-MM for the versioned filename — the month the report is ABOUT.
+
+    Scored rows use their round key. Current/combined rows take the month
+    from ``hs_run_id`` rather than ``created_at``: for a normal cycle the two
+    agree, but a backfill generates July's report today and naming that file
+    for August would misfile it. Falls back to the creation month when the
+    run id is missing or malformed.
+    """
     if str(row.get("kind") or "") == "scored" and row.get("scored_run_id"):
         label = str(row["scored_run_id"])[:7]
         if re.match(r"^\d{4}-\d{2}$", label):
             return label
+    match = _HS_RUN_MONTH.match(str(row.get("hs_run_id") or ""))
+    if match:
+        return f"{match.group(1)}-{match.group(2)}"
     return str(row.get("created_at") or "")[:7] or "unknown"
 
 
