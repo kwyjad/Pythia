@@ -1677,6 +1677,51 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
             _seed_bucket_centroids(con, metric, specs)
 
         # --- eiv_scores table (Phase 1 — EIV scoring) ---
+        # Deviation-from-base-rate rows, one per (run, question, aggregate
+        # model). Written by pythia/tools/compute_deviation.py; idempotency is
+        # DELETE-per-run-then-INSERT there. baserate_json stores the anchor
+        # distribution so every row is reproducible without re-querying the
+        # source tables.
+        _ensure_table_and_columns(
+            con,
+            "forecast_deviation",
+            """
+            CREATE TABLE IF NOT EXISTS forecast_deviation (
+                run_id TEXT,
+                question_id TEXT,
+                model_name TEXT,
+                iso3 TEXT,
+                hazard_code TEXT,
+                metric TEXT,
+                score_family TEXT,
+                js_vs_baserate DOUBLE,
+                log_ev_ratio DOUBLE,
+                eiv_nominal DOUBLE,
+                eiv_per_100k DOUBLE,
+                baserate_source TEXT,
+                baserate_json TEXT,
+                created_at TIMESTAMP DEFAULT now()
+            );
+            """,
+            {
+                "run_id": "TEXT",
+                "question_id": "TEXT",
+                "model_name": "TEXT",
+                "iso3": "TEXT",
+                "hazard_code": "TEXT",
+                "metric": "TEXT",
+                "score_family": "TEXT",
+                "js_vs_baserate": "DOUBLE",
+                "log_ev_ratio": "DOUBLE",
+                "eiv_nominal": "DOUBLE",
+                "eiv_per_100k": "DOUBLE",
+                "baserate_source": "TEXT",
+                "baserate_json": "TEXT",
+                "created_at": "TIMESTAMP",
+                "is_test": "BOOLEAN DEFAULT FALSE",
+            },
+        )
+
         # NOTE: PK removed; idempotency is handled by DELETE-before-INSERT in
         # compute_scores.py. The run_id column allows per-run scoring.
         _ensure_table_and_columns(

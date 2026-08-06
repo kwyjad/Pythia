@@ -1239,6 +1239,25 @@ jobs:
               con.close()
           PY
 
+      # Deviation-from-base-rate rows for this run's aggregate forecasts
+      # (forecast_deviation, consumed by the interpreter's attention index).
+      # Non-fatal by the same contract as every diagnostic step here: a
+      # deviation bug must never take down real forecasting work. Sibyl's
+      # rows are added by the equivalent step in run_sibyl.yml, which
+      # recomputes after Sibyl writes.
+      - name: Compute forecast deviation
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          if [ -n "${FORECASTER_RUN_ID}" ]; then
+            python -m pythia.tools.compute_deviation \
+              --db-url "${PYTHIA_DB_URL}" --run-id "${FORECASTER_RUN_ID}"
+          else
+            python -m pythia.tools.compute_deviation --db-url "${PYTHIA_DB_URL}"
+          fi
+          exit 0
+
       # Teed and uploaded like the HS stages': this is the ONLY stage that
       # makes SPD/binary calls, so its prompt-cache and forecast-coverage
       # check is the one that matters — and it lived solely in job logs,
