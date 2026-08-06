@@ -6,10 +6,10 @@ reader with no forecasting background. Part A covers the current forecast run
 (how well the system performed). Generation is fully automatic — no draft
 state, no approval gate.
 
-Status: **Phases 0–3 built** (deterministic metrics, input packs, the
-generator itself). Phase 4 (deep validation), Phase 5 (API + dashboard +
-map), Phase 6 (PDF + workflow wiring) are pending — the runner is NOT yet
-invoked by any workflow.
+Status: **Phases 0–4 built** (deterministic metrics, input packs, the
+generator, and the deep validator). Phase 5 (API + dashboard + map) and
+Phase 6 (PDF + workflow wiring) are pending — the runner is NOT yet invoked
+by any workflow.
 
 ## Design principles (short form)
 
@@ -119,13 +119,33 @@ be inspected; the dashboard (Phase 5) renders them behind a warning banner.
 | `PYTHIA_INTERPRETER_TIMEOUT_SEC` | `900` | call timeout |
 | `PYTHIA_INTERPRETER_STRICT_VALIDATION` | `0` | Phase 4: failure suppresses publication |
 
-## Validation (current state vs Phase 4)
+## Validation (Phase 4 — `interpreter/validate.py`)
 
-Phase 3 validates SHAPE (jsonschema + kind-conditional requirements) and
-tracks unresolved figure placeholders. Phase 4 adds: the bare-numeral prose
-lint, lexicon band agreement, referential checks (every question_id exists
-in the pack), and the independent-SQL numeric guard — plus
-`PYTHIA_INTERPRETER_STRICT_VALIDATION=1` suppressing publication.
+Four checks run after generation, before storage; each is reported
+separately in `validation_json` and any failure sets
+`status='failed_validation'` (the report is still stored and rendered, so
+failures stay inspectable):
+
+1. **schema** — jsonschema shape + kind-conditional requirements.
+2. **referential** — every cited `question_id` exists in the pack; every
+   figure reference (`figure_refs` entries AND inline `{{fig:...}}`
+   placeholders) resolves against that entry's figure maps.
+3. **numeric** — every referenced figure that can be re-derived with
+   independent SQL (`forecast_deviation`, `hs_triage` via `questions`) is
+   recomputed from the DB and compared (rtol 1e-6). A mismatch is a pack
+   bug and fails the check. No DB / no source tables → the check is
+   SKIPPED and says so — a missing DB never reads as a validated pack.
+4. **prose** — the bare-numeral lint (digits outside a placeholder fail,
+   with a whitelist for calendar month/year references), lexicon band
+   agreement (a lexicon word attached to a probability placeholder must sit
+   in that figure's band; lexicon phrases are matched longest-first and
+   consumed, and ambiguous sentences — two distinct words — are skipped
+   rather than guessed at), and a per-field length cap.
+
+A crashed check is reported as a failed check, never an unhandled error.
+`PYTHIA_INTERPRETER_STRICT_VALIDATION=1` additionally suppresses the
+publication artifacts (`--out-dir` files; the Phase 5/6 consumers honour
+the same flag) — the row is still stored, suppressed but never silent.
 
 ## Tests / CI
 

@@ -122,6 +122,24 @@ def load_pack(path: str | Path) -> Pack:
     return pack
 
 
+def pack_question_ids(pack: Pack) -> set[str]:
+    """Every question_id the pack knows about (the referential check's
+    universe): attention rows + records for the current pack, the
+    questions_index for the scored pack."""
+    out: set[str] = set()
+    for row in pack.attention_rows:
+        qid = str(row.get("question_id") or "")
+        if qid:
+            out.add(qid)
+    out.update(pack.records.keys())
+    if "questions_index.csv" in pack.files:
+        for row in _csv_rows(pack.files["questions_index.csv"]):
+            qid = str(row.get("question_id") or "")
+            if qid:
+                out.add(qid)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Figures — the values {{fig:...}} placeholders resolve against
 # ---------------------------------------------------------------------------

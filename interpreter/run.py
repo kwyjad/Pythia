@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from interpreter import config, packs, prompts, render, schema, store
+from interpreter import config, packs, prompts, render, store, validate
 
 LOGGER = logging.getLogger(__name__)
 
@@ -374,9 +374,17 @@ def run_interpreter(
                            "interpretation_id": interpretation_id})
             return result
 
-        # --- Validation (shape; the Phase 4 validator adds the deeper checks)
-        errors = schema.validate_output(content, kind=kind)
-        status = "ok" if not errors else "failed_validation"
+        # --- Validation (Phase 4: schema + referential + numeric + prose) ---
+        report = validate.validate_interpretation(
+            content,
+            kind=kind,
+            valid_question_ids=packs.pack_question_ids(pack) | set(per_question),
+            per_question=per_question,
+            global_figures=global_figures,
+            con=con,
+            run_id=run_id,
+        )
+        status = "ok" if report.passed else "failed_validation"
 
         # --- Render (the report is still written on validation failure so it
         # can be inspected; the dashboard shows it behind a warning banner).
@@ -387,8 +395,9 @@ def run_interpreter(
         interpretation_id, version = store.save_interpretation(
             con, content=content, content_md=content_md, figures=figures,
             status=status,
-            validation={"schema_errors": errors,
+            validation={**report.as_dict(),
                         "unresolved_figures": resolver.misses,
+                        "strict": config.strict_validation(),
                         "pack_stats": pack_stats},
             **common_kwargs,
         )
@@ -396,16 +405,31 @@ def run_interpreter(
             "[interpreter] stored %s v%d (status=%s, cost=%s, unresolved figs=%d)",
             interpretation_id, version, status, cost_usd, len(resolver.misses),
         )
-        if out_dir:
+        if status != "ok":
+            for name, check in report.checks.items():
+                for err in check.errors[:20]:
+                    LOGGER.warning("[interpreter] %s check: %s", name, err)
+
+        # Strict mode: a failed validation suppresses the publication
+        # artifacts — the row is still stored (inspectable, never silent),
+        # but nothing consumer-facing is written.
+        suppressed = config.strict_validation() and status != "ok"
+        if out_dir and not suppressed:
             out = Path(out_dir)
             out.mkdir(parents=True, exist_ok=True)
             (out / f"report_{kind}_v{version}.md").write_text(content_md, encoding="utf-8")
             (out / f"content_{kind}_v{version}.json").write_text(
                 json.dumps(content, indent=1, default=str), encoding="utf-8"
             )
+        elif suppressed:
+            LOGGER.warning(
+                "[interpreter] strict validation: publication artifacts "
+                "suppressed for %s v%d", interpretation_id, version,
+            )
         result.update({"status": status, "version": version,
                        "interpretation_id": interpretation_id,
-                       "schema_errors": errors})
+                       "validation": report.as_dict(),
+                       "published": not suppressed})
         return result
     finally:
         duckdb_io.close_db(con)
