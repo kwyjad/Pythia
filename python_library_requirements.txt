@@ -31,3 +31,4 @@ regionmask>=0.12,<1
 geopandas>=1.0,<2
 shapely>=2.0,<3
 pycountry>=24.6,<25
+jsonschema>=4.17,<5

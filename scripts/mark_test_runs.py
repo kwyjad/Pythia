@@ -18,6 +18,8 @@ RUN_ID_TABLES = [
     "scenarios",
     "question_context",
     "run_provenance",
+    "forecast_deviation",
+    "interpretations",
 ]
 
 # Tables keyed by hs_run_id (horizon scanner runs)

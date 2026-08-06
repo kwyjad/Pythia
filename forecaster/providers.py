@@ -129,7 +129,11 @@ class ModelSpec:
     active: bool = True
     purpose: Optional[str] = None
     temperature: Optional[float] = None  # None = use caller default (0.2)
-    thinking: Optional[str] = None       # None = don't send; "off"|"low"|"medium"|"high"
+    # None = don't send. OpenAI: reasoning_effort; Google: thinkingLevel
+    # ("off"|"low"|"medium"|"high"); Anthropic (effort-capable models only,
+    # see _ANTHROPIC_EFFORT_PREFIXES): output_config.effort
+    # ("low"|"medium"|"high"|"xhigh"|"max").
+    thinking: Optional[str] = None
 
 
 _MAX_LLM_CONCURRENCY = int(os.getenv("PYTHIA_LLM_CONCURRENCY", os.getenv("LLM_MAX_CONCURRENCY", "18")))
@@ -569,6 +573,22 @@ _ANTHROPIC_NO_TEMPERATURE_PREFIXES = (
     "claude-opus-5",
     "claude-sonnet-5",
     "claude-fable",
+)
+# Anthropic models that accept the GA effort knob (``output_config.effort``,
+# no beta header; ``budget_tokens`` is REMOVED on Opus 5 — 400 if sent).
+# Same literal-prefix contract as the temperature guard above, and gated for
+# the same reason in reverse: grounding_claude is pinned to Haiku 4.5, which
+# REJECTS ``effort`` — an ungated emit would 400 that role on its first call.
+# Deliberately narrower than the temperature tuple: a missing entry is a
+# safe no-op (the level is silently not sent), a wrong entry is a 400 on
+# every call, so only generations verified to take ``effort`` are listed.
+# Accepted levels: low | medium | high | xhigh | max ("high" is the model
+# default). ModelSpec.thinking values pass through verbatim.
+_ANTHROPIC_EFFORT_PREFIXES = (
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable",
+    "claude-mythos",
 )
 _OPENAI_TIMEOUT = _resolve_timeout("OPENAI_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
 _ANTHROPIC_TIMEOUT = _resolve_timeout("ANTHROPIC_CALL_TIMEOUT_SEC", GPT5_CALL_TIMEOUT_SEC, 60.0)
@@ -1140,6 +1160,7 @@ def build_anthropic_body(
     cache_segments: Optional[List[tuple]] = None,
     cache_ttl: Optional[str] = None,
     max_tokens_override: Optional[int] = None,
+    thinking_level: Optional[str] = None,
 ) -> dict:
     """Build the exact /v1/messages request body.
 
@@ -1210,6 +1231,18 @@ def build_anthropic_body(
     # Opus 4.7+ family models reject sampling params with HTTP 400.
     if model.lower().startswith(_ANTHROPIC_NO_TEMPERATURE_PREFIXES):
         body.pop("temperature", None)
+    # Explicit thinking depth (ModelSpec.thinking / resolve_request_params),
+    # emitted only for models verified to accept the effort knob — see
+    # _ANTHROPIC_EFFORT_PREFIXES. Omitted entirely when unset, so every
+    # existing body stays byte-identical. Thinking tokens share the
+    # max_tokens budget: a caller raising effort above the default should
+    # also raise max_tokens_override.
+    if (
+        thinking_level
+        and thinking_level not in ("off", "none")
+        and model.lower().startswith(_ANTHROPIC_EFFORT_PREFIXES)
+    ):
+        body["output_config"] = {"effort": str(thinking_level)}
     return body
 
 
@@ -1250,6 +1283,7 @@ def call_anthropic(
     cache_segments: Optional[List[tuple]] = None,
     max_tokens_override: Optional[int] = None,
     timeout_sec: Optional[float] = None,
+    thinking_level: Optional[str] = None,
 ) -> ProviderResult:
     if not _ANTHROPIC_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing ANTHROPIC_API_KEY")
@@ -1261,7 +1295,7 @@ def call_anthropic(
     }
     body = build_anthropic_body(
         prompt, model, temperature, purpose=purpose, cache_segments=cache_segments,
-        max_tokens_override=max_tokens_override,
+        max_tokens_override=max_tokens_override, thinking_level=thinking_level,
     )
     try:
         resp = requests.post(
@@ -1537,6 +1571,7 @@ def build_body_for_spec(
             prompt, ms.model_id, effective_temperature, purpose=ms.purpose,
             cache_segments=cache_segments,
             cache_ttl=_batch_cache_ttl() if cache_segments else None,
+            thinking_level=thinking_level,
         )
     if provider in {"google", "gemini"}:
         return build_google_body(
@@ -1569,6 +1604,7 @@ def _call_provider_sync(
         return call_anthropic(
             prompt, model, temperature, purpose=purpose, cache_segments=cache_segments,
             max_tokens_override=max_tokens_override, timeout_sec=timeout_sec,
+            thinking_level=thinking_level,
         )
     if p in {"google", "gemini"}:
         return call_google(prompt, model, temperature, timeout_sec=timeout_sec, thinking_level=thinking_level)

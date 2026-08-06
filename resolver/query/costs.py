@@ -60,6 +60,7 @@ RUN_RUNTIME_COLUMNS = [
     "prediction_markets_ms",
     "sibyl_ms",
     "resolution_ms",
+    "interpreter_ms",
     "other_ms",
     "total_ms",
 ]
@@ -78,6 +79,7 @@ CANONICAL_PHASES = [
     "prediction_markets",
     "sibyl",
     "resolution",
+    "interpreter",
     "other",
 ]
 
@@ -107,6 +109,12 @@ def phase_group(phase: str | None) -> str:
     # never land in "other" — that is how Sibyl's went missing once.
     if "hazard" in value or value == "resolution":
         return "resolution"
+    # The interpreter's report-generation call (interpreter/run.py writes
+    # phase='interpreter', component='Interpreter'). Before the generic
+    # branches for the same reason as hazard_extraction: one Opus call per
+    # cycle in "other" is exactly how Sibyl's spend went missing once.
+    if "interpreter" in value:
+        return "interpreter"
     if "web" in value:  # web_search, web_research
         return "web_search"
     if value.startswith("hs") or "horizon" in value or "triage" in value:
@@ -618,6 +626,7 @@ def build_run_runtimes(conn, track: int | None = None, include_test: bool = Fals
         "prediction_markets": "prediction_markets_ms",
         "sibyl": "sibyl_ms",
         "resolution": "resolution_ms",
+        "interpreter": "interpreter_ms",
         "other": "other_ms",
     }
     pivot = pivot.rename(columns=phase_columns)
