@@ -516,3 +516,118 @@ export type SibylQuestionDetailResponse = {
 export type SibylRunsResponse = {
   rows: SibylRun[];
 };
+
+// ---------------------------------------------------------------------------
+// Interpreter (plain-language report) — /v1/interpreter/*
+// ---------------------------------------------------------------------------
+
+export type InterpreterReasonCode =
+  | "base_rate_deviation"
+  | "large_impact_nominal"
+  | "large_impact_per_capita"
+  | "rc_deviation_disagreement";
+
+export type InterpreterAttentionEntry = {
+  rank: number;
+  reason_code: InterpreterReasonCode;
+  iso3: string;
+  hazard_code: string;
+  metric: string;
+  question_ids: string[];
+  figure_refs?: string[];
+  why_it_stands_out?: string;
+  how_to_read_the_distribution?: string;
+  what_the_model_was_reacting_to?: string;
+  impacts?: string[];
+  operational_challenges?: string[];
+  lead_time_months?: number;
+};
+
+export type InterpreterCallEntry = {
+  question_ids: string[];
+  what_was_right?: string;
+  what_went_wrong?: string;
+  figure_refs?: string[];
+};
+
+export type InterpreterPerformance = {
+  plain_summary?: string;
+  skill_statement?: string;
+  best_calls?: InterpreterCallEntry[];
+  worst_calls?: InterpreterCallEntry[];
+  track_comparison?: string;
+  sibyl_comparison?: string;
+  vs_system_average?: string;
+};
+
+export type InterpreterContent = {
+  schema_version: string;
+  template_version: string;
+  kind: "current" | "scored" | "combined";
+  headline: string;
+  attention?: InterpreterAttentionEntry[];
+  performance?: InterpreterPerformance;
+  changes_since_last_run?: string[];
+  blind_spots?: string[];
+  confidence_notes?: string[];
+};
+
+export type InterpreterReport = {
+  interpretation_id: string;
+  kind: string;
+  run_id: string | null;
+  hs_run_id: string | null;
+  scored_run_id: string | null;
+  version: number;
+  template_version: string | null;
+  model_name: string | null;
+  thinking_level: string | null;
+  status: string;
+  cost_usd: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  created_at: string | null;
+  is_test: boolean | null;
+  content: InterpreterContent | null;
+  content_resolved: InterpreterContent | null;
+  content_md?: string | null;
+  validation?: Record<string, unknown> | null;
+  unresolved_figures?: string[];
+};
+
+export type InterpreterVersionRow = {
+  interpretation_id: string;
+  kind: string;
+  run_id: string | null;
+  scored_run_id: string | null;
+  version: number;
+  status: string;
+  model_name: string | null;
+  template_version: string | null;
+  created_at: string | null;
+  is_test: boolean | null;
+};
+
+export type InterpreterLatestResponse = {
+  has_interpretation: boolean;
+  kind: string;
+  interpretation?: InterpreterReport;
+};
+
+export type InterpreterVersionsResponse = { rows: InterpreterVersionRow[] };
+
+export type InterpreterAttentionMapRow = {
+  iso3: string;
+  js_vs_baserate: number | null;
+  hazard_code: string | null;
+  metric: string | null;
+  eiv_nominal: number | null;
+  n_questions: number;
+  attention: number | null;
+};
+
+export type InterpreterAttentionMapResponse = {
+  has_data: boolean;
+  run_id: string | null;
+  rows: InterpreterAttentionMapRow[];
+};

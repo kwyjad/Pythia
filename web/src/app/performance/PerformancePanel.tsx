@@ -7,6 +7,14 @@ import KpiCard from "../../components/KpiCard";
 import SortableTable, { SortableColumn } from "../../components/SortableTable";
 import { apiGet } from "../../lib/api";
 import { formatModelName } from "../../lib/model_names";
+import {
+  TOOLTIP_BRIER_BINARY,
+  TOOLTIP_BRIER_SPD,
+  TOOLTIP_CRPS,
+  TOOLTIP_EXTERNAL_BENCHMARK,
+  TOOLTIP_LOG,
+  TOOLTIP_SAMPLES,
+} from "../../lib/score_glossary";
 import type {
   PerformanceRunRow,
   PerformanceScoresResponse,
@@ -87,39 +95,8 @@ const VIEW_LABELS: { key: ViewMode; label: string }[] = [
   { key: "by_model", label: "By Model" },
 ];
 
-// Shared tooltip texts (consistent across all views)
-const TOOLTIP_BRIER_SPD =
-  "Multiclass Brier score for SPD questions (PA, FATALITIES, PHASE3PLUS_IN_NEED). " +
-  "Lower is better. Range: 0 (perfect) to 2. Not comparable to Binary Brier.";
-const TOOLTIP_BRIER_BINARY =
-  "Brier score for binary EVENT_OCCURRENCE questions: (forecast_p − outcome)². " +
-  "Lower is better. Range: 0 (perfect) to 1. Structurally near-zero for rare events " +
-  "correctly forecast as unlikely. Not comparable to SPD Brier — the two families " +
-  "are never averaged together.";
-const TOOLTIP_LOG =
-  "Logarithmic scoring rule. Lower is better. Heavily penalises confident wrong predictions. Range: 0 (perfect) to +\u221E.";
-const TOOLTIP_CRPS =
-  "Normalized Ranked Probability Score (the discrete form of CRPS): squared cumulative-distribution error across the ordered buckets, divided by K\u22121. Lower is better. Range: 0 (perfect) to 1 (all probability in the bucket farthest from the outcome).";
-const TOOLTIP_SAMPLES =
-  "Number of individual scored data points (question \u00D7 horizon combinations). Each question can produce multiple samples across different forecast horizons.";
-const TOOLTIP_EXTERNAL_BENCHMARK =
-  "ViEWS (Violence & Impacts Early-Warning System) is an external conflict fatality " +
-  "forecasting model from Uppsala University that produces monthly point forecasts " +
-  "(expected fatality counts) for every country at lead times of 1\u20136 months \u2014 the " +
-  "same horizons Fred uses.\n\n" +
-  "Scoring method: ViEWS point forecasts are converted into synthetic 7-bucket " +
-  "probability distributions using a log-normal model. Given a point forecast of X " +
-  "fatalities, we construct a log-normal distribution with E[X] = point forecast and " +
-  "integrate over Fred\u2019s fatality bucket boundaries (0, 1\u20134, 5\u201324, 25\u201399, 100\u2013499, 500\u2013999, \u22651000) " +
-  "to get bucket probabilities. These synthetic SPDs are then scored with the same " +
-  "Brier, Log Loss, and CRPS functions used for Fred\u2019s own models.\n\n" +
-  "The log-normal spread parameter (\u03C3) controls how uncertain the synthetic SPD is " +
-  "around the point forecast. It is periodically optimized to minimize ViEWS\u2019s Brier " +
-  "score against resolved outcomes.\n\n" +
-  "Purpose: This lets us directly compare ViEWS accuracy against Fred\u2019s ensemble and " +
-  "individual models on the same scale. The comparison also feeds back into Fred\u2019s " +
-  "calibration advice \u2014 if ViEWS outperforms the ensemble, forecasting models are " +
-  "told to anchor more strongly on ViEWS conflict forecasts when they are provided as input.";
+// Shared tooltip texts are single-sourced from web/src/lib/score_glossary.ts
+// (the Interpreter page glossary reads the same copy, so the two never drift).
 
 /** Check if a model_name represents an ensemble method. */
 const isEnsembleModel = (name: string | null): boolean => {

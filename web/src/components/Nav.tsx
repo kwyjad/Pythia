@@ -52,6 +52,12 @@ const Nav = () => {
             </Link>
             <Link
               className="text-fred-primary font-semibold hover:text-fred-secondary"
+              href="/interpreter"
+            >
+              Report
+            </Link>
+            <Link
+              className="text-fred-primary font-semibold hover:text-fred-secondary"
               href="/countries"
             >
               Countries
@@ -166,6 +172,12 @@ const Nav = () => {
                 href="/"
               >
                 Run Results
+              </Link>
+              <Link
+                className="text-fred-primary font-semibold hover:text-fred-secondary"
+                href="/interpreter"
+              >
+                Report
               </Link>
               <Link
                 className="text-fred-primary font-semibold hover:text-fred-secondary"

@@ -9,6 +9,19 @@ type RiskIndexMapProps = {
   countriesRows: CountriesRow[];
   view: RiskView;
   heightClassName?: string;
+  // --- Optional injected-value mode (interpreter attention map etc.) ---
+  // All optional so every existing call site is untouched. When provided:
+  // valuesByIso3 overrides the riskRows-derived values; colorFor overrides
+  // the Jenks/binary color fork; valueLabelFor overrides the tooltip value
+  // formatting; legendItems replaces the built-in legend; onCountryClick
+  // adds a click handler (cursor: pointer); showRcOverlay=false suppresses
+  // the RC circles.
+  valuesByIso3?: Record<string, number>;
+  colorFor?: (value: number) => string;
+  valueLabelFor?: (value: number) => string;
+  legendItems?: Array<{ label: string; color: string }>;
+  onCountryClick?: (iso3: string) => void;
+  showRcOverlay?: boolean;
 };
 
 const SENTINEL_ISO3 = ["AFG", "AUS"] as const;
@@ -143,6 +156,12 @@ export default function RiskIndexMap({
   countriesRows,
   view,
   heightClassName,
+  valuesByIso3,
+  colorFor,
+  valueLabelFor,
+  legendItems,
+  onCountryClick,
+  showRcOverlay = true,
 }: RiskIndexMapProps) {
   const [svgText, setSvgText] = useState<string>("");
   const [svgWarnings, setSvgWarnings] = useState<string[]>([]);
@@ -258,6 +277,15 @@ export default function RiskIndexMap({
 
   const valueByIso3 = useMemo(() => {
     const map = new Map<string, number>();
+    if (valuesByIso3) {
+      Object.entries(valuesByIso3).forEach(([iso3, value]) => {
+        const key = (iso3 ?? "").toUpperCase();
+        if (key && typeof value === "number" && Number.isFinite(value)) {
+          map.set(key, value);
+        }
+      });
+      return map;
+    }
     riskRows.forEach((row) => {
       const iso3 = (row.iso3 ?? "").toUpperCase();
       const value = isPerCapita ? row.total_pc : row.total;
@@ -266,7 +294,7 @@ export default function RiskIndexMap({
       }
     });
     return map;
-  }, [riskRows, isPerCapita]);
+  }, [riskRows, isPerCapita, valuesByIso3]);
 
   const values = useMemo(
     () => Array.from(valueByIso3.values()).filter((value) => Number.isFinite(value)),
@@ -417,7 +445,7 @@ export default function RiskIndexMap({
       if (existingOverlay && existingOverlay.parentNode) {
         existingOverlay.parentNode.removeChild(existingOverlay);
       }
-      if (rcByIso3.size > 0) {
+      if (showRcOverlay && rcByIso3.size > 0) {
         const overlay = document.createElementNS(
           "http://www.w3.org/2000/svg",
           "g"
@@ -593,7 +621,9 @@ export default function RiskIndexMap({
       const value = valueByIso3.get(iso3);
       let fillColor = palette.noQ;
       if (typeof value === "number" && Number.isFinite(value)) {
-        if (isBinary) {
+        if (colorFor) {
+          fillColor = colorFor(value);
+        } else if (isBinary) {
           const classIndex = classifyBinaryProb(value);
           fillColor = binaryColorScale[classIndex] ?? binaryColorScale[0];
         } else {
@@ -609,6 +639,9 @@ export default function RiskIndexMap({
         path.style.setProperty("stroke", "rgba(148,163,184,0.55)", "important");
         path.style.setProperty("stroke-width", "0.6", "important");
         path.style.setProperty("vector-effect", "non-scaling-stroke", "important");
+        if (onCountryClick) {
+          path.style.setProperty("cursor", "pointer", "important");
+        }
       });
 
       const handleMouseMove = (event: MouseEvent) => {
@@ -617,7 +650,9 @@ export default function RiskIndexMap({
           target?.getAttribute("data-name")?.trim() || iso3.toUpperCase();
         let valueLabel = "In country list, not forecasted";
         if (typeof value === "number") {
-          valueLabel = formatValueLabel(value, isPerCapita);
+          valueLabel = valueLabelFor
+            ? valueLabelFor(value)
+            : formatValueLabel(value, isPerCapita);
         } else if (!inCountryListIso3.has(iso3)) {
           valueLabel = "Not in country list";
         }
@@ -632,15 +667,25 @@ export default function RiskIndexMap({
 
       const handleMouseLeave = () => setTooltip(null);
 
+      const handleClick = onCountryClick
+        ? () => onCountryClick(iso3)
+        : null;
+
       targets.forEach((path) => {
         path.addEventListener("mousemove", handleMouseMove);
         path.addEventListener("mouseleave", handleMouseLeave);
+        if (handleClick) {
+          path.addEventListener("click", handleClick);
+        }
       });
 
       listeners.push(() => {
         targets.forEach((path) => {
           path.removeEventListener("mousemove", handleMouseMove);
           path.removeEventListener("mouseleave", handleMouseLeave);
+          if (handleClick) {
+            path.removeEventListener("click", handleClick);
+          }
         });
       });
     });
@@ -979,6 +1024,10 @@ export default function RiskIndexMap({
     riskRows,
     rcByIso3,
     resolvedHeightClassName,
+    colorFor,
+    valueLabelFor,
+    onCountryClick,
+    showRcOverlay,
   ]);
 
   return (
@@ -1008,6 +1057,21 @@ export default function RiskIndexMap({
           </div>
         ) : null}
       </div>
+      {legendItems ? (
+        <div className="absolute bottom-3 right-3 rounded-md border border-fred-secondary bg-fred-surface/90 px-3 py-2 text-[11px] text-fred-text shadow-fredCard sm:text-xs">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-1">
+            {legendItems.map((item) => (
+              <div key={item.label} className="flex items-center gap-2">
+                <span
+                  className="h-3 w-3 rounded-sm border border-fred-border"
+                  style={{ backgroundColor: item.color }}
+                />
+                <span>{item.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
       <div className="absolute bottom-3 right-3 rounded-md border border-fred-secondary bg-fred-surface/90 px-3 py-2 text-[11px] text-fred-text shadow-fredCard sm:text-xs">
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-1">
           {(isBinary
@@ -1054,6 +1118,7 @@ export default function RiskIndexMap({
           <div className="mt-0.5 text-[10px] text-fred-muted">Circle size indicates EIV</div>
         </div>
       </div>
+      )}
       {debugEnabled && debugInfo ? (
         <>
           {debugInfo.autoFitApplied &&

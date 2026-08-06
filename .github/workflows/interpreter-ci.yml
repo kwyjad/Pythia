@@ -14,6 +14,11 @@ on:
       - "pythia/llm_profiles.py"
       - "pythia/config.yaml"
       - "python_library_requirements.txt"
+      # The interpreter API surface (Phase 5): the route module and its test
+      # live outside interpreter/ but change with it. Named explicitly —
+      # nothing runs pythia/tests/ broadly.
+      - "pythia/api/routes/interpreter.py"
+      - "pythia/tests/test_api_interpreter.py"
       # Self-reference (same rule as forecaster-ci): a PR editing this
       # workflow's own test list must run the list it edited.
       - ".github/workflows/interpreter-ci.yml"
@@ -50,4 +55,5 @@ jobs:
           # re-run both sides (they also run in forecaster-ci; duplicate
           # execution is cheap, a gap is not).
           echo "=== Running interpreter + ai_bundle tests ==="
-          pytest -vv interpreter/tests/ scripts/ai_bundle/tests/
+          pytest -vv interpreter/tests/ scripts/ai_bundle/tests/ \
+            pythia/tests/test_api_interpreter.py

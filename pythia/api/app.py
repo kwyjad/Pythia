@@ -556,6 +556,7 @@ from pythia.api.routes import (  # noqa: E402
     diagnostics as _diagnostics_routes,
     downloads as _downloads_routes,
     forecasts as _forecasts_routes,
+    interpreter as _interpreter_routes,
     performance as _performance_routes,
     questions as _questions_routes,
     resolver_explorer as _resolver_explorer_routes,
@@ -636,6 +637,7 @@ app.include_router(_resolver_explorer_routes.router)
 app.include_router(_downloads_routes.router)
 app.include_router(_costs_routes.router)
 app.include_router(_sibyl_routes.router)
+app.include_router(_interpreter_routes.router)
 
 # ---------------------------------------------------------------------------
 # Backward-compat re-exports of names moved into route modules.
