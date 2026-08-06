@@ -57,6 +57,21 @@ LOG = logging.getLogger(__name__)
 SOURCE = "idmc_idu"
 API_KEY_ENV = "IDMC_API_KEY"
 
+#: The SAME credential under the name the rest of the repo already uses.
+#: ``resolver/ingestion/idmc`` and ``scripts/ci/probe_idmc_reachability.py``
+#: send ``IDMC_HELIX_CLIENT_ID`` as the ``client_id`` query param against
+#: ``helix-tools-api.idmcdb.org/external-api/idus/...`` — the same host, the
+#: same API family and the same parameter this module uses, differing only in
+#: endpoint (``all`` here, ``last-180-days`` there). Accepting it as a
+#: fallback means one IDMC client id serves both consumers instead of the
+#: operator maintaining two secrets that hold one value and can drift apart.
+#:
+#: NOT a fallback, deliberately: ``IDMC_API_TOKEN``. That is a different
+#: credential — a bearer token for ``backend.idmcdb.org`` — and its mere
+#: presence is a feature flag (``scripts/ci/run_connectors.py`` sets
+#: ``RESOLVER_SKIP_IDMC`` from it), so it must never be repurposed here.
+FALLBACK_KEY_ENV = "IDMC_HELIX_CLIENT_ID"
+
 #: Injectable transport seam for tests: (url, params, timeout) -> list[dict].
 GetFn = Callable[[str, dict, float], list]
 
@@ -65,16 +80,30 @@ GetFn = Callable[[str, dict, float], list]
 _FIGURE_FIELDS = ("figure", "total_figures", "displacement_figure")
 
 
-def _api_key() -> str | None:
-    key = os.getenv(API_KEY_ENV, "").strip()
-    if not key:
-        LOG.warning(
-            "[idmc_idu] %s is not set — the ladder's lower-bound rung will "
-            "contribute no candidates this run",
-            API_KEY_ENV,
-        )
-        return None
-    return key
+def _api_key() -> tuple[str, str] | None:
+    """The IDU client id and the env var it came from, or None.
+
+    ``IDMC_API_KEY`` wins when both are set, so an operator can point this
+    rung at a different client id than the ingestion path without touching
+    the shared one.
+    """
+
+    for env_name in (API_KEY_ENV, FALLBACK_KEY_ENV):
+        key = os.getenv(env_name, "").strip()
+        if key:
+            if env_name != API_KEY_ENV:
+                LOG.info(
+                    "[idmc_idu] %s is not set — using %s (the same IDMC client "
+                    "id, sent as client_id to the same external-api host)",
+                    API_KEY_ENV, env_name,
+                )
+            return key, env_name
+    LOG.warning(
+        "[idmc_idu] neither %s nor %s is set — the ladder's lower-bound rung "
+        "will contribute no candidates this run",
+        API_KEY_ENV, FALLBACK_KEY_ENV,
+    )
+    return None
 
 
 def _default_get(url: str, params: dict, timeout: float) -> list:
@@ -189,10 +218,14 @@ def fetch_idmc_idu(
     wanted_types = {str(t).strip().lower() for t in rulebook.get("idmc_idu.displacement_types")}
 
     outcome = FetchOutcome(source=SOURCE, ok=False, source_urls=[url])
-    key = _api_key()
-    if not key:
-        outcome.error = f"{API_KEY_ENV} not set"
+    resolved = _api_key()
+    if not resolved:
+        # UNAVAILABLE, not empty: the row records that this rung could not be
+        # read rather than that it had nothing to say.
+        outcome.error = f"neither {API_KEY_ENV} nor {FALLBACK_KEY_ENV} is set"
         return outcome
+    key, key_env = resolved
+    outcome.detail["credential_env"] = key_env
 
     start, end = fetch_window(ym, rulebook, "idmc_idu")
     get = get or _default_get
@@ -230,6 +263,9 @@ def fetch_idmc_idu(
     outcome.records = stored["records"]
     outcome.inserted = stored["inserted"]
     outcome.detail = {
+        # Which env var supplied the client id — provenance for a rung whose
+        # credential now has two accepted names.
+        "credential_env": key_env,
         "window": {"from": start.isoformat(), "to": end.isoformat()},
         "rows_returned": len(rows or []),
         "skipped_displacement_type": skipped_type,

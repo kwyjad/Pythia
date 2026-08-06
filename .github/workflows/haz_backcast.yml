@@ -113,7 +113,11 @@ jobs:
       # Ladder sources. Unset secrets degrade per rung (the rows record
       # UNAVAILABLE), they never fail the run.
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
+      # The IDU rung takes IDMC_API_KEY, falling back to IDMC_HELIX_CLIENT_ID
+      # — the same IDMC client id, sent as client_id to the same
+      # external-api host, so one secret can serve both consumers.
       IDMC_API_KEY: ${{ secrets.IDMC_API_KEY }}
+      IDMC_HELIX_CLIENT_ID: ${{ secrets.IDMC_HELIX_CLIENT_ID }}
       IPC_API_KEY: ${{ secrets.IPC_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}

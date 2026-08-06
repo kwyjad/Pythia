@@ -273,6 +273,22 @@ upstream rename fails loudly in CI rather than at runtime in production.
 vendored boundaries need no credentials. Keys are read from the
 environment only; the rulebook loader rejects any key that looks like one.
 
+The IDU rung accepts **either** `IDMC_API_KEY` or, when that is unset,
+`IDMC_HELIX_CLIENT_ID`. They are the same IDMC credential: both are sent as
+the `client_id` query parameter to `helix-tools-api.idmcdb.org`, this rung
+against `/external-api/idus/all/` and `resolver/ingestion/idmc` against
+`/external-api/idus/last-180-days/`. One secret therefore serves both
+consumers, rather than two secrets holding one value and drifting apart.
+`IDMC_API_KEY` wins when both are set, so this rung can be pointed at a
+different client id deliberately.
+
+`IDMC_API_TOKEN` is **not** accepted and must never be repurposed here: it
+is a bearer token for a different host (`backend.idmcdb.org`), and its mere
+presence is a feature flag — `scripts/ci/run_connectors.py` derives
+`RESOLVER_SKIP_IDMC` from it, so moving it would silently switch off the
+whole IDMC ingestion path. With neither client id set, the rung reports
+UNAVAILABLE, which the resolution row records as unread rather than empty.
+
 ## Phase 3: reading the documents (implemented)
 
 Rung 2 is the machine's only paid step, and the only place a model
