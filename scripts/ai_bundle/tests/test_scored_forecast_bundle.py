@@ -500,3 +500,56 @@ def test_empty_db_returns_none(tmp_path: Path) -> None:
     db_path = tmp_path / "empty.duckdb"
     duckdb.connect(str(db_path)).close()
     assert build_bundle(f"duckdb:///{db_path}", tmp_path / "out_empty") is None
+
+
+def test_rollups_carry_skill_vs_climatology(mini_db: str, tmp_path: Path) -> None:
+    """The __ext_climatology reference rows produce skill columns, grouped
+    per (hazard, metric, family, score_type) — never across."""
+    db_path = mini_db.replace("duckdb:///", "")
+    con = duckdb.connect(db_path)
+    con.execute(
+        "INSERT INTO scores (question_id, horizon_m, metric, score_type, model_name, value, run_id) VALUES "
+        # Climatology Brier 0.8 on the SPD question → skill for the mean
+        # ensemble (mean Brier 0.4 over its two horizons) = 1 − 0.4/0.8 = 0.5.
+        f"('{QID_SPD}', 1, 'FATALITIES', 'brier', '__ext_climatology', 0.80, NULL),"
+        f"('{QID_SPD}', 2, 'FATALITIES', 'brier', '__ext_climatology', 0.80, NULL),"
+        f"('{QID_SPD}', 1, 'FATALITIES', 'brier', '__ext_uniform', 0.86, NULL)"
+    )
+    con.close()
+
+    out_dir = tmp_path / "out_skill"
+    zip_path = build_bundle(mini_db, out_dir, months_back=0, n_case_studies=2)
+    assert zip_path is not None
+    with zipfile.ZipFile(zip_path) as zf:
+        rollups_text = zf.read("rollups.csv").decode("utf-8")
+        guide = zf.read("ANALYST_GUIDE.md").decode("utf-8")
+        digest = zf.read("digest.md").decode("utf-8")
+
+    rows = list(csv.DictReader(rollups_text.splitlines()))
+    header = rows[0].keys()
+    assert "climatology_mean" in header and "skill_vs_climatology" in header
+
+    def _row(model, score_type):
+        matches = [
+            r for r in rows
+            if r["model_name"] == model and r["score_type"] == score_type
+            and r["hazard_code"] == "ACE" and r["metric"] == "FATALITIES"
+        ]
+        assert matches, f"no rollup row for {model}/{score_type}"
+        return matches[0]
+
+    mean_row = _row("ensemble_mean_v2", "brier")
+    assert float(mean_row["climatology_mean"]) == pytest.approx(0.80)
+    assert float(mean_row["skill_vs_climatology"]) == pytest.approx(0.5)
+    # Climatology's own skill is exactly 0 (it matches itself).
+    assert float(_row("__ext_climatology", "brier")["skill_vs_climatology"]) == pytest.approx(0.0)
+    # crps has NO climatology reference in this fixture — skill must be empty,
+    # never borrowed from the brier group.
+    crps_row = _row("ensemble_mean_v2", "crps")
+    assert crps_row["skill_vs_climatology"] == ""
+
+    # Guide documents the reference forecasters and the Track 1/2 trap.
+    assert "__ext_climatology" in guide
+    assert "Track 1 vs Track 2" in guide
+    # Digest's model table carries the skill column.
+    assert "skill vs climatology" in digest

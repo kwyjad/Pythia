@@ -311,13 +311,21 @@ def build_question_record(
     *,
     include_test: bool,
     include_sibyl_trials: bool,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
+    """Assemble the full reasoning record for one question.
+
+    ``run_id`` pins the forecaster run explicitly (the current-run bundle
+    knows it); when omitted it is resolved from scores/forecasts_ensemble
+    (the scored bundle's behaviour, unchanged).
+    """
     qid = str(q["question_id"])
     iso3 = q.get("iso3")
     hz = q.get("hazard_code")
     metric = str(q.get("metric") or "")
     hs_run_id = q.get("hs_run_id")
-    run_id = _forecast_run_id_for_question(con, qid, include_test)
+    if run_id is None:
+        run_id = _forecast_run_id_for_question(con, qid, include_test)
 
     record: dict[str, Any] = {
         "question": q,
@@ -441,28 +449,32 @@ def build_question_record(
             record["weights_applied"] = weights
 
     # --- Outcome + scores ---------------------------------------------------
-    has_source_desc = column_exists(con, "resolutions", "source_desc")
-    resolution_rows = rows_as_dicts(
-        con,
-        "SELECT horizon_m, observed_month, value, source_snapshot_ym"
-        + (", source_desc" if has_source_desc else "")
-        + " FROM resolutions WHERE question_id = ? ORDER BY horizon_m",
-        [qid],
-    )
-    for r in resolution_rows:
-        r["realized_bucket"] = _realized_bucket(con, metric, r.get("value"))
-    resolved_horizons = {int(r["horizon_m"]) for r in resolution_rows if r.get("horizon_m") is not None}
-    record["outcome"] = {
-        "resolutions": resolution_rows,
-        "unresolved_horizons": sorted(set(range(1, 7)) - resolved_horizons),
-    }
+    # Guarded: the current-run bundle builds from a DB where these tables may
+    # not exist yet (nothing has resolved); the scored bundle always has them.
+    if table_exists(con, "resolutions"):
+        has_source_desc = column_exists(con, "resolutions", "source_desc")
+        resolution_rows = rows_as_dicts(
+            con,
+            "SELECT horizon_m, observed_month, value, source_snapshot_ym"
+            + (", source_desc" if has_source_desc else "")
+            + " FROM resolutions WHERE question_id = ? ORDER BY horizon_m",
+            [qid],
+        )
+        for r in resolution_rows:
+            r["realized_bucket"] = _realized_bucket(con, metric, r.get("value"))
+        resolved_horizons = {int(r["horizon_m"]) for r in resolution_rows if r.get("horizon_m") is not None}
+        record["outcome"] = {
+            "resolutions": resolution_rows,
+            "unresolved_horizons": sorted(set(range(1, 7)) - resolved_horizons),
+        }
 
-    record["scores"] = rows_as_dicts(
-        con,
-        "SELECT horizon_m, model_name, score_type, value FROM scores "
-        "WHERE question_id = ? ORDER BY model_name, score_type, horizon_m",
-        [qid],
-    )
+    if table_exists(con, "scores"):
+        record["scores"] = rows_as_dicts(
+            con,
+            "SELECT horizon_m, model_name, score_type, value FROM scores "
+            "WHERE question_id = ? ORDER BY model_name, score_type, horizon_m",
+            [qid],
+        )
 
     # --- Sibyl cross-reference ---------------------------------------------
     if table_exists(con, "sibyl_forecasts"):
@@ -590,6 +602,33 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
     )
 
 
+def _attach_skill(rows: list[dict[str, Any]]) -> None:
+    """Attach skill-vs-climatology columns to rollup rows in place.
+
+    skill = 1 − (model_mean / climatology_mean), per
+    (hazard, metric, score_family, score_type) — NEVER across score types or
+    families. Positive = beat the base rate; 0 = matched; negative = lost.
+    Climatology comes from the `__ext_climatology` reference rows written by
+    pythia/tools/score_baselines.py; where no climatology row exists for a
+    group (no base-rate anchor for that pair), skill stays empty.
+    """
+    clim_mean: dict[tuple, float] = {}
+    for r in rows:
+        if r.get("model_name") == "__ext_climatology" and r.get("mean_value") is not None:
+            key = (r.get("hazard_code"), r.get("metric"),
+                   r.get("score_family"), r.get("score_type"))
+            clim_mean[key] = float(r["mean_value"])
+    for r in rows:
+        key = (r.get("hazard_code"), r.get("metric"),
+               r.get("score_family"), r.get("score_type"))
+        clim = clim_mean.get(key)
+        r["climatology_mean"] = clim
+        if clim is not None and clim > 0 and r.get("mean_value") is not None:
+            r["skill_vs_climatology"] = round(1.0 - float(r["mean_value"]) / clim, 4)
+        else:
+            r["skill_vs_climatology"] = None
+
+
 def _emit_rollups(con, out_dir: Path, qids: list[str]) -> list[dict[str, Any]]:
     rows = rows_as_dicts(
         con,
@@ -603,11 +642,13 @@ def _emit_rollups(con, out_dir: Path, qids: list[str]) -> list[dict[str, Any]]:
         "GROUP BY 1, 2, 3, 4, 5 ORDER BY 3, 1, 2, 5, 8",
         [qids],
     )
+    _attach_skill(rows)
     write_csv(
         out_dir / "rollups.csv",
         [
             "hazard_code", "metric", "score_family", "model_name", "score_type",
             "n_samples", "n_questions", "mean_value", "median_value",
+            "climatology_mean", "skill_vs_climatology",
         ],
         rows,
     )
@@ -795,16 +836,40 @@ def _write_digest(
         "",
         "## Model comparison (Brier by score family — never blend the two)",
         "",
-        "| family | model | score_type | n | mean | median |",
-        "|---|---|---|---|---|---|",
+        "_skill = 1 − mean/climatology-mean within the same (hazard, metric, "
+        "family, score_type) group, aggregated here across groups; positive = "
+        "beat the base rate. `__ext_climatology` / `__ext_uniform` are the "
+        "reference forecasters, not Pythia models._",
+        "",
+        "| family | model | score_type | n | mean | median | skill vs climatology |",
+        "|---|---|---|---|---|---|---|",
     ]
+    # The rollup rows are per (hazard, metric); the digest table aggregates
+    # per (family, model). Skill is averaged over the groups that HAVE a
+    # climatology reference, weighted by sample count.
+    agg: dict[tuple, dict[str, float]] = {}
     for r in rollups:
         if r.get("score_type") not in ("brier",):
             continue
+        key = (r["score_family"], r["model_name"])
+        a = agg.setdefault(key, {"n": 0, "vsum": 0.0, "msum": 0.0,
+                                 "skill_n": 0, "skill_sum": 0.0})
+        n = int(r["n_samples"] or 0)
+        a["n"] += n
+        a["vsum"] += float(r["mean_value"] or 0) * n
+        a["msum"] += float(r["median_value"] or 0) * n
+        if r.get("skill_vs_climatology") is not None:
+            a["skill_n"] += n
+            a["skill_sum"] += float(r["skill_vs_climatology"]) * n
+    for (family, model), a in sorted(agg.items()):
+        if not a["n"]:
+            continue
+        skill = (
+            f"{a['skill_sum'] / a['skill_n']:+.3f}" if a["skill_n"] else "—"
+        )
         lines.append(
-            f"| {r['score_family']} | {r['model_name']} | {r['score_type']} "
-            f"| {r['n_samples']} | {float(r['mean_value'] or 0):.4f} "
-            f"| {float(r['median_value'] or 0):.4f} |"
+            f"| {family} | {model} | brier | {a['n']} "
+            f"| {a['vsum'] / a['n']:.4f} | {a['msum'] / a['n']:.4f} | {skill} |"
         )
 
     def _qline(s: dict[str, Any]) -> str:
