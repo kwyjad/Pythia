@@ -1722,6 +1722,63 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
             },
         )
 
+        # Interpreter reports (interpreter/store.py writes; versioned per
+        # (kind, run key) — a re-run with --force appends a new version, it
+        # never overwrites. content_json is the validated structured output,
+        # content_md the rendered report; the PDF is NOT stored here (it
+        # rides as a release asset).
+        _ensure_table_and_columns(
+            con,
+            "interpretations",
+            """
+            CREATE TABLE IF NOT EXISTS interpretations (
+                interpretation_id TEXT,
+                kind TEXT,
+                run_id TEXT,
+                hs_run_id TEXT,
+                scored_run_id TEXT,
+                version INTEGER,
+                template_version TEXT,
+                model_name TEXT,
+                thinking_level TEXT,
+                prompt_hash TEXT,
+                pack_hash TEXT,
+                content_json TEXT,
+                content_md TEXT,
+                figures_json TEXT,
+                status TEXT,
+                validation_json TEXT,
+                cost_usd DOUBLE,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                created_at TIMESTAMP DEFAULT now()
+            );
+            """,
+            {
+                "interpretation_id": "TEXT",
+                "kind": "TEXT",
+                "run_id": "TEXT",
+                "hs_run_id": "TEXT",
+                "scored_run_id": "TEXT",
+                "version": "INTEGER",
+                "template_version": "TEXT",
+                "model_name": "TEXT",
+                "thinking_level": "TEXT",
+                "prompt_hash": "TEXT",
+                "pack_hash": "TEXT",
+                "content_json": "TEXT",
+                "content_md": "TEXT",
+                "figures_json": "TEXT",
+                "status": "TEXT",
+                "validation_json": "TEXT",
+                "cost_usd": "DOUBLE",
+                "input_tokens": "INTEGER",
+                "output_tokens": "INTEGER",
+                "created_at": "TIMESTAMP",
+                "is_test": "BOOLEAN DEFAULT FALSE",
+            },
+        )
+
         # NOTE: PK removed; idempotency is handled by DELETE-before-INSERT in
         # compute_scores.py. The run_id column allows per-run scoring.
         _ensure_table_and_columns(

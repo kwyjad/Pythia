@@ -102,7 +102,9 @@ llm:
         # Claude Opus: rejects sampling params (the provider adapter drops
         # temperature for the opus-4-7+/opus-5/sonnet-5+/fable family). Left
         # with no thinking key on purpose — Opus 5 runs adaptive thinking by
-        # default, and no Anthropic thinking knob is wired in providers.py.
+        # default. (An Anthropic thinking knob IS wired since Aug 2026 —
+        # ModelSpec.thinking -> output_config.effort for effort-capable
+        # models — but the SPD member deliberately stays on the default.)
         # Thinking shares the max_tokens budget, hence the raised SPD ceiling
         # in providers.py (_ANTHROPIC_SPD_MAX_OUTPUT_DEFAULT).
         - model: claude
@@ -149,6 +151,12 @@ llm:
         # Haiku-class model: the task is copying a number and its sentence,
         # not judgement, and it is the machine's only paid step.
         hazard_extraction: anthropic:claude-haiku-4-5-20251001
+        # --- Interpreter (plain-language report, interpreter/run.py) ---
+        # One Opus-class call per cycle; PYTHIA_INTERPRETER_MODEL_ID
+        # overrides. The call site requests explicit thinking depth via
+        # output_config.effort (PYTHIA_INTERPRETER_THINKING, default high)
+        # and never sends temperature (the opus-5 prefix guard drops it).
+        interpreter:      claude
 
 forecaster:
   horizons: [1,2,3,4,5,6]

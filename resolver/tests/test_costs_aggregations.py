@@ -274,6 +274,8 @@ def test_phase_group_canonical_mapping():
     assert phase_group("ScenarioWriter") == "scenario"
     assert phase_group("hazard_extraction") == "resolution"
     assert phase_group("HazardResolution") == "resolution"
+    assert phase_group("interpreter") == "interpreter"
+    assert phase_group("Interpreter") == "interpreter"
     assert phase_group(None) == "other"
     assert phase_group("") == "other"
     assert phase_group("misc") == "other"

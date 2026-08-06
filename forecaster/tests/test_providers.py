@@ -665,3 +665,52 @@ def test_stop_reason_errors_do_not_feed_provider_breaker(monkeypatch) -> None:
     assert noted == []  # breaker never fed
     # Usage is preserved on the error result (the tokens were billed).
     assert usage["prompt_tokens"] >= 10
+
+
+# ---------------------------------------------------------------------------
+# Anthropic effort knob (output_config.effort — interpreter Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def test_anthropic_effort_emitted_only_for_capable_models() -> None:
+    import forecaster.providers as providers
+
+    body = providers.build_anthropic_body(
+        "p", "claude-opus-5", 0.2, thinking_level="high"
+    )
+    assert body["output_config"] == {"effort": "high"}
+    assert "temperature" not in body  # the no-sampling-params guard still holds
+    assert "thinking" not in body  # adaptive is already the Opus 5 default
+
+    # Haiku (grounding_claude) REJECTS effort — must never be emitted.
+    body_haiku = providers.build_anthropic_body(
+        "p", "claude-haiku-4-5-20251001", 0.2, thinking_level="high"
+    )
+    assert "output_config" not in body_haiku
+
+
+def test_anthropic_body_unchanged_when_thinking_unset() -> None:
+    import forecaster.providers as providers
+
+    with_none = providers.build_anthropic_body("p", "claude-opus-5", 0.2)
+    with_off = providers.build_anthropic_body(
+        "p", "claude-opus-5", 0.2, thinking_level="off"
+    )
+    assert "output_config" not in with_none
+    assert with_none == with_off
+
+
+def test_build_body_for_spec_threads_anthropic_thinking() -> None:
+    import forecaster.providers as providers
+
+    ms = providers.ModelSpec(
+        name="claude-opus-5", provider="anthropic", model_id="claude-opus-5",
+        purpose="interpreter", thinking="xhigh",
+    )
+    body = providers.build_body_for_spec(ms, "prompt text")
+    assert body["output_config"] == {"effort": "xhigh"}
+    # Parity: identical to the sync body builder with the same resolved level.
+    assert body == providers.build_anthropic_body(
+        "prompt text", "claude-opus-5", 0.2, purpose="interpreter",
+        thinking_level="xhigh",
+    )

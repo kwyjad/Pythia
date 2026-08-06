@@ -47,6 +47,7 @@ _ROLE_FALLBACKS: Dict[str, str] = {
     "grounding_claude": "anthropic:claude-haiku-4-5-20251001",
     "crisiswatch": "google:gemini-2.5-flash",
     "hazard_extraction": "anthropic:claude-haiku-4-5-20251001",
+    "interpreter": "anthropic:claude-opus-5",
 }
 
 
