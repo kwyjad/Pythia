@@ -225,6 +225,31 @@ jobs:
 
           echo "db_path=data_out/resolver.duckdb" >> "$GITHUB_OUTPUT"
 
+      # Build the copy that actually gets published: strip the PA machine's
+      # raw source caches (haz_raw_*, which nothing in pythia/api/** or
+      # web/src/** reads) and compact the file. Runs BEFORE the sha, the
+      # regression guard and every upload, so those all describe the artifact
+      # a reader will download.
+      #
+      # This step is also the SIZE GUARD. On 2026-08-06 the canonical DB hit
+      # 3.0 GB, and `gh release upload --clobber` deleted the working 453 MB
+      # asset before GitHub rejected the oversized replacement (HTTP 422,
+      # "size must be less than 2147483648"), leaving the release with no
+      # database at all. build_release_db exits non-zero when the result is
+      # still over the limit, which stops the job here — with the existing
+      # asset untouched — instead of destroying it and then failing.
+      - name: Build publishable DB (strip machine caches, compact, size-guard)
+        run: |
+          set -euo pipefail
+          python -c "import duckdb" 2>/dev/null || pip install duckdb >/dev/null
+          rm -f data_out/resolver.duckdb.wal
+          mv data_out/resolver.duckdb data_out/resolver.canonical.duckdb
+          python -m scripts.ci.build_release_db \
+            --src data_out/resolver.canonical.duckdb \
+            --out data_out/resolver.duckdb
+          rm -f data_out/resolver.canonical.duckdb
+          ls -lh data_out/resolver.duckdb
+
       - name: Compute DB sha256
         id: sha
         run: |
