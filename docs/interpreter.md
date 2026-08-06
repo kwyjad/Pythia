@@ -6,10 +6,10 @@ reader with no forecasting background. Part A covers the current forecast run
 (how well the system performed). Generation is fully automatic — no draft
 state, no approval gate.
 
-Status: **Phases 0–4 built** (deterministic metrics, input packs, the
-generator, and the deep validator). Phase 5 (API + dashboard + map) and
-Phase 6 (PDF + workflow wiring) are pending — the runner is NOT yet invoked
-by any workflow.
+Status: **Phases 0–5 built** (deterministic metrics, input packs, the
+generator, the deep validator, and the API + dashboard). Phase 6 (PDF +
+workflow wiring) is pending — the runner is NOT yet invoked by any workflow,
+so the dashboard page shows its explicit empty state until Phase 6 lands.
 
 ## Design principles (short form)
 
@@ -146,6 +146,38 @@ A crashed check is reported as a failed check, never an unhandled error.
 `PYTHIA_INTERPRETER_STRICT_VALIDATION=1` additionally suppresses the
 publication artifacts (`--out-dir` files; the Phase 5/6 consumers honour
 the same flag) — the row is still stored, suppressed but never silent.
+
+## API + dashboard (Phase 5)
+
+`pythia/api/routes/interpreter.py` (registered in app.py; route modules never
+import app.py):
+
+- `GET /v1/interpreter/latest?kind=&include_test=` — highest version of the
+  newest run; `has_interpretation: false` on a pre-interpreter DB (never a
+  500).
+- `GET /v1/interpreter/versions?kind=&run_id=&include_test=` — light rows
+  for the version selector.
+- `GET /v1/interpreter/{interpretation_id}` — one report (any status; the
+  frontend banners non-ok rows). Declared last so literal routes win.
+- `GET /v1/interpreter/attention_map?run_id=&include_test=` — per-ISO3
+  attention (max `js_vs_baserate`/ln 2 over the run's questions, preferred
+  aggregate per question). Coloured by attention, deliberately not raw risk.
+
+Placeholders are resolved SERVER-side (`interpreter/render.py::
+resolve_content` → the `content_resolved` field) so figure formatting has
+exactly one implementation — the dashboard never re-formats numbers.
+
+Frontend (`web/src/app/interpreter/`, Nav item "Report"): the attention map
+(`RiskIndexMap` widened with optional injected-value props; click a
+highlighted country to jump to its section), version selector, visible
+warn/error banners for `failed_validation`/`failed_generation`, an explicit
+no-report empty state, the report body rendered from `content_resolved`
+with per-question links, the fixed lexicon + provenance appendix, and the
+shared glossary (`web/src/lib/score_glossary.ts` — the same constants the
+Performance page tooltips import, so the two never drift).
+`/interpreter/print` is the print-ready view (no nav, page breaks): the
+always-available PDF fallback and the page the Phase 6 CI PDF renderer
+loads.
 
 ## Tests / CI
 

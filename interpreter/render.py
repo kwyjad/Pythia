@@ -91,6 +91,53 @@ class FigureResolver:
         return _PLACEHOLDER.sub(_sub, text or "")
 
 
+def resolve_content(content: dict[str, Any], resolver: FigureResolver) -> dict[str, Any]:
+    """A deep copy of content_json with every prose placeholder resolved.
+
+    The API serves this so the dashboard renders structured content without
+    re-implementing figure formatting in TypeScript — one formatting
+    implementation, no drift. Traversal mirrors render_markdown's: attention
+    entries and best/worst calls resolve in their question_ids context,
+    everything else globally.
+    """
+    import copy
+
+    out = copy.deepcopy(content)
+
+    def _r(text: Any, qids: list[str] | None = None) -> Any:
+        if isinstance(text, str):
+            return resolver.resolve_text(text, qids)
+        return text
+
+    if out.get("headline"):
+        out["headline"] = _r(out["headline"])
+    for entry in out.get("attention") or []:
+        qids = [str(q) for q in entry.get("question_ids") or []]
+        for name in ("why_it_stands_out", "how_to_read_the_distribution",
+                     "what_the_model_was_reacting_to"):
+            if entry.get(name):
+                entry[name] = _r(entry[name], qids)
+        for name in ("impacts", "operational_challenges"):
+            if entry.get(name):
+                entry[name] = [_r(item, qids) for item in entry[name]]
+    performance = out.get("performance")
+    if isinstance(performance, dict):
+        for name in ("plain_summary", "skill_statement", "track_comparison",
+                     "sibyl_comparison", "vs_system_average"):
+            if performance.get(name):
+                performance[name] = _r(performance[name])
+        for side in ("best_calls", "worst_calls"):
+            for call in performance.get(side) or []:
+                qids = [str(q) for q in call.get("question_ids") or []]
+                for name in ("what_was_right", "what_went_wrong"):
+                    if call.get(name):
+                        call[name] = _r(call[name], qids)
+    for name in ("changes_since_last_run", "blind_spots", "confidence_notes"):
+        if out.get(name):
+            out[name] = [_r(item) for item in out[name]]
+    return out
+
+
 _REASON_LABELS = {
     "base_rate_deviation": "far from its base rate",
     "large_impact_nominal": "large expected impact",
