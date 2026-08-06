@@ -259,6 +259,18 @@ jobs:
             resolver/tests/test_idmc_history_conflict_pa.py \
             resolver/tests/test_hazard_resolution_extraction.py
 
+      - name: Run deviation + baseline-scoring tests (interpreter Phase 1)
+        run: |
+          # base_rate_spd / compute_deviation / score_baselines live in
+          # pythia/tools and their tests in pythia/tests — which no workflow
+          # runs broadly, so they must be named here explicitly (CI runs
+          # explicit test-file lists; an unnamed test file runs NOWHERE).
+          echo "=== Running interpreter Phase 1 tests ==="
+          pytest -vv \
+            pythia/tests/test_base_rate_spd.py \
+            pythia/tests/test_compute_deviation.py \
+            pythia/tests/test_score_baselines.py
+
       - name: Run debug-bundle tests
         run: |
           # These ran in NO workflow — forecaster-ci executes an explicit file

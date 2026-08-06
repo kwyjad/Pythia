@@ -128,6 +128,21 @@ jobs:
             python -m sibyl.run | tee sibyl_stdout.txt
           fi
 
+      # Deviation-from-base-rate rows (forecast_deviation) — recomputed here
+      # so Sibyl's forecasts (written under the standard forecaster run_id
+      # with model_name='sibyl') get deviation rows too, and so the legacy
+      # sync pipeline (run_horizon_scanner.yml, which has no deviation step)
+      # is covered by the Sibyl leg that chains off it. Idempotent per run.
+      # Non-fatal: a deviation bug must never cost the run its DB upload or
+      # its publish dispatch.
+      - name: Compute forecast deviation
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          python -m pythia.tools.compute_deviation --db-url "${RESOLVER_DB_URL}"
+          exit 0
+
       # Sibyl ran 40+ minutes on Claude Opus under a $40 hard cap with NO
       # telemetry of any kind — plausibly the most expensive stage in the
       # pipeline and the only one whose spend was unmeasured. Same never-fail

@@ -70,6 +70,18 @@ jobs:
           python -m pythia.tools.score_views --db-url "${RESOLVER_DB_URL}"
           echo "=== score_views completed ==="
 
+      # Reference forecasters (__ext_climatology / __ext_uniform) — the skill
+      # baselines the interpreter's "how well did we do" section divides by.
+      # Non-fatal: a baseline-scoring bug must never block the scores upload.
+      - name: Score climatology/uniform baselines
+        continue-on-error: true
+        env:
+          PYTHIA_CONFIG_YAML: "pythia/config.yaml"
+        run: |
+          echo "=== Running pythia.tools.score_baselines ==="
+          python -m pythia.tools.score_baselines --db-url "${RESOLVER_DB_URL}"
+          echo "=== score_baselines completed ==="
+
       - name: Upload canonical resolver DB
         if: success()
         uses: actions/upload-artifact@v4
