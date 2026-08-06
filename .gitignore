@@ -17,6 +17,13 @@ downloads/
 eggs/
 .eggs/
 lib/
+# The Python build-artifact pattern above matches ANY dir named lib —
+# including the dashboard's web/src/lib/, whose EXISTING files stay tracked
+# while any NEW file is silently dropped from git add (this cost a green
+# local build a red web-ci once: score_glossary.ts imported everywhere but
+# never committed). Same negation idiom as web/src/app/downloads/ below.
+!web/src/lib/
+!web/src/lib/**
 lib64/
 parts/
 sdist/
