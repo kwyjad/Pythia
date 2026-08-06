@@ -100,12 +100,16 @@ def _content(kind: str) -> dict:
         }],
         "performance": {
             "plain_summary": "The system beat its base rate.",
-            "skill_statement": "Skill against climatology was {{fig:skill_brier_spd}}.",
         },
         "blind_spots": ["Impact reporting is thin."],
     }
     if kind == "scored":
         content.pop("attention")
+        # The scored pack provides the skill figure; a combined run may only
+        # reference it once a scored interpretation's figures are stored.
+        content["performance"]["skill_statement"] = (
+            "Skill against climatology was {{fig:skill_brier_spd}}."
+        )
     if kind == "current":
         content.pop("performance")
     return content
@@ -161,7 +165,11 @@ class TestRunner:
         result = run_interpreter(db=str(db), kind="scored", pack_path=str(scored_bundle))
         assert result["status"] == "ok"
 
-        mock_model.response = json.dumps(_content("combined"))
+        combined = _content("combined")
+        combined["performance"]["skill_statement"] = (
+            "Skill against climatology was {{fig:skill_brier_spd}}."
+        )
+        mock_model.response = json.dumps(combined)
         result2 = run_interpreter(
             db=str(db), kind="combined", pack_path=str(current_bundle)
         )
@@ -189,6 +197,13 @@ class TestRunner:
 
     def test_combined_without_scored_says_so(self, tmp_path, current_bundle, mock_model):
         db = tmp_path / "p.duckdb"
+        # Without a stored scored interpretation there are no performance
+        # figures to reference — the canned output mirrors the instructed
+        # behaviour (plain statement, no placeholders). A skill placeholder
+        # here would rightly fail the referential check.
+        content = _content("combined")
+        content["performance"] = {"plain_summary": "No forecast window has resolved yet."}
+        mock_model.response = json.dumps(content)
         result = run_interpreter(db=str(db), kind="combined", pack_path=str(current_bundle))
         assert result["status"] == "ok"
         assert "NO scored run exists yet" in mock_model.calls[-1]
@@ -240,6 +255,47 @@ class TestRunner:
         rows = _rows(db)
         assert rows[0][2] == "failed_validation"
         assert rows[0][3]  # content_md written so the failure is inspectable
+
+    def test_prose_numeral_fails_validation_end_to_end(
+        self, tmp_path, current_bundle, mock_model
+    ):
+        db = tmp_path / "p.duckdb"
+        bad = _content("combined")
+        bad["attention"][0]["why_it_stands_out"] = "Roughly 40,000 people affected."
+        mock_model.response = json.dumps(bad)
+        result = run_interpreter(db=str(db), kind="combined", pack_path=str(current_bundle))
+        assert result["status"] == "failed_validation"
+        assert not result["validation"]["checks"]["prose"]["passed"]
+
+    def test_strict_mode_suppresses_publication_artifacts(
+        self, tmp_path, current_bundle, mock_model, monkeypatch
+    ):
+        db = tmp_path / "p.duckdb"
+        out = tmp_path / "out_strict"
+        bad = _content("combined")
+        bad["attention"][0]["why_it_stands_out"] = "Roughly 40,000 people affected."
+        mock_model.response = json.dumps(bad)
+        monkeypatch.setenv("PYTHIA_INTERPRETER_STRICT_VALIDATION", "1")
+        result = run_interpreter(
+            db=str(db), kind="combined", pack_path=str(current_bundle),
+            out_dir=str(out),
+        )
+        assert result["status"] == "failed_validation"
+        assert result["published"] is False
+        assert not out.exists() or not list(out.iterdir())
+        # The row is still stored — suppressed, never silent.
+        assert _rows(db)[0][2] == "failed_validation"
+
+        # Without strict mode the same failure still writes the artifacts.
+        monkeypatch.delenv("PYTHIA_INTERPRETER_STRICT_VALIDATION")
+        out2 = tmp_path / "out_lax"
+        result2 = run_interpreter(
+            db=str(db), kind="combined", pack_path=str(current_bundle),
+            out_dir=str(out2), force=True,
+        )
+        assert result2["status"] == "failed_validation"
+        assert result2["published"] is True
+        assert any(out2.iterdir())
 
     def test_kill_switch(self, tmp_path, current_bundle, mock_model, monkeypatch):
         monkeypatch.setenv("PYTHIA_INTERPRETER_ENABLED", "0")
