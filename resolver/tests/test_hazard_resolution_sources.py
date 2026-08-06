@@ -344,9 +344,68 @@ def test_idu_sends_the_key_as_client_id_from_the_environment(con, rulebook, monk
 
 def test_idu_without_a_key_reports_unavailable(con, rulebook, monkeypatch):
     monkeypatch.delenv("IDMC_API_KEY", raising=False)
+    monkeypatch.delenv("IDMC_HELIX_CLIENT_ID", raising=False)
     outcome = idu_mod.fetch_idmc_idu(con, "2024-03", "FL", rulebook)
     assert outcome.ok is False
+    # The error must name BOTH accepted vars — an operator reading it should
+    # not have to grep the source to learn what would fix it.
     assert "IDMC_API_KEY" in outcome.error
+    assert "IDMC_HELIX_CLIENT_ID" in outcome.error
+
+
+def test_idu_falls_back_to_the_helix_client_id(con, rulebook, monkeypatch):
+    """One IDMC client id serves both consumers.
+
+    IDMC_HELIX_CLIENT_ID is the same credential the ingestion path already
+    sends as client_id to the same external-api host — accepting it here
+    means the operator keeps one secret instead of two that can drift.
+    """
+
+    monkeypatch.delenv("IDMC_API_KEY", raising=False)
+    monkeypatch.setenv("IDMC_HELIX_CLIENT_ID", "helix-client-id")
+    seen = {}
+
+    def capture(url, params, timeout):
+        seen.update(params=params)
+        return []
+
+    outcome = idu_mod.fetch_idmc_idu(con, "2024-03", "FL", rulebook, get=capture)
+    assert outcome.ok is True
+    assert seen["params"]["client_id"] == "helix-client-id"
+    assert outcome.detail["credential_env"] == "IDMC_HELIX_CLIENT_ID"
+
+
+def test_idu_prefers_its_own_key_over_the_fallback(con, rulebook, monkeypatch):
+    """IDMC_API_KEY wins, so this rung can be pointed at a different id."""
+
+    monkeypatch.setenv("IDMC_API_KEY", "rung-specific")
+    monkeypatch.setenv("IDMC_HELIX_CLIENT_ID", "helix-client-id")
+    seen = {}
+
+    def capture(url, params, timeout):
+        seen.update(params=params)
+        return []
+
+    outcome = idu_mod.fetch_idmc_idu(con, "2024-03", "FL", rulebook, get=capture)
+    assert seen["params"]["client_id"] == "rung-specific"
+    assert outcome.detail["credential_env"] == "IDMC_API_KEY"
+
+
+def test_idu_never_reads_the_bearer_token_credential(con, rulebook, monkeypatch):
+    """IDMC_API_TOKEN is a DIFFERENT credential and must never be used here.
+
+    It is a bearer token for backend.idmcdb.org, and its mere presence is a
+    feature flag for the ingestion path (run_connectors sets
+    RESOLVER_SKIP_IDMC from it) — repurposing it would be two bugs at once.
+    """
+
+    monkeypatch.delenv("IDMC_API_KEY", raising=False)
+    monkeypatch.delenv("IDMC_HELIX_CLIENT_ID", raising=False)
+    monkeypatch.setenv("IDMC_API_TOKEN", "bearer-token-for-a-different-host")
+
+    outcome = idu_mod.fetch_idmc_idu(con, "2024-03", "FL", rulebook)
+    assert outcome.ok is False, "the bearer token must not satisfy this rung"
+    assert "bearer-token-for-a-different-host" not in str(outcome.error)
 
 
 def test_idu_skips_conflict_displacement(con, rulebook, monkeypatch):
