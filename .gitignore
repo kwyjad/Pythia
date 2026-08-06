@@ -177,6 +177,10 @@ ${RESOLVER_DATA_DIR}/
 # ENSO module cached output
 horizon_scanner/enso/output/
 
+# Node dependencies (web/ has its own /node_modules rule; this catches a
+# stray npx/npm run from the repo root)
+node_modules/
+
 # Local dev container / workspace artifacts
 workspaces/
 data/resolver.duckdb.local.dev
