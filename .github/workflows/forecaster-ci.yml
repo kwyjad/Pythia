@@ -57,7 +57,10 @@ on:
       - "scripts/ci/stage_health.py"
       - "scripts/ci/tests/test_batch_economics.py"
       - "scripts/ci/tests/test_stage_health.py"
+      - "scripts/ci/build_release_db.py"
+      - "scripts/ci/tests/test_build_release_db.py"
       - ".github/workflows/pythia_pipeline_stage.yml"
+      - ".github/workflows/publish_latest_data.yml"
       # Self-reference, as horizon-scanner-ci.yml already does: without it a PR
       # editing this workflow's own test list never runs the list it edited.
       - ".github/workflows/forecaster-ci.yml"
@@ -221,7 +224,8 @@ jobs:
             tests/test_poll_llm_batches_guard.py \
             tests/test_check_pipeline_active.py \
             scripts/ci/tests/test_batch_economics.py \
-            scripts/ci/tests/test_stage_health.py
+            scripts/ci/tests/test_stage_health.py \
+            scripts/ci/tests/test_build_release_db.py
 
       - name: Run base-rate history + rendering tests
         run: |
