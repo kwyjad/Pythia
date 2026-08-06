@@ -33,10 +33,12 @@ export default function InterpreterClient({
   report,
   versions,
   attentionMap,
+  reportPdfUrl = null,
 }: {
   report: InterpreterReport | null;
   versions: InterpreterVersionRow[];
   attentionMap: InterpreterAttentionMapResponse;
+  reportPdfUrl?: string | null;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -133,6 +135,16 @@ export default function InterpreterClient({
               ))}
             </select>
           </label>
+        ) : null}
+        {reportPdfUrl ? (
+          <a
+            className="rounded-md border border-fred-primary bg-fred-primary px-3 py-1 text-sm text-white hover:opacity-90"
+            href={reportPdfUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Download PDF
+          </a>
         ) : null}
         {report ? (
           <Link

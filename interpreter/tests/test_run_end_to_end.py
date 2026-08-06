@@ -315,3 +315,54 @@ class TestRunner:
             "--pack", str(current_bundle),
         ])
         assert rc == 0  # never fail the pipeline
+
+
+class TestTestModeDerivation:
+    """Phase 6: the runner derives is_test from hs_runs (the Sibyl pattern)."""
+
+    def _con_with_hs_run(self, tmp_path, is_test):
+        import duckdb
+
+        con = duckdb.connect(str(tmp_path / "tm.duckdb"))
+        con.execute("CREATE TABLE hs_runs (hs_run_id TEXT, is_test BOOLEAN)")
+        con.execute("INSERT INTO hs_runs VALUES ('hs_x', ?)", [is_test])
+        return con
+
+    def test_test_run_exports_the_flag(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+        con = self._con_with_hs_run(tmp_path, True)
+        run_mod._maybe_inherit_test_mode(con, "hs_x")
+        import os
+
+        assert os.environ.get("PYTHIA_TEST_MODE") == "1"
+        con.close()
+
+    def test_production_run_leaves_env_unset(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+        con = self._con_with_hs_run(tmp_path, False)
+        run_mod._maybe_inherit_test_mode(con, "hs_x")
+        import os
+
+        assert os.environ.get("PYTHIA_TEST_MODE") is None
+        con.close()
+
+    def test_explicit_env_always_wins(self, tmp_path, monkeypatch):
+        # An operator's explicit "0" must never be flipped by the derivation.
+        monkeypatch.setenv("PYTHIA_TEST_MODE", "0")
+        con = self._con_with_hs_run(tmp_path, True)
+        run_mod._maybe_inherit_test_mode(con, "hs_x")
+        import os
+
+        assert os.environ.get("PYTHIA_TEST_MODE") == "0"
+        con.close()
+
+    def test_missing_table_is_a_quiet_no_op(self, tmp_path, monkeypatch):
+        import duckdb
+
+        monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+        con = duckdb.connect(str(tmp_path / "bare.duckdb"))
+        run_mod._maybe_inherit_test_mode(con, "hs_x")
+        import os
+
+        assert os.environ.get("PYTHIA_TEST_MODE") is None
+        con.close()

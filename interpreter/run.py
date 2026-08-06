@@ -212,6 +212,35 @@ def _open_db(db: str):
     return duckdb_io, duckdb_io.get_db(db or duckdb_io.DEFAULT_DB_URL)
 
 
+def _maybe_inherit_test_mode(con, hs_run_id: str | None) -> None:
+    """Derive test mode from the interpreted run (the Sibyl pattern).
+
+    The workflow step that invokes this runner cannot carry the upstream
+    ``test_mode`` input, so a test-mode cycle would otherwise store its
+    interpretation (and its llm_calls telemetry) stamped as production data.
+    An explicit PYTHIA_TEST_MODE always wins; the derivation only ever turns
+    the flag ON, never off.
+    """
+    import os
+
+    if os.getenv("PYTHIA_TEST_MODE") or not hs_run_id:
+        return
+    try:
+        row = con.execute(
+            "SELECT COALESCE(is_test, FALSE) FROM hs_runs WHERE hs_run_id = ?",
+            [hs_run_id],
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001 - probe only, never fatal
+        LOGGER.warning("[interpreter] hs_runs is_test probe failed: %s", exc)
+        return
+    if row and bool(row[0]):
+        os.environ["PYTHIA_TEST_MODE"] = "1"
+        LOGGER.info(
+            "[interpreter] hs_run %s is a test run — stamping outputs is_test",
+            hs_run_id,
+        )
+
+
 def run_interpreter(
     *,
     db: str,
@@ -254,6 +283,7 @@ def run_interpreter(
     duckdb_io, con = _open_db(db)
     try:
         store.ensure_table(con)
+        _maybe_inherit_test_mode(con, hs_run_id)
 
         if not force:
             existing = store.existing_ok_version(con, kind, run_id, scored_run_id)

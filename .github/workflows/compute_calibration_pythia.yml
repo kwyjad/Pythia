@@ -100,6 +100,12 @@ jobs:
           python -m pythia.tools.generate_calibration_advice --db-url "${RESOLVER_DB_URL}"
           echo "=== generate_calibration_advice completed ==="
 
+      # stage_health windows its cost rollup on this — llm_calls accumulates
+      # in the travelling DB, so without a start marker the interpreter step
+      # below could only be costed as "the DB's cumulative spend".
+      - name: Record stage start
+        run: echo "STAGE_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+
       # One self-describing zip an AI analyst can consume: for every scored
       # question, the forecast-time reasoning (exact prompt, member responses,
       # traces, RC/triage rationale, grounding evidence) joined to its realized
@@ -121,6 +127,58 @@ jobs:
           name: pythia-ai-analysis-bundle
           path: ai_bundle/scored_forecast_analysis__*.zip
           if-no-files-found: warn
+
+      # The interpreter's performance-side (scored) report — generated here
+      # because this is where the scored bundle already exists, and the row
+      # rides in the canonical DB this workflow uploads below. The next
+      # forecast cycle's combined report folds it in from the DB (its figure
+      # map is persisted in figures_json, so the scored pack never needs to
+      # travel). Non-fatal: interpreter.run's main() always returns 0, and
+      # this step must never gate the publish dispatch.
+      - name: Generate interpreter report (scored)
+        if: always()
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          PACK=$(ls -1 ai_bundle/scored_forecast_analysis__*.zip 2>/dev/null | tail -n 1)
+          if [ -z "${PACK}" ]; then
+            echo "::warning::No scored bundle found — skipping interpreter (scored)."
+            exit 0
+          fi
+          python -m interpreter.run \
+            --db "${RESOLVER_DB_URL}" \
+            --kind scored \
+            --pack "${PACK}" \
+            --out-dir interpreter_out
+          exit 0
+
+      - name: Stage health (interpreter scored)
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.stage_health \
+            --db "${RESOLVER_DB_URL}" \
+            --stage calibration_interpreter \
+            --since "${STAGE_STARTED_AT:-}" \
+            --out diagnostics/stage_health__calibration_interpreter.json
+          exit 0
+
+      - name: Upload interpreter scored report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-interpreter-scored
+          path: |
+            interpreter_out/report_scored_v*.md
+            interpreter_out/content_scored_v*.json
+            diagnostics/stage_health__calibration_interpreter.json
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Emit calibration summary
         if: always()

@@ -9,6 +9,7 @@ import type {
   InterpreterLatestResponse,
   InterpreterReport,
   InterpreterVersionsResponse,
+  VersionResponse,
 } from "../../lib/types";
 import InterpreterClient from "./InterpreterClient";
 
@@ -37,7 +38,7 @@ export default async function InterpreterPage({
 
   // Every fetch is independent and null-safe — a degraded API renders an
   // explicit empty state, never a blank page (the standing soft-fail rule).
-  const [latestResult, versionsResult, mapResult] = await Promise.allSettled([
+  const [latestResult, versionsResult, mapResult, versionResult] = await Promise.allSettled([
     interpretationId
       ? apiGet<{ interpretation: InterpreterReport }>(
           `/interpreter/${encodeURIComponent(interpretationId)}`
@@ -56,6 +57,8 @@ export default async function InterpreterPage({
     apiGet<InterpreterAttentionMapResponse>("/interpreter/attention_map", {
       include_test: includeTest || undefined,
     }),
+    // The release-asset PDF URL rides in /v1/version (manifest passthrough).
+    apiGet<VersionResponse>("/version"),
   ]);
 
   if (latestResult.status === "fulfilled") {
@@ -72,6 +75,10 @@ export default async function InterpreterPage({
   if (mapResult.status === "fulfilled") {
     attentionMap = mapResult.value;
   }
+  const reportPdfUrl =
+    versionResult.status === "fulfilled"
+      ? versionResult.value.interpreter_report_url ?? null
+      : null;
 
   return (
     <div className="space-y-6">
@@ -95,6 +102,7 @@ export default async function InterpreterPage({
         report={report}
         versions={versions.rows}
         attentionMap={attentionMap}
+        reportPdfUrl={reportPdfUrl}
       />
     </div>
   );

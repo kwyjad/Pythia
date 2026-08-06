@@ -6,10 +6,11 @@ reader with no forecasting background. Part A covers the current forecast run
 (how well the system performed). Generation is fully automatic — no draft
 state, no approval gate.
 
-Status: **Phases 0–5 built** (deterministic metrics, input packs, the
-generator, the deep validator, and the API + dashboard). Phase 6 (PDF +
-workflow wiring) is pending — the runner is NOT yet invoked by any workflow,
-so the dashboard page shows its explicit empty state until Phase 6 lands.
+Status: **Phases 0–6 built — fully wired.** The combined report is generated
+at the end of every forecast cycle (`run_sibyl.yml`), the scored report at
+the end of every calibration cycle (`compute_calibration_pythia.yml`), the
+PDF is rendered in CI and attached to the `pythia-data-latest` release, and
+the dashboard's Report page links to it.
 
 ## Design principles (short form)
 
@@ -33,6 +34,9 @@ Phase 2 (scripts/ai_bundle/):   build_current_run_bundle (attention index, delta
                                 + skill columns in the scored bundle
 Phase 3 (interpreter/):         pack -> Opus 5 (role: interpreter, effort=high)
                                 -> JSON (schema-validated) -> markdown -> interpretations
+Phase 6 (interpreter/pdf.py):   interpretations row -> HTML -> WeasyPrint
+                                -> report__{YYYY-MM}__v{n}.pdf + latest copy
+                                -> pythia-interpreter-report artifact -> release
 ```
 
 ## CLI
@@ -47,8 +51,8 @@ python -m interpreter.run \
 ```
 
 - `--kind scored` + the scored bundle: writes the performance-side
-  interpretation (run in `compute_calibration_pythia.yml` once Phase 6 wires
-  it).
+  interpretation (runs in `compute_calibration_pythia.yml` right after the
+  scored-bundle step).
 - `--kind combined` + the current-run bundle: the full report; Part B is
   folded in from the most recent stored `scored` interpretation (its figure
   map is persisted in `figures_json`, so the scored pack is not needed at
@@ -72,6 +76,7 @@ interpreter/
   render.py     # JSON -> markdown; {{fig:...}} substitution; misses tracked
   store.py      # interpretations table writes; versioning; latest_scored
   run.py        # CLI orchestrator (model seam: interpreter.run._call_model)
+  pdf.py        # Phase 6: stored row -> HTML -> WeasyPrint -> PDF
   tests/
 ```
 
@@ -172,12 +177,63 @@ Frontend (`web/src/app/interpreter/`, Nav item "Report"): the attention map
 highlighted country to jump to its section), version selector, visible
 warn/error banners for `failed_validation`/`failed_generation`, an explicit
 no-report empty state, the report body rendered from `content_resolved`
-with per-question links, the fixed lexicon + provenance appendix, and the
+with per-question links, the fixed lexicon + provenance appendix, the
 shared glossary (`web/src/lib/score_glossary.ts` — the same constants the
-Performance page tooltips import, so the two never drift).
-`/interpreter/print` is the print-ready view (no nav, page breaks): the
-always-available PDF fallback and the page the Phase 6 CI PDF renderer
-loads.
+Performance page tooltips import, so the two never drift), and a
+**Download PDF** button linking to the release asset (URL from
+`/v1/version`'s `interpreter_report_url` manifest passthrough; the button
+hides when no asset exists). `/interpreter/print` is the print-ready view
+(no nav, page breaks): the always-available `window.print()` fallback when
+the release asset is missing.
+
+## PDF + workflow wiring (Phase 6)
+
+`interpreter/pdf.py` (`python -m interpreter.pdf --db ... --kind combined
+--out-dir interpreter_out`) reads the newest `interpretations` row of the
+kind (test-filtered by default; `--interpretation-id` pins an exact row),
+converts its `content_md` to a self-contained HTML document with a small
+deterministic subset converter (only what `render_markdown` emits —
+headings, lists, pipe tables, bold/italic/code; inline code protects the
+underscored question ids from emphasis parsing), and renders it with
+**WeasyPrint** (chosen over a headless browser: fewer moving parts; the
+import is lazy and the render seam `interpreter.pdf._render_pdf` is what
+tests mock). Outputs `report__{YYYY-MM}__v{n}.pdf` plus the constant-name
+copy `interpreter_report_latest.pdf`. A render failure keeps the HTML as
+evidence and still exits 0; a non-`ok` row renders behind a validation
+banner, unless `PYTHIA_INTERPRETER_STRICT_VALIDATION=1`, which suppresses
+the PDF entirely (the row stays stored). `main()` returns 0 in every
+outcome.
+
+Where it runs — two insertion points, both inside workflows that already
+own and upload the canonical DB (no new canonical-DB producer):
+
+- **`run_sibyl.yml`** (the combined report): after `compute_deviation` and
+  the current-run bundle, BEFORE the canonical DB upload and the publish
+  dispatch — so the release order stays pythia → Sibyl → interpreter →
+  publish and the published DB already contains the interpretations row.
+  Steps: `interpreter.run --kind combined` (needs `ANTHROPIC_API_KEY`),
+  then `interpreter.pdf` (apt pango top-up + `pip install weasyprint`),
+  then upload of the **`pythia-interpreter-report`** artifact. All
+  `continue-on-error` — a report bug must never cost the run its DB upload
+  or its publish dispatch. The runner derives test mode from
+  `hs_runs.is_test` for the interpreted run (the Sibyl pattern) so a
+  test-mode cycle's report is stamped `is_test`.
+- **`compute_calibration_pythia.yml`** (the scored report): right after the
+  scored-bundle step, before the canonical DB upload — the row rides in the
+  DB this workflow publishes. Has its own `Record stage start` +
+  `stage_health --stage calibration_interpreter` so the call's cost is
+  windowed; outputs upload as **`pythia-interpreter-scored`**.
+
+**Release + manifest** (`publish_latest_data.yml`): a best-effort step
+fetches `pythia-interpreter-report` from the source run (the Sibyl-chain
+publish has one; the calibration-chain publish does not, which is expected
+— the release keeps the previous PDF), uploads the PDFs to the
+`pythia-data-latest` release with `--clobber`, and stamps
+`interpreter_report_asset` / `interpreter_report_url` /
+`interpreter_report_versioned_asset` into `manifest.json`. The URL key
+reflects what is actually downloadable AFTER the publish (fresh upload OR
+carried-over asset). `/v1/version` passes manifest keys through, which is
+where the dashboard button reads it.
 
 ## Tests / CI
 
