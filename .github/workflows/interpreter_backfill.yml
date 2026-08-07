@@ -242,7 +242,7 @@ jobs:
               echo "::endgroup::"
               continue
             fi
-            PACK="$(ls -1 "ai_bundle/${RUN}"/current_run_analysis__*.zip 2>/dev/null | tail -n 1)"
+            PACK="$(find "ai_bundle/${RUN}" -maxdepth 1 -name 'current_run_analysis__*.zip' 2>/dev/null | sort | tail -n 1)"
             if [ -z "${PACK}" ]; then
               echo "::warning::no bundle produced for ${RUN}"
               FAILED=1
