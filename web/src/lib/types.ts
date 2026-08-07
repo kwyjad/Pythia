@@ -603,6 +603,9 @@ export type InterpreterVersionRow = {
   interpretation_id: string;
   kind: string;
   run_id: string | null;
+  // Served by the API's _LIGHT_COLUMNS; the run selector derives each run's
+  // month label from it (the month the report is ABOUT).
+  hs_run_id: string | null;
   scored_run_id: string | null;
   version: number;
   status: string;

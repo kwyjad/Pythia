@@ -295,7 +295,10 @@ def main() -> None:
             "About page must include ABOUT_MD and a Welcome header.",
             {"file": str(about_page_path)},
         )
-    if 'href="/about"' not in nav_content:
+    # The nav declares its links as data (NAV_LINKS) rather than repeating a
+    # JSX list per breakpoint, so accept both spellings: the guardrail's
+    # intent is "the nav links to /about", not "the nav uses this syntax".
+    if 'href="/about"' not in nav_content and 'href: "/about"' not in nav_content:
         fail_guardrail(
             "Navigation must include /about link.",
             {"file": str(nav_path)},
