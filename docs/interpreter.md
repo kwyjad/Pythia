@@ -179,10 +179,20 @@ warn/error banners for `failed_validation`/`failed_generation`, an explicit
 no-report empty state, the report body rendered from `content_resolved`
 with per-question links, the fixed lexicon + provenance appendix, the
 shared glossary (`web/src/lib/score_glossary.ts` — the same constants the
-Performance page tooltips import, so the two never drift), and a
-**Download PDF** button linking to the release asset (URL from
+Performance page tooltips import, so the two never drift), a **run
+selector** defaulting to the most recent run (options are grouped per run by
+`groupVersionsByRun`, labelled with the month the report is ABOUT via
+`runMonthLabel`, which parses `hs_run_id` exactly as `pdf.py::month_label`
+does; a per-run version selector appears only when that run has more than
+one version), and a **Download PDF** button linking to the release asset (URL from
 `/v1/version`'s `interpreter_report_url` manifest passthrough; the button
-hides when no asset exists). `/interpreter/print` is the print-ready view
+hides when no asset exists). When the release advertises a report PDF but the API serves no report, the
+page says so explicitly ("still syncing") instead of rendering the
+no-report empty state — the API's database lagging the release it just read
+the manifest from is a soft-fail, and a soft-fail must never be
+indistinguishable from "no data".
+
+`/interpreter/print` is the print-ready view
 (no nav, page breaks): the always-available `window.print()` fallback when
 the release asset is missing.
 

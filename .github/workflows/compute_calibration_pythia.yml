@@ -142,7 +142,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set +e
-          PACK=$(ls -1 ai_bundle/scored_forecast_analysis__*.zip 2>/dev/null | tail -n 1)
+          PACK=$(find ai_bundle -maxdepth 1 -name 'scored_forecast_analysis__*.zip' 2>/dev/null | sort | tail -n 1)
           if [ -z "${PACK}" ]; then
             echo "::warning::No scored bundle found — skipping interpreter (scored)."
             exit 0

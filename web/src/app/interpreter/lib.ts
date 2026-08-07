@@ -5,7 +5,78 @@
 
 // Pure helpers for the interpreter page (unit-tested in __tests__/lib.test.ts).
 
-import type { InterpreterReasonCode } from "../../lib/types";
+import type {
+  InterpreterReasonCode,
+  InterpreterVersionRow,
+} from "../../lib/types";
+
+// A run's month is the month the report is ABOUT, taken from the HS run id
+// (hs_YYYYMMDDTHHMMSS) rather than when it was generated — the same rule
+// interpreter/pdf.py::month_label uses, so a backfilled July report reads as
+// July here and in its filename. Falls back to created_at.
+const HS_RUN_MONTH = /^hs_(\d{4})(\d{2})\d{2}T/;
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+export const runMonthLabel = (
+  hsRunId?: string | null,
+  createdAt?: string | null
+): string => {
+  const match = HS_RUN_MONTH.exec(hsRunId ?? "");
+  let year: number | null = null;
+  let monthIdx: number | null = null;
+  if (match) {
+    year = Number(match[1]);
+    monthIdx = Number(match[2]) - 1;
+  } else if (createdAt) {
+    const parts = /^(\d{4})-(\d{2})/.exec(String(createdAt));
+    if (parts) {
+      year = Number(parts[1]);
+      monthIdx = Number(parts[2]) - 1;
+    }
+  }
+  if (year === null || monthIdx === null || monthIdx < 0 || monthIdx > 11) {
+    return "Unknown month";
+  }
+  return `${MONTHS[monthIdx]} ${year}`;
+};
+
+export type InterpreterRunOption = {
+  runKey: string;
+  label: string;
+  latest: InterpreterVersionRow;
+  versions: InterpreterVersionRow[];
+};
+
+/** Group version rows into one option per run, newest run first.
+ *
+ * The API returns rows already ordered created_at DESC, version DESC, so the
+ * FIRST row seen for a run is that run's newest version — which is what the
+ * selector selects. Rows with no run key at all are grouped under "" rather
+ * than dropped, so a report can never become unreachable through the picker.
+ */
+export const groupVersionsByRun = (
+  rows: InterpreterVersionRow[]
+): InterpreterRunOption[] => {
+  const byRun = new Map<string, InterpreterRunOption>();
+  for (const row of rows ?? []) {
+    const runKey = row.run_id || row.scored_run_id || "";
+    const existing = byRun.get(runKey);
+    if (existing) {
+      existing.versions.push(row);
+      continue;
+    }
+    byRun.set(runKey, {
+      runKey,
+      label: runMonthLabel(row.hs_run_id, row.created_at),
+      latest: row,
+      versions: [row],
+    });
+  }
+  return Array.from(byRun.values());
+};
 
 // Plain-word reason labels — mirrors interpreter/render.py's _REASON_LABELS.
 export const REASON_LABELS: Record<InterpreterReasonCode, string> = {

@@ -79,6 +79,10 @@ export default async function InterpreterPage({
     versionResult.status === "fulfilled"
       ? versionResult.value.interpreter_report_url ?? null
       : null;
+  // The release advertising a report PDF while the API serves no report means
+  // the API's DB is behind the release it just read the manifest from — a
+  // soft-fail, which must never be dressed as "no data".
+  const reportPublishedButMissing = Boolean(reportPdfUrl) && report === null;
 
   return (
     <div className="space-y-6">
@@ -103,6 +107,7 @@ export default async function InterpreterPage({
         versions={versions.rows}
         attentionMap={attentionMap}
         reportPdfUrl={reportPdfUrl}
+        reportPublishedButMissing={reportPublishedButMissing}
       />
     </div>
   );

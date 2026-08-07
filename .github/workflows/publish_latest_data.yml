@@ -503,7 +503,7 @@ jobs:
           if [ "${HAVE_FRESH}" = "1" ]; then
             echo "Fresh interpreter PDF found in run ${RUN_ID}."
             cp -f interpreter_report/interpreter_report_latest.pdf data_out/
-            VERSIONED="$(ls -1 interpreter_report/report__*.pdf 2>/dev/null | head -n 1 || true)"
+            VERSIONED="$(find interpreter_report -maxdepth 1 -name 'report__*.pdf' 2>/dev/null | sort | head -n 1)"
             if [ -n "${VERSIONED}" ]; then
               cp -f "${VERSIONED}" data_out/
               echo "versioned_name=$(basename "${VERSIONED}")" >> "$GITHUB_OUTPUT"
@@ -515,11 +515,11 @@ jobs:
           # Does the release already carry the constant-name asset? The
           # manifest key must reflect what a reader can actually download
           # AFTER this publish, fresh or carried over.
-          RELEASE_HAS=0
+          HAS_PUBLISHED_REPORT=0
           if gh release view "${RELEASE_TAG}" -R "${GH_REPO}" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "interpreter_report_latest.pdf"; then
-            RELEASE_HAS=1
+            HAS_PUBLISHED_REPORT=1
           fi
-          echo "release_has=${RELEASE_HAS}" >> "$GITHUB_OUTPUT"
+          echo "release_has=${HAS_PUBLISHED_REPORT}" >> "$GITHUB_OUTPUT"
 
       - name: Build manifest.json (best-effort hs_run_id)
         if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
@@ -680,7 +680,7 @@ jobs:
             -R "${GH_REPO}" \
             data_out/interpreter_report_latest.pdf \
             --clobber
-          VERSIONED="$(ls -1 data_out/report__*.pdf 2>/dev/null | head -n 1 || true)"
+          VERSIONED="$(find data_out -maxdepth 1 -name 'report__*.pdf' 2>/dev/null | sort | head -n 1)"
           if [ -n "${VERSIONED}" ]; then
             gh release upload "${RELEASE_TAG}" -R "${GH_REPO}" "${VERSIONED}" --clobber
           fi
