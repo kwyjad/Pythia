@@ -487,9 +487,6 @@ jobs:
           RUN_ID: ${{ steps.resolve_run.outputs.run_id }}
         run: |
           set -euo pipefail
-          # RELEASE_TAG/GH_REPO/GH_TOKEN come from the job-level env block,
-          # which shellcheck cannot see from inside this script.
-          # shellcheck disable=SC2153
           mkdir -p interpreter_report
           HAVE_FRESH=0
           JSON="$(gh api -H "Accept: application/vnd.github+json" "/repos/${GH_REPO}/actions/runs/${RUN_ID}/artifacts" 2>/dev/null || echo '{}')"
@@ -518,11 +515,11 @@ jobs:
           # Does the release already carry the constant-name asset? The
           # manifest key must reflect what a reader can actually download
           # AFTER this publish, fresh or carried over.
-          RELEASE_HAS=0
+          HAS_PUBLISHED_REPORT=0
           if gh release view "${RELEASE_TAG}" -R "${GH_REPO}" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx "interpreter_report_latest.pdf"; then
-            RELEASE_HAS=1
+            HAS_PUBLISHED_REPORT=1
           fi
-          echo "release_has=${RELEASE_HAS}" >> "$GITHUB_OUTPUT"
+          echo "release_has=${HAS_PUBLISHED_REPORT}" >> "$GITHUB_OUTPUT"
 
       - name: Build manifest.json (best-effort hs_run_id)
         if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
