@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from interpreter import selection
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -389,10 +391,22 @@ def assemble_input_text(
     truncated: list[str] = []
 
     if pack.kind == "current":
-        ordered = [
+        # Report order, not attention order. The rows the pack put in a
+        # section are the ones the report is required to cover, so they are
+        # the last thing a tight budget gives up. Ordering by attention rank
+        # here would drop a categorised record in favour of a question the
+        # report never mentions.
+        categorised = [
+            str(r.get("question_id") or "")
+            for r in selection.selected_rows(pack.attention_rows)
+            if str(r.get("question_id") or "") in pack.records
+        ]
+        seen = set(categorised)
+        ordered = categorised + [
             str(r.get("question_id") or "")
             for r in pack.attention_rows
             if str(r.get("question_id") or "") in pack.records
+            and str(r.get("question_id") or "") not in seen
         ]
         for qid in ordered:
             if truncated:
@@ -410,12 +424,23 @@ def assemble_input_text(
             used += tokens
             kept.append(qid)
         if truncated:
-            parts.append(_section(
-                "TRUNCATION NOTICE",
-                "The following low-attention-rank question records were "
-                "omitted for the token budget (their attention_index rows "
-                f"above still describe them): {', '.join(truncated)}",
-            ))
+            dropped_covered = [q for q in truncated if q in seen]
+            notice = (
+                "The following question records were omitted for the token "
+                "budget (their attention_index rows above still describe "
+                f"them): {', '.join(truncated)}"
+            )
+            if dropped_covered:
+                # The model must not invent detail for a section entry whose
+                # record it cannot see. Say so, by name, in the prompt.
+                notice += (
+                    "\n\nSome of these carry a category, so the report is "
+                    "expected to cover them: "
+                    f"{', '.join(dropped_covered)}. Write those entries from "
+                    "their attention_index row alone. Do not invent evidence "
+                    "or detail you cannot see."
+                )
+            parts.append(_section("TRUNCATION NOTICE", notice))
 
     stats = {
         "input_tokens_estimate": used,

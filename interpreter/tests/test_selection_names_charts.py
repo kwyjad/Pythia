@@ -204,3 +204,58 @@ class TestCharts:
     def test_binary_bar_clamps(self):
         assert "100%" in charts.probability_bar(1.4)
         assert "0%" in charts.probability_bar(-0.2)
+
+
+def _tokens(text: str) -> int:
+    return max(1, len(text) // 4)
+
+
+class TestPackRecordOrder:
+    """The prompt's record budget must spend itself on the rows the report is
+    required to cover, not on whatever ranked highest for attention."""
+
+    def _pack(self):
+        from interpreter import packs
+
+        pack = packs.Pack(kind="current", path="x", manifest={}, files={})
+        pack.attention_rows = [
+            {"question_id": "loud", "category": "", "hazard_family": "climate",
+             "attention_rank": 1},
+            {"question_id": "covered", "category": "worsening",
+             "hazard_family": "climate", "category_rank": 1, "attention_rank": 9},
+        ]
+        pack.records = {"loud": {"a": "x" * 4000}, "covered": {"a": "y" * 4000}}
+        return pack
+
+    def test_categorised_records_survive_a_tight_budget(self):
+        from interpreter import packs
+
+        _text, stats = packs.assemble_input_text(
+            self._pack(), budget_tokens=1200, estimate_tokens=_tokens
+        )
+        assert stats["records_kept"] == ["covered"]
+        assert stats["records_truncated"] == ["loud"]
+
+    def test_a_dropped_covered_record_is_named_in_the_prompt(self):
+        from interpreter import packs
+
+        pack = self._pack()
+        pack.attention_rows.append({
+            "question_id": "also_covered", "category": "worsening",
+            "hazard_family": "conflict", "category_rank": 1, "attention_rank": 5,
+        })
+        pack.records["also_covered"] = {"a": "z" * 4000}
+        text, stats = packs.assemble_input_text(
+            pack, budget_tokens=1200, estimate_tokens=_tokens
+        )
+        dropped = [q for q in stats["records_truncated"] if "covered" in q]
+        assert dropped
+        assert "Do not invent evidence" in text
+        for qid in dropped:
+            assert qid in text
+
+    def test_pack_categories_reads_only_categorised_rows(self):
+        from interpreter import packs
+
+        got = packs.pack_categories(self._pack())
+        assert got == {"covered": ("worsening", "climate")}
