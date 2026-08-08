@@ -69,10 +69,14 @@ python -m interpreter.run \
 interpreter/
   config.py     # env-driven knobs (see below)
   lexicon.py    # the fixed probability-word bands + appendix table
+  names.py      # ISO3/hazard/metric codes -> the words a reader reads
+  selection.py  # which forecasts the report covers, and under which heading
+  charts.py     # inline SVG of a forecast distribution (Fred palette)
+  mapviz.py     # the printed attention map (vendored Natural Earth, no JS)
   schema.py     # the structured-output contract (jsonschema draft-07)
   packs.py      # loads the Phase 2 bundles; figure maps; token-capped input
   prompts.py    # template assembly from templates/{version}/
-  templates/v1/ # system.md, current_run.md, scored_run.md, report_skeleton.md
+  templates/v2/ # system.md, current_run.md, scored_run.md, report_skeleton.md
   render.py     # JSON -> markdown; {{fig:...}} substitution; misses tracked
   store.py      # interpretations table writes; versioning; latest_scored
   run.py        # CLI orchestrator (model seam: interpreter.run._call_model)
@@ -115,18 +119,59 @@ be inspected; the dashboard (Phase 5) renders them behind a warning banner.
 |---|---|---|
 | `PYTHIA_INTERPRETER_ENABLED` | `1` | kill switch |
 | `PYTHIA_INTERPRETER_MODEL_ID` | unset | overrides the config role |
-| `PYTHIA_INTERPRETER_TEMPLATE_VERSION` | `v1` | |
+| `PYTHIA_INTERPRETER_TEMPLATE_VERSION` | `v2` | |
 | `PYTHIA_INTERPRETER_MAX_PACK_TOKENS` | `250000` | model-input hard cap |
 | `PYTHIA_INTERPRETER_TOP_N` | `8` | attention list length |
 | `PYTHIA_INTERPRETER_PER_CAPITA_FLOOR` | `10000` | per-capita ranking floor |
+| `PYTHIA_INTERPRETER_WORSENING_MULTIPLE` | `2.0` | how far above the base rate an extra entry must sit |
+| `PYTHIA_INTERPRETER_MIN_PER_CATEGORY` | `3` | always shown per box, however quiet the month |
+| `PYTHIA_INTERPRETER_MAX_PER_CATEGORY` | `6` | cap per box |
+| `PYTHIA_PUBLIC_BASE_URL` | `https://fredforecaster.org` | absolute question links in the PDF |
 | `PYTHIA_INTERPRETER_THINKING` | `high` | output_config.effort level |
 | `PYTHIA_INTERPRETER_MAX_OUTPUT_TOKENS` | `32768` | shared with thinking |
 | `PYTHIA_INTERPRETER_TIMEOUT_SEC` | `900` | call timeout |
 | `PYTHIA_INTERPRETER_STRICT_VALIDATION` | `0` | Phase 4: failure suppresses publication |
 
+## What the report covers (`interpreter/selection.py`)
+
+The pack, not the model, decides which forecasts the report talks about and
+under which heading. Four boxes:
+
+| box | who is in it |
+|---|---|
+| Potentially worsening situations: climate hazards | drought, flood, tropical cyclone sitting ABOVE what history would suggest |
+| Potentially worsening situations: conflict | the same, for armed conflict |
+| Major impact but roughly stable: climate hazards | heavy burden per head, no call that things are departing from the usual |
+| Major impact but roughly stable: conflict | the same, for armed conflict |
+
+**Direction is the point.** Ranking is on `log_ev_ratio`, which is signed. The
+divergence score `js_vs_baserate` is not: ranking on it would promote a
+forecast for sitting far BELOW its base rate, which is not news. A ±5% deadband
+keeps forecasts that merely round off the base rate out of the worsening
+sections.
+
+**Dual gate.** The top `PYTHIA_INTERPRETER_MIN_PER_CATEGORY` (3) always appear,
+however unremarkable the month, so a section is never empty and always names
+the month's worst. Beyond that an entry appears only if it sits at least
+`PYTHIA_INTERPRETER_WORSENING_MULTIPLE` (2.0) times the historical expectation.
+A cap of `PYTHIA_INTERPRETER_MAX_PER_CATEGORY` (6) keeps the report short.
+
+**No relabelling.** A forecast that clears the worsening threshold but is
+crowded out by the cap is left out of BOTH sections. Describing it as "roughly
+stable" would be false.
+
+**Nothing is dropped silently.** Uncategorised entries the model still emits
+render under "Other situations of note", where they are visible and obviously
+odd. The August run produced 6/3/6/6 across the four boxes from 200 questions.
+
+**Records follow the report, not the ranking.** Both the bundle builder and the
+prompt assembly write question records in report order, so the rows the report
+must cover are the last thing a token budget gives up; anything that still
+loses its record is named, in the manifest and in the prompt.
+
 ## Validation (Phase 4 — `interpreter/validate.py`)
 
-Four checks run after generation, before storage; each is reported
+Six checks run after generation, before storage; each is reported
 separately in `validation_json` and any failure sets
 `status='failed_validation'` (the report is still stored and rendered, so
 failures stay inspectable):
@@ -146,6 +191,18 @@ failures stay inspectable):
    in that figure's band; lexicon phrases are matched longest-first and
    consumed, and ambiguous sentences — two distinct words — are skipped
    rather than guessed at), and a per-field length cap.
+
+5. **style** — the house rules that can be checked mechanically: no em or
+   en dashes, no banned words (`BANNED_PHRASES`), no "not X, but Y", no
+   "on the other hand", and no bare ISO3 / metric enum / `HZ/METRIC` code
+   where the reader needs a name. Deliberately narrow: rhythm, variety and
+   the habit of joining clauses with "and" are asked for in the prompt and
+   judged by a reader, and a lint that scored them would fail honest prose.
+6. **categories** — the pack decides which forecasts the report covers and
+   under which heading; the model copies that decision across. Promoting,
+   demoting, inventing or dropping an entry fails. Skipped when the pack
+   carries no categorised rows (a scored interpretation has no attention
+   list at all).
 
 A crashed check is reported as a failed check, never an unhandled error.
 `PYTHIA_INTERPRETER_STRICT_VALIDATION=1` additionally suppresses the
@@ -213,6 +270,26 @@ evidence and still exits 0; a non-`ok` row renders behind a validation
 banner, unless `PYTHIA_INTERPRETER_STRICT_VALIDATION=1`, which suppresses
 the PDF entirely (the row stays stored). `main()` returns 0 in every
 outcome.
+
+The page carries Fred's masthead (wordmark, strapline, the month the report
+is about) and Fred's palette from `web/tailwind.config.ts`, so the printed
+report and the dashboard read as one publication. Under the masthead sits the
+attention map: `interpreter/mapviz.py` projects the vendored Natural Earth
+boundaries the PA resolution machine already ships (1:50m, because 1:110m
+drops the small island states) and fills each country from
+`forecast_deviation` using the same table, preference order and ln 2 scaling
+as `/v1/interpreter/attention_map`, so the printed map and the dashboard map
+cannot disagree. It is drawn here rather than borrowed because the dashboard's
+choropleth is JavaScript and a PDF cannot run JavaScript. Coordinates are
+rounded to the pixel and consecutive duplicates dropped: the source carries
+far more precision than a 960px map can show, and keeping it would put
+megabytes into every PDF. A missing boundary file degrades the report to no
+map, never a failed render.
+
+Each attention entry also carries an inline SVG of its own forecast
+distribution (`interpreter/charts.py`), drawn from the PACK, never from model
+output. Question ids render as absolute links to their dashboard pages
+(`PYTHIA_PUBLIC_BASE_URL`); a bare id in a printed report is a dead end.
 
 Where it runs — two insertion points, both inside workflows that already
 own and upload the canonical DB (no new canonical-DB producer):
