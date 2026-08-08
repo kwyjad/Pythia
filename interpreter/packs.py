@@ -250,6 +250,63 @@ def _weighted_skill(rows: list[dict[str, Any]], family: str) -> dict[str, float]
     return out
 
 
+def run_summary_figures(pack: Pack) -> dict[str, Any]:
+    """Scan-scope counts for the report's opening paragraph.
+
+    These are GLOBAL figures (they belong to the run, not to a question), so
+    the model cites them the same way it cites anything else: by placeholder.
+    It never counts rows itself.
+    """
+    manifest = pack.manifest or {}
+    summary = manifest.get("run_summary") or {}
+    out: dict[str, Any] = {}
+    for key in (
+        "countries_scanned",
+        "countries_with_questions",
+        "countries_track1",
+        "countries_track2",
+        "n_questions",
+        "n_above_base_rate",
+        "n_below_base_rate",
+    ):
+        value = summary.get(key)
+        if value is not None:
+            out[key] = value
+    threshold = manifest.get("worsening_multiple")
+    if threshold is not None:
+        out["worsening_multiple"] = threshold
+    return out
+
+
+def question_distributions(pack: Pack) -> dict[str, dict[str, Any]]:
+    """{question_id: {"spd": [...], "bucket_labels": {...}, "binary": bool}}.
+
+    Reuses _preferred_grid/_mean_vector, the same pair question_figures uses,
+    so the chart and the modal-bucket figure printed beside it are computed
+    from one aggregation rather than two that can drift.
+
+    Charts are drawn from THIS, never from model output: the schema forbids
+    extra properties on an entry, and a picture built from prose could
+    disagree with the numbers next to it.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for row in pack.attention_rows:
+        qid = str(row.get("question_id") or "")
+        if not qid:
+            continue
+        record = pack.records.get(qid) or {}
+        grid = _preferred_grid(record)
+        vec = _mean_vector(grid) if grid else None
+        if not vec:
+            continue
+        out[qid] = {
+            "spd": vec,
+            "bucket_labels": record.get("bucket_labels"),
+            "binary": str(row.get("score_family") or "") == "binary",
+        }
+    return out
+
+
 def performance_figures(pack: Pack) -> dict[str, Any]:
     """Pack-level figures for the performance prose (scored pack only)."""
     figs: dict[str, Any] = {}

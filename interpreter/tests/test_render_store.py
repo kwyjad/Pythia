@@ -25,8 +25,15 @@ class TestFormatFigure:
         assert format_figure("p_modal_bucket", 0.41) == "41%"
         assert format_figure("skill_brier_spd", 0.35) == "+35%"
         assert format_figure("skill_brier_spd", -0.1) == "-10%"
-        assert format_figure("js_vs_baserate", 0.3466) == "50% of maximum"
-        assert format_figure("log_ev_ratio", 0.693).startswith("2.0x")
+        # Plain words, not "% of maximum" (which meant nothing to a reader).
+        assert format_figure("js_vs_baserate", 0.3466) == "a long way from its usual pattern"
+        assert format_figure("js_vs_baserate", 0.02) == "close to its usual pattern"
+        # A multiple a reader can check, never "1/87.5x".
+        import math as _m
+        assert format_figure("log_ev_ratio", _m.log(14.11)).startswith("about 14.1 times")
+        assert format_figure("log_ev_ratio", _m.log(0.5)) == "about one half of the usual level"
+        assert format_figure("log_ev_ratio", _m.log(1 / 87.5)) == "a small fraction of the usual level"
+        assert format_figure("log_ev_ratio", 0.693) == "about 2.0 times the usual level"
         assert format_figure("baserate_source", "acled:6m") == "acled:6m"
         assert format_figure("anything", None) == UNAVAILABLE
 
@@ -42,7 +49,7 @@ class TestFigureResolver:
             "and {{fig:nonexistent}}",
             [QID],
         )
-        assert "50% of maximum" in text
+        assert "usual pattern" in text
         assert "+20%" in text
         assert UNAVAILABLE in text
         assert r.misses == ["nonexistent"]
@@ -61,6 +68,8 @@ def _content() -> dict:
                 "iso3": "ETH",
                 "hazard_code": "ACE",
                 "metric": "FATALITIES",
+                "category": "worsening",
+                "hazard_family": "conflict",
                 "question_ids": [QID],
                 "why_it_stands_out": "The forecast moved {{fig:js_vs_baserate}} away.",
                 "impacts": ["Impact prose."],
@@ -80,9 +89,16 @@ class TestRenderMarkdown:
         )
         md = render_markdown(_content(), resolver, provenance={"run_id": "fc_1"})
         assert "{{fig:" not in md  # every placeholder substituted
-        assert "50% of maximum" in md
+        # js_vs_baserate now reads as words, not "% of maximum"
+        assert "usual pattern" in md
         assert "+50%" in md
-        assert "## What to watch this month" in md
+        # The entry carries category=worsening + hazard_family=conflict, so it
+        # lands under its named section, with full names and no codes.
+        assert "## Potentially worsening situations: conflict" in md
+        assert "### 1. Ethiopia, armed conflict: deaths" in md
+        heading = [ln for ln in md.splitlines() if ln.startswith("### 1.")][0]
+        assert "ETH" not in heading and "ACE" not in heading
+        assert "FATALITIES" not in heading
         assert "## How well did we do" in md
         assert "## What we cannot see" in md
         assert "### Probability words" in md  # appendix lexicon

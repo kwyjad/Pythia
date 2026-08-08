@@ -301,6 +301,12 @@ def run_interpreter(
         global_figures: dict[str, Any] = (
             packs.performance_figures(pack) if pack.kind == "scored" else {}
         )
+        if pack.kind == "current":
+            # Scan-scope counts the report opens with. Without these in the
+            # global map the run_summary placeholders would resolve to
+            # "[figure unavailable]" and the opening paragraph would read as
+            # a hole where the scale of the run should be.
+            global_figures.update(packs.run_summary_figures(pack))
         scored_section: str | None = None
         if kind == "combined":
             latest = store.latest_scored(con)
@@ -418,7 +424,13 @@ def run_interpreter(
 
         # --- Render (the report is still written on validation failure so it
         # can be inspected; the dashboard shows it behind a warning banner).
-        resolver = render.FigureResolver(per_question, global_figures)
+        resolver = render.FigureResolver(
+            per_question, global_figures,
+            spd_by_question=(
+                packs.question_distributions(pack)
+                if pack.kind == "current" else {}
+            ),
+        )
         content_md = render.render_markdown(content, resolver, provenance=provenance)
         figures = {"global": global_figures, "per_question": per_question}
 

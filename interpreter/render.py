@@ -17,7 +17,7 @@ import math
 import re
 from typing import Any
 
-from interpreter import lexicon
+from interpreter import charts, lexicon, names, selection
 
 _PLACEHOLDER = re.compile(r"\{\{fig:([A-Za-z0-9_.-]+)\}\}")
 
@@ -25,6 +25,19 @@ UNAVAILABLE = "[figure unavailable]"
 
 # ln 2 — js_vs_baserate's maximum, used for the percent rendering.
 _LN2 = math.log(2.0)
+
+
+
+_FRACTION_WORDS = {
+    2: "half", 3: "third", 4: "quarter", 5: "fifth", 6: "sixth",
+    7: "seventh", 8: "eighth", 9: "ninth", 10: "tenth",
+}
+
+
+def _ordinal_word(inverse: float) -> str:
+    """"one third of" reads; "1/3.2x" does not."""
+    nearest = max(2, min(int(round(inverse)), 10))
+    return _FRACTION_WORDS[nearest]
 
 
 def format_figure(key: str, value: Any) -> str:
@@ -46,12 +59,31 @@ def format_figure(key: str, value: Any) -> str:
     if key.startswith("skill_"):
         return f"{v * 100:+.0f}%"
     if key == "js_vs_baserate":
-        # Expressed as a share of the metric's maximum (ln 2) so the reader
-        # gets "how far toward maximal disagreement", not nats.
-        return f"{min(v / _LN2, 1.0) * 100:.0f}% of maximum"
-    if key == "log_ev_ratio":
-        ratio = math.exp(v)
-        return f"{ratio:.1f}x" if ratio >= 1 else f"1/{1.0 / ratio:.1f}x"
+        # "25% of maximum from its anchor" told readers nothing. Say how far
+        # the forecast has moved from the usual pattern, in words, with the
+        # share kept for anyone who wants it.
+        share = min(v / _LN2, 1.0)
+        if share >= 0.5:
+            word = "a long way from its usual pattern"
+        elif share >= 0.25:
+            word = "well away from its usual pattern"
+        elif share >= 0.1:
+            word = "a little away from its usual pattern"
+        else:
+            word = "close to its usual pattern"
+        return word
+    if key in ("log_ev_ratio", "ev_multiple"):
+        # A multiple a reader can check against the sentence around it.
+        # "1/87.5x" meant nothing; "a fraction of the usual level" does.
+        ratio = math.exp(v) if key == "log_ev_ratio" else v
+        if ratio >= 1.0:
+            return f"about {ratio:.1f} times the usual level"
+        if ratio <= 0:
+            return "far below the usual level"
+        inverse = 1.0 / ratio
+        if inverse >= 10:
+            return "a small fraction of the usual level"
+        return f"about one {_ordinal_word(inverse)} of the usual level"
     if key.startswith("eiv") or key.startswith("n_") or abs(v) >= 1000:
         return f"{v:,.0f}"
     if key.startswith("mean_brier") or key.startswith("climatology_brier"):
@@ -71,10 +103,23 @@ class FigureResolver:
         self,
         per_question: dict[str, dict[str, Any]] | None = None,
         global_figures: dict[str, Any] | None = None,
+        spd_by_question: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.per_question = per_question or {}
         self.global_figures = global_figures or {}
+        # {question_id: {"spd": [...], "bucket_labels": {...}}} for the charts.
+        self.spd_by_question = spd_by_question or {}
         self.misses: list[str] = []
+
+    def spd_for(self, question_ids: list[str] | None) -> tuple[Any, Any, bool]:
+        """(spd, bucket_labels, is_binary) for the first cited question that
+        has a distribution, else (None, None, False)."""
+        for qid in question_ids or []:
+            entry = self.spd_by_question.get(qid)
+            if entry and entry.get("spd"):
+                return (entry.get("spd"), entry.get("bucket_labels"),
+                        bool(entry.get("binary")))
+        return None, None, False
 
     def resolve_text(self, text: str, question_ids: list[str] | None = None) -> str:
         def _sub(match: re.Match[str]) -> str:
@@ -146,6 +191,58 @@ _REASON_LABELS = {
 }
 
 
+
+def _render_entry(entry: dict[str, Any], resolver: FigureResolver) -> list[str]:
+    """One attention entry: a named heading and at most half a page under it."""
+    qids = [str(q) for q in entry.get("question_ids") or []]
+
+    def _r(field: str) -> str:
+        return resolver.resolve_text(str(entry.get(field) or ""), qids)
+
+    lines: list[str] = []
+    # Full names, never codes: "Nicaragua, drought: major alert".
+    lines.append(
+        f"### {entry.get('rank')}. "
+        f"{names.describe_pair(entry.get('iso3'), entry.get('hazard_code'), entry.get('metric'))}"
+    )
+    lines.append("")
+    if entry.get("why_it_stands_out"):
+        lines.append(_r("why_it_stands_out"))
+    if entry.get("spd_shape"):
+        lines.append("")
+        lines.append(f"*The shape of the forecast:* {_r('spd_shape')}")
+    if entry.get("how_to_read_the_distribution"):
+        lines.append("")
+        lines.append(f"*Reading the forecast:* {_r('how_to_read_the_distribution')}")
+    if entry.get("what_the_model_was_reacting_to"):
+        lines.append("")
+        lines.append(f"*What the system was reacting to:* {_r('what_the_model_was_reacting_to')}")
+    for field, label in (("impacts", "Likely impacts"),
+                         ("operational_challenges", "Operational challenges")):
+        items = entry.get(field) or []
+        if items:
+            lines.append("")
+            lines.append(f"*{label}:*")
+            for item in items:
+                lines.append(f"- {resolver.resolve_text(str(item), qids)}")
+    # The distribution comes from the PACK, never from the model: the schema
+    # forbids extra properties on an entry, and a chart drawn from model
+    # output could disagree with the numbers printed beside it.
+    spd, bucket_labels, is_binary = resolver.spd_for(qids)
+    if is_binary:
+        # A yes/no question has one number, not a distribution: bucket 1 is
+        # P(yes). Six bars where five are empty would misrepresent it.
+        chart = charts.probability_bar(spd[0] if spd else None)
+    else:
+        chart = charts.probability_chart(spd, bucket_labels)
+    if chart:
+        lines += ["", chart]
+    if qids:
+        lines += ["", "Questions: " + ", ".join(f"`{q}`" for q in qids)]
+    lines.append("")
+    return lines
+
+
 def render_markdown(
     content: dict[str, Any],
     resolver: FigureResolver,
@@ -160,51 +257,45 @@ def render_markdown(
     lines.append("")
     lines.append(f"**{resolver.resolve_text(str(content.get('headline') or ''))}**")
 
+    if content.get("run_summary"):
+        lines += ["", "## The scan this month", ""]
+        lines.append(resolver.resolve_text(str(content["run_summary"])))
+
     attention = content.get("attention") or []
     if attention:
-        lines += ["", "## What to watch this month", ""]
-        for entry in sorted(attention, key=lambda e: int(e.get("rank") or 99)):
-            qids = list(entry.get("question_ids") or [])
+        # Grouped into the report's four boxes rather than one flat list, so
+        # a reader can tell "this is getting worse" from "this is already
+        # bad" without reading every entry.
+        for category, family in selection.SECTION_ORDER:
+            group = [
+                e for e in attention
+                if str(e.get("category")) == category
+                and str(e.get("hazard_family")) == family
+            ]
+            if not group:
+                continue
+            lines += [
+                "",
+                f"## {selection.CATEGORY_LABELS[category]}: "
+                f"{names.FAMILY_LABELS.get(family, family).lower()}",
+                "",
+            ]
+            for entry in sorted(group, key=lambda e: int(e.get("rank") or 99)):
+                lines += _render_entry(entry, resolver)
 
-            def _r(field: str) -> str:
-                return resolver.resolve_text(str(entry.get(field) or ""), qids)
-
-            reason = _REASON_LABELS.get(
-                str(entry.get("reason_code") or ""), str(entry.get("reason_code") or "")
-            )
-            lines.append(
-                f"### {entry.get('rank')}. {entry.get('iso3')} — "
-                f"{entry.get('hazard_code')}/{entry.get('metric')} ({reason})"
-            )
-            lines.append("")
-            if entry.get("why_it_stands_out"):
-                lines.append(_r("why_it_stands_out"))
-            if entry.get("how_to_read_the_distribution"):
-                lines.append("")
-                lines.append(f"*Reading the forecast:* {_r('how_to_read_the_distribution')}")
-            if entry.get("what_the_model_was_reacting_to"):
-                lines.append("")
-                lines.append(f"*What the system was reacting to:* {_r('what_the_model_was_reacting_to')}")
-            impacts = entry.get("impacts") or []
-            if impacts:
-                lines.append("")
-                lines.append("*Likely impacts:*")
-                for item in impacts:
-                    lines.append(f"- {resolver.resolve_text(str(item), qids)}")
-            challenges = entry.get("operational_challenges") or []
-            if challenges:
-                lines.append("")
-                lines.append("*Operational challenges:*")
-                for item in challenges:
-                    lines.append(f"- {resolver.resolve_text(str(item), qids)}")
-            if entry.get("lead_time_months") is not None:
-                lines.append("")
-                lines.append(f"*Lead time:* about {entry['lead_time_months']} month(s).")
-            lines.append("")
-            lines.append(
-                "Questions: " + ", ".join(f"`{q}`" for q in qids)
-            )
-            lines.append("")
+        # An entry the model failed to place must never disappear from the
+        # report. Print it under its own heading instead, where it is
+        # visible and obviously odd.
+        placed = {
+            id(e) for cat, fam in selection.SECTION_ORDER
+            for e in attention
+            if str(e.get("category")) == cat and str(e.get("hazard_family")) == fam
+        }
+        stragglers = [e for e in attention if id(e) not in placed]
+        if stragglers:
+            lines += ["", "## Other situations of note", ""]
+            for entry in sorted(stragglers, key=lambda e: int(e.get("rank") or 99)):
+                lines += _render_entry(entry, resolver)
 
     changes = content.get("changes_since_last_run") or []
     if changes:

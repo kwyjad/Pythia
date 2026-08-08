@@ -49,6 +49,8 @@ def _content(**overrides) -> dict:
             "iso3": "ETH",
             "hazard_code": "ACE",
             "metric": "FATALITIES",
+            "category": "worsening",
+            "hazard_family": "conflict",
             "question_ids": [QID],
             "figure_refs": ["js_vs_baserate"],
             "why_it_stands_out": "The ensemble moved {{fig:js_vs_baserate}} from its base rate.",
