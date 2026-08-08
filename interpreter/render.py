@@ -17,7 +17,7 @@ import math
 import re
 from typing import Any
 
-from interpreter import charts, lexicon, names, selection
+from interpreter import charts, config, lexicon, names, selection
 
 _PLACEHOLDER = re.compile(r"\{\{fig:([A-Za-z0-9_.-]+)\}\}")
 
@@ -25,6 +25,21 @@ UNAVAILABLE = "[figure unavailable]"
 
 # ln 2 — js_vs_baserate's maximum, used for the percent rendering.
 _LN2 = math.log(2.0)
+
+
+def question_link(question_id: str) -> str:
+    """A question id as a markdown link to its page on the dashboard.
+
+    The PDF is read away from the dashboard, so a bare id there is a dead end.
+    The link is absolute, built from ``PYTHIA_PUBLIC_BASE_URL``; the dashboard
+    resolves the same markdown itself and can follow a relative path, but one
+    form serving both is worth more than the shorter href.
+    """
+    qid = str(question_id)
+    base = (config.public_base_url() or "").rstrip("/")
+    if not base:
+        return f"`{qid}`"
+    return f"[{qid}]({base}/questions/{qid})"
 
 
 
@@ -156,10 +171,12 @@ def resolve_content(content: dict[str, Any], resolver: FigureResolver) -> dict[s
 
     if out.get("headline"):
         out["headline"] = _r(out["headline"])
+    if out.get("run_summary"):
+        out["run_summary"] = _r(out["run_summary"])
     for entry in out.get("attention") or []:
         qids = [str(q) for q in entry.get("question_ids") or []]
         for name in ("why_it_stands_out", "how_to_read_the_distribution",
-                     "what_the_model_was_reacting_to"):
+                     "spd_shape", "what_the_model_was_reacting_to"):
             if entry.get(name):
                 entry[name] = _r(entry[name], qids)
         for name in ("impacts", "operational_challenges"):
@@ -238,7 +255,7 @@ def _render_entry(entry: dict[str, Any], resolver: FigureResolver) -> list[str]:
     if chart:
         lines += ["", chart]
     if qids:
-        lines += ["", "Questions: " + ", ".join(f"`{q}`" for q in qids)]
+        lines += ["", "Questions: " + ", ".join(question_link(q) for q in qids)]
     lines.append("")
     return lines
 
@@ -253,7 +270,7 @@ def render_markdown(
     lines: list[str] = []
     kind = str(content.get("kind") or "")
 
-    lines.append("# Fred — this cycle, in plain language")
+    lines.append("# Fred's Monthly Risk Report")
     lines.append("")
     lines.append(f"**{resolver.resolve_text(str(content.get('headline') or ''))}**")
 
@@ -364,6 +381,6 @@ def render_markdown(
         )
         lines.append("")
     lines.append(f"_Report kind: {kind}. Generated automatically; no numbers "
-                 "in this report were written by the language model — every "
+                 "in this report were written by the language model; every "
                  "figure is substituted from the system's own computed data._")
     return "\n".join(lines)

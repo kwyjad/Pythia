@@ -102,7 +102,8 @@ class TestRenderMarkdown:
         assert "## How well did we do" in md
         assert "## What we cannot see" in md
         assert "### Probability words" in md  # appendix lexicon
-        assert f"`{QID}`" in md  # claims carry their question ids
+        # Claims carry their question ids, as links a PDF reader can follow.
+        assert f"[{QID}](" in md and f"/questions/{QID})" in md
         assert "run_id: `fc_1`" in md
 
     def test_unresolved_figures_are_visible_never_silent(self):
