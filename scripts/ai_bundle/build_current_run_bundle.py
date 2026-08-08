@@ -73,6 +73,14 @@ from scripts.ai_bundle.common import (
 )
 from scripts.ai_bundle.guides import build_current_run_guide
 
+# The pack is what the model sees, so the names and the section assignment
+# have to be decided HERE, not left to the prose. Both modules are pure
+# (names reads one CSV; selection is arithmetic), so importing the
+# interpreter package from the bundle builder costs nothing at import time.
+from interpreter import config as _interp_config
+from interpreter import names as _names
+from interpreter import selection as _selection
+
 LOGGER = logging.getLogger(__name__)
 
 # Best-available aggregate per question (mirrors the dashboard's
@@ -254,12 +262,24 @@ def build_attention_rows(
             # by its ln 2 maximum. Large = HS and the ensemble disagree about
             # whether something is happening here.
             disagreement = abs(float(rc_score) - float(js) / LN2)
+        log_ev = dev.get("log_ev_ratio") if dev else None
         rows.append(
             {
                 "question_id": qid,
                 "iso3": q.get("iso3"),
+                # Names, not codes: the model must never have to write
+                # "NIC — DR/EVENT_OCCURRENCE", and it can only write what the
+                # pack gives it.
+                "country_name": _names.country_name(q.get("iso3")),
                 "hazard_code": q.get("hazard_code"),
+                "hazard_name": _names.hazard_name(q.get("hazard_code")),
+                "hazard_family": _names.hazard_family(q.get("hazard_code")),
                 "metric": metric,
+                "metric_name": _names.metric_name(metric),
+                # Signed direction + the multiple a reader can check against
+                # the sentence it appears in.
+                "direction": _selection.direction(log_ev),
+                "ev_multiple": _selection.ev_multiple(log_ev),
                 "score_family": _score_family(metric),
                 "track": q.get("track"),
                 "tier": t.get("tier"),
@@ -291,6 +311,17 @@ def build_attention_rows(
     )
     _rank(rows, "rc_deviation_disagreement", "rank_rc_disagreement")
 
+    # Which of the four report sections each row belongs to (if any). Done
+    # here so the model receives a decided list rather than being asked to
+    # apply thresholds in prose, which it cannot be trusted to do.
+    _selection.assign_categories(
+        rows,
+        threshold_multiple=_interp_config.worsening_multiple(),
+        min_entries=_interp_config.min_per_category(),
+        max_entries=_interp_config.max_per_category(),
+        per_capita_floor=per_capita_floor,
+    )
+
     rank_cols = (
         "rank_deviation", "rank_impact_nominal",
         "rank_impact_per_capita", "rank_rc_disagreement",
@@ -306,6 +337,61 @@ def build_attention_rows(
     return rows
 
 
+def _build_run_summary(
+    con,
+    hs_run_id: str | None,
+    questions: list[dict[str, Any]],
+    attention_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The counts the report opens with: how wide the scan was, how much of
+    it survived triage, and how the survivors split across the two tracks.
+
+    Track 1 is the full ensemble (regime change detected); Track 2 is a
+    single model on quiet-but-notable country-hazards. Counted over
+    COUNTRIES, not questions, because that is the unit a reader pictures.
+    """
+    summary: dict[str, Any] = {
+        "countries_scanned": None,
+        "countries_with_questions": None,
+        "countries_track1": None,
+        "countries_track2": None,
+        "n_questions": len(questions),
+    }
+    if hs_run_id and table_exists(con, "hs_triage"):
+        try:
+            rows = rows_as_dicts(
+                con,
+                # hs_triage keys the HS run as run_id, not hs_run_id (the
+                # sibling loader at the top of this file already does this).
+                "SELECT COUNT(DISTINCT iso3) AS n FROM hs_triage WHERE run_id = ?",
+                [hs_run_id],
+            )
+            summary["countries_scanned"] = int(rows[0]["n"]) if rows else None
+        except Exception as exc:  # noqa: BLE001 - a count must never fail a pack
+            LOGGER.warning("run_summary: hs_triage count failed: %s", exc)
+
+    by_track: dict[str, set[str]] = {"1": set(), "2": set()}
+    countries: set[str] = set()
+    for q in questions:
+        iso3 = str(q.get("iso3") or "")
+        if not iso3:
+            continue
+        countries.add(iso3)
+        track = str(q.get("track") or "").strip()
+        if track in by_track:
+            by_track[track].add(iso3)
+    summary["countries_with_questions"] = len(countries) or None
+    summary["countries_track1"] = len(by_track["1"]) or None
+    summary["countries_track2"] = len(by_track["2"]) or None
+    summary["n_above_base_rate"] = sum(
+        1 for r in attention_rows if r.get("direction") == "above"
+    )
+    summary["n_below_base_rate"] = sum(
+        1 for r in attention_rows if r.get("direction") == "below"
+    )
+    return summary
+
+
 ATTENTION_FIELDS = [
     "question_id", "iso3", "hazard_code", "metric", "score_family", "track",
     "tier", "triage_score", "rc_level", "rc_score", "deviation_model",
@@ -313,6 +399,9 @@ ATTENTION_FIELDS = [
     "baserate_source", "sibyl_covered", "rc_deviation_disagreement",
     "rank_deviation", "rank_impact_nominal", "rank_impact_per_capita",
     "rank_rc_disagreement", "attention_rank", "record_path",
+    # Names and section assignment (the report's inclusion criteria).
+    "country_name", "hazard_name", "hazard_family", "metric_name",
+    "direction", "ev_multiple", "category", "category_rank",
 ]
 
 
@@ -629,9 +718,84 @@ def _model_lineup() -> list[str]:
         return []
 
 
+# A question record built for an ANALYST carries everything: every member's
+# raw response, the whole assembled prompt, every grounding snippet. On the
+# August run that is 46 to 125 KB each, and the pack could hold nine of them
+# against twenty-one the report was required to cover.
+#
+# The interpreter does not re-read the evidence. It explains what the system
+# produced and, in a sentence, what the system was reacting to. So the record
+# is trimmed here rather than in the shared builder: the scored bundle is read
+# by a person who does want the full text.
+#
+# Every cut says so in place. A silently shortened prompt would let the
+# interpreter describe evidence that was never there.
+TRIM_CAPS = {
+    "grounding.report_markdown": 4000,
+    "grounding.structural_context": 1200,
+    "grounding.sources": 2000,
+    "grounding.recent_signals": 1500,
+    "spd_prompt": 4000,
+    # The parsed spd and the reasoning trace already carry what the member
+    # said; the raw response text is the same thing again in prose.
+    "member.response_text": 600,
+    "member.human_explanation": 1000,
+    "adversarial": 3000,
+}
+
+
+def _cut(value: Any, cap: int) -> Any:
+    """Cap a string (or the JSON form of a structure) with a visible marker."""
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else _json_dumps(value)
+    if len(text) <= cap:
+        return value
+    return text[:cap] + f"\n[trimmed for the interpreter pack: {len(text) - cap} more characters]"
+
+
+def _json_dumps(value: Any) -> str:
+    import json as _json
+
+    return _json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _trim_for_interpreter(record: dict[str, Any]) -> None:
+    """Shrink a record to what the interpreter actually reads."""
+    for pack in record.get("grounding") or []:
+        if not isinstance(pack, dict):
+            continue
+        for field in ("report_markdown", "structural_context", "sources",
+                      "recent_signals"):
+            if field in pack:
+                pack[field] = _cut(pack[field], TRIM_CAPS[f"grounding.{field}"])
+
+    if record.get("spd_prompt"):
+        record["spd_prompt"] = _cut(record["spd_prompt"], TRIM_CAPS["spd_prompt"])
+
+    members = record.get("members")
+    member_list = (
+        members if isinstance(members, list)
+        else list(members.values()) if isinstance(members, dict)
+        else []
+    )
+    for member in member_list:
+        if not isinstance(member, dict):
+            continue
+        for field in ("response_text", "human_explanation"):
+            if member.get(field):
+                member[field] = _cut(member[field], TRIM_CAPS[f"member.{field}"])
+        # A diagnostic score for the trace, not something the report explains.
+        member.pop("trace_quality", None)
+
+    if record.get("adversarial"):
+        record["adversarial"] = _cut(record["adversarial"], TRIM_CAPS["adversarial"])
+
+
 def _augment_record(con, record: dict[str, Any], q: dict[str, Any],
                     run_id: str, deviation_by_model: dict[str, dict[str, Any]] | None) -> None:
     """Current-run additions on top of the shared question record."""
+    _trim_for_interpreter(record)
     metric = str(q.get("metric") or "").upper()
     try:
         from pythia.buckets import labels_for
@@ -774,7 +938,17 @@ def build_bundle(
         kept: list[str] = []
         truncated: list[str] = []
         pack_tokens = max_pack_tokens - budget_left
-        for row in attention_rows:
+        # Records are written in REPORT order, not attention order: the rows
+        # the report is required to cover come first, then everything else by
+        # attention rank. Without this a categorised row could lose its record
+        # to a row the report never mentions, and the interpreter would be
+        # asked to write about a question it cannot see.
+        categorised = _selection.selected_rows(attention_rows)
+        seen_ids = {str(r["question_id"]) for r in categorised}
+        record_order = categorised + [
+            r for r in attention_rows if str(r["question_id"]) not in seen_ids
+        ]
+        for row in record_order:
             qid = str(row["question_id"])
             q = q_by_id.get(qid)
             if q is None:
@@ -818,6 +992,16 @@ def build_bundle(
                 "%d lowest-ranked (recorded in MANIFEST.json)",
                 max_pack_tokens, len(kept), len(truncated),
             )
+        # A categorised row without a record is the one truncation that
+        # actually damages the report, so it is reported on its own rather
+        # than buried in a count.
+        dropped_categorised = [q for q in truncated if q in seen_ids]
+        if dropped_categorised:
+            LOGGER.warning(
+                "Token budget: %d of the %d rows the report must cover lost "
+                "their question record: %s",
+                len(dropped_categorised), len(seen_ids), dropped_categorised[:5],
+            )
 
         write_csv(staging / "attention_index.csv", ATTENTION_FIELDS, attention_rows)
 
@@ -838,6 +1022,13 @@ def build_bundle(
             key = f"{r['hazard_code']}/{r['metric']}"
             by_pair[key] = by_pair.get(key, 0) + 1
 
+        run_summary = _build_run_summary(con, hs_run_id, questions, attention_rows)
+        section_counts: dict[str, int] = {}
+        for r in attention_rows:
+            if r.get("category"):
+                key = f"{r['category']}/{r['hazard_family']}"
+                section_counts[key] = section_counts.get(key, 0) + 1
+
         write_manifest(
             staging,
             bundle_kind="current_run_analysis",
@@ -853,6 +1044,13 @@ def build_bundle(
                 },
                 "n_questions": len(questions),
                 "questions_by_pair": by_pair,
+                # The report opens with these, so they are computed here and
+                # quoted, never counted by the model.
+                "run_summary": run_summary,
+                "section_counts": section_counts,
+                "worsening_multiple": _interp_config.worsening_multiple(),
+                "min_per_category": _interp_config.min_per_category(),
+                "max_per_category": _interp_config.max_per_category(),
                 "n_with_deviation": sum(
                     1 for r in attention_rows if r.get("js_vs_baserate") is not None
                 ),
@@ -866,6 +1064,9 @@ def build_bundle(
                 "pack_tokens": pack_tokens,
                 "n_question_records_kept": len(kept),
                 "truncated_question_ids": truncated,
+                # The rows the report must cover that lost their record.
+                # Empty is the only healthy value.
+                "truncated_categorised_question_ids": dropped_categorised,
                 "include_test": include_test,
             },
         )

@@ -5,7 +5,7 @@
 
 """Phase 4 validation: runs after generation, before storage (plan §8).
 
-Four checks, each reported separately in ``validation_json`` so failures are
+Six checks, each reported separately in ``validation_json`` so failures are
 inspectable:
 
 1. **schema** — jsonschema shape validation (interpreter/schema.py) plus the
@@ -22,6 +22,11 @@ inspectable:
    fail, with a whitelist for calendar month/year references), lexicon
    band agreement (a lexicon word attached to a probability figure must sit
    in that figure's band), and a per-field length cap.
+5. **style** — the house-style rules that can be checked mechanically: no em
+   or en dashes, no banned words, no "not X, but Y", and no bare codes where
+   the reader needs a name.
+6. **categories** — the pack decides which forecasts the report covers and
+   under which heading; the model copies that decision and may not change it.
 
 Failures set ``status='failed_validation'``; the report is still written so
 it can be inspected. With PYTHIA_INTERPRETER_STRICT_VALIDATION=1 the runner
@@ -57,6 +62,7 @@ PROSE_MAX_CHARS = 2000
 _ENTRY_PROSE_FIELDS = (
     "why_it_stands_out",
     "how_to_read_the_distribution",
+    "spd_shape",
     "what_the_model_was_reacting_to",
 )
 _ENTRY_PROSE_LISTS = ("impacts", "operational_challenges")
@@ -126,6 +132,8 @@ def _prose_fields(content: dict[str, Any]) -> list[tuple[str, list[str], str]]:
     out: list[tuple[str, list[str], str]] = []
     if content.get("headline"):
         out.append(("headline", [], str(content["headline"])))
+    if content.get("run_summary"):
+        out.append(("run_summary", [], str(content["run_summary"])))
     for i, entry in enumerate(content.get("attention") or []):
         qids = [str(q) for q in entry.get("question_ids") or []]
         for name in _ENTRY_PROSE_FIELDS:
@@ -446,6 +454,147 @@ def check_prose(
 
 
 # ---------------------------------------------------------------------------
+# Check 5: house style
+# ---------------------------------------------------------------------------
+
+# Words and phrases that mark a text as machine-written to a reader who reads
+# a lot of them. The ban is absolute: there is always another word.
+BANNED_PHRASES = (
+    "delve", "tapestry", "treasure trove", "unleash", "game-changer",
+    "game changer", "revolutionary", "landscape", "utilize", "leverage",
+    "pivotal", "intricate", "load-bearing", "the distinction matters",
+    "table stakes", "on the other hand",
+)
+
+# Two constructions the reader asked to be rid of, matched loosely enough to
+# catch the variants ("it's not X, it's Y", "not a failure, but a delay").
+_NOT_BUT = re.compile(r"\bnot\s+(?:a|an|the)?\s*[^,.;]{1,40},\s*but\b", re.IGNORECASE)
+
+# Em dash and en dash. Full stops, commas and semi-colons only.
+_DASHES = ("—", "–")
+
+# A code leaking into prose: three capitals standing alone (ISO3), or one of
+# the metric enums. Hazard codes are two letters and too easily a real word,
+# so they are checked only in their slash form ("DR/PA").
+_ISO3_IN_PROSE = re.compile(r"(?<![A-Za-z])[A-Z]{3}(?![A-Za-z])")
+_METRIC_CODES = ("EVENT_OCCURRENCE", "PHASE3PLUS_IN_NEED", "FATALITIES")
+_HAZARD_SLASH = re.compile(r"\b[A-Z]{2}/[A-Z_]{2,}")
+
+# Country names that legitimately contain a three-capital run, plus the
+# handful of acronyms a humanitarian reader expects to see spelled that way.
+_ALLOWED_CAPS = {
+    "UN", "OCHA", "IPC", "ACLED", "IFRC", "IDMC", "GDACS", "FEWS", "NET",
+    "WFP", "UNHCR", "DREF", "ENSO", "USD", "NGO", "NGOs", "IDP", "IDPs",
+    "SPD", "RC", "EM", "DAT",
+}
+
+
+def find_banned_phrases(text: str) -> list[str]:
+    lowered = (text or "").lower()
+    hits = [p for p in BANNED_PHRASES if p in lowered]
+    if _NOT_BUT.search(text or ""):
+        hits.append("not X, but Y")
+    return hits
+
+
+def find_codes_in_prose(text: str) -> list[str]:
+    """Codes the reader would have to look up. Placeholders are stripped first
+    (a figure key is not prose), and known acronyms are allowed."""
+    cleaned = _strip_placeholders(text or "")
+    hits = [m for m in _METRIC_CODES if m in cleaned]
+    hits.extend(_HAZARD_SLASH.findall(cleaned))
+    hits.extend(
+        m for m in _ISO3_IN_PROSE.findall(cleaned)
+        if m not in _ALLOWED_CAPS
+    )
+    return hits
+
+
+def check_style(content: dict[str, Any]) -> CheckResult:
+    """The house-style rules that can be checked mechanically.
+
+    Deliberately narrow. Rhythm, variety and the habit of joining clauses with
+    "and" are asked for in the prompt and judged by a reader; a lint that tried
+    to score them would fail honest prose. What is here is unambiguous: a
+    banned word is banned, an em dash is an em dash, and a country code in a
+    sentence is a code the reader has to decode.
+    """
+    errors: list[str] = []
+    for path, _qids, text in _prose_fields(content):
+        for dash in _DASHES:
+            if dash in text:
+                errors.append(
+                    f"{path}: contains {dash!r} — use a full stop, comma or semi-colon"
+                )
+                break
+        banned = find_banned_phrases(text)
+        if banned:
+            errors.append(f"{path}: banned phrase(s) {banned!r}")
+        codes = find_codes_in_prose(text)
+        if codes:
+            errors.append(
+                f"{path}: code(s) {sorted(set(codes))!r} in prose — "
+                "write the country, hazard and metric out in words"
+            )
+    return CheckResult(passed=not errors, errors=errors)
+
+
+def check_categories(
+    content: dict[str, Any],
+    *,
+    pack_categories: dict[str, tuple[str | None, str | None]],
+) -> CheckResult:
+    """The pack decides which forecasts are covered and under which heading.
+
+    The model copies that decision across. If it promotes, demotes or invents
+    an entry, the report says a country is worsening on the model's authority
+    rather than the system's, which is exactly the claim the interpreter is
+    not allowed to make. Skipped when the pack carries no categories (a scored
+    interpretation has no attention list at all).
+    """
+    if not pack_categories:
+        return CheckResult(
+            passed=True, errors=[], skipped=True,
+            detail={"reason": "pack carries no categorised rows"},
+        )
+    errors: list[str] = []
+    seen: set[str] = set()
+    for i, entry in enumerate(content.get("attention") or []):
+        qids = [str(q) for q in entry.get("question_ids") or []]
+        matched = [q for q in qids if q in pack_categories]
+        if not matched:
+            errors.append(
+                f"attention[{i}]: cites no question the pack put in a category"
+            )
+            continue
+        qid = matched[0]
+        seen.add(qid)
+        want_cat, want_family = pack_categories[qid]
+        got_cat = entry.get("category")
+        got_family = entry.get("hazard_family")
+        if got_cat != want_cat:
+            errors.append(
+                f"attention[{i}] ({qid}): category {got_cat!r} but the pack "
+                f"says {want_cat!r}"
+            )
+        if got_family != want_family:
+            errors.append(
+                f"attention[{i}] ({qid}): hazard_family {got_family!r} but the "
+                f"pack says {want_family!r}"
+            )
+    missing = sorted(set(pack_categories) - seen)
+    if missing:
+        errors.append(
+            f"attention: the pack categorised {len(missing)} question(s) the "
+            f"report never covers: {missing[:5]}"
+        )
+    return CheckResult(
+        passed=not errors, errors=errors,
+        detail={"n_pack_categorised": len(pack_categories), "n_covered": len(seen)},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -459,8 +608,9 @@ def validate_interpretation(
     global_figures: dict[str, Any],
     con=None,
     run_id: str | None = None,
+    pack_categories: dict[str, tuple[str | None, str | None]] | None = None,
 ) -> ValidationReport:
-    """Run all four checks. Never raises — a validator crash is reported as
+    """Run every check. Never raises — a validator crash is reported as
     a failed check, not an unhandled error (the report must still store)."""
     checks: dict[str, CheckResult] = {}
 
@@ -476,6 +626,9 @@ def validate_interpretation(
             per_question=per_question, global_figures=global_figures)),
         ("prose", lambda: check_prose(
             content, per_question=per_question, global_figures=global_figures)),
+        ("style", lambda: check_style(content)),
+        ("categories", lambda: check_categories(
+            content, pack_categories=pack_categories or {})),
     ):
         try:
             checks[name] = fn()

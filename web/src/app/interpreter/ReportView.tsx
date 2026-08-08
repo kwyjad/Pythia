@@ -10,7 +10,13 @@
 import Link from "next/link";
 
 import type { InterpreterCallEntry, InterpreterReport } from "../../lib/types";
-import { LEXICON_TABLE, REASON_LABELS, countryAnchorId } from "./lib";
+import {
+  LEXICON_TABLE,
+  REASON_LABELS,
+  countryAnchorId,
+  entryHeading,
+  groupAttention,
+} from "./lib";
 
 const QuestionLinks = ({ ids }: { ids: string[] }) => (
   <span className="inline-flex flex-wrap gap-2">
@@ -71,28 +77,40 @@ export default function ReportView({
     <article className="space-y-8">
       <p className="text-lg font-semibold text-fred-primary">{content.headline}</p>
 
-      {attention.length ? (
-        <section className="space-y-5">
+      {content.run_summary ? (
+        <section className="space-y-2">
           <h2 className="text-2xl font-semibold text-fred-primary">
-            What to watch this month
+            The scan this month
           </h2>
-          {attention
-            .slice()
-            .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99))
-            .map((entry) => (
+          <p className="text-sm text-fred-text">{content.run_summary}</p>
+        </section>
+      ) : null}
+
+      {groupAttention(attention).map((group) => (
+        <section key={group.key} className="space-y-5">
+          <h2 className="text-2xl font-semibold text-fred-primary">
+            {group.heading}
+          </h2>
+          {group.entries.map((entry) => (
               <div
                 key={`${entry.rank}-${entry.iso3}-${entry.hazard_code}`}
                 id={countryAnchorId(entry.iso3)}
                 className="scroll-mt-24 rounded-lg border border-fred-secondary bg-fred-surface/60 p-4"
               >
                 <h3 className="text-lg font-semibold text-fred-primary">
-                  {entry.rank}. {entry.iso3} — {entry.hazard_code}/{entry.metric}{" "}
+                  {entry.rank}. {entryHeading(entry)}{" "}
                   <span className="text-sm font-normal text-fred-muted">
                     ({REASON_LABELS[entry.reason_code] ?? entry.reason_code})
                   </span>
                 </h3>
                 {entry.why_it_stands_out ? (
                   <p className="mt-2 text-sm text-fred-text">{entry.why_it_stands_out}</p>
+                ) : null}
+                {entry.spd_shape ? (
+                  <p className="mt-2 text-sm text-fred-text">
+                    <span className="font-medium">The shape of the forecast:</span>{" "}
+                    {entry.spd_shape}
+                  </p>
                 ) : null}
                 {entry.how_to_read_the_distribution ? (
                   <p className="mt-2 text-sm text-fred-text">
@@ -129,9 +147,9 @@ export default function ReportView({
                   Questions: <QuestionLinks ids={entry.question_ids || []} />
                 </p>
               </div>
-            ))}
+          ))}
         </section>
-      ) : null}
+      ))}
 
       {content.changes_since_last_run?.length ? (
         <section className={`space-y-2 ${sectionBreak}`}>
@@ -250,7 +268,7 @@ export default function ReportView({
         </div>
         <p className="text-xs text-fred-muted">
           Generated automatically. No numbers in this report were written by
-          the language model — every figure is substituted from the
+          the language model; every figure is substituted from the
           system&apos;s own computed data.
         </p>
       </section>

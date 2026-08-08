@@ -227,3 +227,79 @@ class TestGenerate:
         if result["status"] == "ok":
             head = (tmp_path / "out" / "interpreter_report_latest.pdf").read_bytes()[:5]
             assert head == b"%PDF-"
+
+
+class TestMap:
+    """The printed map. The dashboard draws its own with JavaScript, which a
+    PDF cannot run, so this is the only map a printed report gets."""
+
+    def test_countries_are_filled_by_value(self):
+        from interpreter import mapviz
+
+        svg = mapviz.attention_map_svg({"ETH": 0.9, "SOM": 0.05})
+        assert svg.startswith("<svg")
+        assert mapviz.SCALE[-1] in svg    # the dark end is used
+        assert mapviz.NO_DATA in svg      # so is "no forecast"
+        assert "no forecast" in svg       # and the legend says so
+
+    def test_scale_bands(self):
+        from interpreter import mapviz
+
+        assert mapviz.colour_for(None) == mapviz.NO_DATA
+        assert mapviz.colour_for("nonsense") == mapviz.NO_DATA
+        assert mapviz.colour_for(0.0) == mapviz.SCALE[0]
+        assert mapviz.colour_for(0.99) == mapviz.SCALE[-1]
+
+    def test_missing_boundaries_degrade_rather_than_fail(self, monkeypatch):
+        from interpreter import mapviz
+
+        monkeypatch.setattr(mapviz, "_features", lambda: [])
+        assert mapviz.attention_map_svg({"ETH": 0.5}) == ""
+
+    def test_captions_name_countries_not_codes(self):
+        from interpreter import mapviz
+
+        assert mapviz.country_labels({"ETH": 0.9, "NIC": 0.2}) == [
+            "Ethiopia", "Nicaragua",
+        ]
+
+    def test_values_from_deviation_without_the_table_returns_nothing(self, tmp_path):
+        from interpreter import mapviz
+
+        con = duckdb.connect(str(tmp_path / "m.duckdb"))
+        assert mapviz.values_from_deviation(con, "fc_1", include_test=False) == {}
+        con.close()
+
+
+class TestBranding:
+    def test_masthead_carries_fred_and_the_month(self):
+        html = pdf.build_report_html(
+            {"kind": "combined", "version": 1, "status": "ok",
+             "hs_run_id": "hs_20260801T000000", "content_md": "# Report"}
+        )
+        assert "Fred" in html
+        assert "2026-08" in html
+        assert pdf.FRED_PRIMARY in html
+
+    def test_map_is_included_when_supplied_and_absent_when_not(self):
+        row = {"kind": "combined", "version": 1, "status": "ok",
+               "content_md": "# Report"}
+        with_map = pdf.build_report_html(
+            row, map_svg="<svg id='m'></svg>", map_captions=["Ethiopia"]
+        )
+        assert "<svg id='m'></svg>" in with_map
+        assert "Ethiopia" in with_map
+        assert 'class="mapblock"' not in pdf.build_report_html(row)
+
+    def test_inline_svg_passes_through_unescaped(self):
+        html = pdf.markdown_to_html('Text.\n\n<svg width="10"><rect /></svg>\n\nMore.')
+        assert '<svg width="10"><rect /></svg>' in html
+        assert "&lt;svg" not in html
+
+    def test_question_links_become_anchors(self):
+        html = pdf.markdown_to_html(
+            "Questions: [SOM_FL_PA_2026-08](https://example.org/questions/SOM_FL_PA_2026-08)"
+        )
+        assert 'href="https://example.org/questions/SOM_FL_PA_2026-08"' in html
+        # The underscores in the id must survive the emphasis pass.
+        assert ">SOM_FL_PA_2026-08</a>" in html

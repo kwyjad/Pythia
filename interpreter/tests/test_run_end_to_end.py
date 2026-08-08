@@ -94,6 +94,8 @@ def _content(kind: str) -> dict:
             "iso3": "ETH",
             "hazard_code": "ACE",
             "metric": "FATALITIES",
+            "category": "worsening",
+            "hazard_family": "conflict",
             "question_ids": [QID],
             "why_it_stands_out": "The ensemble moved {{fig:js_vs_baserate}} from its base rate, with a modal outcome of {{fig:modal_bucket_label}} fatalities.",
             "lead_time_months": 2,
@@ -186,7 +188,7 @@ class TestRunner:
         combined_md = rows[1][3]
         assert "{{fig:" not in combined_md
         # Per-question figure from the pack...
-        assert "50% of maximum" in combined_md
+        assert "a long way from its usual pattern" in combined_md
         # ...modal bucket from the ensemble grid...
         assert "25-<100" in combined_md
         # ...and the performance figure from the SCORED interpretation's

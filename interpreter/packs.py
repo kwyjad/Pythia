@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from interpreter import selection
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -137,6 +139,19 @@ def pack_question_ids(pack: Pack) -> set[str]:
             qid = str(row.get("question_id") or "")
             if qid:
                 out.add(qid)
+    return out
+
+
+def pack_categories(pack: Pack) -> dict[str, tuple[str | None, str | None]]:
+    """{question_id: (category, hazard_family)} for the rows the pack put in a
+    section. The validator holds the report to exactly this list."""
+    out: dict[str, tuple[str | None, str | None]] = {}
+    for row in pack.attention_rows:
+        qid = str(row.get("question_id") or "")
+        category = str(row.get("category") or "") or None
+        if not qid or not category:
+            continue
+        out[qid] = (category, str(row.get("hazard_family") or "") or None)
     return out
 
 
@@ -250,6 +265,63 @@ def _weighted_skill(rows: list[dict[str, Any]], family: str) -> dict[str, float]
     return out
 
 
+def run_summary_figures(pack: Pack) -> dict[str, Any]:
+    """Scan-scope counts for the report's opening paragraph.
+
+    These are GLOBAL figures (they belong to the run, not to a question), so
+    the model cites them the same way it cites anything else: by placeholder.
+    It never counts rows itself.
+    """
+    manifest = pack.manifest or {}
+    summary = manifest.get("run_summary") or {}
+    out: dict[str, Any] = {}
+    for key in (
+        "countries_scanned",
+        "countries_with_questions",
+        "countries_track1",
+        "countries_track2",
+        "n_questions",
+        "n_above_base_rate",
+        "n_below_base_rate",
+    ):
+        value = summary.get(key)
+        if value is not None:
+            out[key] = value
+    threshold = manifest.get("worsening_multiple")
+    if threshold is not None:
+        out["worsening_multiple"] = threshold
+    return out
+
+
+def question_distributions(pack: Pack) -> dict[str, dict[str, Any]]:
+    """{question_id: {"spd": [...], "bucket_labels": {...}, "binary": bool}}.
+
+    Reuses _preferred_grid/_mean_vector, the same pair question_figures uses,
+    so the chart and the modal-bucket figure printed beside it are computed
+    from one aggregation rather than two that can drift.
+
+    Charts are drawn from THIS, never from model output: the schema forbids
+    extra properties on an entry, and a picture built from prose could
+    disagree with the numbers next to it.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for row in pack.attention_rows:
+        qid = str(row.get("question_id") or "")
+        if not qid:
+            continue
+        record = pack.records.get(qid) or {}
+        grid = _preferred_grid(record)
+        vec = _mean_vector(grid) if grid else None
+        if not vec:
+            continue
+        out[qid] = {
+            "spd": vec,
+            "bucket_labels": record.get("bucket_labels"),
+            "binary": str(row.get("score_family") or "") == "binary",
+        }
+    return out
+
+
 def performance_figures(pack: Pack) -> dict[str, Any]:
     """Pack-level figures for the performance prose (scored pack only)."""
     figs: dict[str, Any] = {}
@@ -319,10 +391,22 @@ def assemble_input_text(
     truncated: list[str] = []
 
     if pack.kind == "current":
-        ordered = [
+        # Report order, not attention order. The rows the pack put in a
+        # section are the ones the report is required to cover, so they are
+        # the last thing a tight budget gives up. Ordering by attention rank
+        # here would drop a categorised record in favour of a question the
+        # report never mentions.
+        categorised = [
+            str(r.get("question_id") or "")
+            for r in selection.selected_rows(pack.attention_rows)
+            if str(r.get("question_id") or "") in pack.records
+        ]
+        seen = set(categorised)
+        ordered = categorised + [
             str(r.get("question_id") or "")
             for r in pack.attention_rows
             if str(r.get("question_id") or "") in pack.records
+            and str(r.get("question_id") or "") not in seen
         ]
         for qid in ordered:
             if truncated:
@@ -340,12 +424,23 @@ def assemble_input_text(
             used += tokens
             kept.append(qid)
         if truncated:
-            parts.append(_section(
-                "TRUNCATION NOTICE",
-                "The following low-attention-rank question records were "
-                "omitted for the token budget (their attention_index rows "
-                f"above still describe them): {', '.join(truncated)}",
-            ))
+            dropped_covered = [q for q in truncated if q in seen]
+            notice = (
+                "The following question records were omitted for the token "
+                "budget (their attention_index rows above still describe "
+                f"them): {', '.join(truncated)}"
+            )
+            if dropped_covered:
+                # The model must not invent detail for a section entry whose
+                # record it cannot see. Say so, by name, in the prompt.
+                notice += (
+                    "\n\nSome of these carry a category, so the report is "
+                    "expected to cover them: "
+                    f"{', '.join(dropped_covered)}. Write those entries from "
+                    "their attention_index row alone. Do not invent evidence "
+                    "or detail you cannot see."
+                )
+            parts.append(_section("TRUNCATION NOTICE", notice))
 
     stats = {
         "input_tokens_estimate": used,

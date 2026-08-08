@@ -54,6 +54,8 @@ def _valid_content(kind: str = "combined") -> dict:
                 "iso3": "ETH",
                 "hazard_code": "ACE",
                 "metric": "FATALITIES",
+                "category": "worsening",
+                "hazard_family": "conflict",
                 "question_ids": ["ETH_ACE_FATALITIES_2026-08"],
                 "figure_refs": ["js_vs_baserate", "eiv_nominal"],
                 "why_it_stands_out": "The ensemble sits {{fig:js_vs_baserate}} from its base rate.",
