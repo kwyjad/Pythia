@@ -140,6 +140,19 @@ def pack_question_ids(pack: Pack) -> set[str]:
     return out
 
 
+def pack_categories(pack: Pack) -> dict[str, tuple[str | None, str | None]]:
+    """{question_id: (category, hazard_family)} for the rows the pack put in a
+    section. The validator holds the report to exactly this list."""
+    out: dict[str, tuple[str | None, str | None]] = {}
+    for row in pack.attention_rows:
+        qid = str(row.get("question_id") or "")
+        category = str(row.get("category") or "") or None
+        if not qid or not category:
+            continue
+        out[qid] = (category, str(row.get("hazard_family") or "") or None)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Figures — the values {{fig:...}} placeholders resolve against
 # ---------------------------------------------------------------------------

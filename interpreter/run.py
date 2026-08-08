@@ -410,7 +410,7 @@ def run_interpreter(
                            "interpretation_id": interpretation_id})
             return result
 
-        # --- Validation (Phase 4: schema + referential + numeric + prose) ---
+        # --- Validation (schema, referential, numeric, prose, style, sections) ---
         report = validate.validate_interpretation(
             content,
             kind=kind,
@@ -419,6 +419,7 @@ def run_interpreter(
             global_figures=global_figures,
             con=con,
             run_id=run_id,
+            pack_categories=packs.pack_categories(pack),
         )
         status = "ok" if report.passed else "failed_validation"
 

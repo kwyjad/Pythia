@@ -238,7 +238,9 @@ class TestValidateInterpretation:
     def test_all_checks_pass_on_clean_content(self):
         report = self._run(_content())
         assert report.passed, json.dumps(report.as_dict(), indent=1)
-        assert set(report.checks) == {"schema", "referential", "numeric", "prose"}
+        assert set(report.checks) == {
+            "schema", "referential", "numeric", "prose", "style", "categories",
+        }
 
     def test_schema_failure_flows_through(self):
         content = _content()
@@ -263,3 +265,103 @@ class TestValidateInterpretation:
         report = self._run(_content())
         assert not report.passed
         assert any("check crashed" in e for e in report.checks["prose"].errors)
+
+
+class TestStyle:
+    """The house-style rules that can be checked mechanically.
+
+    Deliberately narrow: rhythm and variety are judged by a reader, not by a
+    lint. What is here is unambiguous, and each rule was asked for because a
+    reader tripped over it.
+    """
+
+    def test_em_dash_fails(self):
+        content = _content()
+        content["headline"] = "One country stands out — and it is not the usual one."
+        result = validate_mod.check_style(content)
+        assert not result.passed
+        assert any("full stop" in e for e in result.errors)
+
+    def test_en_dash_fails_too(self):
+        content = _content(headline="A rise – of a kind we have not seen.")
+        assert not validate_mod.check_style(content).passed
+
+    def test_banned_words(self):
+        for word in ("delve", "tapestry", "leverage", "pivotal", "landscape"):
+            content = _content(headline=f"We {word} into the record.")
+            result = validate_mod.check_style(content)
+            assert not result.passed, word
+            assert any(word in e for e in result.errors), word
+
+    def test_both_sidesing_and_not_x_but_y(self):
+        assert not validate_mod.check_style(
+            _content(headline="It is bad. On the other hand, it could be worse.")
+        ).passed
+        assert not validate_mod.check_style(
+            _content(headline="This is not a surprise, but a warning.")
+        ).passed
+
+    def test_codes_in_prose_fail(self):
+        assert not validate_mod.check_style(
+            _content(headline="ETH is the country to watch.")
+        ).passed
+        assert not validate_mod.check_style(
+            _content(headline="The DR/PA forecast is high.")
+        ).passed
+        assert not validate_mod.check_style(
+            _content(headline="EVENT_OCCURRENCE is elevated.")
+        ).passed
+
+    def test_known_acronyms_and_plain_prose_pass(self):
+        content = _content(
+            headline="Ethiopia stands out; the IPC analysis and OCHA reporting agree."
+        )
+        result = validate_mod.check_style(content)
+        assert result.passed, result.errors
+
+    def test_a_placeholder_is_not_a_code(self):
+        content = _content(headline="The forecast sits at {{fig:log_ev_ratio}}.")
+        assert validate_mod.check_style(content).passed
+
+
+class TestCategories:
+    """The pack decides the sections. The model copies that decision."""
+
+    PACK = {QID: ("worsening", "conflict")}
+
+    def test_matching_content_passes(self):
+        result = validate_mod.check_categories(_content(), pack_categories=self.PACK)
+        assert result.passed, result.errors
+
+    def test_promotion_fails(self):
+        content = _content()
+        content["attention"][0]["category"] = "stable_major"
+        result = validate_mod.check_categories(content, pack_categories=self.PACK)
+        assert not result.passed
+        assert any("category" in e for e in result.errors)
+
+    def test_wrong_family_fails(self):
+        content = _content()
+        content["attention"][0]["hazard_family"] = "climate"
+        assert not validate_mod.check_categories(
+            content, pack_categories=self.PACK
+        ).passed
+
+    def test_invented_entry_fails(self):
+        content = _content()
+        content["attention"].append(dict(content["attention"][0]))
+        content["attention"][1]["question_ids"] = ["MADE_UP_QID"]
+        result = validate_mod.check_categories(content, pack_categories=self.PACK)
+        assert not result.passed
+        assert any("no question the pack put in a category" in e for e in result.errors)
+
+    def test_dropped_entry_fails(self):
+        pack = dict(self.PACK)
+        pack["SOM_FL_PA_2026-08"] = ("worsening", "climate")
+        result = validate_mod.check_categories(_content(), pack_categories=pack)
+        assert not result.passed
+        assert any("never covers" in e for e in result.errors)
+
+    def test_no_categorised_rows_skips_rather_than_fails(self):
+        result = validate_mod.check_categories(_content(), pack_categories={})
+        assert result.passed and result.skipped
