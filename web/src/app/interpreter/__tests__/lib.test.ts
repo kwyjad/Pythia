@@ -13,10 +13,14 @@ import {
   LEXICON_TABLE,
   REASON_LABELS,
   attentionColor,
+  attentionLabel,
   attentionLegend,
   countryAnchorId,
+  entryHeading,
+  groupAttention,
   groupVersionsByRun,
   runMonthLabel,
+  sectionHeading,
   statusBanner,
 } from "../lib";
 
@@ -191,5 +195,85 @@ describe("navigation", () => {
       expect(hrefs).toContain(href);
     }
     expect(NAV_LINKS.find((l) => l.label === "Substack")?.external).toBe(true);
+  });
+});
+
+
+describe("report sections", () => {
+  const entry = (
+    category: string | undefined,
+    hazard_family: string | undefined,
+    rank: number
+  ) => ({ category, hazard_family, rank });
+
+  it("orders the four boxes: what is changing before what is merely large", () => {
+    const groups = groupAttention([
+      entry("stable_major", "conflict", 1),
+      entry("worsening", "conflict", 1),
+      entry("stable_major", "climate", 1),
+      entry("worsening", "climate", 1),
+    ]);
+    expect(groups.map((g) => g.key)).toEqual([
+      "worsening-climate",
+      "worsening-conflict",
+      "stable_major-climate",
+      "stable_major-conflict",
+    ]);
+  });
+
+  it("never drops an entry the model failed to place", () => {
+    const stray = entry(undefined, undefined, 3);
+    const groups = groupAttention([entry("worsening", "climate", 1), stray]);
+    expect(groups.map((g) => g.key)).toEqual(["worsening-climate", "other"]);
+    expect(groups[1].entries).toEqual([stray]);
+  });
+
+  it("sorts within a box by rank and skips empty boxes", () => {
+    const groups = groupAttention([
+      entry("worsening", "climate", 3),
+      entry("worsening", "climate", 1),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].entries.map((e) => e.rank)).toEqual([1, 3]);
+  });
+
+  it("headings read as sentences", () => {
+    expect(sectionHeading("worsening", "climate")).toBe(
+      "Potentially worsening situations: climate hazards"
+    );
+    expect(sectionHeading("stable_major", "conflict")).toBe(
+      "Major impact but roughly stable: conflict"
+    );
+  });
+});
+
+describe("entry headings", () => {
+  it("prints names, never codes, when the API supplied them", () => {
+    expect(
+      entryHeading({
+        country_name: "Nicaragua",
+        iso3: "NIC",
+        hazard_name: "Drought",
+        hazard_code: "DR",
+        metric_name: "a major disaster alert",
+        metric: "EVENT_OCCURRENCE",
+      })
+    ).toBe("Nicaragua, drought: a major disaster alert");
+  });
+
+  it("falls back to codes rather than printing nothing", () => {
+    expect(
+      entryHeading({ iso3: "NIC", hazard_code: "DR", metric: "PA" })
+    ).toBe("NIC, dr: PA");
+  });
+});
+
+describe("attention wording", () => {
+  it("says how far in words, never a percentage of a maximum", () => {
+    expect(attentionLabel(0.8)).toBe("a long way from its usual pattern");
+    expect(attentionLabel(0.3)).toBe("well away from its usual pattern");
+    expect(attentionLabel(0.15)).toBe("a little away from its usual pattern");
+    expect(attentionLabel(0.01)).toBe("close to its usual pattern");
+    expect(attentionLabel(5)).toBe("a long way from its usual pattern");
   });
 });

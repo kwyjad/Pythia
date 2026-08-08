@@ -110,8 +110,87 @@ export const attentionLegend = (): Array<{ label: string; color: string }> => [
   { label: "No deviation data", color: "var(--risk-map-no-questions)" },
 ];
 
-export const attentionLabel = (value: number): string =>
-  `${Math.round(Math.max(0, Math.min(value, 1)) * 100)}% of maximum deviation`;
+// Words, not "% of maximum deviation": the maximum is ln 2, which no reader
+// can picture. Bands mirror interpreter/render.py's format_figure.
+export const attentionLabel = (value: number): string => {
+  const v = Math.max(0, Math.min(value, 1));
+  if (v >= 0.5) return "a long way from its usual pattern";
+  if (v >= 0.25) return "well away from its usual pattern";
+  if (v >= 0.1) return "a little away from its usual pattern";
+  return "close to its usual pattern";
+};
+
+// The report's four boxes. Order and labels mirror interpreter/selection.py.
+export const CATEGORY_LABELS: Record<string, string> = {
+  worsening: "Potentially worsening situations",
+  stable_major: "Major impact but roughly stable",
+};
+
+export const FAMILY_LABELS: Record<string, string> = {
+  climate: "Climate hazards",
+  conflict: "Conflict",
+  other: "Other hazards",
+};
+
+export const SECTION_ORDER: Array<{ category: string; family: string }> = [
+  { category: "worsening", family: "climate" },
+  { category: "worsening", family: "conflict" },
+  { category: "stable_major", family: "climate" },
+  { category: "stable_major", family: "conflict" },
+];
+
+export const sectionHeading = (category: string, family: string): string =>
+  `${CATEGORY_LABELS[category] ?? category}: ${(
+    FAMILY_LABELS[family] ?? family
+  ).toLowerCase()}`;
+
+// One entry's heading, in words. The API stamps the names on each entry from
+// interpreter/names.py; the codes are the fallback, never the first choice.
+export const entryHeading = (entry: {
+  country_name?: string;
+  iso3?: string;
+  hazard_name?: string;
+  hazard_code?: string;
+  metric_name?: string;
+  metric?: string;
+}): string => {
+  const country = entry.country_name || entry.iso3 || "";
+  const hazard = (entry.hazard_name || entry.hazard_code || "").toLowerCase();
+  const metric = entry.metric_name || entry.metric || "";
+  return `${country}, ${hazard}: ${metric}`;
+};
+
+// Entries grouped into the four boxes, in report order, with anything the
+// model failed to place kept in a trailing group rather than dropped.
+export const groupAttention = <T extends { category?: string; hazard_family?: string; rank?: number }>(
+  entries: T[]
+): Array<{ key: string; heading: string; entries: T[] }> => {
+  const out: Array<{ key: string; heading: string; entries: T[] }> = [];
+  const placed = new Set<T>();
+  const byRank = (a: T, b: T) => (a.rank ?? 99) - (b.rank ?? 99);
+  for (const { category, family } of SECTION_ORDER) {
+    const group = entries.filter(
+      (e) => e.category === category && e.hazard_family === family
+    );
+    group.forEach((e) => placed.add(e));
+    if (group.length) {
+      out.push({
+        key: `${category}-${family}`,
+        heading: sectionHeading(category, family),
+        entries: group.slice().sort(byRank),
+      });
+    }
+  }
+  const stragglers = entries.filter((e) => !placed.has(e));
+  if (stragglers.length) {
+    out.push({
+      key: "other",
+      heading: "Other situations of note",
+      entries: stragglers.slice().sort(byRank),
+    });
+  }
+  return out;
+};
 
 // The fixed probability lexicon — FIXED BY DESIGN (interpreter/lexicon.py);
 // printed in the report appendix so the reader can check the writer.

@@ -69,6 +69,27 @@ def _maybe_json(raw: Any) -> Any:
         return None
 
 
+def _name_attention_entries(content: Any) -> None:
+    """Stamp full country, hazard and metric names onto each entry.
+
+    The dashboard should not have to carry a second copy of the country table
+    in TypeScript, and two copies would eventually disagree. The names come
+    from the same ``interpreter.names`` module the PDF and the markdown use.
+    """
+    if not isinstance(content, dict):
+        return
+    try:
+        from interpreter import names as _names
+    except Exception:  # noqa: BLE001 - names are a nicety, never a 500
+        return
+    for entry in content.get("attention") or []:
+        if not isinstance(entry, dict):
+            continue
+        entry["country_name"] = _names.country_name(entry.get("iso3"))
+        entry["hazard_name"] = _names.hazard_name(entry.get("hazard_code"))
+        entry["metric_name"] = _names.metric_name(entry.get("metric"), short=True)
+
+
 def _shape_full(row: Dict[str, Any]) -> Dict[str, Any]:
     """One interpretation row -> API shape (content resolved server-side)."""
     content = _maybe_json(row.pop("content_json", None))
@@ -87,6 +108,7 @@ def _shape_full(row: Dict[str, Any]) -> Dict[str, Any]:
             )
             content_resolved = resolve_content(content, resolver)
             unresolved = resolver.misses
+            _name_attention_entries(content_resolved)
         except Exception:  # noqa: BLE001 - serve the raw content over a 500
             logger.exception("interpreter content resolution failed")
             content_resolved = content

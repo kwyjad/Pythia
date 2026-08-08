@@ -531,15 +531,28 @@ export type InterpreterReasonCode =
   | "large_impact_per_capita"
   | "rc_deviation_disagreement";
 
+export type InterpreterCategory = "worsening" | "stable_major";
+export type InterpreterHazardFamily = "climate" | "conflict" | "other";
+
 export type InterpreterAttentionEntry = {
   rank: number;
   reason_code: InterpreterReasonCode;
   iso3: string;
   hazard_code: string;
   metric: string;
+  // Which of the report's four boxes this entry belongs to. Decided by the
+  // pack, copied by the model, checked by the validator.
+  category?: InterpreterCategory;
+  hazard_family?: InterpreterHazardFamily;
+  // Stamped by the API from interpreter/names.py, so the dashboard never
+  // carries a second copy of the country table.
+  country_name?: string;
+  hazard_name?: string;
+  metric_name?: string;
   question_ids: string[];
   figure_refs?: string[];
   why_it_stands_out?: string;
+  spd_shape?: string;
   how_to_read_the_distribution?: string;
   what_the_model_was_reacting_to?: string;
   impacts?: string[];
@@ -569,6 +582,7 @@ export type InterpreterContent = {
   template_version: string;
   kind: "current" | "scored" | "combined";
   headline: string;
+  run_summary?: string;
   attention?: InterpreterAttentionEntry[];
   performance?: InterpreterPerformance;
   changes_since_last_run?: string[];
