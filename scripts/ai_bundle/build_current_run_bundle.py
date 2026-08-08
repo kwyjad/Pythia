@@ -718,9 +718,84 @@ def _model_lineup() -> list[str]:
         return []
 
 
+# A question record built for an ANALYST carries everything: every member's
+# raw response, the whole assembled prompt, every grounding snippet. On the
+# August run that is 46 to 125 KB each, and the pack could hold nine of them
+# against twenty-one the report was required to cover.
+#
+# The interpreter does not re-read the evidence. It explains what the system
+# produced and, in a sentence, what the system was reacting to. So the record
+# is trimmed here rather than in the shared builder: the scored bundle is read
+# by a person who does want the full text.
+#
+# Every cut says so in place. A silently shortened prompt would let the
+# interpreter describe evidence that was never there.
+TRIM_CAPS = {
+    "grounding.report_markdown": 4000,
+    "grounding.structural_context": 1200,
+    "grounding.sources": 2000,
+    "grounding.recent_signals": 1500,
+    "spd_prompt": 4000,
+    # The parsed spd and the reasoning trace already carry what the member
+    # said; the raw response text is the same thing again in prose.
+    "member.response_text": 600,
+    "member.human_explanation": 1000,
+    "adversarial": 3000,
+}
+
+
+def _cut(value: Any, cap: int) -> Any:
+    """Cap a string (or the JSON form of a structure) with a visible marker."""
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else _json_dumps(value)
+    if len(text) <= cap:
+        return value
+    return text[:cap] + f"\n[trimmed for the interpreter pack: {len(text) - cap} more characters]"
+
+
+def _json_dumps(value: Any) -> str:
+    import json as _json
+
+    return _json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _trim_for_interpreter(record: dict[str, Any]) -> None:
+    """Shrink a record to what the interpreter actually reads."""
+    for pack in record.get("grounding") or []:
+        if not isinstance(pack, dict):
+            continue
+        for field in ("report_markdown", "structural_context", "sources",
+                      "recent_signals"):
+            if field in pack:
+                pack[field] = _cut(pack[field], TRIM_CAPS[f"grounding.{field}"])
+
+    if record.get("spd_prompt"):
+        record["spd_prompt"] = _cut(record["spd_prompt"], TRIM_CAPS["spd_prompt"])
+
+    members = record.get("members")
+    member_list = (
+        members if isinstance(members, list)
+        else list(members.values()) if isinstance(members, dict)
+        else []
+    )
+    for member in member_list:
+        if not isinstance(member, dict):
+            continue
+        for field in ("response_text", "human_explanation"):
+            if member.get(field):
+                member[field] = _cut(member[field], TRIM_CAPS[f"member.{field}"])
+        # A diagnostic score for the trace, not something the report explains.
+        member.pop("trace_quality", None)
+
+    if record.get("adversarial"):
+        record["adversarial"] = _cut(record["adversarial"], TRIM_CAPS["adversarial"])
+
+
 def _augment_record(con, record: dict[str, Any], q: dict[str, Any],
                     run_id: str, deviation_by_model: dict[str, dict[str, Any]] | None) -> None:
     """Current-run additions on top of the shared question record."""
+    _trim_for_interpreter(record)
     metric = str(q.get("metric") or "").upper()
     try:
         from pythia.buckets import labels_for
@@ -863,7 +938,17 @@ def build_bundle(
         kept: list[str] = []
         truncated: list[str] = []
         pack_tokens = max_pack_tokens - budget_left
-        for row in attention_rows:
+        # Records are written in REPORT order, not attention order: the rows
+        # the report is required to cover come first, then everything else by
+        # attention rank. Without this a categorised row could lose its record
+        # to a row the report never mentions, and the interpreter would be
+        # asked to write about a question it cannot see.
+        categorised = _selection.selected_rows(attention_rows)
+        seen_ids = {str(r["question_id"]) for r in categorised}
+        record_order = categorised + [
+            r for r in attention_rows if str(r["question_id"]) not in seen_ids
+        ]
+        for row in record_order:
             qid = str(row["question_id"])
             q = q_by_id.get(qid)
             if q is None:
@@ -906,6 +991,16 @@ def build_bundle(
                 "Token budget %d: kept %d question records, truncated the "
                 "%d lowest-ranked (recorded in MANIFEST.json)",
                 max_pack_tokens, len(kept), len(truncated),
+            )
+        # A categorised row without a record is the one truncation that
+        # actually damages the report, so it is reported on its own rather
+        # than buried in a count.
+        dropped_categorised = [q for q in truncated if q in seen_ids]
+        if dropped_categorised:
+            LOGGER.warning(
+                "Token budget: %d of the %d rows the report must cover lost "
+                "their question record: %s",
+                len(dropped_categorised), len(seen_ids), dropped_categorised[:5],
             )
 
         write_csv(staging / "attention_index.csv", ATTENTION_FIELDS, attention_rows)
@@ -969,6 +1064,9 @@ def build_bundle(
                 "pack_tokens": pack_tokens,
                 "n_question_records_kept": len(kept),
                 "truncated_question_ids": truncated,
+                # The rows the report must cover that lost their record.
+                # Empty is the only healthy value.
+                "truncated_categorised_question_ids": dropped_categorised,
                 "include_test": include_test,
             },
         )
