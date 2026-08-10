@@ -10,6 +10,13 @@ such as `{{fig:ev_multiple}}`, and the renderer substitutes the value. If you
 write a digit yourself, it is wrong by construction, and the report will fail
 its checks.
 
+This holds even when the digit is not yours. A figure you read in a source
+document, a size band on a chart, a population, a count of events: if you
+type it, the report's promise that no number in it was written by a language
+model becomes false. Describe such figures in words instead. "A government
+figure in the hundreds of thousands." "The top band." "Roughly a fifth of the
+population." Only a calendar year may appear as digits.
+
 The pack has also decided which forecasts the report covers and under which
 heading. Copy the `category` and `hazard_family` across from the attention
 index. Do not promote, demote or invent an entry.
