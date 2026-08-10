@@ -18,6 +18,7 @@ import {
   countryAnchorId,
   entryHeading,
   groupAttention,
+  monthLabel,
   groupVersionsByRun,
   runMonthLabel,
   sectionHeading,
@@ -275,5 +276,21 @@ describe("attention wording", () => {
     expect(attentionLabel(0.15)).toBe("a little away from its usual pattern");
     expect(attentionLabel(0.01)).toBe("close to its usual pattern");
     expect(attentionLabel(5)).toBe("a long way from its usual pattern");
+  });
+});
+
+describe("decision deadlines", () => {
+  it("prints the month a decision is due", () => {
+    expect(monthLabel("2026-08")).toBe("August 2026");
+    expect(monthLabel("2027-01")).toBe("January 2027");
+  });
+
+  it("says so plainly when a row carries no derived deadline", () => {
+    // The deadline comes from the peak horizon; a row without one has no
+    // date, and inventing a plausible month is exactly what the derivation
+    // exists to prevent.
+    expect(monthLabel(undefined)).toBe("no dated deadline");
+    expect(monthLabel("")).toBe("no dated deadline");
+    expect(monthLabel("2026-13")).toBe("no dated deadline");
   });
 });

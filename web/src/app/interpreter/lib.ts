@@ -43,6 +43,15 @@ export const runMonthLabel = (
   return `${MONTHS[monthIdx]} ${year}`;
 };
 
+/** "2026-08" as "August 2026", for a decision deadline. */
+export const monthLabel = (ym?: string | null): string => {
+  const parts = /^(\d{4})-(\d{2})$/.exec(String(ym ?? ""));
+  if (!parts) return "no dated deadline";
+  const monthIdx = Number(parts[2]) - 1;
+  if (monthIdx < 0 || monthIdx > 11) return "no dated deadline";
+  return `${MONTHS[monthIdx]} ${parts[1]}`;
+};
+
 export type InterpreterRunOption = {
   runKey: string;
   label: string;

@@ -78,9 +78,14 @@ from scripts.ai_bundle.guides import build_current_run_guide
 # (names reads one CSV; selection is arithmetic), so importing the
 # interpreter package from the bundle builder costs nothing at import time.
 from interpreter import config as _interp_config
+from interpreter import decisions as _decisions
 from interpreter import names as _names
 from interpreter import gating as _gating
 from interpreter import panels as _panels
+from interpreter import performance as _performance
+from interpreter import persistence as _persistence
+from interpreter import secondopinion as _secondopinion
+from interpreter import sector as _sector
 from interpreter import selection as _selection
 
 LOGGER = logging.getLogger(__name__)
@@ -171,15 +176,43 @@ def _questions_for_run(con, run_id: str, include_test: bool) -> list[dict[str, A
 # ---------------------------------------------------------------------------
 
 
+# What the gate and the planning sentence read. Selected by name and guarded
+# by column_exists, because the table predates them: compute_deviation adds
+# them by migration, and a DB from before that migration must still bundle.
+#
+# These were missing from the SELECT until 2026-08-10, so every attention row
+# carried excess_nominal=None and exceedances=[]: the gate stamped nothing,
+# selection categorised nothing, and the report fell back on whatever the
+# earlier ordering produced. A column that is written and never read is the
+# same as a column that was never written.
+_DEVIATION_V3_COLUMNS = (
+    "eiv_baserate", "excess_nominal", "excess_per_100k", "exceedances_json",
+    "baserate_n_obs", "peak_horizon", "p50_peak", "p90_peak", "p_zero_peak",
+)
+
+
 def _load_deviation(con, run_id: str) -> dict[str, dict[str, dict[str, Any]]]:
     """{question_id: {model_name: deviation row}} for one run."""
     if not table_exists(con, "forecast_deviation"):
         return {}
+    extra = [
+        c for c in _DEVIATION_V3_COLUMNS
+        if column_exists(con, "forecast_deviation", c)
+    ]
+    missing = [c for c in _DEVIATION_V3_COLUMNS if c not in extra]
+    if missing:
+        LOGGER.warning(
+            "forecast_deviation is missing %s — the selection gate will have "
+            "nothing to read and the report will carry no entries. Re-run "
+            "compute_deviation against this database.",
+            ", ".join(missing),
+        )
     rows = rows_as_dicts(
         con,
         "SELECT question_id, model_name, score_family, js_vs_baserate, "
-        "log_ev_ratio, eiv_nominal, eiv_per_100k, baserate_source, baserate_json "
-        "FROM forecast_deviation WHERE run_id = ?",
+        "log_ev_ratio, eiv_nominal, eiv_per_100k, baserate_source, baserate_json"
+        + ("".join(f", {c}" for c in extra))
+        + " FROM forecast_deviation WHERE run_id = ?",
         [run_id],
     )
     out: dict[str, dict[str, dict[str, Any]]] = {}
@@ -355,6 +388,10 @@ def build_attention_rows(
             }
         )
 
+    # The window each row's horizons are counted from, kept for the decision
+    # calendar (below) and dropped before the CSV is written.
+    starts = {str(q["question_id"]): q.get("window_start_date") for q in questions}
+
     _rank(rows, "js_vs_baserate", "rank_deviation")
     _rank(rows, "eiv_nominal", "rank_impact_nominal")
     # The absolute floor keeps the per-capita ordering from returning the
@@ -382,15 +419,22 @@ def build_attention_rows(
         gate_counts.get("major", 0), gate_counts.get("watchlist", 0),
         gate_counts.get("thin", 0), gate_counts.get("unusual_cut") or 0.0,
     )
-    # The v2 four-box assignment still runs: it decides the report's headings
-    # among the gated rows, and the validator holds the model to them.
-    _selection.assign_categories(
-        rows,
-        threshold_multiple=_interp_config.worsening_multiple(),
-        min_entries=_interp_config.min_per_category(),
-        max_entries=_interp_config.max_per_category(),
-        per_capita_floor=per_capita_floor,
-    )
+    # The four-box assignment reads the gate the line above stamped: which
+    # box a row belongs in is the gate's decision, and this only orders the
+    # gated rows by expected excess and cuts them to length. The validator
+    # then holds the model to the result.
+    _selection.assign_categories(rows, max_entries=_interp_config.max_entries())
+
+    # The decision calendar. Derived, never invented: the peak horizon the
+    # materiality gate already found, less the hazard's configured lead time.
+    for row in rows:
+        decision = _decisions.decision_point(
+            window_start=starts.get(str(row["question_id"])),
+            peak_horizon=row.get("peak_horizon"),
+            lead_months=_interp_config.lead_time_months(row.get("hazard_code")),
+        )
+        row["decision"] = decision or None
+        row["decision_deadline"] = (decision or {}).get("deadline_month")
 
     rank_cols = (
         "rank_deviation", "rank_impact_nominal",
@@ -477,6 +521,8 @@ ATTENTION_FIELDS = [
     "passed_unusual", "passed_material", "peak_horizon", "gate",
     "baserate_thin", "p50_peak", "p90_peak", "p_zero_peak", "peak_month",
     "window_shape",
+    # v3: when the decision is due, and what the second reader made of it.
+    "decision_deadline", "sibyl_tag",
 ]
 
 
@@ -548,6 +594,128 @@ def _preferred_model_for(con, run_id: str, qid: str) -> str | None:
     return None
 
 
+def _planning_by_month(
+    con,
+    run_id: str,
+    qid: str,
+    metric: str,
+    window_start: Any,
+) -> dict[str, float]:
+    """{calendar month: planning figure} for one question in one run.
+
+    Keyed by CALENDAR month, not horizon index, because consecutive runs
+    share five of their six months at different horizon numbers. Comparing
+    horizon 1 against horizon 1 would read the window sliding forward as the
+    forecast changing.
+    """
+    model = _preferred_model_for(con, run_id, qid)
+    if not model:
+        return {}
+    out: dict[str, float] = {}
+    for horizon, vec in _monthly_spd(con, run_id, qid, model).items():
+        month = _decisions.horizon_month(window_start, horizon)
+        if not month:
+            continue
+        value = _gating.quantile(vec, metric, 0.5)
+        if value is not None:
+            out[month] = float(value)
+    return out
+
+
+def _build_persistence(
+    con,
+    *,
+    run_id: str,
+    previous_run_id: str | None,
+    attention_rows: list[dict[str, Any]],
+    previous_questions: list[dict[str, Any]],
+    current_questions: list[dict[str, Any]],
+    previous_reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """How long each shown risk has been flagged, and how it has moved.
+
+    Persistence counts the REPORTS that flagged it, newest first, stopping at
+    the first that did not: a risk flagged in June and August but not July has
+    been flagged once, and calling that two runs would be a lie about a gap.
+
+    Movement is measured only on the calendar months the two runs share.
+    """
+    flag_sets = [r.get("flagged_keys") or [] for r in previous_reports]
+    cur_starts = {
+        str(q["question_id"]): q.get("window_start_date") for q in current_questions
+    }
+    prev_starts = {
+        str(q["question_id"]): q.get("window_start_date") for q in previous_questions
+    }
+    prev_by_key: dict[tuple, dict[str, Any]] = {}
+    for q in previous_questions:
+        prev_by_key[_persistence.match_key(q)] = q
+
+    shown = [r for r in attention_rows if r.get("category")]
+    entries: list[dict[str, Any]] = []
+    for row in shown:
+        key = _persistence.match_key(row)
+        qid = str(row["question_id"])
+        runs = _persistence.consecutive_runs(key, flag_sets)
+        move = None
+        prev_q = prev_by_key.get(key)
+        if previous_run_id and prev_q is not None:
+            metric = str(row.get("metric") or "").upper()
+            move = _persistence.movement(
+                _planning_by_month(
+                    con, previous_run_id, str(prev_q["question_id"]), metric,
+                    prev_starts.get(str(prev_q["question_id"])),
+                ),
+                _planning_by_month(
+                    con, run_id, qid, metric, cur_starts.get(qid),
+                ),
+            )
+        entries.append({
+            "question_id": qid,
+            "iso3": row.get("iso3"),
+            "country_name": row.get("country_name"),
+            "hazard_code": row.get("hazard_code"),
+            "hazard_name": row.get("hazard_name"),
+            "metric": row.get("metric"),
+            "metric_name": row.get("metric_name"),
+            "consecutive_runs": runs,
+            "persistence": _persistence.persistence_phrase(runs),
+            "movement": move,
+        })
+
+    # Risks the last report flagged that this one does not show, and why.
+    shown_keys = {_persistence.match_key(r) for r in shown}
+    shown_qids = {str(r["question_id"]) for r in shown}
+    cur_by_key = {_persistence.match_key(r): r for r in attention_rows}
+    dropped: list[dict[str, Any]] = []
+    if previous_reports:
+        last = previous_reports[0]
+        for entry in last.get("entries") or []:
+            key = _persistence.match_key(entry)
+            if key in shown_keys:
+                continue
+            reason = _persistence.drop_reason(
+                cur_by_key.get(key), shown_question_ids=shown_qids
+            )
+            if not reason:
+                continue
+            dropped.append({
+                "iso3": key[0],
+                "country_name": _names.country_name(key[0]),
+                "hazard_code": key[1],
+                "hazard_name": _names.hazard_name(key[1]),
+                "metric": key[2],
+                "metric_name": _names.metric_name(key[2]),
+                "previous_report_month": last.get("month_label"),
+                "reason": reason,
+            })
+    return {
+        "n_previous_reports": len(previous_reports),
+        "entry_persistence": entries,
+        "dropped_flags": dropped,
+    }
+
+
 def build_deltas(
     con,
     *,
@@ -556,24 +724,34 @@ def build_deltas(
     attention_rows: list[dict[str, Any]],
     previous_deviation: dict[str, dict[str, dict[str, Any]]],
     previous_questions: list[dict[str, Any]],
+    current_questions: list[dict[str, Any]] | None = None,
+    previous_reports: list[dict[str, Any]] | None = None,
     top_n: int,
 ) -> dict[str, Any]:
     """Entries/exits from the top-N attention list, largest SPD movements,
     and how the previous run's flagged risks are tracking. Matched on
     (iso3, hazard_code, metric) — question ids are epoch-suffixed and never
     match across runs by design."""
+    previous_reports = previous_reports or []
+    _key = _persistence.match_key
+
+    persistence_block = _build_persistence(
+        con,
+        run_id=run_id,
+        previous_run_id=previous_run_id,
+        attention_rows=attention_rows,
+        previous_questions=previous_questions,
+        current_questions=current_questions or [],
+        previous_reports=previous_reports,
+    )
+
     if not previous_run_id:
         return {
             "previous_run_id": None,
             "note": "no previous run in this DB — first cycle, no deltas",
+            "match_key": "(iso3, hazard_code, metric)",
+            **persistence_block,
         }
-
-    def _key(row: dict[str, Any]) -> tuple:
-        return (
-            str(row.get("iso3") or ""),
-            str(row.get("hazard_code") or ""),
-            str(row.get("metric") or "").upper(),
-        )
 
     # Previous run's attention ordering, rebuilt from its deviation rows
     # (same preference, same js-descending ordering).
@@ -683,6 +861,7 @@ def build_deltas(
         "attention_exits": exits,
         "largest_spd_movements": movements[:20],
         "previous_flagged_tracking": tracking,
+        **persistence_block,
     }
     if jsd_unavailable:
         out["largest_spd_movements"] = []
@@ -692,6 +871,342 @@ def build_deltas(
             "movements skipped rather than re-implemented"
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# The second reader (Sibyl)
+# ---------------------------------------------------------------------------
+
+
+def _monthly_spd(con, run_id: str, qid: str, model_name: str) -> dict[int, list[float]]:
+    """{month_index: bucket vector} for one (run, question, model)."""
+    rows = rows_as_dicts(
+        con,
+        "SELECT month_index, bucket_index, probability FROM forecasts_raw "
+        "WHERE run_id = ? AND question_id = ? AND model_name = ? "
+        "ORDER BY month_index, bucket_index",
+        [run_id, qid, model_name],
+    )
+    by_month: dict[int, dict[int, float]] = {}
+    for r in rows:
+        by_month.setdefault(int(r["month_index"] or 0), {})[
+            int(r["bucket_index"] or 0)
+        ] = float(r["probability"] or 0.0)
+    out: dict[int, list[float]] = {}
+    k = max((max(b) for b in by_month.values() if b), default=0)
+    for month, buckets in by_month.items():
+        vec = [buckets.get(i + 1, 0.0) for i in range(k)]
+        if sum(vec) > 0:
+            out[month] = vec
+    return out
+
+
+def _expected_value(vec: list[float] | None, metric: str) -> float | None:
+    if not vec:
+        return None
+    try:
+        return float(_gating.expected_value(vec, metric))
+    except Exception:  # noqa: BLE001 - a metric with no centroids has no EV
+        return None
+
+
+def _main_pipeline_evidence(con, run_id: str, qid: str) -> str:
+    """What the ensemble actually read for this question.
+
+    The assembled SPD prompt carries every inject the pipeline had, so it is
+    the right thing to test Sibyl's findings against: anything in Sibyl's
+    trials whose content is absent from here is, by construction, something
+    the structured connectors did not carry.
+    """
+    if not table_exists(con, "llm_calls"):
+        return ""
+    try:
+        rows = rows_as_dicts(
+            con,
+            "SELECT prompt_text FROM llm_calls WHERE run_id = ? AND "
+            "question_id = ? AND phase IN ('spd_v2', 'binary_v2') AND "
+            "prompt_text IS NOT NULL ORDER BY length(prompt_text) DESC LIMIT 1",
+            [run_id, qid],
+        )
+    except Exception as exc:  # noqa: BLE001 - evidence is best effort
+        LOGGER.debug("sibyl: prompt lookup failed for %s: %s", qid, exc)
+        return ""
+    return str(rows[0]["prompt_text"] or "") if rows else ""
+
+
+# Below this much comparison text we do not claim anything is novel. With no
+# prompt to compare against, EVERY sentence looks new, and the report would
+# announce discoveries that the main system had in front of it all along.
+_MIN_EVIDENCE_CHARS = 500
+
+
+def build_sibyl_section(
+    con,
+    run_id: str,
+    attention_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Sibyl as a second reader: where it disagrees, and what it found.
+
+    Sibyl writes its pooled SPD into forecasts_raw under model_name='sibyl'
+    on the same run and question as the standard track, so the two expected
+    values come from one table and one aggregation.
+    """
+    if not table_exists(con, "sibyl_forecasts"):
+        return {"available": False, "reason": "no sibyl_forecasts table in this DB"}
+    by_qid = {str(r["question_id"]): r for r in attention_rows}
+    try:
+        forecasts = rows_as_dicts(
+            con,
+            "SELECT question_id, status, skip_reason, volatility_score, "
+            "js_divergence_vs_standard, js_divergence_inter_trial, trials_json, "
+            "cost_usd FROM sibyl_forecasts WHERE run_id = ? ORDER BY question_id",
+            [run_id],
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("sibyl section unavailable: %s", exc)
+        return {"available": False, "reason": str(exc)}
+    if not forecasts:
+        return {"available": False, "reason": f"Sibyl covered nothing in run {run_id}"}
+
+    ratio = _interp_config.sibyl_disagreement_ratio()
+    share = _interp_config.sibyl_unsettled_share()
+    n_facts = _interp_config.sibyl_novel_facts()
+
+    rows: list[dict[str, Any]] = []
+    for f in forecasts:
+        qid = str(f["question_id"])
+        row = by_qid.get(qid) or {}
+        metric = str(row.get("metric") or "").upper()
+        status = str(f.get("status") or "")
+        fred_model = _preferred_model_for(con, run_id, qid)
+        fred_ev = _expected_value(
+            _mean_spd(con, run_id, qid, fred_model) if fred_model else None, metric
+        )
+        sibyl_ev = _expected_value(_mean_spd(con, run_id, qid, "sibyl"), metric)
+        tag = (
+            _secondopinion.direction_tag(fred_ev, sibyl_ev, ratio=ratio)
+            if status not in ("skipped",)
+            else _secondopinion.TAG_NOT_COVERED
+        )
+
+        novel: list[str] = []
+        evidence = _main_pipeline_evidence(con, run_id, qid)
+        if len(evidence) >= _MIN_EVIDENCE_CHARS:
+            novel = _secondopinion.novel_facts(
+                _secondopinion.trial_texts(safe_json_loads(f.get("trials_json"))),
+                evidence,
+                limit=n_facts,
+            )
+        rows.append({
+            "question_id": qid,
+            "iso3": row.get("iso3"),
+            "country_name": row.get("country_name") or _names.country_name(row.get("iso3")),
+            "hazard_name": row.get("hazard_name") or _names.hazard_name(row.get("hazard_code")),
+            "metric": metric,
+            "metric_name": row.get("metric_name") or _names.metric_name(metric),
+            "status": status,
+            "skip_reason": f.get("skip_reason"),
+            "fred_expected": fred_ev,
+            "sibyl_expected": sibyl_ev,
+            "js_divergence_vs_standard": f.get("js_divergence_vs_standard"),
+            "js_divergence_inter_trial": f.get("js_divergence_inter_trial"),
+            "volatility_score": f.get("volatility_score"),
+            "cost_usd": f.get("cost_usd"),
+            "tag": tag,
+            "unsettled": _secondopinion.unsettled(
+                f.get("js_divergence_inter_trial"), share=share
+            ),
+            "novel_evidence": novel,
+            "evidence_comparable": len(evidence) >= _MIN_EVIDENCE_CHARS,
+        })
+
+    rows.sort(
+        key=lambda r: (
+            -(float(r.get("js_divergence_vs_standard") or 0.0)),
+            str(r.get("question_id")),
+        )
+    )
+    for row in rows:
+        tagged = by_qid.get(str(row["question_id"]))
+        if tagged is not None:
+            tagged["sibyl_tag"] = row["tag"]
+    return {
+        "available": True,
+        "caveat": _secondopinion.SIBYL_CAVEAT,
+        "summary": _secondopinion.summarise(rows),
+        "rows": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# The sector comparison (ACAPS)
+# ---------------------------------------------------------------------------
+
+
+def build_sector_comparison(con, attention_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Where Fred is more or less worried than the prevailing sector view."""
+    inform: list[dict[str, Any]] = []
+    risk: list[dict[str, Any]] = []
+    if table_exists(con, "acaps_inform_severity"):
+        try:
+            # The newest snapshot only: an older one would mix two vintages
+            # into one ranking and the gaps would be partly a date artefact.
+            inform = rows_as_dicts(
+                con,
+                "SELECT iso3, severity_score FROM acaps_inform_severity "
+                "WHERE snapshot_date = (SELECT MAX(snapshot_date) "
+                "FROM acaps_inform_severity)",
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("sector: INFORM severity unavailable: %s", exc)
+    if table_exists(con, "acaps_risk_radar"):
+        try:
+            risk = rows_as_dicts(
+                con, "SELECT iso3, impact, risk_level FROM acaps_risk_radar"
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("sector: Risk Radar unavailable: %s", exc)
+
+    block = _sector.build(
+        attention_rows,
+        inform_rows=inform,
+        risk_rows=risk,
+        list_size=_interp_config.sector_list_size(),
+        min_rank_gap=_interp_config.sector_min_rank_gap(),
+    )
+    # Names, so the model never has to turn a code into a country.
+    for comparison in block.get("comparisons") or []:
+        for side in ("more_worried", "less_worried"):
+            for entry in comparison.get(side) or []:
+                entry["country_name"] = _names.country_name(entry.get("iso3"))
+    block["available"] = bool(block.get("comparisons"))
+    if not block["available"]:
+        block["reason"] = (
+            "no ACAPS severity or risk rows in this DB to compare against"
+        )
+    return block
+
+
+# ---------------------------------------------------------------------------
+# Part B outlook: what resolves, when, and the forecast diary
+# ---------------------------------------------------------------------------
+
+
+def _previous_reports(con, *, include_test: bool, limit: int = 12) -> list[dict[str, Any]]:
+    """Stored interpretations, newest first, with their attention entries.
+
+    The reports themselves are the only honest record of what was flagged:
+    re-running today's thresholds over an old run would tell us what we WOULD
+    have said, which is a different claim.
+    """
+    if not table_exists(con, "interpretations"):
+        return []
+    test_clause = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
+    try:
+        rows = rows_as_dicts(
+            con,
+            "SELECT run_id, hs_run_id, created_at, content_json FROM interpretations "
+            f"WHERE kind IN ('current', 'combined') AND status = 'ok'{test_clause} "
+            "ORDER BY created_at DESC, version DESC LIMIT ?",
+            [int(limit)],
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("previous reports unavailable: %s", exc)
+        return []
+
+    out: list[dict[str, Any]] = []
+    seen_runs: set[str] = set()
+    for r in rows:
+        run = str(r.get("run_id") or r.get("hs_run_id") or "")
+        if run in seen_runs:
+            continue  # one report per run: later versions supersede earlier
+        seen_runs.add(run)
+        content = safe_json_loads(r.get("content_json")) or {}
+        entries = [e for e in (content.get("attention") or []) if isinstance(e, dict)]
+        out.append({
+            "run_id": r.get("run_id"),
+            "month_label": str(r.get("created_at") or "")[:7],
+            "entries": entries,
+            "flagged_keys": [
+                _persistence.match_key(e) for e in entries
+            ],
+        })
+    return out
+
+
+def _resolutions_for(con, qids: list[str]) -> dict[str, list[dict[str, Any]]]:
+    if not table_exists(con, "resolutions") or not qids:
+        return {}
+    try:
+        rows = rows_as_dicts(
+            con,
+            "SELECT question_id, horizon_m, observed_month, value FROM resolutions "
+            "WHERE question_id IN (SELECT UNNEST(?::VARCHAR[]))",
+            [qids],
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("diary: resolutions unavailable: %s", exc)
+        return {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        out.setdefault(str(r["question_id"]), []).append(r)
+    return out
+
+
+def build_performance_outlook(
+    con,
+    questions: list[dict[str, Any]],
+    *,
+    include_test: bool,
+    as_of: str,
+) -> dict[str, Any]:
+    """Part B's material: what is scored, what is due, and the diary.
+
+    The scored run is resolved from the tables that would carry outcomes, not
+    from the current run. Before this the runner fell back to the previous
+    stored interpretation, of which there has never been one, so the section
+    could only ever report emptiness.
+    """
+    n_resolutions = row_count(con, "resolutions") if table_exists(con, "resolutions") else 0
+    n_scores = row_count(con, "scores") if table_exists(con, "scores") else 0
+    scored_run_id = None
+    if n_scores:
+        try:
+            rows = rows_as_dicts(
+                con,
+                "SELECT MAX(run_id) AS run_id FROM scores WHERE run_id IS NOT NULL "
+                "AND run_id <> ''",
+            )
+            scored_run_id = str(rows[0]["run_id"]) if rows and rows[0].get("run_id") else None
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("scored run lookup failed: %s", exc)
+
+    upcoming = _performance.upcoming_resolutions(questions, as_of=as_of)
+    previous = _previous_reports(con, include_test=include_test)
+    diary_qids = sorted({
+        str(q)
+        for report in previous
+        for entry in report["entries"]
+        for q in (entry.get("question_ids") or [])
+    })
+    diary = _performance.diary(previous, _resolutions_for(con, diary_qids))
+    return {
+        "has_scored_run": bool(n_scores and n_resolutions),
+        "scored_run_id": scored_run_id,
+        "n_resolution_rows": n_resolutions,
+        "n_score_rows": n_scores,
+        "min_resolved_for_skill": _interp_config.min_resolved_for_skill(),
+        "upcoming_resolutions": upcoming,
+        "dormant_sentences": (
+            [] if (n_scores and n_resolutions)
+            else _performance.dormant_sentences(upcoming)
+        ),
+        "diary": diary,
+        "score_explanations": [
+            {"term": term, "text": text}
+            for term, text in _performance.SCORE_EXPLANATIONS
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -970,7 +1485,13 @@ def build_bundle(
             per_capita_floor=per_capita_floor,
         )
 
+        # The second reader runs before the deltas because it stamps each
+        # attention row with its tag, and the deltas read those rows.
+        sibyl_section = build_sibyl_section(con, run_id, attention_rows)
+        sector_block = build_sector_comparison(con, attention_rows)
+
         previous_run = _previous_run_id(con, run_id, include_test)
+        previous_reports = _previous_reports(con, include_test=include_test)
         deltas = build_deltas(
             con,
             run_id=run_id,
@@ -980,9 +1501,15 @@ def build_bundle(
             previous_questions=(
                 _questions_for_run(con, previous_run, include_test) if previous_run else []
             ),
+            current_questions=questions,
+            previous_reports=previous_reports,
             top_n=top_n,
         )
         blind_spots = build_blind_spots(attention_rows)
+        outlook = build_performance_outlook(
+            con, questions, include_test=include_test,
+            as_of=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        )
 
         label = datetime.now(timezone.utc).strftime("%Y-%m")
         staging = out_dir / f"current_run_analysis__{label}"
@@ -992,6 +1519,28 @@ def build_bundle(
 
         write_json(staging / "deltas.json", deltas)
         write_json(staging / "blind_spots.json", blind_spots)
+        write_json(staging / "sibyl.json", sibyl_section)
+        write_json(staging / "sector_comparison.json", sector_block)
+        write_json(staging / "performance_outlook.json", outlook)
+        write_json(
+            staging / "decision_calendar.json",
+            {
+                "note": (
+                    "Deadlines are derived: the month with most expected "
+                    "impact, less a lead time configured per hazard. The "
+                    "report's model writes the action, never the date."
+                ),
+                "lead_time_months": {
+                    hz: _interp_config.lead_time_months(hz)
+                    for hz in sorted({
+                        str(r.get("hazard_code") or "") for r in attention_rows
+                    } - {""})
+                },
+                "rows": _decisions.calendar_rows(
+                    [r for r in attention_rows if r.get("category")]
+                ),
+            },
+        )
 
         guide = build_current_run_guide({"n_questions": len(questions), "run_id": run_id})
         (staging / "ANALYST_GUIDE.md").write_text(guide, encoding="utf-8")
@@ -1003,8 +1552,14 @@ def build_bundle(
         q_by_id = {str(q["question_id"]): q for q in questions}
         fixed_texts = [
             guide,
-            (staging / "deltas.json").read_text(encoding="utf-8"),
-            (staging / "blind_spots.json").read_text(encoding="utf-8"),
+            *(
+                (staging / name).read_text(encoding="utf-8")
+                for name in (
+                    "deltas.json", "blind_spots.json", "sibyl.json",
+                    "sector_comparison.json", "performance_outlook.json",
+                    "decision_calendar.json",
+                )
+            ),
         ]
         budget_left = max_pack_tokens - sum(_estimate_tokens(t) for t in fixed_texts)
         # Reserve a slice for attention_index.csv + MANIFEST (written after).
@@ -1123,9 +1678,14 @@ def build_bundle(
                 # quoted, never counted by the model.
                 "run_summary": run_summary,
                 "section_counts": section_counts,
-                "worsening_multiple": _interp_config.worsening_multiple(),
-                "min_per_category": _interp_config.min_per_category(),
-                "max_per_category": _interp_config.max_per_category(),
+                # The report's own length budget, so the model is told the
+                # number rather than left to infer it from the row count.
+                "max_entries": _interp_config.max_entries(),
+                "n_entries": len(
+                    [r for r in attention_rows if r.get("category")]
+                ),
+                "n_sibyl_rows": len((sibyl_section.get("rows") or [])),
+                "has_scored_run": outlook.get("has_scored_run"),
                 "n_with_deviation": sum(
                     1 for r in attention_rows if r.get("js_vs_baserate") is not None
                 ),

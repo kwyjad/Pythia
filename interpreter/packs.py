@@ -102,6 +102,11 @@ def load_pack(path: str | Path) -> Pack:
         "ANALYST_GUIDE.md", "deltas.json", "blind_spots.json", "digest.md",
         "attention_index.csv", "rollups.csv", "questions_index.csv",
         "calibration_advice.md", "briefing/02_case_studies.md",
+        # v3: the second reader, the sector comparison, the dated calendar and
+        # Part B's outlook. All four are rendered from the pack, not written
+        # by the model.
+        "sibyl.json", "sector_comparison.json", "performance_outlook.json",
+        "decision_calendar.json",
     ):
         text = _text(name)
         if text is not None:
@@ -142,13 +147,59 @@ def pack_question_ids(pack: Pack) -> set[str]:
     return out
 
 
+def _json_file(pack: Pack, name: str) -> dict[str, Any]:
+    text = pack.files.get(name)
+    if not text:
+        return {}
+    try:
+        obj = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        LOGGER.warning("Unreadable %s in pack: %s", name, exc)
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+_ISSUE_RUN = None  # set lazily below to avoid a module-level regex import cost
+
+
+def _issue_line(pack: Pack) -> dict[str, Any]:
+    """When these forecasts were issued and which months they cover.
+
+    The August report gave a reader no way to tell what period it described
+    without reading an entry and working it out. One line under the title
+    fixes that, and it is derived rather than written: the issue date comes
+    from the run id, the window from the questions themselves.
+    """
+    import re
+
+    from interpreter import decisions
+
+    manifest = pack.manifest or {}
+    issued = None
+    match = re.match(r"^hs_(\d{4})(\d{2})(\d{2})T", str(manifest.get("hs_run_id") or ""))
+    if match:
+        year, month, day = (int(g) for g in match.groups())
+        issued = f"{day} {decisions.MONTH_NAMES[month - 1]} {year}"
+    elif manifest.get("generated_at"):
+        label = decisions.month_label(str(manifest["generated_at"])[:7])
+        issued = label
+
+    window = manifest.get("window") or {}
+    start = str(window.get("start") or "")[:7]
+    first = decisions.month_label(start)
+    last = decisions.month_label(decisions.add_months(start, 5) or "")
+    covering = f"{first} to {last}" if first and last else None
+    return {"issued": issued, "covering": covering}
+
+
 def report_extras(pack: Pack) -> dict[str, Any]:
     """The pieces the report states about ITSELF, generated not written.
 
-    The selection panel and the appendix question table are derived from the
-    configuration and the gate's own counts. The model never sees them as
-    something to compose, so it cannot get them wrong, and the counts in the
-    panel are the same objects the table is built from.
+    The selection panel, the appendix question table, the decision calendar,
+    the second reader's section and the sector comparison are all derived from
+    the pack and from configuration. The model never sees them as something to
+    compose, so it cannot get them wrong, and every count the report prints
+    about itself comes from one object.
     """
     from interpreter import gating, panels
 
@@ -168,7 +219,10 @@ def report_extras(pack: Pack) -> dict[str, Any]:
         "watchlist": sum(1 for r in rows if r.get("gate") == gating.GATE_WATCHLIST),
         "thin": sum(1 for r in rows if r.get("baserate_thin")),
     }
+    blind = _json_file(pack, "blind_spots.json")
+    deltas = _json_file(pack, "deltas.json")
     return {
+        "issue_line": _issue_line(pack),
         "selection_panel": panels.selection_panel(counts),
         "question_table": panels.question_table(rows),
         # {question_id: gate} so the renderer can tag each entry with the gate
@@ -178,6 +232,23 @@ def report_extras(pack: Pack) -> dict[str, Any]:
             str(r.get("question_id")): str(r.get("gate"))
             for r in rows if r.get("gate")
         },
+        # {question_id: what the second reader made of it}, same contract.
+        "sibyl_tags": {
+            str(r.get("question_id")): str(r.get("sibyl_tag"))
+            for r in rows if r.get("sibyl_tag")
+        },
+        "decision_calendar": (_json_file(pack, "decision_calendar.json") or {}),
+        "sibyl": _json_file(pack, "sibyl.json"),
+        "sector": _json_file(pack, "sector_comparison.json"),
+        "performance_outlook": _json_file(pack, "performance_outlook.json"),
+        "persistence": {
+            "entries": deltas.get("entry_persistence") or [],
+            "dropped": deltas.get("dropped_flags") or [],
+        },
+        # Three lines on page one; the full list stays in the appendix. What
+        # the system cannot see changes how every entry should be read, and it
+        # used to sit on page fourteen.
+        "blind_spots_short": list(blind.get("standing_caveats") or [])[:3],
         "watchlist": [
             {
                 "country": r.get("country_name") or r.get("iso3"),
@@ -187,6 +258,26 @@ def report_extras(pack: Pack) -> dict[str, Any]:
             for r in rows if r.get("gate") == gating.GATE_WATCHLIST
         ],
     }
+
+
+def evidence_text(pack: Pack) -> str:
+    """Everything the pack actually carried, as one lowercase haystack.
+
+    The proper-noun guard tests the report's names against this. It has to be
+    the whole pack rather than a curated slice: a name the model read in a
+    grounding snippet is supported, and a guard that only looked at the
+    attention index would fail every legitimate mention.
+    """
+    parts: list[str] = []
+    for name, text in pack.files.items():
+        if name.endswith((".csv", ".json", ".md")):
+            parts.append(text)
+    for record in pack.records.values():
+        try:
+            parts.append(json.dumps(record, default=str))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            continue
+    return "\n".join(parts).lower()
 
 
 def _as_float(value: Any) -> float | None:
@@ -225,6 +316,23 @@ def pack_identity(pack: Pack) -> dict[str, dict[str, str]]:
         }
         if all(fields.values()):
             out[qid] = fields
+    return out
+
+
+def decision_blocks(pack: Pack) -> dict[str, dict[str, Any]]:
+    """{question_id: the derived decision block} from decision_calendar.json.
+
+    The dates are arithmetic over the peak horizon; the model supplies only
+    the action. Returned so the runner can overwrite whatever month the model
+    wrote, the same repair contract as the identity fields.
+    """
+    calendar = _json_file(pack, "decision_calendar.json")
+    out: dict[str, dict[str, Any]] = {}
+    for row in calendar.get("rows") or []:
+        qid = str(row.get("question_id") or "")
+        deadline = row.get("deadline_month")
+        if qid and deadline:
+            out[qid] = {"deadline_month": deadline, "basis": "peak_horizon"}
     return out
 
 
@@ -387,9 +495,6 @@ def run_summary_figures(pack: Pack) -> dict[str, Any]:
         value = summary.get(key)
         if value is not None:
             out[key] = value
-    threshold = manifest.get("worsening_multiple")
-    if threshold is not None:
-        out["worsening_multiple"] = threshold
     return out
 
 
@@ -473,8 +578,12 @@ def assemble_input_text(
     if pack.kind == "current":
         for name, title in (
             ("attention_index.csv", "ATTENTION INDEX (csv)"),
-            ("deltas.json", "DELTAS VS PREVIOUS RUN"),
+            ("deltas.json", "DELTAS VS PREVIOUS RUN (incl. persistence)"),
             ("blind_spots.json", "BLIND SPOTS"),
+            ("decision_calendar.json", "DECISION CALENDAR (deadlines are derived)"),
+            ("sibyl.json", "SECOND READER (Sibyl)"),
+            ("sector_comparison.json", "SECTOR COMPARISON (ACAPS)"),
+            ("performance_outlook.json", "WHAT RESOLVES, AND WHEN"),
         ):
             if name in pack.files:
                 parts.append(_section(title, pack.files[name]))

@@ -19,6 +19,22 @@ Env vars (see CLAUDE.md's table):
   budget, so it sits at the SPD ceiling, not the 16k general one.
 - PYTHIA_INTERPRETER_STRICT_VALIDATION (default 0) — when 1, a validation
   failure suppresses publication (consumed by the Phase 4 validator).
+
+v3 selection and report knobs (all with defaults below):
+- PYTHIA_INTERPRETER_THRESHOLD_{PA,FATALITIES,PHASE3} and the two
+  _POP_SHARE variants — what counts as an impact worth mobilising against.
+- PYTHIA_INTERPRETER_MINPROB (and _MINPROB_{METRIC}) — how much probability
+  has to sit above that threshold, in any one month of the window.
+- PYTHIA_INTERPRETER_UNUSUAL_PERCENTILE — how far from its own history a
+  forecast must sit, as a percentile of this run's own spread.
+- PYTHIA_INTERPRETER_BASERATE_MIN_OBS — below this the anchor is called thin.
+- PYTHIA_INTERPRETER_MAX_ENTRIES — how many entries the report carries.
+- PYTHIA_INTERPRETER_LEAD_TIME_{HAZARD} — months between the decision and the
+  month the plan has to cover (the decision calendar's derivation).
+- PYTHIA_INTERPRETER_SIBYL_{DISAGREEMENT_RATIO,UNSETTLED_SHARE,NOVEL_FACTS}.
+- PYTHIA_INTERPRETER_SECTOR_{LIST_SIZE,MIN_RANK_GAP}.
+- PYTHIA_INTERPRETER_MIN_RESOLVED_FOR_SKILL and _SKILL_BOOTSTRAP — Part B's
+  small-sample floor and the size of its bootstrap.
 """
 
 from __future__ import annotations
@@ -30,17 +46,12 @@ DEFAULT_TEMPLATE_VERSION = "v3"
 SCHEMA_VERSION = "1"
 
 # --- Attention selection (report sections) ---------------------------------
-# A forecast BELOW its base rate is not news, so only forecasts above it can
-# enter the "potentially worsening" sections. "Significantly above" is set as
-# a multiple of the historical expectation rather than a divergence score,
-# because a multiple is the one number a lay reader can check against the
-# sentence it appears in: 2x means the system expects twice the impact
-# history would suggest. Each section takes its top MIN entries whatever the
-# multiple (so a quiet month still names the month's worst), plus any further
-# entries that clear the multiple, capped at MAX so the report stays short.
-DEFAULT_WORSENING_MULTIPLE = 2.0
-DEFAULT_MIN_PER_CATEGORY = 3
-DEFAULT_MAX_PER_CATEGORY = 6
+# Which box a row belongs in is the GATE's decision (interpreter/gating.py);
+# selection only orders the gated rows by expected excess and cuts them to
+# DEFAULT_MAX_ENTRIES. The old per-section knobs (a worsening MULTIPLE, a
+# minimum and a maximum per box) were removed in v3: ranking by a multiple is
+# what put a cyclone question with 87% of its weight on "nobody affected" at
+# the top of a report whose second half was famine in Sudan.
 
 # chars-per-token estimate shared with the pack builder.
 CHARS_PER_TOKEN = 4.0
@@ -129,6 +140,40 @@ DEFAULT_MAX_ENTRIES = 5
 # Part B: the smallest resolved count that can support a skill claim.
 DEFAULT_MIN_RESOLVED_FOR_SKILL = 100
 
+# How many bootstrap resamples stand behind a printed skill interval. A point
+# estimate off eighty question-horizons is a number with no error bar, and the
+# first scored run will be exactly that size.
+DEFAULT_SKILL_BOOTSTRAP_SAMPLES = 2000
+
+# --- The decision calendar (task 5) ----------------------------------------
+# How long before the month a plan has to cover the decision must be taken.
+# Slow-onset hazards need the longest run-up: a drought response is a pipeline
+# and a procurement cycle, a cyclone response is a warehouse that is already
+# stocked or is not. These are the report's own planning assumptions, stated
+# here so they can be argued with rather than buried in a sentence.
+DEFAULT_LEAD_TIME_MONTHS = {
+    "DR": 3,
+    "FL": 1,
+    "TC": 1,
+    "ACE": 2,
+}
+DEFAULT_LEAD_TIME_FALLBACK = 1
+
+# --- The second reader (task 4) --------------------------------------------
+# How far Sibyl's expected value must sit from the main pipeline's before the
+# report calls it a disagreement rather than agreement. A ratio, both ways.
+DEFAULT_SIBYL_DISAGREEMENT_RATIO = 1.5
+# How much inter-trial divergence means Sibyl's own research did not settle
+# the question. js_divergence is on [0, ln 2]; this is the share of that.
+DEFAULT_SIBYL_UNSETTLED_SHARE = 0.25
+DEFAULT_SIBYL_NOVEL_FACTS = 2
+
+# --- The sector comparison (task 6) ----------------------------------------
+DEFAULT_SECTOR_LIST_SIZE = 5
+# A country needs a rank gap of at least this many places before the report
+# claims Fred and the sector disagree about it. Two adjacent ranks is noise.
+DEFAULT_SECTOR_MIN_RANK_GAP = 5
+
 
 def _metric_key(metric: str) -> str:
     m = (metric or "").upper()
@@ -207,20 +252,50 @@ def min_resolved_for_skill() -> int:
     )
 
 
-def worsening_multiple() -> float:
-    """How far above the base rate counts as "significantly above"."""
-    return _env_float("PYTHIA_INTERPRETER_WORSENING_MULTIPLE",
-                      DEFAULT_WORSENING_MULTIPLE)
+def skill_bootstrap_samples() -> int:
+    return _env_int(
+        "PYTHIA_INTERPRETER_SKILL_BOOTSTRAP", DEFAULT_SKILL_BOOTSTRAP_SAMPLES
+    )
 
 
-def min_per_category() -> int:
-    return _env_int("PYTHIA_INTERPRETER_MIN_PER_CATEGORY",
-                    DEFAULT_MIN_PER_CATEGORY)
+def lead_time_months(hazard_code: str | None) -> int:
+    """Months between the decision and the month the plan has to cover.
+
+    Per-hazard env override (``PYTHIA_INTERPRETER_LEAD_TIME_DR``) so the
+    planning assumption can be retuned by whoever disagrees with it.
+    """
+    key = (hazard_code or "").strip().upper()
+    default = DEFAULT_LEAD_TIME_MONTHS.get(key, DEFAULT_LEAD_TIME_FALLBACK)
+    if not key:
+        return default
+    return _env_int(f"PYTHIA_INTERPRETER_LEAD_TIME_{key}", default)
 
 
-def max_per_category() -> int:
-    return _env_int("PYTHIA_INTERPRETER_MAX_PER_CATEGORY",
-                    DEFAULT_MAX_PER_CATEGORY)
+def sibyl_disagreement_ratio() -> float:
+    return _env_float(
+        "PYTHIA_INTERPRETER_SIBYL_DISAGREEMENT_RATIO",
+        DEFAULT_SIBYL_DISAGREEMENT_RATIO,
+    )
+
+
+def sibyl_unsettled_share() -> float:
+    return _env_float(
+        "PYTHIA_INTERPRETER_SIBYL_UNSETTLED_SHARE", DEFAULT_SIBYL_UNSETTLED_SHARE
+    )
+
+
+def sibyl_novel_facts() -> int:
+    return _env_int("PYTHIA_INTERPRETER_SIBYL_NOVEL_FACTS", DEFAULT_SIBYL_NOVEL_FACTS)
+
+
+def sector_list_size() -> int:
+    return _env_int("PYTHIA_INTERPRETER_SECTOR_LIST_SIZE", DEFAULT_SECTOR_LIST_SIZE)
+
+
+def sector_min_rank_gap() -> int:
+    return _env_int(
+        "PYTHIA_INTERPRETER_SECTOR_MIN_RANK_GAP", DEFAULT_SECTOR_MIN_RANK_GAP
+    )
 
 
 def public_base_url() -> str:

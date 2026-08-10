@@ -23,10 +23,10 @@ and what came out of it. Use the placeholders, never your own digits:
 
 ### `attention`
 
-One entry per row in the attention index that carries a `category`. Do not
-add rows without one. Do not drop rows that have one. Copy `iso3`,
-`hazard_code`, `metric`, `category` and `hazard_family` exactly as the pack
-gives them, and set `rank` from `category_rank`.
+One entry per row in the attention index that carries a `category`. There
+will be at most five. Do not add rows without one. Do not drop rows that have
+one. Copy `iso3`, `hazard_code`, `metric`, `category` and `hazard_family`
+exactly as the pack gives them, and set `rank` from `category_rank`.
 
 The four boxes, and what each one means:
 
@@ -71,11 +71,20 @@ For each entry write:
   typed, and this report's standing promise is that it contains none. Say
   "a government figure in the hundreds of thousands", "a sharp rise in
   recorded events", "roughly a fifth of the population".
+- `decision_point` — the decision this entry calls for. Write the `action`:
+  one sentence naming what has to be decided and by whom, in the language of
+  a response plan. Prepositioning stock. Opening a pipeline. Moving money
+  between appeals. Set `deadline_month` and `basis` from the decision
+  calendar in the pack; both are recomputed from the pack after you answer,
+  so a guess there is wasted work while a guess in `action` is not. **If you
+  cannot name a decision, the entry does not belong in the report.** Say so
+  in `why_it_stands_out` rather than inventing one.
 - `impacts` — what this would mean for people, in one or two short items.
 - `operational_challenges` — access, funding, season, in one or two short
   items. Leave it out if the pack says nothing useful.
 
-Keep the whole entry under one hundred and fifty words.
+Keep the whole entry under one hundred and twenty words. The report carries
+five entries at most and it is read by people with a morning, not a day.
 
 **One rule governs every field above: you write no digits.** Not in impacts,
 not in operational challenges, not in the reason an entry stands out. Where
@@ -87,7 +96,8 @@ number in it was written by a language model.
 ### `changes_since_last_run`
 
 Three or four short items from `deltas.json`: what entered, what left, what
-moved most. Name countries, not codes.
+moved most. Name countries, not codes. Do not restate the persistence table
+or the movement table; the report prints those itself from the same file.
 
 ### `blind_spots`
 
@@ -98,14 +108,28 @@ and brief.
 
 One sentence. The single thing a reader should take away.
 
+## What you must NOT write
+
+Several sections of the report are generated from the pack and printed
+without passing through you. Do not write them, summarise them, or refer to
+figures inside them:
+
+- the decision calendar page,
+- the second reader's section, including what Sibyl found and its caveat,
+- the comparison against the sector's own severity rankings,
+- the selection panel, the appendix question table and the score glossary,
+- the schedule of what resolves and when.
+
+Your part in those is the `action` sentence on each entry, and nothing else.
+
 ## Part B: how well the system has done
 
 {{SCORED_SECTION}}
 
-If the section above says no scored run is available, write a `performance`
-block whose `plain_summary` says plainly that no forecast window has closed
-yet, so there is nothing to score. Do not imply performance is unknown for
-some deeper reason. Otherwise summarise it: the plain result, the skill
-against climatology, the best and worst calls, and the standing warning that
+If the section above says no scored run is available, omit the `performance`
+block entirely. The report prints its own account of what is due to resolve
+and when, which is more use than a paragraph saying there is nothing yet.
+Otherwise summarise it: the plain result, the skill against climatology with
+its uncertainty, the best and worst calls, and the standing warning that
 Track 1 and Track 2 cover different questions and cannot be compared on raw
 scores.

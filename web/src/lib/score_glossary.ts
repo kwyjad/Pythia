@@ -80,6 +80,46 @@ export const TOOLTIP_SKILL =
   "lost to it. Track 1 and Track 2 are disjoint populations — compare each " +
   "track against its own climatology, never raw scores across tracks.";
 
+// --- The plain-English copy the monthly report prints -----------------------
+// Mirrored verbatim in interpreter/performance.py (SCORE_EXPLANATIONS) and
+// pinned by interpreter/tests/test_performance.py, so the PDF and the
+// dashboard can never explain the same score two different ways. The tooltips
+// above stay technical for the Performance page; these are for a reader who
+// has never seen a Brier score.
+export const REPORT_SCORE_EXPLANATIONS: Array<{ term: string; text: string }> = [
+  {
+    term: "Brier score",
+    text:
+      "How far the forecast sat from what happened, squared and averaged. " +
+      "Lower is better, and zero is perfect. It rewards a forecast that put " +
+      "its weight in the right place and punishes one that was confident " +
+      "and wrong.",
+  },
+  {
+    term: "Log loss",
+    text:
+      "The same idea, but far harsher on confidence. A forecast that ruled " +
+      "something out and then watched it happen scores very badly indeed. " +
+      "Lower is better.",
+  },
+  {
+    term: "Ranked probability score",
+    text:
+      "Brier's cousin for questions about size. It gives partial credit for " +
+      "being close: a forecast that expected the band next door scores " +
+      "better than one that expected the other end of the scale. Lower is " +
+      "better.",
+  },
+  {
+    term: "Skill",
+    text:
+      "The score set against what you would have got by assuming a normal " +
+      "year. Above zero means the system beat that; below zero means it " +
+      "lost to it. This is the number that says whether the forecasting was " +
+      "worth doing.",
+  },
+];
+
 export const SCORE_GLOSSARY: Array<{ term: string; text: string }> = [
   { term: "SPD Brier", text: TOOLTIP_BRIER_SPD },
   { term: "Binary Brier", text: TOOLTIP_BRIER_BINARY },

@@ -94,8 +94,15 @@ def _inline(text: str) -> str:
 _TABLE_SEP = re.compile(r"^\s*\|?[\s:|-]+\|?\s*$")
 
 
-def markdown_to_html(md: str) -> str:
-    """The deterministic subset converter (see module docstring)."""
+def markdown_to_blocks(md: str) -> list[str]:
+    """The deterministic subset converter, one HTML block per element.
+
+    Returned as blocks rather than one string so the first page can be
+    assembled properly: the title and the issue line come from the markdown,
+    and the map and the metadata belong between them and the rest. The map
+    used to be emitted before the whole body, which put its caption above the
+    report's own title.
+    """
     out: list[str] = []
     lines = (md or "").split("\n")
     i = 0
@@ -175,7 +182,49 @@ def markdown_to_html(md: str) -> str:
             para.append(nxt)
             i += 1
         out.append(f"<p>{_inline(' '.join(para))}</p>")
-    return "\n".join(out)
+    return out
+
+
+def markdown_to_html(md: str) -> str:
+    """The whole body as one HTML string (the blocks, joined)."""
+    return "\n".join(markdown_to_blocks(md))
+
+
+_H2 = re.compile(r"^<h2>(.*)</h2>$", re.S)
+
+
+def _anchor_headings(blocks: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
+    """Give every top-level heading an id, and collect them for the contents.
+
+    Returns (blocks with ids, [(id, title)]). Only h2 is collected: a table of
+    contents that listed every sub-heading would be as long as the report it
+    is meant to make navigable.
+    """
+    out: list[str] = []
+    entries: list[tuple[str, str]] = []
+    for block in blocks:
+        match = _H2.match(block.strip())
+        if match:
+            anchor = f"sec-{len(entries)}"
+            entries.append((anchor, match.group(1)))
+            out.append(f'<h2 id="{anchor}">{match.group(1)}</h2>')
+        else:
+            out.append(block)
+    return out, entries
+
+
+def _contents_block(entries: list[tuple[str, str]]) -> str:
+    """The table of contents, with real page numbers.
+
+    ``target-counter`` is resolved by WeasyPrint at layout time, so the
+    numbers are the printed ones rather than an estimate.
+    """
+    if len(entries) < 3:
+        return ""  # a contents page for two sections helps nobody
+    items = "".join(
+        f'<li><a href="#{anchor}">{title}</a></li>' for anchor, title in entries
+    )
+    return f'<nav class="toc"><h2>Contents</h2><ul>{items}</ul></nav>'
 
 
 # ---------------------------------------------------------------------------
@@ -194,10 +243,13 @@ FRED_BG = "#F5F5F5"
 
 _CSS = f"""
 @page {{
-  margin: 16mm 18mm 18mm;
+  /* The bottom margin has to clear the running footer, or the page number
+     lands on top of the last line of body text. It did. */
+  margin: 16mm 18mm 24mm;
   @bottom-center {{
     content: "Fred  ·  page " counter(page) " of " counter(pages);
     font-family: sans-serif; font-size: 8pt; color: {FRED_MUTED};
+    vertical-align: top; padding-top: 6mm;
   }}
 }}
 body {{
@@ -226,8 +278,16 @@ h2 + * {{ page-break-before: avoid; }}
 h3 {{ font-size: 11pt; margin: 11pt 0 3pt; page-break-after: avoid;
      color: {FRED_SECONDARY}; }}
 p {{ margin: 4pt 0; }}
-ul {{ margin: 4pt 0 4pt 14pt; padding: 0; }}
-li {{ margin: 2pt 0; }}
+/* Indent with PADDING, not margin: with margin and zero padding the marker
+   is laid out outside the box and drifts away from its own text. */
+ul {{ margin: 4pt 0; padding-left: 16pt; list-style-position: outside; }}
+li {{ margin: 2pt 0; padding-left: 2pt; }}
+.toc {{ page-break-after: always; }}
+.toc ul {{ list-style: none; padding-left: 0; }}
+.toc li {{ margin: 3pt 0; border-bottom: 1px dotted {FRED_BORDER}; }}
+.toc li a {{ color: {FRED_TEXT}; }}
+.toc li a::after {{ content: target-counter(attr(href), page); float: right;
+                   color: {FRED_MUTED}; }}
 a {{ color: {FRED_PRIMARY}; text-decoration: none; }}
 code {{ font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9pt;
        background: {FRED_BG}; padding: 0 2pt; border-radius: 2pt; }}
@@ -236,8 +296,10 @@ th, td {{ border: 1px solid {FRED_BORDER}; padding: 2pt 6pt; text-align: left; }
 th {{ background: {FRED_BG}; color: {FRED_TEXT}; }}
 .figure {{ margin: 6pt 0 8pt; page-break-inside: avoid; }}
 .figure svg {{ max-width: 100%; height: auto; }}
-.mapblock {{ margin: 10pt 0 14pt; page-break-inside: avoid; }}
-.mapblock .caption {{ font-size: 9pt; color: {FRED_MUTED}; margin-top: 3pt; }}
+.mapblock {{ margin: 10pt 0 14pt; page-break-inside: avoid; text-align: center; }}
+.mapblock svg {{ max-width: 100%; height: auto; }}
+.mapblock .caption {{ font-size: 9pt; color: {FRED_MUTED}; margin-top: 4pt;
+                     text-align: left; }}
 .meta {{ color: {FRED_MUTED}; font-size: 8.5pt; margin-bottom: 10pt; }}
 .banner {{ border: 1px solid {FRED_SECONDARY}; background: #FBEDE6;
           color: {FRED_SECONDARY};
@@ -259,22 +321,26 @@ def _masthead(row: dict[str, Any]) -> str:
 
 
 def _map_block(map_svg: str | None, captions: list[str] | None) -> str:
-    """The attention map, printed once under the masthead.
+    """The attention map, centred, with its scale stated in words.
 
     The dashboard draws this with JavaScript, which a PDF cannot run, so the
     printed report carries its own SVG. When the map is unavailable the block
     is simply absent; a missing picture must not fail a report.
+
+    The caption used to be the bare string "Darkest first: " followed by a
+    list of countries, which read as a debugging artefact. It now says what
+    the shading means and then names the countries.
     """
     if not map_svg:
         return ""
-    caption = ""
+    text = (
+        "Shading is how far a country's forecasts sit from their own history, "
+        "from close to usual through to a long way from it. Grey means no "
+        "forecast this month."
+    )
     if captions:
-        caption = (
-            '<div class="caption">Darkest first: '
-            + _html.escape(", ".join(captions))
-            + ".</div>"
-        )
-    return f'<div class="mapblock">{map_svg}{caption}</div>'
+        text += " Furthest from usual: " + _html.escape(", ".join(captions)) + "."
+    return f'<div class="mapblock">{map_svg}<div class="caption">{text}</div></div>'
 
 
 def build_report_html(
@@ -283,8 +349,24 @@ def build_report_html(
     map_svg: str | None = None,
     map_captions: list[str] | None = None,
 ) -> str:
-    """A self-contained HTML document from one interpretations row."""
-    body = markdown_to_html(str(row.get("content_md") or ""))
+    """A self-contained HTML document from one interpretations row.
+
+    First page order: masthead, title, the issue line, the map, then the
+    metadata, then the report. The map used to be emitted ahead of the whole
+    body, so its caption printed above the report's own title.
+    """
+    blocks = markdown_to_blocks(str(row.get("content_md") or ""))
+    blocks, headings = _anchor_headings(blocks)
+
+    # The title (h1) and the issue line beneath it come from the markdown and
+    # belong above the map; everything from the first section onward comes
+    # after the contents page.
+    lead: list[str] = []
+    while blocks and not blocks[0].startswith(("<h2", "<h3")):
+        lead.append(blocks.pop(0))
+        if len(lead) >= 3:
+            break
+
     status = str(row.get("status") or "")
     banner = ""
     if status != "ok":
@@ -305,9 +387,11 @@ def build_report_html(
         "</head><body>"
         f"{_masthead(row)}"
         f"{banner}"
+        f"{''.join(lead)}"
         f"{_map_block(map_svg, map_captions)}"
         f"<div class='meta'>{' · '.join(meta_bits)}</div>"
-        f"{body}</body></html>"
+        f"{_contents_block(headings)}"
+        f"{''.join(blocks)}</body></html>"
     )
 
 

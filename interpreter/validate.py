@@ -5,7 +5,7 @@
 
 """Phase 4 validation: runs after generation, before storage (plan §8).
 
-Six checks, each reported separately in ``validation_json`` so failures are
+Seven checks, each reported separately in ``validation_json`` so failures are
 inspectable:
 
 1. **schema** — jsonschema shape validation (interpreter/schema.py) plus the
@@ -27,6 +27,9 @@ inspectable:
    the reader needs a name.
 6. **categories** — the pack decides which forecasts the report covers and
    under which heading; the model copies that decision and may not change it.
+7. **proper_nouns** — a name in prose must appear in the pack's evidence.
+   Reports rather than fails (see ``check_proper_nouns``), but the violations
+   are quoted back to the model in the correction pass.
 
 Failures set ``status='failed_validation'``; the report is still written so
 it can be inspected. With PYTHIA_INTERPRETER_STRICT_VALIDATION=1 the runner
@@ -143,6 +146,12 @@ def _prose_fields(content: dict[str, Any]) -> list[tuple[str, list[str], str]]:
         for name in _ENTRY_PROSE_LISTS:
             for j, item in enumerate(entry.get(name) or []):
                 out.append((f"attention[{i}].{name}[{j}]", qids, str(item)))
+        # The decision point's action is prose and is linted like any other:
+        # its sibling fields (deadline_month, basis) are data the runner
+        # derives, and carry digits by design.
+        action = (entry.get("decision_point") or {}).get("action")
+        if action:
+            out.append((f"attention[{i}].decision_point.action", qids, str(action)))
     performance = content.get("performance") or {}
     for name in _PERFORMANCE_PROSE_FIELDS:
         if performance.get(name):
@@ -578,6 +587,139 @@ def check_style(content: dict[str, Any]) -> CheckResult:
     return CheckResult(passed=not errors, errors=errors)
 
 
+# ---------------------------------------------------------------------------
+# Check 7: proper nouns (task 8)
+# ---------------------------------------------------------------------------
+
+# The existing guards protect NUMBERS. They do not protect NAMES, and the
+# report's footer tells the reader that every figure in it is machine-derived,
+# which invites them to trust the rest of it too. The August report named
+# "Typhoon Maysak" in its Vietnam entry. That string appears nowhere in the
+# pack. The model supplied it.
+#
+# So: a proper noun in prose must appear somewhere in the evidence the pack
+# actually carried. Named storms, named operations, named agreements and
+# named places are the risk cases, and all of them are things a reader will
+# take as fact.
+#
+# This check REPORTS rather than fails (the brief's instruction): the
+# violations land in validation_json and in the correction pass's complaints,
+# so the model is asked to remove the name, but a false positive on an unusual
+# spelling cannot stop a report being published.
+
+# Capitalised runs, allowing the small joining words a name can contain
+# ("Horn of Africa", "Lake Chad Basin"). Sentence-initial words are excluded
+# by the caller, because a capital there carries no information.
+_PROPER_RUN = re.compile(
+    r"\b[A-Z][A-Za-z'’-]+(?:\s+(?:of|the|and|de|du|da|el|al)\s+[A-Z][A-Za-z'’-]+"
+    r"|\s+[A-Z][A-Za-z'’-]+)*"
+)
+_SENTENCE_START = re.compile(r"(?:^|(?<=[.!?;:])\s+|(?<=^)|(?<=\n))")
+
+# Words that are capitalised in ordinary writing and name nothing a reader
+# could be misled by: the calendar, the report's own vocabulary, and the
+# system's own parts.
+_PROPER_ALLOWED = {
+    *(m.capitalize() for m in _MONTHS),
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+    "Sunday",
+    "Fred", "Sibyl", "Track", "Brier", "Phase", "Level", "Deep", "Research",
+    "North", "South", "East", "West", "Northern", "Southern", "Eastern",
+    "Western", "Central", "Horn", "Sahel", "Africa", "Asia", "Europe",
+    "America", "Americas", "Pacific", "Atlantic", "Indian", "Caribbean",
+    "January", "The", "A", "An", "This", "That", "These", "Those", "It",
+    "Its", "There", "Their", "They", "We", "Our", "If", "In", "On", "At",
+    "By", "For", "From", "With", "But", "And", "Or", "So", "As", "Where",
+    "When", "While", "Both", "Neither", "Each", "Every", "No", "Not",
+    "Government", "Ministry", "United", "Nations", "Red", "Cross", "Crescent",
+}
+
+
+def _known_names() -> set[str]:
+    """Country and hazard names the report is REQUIRED to print.
+
+    They come from the system's own tables, so they are never the model's
+    invention even when they do not appear in a pack's evidence text.
+    """
+    out: set[str] = set()
+    try:
+        from interpreter import names as _names
+
+        for code in _names.iso3_codes():
+            for word in _names.country_name(code).replace("-", " ").split():
+                if word[:1].isupper():
+                    out.add(word)
+        out.update(_names.HAZARD_NAMES.values())
+    except Exception:  # noqa: BLE001 - a missing table means fewer allowances
+        pass
+    return out
+
+
+def find_unsupported_proper_nouns(text: str, evidence_lower: str) -> list[str]:
+    """Proper nouns in one prose field that the pack's evidence does not carry."""
+    cleaned = _strip_placeholders(text or "")
+    allowed = _PROPER_ALLOWED | _known_names()
+    hits: list[str] = []
+    # Only look at what follows a sentence boundary's first word: the first
+    # word of a sentence is capitalised by grammar, not by naming.
+    for sentence in _sentences(cleaned):
+        body = sentence.strip()
+        # Drop the first token so a sentence-initial capital never counts.
+        first_space = body.find(" ")
+        body = body[first_space + 1:] if first_space > 0 else ""
+        for match in _PROPER_RUN.finditer(body):
+            phrase = match.group(0).strip()
+            if len(phrase) < 4:
+                continue
+            words = [w for w in phrase.replace("-", " ").split() if w[:1].isupper()]
+            if all(w in allowed for w in words):
+                continue
+            if phrase.lower() in evidence_lower:
+                continue
+            # A multiword name whose distinctive half is present is supported:
+            # "Typhoon Yagi" is fine when the pack says "Yagi".
+            distinctive = [w for w in words if w not in allowed]
+            if distinctive and all(w.lower() in evidence_lower for w in distinctive):
+                continue
+            hits.append(phrase)
+    return hits
+
+
+def check_proper_nouns(
+    content: dict[str, Any], *, evidence_text: str | None
+) -> CheckResult:
+    """Names in prose must come from the pack, not from the model's memory.
+
+    Non-blocking by design: reported in ``validation_json`` and quoted back to
+    the model in the correction pass. A name the model invented is a serious
+    defect, and a validator that failed the whole report on an unusual
+    spelling would get switched off within two months.
+    """
+    if not evidence_text:
+        return CheckResult(
+            passed=True, skipped=True,
+            detail={"reason": "pack carried no evidence text to check against"},
+        )
+    evidence_lower = evidence_text.lower()
+    violations: list[str] = []
+    for path, _qids, text in _prose_fields(content):
+        for phrase in find_unsupported_proper_nouns(text, evidence_lower):
+            violations.append(
+                f"{path}: {phrase!r} appears nowhere in the pack — remove the "
+                "name or describe the thing without naming it"
+            )
+    if violations:
+        LOGGER.warning(
+            "[interpreter] %d proper noun(s) in prose are not supported by the "
+            "pack: %s", len(violations), violations[:5],
+        )
+    # passed stays True: this check informs, it does not block.
+    return CheckResult(
+        passed=True, errors=[],
+        detail={"n_violations": len(violations), "violations": violations},
+    )
+
+
 def check_categories(
     content: dict[str, Any],
     *,
@@ -648,12 +790,16 @@ def validate_interpretation(
     con=None,
     run_id: str | None = None,
     pack_categories: dict[str, tuple[str | None, str | None]] | None = None,
+    evidence_text: str | None = None,
+    require_performance: bool = True,
 ) -> ValidationReport:
     """Run every check. Never raises — a validator crash is reported as
     a failed check, not an unhandled error (the report must still store)."""
     checks: dict[str, CheckResult] = {}
 
-    schema_errors = schema.validate_output(content, kind=kind)
+    schema_errors = schema.validate_output(
+        content, kind=kind, require_performance=require_performance
+    )
     checks["schema"] = CheckResult(passed=not schema_errors, errors=schema_errors)
 
     for name, fn in (
@@ -668,6 +814,8 @@ def validate_interpretation(
         ("style", lambda: check_style(content)),
         ("categories", lambda: check_categories(
             content, pack_categories=pack_categories or {})),
+        ("proper_nouns", lambda: check_proper_nouns(
+            content, evidence_text=evidence_text)),
     ):
         try:
             checks[name] = fn()

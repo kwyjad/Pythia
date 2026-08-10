@@ -17,10 +17,11 @@ import math
 
 import pytest
 
-from interpreter import charts, names, selection
+from interpreter import charts, gating, names, selection
 
 
-def _row(qid, family, *, log_ev=None, per_100k=None, nominal=0.0):
+def _row(qid, family, *, log_ev=None, per_100k=None, nominal=0.0, gate=None,
+         excess=None, thin=False):
     return {
         "question_id": qid,
         "hazard_family": family,
@@ -28,6 +29,9 @@ def _row(qid, family, *, log_ev=None, per_100k=None, nominal=0.0):
         "direction": selection.direction(log_ev),
         "eiv_per_100k": per_100k,
         "eiv_nominal": nominal,
+        "gate": gate,
+        "excess_nominal": excess if excess is not None else nominal,
+        "baserate_thin": thin,
     }
 
 
@@ -44,120 +48,135 @@ class TestDirection:
 
 
 class TestWorsening:
-    def test_below_base_rate_can_never_enter(self):
-        rows = [
-            _row("a", "climate", log_ev=math.log(0.01)),   # 100x BELOW
-            _row("b", "climate", log_ev=math.log(1.2)),
-        ]
-        picked = selection.select_worsening(
-            rows, threshold_multiple=2.0, min_entries=3, max_entries=6
-        )
-        assert [r["question_id"] for r in picked] == ["b"]
+    """Membership is the gate's; this only orders and cuts to length."""
 
-    def test_minimum_shows_the_worst_few_even_below_threshold(self):
+    def test_only_rows_the_gate_called_worsening_can_enter(self):
         rows = [
-            _row("a", "conflict", log_ev=math.log(1.5)),
-            _row("b", "conflict", log_ev=math.log(1.4)),
-            _row("c", "conflict", log_ev=math.log(1.3)),
-            _row("d", "conflict", log_ev=math.log(1.2)),
+            _row("gated", "climate", gate=gating.GATE_WORSENING, excess=100.0),
+            _row("burden", "climate", gate=gating.GATE_MAJOR, excess=9_000_000.0),
+            _row("watch", "climate", gate=gating.GATE_WATCHLIST, excess=500.0),
+            _row("nothing", "climate", gate=None, excess=8_000_000.0),
         ]
-        picked = selection.select_worsening(
-            rows, threshold_multiple=2.0, min_entries=3, max_entries=6
-        )
-        # Three always appear, ranked; the fourth clears nothing so it stops.
-        assert [r["question_id"] for r in picked] == ["a", "b", "c"]
+        picked = selection.select_worsening(rows, max_entries=6)
+        assert [r["question_id"] for r in picked] == ["gated"]
 
-    def test_threshold_admits_extras_up_to_the_cap(self):
-        rows = [_row(f"q{i}", "climate", log_ev=math.log(10 - i)) for i in range(8)]
-        picked = selection.select_worsening(
-            rows, threshold_multiple=2.0, min_entries=3, max_entries=6
-        )
-        assert len(picked) == 6
-        assert [r["question_id"] for r in picked] == [f"q{i}" for i in range(6)]
-
-    def test_ordering_is_stable_on_ties(self):
+    def test_ordering_is_expected_excess_not_the_ratio(self):
+        # The August failure in one test: the small cyclone question has by
+        # far the larger multiple and by far the smaller excess.
         rows = [
-            _row("zzz", "climate", log_ev=0.5),
-            _row("aaa", "climate", log_ev=0.5),
+            _row("cyclone", "climate", gate=gating.GATE_WORSENING,
+                 log_ev=math.log(14.0), excess=3_500.0),
+            _row("drought", "climate", gate=gating.GATE_WORSENING,
+                 log_ev=math.log(1.4), excess=2_900_000.0),
         ]
-        picked = selection.select_worsening(
-            rows, threshold_multiple=2.0, min_entries=2, max_entries=6
-        )
-        assert [r["question_id"] for r in picked] == ["aaa", "zzz"]
+        picked = selection.select_worsening(rows, max_entries=6)
+        assert [r["question_id"] for r in picked] == ["drought", "cyclone"]
+
+    def test_thin_anchors_are_demoted_below_every_clear_one(self):
+        rows = [
+            _row("thin", "climate", gate=gating.GATE_WORSENING,
+                 excess=9_999_999.0, thin=True),
+            _row("clear", "climate", gate=gating.GATE_WORSENING, excess=10.0),
+        ]
+        picked = selection.select_worsening(rows, max_entries=6)
+        assert [r["question_id"] for r in picked] == ["clear", "thin"]
+
+    def test_the_cap_cuts_the_tail(self):
+        rows = [
+            _row(f"q{i}", "climate", gate=gating.GATE_WORSENING, excess=1000 - i)
+            for i in range(8)
+        ]
+        picked = selection.select_worsening(rows, max_entries=3)
+        assert [r["question_id"] for r in picked] == ["q0", "q1", "q2"]
 
 
 class TestStableMajor:
-    def test_per_capita_floor_keeps_out_tiny_absolute_impacts(self):
+    def test_only_the_heavy_burden_gate_enters(self):
         rows = [
-            _row("small", "climate", per_100k=9000.0, nominal=50.0),
-            _row("real", "climate", per_100k=400.0, nominal=90000.0),
+            _row("burden", "climate", gate=gating.GATE_MAJOR, nominal=90000.0),
+            _row("worse", "climate", gate=gating.GATE_WORSENING, nominal=99999.0),
+            _row("none", "climate", gate=None, nominal=99999.0),
         ]
         picked = selection.select_stable_major(
-            rows,
-            exclude_question_ids=set(),
-            max_entries=6,
-            per_capita_floor=10000.0,
-            threshold_multiple=2.0,
+            rows, exclude_question_ids=set(), max_entries=6
         )
-        assert [r["question_id"] for r in picked] == ["real"]
+        assert [r["question_id"] for r in picked] == ["burden"]
 
     def test_a_worsening_entry_is_never_relabelled_as_stable(self):
-        # Clears the worsening threshold but was crowded out by the cap.
+        # Structural now: a row carries ONE gate, and the two sections read
+        # different gates, so a cap crowding an entry out of its own section
+        # cannot move it into the other one.
         rows = [
-            _row("hot", "climate", log_ev=math.log(9.0), per_100k=800.0, nominal=99999.0),
+            _row("hot", "climate", gate=gating.GATE_WORSENING, nominal=99999.0),
         ]
+        assert selection.select_worsening(rows, max_entries=0) == []
+        assert selection.select_stable_major(
+            rows, exclude_question_ids=set(), max_entries=6
+        ) == []
+
+    def test_already_selected_never_appears_twice(self):
+        rows = [_row("x", "conflict", gate=gating.GATE_MAJOR, nominal=50000.0)]
         picked = selection.select_stable_major(
-            rows,
-            exclude_question_ids=set(),
-            max_entries=6,
-            per_capita_floor=10000.0,
-            threshold_multiple=2.0,
+            rows, exclude_question_ids={"x"}, max_entries=6
         )
         assert picked == []
 
-    def test_already_selected_never_appears_twice(self):
-        rows = [_row("x", "conflict", per_100k=500.0, nominal=50000.0)]
+    def test_ordered_by_the_burden_itself(self):
+        rows = [
+            _row("small", "climate", gate=gating.GATE_MAJOR, nominal=1000.0),
+            _row("big", "climate", gate=gating.GATE_MAJOR, nominal=900000.0),
+        ]
         picked = selection.select_stable_major(
-            rows,
-            exclude_question_ids={"x"},
-            max_entries=6,
-            per_capita_floor=10000.0,
-            threshold_multiple=2.0,
+            rows, exclude_question_ids=set(), max_entries=6
         )
-        assert picked == []
+        assert [r["question_id"] for r in picked] == ["big", "small"]
 
 
 class TestAssignCategories:
     def test_four_boxes_and_report_order(self):
         rows = [
-            _row("c_w", "climate", log_ev=math.log(5.0)),
-            _row("k_w", "conflict", log_ev=math.log(4.0)),
-            _row("c_s", "climate", per_100k=900.0, nominal=80000.0),
-            _row("k_s", "conflict", per_100k=700.0, nominal=80000.0),
-            _row("ignored", "other", log_ev=math.log(50.0)),
+            _row("c_w", "climate", gate=gating.GATE_WORSENING, excess=5000.0),
+            _row("k_w", "conflict", gate=gating.GATE_WORSENING, excess=4000.0),
+            _row("c_s", "climate", gate=gating.GATE_MAJOR, nominal=80000.0),
+            _row("k_s", "conflict", gate=gating.GATE_MAJOR, nominal=70000.0),
+            _row("ignored", "other", gate=None, excess=50000.0),
         ]
-        selection.assign_categories(
-            rows,
-            threshold_multiple=2.0,
-            min_entries=3,
-            max_entries=6,
-            per_capita_floor=10000.0,
-        )
+        selection.assign_categories(rows, max_entries=6)
         ordered = [r["question_id"] for r in selection.selected_rows(rows)]
         assert ordered == ["c_w", "k_w", "c_s", "k_s"]
         # A hazard outside the two families is carried in the index but never
         # categorised, so it cannot be filed under a heading that misdescribes it.
         assert [r for r in rows if r["question_id"] == "ignored"][0]["category"] is None
 
+    def test_the_report_is_capped_at_the_configured_length(self):
+        rows = [
+            _row(f"w{i}", "climate", gate=gating.GATE_WORSENING, excess=1000 - i)
+            for i in range(9)
+        ] + [
+            _row(f"m{i}", "conflict", gate=gating.GATE_MAJOR, nominal=1000 - i)
+            for i in range(9)
+        ]
+        selection.assign_categories(rows, max_entries=5)
+        picked = selection.selected_rows(rows)
+        assert len(picked) == 5
+        # Worsening takes the larger share, and both sections are represented.
+        assert sum(1 for r in picked if r["category"] == "worsening") == 3
+        assert sum(1 for r in picked if r["category"] == "stable_major") == 2
+
+    def test_an_empty_category_hands_its_slots_to_the_other(self):
+        rows = [
+            _row(f"m{i}", "climate", gate=gating.GATE_MAJOR, nominal=1000 - i)
+            for i in range(9)
+        ]
+        selection.assign_categories(rows, max_entries=5)
+        assert len(selection.selected_rows(rows)) == 5
+
     def test_every_row_keeps_its_place_in_the_index(self):
-        rows = [_row("a", "climate", log_ev=math.log(3.0)), _row("b", "climate")]
-        out = selection.assign_categories(
-            rows,
-            threshold_multiple=2.0,
-            min_entries=1,
-            max_entries=6,
-            per_capita_floor=10000.0,
-        )
+        rows = [
+            _row("a", "climate", gate=gating.GATE_WORSENING, excess=3.0),
+            _row("b", "climate"),
+        ]
+        out = selection.assign_categories(rows, max_entries=6)
         assert len(out) == 2
         assert out[1]["category"] is None
 
@@ -698,7 +717,7 @@ class TestReportSelfAccount:
         )
         assert "How these entries were chosen" in md
         assert "91 forecasts were considered" in md
-        assert f"Selected because: {gating.GATE_WORSENING}" in md
+        assert f"selected because it is {gating.GATE_WORSENING}" in md
         assert "Every question considered" in md
         assert "Somalia" in md
         assert "Watchlist" in md

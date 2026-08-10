@@ -59,6 +59,7 @@ def _valid_content(kind: str = "combined") -> dict:
                 "question_ids": ["ETH_ACE_FATALITIES_2026-08"],
                 "figure_refs": ["js_vs_baserate", "eiv_nominal"],
                 "why_it_stands_out": "The ensemble sits {{fig:js_vs_baserate}} from its base rate.",
+                "decision_point": {"action": "Decide whether to preposition stock.", "deadline_month": "2026-09", "basis": "peak_horizon"},
                 "impacts": ["Displacement pressure on neighbouring regions."],
                 "lead_time_months": 3,
             }
