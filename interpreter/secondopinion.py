@@ -140,6 +140,47 @@ def _content_tokens(text: str) -> list[str]:
     ]
 
 
+# Sibyl's traces mix two kinds of prose: what it LEARNED about the world, and
+# how it went about forecasting. The first live run printed "Nudged q0.99 up
+# modestly to 150,000 to respect the fat conditional tail", "further research
+# would not materially move the distribution, so submitting" and "Fetching the
+# dedicated war article should give a month-by-month casualty timeline" under a
+# heading promising things the main system did not know. None of those is a
+# finding; two are a to-do list.
+#
+# So a sentence is dropped when it talks about the forecast rather than about
+# the situation. Matched on vocabulary that only appears in forecasting talk,
+# and on the first person, which a factual finding never needs.
+_PROCESS_MARKERS = re.compile(
+    r"""\b(
+        q0\.\d+ | quantile | quantiles | posterior | prior[s]? | draws? |
+        pooled | median | percentile | distribution | calibrat\w* |
+        submitting | submit | nudged? | seeded | anchor\w* | my\ (?:central|
+        estimate|forecast|read) | i\ (?:therefore|stay|keep|set|put|assume|
+        will|would|should|expect\ to)
+    )\b""",
+    re.IGNORECASE | re.VERBOSE,
+)
+# A research to-do rather than a statement: no finite verb, or an opening that
+# only makes sense as a question to go and answer.
+_TODO_OPENERS = re.compile(
+    r"^(any\b|whether\b|check\b|confirm\b|fetch\w*\b|search\b|verify\b|"
+    r"look\b|find\b|need\ to\b|todo\b|month-by-month\b)",
+    re.IGNORECASE,
+)
+_BARE_URL = re.compile(r"^\s*https?://\S+\s*$", re.IGNORECASE)
+
+
+def _is_process_talk(sentence: str) -> bool:
+    """Is this about the forecast rather than about the world?"""
+    text = sentence.strip()
+    if _BARE_URL.match(text):
+        return True  # a link is a citation, not a finding
+    if _TODO_OPENERS.match(text):
+        return True
+    return bool(_PROCESS_MARKERS.search(text))
+
+
 def _sentences(text: str) -> list[str]:
     out: list[str] = []
     for chunk in re.split(r"[\n\r]+", text or ""):
@@ -179,6 +220,8 @@ def novel_facts(
                 continue
             specific = bool(_PROPER.search(sentence)) or bool(_DIGIT.search(sentence))
             if not specific:
+                continue
+            if _is_process_talk(sentence):
                 continue
             if sentence.lower() in known_lower:
                 continue

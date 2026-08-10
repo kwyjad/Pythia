@@ -98,16 +98,18 @@ def horizon_month(window_start: Any, horizon: Any) -> str | None:
 
 
 def deadline_for(peak_ym: Any, lead_months: int) -> str | None:
-    """The decision month: the peak month less the hazard's lead time.
-
-    A deadline that has already passed is still printed rather than silently
-    dropped or nudged forward. The window opens before the report does for a
-    cyclone two months out, and the honest thing to say is that the decision
-    was due already.
-    """
+    """The decision month: the peak month less the hazard's lead time."""
     if not peak_ym:
         return None
     return add_months(str(peak_ym), -int(lead_months))
+
+
+# What an already-passed deadline reads as. A drought's three-month run-up
+# subtracted from a horizon-1 peak lands two months BEFORE the report was
+# written, and the first live report duly printed "By June 2026" against three
+# of its five entries. A date in the past is not a deadline; it is a statement
+# that the run-up has already begun, and that is what the calendar should say.
+OVERDUE_LABEL = "as soon as possible"
 
 
 def decision_point(
@@ -116,12 +118,18 @@ def decision_point(
     peak_horizon: Any,
     lead_months: int,
     basis: str = DEFAULT_BASIS,
+    issued_month: Any = None,
 ) -> dict[str, Any]:
     """The derived half of an entry's decision point.
 
     The ``action`` half is the model's; everything datable is computed here.
     An empty dict means the row carries no peak horizon, which the caller
     must treat as "no derived deadline", never as a reason to invent one.
+
+    ``issued_month`` is when the report goes out. The derived month is kept
+    verbatim either way (it is the honest arithmetic and the audit trail), but
+    a deadline before the report exists is LABELLED as immediate rather than
+    printed as a month a reader cannot act on.
     """
     peak_ym = horizon_month(window_start, peak_horizon)
     if not peak_ym:
@@ -129,11 +137,17 @@ def decision_point(
     deadline = deadline_for(peak_ym, lead_months)
     if not deadline:
         return {}
+    issued = parse_ym(issued_month)
+    overdue = bool(issued and parse_ym(deadline) and parse_ym(deadline) <= issued)
     return {
         "peak_month": peak_ym,
         "peak_month_label": month_label(peak_ym),
         "deadline_month": deadline,
-        "deadline_month_label": month_label(deadline),
+        "deadline_month_label": (
+            OVERDUE_LABEL if overdue else month_label(deadline)
+        ),
+        "derived_deadline_month_label": month_label(deadline),
+        "overdue": overdue,
         "lead_time_months": int(lead_months),
         "basis": basis,
     }
@@ -172,6 +186,7 @@ def calendar_rows(
             "metric": row.get("metric_name") or row.get("metric"),
             "deadline_month": decision.get("deadline_month"),
             "deadline_label": decision.get("deadline_month_label") or "not dated",
+            "overdue": bool(decision.get("overdue")),
             "peak_label": decision.get("peak_month_label") or "",
             "basis": BASIS_LABELS.get(
                 str(decision.get("basis") or DEFAULT_BASIS), ""

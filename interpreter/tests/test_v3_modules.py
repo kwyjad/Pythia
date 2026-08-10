@@ -41,6 +41,28 @@ class TestDecisions:
         assert point["deadline_month"] == "2026-08"
         assert point["deadline_month_label"] == "August 2026"
 
+    def test_a_deadline_before_the_report_exists_reads_as_immediate(self):
+        # Drought's three-month run-up subtracted from a horizon-1 peak lands
+        # BEFORE the report is written. The first live report printed
+        # "By June 2026" against three of its five entries, which is not a
+        # deadline; it is a statement that the run-up has already begun.
+        point = decisions.decision_point(
+            window_start="2026-09-01", peak_horizon=1, lead_months=3,
+            issued_month="2026-08",
+        )
+        assert point["deadline_month"] == "2026-06"       # the arithmetic stands
+        assert point["derived_deadline_month_label"] == "June 2026"
+        assert point["overdue"] is True
+        assert point["deadline_month_label"] == decisions.OVERDUE_LABEL
+
+    def test_a_future_deadline_keeps_its_month(self):
+        point = decisions.decision_point(
+            window_start="2026-09-01", peak_horizon=5, lead_months=1,
+            issued_month="2026-08",
+        )
+        assert point["overdue"] is False
+        assert point["deadline_month_label"] == "December 2026"
+
     def test_no_peak_horizon_means_no_derived_deadline(self):
         # The caller must treat this as "no deadline", never as licence to
         # invent one.
@@ -115,6 +137,35 @@ class TestSecondOpinion:
             "further deterioration cannot be ruled out at this stage.",
         ]
         assert secondopinion.novel_facts(trials, known) == []
+
+    def test_sibyls_own_forecasting_talk_is_not_a_finding(self):
+        # Every one of these is verbatim from the first live report, printed
+        # under a heading promising things the main system did not know. Two
+        # of them are a research to-do list.
+        known = "Drought conditions persist across the country."
+        process = [
+            "Since Dec-Feb are always 0 and Nov is usually 0, ~2/3 of draws "
+            "should be 0, so q0.1-q0.5 = 0.",
+            "I therefore stay close to the pooled empirical quantiles, "
+            "trimming only marginally at q0.9-q0.95.",
+            "Any dated Phase 2 milestone or deadline falling within Sept "
+            "2026-Feb 2027",
+            "Fetching the dedicated war article should give a month-by-month "
+            "casualty timeline before I submit.",
+            "Nudged q0.99 up modestly to 150,000 to respect the fat "
+            "conditional tail, so submitting.",
+            "https://www.un.org/unispal/document/bulletin-april-2026-en-ar/",
+        ]
+        assert secondopinion.novel_facts(process, known, limit=10) == []
+
+    def test_a_real_finding_still_survives_the_filter(self):
+        known = "Conflict continues in several regions."
+        finding = (
+            "Indepaz recorded 48 massacres and 229 deaths between January and "
+            "April 2026, the worst since 2016."
+        )
+        out = secondopinion.novel_facts([finding], known, limit=2)
+        assert out == [finding]
 
     def test_trial_texts_walks_whatever_shape_the_traces_are_in(self):
         trials = {"trials": [{"belief_trace": [

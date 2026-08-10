@@ -290,6 +290,26 @@ class TestProperNounGuard:
         )
         assert result.detail["violations"] == []
 
+    def test_a_possessive_country_name_is_the_same_name(self):
+        # "Afghanistan's drought" flagged on the guard's first live run and
+        # cost a correction pass to remove a country name the report is
+        # required to print. That is the false positive that gets a checker
+        # switched off.
+        content = self._content_with(
+            "Afghanistan's outlook is the reason, and Somalia's is worse."
+        )
+        result = validate_mod.check_proper_nouns(
+            content, evidence_text=self.EVIDENCE
+        )
+        assert result.detail["violations"] == []
+
+    def test_a_possessive_invented_name_is_still_flagged(self):
+        content = self._content_with("Typhoon Maysak's track shifted west.")
+        result = validate_mod.check_proper_nouns(
+            content, evidence_text=self.EVIDENCE
+        )
+        assert any("Maysak" in v for v in result.detail["violations"])
+
     def test_a_sentence_initial_capital_is_grammar_not_a_name(self):
         content = self._content_with("Rainfall drove the change.")
         result = validate_mod.check_proper_nouns(

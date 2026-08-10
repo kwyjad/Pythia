@@ -391,6 +391,11 @@ def build_attention_rows(
     # The window each row's horizons are counted from, kept for the decision
     # calendar (below) and dropped before the CSV is written.
     starts = {str(q["question_id"]): q.get("window_start_date") for q in questions}
+    # When the report goes out, so a derived deadline that has already passed
+    # is labelled immediate rather than printed as a month a reader cannot act
+    # on. The forecasts are issued in the month before the window opens.
+    earliest = min((str(v)[:7] for v in starts.values() if v), default="")
+    issued_month = _decisions.add_months(earliest, -1) if earliest else None
 
     _rank(rows, "js_vs_baserate", "rank_deviation")
     _rank(rows, "eiv_nominal", "rank_impact_nominal")
@@ -432,6 +437,7 @@ def build_attention_rows(
             window_start=starts.get(str(row["question_id"])),
             peak_horizon=row.get("peak_horizon"),
             lead_months=_interp_config.lead_time_months(row.get("hazard_code")),
+            issued_month=issued_month,
         )
         row["decision"] = decision or None
         row["decision_deadline"] = (decision or {}).get("deadline_month")
