@@ -508,7 +508,8 @@ def _decision_calendar_lines(
         "", "## The decision calendar", "",
         "What has to be decided, for where, and by when. Each deadline is the "
         "month with most expected impact, less the run-up that hazard needs. "
-        "A deadline already past is printed as it falls.",
+        "Where that run-up has already begun, the row says so instead of "
+        "naming a month that has passed.",
         "",
         "| By | Country | Hazard | Decision |",
         "| --- | --- | --- | --- |",

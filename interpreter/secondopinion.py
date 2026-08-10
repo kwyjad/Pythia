@@ -178,6 +178,13 @@ def _is_process_talk(sentence: str) -> bool:
         return True  # a link is a citation, not a finding
     if _TODO_OPENERS.match(text):
         return True
+    # A finding is a statement. Sibyl's traces carry its open questions in the
+    # same field as its answers ("Is the July ACLED figure of 79 real or an
+    # artifact of coding lag?"), and the second run printed three of them under
+    # a heading promising things the main system did not know. A question mark
+    # is the one unambiguous marker of a question, wherever it falls.
+    if "?" in text:
+        return True
     return bool(_PROCESS_MARKERS.search(text))
 
 
