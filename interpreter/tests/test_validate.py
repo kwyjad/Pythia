@@ -365,3 +365,51 @@ class TestCategories:
     def test_no_categorised_rows_skips_rather_than_fails(self):
         result = validate_mod.check_categories(_content(), pack_categories={})
         assert result.passed and result.skipped
+
+
+class TestFigureKeyNormalisation:
+    """The model writes figure_refs as "fig:x" because the prose syntax is
+    {{fig:x}}. The prefix carries no meaning; rejecting it failed a whole
+    report over punctuation."""
+
+    def test_prefixed_refs_resolve(self):
+        content = _content()
+        content["attention"][0]["figure_refs"] = [
+            "js_vs_baserate", "fig:js_vs_baserate", "{{fig:js_vs_baserate}}",
+        ]
+        result = validate_mod.check_referential(
+            content,
+            valid_question_ids={QID},
+            per_question={QID: {"js_vs_baserate": 0.3}},
+            global_figures={"skill_brier_spd": 0.4},
+        )
+        assert result.passed, result.errors
+
+    def test_a_genuinely_missing_key_still_fails(self):
+        content = _content()
+        content["attention"][0]["figure_refs"] = ["fig:not_a_real_key"]
+        result = validate_mod.check_referential(
+            content,
+            valid_question_ids={QID},
+            per_question={QID: {"js_vs_baserate": 0.3}},
+            global_figures={},
+        )
+        assert not result.passed
+
+
+class TestCodeCheckPrecision:
+    """FAO and IOM are prose. SOM and NIC are codes a reader cannot decode."""
+
+    def test_agency_acronyms_are_not_codes(self):
+        for text in ("The FAO reported shortages.",
+                     "IOM tracked the movement.",
+                     "WHO and ICRC both responded."):
+            assert validate_mod.find_codes_in_prose(text) == [], text
+
+    def test_real_iso3_codes_are_still_caught(self):
+        assert "SOM" in validate_mod.find_codes_in_prose("SOM is worsening.")
+        assert "NIC" in validate_mod.find_codes_in_prose("Watch NIC this month.")
+
+    def test_metric_enums_and_slash_forms_still_caught(self):
+        assert validate_mod.find_codes_in_prose("EVENT_OCCURRENCE is up.")
+        assert validate_mod.find_codes_in_prose("The DR/PA forecast.")

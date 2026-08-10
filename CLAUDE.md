@@ -99,6 +99,8 @@ entries. When you add a failure-mode entry with a `**Rule:**` line, add the rule
 - The PACK decides which forecasts the report covers and under which heading; the model copies that decision and the validator holds it to the list. A report that promotes an entry is making a claim on the model's authority, not the system's.
 - A question record budget is spent in REPORT order, never attention order — otherwise a row the report must cover loses its record to a question the report never mentions, and any covered row that still loses one is named rather than counted.
 - The report prints names, never codes, and figures as sentences: no "% of maximum", no "1/87.5x". Both were shipped and both confused readers.
+- A template may only name a `{{fig:...}}` key some producer declares (`packs._ATTENTION_FIG_KEYS` / `_RUN_SUMMARY_KEYS` / `_PERFORMANCE_KEYS`) — an undeclared key renders `[figure unavailable]` and fails the whole report's referential check.
+- The style check's code test matches the REAL ISO3 set, never any three-capital run: FAO, IOM and "Phase III" are ordinary humanitarian prose, and a validator that cries wolf gets ignored.
 - The printed map is drawn by `interpreter/mapviz.py` from the same table, preference order and scaling as `/v1/interpreter/attention_map` — the dashboard's choropleth is JavaScript and a PDF cannot run it, so the two must be kept honest by construction, not by hand.
 
 **Release publishing**

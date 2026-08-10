@@ -194,12 +194,29 @@ def _referenced_figures(
     return out
 
 
+def _normalise_figure_key(key: str) -> str:
+    """``fig:eiv_nominal`` and ``{{fig:eiv_nominal}}`` both mean ``eiv_nominal``.
+
+    The figure maps are keyed on the bare name, but a model asked to write
+    ``{{fig:x}}`` in prose reasonably writes ``fig:x`` in figure_refs too. The
+    prefix carries no meaning, so accepting it costs nothing; rejecting it
+    failed a whole report over punctuation.
+    """
+    text = str(key or "").strip()
+    if text.startswith("{{") and text.endswith("}}"):
+        text = text[2:-2].strip()
+    if text.startswith("fig:"):
+        text = text[4:]
+    return text
+
+
 def _lookup_figure(
     key: str,
     qids: list[str],
     per_question: dict[str, dict[str, Any]],
     global_figures: dict[str, Any],
 ) -> tuple[bool, Any]:
+    key = _normalise_figure_key(key)
     for qid in qids:
         figs = per_question.get(qid)
         if figs and key in figs:
@@ -473,20 +490,32 @@ _NOT_BUT = re.compile(r"\bnot\s+(?:a|an|the)?\s*[^,.;]{1,40},\s*but\b", re.IGNOR
 # Em dash and en dash. Full stops, commas and semi-colons only.
 _DASHES = ("—", "–")
 
-# A code leaking into prose: three capitals standing alone (ISO3), or one of
-# the metric enums. Hazard codes are two letters and too easily a real word,
-# so they are checked only in their slash form ("DR/PA").
-_ISO3_IN_PROSE = re.compile(r"(?<![A-Za-z])[A-Z]{3}(?![A-Za-z])")
+# A code leaking into prose. Three capitals alone are NOT enough to condemn a
+# token: FAO, IOM, WHO and ICRC are ordinary prose to a humanitarian reader,
+# and flagging them failed a correct report. Only a token that is genuinely an
+# ISO3 country code counts, because that is the one a reader cannot decode
+# and the one the entry heading is supposed to have spelled out.
+_CAPS_IN_PROSE = re.compile(r"(?<![A-Za-z])[A-Z]{3}(?![A-Za-z])")
 _METRIC_CODES = ("EVENT_OCCURRENCE", "PHASE3PLUS_IN_NEED", "FATALITIES")
 _HAZARD_SLASH = re.compile(r"\b[A-Z]{2}/[A-Z_]{2,}")
 
-# Country names that legitimately contain a three-capital run, plus the
-# handful of acronyms a humanitarian reader expects to see spelled that way.
-_ALLOWED_CAPS = {
-    "UN", "OCHA", "IPC", "ACLED", "IFRC", "IDMC", "GDACS", "FEWS", "NET",
-    "WFP", "UNHCR", "DREF", "ENSO", "USD", "NGO", "NGOs", "IDP", "IDPs",
-    "SPD", "RC", "EM", "DAT",
-}
+# A few ISO3 codes are also words or common acronyms in humanitarian prose.
+# "CAR" is the Central African Republic's code and an English noun; "AND",
+# "ARE", "CAN", "ALL", "ONE", "TON", "USA", "GBR" read as prose or as names a
+# reader already knows. Allowing them risks missing a real code; refusing them
+# guarantees false positives on correct writing, and a validator that cries
+# wolf gets ignored.
+_ALLOWED_ISO3 = {"AND", "ARE", "CAN", "ALL", "ONE", "TON", "USA", "COD", "CAR"}
+
+
+def _iso3_codes() -> frozenset[str]:
+    """The ISO3 set, from the same country table the report names things by."""
+    try:
+        from interpreter import names as _names
+
+        return frozenset(_names.iso3_codes()) - _ALLOWED_ISO3
+    except Exception:  # noqa: BLE001 - no table means no code check, not a crash
+        return frozenset()
 
 
 def find_banned_phrases(text: str) -> list[str]:
@@ -503,10 +532,8 @@ def find_codes_in_prose(text: str) -> list[str]:
     cleaned = _strip_placeholders(text or "")
     hits = [m for m in _METRIC_CODES if m in cleaned]
     hits.extend(_HAZARD_SLASH.findall(cleaned))
-    hits.extend(
-        m for m in _ISO3_IN_PROSE.findall(cleaned)
-        if m not in _ALLOWED_CAPS
-    )
+    codes = _iso3_codes()
+    hits.extend(m for m in _CAPS_IN_PROSE.findall(cleaned) if m in codes)
     return hits
 
 

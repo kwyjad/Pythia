@@ -169,6 +169,24 @@ prompt assembly write question records in report order, so the rows the report
 must cover are the last thing a token budget gives up; anything that still
 loses its record is named, in the manifest and in the prompt.
 
+## The figure-key contract
+
+A template may only name a `{{fig:...}}` key that something actually produces:
+`packs._ATTENTION_FIG_KEYS` (per question), `_RUN_SUMMARY_KEYS` (run level) or
+`_PERFORMANCE_KEYS` (scored pack). A key nothing produces renders as
+`[figure unavailable]` and fails the referential check for the whole report.
+
+`interpreter/tests/test_selection_names_charts.py::TestTemplateFigureContract`
+scans every template for placeholder keys and fails if one is not produced. It
+exists because `ev_multiple` shipped exactly that way: the system prompt told
+the model to write it, the selection module computed it onto every attention
+row, and the figure map never exposed it, so the first live report failed
+validation with every worsening entry's headline number unresolvable.
+
+`figure_refs` entries are normalised before lookup, so `eiv_nominal`,
+`fig:eiv_nominal` and `{{fig:eiv_nominal}}` all resolve. The prefix carries no
+meaning and rejecting it failed a report over punctuation.
+
 ## Validation (Phase 4 — `interpreter/validate.py`)
 
 Six checks run after generation, before storage; each is reported
@@ -195,7 +213,10 @@ failures stay inspectable):
 5. **style** — the house rules that can be checked mechanically: no em or
    en dashes, no banned words (`BANNED_PHRASES`), no "not X, but Y", no
    "on the other hand", and no bare ISO3 / metric enum / `HZ/METRIC` code
-   where the reader needs a name. Deliberately narrow: rhythm, variety and
+   where the reader needs a name. The code check matches the REAL ISO3 set
+   from `resolver/data/countries.csv`, never any three-capital run: FAO, IOM
+   and "Phase III" are ordinary humanitarian prose, and flagging them failed a
+   correct report. Deliberately narrow: rhythm, variety and
    the habit of joining clauses with "and" are asked for in the prompt and
    judged by a reader, and a lint that scored them would fail honest prose.
 6. **categories** — the pack decides which forecasts the report covers and

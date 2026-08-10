@@ -159,8 +159,14 @@ def pack_categories(pack: Pack) -> dict[str, tuple[str | None, str | None]]:
 # Figures — the values {{fig:...}} placeholders resolve against
 # ---------------------------------------------------------------------------
 
+# Every key here must be a column the attention index actually carries, and
+# every {{fig:...}} key the templates instruct the model to use must be here.
+# test_template_figure_keys_are_all_produced pins the second half: a template
+# naming a key nothing produces renders [figure unavailable] in the report and
+# fails the referential check, which is how ev_multiple shipped broken.
 _ATTENTION_FIG_KEYS = (
-    "js_vs_baserate", "log_ev_ratio", "eiv_nominal", "eiv_per_100k",
+    "js_vs_baserate", "log_ev_ratio", "ev_multiple",
+    "eiv_nominal", "eiv_per_100k",
     "rc_level", "rc_score", "triage_score", "attention_rank",
     "baserate_source",
 )
@@ -265,6 +271,19 @@ def _weighted_skill(rows: list[dict[str, Any]], family: str) -> dict[str, float]
     return out
 
 
+# Run-level figure keys (they belong to the run, not to a question). Same
+# contract as _ATTENTION_FIG_KEYS: a template may only name keys listed here.
+_RUN_SUMMARY_KEYS = (
+    "countries_scanned",
+    "countries_with_questions",
+    "countries_track1",
+    "countries_track2",
+    "n_questions",
+    "n_above_base_rate",
+    "n_below_base_rate",
+)
+
+
 def run_summary_figures(pack: Pack) -> dict[str, Any]:
     """Scan-scope counts for the report's opening paragraph.
 
@@ -275,15 +294,7 @@ def run_summary_figures(pack: Pack) -> dict[str, Any]:
     manifest = pack.manifest or {}
     summary = manifest.get("run_summary") or {}
     out: dict[str, Any] = {}
-    for key in (
-        "countries_scanned",
-        "countries_with_questions",
-        "countries_track1",
-        "countries_track2",
-        "n_questions",
-        "n_above_base_rate",
-        "n_below_base_rate",
-    ):
+    for key in _RUN_SUMMARY_KEYS:
         value = summary.get(key)
         if value is not None:
             out[key] = value
@@ -322,10 +333,20 @@ def question_distributions(pack: Pack) -> dict[str, dict[str, Any]]:
     return out
 
 
+# Performance figure keys (scored pack only). Derived from the family loop in
+# _weighted_skill so the declaration cannot drift from what it emits.
+_PERFORMANCE_FAMILIES = ("spd", "binary")
+_PERFORMANCE_KEYS = tuple(
+    f"{stem}_{family}"
+    for family in _PERFORMANCE_FAMILIES
+    for stem in ("mean_brier", "skill_brier", "climatology_brier")
+) + ("n_scored_questions",)
+
+
 def performance_figures(pack: Pack) -> dict[str, Any]:
     """Pack-level figures for the performance prose (scored pack only)."""
     figs: dict[str, Any] = {}
-    for family in ("spd", "binary"):
+    for family in _PERFORMANCE_FAMILIES:
         figs.update(_weighted_skill(pack.rollups, family))
     n = pack.manifest.get("n_scored_questions")
     if n is not None:
