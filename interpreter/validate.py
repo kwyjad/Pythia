@@ -655,6 +655,17 @@ def _known_names() -> set[str]:
     return out
 
 
+# A possessive is the same name. "Afghanistan's drought" flagged on the first
+# live run and cost a correction pass to remove a country name the report is
+# required to print, which is precisely the false positive that gets a checker
+# switched off.
+_POSSESSIVE = re.compile(r"['’]s?$")
+
+
+def _bare(word: str) -> str:
+    return _POSSESSIVE.sub("", word)
+
+
 def find_unsupported_proper_nouns(text: str, evidence_lower: str) -> list[str]:
     """Proper nouns in one prose field that the pack's evidence does not carry."""
     cleaned = _strip_placeholders(text or "")
@@ -671,10 +682,13 @@ def find_unsupported_proper_nouns(text: str, evidence_lower: str) -> list[str]:
             phrase = match.group(0).strip()
             if len(phrase) < 4:
                 continue
-            words = [w for w in phrase.replace("-", " ").split() if w[:1].isupper()]
+            words = [
+                _bare(w) for w in phrase.replace("-", " ").split()
+                if w[:1].isupper()
+            ]
             if all(w in allowed for w in words):
                 continue
-            if phrase.lower() in evidence_lower:
+            if _bare(phrase).lower() in evidence_lower:
                 continue
             # A multiword name whose distinctive half is present is supported:
             # "Typhoon Yagi" is fine when the pack says "Yagi".
