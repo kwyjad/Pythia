@@ -49,6 +49,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from pythia.buckets import centroids_for, labels_for
+
+from interpreter import config as _interp_config
+from interpreter import gating as _gating
 from pythia.config import load as load_cfg
 from pythia.tools.base_rate_spd import base_rate_spd, _as_of_ym
 from pythia.tools.compute_scores import _load_spd
@@ -161,6 +164,16 @@ CREATE TABLE IF NOT EXISTS forecast_deviation (
     log_ev_ratio DOUBLE,
     eiv_nominal DOUBLE,
     eiv_per_100k DOUBLE,
+    -- Expected EXCESS: how many more than history would suggest. This is
+    -- what the report ranks by, because the ratio is dominated by whichever
+    -- anchor sits closest to zero.
+    eiv_baserate DOUBLE,
+    excess_nominal DOUBLE,
+    excess_per_100k DOUBLE,
+    -- P(>= the metric's action threshold) per horizon, JSON list in window
+    -- order, and how many observations the anchor rests on.
+    exceedances_json TEXT,
+    baserate_n_obs INTEGER,
     baserate_source TEXT,
     baserate_json TEXT,
     is_test BOOLEAN DEFAULT FALSE,
@@ -169,8 +182,55 @@ CREATE TABLE IF NOT EXISTS forecast_deviation (
 """
 
 
+# Columns added after the table shipped. The DDL is CREATE TABLE IF NOT
+# EXISTS, so an existing canonical DB would never gain them; the same
+# add-column-if-missing idiom the resolution machine uses.
+_COLUMN_MIGRATIONS = (
+    ("eiv_baserate", "DOUBLE"),
+    ("excess_nominal", "DOUBLE"),
+    ("excess_per_100k", "DOUBLE"),
+    ("exceedances_json", "TEXT"),
+    ("baserate_n_obs", "INTEGER"),
+)
+
+
+# base_rate_spd counts observations under a different key per method
+# (n_months_used, n_months_observed, n_severity_values, ...). One normalised
+# reading, because the thin-anchor rule needs a single number and the caller
+# should not have to know which anchor method ran.
+_N_OBS_KEYS = (
+    "n_months_used",
+    "n_months_observed",
+    "n_pa_months_all",
+    "n_occurrence_obs",
+    "n_severity_values",
+)
+
+
+def _baserate_n_obs(detail: Any) -> Optional[int]:
+    """How many historical observations the anchor rests on, or None."""
+    if not isinstance(detail, dict):
+        return None
+    for key in _N_OBS_KEYS:
+        value = detail.get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 def _ensure_table(conn) -> None:
     conn.execute(FORECAST_DEVIATION_DDL)
+    for name, sql_type in _COLUMN_MIGRATIONS:
+        try:
+            conn.execute(
+                f"ALTER TABLE forecast_deviation ADD COLUMN IF NOT EXISTS "
+                f"{name} {sql_type}"
+            )
+        except Exception as exc:  # noqa: BLE001 - a fresh table already has them
+            LOGGER.debug("forecast_deviation migration %s: %s", name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +431,12 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                 )
                 eiv_nominal = None
                 eiv_per_100k = None
+                eiv_baserate = None
+                excess_nominal = None
+                excess_per_100k = None
+                # A binary question's P(event) IS its exceedance; there is no
+                # size threshold to clear, only a probability.
+                exceedances = [float(x) for x in monthly_p]
             else:
                 class_bins = labels_for(metric)
                 if not class_bins:
@@ -394,9 +460,29 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                     monthly_spds, base_probs, None, metric
                 )
                 eiv_nominal = metrics_d["eiv_nominal"]
+                eiv_baserate = metrics_d["eiv_baserate"]
                 pop = _population(iso3)
                 eiv_per_100k = (
                     (eiv_nominal / pop) * 100_000.0 if pop else None
+                )
+                # Expected EXCESS, the report's ordering: how many more than
+                # history would suggest. Both sides use the same surge blend,
+                # so the difference is one summary applied to two
+                # distributions rather than two different summaries.
+                excess_nominal = eiv_nominal - eiv_baserate
+                excess_per_100k = (
+                    (excess_nominal / pop) * 100_000.0 if pop else None
+                )
+                # P(>= the action threshold) per horizon. The threshold is
+                # per country as well as per metric: a flat floor would
+                # exclude every small state.
+                threshold = _gating.materiality_threshold(
+                    metric, pop,
+                    absolute=_interp_config.threshold_for_metric(metric),
+                    population_share=_interp_config.population_share_for_metric(metric),
+                )
+                exceedances = _gating.horizon_exceedances(
+                    monthly_spds, metric, threshold
                 )
 
             rows_out.append((
@@ -405,6 +491,9 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                 metrics_d["js_vs_baserate"],
                 metrics_d["log_ev_ratio"],
                 eiv_nominal, eiv_per_100k,
+                eiv_baserate, excess_nominal, excess_per_100k,
+                json.dumps(exceedances),
+                _baserate_n_obs(base_detail),
                 base_source,
                 json.dumps({"probs": base_probs, "detail": base_detail}, default=str),
                 bool(is_test), now,
@@ -423,8 +512,10 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                 INSERT INTO forecast_deviation
                     (run_id, question_id, model_name, iso3, hazard_code, metric,
                      score_family, js_vs_baserate, log_ev_ratio, eiv_nominal,
-                     eiv_per_100k, baserate_source, baserate_json, is_test, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     eiv_per_100k, eiv_baserate, excess_nominal, excess_per_100k,
+                     exceedances_json, baserate_n_obs,
+                     baserate_source, baserate_json, is_test, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows_out,
             )

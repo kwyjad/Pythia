@@ -451,3 +451,116 @@ class TestAggregatePreference:
         import math as _m
         assert values["ETH"] == pytest.approx(0.20 / _m.log(2.0))
         con.close()
+
+
+class TestGating:
+    """The two-key gate and the excess ranking that replaced the ratio."""
+
+    def test_exceedance_interpolates_within_the_straddled_bucket(self):
+        from interpreter import gating
+
+        # PA edges: 0, 1, 10k, 50k, 250k, 500k, inf
+        probs = [0.5, 0.2, 0.15, 0.1, 0.03, 0.02]
+        assert gating.exceedance(probs, "PA", 50_000) == pytest.approx(0.15)
+        assert gating.exceedance(probs, "PA", 10_000) == pytest.approx(0.30)
+        # 30k sits mid-way through the 10k-50k band: half of its 0.15.
+        assert gating.exceedance(probs, "PA", 30_000) == pytest.approx(0.225)
+
+    def test_quantiles_read_as_planning_figures(self):
+        from interpreter import gating
+
+        probs = [0.5, 0.2, 0.15, 0.1, 0.03, 0.02]
+        assert gating.quantile(probs, "PA", 0.5) == pytest.approx(1.0)
+        assert gating.quantile(probs, "PA", 0.9) == pytest.approx(150_000, rel=1e-6)
+        assert gating.p_zero(probs) == pytest.approx(0.5)
+
+    def test_the_population_share_lets_small_states_in(self):
+        from interpreter import gating
+
+        # A flat 50,000 floor would mean Vanuatu never appears in a cyclone
+        # report, which would be absurd.
+        vut = gating.materiality_threshold(
+            "PA", 320_000, absolute=50_000, population_share=0.01
+        )
+        eth = gating.materiality_threshold(
+            "PA", 120_000_000, absolute=50_000, population_share=0.01
+        )
+        assert vut == pytest.approx(3_200)
+        assert eth == pytest.approx(50_000)
+
+    def test_a_metric_without_a_threshold_gates_on_probability_alone(self):
+        from interpreter import gating
+
+        assert gating.materiality_threshold(
+            "EVENT_OCCURRENCE", 1e6, absolute=None, population_share=None
+        ) is None
+
+    def test_any_horizon_clears_and_the_month_is_carried(self):
+        from interpreter import gating
+
+        cleared, horizon = gating.clears_materiality([0.05, 0.10, 0.40, 0.02], 0.25)
+        assert cleared and horizon == 3
+        cleared, horizon = gating.clears_materiality([0.05, 0.10], 0.25)
+        assert not cleared and horizon == 2  # the best month, still reported
+
+    def test_below_base_rate_is_never_called_worsening(self):
+        from interpreter import gating
+
+        # Unusual and material, but expecting FEWER people than usual. Uganda
+        # did exactly this on the August run: excess -2,069,829, both keys
+        # passed. "Worsening" is a claim about direction.
+        rows = [{
+            "question_id": "UGA", "js_vs_baserate": 0.9,
+            "exceedances": [0.9], "excess_nominal": -2_069_829,
+            "baserate_n_obs": 36,
+        }]
+        gating.gate_rows(rows, unusual_percentile=0.0, min_probability=0.25,
+                         thin_min_obs=12)
+        assert rows[0]["gate"] == gating.GATE_MAJOR
+        assert rows[0]["gate"] != gating.GATE_WORSENING
+
+    def test_unusual_but_immaterial_goes_to_the_watchlist_not_the_bin(self):
+        from interpreter import gating
+
+        rows = [{
+            "question_id": "rare_storm", "js_vs_baserate": 0.9,
+            "exceedances": [0.06], "excess_nominal": 400.0,
+            "baserate_n_obs": 36,
+        }]
+        gating.gate_rows(rows, unusual_percentile=0.0, min_probability=0.25,
+                         thin_min_obs=12)
+        assert rows[0]["gate"] == gating.GATE_WATCHLIST
+
+    def test_thin_anchors_are_demoted_not_dropped(self):
+        from interpreter import gating
+
+        thin = {"question_id": "thin", "excess_nominal": 999_999,
+                "baserate_thin": True}
+        clear = {"question_id": "clear", "excess_nominal": 10,
+                 "baserate_thin": False}
+        ordered = sorted([thin, clear], key=gating.rank_key)
+        assert [r["question_id"] for r in ordered] == ["clear", "thin"]
+
+    def test_counts_are_returned_so_the_panel_and_table_agree(self):
+        from interpreter import gating
+
+        rows = [
+            {"question_id": "a", "js_vs_baserate": 0.9, "exceedances": [0.9],
+             "excess_nominal": 100.0, "baserate_n_obs": 36},
+            {"question_id": "b", "js_vs_baserate": 0.01, "exceedances": [0.9],
+             "excess_nominal": 100.0, "baserate_n_obs": 36},
+            {"question_id": "c", "js_vs_baserate": 0.9, "exceedances": [0.01],
+             "excess_nominal": 1.0, "baserate_n_obs": 2},
+        ]
+        counts = gating.gate_rows(rows, unusual_percentile=0.5,
+                                  min_probability=0.25, thin_min_obs=12)
+        assert counts["considered"] == 3
+        assert counts["both"] + counts["major"] + counts["watchlist"] <= 3
+        assert counts["thin"] == 1
+
+    def test_percentile_is_pinned_by_this_repo(self):
+        from interpreter import gating
+
+        assert gating.percentile([1, 2, 3, 4, 5], 0.5) == pytest.approx(3.0)
+        assert gating.percentile([1, 2, 3, 4], 0.5) == pytest.approx(2.5)
+        assert gating.percentile([], 0.5) is None
