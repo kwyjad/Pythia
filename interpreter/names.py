@@ -88,6 +88,15 @@ def country_name(iso3: str | None) -> str:
     return _country_map().get(code, code)
 
 
+def iso3_codes() -> frozenset[str]:
+    """Every ISO3 code the country table knows.
+
+    Used by the style check to tell a country code from an agency acronym:
+    FAO and IOM are prose, SOM and NIC are codes a reader cannot decode.
+    """
+    return frozenset(_country_map())
+
+
 def hazard_name(hazard_code: str | None) -> str:
     code = (hazard_code or "").strip().upper()
     return HAZARD_NAMES.get(code, code or "Unknown hazard")

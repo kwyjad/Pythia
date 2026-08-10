@@ -259,3 +259,72 @@ class TestPackRecordOrder:
 
         got = packs.pack_categories(self._pack())
         assert got == {"covered": ("worsening", "climate")}
+
+
+class TestTemplateFigureContract:
+    """A template naming a figure key nothing produces is a broken report.
+
+    This is the guard that was missing: interpreter/templates/v2/system.md
+    told the model to write {{fig:ev_multiple}}, the selection module computed
+    ev_multiple onto every attention row, and the figure map never exposed it.
+    Every worsening entry's headline number rendered [figure unavailable] and
+    the referential check failed the whole report.
+    """
+
+    def _template_keys(self) -> set[str]:
+        import re
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1] / "templates"
+        keys: set[str] = set()
+        for path in root.rglob("*.md"):
+            keys |= set(re.findall(r"\{\{fig:([A-Za-z0-9_.-]+)\}\}", path.read_text()))
+        return keys
+
+    def test_template_figure_keys_are_all_produced(self):
+        from interpreter import packs
+
+        produced = (
+            set(packs._ATTENTION_FIG_KEYS)
+            | set(packs._RUN_SUMMARY_KEYS)
+            | set(packs._PERFORMANCE_KEYS)
+        )
+        missing = sorted(self._template_keys() - produced)
+        assert not missing, (
+            f"templates instruct {{{{fig:...}}}} keys nothing produces: {missing}. "
+            "Add them to packs._ATTENTION_FIG_KEYS (per-question), "
+            "_RUN_SUMMARY_KEYS (run-level) or _PERFORMANCE_KEYS "
+            "(scored), or stop naming them."
+        )
+
+    def test_attention_keys_exist_on_a_real_attention_row(self):
+        """Every per-question figure key must be a column the pack carries."""
+        from scripts.ai_bundle.build_current_run_bundle import ATTENTION_FIELDS
+        from interpreter import packs
+
+        # baserate_source and the rank columns are pack columns too; anything
+        # here that ATTENTION_FIELDS does not carry can never resolve.
+        missing = sorted(set(packs._ATTENTION_FIG_KEYS) - set(ATTENTION_FIELDS))
+        assert not missing, f"figure keys absent from the attention index: {missing}"
+
+
+class TestKindIsStated:
+    def test_current_run_template_tells_the_model_its_kind(self):
+        """The model wrote kind='current' on a combined run because the v2
+        template dropped the {{KIND}} placeholder prompts.py substitutes."""
+        from pathlib import Path
+
+        text = (
+            Path(__file__).resolve().parents[1]
+            / "templates" / "v2" / "current_run.md"
+        ).read_text()
+        assert "{{KIND}}" in text
+
+    def test_assembled_prompt_names_the_kind(self):
+        from interpreter import prompts
+
+        text = prompts.build_user_prompt(
+            kind="combined", pack_text="PACK", version="v2"
+        )
+        assert "{{KIND}}" not in text
+        assert "`combined`" in text

@@ -1,5 +1,8 @@
 # This month's forecast run
 
+Set `kind` in your output to exactly `{{KIND}}`. That is a fact about this
+request, not a judgement; getting it wrong fails the report.
+
 Below is the pack for the run you are reporting on. Work only from it.
 
 {{PACK}}
