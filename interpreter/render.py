@@ -17,7 +17,7 @@ import math
 import re
 from typing import Any
 
-from interpreter import charts, config, lexicon, names, selection
+from interpreter import charts, config, lexicon, names, panels, selection
 
 _PLACEHOLDER = re.compile(r"\{\{fig:([A-Za-z0-9_.-]+)\}\}")
 
@@ -53,6 +53,21 @@ def _ordinal_word(inverse: float) -> str:
     """"one third of" reads; "1/3.2x" does not."""
     nearest = max(2, min(int(round(inverse)), 10))
     return _FRACTION_WORDS[nearest]
+
+
+def _round_planning(value: float) -> float:
+    """Round a planning figure to its own scale.
+
+    150,000 rather than 149,997: the figure comes from interpolating inside a
+    bucket whose width is tens of thousands, and printing every digit would
+    claim a precision the bucket scheme does not have.
+    """
+    if value <= 0:
+        return 0.0
+    import math as _m
+
+    magnitude = 10 ** max(0, int(_m.floor(_m.log10(value))) - 1)
+    return round(value / magnitude) * magnitude
 
 
 def format_figure(key: str, value: Any) -> str:
@@ -104,6 +119,18 @@ def format_figure(key: str, value: Any) -> str:
         if inverse >= 10:
             return "a small fraction of"
         return f"one {_ordinal_word(inverse)} of"
+    if key == "p_zero_peak":
+        return f"{v * 100:.0f}%"
+    if key in ("p50_peak", "p90_peak"):
+        # A planning figure. Rounded to something a planner would actually
+        # write on a form, never to the false precision of an interpolation.
+        return f"{_round_planning(v):,.0f} people" if v >= 1 else "almost nobody"
+    if key == "excess_nominal":
+        return f"{v:+,.0f} people"
+    if key == "excess_per_100k":
+        return f"{v:+,.0f} per 100,000"
+    if key == "baserate_n_obs":
+        return f"{int(v):,}"
     if key.startswith("eiv") or key.startswith("n_") or abs(v) >= 1000:
         return f"{v:,.0f}"
     if key.startswith("mean_brier") or key.startswith("climatology_brier"):
@@ -214,7 +241,11 @@ _REASON_LABELS = {
 
 
 
-def _render_entry(entry: dict[str, Any], resolver: FigureResolver) -> list[str]:
+def _render_entry(
+    entry: dict[str, Any],
+    resolver: FigureResolver,
+    gates: dict[str, str] | None = None,
+) -> list[str]:
     """One attention entry: a named heading and at most half a page under it."""
     qids = [str(q) for q in entry.get("question_ids") or []]
 
@@ -228,8 +259,18 @@ def _render_entry(entry: dict[str, Any], resolver: FigureResolver) -> list[str]:
         f"{names.describe_pair(entry.get('iso3'), entry.get('hazard_code'), entry.get('metric'))}"
     )
     lines.append("")
+    # Which test admitted this entry, in the panel's own words. A reader who
+    # asks "why is this here and not my country" gets the answer on the entry
+    # rather than having to infer it from the section heading.
+    gate = next((gates.get(q) for q in qids if (gates or {}).get(q)), None) if gates else None
+    if gate:
+        lines.append(f"*Selected because: {gate}.*")
+        lines.append("")
     if entry.get("why_it_stands_out"):
         lines.append(_r("why_it_stands_out"))
+    if entry.get("planning_sentence"):
+        lines.append("")
+        lines.append(f"**What to plan against:** {_r('planning_sentence')}")
     if entry.get("spd_shape"):
         lines.append("")
         lines.append(f"*The shape of the forecast:* {_r('spd_shape')}")
@@ -247,22 +288,113 @@ def _render_entry(entry: dict[str, Any], resolver: FigureResolver) -> list[str]:
             lines.append(f"*{label}:*")
             for item in items:
                 lines.append(f"- {resolver.resolve_text(str(item), qids)}")
-    # The distribution comes from the PACK, never from the model: the schema
-    # forbids extra properties on an entry, and a chart drawn from model
-    # output could disagree with the numbers printed beside it.
-    spd, bucket_labels, is_binary = resolver.spd_for(qids)
-    if is_binary:
-        # A yes/no question has one number, not a distribution: bucket 1 is
-        # P(yes). Six bars where five are empty would misrepresent it.
-        chart = charts.probability_bar(spd[0] if spd else None)
-    else:
-        chart = charts.probability_chart(spd, bucket_labels)
-    if chart:
-        lines += ["", chart]
+    # The bucket chart moved to the appendix (v3): a picture of uncertainty
+    # is not something a response planner can act on, and it was crowding out
+    # the two figures that are. The reader who wants the distribution finds
+    # the full table at the back.
     if qids:
         lines += ["", "Questions: " + ", ".join(question_link(q) for q in qids)]
     lines.append("")
     return lines
+
+
+def _selection_panel_lines(panel: dict[str, Any] | None) -> list[str]:
+    """The boxed "How these entries were chosen" panel.
+
+    Rendered from `panels.selection_panel`, never from model prose: a report
+    that describes its own selection rules in the model's words can describe
+    them wrongly, and the reader has no way to check.
+    """
+    if not panel:
+        return []
+    lines = ["", f"## {panel.get('title')}", ""]
+    if panel.get("ordering"):
+        lines += [str(panel["ordering"]), ""]
+    tests = panel.get("tests") or []
+    if tests:
+        lines.append("An entry has to pass two tests:")
+        lines.append("")
+        for test in tests:
+            lines.append(f"- {test}")
+        lines.append("")
+    thresholds = panel.get("thresholds") or []
+    if thresholds:
+        lines.append("Sizes worth mobilising for:")
+        lines.append("")
+        for item in thresholds:
+            lines.append(f"- {item}")
+        lines.append("")
+    if panel.get("counts_sentence"):
+        lines += [str(panel["counts_sentence"]), ""]
+    if panel.get("thin_note"):
+        lines += [str(panel["thin_note"]), ""]
+    return lines
+
+
+def _question_table_lines(rows: list[dict[str, Any]] | None) -> list[str]:
+    """Every question considered, one row each: the report's audit trail."""
+    if not rows:
+        return []
+    lines = [
+        "",
+        "### Every question considered",
+        "",
+        "This is the whole list the report was drawn from, so a reader can "
+        "see what was weighed and left out as well as what was chosen.",
+        "",
+        "| Country | Hazard | Measure | Expected excess | Chance of passing the threshold | Selected as | Record |",
+        "| --- | --- | --- | ---: | ---: | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row.get('country', '')} | {row.get('hazard', '')} | "
+            f"{row.get('metric', '')} | {row.get('excess', '')} | "
+            f"{row.get('chance', '')} | {row.get('gate', '')} | "
+            f"{row.get('anchor', '')} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _bucket_table_lines(
+    attention: list[dict[str, Any]], resolver: FigureResolver
+) -> list[str]:
+    """The full bucket distributions, in the appendix where they belong.
+
+    They used to sit inside every entry, where they crowded out the two
+    figures a planner can actually act on. A reader who wants the shape of
+    the whole distribution still gets it, with the bands named in words.
+    """
+    blocks: list[str] = []
+    for entry in attention:
+        qids = [str(q) for q in entry.get("question_ids") or []]
+        spd, _labels, is_binary = resolver.spd_for(qids)
+        if not spd or is_binary:
+            continue
+        metric = str(entry.get("metric") or "")
+        labels = panels.humanised_labels(metric)
+        rows = []
+        for i, prob in enumerate(spd):
+            label = labels[i] if i < len(labels) else f"band {i + 1}"
+            rows.append(f"| {label} | {float(prob) * 100:.0f}% |")
+        if not rows:
+            continue
+        blocks += [
+            "",
+            f"**{names.describe_pair(entry.get('iso3'), entry.get('hazard_code'), metric)}**",
+            "",
+            "| How many | Chance |",
+            "| --- | ---: |",
+        ] + rows
+    if not blocks:
+        return []
+    return [
+        "",
+        "### The full forecasts",
+        "",
+        "Each forecast is a set of chances across bands of size, averaged "
+        "over the six months of the window.",
+    ] + blocks + [""]
 
 
 def render_markdown(
@@ -270,14 +402,25 @@ def render_markdown(
     resolver: FigureResolver,
     *,
     provenance: dict[str, Any] | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> str:
-    """content_json -> the report markdown, placeholders resolved."""
+    """content_json -> the report markdown, placeholders resolved.
+
+    ``extras`` is `packs.report_extras(pack)`: the selection panel, the gate
+    tags and the appendix question table. All three are GENERATED from the
+    gate's own counts, so a reader can check the report's account of itself
+    against the report.
+    """
     lines: list[str] = []
     kind = str(content.get("kind") or "")
+    extras = extras or {}
+    gates = extras.get("gates") or {}
 
     lines.append("# Fred's Monthly Risk Report")
     lines.append("")
     lines.append(f"**{resolver.resolve_text(str(content.get('headline') or ''))}**")
+
+    lines += _selection_panel_lines(extras.get("selection_panel"))
 
     if content.get("run_summary"):
         lines += ["", "## The scan this month", ""]
@@ -303,7 +446,7 @@ def render_markdown(
                 "",
             ]
             for entry in sorted(group, key=lambda e: int(e.get("rank") or 99)):
-                lines += _render_entry(entry, resolver)
+                lines += _render_entry(entry, resolver, gates)
 
         # An entry the model failed to place must never disappear from the
         # report. Print it under its own heading instead, where it is
@@ -317,7 +460,7 @@ def render_markdown(
         if stragglers:
             lines += ["", "## Other situations of note", ""]
             for entry in sorted(stragglers, key=lambda e: int(e.get("rank") or 99)):
-                lines += _render_entry(entry, resolver)
+                lines += _render_entry(entry, resolver, gates)
 
     changes = content.get("changes_since_last_run") or []
     if changes:
@@ -372,6 +515,24 @@ def render_markdown(
     )
     lines.append("")
     lines.append(lexicon.markdown_table())
+    lines += _question_table_lines(extras.get("question_table"))
+    lines += _bucket_table_lines(list(attention), resolver)
+    watchlist = extras.get("watchlist") or []
+    if watchlist:
+        lines += [
+            "",
+            "### Watchlist",
+            "",
+            "These forecasts are unusual against their own history but too "
+            "small to mobilise against. They are tracked, not acted on.",
+            "",
+        ]
+        for item in watchlist:
+            lines.append(
+                f"- {item.get('country')}, {item.get('hazard')}: "
+                f"{item.get('metric')}"
+            )
+        lines.append("")
     if provenance:
         lines += ["", "### Run provenance", ""]
         for key, value in provenance.items():

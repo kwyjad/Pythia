@@ -43,9 +43,21 @@ router = APIRouter()
 
 _LN2 = math.log(2.0)
 
-# Best-available aggregate per question — mirrors the dashboard's
-# STANDARD_MODEL_PREFERENCE and compute_deviation's consumer ordering.
-_MODEL_PREFERENCE = ("ensemble_bayesmc_v2", "ensemble_mean_v2", "track2_flash")
+def _model_preference() -> tuple[str, ...]:
+    """Best-available aggregate per question, single-sourced.
+
+    Defensive import: the API must not 500 because the interpreter package
+    moved. The literal fallback is the same order.
+    """
+    try:
+        from interpreter.names import AGGREGATE_PREFERENCE
+
+        return tuple(AGGREGATE_PREFERENCE)
+    except Exception:  # noqa: BLE001
+        return ("ensemble_mean_v2", "ensemble_bayesmc_v2", "track2_flash")
+
+
+_MODEL_PREFERENCE = _model_preference()
 
 _KINDS = ("current", "scored", "combined")
 

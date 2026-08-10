@@ -56,6 +56,9 @@ _ATTENTION_ENTRY = {
         "why_it_stands_out": _PROSE,
         "how_to_read_the_distribution": _PROSE,
         # Where the probability sits and how heavy the tail is, in words.
+        # The frame the renderer fills with the two planning figures. Prose
+        # with placeholders; the numbers are never the model's.
+        "planning_sentence": _PROSE,
         "spd_shape": _PROSE,
         "what_the_model_was_reacting_to": _PROSE,
         "impacts": _PROSE_LIST,

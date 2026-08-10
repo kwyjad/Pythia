@@ -550,8 +550,19 @@ def run_interpreter(
                 if pack.kind == "current" else {}
             ),
         )
-        content_md = render.render_markdown(content, resolver, provenance=provenance)
-        figures = {"global": global_figures, "per_question": per_question}
+        # The report's account of ITSELF: the selection panel, the gate tag on
+        # each entry and the appendix question table, all generated from the
+        # gate's own counts. Stored beside the figures so the PDF and the
+        # dashboard render the same account without recomputing it.
+        extras = packs.report_extras(pack) if pack.kind == "current" else {}
+        content_md = render.render_markdown(
+            content, resolver, provenance=provenance, extras=extras,
+        )
+        figures = {
+            "global": global_figures,
+            "per_question": per_question,
+            "extras": extras,
+        }
 
         interpretation_id, version = store.save_interpretation(
             con, content=content, content_md=content_md, figures=figures,

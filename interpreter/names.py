@@ -24,6 +24,18 @@ from pathlib import Path
 # The two families the report splits its sections by. Drought, flood and
 # tropical cyclone move with the weather; armed conflict does not, and the
 # reasoning a reader needs for each is different enough to keep apart.
+# Which aggregate speaks for a question, best first.
+#
+# ensemble_mean_v2 leads by owner decision (2026-08-10). BayesMC and the mean
+# disagree sharply on thin anchors: on IDN_TC_PA_2026-09 BayesMC put the
+# forecast at 14.1x its base rate where the mean put it at 2.25x, and it was
+# the BayesMC figure that led the August report. Declared once and read by the
+# pack builder, the prompt pack, the API and the printed map, because it
+# previously lived in three copies plus an implicit fourth (the printed map
+# had no preference at all and simply took the largest across every model,
+# Sibyl included).
+AGGREGATE_PREFERENCE = ("ensemble_mean_v2", "ensemble_bayesmc_v2", "track2_flash")
+
 CLIMATE_HAZARDS = ("DR", "FL", "TC")
 CONFLICT_HAZARDS = ("ACE", "ACO")
 
