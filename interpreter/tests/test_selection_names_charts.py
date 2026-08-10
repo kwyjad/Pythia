@@ -400,3 +400,54 @@ class TestEvMultipleComposes:
         from interpreter.render import format_figure
 
         assert format_figure("ev_multiple", 0.5) == "one half of"
+
+
+class TestAggregatePreference:
+    """One aggregate speaks for a question, declared once.
+
+    It previously lived in three copies plus an implicit fourth: the printed
+    map had no preference at all and took the largest divergence across every
+    model row, Sibyl included, so it could disagree with the dashboard's map.
+    """
+
+    def test_the_mean_leads(self):
+        assert names.AGGREGATE_PREFERENCE[0] == "ensemble_mean_v2"
+
+    def test_every_consumer_reads_the_same_order(self):
+        from interpreter import packs
+        from scripts.ai_bundle.build_current_run_bundle import AGGREGATE_PREFERENCE
+        import pythia.api.routes.interpreter as api_routes
+
+        assert tuple(AGGREGATE_PREFERENCE) == tuple(names.AGGREGATE_PREFERENCE)
+        assert tuple(api_routes._MODEL_PREFERENCE) == tuple(names.AGGREGATE_PREFERENCE)
+        # packs picks its grid by the same order.
+        record = {"ensemble": {
+            "ensemble_bayesmc_v2": {"months": {"1": {"1": 1.0}}},
+            "ensemble_mean_v2": {"months": {"1": {"2": 1.0}}},
+        }}
+        grid = packs._preferred_grid(record)
+        assert grid == {"months": {"1": {"2": 1.0}}}
+
+    def test_the_printed_map_picks_one_row_per_question(self, tmp_path):
+        import duckdb
+        from interpreter import mapviz
+
+        con = duckdb.connect(str(tmp_path / "m.duckdb"))
+        con.execute(
+            "CREATE TABLE forecast_deviation (run_id TEXT, question_id TEXT, "
+            "model_name TEXT, iso3 TEXT, js_vs_baserate DOUBLE, "
+            "is_test BOOLEAN DEFAULT FALSE)"
+        )
+        con.executemany(
+            "INSERT INTO forecast_deviation VALUES (?,?,?,?,?,FALSE)",
+            [
+                ("fc_1", "q1", "ensemble_mean_v2", "ETH", 0.20),
+                ("fc_1", "q1", "ensemble_bayesmc_v2", "ETH", 0.60),
+                ("fc_1", "q1", "sibyl", "ETH", 0.69),
+            ],
+        )
+        values = mapviz.values_from_deviation(con, "fc_1", include_test=False)
+        # The mean's 0.20, not bayesmc's 0.60 and not Sibyl's 0.69.
+        import math as _m
+        assert values["ETH"] == pytest.approx(0.20 / _m.log(2.0))
+        con.close()

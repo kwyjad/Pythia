@@ -110,7 +110,11 @@ def _make_db(db_path: Path, *, with_tables: bool = True) -> None:
         "baserate_json TEXT, is_test BOOLEAN DEFAULT FALSE)"
     )
     rows = [
-        # ETH/ACE: bayesmc must be preferred over the (higher-js) mean row.
+        # ETH/ACE: the mean must be preferred over the bayesmc row, and the
+        # figures are deliberately set so preferring the wrong one is visible
+        # (mean 0.60 vs bayesmc 0.3466). Owner decision 2026-08-10: BayesMC
+        # and the mean diverge most on thin anchors, and BayesMC's figure is
+        # what led the August report astray.
         ("fc_1", QID_ACE, "ensemble_bayesmc_v2", "ETH", "ACE", "FATALITIES",
          "spd", 0.3466, 1.2, 200000.0, 180.0, False),
         ("fc_1", QID_ACE, "ensemble_mean_v2", "ETH", "ACE", "FATALITIES",
@@ -225,11 +229,11 @@ def test_attention_map_preference_scaling_and_test_filter(api_env) -> None:
     # The test-mode question is filtered out entirely.
     assert set(by_iso3) == {"ETH", "KEN"}
     eth = by_iso3["ETH"]
-    # bayesmc (0.3466) is preferred over the mean row (0.60) for QID_ACE,
+    # The mean (0.60) is preferred over the bayesmc row (0.3466) for QID_ACE,
     # and ACE beats FL (0.10) as ETH's top entry.
     assert eth["hazard_code"] == "ACE"
-    assert eth["js_vs_baserate"] == pytest.approx(0.3466)
-    assert eth["attention"] == pytest.approx(0.3466 / math.log(2.0))
+    assert eth["js_vs_baserate"] == pytest.approx(0.60)
+    assert eth["attention"] == pytest.approx(0.60 / math.log(2.0))
     assert eth["n_questions"] == 2
     assert by_iso3["KEN"]["attention"] == pytest.approx(0.20 / math.log(2.0))
 

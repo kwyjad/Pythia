@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from interpreter import selection
+from interpreter import names, selection
 
 LOGGER = logging.getLogger(__name__)
 
@@ -195,7 +195,7 @@ _ATTENTION_FIG_KEYS = (
 
 def _preferred_grid(record: dict[str, Any]) -> dict[str, Any] | None:
     grids = record.get("ensemble") or {}
-    for pref in ("ensemble_bayesmc_v2", "ensemble_mean_v2", "track2_flash"):
+    for pref in names.AGGREGATE_PREFERENCE:
         if pref in grids:
             return grids[pref]
     return next(iter(grids.values()), None)

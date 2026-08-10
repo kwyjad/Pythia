@@ -209,10 +209,28 @@ def values_from_deviation(con, run_id: str | None, *, include_test: bool) -> dic
     if run_id:
         where.append("run_id = ?")
         params.append(run_id)
+    # One aggregate per question, best-available, exactly as
+    # /v1/interpreter/attention_map does it. This map previously took MAX
+    # across EVERY model row including Sibyl, so a country could be coloured
+    # by whichever aggregate happened to diverge most and the printed map
+    # could disagree with the dashboard's — the one thing drawing it here
+    # was supposed to prevent.
+    order = " ".join(
+        f"WHEN model_name = '{m}' THEN {i}"
+        for i, m in enumerate(names.AGGREGATE_PREFERENCE)
+    )
     sql = f"""
+        WITH ranked AS (
+            SELECT iso3, question_id, js_vs_baserate,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY question_id
+                       ORDER BY CASE {order} ELSE 99 END, model_name
+                   ) AS rn
+            FROM forecast_deviation
+            WHERE {' AND '.join(where)}{test_clause}
+        )
         SELECT iso3, MAX(js_vs_baserate) AS m
-        FROM forecast_deviation
-        WHERE {' AND '.join(where)}{test_clause}
+        FROM ranked WHERE rn = 1
         GROUP BY iso3
     """
     try:

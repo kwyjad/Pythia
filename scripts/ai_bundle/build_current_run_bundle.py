@@ -83,11 +83,11 @@ from interpreter import selection as _selection
 
 LOGGER = logging.getLogger(__name__)
 
-# Best-available aggregate per question (mirrors the dashboard's
-# STANDARD_MODEL_PREFERENCE; bayesmc first — deviation is SPD-shaped and
-# binary questions fall through to the mean, which is the only aggregate
-# that carries them).
-AGGREGATE_PREFERENCE = ("ensemble_bayesmc_v2", "ensemble_mean_v2", "track2_flash")
+# Best-available aggregate per question. Single-sourced from
+# interpreter.names so the pack builder, the prompt pack, the API and the
+# printed map cannot drift apart. Binary questions fall through to whichever
+# aggregate carries them.
+AGGREGATE_PREFERENCE = _names.AGGREGATE_PREFERENCE
 
 LN2 = math.log(2.0)
 
