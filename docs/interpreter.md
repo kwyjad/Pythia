@@ -225,6 +225,14 @@ failures stay inspectable):
    carries no categorised rows (a scored interpretation has no attention
    list at all).
 
+**One correction pass.** When validation fails, the runner quotes the exact
+complaints back to the model and asks for the same report with only those
+points fixed. The better of the two answers is kept, never the worse one, and
+the retry's tokens are added to the interpretation's cost. Capped at one
+(`PYTHIA_INTERPRETER_VALIDATION_RETRIES`, default 1): the failures worth
+retrying are single-sentence slips, and a model that misses twice is telling
+you something about the checks rather than about itself.
+
 A crashed check is reported as a failed check, never an unhandled error.
 `PYTHIA_INTERPRETER_STRICT_VALIDATION=1` additionally suppresses the
 publication artifacts (`--out-dir` files; the Phase 5/6 consumers honour

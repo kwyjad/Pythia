@@ -116,6 +116,16 @@ def max_output_tokens() -> int:
     return _env_int("PYTHIA_INTERPRETER_MAX_OUTPUT_TOKENS", 32_768)
 
 
+def validation_retries() -> int:
+    """How many correction passes to allow after a failed validation.
+
+    One by default. A second call costs about the same as the first, and the
+    failures worth retrying are single-sentence slips; a model that misses
+    twice is telling us something about the checks rather than about itself.
+    """
+    return _env_int("PYTHIA_INTERPRETER_VALIDATION_RETRIES", 1)
+
+
 def strict_validation() -> bool:
     return (os.getenv("PYTHIA_INTERPRETER_STRICT_VALIDATION", "0") or "0").strip().lower() in (
         "1", "true", "yes",

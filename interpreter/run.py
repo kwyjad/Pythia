@@ -212,6 +212,14 @@ def _open_db(db: str):
     return duckdb_io, duckdb_io.get_db(db or duckdb_io.DEFAULT_DB_URL)
 
 
+def _error_count(report) -> list[str]:
+    """Every error string in a validation report, flattened."""
+    return [
+        err for check in report.checks.values() if not check.passed
+        for err in (check.errors or [])
+    ]
+
+
 def _repair_entry_identity(
     content: dict[str, Any], identity: dict[str, dict[str, str]]
 ) -> int:
@@ -449,16 +457,88 @@ def run_interpreter(
         _repair_entry_identity(content, packs.pack_identity(pack))
 
         # --- Validation (schema, referential, numeric, prose, style, sections) ---
-        report = validate.validate_interpretation(
-            content,
-            kind=kind,
-            valid_question_ids=packs.pack_question_ids(pack) | set(per_question),
-            per_question=per_question,
-            global_figures=global_figures,
-            con=con,
-            run_id=run_id,
-            pack_categories=packs.pack_categories(pack),
-        )
+        def _validate(candidate: dict[str, Any]):
+            return validate.validate_interpretation(
+                candidate,
+                kind=kind,
+                valid_question_ids=packs.pack_question_ids(pack) | set(per_question),
+                per_question=per_question,
+                global_figures=global_figures,
+                con=con,
+                run_id=run_id,
+                pack_categories=packs.pack_categories(pack),
+            )
+
+        report = _validate(content)
+
+        # One correction pass. Most failures that survive the prompt are a
+        # single slip in one field: a stray numeral, one banned construction.
+        # Re-running the whole cycle by hand to fix one sentence costs a full
+        # model call and leaves a banner on the dashboard in the meantime,
+        # so the runner asks for the fix itself, quoting the exact complaints.
+        # Capped at one attempt: a model that cannot satisfy the checks twice
+        # is telling us something about the checks, and the report still
+        # stores either way.
+        retries = 0
+        if not report.passed and config.validation_retries() > 0:
+            complaints = [
+                f"- {name}: {err}"
+                for name, check in report.checks.items()
+                if not check.passed
+                for err in (check.errors or [])
+            ]
+            LOGGER.warning(
+                "[interpreter] validation failed on %d point(s); asking the "
+                "model to correct them", len(complaints),
+            )
+            fix_prompt = (
+                full_prompt
+                + "\n\n## Your previous answer failed these checks\n\n"
+                + "\n".join(complaints[:60])
+                + "\n\nReturn the WHOLE report again as JSON, identical "
+                "except for the points above. Change nothing else: not the "
+                "entries covered, not their categories, not their order. "
+                "Fix only what is listed."
+            )
+            retry_text, retry_usage, retry_error = _call_model(fix_prompt, model_ref)
+            _log_llm_call(
+                model_ref=model_ref, prompt=fix_prompt, response=retry_text,
+                usage=retry_usage, error=retry_error, run_id=run_id,
+                hs_run_id=hs_run_id, kind=f"{kind}_retry",
+            )
+            retries = 1
+            retry_content = parse_model_json(retry_text) if not retry_error else None
+            if retry_content is not None:
+                _repair_entry_identity(retry_content, packs.pack_identity(pack))
+                retry_report = _validate(retry_content)
+                if retry_report.passed or len(_error_count(retry_report)) < len(complaints):
+                    # Keep the better answer, never the worse one.
+                    content, report = retry_content, retry_report
+                # The retry's tokens are part of this interpretation's cost.
+                try:
+                    from forecaster.providers import estimate_cost_usd
+
+                    extra = estimate_cost_usd(model_id, retry_usage or {})
+                    if extra:
+                        cost_usd = (cost_usd or 0.0) + extra
+                except Exception:  # noqa: BLE001
+                    pass
+                input_tokens = (input_tokens or 0) + int(
+                    (retry_usage or {}).get("prompt_tokens") or 0
+                ) or None
+                output_tokens = (output_tokens or 0) + int(
+                    (retry_usage or {}).get("completion_tokens") or 0
+                ) or None
+                common_kwargs.update(
+                    cost_usd=cost_usd, input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+            else:
+                LOGGER.warning(
+                    "[interpreter] correction pass produced no usable JSON (%s); "
+                    "keeping the first answer", retry_error or "unparseable",
+                )
+
         status = "ok" if report.passed else "failed_validation"
 
         # --- Render (the report is still written on validation failure so it
