@@ -50,13 +50,27 @@ For each entry write:
 - `spd_shape` — one or two sentences on where the probability sits and how
   much weight is in the tail. Is the system fairly sure of a moderate
   number, or is it holding a small chance of something much larger?
+  **Write no digits here.** Do not name the size bands by their numbers.
+  Say "the middle band", "the top band", "the band above it"; the chart
+  printed beside your words carries the figures.
 - `what_the_model_was_reacting_to` — the evidence, briefly. Name the source
-  where the pack names it.
+  where the pack names it. **Write no digits here either**, however
+  tempting. A figure you read in a source document is still a number you
+  typed, and this report's standing promise is that it contains none. Say
+  "a government figure in the hundreds of thousands", "a sharp rise in
+  recorded events", "roughly a fifth of the population".
 - `impacts` — what this would mean for people, in one or two short items.
 - `operational_challenges` — access, funding, season, in one or two short
   items. Leave it out if the pack says nothing useful.
 
 Keep the whole entry under one hundred and fifty words.
+
+**One rule governs every field above: you write no digits.** Not in impacts,
+not in operational challenges, not in the reason an entry stands out. Where
+you need a figure the system computed, use its placeholder. Where you need a
+figure the system did not compute, describe its size in words. A single
+stray numeral fails the whole report, and the report says of itself that no
+number in it was written by a language model.
 
 ### `changes_since_last_run`
 
