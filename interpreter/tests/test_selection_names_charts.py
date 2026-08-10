@@ -328,3 +328,75 @@ class TestKindIsStated:
         )
         assert "{{KIND}}" not in text
         assert "`combined`" in text
+
+
+class TestIdentityRepair:
+    """The pack owns a question's country, hazard and metric.
+
+    The August report printed "Mali, fatalities: deaths" because the model
+    copied FATALITIES into hazard_code. Copying is transcription, not
+    judgement, so it is repaired rather than published.
+    """
+
+    def test_miscopied_hazard_code_is_corrected(self):
+        from interpreter.run import _repair_entry_identity
+
+        content = {"attention": [{
+            "question_ids": ["MLI_ACE_FATALITIES_2026-09"],
+            "iso3": "MLI", "hazard_code": "FATALITIES", "metric": "FATALITIES",
+            "category": "worsening", "hazard_family": "conflict",
+        }]}
+        identity = {"MLI_ACE_FATALITIES_2026-09": {
+            "iso3": "MLI", "hazard_code": "ACE", "metric": "FATALITIES",
+        }}
+        assert _repair_entry_identity(content, identity) == 1
+        assert content["attention"][0]["hazard_code"] == "ACE"
+
+    def test_judgement_fields_are_never_touched(self):
+        from interpreter.run import _repair_entry_identity
+
+        content = {"attention": [{
+            "question_ids": ["MLI_ACE_FATALITIES_2026-09"],
+            "iso3": "MLI", "hazard_code": "ACE", "metric": "FATALITIES",
+            "category": "worsening", "hazard_family": "conflict",
+        }]}
+        identity = {"MLI_ACE_FATALITIES_2026-09": {
+            "iso3": "MLI", "hazard_code": "ACE", "metric": "FATALITIES",
+        }}
+        assert _repair_entry_identity(content, identity) == 0
+        # The validator, not this repair, owns category and hazard_family.
+        assert content["attention"][0]["category"] == "worsening"
+
+    def test_an_unknown_question_is_left_alone(self):
+        from interpreter.run import _repair_entry_identity
+
+        content = {"attention": [{
+            "question_ids": ["NOT_IN_PACK"], "iso3": "ZZZ",
+            "hazard_code": "XX", "metric": "PA",
+        }]}
+        assert _repair_entry_identity(content, {"other": {}}) == 0
+        assert content["attention"][0]["iso3"] == "ZZZ"
+
+
+class TestEvMultipleComposes:
+    """format_figure returns a noun phrase because the model writes the value
+    inside a sentence of its own. Returning a clause published "about about
+    14.1 times the usual level the usual number of people affected"."""
+
+    def test_it_reads_inside_the_prompt_own_example(self):
+        from interpreter.render import format_figure
+
+        sentence = (
+            "the system expects about "
+            + format_figure("ev_multiple", 14.11)
+            + " the usual number of people affected"
+        )
+        assert sentence == (
+            "the system expects about 14.1 times the usual number of people affected"
+        )
+        assert "the usual level the usual" not in sentence
+
+    def test_below_one_still_reads(self):
+        from interpreter.render import format_figure
+
+        assert format_figure("ev_multiple", 0.5) == "one half of"

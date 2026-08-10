@@ -27,6 +27,9 @@ QID = "ETH_ACE_FATALITIES_2026-08"
 PER_QUESTION = {
     QID: {
         "js_vs_baserate": 0.3466,
+        "log_ev_ratio": 1.2,
+        # exp(1.2) — the readable form the report leads with.
+        "ev_multiple": 3.3201169227365472,
         "eiv_nominal": 200000.0,
         "rc_level": 2,
         "rc_score": 0.24,
@@ -413,3 +416,58 @@ class TestCodeCheckPrecision:
     def test_metric_enums_and_slash_forms_still_caught(self):
         assert validate_mod.find_codes_in_prose("EVENT_OCCURRENCE is up.")
         assert validate_mod.find_codes_in_prose("The DR/PA forecast.")
+
+
+class TestEvMultipleIsVerifiable:
+    """The report leads with ev_multiple, so the guard must be able to check it.
+
+    It could not: the first passing live report had the numeric check report
+    "0 checked, 9 unverifiable" — honest, and no protection at all, because
+    every figure the model cited was one the guard did not know how to derive.
+    ev_multiple is exp(log_ev_ratio) from the same row.
+    """
+
+    def test_ev_multiple_is_rederived_and_matched(self, tmp_path: Path):
+        con = duckdb.connect(str(tmp_path / "ev.duckdb"))
+        con.execute(
+            "CREATE TABLE forecast_deviation (run_id TEXT, question_id TEXT, "
+            "model_name TEXT, js_vs_baserate DOUBLE, log_ev_ratio DOUBLE, "
+            "eiv_nominal DOUBLE, eiv_per_100k DOUBLE)"
+        )
+        con.execute(
+            "INSERT INTO forecast_deviation VALUES "
+            f"('fc_1', '{QID}', 'ensemble_mean_v2', 0.3466, 1.2, 200000.0, 180.0)"
+        )
+        content = _content()
+        content["attention"][0]["figure_refs"] = ["ev_multiple"]
+        content["attention"][0]["why_it_stands_out"] = (
+            "About {{fig:ev_multiple}} the usual level."
+        )
+        result = check_numeric(
+            content, con=con, run_id="fc_1",
+            per_question=PER_QUESTION, global_figures=GLOBAL,
+        )
+        assert result.passed, result.errors
+        assert result.detail["n_checked"] >= 1, result.detail
+        con.close()
+
+    def test_a_wrong_ev_multiple_is_caught(self, tmp_path: Path):
+        con = duckdb.connect(str(tmp_path / "ev2.duckdb"))
+        con.execute(
+            "CREATE TABLE forecast_deviation (run_id TEXT, question_id TEXT, "
+            "model_name TEXT, js_vs_baserate DOUBLE, log_ev_ratio DOUBLE, "
+            "eiv_nominal DOUBLE, eiv_per_100k DOUBLE)"
+        )
+        con.execute(
+            "INSERT INTO forecast_deviation VALUES "
+            f"('fc_1', '{QID}', 'ensemble_mean_v2', 0.3466, 1.2, 200000.0, 180.0)"
+        )
+        figs = {QID: dict(PER_QUESTION[QID], ev_multiple=99.0)}
+        content = _content()
+        content["attention"][0]["figure_refs"] = ["ev_multiple"]
+        result = check_numeric(
+            content, con=con, run_id="fc_1",
+            per_question=figs, global_figures=GLOBAL,
+        )
+        assert not result.passed
+        con.close()

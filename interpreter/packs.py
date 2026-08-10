@@ -142,6 +142,27 @@ def pack_question_ids(pack: Pack) -> set[str]:
     return out
 
 
+def pack_identity(pack: Pack) -> dict[str, dict[str, str]]:
+    """{question_id: {iso3, hazard_code, metric}} straight from the pack.
+
+    These are facts about a question, not judgements, so the model's copy of
+    them is repaired rather than trusted: a mis-copied hazard_code printed
+    "Mali, fatalities: deaths" in a published report.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for row in pack.attention_rows:
+        qid = str(row.get("question_id") or "")
+        if not qid:
+            continue
+        fields = {
+            name: str(row.get(name) or "")
+            for name in ("iso3", "hazard_code", "metric")
+        }
+        if all(fields.values()):
+            out[qid] = fields
+    return out
+
+
 def pack_categories(pack: Pack) -> dict[str, tuple[str | None, str | None]]:
     """{question_id: (category, hazard_family)} for the rows the pack put in a
     section. The validator holds the report to exactly this list."""

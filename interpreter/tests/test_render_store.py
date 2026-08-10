@@ -28,12 +28,14 @@ class TestFormatFigure:
         # Plain words, not "% of maximum" (which meant nothing to a reader).
         assert format_figure("js_vs_baserate", 0.3466) == "a long way from its usual pattern"
         assert format_figure("js_vs_baserate", 0.02) == "close to its usual pattern"
-        # A multiple a reader can check, never "1/87.5x".
+        # A multiple a reader can check, never "1/87.5x". A NOUN PHRASE, so
+        # it composes inside the model's own sentence ("about {x} the usual
+        # number of people affected"); a clause published a duplication.
         import math as _m
-        assert format_figure("log_ev_ratio", _m.log(14.11)).startswith("about 14.1 times")
-        assert format_figure("log_ev_ratio", _m.log(0.5)) == "about one half of the usual level"
-        assert format_figure("log_ev_ratio", _m.log(1 / 87.5)) == "a small fraction of the usual level"
-        assert format_figure("log_ev_ratio", 0.693) == "about 2.0 times the usual level"
+        assert format_figure("log_ev_ratio", _m.log(14.11)) == "14.1 times"
+        assert format_figure("log_ev_ratio", _m.log(0.5)) == "one half of"
+        assert format_figure("log_ev_ratio", _m.log(1 / 87.5)) == "a small fraction of"
+        assert format_figure("log_ev_ratio", 0.693) == "2.0 times"
         assert format_figure("baserate_source", "acled:6m") == "acled:6m"
         assert format_figure("anything", None) == UNAVAILABLE
 

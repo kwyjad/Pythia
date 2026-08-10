@@ -280,11 +280,21 @@ def _db_deviation_values(con, run_id: str | None, qid: str) -> list[dict[str, An
         f"FROM forecast_deviation WHERE question_id = ?{run_clause}",
         params,
     ).fetchall()
-    return [
-        {"js_vs_baserate": r[0], "log_ev_ratio": r[1],
-         "eiv_nominal": r[2], "eiv_per_100k": r[3]}
-        for r in rows
-    ]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        row = {"js_vs_baserate": r[0], "log_ev_ratio": r[1],
+               "eiv_nominal": r[2], "eiv_per_100k": r[3]}
+        # ev_multiple is the readable form of log_ev_ratio and is what the
+        # report actually leads with, so it must be verifiable. Without it the
+        # guard reported "0 checked, 9 unverifiable" on a whole live report:
+        # honest, and no protection at all.
+        if r[1] is not None:
+            try:
+                row["ev_multiple"] = math.exp(float(r[1]))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        out.append(row)
+    return out
 
 
 def _db_triage_values(con, qid: str) -> list[dict[str, Any]]:
@@ -305,7 +315,8 @@ def _db_triage_values(con, qid: str) -> list[dict[str, Any]]:
     ]
 
 
-_DEVIATION_KEYS = ("js_vs_baserate", "log_ev_ratio", "eiv_nominal", "eiv_per_100k")
+_DEVIATION_KEYS = ("js_vs_baserate", "log_ev_ratio", "ev_multiple",
+                   "eiv_nominal", "eiv_per_100k")
 _TRIAGE_KEYS = ("rc_level", "rc_score", "triage_score")
 
 
