@@ -841,6 +841,20 @@ def render_markdown(
             lines += ["", "## Other situations of note", ""]
             for entry in sorted(stragglers, key=lambda e: int(e.get("rank") or 99)):
                 lines += _render_entry(entry, resolver, gates, extras)
+    elif kind in ("current", "combined"):
+        # A month in which nothing cleared the tests is a finding about the
+        # month, and it has to read as one. An empty stretch of page where
+        # the entries should be is indistinguishable from a broken report.
+        lines += [
+            "",
+            "## Nothing cleared both tests this month",
+            "",
+            "No forecast this month was both unusual against its own history "
+            "and large enough to mobilise against. That is a statement about "
+            "the month, not a gap in the system. The full list of what was "
+            "considered, with the figures behind each one, is in the appendix.",
+            "",
+        ]
 
     lines += _sibyl_lines(extras)
     lines += _changes_lines(content, extras, resolver)

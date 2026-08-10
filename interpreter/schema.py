@@ -146,7 +146,11 @@ def schema_json() -> str:
 
 
 def validate_output(
-    obj: Any, *, kind: str | None = None, require_performance: bool = True
+    obj: Any,
+    *,
+    kind: str | None = None,
+    require_performance: bool = True,
+    require_attention: bool = True,
 ) -> list[str]:
     """Shape-validate a structured output. Returns a list of error strings
     (empty = valid).
@@ -160,6 +164,11 @@ def validate_output(
     summary of nothing, which the renderer then discards in favour of the
     generated dormant state; asking for prose we do not print is how a model
     learns to invent.
+
+    ``require_attention`` is lowered when the gate admitted nothing at all.
+    That is a finding about the month, and it should read as one: failing the
+    whole report instead would turn a quiet month into a broken report, and
+    the reader would be told nothing either way.
     """
     errors: list[str] = []
     try:
@@ -174,7 +183,11 @@ def validate_output(
 
     if isinstance(obj, dict):
         effective_kind = kind or obj.get("kind")
-        if effective_kind in ("current", "combined") and not obj.get("attention"):
+        if (
+            require_attention
+            and effective_kind in ("current", "combined")
+            and not obj.get("attention")
+        ):
             errors.append("<root>: 'attention' is required and non-empty for kind "
                           f"{effective_kind!r}")
         if (

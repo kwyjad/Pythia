@@ -555,6 +555,17 @@ def run_interpreter(
         # performance block: the renderer prints the generated dormant state
         # instead, and prose we discard is prose the model learned to invent.
         require_performance = kind == "scored" or bool(scored_section)
+        # A month in which the gate admitted nothing is a finding about the
+        # month. Requiring an attention list there would fail the whole
+        # report, which tells the reader less than the empty section does.
+        categorised = packs.pack_categories(pack)
+        require_attention = pack.kind != "current" or bool(categorised)
+        if pack.kind == "current" and not categorised:
+            LOGGER.warning(
+                "[interpreter] the gate admitted no forecasts this run — the "
+                "report will say so rather than listing entries. Check the "
+                "thresholds with `python -m interpreter.gatecheck`."
+            )
 
         # --- Validation (schema, referential, numeric, prose, style,
         # sections, proper nouns) ---
@@ -567,9 +578,10 @@ def run_interpreter(
                 global_figures=global_figures,
                 con=con,
                 run_id=run_id,
-                pack_categories=packs.pack_categories(pack),
+                pack_categories=categorised,
                 evidence_text=evidence,
                 require_performance=require_performance,
+                require_attention=require_attention,
             )
 
         report = _validate(content)

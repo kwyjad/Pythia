@@ -792,13 +792,15 @@ def validate_interpretation(
     pack_categories: dict[str, tuple[str | None, str | None]] | None = None,
     evidence_text: str | None = None,
     require_performance: bool = True,
+    require_attention: bool = True,
 ) -> ValidationReport:
     """Run every check. Never raises — a validator crash is reported as
     a failed check, not an unhandled error (the report must still store)."""
     checks: dict[str, CheckResult] = {}
 
     schema_errors = schema.validate_output(
-        content, kind=kind, require_performance=require_performance
+        content, kind=kind, require_performance=require_performance,
+        require_attention=require_attention,
     )
     checks["schema"] = CheckResult(passed=not schema_errors, errors=schema_errors)
 

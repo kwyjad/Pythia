@@ -275,3 +275,28 @@ class TestPdfLayout:
         # Indent with padding, not margin: with margin and zero padding the
         # marker is laid out outside the box and drifts off.
         assert "padding-left: 16pt" in pdf._CSS
+
+
+class TestAQuietMonth:
+    """Nothing cleared the tests. That is a finding, not a broken report."""
+
+    def test_an_empty_attention_list_says_so_rather_than_leaving_a_gap(self):
+        content = _content()
+        content["attention"] = []
+        md = render_markdown(content, _resolver(), extras=_extras())
+        assert "## Nothing cleared both tests this month" in md
+        assert "statement about the month" in md
+
+    def test_the_schema_can_be_told_not_to_require_an_attention_list(self):
+        from interpreter import schema
+
+        content = _content()
+        content["attention"] = []
+        # Default: an empty list is a schema failure, which is right whenever
+        # the pack DID categorise rows and the model dropped them.
+        assert schema.validate_output(content, kind="combined")
+        # Lowered by the runner when the pack itself categorised nothing.
+        assert schema.validate_output(
+            content, kind="combined", require_performance=False,
+            require_attention=False,
+        ) == []
