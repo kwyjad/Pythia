@@ -17,7 +17,15 @@ import math
 import re
 from typing import Any
 
-from interpreter import charts, config, lexicon, names, panels, selection
+from interpreter import (
+    charts,
+    config,
+    decisions,
+    lexicon,
+    names,
+    panels,
+    selection,
+)
 
 _PLACEHOLDER = re.compile(r"\{\{fig:([A-Za-z0-9_.-]+)\}\}")
 
@@ -208,12 +216,16 @@ def resolve_content(content: dict[str, Any], resolver: FigureResolver) -> dict[s
     for entry in out.get("attention") or []:
         qids = [str(q) for q in entry.get("question_ids") or []]
         for name in ("why_it_stands_out", "how_to_read_the_distribution",
-                     "spd_shape", "what_the_model_was_reacting_to"):
+                     "planning_sentence", "spd_shape",
+                     "what_the_model_was_reacting_to"):
             if entry.get(name):
                 entry[name] = _r(entry[name], qids)
         for name in ("impacts", "operational_challenges"):
             if entry.get(name):
                 entry[name] = [_r(item, qids) for item in entry[name]]
+        decision = entry.get("decision_point")
+        if isinstance(decision, dict) and decision.get("action"):
+            decision["action"] = _r(decision["action"], qids)
     performance = out.get("performance")
     if isinstance(performance, dict):
         for name in ("plain_summary", "skill_statement", "track_comparison",
@@ -241,13 +253,24 @@ _REASON_LABELS = {
 
 
 
+def _first_for(qids: list[str], table: dict[str, Any] | None) -> Any:
+    """The first value in ``table`` any of an entry's questions carries."""
+    for qid in qids:
+        value = (table or {}).get(qid)
+        if value:
+            return value
+    return None
+
+
 def _render_entry(
     entry: dict[str, Any],
     resolver: FigureResolver,
     gates: dict[str, str] | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> list[str]:
     """One attention entry: a named heading and at most half a page under it."""
     qids = [str(q) for q in entry.get("question_ids") or []]
+    extras = extras or {}
 
     def _r(field: str) -> str:
         return resolver.resolve_text(str(entry.get(field) or ""), qids)
@@ -259,12 +282,28 @@ def _render_entry(
         f"{names.describe_pair(entry.get('iso3'), entry.get('hazard_code'), entry.get('metric'))}"
     )
     lines.append("")
-    # Which test admitted this entry, in the panel's own words. A reader who
-    # asks "why is this here and not my country" gets the answer on the entry
-    # rather than having to infer it from the section heading.
+    # One line of provenance for the entry: which test admitted it, how long
+    # it has been flagged, and what the second reader made of it. All three
+    # come from the pack's own stamps, never from the model, so a reader
+    # asking "why is this here and not my country" gets a checkable answer.
+    tags: list[str] = []
     gate = next((gates.get(q) for q in qids if (gates or {}).get(q)), None) if gates else None
     if gate:
-        lines.append(f"*Selected because: {gate}.*")
+        tags.append(f"selected because it is {gate}")
+    persistence = _first_for(
+        qids,
+        {
+            str(e.get("question_id")): e.get("persistence")
+            for e in (extras.get("persistence") or {}).get("entries") or []
+        },
+    )
+    if persistence:
+        tags.append(str(persistence))
+    sibyl_tag = _first_for(qids, extras.get("sibyl_tags"))
+    if sibyl_tag:
+        tags.append(str(sibyl_tag))
+    if tags:
+        lines.append(f"*{'; '.join(tags)}.*")
         lines.append("")
     if entry.get("why_it_stands_out"):
         lines.append(_r("why_it_stands_out"))
@@ -288,6 +327,20 @@ def _render_entry(
             lines.append(f"*{label}:*")
             for item in items:
                 lines.append(f"- {resolver.resolve_text(str(item), qids)}")
+    decision = entry.get("decision_point") or {}
+    if decision.get("action"):
+        deadline = _first_for(
+            qids,
+            {
+                str(r.get("question_id")): r.get("deadline_label")
+                for r in (extras.get("decision_calendar") or {}).get("rows") or []
+            },
+        ) or decisions.month_label(decision.get("deadline_month")) or "no dated deadline"
+        lines.append("")
+        lines.append(
+            f"**Decision by {deadline}:** "
+            f"{resolver.resolve_text(str(decision['action']), qids)}"
+        )
     # The bucket chart moved to the appendix (v3): a picture of uncertainty
     # is not something a response planner can act on, and it was crowding out
     # the two figures that are. The reader who wants the distribution finds
@@ -397,6 +450,328 @@ def _bucket_table_lines(
     ] + blocks + [""]
 
 
+def _issue_line(extras: dict[str, Any]) -> list[str]:
+    """Forecasts issued on X, covering Y to Z. One line, under the title."""
+    line = extras.get("issue_line") or {}
+    issued, covering = line.get("issued"), line.get("covering")
+    if not issued and not covering:
+        return []
+    parts = []
+    if issued:
+        parts.append(f"Forecasts issued {issued}")
+    if covering:
+        parts.append(f"covering {covering}")
+    return ["", f"*{', '.join(parts)}. Automated output, unreviewed.*", ""]
+
+
+def _blind_spots_front(extras: dict[str, Any]) -> list[str]:
+    """Three lines of what the system cannot see, on page one.
+
+    This used to sit on page fourteen. That people-affected ground truth is
+    thin, and that the machine which will fix it runs in shadow mode, changes
+    how a reader should read every climate entry in the report. The full list
+    stays in the appendix.
+    """
+    items = extras.get("blind_spots_short") or []
+    if not items:
+        return []
+    lines = ["", "## What this report cannot see", ""]
+    for item in items[:3]:
+        lines.append(f"- {item}")
+    lines.append("")
+    return lines
+
+
+def _decision_calendar_lines(
+    content: dict[str, Any], extras: dict[str, Any], resolver: FigureResolver
+) -> list[str]:
+    """The dated page: what decision, for where, by when.
+
+    Rows and dates come from the pack; the action is the model's sentence for
+    that entry. A deadline is derived from the peak month less the hazard's
+    lead time, so it cannot be a plausible date the system does not believe.
+    """
+    calendar = extras.get("decision_calendar") or {}
+    rows = calendar.get("rows") or []
+    if not rows:
+        return []
+    actions: dict[str, str] = {}
+    for entry in content.get("attention") or []:
+        action = (entry.get("decision_point") or {}).get("action")
+        if not action:
+            continue
+        qids = [str(q) for q in entry.get("question_ids") or []]
+        for qid in qids:
+            actions[qid] = resolver.resolve_text(str(action), qids)
+
+    lines = [
+        "", "## The decision calendar", "",
+        "What has to be decided, for where, and by when. Each deadline is the "
+        "month with most expected impact, less the run-up that hazard needs. "
+        "A deadline already past is printed as it falls.",
+        "",
+        "| By | Country | Hazard | Decision |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        action = actions.get(str(row.get("question_id"))) or str(row.get("action") or "")
+        lines.append(
+            f"| {row.get('deadline_label', 'not dated')} | {row.get('country', '')} | "
+            f"{row.get('hazard', '')} | {action or 'no decision was attached'} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _sibyl_lines(extras: dict[str, Any]) -> list[str]:
+    """The second reader's own section.
+
+    Everything here is drawn from the pack, including the caveat: Sibyl has
+    no scored track record, and a model asked to summarise a comparison it
+    cannot check would eventually promote it into a tiebreaker.
+    """
+    block = extras.get("sibyl") or {}
+    if not block.get("available"):
+        return []
+    rows = block.get("rows") or []
+    if not rows:
+        return []
+    summary = block.get("summary") or {}
+    lines = [
+        "", "## A second reader", "",
+        "Sibyl re-forecasts the most volatile questions by reading the open "
+        "web with an agent, while the main system reads structured data "
+        "feeds. Where the two disagree, something is worth a second look.",
+        "",
+        f"It covered {summary.get('n_covered', 0)} questions this month. It "
+        f"was more alarmed than the main system on "
+        f"{summary.get('n_more_alarmed', 0)}, more cautious on "
+        f"{summary.get('n_more_cautious', 0)}, and broadly agreed on "
+        f"{summary.get('n_agrees', 0)}.",
+        "",
+    ]
+    chart = charts.second_opinion_chart(rows, title="Where the two readers differ")
+    if chart:
+        lines += [chart, "", f"*{charts.second_opinion_legend()}*", ""]
+
+    lines += [
+        "| Country | Hazard | Second opinion | Its own trials |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        settled = "did not settle it" if row.get("unsettled") else "agreed with each other"
+        lines.append(
+            f"| {row.get('country_name', '')} | {row.get('hazard_name', '')} | "
+            f"{row.get('tag', '')} | {settled} |"
+        )
+    lines.append("")
+
+    novel = [r for r in rows if r.get("novel_evidence")]
+    if novel:
+        lines += [
+            "### What the second reader found that the main system did not",
+            "",
+            "These come from Sibyl's own research notes. Each one is absent "
+            "from the evidence the main system was given, which is a reason "
+            "to check it rather than a finding in itself.",
+            "",
+        ]
+        for row in novel:
+            lines.append(
+                f"**{row.get('country_name', '')}, "
+                f"{str(row.get('hazard_name') or '').lower()}**"
+            )
+            for fact in row.get("novel_evidence") or []:
+                lines.append(f"- {fact}")
+            lines.append("")
+
+    if block.get("caveat"):
+        lines += [f"*{block['caveat']}*", ""]
+    return lines
+
+
+def _sector_lines(extras: dict[str, Any]) -> list[str]:
+    """Where Fred departs from the prevailing institutional view."""
+    block = extras.get("sector") or {}
+    if not block.get("available"):
+        return []
+    lines = ["", "## Fred against the sector", ""]
+    for comparison in block.get("comparisons") or []:
+        label = comparison.get("source_label") or comparison.get("source")
+        lines.append(
+            f"### Compared with {label} "
+            f"({comparison.get('n_compared', 0)} countries in both)"
+        )
+        lines.append("")
+        for side, heading in (
+            ("more_worried", "Fred ranks these higher than the sector does"),
+            ("less_worried", "Fred ranks these lower than the sector does"),
+        ):
+            entries = comparison.get(side) or []
+            if not entries:
+                continue
+            lines += [f"*{heading}:*", ""]
+            for entry in entries:
+                gap = int(entry.get("rank_gap") or 0)
+                lines.append(
+                    f"- {entry.get('country_name') or entry.get('iso3')}: "
+                    f"Fred places it {entry.get('fred_rank')} of "
+                    f"{comparison.get('n_compared')}, {label} places it "
+                    f"{entry.get('sector_rank')}, a gap of {abs(gap)} places."
+                )
+            lines.append("")
+    if block.get("caveat"):
+        lines += [f"*{block['caveat']}*", ""]
+    return lines
+
+
+def _changes_lines(
+    content: dict[str, Any], extras: dict[str, Any], resolver: FigureResolver
+) -> list[str]:
+    """What changed since last month, with persistence and movement.
+
+    The model's items describe what entered and left. The persistence table
+    beneath them is generated, because how long something has been flagged
+    and which way its planning figure has moved are facts about two runs, not
+    a judgement.
+    """
+    items = content.get("changes_since_last_run") or []
+    persistence = extras.get("persistence") or {}
+    entries = [e for e in (persistence.get("entries") or []) if e.get("movement")]
+    dropped = persistence.get("dropped") or []
+    if not items and not entries and not dropped:
+        return []
+
+    lines = ["", "## What changed since last month", ""]
+    for item in items:
+        lines.append(f"- {resolver.resolve_text(str(item))}")
+    if entries:
+        lines += [
+            "",
+            "How this month's entries have moved, measured only on the months "
+            "the two runs share:",
+            "",
+            "| Country | Hazard | How long flagged | Planning figure |",
+            "| --- | --- | --- | --- |",
+        ]
+        for entry in entries:
+            move = entry.get("movement") or {}
+            lines.append(
+                f"| {entry.get('country_name', '')} | "
+                f"{entry.get('hazard_name', '')} | "
+                f"{entry.get('persistence', '')} | "
+                f"{move.get('movement', 'unchanged')} over "
+                f"{move.get('n_overlapping_months', 0)} shared months |"
+            )
+        lines.append("")
+    if dropped:
+        lines += ["", "Flagged last month and not shown this month:", ""]
+        for row in dropped:
+            lines.append(
+                f"- {row.get('country_name', '')}, "
+                f"{str(row.get('hazard_name') or '').lower()}: "
+                f"{row.get('reason', '')}."
+            )
+        lines.append("")
+    return lines
+
+
+def _performance_lines(
+    content: dict[str, Any], extras: dict[str, Any], resolver: FigureResolver
+) -> list[str]:
+    """Part B, including its dormant state.
+
+    A dormant Part B that says "there is nothing to score" and stops tells a
+    reader nothing. This one says how many question-months are due, on what
+    date, and which hazards they cover, so a reader finishes it knowing when
+    the system will first be testable.
+    """
+    outlook = extras.get("performance_outlook") or {}
+    performance = content.get("performance") or {}
+    dormant = outlook.get("dormant_sentences") or []
+    if not performance and not dormant:
+        return []
+
+    lines = ["", "## How well did we do", ""]
+    if dormant:
+        for sentence in dormant:
+            lines.append(sentence)
+            lines.append("")
+        schedule = (outlook.get("upcoming_resolutions") or {}).get("schedule") or []
+        if schedule:
+            lines += [
+                "| Outcomes land | For the month of | Question-months |",
+                "| --- | --- | ---: |",
+            ]
+            for slot in schedule[:6]:
+                lines.append(
+                    f"| {slot.get('resolution_date', '')} | "
+                    f"{slot.get('window_month_label', '')} | "
+                    f"{slot.get('n_question_horizons', 0):,} |"
+                )
+            lines.append("")
+    else:
+        if performance.get("plain_summary"):
+            lines.append(resolver.resolve_text(str(performance["plain_summary"])))
+        if performance.get("skill_statement"):
+            lines.append("")
+            lines.append(resolver.resolve_text(str(performance["skill_statement"])))
+        for side, title in (("best_calls", "Best calls"), ("worst_calls", "Worst calls")):
+            calls = performance.get(side) or []
+            if calls:
+                lines += ["", f"### {title}", ""]
+                for call in calls:
+                    qids = list(call.get("question_ids") or [])
+                    text = call.get("what_was_right") or call.get("what_went_wrong") or ""
+                    lines.append(
+                        f"- {resolver.resolve_text(str(text), qids)} "
+                        f"({', '.join(question_link(q) for q in qids)})"
+                    )
+        for field, title in (
+            ("track_comparison", "Track 1 against Track 2"),
+            ("sibyl_comparison", "The main system against the second reader"),
+            ("vs_system_average", "This run against the system average"),
+        ):
+            if performance.get(field):
+                lines += ["", f"### {title}", ""]
+                lines.append(resolver.resolve_text(str(performance[field])))
+
+    diary = outlook.get("diary") or []
+    if diary:
+        lines += [
+            "", "### The forecast diary", "",
+            "Calls this report made in an earlier month, and what happened.",
+            "",
+        ]
+        for row in diary:
+            observed = ", ".join(
+                f"{o.get('observed_month')}: {o.get('value')}"
+                for o in row.get("observed") or []
+            )
+            lines.append(
+                f"- {names.describe_pair(row.get('iso3'), row.get('hazard_code'), row.get('metric'))}, "
+                f"flagged in the {row.get('report_month')} report. Recorded: {observed}."
+            )
+        lines.append("")
+    return lines
+
+
+def _score_explanation_lines(extras: dict[str, Any]) -> list[str]:
+    """The plain-English score glossary, in the appendix.
+
+    Single-sourced with the dashboard (web/src/lib/score_glossary.ts) so the
+    two never explain the same score two different ways.
+    """
+    items = (extras.get("performance_outlook") or {}).get("score_explanations") or []
+    if not items:
+        return []
+    lines = ["", "### What the scores mean", ""]
+    for item in items:
+        lines.append(f"- **{item.get('term')}**: {item.get('text')}")
+    lines.append("")
+    return lines
+
+
 def render_markdown(
     content: dict[str, Any],
     resolver: FigureResolver,
@@ -417,10 +792,15 @@ def render_markdown(
     gates = extras.get("gates") or {}
 
     lines.append("# Fred's Monthly Risk Report")
-    lines.append("")
+    lines += _issue_line(extras)
     lines.append(f"**{resolver.resolve_text(str(content.get('headline') or ''))}**")
 
+    # Page one, in the order a reader needs it: what happened, what we cannot
+    # see, and how these entries were chosen. The blind spots come BEFORE the
+    # entries because they change how every entry should be read.
+    lines += _blind_spots_front(extras)
     lines += _selection_panel_lines(extras.get("selection_panel"))
+    lines += _decision_calendar_lines(content, extras, resolver)
 
     if content.get("run_summary"):
         lines += ["", "## The scan this month", ""]
@@ -446,7 +826,7 @@ def render_markdown(
                 "",
             ]
             for entry in sorted(group, key=lambda e: int(e.get("rank") or 99)):
-                lines += _render_entry(entry, resolver, gates)
+                lines += _render_entry(entry, resolver, gates, extras)
 
         # An entry the model failed to place must never disappear from the
         # report. Print it under its own heading instead, where it is
@@ -460,53 +840,26 @@ def render_markdown(
         if stragglers:
             lines += ["", "## Other situations of note", ""]
             for entry in sorted(stragglers, key=lambda e: int(e.get("rank") or 99)):
-                lines += _render_entry(entry, resolver, gates)
+                lines += _render_entry(entry, resolver, gates, extras)
+    elif kind in ("current", "combined"):
+        # A month in which nothing cleared the tests is a finding about the
+        # month, and it has to read as one. An empty stretch of page where
+        # the entries should be is indistinguishable from a broken report.
+        lines += [
+            "",
+            "## Nothing cleared both tests this month",
+            "",
+            "No forecast this month was both unusual against its own history "
+            "and large enough to mobilise against. That is a statement about "
+            "the month, not a gap in the system. The full list of what was "
+            "considered, with the figures behind each one, is in the appendix.",
+            "",
+        ]
 
-    changes = content.get("changes_since_last_run") or []
-    if changes:
-        lines += ["", "## What changed since last month", ""]
-        for item in changes:
-            lines.append(f"- {resolver.resolve_text(str(item))}")
-
-    performance = content.get("performance")
-    if performance:
-        lines += ["", "## How well did we do", ""]
-        if performance.get("plain_summary"):
-            lines.append(resolver.resolve_text(str(performance["plain_summary"])))
-        if performance.get("skill_statement"):
-            lines.append("")
-            lines.append(resolver.resolve_text(str(performance["skill_statement"])))
-        for side, title in (("best_calls", "Best calls"), ("worst_calls", "Worst calls")):
-            calls = performance.get(side) or []
-            if calls:
-                lines += ["", f"### {title}", ""]
-                for call in calls:
-                    qids = list(call.get("question_ids") or [])
-                    text = call.get("what_was_right") or call.get("what_went_wrong") or ""
-                    lines.append(
-                        f"- {resolver.resolve_text(str(text), qids)} "
-                        f"({', '.join(f'`{q}`' for q in qids)})"
-                    )
-        for field, title in (
-            ("track_comparison", "Track 1 vs Track 2"),
-            ("sibyl_comparison", "Deep research (Sibyl) vs the standard track"),
-            ("vs_system_average", "This run vs the system average"),
-        ):
-            if performance.get(field):
-                lines += ["", f"### {title}", ""]
-                lines.append(resolver.resolve_text(str(performance[field])))
-
-    blind = content.get("blind_spots") or []
-    if blind:
-        lines += ["", "## What we cannot see", ""]
-        for item in blind:
-            lines.append(f"- {resolver.resolve_text(str(item))}")
-
-    notes = content.get("confidence_notes") or []
-    if notes:
-        lines += ["", "## Confidence notes", ""]
-        for item in notes:
-            lines.append(f"- {resolver.resolve_text(str(item))}")
+    lines += _sibyl_lines(extras)
+    lines += _changes_lines(content, extras, resolver)
+    lines += _sector_lines(extras)
+    lines += _performance_lines(content, extras, resolver)
 
     lines += ["", "## Appendix", "", "### Probability words", ""]
     lines.append(
@@ -515,8 +868,23 @@ def render_markdown(
     )
     lines.append("")
     lines.append(lexicon.markdown_table())
+    lines += _score_explanation_lines(extras)
     lines += _question_table_lines(extras.get("question_table"))
     lines += _bucket_table_lines(list(attention), resolver)
+
+    # The full blind-spot list and the confidence notes live at the back; the
+    # three lines that change how the whole report reads are on page one.
+    blind = content.get("blind_spots") or []
+    if blind:
+        lines += ["", "### What we cannot see, in full", ""]
+        for item in blind:
+            lines.append(f"- {resolver.resolve_text(str(item))}")
+    notes = content.get("confidence_notes") or []
+    if notes:
+        lines += ["", "### Confidence notes", ""]
+        for item in notes:
+            lines.append(f"- {resolver.resolve_text(str(item))}")
+
     watchlist = extras.get("watchlist") or []
     if watchlist:
         lines += [

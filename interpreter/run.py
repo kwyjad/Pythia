@@ -213,11 +213,20 @@ def _open_db(db: str):
 
 
 def _error_count(report) -> list[str]:
-    """Every error string in a validation report, flattened."""
-    return [
+    """Every complaint in a validation report, flattened.
+
+    Includes the proper-noun violations even though that check never fails:
+    otherwise a correction pass that removed an invented storm name and
+    changed nothing else would score as no improvement and be thrown away.
+    """
+    out = [
         err for check in report.checks.values() if not check.passed
         for err in (check.errors or [])
     ]
+    nouns = report.checks.get("proper_nouns")
+    if nouns is not None:
+        out.extend(nouns.detail.get("violations") or [])
+    return out
 
 
 def _repair_entry_identity(
@@ -248,6 +257,75 @@ def _repair_entry_identity(
                     fixed += 1
             break
     return fixed
+
+
+def _repair_decision_points(
+    content: dict[str, Any], derived: dict[str, dict[str, Any]]
+) -> int:
+    """Overwrite each entry's decision deadline with the derived one.
+
+    The deadline is arithmetic: the month with most expected impact, less the
+    hazard's configured lead time. A model asked for it will write a
+    plausible month that no part of the system believes, and the reader has
+    no way to check. So the model writes the ACTION and this writes the date.
+
+    Where the pack has no peak horizon for a row there is nothing to derive,
+    and the model's own value stands rather than being blanked.
+    """
+    if not isinstance(content, dict) or not derived:
+        return 0
+    fixed = 0
+    for entry in content.get("attention") or []:
+        if not isinstance(entry, dict):
+            continue
+        point = entry.get("decision_point")
+        if not isinstance(point, dict):
+            continue
+        for qid in entry.get("question_ids") or []:
+            block = derived.get(str(qid))
+            if not block:
+                continue
+            for name in ("deadline_month", "basis"):
+                want = block.get(name)
+                if want and str(point.get(name) or "") != str(want):
+                    LOGGER.info(
+                        "[interpreter] %s: decision %s %r replaced by the "
+                        "derived %r", qid, name, point.get(name), want,
+                    )
+                    point[name] = want
+                    fixed += 1
+            break
+    return fixed
+
+
+def _scored_run_probe(con) -> dict[str, Any]:
+    """Is there anything to score yet, and which run carries it?
+
+    Part B used to resolve its run from the CLI argument and then fall back
+    to the most recent stored ``scored`` interpretation, of which there has
+    never been one. So the section could only ever report emptiness, and it
+    would have gone on doing so on the day the first outcomes landed. This
+    asks the tables that would actually carry them.
+    """
+    out = {"has_scored_run": False, "scored_run_id": None,
+           "n_resolutions": 0, "n_scores": 0}
+    for table, key in (("resolutions", "n_resolutions"), ("scores", "n_scores")):
+        try:
+            row = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+            out[key] = int(row[0] or 0) if row else 0
+        except Exception:  # noqa: BLE001 - a missing table means none of them
+            out[key] = 0
+    if out["n_scores"] and out["n_resolutions"]:
+        out["has_scored_run"] = True
+        try:
+            row = con.execute(
+                "SELECT MAX(run_id) FROM scores WHERE run_id IS NOT NULL "
+                "AND run_id <> ''"
+            ).fetchone()
+            out["scored_run_id"] = str(row[0]) if row and row[0] else None
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 def _maybe_inherit_test_mode(con, hs_run_id: str | None) -> None:
@@ -346,8 +424,22 @@ def run_interpreter(
             # a hole where the scale of the run should be.
             global_figures.update(packs.run_summary_figures(pack))
         scored_section: str | None = None
+        scored_probe = _scored_run_probe(con) if kind == "combined" else {}
         if kind == "combined":
             latest = store.latest_scored(con)
+            if scored_probe.get("has_scored_run") and not (
+                latest and latest.get("content")
+            ):
+                # Outcomes exist and no scored interpretation has been made of
+                # them. Loud, because this is the state the section is meant
+                # to come alive in, and silence here is what kept Part B empty.
+                LOGGER.warning(
+                    "[interpreter] %d scored rows exist (run %s) but no stored "
+                    "'scored' interpretation to fold in — run "
+                    "`python -m interpreter.run --kind scored` against the "
+                    "scored bundle",
+                    scored_probe.get("n_scores"), scored_probe.get("scored_run_id"),
+                )
             if latest and latest.get("content"):
                 scored_section = json.dumps(latest["content"], indent=1, default=str)
                 scored_run_id = scored_run_id or latest.get("scored_run_id")
@@ -455,8 +547,28 @@ def run_interpreter(
         # fatalities: deaths". The judgement fields (category, hazard_family)
         # are NOT repaired — those the validator holds the model to.
         _repair_entry_identity(content, packs.pack_identity(pack))
+        derived_decisions = packs.decision_blocks(pack)
+        _repair_decision_points(content, derived_decisions)
 
-        # --- Validation (schema, referential, numeric, prose, style, sections) ---
+        evidence = packs.evidence_text(pack) if pack.kind == "current" else ""
+        # A combined report with no outcomes behind it is not asked for a
+        # performance block: the renderer prints the generated dormant state
+        # instead, and prose we discard is prose the model learned to invent.
+        require_performance = kind == "scored" or bool(scored_section)
+        # A month in which the gate admitted nothing is a finding about the
+        # month. Requiring an attention list there would fail the whole
+        # report, which tells the reader less than the empty section does.
+        categorised = packs.pack_categories(pack)
+        require_attention = pack.kind != "current" or bool(categorised)
+        if pack.kind == "current" and not categorised:
+            LOGGER.warning(
+                "[interpreter] the gate admitted no forecasts this run — the "
+                "report will say so rather than listing entries. Check the "
+                "thresholds with `python -m interpreter.gatecheck`."
+            )
+
+        # --- Validation (schema, referential, numeric, prose, style,
+        # sections, proper nouns) ---
         def _validate(candidate: dict[str, Any]):
             return validate.validate_interpretation(
                 candidate,
@@ -466,7 +578,10 @@ def run_interpreter(
                 global_figures=global_figures,
                 con=con,
                 run_id=run_id,
-                pack_categories=packs.pack_categories(pack),
+                pack_categories=categorised,
+                evidence_text=evidence,
+                require_performance=require_performance,
+                require_attention=require_attention,
             )
 
         report = _validate(content)
@@ -479,14 +594,22 @@ def run_interpreter(
         # Capped at one attempt: a model that cannot satisfy the checks twice
         # is telling us something about the checks, and the report still
         # stores either way.
+        # A name the model invented is a serious defect even though the
+        # proper-noun check does not fail the report, so its violations are
+        # quoted back in the correction pass alongside the hard failures. The
+        # August report named a typhoon that appears nowhere in the pack.
+        noun_violations = list(
+            (report.checks.get("proper_nouns").detail.get("violations") or [])
+            if report.checks.get("proper_nouns") else []
+        )
         retries = 0
-        if not report.passed and config.validation_retries() > 0:
+        if (not report.passed or noun_violations) and config.validation_retries() > 0:
             complaints = [
                 f"- {name}: {err}"
                 for name, check in report.checks.items()
                 if not check.passed
                 for err in (check.errors or [])
-            ]
+            ] + [f"- proper_nouns: {v}" for v in noun_violations]
             LOGGER.warning(
                 "[interpreter] validation failed on %d point(s); asking the "
                 "model to correct them", len(complaints),

@@ -57,6 +57,7 @@ def _content(**overrides) -> dict:
             "question_ids": [QID],
             "figure_refs": ["js_vs_baserate"],
             "why_it_stands_out": "The ensemble moved {{fig:js_vs_baserate}} from its base rate.",
+            "decision_point": {"action": "Decide whether to preposition stock.", "deadline_month": "2026-09", "basis": "peak_horizon"},
             "lead_time_months": 2,
         }],
         "performance": {"plain_summary": "Skill was {{fig:skill_brier_spd}}."},
@@ -230,6 +231,79 @@ class TestNumericGuard:
         assert result.passed and result.skipped
 
 
+class TestProperNounGuard:
+    """The August report named "Typhoon Maysak". The pack does not.
+
+    The existing guards protect numbers. The report's own footer tells the
+    reader that every figure in it is machine-derived, which invites them to
+    trust the names too, and nothing checked those.
+    """
+
+    EVIDENCE = (
+        "gdacs recorded an orange alert for tropical cyclone activity "
+        "affecting viet nam. the national committee issued a warning for "
+        "quang ninh province. reliefweb carried an ocha situation report."
+    )
+
+    def _content_with(self, prose: str) -> dict:
+        content = _content()
+        content["attention"][0]["why_it_stands_out"] = prose
+        return content
+
+    def test_a_planted_storm_name_is_flagged(self):
+        content = self._content_with(
+            "The system reacted to Typhoon Maysak approaching the coast."
+        )
+        result = validate_mod.check_proper_nouns(
+            content, evidence_text=self.EVIDENCE
+        )
+        violations = result.detail["violations"]
+        assert any("Maysak" in v for v in violations), violations
+
+    def test_flagging_does_not_fail_the_report(self):
+        # It reports; it does not block. A validator that failed a whole
+        # report on an unusual spelling would be switched off within months.
+        content = self._content_with("Typhoon Maysak is approaching.")
+        result = validate_mod.check_proper_nouns(
+            content, evidence_text=self.EVIDENCE
+        )
+        assert result.passed is True
+
+    def test_a_name_the_pack_carries_is_left_alone(self):
+        content = self._content_with(
+            "The warning covers Quang Ninh province on the coast."
+        )
+        result = validate_mod.check_proper_nouns(
+            content, evidence_text=self.EVIDENCE
+        )
+        assert result.detail["violations"] == []
+
+    def test_countries_and_hazards_are_never_flagged(self):
+        # The report is REQUIRED to print these, and they come from the
+        # system's own tables rather than from the model.
+        content = self._content_with(
+            "In Somalia the drought outlook is the reason. Ethiopia is "
+            "the comparison."
+        )
+        result = validate_mod.check_proper_nouns(
+            content, evidence_text=self.EVIDENCE
+        )
+        assert result.detail["violations"] == []
+
+    def test_a_sentence_initial_capital_is_grammar_not_a_name(self):
+        content = self._content_with("Rainfall drove the change.")
+        result = validate_mod.check_proper_nouns(
+            content, evidence_text=self.EVIDENCE
+        )
+        assert result.detail["violations"] == []
+
+    def test_no_evidence_text_skips_rather_than_flagging_everything(self):
+        content = self._content_with("Typhoon Maysak is approaching.")
+        result = validate_mod.check_proper_nouns(content, evidence_text=None)
+        assert result.skipped is True
+        assert result.detail.get("violations") is None
+
+
 class TestValidateInterpretation:
     def _run(self, content, con=None):
         return validate_interpretation(
@@ -243,6 +317,7 @@ class TestValidateInterpretation:
         assert report.passed, json.dumps(report.as_dict(), indent=1)
         assert set(report.checks) == {
             "schema", "referential", "numeric", "prose", "style", "categories",
+            "proper_nouns",
         }
 
     def test_schema_failure_flows_through(self):

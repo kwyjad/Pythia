@@ -17,19 +17,38 @@ Two questions a reader has, kept apart:
 Each is split into climate hazards (drought, flood, tropical cyclone) and
 conflict, because the reasoning a reader needs differs.
 
-Selection inside each of the four boxes is a dual gate: the top
-``min_per_entries`` always appear, however unremarkable the month, so the
-section is never empty and always names the month's worst; beyond that, an
-entry appears only if it clears the threshold. A cap keeps the report short.
+**Which box a row belongs in is decided by the gate**, not here:
+`gating.gate_rows` stamps every row `larger than usual`, `heavy burden`,
+`unusual, small scale` or nothing, and this module only orders the gated rows
+and cuts them to length. That is why a worsening entry can no longer be
+relabelled "roughly stable" when a cap crowds it out: a row has one gate, and
+the two sections read different gates.
 
-Pure functions over plain dicts — no DB, no IO — so the thresholds are
-testable without a pack.
+Ordering is **expected excess**, descending, with thin anchors demoted
+(`gating.rank_key`). The stable-major section orders by the expected burden
+itself, because "already in trouble" is a statement about size, not about
+change.
+
+The report carries at most `max_entries` entries in total, split between the
+two categories. Fifteen pages with twelve entries is not a briefing, and the
+sixth-most-notable forecast in a month has never changed anyone's plan.
+
+Pure functions over plain dicts — no DB, no IO — so the policy is testable
+without a pack.
 """
 
 from __future__ import annotations
 
 import math
 from typing import Any, Iterable
+
+from interpreter import gating
+
+# How the total entry budget splits between the two categories. Worsening
+# leads because a change is news and a standing crisis is not, but the split
+# is deliberately not all-or-nothing: a report with no standing crises in it
+# would mislead a reader about where the need actually is.
+WORSENING_SHARE = 0.6
 
 CATEGORY_WORSENING = "worsening"
 CATEGORY_STABLE_MAJOR = "stable_major"
@@ -89,28 +108,18 @@ def _sorted_by(rows: Iterable[dict[str, Any]], key: str) -> list[dict[str, Any]]
 def select_worsening(
     rows: Iterable[dict[str, Any]],
     *,
-    threshold_multiple: float,
-    min_entries: int,
     max_entries: int,
 ) -> list[dict[str, Any]]:
-    """Above-base-rate entries for one hazard family, best first.
+    """The rows the gate called ``larger than usual``, worst first.
 
-    Ranked by how far ABOVE the base rate the forecast sits, which is
-    log_ev_ratio: a signed quantity, so ranking on it cannot smuggle in a
-    forecast that diverges by being far BELOW its anchor (which the
-    undirected divergence score would happily do).
+    Membership is the gate's, so this cannot admit a forecast sitting far
+    BELOW its anchor (the gate tests direction) nor one too small to mobilise
+    against (the gate tests materiality). Ordering is expected excess with
+    thin anchors demoted, which is `gating.rank_key`.
     """
-    above = [r for r in rows if r.get("direction") == "above"]
-    ordered = _sorted_by(above, "log_ev_ratio")
-    threshold = math.log(threshold_multiple) if threshold_multiple > 0 else 0.0
-    picked: list[dict[str, Any]] = []
-    for index, row in enumerate(ordered):
-        if len(picked) >= max_entries:
-            break
-        clears = float(row["log_ev_ratio"]) >= threshold
-        if index < min_entries or clears:
-            picked.append(row)
-    return picked
+    picked = [r for r in rows if r.get("gate") == gating.GATE_WORSENING]
+    picked.sort(key=gating.rank_key)
+    return picked[:max(0, int(max_entries))]
 
 
 def select_stable_major(
@@ -118,85 +127,87 @@ def select_stable_major(
     *,
     exclude_question_ids: set[str],
     max_entries: int,
-    per_capita_floor: float,
-    threshold_multiple: float,
 ) -> list[dict[str, Any]]:
-    """Large per-capita burden that is NOT being called as worsening.
+    """The rows the gate called ``heavy burden``, largest first.
 
-    The nominal floor is the existing per-capita gate: without it the
-    ordering returns the same handful of very small states every cycle.
-    Anything already named as worsening is excluded, so no country appears
-    twice under two headings.
+    These are the places already in trouble: material enough to mobilise
+    against, without a call that things are departing from the usual. Ordered
+    by the expected burden itself rather than by excess, because the reason a
+    reader needs them is the size of the caseload, not its novelty.
 
-    There is no second threshold here. "Large impact" is a ranking question,
-    the per-capita floor is already the gate, and a top-N over a ranking
-    satisfies the same "always show the worst few" guarantee the worsening
-    sections get from their minimum.
+    A worsening entry can no longer leak in here even when the cap crowds it
+    out of its own section: a row carries ONE gate, and the two sections read
+    different gates.
     """
-    threshold = math.log(threshold_multiple) if threshold_multiple > 0 else 0.0
     eligible = [
         r for r in rows
-        if str(r.get("question_id")) not in exclude_question_ids
-        and r.get("eiv_per_100k") is not None
-        and (r.get("eiv_nominal") or 0) >= per_capita_floor
-        # A forecast that clears the worsening threshold is never described as
-        # "roughly stable" just because the cap crowded it out of the section
-        # above. It is simply left out of both.
-        and not (
-            r.get("direction") == "above"
-            and r.get("log_ev_ratio") is not None
-            and float(r["log_ev_ratio"]) >= threshold
-        )
+        if r.get("gate") == gating.GATE_MAJOR
+        and str(r.get("question_id")) not in exclude_question_ids
     ]
-    return _sorted_by(eligible, "eiv_per_100k")[:max_entries]
+    ordered = _sorted_by(eligible, "eiv_nominal")
+    # Rows with no impact centroid (binary questions) still belong; they sort
+    # after the ranked ones rather than vanishing.
+    unranked = [r for r in eligible if r.get("eiv_nominal") is None]
+    unranked.sort(key=lambda r: str(r.get("question_id") or ""))
+    return (ordered + unranked)[:max(0, int(max_entries))]
+
+
+def split_budget(max_entries: int, n_worsening: int, n_major: int) -> tuple[int, int]:
+    """How the total entry budget divides between the two categories.
+
+    Worsening takes the larger share, and whichever side has fewer candidates
+    hands its unused slots to the other. A month with nothing worsening in it
+    still fills the report with the heaviest burdens rather than printing a
+    short page and a gap.
+    """
+    total = max(0, int(max_entries))
+    want_worsening = min(n_worsening, math.ceil(total * WORSENING_SHARE))
+    want_major = min(n_major, total - want_worsening)
+    # Hand back whatever the other side could not use.
+    want_worsening = min(n_worsening, total - want_major)
+    return want_worsening, want_major
 
 
 def assign_categories(
     rows: list[dict[str, Any]],
     *,
-    threshold_multiple: float,
-    min_entries: int,
     max_entries: int,
-    per_capita_floor: float,
 ) -> list[dict[str, Any]]:
     """Stamp ``category`` and ``category_rank`` on the rows the report covers.
 
     Mutates and returns ``rows`` (every row keeps its place in the index;
     only the selected ones gain a category), so the pack still carries the
-    full picture and the selection stays auditable.
+    full picture and the selection stays auditable. ``gating.gate_rows`` must
+    have run first: this reads the gate, it does not re-derive it.
+
+    ``category_rank`` is a single ordering across the whole category, not a
+    per-family one, so the report's numbering runs 1..N down the page rather
+    than restarting under each heading.
     """
     for row in rows:
         row.setdefault("category", None)
         row.setdefault("category_rank", None)
 
-    selected_ids: set[str] = set()
-    for family in ("climate", "conflict"):
-        family_rows = [r for r in rows if r.get("hazard_family") == family]
-        worsening = select_worsening(
-            family_rows,
-            threshold_multiple=threshold_multiple,
-            min_entries=min_entries,
-            max_entries=max_entries,
-        )
-        for rank, row in enumerate(worsening, start=1):
-            row["category"] = CATEGORY_WORSENING
-            row["category_rank"] = rank
-            selected_ids.add(str(row.get("question_id")))
+    worsening_pool = [r for r in rows if r.get("gate") == gating.GATE_WORSENING]
+    major_pool = [
+        r for r in rows if r.get("gate") == gating.GATE_MAJOR
+    ]
+    n_worsening, n_major = split_budget(
+        max_entries, len(worsening_pool), len(major_pool)
+    )
 
-    for family in ("climate", "conflict"):
-        family_rows = [r for r in rows if r.get("hazard_family") == family]
-        stable = select_stable_major(
-            family_rows,
-            exclude_question_ids=selected_ids,
-            max_entries=max_entries,
-            per_capita_floor=per_capita_floor,
-            threshold_multiple=threshold_multiple,
-        )
-        for rank, row in enumerate(stable, start=1):
-            row["category"] = CATEGORY_STABLE_MAJOR
-            row["category_rank"] = rank
-            selected_ids.add(str(row.get("question_id")))
+    worsening = select_worsening(rows, max_entries=n_worsening)
+    selected_ids = {str(r.get("question_id")) for r in worsening}
+    major = select_stable_major(
+        rows, exclude_question_ids=selected_ids, max_entries=n_major
+    )
 
+    for rank, row in enumerate(worsening, start=1):
+        row["category"] = CATEGORY_WORSENING
+        row["category_rank"] = rank
+    for rank, row in enumerate(major, start=1):
+        row["category"] = CATEGORY_STABLE_MAJOR
+        row["category_rank"] = rank
     return rows
 
 

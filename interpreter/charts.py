@@ -137,6 +137,101 @@ def probability_bar(p: float | None) -> str:
     )
 
 
+_DUMBBELL_LABEL_WIDTH = 150
+_DUMBBELL_TRACK_WIDTH = 250
+_DUMBBELL_ROW_HEIGHT = 18
+
+
+def second_opinion_chart(rows: Sequence[dict[str, Any]], *, title: str = "") -> str:
+    """Fred against the second reader, one row per covered question.
+
+    Drawn on a SHARE axis rather than on the raw expected values: the covered
+    questions mix deaths with millions of people in need, and one linear axis
+    across both would say nothing. Each row plots Sibyl's share of the two
+    expected values, so the centre line is agreement, right of it means Sibyl
+    expects more and left of it means it expects less. That is dimensionless,
+    so the rows are comparable, and it is the same dumbbell grammar the
+    Sibyl performance page uses (which is React, and a PDF cannot run React).
+    """
+    plotted: list[tuple[str, float, float, float]] = []
+    for row in rows:
+        fred = row.get("fred_expected")
+        sibyl = row.get("sibyl_expected")
+        try:
+            f, s = float(fred), float(sibyl)
+        except (TypeError, ValueError):
+            continue
+        total = f + s
+        if total <= 0:
+            continue
+        label = f"{row.get('country_name') or ''}, {str(row.get('hazard_name') or '').lower()}"
+        plotted.append((label.strip(", "), f / total, s / total, total))
+    if not plotted:
+        return ""
+
+    width = _DUMBBELL_LABEL_WIDTH + _DUMBBELL_TRACK_WIDTH + 20
+    header = 16 if title else 0
+    height = header + len(plotted) * _DUMBBELL_ROW_HEIGHT + 22
+    x0 = _DUMBBELL_LABEL_WIDTH
+    mid = x0 + _DUMBBELL_TRACK_WIDTH / 2
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
+        f'height="{height}" viewBox="0 0 {width} {height}" role="img" '
+        f'aria-label="Where the second reader differs from the main system">'
+    ]
+    if title:
+        parts.append(
+            f'<text x="0" y="11" font-family="sans-serif" font-size="10" '
+            f'fill="{FRED_MUTED}">{html.escape(title)}</text>'
+        )
+    parts.append(
+        f'<line x1="{mid:.1f}" y1="{header}" x2="{mid:.1f}" '
+        f'y2="{header + len(plotted) * _DUMBBELL_ROW_HEIGHT}" '
+        f'stroke="{FRED_BORDER}" stroke-width="1" stroke-dasharray="2 2" />'
+    )
+    for i, (label, fred_share, sibyl_share, _total) in enumerate(plotted):
+        y = header + i * _DUMBBELL_ROW_HEIGHT + _DUMBBELL_ROW_HEIGHT / 2
+        fx = x0 + fred_share * _DUMBBELL_TRACK_WIDTH
+        sx = x0 + sibyl_share * _DUMBBELL_TRACK_WIDTH
+        parts.append(
+            f'<text x="0" y="{y + 3:.1f}" font-family="sans-serif" '
+            f'font-size="9" fill="{FRED_TEXT}">{html.escape(label[:30])}</text>'
+        )
+        parts.append(
+            f'<line x1="{min(fx, sx):.1f}" y1="{y:.1f}" x2="{max(fx, sx):.1f}" '
+            f'y2="{y:.1f}" stroke="{FRED_BORDER}" stroke-width="2" />'
+        )
+        parts.append(
+            f'<circle cx="{fx:.1f}" cy="{y:.1f}" r="3.5" fill="{FRED_PRIMARY}" />'
+        )
+        parts.append(
+            f'<circle cx="{sx:.1f}" cy="{y:.1f}" r="3.5" fill="{FRED_SECONDARY}" />'
+        )
+    legend_y = header + len(plotted) * _DUMBBELL_ROW_HEIGHT + 14
+    parts.append(
+        f'<circle cx="{x0 + 4}" cy="{legend_y - 3:.0f}" r="3.5" fill="{FRED_PRIMARY}" />'
+        f'<text x="{x0 + 12}" y="{legend_y:.0f}" font-family="sans-serif" '
+        f'font-size="9" fill="{FRED_MUTED}">the main system</text>'
+        f'<circle cx="{x0 + 110}" cy="{legend_y - 3:.0f}" r="3.5" fill="{FRED_SECONDARY}" />'
+        f'<text x="{x0 + 118}" y="{legend_y:.0f}" font-family="sans-serif" '
+        f'font-size="9" fill="{FRED_MUTED}">the second reader</text>'
+    )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def second_opinion_legend() -> str:
+    """One line explaining the share axis, printed under the chart."""
+    return (
+        "Each row places the two readers on a shared line. The dashed centre "
+        "is agreement. A mark to the right of it means that reader expects "
+        "more than the other. The scale is a share rather than a count, so "
+        "rows about deaths and rows about millions of people can sit on one "
+        "picture."
+    )
+
+
 def legend() -> str:
     """One line explaining what the bars are, printed once."""
     return (

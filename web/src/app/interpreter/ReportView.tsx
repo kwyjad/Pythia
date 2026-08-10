@@ -16,6 +16,7 @@ import {
   countryAnchorId,
   entryHeading,
   groupAttention,
+  monthLabel,
 } from "./lib";
 
 const QuestionLinks = ({ ids }: { ids: string[] }) => (
@@ -105,6 +106,20 @@ export default function ReportView({
                 </h3>
                 {entry.why_it_stands_out ? (
                   <p className="mt-2 text-sm text-fred-text">{entry.why_it_stands_out}</p>
+                ) : null}
+                {entry.planning_sentence ? (
+                  <p className="mt-2 text-sm text-fred-text">
+                    <span className="font-medium">What to plan against:</span>{" "}
+                    {entry.planning_sentence}
+                  </p>
+                ) : null}
+                {entry.decision_point?.action ? (
+                  <p className="mt-2 rounded border border-fred-border bg-fred-bg/60 p-2 text-sm text-fred-text">
+                    <span className="font-medium">
+                      Decision by {monthLabel(entry.decision_point.deadline_month)}:
+                    </span>{" "}
+                    {entry.decision_point.action}
+                  </p>
                 ) : null}
                 {entry.spd_shape ? (
                   <p className="mt-2 text-sm text-fred-text">

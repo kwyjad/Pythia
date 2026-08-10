@@ -72,7 +72,13 @@ interpreter/
   names.py      # ISO3/hazard/metric codes -> the words a reader reads
   selection.py  # which forecasts the report covers, and under which heading
   gating.py     # v3: expected excess, the two-key gate, thin anchors
+  gatecheck.py  # v3: run the gate over every run in a DB and print what it does
   panels.py     # v3: the selection panel, gate tags, appendix question table
+  decisions.py  # v3: derived deadlines and the dated calendar page
+  secondopinion.py # v3: Sibyl's direction, its unsettled trials, novel facts
+  sector.py     # v3: rank gaps against ACAPS INFORM Severity / Risk Radar
+  persistence.py # v3: (iso3,hazard,metric) matching, overlap movement, drops
+  performance.py # v3: Part B — what resolves and when, small-sample discipline
   charts.py     # inline SVG of a forecast distribution (Fred palette)
   mapviz.py     # the printed attention map (vendored Natural Earth, no JS)
   schema.py     # the structured-output contract (jsonschema draft-07)
@@ -126,9 +132,6 @@ be inspected; the dashboard (Phase 5) renders them behind a warning banner.
 | `PYTHIA_INTERPRETER_MAX_PACK_TOKENS` | `250000` | model-input hard cap |
 | `PYTHIA_INTERPRETER_TOP_N` | `8` | attention list length |
 | `PYTHIA_INTERPRETER_PER_CAPITA_FLOOR` | `10000` | per-capita ranking floor |
-| `PYTHIA_INTERPRETER_WORSENING_MULTIPLE` | `2.0` | how far above the base rate an extra entry must sit |
-| `PYTHIA_INTERPRETER_MIN_PER_CATEGORY` | `3` | always shown per box, however quiet the month |
-| `PYTHIA_INTERPRETER_MAX_PER_CATEGORY` | `6` | cap per box |
 | `PYTHIA_PUBLIC_BASE_URL` | `https://fredforecaster.org` | absolute question links in the PDF |
 | `PYTHIA_INTERPRETER_THINKING` | `high` | output_config.effort level |
 | `PYTHIA_INTERPRETER_MAX_OUTPUT_TOKENS` | `32768` | shared with thinking |
@@ -146,6 +149,13 @@ be inspected; the dashboard (Phase 5) renders them behind a warning banner.
 | `PYTHIA_INTERPRETER_BASERATE_SMOOTHING` | `0.5` | v3: Jeffreys pseudo-count on the anchor |
 | `PYTHIA_INTERPRETER_MAX_ENTRIES` | `5` | v3 |
 | `PYTHIA_INTERPRETER_MIN_RESOLVED_FOR_SKILL` | `100` | v3: below this, skill is not claimed |
+| `PYTHIA_INTERPRETER_SKILL_BOOTSTRAP` | `2000` | v3: resamples behind a printed interval |
+| `PYTHIA_INTERPRETER_LEAD_TIME_{HAZARD}` | DR 3, ACE 2, FL/TC 1 | v3: months from decision to the month it covers |
+| `PYTHIA_INTERPRETER_SIBYL_DISAGREEMENT_RATIO` | `1.5` | v3: when the second reader is called more alarmed |
+| `PYTHIA_INTERPRETER_SIBYL_UNSETTLED_SHARE` | `0.25` | v3: inter-trial divergence that means "unsettled" |
+| `PYTHIA_INTERPRETER_SIBYL_NOVEL_FACTS` | `2` | v3: novel findings printed per covered question |
+| `PYTHIA_INTERPRETER_SECTOR_LIST_SIZE` | `5` | v3: entries per sector-gap list |
+| `PYTHIA_INTERPRETER_SECTOR_MIN_RANK_GAP` | `5` | v3: places apart before a gap is worth printing |
 
 ## What the report covers (`interpreter/selection.py`)
 
@@ -232,15 +242,19 @@ out the two figures that are: `p50_peak` (plan against) and `p90_peak` (hold
 contingency for), both at the peak horizon, with the month named
 (`peak_month`) and `p_zero_peak` where the chance of nothing is worth saying.
 
-**Dual gate.** The top `PYTHIA_INTERPRETER_MIN_PER_CATEGORY` (3) always appear,
-however unremarkable the month, so a section is never empty and always names
-the month's worst. Beyond that an entry appears only if it sits at least
-`PYTHIA_INTERPRETER_WORSENING_MULTIPLE` (2.0) times the historical expectation.
-A cap of `PYTHIA_INTERPRETER_MAX_PER_CATEGORY` (6) keeps the report short.
+**Membership is the gate's, not selection's.** `select_worsening` reads
+`gate == "larger than usual"` and `select_stable_major` reads
+`gate == "heavy burden"`; selection only orders (excess descending, thin
+anchors demoted) and cuts to `PYTHIA_INTERPRETER_MAX_ENTRIES` (5) across the
+whole report, split 60/40 in favour of worsening with either side handing its
+unused slots to the other. The per-section knobs of v2 (a worsening MULTIPLE,
+a minimum and a maximum per box) were removed: ranking by a multiple is the
+defect the excess ordering exists to fix, and keeping a second policy beside
+the gate would let the two disagree.
 
-**No relabelling.** A forecast that clears the worsening threshold but is
-crowded out by the cap is left out of BOTH sections. Describing it as "roughly
-stable" would be false.
+**No relabelling, structurally.** A row carries ONE gate and the two sections
+read different gates, so a worsening entry crowded out by the cap is left out
+of both rather than described as "roughly stable".
 
 **Nothing is dropped silently.** Uncategorised entries the model still emits
 render under "Other situations of note", where they are visible and obviously
@@ -250,6 +264,143 @@ odd. The August run produced 6/3/6/6 across the four boxes from 200 questions.
 prompt assembly write question records in report order, so the rows the report
 must cover are the last thing a token budget gives up; anything that still
 loses its record is named, in the manifest and in the prompt.
+
+### The decision calendar (v3, `interpreter/decisions.py`)
+
+The most useful sentence in the August report appeared once, by accident: the
+Vietnam entry noted the prepositioning window closes in September. A forecast a
+reader cannot act on by a date is a fact, not a decision.
+
+Every attention entry now carries a `decision_point` (required by the schema),
+and the deadlines are collected onto one dated page near the front, ordered by
+deadline. The split of work is deliberate:
+
+- the **model writes the action** — one sentence naming what has to be decided.
+  If it cannot name one, the entry does not belong in the report, and asking
+  for it is how the model is made to justify its inclusion;
+- the **deadline is derived** — the peak horizon the materiality gate found,
+  less `PYTHIA_INTERPRETER_LEAD_TIME_{HAZARD}` (DR 3, ACE 2, FL/TC 1). The
+  runner overwrites whatever month the model wrote, the same repair contract
+  as the identity fields. A deadline already past is printed as it falls.
+
+A row with no peak horizon has no derived deadline, and the calendar says "not
+dated" rather than inventing one.
+
+### The second reader (v3, `interpreter/secondopinion.py`)
+
+Sibyl re-forecasts the most volatile questions by reading the open web; the
+main pipeline reads structured connectors. It used to appear in one confidence
+note on page fourteen. It now has a section:
+
+- **direction of disagreement**, compared on expected value (a ratio, so
+  questions about deaths and questions about millions share one rule) —
+  `second opinion agrees` / `is more alarmed` / `is more cautious`. The tag is
+  also stamped inline on every attention entry, so a reader does not have to
+  reach the back to learn Sibyl disagreed;
+- **unsettled trials**: `js_divergence_inter_trial` above a share of its ln 2
+  maximum means careful research did not settle the question. That is a
+  different signal from disagreeing with Fred, and it prints as its own flag;
+- **what the second reader found that the main system did not** — sentences
+  from Sibyl's trial belief traces whose content words are absent from the
+  ASSEMBLED SPD PROMPT for that question (which carries every inject the
+  ensemble had). Substring and token matching, deliberately: it is a prompt
+  for attention, not a claim that a fact is new to the world. Below 500
+  characters of comparison text nothing is claimed novel — with no prompt to
+  compare against, every sentence looks new;
+- **fixed caveat** the model may not drop: Sibyl has no scored track record,
+  so it is a second reader, never a tiebreaker.
+
+The dumbbell chart is drawn in `charts.second_opinion_chart` on a SHARE axis
+(the centre line is agreement), because the covered questions mix deaths with
+millions of people and one linear axis across both would say nothing. The
+dashboard's own dumbbell is React, which a PDF cannot run, so the two share
+the grammar rather than the code.
+
+### Fred against the sector (v3, `interpreter/sector.py`)
+
+Everyone knows Sudan and Somalia are catastrophic. The value is where Fred
+departs from the prevailing view. Countries are ranked three ways — Fred's
+summed positive excess, ACAPS INFORM Severity (newest snapshot, worst crisis
+per country) and ACAPS Risk Radar (worst risk per country) — and the rank gaps
+are printed in both directions, five each, above
+`PYTHIA_INTERPRETER_SECTOR_MIN_RANK_GAP` (5) places.
+
+Only countries in BOTH rankings are compared: treating absent ACAPS coverage
+as a low sector rank would manufacture disagreement out of coverage. The fixed
+`NOT_COMMENSURABLE` text says plainly that the three measure different things
+and that a gap is a prompt to look, not a verdict.
+
+### What changed, and persistence (v3, `interpreter/persistence.py`)
+
+- **Matching is `(iso3, hazard_code, metric)`.** Without the metric a
+  country's drought DEATHS question matched its drought PEOPLE AFFECTED
+  question.
+- **Movement is measured on the months the two runs share.** Consecutive runs
+  overlap by five of six months at different horizon numbers, so the planning
+  figure is keyed by CALENDAR month; comparing horizon 1 against horizon 1
+  would read the window sliding forward as the forecast changing.
+- **Persistence is counted from the reports themselves** (stored
+  `interpretations` rows, newest first) and stops at the first month that did
+  not flag it. Re-running today's thresholds over an old run would say what we
+  WOULD have said, which is a different claim.
+- **A dropped flag says why**: no question this month, below the gate, or
+  still passing but ranked below the entries shown.
+
+### Part B: the scored run (v3, `interpreter/performance.py`)
+
+Part B used to resolve its run from the CLI argument and then fall back to the
+most recent stored `scored` interpretation, of which there has never been one.
+It could only ever report emptiness, and would have gone on doing so on the day
+the first outcomes landed. It now probes `resolutions` and `scores` directly,
+and logs loudly when outcomes exist with no scored interpretation made of them.
+
+The **dormant state is informative**: how many question-months are due, on what
+date, for which hazards, printed from `upcoming_resolutions` (a window month
+resolves on the 28th of the month after it). A combined report with no scored
+run behind it is not asked for a `performance` block at all — prose we discard
+is prose the model learns to invent.
+
+The **small-sample discipline** is built now because the failure happens once.
+The first scored run will rest on well under a hundred question-months:
+
+- below `PYTHIA_INTERPRETER_MIN_RESOLVED_FOR_SKILL` (100) the report DECLINES
+  the claim. It states the count and offers no skill number, because a printed
+  figure beside a hedge is the figure a reader keeps;
+- every skill figure carries a seeded percentile bootstrap interval, and the
+  interval is what gets printed. Pairs are resampled TOGETHER: the pairing is
+  what makes the comparison fair;
+- horizons are never pooled and score families never blended.
+
+The **forecast diary** links back: a question flagged in an earlier report that
+has since resolved, with what happened. Only resolved ones appear; padding it
+with open questions would make it a second attention list.
+
+### The proper-noun guard (v3, `interpreter/validate.py`)
+
+The August report named "Typhoon Maysak" in its Vietnam entry. That string
+appears nowhere in the pack, in a document whose footer tells the reader that
+every figure in it is machine-derived. `check_proper_nouns` requires a proper
+noun in prose to appear in the pack's evidence text (`packs.evidence_text`:
+every file plus every question record, lowercased). Country and hazard names
+from the system's own tables are always allowed, and a sentence-initial capital
+is grammar rather than a name.
+
+It **reports rather than fails** — the violations land in `validation_json` and
+are quoted back to the model in the correction pass. A validator that failed a
+whole report on an unusual spelling would be switched off within two months.
+`_error_count` counts the violations so a correction that removes an invented
+name is not thrown away as "no improvement".
+
+### Checking the gate before shipping a threshold
+
+```
+python -m interpreter.gatecheck --db "$PYTHIA_DB_URL" [--include-test]
+```
+
+Runs the gate over every run with deviation rows and prints what it admits and
+drops per run, plus any run that would produce no entries at all.
+`gating.calibration_table` existed from the start with no caller, which in this
+repo means it did not exist.
 
 ## The figure-key contract
 
@@ -271,7 +422,7 @@ meaning and rejecting it failed a report over punctuation.
 
 ## Validation (Phase 4 — `interpreter/validate.py`)
 
-Six checks run after generation, before storage; each is reported
+Seven checks run after generation, before storage; each is reported
 separately in `validation_json` and any failure sets
 `status='failed_validation'` (the report is still stored and rendered, so
 failures stay inspectable):
@@ -469,4 +620,16 @@ where the dashboard button reads it.
 bundle-directory fixtures. Run by `.github/workflows/interpreter-ci.yml`
 (path-filtered on `interpreter/**` + `scripts/ai_bundle/**`, which also
 re-runs the bundle suites — the interpreter consumes those bundles, so a
-pack-shape change must re-run both sides).
+pack-shape change must re-run both sides). Both are DIRECTORY-level pytest
+invocations, so a new test file under either runs without being named — the
+one place in this repo where that is true.
+
+v3 suites: `test_v3_modules.py` (decisions, second opinion, sector,
+persistence), `test_performance.py` (the dormant state, the small-sample
+floor, the seeded bootstrap, and the guard that the report's score copy stays
+verbatim-identical to `web/src/lib/score_glossary.ts`), `test_v3_report.py`
+(section order, the calendar, the second reader, the sector lists, the PDF
+contents page and map placement), the proper-noun class in `test_validate.py`
+(a planted storm name is flagged and does NOT fail the report), and
+`scripts/ai_bundle/tests/test_current_run_bundle_v3.py` (the whole chain over
+a DB carrying the v3 deviation columns).

@@ -114,6 +114,10 @@ def selection_panel(counts: dict[str, Any]) -> dict[str, Any]:
             f"that it is worsening. "
             f"{counts.get('watchlist', 0)} are unusual but too small to act "
             f"on, and are held on the watchlist. "
+            # Without this a reader who sees a dozen cleared entries and five
+            # printed ones concludes the report lost seven of them.
+            f"The report carries at most {config.max_entries()} entries, so "
+            f"the rest appear only in the table at the back. "
             # The gate emits "thin"; the panel renames it "thin_anchor" for the
             # reader. Reading the reader-facing name back out of the gate's
             # dict silently printed zero.

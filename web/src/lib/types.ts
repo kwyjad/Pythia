@@ -552,9 +552,20 @@ export type InterpreterAttentionEntry = {
   question_ids: string[];
   figure_refs?: string[];
   why_it_stands_out?: string;
+  // The two figures a response planner can act on, as a sentence. The
+  // placeholders are resolved server-side, like every other figure.
+  planning_sentence?: string;
   spd_shape?: string;
   how_to_read_the_distribution?: string;
   what_the_model_was_reacting_to?: string;
+  // What has to be decided, and by when. The month is DERIVED (the peak
+  // horizon less the hazard's lead time) and overwritten server-side; only
+  // the action is the model's.
+  decision_point?: {
+    action?: string;
+    deadline_month?: string;
+    basis?: string;
+  };
   impacts?: string[];
   operational_challenges?: string[];
   lead_time_months?: number;

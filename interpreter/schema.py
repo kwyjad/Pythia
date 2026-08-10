@@ -34,11 +34,33 @@ _FIGURE_REFS = {"type": "array", "items": {"type": "string"}}
 CATEGORIES = ["worsening", "stable_major"]
 HAZARD_FAMILIES = ["climate", "conflict", "other"]
 
+# What a decision point may be anchored to. The runner overwrites
+# ``deadline_month`` and ``basis`` with the pack's derived values wherever the
+# pack has them (peak horizon minus the hazard's lead time), so the model's
+# real job in this object is ``action``: naming the decision. An entry with no
+# decision attached is an entry that should not be in the report, and asking
+# for one is how the model is made to justify its inclusion.
+DECISION_BASES = [
+    "peak_horizon", "lean_season_start", "election_date", "seasonal_window",
+]
+
+_DECISION_POINT = {
+    "type": "object",
+    "required": ["action", "deadline_month", "basis"],
+    "properties": {
+        "action": _PROSE,
+        "deadline_month": {"type": "string", "pattern": r"^\d{4}-\d{2}$"},
+        "basis": {"type": "string", "enum": DECISION_BASES},
+    },
+    "additionalProperties": False,
+}
+
 _ATTENTION_ENTRY = {
     "type": "object",
     "required": [
         "rank", "reason_code", "iso3", "hazard_code", "metric",
         "category", "hazard_family", "question_ids", "why_it_stands_out",
+        "decision_point",
     ],
     "properties": {
         "rank": {"type": "integer", "minimum": 1},
@@ -61,6 +83,7 @@ _ATTENTION_ENTRY = {
         "planning_sentence": _PROSE,
         "spd_shape": _PROSE,
         "what_the_model_was_reacting_to": _PROSE,
+        "decision_point": _DECISION_POINT,
         "impacts": _PROSE_LIST,
         "operational_challenges": _PROSE_LIST,
         "lead_time_months": {"type": "integer", "minimum": 1, "maximum": 6},
@@ -122,13 +145,30 @@ def schema_json() -> str:
     return json.dumps(OUTPUT_SCHEMA, indent=1)
 
 
-def validate_output(obj: Any, *, kind: str | None = None) -> list[str]:
+def validate_output(
+    obj: Any,
+    *,
+    kind: str | None = None,
+    require_performance: bool = True,
+    require_attention: bool = True,
+) -> list[str]:
     """Shape-validate a structured output. Returns a list of error strings
     (empty = valid).
 
     Kind-conditional requirements live here rather than in the jsonschema
     (draft-07 conditionals are write-only): ``attention`` is required for
     current/combined, ``performance`` for scored/combined.
+
+    ``require_performance`` is lowered for a combined report with no scored
+    run behind it. Demanding the block there would make the model write a
+    summary of nothing, which the renderer then discards in favour of the
+    generated dormant state; asking for prose we do not print is how a model
+    learns to invent.
+
+    ``require_attention`` is lowered when the gate admitted nothing at all.
+    That is a finding about the month, and it should read as one: failing the
+    whole report instead would turn a quiet month into a broken report, and
+    the reader would be told nothing either way.
     """
     errors: list[str] = []
     try:
@@ -143,10 +183,18 @@ def validate_output(obj: Any, *, kind: str | None = None) -> list[str]:
 
     if isinstance(obj, dict):
         effective_kind = kind or obj.get("kind")
-        if effective_kind in ("current", "combined") and not obj.get("attention"):
+        if (
+            require_attention
+            and effective_kind in ("current", "combined")
+            and not obj.get("attention")
+        ):
             errors.append("<root>: 'attention' is required and non-empty for kind "
                           f"{effective_kind!r}")
-        if effective_kind in ("scored", "combined") and not obj.get("performance"):
+        if (
+            require_performance
+            and effective_kind in ("scored", "combined")
+            and not obj.get("performance")
+        ):
             errors.append("<root>: 'performance' is required for kind "
                           f"{effective_kind!r}")
         if kind and obj.get("kind") != kind:

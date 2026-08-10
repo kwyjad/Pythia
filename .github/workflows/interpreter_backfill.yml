@@ -272,6 +272,27 @@ jobs:
       # Per-run PDFs for the diagnostics artifact, then one top-level render
       # of the NEWEST row so publish_latest_data.yml finds exactly one
       # interpreter_report_latest.pdf where it expects it.
+      # What the selection gate admits and drops, per run, over the deviation
+      # rows the reports were just built from (compute_deviation runs inside
+      # the step above, so running this before it would describe last cycle's
+      # rows). A threshold that empties a section is a finding, and a
+      # finding is worth more than a silently short report — so it is printed
+      # where a human reviewing this run will see it, not left to a CLI
+      # nobody remembers to run. Read-only and never fatal.
+      - name: Gate calibration table
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mkdir -p diagnostics
+          python -m interpreter.gatecheck --db "${RESOLVER_DB_URL}" \
+            2>&1 | tee diagnostics/gate_calibration.txt
+          {
+            echo "### Selection gate: what it admits and drops"
+            echo '```'
+            cat diagnostics/gate_calibration.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Render PDFs
         if: always()
         continue-on-error: true
