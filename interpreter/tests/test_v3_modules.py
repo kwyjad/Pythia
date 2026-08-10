@@ -155,6 +155,12 @@ class TestSecondOpinion:
             "Nudged q0.99 up modestly to 150,000 to respect the fat "
             "conditional tail, so submitting.",
             "https://www.un.org/unispal/document/bulletin-april-2026-en-ar/",
+            # Verbatim from the SECOND live run: Sibyl keeps its open
+            # questions in the same field as its answers, and a question is
+            # not a finding however specific it is.
+            "Is the July 2026 ACLED figure of 79 real or an artifact of "
+            "coding lag / genuine lull?",
+            "August 2026 strike tempo - is 18/month holding or creeping up?",
         ]
         assert secondopinion.novel_facts(process, known, limit=10) == []
 
