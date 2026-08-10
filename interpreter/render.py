@@ -88,17 +88,22 @@ def format_figure(key: str, value: Any) -> str:
             word = "close to its usual pattern"
         return word
     if key in ("log_ev_ratio", "ev_multiple"):
-        # A multiple a reader can check against the sentence around it.
-        # "1/87.5x" meant nothing; "a fraction of the usual level" does.
+        # A multiple a reader can check against the sentence around it;
+        # "1/87.5x" meant nothing. Rendered as a NOUN PHRASE, not a clause,
+        # because the model writes it inside a sentence of its own ("about
+        # {{fig:ev_multiple}} the usual number of people affected"). Returning
+        # "about 14.1 times the usual level" there produced "about about 14.1
+        # times the usual level the usual number of people affected" in a
+        # published report.
         ratio = math.exp(v) if key == "log_ev_ratio" else v
         if ratio >= 1.0:
-            return f"about {ratio:.1f} times the usual level"
+            return f"{ratio:.1f} times"
         if ratio <= 0:
-            return "far below the usual level"
+            return "a tiny fraction of"
         inverse = 1.0 / ratio
         if inverse >= 10:
-            return "a small fraction of the usual level"
-        return f"about one {_ordinal_word(inverse)} of the usual level"
+            return "a small fraction of"
+        return f"one {_ordinal_word(inverse)} of"
     if key.startswith("eiv") or key.startswith("n_") or abs(v) >= 1000:
         return f"{v:,.0f}"
     if key.startswith("mean_brier") or key.startswith("climatology_brier"):

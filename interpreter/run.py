@@ -212,6 +212,36 @@ def _open_db(db: str):
     return duckdb_io, duckdb_io.get_db(db or duckdb_io.DEFAULT_DB_URL)
 
 
+def _repair_entry_identity(
+    content: dict[str, Any], identity: dict[str, dict[str, str]]
+) -> int:
+    """Overwrite each attention entry's iso3/hazard_code/metric from the pack.
+
+    Returns the number of fields corrected, logged so a persistently sloppy
+    model is visible rather than silently patched.
+    """
+    if not isinstance(content, dict) or not identity:
+        return 0
+    fixed = 0
+    for entry in content.get("attention") or []:
+        if not isinstance(entry, dict):
+            continue
+        for qid in entry.get("question_ids") or []:
+            truth = identity.get(str(qid))
+            if not truth:
+                continue
+            for name, value in truth.items():
+                if str(entry.get(name) or "") != value:
+                    LOGGER.info(
+                        "[interpreter] %s: %s %r corrected to %r from the pack",
+                        qid, name, entry.get(name), value,
+                    )
+                    entry[name] = value
+                    fixed += 1
+            break
+    return fixed
+
+
 def _maybe_inherit_test_mode(con, hs_run_id: str | None) -> None:
     """Derive test mode from the interpreted run (the Sibyl pattern).
 
@@ -409,6 +439,14 @@ def run_interpreter(
             result.update({"status": "failed_generation", "version": version,
                            "interpretation_id": interpretation_id})
             return result
+
+        # The pack owns each question's country, hazard and metric. Copying
+        # them is a transcription step with no judgement in it, so a slip is
+        # repaired here rather than published or made fatal: the August run
+        # copied FATALITIES into hazard_code and the report printed "Mali,
+        # fatalities: deaths". The judgement fields (category, hazard_family)
+        # are NOT repaired — those the validator holds the model to.
+        _repair_entry_identity(content, packs.pack_identity(pack))
 
         # --- Validation (schema, referential, numeric, prose, style, sections) ---
         report = validate.validate_interpretation(
