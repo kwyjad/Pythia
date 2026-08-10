@@ -213,7 +213,10 @@ failures stay inspectable):
 5. **style** — the house rules that can be checked mechanically: no em or
    en dashes, no banned words (`BANNED_PHRASES`), no "not X, but Y", no
    "on the other hand", and no bare ISO3 / metric enum / `HZ/METRIC` code
-   where the reader needs a name. Deliberately narrow: rhythm, variety and
+   where the reader needs a name. The code check matches the REAL ISO3 set
+   from `resolver/data/countries.csv`, never any three-capital run: FAO, IOM
+   and "Phase III" are ordinary humanitarian prose, and flagging them failed a
+   correct report. Deliberately narrow: rhythm, variety and
    the habit of joining clauses with "and" are asked for in the prompt and
    judged by a reader, and a lint that scored them would fail honest prose.
 6. **categories** — the pack decides which forecasts the report covers and
