@@ -62,6 +62,7 @@ PROSE_MAX_CHARS = 2000
 _ENTRY_PROSE_FIELDS = (
     "why_it_stands_out",
     "how_to_read_the_distribution",
+    "planning_sentence",
     "spd_shape",
     "what_the_model_was_reacting_to",
 )

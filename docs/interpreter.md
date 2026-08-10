@@ -71,12 +71,15 @@ interpreter/
   lexicon.py    # the fixed probability-word bands + appendix table
   names.py      # ISO3/hazard/metric codes -> the words a reader reads
   selection.py  # which forecasts the report covers, and under which heading
+  gating.py     # v3: expected excess, the two-key gate, thin anchors
+  panels.py     # v3: the selection panel, gate tags, appendix question table
   charts.py     # inline SVG of a forecast distribution (Fred palette)
   mapviz.py     # the printed attention map (vendored Natural Earth, no JS)
   schema.py     # the structured-output contract (jsonschema draft-07)
   packs.py      # loads the Phase 2 bundles; figure maps; token-capped input
   prompts.py    # template assembly from templates/{version}/
   templates/v2/ # system.md, current_run.md, scored_run.md, report_skeleton.md
+  templates/v3/ # the shipped version: excess ordering, planning sentence
   render.py     # JSON -> markdown; {{fig:...}} substitution; misses tracked
   store.py      # interpretations table writes; versioning; latest_scored
   run.py        # CLI orchestrator (model seam: interpreter.run._call_model)
@@ -119,7 +122,7 @@ be inspected; the dashboard (Phase 5) renders them behind a warning banner.
 |---|---|---|
 | `PYTHIA_INTERPRETER_ENABLED` | `1` | kill switch |
 | `PYTHIA_INTERPRETER_MODEL_ID` | unset | overrides the config role |
-| `PYTHIA_INTERPRETER_TEMPLATE_VERSION` | `v2` | |
+| `PYTHIA_INTERPRETER_TEMPLATE_VERSION` | `v3` | |
 | `PYTHIA_INTERPRETER_MAX_PACK_TOKENS` | `250000` | model-input hard cap |
 | `PYTHIA_INTERPRETER_TOP_N` | `8` | attention list length |
 | `PYTHIA_INTERPRETER_PER_CAPITA_FLOOR` | `10000` | per-capita ranking floor |
@@ -131,6 +134,18 @@ be inspected; the dashboard (Phase 5) renders them behind a warning banner.
 | `PYTHIA_INTERPRETER_MAX_OUTPUT_TOKENS` | `32768` | shared with thinking |
 | `PYTHIA_INTERPRETER_TIMEOUT_SEC` | `900` | call timeout |
 | `PYTHIA_INTERPRETER_STRICT_VALIDATION` | `0` | Phase 4: failure suppresses publication |
+| `PYTHIA_INTERPRETER_VALIDATION_RETRIES` | `1` | correction passes after a failed validation |
+| `PYTHIA_INTERPRETER_UNUSUAL_PERCENTILE` | `0.80` | v3: the "unusual" cut, within the run |
+| `PYTHIA_INTERPRETER_MINPROB` | `0.25` | v3: the "material" probability, any horizon |
+| `PYTHIA_INTERPRETER_THRESHOLD_PA` | `50000` | v3: people affected worth mobilising for |
+| `PYTHIA_INTERPRETER_THRESHOLD_PA_POP_SHARE` | `0.01` | v3: the small-state alternative |
+| `PYTHIA_INTERPRETER_THRESHOLD_FATALITIES` | `100` | v3 |
+| `PYTHIA_INTERPRETER_THRESHOLD_PHASE3` | `1000000` | v3 |
+| `PYTHIA_INTERPRETER_THRESHOLD_PHASE3_POP_SHARE` | `0.10` | v3 |
+| `PYTHIA_INTERPRETER_BASERATE_MIN_OBS` | `12` | v3: below this an anchor is thin and is demoted |
+| `PYTHIA_INTERPRETER_BASERATE_SMOOTHING` | `0.5` | v3: Jeffreys pseudo-count on the anchor |
+| `PYTHIA_INTERPRETER_MAX_ENTRIES` | `5` | v3 |
+| `PYTHIA_INTERPRETER_MIN_RESOLVED_FOR_SKILL` | `100` | v3: below this, skill is not claimed |
 
 ## What the report covers (`interpreter/selection.py`)
 
@@ -144,11 +159,78 @@ under which heading. Four boxes:
 | Major impact but roughly stable: climate hazards | heavy burden per head, no call that things are departing from the usual |
 | Major impact but roughly stable: conflict | the same, for armed conflict |
 
-**Direction is the point.** Ranking is on `log_ev_ratio`, which is signed. The
-divergence score `js_vs_baserate` is not: ranking on it would promote a
-forecast for sitting far BELOW its base rate, which is not news. A ±5% deadband
-keeps forecasts that merely round off the base rate out of the worsening
-sections.
+**Direction is the point.** The divergence score `js_vs_baserate` is unsigned:
+ranking on it would promote a forecast for sitting far BELOW its base rate,
+which is not news. A ±5% deadband keeps forecasts that merely round off the
+base rate out of the worsening sections.
+
+### Ranking and the two-key gate (v3, `interpreter/gating.py`)
+
+Ranking used to be on `log_ev_ratio`, a RATIO, and a ratio is dominated by
+whichever base rate happens to sit closest to zero. A cyclone question whose
+history puts almost all its weight on "nobody affected" divides by almost
+nothing, so a modest tail produces a huge multiple. The August report led on
+Indonesian cyclones and put famine in Sudan on page two. Ordering is now on
+**expected excess** — `excess_nominal = eiv_nominal − eiv_baserate`, in people
+— and the ratio survives only as a descriptor in the prose. Switching the
+order on the real August data changes the top six from all-cyclone to
+all-drought.
+
+Selection is a **two-key gate** stamped by `gating.gate_rows`, which returns
+the counts the report prints:
+
+| key | test |
+|---|---|
+| unusual | `js_vs_baserate` at or above the run's `PYTHIA_INTERPRETER_UNUSUAL_PERCENTILE` (0.80) percentile |
+| material | at least `PYTHIA_INTERPRETER_MINPROB` (0.25) chance, in ANY month of the window, of passing a size worth mobilising for |
+| rising | `excess_nominal > 0` |
+
+Materiality thresholds are `min(absolute, share × population)` so a flat 50,000
+floor does not silently exclude every small island state from a cyclone report.
+The horizon that cleared is carried on the row (`peak_horizon`), because which
+month cleared is part of the answer.
+
+**Direction is a separate test.** Unusual and material describe SIZE and
+CONFIDENCE, neither of which has a sign. Without the `rising` test a forecast
+expecting two million FEWER people than usual lands in "potentially worsening
+situations", which Uganda did on the August run (excess −2,069,829, both keys
+passed).
+
+Gates, in the words the report prints: `larger than usual` (all three),
+`heavy burden` (material but not rising or not unusual), `unusual, small scale`
+(the watchlist — tracked, not acted on, and never on page two ahead of Sudan).
+
+**Thin anchors are demoted, not dropped.** Below
+`PYTHIA_INTERPRETER_BASERATE_MIN_OBS` (12) historical observations a row is
+ranked below every clear-anchored row and says so. Indonesia's near-empty
+cyclone record may be a gap in GDACS and IFRC rather than a real absence of
+impact; the honest response to not knowing is to rank it lower and say so.
+
+### The report's account of itself (`interpreter/panels.py`)
+
+A reader must be able to see why something is in the report and why something
+else is not. Three pieces, all GENERATED from the configuration and the gate's
+own counts rather than written by the model — a model asked to describe the
+selection rules will eventually describe them wrongly, and the reader has no
+way to check:
+
+- a boxed **"How these entries were chosen"** panel near the front, stating the
+  ordering rule, both tests, the thresholds and the counts;
+- a **gate tag** on every entry (`*Selected because: …*`);
+- an appendix **question table** listing every question considered, which is
+  what answers "why is my country not in the report".
+
+All three read one counts dict, so they cannot disagree. Three numbers that
+ought to match and are computed three times will eventually not match.
+
+### What a planner is given (v3)
+
+Bucket probability tables moved out of the entries and into the appendix, with
+the bands named in words ("1 to 9,999 people", never `1-<10k`). A picture of
+uncertainty is not something a response planner can act on, and it was crowding
+out the two figures that are: `p50_peak` (plan against) and `p90_peak` (hold
+contingency for), both at the peak horizon, with the month named
+(`peak_month`) and `p_zero_peak` where the chance of nothing is worth saying.
 
 **Dual gate.** The top `PYTHIA_INTERPRETER_MIN_PER_CATEGORY` (3) always appear,
 however unremarkable the month, so a section is never empty and always names

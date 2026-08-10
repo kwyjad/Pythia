@@ -142,6 +142,71 @@ def pack_question_ids(pack: Pack) -> set[str]:
     return out
 
 
+def report_extras(pack: Pack) -> dict[str, Any]:
+    """The pieces the report states about ITSELF, generated not written.
+
+    The selection panel and the appendix question table are derived from the
+    configuration and the gate's own counts. The model never sees them as
+    something to compose, so it cannot get them wrong, and the counts in the
+    panel are the same objects the table is built from.
+    """
+    from interpreter import gating, panels
+
+    rows = [dict(r) for r in pack.attention_rows]
+    for row in rows:
+        row["exceedances"] = _as_floats(row.get("exceedances"))
+        for key in ("excess_nominal", "excess_per_100k", "js_vs_baserate",
+                    "baserate_n_obs"):
+            row[key] = _as_float(row.get(key))
+        row["baserate_thin"] = str(row.get("baserate_thin") or "").lower() in (
+            "true", "1", "yes"
+        )
+    counts = {
+        "considered": len(rows),
+        "both": sum(1 for r in rows if r.get("gate") == gating.GATE_WORSENING),
+        "major": sum(1 for r in rows if r.get("gate") == gating.GATE_MAJOR),
+        "watchlist": sum(1 for r in rows if r.get("gate") == gating.GATE_WATCHLIST),
+        "thin": sum(1 for r in rows if r.get("baserate_thin")),
+    }
+    return {
+        "selection_panel": panels.selection_panel(counts),
+        "question_table": panels.question_table(rows),
+        # {question_id: gate} so the renderer can tag each entry with the gate
+        # it actually passed. The tag has to come from the gate's own stamp,
+        # not from the model, or the panel's counts and the tags disagree.
+        "gates": {
+            str(r.get("question_id")): str(r.get("gate"))
+            for r in rows if r.get("gate")
+        },
+        "watchlist": [
+            {
+                "country": r.get("country_name") or r.get("iso3"),
+                "hazard": r.get("hazard_name") or r.get("hazard_code"),
+                "metric": r.get("metric_name") or r.get("metric"),
+            }
+            for r in rows if r.get("gate") == gating.GATE_WATCHLIST
+        ],
+    }
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_floats(value: Any) -> list[float]:
+    if isinstance(value, list):
+        return [float(v) for v in value if v is not None]
+    if not value:
+        return []
+    try:
+        return [float(v) for v in json.loads(value) if v is not None]
+    except (TypeError, ValueError):
+        return []
+
+
 def pack_identity(pack: Pack) -> dict[str, dict[str, str]]:
     """{question_id: {iso3, hazard_code, metric}} straight from the pack.
 
@@ -188,6 +253,9 @@ def pack_categories(pack: Pack) -> dict[str, tuple[str | None, str | None]]:
 _ATTENTION_FIG_KEYS = (
     "js_vs_baserate", "log_ev_ratio", "ev_multiple",
     "eiv_nominal", "eiv_per_100k",
+    # v3: the ordering, and the two figures a planner acts on.
+    "excess_nominal", "excess_per_100k", "baserate_n_obs",
+    "p50_peak", "p90_peak", "p_zero_peak", "peak_month",
     "rc_level", "rc_score", "triage_score", "attention_rank",
     "baserate_source",
 )

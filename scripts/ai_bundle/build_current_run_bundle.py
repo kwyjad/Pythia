@@ -79,6 +79,8 @@ from scripts.ai_bundle.guides import build_current_run_guide
 # interpreter package from the bundle builder costs nothing at import time.
 from interpreter import config as _interp_config
 from interpreter import names as _names
+from interpreter import gating as _gating
+from interpreter import panels as _panels
 from interpreter import selection as _selection
 
 LOGGER = logging.getLogger(__name__)
@@ -227,6 +229,43 @@ def _sibyl_covered(con, qids: list[str]) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+_MONTH_NAMES = (
+    "January", "February", "March", "April", "May", "June", "July",
+    "August", "September", "October", "November", "December",
+)
+
+
+def _month_label(window_start: Any, horizon: Any) -> str | None:
+    """Horizon 3 of a window starting 2026-09 is "November 2026".
+
+    Month index 1 IS the window_start month, the repo's anchoring convention
+    everywhere (see CLAUDE.md's per-horizon architecture note).
+    """
+    if not window_start or not horizon:
+        return None
+    try:
+        text = str(window_start)[:7]
+        year, month = int(text[:4]), int(text[5:7])
+        offset = month - 1 + (int(horizon) - 1)
+        return f"{_MONTH_NAMES[offset % 12]} {year + offset // 12}"
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _json_list(raw: Any) -> list[float]:
+    """A JSON list column back to floats; [] when absent or unreadable."""
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [float(v) for v in raw if v is not None]
+    try:
+        import json as _json
+
+        return [float(v) for v in (_json.loads(raw) or []) if v is not None]
+    except (TypeError, ValueError):
+        return []
+
+
 def _rank(rows: list[dict[str, Any]], key: str, rank_col: str, *, eligible=None) -> None:
     """Attach a 1-based descending rank on ``key`` (None = unranked)."""
     pool = [
@@ -291,6 +330,21 @@ def build_attention_rows(
                 "log_ev_ratio": dev.get("log_ev_ratio") if dev else None,
                 "eiv_nominal": dev.get("eiv_nominal") if dev else None,
                 "eiv_per_100k": dev.get("eiv_per_100k") if dev else None,
+                # v3: the ordering. Expected EXCESS, not the ratio.
+                "eiv_baserate": dev.get("eiv_baserate") if dev else None,
+                "excess_nominal": dev.get("excess_nominal") if dev else None,
+                "excess_per_100k": dev.get("excess_per_100k") if dev else None,
+                "exceedances": _json_list(dev.get("exceedances_json") if dev else None),
+                "baserate_n_obs": dev.get("baserate_n_obs") if dev else None,
+                # What a planner acts on, at the month most likely to breach
+                # the threshold. Named as a month, not "horizon 3".
+                "p50_peak": dev.get("p50_peak") if dev else None,
+                "p90_peak": dev.get("p90_peak") if dev else None,
+                "p_zero_peak": dev.get("p_zero_peak") if dev else None,
+                "peak_month": _month_label(
+                    q.get("window_start_date"),
+                    dev.get("peak_horizon") if dev else None,
+                ),
                 "baserate_source": dev.get("baserate_source") if dev else None,
                 "sibyl_covered": qid in sibyl_qids,
                 "rc_deviation_disagreement": disagreement,
@@ -311,9 +365,25 @@ def build_attention_rows(
     )
     _rank(rows, "rc_deviation_disagreement", "rank_rc_disagreement")
 
-    # Which of the four report sections each row belongs to (if any). Done
-    # here so the model receives a decided list rather than being asked to
-    # apply thresholds in prose, which it cannot be trusted to do.
+    # The two-key gate (v3). Done here so the model receives a decided list
+    # rather than being asked to apply thresholds in prose, which it cannot
+    # be trusted to do. The counts come back so the selection panel, the
+    # entry tags and the appendix table all read one number.
+    gate_counts = _gating.gate_rows(
+        rows,
+        unusual_percentile=_interp_config.unusual_percentile(),
+        min_probability=_interp_config.min_probability(),
+        thin_min_obs=_interp_config.baserate_min_obs(),
+    )
+    LOGGER.info(
+        "gate: %d considered, %d cleared both, %d heavy burden, %d watchlist, "
+        "%d thin anchors (unusual cut js>=%.4f)",
+        gate_counts.get("considered", 0), gate_counts.get("both", 0),
+        gate_counts.get("major", 0), gate_counts.get("watchlist", 0),
+        gate_counts.get("thin", 0), gate_counts.get("unusual_cut") or 0.0,
+    )
+    # The v2 four-box assignment still runs: it decides the report's headings
+    # among the gated rows, and the validator holds the model to them.
     _selection.assign_categories(
         rows,
         threshold_multiple=_interp_config.worsening_multiple(),
@@ -402,6 +472,11 @@ ATTENTION_FIELDS = [
     # Names and section assignment (the report's inclusion criteria).
     "country_name", "hazard_name", "hazard_family", "metric_name",
     "direction", "ev_multiple", "category", "category_rank",
+    # v3: the ordering, the gate and what a planner acts on.
+    "eiv_baserate", "excess_nominal", "excess_per_100k", "baserate_n_obs",
+    "passed_unusual", "passed_material", "peak_horizon", "gate",
+    "baserate_thin", "p50_peak", "p90_peak", "p_zero_peak", "peak_month",
+    "window_shape",
 ]
 
 

@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 
 ROLE = "interpreter"
-DEFAULT_TEMPLATE_VERSION = "v2"
+DEFAULT_TEMPLATE_VERSION = "v3"
 SCHEMA_VERSION = "1"
 
 # --- Attention selection (report sections) ---------------------------------

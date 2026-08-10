@@ -564,3 +564,173 @@ class TestGating:
         assert gating.percentile([1, 2, 3, 4, 5], 0.5) == pytest.approx(3.0)
         assert gating.percentile([1, 2, 3, 4], 0.5) == pytest.approx(2.5)
         assert gating.percentile([], 0.5) is None
+
+
+class TestPanels:
+    """The report's account of itself is generated, never composed.
+
+    A model asked to describe the selection rules in its own words will
+    eventually describe them wrongly, and a reader has no way to check. So
+    the panel, the per-entry tags and the appendix table all read the same
+    counts, and these tests hold them to that.
+    """
+
+    def test_bucket_labels_are_readable_and_carry_their_unit(self):
+        from interpreter import panels
+
+        assert panels.humanise_bucket_label("0", "PA", 0) == "no people recorded"
+        assert panels.humanise_bucket_label("1-<10k", "PA", 1) == "1 to 9,999 people"
+        assert panels.humanise_bucket_label(">=500k", "PA", 5) == "500,000 people or more"
+        # A fatality band counts deaths, not people affected. Calling the two
+        # by the same noun is how a reader reads a hundred deaths as a
+        # hundred people needing blankets.
+        assert "deaths" in panels.humanise_bucket_label("0", "FATALITIES", 0)
+
+    def test_panel_states_the_counts_the_gate_produced(self):
+        from interpreter import panels
+
+        panel = panels.selection_panel({
+            "considered": 91, "both": 3, "major": 5, "watchlist": 7, "thin": 58,
+        })
+        assert panel["counts"]["considered"] == 91
+        assert panel["counts"]["cleared_both"] == 3
+        assert panel["counts"]["thin_anchor"] == 58
+        for token in ("91", "3", "5", "7", "58"):
+            assert token in panel["counts_sentence"]
+        # It has to state the ordering rule, because that is the single thing
+        # about this report a reader is most likely to get wrong.
+        assert "ADDITIONAL" in panel["ordering"] or "additional" in panel["ordering"]
+
+    def test_thresholds_never_hardcode_a_number_in_prose(self):
+        from interpreter import config, panels
+
+        panel = panels.selection_panel({"considered": 0})
+        joined = " ".join(panel["thresholds"])
+        assert f"{config.threshold_for_metric('PA'):,.0f}" in joined
+        assert "whichever is lower" in joined
+
+    def test_question_table_lists_everything_considered(self):
+        from interpreter import gating, panels
+
+        rows = [
+            {"question_id": "a", "iso3": "SOM", "hazard_code": "DR",
+             "metric": "PHASE3PLUS_IN_NEED", "excess_nominal": 2_900_000.0,
+             "exceedances": [0.8, 0.9], "gate": gating.GATE_WORSENING},
+            {"question_id": "b", "iso3": "IDN", "hazard_code": "TC",
+             "metric": "PA", "excess_nominal": 3_524.0,
+             "exceedances": [0.02], "gate": None, "baserate_thin": True},
+        ]
+        table = panels.question_table(rows)
+        assert len(table) == 2
+        assert table[0]["country"] == "Somalia"
+        assert table[0]["excess"] == "+2,900,000"
+        assert table[0]["chance"] == "90%"
+        # Not selected is a verdict the reader is owed, not a blank.
+        assert table[1]["gate"] == "not selected"
+        assert table[1]["anchor"] == "thin"
+
+    def test_planning_figures_report_the_peak_month_by_name(self):
+        from interpreter import panels
+
+        flat = [0.5, 0.5, 0.0, 0.0, 0.0, 0.0]
+        big = [0.1, 0.2, 0.3, 0.2, 0.1, 0.1]
+        figs = panels.planning_figures(
+            [flat, big, flat], "PA",
+            ["September 2026", "October 2026", "November 2026"],
+        )
+        assert figs["peak_horizon"] == 2
+        assert figs["peak_month"] == "October 2026"
+        assert figs["p50_peak"] is not None
+        assert figs["p90_peak"] >= figs["p50_peak"]
+        assert figs["p_zero_peak"] == pytest.approx(0.1)
+
+    def test_no_distributions_means_no_planning_figures_not_zeros(self):
+        from interpreter import panels
+
+        assert panels.planning_figures([], "PA") == {}
+
+
+class TestReportSelfAccount:
+    """The rendered report has to carry the panel, the tags and the table."""
+
+    def _resolver(self):
+        from interpreter import render
+
+        return render.FigureResolver({}, {}, spd_by_question={})
+
+    def _content(self):
+        return {
+            "kind": "current",
+            "headline": "A headline.",
+            "attention": [{
+                "rank": 1, "iso3": "SOM", "hazard_code": "DR",
+                "metric": "PHASE3PLUS_IN_NEED",
+                "category": "worsening", "hazard_family": "climate",
+                "question_ids": ["SOM_DR_PHASE3PLUS_IN_NEED_2026-09"],
+                "why_it_stands_out": "Because it does.",
+                "planning_sentence": "Plan against a large caseload.",
+            }],
+        }
+
+    def test_panel_and_table_and_gate_tag_all_render(self):
+        from interpreter import gating, panels, render
+
+        extras = {
+            "selection_panel": panels.selection_panel(
+                {"considered": 91, "both": 3, "major": 5,
+                 "watchlist": 7, "thin": 58}
+            ),
+            "question_table": panels.question_table([{
+                "question_id": "SOM_DR_PHASE3PLUS_IN_NEED_2026-09",
+                "iso3": "SOM", "hazard_code": "DR",
+                "metric": "PHASE3PLUS_IN_NEED",
+                "excess_nominal": 2_900_000.0, "exceedances": [0.9],
+                "gate": gating.GATE_WORSENING,
+            }]),
+            "gates": {
+                "SOM_DR_PHASE3PLUS_IN_NEED_2026-09": gating.GATE_WORSENING
+            },
+            "watchlist": [{"country": "Indonesia", "hazard": "tropical cyclone",
+                           "metric": "people affected"}],
+        }
+        md = render.render_markdown(
+            self._content(), self._resolver(), extras=extras
+        )
+        assert "How these entries were chosen" in md
+        assert "91 forecasts were considered" in md
+        assert f"Selected because: {gating.GATE_WORSENING}" in md
+        assert "Every question considered" in md
+        assert "Somalia" in md
+        assert "Watchlist" in md
+        assert "Indonesia" in md
+
+    def test_report_still_renders_without_extras(self):
+        from interpreter import render
+
+        md = render.render_markdown(self._content(), self._resolver())
+        assert "How these entries were chosen" not in md
+        assert "A headline." in md
+
+    def test_planning_sentence_leads_and_the_bucket_chart_left_the_entry(self):
+        from interpreter import render
+
+        md = render.render_markdown(self._content(), self._resolver())
+        assert "What to plan against:" in md
+        # The chart moved to the appendix. Inside the entry it crowded out
+        # the two figures a planner can act on.
+        body = md.split("## Appendix")[0]
+        assert "<svg" not in body
+
+    def test_bucket_tables_move_to_the_appendix_with_readable_bands(self):
+        from interpreter import render
+
+        resolver = render.FigureResolver({}, {}, spd_by_question={
+            "SOM_DR_PHASE3PLUS_IN_NEED_2026-09": {
+                "spd": [0.1, 0.2, 0.3, 0.2, 0.1, 0.1],
+                "bucket_labels": None, "binary": False,
+            }
+        })
+        md = render.render_markdown(self._content(), resolver, extras={})
+        appendix = md.split("## Appendix")[1]
+        assert "The full forecasts" in appendix
+        assert "1 to 99,999 people" in appendix

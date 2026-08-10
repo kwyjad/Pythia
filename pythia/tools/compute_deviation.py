@@ -174,6 +174,14 @@ CREATE TABLE IF NOT EXISTS forecast_deviation (
     -- order, and how many observations the anchor rests on.
     exceedances_json TEXT,
     baserate_n_obs INTEGER,
+    -- What a response planner acts on, at the peak horizon: the planning
+    -- figure, the contingency figure, and the chance of nothing recorded.
+    -- A bucket probability table is a picture of uncertainty and nobody can
+    -- plan against a picture.
+    peak_horizon INTEGER,
+    p50_peak DOUBLE,
+    p90_peak DOUBLE,
+    p_zero_peak DOUBLE,
     baserate_source TEXT,
     baserate_json TEXT,
     is_test BOOLEAN DEFAULT FALSE,
@@ -191,6 +199,10 @@ _COLUMN_MIGRATIONS = (
     ("excess_per_100k", "DOUBLE"),
     ("exceedances_json", "TEXT"),
     ("baserate_n_obs", "INTEGER"),
+    ("peak_horizon", "INTEGER"),
+    ("p50_peak", "DOUBLE"),
+    ("p90_peak", "DOUBLE"),
+    ("p_zero_peak", "DOUBLE"),
 )
 
 
@@ -437,6 +449,12 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                 # A binary question's P(event) IS its exceedance; there is no
                 # size threshold to clear, only a probability.
                 exceedances = [float(x) for x in monthly_p]
+                peak_h = _gating.peak_horizon(exceedances)
+                # A yes/no question has no size to plan against.
+                p50_peak = p90_peak = None
+                p_zero_peak = (
+                    1.0 - exceedances[peak_h - 1] if peak_h else None
+                )
             else:
                 class_bins = labels_for(metric)
                 if not class_bins:
@@ -484,6 +502,19 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                 exceedances = _gating.horizon_exceedances(
                     monthly_spds, metric, threshold
                 )
+                # The planning figures, read at the month most likely to
+                # breach the threshold. One peak month serves the gate, the
+                # planning sentence and the decision deadline, so the report
+                # cannot name three different months for one forecast.
+                peak_h = _gating.peak_horizon(exceedances)
+                peak_spd = monthly_spds[peak_h - 1] if peak_h else None
+                p50_peak = (
+                    _gating.quantile(peak_spd, metric, 0.5) if peak_spd else None
+                )
+                p90_peak = (
+                    _gating.quantile(peak_spd, metric, 0.9) if peak_spd else None
+                )
+                p_zero_peak = _gating.p_zero(peak_spd) if peak_spd else None
 
             rows_out.append((
                 rid, qid, model_name, iso3, hazard_code, metric,
@@ -494,6 +525,7 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                 eiv_baserate, excess_nominal, excess_per_100k,
                 json.dumps(exceedances),
                 _baserate_n_obs(base_detail),
+                peak_h, p50_peak, p90_peak, p_zero_peak,
                 base_source,
                 json.dumps({"probs": base_probs, "detail": base_detail}, default=str),
                 bool(is_test), now,
@@ -514,8 +546,10 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                      score_family, js_vs_baserate, log_ev_ratio, eiv_nominal,
                      eiv_per_100k, eiv_baserate, excess_nominal, excess_per_100k,
                      exceedances_json, baserate_n_obs,
+                     peak_horizon, p50_peak, p90_peak, p_zero_peak,
                      baserate_source, baserate_json, is_test, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?)
                 """,
                 rows_out,
             )
