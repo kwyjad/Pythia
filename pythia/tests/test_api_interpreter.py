@@ -164,8 +164,13 @@ def test_latest_highest_version_of_newest_production_run(api_env) -> None:
     resolved = interp["content_resolved"]["attention"][0]["why_it_stands_out"]
     assert "{{fig:js_vs_baserate}}" in raw
     assert "{{fig:" not in resolved
-    assert "50% of maximum" in resolved
+    assert "a long way from its usual pattern" in resolved
     assert interp["unresolved_figures"] == []
+    # Names are stamped server-side from interpreter/names.py, so the
+    # dashboard never carries a second copy of the country table.
+    entry = interp["content_resolved"]["attention"][0]
+    assert entry["country_name"] and entry["country_name"] != entry["iso3"]
+    assert entry["hazard_name"] and entry["metric_name"]
 
 
 def test_latest_include_test_surfaces_test_row(api_env) -> None:

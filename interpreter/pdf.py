@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from interpreter import config, store
+from interpreter import config, mapviz, store
 
 LOGGER = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ LATEST_PDF_NAME = "interpreter_report_latest.pdf"
 # ---------------------------------------------------------------------------
 
 _CODE_SPAN = re.compile(r"`([^`]+)`")
+_LINK = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 _BOLD = re.compile(r"\*\*([^*]+)\*\*")
 _STAR_ITAL = re.compile(r"\*([^*\s][^*]*)\*")
 # Word-boundary underscores only: question ids like SOM_ACE_PA_2026-08 carry
@@ -71,7 +72,16 @@ def _inline(text: str) -> str:
         placeholders.append(f"<code>{_html.escape(match.group(1))}</code>")
         return f"\x00{len(placeholders) - 1}\x00"
 
+    def _stash_link(match: re.Match[str]) -> str:
+        label = _html.escape(match.group(1))
+        href = _html.escape(match.group(2), quote=True)
+        placeholders.append(f'<a href="{href}">{label}</a>')
+        return f"\x00{len(placeholders) - 1}\x00"
+
     working = _CODE_SPAN.sub(_stash, text)
+    # Links after code spans, before escaping: a question id carries
+    # underscores that the emphasis regexes must not touch inside an href.
+    working = _LINK.sub(_stash_link, working)
     working = _html.escape(working, quote=False)
     working = _BOLD.sub(r"<strong>\1</strong>", working)
     working = _STAR_ITAL.sub(r"<em>\1</em>", working)
@@ -94,6 +104,17 @@ def markdown_to_html(md: str) -> str:
         stripped = line.strip()
         if not stripped:
             i += 1
+            continue
+        if stripped.startswith("<svg"):
+            # Charts and the map are inline SVG our own renderer produced.
+            # They pass through untouched; escaping them would print the
+            # markup instead of the picture.
+            svg = [stripped]
+            while not svg[-1].rstrip().endswith("</svg>") and i + 1 < len(lines):
+                i += 1
+                svg.append(lines[i].strip())
+            i += 1
+            out.append('<div class="figure">' + "".join(svg) + "</div>")
             continue
         if stripped.startswith("### "):
             out.append(f"<h3>{_inline(stripped[4:])}</h3>")
@@ -149,7 +170,7 @@ def markdown_to_html(md: str) -> str:
         i += 1
         while i < len(lines):
             nxt = lines[i].strip()
-            if not nxt or nxt.startswith(("#", "- ", "|")):
+            if not nxt or nxt.startswith(("#", "- ", "|", "<svg")):
                 break
             para.append(nxt)
             i += 1
@@ -161,32 +182,107 @@ def markdown_to_html(md: str) -> str:
 # HTML document
 # ---------------------------------------------------------------------------
 
-_CSS = """
-@page { margin: 18mm; }
-body {
+# Fred's palette (web/tailwind.config.ts), so the printed report and the
+# dashboard are recognisably the same publication.
+FRED_PRIMARY = "#156082"
+FRED_SECONDARY = "#80350E"
+FRED_TEXT = "#3A3A3A"
+FRED_BORDER = "#D6D6D6"
+FRED_MUTED = "#6B7280"
+FRED_SURFACE = "#FFFFFF"
+FRED_BG = "#F5F5F5"
+
+_CSS = f"""
+@page {{
+  margin: 16mm 18mm 18mm;
+  @bottom-center {{
+    content: "Fred  ·  page " counter(page) " of " counter(pages);
+    font-family: sans-serif; font-size: 8pt; color: {FRED_MUTED};
+  }}
+}}
+body {{
   font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  color: #0f172a; font-size: 10.5pt; line-height: 1.5;
-}
-h1 { font-size: 17pt; margin: 0 0 6pt; }
-h2 { font-size: 13pt; margin: 14pt 0 4pt; page-break-after: avoid;
-     border-bottom: 1px solid #cbd5e1; padding-bottom: 2pt; }
-h2 + * { page-break-before: avoid; }
-h3 { font-size: 11pt; margin: 10pt 0 3pt; page-break-after: avoid; }
-p { margin: 4pt 0; }
-ul { margin: 4pt 0 4pt 14pt; padding: 0; }
-li { margin: 2pt 0; }
-code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9pt;
-       background: #f1f5f9; padding: 0 2pt; border-radius: 2pt; }
-table { border-collapse: collapse; margin: 6pt 0; font-size: 9.5pt; }
-th, td { border: 1px solid #cbd5e1; padding: 2pt 6pt; text-align: left; }
-th { background: #f1f5f9; }
-.meta { color: #475569; font-size: 9pt; margin-bottom: 10pt; }
-.banner { border: 1px solid #d97706; background: #fef3c7; color: #92400e;
-          padding: 6pt 8pt; margin-bottom: 10pt; font-size: 9.5pt; }
+  color: {FRED_TEXT}; font-size: 10.5pt; line-height: 1.55;
+}}
+.masthead {{
+  border-bottom: 3px solid {FRED_PRIMARY};
+  padding-bottom: 6pt; margin-bottom: 12pt;
+}}
+.masthead .wordmark {{
+  font-size: 22pt; font-weight: 700; color: {FRED_PRIMARY};
+  letter-spacing: -0.5pt; line-height: 1;
+}}
+.masthead .strap {{
+  font-size: 9.5pt; color: {FRED_MUTED}; margin-top: 3pt;
+}}
+.masthead .month {{
+  float: right; font-size: 11pt; color: {FRED_SECONDARY}; font-weight: 600;
+}}
+h1 {{ font-size: 16pt; margin: 0 0 6pt; color: {FRED_TEXT}; }}
+h2 {{ font-size: 12.5pt; margin: 16pt 0 5pt; page-break-after: avoid;
+     color: {FRED_PRIMARY};
+     border-bottom: 1px solid {FRED_BORDER}; padding-bottom: 2pt; }}
+h2 + * {{ page-break-before: avoid; }}
+h3 {{ font-size: 11pt; margin: 11pt 0 3pt; page-break-after: avoid;
+     color: {FRED_SECONDARY}; }}
+p {{ margin: 4pt 0; }}
+ul {{ margin: 4pt 0 4pt 14pt; padding: 0; }}
+li {{ margin: 2pt 0; }}
+a {{ color: {FRED_PRIMARY}; text-decoration: none; }}
+code {{ font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9pt;
+       background: {FRED_BG}; padding: 0 2pt; border-radius: 2pt; }}
+table {{ border-collapse: collapse; margin: 6pt 0; font-size: 9.5pt; }}
+th, td {{ border: 1px solid {FRED_BORDER}; padding: 2pt 6pt; text-align: left; }}
+th {{ background: {FRED_BG}; color: {FRED_TEXT}; }}
+.figure {{ margin: 6pt 0 8pt; page-break-inside: avoid; }}
+.figure svg {{ max-width: 100%; height: auto; }}
+.mapblock {{ margin: 10pt 0 14pt; page-break-inside: avoid; }}
+.mapblock .caption {{ font-size: 9pt; color: {FRED_MUTED}; margin-top: 3pt; }}
+.meta {{ color: {FRED_MUTED}; font-size: 8.5pt; margin-bottom: 10pt; }}
+.banner {{ border: 1px solid {FRED_SECONDARY}; background: #FBEDE6;
+          color: {FRED_SECONDARY};
+          padding: 6pt 8pt; margin-bottom: 10pt; font-size: 9.5pt; }}
 """
 
+_STRAPLINE = "Monthly risk report from the Fred forecasting system"
 
-def build_report_html(row: dict[str, Any]) -> str:
+
+def _masthead(row: dict[str, Any]) -> str:
+    month = _html.escape(month_label(row))
+    return (
+        '<div class="masthead">'
+        f'<div class="month">{month}</div>'
+        '<div class="wordmark">Fred</div>'
+        f'<div class="strap">{_STRAPLINE}</div>'
+        "</div>"
+    )
+
+
+def _map_block(map_svg: str | None, captions: list[str] | None) -> str:
+    """The attention map, printed once under the masthead.
+
+    The dashboard draws this with JavaScript, which a PDF cannot run, so the
+    printed report carries its own SVG. When the map is unavailable the block
+    is simply absent; a missing picture must not fail a report.
+    """
+    if not map_svg:
+        return ""
+    caption = ""
+    if captions:
+        caption = (
+            '<div class="caption">Darkest first: '
+            + _html.escape(", ".join(captions))
+            + ".</div>"
+        )
+    return f'<div class="mapblock">{map_svg}{caption}</div>'
+
+
+def build_report_html(
+    row: dict[str, Any],
+    *,
+    map_svg: str | None = None,
+    map_captions: list[str] | None = None,
+) -> str:
     """A self-contained HTML document from one interpretations row."""
     body = markdown_to_html(str(row.get("content_md") or ""))
     status = str(row.get("status") or "")
@@ -205,9 +301,12 @@ def build_report_html(row: dict[str, Any]) -> str:
     ]
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        f"<title>Fred — plain-language report</title><style>{_CSS}</style>"
+        f"<title>Fred - monthly risk report</title><style>{_CSS}</style>"
         "</head><body>"
-        f"{banner}<div class='meta'>{' · '.join(meta_bits)}</div>"
+        f"{_masthead(row)}"
+        f"{banner}"
+        f"{_map_block(map_svg, map_captions)}"
+        f"<div class='meta'>{' · '.join(meta_bits)}</div>"
         f"{body}</body></html>"
     )
 
@@ -303,11 +402,16 @@ def generate_pdf(
     from resolver.db import duckdb_io
 
     con = duckdb_io.get_db(db or duckdb_io.DEFAULT_DB_URL)
+    map_values: dict[str, float] = {}
     try:
         row = select_row(
             con, kind=kind, interpretation_id=interpretation_id,
             include_test=include_test,
         )
+        if row is not None:
+            map_values = mapviz.values_from_deviation(
+                con, row.get("run_id"), include_test=include_test,
+            )
     finally:
         duckdb_io.close_db(con)
 
@@ -336,7 +440,15 @@ def generate_pdf(
         })
         return result
 
-    html = build_report_html(row)
+    map_svg = mapviz.attention_map_svg(
+        map_values,
+        title="Where this month's forecasts sit furthest from their usual pattern",
+    )
+    html = build_report_html(
+        row,
+        map_svg=map_svg or None,
+        map_captions=mapviz.country_labels(map_values),
+    )
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     versioned = out / pdf_filename(row)

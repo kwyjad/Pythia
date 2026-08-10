@@ -327,15 +327,22 @@ class TestCurrentRunBundle:
         assert kept >= 1, "the top-ranked question is never truncated"
         assert truncated, "a 1k-token budget must truncate something"
         assert kept + len(truncated) <= 4
-        # The kept set is the TOP of the attention ordering: the top-ranked
-        # question (CQ_ACE) must have a record, and every truncated id must
-        # rank below every kept id.
-        assert (root / "questions" / f"{CQ_ACE}.json").exists()
-        assert CQ_ACE not in truncated
+        # Records are written in REPORT order, so the rows the report is
+        # required to cover are the last thing a tight budget gives up. Under
+        # a budget this small some of them do go, and when they do the
+        # manifest says which: a categorised row without a record is the one
+        # truncation that damages the report, so it is never just a count.
         rows = {r["question_id"]: r for r in _read_csv(root / "attention_index.csv")}
+        categorised = [q for q, r in rows.items() if r["category"]]
+        dropped = manifest["truncated_categorised_question_ids"]
+        assert set(dropped) <= set(truncated)
+        assert set(dropped) <= set(categorised)
         for qid in truncated:
             assert rows[qid]["record_path"] == ""
-        assert rows[CQ_ACE]["record_path"] == f"questions/{CQ_ACE}.json"
+        # Whatever survived, it is a categorised row while any exist.
+        if categorised:
+            kept_ids = [q for q, r in rows.items() if r["record_path"]]
+            assert all(q in categorised for q in kept_ids)
 
     def test_no_previous_run(self, mini_db: str, tmp_path: Path) -> None:
         # Point at the previous run itself: nothing earlier exists.

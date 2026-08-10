@@ -31,14 +31,22 @@ _PROSE_LIST = {"type": "array", "items": _PROSE}
 _QUESTION_IDS = {"type": "array", "items": {"type": "string"}, "minItems": 1}
 _FIGURE_REFS = {"type": "array", "items": {"type": "string"}}
 
+CATEGORIES = ["worsening", "stable_major"]
+HAZARD_FAMILIES = ["climate", "conflict", "other"]
+
 _ATTENTION_ENTRY = {
     "type": "object",
     "required": [
         "rank", "reason_code", "iso3", "hazard_code", "metric",
-        "question_ids", "why_it_stands_out",
+        "category", "hazard_family", "question_ids", "why_it_stands_out",
     ],
     "properties": {
         "rank": {"type": "integer", "minimum": 1},
+        # Which of the report's four boxes this belongs in. The pack decides
+        # it (interpreter/selection.py); the model copies it across and may
+        # not invent a placement.
+        "category": {"type": "string", "enum": CATEGORIES},
+        "hazard_family": {"type": "string", "enum": HAZARD_FAMILIES},
         "reason_code": {"type": "string", "enum": REASON_CODES},
         "iso3": {"type": "string", "minLength": 3, "maxLength": 3},
         "hazard_code": {"type": "string"},
@@ -47,6 +55,8 @@ _ATTENTION_ENTRY = {
         "figure_refs": _FIGURE_REFS,
         "why_it_stands_out": _PROSE,
         "how_to_read_the_distribution": _PROSE,
+        # Where the probability sits and how heavy the tail is, in words.
+        "spd_shape": _PROSE,
         "what_the_model_was_reacting_to": _PROSE,
         "impacts": _PROSE_LIST,
         "operational_challenges": _PROSE_LIST,
@@ -91,6 +101,9 @@ OUTPUT_SCHEMA: dict[str, Any] = {
         "template_version": {"type": "string"},
         "kind": {"type": "string", "enum": ["current", "scored", "combined"]},
         "headline": _PROSE,
+        # One short paragraph of scan-scope counts, written from the pack's
+        # run_summary figures (the model never counts anything itself).
+        "run_summary": _PROSE,
         "attention": {"type": "array", "items": _ATTENTION_ENTRY},
         "performance": _PERFORMANCE,
         "changes_since_last_run": _PROSE_LIST,
