@@ -614,6 +614,7 @@ Some test files require `fastapi` or `openai` which may not be installed locally
 | `PYTHIA_INTERPRETER_THINKING` | Anthropic `output_config.effort` level for the interpreter call (default high) |
 | `PYTHIA_INTERPRETER_MAX_OUTPUT_TOKENS` | Interpreter max_tokens — thinking shares this budget (default 32768) |
 | `PYTHIA_INTERPRETER_STRICT_VALIDATION` | When 1, a validation failure suppresses publication (Phase 4 consumer; default 0) |
+| `PYTHIA_INTERPRETER_VALIDATION_RETRIES` | Correction passes after a failed validation (default 1; 0 disables) |
 
 | `PYTHIA_HS_ONLY_COUNTRIES` | Restrict HS to specific countries (comma-separated ISO3s) |
 | `PYTHIA_HS_FALLBACK_MODEL_SPECS` | Fallback model for HS triage (default from profile `hs_fallback`) |

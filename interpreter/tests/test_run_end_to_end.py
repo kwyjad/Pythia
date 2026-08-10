@@ -368,3 +368,75 @@ class TestTestModeDerivation:
 
         assert os.environ.get("PYTHIA_TEST_MODE") is None
         con.close()
+
+
+class TestValidationRetry:
+    """One correction pass, because the failures that survive the prompt are
+    usually a single slip in one field and a manual re-run costs a whole
+    model call plus a warning banner on the dashboard in the meantime."""
+
+    def _responses(self, monkeypatch, seq):
+        """Serve a queued list of responses; record the prompts."""
+        calls: list[str] = []
+        queue = list(seq)
+
+        def _fake(prompt: str, model_ref: str):
+            calls.append(prompt)
+            body = queue.pop(0) if queue else queue_last[0]
+            queue_last[0] = body
+            return body, {"prompt_tokens": 100, "completion_tokens": 20}, ""
+
+        queue_last = [seq[-1]]
+        monkeypatch.setattr(run_mod, "_call_model", _fake)
+        monkeypatch.setattr(run_mod, "_log_llm_call", lambda **kw: None)
+        return calls
+
+    def test_a_slip_is_corrected_and_the_report_stores_ok(
+        self, tmp_path, current_bundle, monkeypatch
+    ):
+        monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+        bad = _content("combined")
+        bad["attention"][0]["why_it_stands_out"] = "Roughly 40,000 people affected."
+        good = _content("combined")
+        calls = self._responses(monkeypatch, [json.dumps(bad), json.dumps(good)])
+
+        db = tmp_path / "p.duckdb"
+        result = run_interpreter(
+            db=str(db), kind="combined", pack_path=str(current_bundle)
+        )
+        assert len(calls) == 2, "the runner must ask once for a correction"
+        assert "failed these checks" in calls[1]
+        assert "bare numeral" in calls[1], "the complaint must be quoted back"
+        assert result["status"] == "ok"
+
+    def test_a_worse_correction_is_discarded(
+        self, tmp_path, current_bundle, monkeypatch
+    ):
+        monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+        bad = _content("combined")
+        bad["attention"][0]["why_it_stands_out"] = "Roughly 40,000 people affected."
+        worse = _content("combined")
+        worse["attention"][0]["why_it_stands_out"] = (
+            "Roughly 40,000 people affected across 12 districts."
+        )
+        self._responses(monkeypatch, [json.dumps(bad), json.dumps(worse)])
+
+        db = tmp_path / "p2.duckdb"
+        result = run_interpreter(
+            db=str(db), kind="combined", pack_path=str(current_bundle)
+        )
+        # Both fail; the runner keeps the first rather than the worse retry.
+        assert result["status"] == "failed_validation"
+
+    def test_retries_can_be_turned_off(
+        self, tmp_path, current_bundle, monkeypatch
+    ):
+        monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+        monkeypatch.setenv("PYTHIA_INTERPRETER_VALIDATION_RETRIES", "0")
+        bad = _content("combined")
+        bad["attention"][0]["why_it_stands_out"] = "Roughly 40,000 people affected."
+        calls = self._responses(monkeypatch, [json.dumps(bad)])
+
+        db = tmp_path / "p3.duckdb"
+        run_interpreter(db=str(db), kind="combined", pack_path=str(current_bundle))
+        assert len(calls) == 1
