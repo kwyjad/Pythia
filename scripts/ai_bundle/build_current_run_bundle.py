@@ -1030,6 +1030,13 @@ def build_sibyl_section(
         tagged = by_qid.get(str(row["question_id"]))
         if tagged is not None:
             tagged["sibyl_tag"] = row["tag"]
+    # EVERY attention row gets a tag, not only the covered ones. A reader
+    # scanning the entries has to be able to tell "the second reader agreed"
+    # from "the second reader never looked at this", and an absent tag reads
+    # as the first. Only done when Sibyl actually ran: tagging a whole run
+    # "not covered" because Sibyl was gated out would be noise, not news.
+    for row in attention_rows:
+        row.setdefault("sibyl_tag", _secondopinion.TAG_NOT_COVERED)
     return {
         "available": True,
         "caveat": _secondopinion.SIBYL_CAVEAT,

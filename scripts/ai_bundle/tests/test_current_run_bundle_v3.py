@@ -329,10 +329,20 @@ class TestV3Pack:
         assert any("Baidoa" in fact for fact in row["novel_evidence"])
         assert "tiebreaker" in sibyl["caveat"]
 
-    def test_the_second_opinion_tag_reaches_the_attention_index(self):
-        text = (self.root / "attention_index.csv").read_text(encoding="utf-8")
-        assert "sibyl_tag" in text.splitlines()[0]
-        assert "second opinion is more alarmed" in text
+    def test_every_entry_carries_a_second_opinion_tag(self):
+        import csv, io
+
+        rows = {
+            r["question_id"]: r
+            for r in csv.DictReader(
+                io.StringIO((self.root / "attention_index.csv").read_text())
+            )
+        }
+        assert rows[Q_DR]["sibyl_tag"] == "second opinion is more alarmed"
+        # An entry Sibyl never looked at says so. An absent tag would read as
+        # agreement to anyone scanning the entries.
+        assert rows[Q_ACE]["sibyl_tag"] == "no second opinion"
+        assert rows[Q_TC]["sibyl_tag"] == "no second opinion"
 
     def test_the_sector_comparison_ranks_the_same_countries_three_ways(self):
         block = _json(self.root / "sector_comparison.json")
