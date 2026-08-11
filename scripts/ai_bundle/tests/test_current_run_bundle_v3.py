@@ -110,30 +110,50 @@ def v3_db(tmp_path: Path) -> str:
             eiv_per_100k DOUBLE, eiv_baserate DOUBLE, excess_nominal DOUBLE,
             excess_per_100k DOUBLE, exceedances_json TEXT,
             baserate_n_obs INTEGER, peak_horizon INTEGER, p50_peak DOUBLE,
-            p90_peak DOUBLE, p_zero_peak DOUBLE, baserate_source TEXT,
+            p90_peak DOUBLE, p_zero_peak DOUBLE,
+            baserate_p50_peak DOUBLE, baserate_p90_peak DOUBLE,
+            delta_p50 DOUBLE, delta_p90 DOUBLE, movement_threshold DOUBLE,
+            baserate_source TEXT,
             baserate_json TEXT, is_test BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT now()
         )
         """
     )
     dev = [
-        # (qid, iso3, hz, metric, js, log_ev, eiv, excess, exceedances, n_obs, peak)
-        (Q_DR, "SOM", "DR", "PHASE3PLUS_IN_NEED", 0.40, 0.35, 5_000_000.0,
-         2_900_000.0, [0.7, 0.8, 0.9, 0.85, 0.8, 0.7], 36, 3),
+        # (qid, iso3, hz, metric, js, log_ev, eiv, excess, exceedances, n_obs,
+        #  peak, delta_p50, delta_p90, movement_threshold)
+        #
+        # Somalia's drought is unusual AND its planning figures have risen by
+        # far more than the size worth mobilising against: the v4 worsening
+        # case.
+        (Q_DR, "SOM", "DR", "PHASE3PLUS_IN_NEED", 0.45, 0.35, 5_000_000.0,
+         2_900_000.0, [0.7, 0.8, 0.9, 0.85, 0.8, 0.7], 36, 3,
+         1_800_000.0, 3_100_000.0, 1_000_000.0),
+        # Indonesia is unusual and its planning figures barely move: the
+        # watchlist case, and the August failure in one row.
         (Q_TC, "IDN", "TC", "PA", 0.45, 2.6, 12_000.0, 3_500.0,
-         [0.05, 0.06, 0.04, 0.03, 0.02, 0.02], 2, 2),
+         [0.05, 0.06, 0.04, 0.03, 0.02, 0.02], 2, 2,
+         0.0, 4_000.0, 50_000.0),
+        # Sudan carries a heavy burden that has not moved: the level test
+        # clears, the movement test does not, so it is a burden and not a
+        # worsening. Under the v3 key this row was the Ethiopia defect.
         (Q_ACE, "SDN", "ACE", "FATALITIES", 0.02, 0.01, 900.0, 5.0,
-         [0.9, 0.9, 0.9, 0.9, 0.9, 0.9], 60, 1),
+         [0.9, 0.9, 0.9, 0.9, 0.9, 0.9], 60, 1,
+         2.0, 8.0, 100.0),
     ]
-    for qid, iso3, hz, metric, js, log_ev, eiv, excess, exc, n_obs, peak in dev:
+    for (qid, iso3, hz, metric, js, log_ev, eiv, excess, exc, n_obs, peak,
+         d50, d90, thr) in dev:
         con.execute(
             "INSERT INTO forecast_deviation (run_id, question_id, model_name, "
             "iso3, hazard_code, metric, score_family, js_vs_baserate, "
             "log_ev_ratio, eiv_nominal, excess_nominal, exceedances_json, "
             "baserate_n_obs, peak_horizon, p50_peak, p90_peak, p_zero_peak, "
-            "baserate_source) VALUES (?,?,'ensemble_mean_v2',?,?,?,'spd',?,?,?,?,?,?,?,?,?,?, 'src')",
+            "delta_p50, delta_p90, movement_threshold, "
+            "baserate_source) VALUES "
+            "(?,?,'ensemble_mean_v2',?,?,?,'spd',?,?,?,?,?,?,?,?,?,?,?,?,?, 'src')",
             [FC_CUR, qid, iso3, hz, metric, js, log_ev, eiv, excess,
-             json.dumps(exc), n_obs, peak, 1000.0, 5000.0, 0.02],
+             json.dumps(exc), n_obs, peak, 1000.0, 5000.0, 0.02,
+             d50, d90, thr],
         )
     con.execute(
         "INSERT INTO forecast_deviation (run_id, question_id, model_name, iso3, "
@@ -302,8 +322,35 @@ class TestV3Pack:
         assert rows[Q_TC]["gate"] == "unusual, small scale"
         assert rows[Q_TC]["category"] == ""
         assert rows[Q_TC]["baserate_thin"] == "True"
-        assert rows[Q_DR]["category"] == "stable_major"
+        assert rows[Q_DR]["category"] == "worsening"
         assert rows[Q_DR]["category_rank"] == "1"
+
+    def test_the_movement_key_reaches_the_gate(self):
+        """The columns are written, read, and acted on — end to end.
+
+        This is the shape of the defect that shipped in v3: the gate landed,
+        its tests passed, and the pack builder's SELECT never named the
+        columns, so the gate stamped nothing on anything. Every unit test
+        passed throughout. Only a run against a DB carrying the columns
+        catches it, which is what this is.
+        """
+        import csv, io
+
+        rows = {
+            r["question_id"]: r
+            for r in csv.DictReader(
+                io.StringIO((self.root / "attention_index.csv").read_text())
+            )
+        }
+        # The columns survived the SELECT and the CSV.
+        assert float(rows[Q_DR]["delta_p90"]) == 3_100_000.0
+        assert float(rows[Q_DR]["movement_threshold"]) == 1_000_000.0
+        assert rows[Q_DR]["passed_worsening"] == "True"
+        # Sudan's caseload is heavy and has not moved: a burden, never a
+        # worsening. Under the level-only key it was the Ethiopia defect.
+        assert rows[Q_ACE]["passed_material"] == "True"
+        assert rows[Q_ACE]["passed_worsening"] == "False"
+        assert rows[Q_ACE]["gate"] == "heavy burden"
 
     def test_deadlines_are_derived_from_the_peak_month_and_the_lead_time(self):
         calendar = _json(self.root / "decision_calendar.json")

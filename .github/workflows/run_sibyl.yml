@@ -157,6 +157,47 @@ jobs:
             --db "${RESOLVER_DB_URL}" --out-dir ai_bundle
           exit 0
 
+      # What the selection gate did, and what the base-rate anchors rest on.
+      # Both write to the step summary AND to the diagnostics artifact,
+      # because a diagnostic that exists only in a job log does not exist:
+      # logs expire, artifacts are the record. Read them when a section comes
+      # back empty — an empty worsening list is a legitimate result and this
+      # is how it is told apart from a threshold set wrong.
+      - name: Gate recalibration and anchor depth
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          {
+            echo "## Selection gate"
+            echo '```'
+            python -m interpreter.gatecheck --db "${RESOLVER_DB_URL}"
+            echo '```'
+            echo "## Selection gate, level mode (the pre-v4 rollback)"
+            echo '```'
+            python -m interpreter.gatecheck --db "${RESOLVER_DB_URL}" --mode level
+            echo '```'
+            echo "## Base-rate anchor depth"
+            echo '```'
+            python -m interpreter.anchorcheck --db "${RESOLVER_DB_URL}" \
+              --json-out diagnostics/anchor_depth.json
+            echo '```'
+          } | tee diagnostics/gate_recalibration.md >> "${GITHUB_STEP_SUMMARY}"
+          exit 0
+
+      - name: Upload gate diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-interpreter-gate-diagnostics
+          path: |
+            diagnostics/gate_recalibration.md
+            diagnostics/anchor_depth.json
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: Upload current-run bundle
         if: always()
         continue-on-error: true

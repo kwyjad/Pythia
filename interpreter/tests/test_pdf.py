@@ -233,22 +233,42 @@ class TestMap:
     """The printed map. The dashboard draws its own with JavaScript, which a
     PDF cannot run, so this is the only map a printed report gets."""
 
-    def test_countries_are_filled_by_value(self):
+    def test_countries_are_filled_by_direction(self):
         from interpreter import mapviz
 
-        svg = mapviz.attention_map_svg({"ETH": 0.9, "SOM": 0.05})
+        svg = mapviz.attention_map_svg({"ETH": 2.5, "UGA": -2.5, "SOM": 0.02})
         assert svg.startswith("<svg")
-        assert mapviz.SCALE[-1] in svg    # the dark end is used
-        assert mapviz.NO_DATA in svg      # so is "no forecast"
-        assert "no forecast" in svg       # and the legend says so
+        assert mapviz.SCALE_ABOVE[-1] in svg   # a country far above its level
+        assert mapviz.SCALE_BELOW[-1] in svg   # and one far below it
+        assert mapviz.NO_DATA in svg           # and "no forecast"
+        assert "no forecast" in svg
+        # The legend must NAME the direction. A reader who cannot tell warm
+        # from cool without reading the body has an unlabelled map.
+        assert "above its usual level" in svg
+        assert "below its usual level" in svg
 
-    def test_scale_bands(self):
+    def test_scale_is_diverging_so_a_fall_is_never_shaded_as_a_rise(self):
         from interpreter import mapviz
 
         assert mapviz.colour_for(None) == mapviz.NO_DATA
         assert mapviz.colour_for("nonsense") == mapviz.NO_DATA
-        assert mapviz.colour_for(0.0) == mapviz.SCALE[0]
-        assert mapviz.colour_for(0.99) == mapviz.SCALE[-1]
+        # Near the anchor is neutral in either direction.
+        assert mapviz.colour_for(0.0) == mapviz.NEUTRAL
+        assert mapviz.colour_for(-0.01) == mapviz.NEUTRAL
+        # This is the regression: Uganda's forecast moved DOWN and the map
+        # shaded it among the countries furthest from usual.
+        assert mapviz.colour_for(2.5) == mapviz.SCALE_ABOVE[-1]
+        assert mapviz.colour_for(-2.5) == mapviz.SCALE_BELOW[-1]
+        assert mapviz.colour_for(2.5) != mapviz.colour_for(-2.5)
+
+    def test_a_country_with_several_hazards_shows_its_largest_movement(self):
+        from interpreter import mapviz
+
+        # Sign kept, magnitude compared: a large fall must not hide behind a
+        # small rise.
+        assert mapviz._largest_signed(
+            [("ETH", 0.3), ("ETH", -1.8), ("SOM", 0.9)]
+        ) == {"ETH": -1.8, "SOM": 0.9}
 
     def test_missing_boundaries_degrade_rather_than_fail(self, monkeypatch):
         from interpreter import mapviz
@@ -259,8 +279,10 @@ class TestMap:
     def test_captions_name_countries_not_codes(self):
         from interpreter import mapviz
 
-        assert mapviz.country_labels({"ETH": 0.9, "NIC": 0.2}) == [
-            "Ethiopia", "Nicaragua",
+        # Ordered by MAGNITUDE: a forecast that fell a long way is as
+        # notable as one that rose.
+        assert mapviz.country_labels({"ETH": 0.9, "NIC": -1.4}) == [
+            "Nicaragua", "Ethiopia",
         ]
 
     def test_values_from_deviation_without_the_table_returns_nothing(self, tmp_path):
@@ -272,14 +294,40 @@ class TestMap:
 
 
 class TestBranding:
-    def test_masthead_carries_fred_and_the_month(self):
+    def test_one_title_only_and_no_masthead(self):
         html = pdf.build_report_html(
             {"kind": "combined", "version": 1, "status": "ok",
-             "hs_run_id": "hs_20260801T000000", "content_md": "# Report"}
+             "hs_run_id": "hs_20260801T000000",
+             "content_md": "# Fred's Monthly Forecast Report"}
         )
-        assert "Fred" in html
-        assert "2026-08" in html
         assert pdf.FRED_PRIMARY in html
+        assert "Fred's Monthly Forecast Report" in html
+        # The masthead block was two titles' worth of furniture above the
+        # report's own title, and its strapline said nothing the title did
+        # not.
+        assert "masthead" not in html
+        assert "Monthly risk report from the Fred forecasting system" not in html
+        assert html.count("<h1>") == 1
+
+    def test_the_map_and_the_contents_share_page_one(self):
+        html = pdf.build_report_html(
+            {"kind": "combined", "version": 1, "status": "ok",
+             "content_md": (
+                 "# Report\n\n## First section\n\nBody.\n\n"
+                 "## Second section\n\nMore.\n\n## Third section\n\nMore."
+             )},
+            map_svg="<svg id='m'></svg>",
+        )
+        # The map and the contents sit inside ONE break-after container, so
+        # the reader turns a single page to reach the body. They used to be
+        # split by the metadata line, which gave the contents a page of its
+        # own.
+        start = html.index("<div class='frontmatter'>")
+        end = html.index("<div class='meta'>")
+        front = html[start:end]
+        assert "<svg id='m'></svg>" in front
+        assert 'class="toc"' in front
+        assert front.index("<svg id='m'>") < front.index('class="toc"')
 
     def test_map_is_included_when_supplied_and_absent_when_not(self):
         row = {"kind": "combined", "version": 1, "status": "ok",

@@ -14,7 +14,7 @@ export const NAV_LINKS: Array<{
   external?: boolean;
 }> = [
   { href: "/", label: "Run Results" },
-  { href: "/interpreter", label: "Fred's Monthly Risk Report" },
+  { href: "/interpreter", label: "Fred's Monthly Forecast Report" },
   { href: "/countries", label: "Countries" },
   { href: "/hs-triage", label: "HS Triage & RC" },
   { href: "/questions", label: "Forecasts" },

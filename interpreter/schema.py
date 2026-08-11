@@ -55,12 +55,67 @@ _DECISION_POINT = {
     "additionalProperties": False,
 }
 
+# The analytical fields (v4). Everything numeric in this report is computed in
+# SQL and rendered deterministically, which is right and does not change. That
+# left the model summarising, which is not what a frontier model is for. These
+# four require judgement and none of them can be computed.
+
+# Two claims in the evidence that do not sit together, and an account of why
+# both can be true or which is more credible. The grounding pack routinely
+# carries figures that appear to conflict, and until v4 the report printed
+# them side by side without comment: a sixty-seven per cent rise in civilian
+# killings above a four per cent fall in violent incidents, as adjacent
+# bullets. An acknowledged contradiction is worth more than a tidy narrative
+# that buried one side.
+_TENSION = {
+    "type": "object",
+    "required": ["claim_a", "claim_b", "reconciliation"],
+    "properties": {
+        "claim_a": _PROSE,
+        "claim_b": _PROSE,
+        "reconciliation": _PROSE,
+        "source_refs": {"type": "array", "items": {"type": "string"}},
+    },
+    "additionalProperties": False,
+}
+
+# What the adversarial check did to the reading. Every Track 1 question
+# carries a challenge; it appeared in the prose as a passing clause with no
+# indication whether it changed anything. Somalia is the live example: the
+# challenge argued the coming short rains carry flood risk rather than
+# drought, which is a serious objection to a drought entry, and the report
+# gave the reader no way to know whether it was taken seriously.
+CHALLENGE_VERDICTS = ["held", "weakened", "changed_the_reading"]
+
+_CHALLENGE = {
+    "type": "object",
+    "required": ["verdict", "reasoning"],
+    "properties": {
+        "verdict": {"type": "string", "enum": CHALLENGE_VERDICTS},
+        "reasoning": _PROSE,
+    },
+    "additionalProperties": False,
+}
+
+# Why two processes reached different answers. The scan reads the news for a
+# change of regime; the ensemble puts a number on six months. Where one is
+# loud and the other sits at its anchor, one of them is wrong.
+_DISAGREEMENT = {
+    "type": "object",
+    "required": ["question_ids", "explanation"],
+    "properties": {
+        "question_ids": _QUESTION_IDS,
+        "explanation": _PROSE,
+    },
+    "additionalProperties": False,
+}
+
 _ATTENTION_ENTRY = {
     "type": "object",
     "required": [
         "rank", "reason_code", "iso3", "hazard_code", "metric",
         "category", "hazard_family", "question_ids", "why_it_stands_out",
-        "decision_point",
+        "decision_point", "falsifier",
     ],
     "properties": {
         "rank": {"type": "integer", "minimum": 1},
@@ -87,6 +142,14 @@ _ATTENTION_ENTRY = {
         "impacts": _PROSE_LIST,
         "operational_challenges": _PROSE_LIST,
         "lead_time_months": {"type": "integer", "minimum": 1, "maximum": 6},
+        # v4, the analytical work.
+        "tensions": {"type": "array", "items": _TENSION, "maxItems": 2},
+        "challenge": _CHALLENGE,
+        "second_opinion_explanation": _PROSE,
+        # One line, and cheap. It makes the call testable before anything
+        # resolves, and it feeds the forecast diary in Part B: a falsifier
+        # that fired is the most legible way to report a miss.
+        "falsifier": _PROSE,
     },
     "additionalProperties": False,
 }
@@ -132,6 +195,14 @@ OUTPUT_SCHEMA: dict[str, Any] = {
         "run_summary": _PROSE,
         "attention": {"type": "array", "items": _ATTENTION_ENTRY},
         "performance": _PERFORMANCE,
+        # Five sentences at most, near the front: are this month's entries
+        # connected by a common driver, or are they four separate droughts
+        # that happen to fall in one month? This is the connective tissue a
+        # senior reader supplies for themselves today.
+        "cross_cutting": _PROSE,
+        "scan_forecast_disagreements": {
+            "type": "array", "items": _DISAGREEMENT, "maxItems": 6,
+        },
         "changes_since_last_run": _PROSE_LIST,
         "blind_spots": _PROSE_LIST,
         "confidence_notes": _PROSE_LIST,

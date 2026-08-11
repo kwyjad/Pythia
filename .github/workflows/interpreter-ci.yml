@@ -19,6 +19,12 @@ on:
       # nothing runs pythia/tests/ broadly.
       - "pythia/api/routes/interpreter.py"
       - "pythia/tests/test_api_interpreter.py"
+      # The anchor depth investigation guards interpreter/anchorcheck.py and
+      # the base-rate builder the gate compares against, and lives in
+      # pythia/tests/ which no workflow runs broadly.
+      - "pythia/tools/base_rate_spd.py"
+      - "pythia/tools/compute_deviation.py"
+      - "pythia/tests/test_base_rate_anchor_depth.py"
       # Self-reference (same rule as forecaster-ci): a PR editing this
       # workflow's own test list must run the list it edited.
       - ".github/workflows/interpreter-ci.yml"
@@ -56,4 +62,5 @@ jobs:
           # execution is cheap, a gap is not).
           echo "=== Running interpreter + ai_bundle tests ==="
           pytest -vv interpreter/tests/ scripts/ai_bundle/tests/ \
-            pythia/tests/test_api_interpreter.py
+            pythia/tests/test_api_interpreter.py \
+            pythia/tests/test_base_rate_anchor_depth.py

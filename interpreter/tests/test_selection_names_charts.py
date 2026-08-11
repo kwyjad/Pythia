@@ -60,15 +60,18 @@ class TestWorsening:
         picked = selection.select_worsening(rows, max_entries=6)
         assert [r["question_id"] for r in picked] == ["gated"]
 
-    def test_ordering_is_expected_excess_not_the_ratio(self):
+    def test_ordering_is_the_movement_not_the_ratio(self):
         # The August failure in one test: the small cyclone question has by
-        # far the larger multiple and by far the smaller excess.
+        # far the larger multiple and by far the smaller movement in the
+        # figure a planner would act on.
         rows = [
             _row("cyclone", "climate", gate=gating.GATE_WORSENING,
                  log_ev=math.log(14.0), excess=3_500.0),
             _row("drought", "climate", gate=gating.GATE_WORSENING,
                  log_ev=math.log(1.4), excess=2_900_000.0),
         ]
+        rows[0]["material_movement"] = 3_000.0
+        rows[1]["material_movement"] = 1_800_000.0
         picked = selection.select_worsening(rows, max_entries=6)
         assert [r["question_id"] for r in picked] == ["drought", "cyclone"]
 
@@ -78,6 +81,8 @@ class TestWorsening:
                  excess=9_999_999.0, thin=True),
             _row("clear", "climate", gate=gating.GATE_WORSENING, excess=10.0),
         ]
+        rows[0]["material_movement"] = 9_999_999.0
+        rows[1]["material_movement"] = 10.0
         picked = selection.select_worsening(rows, max_entries=6)
         assert [r["question_id"] for r in picked] == ["clear", "thin"]
 
@@ -86,6 +91,8 @@ class TestWorsening:
             _row(f"q{i}", "climate", gate=gating.GATE_WORSENING, excess=1000 - i)
             for i in range(8)
         ]
+        for i, row in enumerate(rows):
+            row["material_movement"] = 1000 - i
         picked = selection.select_worsening(rows, max_entries=3)
         assert [r["question_id"] for r in picked] == ["q0", "q1", "q2"]
 
@@ -455,20 +462,59 @@ class TestAggregatePreference:
         con.execute(
             "CREATE TABLE forecast_deviation (run_id TEXT, question_id TEXT, "
             "model_name TEXT, iso3 TEXT, js_vs_baserate DOUBLE, "
+            "delta_p50 DOUBLE, delta_p90 DOUBLE, movement_threshold DOUBLE, "
             "is_test BOOLEAN DEFAULT FALSE)"
         )
         con.executemany(
-            "INSERT INTO forecast_deviation VALUES (?,?,?,?,?,FALSE)",
+            "INSERT INTO forecast_deviation VALUES (?,?,?,?,?,?,?,?,FALSE)",
             [
-                ("fc_1", "q1", "ensemble_mean_v2", "ETH", 0.20),
-                ("fc_1", "q1", "ensemble_bayesmc_v2", "ETH", 0.60),
-                ("fc_1", "q1", "sibyl", "ETH", 0.69),
+                ("fc_1", "q1", "ensemble_mean_v2", "ETH", 0.20,
+                 10_000.0, 25_000.0, 50_000.0),
+                ("fc_1", "q1", "ensemble_bayesmc_v2", "ETH", 0.60,
+                 90_000.0, 150_000.0, 50_000.0),
+                ("fc_1", "q1", "sibyl", "ETH", 0.69,
+                 99_000.0, 200_000.0, 50_000.0),
             ],
         )
         values = mapviz.values_from_deviation(con, "fc_1", include_test=False)
-        # The mean's 0.20, not bayesmc's 0.60 and not Sibyl's 0.69.
-        import math as _m
-        assert values["ETH"] == pytest.approx(0.20 / _m.log(2.0))
+        # The mean's movement (25,000 against a 50,000 threshold), not
+        # bayesmc's and not Sibyl's.
+        assert values["ETH"] == pytest.approx(0.5)
+        # And it is the SAME quantity the gate tests: the map is a picture of
+        # the gate's own input, so max(delta_p50, delta_p90) scaled by the
+        # threshold, not whichever of the two happens to be present.
+        assert values["ETH"] == pytest.approx(
+            gating.material_movement(10_000.0, 25_000.0) / 50_000.0
+        )
+        con.close()
+
+    def test_the_printed_map_keeps_the_sign(self, tmp_path):
+        import duckdb
+        from interpreter import mapviz
+
+        con = duckdb.connect(str(tmp_path / "m2.duckdb"))
+        con.execute(
+            "CREATE TABLE forecast_deviation (run_id TEXT, question_id TEXT, "
+            "model_name TEXT, iso3 TEXT, js_vs_baserate DOUBLE, "
+            "delta_p50 DOUBLE, delta_p90 DOUBLE, movement_threshold DOUBLE, "
+            "is_test BOOLEAN DEFAULT FALSE)"
+        )
+        # Uganda's forecast moved DOWN. The old undirected scaling shaded it
+        # among the countries furthest from usual, on the same page as text
+        # saying its ensemble had fallen.
+        con.executemany(
+            "INSERT INTO forecast_deviation VALUES (?,?,?,?,?,?,?,?,FALSE)",
+            [("fc_1", "q1", "ensemble_mean_v2", "UGA", 0.60,
+              -900_000.0, -2_000_000.0, 1_000_000.0)],
+        )
+        values = mapviz.values_from_deviation(con, "fc_1", include_test=False)
+        # max(-900k, -2m) / 1m: the LESS negative of the two, which is the
+        # gate's own quantity and deliberately conservative about good news.
+        # A map that understated a deterioration would be a worse fault than
+        # one that understates an improvement.
+        assert values["UGA"] == pytest.approx(-0.9)
+        assert values["UGA"] < 0
+        assert mapviz.colour_for(values["UGA"]) in mapviz.SCALE_BELOW
         con.close()
 
 
@@ -618,7 +664,9 @@ class TestPanels:
             assert token in panel["counts_sentence"]
         # It has to state the ordering rule, because that is the single thing
         # about this report a reader is most likely to get wrong.
-        assert "ADDITIONAL" in panel["ordering"] or "additional" in panel["ordering"]
+        # Each section states its own ordering, because the two differ.
+        assert "planning figures have risen" in panel["ordering"]
+        assert "expected number of people affected" in panel["ordering"]
 
     def test_thresholds_never_hardcode_a_number_in_prose(self):
         from interpreter import config, panels
@@ -634,19 +682,47 @@ class TestPanels:
         rows = [
             {"question_id": "a", "iso3": "SOM", "hazard_code": "DR",
              "metric": "PHASE3PLUS_IN_NEED", "excess_nominal": 2_900_000.0,
-             "exceedances": [0.8, 0.9], "gate": gating.GATE_WORSENING},
+             "exceedances": [0.8, 0.9], "gate": gating.GATE_WORSENING,
+             "delta_p50": 1_400_000.0, "delta_p90": 2_600_000.0,
+             "movement_threshold": 1_000_000.0, "score_family": "spd"},
             {"question_id": "b", "iso3": "IDN", "hazard_code": "TC",
              "metric": "PA", "excess_nominal": 3_524.0,
-             "exceedances": [0.02], "gate": None, "baserate_thin": True},
+             "exceedances": [0.02], "gate": None, "baserate_thin": True,
+             "score_family": "spd"},
         ]
         table = panels.question_table(rows)
         assert len(table) == 2
         assert table[0]["country"] == "Somalia"
-        assert table[0]["excess"] == "+2,900,000"
-        assert table[0]["chance"] == "90%"
+        # Rounded to its own scale: "+2,900,000" claims a precision the
+        # bucket interpolation does not have.
+        assert table[0]["excess"] == "+2.9m"
+        # The movement columns are the EVIDENCE for the gate. A column of
+        # "n/a" makes the transparency table decorative.
+        assert table[0]["move_p50"] == "+1.4m people"
+        assert table[0]["move_p90"] == "+2.6m people"
         # Not selected is a verdict the reader is owed, not a blank.
         assert table[1]["gate"] == "not selected"
         assert table[1]["anchor"] == "thin"
+
+    def test_every_movement_cell_carries_a_figure_or_a_reason(self):
+        from interpreter import panels
+
+        rows = [
+            # No anchor at all: the reason, never a bare "n/a".
+            {"question_id": "a", "iso3": "SOM", "hazard_code": "DR",
+             "metric": "PHASE3PLUS_IN_NEED", "score_family": "spd"},
+            # A yes/no question has no contingency figure, and says so.
+            {"question_id": "b", "iso3": "NIC", "hazard_code": "FL",
+             "metric": "EVENT_OCCURRENCE", "score_family": "binary",
+             "delta_p50": 0.18, "movement_threshold": 0.25},
+        ]
+        table = panels.question_table(rows)
+        cells = [c for row in table for c in (row["move_p50"], row["move_p90"])]
+        assert "n/a" not in cells
+        assert all(cell.strip() for cell in cells)
+        assert table[0]["move_p50"] == "no historical anchor"
+        assert table[1]["move_p50"] == "+18 points"
+        assert table[1]["move_p90"] == "yes/no question"
 
     def test_planning_figures_report_the_peak_month_by_name(self):
         from interpreter import panels

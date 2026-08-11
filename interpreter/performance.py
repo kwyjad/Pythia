@@ -182,7 +182,15 @@ def dormant_sentences(upcoming: Mapping[str, Any]) -> list[str]:
     total = upcoming.get("n_question_horizons") or 0
     if total:
         by_hazard = upcoming.get("by_hazard") or {}
-        parts = ", ".join(f"{k} {v:,}" for k, v in by_hazard.items())
+        # Spelled out, with the acronym in brackets. "ACE 468, DR 264" reads
+        # as nothing at all to a reader who has never met the codes, and this
+        # sentence is on page three.
+        from interpreter import names as _names
+
+        parts = ", ".join(
+            f"{_names.hazard_name_with_code(k)} {v:,}"
+            for k, v in by_hazard.items()
+        )
         lines.append(
             f"In all, {total:,} question-months from this run are due to "
             f"resolve over the coming half year ({parts})."

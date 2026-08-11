@@ -655,7 +655,12 @@ export type InterpreterAttentionMapRow = {
   metric: string | null;
   eiv_nominal: number | null;
   n_questions: number;
+  // Undirected divergence, scaled to [0, 1]. Retained so an older build keeps
+  // rendering; the map is coloured by `movement`.
   attention: number | null;
+  // SIGNED movement in the figure a planner acts on, as a multiple of the
+  // size worth mobilising against. Positive is above the historical level.
+  movement: number | null;
 };
 
 export type InterpreterAttentionMapResponse = {

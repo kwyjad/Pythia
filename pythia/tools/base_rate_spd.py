@@ -61,9 +61,37 @@ if not LOGGER.handlers:
 # Jeffreys prior pseudo-count added to every bucket before normalising.
 SMOOTHING_PSEUDOCOUNT = 0.5
 
-# Window lengths, mirroring the prompt-time loaders they anchor against.
-CONFLICT_WINDOW_MONTHS = 6      # _build_conflict_base_rate: 6 complete months
+# Window lengths.
+#
+# The conflict window used to be 6, mirroring the SIX ROWS the prompt-time
+# trajectory block prints. That was a mistake of kind: the prompt block is a
+# trajectory (last month, trailing average, direction) and six points are
+# plenty for it, while this is a DISTRIBUTION over seven buckets, where six
+# observations leave the Jeffreys smoothing carrying nearly as much weight as
+# the data. It also made the thin-anchor flag arithmetic rather than
+# evidence: with a 6-month window and a 12-observation cutoff, no armed
+# conflict anchor could ever clear it, which is most of why 138 of 185 anchors
+# were marked thin.
+#
+# 36 months matches the Phase 3+ window, is well inside what ACLED serves, and
+# leaves the SOURCE class untouched — the invariant that matters is that an
+# anchor is drawn from the series that will resolve the question, not that it
+# uses the same number of rows as a prose summary.
+CONFLICT_WINDOW_MONTHS = 36
 PHASE3_WINDOW_MONTHS = 36       # _load_fewsnet_phase3_history(months=36)
+
+# A month in which a source recorded nothing for a country is an OBSERVED
+# ZERO, not an absent observation — but only where the source was live and
+# the country is inside its universe. Both gates matter: without them an
+# ingestion gap becomes a run of quiet months and the anchor understates,
+# which is the same defect `source_coverage` exists to prevent on the
+# resolution side.
+#
+# Without this the conflict anchors were built only from months something was
+# reported, so they put almost no weight on the "nothing recorded" bucket and
+# said displacement happens every month in countries where IDMC reports twice
+# a year.
+COUNT_QUIET_MONTHS_AS_ZERO = True
 
 # Hazards the seasonal-profile / GDACS loaders cover (see NATURAL_HAZARD_CODES
 # in forecaster/history_loaders.py and _build_gdacs_event_history's guard).
@@ -184,22 +212,101 @@ def _pa_metric_in_clause(column: str = "metric") -> str:
 # Per-pair builders
 # ---------------------------------------------------------------------------
 
+def _window_months(before_ym: str, n: int) -> List[str]:
+    """The n complete months immediately before ``before_ym``, oldest first."""
+    return [_add_months(before_ym, -i) for i in range(n, 0, -1)]
+
+
+def _live_months(
+    con, table: str, column: str, months: List[str], *, extra_where: str = ""
+) -> set[str]:
+    """Which of ``months`` the source recorded ANYTHING in, for any country.
+
+    The month gate. A month with no row for any country is a month the
+    ingestion did not cover, and counting it as quiet for one country would
+    manufacture a zero out of an outage — the same rule
+    ``pythia/tools/source_coverage.py`` applies on the resolution side.
+
+    ``extra_where`` narrows the gate to the SAME source the caller is
+    anchoring on. Without it a month in which some other publisher wrote to a
+    shared table would read as a month this source was live for.
+    """
+    if not months:
+        return set()
+    clause = f" AND ({extra_where})" if extra_where else ""
+    try:
+        rows = con.execute(
+            f"""
+            SELECT DISTINCT substr(CAST({column} AS VARCHAR), 1, 7) AS ym
+            FROM {table}
+            WHERE substr(CAST({column} AS VARCHAR), 1, 7) >= ?
+              AND substr(CAST({column} AS VARCHAR), 1, 7) <= ?{clause}
+            """,
+            [months[0], months[-1]],
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - no gate is safer than a wrong gate
+        return set()
+    return {str(r[0]) for r in rows if r[0]}
+
+
+# The IDMC rows inside facts_deltas, as a WHERE fragment. Kept beside the
+# query that selects them so the live-month gate and the anchor cannot drift
+# apart into two different ideas of what an IDMC row is.
+_IDMC_DELTA_WHERE = (
+    "lower(series_semantics) = 'new' AND ("
+    "lower(source_id) IN ('idmc', 'idmc_idu') OR lower(metric) IN ("
+    "'new_displacements', 'idp_displacement_new_dtm', "
+    "'idp_displacement_flow_idmc'))"
+)
+
+
+def _fill_quiet_months(
+    observed: Dict[str, float], months: List[str], live: set[str]
+) -> Tuple[List[float], int, int]:
+    """(values, n reported, n quiet) over the window.
+
+    A month inside the window that the source was live for and did not report
+    for this country is an observed zero. A month the source was dark for is
+    not an observation at all and is left out.
+    """
+    values: List[float] = []
+    n_quiet = 0
+    for ym in months:
+        if ym in observed:
+            values.append(observed[ym])
+        elif ym in live:
+            values.append(0.0)
+            n_quiet += 1
+    return values, len(values) - n_quiet, n_quiet
+
+
 def _conflict_fatalities(con, iso3: str, before_ym: str) -> Tuple[List[float], str, Dict[str, Any]]:
     """ACE/FATALITIES: the ACLED monthly-fatalities series the prompt anchors on."""
     if not _table_exists(con, "acled_monthly_fatalities"):
         return [], NO_BASE_RATE_SOURCE, {"reason": "acled_monthly_fatalities missing"}
+    months = _window_months(before_ym, CONFLICT_WINDOW_MONTHS)
     rows = con.execute(
         """
-        SELECT month, fatalities
+        SELECT substr(CAST(month AS VARCHAR), 1, 7) AS ym, SUM(fatalities)
         FROM acled_monthly_fatalities
         WHERE iso3 = ?
           AND substr(CAST(month AS VARCHAR), 1, 7) < ?
-        ORDER BY month DESC
-        LIMIT ?
+          AND substr(CAST(month AS VARCHAR), 1, 7) >= ?
+        GROUP BY ym
         """,
-        [iso3, before_ym, CONFLICT_WINDOW_MONTHS],
+        [iso3, before_ym, months[0]],
     ).fetchall()
-    values = [float(v or 0) for _, v in rows]
+    observed = {str(ym): float(v or 0) for ym, v in rows if ym}
+    n_quiet = 0
+    if COUNT_QUIET_MONTHS_AS_ZERO and observed:
+        # The country gate: a country that never appears in the table is
+        # outside ACLED's universe, and its silence says nothing. `observed`
+        # being non-empty is that gate, evaluated over this window.
+        live = _live_months(con, "acled_monthly_fatalities", "month", months)
+        values, n_reported, n_quiet = _fill_quiet_months(observed, months, live)
+    else:
+        values = [observed[k] for k in sorted(observed)]
+        n_reported = len(values)
     probs = _empirical_bucket_probs(values, "FATALITIES")
     if probs is None:
         return [], NO_BASE_RATE_SOURCE, {"reason": "no ACLED fatalities history before window"}
@@ -208,6 +315,8 @@ def _conflict_fatalities(con, iso3: str, before_ym: str) -> Tuple[List[float], s
         "method": "empirical_monthly_buckets",
         "window_months": CONFLICT_WINDOW_MONTHS,
         "n_months_used": len(values),
+        "n_months_reported": n_reported,
+        "n_months_quiet": n_quiet,
         "values": values,
     }
     return probs, f"acled_monthly_fatalities:{len(values)}m", detail
@@ -218,9 +327,11 @@ def _conflict_displacement(con, iso3: str, hazard_code: str, before_ym: str) -> 
     prompt marks THIS QUESTION'S SERIES for ACE/PA."""
     if not _table_exists(con, "facts_deltas"):
         return [], NO_BASE_RATE_SOURCE, {"reason": "facts_deltas missing"}
+    months = _window_months(before_ym, CONFLICT_WINDOW_MONTHS)
     rows = con.execute(
         """
-        SELECT ym, SUM(COALESCE(value_new, 0)) AS flow_value
+        SELECT substr(CAST(ym AS VARCHAR), 1, 7) AS ym_key,
+               SUM(COALESCE(value_new, 0)) AS flow_value
         FROM facts_deltas
         WHERE upper(iso3) = ?
           AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') IN (?, 'IDU')
@@ -234,13 +345,26 @@ def _conflict_displacement(con, iso3: str, hazard_code: str, before_ym: str) -> 
               )
           )
           AND substr(CAST(ym AS VARCHAR), 1, 7) < ?
-        GROUP BY ym
-        ORDER BY ym DESC
-        LIMIT ?
+          AND substr(CAST(ym AS VARCHAR), 1, 7) >= ?
+        GROUP BY ym_key
         """,
-        [iso3, hazard_code, before_ym, CONFLICT_WINDOW_MONTHS],
+        [iso3, hazard_code, before_ym, months[0]],
     ).fetchall()
-    values = [float(v or 0) for _, v in rows]
+    observed = {str(ym): float(v or 0) for ym, v in rows if ym}
+    n_quiet = 0
+    if COUNT_QUIET_MONTHS_AS_ZERO and observed:
+        # IDMC reports a country only when it records displacement, so an
+        # anchor built from present rows alone said displacement happens every
+        # month in a country IDMC reported twice a year. The window's quiet
+        # months are observations, and leaving them out inflated the anchor
+        # and therefore suppressed every excess measured against it.
+        live = _live_months(
+            con, "facts_deltas", "ym", months, extra_where=_IDMC_DELTA_WHERE
+        )
+        values, n_reported, n_quiet = _fill_quiet_months(observed, months, live)
+    else:
+        values = [observed[k] for k in sorted(observed)]
+        n_reported = len(values)
     probs = _empirical_bucket_probs(values, "PA")
     if probs is None:
         return [], NO_BASE_RATE_SOURCE, {"reason": "no IDMC displacement history before window"}
@@ -249,6 +373,8 @@ def _conflict_displacement(con, iso3: str, hazard_code: str, before_ym: str) -> 
         "method": "empirical_monthly_buckets",
         "window_months": CONFLICT_WINDOW_MONTHS,
         "n_months_used": len(values),
+        "n_months_reported": n_reported,
+        "n_months_quiet": n_quiet,
         "values": values,
     }
     return probs, f"facts_deltas:idmc:{len(values)}m", detail

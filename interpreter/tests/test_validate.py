@@ -57,6 +57,7 @@ def _content(**overrides) -> dict:
             "question_ids": [QID],
             "figure_refs": ["js_vs_baserate"],
             "why_it_stands_out": "The ensemble moved {{fig:js_vs_baserate}} from its base rate.",
+            "falsifier": "A dry run of weeks through the season would show this call to be wrong.",
             "decision_point": {"action": "Decide whether to preposition stock.", "deadline_month": "2026-09", "basis": "peak_horizon"},
             "lead_time_months": 2,
         }],
@@ -337,7 +338,7 @@ class TestValidateInterpretation:
         assert report.passed, json.dumps(report.as_dict(), indent=1)
         assert set(report.checks) == {
             "schema", "referential", "numeric", "prose", "style", "categories",
-            "proper_nouns",
+            "proper_nouns", "generic_phrases",
         }
 
     def test_schema_failure_flows_through(self):

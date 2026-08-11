@@ -63,6 +63,27 @@ def _ordinal_word(inverse: float) -> str:
     return _FRACTION_WORDS[nearest]
 
 
+def _signed_magnitude(value: float) -> str:
+    """A movement, signed, rounded to its own scale.
+
+    "9.6 million more" rather than "+9,577,500": the figure is interpolated
+    inside a bucket tens of thousands wide, and a reader keeps every digit
+    they are shown.
+    """
+    magnitude = abs(float(value))
+    direction = "more" if value >= 0 else "fewer"
+    if magnitude >= 1_000_000:
+        text = f"{magnitude / 1_000_000:.1f} million".replace(".0 million", " million")
+    elif magnitude >= 1_000:
+        import math as _m
+
+        step = 10 ** max(0, int(_m.floor(_m.log10(magnitude))) - 2)
+        text = f"{round(magnitude / step) * step:,.0f}"
+    else:
+        text = f"{round(magnitude):,.0f}"
+    return f"{text} {direction}"
+
+
 def _round_planning(value: float) -> float:
     """Round a planning figure to its own scale.
 
@@ -78,8 +99,24 @@ def _round_planning(value: float) -> float:
     return round(value / magnitude) * magnitude
 
 
-def format_figure(key: str, value: Any) -> str:
-    """Human formatting per figure key. Deterministic; no rounding drama."""
+# The metric a question's figures belong to, carried in its own figure map so
+# a count can be printed in the right unit. Without this every count rendered
+# as "people": `{{fig:excess_nominal}}` on a fatalities question produced
+# "+5 people", and the model's own "more deaths" beside it gave the published
+# "+5 people more deaths". The model was not the one that wrote "people".
+METRIC_KEY = "_metric"
+
+
+def _unit_for(metric: str | None) -> str:
+    return "deaths" if str(metric or "").upper() == "FATALITIES" else "people"
+
+
+def format_figure(key: str, value: Any, metric: str | None = None) -> str:
+    """Human formatting per figure key. Deterministic; no rounding drama.
+
+    ``metric`` decides the unit on the count-valued keys. It arrives from the
+    question's own figure map rather than being guessed at.
+    """
     if value is None or value == "":
         return UNAVAILABLE
     try:
@@ -129,12 +166,20 @@ def format_figure(key: str, value: Any) -> str:
         return f"one {_ordinal_word(inverse)} of"
     if key == "p_zero_peak":
         return f"{v * 100:.0f}%"
+    unit = _unit_for(metric)
     if key in ("p50_peak", "p90_peak"):
         # A planning figure. Rounded to something a planner would actually
         # write on a form, never to the false precision of an interpolation.
-        return f"{_round_planning(v):,.0f} people" if v >= 1 else "almost nobody"
-    if key == "excess_nominal":
-        return f"{v:+,.0f} people"
+        return (
+            f"{_round_planning(v):,.0f} {unit}" if v >= 1
+            else ("almost no deaths" if unit == "deaths" else "almost nobody")
+        )
+    if key in ("excess_nominal", "material_movement", "delta_p50", "delta_p90"):
+        # A complete phrase, carrying its unit exactly once. The template
+        # tells the model to write the placeholder as it stands: adding "more
+        # people" beside it is what produced "nine and a half million people
+        # more people in crisis-level hunger".
+        return f"{_signed_magnitude(v)} {unit}"
     if key == "excess_per_100k":
         return f"{v:+,.0f} per 100,000"
     if key == "baserate_n_obs":
@@ -182,7 +227,7 @@ class FigureResolver:
             for qid in question_ids or []:
                 figs = self.per_question.get(qid)
                 if figs and key in figs:
-                    return format_figure(key, figs[key])
+                    return format_figure(key, figs[key], figs.get(METRIC_KEY))
             if key in self.global_figures:
                 return format_figure(key, self.global_figures[key])
             self.misses.append(key)
@@ -213,16 +258,36 @@ def resolve_content(content: dict[str, Any], resolver: FigureResolver) -> dict[s
         out["headline"] = _r(out["headline"])
     if out.get("run_summary"):
         out["run_summary"] = _r(out["run_summary"])
+    if out.get("cross_cutting"):
+        out["cross_cutting"] = _r(out["cross_cutting"])
+    for row in out.get("scan_forecast_disagreements") or []:
+        if isinstance(row, dict) and row.get("explanation"):
+            row["explanation"] = _r(
+                row["explanation"], [str(q) for q in row.get("question_ids") or []]
+            )
     for entry in out.get("attention") or []:
         qids = [str(q) for q in entry.get("question_ids") or []]
         for name in ("why_it_stands_out", "how_to_read_the_distribution",
                      "planning_sentence", "spd_shape",
-                     "what_the_model_was_reacting_to"):
+                     "what_the_model_was_reacting_to",
+                     # v4: the analytical fields carry placeholders like any
+                     # other prose, and the dashboard renders them through
+                     # this one implementation rather than a second copy.
+                     "second_opinion_explanation", "falsifier"):
             if entry.get(name):
                 entry[name] = _r(entry[name], qids)
         for name in ("impacts", "operational_challenges"):
             if entry.get(name):
                 entry[name] = [_r(item, qids) for item in entry[name]]
+        for tension in entry.get("tensions") or []:
+            if not isinstance(tension, dict):
+                continue
+            for name in ("claim_a", "claim_b", "reconciliation"):
+                if tension.get(name):
+                    tension[name] = _r(tension[name], qids)
+        challenge = entry.get("challenge")
+        if isinstance(challenge, dict) and challenge.get("reasoning"):
+            challenge["reasoning"] = _r(challenge["reasoning"], qids)
         decision = entry.get("decision_point")
         if isinstance(decision, dict) and decision.get("action"):
             decision["action"] = _r(decision["action"], qids)
@@ -243,6 +308,15 @@ def resolve_content(content: dict[str, Any], resolver: FigureResolver) -> dict[s
             out[name] = [_r(item) for item in out[name]]
     return out
 
+
+# What the adversarial check did to the reading, in the words the report
+# prints. Every Track 1 question carries a challenge; until v4 it appeared as
+# a passing clause with no indication whether it changed anything.
+_CHALLENGE_LABELS = {
+    "held": "the reading held",
+    "weakened": "the reading is weaker for it",
+    "changed_the_reading": "it changed the reading",
+}
 
 _REASON_LABELS = {
     "base_rate_deviation": "far from its base rate",
@@ -307,12 +381,28 @@ def _render_entry(
         lines.append("")
     if entry.get("why_it_stands_out"):
         lines.append(_r("why_it_stands_out"))
-    if entry.get("planning_sentence"):
+    # Which of the two figures moved. Generated, because "worsening" is a
+    # claim about a specific number and the report may not assert a rise the
+    # planning figure does not support.
+    note = _first_for(qids, extras.get("movement_notes"))
+    if note:
+        lines.append("")
+        lines.append(f"*What moved:* {str(note)[0].upper()}{str(note)[1:]}.")
+    # The planning sentence is GENERATED from the pack, never written: it is a
+    # frame with two numbers in it and no judgement. The model's own version
+    # is used only when the pack has none, and it is the one that produced
+    # "+5 people more deaths" and a contingency figure identical to the
+    # planning figure.
+    planning = _first_for(qids, extras.get("planning_sentences"))
+    if planning:
+        lines.append("")
+        lines.append(f"**What to plan against:** {planning}")
+    elif entry.get("planning_sentence"):
         lines.append("")
         lines.append(f"**What to plan against:** {_r('planning_sentence')}")
-    if entry.get("spd_shape"):
-        lines.append("")
-        lines.append(f"*The shape of the forecast:* {_r('spd_shape')}")
+    # `spd_shape` was cut in v4. It largely restated the two planning figures
+    # above it, and the full distributions are in the appendix with their
+    # bands named in words.
     if entry.get("how_to_read_the_distribution"):
         lines.append("")
         lines.append(f"*Reading the forecast:* {_r('how_to_read_the_distribution')}")
@@ -327,6 +417,40 @@ def _render_entry(
             lines.append(f"*{label}:*")
             for item in items:
                 lines.append(f"- {resolver.resolve_text(str(item), qids)}")
+    # The analytical work: contradictions the model had to reconcile, what it
+    # made of the adversarial challenge, why the second reader differs, and
+    # what would show the call to be wrong. None of these can be computed, and
+    # all of them are what a frontier model is actually for.
+    tensions = entry.get("tensions") or []
+    if tensions:
+        lines.append("")
+        lines.append("*Evidence that does not agree with itself:*")
+        for tension in tensions:
+            if not isinstance(tension, dict):
+                continue
+            claim_a = resolver.resolve_text(str(tension.get("claim_a") or ""), qids)
+            claim_b = resolver.resolve_text(str(tension.get("claim_b") or ""), qids)
+            why = resolver.resolve_text(
+                str(tension.get("reconciliation") or ""), qids
+            )
+            lines.append(f"- {claim_a} Against that: {claim_b} {why}")
+    challenge = entry.get("challenge")
+    if isinstance(challenge, dict) and challenge.get("verdict"):
+        lines.append("")
+        lines.append(
+            f"*The challenge to this reading* "
+            f"({_CHALLENGE_LABELS.get(str(challenge.get('verdict')), str(challenge.get('verdict')))}): "
+            f"{resolver.resolve_text(str(challenge.get('reasoning') or ''), qids)}"
+        )
+    if entry.get("second_opinion_explanation"):
+        lines.append("")
+        lines.append(
+            f"*Why the second reader differs:* "
+            f"{_r('second_opinion_explanation')}"
+        )
+    if entry.get("falsifier"):
+        lines.append("")
+        lines.append(f"*What would show this call to be wrong:* {_r('falsifier')}")
     decision = entry.get("decision_point") or {}
     if decision.get("action"):
         deadline = _first_for(
@@ -395,15 +519,17 @@ def _question_table_lines(rows: list[dict[str, Any]] | None) -> list[str]:
         "This is the whole list the report was drawn from, so a reader can "
         "see what was weighed and left out as well as what was chosen.",
         "",
-        "| Country | Hazard | Measure | Expected excess | Chance of passing the threshold | Selected as | Record |",
-        "| --- | --- | --- | ---: | ---: | --- | --- |",
+        "| Country | Hazard | Measure | Expected excess | Movement in the "
+        "planning figure | Movement in the contingency figure | Selected as | "
+        "Record |",
+        "| --- | --- | --- | ---: | ---: | ---: | --- | --- |",
     ]
     for row in rows:
         lines.append(
             f"| {row.get('country', '')} | {row.get('hazard', '')} | "
             f"{row.get('metric', '')} | {row.get('excess', '')} | "
-            f"{row.get('chance', '')} | {row.get('gate', '')} | "
-            f"{row.get('anchor', '')} |"
+            f"{row.get('move_p50', '')} | {row.get('move_p90', '')} | "
+            f"{row.get('gate', '')} | {row.get('anchor', '')} |"
         )
     lines.append("")
     return lines
@@ -569,12 +695,19 @@ def _sibyl_lines(extras: dict[str, Any]) -> list[str]:
 
     novel = [r for r in rows if r.get("novel_evidence")]
     if novel:
+        scope = str((novel[0] or {}).get("novel_evidence_scope") or "")
+        scope_note = (
+            " Only the questions where the two readers differ, or where "
+            "Sibyl's own trials did not settle, are shown: a fresh detail "
+            "from a reader who reached the same answer is a research note."
+            if scope == "disagreement" else ""
+        )
         lines += [
             "### What the second reader found that the main system did not",
             "",
             "These come from Sibyl's own research notes. Each one is absent "
             "from the evidence the main system was given, which is a reason "
-            "to check it rather than a finding in itself.",
+            f"to check it rather than a finding in itself.{scope_note}",
             "",
         ]
         for row in novel:
@@ -591,12 +724,59 @@ def _sibyl_lines(extras: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _scan_disagreement_lines(
+    content: dict[str, Any], resolver: FigureResolver
+) -> list[str]:
+    """Where the scan and the ensemble reached different answers.
+
+    The scan looks for a change of regime; the ensemble puts a number on the
+    next six months. Where one is loud and the other is at its anchor, one of
+    them is wrong, and explaining which requires reading both. Nothing outside
+    this system produces this page, and it was specified in the v3 plan and
+    never appeared in a published report.
+    """
+    rows = content.get("scan_forecast_disagreements") or []
+    if not rows:
+        return []
+    lines = [
+        "", "## Where the scan and the forecast disagree", "",
+        "The scan reads the news for signs that a situation is departing from "
+        "its pattern. The ensemble puts a number on the next six months. "
+        "These are the places where the two did not agree, and what the "
+        "disagreement rests on.",
+        "",
+    ]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        qids = [str(q) for q in row.get("question_ids") or []]
+        text = resolver.resolve_text(str(row.get("explanation") or ""), qids)
+        links = ", ".join(question_link(q) for q in qids)
+        lines.append(f"- {text}" + (f" ({links})" if links else ""))
+    lines.append("")
+    return lines
+
+
 def _sector_lines(extras: dict[str, Any]) -> list[str]:
     """Where Fred departs from the prevailing institutional view."""
     block = extras.get("sector") or {}
     if not block.get("available"):
         return []
     lines = ["", "## Fred against the sector", ""]
+    # How wide the join actually is. A section reporting one country out of
+    # ten reads as a broken comparison unless it says why the overlap is that
+    # size: Fred only ranks countries where it expects MORE people than usual,
+    # so the join is bounded by that count, not by how many countries were
+    # scanned.
+    n_excess = block.get("n_countries_with_excess")
+    if n_excess is not None:
+        lines += [
+            f"Fred ranks the {n_excess} countries where it expects more people "
+            "affected than history would suggest. A country it is not worried "
+            "about cannot produce a gap, so the overlap below is bounded by "
+            "that number rather than by how many countries were scanned.",
+            "",
+        ]
     for comparison in block.get("comparisons") or []:
         label = comparison.get("source_label") or comparison.get("source")
         lines.append(
@@ -604,6 +784,22 @@ def _sector_lines(extras: dict[str, Any]) -> list[str]:
             f"({comparison.get('n_compared', 0)} countries in both)"
         )
         lines.append("")
+        if comparison.get("note"):
+            lines += [f"{comparison['note']}.", ""]
+        # A heading with nothing under it reads as a broken comparison. Say
+        # what happened: the two rankings agreed to within the gap that
+        # counts as disagreement.
+        if not (comparison.get("more_worried") or comparison.get("less_worried")):
+            gap = comparison.get("min_rank_gap")
+            reason = (
+                f"No country's rank differs by {gap} places or more, so the "
+                "two rankings agree on the countries they both cover."
+                if gap else
+                "Neither ranking places a country far enough from the other "
+                "to be worth reporting."
+            )
+            lines += [reason, ""]
+            continue
         for side, heading in (
             ("more_worried", "Fred ranks these higher than the sector does"),
             ("less_worried", "Fred ranks these lower than the sector does"),
@@ -792,9 +988,16 @@ def render_markdown(
     extras = extras or {}
     gates = extras.get("gates") or {}
 
-    lines.append("# Fred's Monthly Risk Report")
+    lines.append("# Fred's Monthly Forecast Report")
     lines += _issue_line(extras)
     lines.append(f"**{resolver.resolve_text(str(content.get('headline') or ''))}**")
+
+    # The connective tissue a senior reader supplies for themselves: four
+    # drought entries in different regions either share a driver or they do
+    # not, and saying which is the sort of thing a model is good at.
+    if content.get("cross_cutting"):
+        lines += ["", "## Reading the month as a whole", ""]
+        lines.append(resolver.resolve_text(str(content["cross_cutting"])))
 
     # Page one, in the order a reader needs it: what happened, what we cannot
     # see, and how these entries were chosen. The blind spots come BEFORE the
@@ -820,10 +1023,16 @@ def render_markdown(
             ]
             if not group:
                 continue
+            # The heading states the ordering. A reader who can see it can
+            # check it; a reader who cannot has to take the sequence on trust,
+            # and the two sections are deliberately ordered differently.
             lines += [
                 "",
                 f"## {selection.CATEGORY_LABELS[category]}: "
                 f"{names.FAMILY_LABELS.get(family, family).lower()}",
+                "",
+                f"*{selection.CATEGORY_ORDERINGS.get(category, '')}.*"
+                if selection.CATEGORY_ORDERINGS.get(category) else "",
                 "",
             ]
             for entry in sorted(group, key=lambda e: int(e.get("rank") or 99)):
@@ -858,6 +1067,7 @@ def render_markdown(
         ]
 
     lines += _sibyl_lines(extras)
+    lines += _scan_disagreement_lines(content, resolver)
     lines += _changes_lines(content, extras, resolver)
     lines += _sector_lines(extras)
     lines += _performance_lines(content, extras, resolver)
@@ -888,18 +1098,24 @@ def render_markdown(
 
     watchlist = extras.get("watchlist") or []
     if watchlist:
-        lines += [
-            "",
-            "### Watchlist",
-            "",
+        total = int(extras.get("watchlist_total") or len(watchlist))
+        intro = (
             "These forecasts are unusual against their own history but too "
-            "small to mobilise against. They are tracked, not acted on.",
-            "",
-        ]
+            "small to mobilise against. They are tracked, not acted on, and "
+            "each line carries the movement that put it here."
+        )
+        if total > len(watchlist):
+            intro += (
+                f" {total} qualified this month; the largest {len(watchlist)} "
+                "are shown and the rest are in the table above."
+            )
+        lines += ["", "### Watchlist", "", intro, ""]
         for item in watchlist:
+            movement = item.get("movement")
+            suffix = f" ({movement})" if movement else ""
             lines.append(
                 f"- {item.get('country')}, {item.get('hazard')}: "
-                f"{item.get('metric')}"
+                f"{item.get('metric')}{suffix}"
             )
         lines.append("")
     if provenance:

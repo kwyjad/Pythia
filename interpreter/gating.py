@@ -16,10 +16,47 @@ expects than history would suggest, in people. The ratio survives in the prose
 as a descriptor, never as the ordering.
 
 Selection is a two-key gate. A forecast must be **unusual** (its divergence
-sits in the top slice of this run) and **material** (enough probability above a
-threshold worth mobilising against). Unusual-but-small goes to a watchlist
-rather than into the report or the bin: a country office wants to know a rare
-storm is being tracked, and does not want it on page two ahead of Sudan.
+sits in the top slice of this run) and **material**. Unusual-but-small goes to
+a watchlist rather than into the report or the bin: a country office wants to
+know a rare storm is being tracked, and does not want it on page two ahead of
+Sudan.
+
+**Materiality is two different tests, and v4 keeps them apart.**
+
+* The LEVEL test — is enough probability sitting above a size worth
+  mobilising against? — answers "is this a heavy burden". It is what puts
+  Sudan in the report whether or not anything changed.
+* The MOVEMENT test — has the number a planner would actually write on a form
+  RISEN by at least that size? — answers "is this worsening".
+
+Until v4 the level test did both jobs, and it cannot. A country with a
+chronically large caseload clears an absolute level every month by
+construction, so any positive excess then read as worsening: Ethiopia cleared
+the hundred-deaths test at essentially certainty and led the September report
+on five expected excess deaths. Indonesia's cyclone entry cleared it on a tail
+whose planning figure never moved at all.
+
+So worsening now asks, at the peak horizon:
+
+    delta_p50 = forecast p50 - base-rate p50
+    delta_p90 = forecast p90 - base-rate p90
+    material  = max(delta_p50, delta_p90) >= the metric's action threshold
+
+Three things follow. The gate is stated in the same units as the
+recommendation, so a reader can check it: "the number you would plan against
+has risen by fifty thousand people" audits itself. A shape change is caught
+honestly, because a widened tail moves p90 even when p50 sits still. And the
+explicit direction test disappears, because a threshold is a positive number
+and clearing it IS the direction — which also removes the old sensitivity to a
+near-zero denominator, since a difference in people cannot be inflated by a
+small base.
+
+Binary questions have no size to plan against, so their movement is measured
+in probability points against the same anchor and gated on the run's minimum
+probability. Commensurable within its own kind, and never mixed with people.
+
+``PYTHIA_INTERPRETER_GATE_MODE=level`` restores the pre-v4 behaviour; the
+caller passes the mode in, like every other threshold.
 
 Pure functions over plain numbers. No DB, no IO, no config reads — every
 threshold arrives as an argument so the caller owns the policy and the tests
@@ -38,6 +75,12 @@ GATE_WORSENING = "larger than usual"
 GATE_MAJOR = "heavy burden"
 GATE_WATCHLIST = "unusual, small scale"
 GATE_DISAGREEMENT = "scan and forecast disagree"
+
+# How materiality is tested. ``delta`` is v4: the movement in the planning and
+# contingency figures. ``level`` is the pre-v4 behaviour, kept so a bad month
+# can be rolled back without a deploy.
+MODE_DELTA = "delta"
+MODE_LEVEL = "level"
 
 
 def exceedance(probs: Sequence[float], metric: str, threshold: float) -> float:
@@ -189,6 +232,45 @@ def clears_materiality(
     return exceedances[best_i - 1] >= min_probability, best_i
 
 
+def material_movement(
+    delta_p50: float | None, delta_p90: float | None
+) -> float | None:
+    """The larger of the two movements, or None when neither is known.
+
+    Two figures rather than one because they fail differently. A caseload that
+    grows moves p50. A tail that widens while the middle sits still moves only
+    p90, and that is exactly the case a planner needs told: the number to plan
+    against has not changed, the number to hold contingency for has.
+    """
+    values = [float(v) for v in (delta_p50, delta_p90) if v is not None]
+    return max(values) if values else None
+
+
+def movement_shape(
+    delta_p50: float | None, delta_p90: float | None, threshold: float | None
+) -> str | None:
+    """Which of the two figures moved, in the words the report prints.
+
+    Returned so the entry can say "the contingency figure has risen while the
+    planning figure has not" instead of asserting a rise the p50 does not
+    support. None when there is nothing to describe.
+    """
+    if threshold is None or (delta_p50 is None and delta_p90 is None):
+        return None
+    p50_moved = delta_p50 is not None and delta_p50 >= threshold
+    p90_moved = delta_p90 is not None and delta_p90 >= threshold
+    if p50_moved and p90_moved:
+        return "both the planning figure and the contingency figure have risen"
+    if p50_moved:
+        return "the planning figure has risen"
+    if p90_moved:
+        return (
+            "the contingency figure has risen while the planning figure has "
+            "barely moved"
+        )
+    return "neither figure has moved by enough to act on"
+
+
 def percentile(values: Iterable[float], q: float) -> float | None:
     """The q-percentile (0-1) of a run's values, linear interpolation.
 
@@ -213,12 +295,17 @@ def gate_rows(
     unusual_percentile: float,
     min_probability: float,
     thin_min_obs: int,
+    mode: str = MODE_DELTA,
 ) -> dict[str, int]:
     """Stamp the gate result on every row. Returns the counts the report prints.
 
     Each row needs: ``js_vs_baserate``, ``exceedances`` (per horizon),
-    ``excess_nominal``, ``baserate_n_obs``. Each row gains ``passed_unusual``,
-    ``passed_material``, ``peak_horizon``, ``gate``, ``baserate_thin``.
+    ``excess_nominal``, ``baserate_n_obs``, and — for the delta mode — the two
+    movements ``delta_p50`` / ``delta_p90`` with the ``movement_threshold``
+    they are tested against. Each row gains ``passed_unusual``,
+    ``passed_material`` (the LEVEL test, which decides heavy burden),
+    ``passed_worsening`` (the MOVEMENT test), ``material_movement``,
+    ``movement_shape``, ``peak_horizon``, ``gate`` and ``baserate_thin``.
 
     The counts are returned rather than recomputed by the caller, because the
     selection panel, the entry tags and the appendix table must agree and the
@@ -229,49 +316,80 @@ def gate_rows(
         if r.get("js_vs_baserate") is not None
     ]
     cut = percentile(js_values, unusual_percentile)
+    delta_mode = str(mode or MODE_DELTA).strip().lower() != MODE_LEVEL
 
     counts = {"considered": len(rows), "unusual": 0, "material": 0,
-              "both": 0, "major": 0, "watchlist": 0, "thin": 0}
+              "worsening_movement": 0, "both": 0, "major": 0, "watchlist": 0,
+              "thin": 0, "near_miss": 0}
     for row in rows:
         js = row.get("js_vs_baserate")
         unusual = js is not None and cut is not None and float(js) >= cut
+        # The LEVEL test. Still the heavy-burden key: a country already
+        # carrying twenty million people in crisis belongs in the report
+        # whether or not anything moved this month.
         cleared, horizon = clears_materiality(
             row.get("exceedances") or [], min_probability
         )
         n_obs = row.get("baserate_n_obs")
         thin = n_obs is not None and int(n_obs) < thin_min_obs
 
-        # Direction still decides what "worsening" means. Unusual and
-        # material describe SIZE and CONFIDENCE, neither of which has a sign,
-        # so without this a forecast expecting two million FEWER people than
-        # usual lands in "potentially worsening situations". Uganda did
-        # exactly that on the August run: excess -2,069,829, both keys passed.
-        excess = row.get("excess_nominal")
-        rising = excess is not None and float(excess) > 0
+        # The MOVEMENT test, in the units the recommendation is written in.
+        threshold = row.get("movement_threshold")
+        movement = material_movement(row.get("delta_p50"), row.get("delta_p90"))
+        row["material_movement"] = movement
+        row["movement_shape"] = movement_shape(
+            row.get("delta_p50"), row.get("delta_p90"), threshold
+        )
+        if delta_mode:
+            moved = (
+                movement is not None
+                and threshold is not None
+                and float(movement) >= float(threshold)
+            )
+        else:
+            # Pre-v4: the level test plus an explicit direction test. Kept
+            # because unusual and material both describe size, neither has a
+            # sign, and without the sign a forecast expecting two million
+            # FEWER people than usual landed under "potentially worsening".
+            excess = row.get("excess_nominal")
+            moved = cleared and excess is not None and float(excess) > 0
 
         row["passed_unusual"] = unusual
         row["passed_material"] = cleared
+        row["passed_worsening"] = moved
         row["peak_horizon"] = horizon
         row["baserate_thin"] = thin
-        if unusual and cleared and rising:
+        if unusual and moved:
             row["gate"] = GATE_WORSENING
         elif cleared:
-            # Material but not rising, or material but unremarkable: a heavy
-            # burden the report should carry, without the claim that it is
-            # getting worse.
+            # A heavy burden the report should carry, without the claim that
+            # it is getting worse.
             row["gate"] = GATE_MAJOR
         elif unusual:
             row["gate"] = GATE_WATCHLIST
         else:
             row["gate"] = None
 
+        # A near miss is a row that moved by at least half the threshold and
+        # was still refused. Counted so a recalibration can see how close the
+        # cut is sitting to the population, rather than only what it admitted.
+        if (
+            row["gate"] != GATE_WORSENING
+            and movement is not None
+            and threshold
+            and float(movement) >= 0.5 * float(threshold)
+        ):
+            counts["near_miss"] += 1
+
         counts["unusual"] += int(unusual)
         counts["material"] += int(cleared)
+        counts["worsening_movement"] += int(moved)
         counts["both"] += int(row["gate"] == GATE_WORSENING)
         counts["watchlist"] += int(row["gate"] == GATE_WATCHLIST)
         counts["major"] = counts.get("major", 0) + int(row["gate"] == GATE_MAJOR)
         counts["thin"] += int(thin)
     counts["unusual_cut"] = cut
+    counts["mode"] = MODE_DELTA if delta_mode else MODE_LEVEL
     return counts
 
 
@@ -292,6 +410,23 @@ def rank_key(row: dict[str, Any], *, per_capita: bool = False) -> tuple:
     )
 
 
+def movement_rank_key(row: dict[str, Any]) -> tuple:
+    """Sort key for the worsening list: by how far the planning figures moved.
+
+    Two lists, two orderings, each in the units that suit its purpose. The
+    worsening list answers "what has changed", so it is ordered by the change;
+    the heavy-burden list answers "where is the need", so it is ordered by the
+    need. Ranking both by one number is what let a cyclone question carrying
+    most of its weight on "nobody affected" lead a report.
+    """
+    value = row.get("material_movement")
+    return (
+        1 if row.get("baserate_thin") else 0,
+        -(float(value) if value is not None else float("-inf")),
+        str(row.get("question_id") or ""),
+    )
+
+
 def calibration_table(runs: dict[str, dict[str, int]]) -> str:
     """What the gate admits and drops, per run, as a printable table.
 
@@ -300,17 +435,20 @@ def calibration_table(runs: dict[str, dict[str, int]]) -> str:
     is a finding to look at, not a silently blank page.
     """
     header = (
-        f"{'run':<20}{'seen':>6}{'unusual':>9}{'material':>10}"
-        f"{'worsening':>11}{'burden':>8}{'watch':>7}{'thin':>6}{'cut':>8}"
+        f"{'run':<20}{'seen':>6}{'unusual':>9}{'level':>7}{'moved':>7}"
+        f"{'worsening':>11}{'burden':>8}{'watch':>7}{'near':>6}{'thin':>6}"
+        f"{'cut':>8}"
     )
     lines = [header, "-" * len(header)]
     for run_id, c in runs.items():
         cut = c.get("unusual_cut")
         lines.append(
             f"{str(run_id)[:19]:<20}{c.get('considered', 0):>6}"
-            f"{c.get('unusual', 0):>9}{c.get('material', 0):>10}"
+            f"{c.get('unusual', 0):>9}{c.get('material', 0):>7}"
+            f"{c.get('worsening_movement', 0):>7}"
             f"{c.get('both', 0):>11}{c.get('major', 0):>8}"
-            f"{c.get('watchlist', 0):>7}{c.get('thin', 0):>6}"
+            f"{c.get('watchlist', 0):>7}{c.get('near_miss', 0):>6}"
+            f"{c.get('thin', 0):>6}"
             f"{(f'{cut:.3f}' if cut is not None else '-'):>8}"
         )
     return "\n".join(lines)

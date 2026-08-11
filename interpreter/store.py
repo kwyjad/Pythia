@@ -153,6 +153,43 @@ def save_interpretation(
     return interpretation_id, version
 
 
+def get_interpretation(con, interpretation_id: str) -> dict[str, Any] | None:
+    """One stored report by id, with its content parsed.
+
+    Written for the side-by-side model harness, which needs to read back what
+    each model actually produced rather than trust the runner's result dict.
+    Returns None rather than raising: a reader must never fail a run.
+    """
+    try:
+        ensure_table(con)
+        rows = con.execute(
+            """
+            SELECT interpretation_id, kind, version, status, model_name,
+                   content_json, content_md, cost_usd, created_at
+            FROM interpretations
+            WHERE interpretation_id = ?
+            ORDER BY version DESC LIMIT 1
+            """,
+            [interpretation_id],
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("get_interpretation(%s) failed: %s", interpretation_id, exc)
+        return None
+    if not rows:
+        return None
+    r = rows[0]
+    out: dict[str, Any] = {
+        "interpretation_id": r[0], "kind": r[1], "version": r[2],
+        "status": r[3], "model_name": r[4], "content": None,
+        "content_md": r[6], "cost_usd": r[7], "created_at": r[8],
+    }
+    try:
+        out["content"] = json.loads(r[5]) if r[5] else None
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def latest_scored(con, *, include_test: bool = False) -> dict[str, Any] | None:
     """The newest status='ok' scored interpretation (for combined assembly).
 

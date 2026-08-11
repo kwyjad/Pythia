@@ -256,21 +256,8 @@ body {{
   font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color: {FRED_TEXT}; font-size: 10.5pt; line-height: 1.55;
 }}
-.masthead {{
-  border-bottom: 3px solid {FRED_PRIMARY};
-  padding-bottom: 6pt; margin-bottom: 12pt;
-}}
-.masthead .wordmark {{
-  font-size: 22pt; font-weight: 700; color: {FRED_PRIMARY};
-  letter-spacing: -0.5pt; line-height: 1;
-}}
-.masthead .strap {{
-  font-size: 9.5pt; color: {FRED_MUTED}; margin-top: 3pt;
-}}
-.masthead .month {{
-  float: right; font-size: 11pt; color: {FRED_SECONDARY}; font-weight: 600;
-}}
-h1 {{ font-size: 16pt; margin: 0 0 6pt; color: {FRED_TEXT}; }}
+h1 {{ font-size: 19pt; margin: 0 0 6pt; color: {FRED_PRIMARY};
+     border-bottom: 3px solid {FRED_PRIMARY}; padding-bottom: 5pt; }}
 h2 {{ font-size: 12.5pt; margin: 16pt 0 5pt; page-break-after: avoid;
      color: {FRED_PRIMARY};
      border-bottom: 1px solid {FRED_BORDER}; padding-bottom: 2pt; }}
@@ -282,7 +269,11 @@ p {{ margin: 4pt 0; }}
    is laid out outside the box and drifts away from its own text. */
 ul {{ margin: 4pt 0; padding-left: 16pt; list-style-position: outside; }}
 li {{ margin: 2pt 0; padding-left: 2pt; }}
-.toc {{ page-break-after: always; }}
+/* The map and the contents share page one, and the body starts on the
+   next: the break belongs to the pair, not to the contents alone. */
+.frontmatter {{ page-break-after: always; }}
+.toc {{ margin-top: 10pt; }}
+.toc h2 {{ margin-top: 6pt; }}
 .toc ul {{ list-style: none; padding-left: 0; }}
 .toc li {{ margin: 3pt 0; border-bottom: 1px dotted {FRED_BORDER}; }}
 .toc li a {{ color: {FRED_TEXT}; }}
@@ -306,18 +297,11 @@ th {{ background: {FRED_BG}; color: {FRED_TEXT}; }}
           padding: 6pt 8pt; margin-bottom: 10pt; font-size: 9.5pt; }}
 """
 
-_STRAPLINE = "Monthly risk report from the Fred forecasting system"
-
-
-def _masthead(row: dict[str, Any]) -> str:
-    month = _html.escape(month_label(row))
-    return (
-        '<div class="masthead">'
-        f'<div class="month">{month}</div>'
-        '<div class="wordmark">Fred</div>'
-        f'<div class="strap">{_STRAPLINE}</div>'
-        "</div>"
-    )
+# The masthead block was cut in v4. Two titles at the top of page one
+# ("Fred" plus a strapline, then the report's own h1) is one title too many,
+# and the strapline said nothing the title did not. The month moved into the
+# issue line, which already sits under the title and carries the unreviewed
+# stamp beside it.
 
 
 def _map_block(map_svg: str | None, captions: list[str] | None) -> str:
@@ -334,12 +318,12 @@ def _map_block(map_svg: str | None, captions: list[str] | None) -> str:
     if not map_svg:
         return ""
     text = (
-        "Shading is how far a country's forecasts sit from their own history, "
-        "from close to usual through to a long way from it. Grey means no "
-        "forecast this month."
+        "Warm shading means a country expects more people affected than its "
+        "history would suggest; cool shading means fewer. The depth is how "
+        "far it has moved. Grey means no forecast this month."
     )
     if captions:
-        text += " Furthest from usual: " + _html.escape(", ".join(captions)) + "."
+        text += " Moved most: " + _html.escape(", ".join(captions)) + "."
     return f'<div class="mapblock">{map_svg}<div class="caption">{text}</div></div>'
 
 
@@ -351,9 +335,11 @@ def build_report_html(
 ) -> str:
     """A self-contained HTML document from one interpretations row.
 
-    First page order: masthead, title, the issue line, the map, then the
-    metadata, then the report. The map used to be emitted ahead of the whole
-    body, so its caption printed above the report's own title.
+    First page order: title, the issue line, then the map and the contents
+    together, then the body. The map used to be emitted ahead of the whole
+    body, so its caption printed above the report's own title; the contents
+    then took a page of its own and the reader turned twice before the
+    first entry.
     """
     blocks = markdown_to_blocks(str(row.get("content_md") or ""))
     blocks, headings = _anchor_headings(blocks)
@@ -383,14 +369,18 @@ def build_report_html(
     ]
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        f"<title>Fred - monthly risk report</title><style>{_CSS}</style>"
+        f"<title>Fred's Monthly Forecast Report</title><style>{_CSS}</style>"
         "</head><body>"
-        f"{_masthead(row)}"
         f"{banner}"
         f"{''.join(lead)}"
+        # The map and the contents sit together on page one. They used to be
+        # split by the metadata line, which pushed the contents onto a page
+        # of its own and made the reader turn twice before the first entry.
+        f"<div class='frontmatter'>"
         f"{_map_block(map_svg, map_captions)}"
-        f"<div class='meta'>{' · '.join(meta_bits)}</div>"
         f"{_contents_block(headings)}"
+        f"</div>"
+        f"<div class='meta'>{' · '.join(meta_bits)}</div>"
         f"{''.join(blocks)}</body></html>"
     )
 
@@ -526,7 +516,7 @@ def generate_pdf(
 
     map_svg = mapviz.attention_map_svg(
         map_values,
-        title="Where this month's forecasts sit furthest from their usual pattern",
+        title="Where this month's forecasts sit against their usual level",
     )
     html = build_report_html(
         row,

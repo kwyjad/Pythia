@@ -26,6 +26,14 @@ Metrics per row:
 - ``eiv_per_100k``: population-normalised, from ``resolver/data/population.csv``
   (the same registry ``/v1/risk_index?normalize=true`` reads; env override
   ``PYTHIA_POPULATION_CSV_PATH``).
+- ``delta_p50`` / ``delta_p90``: how far the planning figure and the
+  contingency figure sit ABOVE the anchor's equivalents at the peak horizon,
+  with the ``movement_threshold`` they are tested against. This is the v4
+  materiality key. Both sides use the same in-bucket quantile interpolation,
+  so the pair is one summary applied to two distributions rather than two
+  different summaries compared with each other. Binary questions carry their
+  movement in probability points on ``delta_p50``; they have no size to plan
+  against and therefore no contingency figure.
 
 A question whose (hazard, metric) pair has no base rate gets NO row — an
 anchor is never silently invented (``baserate_source`` records provenance for
@@ -182,6 +190,20 @@ CREATE TABLE IF NOT EXISTS forecast_deviation (
     p50_peak DOUBLE,
     p90_peak DOUBLE,
     p_zero_peak DOUBLE,
+    -- The same two figures read off the BASE RATE, and the movement between
+    -- them. This is what the v4 gate tests: a rise in the number a planner
+    -- would write on a form, in the units the recommendation is written in.
+    -- The absolute level cannot do that job, because a country with a
+    -- chronically large caseload clears an absolute level every month by
+    -- construction and any positive excess then reads as worsening.
+    baserate_p50_peak DOUBLE,
+    baserate_p90_peak DOUBLE,
+    delta_p50 DOUBLE,
+    delta_p90 DOUBLE,
+    -- The country-and-metric threshold those movements are tested against,
+    -- carried on the row so the report can print the test it applied rather
+    -- than re-deriving it from configuration that may since have moved.
+    movement_threshold DOUBLE,
     baserate_source TEXT,
     baserate_json TEXT,
     is_test BOOLEAN DEFAULT FALSE,
@@ -203,6 +225,11 @@ _COLUMN_MIGRATIONS = (
     ("p50_peak", "DOUBLE"),
     ("p90_peak", "DOUBLE"),
     ("p_zero_peak", "DOUBLE"),
+    ("baserate_p50_peak", "DOUBLE"),
+    ("baserate_p90_peak", "DOUBLE"),
+    ("delta_p50", "DOUBLE"),
+    ("delta_p90", "DOUBLE"),
+    ("movement_threshold", "DOUBLE"),
 )
 
 
@@ -455,6 +482,24 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                 p_zero_peak = (
                     1.0 - exceedances[peak_h - 1] if peak_h else None
                 )
+                # A binary question's movement is measured in probability
+                # points against the same anchor, and gated on the run's
+                # minimum probability. Commensurable within its own kind, and
+                # never mixed with a movement in people.
+                baserate_p50_peak = baserate_p90_peak = None
+                base_p_peak = float(base_probs[0])
+                if peak_h and probs_by_month_map:
+                    by_month = list(probs_by_month_map.values())
+                    if peak_h - 1 < len(by_month):
+                        base_p_peak = float(by_month[peak_h - 1][0])
+                # Carried as delta_p50: the chance of the event IS the figure
+                # a planner acts on here, and there is no contingency figure
+                # for a question with no size.
+                delta_p50 = (
+                    exceedances[peak_h - 1] - base_p_peak if peak_h else None
+                )
+                delta_p90 = None
+                movement_threshold = _interp_config.min_probability(metric)
             else:
                 class_bins = labels_for(metric)
                 if not class_bins:
@@ -515,6 +560,23 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                     _gating.quantile(peak_spd, metric, 0.9) if peak_spd else None
                 )
                 p_zero_peak = _gating.p_zero(peak_spd) if peak_spd else None
+                # The same two figures read off the ANCHOR, with the same
+                # in-bucket interpolation, so the pair is commensurable: one
+                # summary applied to two distributions rather than two
+                # different summaries compared with each other.
+                baserate_p50_peak = _gating.quantile(base_probs, metric, 0.5)
+                baserate_p90_peak = _gating.quantile(base_probs, metric, 0.9)
+                delta_p50 = (
+                    p50_peak - baserate_p50_peak
+                    if p50_peak is not None and baserate_p50_peak is not None
+                    else None
+                )
+                delta_p90 = (
+                    p90_peak - baserate_p90_peak
+                    if p90_peak is not None and baserate_p90_peak is not None
+                    else None
+                )
+                movement_threshold = threshold
 
             rows_out.append((
                 rid, qid, model_name, iso3, hazard_code, metric,
@@ -526,6 +588,8 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                 json.dumps(exceedances),
                 _baserate_n_obs(base_detail),
                 peak_h, p50_peak, p90_peak, p_zero_peak,
+                baserate_p50_peak, baserate_p90_peak,
+                delta_p50, delta_p90, movement_threshold,
                 base_source,
                 json.dumps({"probs": base_probs, "detail": base_detail}, default=str),
                 bool(is_test), now,
@@ -547,9 +611,11 @@ def compute_deviation(db_url: str, run_id: Optional[str] = None) -> int:
                      eiv_per_100k, eiv_baserate, excess_nominal, excess_per_100k,
                      exceedances_json, baserate_n_obs,
                      peak_horizon, p50_peak, p90_peak, p_zero_peak,
+                     baserate_p50_peak, baserate_p90_peak,
+                     delta_p50, delta_p90, movement_threshold,
                      baserate_source, baserate_json, is_test, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?)
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows_out,
             )
