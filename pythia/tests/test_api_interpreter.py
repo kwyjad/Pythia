@@ -198,7 +198,7 @@ def test_pre_interpreter_db_has_interpretation_false(api_env) -> None:
     assert body == {"has_interpretation": False, "kind": "combined"}
     assert client.get("/v1/interpreter/versions").json() == {"rows": []}
     assert client.get("/v1/interpreter/attention_map").json() == {
-        "has_data": False, "run_id": None, "rows": [],
+        "has_data": False, "has_movement": False, "run_id": None, "rows": [],
     }
 
 
@@ -238,6 +238,28 @@ def test_attention_map_preference_scaling_and_test_filter(api_env) -> None:
     assert eth["attention"] == pytest.approx(0.60 / math.log(2.0))
     assert eth["n_questions"] == 2
     assert by_iso3["KEN"]["attention"] == pytest.approx(0.20 / math.log(2.0))
+
+
+def test_attention_map_says_when_it_cannot_be_drawn(api_env) -> None:
+    """A DB predating the movement migration must SAY so, not go grey.
+
+    This is the live symptom: the dashboard served a uniformly grey world
+    under a legend promising colours, because every row's movement was null
+    and the frontend had no way to tell that apart from "no countries moved".
+    The fixture DB has no delta_p50/delta_p90/movement_threshold columns,
+    which is exactly the state a canonical DB is in before compute_deviation
+    has run with them.
+    """
+    client = api_env()
+    body = client.get("/v1/interpreter/attention_map").json()
+    # There ARE rows — the map is not empty, it is undrawable.
+    assert body["has_data"] is True
+    assert body["rows"]
+    assert body["has_movement"] is False
+    assert body["movement_columns_present"] is False
+    assert all(r["movement"] is None for r in body["rows"])
+    # The undirected value is still served, so a caller can explain itself.
+    assert all(r["attention"] is not None for r in body["rows"])
 
 
 def test_attention_map_include_test(api_env) -> None:

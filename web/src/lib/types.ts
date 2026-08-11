@@ -9,6 +9,10 @@ export type VersionResponse = {
   // these into manifest.json, and /v1/version passes manifest keys through.
   interpreter_report_url?: string | null;
   interpreter_report_asset?: string | null;
+  // e.g. "report__2026-08__v10.pdf" — the version the RELEASE carries. The
+  // page compares it against the newest version the API can serve, because
+  // a v10 download button beside a v9 report tells the reader nothing.
+  interpreter_report_versioned_asset?: string | null;
 };
 
 export type DiagnosticsSummaryResponse = {
@@ -665,6 +669,12 @@ export type InterpreterAttentionMapRow = {
 
 export type InterpreterAttentionMapResponse = {
   has_data: boolean;
+  // Whether the map can be DRAWN, reported separately from whether rows
+  // exist. A database that predates the movement columns, or whose deviation
+  // rows have not been recomputed, has rows whose movement is null for every
+  // country — a grey world under a legend promising colours.
+  has_movement?: boolean;
+  movement_columns_present?: boolean;
   run_id: string | null;
   rows: InterpreterAttentionMapRow[];
 };
