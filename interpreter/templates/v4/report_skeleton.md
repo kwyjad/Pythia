@@ -1,5 +1,11 @@
 # Report skeleton
 
+> **Reference only.** `{{REPORT_SKELETON}}` is injected by `v1/system.md`
+> alone; from v2 onward the shape is stated in `current_run.md` instead. This
+> file is kept as the one place the whole running order is written down in
+> sequence, and editing it changes no prompt. Keep it in step with the
+> renderer (`interpreter/render.py::render_markdown`) when sections move.
+
 1. Headline. One sentence: the single thing a reader should take away.
 2. Reading the month as a whole. Are the entries connected, and how?
 3. The scan this month. How wide it was and what came out of it, in three
