@@ -166,6 +166,22 @@ class TestTheAnchorCheckDiagnosesRatherThanTunes:
         notes = anchorcheck._diagnosis(summary, thin_below=12)
         assert any("EVERY anchor is thin" in n for n in notes)
         assert any("arithmetic, not data" in n for n in notes)
+        assert any("Lengthen the window" in n for n in notes)
+
+    def test_it_tells_a_short_window_from_a_short_record(self):
+        from interpreter import anchorcheck
+
+        # No declared window: the occurrence-times-severity anchors count
+        # reported impact months, not the occurrence evidence behind them, so
+        # "lengthen the window" would be the wrong advice.
+        rows = [
+            {"hazard_code": "TC", "metric": "PA", "n_obs": 2, "p_zero": 0.94,
+             "method": "occurrence_x_severity", "window_months": None},
+        ]
+        summary = anchorcheck.summarise(rows, thin_below=12)
+        notes = anchorcheck._diagnosis(summary, thin_below=12)
+        assert any("short RECORD rather than a short window" in n for n in notes)
+        assert not any("Lengthen the window" in n for n in notes)
 
     def test_it_names_an_anchor_with_no_weight_on_a_quiet_month(self):
         from interpreter import anchorcheck

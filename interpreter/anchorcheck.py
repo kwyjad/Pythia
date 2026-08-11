@@ -171,12 +171,33 @@ def _diagnosis(summary: list[dict[str, Any]], *, thin_below: int) -> list[str]:
             notes.append(f"{pair}: no anchor carries an observation count.")
             continue
         if row["max_obs"] is not None and row["max_obs"] < thin_below:
-            notes.append(
-                f"{pair}: EVERY anchor is thin, and the largest rests on "
-                f"{row['max_obs']:.0f} observations against a cutoff of "
-                f"{thin_below}. This is arithmetic, not data: the window is "
-                "shorter than the cutoff, so the flag can never clear."
-            )
+            windows = [
+                int(w) for w in str(row["window_months"] or "").split(",")
+                if w.strip().isdigit()
+            ]
+            # A declared window shorter than the cutoff is ARITHMETIC: no
+            # anchor for this pair can ever clear the flag, whatever the data
+            # says. A pair with no declared window (the occurrence x severity
+            # anchors) is a short RECORD, which is a different finding and
+            # needs a different fix.
+            if windows and max(windows) < thin_below:
+                notes.append(
+                    f"{pair}: EVERY anchor is thin, and the window is "
+                    f"{max(windows)} months against a cutoff of {thin_below} "
+                    "observations. This is arithmetic, not data: the flag can "
+                    "never clear, whatever the record holds. Lengthen the "
+                    "window."
+                )
+            else:
+                notes.append(
+                    f"{pair}: EVERY anchor is thin, and the largest rests on "
+                    f"{row['max_obs']:.0f} observations. There is no declared "
+                    "window here, so this is a short RECORD rather than a "
+                    "short window. Check what the count is measuring before "
+                    "changing anything: for the occurrence-times-severity "
+                    "anchors it is the number of reported impact months, not "
+                    "the occurrence evidence behind them."
+                )
         elif row["share_thin"] >= 0.5:
             notes.append(
                 f"{pair}: {row['share_thin'] * 100:.0f}% thin, median "
