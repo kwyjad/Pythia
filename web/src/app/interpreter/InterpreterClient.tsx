@@ -27,6 +27,8 @@ import {
   movementLegend,
   countryAnchorId,
   groupVersionsByRun,
+  newestServedVersion,
+  pdfVersionFromAsset,
   statusBanner,
 } from "./lib";
 
@@ -35,12 +37,14 @@ export default function InterpreterClient({
   versions,
   attentionMap,
   reportPdfUrl = null,
+  reportPdfAsset = null,
   reportPublishedButMissing = false,
 }: {
   report: InterpreterReport | null;
   versions: InterpreterVersionRow[];
   attentionMap: InterpreterAttentionMapResponse;
   reportPdfUrl?: string | null;
+  reportPdfAsset?: string | null;
   reportPublishedButMissing?: boolean;
 }) {
   const router = useRouter();
@@ -57,6 +61,28 @@ export default function InterpreterClient({
     });
     return out;
   }, [attentionMap.rows]);
+
+  // The map is drawn from the SIGNED movement and from nothing else. When the
+  // database behind this API predates those columns every value is null, and
+  // drawing the map anyway produced a uniformly grey world under a legend
+  // promising colours — a soft-fail wearing the empty state's clothes. Say so
+  // instead, and say which of the two causes it is.
+  const mapUnavailable = useMemo(() => {
+    if (!attentionMap.has_data) return null;
+    if (Object.keys(valuesByIso3).length > 0) return null;
+    if (attentionMap.movement_columns_present === false) {
+      return (
+        "This database was built before the movement figures existed, so " +
+        "there is nothing to shade yet. The map returns with the next " +
+        "forecast cycle; the report below is unaffected."
+      );
+    }
+    return (
+      "No country in this run has a movement figure yet — the deviation " +
+      "table has the columns but has not been recomputed for it. The map " +
+      "returns once it is; the report below is unaffected."
+    );
+  }, [attentionMap.has_data, attentionMap.movement_columns_present, valuesByIso3]);
 
   const reportIso3 = useMemo(() => {
     const set = new Set<string>();
@@ -114,8 +140,26 @@ export default function InterpreterClient({
 
   const banner = report ? statusBanner(report.status) : null;
 
+  // The published PDF carries its version in its filename. When that is newer
+  // than anything the API served, the reader is looking at an older report
+  // than the one the Download button hands them, and only the page can see
+  // both numbers at once.
+  const pdfVersion = pdfVersionFromAsset(reportPdfAsset);
+  const servedVersion = newestServedVersion(versions);
+  const pdfIsNewerThanScreen =
+    pdfVersion != null && servedVersion != null && pdfVersion > servedVersion;
+
   return (
     <div className="space-y-6">
+      {pdfIsNewerThanScreen ? (
+        <div className="rounded-md border border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          The published PDF is version {pdfVersion}, but the newest report this
+          API can serve is version {servedVersion} — its database is still
+          catching up with the release. Download the PDF for the current
+          report; the on-page version should follow within a few minutes.
+        </div>
+      ) : null}
+
       {attentionMap.has_data ? (
         <section className="space-y-2">
           <div className="flex items-center gap-2">
@@ -132,18 +176,24 @@ export default function InterpreterClient({
               }
             />
           </div>
-          <RiskIndexMap
-            riskRows={[]}
-            countriesRows={[]}
-            view="PA_EIV"
-            valuesByIso3={valuesByIso3}
-            colorFor={movementColor}
-            valueLabelFor={movementLabel}
-            legendItems={legendItems}
-            onCountryClick={handleCountryClick}
-            showRcOverlay={false}
-            heightClassName="h-[420px]"
-          />
+          {mapUnavailable ? (
+            <div className="rounded-md border border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              {mapUnavailable}
+            </div>
+          ) : (
+            <RiskIndexMap
+              riskRows={[]}
+              countriesRows={[]}
+              view="PA_EIV"
+              valuesByIso3={valuesByIso3}
+              colorFor={movementColor}
+              valueLabelFor={movementLabel}
+              legendItems={legendItems}
+              onCountryClick={handleCountryClick}
+              showRcOverlay={false}
+              heightClassName="h-[420px]"
+            />
+          )}
         </section>
       ) : null}
 

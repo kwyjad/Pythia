@@ -31,6 +31,7 @@ export default async function InterpreterPage({
   let versions: InterpreterVersionsResponse = { rows: [] };
   let attentionMap: InterpreterAttentionMapResponse = {
     has_data: false,
+    has_movement: false,
     run_id: null,
     rows: [],
   };
@@ -79,6 +80,14 @@ export default async function InterpreterPage({
     versionResult.status === "fulfilled"
       ? versionResult.value.interpreter_report_url ?? null
       : null;
+  // The versioned filename (report__2026-08__v10.pdf) is the only way the page
+  // can tell that the Download PDF button is offering a NEWER report than
+  // anything the API can serve — the release and the API's database are two
+  // stores that catch up at different speeds.
+  const reportPdfAsset =
+    versionResult.status === "fulfilled"
+      ? versionResult.value.interpreter_report_versioned_asset ?? null
+      : null;
   // The release advertising a report PDF while the API serves no report means
   // the API's DB is behind the release it just read the manifest from — a
   // soft-fail, which must never be dressed as "no data".
@@ -107,6 +116,7 @@ export default async function InterpreterPage({
         versions={versions.rows}
         attentionMap={attentionMap}
         reportPdfUrl={reportPdfUrl}
+        reportPdfAsset={reportPdfAsset}
         reportPublishedButMissing={reportPublishedButMissing}
       />
     </div>

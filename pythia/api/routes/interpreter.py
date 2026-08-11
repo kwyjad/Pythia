@@ -234,7 +234,7 @@ def interpreter_attention_map(
     """
     con = _con()
     if not _table_exists(con, "forecast_deviation") or not _table_exists(con, "questions"):
-        return {"has_data": False, "run_id": None, "rows": []}
+        return {"has_data": False, "has_movement": False, "run_id": None, "rows": []}
 
     if not run_id:
         rows = _execute(
@@ -248,7 +248,8 @@ def interpreter_attention_map(
         ).fetchall()
         run_id = rows[0][0] if rows and rows[0] and rows[0][0] else None
     if not run_id:
-        return {"has_data": False, "run_id": None, "rows": []}
+        return {"has_data": False, "has_movement": False, "run_id": None,
+                "rows": []}
 
     pref_cases = " ".join(
         f"WHEN model_name = '{m}' THEN {i}" for i, m in enumerate(_MODEL_PREFERENCE)
@@ -328,7 +329,20 @@ def interpreter_attention_map(
         r["movement"] = (
             max(-3.0, min(float(move), 3.0)) if move is not None else None
         )
-    return {"has_data": bool(rows), "run_id": run_id, "rows": rows}
+    # Whether the map can be DRAWN, reported separately from whether there are
+    # rows at all. A database predating the movement migration, or one whose
+    # deviation rows have not been recomputed, yields rows with movement=None
+    # for every country — which renders as a uniformly grey world under a
+    # legend promising colours. That is a soft-fail wearing the empty state's
+    # clothes, and the dashboard is not allowed to do that, so the frontend is
+    # told which case it is in and says so.
+    return {
+        "has_data": bool(rows),
+        "has_movement": any(r.get("movement") is not None for r in rows),
+        "movement_columns_present": has_movement,
+        "run_id": run_id,
+        "rows": rows,
+    }
 
 
 # The dynamic path is declared LAST so the literal routes above always win.

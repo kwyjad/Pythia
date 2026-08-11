@@ -22,6 +22,8 @@ import {
   groupAttention,
   monthLabel,
   groupVersionsByRun,
+  newestServedVersion,
+  pdfVersionFromAsset,
   runMonthLabel,
   sectionHeading,
   statusBanner,
@@ -312,5 +314,51 @@ describe("decision deadlines", () => {
     expect(monthLabel(undefined)).toBe("no dated deadline");
     expect(monthLabel("")).toBe("no dated deadline");
     expect(monthLabel("2026-13")).toBe("no dated deadline");
+  });
+});
+
+describe("the published PDF against the report on screen", () => {
+  // The release and the API's database catch up at different speeds. On
+  // 2026-08-11 the Download button offered v10 while the page's newest
+  // selectable report was v9, and nothing on the page said so: the reader
+  // could only tell by opening the PDF. The existing "still syncing" banner
+  // did not cover it, because it fires only when the API has NO report.
+  it("reads the version out of a published asset name", () => {
+    expect(pdfVersionFromAsset("report__2026-08__v10.pdf")).toBe(10);
+    expect(pdfVersionFromAsset("report__2026-08__v9.pdf")).toBe(9);
+  });
+
+  it("returns nothing rather than guessing", () => {
+    // The constant-name asset carries no version, and a missing manifest key
+    // must not be read as version zero — either would make the comparison
+    // fire on every page load.
+    expect(pdfVersionFromAsset("interpreter_report_latest.pdf")).toBeNull();
+    expect(pdfVersionFromAsset(null)).toBeNull();
+    expect(pdfVersionFromAsset(undefined)).toBeNull();
+    expect(pdfVersionFromAsset("")).toBeNull();
+  });
+
+  it("takes the newest version served across every run", () => {
+    const rows = [
+      { version: 9 },
+      { version: 2 },
+      { version: 7 },
+    ];
+    expect(newestServedVersion(rows)).toBe(9);
+  });
+
+  it("says nothing when the API served no report at all", () => {
+    expect(newestServedVersion([])).toBeNull();
+    expect(newestServedVersion([{ version: null }])).toBeNull();
+  });
+
+  it("catches the live mismatch and stays quiet when they agree", () => {
+    const served = newestServedVersion([{ version: 9 }]);
+    expect(pdfVersionFromAsset("report__2026-08__v10.pdf")! > served!).toBe(
+      true
+    );
+    expect(pdfVersionFromAsset("report__2026-08__v9.pdf")! > served!).toBe(
+      false
+    );
   });
 });

@@ -252,3 +252,25 @@ export const statusBanner = (
   }
   return { tone: "warn", text: `Unexpected report status: ${status}` };
 };
+
+// The version number inside a published PDF's filename, e.g.
+// "report__2026-08__v10.pdf" -> 10. The release and the API's database are
+// two different stores that catch up at different speeds, and the page has
+// no other way to tell that the Download PDF button is offering something
+// newer than anything it can show on screen.
+export const pdfVersionFromAsset = (asset?: string | null): number | null => {
+  const match = /__v(\d+)\.pdf$/i.exec(String(asset ?? ""));
+  if (!match) return null;
+  const n = Number(match[1]);
+  return Number.isFinite(n) ? n : null;
+};
+
+// The newest version the API actually served, across every run.
+export const newestServedVersion = (
+  rows: Array<{ version?: number | null }>
+): number | null => {
+  const versions = (rows ?? [])
+    .map((r) => (typeof r.version === "number" ? r.version : null))
+    .filter((v): v is number => v != null);
+  return versions.length ? Math.max(...versions) : null;
+};
