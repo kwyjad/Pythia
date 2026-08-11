@@ -261,12 +261,15 @@ def interpreter_attention_map(
     # renders every country neutral, which is true: nothing is known about
     # the direction.
     has_movement = _has_movement_columns(con)
+    # GREATEST ignores NULLs and is NULL only when both are — exactly
+    # gating.material_movement, and the same expression interpreter/mapviz.py
+    # uses, so the printed map and this one cannot disagree.
     move_expr = (
-        """CASE WHEN COALESCE(p.delta_p90, p.delta_p50) IS NULL
+        """CASE WHEN GREATEST(p.delta_p50, p.delta_p90) IS NULL
                      OR p.movement_threshold IS NULL
                      OR p.movement_threshold = 0
                 THEN NULL
-                ELSE COALESCE(p.delta_p90, p.delta_p50) / p.movement_threshold
+                ELSE GREATEST(p.delta_p50, p.delta_p90) / p.movement_threshold
            END"""
         if has_movement else "CAST(NULL AS DOUBLE)"
     )

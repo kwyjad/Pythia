@@ -175,8 +175,8 @@ def attention_map_svg(
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{_WIDTH:.0f}" '
         f'height="{total_height:.0f}" viewBox="0 0 {_WIDTH:.0f} {total_height:.0f}" '
-        f'role="img" aria-label="Map of where the forecasts depart most from '
-        f'their usual pattern">'
+        f'role="img" aria-label="Map of where forecasts sit against their '
+        f'usual level, above or below">'
     ]
     if title:
         parts.append(
@@ -257,11 +257,20 @@ SIGNED_MOVEMENT_SQL = """
     ),
     scaled AS (
         SELECT iso3,
-               CASE WHEN COALESCE(delta_p90, delta_p50) IS NULL
+               -- GREATEST(a, b) ignores NULLs and is NULL only when both are,
+               -- which is exactly gating.material_movement. The map is a
+               -- picture of the gate's own input, so it colours by the same
+               -- quantity the gate tests.
+               --
+               -- The asymmetry is deliberate. For a rise this takes the more
+               -- alarming of the two figures; for a fall it takes the less
+               -- negative, so an improvement is shaded conservatively. A map
+               -- that understated a deterioration would be the worse fault.
+               CASE WHEN GREATEST(delta_p50, delta_p90) IS NULL
                          OR movement_threshold IS NULL
                          OR movement_threshold = 0
                     THEN NULL
-                    ELSE COALESCE(delta_p90, delta_p50) / movement_threshold
+                    ELSE GREATEST(delta_p50, delta_p90) / movement_threshold
                END AS signed_move
         FROM ranked WHERE rn = 1
     )

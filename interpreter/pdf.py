@@ -516,7 +516,7 @@ def generate_pdf(
 
     map_svg = mapviz.attention_map_svg(
         map_values,
-        title="Where this month's forecasts sit furthest from their usual pattern",
+        title="Where this month's forecasts sit against their usual level",
     )
     html = build_report_html(
         row,

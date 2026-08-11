@@ -480,6 +480,12 @@ class TestAggregatePreference:
         # The mean's movement (25,000 against a 50,000 threshold), not
         # bayesmc's and not Sibyl's.
         assert values["ETH"] == pytest.approx(0.5)
+        # And it is the SAME quantity the gate tests: the map is a picture of
+        # the gate's own input, so max(delta_p50, delta_p90) scaled by the
+        # threshold, not whichever of the two happens to be present.
+        assert values["ETH"] == pytest.approx(
+            gating.material_movement(10_000.0, 25_000.0) / 50_000.0
+        )
         con.close()
 
     def test_the_printed_map_keeps_the_sign(self, tmp_path):
@@ -502,7 +508,12 @@ class TestAggregatePreference:
               -900_000.0, -2_000_000.0, 1_000_000.0)],
         )
         values = mapviz.values_from_deviation(con, "fc_1", include_test=False)
-        assert values["UGA"] == pytest.approx(-2.0)
+        # max(-900k, -2m) / 1m: the LESS negative of the two, which is the
+        # gate's own quantity and deliberately conservative about good news.
+        # A map that understated a deterioration would be a worse fault than
+        # one that understates an improvement.
+        assert values["UGA"] == pytest.approx(-0.9)
+        assert values["UGA"] < 0
         assert mapviz.colour_for(values["UGA"]) in mapviz.SCALE_BELOW
         con.close()
 
