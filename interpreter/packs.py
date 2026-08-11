@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from interpreter import gating, names, panels, selection
+from interpreter import gating, names, panels, render, selection
 
 LOGGER = logging.getLogger(__name__)
 
@@ -414,6 +414,11 @@ _ATTENTION_FIG_KEYS = (
     "p50_peak", "p90_peak", "p_zero_peak", "peak_month",
     "rc_level", "rc_score", "triage_score", "attention_rank",
     "baserate_source",
+    # v4: the movement the gate tested. The entry is asked to lead with what
+    # MOVED, so it needs a placeholder for it — describing it only in words
+    # would leave the one sentence that audits the gate unable to carry its
+    # own number.
+    "material_movement", "delta_p50", "delta_p90",
 )
 
 
@@ -457,6 +462,12 @@ def question_figures(pack: Pack) -> dict[str, dict[str, Any]]:
         if not qid:
             continue
         figs: dict[str, Any] = {}
+        # The metric decides the UNIT on every count. Carried here rather than
+        # guessed at in the formatter, which printed "people" on a fatalities
+        # question and gave a published report "+5 people more deaths".
+        metric = str(row.get("metric") or "")
+        if metric:
+            figs[render.METRIC_KEY] = metric
         for key in _ATTENTION_FIG_KEYS:
             value = row.get(key)
             if value not in (None, ""):

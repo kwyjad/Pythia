@@ -58,14 +58,18 @@ The four boxes, and what each one means:
 For each entry write:
 
 - `why_it_stands_out` — the point of the entry, in two or three sentences.
-  For a worsening entry, lead with what has MOVED. The pack tells you which
-  of the two figures rose, in `movement_shape`. Where only the contingency
-  figure rose, say so honestly: the number to plan against has not changed,
-  the number to hold in reserve has. Where the entry is marked with a thin
-  anchor, say plainly that the comparison rests on very few observations.
-  **Do not write the planning figures here.** The report prints them itself
-  in a generated sentence directly below your text, and repeating them
-  produces the same number twice with different rounding.
+  For a worsening entry, lead with what has MOVED, and say by how much using
+  `{{fig:material_movement}}`. That placeholder resolves to a complete
+  phrase carrying its own unit ("about 1.8 million more people", "five more
+  deaths"), so write it as it stands and do not add a unit beside it. The
+  pack tells you which of the two figures rose, in `movement_shape`. Where
+  only the contingency figure rose, say so honestly: the number to plan
+  against has not changed, the number to hold in reserve has. Where the entry
+  is marked with a thin anchor, say plainly that the comparison rests on very
+  few observations.
+  **Do not write the planning figures themselves here.** The report prints
+  them in a generated sentence directly below your text, and repeating them
+  gives the same number twice with different rounding.
 - `what_the_model_was_reacting_to` — the evidence, briefly. Name the source
   where the pack names it. **Write no digits here**, however tempting. A
   figure you read in a source document is still a number you typed, and this

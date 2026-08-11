@@ -181,6 +181,32 @@ class TestWhatWasTakenOff:
         md = _md(content, _extras(planning_sentences={}))
         assert "**What to plan against:**" in md
 
+    def test_a_count_carries_the_metric_s_own_unit(self):
+        from interpreter.render import format_figure
+
+        # "+5 people more deaths" was published. The model wrote "more
+        # deaths"; the FORMATTER wrote "people", because it had no idea what
+        # metric the figure belonged to and assumed one.
+        assert format_figure("excess_nominal", 5, "FATALITIES") == "5 more deaths"
+        assert format_figure("excess_nominal", 5, "PA") == "5 more people"
+        assert format_figure("p50_peak", 120, "FATALITIES") == "120 deaths"
+        # And it rounds by magnitude rather than printing an interpolation.
+        assert format_figure("excess_nominal", 9_577_500, "PHASE3PLUS_IN_NEED") == (
+            "9.6 million more people"
+        )
+        # A fall reads as a fall, not as a minus sign a reader has to parse.
+        assert format_figure("material_movement", -4_200, "PA") == "4,200 fewer people"
+
+    def test_the_metric_reaches_the_formatter_through_the_figure_map(self):
+        from interpreter.render import METRIC_KEY, FigureResolver
+
+        resolver = FigureResolver(
+            per_question={QID: {METRIC_KEY: "FATALITIES", "excess_nominal": 5}}
+        )
+        assert resolver.resolve_text(
+            "about {{fig:excess_nominal}}", [QID]
+        ) == "about 5 more deaths"
+
     def test_the_entry_says_which_figure_moved(self):
         md = _md()
         assert "*What moved:* The contingency figure has risen" in md

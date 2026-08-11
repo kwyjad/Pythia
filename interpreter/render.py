@@ -63,6 +63,27 @@ def _ordinal_word(inverse: float) -> str:
     return _FRACTION_WORDS[nearest]
 
 
+def _signed_magnitude(value: float) -> str:
+    """A movement, signed, rounded to its own scale.
+
+    "9.6 million more" rather than "+9,577,500": the figure is interpolated
+    inside a bucket tens of thousands wide, and a reader keeps every digit
+    they are shown.
+    """
+    magnitude = abs(float(value))
+    direction = "more" if value >= 0 else "fewer"
+    if magnitude >= 1_000_000:
+        text = f"{magnitude / 1_000_000:.1f} million".replace(".0 million", " million")
+    elif magnitude >= 1_000:
+        import math as _m
+
+        step = 10 ** max(0, int(_m.floor(_m.log10(magnitude))) - 2)
+        text = f"{round(magnitude / step) * step:,.0f}"
+    else:
+        text = f"{round(magnitude):,.0f}"
+    return f"{text} {direction}"
+
+
 def _round_planning(value: float) -> float:
     """Round a planning figure to its own scale.
 
@@ -78,8 +99,24 @@ def _round_planning(value: float) -> float:
     return round(value / magnitude) * magnitude
 
 
-def format_figure(key: str, value: Any) -> str:
-    """Human formatting per figure key. Deterministic; no rounding drama."""
+# The metric a question's figures belong to, carried in its own figure map so
+# a count can be printed in the right unit. Without this every count rendered
+# as "people": `{{fig:excess_nominal}}` on a fatalities question produced
+# "+5 people", and the model's own "more deaths" beside it gave the published
+# "+5 people more deaths". The model was not the one that wrote "people".
+METRIC_KEY = "_metric"
+
+
+def _unit_for(metric: str | None) -> str:
+    return "deaths" if str(metric or "").upper() == "FATALITIES" else "people"
+
+
+def format_figure(key: str, value: Any, metric: str | None = None) -> str:
+    """Human formatting per figure key. Deterministic; no rounding drama.
+
+    ``metric`` decides the unit on the count-valued keys. It arrives from the
+    question's own figure map rather than being guessed at.
+    """
     if value is None or value == "":
         return UNAVAILABLE
     try:
@@ -129,12 +166,20 @@ def format_figure(key: str, value: Any) -> str:
         return f"one {_ordinal_word(inverse)} of"
     if key == "p_zero_peak":
         return f"{v * 100:.0f}%"
+    unit = _unit_for(metric)
     if key in ("p50_peak", "p90_peak"):
         # A planning figure. Rounded to something a planner would actually
         # write on a form, never to the false precision of an interpolation.
-        return f"{_round_planning(v):,.0f} people" if v >= 1 else "almost nobody"
-    if key == "excess_nominal":
-        return f"{v:+,.0f} people"
+        return (
+            f"{_round_planning(v):,.0f} {unit}" if v >= 1
+            else ("almost no deaths" if unit == "deaths" else "almost nobody")
+        )
+    if key in ("excess_nominal", "material_movement", "delta_p50", "delta_p90"):
+        # A complete phrase, carrying its unit exactly once. The template
+        # tells the model to write the placeholder as it stands: adding "more
+        # people" beside it is what produced "nine and a half million people
+        # more people in crisis-level hunger".
+        return f"{_signed_magnitude(v)} {unit}"
     if key == "excess_per_100k":
         return f"{v:+,.0f} per 100,000"
     if key == "baserate_n_obs":
@@ -182,7 +227,7 @@ class FigureResolver:
             for qid in question_ids or []:
                 figs = self.per_question.get(qid)
                 if figs and key in figs:
-                    return format_figure(key, figs[key])
+                    return format_figure(key, figs[key], figs.get(METRIC_KEY))
             if key in self.global_figures:
                 return format_figure(key, self.global_figures[key])
             self.misses.append(key)
