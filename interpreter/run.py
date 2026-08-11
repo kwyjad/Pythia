@@ -47,8 +47,8 @@ LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _resolve_model_ref() -> str:
-    override = config.model_id_override()
+def _resolve_model_ref(model_override: str | None = None) -> str:
+    override = model_override or config.model_id_override()
     if override:
         return override if ":" in override else f"anthropic:{override}"
     from pythia.llm_profiles import get_role_model
@@ -369,6 +369,7 @@ def run_interpreter(
     force: bool = False,
     dry_run: bool = False,
     out_dir: str | None = None,
+    model_override: str | None = None,
 ) -> dict[str, Any]:
     """Run one interpretation. Returns a small result dict (for tests/logs)."""
     template_version = template_version or config.template_version()
@@ -495,7 +496,7 @@ def run_interpreter(
             return result
 
         # --- Model call ----------------------------------------------------
-        model_ref = _resolve_model_ref()
+        model_ref = _resolve_model_ref(model_override)
         response_text, usage, error = _call_model(full_prompt, model_ref)
         _log_llm_call(
             model_ref=model_ref, prompt=full_prompt, response=response_text,
@@ -749,6 +750,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="Assemble prompts, no model call, no store")
     parser.add_argument("--out-dir", default=None,
                         help="Also write report/content files here")
+    parser.add_argument(
+        "--model-override", default=None,
+        help="Run this model instead of the configured interpreter role "
+             "(e.g. anthropic:claude-sonnet-5). For the side-by-side "
+             "harness: two models, one pack, two reports to read.",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="[interpreter] %(message)s")
@@ -759,6 +766,7 @@ def main(argv: list[str] | None = None) -> int:
             scored_run_id=args.scored_run_id,
             template_version=args.template_version,
             force=args.force, dry_run=args.dry_run, out_dir=args.out_dir,
+            model_override=args.model_override,
         )
         print(f"[interpreter] RESULT={json.dumps(result, default=str)}")
     except Exception as exc:  # noqa: BLE001 - never fail the pipeline

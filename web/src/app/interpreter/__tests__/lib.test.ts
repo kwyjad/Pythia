@@ -9,12 +9,14 @@ import { SCORE_GLOSSARY } from "../../../lib/score_glossary";
 import { NAV_LINKS } from "../../../components/Nav";
 import type { InterpreterVersionRow } from "../../../lib/types";
 import {
-  ATTENTION_BANDS,
   LEXICON_TABLE,
+  MOVEMENT_ABOVE,
+  MOVEMENT_BELOW,
+  MOVEMENT_NEUTRAL,
   REASON_LABELS,
-  attentionColor,
-  attentionLabel,
-  attentionLegend,
+  movementColor,
+  movementLabel,
+  movementLegend,
   countryAnchorId,
   entryHeading,
   groupAttention,
@@ -25,21 +27,38 @@ import {
   statusBanner,
 } from "../lib";
 
-describe("attention scale", () => {
-  it("maps values into the fixed bands, clamped to [0, 1]", () => {
-    expect(attentionColor(0)).toBe("#ede9fe");
-    expect(attentionColor(0.05)).toBe("#ede9fe");
-    expect(attentionColor(0.1)).toBe("#c4b5fd");
-    expect(attentionColor(0.3)).toBe("#8b5cf6");
-    expect(attentionColor(0.5)).toBe("#6d28d9");
-    expect(attentionColor(0.9)).toBe("#4c1d95");
-    expect(attentionColor(-1)).toBe(attentionColor(0));
-    expect(attentionColor(5)).toBe(attentionColor(1));
+describe("movement scale", () => {
+  it("is diverging, so a fall is never shaded as a rise", () => {
+    // The regression this replaced: Uganda's ensemble moved DOWN and the
+    // undirected scale shaded it among the countries furthest from usual,
+    // on the same page as text saying so.
+    expect(movementColor(2.5)).toBe(MOVEMENT_ABOVE[4]);
+    expect(movementColor(-2.5)).toBe(MOVEMENT_BELOW[4]);
+    expect(movementColor(2.5)).not.toBe(movementColor(-2.5));
   });
 
-  it("legend covers every band plus the no-data swatch, colors unique", () => {
-    const legend = attentionLegend();
-    expect(legend).toHaveLength(ATTENTION_BANDS.length + 1);
+  it("treats a movement near the anchor as neutral in either direction", () => {
+    expect(movementColor(0)).toBe(MOVEMENT_NEUTRAL);
+    expect(movementColor(0.05)).toBe(MOVEMENT_NEUTRAL);
+    expect(movementColor(-0.05)).toBe(MOVEMENT_NEUTRAL);
+  });
+
+  it("clamps rather than running off the ramp", () => {
+    expect(movementColor(99)).toBe(movementColor(3));
+    expect(movementColor(-99)).toBe(movementColor(-3));
+  });
+
+  it("mirrors the printed map's ramps (interpreter/mapviz.py)", () => {
+    expect(MOVEMENT_ABOVE).toHaveLength(5);
+    expect(MOVEMENT_BELOW).toHaveLength(5);
+  });
+
+  it("legend names the direction and colors are unique", () => {
+    const legend = movementLegend();
+    const labels = legend.map((l) => l.label.toLowerCase());
+    expect(labels.some((l) => l.includes("above its usual level"))).toBe(true);
+    expect(labels.some((l) => l.includes("below its usual level"))).toBe(true);
+    expect(labels.some((l) => l.includes("no forecast"))).toBe(true);
     const colors = legend.map((l) => l.color);
     expect(new Set(colors).size).toBe(colors.length);
   });
@@ -184,7 +203,7 @@ describe("navigation", () => {
 
   it("links to the report under its full name", () => {
     const report = NAV_LINKS.find((l) => l.href === "/interpreter");
-    expect(report?.label).toBe("Fred's Monthly Risk Report");
+    expect(report?.label).toBe("Fred's Monthly Forecast Report");
   });
 
   it("keeps every pre-existing destination", () => {
@@ -269,13 +288,14 @@ describe("entry headings", () => {
   });
 });
 
-describe("attention wording", () => {
-  it("says how far in words, never a percentage of a maximum", () => {
-    expect(attentionLabel(0.8)).toBe("a long way from its usual pattern");
-    expect(attentionLabel(0.3)).toBe("well away from its usual pattern");
-    expect(attentionLabel(0.15)).toBe("a little away from its usual pattern");
-    expect(attentionLabel(0.01)).toBe("close to its usual pattern");
-    expect(attentionLabel(5)).toBe("a long way from its usual pattern");
+describe("movement wording", () => {
+  it("gives the direction first and the size second", () => {
+    expect(movementLabel(2.5)).toBe("far above its usual level");
+    expect(movementLabel(-2.5)).toBe("far below its usual level");
+    expect(movementLabel(1.2)).toBe("well above its usual level");
+    expect(movementLabel(-1.2)).toBe("well below its usual level");
+    expect(movementLabel(0.5)).toBe("above its usual level");
+    expect(movementLabel(0.02)).toBe("near its usual level");
   });
 });
 

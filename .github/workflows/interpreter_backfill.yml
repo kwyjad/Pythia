@@ -76,6 +76,11 @@ concurrency:
         required: false
         default: false
         type: boolean
+      compare_models:
+        description: "Also run the pack through a second model and attach both reports for reading (costs a second full call per run)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -279,6 +284,57 @@ jobs:
       # finding is worth more than a silently short report — so it is printed
       # where a human reviewing this run will see it, not left to a CLI
       # nobody remembers to run. Read-only and never fatal.
+      # The side-by-side model harness. Two decisions are pending on the
+      # interpreter's model: whether Opus earns its cost, and whether the v4
+      # analytical fields land or come back hollow. Arguing about either from
+      # memory is worthless, so this produces the artifacts to read plus the
+      # one number that compares mechanically — how much of each report is
+      # written in the sentence that would fit any crisis.
+      #
+      # Opt-in, because it costs a second full call per run, and it NEVER
+      # changes the production model: it produces evidence, and deciding from
+      # the artifacts is a person's job.
+      - name: Compare interpreter models
+        if: ${{ inputs.compare_models != '' }}
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          PACK=$(find ai_bundle -name 'current_run_analysis__*.zip' 2>/dev/null | sort | tail -n 1)
+          if [ -z "${PACK}" ]; then
+            echo "::warning::no bundle to compare models on"
+            exit 0
+          fi
+          mkdir -p diagnostics
+          python -m scripts.compare_interpreter_models \
+            --db "${RESOLVER_DB_URL}" \
+            --pack "${PACK}" \
+            --kind "${{ inputs.kind }}" \
+            --models ${{ inputs.compare_models }} \
+            --out-dir interpreter_compare \
+            2>&1 | tee diagnostics/model_comparison.txt
+          {
+            echo "### Interpreter model comparison"
+            echo "The counts are a proxy. Read both reports in the artifact."
+            echo '```'
+            cat diagnostics/model_comparison.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      - name: Upload model comparison
+        if: ${{ always() && inputs.compare_models != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-interpreter-model-comparison
+          path: |
+            interpreter_compare/**
+            diagnostics/model_comparison.txt
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: Gate calibration table
         continue-on-error: true
         run: |

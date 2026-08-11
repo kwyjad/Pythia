@@ -98,6 +98,7 @@ def _content(kind: str) -> dict:
             "hazard_family": "conflict",
             "question_ids": [QID],
             "why_it_stands_out": "The ensemble moved {{fig:js_vs_baserate}} from its base rate, with a modal outcome of {{fig:modal_bucket_label}} fatalities.",
+            "falsifier": "A dry run of weeks through the season would show this call to be wrong.",
             "decision_point": {"action": "Decide whether to preposition stock.", "deadline_month": "2026-09", "basis": "peak_horizon"},
             "lead_time_months": 2,
         }],

@@ -74,6 +74,7 @@ def _content() -> dict:
                 "hazard_family": "conflict",
                 "question_ids": [QID],
                 "why_it_stands_out": "The forecast moved {{fig:js_vs_baserate}} away.",
+                "falsifier": "A dry run of weeks through the season would show this call to be wrong.",
                 "decision_point": {"action": "Decide whether to preposition stock.", "deadline_month": "2026-09", "basis": "peak_horizon"},
                 "impacts": ["Impact prose."],
                 "lead_time_months": 2,

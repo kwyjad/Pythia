@@ -30,6 +30,10 @@ inspectable:
 7. **proper_nouns** — a name in prose must appear in the pack's evidence.
    Reports rather than fails (see ``check_proper_nouns``), but the violations
    are quoted back to the model in the correction pass.
+8. **generic_phrases** — how much of the report is written in the sentence
+   that fits any crisis. Reports rather than fails; the counts exist so two
+   models can be compared on one pack, which no other check in the suite can
+   do.
 
 Failures set ``status='failed_validation'``; the report is still written so
 it can be inspected. With PYTHIA_INTERPRETER_STRICT_VALIDATION=1 the runner
@@ -68,8 +72,14 @@ _ENTRY_PROSE_FIELDS = (
     "planning_sentence",
     "spd_shape",
     "what_the_model_was_reacting_to",
+    # v4, the analytical fields. Linted like any other prose: the no-digits
+    # rule and the house style apply to a reconciliation exactly as they apply
+    # to an impact.
+    "second_opinion_explanation",
+    "falsifier",
 )
 _ENTRY_PROSE_LISTS = ("impacts", "operational_challenges")
+_TOP_PROSE_FIELDS = ("headline", "run_summary", "cross_cutting")
 _PERFORMANCE_PROSE_FIELDS = (
     "plain_summary", "skill_statement", "track_comparison",
     "sibyl_comparison", "vs_system_average",
@@ -134,10 +144,16 @@ class ValidationReport:
 def _prose_fields(content: dict[str, Any]) -> list[tuple[str, list[str], str]]:
     """Every prose (path, question_ids-context, text) triple in the content."""
     out: list[tuple[str, list[str], str]] = []
-    if content.get("headline"):
-        out.append(("headline", [], str(content["headline"])))
-    if content.get("run_summary"):
-        out.append(("run_summary", [], str(content["run_summary"])))
+    for name in _TOP_PROSE_FIELDS:
+        if content.get(name):
+            out.append((name, [], str(content[name])))
+    for i, row in enumerate(content.get("scan_forecast_disagreements") or []):
+        if isinstance(row, dict) and row.get("explanation"):
+            qids = [str(q) for q in row.get("question_ids") or []]
+            out.append(
+                (f"scan_forecast_disagreements[{i}].explanation", qids,
+                 str(row["explanation"]))
+            )
     for i, entry in enumerate(content.get("attention") or []):
         qids = [str(q) for q in entry.get("question_ids") or []]
         for name in _ENTRY_PROSE_FIELDS:
@@ -152,6 +168,21 @@ def _prose_fields(content: dict[str, Any]) -> list[tuple[str, list[str], str]]:
         action = (entry.get("decision_point") or {}).get("action")
         if action:
             out.append((f"attention[{i}].decision_point.action", qids, str(action)))
+        challenge = entry.get("challenge")
+        if isinstance(challenge, dict) and challenge.get("reasoning"):
+            out.append(
+                (f"attention[{i}].challenge.reasoning", qids,
+                 str(challenge["reasoning"]))
+            )
+        for j, tension in enumerate(entry.get("tensions") or []):
+            if not isinstance(tension, dict):
+                continue
+            for name in ("claim_a", "claim_b", "reconciliation"):
+                if tension.get(name):
+                    out.append(
+                        (f"attention[{i}].tensions[{j}].{name}", qids,
+                         str(tension[name]))
+                    )
     performance = content.get("performance") or {}
     for name in _PERFORMANCE_PROSE_FIELDS:
         if performance.get(name):
@@ -734,6 +765,90 @@ def check_proper_nouns(
     )
 
 
+# ---------------------------------------------------------------------------
+# Check 8: generic phrases (v4, task 11.1)
+# ---------------------------------------------------------------------------
+
+# The sentence that fits any crisis. A weaker model reaches for these, and
+# that degradation is invisible to every other check in the suite: the prose
+# passes the numeral lint, the style lint and the schema while saying nothing
+# a reader could not have written before reading the pack. The lint is crude
+# on purpose — it turns a judgement about quality into a number that can be
+# compared between two models on the same pack.
+GENERIC_PHRASES = (
+    "access constraints",
+    "funding gap",
+    "funding shortfall",
+    "remote management",
+    "protection risk",
+    "humanitarian needs",
+    "compounding factors",
+    "vulnerable populations",
+    "exacerbate",
+    "underlying vulnerabilities",
+    "capacity constraints",
+    "operating environment",
+    # Process vocabulary: the report describing its own machinery instead of
+    # the world. "Left tail" was the one leak that survived v3's filter.
+    "left tail",
+    "right tail",
+    "base rate",
+    "the distribution",
+    "the ensemble",
+)
+
+
+def count_generic_phrases(content: dict[str, Any]) -> dict[str, int]:
+    """{phrase: how many ENTRIES it appears in}.
+
+    Counted per entry rather than per occurrence: a phrase used twice in one
+    paragraph is a writer repeating themselves, and a phrase used in every
+    entry is a writer with one sentence.
+    """
+    per_entry: dict[str, set[str]] = {}
+    for path, _qids, text in _prose_fields(content):
+        # attention[3].impacts[0] -> attention[3]; everything else is its own
+        # bucket so a phrase in the headline is not free.
+        container = path.split(".", 1)[0]
+        lowered = (text or "").lower()
+        for phrase in GENERIC_PHRASES:
+            if phrase in lowered:
+                per_entry.setdefault(phrase, set()).add(container)
+    return {phrase: len(where) for phrase, where in sorted(per_entry.items())}
+
+
+def check_generic_phrases(
+    content: dict[str, Any], *, max_entries_per_phrase: int
+) -> CheckResult:
+    """Flag stock phrases that appear across too much of the report.
+
+    Reports rather than fails, like the proper-noun check: this is a proxy for
+    writing quality, and a proxy should never be the thing that stops a report
+    being published. The counts land in ``validation_json`` so two models can
+    be compared on the same pack.
+    """
+    counts = count_generic_phrases(content)
+    flagged = {
+        phrase: n for phrase, n in counts.items()
+        if n > max(0, int(max_entries_per_phrase))
+    }
+    if flagged:
+        LOGGER.warning(
+            "[interpreter] stock phrase(s) used across more than %d sections: %s",
+            max_entries_per_phrase, flagged,
+        )
+    return CheckResult(
+        passed=True, errors=[],
+        detail={
+            "counts": counts,
+            "flagged": flagged,
+            "threshold": max_entries_per_phrase,
+            "n_flagged": len(flagged),
+            "total_uses": sum(counts.values()),
+        },
+    )
+
+
 def check_categories(
     content: dict[str, Any],
     *,
@@ -794,6 +909,16 @@ def check_categories(
 # ---------------------------------------------------------------------------
 
 
+def _generic_phrase_max() -> int:
+    """Read late so a test can move the threshold with an env var."""
+    try:
+        from interpreter import config
+
+        return config.generic_phrase_max()
+    except Exception:  # noqa: BLE001 - a config import must never fail a check
+        return 3
+
+
 def validate_interpretation(
     content: dict[str, Any],
     *,
@@ -832,6 +957,8 @@ def validate_interpretation(
             content, pack_categories=pack_categories or {})),
         ("proper_nouns", lambda: check_proper_nouns(
             content, evidence_text=evidence_text)),
+        ("generic_phrases", lambda: check_generic_phrases(
+            content, max_entries_per_phrase=_generic_phrase_max())),
     ):
         try:
             checks[name] = fn()

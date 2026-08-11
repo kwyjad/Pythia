@@ -95,38 +95,51 @@ export const REASON_LABELS: Record<InterpreterReasonCode, string> = {
   rc_deviation_disagreement: "the system disagrees with itself here",
 };
 
-// Attention choropleth: a fixed sequential scale over the [0, 1] attention
-// value (js_vs_baserate / ln 2). Fixed thresholds, not Jenks — the map is
-// coloured by ATTENTION, deliberately not repeating the risk index's look.
-export const ATTENTION_BANDS: Array<{ min: number; label: string; color: string }> = [
-  { min: 0.7, label: "Extreme deviation (≥70%)", color: "#4c1d95" },
-  { min: 0.45, label: "High (45–70%)", color: "#6d28d9" },
-  { min: 0.25, label: "Elevated (25–45%)", color: "#8b5cf6" },
-  { min: 0.1, label: "Mild (10–25%)", color: "#c4b5fd" },
-  { min: 0, label: "At base rate (<10%)", color: "#ede9fe" },
-];
+// Movement choropleth: a DIVERGING scale over the signed movement, in
+// multiples of the size worth mobilising against. Mirrors
+// interpreter/mapviz.py's SCALE_ABOVE / SCALE_BELOW / SCALE_BREAKS, so the
+// printed map in the PDF and this one cannot disagree.
+//
+// The scale used to be sequential over an UNDIRECTED divergence, which shaded
+// a country whose forecast had fallen exactly like one whose forecast had
+// risen: Uganda appeared among the countries furthest from usual on the same
+// page as text saying its ensemble had moved down.
+export const MOVEMENT_BREAKS = [0.1, 0.4, 1.0, 2.0];
 
-export const attentionColor = (value: number): string => {
-  const v = Math.max(0, Math.min(value, 1));
-  for (const band of ATTENTION_BANDS) {
-    if (v >= band.min) return band.color;
+export const MOVEMENT_ABOVE = ["#F6D6C4", "#EFAF8C", "#DE7F53", "#B85527", "#8A3410"];
+export const MOVEMENT_BELOW = ["#D6E3EE", "#A9C4DA", "#7398B8", "#456F92", "#274C68"];
+export const MOVEMENT_NEUTRAL = "#F2F0EC";
+
+export const movementColor = (value: number): string => {
+  const v = Math.max(-3, Math.min(value, 3));
+  const magnitude = Math.abs(v);
+  if (magnitude < MOVEMENT_BREAKS[0]) return MOVEMENT_NEUTRAL;
+  const ramp = v > 0 ? MOVEMENT_ABOVE : MOVEMENT_BELOW;
+  for (let i = 0; i < MOVEMENT_BREAKS.length; i += 1) {
+    if (magnitude < MOVEMENT_BREAKS[i]) return ramp[i];
   }
-  return ATTENTION_BANDS[ATTENTION_BANDS.length - 1].color;
+  return ramp[ramp.length - 1];
 };
 
-export const attentionLegend = (): Array<{ label: string; color: string }> => [
-  ...ATTENTION_BANDS.map((b) => ({ label: b.label, color: b.color })),
-  { label: "No deviation data", color: "var(--risk-map-no-questions)" },
+export const movementLegend = (): Array<{ label: string; color: string }> => [
+  { label: "Far above its usual level", color: MOVEMENT_ABOVE[4] },
+  { label: "Above its usual level", color: MOVEMENT_ABOVE[2] },
+  { label: "Near its usual level", color: MOVEMENT_NEUTRAL },
+  { label: "Below its usual level", color: MOVEMENT_BELOW[2] },
+  { label: "Far below its usual level", color: MOVEMENT_BELOW[4] },
+  { label: "No forecast this month", color: "var(--risk-map-no-questions)" },
 ];
 
-// Words, not "% of maximum deviation": the maximum is ln 2, which no reader
-// can picture. Bands mirror interpreter/render.py's format_figure.
-export const attentionLabel = (value: number): string => {
-  const v = Math.max(0, Math.min(value, 1));
-  if (v >= 0.5) return "a long way from its usual pattern";
-  if (v >= 0.25) return "well away from its usual pattern";
-  if (v >= 0.1) return "a little away from its usual pattern";
-  return "close to its usual pattern";
+// Words, not a multiple: the reader needs the direction first and the size
+// second, and "1.4x the action threshold" is not a phrase anyone thinks in.
+export const movementLabel = (value: number): string => {
+  const v = Math.max(-3, Math.min(value, 3));
+  const magnitude = Math.abs(v);
+  if (magnitude < MOVEMENT_BREAKS[0]) return "near its usual level";
+  const direction = v > 0 ? "above" : "below";
+  if (magnitude >= MOVEMENT_BREAKS[3]) return `far ${direction} its usual level`;
+  if (magnitude >= MOVEMENT_BREAKS[2]) return `well ${direction} its usual level`;
+  return `${direction} its usual level`;
 };
 
 // The report's four boxes. Order and labels mirror interpreter/selection.py.

@@ -188,6 +188,11 @@ def _questions_for_run(con, run_id: str, include_test: bool) -> list[dict[str, A
 _DEVIATION_V3_COLUMNS = (
     "eiv_baserate", "excess_nominal", "excess_per_100k", "exceedances_json",
     "baserate_n_obs", "peak_horizon", "p50_peak", "p90_peak", "p_zero_peak",
+    # v4: the movement key. Without these the gate falls back to the level
+    # test, which is exactly the defect v4 exists to remove — so their
+    # absence is warned about by name, like the v3 columns above.
+    "baserate_p50_peak", "baserate_p90_peak", "delta_p50", "delta_p90",
+    "movement_threshold",
 )
 
 
@@ -374,6 +379,13 @@ def build_attention_rows(
                 "p50_peak": dev.get("p50_peak") if dev else None,
                 "p90_peak": dev.get("p90_peak") if dev else None,
                 "p_zero_peak": dev.get("p_zero_peak") if dev else None,
+                # v4: the movement key, in the units the recommendation is
+                # written in.
+                "baserate_p50_peak": dev.get("baserate_p50_peak") if dev else None,
+                "baserate_p90_peak": dev.get("baserate_p90_peak") if dev else None,
+                "delta_p50": dev.get("delta_p50") if dev else None,
+                "delta_p90": dev.get("delta_p90") if dev else None,
+                "movement_threshold": dev.get("movement_threshold") if dev else None,
                 "peak_month": _month_label(
                     q.get("window_start_date"),
                     dev.get("peak_horizon") if dev else None,
@@ -416,14 +428,25 @@ def build_attention_rows(
         unusual_percentile=_interp_config.unusual_percentile(),
         min_probability=_interp_config.min_probability(),
         thin_min_obs=_interp_config.baserate_min_obs(),
+        mode=_interp_config.gate_mode(),
     )
     LOGGER.info(
-        "gate: %d considered, %d cleared both, %d heavy burden, %d watchlist, "
+        "gate (%s): %d considered, %d unusual, %d heavy burden by level, "
+        "%d moved by enough, %d worsening, %d watchlist, %d near miss, "
         "%d thin anchors (unusual cut js>=%.4f)",
-        gate_counts.get("considered", 0), gate_counts.get("both", 0),
-        gate_counts.get("major", 0), gate_counts.get("watchlist", 0),
+        gate_counts.get("mode"), gate_counts.get("considered", 0),
+        gate_counts.get("unusual", 0), gate_counts.get("material", 0),
+        gate_counts.get("worsening_movement", 0), gate_counts.get("both", 0),
+        gate_counts.get("watchlist", 0), gate_counts.get("near_miss", 0),
         gate_counts.get("thin", 0), gate_counts.get("unusual_cut") or 0.0,
     )
+    if gate_counts.get("mode") == _gating.MODE_DELTA and not any(
+        r.get("movement_threshold") is not None for r in rows
+    ):
+        LOGGER.warning(
+            "no row carries a movement_threshold, so the worsening gate can "
+            "admit nothing. Re-run compute_deviation against this database."
+        )
     # The four-box assignment reads the gate the line above stamped: which
     # box a row belongs in is the gate's decision, and this only orders the
     # gated rows by expected excess and cuts them to length. The validator
@@ -529,6 +552,12 @@ ATTENTION_FIELDS = [
     "window_shape",
     # v3: when the decision is due, and what the second reader made of it.
     "decision_deadline", "sibyl_tag",
+    # v4: the movement key. These are what the worsening gate tests and what
+    # the appendix table prints, so they belong in the index a reader can
+    # check the report against.
+    "baserate_p50_peak", "baserate_p90_peak", "delta_p50", "delta_p90",
+    "movement_threshold", "material_movement", "movement_shape",
+    "passed_worsening",
 ]
 
 
@@ -995,9 +1024,22 @@ def build_sibyl_section(
             else _secondopinion.TAG_NOT_COVERED
         )
 
+        unsettled = _secondopinion.unsettled(
+            f.get("js_divergence_inter_trial"), share=share
+        )
+        # Novel evidence from a reader that reached the same answer is a
+        # research note, not a finding, and covering all ten questions ran to
+        # two pages of an eleven-page report. Restricted to the questions
+        # where the second opinion differs or its own trials did not settle.
+        wants_novel = (
+            _interp_config.novel_evidence_scope() == "all"
+            or tag in (_secondopinion.TAG_MORE_ALARMED,
+                       _secondopinion.TAG_MORE_CAUTIOUS)
+            or unsettled
+        )
         novel: list[str] = []
-        evidence = _main_pipeline_evidence(con, run_id, qid)
-        if len(evidence) >= _MIN_EVIDENCE_CHARS:
+        evidence = _main_pipeline_evidence(con, run_id, qid) if wants_novel else ""
+        if wants_novel and len(evidence) >= _MIN_EVIDENCE_CHARS:
             novel = _secondopinion.novel_facts(
                 _secondopinion.trial_texts(safe_json_loads(f.get("trials_json"))),
                 evidence,
@@ -1019,11 +1061,12 @@ def build_sibyl_section(
             "volatility_score": f.get("volatility_score"),
             "cost_usd": f.get("cost_usd"),
             "tag": tag,
-            "unsettled": _secondopinion.unsettled(
-                f.get("js_divergence_inter_trial"), share=share
-            ),
+            "unsettled": unsettled,
             "novel_evidence": novel,
-            "evidence_comparable": len(evidence) >= _MIN_EVIDENCE_CHARS,
+            "novel_evidence_scope": _interp_config.novel_evidence_scope(),
+            "evidence_comparable": (
+                bool(wants_novel) and len(evidence) >= _MIN_EVIDENCE_CHARS
+            ),
         })
 
     rows.sort(
@@ -1226,14 +1269,18 @@ def build_performance_outlook(
 # Blind spots
 # ---------------------------------------------------------------------------
 
+# The blocked-hazard caveat was cut in v4. A reader who has never heard of
+# cold wave, disease, heatwave and conflict-onset question types does not need
+# to be told they are switched off, and it consumed one of the three lines
+# page one has for the caveats that change how the report should be read.
 STANDING_CAVEATS = [
-    "PA resolution coverage is thin (~4% via the legacy IFRC-GO path); the "
-    "PA resolution machine that will replace it runs in shadow mode and does "
-    "not feed scoring yet.",
-    "ACE inputs carry narrative-salience bias: heavily reported conflicts "
-    "generate more model-visible signal, independent of severity.",
-    "Blocked hazards (CU, DI, HW, ACO) are fully deactivated upstream: no "
-    "questions are generated for them. Their absence is policy, not a gap.",
+    "People-affected ground truth is thin: only about one question in "
+    "twenty-five resolves through the current path, and the machine that "
+    "will replace it runs in shadow mode and does not feed scoring yet.",
+    "Armed conflict inputs carry a reporting bias. Heavily covered conflicts "
+    "generate more signal the models can see, whatever their severity.",
+    "Every forecast here is unresolved by construction: the months it covers "
+    "have not happened yet, so nothing in the report has been marked.",
 ]
 
 
@@ -1270,7 +1317,15 @@ def build_blind_spots(
             "failure; performance material lives in the scored bundle."
         ),
         "questions_by_pair": [
-            {"hazard_code": hz, "metric": metric, "n_questions": n}
+            {
+                "hazard_code": hz,
+                # Spelled out with the acronym in brackets. "ACE 468" reads as
+                # nothing to a reader who has never met the code.
+                "hazard_label": _names.hazard_name_with_code(hz),
+                "metric": metric,
+                "metric_label": _names.metric_name(metric),
+                "n_questions": n,
+            }
             for (hz, metric), n in sorted(pairs.items())
         ],
         "no_baserate_questions": no_baserate,

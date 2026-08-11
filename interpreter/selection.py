@@ -24,10 +24,15 @@ and cuts them to length. That is why a worsening entry can no longer be
 relabelled "roughly stable" when a cap crowds it out: a row has one gate, and
 the two sections read different gates.
 
-Ordering is **expected excess**, descending, with thin anchors demoted
-(`gating.rank_key`). The stable-major section orders by the expected burden
-itself, because "already in trouble" is a statement about size, not about
-change.
+**Two lists, two orderings, each in the units that suit its purpose.** The
+worsening list answers "what has changed", so it is ordered by the change:
+how far the planning and contingency figures moved above the anchor
+(`gating.movement_rank_key`, in people or deaths). The stable-major list
+answers "where is the need", so it is ordered by the expected burden itself,
+because "already in trouble" is a statement about size and not about change.
+Ranking both by one number is what let a cyclone question carrying most of
+its weight on "nobody affected" lead a report. Thin anchors are demoted in
+both, never dropped.
 
 The report carries at most `max_entries` entries in total, split between the
 two categories. Fifteen pages with twelve entries is not a briefing, and the
@@ -56,6 +61,14 @@ CATEGORY_STABLE_MAJOR = "stable_major"
 CATEGORY_LABELS = {
     CATEGORY_WORSENING: "Potentially worsening situations",
     CATEGORY_STABLE_MAJOR: "Major impact but roughly stable",
+}
+
+# What each section is ordered by, printed in its own heading. A reader who
+# can see the ordering can check it; a reader who cannot has to take the
+# sequence on trust.
+CATEGORY_ORDERINGS = {
+    CATEGORY_WORSENING: "ranked by how far the planning figures have risen",
+    CATEGORY_STABLE_MAJOR: "ranked by the expected number of people affected",
 }
 
 # Section order in the report: what is changing comes before what is merely
@@ -110,15 +123,15 @@ def select_worsening(
     *,
     max_entries: int,
 ) -> list[dict[str, Any]]:
-    """The rows the gate called ``larger than usual``, worst first.
+    """The rows the gate called ``larger than usual``, biggest movement first.
 
-    Membership is the gate's, so this cannot admit a forecast sitting far
-    BELOW its anchor (the gate tests direction) nor one too small to mobilise
-    against (the gate tests materiality). Ordering is expected excess with
-    thin anchors demoted, which is `gating.rank_key`.
+    Membership is the gate's, so this cannot admit a forecast sitting BELOW
+    its anchor (clearing a positive movement threshold is the direction test)
+    nor one whose planning figures barely moved. Ordering is the movement
+    itself, with thin anchors demoted: `gating.movement_rank_key`.
     """
     picked = [r for r in rows if r.get("gate") == gating.GATE_WORSENING]
-    picked.sort(key=gating.rank_key)
+    picked.sort(key=gating.movement_rank_key)
     return picked[:max(0, int(max_entries))]
 
 

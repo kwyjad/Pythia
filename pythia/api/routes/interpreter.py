@@ -199,17 +199,38 @@ def interpreter_versions(
     return {"rows": rows}
 
 
+def _has_movement_columns(con) -> bool:
+    """Does this DB carry the v4 movement columns on forecast_deviation?
+
+    compute_deviation adds them by migration, so a canonical DB from before
+    that migration will not have them and must still serve a map.
+    """
+    try:
+        rows = _execute(con, "PRAGMA table_info('forecast_deviation')").fetchall()
+    except Exception:  # noqa: BLE001 - no columns is the safe answer
+        return False
+    have = {str(r[1]).lower() for r in rows}
+    return {"delta_p50", "delta_p90", "movement_threshold"} <= have
+
+
 @router.get("/v1/interpreter/attention_map")
 def interpreter_attention_map(
     run_id: Optional[str] = Query(None),
     include_test: bool = Query(False),
 ):
-    """Per-ISO3 attention values for the interpreter map.
+    """Per-ISO3 movement values for the interpreter map.
 
-    ``attention`` is the country's maximum js_vs_baserate (best-available
-    aggregate per question) scaled by its ln 2 maximum to [0, 1] — coloured
-    by ATTENTION, not raw risk (a risk-coloured map would just repeat the
-    risk index page). Every table touched is test-filtered.
+    ``movement`` is SIGNED: how far the figure a planner would act on sits
+    from its historical level, as a multiple of the size worth mobilising
+    against, taking the largest-magnitude movement where a country carries
+    several hazards. The direction is the point. Until v4 this served an
+    UNDIRECTED divergence, so a country whose forecast had fallen was shaded
+    exactly like one whose forecast had risen, and the map contradicted the
+    report's own text about it.
+
+    ``attention`` is retained beside it (the old unsigned scaling) so a
+    dashboard build that has not caught up still renders. Every table touched
+    is test-filtered.
     """
     con = _con()
     if not _table_exists(con, "forecast_deviation") or not _table_exists(con, "questions"):
@@ -232,6 +253,23 @@ def interpreter_attention_map(
     pref_cases = " ".join(
         f"WHEN model_name = '{m}' THEN {i}" for i, m in enumerate(_MODEL_PREFERENCE)
     )
+    # A DB written before compute_deviation gained the movement columns still
+    # has to serve a map. Without this guard the whole endpoint 500s on an
+    # older canonical DB, which on the dashboard is indistinguishable from
+    # "there is no report" — the exact soft-fail the report page exists to
+    # avoid. Absent the columns the rows carry movement=None and the map
+    # renders every country neutral, which is true: nothing is known about
+    # the direction.
+    has_movement = _has_movement_columns(con)
+    move_expr = (
+        """CASE WHEN COALESCE(p.delta_p90, p.delta_p50) IS NULL
+                     OR p.movement_threshold IS NULL
+                     OR p.movement_threshold = 0
+                THEN NULL
+                ELSE COALESCE(p.delta_p90, p.delta_p50) / p.movement_threshold
+           END"""
+        if has_movement else "CAST(NULL AS DOUBLE)"
+    )
     rows = _rows_from_cursor(
         _execute(
             con,
@@ -246,15 +284,21 @@ def interpreter_attention_map(
                 WHERE fd.run_id = ?
                   {_test_filter(include_test, "fd")}{_test_filter(include_test, "q")}
             ),
-            ranked AS (
-                SELECT p.*, ROW_NUMBER() OVER (
-                    PARTITION BY p.iso3
-                    ORDER BY COALESCE(p.js_vs_baserate, -1) DESC
-                ) AS iso_rank
+            scaled AS (
+                SELECT p.*, {move_expr} AS signed_move
                 FROM preferred p WHERE p.rn = 1
+            ),
+            ranked AS (
+                SELECT s.*, ROW_NUMBER() OVER (
+                    PARTITION BY s.iso3
+                    ORDER BY COALESCE(ABS(s.signed_move), -1) DESC,
+                             COALESCE(s.js_vs_baserate, -1) DESC
+                ) AS iso_rank
+                FROM scaled s
             )
             SELECT r.iso3,
                    r.js_vs_baserate,
+                   r.signed_move,
                    r.hazard_code,
                    r.metric,
                    r.eiv_nominal,
@@ -274,6 +318,12 @@ def interpreter_attention_map(
         js = r.get("js_vs_baserate")
         r["attention"] = (
             max(0.0, min(float(js) / _LN2, 1.0)) if js is not None else None
+        )
+        move = r.pop("signed_move", None)
+        # Clamped to +/-3 thresholds, the same bound the printed map applies,
+        # so one runaway movement cannot flatten the whole ramp.
+        r["movement"] = (
+            max(-3.0, min(float(move), 3.0)) if move is not None else None
         )
     return {"has_data": bool(rows), "run_id": run_id, "rows": rows}
 

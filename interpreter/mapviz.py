@@ -8,8 +8,10 @@
 The dashboard draws this map with a JavaScript component. A PDF cannot run
 JavaScript, so the printed report needs its own drawing. It reads the same
 vendored Natural Earth boundaries the resolution machine uses, projects them
-with a plain equirectangular transform, and fills each country by how far its
-forecasts sit from their usual pattern.
+with a plain equirectangular transform, and fills each country by how far the
+figure a planner would act on has moved from its historical level, ABOVE or
+BELOW. The direction is the point: an unsigned scale shaded a country whose
+forecast had fallen exactly as it shaded one whose forecast had risen.
 
 No plotting library, no network, no runtime download. The map is a few hundred
 kilobytes of inline SVG and travels inside the PDF.
@@ -37,12 +39,29 @@ BOUNDARIES = (
     / "ne_50m_admin_0_countries.slim.geojson.gz"
 )
 
-# Fred's palette, light to dark. A country with no forecast is left in the
-# "no data" grey, which must not read as "nothing is happening there".
+# A DIVERGING scale, because the quantity has a sign and the reader needs it.
+# The map used to shade unsigned distance from the anchor, so Uganda appeared
+# among the countries furthest from usual on the same page as text saying
+# Uganda's forecast had moved DOWN. That is an error, not a styling choice.
+#
+# One hue above the anchor, another below, a pale neutral for close to it, and
+# grey for no forecast at all — which must never read as "nothing is happening
+# there".
 NO_DATA = "#E8E8E8"
 LAND_STROKE = "#FFFFFF"
-SCALE = ("#DCE9F0", "#A9C9DA", "#6FA5C0", "#3B7F9F", "#156082")
-SCALE_BREAKS = (0.1, 0.25, 0.4, 0.6)
+
+# Above the anchor: more people expected than usual. Warm, darkening.
+SCALE_ABOVE = ("#F6D6C4", "#EFAF8C", "#DE7F53", "#B85527", "#8A3410")
+# Below the anchor: fewer. Cool, darkening.
+SCALE_BELOW = ("#D6E3EE", "#A9C4DA", "#7398B8", "#456F92", "#274C68")
+# Close enough to the anchor that the direction is not worth colouring.
+NEUTRAL = "#F2F0EC"
+
+# Break points on the SIGNED movement, expressed as multiples of the metric's
+# own action threshold (see `values_from_deviation`). One threshold of
+# movement is by definition the size worth mobilising against, so it sits in
+# the middle of the ramp rather than at its end.
+SCALE_BREAKS = (0.1, 0.4, 1.0, 2.0)
 
 # Web Mercator is wrong for a world choropleth (it triples Greenland), and the
 # report is about people, not ice. Equirectangular, clipped to the latitudes
@@ -63,17 +82,25 @@ def _features() -> list[dict[str, Any]]:
 
 
 def colour_for(value: float | None) -> str:
-    """Attention value in [0, 1] to a fill."""
+    """A SIGNED movement, in multiples of the metric's threshold, to a fill.
+
+    Positive is above the anchor, negative below, and a movement inside the
+    first break is neutral in either direction. None is no forecast at all.
+    """
     if value is None:
         return NO_DATA
     try:
         v = float(value)
     except (TypeError, ValueError):
         return NO_DATA
+    magnitude = abs(v)
+    if magnitude < SCALE_BREAKS[0]:
+        return NEUTRAL
+    ramp = SCALE_ABOVE if v > 0 else SCALE_BELOW
     for i, edge in enumerate(SCALE_BREAKS):
-        if v < edge:
-            return SCALE[i]
-    return SCALE[-1]
+        if magnitude < edge:
+            return ramp[i]
+    return ramp[-1]
 
 
 def _project(lon: float, lat: float, height: float) -> tuple[float, float]:
@@ -144,7 +171,7 @@ def attention_map_svg(
             continue
 
     header = 18 if title else 0
-    total_height = height + header + 34  # room for the legend
+    total_height = height + header + 48  # room for the legend and its note
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{_WIDTH:.0f}" '
         f'height="{total_height:.0f}" viewBox="0 0 {_WIDTH:.0f} {total_height:.0f}" '
@@ -169,89 +196,133 @@ def attention_map_svg(
         )
     parts.append("</g>")
 
-    # Legend. The bands are the same ones the fills use, so the reader can
-    # match a colour on the map to a phrase in the text.
-    labels = ("close to usual", "", "well away", "", "a long way from usual")
+    # Legend. Diverging, and it names the DIRECTION: a reader looking at a
+    # shaded country has to be able to tell "more people than usual" from
+    # "fewer" without reading the text beside it.
     x = 0.0
     y = header + height + 12
-    for i, colour in enumerate(SCALE):
+    swatches = (
+        [(c, "") for c in reversed(SCALE_BELOW)]
+        + [(NEUTRAL, "")]
+        + [(c, "") for c in SCALE_ABOVE]
+        + [(NO_DATA, "")]
+    )
+    for colour, _ in swatches:
         parts.append(
-            f'<rect x="{x:.0f}" y="{y:.0f}" width="26" height="10" fill="{colour}" />'
+            f'<rect x="{x:.0f}" y="{y:.0f}" width="18" height="10" '
+            f'fill="{colour}" />'
         )
-        if labels[i]:
-            parts.append(
-                f'<text x="{x:.0f}" y="{y + 22:.0f}" font-family="sans-serif" '
-                f'font-size="9" fill="#6B7280">{labels[i]}</text>'
-            )
-        x += 28
+        x += 19
+    captions = (
+        (0.0, "well below its usual level"),
+        (5 * 19.0, "near it"),
+        (6 * 19.0, "above its usual level"),
+        (11 * 19.0 + 6, "no forecast"),
+    )
+    for cx, label in captions:
+        parts.append(
+            f'<text x="{cx:.0f}" y="{y + 22:.0f}" font-family="sans-serif" '
+            f'font-size="9" fill="#6B7280">{html.escape(label)}</text>'
+        )
     parts.append(
-        f'<rect x="{x + 12:.0f}" y="{y:.0f}" width="26" height="10" fill="{NO_DATA}" />'
-        f'<text x="{x + 12:.0f}" y="{y + 22:.0f}" font-family="sans-serif" '
-        f'font-size="9" fill="#6B7280">no forecast</text>'
+        f'<text x="0" y="{y + 34:.0f}" font-family="sans-serif" font-size="8" '
+        f'fill="#9CA3AF">Shading is how far the figure a planner would act on '
+        f'sits from its historical level, as a multiple of the size worth '
+        f'mobilising against. Where a country carries several hazards, the '
+        f'largest movement is shown.</text>'
     )
     parts.append("</svg>")
     return "".join(parts)
 
 
-def values_from_deviation(con, run_id: str | None, *, include_test: bool) -> dict[str, float]:
-    """Per-country attention: the largest divergence any of its forecasts
-    shows this run, scaled to [0, 1].
-
-    Mirrors ``/v1/interpreter/attention_map`` (same table, same preference
-    order, same ln 2 scaling) so the printed map and the dashboard map cannot
-    disagree.
-    """
-    if con is None:
-        return {}
-    test_clause = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
-    where = ["js_vs_baserate IS NOT NULL"]
-    params: list[Any] = []
-    if run_id:
-        where.append("run_id = ?")
-        params.append(run_id)
-    # One aggregate per question, best-available, exactly as
-    # /v1/interpreter/attention_map does it. This map previously took MAX
-    # across EVERY model row including Sibyl, so a country could be coloured
-    # by whichever aggregate happened to diverge most and the printed map
-    # could disagree with the dashboard's — the one thing drawing it here
-    # was supposed to prevent.
-    order = " ".join(
-        f"WHEN model_name = '{m}' THEN {i}"
-        for i, m in enumerate(names.AGGREGATE_PREFERENCE)
-    )
-    sql = f"""
-        WITH ranked AS (
-            SELECT iso3, question_id, js_vs_baserate,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY question_id
-                       ORDER BY CASE {order} ELSE 99 END, model_name
-                   ) AS rn
-            FROM forecast_deviation
-            WHERE {' AND '.join(where)}{test_clause}
-        )
-        SELECT iso3, MAX(js_vs_baserate) AS m
+# One aggregate per question, best-available, then the largest movement per
+# country. Shared verbatim with /v1/interpreter/attention_map so the printed
+# map and the dashboard map cannot disagree; the printed one exists only
+# because a PDF cannot run the dashboard's JavaScript.
+#
+# Scaled by the metric's own action threshold, so deaths and people in crisis
+# land on one ramp: 1.0 means "moved by the size worth mobilising against".
+# The old ln 2 scaling of an UNDIRECTED divergence is what shaded a country
+# whose forecast had fallen as though it had risen.
+SIGNED_MOVEMENT_SQL = """
+    WITH ranked AS (
+        SELECT iso3, question_id,
+               delta_p50, delta_p90, movement_threshold,
+               ROW_NUMBER() OVER (
+                   PARTITION BY question_id
+                   ORDER BY CASE {order} ELSE 99 END, model_name
+               ) AS rn
+        FROM forecast_deviation
+        WHERE {where}
+    ),
+    scaled AS (
+        SELECT iso3,
+               CASE WHEN COALESCE(delta_p90, delta_p50) IS NULL
+                         OR movement_threshold IS NULL
+                         OR movement_threshold = 0
+                    THEN NULL
+                    ELSE COALESCE(delta_p90, delta_p50) / movement_threshold
+               END AS signed_move
         FROM ranked WHERE rn = 1
-        GROUP BY iso3
-    """
-    try:
-        rows = con.execute(sql, params).fetchall()
-    except Exception as exc:  # noqa: BLE001 - a missing table is not a failure
-        LOGGER.warning("[interpreter.map] deviation values unavailable: %s", exc)
-        return {}
-    import math
+    )
+    SELECT iso3, signed_move
+    FROM scaled
+    WHERE signed_move IS NOT NULL
+"""
 
+
+def _largest_signed(rows) -> dict[str, float]:
+    """Per country, the movement with the largest MAGNITUDE, sign kept.
+
+    A country carrying several hazards gets the one that moved most, in
+    either direction, and the legend says so. Taking the maximum would hide a
+    large fall behind a small rise.
+    """
     out: dict[str, float] = {}
     for iso3, value in rows:
         if iso3 is None or value is None:
             continue
-        out[str(iso3).upper()] = max(0.0, min(float(value) / math.log(2.0), 1.0))
+        code = str(iso3).upper()
+        v = max(-3.0, min(float(value), 3.0))
+        if code not in out or abs(v) > abs(out[code]):
+            out[code] = v
     return out
 
 
+def values_from_deviation(con, run_id: str | None, *, include_test: bool) -> dict[str, float]:
+    """Per-country SIGNED movement, in multiples of the action threshold."""
+    if con is None:
+        return {}
+    test_clause = "" if include_test else " AND COALESCE(is_test, FALSE) = FALSE"
+    where = ["1 = 1"]
+    params: list[Any] = []
+    if run_id:
+        where.append("run_id = ?")
+        params.append(run_id)
+    order = " ".join(
+        f"WHEN model_name = '{m}' THEN {i}"
+        for i, m in enumerate(names.AGGREGATE_PREFERENCE)
+    )
+    sql = SIGNED_MOVEMENT_SQL.format(
+        order=order, where=" AND ".join(where) + test_clause
+    )
+    try:
+        rows = con.execute(sql, params).fetchall()
+    except Exception as exc:  # noqa: BLE001 - a missing column is not a failure
+        LOGGER.warning("[interpreter.map] movement values unavailable: %s", exc)
+        return {}
+    return _largest_signed(rows)
+
+
 def country_labels(values_by_iso3: dict[str, float], *, top: int = 8) -> list[str]:
-    """The most-diverging countries, named, for the caption under the map."""
+    """The countries that moved most, named, for the caption under the map.
+
+    Ordered by MAGNITUDE: a country whose forecast fell a long way is as
+    notable as one whose forecast rose, and the caption says which by naming
+    it beside a map that colours the direction.
+    """
     ordered = sorted(
         ((k, v) for k, v in (values_by_iso3 or {}).items() if v is not None),
-        key=lambda kv: (-float(kv[1]), kv[0]),
+        key=lambda kv: (-abs(float(kv[1])), kv[0]),
     )
     return [names.country_name(iso3) for iso3, _ in ordered[:top]]

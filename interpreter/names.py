@@ -114,6 +114,24 @@ def hazard_name(hazard_code: str | None) -> str:
     return HAZARD_NAMES.get(code, code or "Unknown hazard")
 
 
+def hazard_name_with_code(hazard_code: str | None) -> str:
+    """"armed conflict events (ACE)" — the expansion, then the acronym.
+
+    Tables elsewhere in the report print bare codes because a table cell has
+    no room for a sentence. A reader who has never met ACE reads "ACE 468" as
+    nothing at all, so wherever the code has to appear it appears with its
+    expansion the first time.
+    """
+    code = (hazard_code or "").strip().upper()
+    if not code:
+        return "unknown hazard"
+    name = HAZARD_NAMES.get(code)
+    if not name:
+        return code
+    spelled = "armed conflict events" if code in CONFLICT_HAZARDS else name.lower()
+    return f"{spelled} ({code})"
+
+
 def metric_name(metric: str | None, *, short: bool = False) -> str:
     code = (metric or "").strip().upper()
     table = METRIC_SHORT if short else METRIC_NAMES

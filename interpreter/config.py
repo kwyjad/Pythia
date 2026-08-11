@@ -33,6 +33,14 @@ v3 selection and report knobs (all with defaults below):
   month the plan has to cover (the decision calendar's derivation).
 - PYTHIA_INTERPRETER_SIBYL_{DISAGREEMENT_RATIO,UNSETTLED_SHARE,NOVEL_FACTS}.
 - PYTHIA_INTERPRETER_SECTOR_{LIST_SIZE,MIN_RANK_GAP}.
+
+v4 knobs:
+- PYTHIA_INTERPRETER_GATE_MODE (delta|level) — how materiality is tested.
+- PYTHIA_INTERPRETER_MAX_WATCHLIST — watchlist lines before the rest are left
+  to the appendix question table.
+- PYTHIA_INTERPRETER_MAX_TENSIONS_PER_ENTRY — reconciled contradictions.
+- PYTHIA_INTERPRETER_GENERIC_PHRASE_MAX — stock-phrase lint threshold.
+- PYTHIA_INTERPRETER_NOVEL_EVIDENCE_SCOPE (disagreement|all).
 - PYTHIA_INTERPRETER_MIN_RESOLVED_FOR_SKILL and _SKILL_BOOTSTRAP — Part B's
   small-sample floor and the size of its bootstrap.
 """
@@ -42,7 +50,7 @@ from __future__ import annotations
 import os
 
 ROLE = "interpreter"
-DEFAULT_TEMPLATE_VERSION = "v3"
+DEFAULT_TEMPLATE_VERSION = "v4"
 SCHEMA_VERSION = "1"
 
 # --- Attention selection (report sections) ---------------------------------
@@ -136,6 +144,31 @@ DEFAULT_BASERATE_SMOOTHING = 0.5
 DEFAULT_BASERATE_MIN_OBS = 12
 
 DEFAULT_MAX_ENTRIES = 5
+
+# How many watchlist lines the appendix prints before the rest are left to the
+# question table. Thirty lines reading "a major disaster alert" with no figure
+# attached is a list nobody finishes.
+DEFAULT_MAX_WATCHLIST = 10
+
+# How materiality is tested: ``delta`` (v4, the movement in the planning and
+# contingency figures) or ``level`` (pre-v4, the absolute level). The rollback
+# is an env var rather than a deploy.
+DEFAULT_GATE_MODE = "delta"
+
+# At most two reconciled contradictions per entry. More than that and the
+# field stops being analysis and becomes a list.
+DEFAULT_MAX_TENSIONS_PER_ENTRY = 2
+
+# How many entries a stock phrase may appear in before the lint flags it. A
+# weaker model reaches for the sentence that fits any crisis, and that
+# degradation is invisible to every other check in the suite.
+DEFAULT_GENERIC_PHRASE_MAX = 3
+
+# Which Sibyl questions get a novel-evidence block. ``disagreement`` restricts
+# it to the questions where the second reader differs or its own trials did
+# not settle; novel evidence from a reader that reached the same answer is a
+# research note, not a finding, and it ran to two pages.
+DEFAULT_NOVEL_EVIDENCE_SCOPE = "disagreement"
 
 # Part B: the smallest resolved count that can support a skill claim.
 DEFAULT_MIN_RESOLVED_FOR_SKILL = 100
@@ -244,6 +277,60 @@ def baserate_min_obs() -> int:
 
 def max_entries() -> int:
     return _env_int("PYTHIA_INTERPRETER_MAX_ENTRIES", DEFAULT_MAX_ENTRIES)
+
+
+def max_watchlist() -> int:
+    return _env_int("PYTHIA_INTERPRETER_MAX_WATCHLIST", DEFAULT_MAX_WATCHLIST)
+
+
+def gate_mode() -> str:
+    """``delta`` (v4) or ``level`` (the pre-v4 rollback)."""
+    raw = (os.getenv("PYTHIA_INTERPRETER_GATE_MODE") or DEFAULT_GATE_MODE)
+    value = raw.strip().lower()
+    return value if value in ("delta", "level") else DEFAULT_GATE_MODE
+
+
+def max_tensions_per_entry() -> int:
+    return _env_int(
+        "PYTHIA_INTERPRETER_MAX_TENSIONS_PER_ENTRY",
+        DEFAULT_MAX_TENSIONS_PER_ENTRY,
+    )
+
+
+def generic_phrase_max() -> int:
+    return _env_int(
+        "PYTHIA_INTERPRETER_GENERIC_PHRASE_MAX", DEFAULT_GENERIC_PHRASE_MAX
+    )
+
+
+def novel_evidence_scope() -> str:
+    """``disagreement`` (default) or ``all``."""
+    raw = (
+        os.getenv("PYTHIA_INTERPRETER_NOVEL_EVIDENCE_SCOPE")
+        or DEFAULT_NOVEL_EVIDENCE_SCOPE
+    )
+    value = raw.strip().lower()
+    return value if value in ("disagreement", "all") else DEFAULT_NOVEL_EVIDENCE_SCOPE
+
+
+def movement_threshold(metric: str, population: float | None) -> float | None:
+    """The rise that counts as material worsening for this country and metric.
+
+    The same number as the level threshold — fifty thousand people, a hundred
+    deaths, a million in crisis-level hunger, or the population share where
+    that is lower — because the question "is this worth mobilising against"
+    and the question "has it risen by enough to change a plan" deserve one
+    answer, not two. Binary questions have no size, so the caller gates them
+    on probability instead.
+    """
+    from interpreter import gating  # local: config must stay import-light
+
+    return gating.materiality_threshold(
+        metric,
+        population,
+        absolute=threshold_for_metric(metric),
+        population_share=population_share_for_metric(metric),
+    )
 
 
 def min_resolved_for_skill() -> int:

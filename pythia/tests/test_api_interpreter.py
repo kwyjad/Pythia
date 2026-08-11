@@ -48,6 +48,7 @@ def _content(kind: str = "combined") -> dict:
             "metric": "FATALITIES",
             "question_ids": [QID_ACE],
             "why_it_stands_out": "Moved {{fig:js_vs_baserate}} from its base rate.",
+            "falsifier": "A dry run of weeks through the season would show this call to be wrong.",
             "decision_point": {"action": "Decide whether to preposition stock.", "deadline_month": "2026-09", "basis": "peak_horizon"},
             "lead_time_months": 2,
         }],

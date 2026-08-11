@@ -36,6 +36,8 @@ def _content() -> dict:
             "question_ids": [QID],
             "why_it_stands_out": "The forecast sits well above its history.",
             "planning_sentence": "Plan against about {{fig:p50_peak}}.",
+            "falsifier": "A good harvest through the season would show this "
+                         "call to be wrong.",
             "decision_point": {
                 "action": "Decide whether to open the pipeline early.",
                 "deadline_month": "2026-08",
@@ -249,8 +251,10 @@ class TestPdfLayout:
             map_captions=["Somalia"],
         )
         assert "Darkest first" not in html
-        assert "Shading is how far a country's forecasts sit" in html
-        assert "Furthest from usual: Somalia." in html
+        assert "Warm shading means a country expects more people affected" in html
+        # The caption must name the DIRECTION, not just the distance.
+        assert "cool shading means fewer" in html
+        assert "Moved most: Somalia." in html
 
     def test_a_contents_page_is_built_from_the_section_headings(self):
         html = pdf.build_report_html(self._row())

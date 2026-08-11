@@ -272,6 +272,7 @@ jobs:
           echo "=== Running interpreter Phase 1 tests ==="
           pytest -vv \
             pythia/tests/test_base_rate_spd.py \
+            pythia/tests/test_base_rate_anchor_depth.py \
             pythia/tests/test_compute_deviation.py \
             pythia/tests/test_score_baselines.py
 

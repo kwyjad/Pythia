@@ -22,9 +22,9 @@ import type {
 } from "../../lib/types";
 import ReportView from "./ReportView";
 import {
-  attentionColor,
-  attentionLabel,
-  attentionLegend,
+  movementColor,
+  movementLabel,
+  movementLegend,
   countryAnchorId,
   groupVersionsByRun,
   statusBanner,
@@ -49,8 +49,10 @@ export default function InterpreterClient({
   const valuesByIso3 = useMemo(() => {
     const out: Record<string, number> = {};
     attentionMap.rows.forEach((row) => {
-      if (row.attention != null) {
-        out[row.iso3] = row.attention;
+      // Signed movement, not undirected divergence. A country whose
+      // forecast moved DOWN must not be shaded like one that moved up.
+      if (row.movement != null) {
+        out[row.iso3] = row.movement;
       }
     });
     return out;
@@ -74,7 +76,7 @@ export default function InterpreterClient({
     [reportIso3]
   );
 
-  const legendItems = useMemo(() => attentionLegend(), []);
+  const legendItems = useMemo(() => movementLegend(), []);
 
   // One option per run, newest first (the API already orders rows
   // created_at DESC, so the first row per run is that run's newest version).
@@ -118,14 +120,15 @@ export default function InterpreterClient({
         <section className="space-y-2">
           <div className="flex items-center gap-2">
             <h2 className="text-xl font-semibold text-fred-primary">
-              Attention map
+              Where forecasts sit against their usual level
             </h2>
             <InfoTooltip
               text={
-                "Coloured by how far each country's strongest forecast moved " +
-                "from its historical base rate — attention, not raw risk (the " +
-                "risk-index map already shows risk). Click a highlighted " +
-                "country to jump to its section in the report."
+                "Warm shading means the country expects MORE than its history would " +
+                "suggest; cool shading means less. The depth is how far it has " +
+                "moved, as a multiple of the size worth mobilising against. " +
+                "Where a country carries several hazards, the largest movement " +
+                "is shown. Click a highlighted country to jump to its section."
               }
             />
           </div>
@@ -134,8 +137,8 @@ export default function InterpreterClient({
             countriesRows={[]}
             view="PA_EIV"
             valuesByIso3={valuesByIso3}
-            colorFor={attentionColor}
-            valueLabelFor={attentionLabel}
+            colorFor={movementColor}
+            valueLabelFor={movementLabel}
             legendItems={legendItems}
             onCountryClick={handleCountryClick}
             showRcOverlay={false}

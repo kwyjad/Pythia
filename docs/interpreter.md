@@ -128,7 +128,7 @@ be inspected; the dashboard (Phase 5) renders them behind a warning banner.
 |---|---|---|
 | `PYTHIA_INTERPRETER_ENABLED` | `1` | kill switch |
 | `PYTHIA_INTERPRETER_MODEL_ID` | unset | overrides the config role |
-| `PYTHIA_INTERPRETER_TEMPLATE_VERSION` | `v3` | |
+| `PYTHIA_INTERPRETER_TEMPLATE_VERSION` | `v4` | |
 | `PYTHIA_INTERPRETER_MAX_PACK_TOKENS` | `250000` | model-input hard cap |
 | `PYTHIA_INTERPRETER_TOP_N` | `8` | attention list length |
 | `PYTHIA_INTERPRETER_PER_CAPITA_FLOOR` | `10000` | per-capita ranking floor |
@@ -156,6 +156,11 @@ be inspected; the dashboard (Phase 5) renders them behind a warning banner.
 | `PYTHIA_INTERPRETER_SIBYL_NOVEL_FACTS` | `2` | v3: novel findings printed per covered question |
 | `PYTHIA_INTERPRETER_SECTOR_LIST_SIZE` | `5` | v3: entries per sector-gap list |
 | `PYTHIA_INTERPRETER_SECTOR_MIN_RANK_GAP` | `5` | v3: places apart before a gap is worth printing |
+| `PYTHIA_INTERPRETER_GATE_MODE` | `delta` | v4: `delta` (movement) or `level` (the pre-v4 rollback) |
+| `PYTHIA_INTERPRETER_MAX_WATCHLIST` | `10` | v4: watchlist lines before the rest go to the appendix table |
+| `PYTHIA_INTERPRETER_MAX_TENSIONS_PER_ENTRY` | `2` | v4: reconciled contradictions per entry |
+| `PYTHIA_INTERPRETER_GENERIC_PHRASE_MAX` | `3` | v4: sections a stock phrase may appear in before the lint flags it |
+| `PYTHIA_INTERPRETER_NOVEL_EVIDENCE_SCOPE` | `disagreement` | v4: `disagreement` or `all` — novel evidence from a reader that agreed is a research note, and it ran to two pages |
 
 ## What the report covers (`interpreter/selection.py`)
 
@@ -174,47 +179,132 @@ ranking on it would promote a forecast for sitting far BELOW its base rate,
 which is not news. A ±5% deadband keeps forecasts that merely round off the
 base rate out of the worsening sections.
 
-### Ranking and the two-key gate (v3, `interpreter/gating.py`)
+### Ranking and the two-key gate (v4, `interpreter/gating.py`)
 
 Ranking used to be on `log_ev_ratio`, a RATIO, and a ratio is dominated by
 whichever base rate happens to sit closest to zero. A cyclone question whose
 history puts almost all its weight on "nobody affected" divides by almost
 nothing, so a modest tail produces a huge multiple. The August report led on
-Indonesian cyclones and put famine in Sudan on page two. Ordering is now on
-**expected excess** — `excess_nominal = eiv_nominal − eiv_baserate`, in people
-— and the ratio survives only as a descriptor in the prose. Switching the
-order on the real August data changes the top six from all-cyclone to
-all-drought.
+Indonesian cyclones and put famine in Sudan on page two.
 
 Selection is a **two-key gate** stamped by `gating.gate_rows`, which returns
-the counts the report prints:
+the counts the report prints. The first key is unchanged; the second was
+redesigned in v4.
 
 | key | test |
 |---|---|
 | unusual | `js_vs_baserate` at or above the run's `PYTHIA_INTERPRETER_UNUSUAL_PERCENTILE` (0.80) percentile |
-| material | at least `PYTHIA_INTERPRETER_MINPROB` (0.25) chance, in ANY month of the window, of passing a size worth mobilising for |
-| rising | `excess_nominal > 0` |
+| material worsening | at the peak horizon, `max(delta_p50, delta_p90) >= threshold` — the figure a planner acts on has RISEN by at least the size worth mobilising against |
+| heavy burden (the level test) | at least `PYTHIA_INTERPRETER_MINPROB` (0.25) chance, in ANY month of the window, of passing that same size, whether or not anything changed |
 
-Materiality thresholds are `min(absolute, share × population)` so a flat 50,000
-floor does not silently exclude every small island state from a cyclone report.
+**Materiality is two different tests, and v4 keeps them apart.** The LEVEL
+test answers "is this a heavy burden" and is what puts Sudan in the report
+whether or not anything moved. The MOVEMENT test answers "is this worsening".
+Until v4 the level test did both jobs, and it cannot: a country with a
+chronically large caseload clears an absolute level every month by
+construction, so any positive excess then read as worsening. Ethiopia cleared
+the hundred-deaths test at essentially certainty and led the September report
+on five expected excess deaths; Indonesia's cyclone entry cleared it on a tail
+whose planning figure never moved at all.
+
+The movement is computed in `compute_deviation` against the SAME in-bucket
+quantile interpolation the forecast uses, so the pair is one summary applied
+to two distributions rather than two different summaries compared with each
+other:
+
+```
+delta_p50 = forecast p50 at the peak horizon − base-rate p50
+delta_p90 = forecast p90 at the peak horizon − base-rate p90
+material  = max(delta_p50, delta_p90) >= movement_threshold
+```
+
+Three things follow. The gate is stated in the same units as the
+recommendation, so a reader can check it. A shape change is caught honestly,
+because a widened tail moves p90 even when p50 sits still — and the entry says
+which figure moved (`movement_shape`), so the report never claims a rise the
+planning figure does not support. And the explicit `rising` test disappears,
+because a threshold is a positive number and clearing it IS the direction,
+which also removes the old sensitivity to a near-zero denominator.
+
+Binary questions have no size to plan against, so their movement is measured
+in probability points against the same anchor and gated on the run's minimum
+probability. Commensurable within its own kind, never mixed with people.
+
+Thresholds are `min(absolute, share × population)` so a flat 50,000 floor does
+not silently exclude every small island state from a cyclone report; the
+movement threshold is the SAME number as the level one, because "worth
+mobilising against" and "risen by enough to change a plan" deserve one answer.
 The horizon that cleared is carried on the row (`peak_horizon`), because which
 month cleared is part of the answer.
 
-**Direction is a separate test.** Unusual and material describe SIZE and
-CONFIDENCE, neither of which has a sign. Without the `rising` test a forecast
-expecting two million FEWER people than usual lands in "potentially worsening
-situations", which Uganda did on the August run (excess −2,069,829, both keys
-passed).
+`PYTHIA_INTERPRETER_GATE_MODE=level` restores the pre-v4 behaviour without a
+deploy. `python -m interpreter.gatecheck --db ... [--mode level]` runs the gate
+over every run in a DB and prints what it admits, what it drops, WHICH
+questions cleared and what the near misses were; `run_sibyl.yml` runs both
+modes every cycle into the step summary and the `pythia-interpreter-gate-diagnostics`
+artifact.
 
-Gates, in the words the report prints: `larger than usual` (all three),
-`heavy burden` (material but not rising or not unusual), `unusual, small scale`
-(the watchlist — tracked, not acted on, and never on page two ahead of Sudan).
+**Two lists, two orderings, each in the units that suit its purpose.** The
+worsening list is ordered by `max(delta_p50, delta_p90)` in people or deaths
+(`gating.movement_rank_key`); the heavy-burden list by the expected burden
+itself, because "already in trouble" is a statement about size and not about
+change. Each section heading states its own ordering
+(`selection.CATEGORY_ORDERINGS`), so a reader who can see it can check it.
+
+Gates, in the words the report prints: `larger than usual` (unusual AND
+moved), `heavy burden` (the level test, without a claim that it is worsening),
+`unusual, small scale` (the watchlist — tracked, not acted on, capped at
+`PYTHIA_INTERPRETER_MAX_WATCHLIST` with each line carrying its movement, and
+the overflow left to the appendix table which already holds every row).
 
 **Thin anchors are demoted, not dropped.** Below
 `PYTHIA_INTERPRETER_BASERATE_MIN_OBS` (12) historical observations a row is
 ranked below every clear-anchored row and says so. Indonesia's near-empty
 cyclone record may be a gap in GDACS and IFRC rather than a real absence of
 impact; the honest response to not knowing is to rank it lower and say so.
+
+### What the anchors rest on (v4 investigation)
+
+The v3 report marked 138 of 185 anchors thin. That is a finding about the
+anchor builder, not a threshold that needs lowering — a flag firing on
+three-quarters of rows has stopped discriminating, and the demotion rule it
+drives is doing nothing. `python -m interpreter.anchorcheck --db ...` reports
+per (hazard, metric) what the anchors rest on and diagnoses which of the three
+causes is in play. Two were real and both were fixed in
+`pythia/tools/base_rate_spd.py`:
+
+- **The conflict window was six months against a twelve-observation cutoff**,
+  so no armed conflict anchor could ever clear the flag. Arithmetic, not
+  evidence. `CONFLICT_WINDOW_MONTHS` is now 36, matching the Phase 3+ window
+  and well inside what ACLED serves. The invariant that matters is that an
+  anchor is drawn from the series that will resolve the question, not that it
+  uses the same number of rows as a prose summary.
+- **Quiet months were dropped rather than counted as observed zeros.** ACLED
+  emits no row for a country-month with no events, and IDMC reports a country
+  only when it records displacement, so an anchor built from present rows
+  alone said displacement happens every month in a country IDMC reports twice
+  a year. `COUNT_QUIET_MONTHS_AS_ZERO` fills them, behind the same two gates
+  `source_coverage` applies on the resolution side: the month must be one the
+  source was live for globally, and the country must appear in the source at
+  all. Without both an ingestion gap becomes a run of quiet months.
+
+"Counting events where months are wanted" was checked and is NOT happening:
+`monthly_fatalities` groups by (iso3, month) already.
+
+### The map shows direction (v4)
+
+`interpreter/mapviz.py` and `/v1/interpreter/attention_map` both colour by the
+SIGNED movement, scaled by the metric's own threshold so deaths and people in
+crisis land on one ramp. One hue above the anchor, another below, pale neutral
+near it, grey for no forecast, and a legend that names the direction. Where a
+country carries several hazards the largest-magnitude movement wins, and the
+legend says so. The old scale was unsigned, so Uganda appeared among the
+countries furthest from usual on the same page as text saying its ensemble had
+moved down. The frontend mirrors the ramps in
+`web/src/app/interpreter/lib.ts`; the API keeps serving the old `attention`
+field beside the new `movement` one so an older dashboard build still renders,
+and guards the movement columns so a DB predating the migration serves a map
+rather than a 500.
 
 ### The report's account of itself (`interpreter/panels.py`)
 
@@ -242,12 +332,25 @@ out the two figures that are: `p50_peak` (plan against) and `p90_peak` (hold
 contingency for), both at the peak horizon, with the month named
 (`peak_month`) and `p_zero_peak` where the chance of nothing is worth saying.
 
+**The planning sentence is GENERATED (v4), not written.** It is a frame with
+two numbers in it and no judgement, and leaving it to the model produced
+"+5 people more deaths" and, where both quantiles land in the open-ended top
+band, a contingency figure identical to the planning figure ("Plan against
+about 20,000,000 people. Hold contingency for 20,000,000 people"). Sudan read
+exactly that. `panels.planning_sentence` prints one sentence using the band's
+lower bound in that case and suppresses the contingency line, and rounds every
+figure to its own scale: the number comes from interpolating inside a bucket
+tens of thousands wide, so every digit past the third is a claim the scheme
+cannot support. The `spd_shape` paragraph was cut in the same change — it
+restated the two figures beside it, and the full distributions are already in
+the appendix with their bands named in words.
+
 **Membership is the gate's, not selection's.** `select_worsening` reads
 `gate == "larger than usual"` and `select_stable_major` reads
-`gate == "heavy burden"`; selection only orders (excess descending, thin
-anchors demoted) and cuts to `PYTHIA_INTERPRETER_MAX_ENTRIES` (5) across the
-whole report, split 60/40 in favour of worsening with either side handing its
-unused slots to the other. The per-section knobs of v2 (a worsening MULTIPLE,
+`gate == "heavy burden"`; selection only orders (worsening by movement,
+heavy burden by expected size, thin anchors demoted in both) and cuts to
+`PYTHIA_INTERPRETER_MAX_ENTRIES` (5) across the whole report, split 60/40 in
+favour of worsening with either side handing its unused slots to the other. The per-section knobs of v2 (a worsening MULTIPLE,
 a minimum and a maximum per box) were removed: ranking by a multiple is the
 defect the excess ordering exists to fix, and keeping a second policy beside
 the gate would let the two disagree.
@@ -420,9 +523,60 @@ validation with every worsening entry's headline number unresolvable.
 `fig:eiv_nominal` and `{{fig:eiv_nominal}}` all resolve. The prefix carries no
 meaning and rejecting it failed a report over punctuation.
 
+## What the model actually writes (v4)
+
+Everything numeric in this report is computed in SQL and rendered
+deterministically. That is the right design and it does not change, but it
+left the model summarising, which is not what a frontier model is for. v4 adds
+four fields that require judgement and none of which can be computed:
+
+| field | what it asks for |
+|---|---|
+| `tensions` (≤2 per entry) | two claims in the evidence that do not sit together, and an account of why both can be true or which is more credible. An acknowledged contradiction is worth more than a tidy narrative with one side buried. South Sudan's entry printed a 67% rise in civilian killings above a 4% fall in violent incidents as adjacent bullets with no comment. |
+| `challenge` | what the adversarial check did to the reading: `held`, `weakened` or `changed_the_reading`, with the reasoning. Somalia is the live case — the challenge argued the coming short rains carry flood risk rather than drought, a serious objection to a drought entry, and the reader had no way to know whether it was taken seriously. |
+| `second_opinion_explanation` | where the second reader differs, the SOURCE of the difference: different evidence, different weight on the same evidence, or a different reading of the time frame. "More cautious" is a label, not something a reader can act on. |
+| `falsifier` (required) | what would have to be observed in the next thirty days for the call to look wrong. Cheap, genuinely analytical, and it makes the report testable before anything resolves. It also feeds the forecast diary: a falsifier that fired is the most legible way to report a miss. |
+
+Two more at the top level: `cross_cutting` (five sentences at most, near the
+front — are the entries connected by a common driver, or are they four
+separate droughts that happen to fall in one month?) and
+`scan_forecast_disagreements`, which was specified in the v3 plan and never
+appeared in a published report. Where the scan called a high chance of change
+and the ensemble came back at its anchor, one of the two is wrong, and nothing
+outside this system produces that page.
+
+All of them are linted like any other prose: the no-digits rule, the house
+style and the code check apply to a reconciliation exactly as they apply to an
+impact.
+
+### Measuring the model rather than arguing about it (v4)
+
+Two decisions are pending: whether Opus earns its cost, and whether the fields
+above land or come back hollow. Two tools, and neither changes the production
+model:
+
+- **`check_generic_phrases`** (validate.py, the eighth check) counts stock
+  phrases — access constraints, funding gaps, protection risks, plus the
+  process vocabulary a reader does not want (base rate, the distribution,
+  left tail) — per SECTION of the report, and flags any that appear in more
+  than `PYTHIA_INTERPRETER_GENERIC_PHRASE_MAX` (3). It REPORTS, like the
+  proper-noun check: a proxy for writing quality must never stop a report
+  being published. It is the only check in the suite that can compare two
+  models on one pack, because a weaker model reaches for the sentence that
+  fits any crisis and that degradation is invisible to everything else here.
+- **`python -m scripts.compare_interpreter_models --models A B`** runs one
+  pack through two models (`interpreter.run --model-override`, `--force` so
+  each gets its own stored version), writes both reports for reading, and
+  prints the phrase counts beside a substance table: tensions per entry,
+  challenge verdicts, falsifiers, and how many characters each model spent on
+  the fields that matter. Opt-in in `interpreter_backfill.yml` via the
+  `compare_models` input, because it costs a second full call per run and
+  because the API key lives in CI. **The counts are a proxy. Deciding from
+  the artifacts is a person's job.**
+
 ## Validation (Phase 4 — `interpreter/validate.py`)
 
-Seven checks run after generation, before storage; each is reported
+Eight checks run after generation, before storage; each is reported
 separately in `validation_json` and any failure sets
 `status='failed_validation'` (the report is still stored and rendered, so
 failures stay inspectable):
@@ -457,6 +611,11 @@ failures stay inspectable):
    demoting, inventing or dropping an entry fails. Skipped when the pack
    carries no categorised rows (a scored interpretation has no attention
    list at all).
+7. **proper_nouns** — a name in prose must appear in the pack's evidence.
+   Reports rather than fails, but the violations are quoted back in the
+   correction pass.
+8. **generic_phrases** — how much of the report is written in the sentence
+   that fits any crisis (see above). Reports rather than fails.
 
 **One correction pass.** When validation fails, the runner quotes the exact
 complaints back to the model and asks for the same report with only those

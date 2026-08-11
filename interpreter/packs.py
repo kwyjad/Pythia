@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from interpreter import names, selection
+from interpreter import gating, names, panels, selection
 
 LOGGER = logging.getLogger(__name__)
 
@@ -201,19 +201,26 @@ def report_extras(pack: Pack) -> dict[str, Any]:
     compose, so it cannot get them wrong, and every count the report prints
     about itself comes from one object.
     """
-    from interpreter import gating, panels
+    from interpreter import config
 
     rows = [dict(r) for r in pack.attention_rows]
     for row in rows:
         row["exceedances"] = _as_floats(row.get("exceedances"))
         for key in ("excess_nominal", "excess_per_100k", "js_vs_baserate",
-                    "baserate_n_obs"):
+                    "baserate_n_obs",
+                    # v4: the movement key, so the appendix table and the
+                    # generated planning sentence read numbers rather than
+                    # the CSV's strings.
+                    "delta_p50", "delta_p90", "movement_threshold",
+                    "material_movement", "p50_peak", "p90_peak",
+                    "p_zero_peak", "baserate_p50_peak", "baserate_p90_peak"):
             row[key] = _as_float(row.get(key))
         row["baserate_thin"] = str(row.get("baserate_thin") or "").lower() in (
             "true", "1", "yes"
         )
     counts = {
         "considered": len(rows),
+        "mode": config.gate_mode(),
         "both": sum(1 for r in rows if r.get("gate") == gating.GATE_WORSENING),
         "major": sum(1 for r in rows if r.get("gate") == gating.GATE_MAJOR),
         "watchlist": sum(1 for r in rows if r.get("gate") == gating.GATE_WATCHLIST),
@@ -237,6 +244,25 @@ def report_extras(pack: Pack) -> dict[str, Any]:
             str(r.get("question_id")): str(r.get("sibyl_tag"))
             for r in rows if r.get("sibyl_tag")
         },
+        # {question_id: the finished planning sentence}. Generated, because it
+        # is a frame with two numbers in it and no judgement, and leaving it
+        # to the model produced "+5 people more deaths" and a contingency
+        # figure identical to the planning figure.
+        "planning_sentences": {
+            qid: sentence
+            for qid, sentence in (
+                (str(r.get("question_id")), panels.planning_sentence(r))
+                for r in rows
+            )
+            if sentence
+        },
+        # {question_id: which of the two figures actually moved}. The report
+        # may not claim a rise the planning figure does not support.
+        "movement_notes": {
+            str(r.get("question_id")): str(r.get("movement_shape"))
+            for r in rows
+            if r.get("movement_shape") and r.get("gate") == gating.GATE_WORSENING
+        },
         "decision_calendar": (_json_file(pack, "decision_calendar.json") or {}),
         "sibyl": _json_file(pack, "sibyl.json"),
         "sector": _json_file(pack, "sector_comparison.json"),
@@ -249,15 +275,37 @@ def report_extras(pack: Pack) -> dict[str, Any]:
         # the system cannot see changes how every entry should be read, and it
         # used to sit on page fourteen.
         "blind_spots_short": list(blind.get("standing_caveats") or [])[:3],
-        "watchlist": [
-            {
-                "country": r.get("country_name") or r.get("iso3"),
-                "hazard": r.get("hazard_name") or r.get("hazard_code"),
-                "metric": r.get("metric_name") or r.get("metric"),
-            }
-            for r in rows if r.get("gate") == gating.GATE_WATCHLIST
-        ],
+        # Capped, with the overflow left to the appendix question table which
+        # already holds every row. Thirty lines reading "a major disaster
+        # alert" with no figure attached is a list nobody finishes.
+        "watchlist": _watchlist(rows, config.max_watchlist()),
+        "watchlist_total": sum(
+            1 for r in rows if r.get("gate") == gating.GATE_WATCHLIST
+        ),
     }
+
+
+def _watchlist(rows: list[dict[str, Any]], cap: int) -> list[dict[str, Any]]:
+    """The watchlist, largest movement first, capped.
+
+    Each line carries a figure: a list of names with no number attached tells
+    a reader nothing about which of them to look at.
+    """
+    picked = [r for r in rows if r.get("gate") == gating.GATE_WATCHLIST]
+    picked.sort(key=gating.movement_rank_key)
+    out: list[dict[str, Any]] = []
+    for row in picked[:max(0, int(cap))]:
+        movement = row.get("material_movement")
+        out.append({
+            "country": row.get("country_name") or row.get("iso3"),
+            "hazard": row.get("hazard_name") or row.get("hazard_code"),
+            "metric": row.get("metric_name") or row.get("metric"),
+            "movement": (
+                panels.humanise_count(movement, str(row.get("metric") or ""))
+                if isinstance(movement, (int, float)) else None
+            ),
+        })
+    return out
 
 
 def evidence_text(pack: Pack) -> str:
