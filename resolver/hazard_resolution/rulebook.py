@@ -393,6 +393,19 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     _require_int_in("extraction.max_output_tokens", 64, 32_000)
     _require_positive_number("extraction.request_timeout_sec")
     _require_int_in("extraction.max_calls_per_month", 0, 1_000_000)
+    _require_int_in("extraction.backcast_max_calls_per_month", 0, 1_000_000)
+    _sub_cap = _get("extraction.backcast_max_calls_per_month")
+    _total_cap = _get("extraction.max_calls_per_month")
+    if (
+        isinstance(_sub_cap, int)
+        and isinstance(_total_cap, int)
+        and _sub_cap > _total_cap
+    ):
+        problems.append(
+            "extraction.backcast_max_calls_per_month must not exceed "
+            "extraction.max_calls_per_month — the sub-cap carves a backcast "
+            "share OUT of the monthly total, it does not add to it"
+        )
     _require_bool("extraction.skip_when_higher_rung_populated")
 
     # Drought rule: IPC Phase 3+ delta, gated by drought indicators.

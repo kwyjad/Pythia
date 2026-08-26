@@ -203,6 +203,7 @@ _CORE_TABLE_DDL: dict[str, str] = {
         cost_usd DOUBLE,
         doc_url TEXT,
         error TEXT,
+        run_type TEXT,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (doc_id, model, prompt_version, iso3, hazard, year, month)
     )
@@ -333,6 +334,10 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str, str | None], ...] = (
     ("haz_impact_candidates", "detail_json", "TEXT", None),
     ("haz_resolutions", "run_type", "TEXT DEFAULT 'live'", "'live'"),
     ("haz_triggers", "run_type", "TEXT DEFAULT 'live'", "'live'"),
+    # Deliberately NO backfill: pre-split ledger rows stay NULL, and the
+    # budget query counts NULL toward the BACKCAST share — every pre-split
+    # row was backcast-created (the live path first runs 2026-08-28).
+    ("haz_doc_extractions", "run_type", "TEXT", None),
 )
 
 _INDEX_DDL = (

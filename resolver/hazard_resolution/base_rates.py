@@ -404,6 +404,18 @@ def compute_all(
 ) -> dict[str, BaseRateRun]:
     """Rebuild both base-rate tables."""
 
+    # First flip the provisional label off rows whose freeze deadline has
+    # passed — values untouched, only the revisability label moves to match
+    # the calendar. Without this, the oldest month of every live trailing
+    # window (written 1-2 days before its own deadline, then out of the
+    # window) stayed provisional forever and compute_severity's
+    # non-provisional filter excluded it from the quantiles for good. Both
+    # callers of the base rates (the nightly backcast and resolver_update
+    # Phase 2.5) route through here, so one call site covers both.
+    from resolver.hazard_resolution.resolutions import finalize_frozen_provisionals
+
+    finalize_frozen_provisionals(con, today=today)
+
     return {
         "occurrence": compute_occurrence(con, rulebook, hazards=hazards, today=today),
         "severity": compute_severity(con, rulebook, hazards=hazards, today=today),

@@ -61,10 +61,17 @@ def open_db(db: str) -> duckdb.DuckDBPyConnection:
     if not path.exists():
         raise FileNotFoundError(f"DuckDB not found at {path}")
     try:
-        return duckdb.connect(str(path), read_only=True)
+        con = duckdb.connect(str(path), read_only=True)
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("Read-only open failed (%s); retrying read-write", exc)
-        return duckdb.connect(str(path), read_only=False)
+        con = duckdb.connect(str(path), read_only=False)
+    try:
+        from pythia.tools._db_utils import apply_compute_memory_guard
+
+        apply_compute_memory_guard(con)
+    except Exception:  # noqa: BLE001 - sparse envs degrade
+        pass
+    return con
 
 
 def rows_as_dicts(

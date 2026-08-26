@@ -159,6 +159,15 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-workflows: |
             Hazard Backcast
+          # This workflow's terminal gate deliberately turns "some months
+          # failed" into a red run AFTER the canonical upload succeeded. A
+          # success-only discovery would orphan every such night's artifact
+          # and restart tomorrow from the last green night — observed
+          # 2026-08-15..25: eleven nights each redoing and discarding ~3.5 h
+          # of work. Failed runs of THIS workflow are therefore candidates
+          # too; validate-cmd still rejects a bad DB.
+          include-failed-runs-from: |
+            Hazard Backcast
           validate-cmd: >-
             python -m scripts.ci.db_signature write
             --db data/resolver.duckdb

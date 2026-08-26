@@ -64,3 +64,53 @@ def test_compare_signatures_detects_regression(tmp_path: Path) -> None:
     out_path = tmp_path / "signature.json"
     db_signature.write_signature(before, out_path)
     assert out_path.exists()
+
+
+def test_compare_optional_signatures_warns_never_blindly(tmp_path: Path) -> None:
+    """Optional regressions are reported; legitimate absence is not.
+
+    Before this existed the optional half of the signature was computed,
+    written and never read — the haz_* tables could drop to zero and the
+    compare still exited 0.
+    """
+
+    db_path = tmp_path / "resolver.duckdb"
+    _setup_db(db_path)
+
+    conn = duckdb_io.get_db(str(db_path))
+    try:
+        conn.execute("CREATE TABLE haz_triggers (id INTEGER)")
+        conn.execute("INSERT INTO haz_triggers VALUES (1), (2), (3)")
+    finally:
+        duckdb_io.close_db(conn)
+
+    optional = ["haz_triggers", "haz_resolutions"]
+    before = db_signature.compute_signature(db_path, ["questions"], optional)
+
+    # A shrink in a present optional table is a warning...
+    conn = duckdb_io.get_db(str(db_path))
+    try:
+        conn.execute("DELETE FROM haz_triggers WHERE id >= 2")
+    finally:
+        duckdb_io.close_db(conn)
+    shrunk = db_signature.compute_signature(db_path, ["questions"], optional)
+    warnings = db_signature.compare_optional_signatures(before, shrunk, optional)
+    assert warnings == ["haz_triggers: 1 < 3"]
+
+    # ...a table the baseline never had is NOT (haz_resolutions is absent in
+    # both signatures — an older DB predating the feature must stay quiet).
+    assert not any("haz_resolutions" in w for w in warnings)
+
+    # A present-before, missing-after table IS a warning.
+    conn = duckdb_io.get_db(str(db_path))
+    try:
+        conn.execute("DROP TABLE haz_triggers")
+    finally:
+        duckdb_io.close_db(conn)
+    dropped = db_signature.compute_signature(db_path, ["questions"], optional)
+    warnings = db_signature.compare_optional_signatures(before, dropped, optional)
+    assert warnings == ["haz_triggers: present before (3 rows), now missing"]
+
+    # And none of it is fatal: compare_signatures (the required check) still
+    # returns no regressions for this DB.
+    assert db_signature.compare_signatures(before, dropped, ["questions"]) == []

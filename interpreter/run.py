@@ -209,7 +209,14 @@ def parse_model_json(text: str) -> dict[str, Any] | None:
 def _open_db(db: str):
     from resolver.db import duckdb_io
 
-    return duckdb_io, duckdb_io.get_db(db or duckdb_io.DEFAULT_DB_URL)
+    con = duckdb_io.get_db(db or duckdb_io.DEFAULT_DB_URL)
+    try:
+        from pythia.tools._db_utils import apply_compute_memory_guard
+
+        apply_compute_memory_guard(con)
+    except Exception:  # pragma: no cover - sparse envs degrade
+        pass
+    return duckdb_io, con
 
 
 def _error_count(report) -> list[str]:

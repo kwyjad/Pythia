@@ -332,7 +332,11 @@ def resolve_triggered_cells(
     run = LadderRun(hazard=hazard, ym=ym, fetches=fetches or {})
     year = int(ym.split("-")[0])
     unavailable = run.unavailable_sources
-    budget = extract_mod.load_budget(con, rulebook, today=today) if extract else None
+    budget = (
+        extract_mod.load_budget(con, rulebook, today=today, run_type=run_type)
+        if extract
+        else None
+    )
     country_names = _load_country_names()
 
     # One country's exception must not cost the rest of the month their

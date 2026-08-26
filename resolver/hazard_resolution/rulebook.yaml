@@ -539,6 +539,17 @@ extraction:
   # extraction_budget_capped in their provenance; they are never silently
   # treated as "ReliefWeb had nothing".
   max_calls_per_month: 3000
+  # The nightly backcast's share of that monthly total (it is a carve-out,
+  # never an addition — the validator enforces sub-cap <= total). The live
+  # trailing-window runs check only the total, so the difference is in
+  # effect a reserve for them: the backcast proved it will consume any
+  # budget it is given (it spent all of August's 1500 calls by mid-month,
+  # leaving the first live resolver_update run nothing), and without a
+  # split the monthly run's rung 2 is starved every month the backfill is
+  # still converging. Pre-split ledger rows carry run_type NULL and count
+  # against the backcast share — every one of them was backcast-created
+  # (the live path first runs 2026-08-28).
+  backcast_max_calls_per_month: 2000
   # Skip extraction for a cell whose HIGHER ladder rung already has a
   # figure. reliefweb_extracted sits below emdat, so it cannot win those
   # cells — reading them buys only adjacent-rung conflict flags, at roughly
