@@ -18,6 +18,7 @@ zero out of an outage.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 import duckdb
 import pytest
@@ -486,3 +487,75 @@ def test_gdacs_fetch_failure_reports_unavailable(con, rulebook, monkeypatch):
     outcome = gdacs_mod.fetch_gdacs_events(con, "2024-03", "FL", rulebook)
     assert outcome.ok is False
     assert "gdacs down" in outcome.error
+
+
+def test_gdacs_event_record_clamps_a_reversed_date_range(caplog):
+    """The real 2021 shape: todate 2021-09-01 precedes fromdate 2021-09-28.
+
+    One such event raised out of event_months and killed four backcast
+    months (2021-08..2021-11) on eleven consecutive nightly runs. A
+    reversed range is upstream data damage, not a reason to lose the
+    month: clamp to the start day, keep the raw todate in provenance,
+    and say so in the log.
+    """
+    with caplog.at_level(logging.WARNING):
+        record = gdacs_mod._event_record(
+            {
+                "eventid": "1000496", "eventtype": "FL", "iso3": "PHL",
+                "iso3_list": ["PHL"], "country": "Philippines",
+                "alertlevel": "Green", "population": 1000,
+                "fromdate": "2021-09-28", "todate": "2021-09-01",
+            },
+            "FL",
+        )
+    assert record is not None
+    assert record.payload["start_date"] == "2021-09-28"
+    assert record.payload["end_date"] == "2021-09-28"  # clamped
+    assert record.payload["end_date_raw"] == "2021-09-01"  # provenance
+    assert record.payload["months_overlapped"] == ["2021-09"]
+    assert record.ym == "2021-09"
+    assert any("1000496" in m for m in caplog.messages)
+
+
+def test_gdacs_event_record_keeps_end_date_raw_none_when_not_clamped():
+    record = gdacs_mod._event_record(
+        {
+            "eventid": "1000001", "eventtype": "FL", "iso3": "PHL",
+            "iso3_list": ["PHL"], "fromdate": "2024-03-05",
+            "todate": "2024-03-09",
+        },
+        "FL",
+    )
+    assert record.payload["end_date_raw"] is None
+
+
+def test_gdacs_fetch_survives_one_malformed_event(con, rulebook, monkeypatch):
+    """The fetch's no-raise contract applies per EVENT, not just per request.
+
+    A single garbled upstream event must be skipped with a warning while
+    the rest of the month's events store normally — GDACS answered.
+    """
+    good = {
+        "eventid": "1", "eventtype": "FL", "iso3": "PHL",
+        "iso3_list": ["PHL"], "fromdate": "2024-03-05",
+        "todate": "2024-03-09",
+    }
+    bad = {**good, "eventid": "2", "iso3_list": 42}  # not iterable -> TypeError
+
+    class TwoEventConnector:
+        def _search_events(self, *a, **kw):
+            return [good, bad]
+
+        def _enrich_with_population(self, session, events, delay, name_to_iso3):
+            return events
+
+    from resolver.connectors import gdacs as core
+
+    monkeypatch.setattr(core, "GdacsConnector", TwoEventConnector)
+    monkeypatch.setattr(core, "_build_session", lambda: object())
+    monkeypatch.setattr(core, "_load_countries", lambda: ({}, {}))
+
+    outcome = gdacs_mod.fetch_gdacs_events(con, "2024-03", "FL", rulebook)
+    assert outcome.ok is True
+    assert outcome.records == 1
+    assert outcome.detail["events_skipped_malformed"] == 1

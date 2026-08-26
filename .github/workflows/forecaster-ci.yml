@@ -6,9 +6,15 @@
 ---
 name: Forecaster CI — SPD
 
+# Per-ref CI group (same pattern as resolver-ci-fast / resolver-smoke).
+# NEVER put this workflow back in the pythia-resolver-db group: it only
+# builds a placeholder DB (`: > data/resolver.duckdb`) and never touches
+# the canonical artifact — and a concurrency group holds exactly ONE
+# pending run, so a PR run queued in that group while the nightly backcast
+# held it would CANCEL a pending scheduled Resolver Update.
 concurrency:
-  group: pythia-resolver-db
-  cancel-in-progress: false
+  group: forecaster-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 on:
   pull_request:
