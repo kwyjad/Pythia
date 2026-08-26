@@ -107,8 +107,13 @@ jobs:
     # non-reset budget rose 150 -> 240 when Phase 2.5 (the PA resolution
     # machine) was added: its ReliefWeb silence sweeps are paced at ~0.5 s per
     # country and cover ~250 countries x 3 trailing months per hazard, which
-    # is 60-90 min of deliberate patience, not slack to trim.
-    timeout-minutes: ${{ inputs.reset_db && 300 || 240 }}
+    # is 60-90 min of deliberate patience, not slack to trim. It rose again
+    # 240 -> 330 (reset 300 -> 350) on 2026-08-26: worst-case step budgets
+    # (Phase 1 connectors 70 + monthly fatalities ~30, Phase 2 ~30, Phase 2.5
+    # 60+75+20+15, Phase 3 30, Phase 4 15, Phase 5 + canonical download tails)
+    # sum past 240, and a job-timeout kill BEFORE the Phase 5 canonical upload
+    # wastes the entire ingest — the job must always reach that upload.
+    timeout-minutes: ${{ inputs.reset_db && 350 || 330 }}
     env:
       RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -331,7 +336,13 @@ jobs:
           # returns partial rows (rc=0) instead of being SIGKILLed (rc=124).
           ACLED_MAX_RUNTIME_SEC: ${{ inputs.reset_db && '3900' || '1500' }}
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_client') || contains(inputs.only_connector, 'ifrc_go_client') }}
-        timeout-minutes: ${{ inputs.reset_db && 90 || 45 }}
+        # CONNECTOR_TIMEOUT is applied PER CONNECTOR by run_connectors.py, and
+        # two live connectors run here (ACLED + IFRC; IDMC is skipped via
+        # RESOLVER_SKIP_IDMC) — so the step budget must exceed 2x it: non-reset
+        # 2x1800 s = 60 min -> 70. The reset arm (90 < 2x4200 s) leans on
+        # ACLED_MAX_RUNTIME_SEC=3900 returning partial rows early and the
+        # observed ~35-min reset pulls.
+        timeout-minutes: ${{ inputs.reset_db && 90 || 70 }}
         run: |
           set -euo pipefail
           echo "::group::Connectors (ACLED, IFRC)"
@@ -448,7 +459,13 @@ jobs:
       - name: "Phase 2.5: Compute machine months (trailing unfrozen window)"
         id: haz_months
         if: ${{ inputs.only_connector == '' }}
+        # Non-fatal like the rest of Phase 2.5 (shadow mode): on failure the
+        # three machine steps below skip via their empty-months guard rather
+        # than running `--months` with no arguments (argparse would reject
+        # that, invisibly, inside a green step).
+        continue-on-error: true
         run: |
+          set -euo pipefail
           MONTHS=$(python -c "
           import datetime as dt
           today = dt.date.today()
@@ -461,34 +478,48 @@ jobs:
                   month, year = 12, year - 1
           print(' '.join(reversed(months)))
           ")
+          if [ -z "${MONTHS}" ]; then
+            echo "::warning::Phase 2.5 month computation produced no output — machine steps will be skipped"
+            exit 1
+          fi
           echo "months=$MONTHS" >> "$GITHUB_OUTPUT"
           echo "PA resolution machine months: $MONTHS"
 
+      # The three machine steps use `set -o pipefail` (deliberately NOT -e):
+      # without pipefail the pipeline's exit status is tee's — always 0 — so
+      # the `|| ::warning` branch was dead code and a failed machine run was
+      # indistinguishable from a clean one in the Actions UI. With pipefail
+      # the warning fires; the `||` still makes the step exit 0, and
+      # continue-on-error stays as belt and braces (shadow mode must never
+      # fail the job).
       - name: "Phase 2.5: PA machine — flood"
         timeout-minutes: 60
-        if: ${{ inputs.only_connector == '' }}
+        if: ${{ inputs.only_connector == '' && steps.haz_months.outputs.months != '' }}
         continue-on-error: true
         run: |
+          set -o pipefail
           echo "::group::PA machine (flood)"
-          python -m resolver.hazard_resolution.cli --hazard flood --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_flood.json 2>&1 | tee diagnostics/phase25_haz_flood.log || echo "WARNING: flood resolution machine failed (non-fatal)"
+          python -m resolver.hazard_resolution.cli --hazard flood --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_flood.json 2>&1 | tee diagnostics/phase25_haz_flood.log || echo "::warning::flood resolution machine failed (non-fatal)"
           echo "::endgroup::"
 
       - name: "Phase 2.5: PA machine — cyclone"
         timeout-minutes: 75
-        if: ${{ inputs.only_connector == '' }}
+        if: ${{ inputs.only_connector == '' && steps.haz_months.outputs.months != '' }}
         continue-on-error: true
         run: |
+          set -o pipefail
           echo "::group::PA machine (cyclone)"
-          python -m resolver.hazard_resolution.cli --hazard cyclone --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_cyclone.json 2>&1 | tee diagnostics/phase25_haz_cyclone.log || echo "WARNING: cyclone resolution machine failed (non-fatal)"
+          python -m resolver.hazard_resolution.cli --hazard cyclone --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_cyclone.json 2>&1 | tee diagnostics/phase25_haz_cyclone.log || echo "::warning::cyclone resolution machine failed (non-fatal)"
           echo "::endgroup::"
 
       - name: "Phase 2.5: PA machine — drought"
         timeout-minutes: 20
-        if: ${{ inputs.only_connector == '' }}
+        if: ${{ inputs.only_connector == '' && steps.haz_months.outputs.months != '' }}
         continue-on-error: true
         run: |
+          set -o pipefail
           echo "::group::PA machine (drought)"
-          python -m resolver.hazard_resolution.cli --hazard drought --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_drought.json 2>&1 | tee diagnostics/phase25_haz_drought.log || echo "WARNING: drought resolution machine failed (non-fatal)"
+          python -m resolver.hazard_resolution.cli --hazard drought --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_drought.json 2>&1 | tee diagnostics/phase25_haz_drought.log || echo "::warning::drought resolution machine failed (non-fatal)"
           echo "::endgroup::"
 
       - name: "Phase 2.5: Refresh machine base rates + acceptance report"
@@ -496,9 +527,10 @@ jobs:
         if: ${{ inputs.only_connector == '' }}
         continue-on-error: true
         run: |
+          set -o pipefail
           echo "::group::PA machine base rates + acceptance"
-          python -m resolver.hazard_resolution.base_rates 2>&1 | tee diagnostics/phase25_haz_base_rates.log || echo "WARNING: base-rate refresh failed (non-fatal)"
-          python -m resolver.hazard_resolution.acceptance --out diagnostics/haz_acceptance_report.md 2>&1 | tee diagnostics/phase25_haz_acceptance.log || echo "WARNING: acceptance report failed (non-fatal)"
+          python -m resolver.hazard_resolution.base_rates 2>&1 | tee diagnostics/phase25_haz_base_rates.log || echo "::warning::base-rate refresh failed (non-fatal)"
+          python -m resolver.hazard_resolution.acceptance --out diagnostics/haz_acceptance_report.md 2>&1 | tee diagnostics/phase25_haz_acceptance.log || echo "::warning::acceptance report failed (non-fatal)"
           echo "::endgroup::"
 
       # === PHASE 3: STRUCTURED DATA — Pythia tables (non-fatal) ===

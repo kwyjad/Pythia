@@ -17,6 +17,7 @@ CLAUDE.md's Known failure modes).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
@@ -27,7 +28,32 @@ __all__ = [
     "row_count",
     "column_exists",
     "add_column_if_missing",
+    "apply_compute_memory_guard",
 ]
+
+
+def apply_compute_memory_guard(conn: Any) -> None:
+    """Cap DuckDB's memory on a compute-path connection — a runaway guard.
+
+    Without a limit DuckDB defaults to ~80% of system RAM, and an OOM-killed
+    compute step is the most likely way to leave a stale WAL behind a
+    `continue-on-error` writer (the calibration-summary landmine, fixed
+    2026-08-26). The default is deliberately GENEROUS (4GB on a 16GB
+    runner): this exists to stop a runaway query taking the process down,
+    never to squeeze the tools — the API's 150MB serving limits are far too
+    small for whole-table compute. Non-fatal by design: a connection that
+    refuses the pragma still works.
+
+    Env: PYTHIA_COMPUTE_DUCKDB_MEMORY_LIMIT (default "4GB"),
+    PYTHIA_COMPUTE_DUCKDB_THREADS (default "4").
+    """
+    memory_limit = os.getenv("PYTHIA_COMPUTE_DUCKDB_MEMORY_LIMIT", "4GB")
+    threads = os.getenv("PYTHIA_COMPUTE_DUCKDB_THREADS", "4")
+    try:
+        conn.execute(f"SET memory_limit='{memory_limit}'")
+        conn.execute(f"SET threads={int(threads)}")
+    except Exception as exc:  # pragma: no cover - pragma support varies
+        LOGGER.warning("compute memory guard not applied: %s", exc)
 
 
 def rollback_quietly(conn: Any) -> None:

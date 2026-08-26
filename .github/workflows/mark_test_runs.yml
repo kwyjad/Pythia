@@ -5,6 +5,14 @@
 
 name: Mark runs as test
 
+# This workflow edits and re-uploads the canonical pythia-resolver-db, so it
+# must serialize with every other producer/consumer of that artifact (same
+# group as purge_hs_run.yml) — without this it can run concurrently with the
+# chain and fork the artifact line.
+concurrency:
+  group: pythia-resolver-db
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:

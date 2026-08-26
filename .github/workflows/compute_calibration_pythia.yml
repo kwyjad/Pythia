@@ -182,8 +182,17 @@ jobs:
 
       - name: Emit calibration summary
         if: always()
+        # Diagnostics only — a summary failure must never fail calibration,
+        # which would skip the canonical upload AND the publish dispatch at
+        # the end of this job (both are if: success()).
+        continue-on-error: true
         run: |
           DB_PATH="${RESOLVER_DB_URL#duckdb:///}"
+          # The two best-effort read-write steps above (AI bundle, interpreter
+          # scored) can die mid-write and leave a stale WAL, which a read_only
+          # open refuses to replay. Same strip idiom as download-canonical-db
+          # and publish_latest_data.
+          rm -f "${DB_PATH}.wal"
           python - <<PY
           import duckdb, json, pathlib
           con = duckdb.connect("${DB_PATH}", read_only=True)
@@ -235,4 +244,5 @@ jobs:
           gh workflow run publish_latest_data.yml \
             -R "${{ github.repository }}" \
             --ref main \
-            -f run_id=${{ github.run_id }}
+            -f run_id=${{ github.run_id }} \
+            -f dispatched_by_chain=true

@@ -109,6 +109,35 @@ def compare_signatures(before: dict, after: dict, required: Iterable[str]) -> li
     return regressions
 
 
+def compare_optional_signatures(
+    before: dict, after: dict, optional: Iterable[str]
+) -> list[str]:
+    """Regressions in OPTIONAL tables — reported, never fatal.
+
+    Optional tables may legitimately be absent (an older DB predating the
+    feature), so absence is not a regression when the table never existed
+    in the baseline. What IS worth a warning: a table the baseline HAD that
+    is now missing, and a row count that shrank. Without this the optional
+    half of the signature was computed, written to the JSON and never read
+    — a decorative guard (the haz_* tables could drop to zero and both the
+    resolver_update and haz_backcast compare steps would exit 0).
+    """
+
+    warnings: list[str] = []
+    before_counts = before.get("optional_counts", {})
+    after_counts = after.get("optional_counts", {})
+    for table in optional:
+        before_count = before_counts.get(table)
+        after_count = after_counts.get(table)
+        if before_count is None:
+            continue  # the baseline never had it — nothing to regress from
+        if after_count is None:
+            warnings.append(f"{table}: present before ({before_count} rows), now missing")
+        elif after_count < before_count:
+            warnings.append(f"{table}: {after_count} < {before_count}")
+    return warnings
+
+
 def print_signature(signature: dict, required: Iterable[str], optional: Iterable[str]) -> None:
     required_list = list(required)
     optional_list = list(optional)
@@ -173,7 +202,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             write_signature(after_signature, args.out)
             regressions = compare_signatures(before, after_signature, required)
+            optional_warnings = compare_optional_signatures(before, after_signature, optional)
             print_signature(after_signature, required, optional)
+            # Optional-table regressions warn but never fail: optional tables
+            # may legitimately be absent on older DBs, and a hard fail here
+            # would block workflows that never touch them.
+            for warning in optional_warnings:
+                print(f"::warning::optional table regressed: {warning}")
             if after_signature.get("missing_required"):
                 sys.stderr.write(
                     "Missing required tables: " + ", ".join(after_signature["missing_required"]) + "\n"

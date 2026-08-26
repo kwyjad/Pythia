@@ -46,6 +46,20 @@ inputs:
       candidates (e.g. a maintenance workflow that re-uploads the artifact
       itself). Candidates from all lists are merged and sorted by createdAt.
     default: ""
+  include-failed-runs-from:
+    description: >
+      Newline-separated workflow names whose FAILED runs are also discovery
+      candidates. For a workflow that uploads the canonical DB and then
+      runs a deliberate red gate (Hazard Backcast: "the run must show red
+      so the failure is visible" — but the upload already succeeded), a
+      success-only discovery orphans every red night's artifact: each night
+      restarts from the last GREEN producer and silently redoes + discards
+      the work (observed 2026-08-15..25, ~3.5 h/night). Safe because the
+      upload step is `if: success()` up to its own point (a run that died
+      BEFORE uploading has no artifact and falls through), and validate-cmd
+      still rejects a bad DB. Use ONLY for self-inclusion of such
+      gate-after-upload workflows.
+    default: ""
   validate-cmd:
     description: >
       Optional shell command run after each candidate DB is copied to
@@ -80,6 +94,7 @@ runs:
         ARTIFACT_NAME: ${{ inputs.artifact-name }}
         DEST: ${{ inputs.dest }}
         EXTRA_WORKFLOWS: ${{ inputs.extra-workflows }}
+        FAILED_RUN_WORKFLOWS: ${{ inputs.include-failed-runs-from }}
         VALIDATE_CMD: ${{ inputs.validate-cmd }}
         PER_WF_LIMIT: ${{ inputs.per-workflow-limit }}
       run: |
@@ -106,6 +121,10 @@ runs:
           fi
           if [ "${src}" != "${DEST}/resolver.duckdb" ]; then
             cp "${src}" "${DEST}/resolver.duckdb"
+            # Drop the downloaded artifact tree once the canonical copy
+            # exists — otherwise every consumer carries two copies of a
+            # multi-GB DB through the rest of its job.
+            rm -rf "${DEST}/${ARTIFACT_NAME}"
           fi
           rm -f "${DEST}/resolver.duckdb.wal"
           return 0
@@ -186,6 +205,8 @@ runs:
         Ingest Structured Data
         Hazard Backcast
         Interpreter Backfill
+        Purge HS Run
+        Mark runs as test
         Pythia — Compute Resolutions
         Pythia — Compute SPD Scores
         Pythia — Compute Calibration Weights & Advice
@@ -201,6 +222,22 @@ runs:
                 --branch main --status success \
                 --json databaseId,createdAt --limit "${PER_WF_LIMIT}" \
                 | jq -r --arg wf "${WF}" '.[] | "\(.createdAt),\(.databaseId),\($wf)"' \
+                >>"${CANDIDATES_FILE}" || true
+            done
+
+        # Failed runs of the explicitly-opted-in workflows (see the
+        # include-failed-runs-from input doc: gate-after-upload workflows
+        # whose red runs still carry a good artifact). A failure that died
+        # before uploading simply has no artifact and falls through; the
+        # per-candidate validate-cmd still guards content.
+        printf '%s\n' "${FAILED_RUN_WORKFLOWS:-}" \
+          | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NF' | sort -u \
+          | while IFS= read -r WF; do
+              gh run list \
+                --workflow "${WF}" \
+                --branch main --status failure \
+                --json databaseId,createdAt --limit "${PER_WF_LIMIT}" \
+                | jq -r --arg wf "${WF}" '.[] | "\(.createdAt),\(.databaseId),\($wf) (failed run)"' \
                 >>"${CANDIDATES_FILE}" || true
             done
 

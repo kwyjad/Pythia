@@ -96,6 +96,7 @@ SEED_ADVICE: Dict[Tuple[str, str], str] = {
 # Shared rollback-safe DuckDB helpers (see pythia/tools/_db_utils.py).
 from pythia.tools._db_utils import (
     add_column_if_missing as _add_column_if_missing,
+    apply_compute_memory_guard,
     column_exists as _column_exists,
     rollback_quietly as _rollback_quietly,
     row_count as _row_count,
@@ -1852,6 +1853,7 @@ def generate_calibration_advice(
         raise RuntimeError(duckdb_io.duckdb_unavailable_reason())
 
     conn = duckdb_io.get_db(db_url or duckdb_io.DEFAULT_DB_URL)
+    apply_compute_memory_guard(conn)
 
     try:
         # Ensure is_test column exists on questions (migration for older DBs).

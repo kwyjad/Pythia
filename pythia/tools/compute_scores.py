@@ -47,6 +47,7 @@ def _utcnow_naive() -> datetime:
 
 # Shared rollback-safe DuckDB helpers (see pythia/tools/_db_utils.py).
 from pythia.tools._db_utils import (
+    apply_compute_memory_guard,
     row_count as _row_count,
     table_exists as _table_exists,
 )
@@ -67,7 +68,9 @@ def _get_db_url_from_config() -> str:
 def _open_db(db_url: str | None):
     if not duckdb_io.DUCKDB_AVAILABLE:
         raise RuntimeError(duckdb_io.duckdb_unavailable_reason())
-    return duckdb_io.get_db(db_url or duckdb_io.DEFAULT_DB_URL)
+    conn = duckdb_io.get_db(db_url or duckdb_io.DEFAULT_DB_URL)
+    apply_compute_memory_guard(conn)
+    return conn
 
 
 def _close_db(conn) -> None:

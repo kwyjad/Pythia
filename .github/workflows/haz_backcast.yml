@@ -51,7 +51,7 @@ concurrency:
       time_budget_min:
         description: "Total wall-clock budget in minutes, split across the hazards"
         required: false
-        default: "300"
+        default: "240"
         type: string
       force_during_pipeline:
         description: "Run even while a staged pipeline is in flight (its final canonical upload will DISCARD this run's rows)"
@@ -59,9 +59,17 @@ concurrency:
         default: false
         type: boolean
   schedule:
-    # Nightly at 22:00 UTC — clear of the 1st-of-month forecast cron
-    # (00:00 UTC) and the 28th resolver update (03:00 UTC).
-    - cron: "0 22 * * *"
+    # Nightly at 20:30 UTC, sized against the 28th 03:00 UTC resolver-update
+    # cron: GitHub fires crons late (observed +17 min, up to +60), so worst
+    # case this starts ~21:30; ~20 min setup + canonical download, the
+    # 240-min default budget, then base rates + signature + a ~20-min
+    # canonical upload finish by ~02:40 even on a bad night — the
+    # pythia-resolver-db group is free before 03:00. Do not raise the
+    # default budget or move this cron later without redoing that sum
+    # (the group holds ONE pending run, so a backcast still holding it at
+    # 03:00 puts the monthly ingest into the pending slot a third run can
+    # cancel).
+    - cron: "30 20 * * *"
 
 permissions:
   contents: read
@@ -104,9 +112,11 @@ jobs:
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
-    # Budget (default 300 min) + download/upload/setup headroom, under the
-    # 360-min hard cap.
-    timeout-minutes: 350
+    # Budget (default 240 min) + download/upload/setup headroom, and a hard
+    # stop that frees the pythia-resolver-db group before the 28th 03:00 UTC
+    # resolver-update cron even on the slowest night (a killed night loses
+    # only that night's chunk — the resume ledger continues tomorrow).
+    timeout-minutes: 310
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -149,6 +159,15 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           extra-workflows: |
             Hazard Backcast
+          # This workflow's terminal gate deliberately turns "some months
+          # failed" into a red run AFTER the canonical upload succeeded. A
+          # success-only discovery would orphan every such night's artifact
+          # and restart tomorrow from the last green night — observed
+          # 2026-08-15..25: eleven nights each redoing and discarding ~3.5 h
+          # of work. Failed runs of THIS workflow are therefore candidates
+          # too; validate-cmd still rejects a bad DB.
+          include-failed-runs-from: |
+            Hazard Backcast
           validate-cmd: >-
             python -m scripts.ci.db_signature write
             --db data/resolver.duckdb
@@ -170,7 +189,7 @@ jobs:
           FROM_YM: ${{ inputs.from_ym || '' }}
           TO_YM: ${{ inputs.to_ym || '' }}
           NO_EXTRACT: ${{ github.event_name == 'workflow_dispatch' && (inputs.no_extract == true || inputs.no_extract == 'true') && 'true' || 'false' }}
-          TIME_BUDGET_MIN: ${{ inputs.time_budget_min || '300' }}
+          TIME_BUDGET_MIN: ${{ inputs.time_budget_min || '240' }}
         run: |
           set -uo pipefail
           # Re-assigning from the env (with the same default the env mapping

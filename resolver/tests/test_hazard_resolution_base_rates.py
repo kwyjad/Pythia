@@ -372,3 +372,73 @@ def test_severity_excludes_provisional_values(con, rulebook):
     assert row is not None
     assert row[0] == 3, "the provisional row must not be counted"
     assert row[1] == 10_000.0, "the provisional value must not move the quantiles"
+
+
+# ---------------------------------------------------------------------------
+# Provisional finalization (the one-way freeze door)
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_flips_provisional_rows_past_their_deadline(con):
+    """A row past its stored freeze deadline is no longer revisable.
+
+    Without this pass, the oldest month of every live trailing window —
+    written 1-2 days before its own deadline, then out of the window before
+    the next monthly run — stayed provisional FOREVER, and the severity
+    quantiles (which admit frozen values only) never saw the live path's
+    work.
+    """
+    from resolver.hazard_resolution.resolutions import finalize_frozen_provisionals
+
+    seed_resolution(
+        con, iso3="PHL", ym="2026-06", status="RESOLVED_VALUE",
+        value=50_000.0, provisional=True, frozen_at="2026-08-29 00:00:00",
+    )
+    n = finalize_frozen_provisionals(con, today=dt.date(2026, 8, 30))
+    assert n == 1
+    row = con.execute(
+        "SELECT provisional, value, status FROM haz_resolutions WHERE iso3 = 'PHL'"
+    ).fetchone()
+    assert row[0] is False
+    assert row[1] == 50_000.0, "finalization must never touch the value"
+    assert row[2] == "RESOLVED_VALUE", "finalization must never touch the status"
+
+
+def test_finalize_leaves_pre_deadline_and_unstamped_rows_alone(con):
+    from resolver.hazard_resolution.resolutions import finalize_frozen_provisionals
+
+    # Still inside its revision window — stays provisional.
+    seed_resolution(
+        con, iso3="BGD", ym="2026-07", status="RESOLVED_VALUE",
+        value=1_000.0, provisional=True, frozen_at="2026-09-29 00:00:00",
+    )
+    # Pre-migration row with no stored deadline — left for the per-cell guard.
+    seed_resolution(
+        con, iso3="VNM", ym="2020-01", status="RESOLVED_VALUE",
+        value=2_000.0, provisional=True, frozen_at=None,
+    )
+    n = finalize_frozen_provisionals(con, today=dt.date(2026, 8, 30))
+    assert n == 0
+    rows = dict(
+        con.execute("SELECT iso3, provisional FROM haz_resolutions").fetchall()
+    )
+    assert rows == {"BGD": True, "VNM": True}
+
+
+def test_compute_all_finalizes_before_the_severity_quantiles(con, rulebook):
+    """The just-frozen live month must reach the severity base rate."""
+
+    for ym in ("2020-01", "2020-02", "2020-03"):
+        seed_resolution(con, iso3="PHL", ym=ym, status="RESOLVED_VALUE", value=10_000.0)
+    # The live path wrote May provisional (2 days before its 30 July
+    # deadline); by this run's `today` the deadline has passed.
+    seed_resolution(
+        con, iso3="PHL", ym="2026-05", status="RESOLVED_VALUE",
+        value=40_000.0, provisional=True, frozen_at="2026-07-30 00:00:00",
+    )
+    br.compute_all(con, rulebook, hazards=["FL"], today=TODAY)
+    row = con.execute(
+        "SELECT n_events FROM haz_base_rates_severity WHERE iso3 = 'PHL' AND hazard = 'FL'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 4, "the finalized row must now be counted"

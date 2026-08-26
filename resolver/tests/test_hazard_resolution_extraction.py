@@ -632,6 +632,85 @@ def test_the_cap_counts_calls_made_by_earlier_runs(con, rulebook):
     assert reloaded.exhausted
 
 
+def test_backcast_budget_is_a_carve_out_of_the_monthly_total(con, rulebook):
+    """The nightly backcast honours its sub-cap; live runs check the total.
+
+    Without the split, the backcast spent all of August 2026's allowance by
+    mid-month and the first live resolver_update run had zero extraction
+    budget — the difference between the two caps is in effect a live
+    reserve.
+    """
+
+    backcast = extract_mod.ExtractionBudget(
+        max_calls_per_month=10,
+        used_this_month=6,
+        run_type="backcast",
+        backcast_max_calls_per_month=6,
+        backcast_used_this_month=6,
+    )
+    assert backcast.remaining == 0, "the sub-cap binds even with overall budget left"
+    assert backcast.exhausted
+
+    live = extract_mod.ExtractionBudget(
+        max_calls_per_month=10,
+        used_this_month=6,
+        run_type="live",
+        backcast_max_calls_per_month=6,
+        backcast_used_this_month=6,
+    )
+    assert live.remaining == 4, "the live run checks only the total"
+
+
+def test_load_budget_counts_legacy_null_run_type_rows_as_backcast(con, rulebook):
+    """Pre-split ledger rows carry NULL run_type and were all backcast-made."""
+
+    first = extract_mod.ExtractionBudget(max_calls_per_month=100)
+    _extract_all(con, rulebook, documents=golden_documents()[:3], budget=first)
+    # Simulate pre-split rows: strip the run_type stamp the writer now adds.
+    con.execute("UPDATE haz_doc_extractions SET run_type = NULL")
+
+    reloaded = extract_mod.load_budget(
+        con,
+        make_rulebook(
+            {"extraction": {"max_calls_per_month": 10, "backcast_max_calls_per_month": 3}}
+        ),
+        run_type="backcast",
+    )
+    assert reloaded.backcast_used_this_month == 3
+    assert reloaded.exhausted, "legacy rows must count against the backcast share"
+
+    live = extract_mod.load_budget(
+        con,
+        make_rulebook(
+            {"extraction": {"max_calls_per_month": 10, "backcast_max_calls_per_month": 3}}
+        ),
+        run_type="live",
+    )
+    assert live.remaining == 7
+
+
+def test_the_ledger_stamps_the_run_type(con, rulebook):
+    budget = extract_mod.ExtractionBudget(max_calls_per_month=100, run_type="backcast")
+    _extract_all(con, rulebook, documents=golden_documents()[:1], budget=budget)
+    row = con.execute("SELECT run_type FROM haz_doc_extractions").fetchone()
+    assert row[0] == "backcast"
+
+
+def test_rulebook_rejects_a_backcast_sub_cap_above_the_total():
+    from resolver.hazard_resolution.rulebook import validate_rulebook
+
+    data = make_rulebook()._data if hasattr(make_rulebook(), "_data") else None
+    assert data is not None
+    import copy
+
+    bad = copy.deepcopy(data)
+    bad["extraction"]["backcast_max_calls_per_month"] = (
+        bad["extraction"]["max_calls_per_month"] + 1
+    )
+    problems = validate_rulebook(bad)
+    assert any("must not exceed" in p for p in problems)
+
+
 def test_a_cached_document_is_never_read_twice(con, rulebook):
     documents = golden_documents()[:3]
     budget = extract_mod.ExtractionBudget(max_calls_per_month=1000)

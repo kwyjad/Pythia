@@ -409,3 +409,54 @@ def write_zero_resolution(
         run_type=run_type,
     )
     return WRITE_WRITTEN
+
+
+def finalize_frozen_provisionals(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    today: dt.date | None = None,
+) -> int:
+    """Flip ``provisional`` to FALSE on rows whose freeze deadline has passed.
+
+    The provisional flag means "still revisable"; from the stored
+    ``frozen_at`` deadline nothing is revisable, so a row still marked
+    provisional past it is simply mislabelled. The label matters because
+    ``base_rates.compute_severity`` admits only non-provisional values into
+    the severity quantiles — without this pass, the oldest month of every
+    live trailing window (written 1-2 days before its own deadline, then
+    out of the window before the next monthly run) stayed provisional
+    FOREVER and never fed a base rate.
+
+    This is NOT a revision: values, statuses and provenance are untouched
+    (the freeze guard still owns those), only the revisability label moves
+    to match the calendar. Rows with a NULL ``frozen_at`` (pre-migration)
+    are left alone — the freeze guard computes their deadline per-cell.
+
+    Returns the number of rows finalized.
+    """
+
+    today = today or _today()
+    before = con.execute(
+        """
+        SELECT COUNT(*) FROM haz_resolutions
+        WHERE COALESCE(provisional, FALSE)
+          AND frozen_at IS NOT NULL
+          AND CAST(frozen_at AS DATE) < ?
+        """,
+        [today],
+    ).fetchone()[0]
+    if before:
+        con.execute(
+            """
+            UPDATE haz_resolutions SET provisional = FALSE
+            WHERE COALESCE(provisional, FALSE)
+              AND frozen_at IS NOT NULL
+              AND CAST(frozen_at AS DATE) < ?
+            """,
+            [today],
+        )
+        LOG.info(
+            "[resolutions] finalized %d provisional row(s) past their freeze deadline",
+            before,
+        )
+    return int(before)

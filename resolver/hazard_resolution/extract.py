@@ -198,6 +198,13 @@ class ExtractionBudget:
     ``used_this_month`` is read from ``haz_doc_extractions`` at
     construction, so the cap spans runs: three CLI invocations in one month
     cannot each spend the monthly allowance.
+
+    A BACKCAST run additionally honours ``backcast_max_calls_per_month`` —
+    a carve-out of the monthly total, never an addition — so the nightly
+    backcast cannot starve the live trailing-window run's rung 2 (it spent
+    all of August 2026's allowance by mid-month, leaving the first live
+    resolver_update run nothing). Live runs check only the total; the
+    difference between the two caps is in effect a live reserve.
     """
 
     max_calls_per_month: int
@@ -206,10 +213,24 @@ class ExtractionBudget:
     cost_this_run_usd: float = 0.0
     cached_hits: int = 0
     capped_cells: list[str] = field(default_factory=list)
+    run_type: str = "live"
+    backcast_max_calls_per_month: int | None = None
+    backcast_used_this_month: int = 0
 
     @property
     def remaining(self) -> int:
-        return max(0, self.max_calls_per_month - self.used_this_month - self.calls_this_run)
+        overall = max(
+            0, self.max_calls_per_month - self.used_this_month - self.calls_this_run
+        )
+        if self.run_type == "backcast" and self.backcast_max_calls_per_month is not None:
+            sub = max(
+                0,
+                self.backcast_max_calls_per_month
+                - self.backcast_used_this_month
+                - self.calls_this_run,
+            )
+            return min(overall, sub)
+        return overall
 
     @property
     def exhausted(self) -> bool:
@@ -220,7 +241,7 @@ class ExtractionBudget:
             self.capped_cells.append(cell)
 
     def as_provenance(self) -> dict[str, Any]:
-        return {
+        out = {
             "max_calls_per_month": self.max_calls_per_month,
             "used_this_month_before_run": self.used_this_month,
             "calls_this_run": self.calls_this_run,
@@ -228,7 +249,12 @@ class ExtractionBudget:
             "cost_this_run_usd": round(self.cost_this_run_usd, 4),
             "remaining": self.remaining,
             "capped": self.exhausted,
+            "run_type": self.run_type,
         }
+        if self.run_type == "backcast" and self.backcast_max_calls_per_month is not None:
+            out["backcast_max_calls_per_month"] = self.backcast_max_calls_per_month
+            out["backcast_used_this_month_before_run"] = self.backcast_used_this_month
+        return out
 
 
 @dataclass
@@ -668,7 +694,10 @@ def _year_month(ym: str) -> tuple[int, int]:
 
 
 def calls_this_calendar_month(
-    con: "duckdb.DuckDBPyConnection", today: dt.date | None = None
+    con: "duckdb.DuckDBPyConnection",
+    today: dt.date | None = None,
+    *,
+    backcast_only: bool = False,
 ) -> int:
     """Extraction calls already billed in the current calendar month.
 
@@ -677,16 +706,26 @@ def calls_this_calendar_month(
     Error rows count only when the provider actually billed tokens — a
     call that never left the process (missing API key, circuit-breaker
     cooldown) spent nothing and must not consume the allowance.
+
+    With ``backcast_only``, counts only the backcast's share — rows with
+    ``run_type = 'backcast'`` OR a NULL run_type: every pre-split row was
+    backcast-created (the live path first runs 2026-08-28), and counting
+    the legacy rows against the live reserve instead would let one more
+    night of backcast eat exactly the budget the split exists to protect.
     """
 
     ensure_haz_schema(con)
     reference = today or dt.date.today()
+    run_type_clause = (
+        "AND (run_type = 'backcast' OR run_type IS NULL)" if backcast_only else ""
+    )
     row = con.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM haz_doc_extractions
         WHERE CAST(strftime(created_at, '%Y-%m') AS VARCHAR) = ?
           AND (status = 'ok'
                OR COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) > 0)
+          {run_type_clause}
         """,
         [f"{reference.year:04d}-{reference.month:02d}"],
     ).fetchone()
@@ -694,18 +733,41 @@ def calls_this_calendar_month(
 
 
 def load_budget(
-    con: "duckdb.DuckDBPyConnection", rulebook: Rulebook, today: dt.date | None = None
+    con: "duckdb.DuckDBPyConnection",
+    rulebook: Rulebook,
+    today: dt.date | None = None,
+    *,
+    run_type: str = "live",
 ) -> ExtractionBudget:
     """The run's cost guard, seeded from what this month already cost."""
 
+    backcast_cap: int | None = None
+    backcast_used = 0
+    if run_type == "backcast":
+        raw_cap = rulebook.get("extraction.backcast_max_calls_per_month", None)
+        backcast_cap = int(raw_cap) if raw_cap is not None else None
+        if backcast_cap is not None:
+            backcast_used = calls_this_calendar_month(
+                con, today=today, backcast_only=True
+            )
     budget = ExtractionBudget(
         max_calls_per_month=int(rulebook.get("extraction.max_calls_per_month")),
         used_this_month=calls_this_calendar_month(con, today=today),
+        run_type=run_type,
+        backcast_max_calls_per_month=backcast_cap,
+        backcast_used_this_month=backcast_used,
     )
     LOG.info(
         "[extract] budget: %d of %d extraction calls already made this calendar "
-        "month, %d remaining",
-        budget.used_this_month, budget.max_calls_per_month, budget.remaining,
+        "month, %d remaining%s",
+        budget.used_this_month,
+        budget.max_calls_per_month,
+        budget.remaining,
+        (
+            f" (backcast share: {backcast_used} of {backcast_cap})"
+            if backcast_cap is not None
+            else ""
+        ),
     )
     return budget
 
@@ -766,6 +828,7 @@ def write_extraction(
     usage: dict[str, Any],
     cost_usd: float,
     error: str | None,
+    run_type: str = "live",
 ) -> None:
     """Record one extraction call — the cache entry AND the ledger line."""
 
@@ -781,8 +844,8 @@ def write_extraction(
         INSERT OR REPLACE INTO haz_doc_extractions
             (doc_id, iso3, year, month, hazard, model, prompt_version, status,
              figures_json, n_figures, n_rejected, prompt_tokens,
-             completion_tokens, cost_usd, doc_url, error)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             completion_tokens, cost_usd, doc_url, error, run_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             str(document.get("doc_id") or ""),
@@ -801,6 +864,7 @@ def write_extraction(
             float(cost_usd),
             str(document.get("url") or ""),
             error,
+            run_type,
         ],
     )
 
@@ -939,6 +1003,7 @@ def extract_for_cell(
                 con, document=document, iso3=iso3, ym=ym, hazard=hazard,
                 model=model_ref, prompt_version=prompt_version, status="error",
                 figures=[], rejected=[], usage=usage, cost_usd=cost, error=detail,
+                run_type=budget.run_type,
             )
             continue
 
@@ -958,7 +1023,7 @@ def extract_for_cell(
             con, document=document, iso3=iso3, ym=ym, hazard=hazard,
             model=model_ref, prompt_version=prompt_version, status="ok",
             figures=figures, rejected=rejected, usage=usage, cost_usd=cost,
-            error=None,
+            error=None, run_type=budget.run_type,
         )
 
     LOG.info(

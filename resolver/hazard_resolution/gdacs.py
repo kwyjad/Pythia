@@ -99,6 +99,24 @@ def _event_record(event: dict[str, Any], hazard: str) -> RawRecord | None:
     if start is None:
         return None
 
+    # GDACS occasionally publishes todate BEFORE fromdate (seen live in
+    # 2021: todate 2021-09-01 against fromdate 2021-09-28), and
+    # event_months rejects a reversed range. Clamp to the start day — the
+    # figure is attributed to the start month anyway — and keep the raw
+    # todate in the payload so provenance records what GDACS actually said.
+    end_date_raw = None
+    if end is not None and end < start:
+        LOG.warning(
+            "[gdacs] event %s (%s): todate %s precedes fromdate %s — "
+            "clamping end to start; raw todate kept as end_date_raw",
+            event_id,
+            event.get("eventtype"),
+            end.isoformat(),
+            start.isoformat(),
+        )
+        end_date_raw = end.isoformat()
+        end = start
+
     iso3_list = [
         str(code).strip().upper()
         for code in (event.get("iso3_list") or [])
@@ -121,6 +139,8 @@ def _event_record(event: dict[str, Any], hazard: str) -> RawRecord | None:
         "exposed_population": parse_number(event.get("population")) or 0.0,
         "start_date": start.isoformat(),
         "end_date": (end or start).isoformat(),
+        # Always present; None unless the reversed-dates clamp above fired.
+        "end_date_raw": end_date_raw,
         "months_overlapped": event_months(start, end or start),
         "published_at": (
             parse_date(event.get("pub_date")).isoformat()
@@ -185,7 +205,27 @@ def fetch_gdacs_events(
         outcome.error = str(exc)
         return outcome
 
-    records = [r for r in (_event_record(e, hazard) for e in events) if r is not None]
+    # Per-event guard: the no-raise contract above applies per RECORD too.
+    # One malformed upstream event (a reversed date range, a garbled field)
+    # must never kill the month — GDACS answered; that event is skipped
+    # with a logged warning and counted in the outcome detail.
+    records = []
+    skipped_malformed = 0
+    for event in events:
+        try:
+            record = _event_record(event, hazard)
+        except Exception as exc:  # noqa: BLE001 - one bad event must not kill the month
+            skipped_malformed += 1
+            LOG.warning(
+                "[gdacs] skipping malformed event %r (%s %s): %s",
+                event.get("eventid"),
+                hazard,
+                ym,
+                exc,
+            )
+            continue
+        if record is not None:
+            records.append(record)
     stored = store_raw_records(con, SOURCE, records)
     outcome.ok = True
     outcome.records = stored["records"]
@@ -193,6 +233,7 @@ def fetch_gdacs_events(
     outcome.detail = {
         "window": {"from": start.isoformat(), "to": end.isoformat()},
         "events_discovered": len(events),
+        "events_skipped_malformed": skipped_malformed,
         "hazard": hazard,
     }
     LOG.info(
