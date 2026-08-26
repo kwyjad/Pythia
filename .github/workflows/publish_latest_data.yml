@@ -33,6 +33,11 @@ on:
         options:
           - "false"
           - "true"
+      dispatched_by_chain:
+        description: "Set true ONLY by compute_calibration_pythia.yml's end-of-chain dispatch. Marks the run as pipeline automation so the regression guard soft-skips (with the freshness override) instead of hard-failing like an operator's explicit run_id."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write   # needed to upload release assets
@@ -108,7 +113,9 @@ jobs:
             "Pythia — Compute Resolutions" \
             "Ingest Structured Data" \
             "Hazard Backcast" \
-            "Interpreter Backfill"
+            "Interpreter Backfill" \
+            "Purge HS Run" \
+            "Mark runs as test"
           do
             gh run list \
               --workflow "${WF}" \
@@ -223,6 +230,12 @@ jobs:
           mkdir -p data_out
           cp -f "${DB_PATH}" data_out/resolver.duckdb
 
+          # Free the artifact zip + extracted tree before build_release_db
+          # makes its own second full-size copy — nothing below reads these
+          # paths, and at a multi-GB canonical DB the job otherwise peaks at
+          # ~4x the DB size on a ~14 GB runner disk.
+          rm -rf downloaded_artifact artifact.zip
+
           echo "db_path=data_out/resolver.duckdb" >> "$GITHUB_OUTPUT"
 
       # Build the copy that actually gets published: strip the PA machine's
@@ -265,10 +278,18 @@ jobs:
           #   - Triggered by upstream workflow_run, OR
           #   - Manual dispatch with no explicit run_id (canonical discovery
           #     picked the candidate, so the user did not intentionally
-          #     choose to roll back to a stale DB).
-          # Manual dispatch WITH an explicit run_id keeps hard-fail semantics
-          # so the user is told their picked run lacks post-pipeline data.
-          AUTO_TRIGGER: ${{ (github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && inputs.run_id == '')) && '1' || '0' }}
+          #     choose to roll back to a stale DB), OR
+          #   - Dispatched by the calibration chain's end-of-run step
+          #     (dispatched_by_chain=true): that dispatch carries a run_id
+          #     but is pure automation with nobody watching — a hard fail
+          #     there stalls the publish silently. Compared against BOTH the
+          #     boolean and the string form (REST/gh-dispatched boolean
+          #     inputs can arrive as strings — the pythia_pipeline_stage.yml
+          #     lesson).
+          # A human's manual dispatch WITH an explicit run_id keeps hard-fail
+          # semantics so the user is told their picked run lacks
+          # post-pipeline data.
+          AUTO_TRIGGER: ${{ (github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && (inputs.run_id == '' || inputs.dispatched_by_chain == true || inputs.dispatched_by_chain == 'true'))) && '1' || '0' }}
           RESOLVE_SOURCE: ${{ steps.resolve_run.outputs.source }}
         run: |
           set -euo pipefail

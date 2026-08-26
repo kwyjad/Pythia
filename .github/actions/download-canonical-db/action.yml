@@ -106,6 +106,10 @@ runs:
           fi
           if [ "${src}" != "${DEST}/resolver.duckdb" ]; then
             cp "${src}" "${DEST}/resolver.duckdb"
+            # Drop the downloaded artifact tree once the canonical copy
+            # exists — otherwise every consumer carries two copies of a
+            # multi-GB DB through the rest of its job.
+            rm -rf "${DEST}/${ARTIFACT_NAME}"
           fi
           rm -f "${DEST}/resolver.duckdb.wal"
           return 0
@@ -186,6 +190,8 @@ runs:
         Ingest Structured Data
         Hazard Backcast
         Interpreter Backfill
+        Purge HS Run
+        Mark runs as test
         Pythia — Compute Resolutions
         Pythia — Compute SPD Scores
         Pythia — Compute Calibration Weights & Advice

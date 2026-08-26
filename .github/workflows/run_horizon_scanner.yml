@@ -307,6 +307,22 @@ jobs:
               --status success \
               --json databaseId,createdAt \
               --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Interpreter Backfill"' >>"${CANDIDATES_FILE}" || true
+            # Maintenance workflows that re-upload the canonical DB after
+            # editing it — without these, a purge or test-marking lands in an
+            # artifact nothing discovers and is silently reverted by the next
+            # consumer resuming from an older producer's DB.
+            gh run list \
+              --workflow "Purge HS Run" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Purge HS Run"' >>"${CANDIDATES_FILE}" || true
+            gh run list \
+              --workflow "Mark runs as test" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Mark runs as test"' >>"${CANDIDATES_FILE}" || true
             # Include the post-pipeline chain so HS Triage starts from the
             # most-complete DB (calibration is the chain terminus and carries
             # all prior tables). Without this, calibration's artifact never

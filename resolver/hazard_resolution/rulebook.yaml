@@ -514,9 +514,12 @@ reliefweb:
 #
 # Cost arithmetic at the shipped defaults: a Haiku-class call over a
 # 24,000-character document is roughly 6k input + 500 output tokens, about
-# USD 0.009. max_calls_per_month = 1500 therefore caps LLM spend near
-# USD 14/month, comfortably inside the USD 50 ceiling and leaving room for
-# a backcast. Every other source in the machine is free.
+# USD 0.009. max_calls_per_month = 3000 therefore caps LLM spend near
+# USD 28/month, inside the USD 50 ceiling. Every other source in the
+# machine is free. (Raised from 1500 on 2026-08-26: the nightly backcast
+# shares this calendar-month cap with the live trailing-window runs and had
+# consumed all 1500 August calls by mid-month, leaving the first live
+# resolver_update run zero extraction budget — owner decision to double it.)
 # ---------------------------------------------------------------------------
 extraction:
   enabled: true
@@ -535,7 +538,7 @@ extraction:
   # instead of quietly spending. Cells skipped by the cap record
   # extraction_budget_capped in their provenance; they are never silently
   # treated as "ReliefWeb had nothing".
-  max_calls_per_month: 1500
+  max_calls_per_month: 3000
   # Skip extraction for a cell whose HIGHER ladder rung already has a
   # figure. reliefweb_extracted sits below emdat, so it cannot win those
   # cells — reading them buys only adjacent-rung conflict flags, at roughly
