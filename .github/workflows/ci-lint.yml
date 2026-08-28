@@ -49,6 +49,14 @@ jobs:
           pip install pytest
           pytest -vv --noconftest resolver/tests/test_ci_shell_sanity.py
 
+      # The cron watchdog guards .github/workflows/** the same way the sanity
+      # checks do (one of its tests reads every workflow's `name:` to catch a
+      # typo in the watched list), and it is stdlib-only, so it belongs in the
+      # one job that runs on every PR. Per the repo's standing rule, a test
+      # file named in no workflow runs nowhere.
+      - name: Cron watchdog tests
+        run: pytest -vv --noconftest tests/test_check_workflow_freshness.py
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:

@@ -20,23 +20,41 @@ concurrency:
 #
 # ICG publishes the previous month's edition in the first days of each
 # month; the early-month cron burst plus --only-if-newer makes repeat
-# runs idempotent no-ops (green, no commit). --max-age-days turns runs
-# red when the on-disk edition is more than two months stale, so silent
-# rot is visible. The local Playwright path (--source live, default)
-# still works for manual refreshes.
+# runs idempotent no-ops. --max-age-days turns runs red when the on-disk
+# edition is more than two months stale, and --expect-edition-by-day
+# catches a single MISSED edition, which an age threshold cannot see. The
+# local Playwright path (--source live, default) still works for manual
+# refreshes.
+#
+# NOTE (Aug 2026): this workflow no longer commits anything. It used to
+# `git push` the refreshed JSON to main, and branch protection began
+# rejecting that around 2026-08-06 (GH006, "Changes must be made through a
+# pull request") — so every run since scraped successfully and then went
+# red, while the checked-in edition froze at 2026-07-29 and
+# resolver_update's Phase 4 carried on storing that stale edition into
+# crisiswatch_entries behind a green step.
+#
+# The consumer is the DATABASE, not the file: crisiswatch.py is DB-first,
+# and resolver_update Phase 4 now refreshes the edition on its own runner
+# before storing it, where no push is involved. This workflow's remaining
+# job is early-month monitoring and manual diagnosis — it scrapes, checks
+# the edition, and keeps the artifact. Do not reintroduce a push; a token
+# able to write to main is not worth it for a file nothing reads any more.
 "on":
   schedule:
     - cron: "17 6 3,5,7,10 * *"
   workflow_dispatch:
     inputs:
       force:
-        description: "Write even if the parsed edition is not newer than the checked-in JSON"
+        description: "Parse and report even if the edition is not newer than the checked-in JSON"
         required: false
         default: false
         type: boolean
 
+# read-only since the commit step was removed: the refreshed edition reaches
+# its consumer through resolver_update's Phase 4, not through a push to main.
 permissions:
-  contents: write  # required to commit the JSON back to the repo
+  contents: read
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -89,11 +107,3 @@ jobs:
             horizon_scanner/data/crisiswatch_latest.json
             horizon_scanner/data/crisiswatch_debug.html
           retention-days: 90
-
-      - name: Commit updated JSON
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f horizon_scanner/data/crisiswatch_latest.json
-          git diff --cached --quiet || git commit -m "chore(crisiswatch): refresh monthly data"
-          git push

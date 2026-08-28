@@ -649,7 +649,43 @@ jobs:
             echo "WARNING: HDX Signals fetch failed (non-fatal)"
           fi
 
-      - name: "Phase 4: Store CrisisWatch from JSON"
+      # Refresh the CrisisWatch edition ON THE RUNNER before storing it.
+      #
+      # refresh-crisiswatch.yml used to commit the scraped JSON back to main,
+      # and that push started being rejected by branch protection (GH006,
+      # "Changes must be made through a pull request") around 2026-08-06. The
+      # scrape kept working; only the commit failed. So the checked-in
+      # crisiswatch_latest.json froze at the 2026-07-29 edition and the store
+      # step below carried on faithfully writing that stale edition into
+      # crisiswatch_entries — a silent data freeze behind a green step.
+      #
+      # Nothing here needs a push: this job already holds the canonical DB and
+      # already uploads it, so refreshing the working copy is enough for the
+      # DB to get the current edition. --only-if-newer keeps it idempotent and
+      # never regresses to an older edition; --expect-edition-by-day 7 turns a
+      # genuinely missing monthly edition red rather than silently old.
+      #
+      # continue-on-error: a failed scrape degrades to storing whatever edition
+      # is checked in, which is exactly today's behaviour, not worse than it.
+      # The IA_S3_* secrets are optional — the Wayback path works anonymously,
+      # just less reliably.
+      - name: "Phase 4: Refresh CrisisWatch edition (Wayback)"
+        timeout-minutes: 30
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'crisiswatch') }}
+        continue-on-error: true
+        env:
+          IA_S3_ACCESS_KEY: ${{ secrets.IA_S3_ACCESS_KEY }}
+          IA_S3_SECRET_KEY: ${{ secrets.IA_S3_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          python -m scripts.refresh_crisiswatch \
+            --source wayback \
+            --only-if-newer \
+            --max-age-days 60 \
+            --expect-edition-by-day 7 \
+            --verbose 2>&1 | tee diagnostics/phase4_crisiswatch_refresh.log
+
+      - name: "Phase 4: Store CrisisWatch"
         timeout-minutes: 15
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'crisiswatch') }}
         continue-on-error: true
@@ -667,7 +703,7 @@ jobs:
             python -m pythia.tools.emit_phase4_diag crisiswatch ok --rows "$ROWS"
             echo "[crisiswatch] OK: stored ${ROWS} entries"
           else
-            python -m pythia.tools.emit_phase4_diag crisiswatch error --reason "zero-rows-or-missing-json"
+            python -m pythia.tools.emit_phase4_diag crisiswatch error --reason "zero-rows-or-missing-edition"
             echo "WARNING: CrisisWatch store failed (non-fatal)"
           fi
 

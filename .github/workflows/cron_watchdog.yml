@@ -1,0 +1,62 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Notice when a scheduled workflow has stopped running.
+#
+# Written after Resolver Update silently stopped for 44 days (last run
+# 2026-07-15; the 28 Aug tick was never delivered). Because the whole
+# post-forecast chain — compute_resolutions -> compute_scores ->
+# compute_calibration -> publish — hangs off it by workflow_run, that one
+# missing tick also meant August's forecasts were never resolved or scored and
+# calibration went six weeks stale. Nothing anywhere reported it.
+#
+# GitHub delivers `schedule` on a best-effort basis and this repo is
+# demonstrably throttled (measured 2026-08-28: the daily 06:00 CI tick landed
+# +11h32m, the nightly 20:30 backcast +7h54m). A monthly cron therefore has
+# ONE firing opportunity that may simply be dropped. This workflow does not
+# prevent that — it makes it visible within a day instead of six weeks, after
+# which the missed run is dispatched by hand.
+#
+# It fails LOUD, unlike the gates in scripts/ci/, which fail open. A red
+# scheduled run emails the repo owner; that email is the entire mechanism. If
+# this workflow is ever made to fail open, it stops doing its job.
+#
+# Deliberately NOT in the pythia-resolver-db concurrency group: it reads the
+# Actions API only and must never queue behind a multi-hour ingest.
+
+name: Cron Watchdog
+
+on:
+  schedule:
+    # Daily. This workflow is itself a cron and subject to the same drift, but
+    # a daily tick missing 40 consecutive days is far less likely than a
+    # monthly one missing a single tick, and a late watchdog still reports.
+    - cron: "0 11 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cron-watchdog
+  cancel-in-progress: false
+
+jobs:
+  freshness:
+    name: Are the scheduled workflows still alive?
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      # python3, not python: no setup-python step. The script is stdlib + gh
+      # only, so the whole job is a checkout and one API call per workflow.
+      - name: Check workflow freshness
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -m scripts.ci.check_workflow_freshness
