@@ -302,6 +302,31 @@ backcast:
   drought: 2017
 
 # ---------------------------------------------------------------------------
+# RAW CACHE RETENTION (haz_raw_*).
+#
+# These caches were append-only in practice until 2026-09-01: a wall clock
+# inside the hashed payload defeated the content-hash dedup, so every run
+# appended a full duplicate of every record it touched. The canonical DB grew
+# from 3.0 GB to 17.7 GB in 26 nights and the release publish aborted.
+#
+# The hash is fixed, so a second row now means a genuine upstream revision --
+# and load_raw_records only ever reads the newest. An audit trail of upstream
+# revisions belongs in haz_revisions, not in an unbounded body cache
+# (reliefweb_docs alone caches up to 30 docs x 24,000 chars per cell).
+# ---------------------------------------------------------------------------
+raw_cache:
+  # Rows kept per (record_id, iso3, ym, hazard). NOT per record_id: the same
+  # ReliefWeb document is legitimately cached once per cell it was fetched
+  # for, and collapsing on the document id alone would delete other cells'
+  # documents. See resolver/hazard_resolution/retention.py.
+  keep_revisions_per_record: 1
+  compaction:
+    # Rewrite the file when it exceeds this multiple of the bytes its live
+    # rows need. DuckDB reuses freed blocks but never truncates, so removing
+    # rows stops growth without returning any space -- only a copy reclaims.
+    file_bloat_ratio: 1.5
+
+# ---------------------------------------------------------------------------
 # BASE RATES computed from the backcast (haz_base_rates_*).
 # ---------------------------------------------------------------------------
 base_rates:

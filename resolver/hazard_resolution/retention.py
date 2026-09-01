@@ -216,18 +216,22 @@ def summarize(results: dict[str, dict[str, Any]]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI: ``python -m resolver.hazard_resolution.retention --db ... [--apply]``.
+    """CLI: ``python -m resolver.hazard_resolution.retention [--db PATH] [--apply]``.
 
     Dry run by default. The caller is expected to read the plan before
     applying, which is why the compaction workflow gates on an ``apply``
     input rather than doing both in one go.
+
+    ``--db`` resolves the same way every other machine entry point does
+    (``duckdb_io.get_db``, env-first), so a workflow that points the machine
+    at a non-default database points retention at the same one.
     """
     import argparse
 
-    import duckdb
+    from resolver.db.duckdb_io import close_db, get_db
 
     parser = argparse.ArgumentParser(description="Compact the machine's raw caches")
-    parser.add_argument("--db", required=True)
+    parser.add_argument("--db", default=None, help="DuckDB path or duckdb:/// URL")
     parser.add_argument("--apply", action="store_true",
                         help="Write the changes (default: report the plan only)")
     parser.add_argument("--sources", nargs="*", default=None,
@@ -235,14 +239,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="[retention] %(message)s")
-    con = duckdb.connect(args.db)
+    con = get_db(args.db)
     try:
         results = compact_all(con, sources=args.sources, apply=args.apply)
         if args.apply:
-            # Flush, so the file the next step copies reflects the rebuild.
+            # Flush, so the file the compaction step copies reflects the
+            # rebuild rather than a WAL the next reader has to replay.
             con.execute("CHECKPOINT")
     finally:
-        con.close()
+        close_db(con)
 
     print("\n".join(summarize(results)))
     failed = [s for s, r in results.items() if r.get("error")]

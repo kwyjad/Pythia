@@ -533,6 +533,20 @@ jobs:
           python -m resolver.hazard_resolution.acceptance --out diagnostics/haz_acceptance_report.md 2>&1 | tee diagnostics/phase25_haz_acceptance.log || echo "::warning::acceptance report failed (non-fatal)"
           echo "::endgroup::"
 
+      # Collapse each raw cache to the row a reader would take. This does not
+      # shrink the file -- DuckDB reuses freed blocks but never truncates, so
+      # only the one-shot Compact Resolver DB workflow reclaims bytes -- but it
+      # keeps the caches from re-accumulating between compactions.
+      - name: "Phase 2.5: Compact machine raw caches"
+        timeout-minutes: 20
+        if: ${{ inputs.only_connector == '' }}
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          echo "::group::PA machine raw-cache retention"
+          python -m resolver.hazard_resolution.retention --apply 2>&1 | tee diagnostics/phase25_haz_retention.log || echo "::warning::raw-cache retention failed (non-fatal)"
+          echo "::endgroup::"
+
       # === PHASE 3: STRUCTURED DATA — Pythia tables (non-fatal) ===
       - name: "Phase 3: Ingest conflict forecasts"
         timeout-minutes: 30
