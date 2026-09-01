@@ -19,6 +19,20 @@ the canonical ARTIFACT, which the machine resumes from and which this script
 never touches. Dropping them from the published copy is what makes the asset
 serveable again; compaction is a free bonus on top.
 
+On 2026-09-01 it happened again and the narrow prefix was why: this stripped
+only ``haz_raw_``, so the machine's WORKING tables still shipped — and
+``haz_triggers`` alone carries one ``evidence_of_absence_json`` per assessed
+cell across ~200 countries x 3 hazards x ~360 months. The publish aborted at
+5.1 GB. ``grep haz_ pythia/api/ web/src/`` returns nothing, and the release
+asset's only consumer is ``pythia/api/db_sync.py`` (every pipeline job takes
+the canonical artifact via ``.github/actions/download-canonical-db``), so the
+prefix is now the whole ``haz_`` family.
+
+It also reports per-table sizes on the way through. The 2026-09-01 abort could
+not be attributed to any table because nothing measured one, which meant the
+only way to choose what to cut was to guess. Now the same log block that says
+"over the limit" says what is over it.
+
     python -m scripts.ci.build_release_db \
         --src data/resolver.duckdb --out data_out/resolver.duckdb \
         [--max-bytes 2147483648] [--keep-all]
@@ -40,12 +54,17 @@ LOGGER = logging.getLogger(__name__)
 # GitHub's per-asset ceiling for a release.
 GITHUB_ASSET_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
 
-# Prefixes of tables excluded from the PUBLISHED copy. These are the PA
-# machine's raw source caches (documents, tracks, provider payloads) plus its
-# working/ledger tables. Nothing in pythia/api/** or web/src/** references
-# them — verified by grep, and pinned by a test so a future consumer cannot
-# quietly start depending on a table this strips.
-EXCLUDED_TABLE_PREFIXES = ("haz_raw_",)
+# Prefixes of tables excluded from the PUBLISHED copy: the PA resolution
+# machine's raw source caches (documents, tracks, provider payloads) AND its
+# working, ledger and verdict tables. Nothing in pythia/api/** or web/src/**
+# references any of them — verified by grep, and pinned by a test so a future
+# consumer cannot quietly start depending on a table this strips.
+#
+# Widening this is a decision about what the dashboard can ever show, so it
+# stays deliberate: if a future view wants the machine's verdicts, narrow this
+# back to the tables that view needs and say so here. Until then the release
+# is a serving copy and the machine's state belongs in the canonical artifact.
+EXCLUDED_TABLE_PREFIXES = ("haz_",)
 
 
 def _connect():
@@ -67,8 +86,27 @@ def is_excluded(table: str) -> bool:
     return any(table.lower().startswith(p) for p in EXCLUDED_TABLE_PREFIXES)
 
 
+def _size_lines(con, alias: str, top: int) -> list[str]:
+    """Per-table sizes, or a note saying why there are none.
+
+    Never fatal: this is a diagnostic wrapped around the one job that must not
+    fail for a diagnostic's sake. A publish that stops because the size REPORT
+    broke would be a worse outcome than a publish with no size report.
+    """
+    if top <= 0:
+        return []
+    try:
+        from scripts.ci.db_table_sizes import report_lines, size_report, whole_file
+
+        return report_lines(
+            size_report(con, catalog=alias, top=top), whole_file(con, alias)
+        )
+    except Exception as exc:  # pragma: no cover - diagnostics must never block
+        return [f"(size report unavailable: {exc})"]
+
+
 def build_release_db(
-    src: str, out: str, *, keep_all: bool = False
+    src: str, out: str, *, keep_all: bool = False, report_top: int = 15
 ) -> dict[str, object]:
     """Copy src -> out, dropping excluded tables and compacting.
 
@@ -87,12 +125,18 @@ def build_release_db(
 
     src_bytes = src_path.stat().st_size
     dropped: list[str] = []
+    before: list[str] = []
+    after: list[str] = []
 
     con = _connect()
     try:
         con.execute(f"ATTACH '{src_path}' AS src (READ_ONLY)")
         con.execute(f"ATTACH '{work_path}' AS work")
         con.execute("COPY FROM DATABASE src TO work")
+        # Blocks are not allocated until the write is flushed, so an
+        # un-checkpointed database measures as zero bytes.
+        con.execute("CHECKPOINT work")
+        before = _size_lines(con, "work", report_top)
         if not keep_all:
             for table in tables_in(con, "work"):
                 if is_excluded(table):
@@ -101,6 +145,8 @@ def build_release_db(
         con.execute("DETACH src")
         con.execute(f"ATTACH '{out_path}' AS dst")
         con.execute("COPY FROM DATABASE work TO dst")
+        con.execute("CHECKPOINT dst")
+        after = _size_lines(con, "dst", report_top)
     finally:
         con.close()
     work_path.unlink(missing_ok=True)
@@ -112,6 +158,8 @@ def build_release_db(
         "out_bytes": out_bytes,
         "dropped_tables": dropped,
         "saved_bytes": src_bytes - out_bytes,
+        "sizes_before": before,
+        "sizes_after": after,
     }
 
 
@@ -126,10 +174,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-bytes", type=int, default=GITHUB_ASSET_LIMIT_BYTES)
     parser.add_argument("--keep-all", action="store_true",
                         help="Compact only; keep every table (diagnostics)")
+    parser.add_argument("--report-top", type=int, default=15,
+                        help="Per-table sizes to log before/after (0 disables)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="[build_release_db] %(message)s")
-    stats = build_release_db(args.src, args.out, keep_all=args.keep_all)
+    stats = build_release_db(
+        args.src, args.out, keep_all=args.keep_all, report_top=args.report_top
+    )
     LOGGER.info(
         "source %s -> published %s (saved %s)",
         _mb(stats["src_bytes"]), _mb(stats["out_bytes"]), _mb(stats["saved_bytes"]),
@@ -139,6 +191,11 @@ def main(argv: list[str] | None = None) -> int:
             "dropped %d machine-cache table(s) the API never reads: %s",
             len(stats["dropped_tables"]), ", ".join(stats["dropped_tables"]),
         )
+    # Log the attribution in the SAME block as any size error, so whoever
+    # reads the failure also reads what caused it.
+    for label, key in (("canonical", "sizes_before"), ("published", "sizes_after")):
+        for line in stats.get(key) or []:
+            LOGGER.info("%s | %s", label, line)
     out_bytes = int(stats["out_bytes"])
     if out_bytes > args.max_bytes:
         # Loud and non-destructive: the caller must NOT proceed to a clobbering
