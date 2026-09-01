@@ -114,6 +114,48 @@ class TestExclusion:
         con.close()
 
 
+class TestCompactDatabase:
+    """The primitive the retention workflow shares with the release path."""
+
+    def test_deleting_rows_does_not_shrink_but_copying_does(self, tmp_path):
+        """DuckDB reuses freed blocks and never truncates the file.
+
+        This is why retention needs two steps: collapsing the rows stops the
+        growth, and only the copy gives the bytes back.
+        """
+        src = tmp_path / "bloat.duckdb"
+        con = duckdb.connect(str(src))
+        con.execute("CREATE TABLE t (a TEXT)")
+        con.execute(
+            "INSERT INTO t SELECT repeat(md5(i::TEXT), 40) FROM range(20000) t(i)"
+        )
+        con.execute("CHECKPOINT")
+        full = src.stat().st_size
+        con.execute("DELETE FROM t WHERE rowid % 10 != 0")
+        con.execute("CHECKPOINT")
+        con.close()
+        assert src.stat().st_size == full, "delete is expected NOT to shrink the file"
+
+        stats = brd.compact_database(str(src), str(tmp_path / "small.duckdb"))
+        assert stats["out_bytes"] < full / 2
+        assert stats["saved_bytes"] > 0
+
+    def test_the_copy_preserves_every_row(self, tmp_path):
+        src = _src(tmp_path)
+        out = tmp_path / "compact.duckdb"
+        brd.compact_database(str(src), str(out))
+        con = duckdb.connect(str(out), read_only=True)
+        # Nothing is dropped by compaction -- that is the strip's job.
+        assert con.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 1
+        assert con.execute("SELECT COUNT(*) FROM haz_triggers").fetchone()[0] == 200
+        con.close()
+
+    def test_missing_source_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            brd.compact_database(str(tmp_path / "nope.duckdb"),
+                                 str(tmp_path / "out.duckdb"))
+
+
 class TestSizeReport:
     """The 2026-09-01 abort could not be attributed to any table."""
 

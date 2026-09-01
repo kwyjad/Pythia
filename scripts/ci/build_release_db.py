@@ -86,6 +86,42 @@ def is_excluded(table: str) -> bool:
     return any(table.lower().startswith(p) for p in EXCLUDED_TABLE_PREFIXES)
 
 
+def compact_database(src: str, out: str) -> dict[str, int]:
+    """Copy src -> out to reclaim space. The ONLY thing that shrinks a file.
+
+    DuckDB reuses freed blocks but never truncates, so deleting rows stops a
+    file growing without giving any bytes back. Reclaiming means writing a
+    fresh database, which is what ``COPY FROM DATABASE`` does here.
+
+    Shared with the retention workflow rather than reimplemented there: a
+    second copy of this would eventually diverge from the release path, and
+    this is the operation with the ~40 GB disk peak if it is run in the wrong
+    order (compact the ROWS first, then the file).
+    """
+    src_path, out_path = Path(src), Path(out)
+    if not src_path.exists():
+        raise FileNotFoundError(f"source DB not found: {src_path}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.unlink(missing_ok=True)
+    Path(str(out_path) + ".wal").unlink(missing_ok=True)
+
+    src_bytes = src_path.stat().st_size
+    con = _connect()
+    try:
+        con.execute(f"ATTACH '{src_path}' AS csrc (READ_ONLY)")
+        con.execute(f"ATTACH '{out_path}' AS cdst")
+        con.execute("COPY FROM DATABASE csrc TO cdst")
+        con.execute("CHECKPOINT cdst")
+    finally:
+        con.close()
+    out_bytes = out_path.stat().st_size
+    return {
+        "src_bytes": src_bytes,
+        "out_bytes": out_bytes,
+        "saved_bytes": src_bytes - out_bytes,
+    }
+
+
 def _size_lines(con, alias: str, top: int) -> list[str]:
     """Per-table sizes, or a note saying why there are none.
 
