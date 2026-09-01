@@ -42,7 +42,6 @@ from resolver.hazard_resolution.sources import (
     load_raw_records,
     parse_number,
     store_raw_records,
-    utcnow_iso,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -171,7 +170,6 @@ def _record(record: dict[str, Any], hazard: str) -> RawRecord | None:
         "total_affected": affected_from_record(record),
         "total_deaths": parse_number(record.get("total_deaths")),
         "raw": record,
-        "fetched_at": utcnow_iso(),
     }
     return RawRecord(
         record_id=f"emdat-{disno}-{iso3}",

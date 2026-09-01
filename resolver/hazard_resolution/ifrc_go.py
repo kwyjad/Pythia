@@ -43,7 +43,6 @@ from resolver.hazard_resolution.sources import (
     parse_date,
     parse_number,
     store_raw_records,
-    utcnow_iso,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -166,7 +165,6 @@ def _record(
         "num_affected": value,
         "affected_field": field,
         "raw": record,
-        "fetched_at": utcnow_iso(),
     }
     return RawRecord(
         record_id=f"go-{report_id}-{iso3}",

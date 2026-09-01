@@ -1,0 +1,246 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+# One-shot reclamation of the canonical DB.
+#
+# The haz_raw_* caches were append-only in practice: a wall clock inside the
+# hashed payload defeated the content-hash dedup, so every nightly backcast
+# appended a full duplicate of every record it touched. The canonical DB went
+# 3.0 GB (2026-08-06) -> 17.7 GB (2026-09-01) and the release publish aborted.
+#
+# Fixing the hash (resolver/hazard_resolution/sources.py) stops the growth.
+# This gives the space back, in the order that matters:
+#
+#   1. collapse the rows  (retention.compact_all --apply)
+#   2. copy the file      (build_release_db.compact_database)
+#
+# Rebuilding first means the copy's source is ~2 GB rather than 17.7 GB. The
+# other order needs ~40 GB of runner scratch.
+#
+# This workflow PRODUCES pythia-resolver-db, so it is listed in the
+# canonical-DB candidate list (.github/actions/download-canonical-db) and in
+# the two bespoke discovery blocks (run_horizon_scanner.yml,
+# publish_latest_data.yml) -- and it includes ITSELF via extra-workflows, so a
+# second run starts from the first one's output rather than the 17.7 GB
+# artifact it replaced.
+#
+# Dry run is the default. Read the plan, then re-dispatch with apply=true.
+
+---
+name: Compact Resolver DB
+
+concurrency:
+  group: pythia-resolver-db
+  cancel-in-progress: false
+
+"on":
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Write the changes (unchecked = report the plan only)"
+        required: false
+        default: false
+        type: boolean
+      db_run_id:
+        description: "Optional: force canonical DB from an Actions run ID. Blank = latest successful producer."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  compact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
+      # haz_raw_* are deliberately in NEITHER list: they shrink by design, and
+      # db_signature treats a required-table shrink as fatal. The machine's
+      # working tables ARE listed (optional) so an unexpected change to the
+      # resume ledger or the verdicts is at least warned about -- those are
+      # what this job must not touch.
+      SIGNATURE_REQUIRED_TABLES: questions,hs_triage,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas
+      SIGNATURE_OPTIONAL_TABLES: haz_backcast_progress,haz_triggers,haz_resolutions,haz_doc_extractions,haz_impact_candidates,haz_revisions,haz_base_rates_occurrence,haz_base_rates_severity
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          set -e
+          python -m pip install --upgrade pip
+          pip install -r python_library_requirements.txt
+
+      - name: Download canonical resolver DB
+        uses: ./.github/actions/download-canonical-db
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          force-run-id: ${{ inputs.db_run_id }}
+          extra-workflows: Compact Resolver DB
+
+      # The rollback handle. The canonical artifact is immutable per run and
+      # retained for 90 days, so recovering from a bad compaction is a
+      # re-dispatch with force-run-id set to the run named here.
+      - name: Record the source run for rollback
+        run: |
+          set -euo pipefail
+          SRC_RUN="${CANONICAL_DB_RUN_ID:-${{ inputs.db_run_id }}}"
+          echo "Canonical DB came from run: ${SRC_RUN:-<discovery, see previous step>}"
+          {
+            echo "### Compact Resolver DB"
+            echo ""
+            echo "- apply: \`${{ inputs.apply }}\`"
+            echo "- source canonical run: \`${SRC_RUN:-see download step log}\`"
+            echo ""
+            echo "To roll back, re-dispatch any canonical consumer with"
+            echo "\`db_run_id\` set to the source run above."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: DB signature before
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostics
+          rm -f data/resolver.duckdb.wal
+          python -m scripts.ci.db_signature write \
+            --db data/resolver.duckdb \
+            --required "${SIGNATURE_REQUIRED_TABLES}" \
+            --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+            --out diagnostics/db_signature_before.json
+
+      - name: Table sizes before
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.db_table_sizes --db data/resolver.duckdb --top 40 \
+            | tee diagnostics/table_sizes_before.txt
+          {
+            echo "#### Table sizes before"
+            echo '```'
+            cat diagnostics/table_sizes_before.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Always runs, apply or not: the plan is what a human reads before
+      # authorising the write.
+      - name: "Dry run: the compaction plan"
+        run: |
+          set -euo pipefail
+          python -m resolver.hazard_resolution.retention \
+            --db data/resolver.duckdb | tee diagnostics/retention_plan.txt
+          {
+            echo "#### Compaction plan (rows)"
+            echo '```'
+            cat diagnostics/retention_plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collapse the raw caches
+        if: inputs.apply == true || inputs.apply == 'true'
+        run: |
+          set -euo pipefail
+          python -m resolver.hazard_resolution.retention \
+            --db data/resolver.duckdb --apply | tee diagnostics/retention_applied.txt
+          {
+            echo "#### Compaction applied (rows)"
+            echo '```'
+            cat diagnostics/retention_applied.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Step 2, and the one that actually returns bytes. Deleting rows leaves
+      # the blocks in the file; only a copy to a fresh database reclaims them.
+      # Disk is plausibly the next thing to fail here: this step holds the
+      # multi-GB canonical DB AND the compacted copy at the same time, and
+      # publish_latest_data.yml's own "~14 GB runner disk" note is stale. A
+      # copy that dies for want of space otherwise looks like a DuckDB error.
+      - name: Reclaim the file
+        if: inputs.apply == true || inputs.apply == 'true'
+        run: |
+          set -euo pipefail
+          echo "disk before: $(df -h . | tail -1)"
+          rm -f data/resolver.duckdb.wal
+          BEFORE=$(stat -c%s data/resolver.duckdb)
+          python - <<'PY'
+          from scripts.ci.build_release_db import compact_database
+          stats = compact_database(
+              "data/resolver.duckdb", "data/resolver.compacted.duckdb"
+          )
+          mb = 1024 * 1024
+          print(
+              f"compacted {stats['src_bytes']/mb:,.1f} MB -> "
+              f"{stats['out_bytes']/mb:,.1f} MB "
+              f"(reclaimed {stats['saved_bytes']/mb:,.1f} MB)"
+          )
+          PY
+          mv -f data/resolver.compacted.duckdb data/resolver.duckdb
+          AFTER=$(stat -c%s data/resolver.duckdb)
+          echo "file: ${BEFORE} -> ${AFTER} bytes"
+          echo "disk after: $(df -h . | tail -1)"
+          {
+            echo "#### File reclaimed"
+            echo ""
+            echo "\`${BEFORE}\` -> \`${AFTER}\` bytes"
+            echo ""
+            echo "Disk: \`$(df -h . | tail -1)\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The proof that the resume ledger and the verdicts survived. A
+      # required-table regression fails the job BEFORE the upload, so a
+      # damaged DB never becomes the canonical artifact.
+      - name: DB signature after
+        if: inputs.apply == true || inputs.apply == 'true'
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.db_signature compare \
+            --before diagnostics/db_signature_before.json \
+            --after-db data/resolver.duckdb \
+            --required "${SIGNATURE_REQUIRED_TABLES}" \
+            --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+            --out diagnostics/db_signature_after.json
+
+      - name: Table sizes after
+        if: inputs.apply == true || inputs.apply == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m scripts.ci.db_table_sizes --db data/resolver.duckdb --top 40 \
+            | tee diagnostics/table_sizes_after.txt
+          {
+            echo "#### Table sizes after"
+            echo '```'
+            cat diagnostics/table_sizes_after.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compact-resolver-db-diagnostics
+          path: diagnostics/
+          if-no-files-found: warn
+
+      # Only on apply: a dry run must not republish the canonical artifact,
+      # or a no-op run would displace the real one in discovery.
+      # A step's `if:` already implies success(), so naming it as well would
+      # only trip the A && B || C shell lint for no behavioural gain.
+      - name: Upload compacted canonical DB
+        if: inputs.apply == true || inputs.apply == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-resolver-db
+          path: data/resolver.duckdb

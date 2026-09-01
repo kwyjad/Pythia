@@ -464,12 +464,53 @@ def build_report(
 
     L(f"**Total tables: {len(all_tables)}**")
     L()
-    L("| Table | Rows | Columns |")
-    L("|-------|-----:|--------:|")
-    for (tbl,) in all_tables:
+
+    # Byte attribution, largest table first. Row counts alone cannot tell you
+    # where a multi-GB file went: on 2026-09-01 the release copy was 5.1 GB
+    # and nothing in the repo could say which table that was, so the only way
+    # to choose what to cut was to guess.
+    sizes: dict[str, int] = {}
+    pcts: dict[str, float] = {}
+    size_note = ""
+    try:
+        from scripts.ci.db_table_sizes import size_report, whole_file
+
+        info = whole_file(con, "main")
+        for entry in size_report(con, catalog="main"):
+            sizes[entry.table] = entry.est_bytes
+            pcts[entry.table] = entry.pct_of_file
+        attributed = sum(sizes.values())
+        file_bytes = info.get("file_bytes") or 0
+        size_note = (
+            f"File {fmt_float(file_bytes / (1024 * 1024), 1)} MB | "
+            f"free list {fmt_float(info.get('free_bytes', 0) / (1024 * 1024), 1)} MB "
+            f"({fmt_num(info.get('free_blocks', 0))} blocks) | "
+            f"unattributed {fmt_float((file_bytes - attributed) / (1024 * 1024), 1)} MB "
+            "(free list, catalog, metadata)"
+        )
+    except Exception as exc:
+        size_note = f"_Per-table sizes unavailable: {exc}_"
+
+    L(size_note)
+    L()
+    L("| Table | Rows | Columns | Est. MB | % of file |")
+    L("|-------|-----:|--------:|--------:|----------:|")
+    ordered = sorted(
+        (t for (t,) in all_tables), key=lambda t: sizes.get(t, -1), reverse=True
+    )
+    for tbl in ordered:
         n = row_count(con, tbl)
         cols = len(schema_info(con, tbl))
-        L(f"| `{tbl}` | {fmt_num(n)} | {cols} |")
+        mb = fmt_float(sizes[tbl] / (1024 * 1024), 1) if tbl in sizes else "—"
+        pct = f"{pcts[tbl]:.1f}%" if tbl in pcts else "—"
+        L(f"| `{tbl}` | {fmt_num(n)} | {cols} | {mb} | {pct} |")
+    L()
+    L(
+        "_Sizes are estimated from DISTINCT storage blocks per table (metadata "
+        "only, no table scan). A large free list means the file is holding "
+        "space no live data needs — DuckDB reuses freed blocks but never "
+        "truncates, so only a copy to a fresh database reclaims it._"
+    )
     L()
 
     # =====================================================================

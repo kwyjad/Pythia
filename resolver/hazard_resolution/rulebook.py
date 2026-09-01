@@ -643,6 +643,17 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
                         f"backcast.{hazard} must be an integer year in [1950, 2100], got {year!r}"
                     )
 
+    # Raw-cache retention. keep_revisions_per_record is capped low on
+    # purpose: these caches hold document bodies, and "keep a few revisions"
+    # is how an append-only log gets rebuilt one increment at a time.
+    _require_int_in("raw_cache.keep_revisions_per_record", 1, 10)
+    ratio = _require("raw_cache.compaction.file_bloat_ratio")
+    if ratio is not _MISSING and (not _is_number(ratio) or ratio < 1.0):
+        problems.append(
+            "raw_cache.compaction.file_bloat_ratio must be a number >= 1.0, "
+            f"got {ratio!r}"
+        )
+
     # Base-rate publication thresholds.
     _require_int_in("base_rates.occurrence.min_years", 1, 200)
     _require_int_in("base_rates.severity.min_events", 1, 10_000)

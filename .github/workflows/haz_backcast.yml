@@ -226,6 +226,22 @@ jobs:
           set -euo pipefail
           python -m resolver.hazard_resolution.base_rates 2>&1 | tee diagnostics/haz_base_rates.log
 
+      # Between base rates and the regression guard on purpose: the signature
+      # compare then runs over the POST-retention DB, so a retention bug is
+      # caught by the guard rather than shipped past it.
+      #
+      # Collapsing rows stops the caches growing; it does not shrink the file
+      # (DuckDB reuses freed blocks but never truncates). The one-shot
+      # Compact Resolver DB workflow does the copy that reclaims. This step is
+      # non-fatal: a file that stays large is a much better outcome than a
+      # night of backcast work lost to a retention failure.
+      - name: Compact raw caches
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m resolver.hazard_resolution.retention --apply 2>&1 \
+            | tee diagnostics/haz_retention.log
+
       - name: Verify DB did not regress
         run: |
           set -euo pipefail

@@ -114,6 +114,7 @@ jobs:
             "Ingest Structured Data" \
             "Hazard Backcast" \
             "Interpreter Backfill" \
+            "Compact Resolver DB" \
             "Purge HS Run" \
             "Mark runs as test"
           do

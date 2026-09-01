@@ -300,6 +300,15 @@ jobs:
               --status success \
               --json databaseId,createdAt \
               --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Hazard Backcast"' >>"${CANDIDATES_FILE}" || true
+            # One-shot raw-cache compaction — rebuilds and re-uploads the
+            # canonical DB, so a run after one must not start from the
+            # pre-compaction artifact it replaced.
+            gh run list \
+              --workflow "Compact Resolver DB" \
+              --branch main \
+              --status success \
+              --json databaseId,createdAt \
+              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Compact Resolver DB"' >>"${CANDIDATES_FILE}" || true
             # Manual interpreter backfill/recovery — also re-uploads canonical.
             gh run list \
               --workflow "Interpreter Backfill" \

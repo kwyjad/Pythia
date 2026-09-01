@@ -50,7 +50,6 @@ from resolver.hazard_resolution.sources import (
     parse_date,
     parse_number,
     store_raw_records,
-    utcnow_iso,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -147,7 +146,6 @@ def _event_record(event: dict[str, Any], hazard: str) -> RawRecord | None:
             if parse_date(event.get("pub_date"))
             else None
         ),
-        "fetched_at": utcnow_iso(),
     }
     core = _connector_api()
     return RawRecord(

@@ -61,7 +61,6 @@ from resolver.hazard_resolution.sources import (
     parse_date,
     shift_month,
     store_raw_records,
-    utcnow_iso,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -396,7 +395,6 @@ def fetch_indicators(
                     "name": name,
                     "provider": str(entry.get("provider")),
                     "url": expanded,
-                    "fetched_at": utcnow_iso(),
                     **snapshot,
                 },
                 ym=snapshot["observed_ym"],

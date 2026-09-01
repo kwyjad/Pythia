@@ -89,11 +89,26 @@ def raw_table_name(source: str) -> str:
     return f"haz_raw_{source}"
 
 
+def raw_ddl(source: str) -> str:
+    """The CREATE TABLE for one raw cache.
+
+    Public because retention.py rebuilds these tables and must recreate them
+    from the SAME definition — a second copy of the DDL would eventually drop
+    the UNIQUE constraint that makes the cache idempotent.
+    """
+    if source == "population":
+        return _POPULATION_RAW_DDL
+    return _generic_raw_ddl(raw_table_name(source))
+
+
 def _generic_raw_ddl(table: str) -> str:
     # record_id is the source-native identifier (storm id, GLIDE/disno,
     # GDACS event id, IDU id, GO report id, ReliefWeb doc id, IPC analysis id).
     # content_hash lets a re-fetch of identical content be a no-op while a
-    # revised record appends a new row — that is what haz_revisions audits.
+    # genuinely revised record appends a new row. NOTE: those rows are not
+    # what haz_revisions audits — only resolutions.py writes that table.
+    # The comment that said otherwise is what kept a broken dedup (a wall
+    # clock inside the hashed payload) looking like intended behaviour.
     return f"""
     CREATE TABLE IF NOT EXISTS {table} (
         record_id TEXT NOT NULL,

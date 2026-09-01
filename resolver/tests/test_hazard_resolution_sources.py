@@ -18,7 +18,10 @@ zero out of an outage.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
+import re
+from pathlib import Path
 
 import duckdb
 import pytest
@@ -27,14 +30,19 @@ from resolver.hazard_resolution import emdat as emdat_mod
 from resolver.hazard_resolution import gdacs as gdacs_mod
 from resolver.hazard_resolution import idmc_idu as idu_mod
 from resolver.hazard_resolution import ifrc_go as go_mod
+from resolver.hazard_resolution import reliefweb_docs as reliefweb_docs_mod
+from resolver.hazard_resolution import sources as sources_mod
 from resolver.hazard_resolution.schema import ensure_haz_schema
 from resolver.hazard_resolution.sources import (
+    VOLATILE_PAYLOAD_KEYS,
     RawRecord,
+    content_hash,
     fetch_window,
     load_raw_records,
     parse_date,
     parse_number,
     shift_month,
+    stable_payload,
     store_raw_records,
 )
 from resolver.tests.hazard_resolution_utils import make_rulebook
@@ -76,6 +84,108 @@ def test_identical_refetch_is_a_no_op_but_a_revision_appends(con):
     loaded = load_raw_records(con, "emdat")
     assert len(loaded) == 1
     assert loaded[0]["total_affected"] == 250
+
+
+def test_a_wall_clock_in_the_payload_does_not_defeat_dedup(con):
+    """The defect that grew the canonical DB from 3.0 GB to 17.7 GB.
+
+    Seven connectors stamped ``"fetched_at": utcnow_iso()`` into the payload
+    that ``content_hash`` covers, so the hash differed on every fetch,
+    ``INSERT OR IGNORE`` never ignored, and each run appended a full
+    duplicate of every record it touched -- ReliefWeb bodies included, at
+    ~720 KB a cell. Content-only hashing is what makes the cache idempotent.
+    """
+    first = RawRecord(
+        record_id="emdat-1",
+        payload={"total_affected": 100, "fetched_at": "2026-08-05T20:30:00Z"},
+        iso3="PHL", ym="2024-03", hazard="FL",
+    )
+    later = RawRecord(
+        record_id="emdat-1",
+        payload={"total_affected": 100, "fetched_at": "2026-08-06T20:30:00Z"},
+        iso3="PHL", ym="2024-03", hazard="FL",
+    )
+    assert store_raw_records(con, "emdat", [first])["inserted"] == 1
+    assert store_raw_records(con, "emdat", [later])["inserted"] == 0
+    assert con.execute("SELECT COUNT(*) FROM haz_raw_emdat").fetchone()[0] == 1
+
+    # A genuine content change still appends -- dedup must not become deafness.
+    revised = RawRecord(
+        record_id="emdat-1",
+        payload={"total_affected": 250, "fetched_at": "2026-08-07T20:30:00Z"},
+        iso3="PHL", ym="2024-03", hazard="FL",
+    )
+    assert store_raw_records(con, "emdat", [revised])["inserted"] == 1
+
+
+def test_stored_payload_carries_no_volatile_keys(con):
+    """Strip from the STORED payload too, not only from the hash input.
+
+    Hashing a stripped copy while storing an unstripped one would make
+    payload_json and content_hash disagree, and the surviving row's
+    fetched_at would be a permanently frozen lie.
+    """
+    store_raw_records(con, "emdat", [RawRecord(
+        record_id="emdat-9",
+        payload={"total_affected": 7, "fetched_at": "2026-08-05T20:30:00Z"},
+        iso3="PHL", ym="2024-03", hazard="FL",
+    )])
+    payload_json = con.execute(
+        "SELECT payload_json FROM haz_raw_emdat WHERE record_id = 'emdat-9'"
+    ).fetchone()[0]
+    stored = json.loads(payload_json)
+    assert not VOLATILE_PAYLOAD_KEYS & set(stored)
+    assert stored["total_affected"] == 7
+
+    # The retrieval time is not lost: it is the column, re-injected on read.
+    loaded = load_raw_records(con, "emdat")
+    assert loaded[0]["_retrieved_at"]
+
+
+def test_no_connector_embeds_a_wall_clock_in_its_cached_payload():
+    """Source-text guard against the copy-paste that produced all seven.
+
+    A behavioural test cannot catch connector #8 naming its key
+    ``retrieved_time``; this catches the literal that actually spread.
+    """
+    machine = Path(sources_mod.__file__).parent
+    offenders = [
+        path.name
+        for path in sorted(machine.glob("*.py"))
+        # sources.py is the storage layer, not a connector: its docstring
+        # quotes the literal in order to explain why it is stripped.
+        if path.name != "sources.py"
+        and re.search(r"""["']fetched_at["']\s*:\s*_?utcnow_iso\(\)""", path.read_text())
+    ]
+    assert offenders == [], (
+        "these connectors stamp a wall clock into the hashed payload, which "
+        f"defeats the raw-cache dedup: {offenders}"
+    )
+
+
+@pytest.mark.parametrize("build", ["gdacs", "reliefweb_docs"])
+def test_record_builders_hash_identically_across_two_clocks(build, rulebook, monkeypatch):
+    """End-to-end on the real builders: same content, two clocks, one hash."""
+    def _hash_with_clock(stamp: str) -> str:
+        monkeypatch.setattr(sources_mod, "utcnow_iso", lambda: stamp)
+        if build == "gdacs":
+            record = gdacs_mod._event_record({
+                "eventid": "1", "eventtype": "FL", "alertlevel": "Orange",
+                "fromdate": "2024-03-01", "todate": "2024-03-05",
+                "iso3": "PHL", "country": "Philippines",
+            }, "flood")
+            payload = record.payload
+        else:
+            payload = reliefweb_docs_mod._document(
+                {"id": "42", "fields": {"title": "Floods", "body": "Body text",
+                                        "url": "https://x", "date": {"created": "2024-03-02"}}},
+                "PHL", "2024-03", "flood", rulebook,
+            )
+        return content_hash(
+            json.dumps(stable_payload(payload), separators=(",", ":"), sort_keys=True)
+        )
+
+    assert _hash_with_clock("2026-08-05T20:30:00Z") == _hash_with_clock("2026-08-06T20:30:00Z")
 
 
 def test_loaded_records_carry_cache_provenance(con):

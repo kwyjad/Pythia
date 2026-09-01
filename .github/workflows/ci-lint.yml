@@ -54,7 +54,17 @@ jobs:
       # typo in the watched list), and it is stdlib-only, so it belongs in the
       # one job that runs on every PR. Per the repo's standing rule, a test
       # file named in no workflow runs nowhere.
+      #
+      # PYTHONPATH: unlike the sanity checks above, this file imports from the
+      # repo (scripts.ci.check_workflow_freshness). Bare `pytest` does not put
+      # the working directory on sys.path and --noconftest stops conftest.py
+      # doing it either, so without this the step dies at collection with
+      # "No module named 'scripts'" -- which is what it has done on main since
+      # this step was added in #873, meaning the watchdog's own tests have
+      # never actually run.
       - name: Cron watchdog tests
+        env:
+          PYTHONPATH: .
         run: pytest -vv --noconftest tests/test_check_workflow_freshness.py
 
       - name: Set up Go
