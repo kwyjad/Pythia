@@ -46,7 +46,6 @@ from resolver.hazard_resolution.sources import (
     parse_date,
     parse_number,
     store_raw_records,
-    utcnow_iso,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -191,7 +190,6 @@ def _record(record: dict[str, Any], hazard: str) -> RawRecord | None:
         # different quantity and the payload must not blur the two.
         "displaced": displacement_from_record(record),
         "raw": record,
-        "fetched_at": utcnow_iso(),
     }
     return RawRecord(
         record_id=f"idu-{record_id}",

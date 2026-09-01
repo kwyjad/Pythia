@@ -13,13 +13,32 @@ cache before anything interprets it, using the one storage idiom
 * the record verbatim in ``payload_json``;
 * ``content_hash`` over that payload, so a re-fetch of identical content is
   a no-op (``UNIQUE (record_id, content_hash)``) while an upstream revision
-  APPENDS a new row — which is the trail ``haz_revisions`` audits;
+  APPENDS a new row;
 * ``retrieved_at`` on every row, because provenance is a hard rule and a
   figure without a retrieval time cannot be audited later.
 
 Readers take the newest revision per ``record_id``
 (:func:`load_raw_records`), so a revised record supersedes its predecessor
 without the older evidence being destroyed.
+
+**The hash covers CONTENT ONLY.** :data:`VOLATILE_PAYLOAD_KEYS` is stripped
+from the payload before it is serialised and hashed, because a wall-clock
+stamp inside the hashed bytes silently converts this idempotent cache into
+an append-only log: the hash differs on every fetch, ``INSERT OR IGNORE``
+never ignores, and each run appends a full duplicate of every record it
+touched. Seven connectors did exactly that (a ``"fetched_at": utcnow_iso()``
+copied from one to the next) and it grew the canonical DB from 3.0 GB to
+17.7 GB in 26 nights before anyone read the "N new revision rows" this
+module has been logging all along. The retrieval time is not lost — it is
+the ``retrieved_at`` COLUMN, which :func:`load_raw_records` re-injects as
+``_retrieved_at``.
+
+One consequence to know: with dedup working, ``retrieved_at`` is when this
+content was FIRST seen, not when it was last checked. The did-we-check fact
+lives at run level in :meth:`FetchOutcome.as_provenance`. Do not add a
+``last_seen_at`` column updated on every collision — a DuckDB UPDATE is
+internally delete+insert, so ~100k of them a night would reintroduce the
+bloat in a subtler form.
 """
 
 from __future__ import annotations
@@ -116,6 +135,19 @@ def fetch_window(ym: str, rulebook, prefix: str) -> tuple[dt.date, dt.date]:
     return start, end
 
 
+# Keys that describe WHEN we fetched, never WHAT was fetched. They are
+# stripped before serialising so an unchanged record hashes identically on
+# every fetch. See the module docstring: leaving a wall clock in the hashed
+# payload is what turned this cache into an append-only log.
+VOLATILE_PAYLOAD_KEYS = frozenset({"fetched_at", "retrieved_at", "_retrieved_at"})
+
+
+def stable_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """The payload as it is stored and hashed: content, no wall clocks."""
+
+    return {k: v for k, v in payload.items() if k not in VOLATILE_PAYLOAD_KEYS}
+
+
 def content_hash(payload_json: str) -> str:
     return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
 
@@ -138,7 +170,13 @@ def store_raw_records(
     before = int(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
     seen = 0
     for record in records:
-        payload_json = json.dumps(record.payload, separators=(",", ":"), sort_keys=True)
+        # Strip volatile keys from the STORED payload, not just from the hash
+        # input: hashing a stripped copy while storing an unstripped one would
+        # make payload_json and content_hash disagree, and the surviving row's
+        # fetched_at would become a permanently frozen lie.
+        payload_json = json.dumps(
+            stable_payload(record.payload), separators=(",", ":"), sort_keys=True
+        )
         con.execute(
             f"""
             INSERT OR IGNORE INTO {table}

@@ -59,7 +59,6 @@ from resolver.hazard_resolution.sources import (
     parse_date,
     parse_number,
     store_raw_records,
-    utcnow_iso,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -180,7 +179,6 @@ def _analysis_record(
         "months_covered": months,
         "phase3plus_population": float(value),
         "analysis_date": analysis_date or "",
-        "fetched_at": utcnow_iso(),
         "raw": raw or {},
     }
     return RawRecord(

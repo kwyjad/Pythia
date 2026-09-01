@@ -54,7 +54,6 @@ from resolver.hazard_resolution.sources import (
     load_raw_records,
     month_bounds,
     store_raw_records,
-    utcnow_iso,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -161,7 +160,6 @@ def _document(
         "formats": _text_of(fields, "format"),
         "disaster_types": _text_of(fields, "disaster_type"),
         "source_rank": source_rank(publishers, rulebook),
-        "fetched_at": utcnow_iso(),
     }
 
 
