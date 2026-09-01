@@ -162,10 +162,15 @@ jobs:
 
       # Step 2, and the one that actually returns bytes. Deleting rows leaves
       # the blocks in the file; only a copy to a fresh database reclaims them.
+      # Disk is plausibly the next thing to fail here: this step holds the
+      # multi-GB canonical DB AND the compacted copy at the same time, and
+      # publish_latest_data.yml's own "~14 GB runner disk" note is stale. A
+      # copy that dies for want of space otherwise looks like a DuckDB error.
       - name: Reclaim the file
         if: inputs.apply == true || inputs.apply == 'true'
         run: |
           set -euo pipefail
+          echo "disk before: $(df -h . | tail -1)"
           rm -f data/resolver.duckdb.wal
           BEFORE=$(stat -c%s data/resolver.duckdb)
           python - <<'PY'
@@ -183,10 +188,13 @@ jobs:
           mv -f data/resolver.compacted.duckdb data/resolver.duckdb
           AFTER=$(stat -c%s data/resolver.duckdb)
           echo "file: ${BEFORE} -> ${AFTER} bytes"
+          echo "disk after: $(df -h . | tail -1)"
           {
             echo "#### File reclaimed"
             echo ""
             echo "\`${BEFORE}\` -> \`${AFTER}\` bytes"
+            echo ""
+            echo "Disk: \`$(df -h . | tail -1)\`"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
