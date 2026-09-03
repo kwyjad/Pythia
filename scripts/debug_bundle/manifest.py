@@ -31,6 +31,40 @@ from typing import Any
 #     prefixes, and this manifest.
 BUNDLE_SCHEMA_VERSION = 2
 
+# Fields that kept their name and changed their MEANING. A consumer that
+# parses one of these gets a different answer than it did before, which
+# breaks it as surely as a rename would — so the manifest says so outright
+# rather than leaving it to a commit message nobody downstream reads.
+CHANGED_FIELD_SEMANTICS: list[dict[str, str]] = [
+    {
+        "file": "question_metrics__*.csv",
+        "field": "target_month",
+        "was": "the LAST month of the six-month window (questions.target_month)",
+        "now": "the question's own month, i.e. the epoch in its id and the window start",
+        "moved_to": "horizon_end_month carries the old value",
+        "since_schema_version": "2",
+    },
+    {
+        "file": "grounding_detail__*.csv",
+        "field": "phase",
+        "was": "llm_calls.phase, which is 'hs_triage' on every HS row",
+        "now": "the derived stage: rc_grounding / triage_grounding / adversarial_search",
+        "moved_to": "db_phase carries the raw column",
+        "since_schema_version": "2",
+    },
+    {
+        "file": "llm_calls_detail__*.jsonl.gz",
+        "field": "prompt_text",
+        "was": "the whole prompt",
+        "now": "the variable TAIL where a shared prefix was deduplicated",
+        "moved_to": (
+            "prompt_prefixes__*.json[prompt_prefix_sha256].text + prompt_text "
+            "reproduces it; prompt_is_complete=true means the record is whole"
+        ),
+        "since_schema_version": "2",
+    },
+]
+
 DESCRIPTIONS: dict[str, str] = {
     "anomalies": "Everything that failed or looks wrong, with severity and where the evidence is. Read this first.",
     "executive_summary": "One-page health report: anomalies, status, cost, cache, connector freshness, coverage.",

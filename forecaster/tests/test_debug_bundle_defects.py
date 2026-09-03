@@ -206,8 +206,9 @@ def test_a_country_whose_questions_all_took_track_2_still_gets_an_spd_row(tmp_pa
     assert rows["TCD"]["n_questions"] == "1"
     assert int(rows["TCD"]["spd_elapsed_ms"]) > 0
     # And the row says where the number came from, because it is a write
-    # span rather than a model latency.
-    assert "forecasts_raw" in rows["TCD"]["spd_timing_source"]
+    # span rather than a model latency — naming the column it actually came
+    # from, which is on forecasts_ensemble; forecasts_raw has no created_at.
+    assert "forecasts_ensemble.created_at" in rows["TCD"]["spd_timing_source"]
 
 
 def test_rc_and_triage_no_longer_share_one_span(tmp_path: Path):
