@@ -375,16 +375,33 @@ def test_progress_is_kept_per_hazard(con, rulebook):
 
 def test_drought_backcast_warns_that_latest_only_indicators_cannot_backcast(rulebook):
     """The shipped ASAP feed publishes a LATEST snapshot with no archive, so
-    every backcast month fails the observation-age test and resolves
-    INCONCLUSIVE. That is correct (fail-closed), and it has to be announced
-    before a multi-hour run, not discovered after it."""
+    it cannot speak for a backcast month and those cells fail the
+    observation-age test. That is correct (fail-closed), and it has to be
+    announced before a multi-hour run, not discovered after it."""
 
     check = bc.check_backcastable("drought", rulebook)
 
     assert check.ok  # never blocks
-    assert len(check.warnings) == 1
-    assert "asap" in check.warnings[0]
-    assert "INCONCLUSIVE" in check.warnings[0]
+    joined = " | ".join(check.warnings)
+    assert "asap" in joined
+    assert "backcast" in joined
+
+
+def test_a_dated_table_indicator_is_reported_as_what_the_backcast_rests_on(rulebook):
+    """The pythia_table entries carry per-row dates, so they CAN backcast.
+
+    That is the difference between "every month will be inconclusive" and
+    "months before the ingest will be" — and an operator about to spend hours
+    should be told which of the two they are in.
+    """
+
+    check = bc.check_backcastable("drought", rulebook)
+    joined = " | ".join(check.warnings)
+
+    assert "hdx_agricultural_stress" in joined
+    assert "as far as those tables were ingested" in joined
+    # The all-inconclusive alarm is for the case where NOTHING is dated.
+    assert "EVERY \nbackcast month" not in joined
 
 
 def test_a_per_month_indicator_archive_clears_the_warning():
@@ -486,3 +503,44 @@ def test_time_budget_defers_cleanly_and_resumes(con, rulebook):
     )
     assert run2.months_run == 3
     assert run2.months_deferred == 0
+
+
+# ---------------------------------------------------------------------------
+# A month that did not crash is not the same as a month that finished
+# ---------------------------------------------------------------------------
+
+
+def test_a_month_that_assessed_cells_and_wrote_nothing_is_not_complete():
+    """The resume ledger must retry it, or a source outage becomes permanent.
+
+    The runner exits 0 when it walks every cell without raising — which it
+    does even when a required source was unreadable and every cell came back
+    INCONCLUSIVE. Recording that as complete is worse than a failure: the
+    month is never re-attempted, so an outage that lasted a week costs a year
+    of history. The August 2026 ASAP outage did exactly this to twelve months
+    of drought.
+    """
+
+    complete, reason = bc.month_is_complete(
+        {"cells": 187, "resolved_value": 0, "resolved_zero": 0, "no_data": 0}
+    )
+    assert complete is False
+    assert "no row written" in reason
+
+
+def test_a_month_that_wrote_something_is_complete():
+    assert bc.month_is_complete(
+        {"cells": 187, "resolved_value": 3, "resolved_zero": 120, "no_data": 4}
+    ) == (True, "")
+
+
+def test_a_month_with_nothing_to_assess_is_complete():
+    """No cells is not a failure — there was nothing to do."""
+
+    assert bc.month_is_complete({"cells": 0}) == (True, "")
+
+
+def test_a_month_whose_only_outcome_was_frozen_skips_is_complete():
+    """Frozen cells were looked at and deliberately left alone."""
+
+    assert bc.month_is_complete({"cells": 12, "frozen_skipped": 12}) == (True, "")

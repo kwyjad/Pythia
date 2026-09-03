@@ -45,7 +45,10 @@ from resolver.hazard_resolution.sources import (
     stable_payload,
     store_raw_records,
 )
-from resolver.tests.hazard_resolution_utils import make_rulebook
+from resolver.tests.hazard_resolution_utils import (
+    SYNTHETIC_COUNTRIES_GEOJSON,
+    make_rulebook,
+)
 
 
 @pytest.fixture()
@@ -669,3 +672,107 @@ def test_gdacs_fetch_survives_one_malformed_event(con, rulebook, monkeypatch):
     assert outcome.ok is True
     assert outcome.records == 1
     assert outcome.detail["events_skipped_malformed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# GDACS names no country for an event still over open ocean
+# ---------------------------------------------------------------------------
+
+
+class TestGdacsGeometryAttribution:
+    """An event with no country is written and then read by no cell.
+
+    GDACS leaves ``affectedcountries`` empty while a tropical cyclone is
+    still offshore, and 16 TC events were dropped that way in the 2026-08 run
+    (ids 1001273..1001315). The event's own position resolves it, against the
+    same vendored boundaries cyclone detection already uses.
+    """
+
+    @staticmethod
+    def _event(**overrides):
+        event = {
+            "eventid": "1001273",
+            "eventtype": "TC",
+            "iso3": "",
+            "iso3_list": [],
+            "country": "",
+            "fromdate": dt.date(2024, 3, 5),
+            "todate": dt.date(2024, 3, 9),
+            "alertlevel": "Orange",
+            "population": 250_000.0,
+        }
+        event.update(overrides)
+        return event
+
+    def test_a_point_inside_a_country_resolves_to_it(self, monkeypatch):
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+        from resolver.hazard_resolution.geometry import load_country_geometries
+
+        monkeypatch.setattr(
+            "resolver.hazard_resolution.geometry.load_country_geometries",
+            lambda *a, **k: load_country_geometries(SYNTHETIC_COUNTRIES_GEOJSON),
+        )
+        # Squareland spans lon 10..15, lat -2..2.
+        record = gdacs_mod._event_record(self._event(lat=0.0, lon=12.0), "TC")
+
+        assert record is not None
+        assert record.payload["iso3_list"] == ["AAA"]
+        assert record.iso3 == "AAA"
+        # Provenance: a derived attribution is a weaker claim than a stated
+        # one, and the row says which this was.
+        assert record.payload["iso3_from_geometry"] == ["AAA"]
+
+    def test_an_offshore_point_still_resolves_to_the_nearby_coast(self, monkeypatch):
+        """A cyclone eye sits well off the coast it is about to hit."""
+
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+        from resolver.hazard_resolution.geometry import load_country_geometries
+
+        monkeypatch.setattr(
+            "resolver.hazard_resolution.geometry.load_country_geometries",
+            lambda *a, **k: load_country_geometries(SYNTHETIC_COUNTRIES_GEOJSON),
+        )
+        # ~2 degrees east of Squareland's edge, roughly 220 km at the equator.
+        record = gdacs_mod._event_record(self._event(lat=0.0, lon=17.0), "TC")
+
+        assert record.payload["iso3_list"] == ["AAA"]
+
+    def test_a_point_in_the_middle_of_an_ocean_resolves_to_nothing(self, monkeypatch):
+        """Failing to place an event leaves it exactly as it was.
+
+        Attribution by proximity must not become attribution by guesswork.
+        """
+
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+        from resolver.hazard_resolution.geometry import load_country_geometries
+
+        monkeypatch.setattr(
+            "resolver.hazard_resolution.geometry.load_country_geometries",
+            lambda *a, **k: load_country_geometries(SYNTHETIC_COUNTRIES_GEOJSON),
+        )
+        record = gdacs_mod._event_record(self._event(lat=-40.0, lon=-140.0), "TC")
+
+        assert record.payload["iso3_list"] == []
+        assert record.payload["iso3_from_geometry"] == []
+
+    def test_a_stated_country_is_never_overridden_by_geometry(self, monkeypatch):
+        """GDACS's own attribution outranks anything derived here."""
+
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+
+        def explode(*_a, **_k):  # pragma: no cover - must not be reached
+            raise AssertionError("geometry must not run when GDACS named a country")
+
+        monkeypatch.setattr(gdacs_mod, "_iso3s_near_event", explode)
+        record = gdacs_mod._event_record(
+            self._event(iso3="PHL", iso3_list=["PHL"], lat=0.0, lon=12.0), "TC"
+        )
+
+        assert record.payload["iso3_list"] == ["PHL"]
+        assert record.payload["iso3_from_geometry"] == []
+
+    def test_an_event_with_no_position_is_not_a_crash(self):
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+
+        record = gdacs_mod._event_record(self._event(), "TC")
+        assert record.payload["iso3_list"] == []

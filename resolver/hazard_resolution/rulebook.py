@@ -68,7 +68,8 @@ _KNOWN_DROUGHT_MONTH_ATTRIBUTION = ("analysis_window", "start_month")
 _KNOWN_IPC_SOURCES = ("ipc_api", "facts_resolved")
 
 #: Drought-indicator feed shapes the machine knows how to parse.
-_KNOWN_INDICATOR_PROVIDERS = ("asap", "tabular")
+_KNOWN_INDICATOR_PROVIDERS = ("asap", "tabular", "pythia_table")
+_KNOWN_INDICATOR_MATCHES = ("classes", "threshold")
 _KNOWN_INDICATOR_COMBINE = ("any", "all")
 _KNOWN_INDICATOR_DIRECTIONS = ("below", "above")
 _KNOWN_CEILING_SOURCES = ("gdacs_exposed",)
@@ -445,6 +446,9 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     # Drought indicators: the attribution gate and the zero gate.
     _require_choice("drought.indicators.combine", _KNOWN_INDICATOR_COMBINE)
     _require_int_in("drought.indicators.max_observation_age_months", 0, 60)
+    # >= 1: at zero, an outage in every feed would read as "no drought
+    # anywhere" and the machine would zero the whole world.
+    _require_int_in("drought.indicators.min_available", 1, 10)
     entries = _require("drought.indicators.entries")
     if entries is not _MISSING:
         if not isinstance(entries, list) or not entries:
@@ -477,6 +481,27 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
                     )
                 elif url.strip() and not url.startswith("https://"):
                     problems.append(f"{where}.url must be an https:// URL, got {url!r}")
+                # `urls` is the candidate list a moved download route needs.
+                urls = entry.get("urls")
+                if urls is not None:
+                    if not isinstance(urls, list) or not all(
+                        isinstance(u, str) and u.startswith("https://") for u in urls
+                    ):
+                        problems.append(
+                            f"{where}.urls must be a list of https:// URLs, got {urls!r}"
+                        )
+                match = entry.get("match")
+                if match is not None and match not in _KNOWN_INDICATOR_MATCHES:
+                    problems.append(
+                        f"{where}.match must be one of "
+                        f"{list(_KNOWN_INDICATOR_MATCHES)}, got {match!r}"
+                    )
+                absence = entry.get("absence_means_no_drought")
+                if absence is not None and not isinstance(absence, bool):
+                    problems.append(
+                        f"{where}.absence_means_no_drought must be a boolean, "
+                        f"got {absence!r}"
+                    )
                 required = entry.get("required")
                 if not isinstance(required, bool):
                     problems.append(f"{where}.required must be a boolean, got {required!r}")
@@ -487,15 +512,33 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
                     problems.append(
                         f"{where}.request_timeout_sec must be a number > 0, got {timeout!r}"
                     )
-                # A required entry with no url can never be read, so it would
-                # suppress every zero for as long as it stayed misconfigured.
-                if required is True and isinstance(url, str) and not url.strip():
+                # A required entry the machine cannot address can never be
+                # read, so it would suppress every zero for as long as it
+                # stayed misconfigured. A pythia_table entry is addressed by
+                # its table, every other provider by a url (or urls).
+                has_urls = isinstance(urls, list) and any(
+                    isinstance(u, str) and u.strip() for u in urls
+                )
+                addressable = (
+                    bool(str(entry.get("table") or "").strip())
+                    if provider == "pythia_table"
+                    else (isinstance(url, str) and bool(url.strip())) or has_urls
+                )
+                if required is True and not addressable:
                     problems.append(
-                        f"{where} is required: true but has an empty url — it could "
-                        "never be read, and an unreadable required indicator "
-                        "suppresses every drought zero"
+                        f"{where} is required: true but has nothing to read from — "
+                        "it could never be read, and an unreadable required "
+                        "indicator suppresses every drought zero"
                     )
-                if provider == "asap":
+                # What an entry needs is decided by HOW it matches values, not
+                # by which transport fetched them: a class-shaped feed needs a
+                # class list, a number-shaped one needs a threshold and a
+                # direction. The default follows the provider so existing
+                # entries are unchanged.
+                effective_match = match or (
+                    "classes" if provider == "asap" else "threshold"
+                )
+                if effective_match == "classes":
                     classes = entry.get("drought_classes")
                     if (
                         not isinstance(classes, list)
@@ -505,7 +548,7 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
                         problems.append(
                             f"{where}.drought_classes must be a non-empty list, got {classes!r}"
                         )
-                if provider == "tabular":
+                elif effective_match == "threshold":
                     if not _is_number(entry.get("threshold")):
                         problems.append(
                             f"{where}.threshold must be a number, got {entry.get('threshold')!r}"
@@ -515,15 +558,49 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
                             f"{where}.direction must be one of "
                             f"{list(_KNOWN_INDICATOR_DIRECTIONS)}, got {entry.get('direction')!r}"
                         )
+                if provider == "pythia_table":
+                    table = entry.get("table")
+                    if not isinstance(table, str) or not table.strip():
+                        problems.append(
+                            f"{where}.table must be a non-empty string, got {table!r}"
+                        )
+                    # The where clause is spliced into SQL, so it may only
+                    # contain a filter — never a statement terminator.
+                    clause = entry.get("where")
+                    if clause is not None and (
+                        not isinstance(clause, str) or ";" in clause
+                    ):
+                        problems.append(
+                            f"{where}.where must be a single SQL filter with no "
+                            f"';', got {clause!r}"
+                        )
             if len(set(names)) != len(names):
                 problems.append(f"drought.indicators.entries has duplicate names: {names}")
-            # With nothing required, an outage in every feed reads as "no
-            # drought anywhere" and the machine would zero the whole world.
-            if not any_required:
+            # An outage in every feed must never read as "no drought
+            # anywhere". Two ways to guarantee that: nominate a required
+            # entry, or demand a minimum number of ANSWERS. The second is
+            # strictly better — naming one feed as required makes that feed a
+            # single point of failure for every cell — so either satisfies
+            # this, and the shipped rulebook uses min_available.
+            min_available = _get("drought.indicators.min_available")
+            has_minimum = (
+                isinstance(min_available, int)
+                and not isinstance(min_available, bool)
+                and min_available >= 1
+            )
+            if not any_required and not has_minimum:
                 problems.append(
-                    "drought.indicators.entries must mark at least one entry "
-                    "required: true — with none, a total indicator outage would "
-                    "be indistinguishable from a quiet month and zero every country"
+                    "drought.indicators needs either an entry with required: true "
+                    "or min_available >= 1 — with neither, a total indicator "
+                    "outage would be indistinguishable from a quiet month and "
+                    "zero every country"
+                )
+            n_entries = sum(1 for e in entries if isinstance(e, Mapping))
+            if has_minimum and min_available > n_entries:
+                problems.append(
+                    f"drought.indicators.min_available is {min_available} but only "
+                    f"{n_entries} entries are configured — no verdict could ever "
+                    "be reached"
                 )
 
     # Freeze policy
@@ -578,6 +655,16 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     _require_choice("sanity.ceiling_source", _KNOWN_CEILING_SOURCES)
     _require_positive_number("sanity.ceiling_multiplier")
     _require_bool("sanity.population_cap")
+    # 0 disables the fallback; above 1 it would exceed the population cap it
+    # is meant to sit under, which would make it inert.
+    share = _get("sanity.population_fallback_share")
+    if share is not None and (
+        not _is_number(share) or not (0.0 <= float(share) <= 1.0)
+    ):
+        problems.append(
+            "sanity.population_fallback_share must be a number in [0, 1] "
+            f"(0 disables it), got {share!r}"
+        )
 
     # Conflict handling
     _require_choice("conflict_rule", _KNOWN_CONFLICT_RULES)

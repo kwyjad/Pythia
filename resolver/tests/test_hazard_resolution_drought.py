@@ -79,6 +79,12 @@ def _verdict(con, iso3, rulebook, ym: str = YM):
     return ind_mod.evaluate_indicators(con, iso3, ym, rulebook)
 
 
+def _raise_dead():
+    """A transport that never answers — the ASAP outage, reproduced."""
+
+    raise RuntimeError("404 Not Found")
+
+
 # ---------------------------------------------------------------------------
 # The rulebook block
 # ---------------------------------------------------------------------------
@@ -92,28 +98,70 @@ class TestRulebook:
             "start_month",
         )
         entries = rulebook.get("drought.indicators.entries")
-        assert any(e["required"] for e in entries)
-        # The ASAP endpoint is configurable, never hard-coded in Python.
+        # A total indicator outage must never read as "no drought anywhere".
+        # Two ways to guarantee that: nominate a required entry, or demand a
+        # minimum number of ANSWERS. The shipped rulebook uses the second,
+        # because naming one feed as required makes that feed a single point
+        # of failure for every cell — which is how one dead ASAP URL left 756
+        # drought cells inconclusive in a single run.
+        assert (
+            any(e["required"] for e in entries)
+            or int(rulebook.get("drought.indicators.min_available")) >= 1
+        )
+        # The ASAP endpoint is configurable, never hard-coded in Python —
+        # and since Sept 2026 it is a candidate LIST, because the portal has
+        # moved its download route without moving the data.
         asap = next(e for e in entries if e["name"] == "asap")
-        assert asap["url"].startswith("https://")
+        addresses = list(asap.get("urls") or []) + [asap.get("url") or ""]
+        assert any(a.startswith("https://") for a in addresses)
 
-    def test_a_required_indicator_with_no_url_is_rejected(self):
+    def test_a_required_indicator_with_nothing_to_read_is_rejected(self):
         """It could never be read, so it would suppress every drought zero."""
 
         data = make_rulebook().raw
-        data["drought"]["indicators"]["entries"][0]["url"] = ""
+        entry = data["drought"]["indicators"]["entries"][0]
+        entry["required"] = True
+        entry["url"] = ""
+        entry["urls"] = []
         problems = validate_rulebook(data)
-        assert any("required: true but has an empty url" in p for p in problems)
+        assert any("has nothing to read from" in p for p in problems)
 
-    def test_all_indicators_optional_is_rejected(self):
+    def test_a_required_entry_is_satisfied_by_a_candidate_url_list(self):
+        """`urls` addresses an entry just as `url` does.
+
+        A portal that moves its download route has not lost the data, and the
+        candidate list is how a moved route costs a YAML edit rather than an
+        outage.
+        """
+
+        data = make_rulebook().raw
+        entry = data["drought"]["indicators"]["entries"][0]
+        entry["required"] = True
+        entry["url"] = ""
+        entry["urls"] = ["https://example.test/a.json", "https://example.test/b.json"]
+        assert not any(
+            "has nothing to read from" in p for p in validate_rulebook(data)
+        )
+
+    def test_no_required_entry_and_no_minimum_is_rejected(self):
         """A total indicator outage would otherwise zero the whole world."""
 
         data = make_rulebook().raw
+        data["drought"]["indicators"]["min_available"] = 0
         for entry in data["drought"]["indicators"]["entries"]:
             entry["required"] = False
             entry["url"] = entry["url"] or "https://example.test/feed.json"
         problems = validate_rulebook(data)
-        assert any("at least one entry" in p for p in problems)
+        assert any("min_available >= 1" in p for p in problems)
+
+    def test_a_minimum_larger_than_the_entry_list_is_rejected(self):
+        """No verdict could ever be reached, so no drought could ever resolve."""
+
+        data = make_rulebook().raw
+        data["drought"]["indicators"]["min_available"] = 9
+        assert any(
+            "no verdict could ever be reached" in p for p in validate_rulebook(data)
+        )
 
     def test_a_lookback_too_short_to_hold_a_baseline_is_rejected(self):
         data = make_rulebook().raw
@@ -285,6 +333,235 @@ class TestIpcConnector:
 # ---------------------------------------------------------------------------
 # The indicators
 # ---------------------------------------------------------------------------
+
+
+class TestIndicatorSourcesBeyondAsap:
+    """The gate must not rest on a single URL.
+
+    Until Sept 2026 ASAP was the only required indicator, so when its
+    download route vanished every drought cell in the run came back
+    INCONCLUSIVE — 756 of them. The repair is not a louder log: it is more
+    ways to satisfy the same requirement, drawn from tables this repo
+    already ingests.
+    """
+
+    @staticmethod
+    def _refresh(con, rulebook):
+        """Run the fetch so the seeded tables reach the indicator cache.
+
+        The module stores VALUES and applies thresholds at evaluation time,
+        so seeding a table is not enough on its own — the snapshot is what
+        the verdict reads.
+        """
+
+        return ind_mod.fetch_indicators(
+            con, YM, rulebook,
+            get=lambda url, timeout: (_raise_dead()),
+        )
+
+    @staticmethod
+    def _seed_hdx(con, values: dict[str, str], signal_date: str = "2024-03-15"):
+        """HDX Signals rows, in the shape the connector writes them."""
+
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hdx_signals (
+                iso3 VARCHAR, hazard_code VARCHAR, indicator VARCHAR,
+                concern_level VARCHAR, indicator_value DOUBLE,
+                description VARCHAR, source_url VARCHAR, signal_date VARCHAR
+            )
+            """
+        )
+        for iso3, level in values.items():
+            con.execute(
+                "INSERT INTO hdx_signals (iso3, hazard_code, indicator, "
+                "concern_level, signal_date) VALUES (?, 'DR', "
+                "'jrc_agricultural_hotspots', ?, ?)",
+                [iso3, level, signal_date],
+            )
+
+    @staticmethod
+    def _seed_nmme(con, values: dict[str, float], issue_date: str = "2024-03-01"):
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS seasonal_forecasts (
+                iso3 TEXT, variable TEXT, lead_months INTEGER,
+                anomaly_value DOUBLE, tercile_category TEXT,
+                forecast_issue_date DATE
+            )
+            """
+        )
+        for iso3, anomaly in values.items():
+            con.execute(
+                "INSERT INTO seasonal_forecasts (iso3, variable, lead_months, "
+                "anomaly_value, forecast_issue_date) VALUES (?, 'prate', 1, ?, ?)",
+                [iso3, anomaly, issue_date],
+            )
+
+    def test_hdx_signals_satisfy_the_gate_when_asap_is_unavailable(
+        self, con, rulebook
+    ):
+        """The headline case: no ASAP snapshot at all, and drought still resolves.
+
+        HDX Signals' ``jrc_agricultural_hotspots`` indicator IS ASAP, reached
+        through a connector this repo already maintains — so this is the same
+        underlying evidence arriving by a route that did not break.
+        """
+
+        self._seed_hdx(con, {"SOM": "High concern"})
+        self._refresh(con, rulebook)
+
+        verdict = _verdict(con, "SOM", rulebook)
+        assert verdict.state == ind_mod.STATE_DROUGHT
+        assert verdict.available
+        # ASAP itself contributed nothing.
+        asap = next(r for r in verdict.readings if r.name == "asap")
+        assert asap.state == ind_mod.STATE_UNAVAILABLE
+
+    def test_a_resolution_row_is_written_on_hdx_evidence_alone(self, con, rulebook):
+        """The whole point: a row that does not exist today, existing.
+
+        A deterioration with a drought signal behind it resolves to the
+        delta. Before this change the same cell was INCONCLUSIVE because the
+        one required indicator could not be read.
+        """
+
+        self._seed_hdx(con, {"SOM": "High concern"})
+        self._refresh(con, rulebook)
+        seed_ipc_analysis(
+            con, iso3="SOM", window_start="2023-10-01", window_end="2023-12-31",
+            value=1_000_000,
+        )
+        seed_ipc_analysis(
+            con, iso3="SOM", window_start="2024-02-01", window_end="2024-04-30",
+            value=1_400_000,
+        )
+        seed_population(con, iso3="SOM", year=2024, population=17_000_000)
+
+        outcome = _decide(con, rulebook, "SOM")
+        assert outcome.status == drought_mod.STATUS_RESOLVED_VALUE
+        assert outcome.value == pytest.approx(400_000)
+
+    def test_absence_from_the_hdx_feed_is_the_statement_that_none_was_issued(
+        self, con, rulebook
+    ):
+        """HDX Signals is an alerting feed, so absence is evidence of absence.
+
+        It publishes signals, not a global status — the same property that
+        makes ASAP usable for zeros.
+        """
+
+        self._seed_hdx(con, {"ETH": "High concern"})
+        self._refresh(con, rulebook)
+        verdict = _verdict(con, "SOM", rulebook)
+        assert verdict.state == ind_mod.STATE_NO_DROUGHT
+        hdx = next(r for r in verdict.readings if r.name == "hdx_agricultural_stress")
+        assert hdx.state == ind_mod.STATE_NO_DROUGHT
+
+    def test_an_nmme_anomaly_is_read_against_the_rulebook_threshold(
+        self, con, rulebook
+    ):
+        self._seed_nmme(con, {"SOM": -1.6, "KEN": -0.2})
+        self._refresh(con, rulebook)
+
+        assert _verdict(con, "SOM", rulebook).state == ind_mod.STATE_DROUGHT
+        # -0.2 sigma is an ordinary month. Absence of drought here, not
+        # absence of information: NMME answered about Kenya.
+        kenya = _verdict(con, "KEN", rulebook)
+        nmme = next(r for r in kenya.readings if r.name == "nmme_precip_anomaly")
+        assert nmme.state == ind_mod.STATE_NO_DROUGHT
+
+    def test_nmme_is_not_thresholded_at_the_tercile_boundary(self, rulebook):
+        """-0.43 sigma is a third of countries in any month, by construction.
+
+        Under combine: any, that would attribute a third of the world's food
+        insecurity to drought — the conflict-driven deterioration this gate
+        exists to keep out.
+        """
+
+        entry = next(
+            e for e in rulebook.get("drought.indicators.entries")
+            if e["name"] == "nmme_precip_anomaly"
+        )
+        assert float(entry["threshold"]) <= -1.0
+
+    def test_a_country_absent_from_an_anomaly_feed_is_unknown_not_dry(
+        self, con, rulebook
+    ):
+        self._seed_nmme(con, {"ETH": -1.6})
+        self._refresh(con, rulebook)
+        verdict = _verdict(con, "SOM", rulebook)
+        nmme = next(r for r in verdict.readings if r.name == "nmme_precip_anomaly")
+        assert nmme.state == ind_mod.STATE_UNAVAILABLE
+
+    def test_no_indicator_answering_is_still_inconclusive(self, con, rulebook):
+        """More sources is not the same as fewer standards.
+
+        With nothing seeded, nothing has been checked — and the machine may
+        neither attribute a deterioration nor write a zero.
+        """
+
+        verdict = _verdict(con, "SOM", rulebook)
+        assert verdict.state == ind_mod.STATE_UNAVAILABLE
+        assert "min_available" in verdict.note
+
+    def test_fews_net_phase3_is_deliberately_not_an_indicator(self, rulebook):
+        """It is the quantity being differenced, so it cannot attribute itself.
+
+        Admitting it would reduce the gate to "IPC rose, therefore drought,
+        because IPC rose", and file conflict-driven food insecurity as
+        drought impact.
+        """
+
+        for entry in rulebook.get("drought.indicators.entries"):
+            table = str(entry.get("table") or "")
+            where = str(entry.get("where") or "")
+            assert "facts_resolved" not in table
+            assert "phase3plus" not in where
+
+    def test_a_missing_table_is_unavailable_not_no_drought(self, con, rulebook):
+        """An absent table means we did not check, not that nothing happened."""
+
+        outcome = ind_mod.fetch_indicators(
+            con, YM, rulebook, get=lambda url, timeout: ("[]", "application/json")
+        )
+        hdx = outcome.detail["entries"]["hdx_agricultural_stress"]
+        assert hdx["ok"] is False
+        assert _verdict(con, "SOM", rulebook).state == ind_mod.STATE_UNAVAILABLE
+
+
+class TestCandidateUrls:
+    """A moved download route should cost a YAML edit, not an outage."""
+
+    def test_the_second_candidate_answers_when_the_first_is_dead(
+        self, con, rulebook
+    ):
+        body = json.dumps([{"iso3": "SOM", "asap_warning": "3", "ym": YM}])
+        calls: list[str] = []
+
+        def get(url: str, timeout: float):
+            calls.append(url)
+            if len(calls) == 1:
+                raise RuntimeError("404 Not Found")
+            return body, "application/json"
+
+        outcome = ind_mod.fetch_indicators(con, YM, rulebook, get=get)
+        asap = outcome.detail["entries"]["asap"]
+        assert asap["ok"] is True
+        assert asap["attempts"] and "404" in asap["attempts"][0]["error"]
+        assert _verdict(con, "SOM", rulebook).state == ind_mod.STATE_DROUGHT
+
+    def test_every_candidate_failing_names_the_last_reason(self, con, rulebook):
+        """"The shape changed" and "the route is dead" want different repairs."""
+
+        def get(url: str, timeout: float):
+            raise RuntimeError("connection refused")
+
+        outcome = ind_mod.fetch_indicators(con, YM, rulebook, get=get)
+        asap = outcome.detail["entries"]["asap"]
+        assert asap["ok"] is False
+        assert "connection refused" in asap["error"]
+        assert len(asap["attempts"]) >= 2
 
 
 class TestIndicators:

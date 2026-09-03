@@ -76,12 +76,47 @@ STATE_UNAVAILABLE = "unavailable"
 
 PROVIDER_ASAP = "asap"
 PROVIDER_TABULAR = "tabular"
+PROVIDER_PYTHIA_TABLE = "pythia_table"
 
 #: Providers whose feeds enumerate only the countries they have something to
 #: say about, so that a country's ABSENCE is itself a statement ("no warning
 #: issued"). For the others, absence means the feed is silent about that
-#: country and the indicator is unavailable there.
-_ABSENCE_MEANS_NO_DROUGHT = {PROVIDER_ASAP: True, PROVIDER_TABULAR: False}
+#: country and the indicator is unavailable there. An entry may override this
+#: with its own ``absence_means_no_drought`` — the meaning of absence is a
+#: property of the FEED, not of the transport that fetched it, and the
+#: pythia_table provider serves both kinds.
+_ABSENCE_MEANS_NO_DROUGHT = {
+    PROVIDER_ASAP: True,
+    PROVIDER_TABULAR: False,
+    PROVIDER_PYTHIA_TABLE: False,
+}
+
+
+def _absence_means_no_drought(entry: Mapping[str, Any]) -> bool:
+    explicit = entry.get("absence_means_no_drought")
+    if isinstance(explicit, bool):
+        return explicit
+    return _ABSENCE_MEANS_NO_DROUGHT.get(str(entry.get("provider")), False)
+
+
+def _entry_urls(entry: Mapping[str, Any]) -> list[str]:
+    """Every candidate url for an entry, in order.
+
+    ``urls`` (a list) exists because a third-party portal moves its download
+    route without moving the data — the JRC ASAP warnings file did exactly
+    that — and a moved route should be a YAML edit rather than an outage.
+    Candidates are tried in order and the first that parses wins.
+    """
+
+    out: list[str] = []
+    for candidate in entry.get("urls") or []:
+        text = str(candidate).strip()
+        if text:
+            out.append(text)
+    single = str(entry.get("url") or "").strip()
+    if single and single not in out:
+        out.append(single)
+    return out
 
 #: Injectable transport seam for tests: (url, timeout) -> (text, content_type).
 GetFn = Callable[[str, float], "tuple[str, str]"]
@@ -103,6 +138,11 @@ _CLASS_KEYS = (
     "level",
 )
 _VALUE_KEYS = ("value", "anomaly", "spi", "spei", "index", "score")
+
+#: Class-shaped values (a concern level, a warning label) versus
+#: number-shaped ones. A pythia_table entry says which it serves.
+_MATCH_CLASSES = "classes"
+_MATCH_THRESHOLD = "threshold"
 
 
 @dataclass
@@ -323,6 +363,90 @@ def _parse_feed(
     }
 
 
+def _snapshot_from_pythia_table(
+    con: "duckdb.DuckDBPyConnection", entry: Mapping[str, Any], ym: str
+) -> dict[str, Any]:
+    """Build a snapshot from a table this repo already ingests. Never raises.
+
+    Two indicator sources reach the drought gate this way, and neither needs
+    a new fetch or a new credential:
+
+    ``hdx_signals``
+        OCHA's automated crisis monitoring, whose ``jrc_agricultural_hotspots``
+        indicator is ASAP itself, reached by a path the repo already
+        maintains. Like ASAP it is an ALERTING feed — it publishes signals,
+        not a global status — so a country's absence is the statement that no
+        signal was issued, and the entry sets
+        ``absence_means_no_drought: true``.
+
+    ``seasonal_forecasts``
+        NMME country-mean precipitation anomalies in sigma units, already
+        ingested monthly. This one is supporting evidence, not a primary
+        gate: it is a FORECAST for the month, not an observation of it, which
+        is why its entry is ``required: false``. A country absent from NMME
+        is unknown, not dry.
+
+    Deliberately NOT offered: FEWS NET / IPC Phase 3+. That is the very
+    quantity the drought rule differences, so admitting it as the
+    attribution indicator would reduce the gate to "IPC rose, therefore
+    drought, because IPC rose" — which is exactly the conflict-driven food
+    insecurity the gate exists to keep out.
+    """
+
+    table = str(entry.get("table") or "")
+    iso_column = str(entry.get("iso3_column") or "iso3")
+    value_column = str(entry.get("value_column") or "value")
+    date_column = str(entry.get("date_column") or "")
+    where = str(entry.get("where") or "").strip()
+    lookback = int(entry.get("lookback_months") or 0)
+
+    # The DB travels between runs and holds every month, so the snapshot has
+    # to be cut to the window this cell may see. Reading the newest row
+    # regardless of date would let a September signal answer for June.
+    clauses = [f"{iso_column} IS NOT NULL", f"{value_column} IS NOT NULL"]
+    params: list[Any] = []
+    if where:
+        clauses.append(f"({where})")
+    if date_column:
+        oldest = shift_month(ym, -max(lookback, 0))
+        clauses.append(f"substr(CAST({date_column} AS VARCHAR), 1, 7) <= ?")
+        params.append(ym)
+        clauses.append(f"substr(CAST({date_column} AS VARCHAR), 1, 7) >= ?")
+        params.append(oldest)
+
+    order = f"substr(CAST({date_column} AS VARCHAR), 1, 7)" if date_column else "1"
+    sql = (
+        f"SELECT {iso_column} AS iso3, {value_column} AS value, "
+        f"{order} AS observed_ym FROM {table} "
+        f"WHERE {' AND '.join(clauses)} ORDER BY observed_ym"
+    )
+    rows = con.execute(sql, params).fetchall()
+
+    values: dict[str, Any] = {}
+    observed: set[str] = set()
+    unresolved = 0
+    for iso3_raw, value, observed_ym in rows:
+        code = str(iso3_raw or "").strip().upper()
+        if len(code) != 3 or not code.isalpha():
+            unresolved += 1
+            continue
+        # Ordered oldest-first, so the last write per country is its newest
+        # reading inside the window.
+        values[code] = value
+        if date_column and observed_ym:
+            observed.add(str(observed_ym))
+
+    observed_ym = max(observed) if observed else ym
+    return {
+        "values": values,
+        "observed_ym": observed_ym,
+        "observed_ym_source": "table" if observed else "target_month",
+        "n_records": len(rows),
+        "n_countries": len(values),
+        "n_unresolved": unresolved,
+    }
+
+
 def fetch_indicators(
     con: "duckdb.DuckDBPyConnection",
     ym: str,
@@ -350,56 +474,108 @@ def fetch_indicators(
 
     for entry in entries:
         name = str(entry.get("name"))
-        url = str(entry.get("url") or "").strip()
-        if not url:
-            detail["entries"][name] = {"ok": False, "skipped": "no url configured"}
-            continue
-        consulted += 1
-        expanded = _expand_url(url, ym)
-        outcome.source_urls.append(expanded)
-        try:
-            text, content_type = getter(
-                expanded, float(entry.get("request_timeout_sec") or 60)
-            )
-            snapshot = _parse_feed(entry, text, content_type, retrieval_ym)
-        except Exception as exc:
-            LOG.error("[drought_indicators] %s fetch failed: %s", name, exc)
-            detail["entries"][name] = {"ok": False, "error": str(exc)}
-            continue
+        provider = str(entry.get("provider"))
 
-        # Every record failing to resolve to a country means the feed's shape
-        # changed, not that the world is drought-free. Refuse the snapshot
-        # rather than cache a feed that says nothing about anywhere.
-        if snapshot["n_records"] and not snapshot["values"]:
-            error = (
-                f"0 of {snapshot['n_records']} records resolved to a country "
-                f"({snapshot['n_unresolved']} unresolved) — the feed's shape has "
-                "probably changed"
-            )
-            LOG.error("[drought_indicators] %s: %s", name, error)
-            detail["entries"][name] = {"ok": False, "error": error}
-            continue
+        # --- A table this repo already ingests. No request, no credential. ---
+        if provider == PROVIDER_PYTHIA_TABLE:
+            consulted += 1
+            try:
+                snapshot = _snapshot_from_pythia_table(con, entry, ym)
+                used_url = f"pythia://{entry.get('table')}"
+            except Exception as exc:  # noqa: BLE001 - an absent table is a fact
+                LOG.error("[drought_indicators] %s read failed: %s", name, exc)
+                detail["entries"][name] = {"ok": False, "error": str(exc)}
+                continue
+            if not snapshot["values"]:
+                error = (
+                    f"{entry.get('table')} holds no usable rows for {ym} — the "
+                    "indicator is unavailable, which is not the same as no drought"
+                )
+                LOG.warning("[drought_indicators] %s: %s", name, error)
+                detail["entries"][name] = {"ok": False, "error": error}
+                continue
+            attempts: list[dict[str, Any]] = []
+        else:
+            candidates = _entry_urls(entry)
+            if not candidates:
+                detail["entries"][name] = {"ok": False, "skipped": "no url configured"}
+                continue
+            consulted += 1
+
+            # Try each candidate url in turn. A portal that moved its download
+            # route has not lost the data, and the first candidate that parses
+            # is the answer.
+            snapshot = None
+            used_url = ""
+            attempts = []
+            for candidate in candidates:
+                expanded = _expand_url(candidate, ym)
+                outcome.source_urls.append(expanded)
+                try:
+                    text, content_type = getter(
+                        expanded, float(entry.get("request_timeout_sec") or 60)
+                    )
+                    parsed = _parse_feed(entry, text, content_type, retrieval_ym)
+                except Exception as exc:
+                    attempts.append({"url": expanded, "error": str(exc)})
+                    LOG.warning(
+                        "[drought_indicators] %s: %s failed (%s)", name, expanded, exc
+                    )
+                    continue
+
+                # Every record failing to resolve to a country means the feed's
+                # shape changed, not that the world is drought-free. Refuse the
+                # snapshot rather than cache a feed that says nothing about
+                # anywhere.
+                if parsed["n_records"] and not parsed["values"]:
+                    error = (
+                        f"0 of {parsed['n_records']} records resolved to a country "
+                        f"({parsed['n_unresolved']} unresolved) — the feed's shape has "
+                        "probably changed"
+                    )
+                    attempts.append({"url": expanded, "error": error})
+                    LOG.error("[drought_indicators] %s: %s", name, error)
+                    continue
+
+                snapshot = parsed
+                used_url = expanded
+                break
+
+            if snapshot is None:
+                # Name the LAST attempt's reason, not a generic summary: "the
+                # feed's shape changed" and "the route is dead" call for
+                # different repairs, and a caller reading only `error` must
+                # still be able to tell them apart.
+                last = attempts[-1]["error"] if attempts else "no attempt made"
+                detail["entries"][name] = {
+                    "ok": False,
+                    "error": last,
+                    "attempts": attempts,
+                }
+                continue
 
         succeeded += 1
         detail["entries"][name] = {
             "ok": True,
+            "url": used_url,
             "observed_ym": snapshot["observed_ym"],
             "observed_ym_source": snapshot["observed_ym_source"],
             "countries": snapshot["n_countries"],
             "unresolved": snapshot["n_unresolved"],
+            **({"attempts": attempts} if attempts else {}),
         }
         records.append(
             RawRecord(
                 record_id=f"{name}-{snapshot['observed_ym']}",
                 payload={
                     "name": name,
-                    "provider": str(entry.get("provider")),
-                    "url": expanded,
+                    "provider": provider,
+                    "url": used_url,
                     **snapshot,
                 },
                 ym=snapshot["observed_ym"],
                 hazard="DR",
-                source_url=expanded,
+                source_url=used_url,
             )
         )
 
@@ -460,7 +636,11 @@ def _reading_for_entry(
     name = str(entry.get("name"))
     provider = str(entry.get("provider"))
     required = bool(entry.get("required"))
-    url = str(entry.get("url") or "").strip()
+    url = (
+        f"pythia://{entry.get('table')}"
+        if provider == PROVIDER_PYTHIA_TABLE
+        else (_entry_urls(entry)[0] if _entry_urls(entry) else "")
+    )
 
     if not url:
         return IndicatorReading(
@@ -483,9 +663,11 @@ def _reading_for_entry(
     raw_value = values.get(iso3.upper())
 
     if raw_value is None:
-        if _ABSENCE_MEANS_NO_DROUGHT.get(provider, False):
-            # ASAP lists the countries it has warned about; not being on the
-            # list IS the statement that no warning was issued.
+        if _absence_means_no_drought(entry):
+            # An alerting feed lists the countries it has warned about; not
+            # being on the list IS the statement that no warning was issued.
+            # ASAP and HDX Signals are both of this kind; an anomaly feed is
+            # not, and absence there is unknown rather than dry.
             return IndicatorReading(
                 name=name, provider=provider, state=STATE_NO_DROUGHT, required=required,
                 observed_ym=observed_ym, source_url=snapshot.get("url"),
@@ -496,7 +678,16 @@ def _reading_for_entry(
             error=f"{iso3} is absent from the {name} feed",
         )
 
-    if provider == PROVIDER_ASAP:
+    # Class-shaped values (a warning class, a concern level) are matched
+    # against the configured list; number-shaped ones go to the threshold.
+    # Which of the two an entry serves is a property of the FEED, so a
+    # pythia_table entry declares it with `match` rather than inheriting it
+    # from its transport.
+    match = str(entry.get("match") or "").strip().lower()
+    if not match:
+        match = _MATCH_CLASSES if provider == PROVIDER_ASAP else _MATCH_THRESHOLD
+
+    if match == _MATCH_CLASSES:
         classes = {str(c).strip().lower() for c in entry.get("drought_classes") or []}
         state = (
             STATE_DROUGHT
@@ -534,14 +725,25 @@ def evaluate_indicators(
     ``combine: any`` — one indicator showing drought is enough.
     ``combine: all`` — every indicator that answered must agree.
 
-    In both modes an UNAVAILABLE **required** indicator makes the verdict
-    unavailable: the machine did not check, so it may neither attribute a
+    Two ways the verdict comes back unavailable, and both mean the same
+    thing: the machine did not check, so it may neither attribute a
     deterioration to drought nor write a zero.
+
+    * an UNAVAILABLE **required** indicator — a feed nominated as
+      indispensable did not answer;
+    * fewer than ``min_available`` indicators answered at all. This is the
+      one the shipped rulebook relies on. Nominating a single required feed
+      makes that feed a single point of failure for every cell, which is how
+      one dead ASAP URL left 756 drought cells inconclusive in a single run.
     """
 
     entries = indicator_entries(rulebook)
     combine = str(rulebook.get("drought.indicators.combine"))
     max_age = int(rulebook.get("drought.indicators.max_observation_age_months"))
+    try:
+        min_available = int(rulebook.get("drought.indicators.min_available"))
+    except Exception:  # noqa: BLE001 - older rulebooks have no such key
+        min_available = 1
 
     readings = [
         _reading_for_entry(con, entry, iso3, ym, max_age) for entry in entries
@@ -562,10 +764,20 @@ def evaluate_indicators(
             ),
         )
 
-    if not answered:
+    if len(answered) < max(min_available, 1):
+        unread = ", ".join(
+            f"{r.name} ({r.error or 'no reading'})"
+            for r in readings
+            if r.state == STATE_UNAVAILABLE
+        )
         return IndicatorVerdict(
             iso3=iso3, ym=ym, state=STATE_UNAVAILABLE, combine=combine,
-            readings=readings, note="no indicator answered for this cell",
+            readings=readings,
+            note=(
+                f"{len(answered)} of {len(readings)} indicator(s) answered, "
+                f"below min_available={min_available}"
+                + (f"; unread: {unread}" if unread else "")
+            ),
         )
 
     dry = [r for r in answered if r.state == STATE_DROUGHT]

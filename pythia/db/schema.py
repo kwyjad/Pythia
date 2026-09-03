@@ -894,6 +894,21 @@ def _ensure_enso_state_table(con: duckdb.DuckDBPyConnection) -> None:
             forecast_json VARCHAR,
             plume_json VARCHAR,
             raw_context VARCHAR,
+            -- The phase is COMPUTED from oni, never scraped. observation_date
+            -- is when the index was OBSERVED, which is not fetch_date: a
+            -- carried-forward row keeps its original observation date and
+            -- states its own age, so nothing reads it as current.
+            oni DOUBLE,
+            enso_strength VARCHAR,
+            oni_basis VARCHAR,
+            observation_date DATE,
+            source_rank_used INTEGER,
+            nino34_source VARCHAR,
+            status VARCHAR,
+            age_days INTEGER,
+            scraped_phase VARCHAR,
+            index_evidence_json VARCHAR,
+            warnings_json VARCHAR,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (fetch_date)
         );
@@ -906,6 +921,17 @@ def _ensure_enso_state_table(con: duckdb.DuckDBPyConnection) -> None:
             "forecast_json": "VARCHAR",
             "plume_json": "VARCHAR",
             "raw_context": "VARCHAR",
+            "oni": "DOUBLE",
+            "enso_strength": "VARCHAR",
+            "oni_basis": "VARCHAR",
+            "observation_date": "DATE",
+            "source_rank_used": "INTEGER",
+            "nino34_source": "VARCHAR",
+            "status": "VARCHAR",
+            "age_days": "INTEGER",
+            "scraped_phase": "VARCHAR",
+            "index_evidence_json": "VARCHAR",
+            "warnings_json": "VARCHAR",
             "created_at": "TIMESTAMP",
         },
     )

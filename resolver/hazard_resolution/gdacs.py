@@ -125,6 +125,18 @@ def _event_record(event: dict[str, Any], hazard: str) -> RawRecord | None:
     if primary and primary not in iso3_list:
         iso3_list.insert(0, primary)
 
+    # GDACS names no country for an event whose affectedcountries list is
+    # empty — routine for a tropical cyclone still over open ocean — and a
+    # record with no country is written and then never read by any cell. The
+    # 2026-08 run dropped 16 TC events this way (ids 1001273..1001315).
+    # The event's own position resolves it, against the same vendored
+    # boundaries cyclone detection already uses.
+    geo_resolved: list[str] = []
+    if not iso3_list:
+        geo_resolved = _iso3s_near_event(event, hazard)
+        iso3_list = list(geo_resolved)
+        primary = iso3_list[0] if iso3_list else primary
+
     payload = {
         "event_id": event_id,
         "event_type": event.get("eventtype"),
@@ -141,6 +153,10 @@ def _event_record(event: dict[str, Any], hazard: str) -> RawRecord | None:
         # Always present; None unless the reversed-dates clamp above fired.
         "end_date_raw": end_date_raw,
         "months_overlapped": event_months(start, end or start),
+        # Provenance: which countries came from GDACS itself and which the
+        # machine derived from the event's position. A derived attribution
+        # is a weaker claim than a stated one and the row must say so.
+        "iso3_from_geometry": geo_resolved,
         "published_at": (
             parse_date(event.get("pub_date")).isoformat()
             if parse_date(event.get("pub_date"))
@@ -161,6 +177,64 @@ def _event_record(event: dict[str, Any], hazard: str) -> RawRecord | None:
             type=event.get("eventtype"), eventid=event_id
         ),
     )
+
+
+#: How far from a country a GDACS point may sit and still be attributed to
+#: it. Deliberately generous: the point is an event CENTRE (a cyclone eye, a
+#: flood's reference location), not its footprint, so a storm affecting a
+#: coast sits well offshore. Narrower than the cyclone rulebook's own buffer
+#: would drop the events this exists to recover.
+_GEOMETRY_ATTRIBUTION_KM = 500.0
+
+
+def _iso3s_near_event(event: dict[str, Any], hazard: str) -> list[str]:
+    """Countries within :data:`_GEOMETRY_ATTRIBUTION_KM` of the event's point.
+
+    Never raises: an event that cannot be placed keeps no country, which is
+    the state it was already in. Returned nearest-first, so the first entry
+    is the primary attribution.
+    """
+
+    lat, lon = event.get("lat"), event.get("lon")
+    if lat is None or lon is None:
+        return []
+    try:
+        lat_f, lon_f = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return []
+
+    try:
+        from resolver.hazard_resolution.geometry import (
+            distance_km,
+            load_country_geometries,
+        )
+
+        countries = load_country_geometries()
+    except Exception as exc:  # noqa: BLE001 - boundaries absent is not fatal
+        LOG.warning(
+            "[gdacs] cannot resolve %s %s by geometry: %s",
+            event.get("eventid"), hazard, exc,
+        )
+        return []
+
+    hits: list[tuple[float, str]] = []
+    for iso3, country in countries.items():
+        try:
+            distance = distance_km(country, lat_f, lon_f, _GEOMETRY_ATTRIBUTION_KM)
+        except Exception:  # noqa: BLE001 - one bad polygon must not lose the event
+            continue
+        if distance is not None and distance <= _GEOMETRY_ATTRIBUTION_KM:
+            hits.append((distance, str(iso3).upper()))
+
+    hits.sort()
+    resolved = [iso3 for _d, iso3 in hits]
+    if resolved:
+        LOG.info(
+            "[gdacs] event %s (%s) named no country; resolved %s from its "
+            "position (%.2f, %.2f)",
+            event.get("eventid"), hazard, ",".join(resolved[:5]), lat_f, lon_f,
+        )
+    return resolved
 
 
 def fetch_gdacs_events(

@@ -59,7 +59,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from resolver.hazard_resolution.base_rates import backcast_window, last_frozen_month
 from resolver.hazard_resolution.rulebook import (
@@ -153,28 +153,67 @@ def check_backcastable(hazard_name: str, rulebook: Rulebook) -> BackcastableChec
 
     warnings: list[str] = []
     if hazard_name == "drought":
-        entries = rulebook.get("drought.indicators.entries", []) or []
+        entries = [
+            entry
+            for entry in (rulebook.get("drought.indicators.entries", []) or [])
+            if isinstance(entry, Mapping)
+        ]
+
+        def _addresses(entry: Mapping[str, Any]) -> list[str]:
+            out = [str(u) for u in (entry.get("urls") or []) if str(u).strip()]
+            single = str(entry.get("url") or "").strip()
+            if single:
+                out.append(single)
+            return out
+
+        # An HTTP feed serving only a "latest" snapshot cannot speak for a
+        # past month: it is stamped with its RETRIEVAL month and correctly
+        # falls outside the observation-age window.
         undated = [
             str(entry.get("name"))
             for entry in entries
-            if entry.get("required")
-            and str(entry.get("url") or "").strip()
+            if str(entry.get("provider")) != "pythia_table"
+            and _addresses(entry)
             and not any(
-                token in str(entry.get("url"))
+                token in address
+                for address in _addresses(entry)
                 for token in ("{ym}", "{year}", "{month}")
             )
         ]
+        # A table this repo ingests carries its own dates per row, so it CAN
+        # answer for a past month — as far back as the ingest goes.
+        dated = [
+            str(entry.get("name"))
+            for entry in entries
+            if str(entry.get("provider")) == "pythia_table"
+            and str(entry.get("date_column") or "").strip()
+        ]
+
         if undated:
             warnings.append(
                 "drought indicator(s) "
                 + ", ".join(undated)
-                + " point at a LATEST snapshot with no per-month archive, so every "
-                "backcast month will fall outside "
+                + " point at a LATEST snapshot with no per-month archive, so they "
+                "cannot speak for a backcast month: their readings fall outside "
                 f"drought.indicators.max_observation_age_months="
                 f"{rulebook.get('drought.indicators.max_observation_age_months')} "
-                "and resolve INCONCLUSIVE (fail-closed, not a false zero). Point "
-                "their url at a per-month archive using {ym}/{year}/{month} to "
-                "backcast drought properly."
+                "(fail-closed, not a false zero). Point their url at a per-month "
+                "archive using {ym}/{year}/{month} to backcast on them."
+            )
+        if undated and not dated:
+            warnings.append(
+                "no drought indicator can speak for a past month, so EVERY "
+                "backcast month will resolve INCONCLUSIVE. Configure a "
+                "pythia_table entry with a date_column, or a per-month archive "
+                "url, before spending hours on this run."
+            )
+        elif dated:
+            warnings.append(
+                "drought backcast will rest on "
+                + ", ".join(dated)
+                + ", which carry their own dates — so it reaches back only as far "
+                "as those tables were ingested, and earlier months will resolve "
+                "INCONCLUSIVE rather than zero."
             )
     return BackcastableCheck(ok=True, warnings=warnings)
 
@@ -302,6 +341,36 @@ def month_counts(con, hazard: str, ym: str) -> dict[str, Any]:
         "extraction_calls": int(extraction[0] or 0),
         "extraction_cost_usd": float(extraction[1] or 0.0),
     }
+
+
+def month_is_complete(counts: Mapping[str, Any]) -> tuple[bool, str]:
+    """Did this month actually finish, or did it merely not crash?
+
+    The runner exits 0 when it walked every cell without raising — which it
+    does even when a required source was unreadable and every cell came back
+    INCONCLUSIVE. Recording that as complete is worse than a failure: the
+    resume ledger then never retries the month, so a source outage becomes
+    permanently missing history rather than a temporary gap. The August 2026
+    ASAP outage did exactly this to twelve months of drought.
+
+    A month with cells assessed and NOTHING written is therefore incomplete,
+    whatever the exit code. A month with no cells to assess is complete —
+    there was nothing to do.
+    """
+
+    cells = int(counts.get("cells") or 0)
+    written = (
+        int(counts.get("resolved_value") or 0)
+        + int(counts.get("resolved_zero") or 0)
+        + int(counts.get("no_data") or 0)
+        + int(counts.get("frozen_skipped") or 0)
+    )
+    if cells and not written:
+        return False, (
+            f"{cells} cell(s) assessed and no row written — a source was "
+            "unreadable, so the month is left incomplete and will be retried"
+        )
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +581,17 @@ def run_backcast(
 
         # A dry run decides nothing and must not claim a month is done.
         if not dry_run:
+            complete, incomplete_reason = month_is_complete(counts)
+            if rc == 0 and not complete:
+                # Exit code 0 only says the runner did not raise. A month that
+                # assessed cells and wrote nothing is a source outage, and
+                # marking it done would make that outage permanent.
+                rc = 1
+                error = incomplete_reason
+                run.months_run -= 1
+                run.months_failed += 1
+                run.failures.append(f"{ym}: {error}")
+                LOG.error("[backcast] %s %s: %s", hazard_name, ym, error)
             record_month(
                 con,
                 hazard=hazard,

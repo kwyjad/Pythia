@@ -224,18 +224,117 @@ def test_the_largest_overlapping_exposure_is_the_binding_ceiling(rulebook):
 
 
 def test_ceiling_multiplier_is_honoured_from_the_rulebook(rulebook):
-    """Doubling the multiplier stops the same figure breaching the ceiling."""
-    candidates = [make_candidate("emdat", 150_000), make_candidate("gdacs", 100_000)]
-    assert reconcile_mod.FLAG_CEILING_EXCEEDED in _reconcile(candidates, rulebook).flags
+    """The multiplier decides the breach, and it is read from the rulebook.
 
-    lenient = make_rulebook({"sanity": {"ceiling_multiplier": 2.0}})
-    assert _reconcile(candidates, lenient).flags == []
+    Derived from the shipped multiplier rather than hardcoded: the value
+    moved 1.0 -> 3.0 in Sept 2026, and a test that pins a figure instead of
+    the mechanism has to be edited every time policy moves.
+    """
+
+    multiplier = float(rulebook.get("sanity.ceiling_multiplier"))
+    exposure = 100_000
+    over = exposure * multiplier * 1.5
+    under = exposure * multiplier * 0.5
+
+    breaching = [make_candidate("emdat", over), make_candidate("gdacs", exposure)]
+    assert reconcile_mod.FLAG_CEILING_EXCEEDED in _reconcile(breaching, rulebook).flags
+
+    inside = [make_candidate("emdat", under), make_candidate("gdacs", exposure)]
+    assert reconcile_mod.FLAG_CEILING_EXCEEDED not in _reconcile(inside, rulebook).flags
+
+    lenient = make_rulebook({"sanity": {"ceiling_multiplier": multiplier * 2}})
+    assert reconcile_mod.FLAG_CEILING_EXCEEDED not in _reconcile(breaching, lenient).flags
+
+
+def test_the_multiplier_leaves_room_between_a_model_and_a_report(rulebook):
+    """At 1.0 there was none, and every report above the model was rejected.
+
+    Reported impact routinely exceeds modelled exposure for good reasons: the
+    GDACS footprint is a hazard envelope rather than an impact assessment,
+    gridded population is coarse, and "affected" counts people beyond those
+    inside the envelope. The ceiling is there to catch a mis-transcription,
+    not to hold reports to a model's arithmetic.
+    """
+
+    assert float(rulebook.get("sanity.ceiling_multiplier")) > 1.0
 
 
 def test_no_exposure_estimate_means_no_ceiling(rulebook):
     """An absent GDACS figure is not evidence against a reported one."""
     verdict = _reconcile([make_candidate("emdat", 9_000_000)], rulebook)
     assert reconcile_mod.FLAG_CEILING_EXCEEDED not in verdict.flags
+
+
+def test_a_zero_exposure_is_unknown_and_not_a_ceiling_of_zero(rulebook):
+    """GDACS declining to say must not reject every figure for the cell.
+
+    Discovery carries no population figure at all; it is filled in by a
+    per-event RSS fetch that tolerates 404s and network errors, leaving the
+    field at its 0.0 default. Read as a ceiling that is exactly what it did —
+    147 of the 199 extracted figures rejected in the August 2026 run were
+    rejected against a ceiling of zero.
+    """
+
+    verdict = _reconcile(
+        [make_candidate("emdat", 250_000), make_candidate("gdacs", 0.0)], rulebook
+    )
+    assert verdict.status == reconcile_mod.STATUS_RESOLVED_VALUE
+    assert verdict.value == 250_000
+    assert reconcile_mod.FLAG_CEILING_EXCEEDED not in verdict.flags
+
+
+def test_a_real_exposure_still_binds_alongside_a_zero_one(rulebook):
+    """Ignoring the zeros must not mean ignoring the ceiling.
+
+    One event with no exposure figure and one with a real one: the real one
+    is still the bound.
+    """
+
+    multiplier = float(rulebook.get("sanity.ceiling_multiplier"))
+    verdict = _reconcile(
+        [
+            make_candidate("emdat", 50_000 * multiplier * 4),
+            make_candidate("gdacs", 0.0, source_ref="g0"),
+            make_candidate("gdacs", 50_000, source_ref="g1"),
+        ],
+        rulebook,
+    )
+    assert reconcile_mod.FLAG_CEILING_EXCEEDED in verdict.flags
+
+
+def test_a_population_share_stands_in_when_gdacs_is_silent(rulebook):
+    """A silent GDACS should leave a bound, not none at all.
+
+    Before this the only remaining bound was the whole national population,
+    so a figure four times too large passed unflagged in exactly the cells
+    GDACS knew least about.
+    """
+
+    share = float(rulebook.get("sanity.population_fallback_share"))
+    population = 20_000_000
+    multiplier = float(rulebook.get("sanity.ceiling_multiplier"))
+
+    over = population * share * multiplier * 1.5
+    verdict = _reconcile(
+        [make_candidate("emdat", over)], rulebook, national_population=population
+    )
+    assert reconcile_mod.FLAG_CEILING_EXCEEDED in verdict.flags
+    assert verdict.provenance["decision"]["ceiling"]["basis"] == "population_share"
+    # It flags, it never rewrites: the ladder's answer stands.
+    assert verdict.value == over
+
+
+def test_the_ceiling_records_which_bound_it_used(rulebook):
+    """A flag against a population share is a different statement from one
+    against a GDACS footprint, and a reader must be able to tell them apart."""
+
+    with_gdacs = _reconcile(
+        [make_candidate("emdat", 10_000), make_candidate("gdacs", 100_000)], rulebook
+    )
+    assert with_gdacs.provenance["decision"]["ceiling"]["basis"] == "gdacs_exposed"
+
+    without_anything = _reconcile([make_candidate("emdat", 10_000)], rulebook)
+    assert without_anything.provenance["decision"]["ceiling"]["basis"] == "none"
 
 
 def test_figure_above_national_population_is_flagged(rulebook):
