@@ -17,10 +17,11 @@ import os
 import statistics as _statistics
 import re
 import zipfile
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Callable, Dict, List, Set, Tuple
 
 import duckdb
 import pandas as pd
@@ -33,6 +34,21 @@ from horizon_scanner.llm_logging import (
 from pythia.db import schema as pythia_schema
 from resolver.db import duckdb_io
 from scripts.ci.llm_latency_summary import render_latency_markdown
+from scripts.debug_bundle import (
+    anomalies as anomalies_mod,
+    batch_lifecycle,
+    code_snapshot,
+    connector_freshness,
+    env_config,
+    manifest as manifest_mod,
+    model_completeness,
+    prompt_cache,
+    prompt_prefixes,
+    provider_objects,
+    retry_report,
+    run_comparison,
+    workflow_logs,
+)
 
 try:
     from forecaster.prompts import _bucket_labels_for_question  # type: ignore
@@ -116,6 +132,42 @@ def _file_stats(db_path: str) -> dict[str, Any]:
     except Exception:
         return stats
     return stats
+
+
+def _load_counts_before(path: str | None) -> dict[str, int | None]:
+    """Row counts as they were before this phase wrote anything.
+
+    They were hardcoded to None, so the provenance table's "before" column
+    was empty on every run and its delta column was empty with it — the one
+    view that says what this phase actually added said nothing at all. The
+    counts already exist: every stage of pythia_pipeline_stage.yml writes a
+    db_signature BEFORE doing any work. This reads that file.
+
+    Missing or unreadable means None, exactly as before: an absent baseline
+    must never be published as a zero, which would turn every row into a
+    fabricated gain.
+    """
+
+    counts: dict[str, int | None] = {tbl: None for tbl in KEY_TABLES}
+    if not path:
+        return counts
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return counts
+    merged: dict[str, Any] = {}
+    for key in ("required_counts", "optional_counts"):
+        section = payload.get(key)
+        if isinstance(section, dict):
+            merged.update(section)
+    for tbl in KEY_TABLES:
+        value = merged.get(tbl)
+        if value is not None:
+            try:
+                counts[tbl] = int(value)
+            except Exception:
+                counts[tbl] = None
+    return counts
 
 
 def _record_run_provenance(
@@ -1054,12 +1106,34 @@ def _compute_question_run_metrics(
                 if qid in complete_by_qid:
                     present_by_qid[qid] = {m for m in present if m in complete_by_qid[qid]}
 
+    # Track 2 makes ONE model call per question, so its llm_calls span is a
+    # single instant and its phase_max map can be empty — which left
+    # wall_ms, compute_ms and queue_ms null on all 85 Track-2 questions of
+    # the 2026-09-01 run. Where llm_calls cannot date a question, the rows
+    # it WROTE can: forecasts_raw carries a created_at per member row.
+    write_span_by_qid = _forecast_write_spans(con, run_id, list(base_rows))
+
     rows_to_upsert: list[dict[str, Any]] = []
     for qid, row in sorted(base_rows.items()):
         phase_max = phase_max_by_qid.get(qid, {})
         compute_ms = (
             sum(int(val or 0) for val in phase_max.values()) if phase_max else None
         )
+        span = write_span_by_qid.get(qid)
+        if span:
+            if row.get("started_at_utc") is None:
+                row["started_at_utc"] = span.get("started_at_utc")
+            if row.get("finished_at_utc") is None:
+                row["finished_at_utc"] = span.get("finished_at_utc")
+            if row.get("wall_ms") is None:
+                row["wall_ms"] = span.get("wall_ms")
+            if compute_ms is None:
+                # The member call duration the writer recorded, falling back
+                # to the write span. Either is a measurement, and a
+                # measurement beats a blank.
+                compute_ms = span.get("compute_ms")
+                if compute_ms is None:
+                    compute_ms = span.get("wall_ms")
         wall_ms = row.get("wall_ms")
         queue_ms = None
         if wall_ms is not None and compute_ms is not None:
@@ -1100,6 +1174,85 @@ def _compute_question_run_metrics(
 
     frame = pd.DataFrame(rows_to_upsert)
     duckdb_io.upsert_dataframe(con, "question_run_metrics", frame, keys=["run_id", "question_id"])
+
+
+def _forecast_write_spans(
+    con: duckdb.DuckDBPyConnection, run_id: str, question_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """{question_id: {started_at_utc, finished_at_utc, wall_ms, compute_ms}}.
+
+    The fallback timing source for questions ``llm_calls`` cannot date. A
+    Track-2 question is one model call, and a batched call is replayed with
+    elapsed_ms=0 at a single collect-stage timestamp — which is why all 85
+    Track-2 questions of the 2026-09-01 run had null timings.
+
+    Two different sources, because they answer two different questions:
+    ``forecasts_ensemble.created_at`` dates when the rows were WRITTEN
+    (a wall span), and ``forecasts_raw.elapsed_ms`` is the per-member call
+    duration the writer recorded (a compute figure). Neither is invented:
+    both are columns the pipeline already fills.
+
+    Never raises — a DB without either column returns {}.
+    """
+
+    if not question_ids:
+        return {}
+    in_clause, params = _build_in_clause(question_ids)
+    if not in_clause:
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT
+                question_id,
+                MIN(created_at) AS started_at_utc,
+                MAX(created_at) AS finished_at_utc,
+                CAST(date_diff('millisecond', MIN(created_at), MAX(created_at)) AS BIGINT)
+                    AS wall_ms
+            FROM forecasts_ensemble
+            WHERE run_id = ? AND question_id IN {in_clause}
+              AND created_at IS NOT NULL
+            GROUP BY question_id
+            """,
+            [run_id, *params],
+        )
+    except Exception:
+        rows = []
+    for row in rows:
+        qid = str(row.get("question_id") or "")
+        if qid:
+            out[qid] = {
+                "started_at_utc": row.get("started_at_utc"),
+                "finished_at_utc": row.get("finished_at_utc"),
+                "wall_ms": row.get("wall_ms"),
+            }
+
+    try:
+        # elapsed_ms repeats across a member's bucket rows, so the slowest
+        # member is MAX, not SUM.
+        compute_rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT question_id, MAX(elapsed_ms) AS compute_ms
+            FROM forecasts_raw
+            WHERE run_id = ? AND question_id IN {in_clause}
+              AND elapsed_ms IS NOT NULL
+            GROUP BY question_id
+            """,
+            [run_id, *params],
+        )
+    except Exception:
+        compute_rows = []
+    for row in compute_rows:
+        qid = str(row.get("question_id") or "")
+        if not qid:
+            continue
+        entry = out.setdefault(qid, {"started_at_utc": None, "finished_at_utc": None, "wall_ms": None})
+        entry["compute_ms"] = row.get("compute_ms")
+    return out
 
 
 def _complete_member_spds_by_question(
@@ -2140,6 +2293,21 @@ def _parse_args() -> argparse.Namespace:
         "--artifact-name",
         default=os.getenv("CANONICAL_DB_ARTIFACT_NAME", ""),
         help="Artifact name used to download the DB (for provenance).",
+    )
+    parser.add_argument(
+        "--counts-before-json",
+        default="diagnostics/db_signature_before.json",
+        help=(
+            "Row counts captured BEFORE this phase wrote anything, as written by "
+            "scripts.ci.db_signature at the start of the stage. Without it the "
+            "provenance table's before column is null for every table and the "
+            "deltas cannot be computed."
+        ),
+    )
+    parser.add_argument(
+        "--pipeline-id",
+        default=os.getenv("PIPELINE_ID", ""),
+        help="Batch pipeline id (pl_...), used to scope batch state and find this cycle's stage runs.",
     )
     parser.add_argument(
         "--legacy",
@@ -3716,244 +3884,22 @@ def _sample_grounding_spot_checks(
 # Emitter: Executive Summary (for GITHUB_STEP_SUMMARY)
 # ---------------------------------------------------------------------------
 
-def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
-    """Generate concise executive summary markdown. Returns the markdown string."""
-    lines: list[str] = []
+def _triage_breakdown(data: BundleData) -> dict[str, Any]:
+    """The RC / triage / question-generation counts both markdown files use.
 
-    lines.append(f"# Pythia Pipeline Health — {data.out_run_id}")
-    lines.append("")
-    lines.append(f"_Generated at {data.now}_")
-    lines.append("")
+    Computed once and read twice: the summary prints the totals and
+    coverage_detail.md prints the enumerations behind them, and two
+    derivations of one number will eventually disagree.
+    """
 
-    # Run identity
-    lines.append("## Run Identity")
-    lines.append("")
-    lines.append(f"- HS run ID: `{data.hs_run_id or 'N/A'}`")
-    lines.append(f"- Forecaster run ID: `{data.forecaster_run_id or 'N/A'}`")
-    lines.append(f"- DB: `{data.db_url}`")
-    lines.append(f"- DB SHA256: `{data.provenance_entry.get('db_sha256') or 'unknown'}`")
-    lines.append("")
-
-    # Traffic light table
-    health_checks = _evaluate_pipeline_health(data)
-    lines.append("## Pipeline Status")
-    lines.append("")
-    lines.append("| Subsystem | Status | Detail |")
-    lines.append("|-----------|--------|--------|")
-    for check in health_checks:
-        lines.append(f"| {check['subsystem']} | {check['status']} | {check['detail']} |")
-    lines.append("")
-
-    # DB provenance (compact)
-    lines.append("## DB Provenance")
-    lines.append("")
-    lines.append("| Table | Before | After | Delta |")
-    lines.append("|-------|--------|-------|-------|")
-    for tbl in KEY_TABLES:
-        before = data.counts_before.get(tbl)
-        after = data.counts_after.get(tbl)
-        delta = ""
-        if before is not None and after is not None:
-            d = after - before
-            delta = f"+{d}" if d >= 0 else str(d)
-        lines.append(
-            f"| {tbl} | {before if before is not None else 'n/a'} "
-            f"| {after if after is not None else 'n/a'} | {delta} |"
-        )
-    lines.append("")
-
-    # Coverage funnel
-    lines.append("## Coverage")
-    lines.append("")
-    lines.append(f"- Countries: {len(data.resolved_countries_sorted)}")
-    lines.append(f"- HS hazard rows: {data.n_hazards_triaged_total}")
-    lines.append(f"- Questions seeded: {len(data.question_ids)}")
-    if data.forecaster_run_id:
-        lines.append(f"- Researched: {data.lifecycle_counts.get('research', 0)}")
-        lines.append(f"- Forecasted: {data.lifecycle_counts.get('forecast', 0)}")
-        lines.append(f"- Scenarios: {data.lifecycle_counts.get('scenario', 0)}")
-        if data.researched_not_forecasted:
-            lines.append(
-                f"- Drop-offs (researched not forecasted): {len(data.researched_not_forecasted)}"
-            )
-    lines.append("")
-
-    # Food security coverage line
-    if data.structured_data_coverage:
-        fewsnet_yes, *_ = data.structured_data_coverage.get("FEWS NET IPC", (0, 0, []))
-        ipc_yes, *_ = data.structured_data_coverage.get("IPC API", (0, 0, []))
-        if fewsnet_yes or ipc_yes:
-            lines.append(
-                f"- Food security: {fewsnet_yes} FEWS NET countries, "
-                f"{ipc_yes} IPC API countries"
-            )
-            lines.append("")
-
-    # Cost & Latency summary
-    if data.usage_by_phase or data.forecaster_run_id:
-        lines.append("## Cost & Latency")
-        lines.append("")
-        lines.append("| Phase | Tokens | Cost (USD) |")
-        lines.append("|-------|--------|------------|")
-        total_tokens = 0.0
-        total_cost = 0.0
-        for phase in sorted(data.usage_by_phase.keys()):
-            vals = data.usage_by_phase[phase]
-            tokens = vals.get("total_tokens", 0.0)
-            cost = vals.get("total_cost_usd", 0.0)
-            total_tokens += tokens
-            total_cost += cost
-            lines.append(
-                f"| {phase} | {int(tokens):,} | ${cost:.2f} |"
-            )
-        lines.append(f"| **Total** | **{int(total_tokens):,}** | **${total_cost:.2f}** |")
-        lines.append("")
-
-    # Latency table (reuse existing render_latency_markdown)
-    if data.latency_block:
-        lines.append(data.latency_block)
-        lines.append("")
-
-    # LLM error summary
-    if data.llm_error_rows:
-        lines.append("## LLM Errors")
-        lines.append("")
-        lines.append("| Phase | Provider | Model | Errors | Error Categories |")
-        lines.append("|-------|----------|-------|--------|-----------------|")
-        for row in data.llm_error_rows:
-            # Categorise errors for this phase/provider/model
-            lines.append(
-                f"| {row.get('phase')} | {row.get('provider')} | {row.get('model_id')} "
-                f"| {row.get('n_errors')} | |"
-            )
-        lines.append("")
-
-    # Ensemble participation
-    if data.forecaster_run_id:
-        lines.append("## Ensemble")
-        lines.append("")
-        ensemble_lines = _ensemble_participation_summary(
-            data.forecasts_raw_counts, data.spd_model_ids
-        )
-        lines.extend(ensemble_lines)
-        lines.append("")
-
-    # Top anomalies
-    if data.question_run_metrics:
-        lines.append("## Top Anomalies")
-        lines.append("")
-        lines.append("### Slowest Questions (wall time)")
-        lines.append("")
-        lines.append("| Question | Wall (s) | ISO3 | Hazard |")
-        lines.append("|----------|----------|------|--------|")
-        # Track-2 questions have no wall_ms (single-model path); fall back to
-        # compute_ms so they rank meaningfully instead of rendering 0.0.
-        def _wall_or_compute_ms(r: dict) -> float:
-            return float(r.get("wall_ms") or r.get("compute_ms") or 0.0)
-
-        for row in sorted(
-            data.question_run_metrics,
-            key=lambda r: -_wall_or_compute_ms(r),
-        )[:10]:
-            wall_s = _wall_or_compute_ms(row) / 1000.0
-            suffix = "" if row.get("wall_ms") else " (compute)"
-            lines.append(
-                f"| {row.get('question_id')} | {wall_s:.1f}{suffix} | {row.get('iso3') or ''} "
-                f"| {row.get('hazard_code') or ''} |"
-            )
-        lines.append("")
-
-        # Questions with missing SPD models
-        missing_model_questions = [
-            r for r in data.question_run_metrics
-            if r.get("missing_model_ids_json") and r.get("missing_model_ids_json") != "[]"
-        ]
-        if missing_model_questions:
-            lines.append("### Questions with Missing SPD Models")
-            lines.append("")
-            lines.append("| Question | ISO3 | Missing Models |")
-            lines.append("|----------|------|---------------|")
-            for row in missing_model_questions[:10]:
-                lines.append(
-                    f"| {row.get('question_id')} | {row.get('iso3') or ''} "
-                    f"| {row.get('missing_model_ids_json') or ''} |"
-                )
-            lines.append("")
-
-    # Grounding spot-checks
-    hs_samples, q_samples = _sample_grounding_spot_checks(
-        data.hs_web_rows, data.question_web_rows, n_hs=3, n_q=5
-    )
-    if hs_samples or q_samples:
-        lines.append("## Grounding Spot-Checks")
-        lines.append("")
-
-    if hs_samples:
-        lines.append("### HS Country Packs (sample)")
-        lines.append("")
-        lines.append("| ISO3 | Grounded | Sources | Backend | Sample URL |")
-        lines.append("|------|----------|---------|---------|------------|")
-        for row in hs_samples:
-            urls = row.get("top_verified_urls") or []
-            sample_url = urls[0][:80] if urls else "(none)"
-            lines.append(
-                f"| {row.get('iso3')} | {row.get('grounded')} | {row.get('n_verified', 0)} "
-                f"| {row.get('selected_backend') or ''} | {sample_url} |"
-            )
-        lines.append("")
-
-    if q_samples:
-        lines.append("### Question Evidence (sample)")
-        lines.append("")
-        lines.append("| Question | Grounded | Sources | Backend | Sample URL |")
-        lines.append("|----------|----------|---------|---------|------------|")
-        for row in q_samples:
-            urls = row.get("top_verified_urls") or []
-            sample_url = urls[0][:80] if urls else "(none)"
-            lines.append(
-                f"| {row.get('question_id')} | {row.get('grounded')} | {row.get('n_verified', 0)} "
-                f"| {row.get('selected_backend') or ''} | {sample_url} |"
-            )
-        lines.append("")
-
-    # ----- Section: Grounding -----
-    lines.append("## Grounding")
-    lines.append("")
-    for label, stats in [
-        ("RC Grounding", data.rc_grounding_call_stats),
-        ("Triage Grounding", data.triage_grounding_call_stats),
-        ("Adversarial Checks", data.adversarial_grounding_call_stats),
-    ]:
-        n_calls = stats.get("n_calls", 0)
-        source_counts = stats.get("source_counts", [])
-        with_sources = sum(1 for c in source_counts if c > 0)
-        empty = n_calls - with_sources
-        s = _compute_source_stats(source_counts)
-        lines.append(
-            f"- {label}: {n_calls} calls, "
-            f"{with_sources} with sources, {empty} empty, "
-            f"sources min/{s['min']} max/{s['max']} avg/{s['avg']:.1f} median/{s['median']}"
-        )
-    _synth = data.adversarial_synth_stats or {}
-    if int(_synth.get("n_calls") or 0) > 0:
-        lines.append(
-            f"- Adversarial Synthesis (generation, not search): "
-            f"{int(_synth.get('n_calls') or 0)} calls, "
-            f"{int(_synth.get('n_errors') or 0)} errors, "
-            f"${float(_synth.get('cost_usd') or 0.0):.2f}"
-        )
-    lines.append("")
-
-    # ----- Pre-compute shared triage data for RC / Triage / Question Generation -----
     _SILENCED_HAZARDS = {"DI", "CU", "HW"}
     rc_counts: dict[int, int] = {0: 0, 1: 0, 2: 0, 3: 0}
-    seasonal_skip_count = 0
     seasonal_skip_pairs: list[str] = []
-    rc_promoted_pairs: list[tuple[str, str, int]] = []  # (iso3, hazard, level)
+    rc_promoted_pairs: list[tuple[str, str, int]] = []
     triage_quiet_pairs: list[tuple[str, str]] = []
     triage_priority_pairs: list[tuple[str, str]] = []
-    n_countries = len(data.resolved_countries_sorted)
-    n_active_hazards = len(EXPECTED_HS_HAZARDS)
+    rc_level_lookup: dict[tuple[str, str], int] = {}
+    triage_tier_lookup: dict[tuple[str, str], str] = {}
 
     for row in data.hs_triage_detail_rows:
         hz = (row.get("hazard_code") or "").upper()
@@ -3971,8 +3917,13 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
             except Exception:
                 pass
 
+        if rc_level is not None:
+            rc_level_lookup[(iso3, hz)] = int(rc_level)
+        tier = (row.get("tier") or "").lower()
+        if tier:
+            triage_tier_lookup[(iso3, hz)] = tier
+
         if status == "seasonal_skip":
-            seasonal_skip_count += 1
             seasonal_skip_pairs.append(f"{iso3}_{hz}")
             continue
 
@@ -3985,127 +3936,478 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
         if status == "rc_promoted":
             continue
 
-        tier = (row.get("tier") or "").lower()
         if tier == "quiet":
             triage_quiet_pairs.append((iso3, hz))
         elif tier == "priority":
             triage_priority_pairs.append((iso3, hz))
 
-    # ----- Section: RC Assessment -----
-    lines.append("## RC Assessment")
-    lines.append("")
+    n_countries = len(data.resolved_countries_sorted)
+    n_active_hazards = len(EXPECTED_HS_HAZARDS)
     total_expected = n_active_hazards * n_countries
-    n_assessed = total_expected - seasonal_skip_count
-    lines.append(f"Unit: 1 row = 1 hazard-country pair.")
+    return {
+        "rc_counts": rc_counts,
+        "seasonal_skip_pairs": seasonal_skip_pairs,
+        "seasonal_skip_count": len(seasonal_skip_pairs),
+        "rc_promoted_pairs": rc_promoted_pairs,
+        "triage_quiet_pairs": triage_quiet_pairs,
+        "triage_priority_pairs": triage_priority_pairs,
+        "rc_level_lookup": rc_level_lookup,
+        "triage_tier_lookup": triage_tier_lookup,
+        "n_countries": n_countries,
+        "total_expected": total_expected,
+        "n_assessed": total_expected - len(seasonal_skip_pairs),
+    }
+
+
+def _cost_lines(data: BundleData, collected: dict[str, Any]) -> list[str]:
+    """Cost, with the batch-versus-sync delta stated rather than implied.
+
+    A total is not actionable. What is actionable is the difference between
+    what this run paid and what it would have paid at the other tier — a
+    figure that in September was ten dollars and appeared in no artifact.
+    """
+
+    lines: list[str] = []
+    lines.append("## Cost")
+    lines.append("")
+    lines.append("| Phase | Tokens | Cost (USD) |")
+    lines.append("|-------|--------|------------|")
+    total_tokens = 0.0
+    total_cost = 0.0
+    for phase in sorted(data.usage_by_phase.keys()):
+        vals = data.usage_by_phase[phase]
+        tokens = vals.get("total_tokens", 0.0)
+        cost = vals.get("total_cost_usd", 0.0)
+        total_tokens += tokens
+        total_cost += cost
+        lines.append(f"| {phase} | {int(tokens):,} | ${cost:.2f} |")
+    lines.append(f"| **Total** | **{int(total_tokens):,}** | **${total_cost:.2f}** |")
+    lines.append("")
+
+    totals = (collected.get("batch_lifecycle") or {}).get("totals") or {}
+    if totals:
+        lost = float(totals.get("lost_discount_usd") or 0.0)
+        lines.append(
+            f"- Provider batches: {totals.get('n_batches', 0)}, "
+            f"{totals.get('n_requests', 0)} requests, "
+            f"{totals.get('n_fell_back_to_sync', 0)} fell back to synchronous "
+            f"({totals.get('fallback_pct_of_requests', 0.0)}%)"
+        )
+        if lost > 0:
+            lines.append(
+                f"- **Batch discount lost: ${lost:.2f}** — spend on batchable families "
+                "that ran at the synchronous full price. See batch_lifecycle.json."
+            )
+        else:
+            lines.append("- Batch discount lost: $0.00 on batchable families")
+        if totals.get("n_batches_yielded_nothing"):
+            lines.append(
+                f"- **{totals['n_batches_yielded_nothing']} batch(es) returned nothing** — "
+                "every one of their requests paid full price"
+            )
+        if totals.get("max_queue_wall_seconds") is not None:
+            lines.append(
+                f"- Batch queue wall time: median "
+                f"{totals.get('median_queue_wall_seconds')}s, max "
+                f"{totals.get('max_queue_wall_seconds')}s"
+            )
+        lines.append("")
+    return lines
+
+
+def _cache_lines(collected: dict[str, Any]) -> list[str]:
+    summary = collected.get("prompt_cache_summary") or {}
+    lines = ["## Prompt cache", ""]
+    if not summary.get("prompt_tokens"):
+        lines.append("No prompt tokens recorded for this run.")
+        lines.append("")
+        return lines
+    flags = summary.get("flags") or {}
+    lines.append(
+        f"- {summary['cache_hit_rate_pct']}% of {summary['prompt_tokens']:,} prompt tokens "
+        f"read from cache (~${summary['estimated_saved_usd']:.2f} saved)"
+    )
+    lines.append(
+        "- Flags: "
+        + ", ".join(f"{k}={v}" for k, v in sorted(flags.items()))
+    )
+    by_provider = summary.get("by_provider") or {}
+    if by_provider:
+        lines.append("")
+        lines.append("| Provider | Prompt tokens | Cache hits | Hit rate |")
+        lines.append("|----------|---------------|------------|----------|")
+        for provider, vals in sorted(by_provider.items()):
+            pt = int(vals.get("prompt_tokens") or 0)
+            hits = int(vals.get("hit_tokens") or 0)
+            rate = f"{100.0 * hits / pt:.1f}%" if pt else "n/a"
+            lines.append(f"| {provider or '(none)'} | {pt:,} | {hits:,} | {rate} |")
+    lines.append("")
+    lines.append(
+        "_A flag being on proves nothing; only a non-zero cache read does. "
+        "Detail per phase and model in prompt_cache_report.csv._"
+    )
+    lines.append("")
+    return lines
+
+
+def _connector_lines(collected: dict[str, Any]) -> list[str]:
+    rows = collected.get("connector_rows") or []
+    lines = ["## Connector freshness", ""]
+    if not rows:
+        lines.append("Not collected.")
+        lines.append("")
+        return lines
+    # Only aged sources get a row here: an age column is the point of the
+    # table, and an empty source has none. Empties are named on one line
+    # below, and every one of them is in the anomaly list already.
+    flagged = [r for r in rows if r.get("status") in ("stale", "warn")]
+    empty = [r for r in rows if r.get("status") == "empty"]
+    fresh = [r for r in rows if r.get("status") == "fresh"]
+    lines.append(
+        f"{len(fresh)} fresh, "
+        f"{sum(1 for r in rows if r.get('status') == 'warn')} warn, "
+        f"{sum(1 for r in rows if r.get('status') == 'stale')} stale, "
+        f"{sum(1 for r in rows if r.get('status') == 'empty')} empty "
+        f"(of {len(rows)} sources)."
+    )
+    lines.append("")
+    if flagged:
+        lines.append("| Source | Age (days) | Status | Labelled in prompt |")
+        lines.append("|--------|-----------|--------|--------------------|")
+        for row in sorted(flagged, key=lambda r: str(r.get("status"))):
+            lines.append(
+                f"| {row.get('source')} | {row.get('age_days_at_run_start')} "
+                f"| {row.get('status')} | {row.get('prompt_staleness_warning')} |"
+            )
+        lines.append("")
+    if empty:
+        lines.append(
+            "Empty tables: " + ", ".join(str(r.get("source")) for r in empty) + "."
+        )
+        lines.append("")
+
+    cw = collected.get("crisiswatch") or {}
+    if cw.get("available"):
+        editions = ", ".join(
+            f"{e['edition']} ({e['n_countries']})" for e in cw.get("editions_present") or []
+        )
+        lines.append(
+            f"- **CrisisWatch (ACE inject)**: editions in table — {editions or 'none'}. "
+            f"{cw.get('n_countries_with_arrow', 0)} countries carry an arrow, "
+            f"{cw.get('n_countries_without_arrow', 0)} do not; "
+            f"{cw.get('n_alerts', 0)} alerts."
+        )
+        arrows = ", ".join(
+            f"{k}={v}" for k, v in sorted((cw.get("arrow_counts") or {}).items())
+        )
+        if arrows:
+            lines.append(f"  - Arrows: {arrows}")
+        lines.append(
+            f"  - {cw.get('n_ace_questions_without_crisiswatch', 0)} ACE question(s) across "
+            f"{cw.get('ace_countries_without_crisiswatch_row', 0)} country(ies) were forecast "
+            "with no CrisisWatch row at all."
+        )
+        lines.append("")
+    return lines
+
+
+def emit_executive_summary(
+    data: BundleData,
+    out_dir: Path,
+    *,
+    collected: dict[str, Any] | None = None,
+    health_checks: list[dict[str, Any]] | None = None,
+) -> str:
+    """The one page a reader can stop at when the run was clean.
+
+    It leads with the anomalies because the old summary's failure was one
+    of ordering as much as of content: the September run's four dead
+    batches and three lost member forecasts were in the file, below a
+    hundred and twenty lines of seasonal screen-outs and quiet pairs. Those
+    enumerations are useful and they now live in coverage_detail.md.
+    """
+
+    collected = collected or {}
+    lines: list[str] = []
+
+    lines.append(f"# Pythia Pipeline Health — {data.out_run_id}")
+    lines.append("")
+    lines.append(f"_Generated at {data.now}_")
+    lines.append("")
+    lines.append(f"- HS run ID: `{data.hs_run_id or 'N/A'}`")
+    lines.append(f"- Forecaster run ID: `{data.forecaster_run_id or 'N/A'}`")
+    lines.append(f"- DB: `{data.db_url}`")
+    lines.append(f"- DB SHA256: `{data.provenance_entry.get('db_sha256') or 'unknown'}`")
+    lines.append("")
+
+    # ----- Anomalies, first -----
+    entries = collected.get("anomalies")
+    lines.append("## Anomalies")
+    lines.append("")
+    if entries is None:
+        lines.append("_Anomaly collection did not run._")
+        lines.append("")
+    elif not entries:
+        lines.append("None. Every check passed and every collector ran.")
+        lines.append("")
+    else:
+        counts = anomalies_mod.counts(entries)
+        lines.append(
+            f"**{counts.get('fail', 0)} fail · {counts.get('warn', 0)} warn · "
+            f"{counts.get('info', 0)} info**"
+        )
+        lines.append("")
+        lines.append("| Severity | Subsystem | What is wrong | Evidence |")
+        lines.append("|----------|-----------|---------------|----------|")
+        for entry in entries:
+            description = str(entry.get("description") or "").replace("|", "\\|")
+            lines.append(
+                f"| {entry.get('severity', '').upper()} | {entry.get('subsystem')} "
+                f"| {description} | `{entry.get('evidence_file')}` |"
+            )
+        lines.append("")
+
+    # ----- Status -----
+    checks = health_checks if health_checks is not None else _evaluate_pipeline_health(data)
+    lines.append("## Pipeline status")
+    lines.append("")
+    lines.append("| Subsystem | Status | Detail |")
+    lines.append("|-----------|--------|--------|")
+    for check in checks:
+        lines.append(f"| {check['subsystem']} | {check['status']} | {check['detail']} |")
+    lines.append("")
+
+    lines.extend(_cost_lines(data, collected))
+    lines.extend(_cache_lines(collected))
+    lines.extend(_connector_lines(collected))
+
+    # ----- Coverage -----
+    breakdown = _triage_breakdown(data)
+    lines.append("## Coverage")
+    lines.append("")
+    lines.append(f"- Countries: {len(data.resolved_countries_sorted)}")
+    lines.append(
+        f"- Hazard-country pairs: {breakdown['total_expected']} expected, "
+        f"{breakdown['seasonal_skip_count']} screened out seasonally, "
+        f"{breakdown['n_assessed']} assessed by RC"
+    )
+    lines.append(
+        "- RC levels (assessed): "
+        + ", ".join(f"L{lvl}={breakdown['rc_counts'].get(lvl, 0)}" for lvl in range(4))
+    )
+    lines.append(
+        f"- Triage: {len(breakdown['triage_priority_pairs'])} priority, "
+        f"{len(breakdown['triage_quiet_pairs'])} quiet"
+    )
+    track1_qs = [q for q in data.questions if q.get("track") == 1]
+    track2_qs = [q for q in data.questions if q.get("track") == 2]
+    lines.append(
+        f"- Questions: {len(data.questions)} "
+        f"(Track 1: {len(track1_qs)}, Track 2: {len(track2_qs)})"
+    )
+    if data.forecaster_run_id:
+        lines.append(f"- Forecasted: {data.lifecycle_counts.get('forecast', 0)}")
+        lines.append(f"- Scenarios: {data.lifecycle_counts.get('scenario', 0)}")
+        if data.researched_not_forecasted:
+            lines.append(
+                f"- Drop-offs (researched not forecasted): {len(data.researched_not_forecasted)}"
+            )
+    lines.append("")
+
+    # ----- Ensemble -----
+    if data.forecaster_run_id:
+        lines.append("## Ensemble")
+        lines.append("")
+        lines.extend(_ensemble_participation_summary(data.forecasts_raw_counts, data.spd_model_ids))
+        roll = collected.get("completeness_rollup") or {}
+        if roll.get("n_cells_expected"):
+            lines.append("")
+            lines.append(
+                f"- Member forecasts landed: "
+                f"{roll['n_cells_expected'] - roll.get('n_cells_missing', 0)} of "
+                f"{roll['n_cells_expected']} (question, model, month) cells; "
+                f"{roll.get('n_question_months_short', 0)} question-months were aggregated "
+                "from fewer members than expected. See model_completeness.csv."
+            )
+        lines.append("")
+
+    # ----- Grounding, compact -----
+    lines.append("## Grounding")
+    lines.append("")
+    for label, stats in [
+        ("RC grounding", data.rc_grounding_call_stats),
+        ("Triage grounding", data.triage_grounding_call_stats),
+        ("Adversarial checks", data.adversarial_grounding_call_stats),
+    ]:
+        n_calls = stats.get("n_calls", 0)
+        source_counts = stats.get("source_counts", [])
+        with_sources = sum(1 for c in source_counts if c > 0)
+        s = _compute_source_stats(source_counts)
+        lines.append(
+            f"- {label}: {n_calls} calls, {with_sources} with sources, "
+            f"{n_calls - with_sources} empty, avg {s['avg']:.1f} sources"
+        )
+    breaker = collected.get("breaker") or {}
+    if breaker.get("no_backend_calls"):
+        lines.append(
+            f"- {breaker['no_backend_calls']} call(s) reached no backend at all "
+            f"({breaker.get('brave_breaker_short_circuits', 0)} of them a Brave breaker trip)"
+        )
+    lines.append("")
+
+    # ----- DB provenance -----
+    lines.append("## DB provenance")
+    lines.append("")
+    lines.append("| Table | Before | After | Delta |")
+    lines.append("|-------|--------|-------|-------|")
+    for tbl in KEY_TABLES:
+        before = data.counts_before.get(tbl)
+        after = data.counts_after.get(tbl)
+        delta = ""
+        if before is not None and after is not None:
+            d = after - before
+            delta = f"+{d}" if d >= 0 else str(d)
+        lines.append(
+            f"| {tbl} | {before if before is not None else 'n/a'} "
+            f"| {after if after is not None else 'n/a'} | {delta} |"
+        )
+    lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append(
+        "Coverage enumerations (seasonal screen-outs, quiet pairs, the full Track 1 and "
+        "Track 2 question tables, structured-data injects, scenarios) are in "
+        "`coverage_detail__<run>.md`. Every file in this bundle is described in "
+        "`BUNDLE_MANIFEST.json`."
+    )
+
+    md = "\n".join(lines)
+    out_path = out_dir / f"executive_summary__{data.out_run_id}.md"
+    out_path.write_text(md, encoding="utf-8")
+    print(f"Wrote executive summary to {out_path}")
+    return md
+
+
+def emit_coverage_detail_markdown(data: BundleData, out_dir: Path) -> str:
+    """The long enumerations, out of the way of the failures.
+
+    They are worth keeping — a seasonal screen-out list is how you check
+    the TC calendar did what it should — but 124 of them above a batch
+    collapse is how a batch collapse goes unread.
+    """
+
+    breakdown = _triage_breakdown(data)
+    lines: list[str] = []
+    lines.append(f"# Coverage detail — {data.out_run_id}")
+    lines.append("")
+    lines.append(f"_Generated at {data.now}. Summary and failures: executive_summary__{data.out_run_id}.md_")
+    lines.append("")
+
+    # ----- RC -----
+    lines.append("## RC assessment")
+    lines.append("")
+    lines.append("Unit: 1 row = 1 hazard-country pair.")
     lines.append(
         f"Assessed hazards: {', '.join(EXPECTED_HS_HAZARDS)} "
-        f"({n_active_hazards} per country × {n_countries} countries = {total_expected})."
+        f"({len(EXPECTED_HS_HAZARDS)} per country × {breakdown['n_countries']} countries "
+        f"= {breakdown['total_expected']})."
     )
-    if seasonal_skip_pairs:
-        lines.append(
-            f"Seasonal screen-outs: {seasonal_skip_count} ({', '.join(sorted(seasonal_skip_pairs))})"
-        )
-    else:
-        lines.append(f"Seasonal screen-outs: 0")
-    lines.append(f"→ {n_assessed} pairs assessed by RC LLM")
+    lines.append(f"→ {breakdown['n_assessed']} pairs assessed by the RC LLM")
     lines.append("")
-
     lines.append("| RC Level | Count | Meaning |")
     lines.append("|----------|-------|---------|")
-    _rc_meanings = {0: "Baseline → triage", 1: "Watch → Track 1", 2: "Elevated → Track 1", 3: "Critical → Track 1"}
+    _rc_meanings = {
+        0: "Baseline → triage", 1: "Watch → Track 1",
+        2: "Elevated → Track 1", 3: "Critical → Track 1",
+    }
     for level in range(4):
-        lines.append(f"| {level} | {rc_counts.get(level, 0)} | {_rc_meanings[level]} |")
+        lines.append(f"| {level} | {breakdown['rc_counts'].get(level, 0)} | {_rc_meanings[level]} |")
     lines.append("")
-
-    if rc_promoted_pairs:
-        lines.append("RC Level ≥1 (promoted to Track 1):")
-        for iso3, hz, lvl in sorted(rc_promoted_pairs):
+    if breakdown["seasonal_skip_pairs"]:
+        lines.append(f"### Seasonal screen-outs ({breakdown['seasonal_skip_count']})")
+        lines.append("")
+        lines.append(", ".join(sorted(breakdown["seasonal_skip_pairs"])))
+        lines.append("")
+    if breakdown["rc_promoted_pairs"]:
+        lines.append(f"### RC Level ≥1, promoted to Track 1 ({len(breakdown['rc_promoted_pairs'])})")
+        lines.append("")
+        for iso3, hz, lvl in sorted(breakdown["rc_promoted_pairs"]):
             lines.append(f"- {iso3}: {hz} (L{lvl})")
         lines.append("")
 
-    # ----- Section: Triage -----
+    # ----- Triage -----
     lines.append("## Triage")
     lines.append("")
-    n_promoted = len(rc_promoted_pairs)
-    n_triage_input = n_assessed - n_promoted
-    lines.append(f"Unit: 1 row = 1 hazard-country pair.")
+    n_promoted = len(breakdown["rc_promoted_pairs"])
     lines.append(
-        f"Input: {n_triage_input} RC Level 0 pairs "
-        f"({n_assessed} assessed − {n_promoted} RC-promoted − {seasonal_skip_count} seasonal)"
+        f"Input: {breakdown['n_assessed'] - n_promoted} RC Level 0 pairs "
+        f"({breakdown['n_assessed']} assessed − {n_promoted} RC-promoted)"
     )
     lines.append("")
-
     lines.append("| Tier | Count |")
     lines.append("|------|-------|")
-    lines.append(f"| Priority | {len(triage_priority_pairs)} → generates Track 2 questions |")
-    lines.append(f"| Quiet | {len(triage_quiet_pairs)} → no questions |")
+    lines.append(f"| Priority | {len(breakdown['triage_priority_pairs'])} → Track 2 questions |")
+    lines.append(f"| Quiet | {len(breakdown['triage_quiet_pairs'])} → no questions |")
     lines.append("")
-
-    if triage_priority_pairs:
-        lines.append("Triage Priority:")
-        for iso3, hz in sorted(triage_priority_pairs):
+    if breakdown["triage_priority_pairs"]:
+        lines.append("### Priority")
+        lines.append("")
+        for iso3, hz in sorted(breakdown["triage_priority_pairs"]):
             lines.append(f"- {iso3}: {hz}")
         lines.append("")
-
-    if triage_quiet_pairs:
-        lines.append("Triage Quiet:")
-        for iso3, hz in sorted(triage_quiet_pairs):
-            lines.append(f"- {iso3}: {hz}")
+    if breakdown["triage_quiet_pairs"]:
+        lines.append(f"### Quiet ({len(breakdown['triage_quiet_pairs'])})")
+        lines.append("")
+        lines.append(
+            ", ".join(f"{iso3}_{hz}" for iso3, hz in sorted(breakdown["triage_quiet_pairs"]))
+        )
         lines.append("")
 
-    # ----- Section: Question Generation -----
-    lines.append("## Question Generation")
+    # ----- Question generation -----
+    lines.append("## Question generation")
     lines.append("")
-    lines.append("Unit: 1 row = 1 forecast question.")
     lines.append("Metric rules per hazard:")
     lines.append("- ACE → PA + FATALITIES (2 questions)")
-    lines.append("- DR → EVENT_OCCURRENCE [+ PHASE3PLUS_IN_NEED if FEWS NET country] (1-2 questions)")
+    lines.append("- DR → EVENT_OCCURRENCE [+ PHASE3PLUS_IN_NEED if a food-security country] (1-2)")
     lines.append("- FL → PA + EVENT_OCCURRENCE (2 questions)")
     lines.append("- TC → PA + EVENT_OCCURRENCE (2 questions)")
     lines.append("")
 
-    # Build lookup from (iso3, hazard) -> RC level from triage detail
-    _rc_level_lookup: dict[tuple[str, str], int] = {}
-    _triage_tier_lookup: dict[tuple[str, str], str] = {}
-    for row in data.hs_triage_detail_rows:
-        hz = (row.get("hazard_code") or "").upper()
-        iso3 = (row.get("iso3") or "").upper()
-        rc_level = row.get("regime_change_level")
-        if rc_level is not None:
-            _rc_level_lookup[(iso3, hz)] = int(rc_level)
-        tier = (row.get("tier") or "").lower()
-        if tier:
-            _triage_tier_lookup[(iso3, hz)] = tier
+    from collections import defaultdict
 
     track1_qs = [q for q in data.questions if q.get("track") == 1]
     track2_qs = [q for q in data.questions if q.get("track") == 2]
-
-    # Group questions by (iso3, hazard_code, track)
-    from collections import defaultdict
     _t1_by_pair: dict[tuple[str, str], list[str]] = defaultdict(list)
     _t2_by_pair: dict[tuple[str, str], list[str]] = defaultdict(list)
     for q in track1_qs:
-        key = ((q.get("iso3") or "").upper(), (q.get("hazard_code") or "").upper())
-        _t1_by_pair[key].append(q.get("question_id") or "?")
+        _t1_by_pair[
+            ((q.get("iso3") or "").upper(), (q.get("hazard_code") or "").upper())
+        ].append(q.get("question_id") or "?")
     for q in track2_qs:
-        key = ((q.get("iso3") or "").upper(), (q.get("hazard_code") or "").upper())
-        _t2_by_pair[key].append(q.get("question_id") or "?")
+        _t2_by_pair[
+            ((q.get("iso3") or "").upper(), (q.get("hazard_code") or "").upper())
+        ].append(q.get("question_id") or "?")
 
-    lines.append(f"### Track 1 ({len(track1_qs)} questions from {len(_t1_by_pair)} hazard-country pairs)")
+    lines.append(
+        f"### Track 1 ({len(track1_qs)} questions from {len(_t1_by_pair)} hazard-country pairs)"
+    )
     lines.append("")
     lines.append("| Source pair | RC Level | Questions generated |")
     lines.append("|-------------|----------|---------------------|")
     for (iso3, hz), qids in sorted(_t1_by_pair.items()):
-        lvl = _rc_level_lookup.get((iso3, hz), 0)
+        lvl = breakdown["rc_level_lookup"].get((iso3, hz), 0)
         lines.append(f"| {iso3}_{hz} | L{lvl} | {', '.join(sorted(qids))} |")
     lines.append("")
 
-    lines.append(f"### Track 2 ({len(track2_qs)} questions from {len(_t2_by_pair)} hazard-country pairs)")
+    lines.append(
+        f"### Track 2 ({len(track2_qs)} questions from {len(_t2_by_pair)} hazard-country pairs)"
+    )
     lines.append("")
     lines.append("| Source pair | Triage tier | Questions generated |")
     lines.append("|-------------|-------------|---------------------|")
     for (iso3, hz), qids in sorted(_t2_by_pair.items()):
-        tier = _triage_tier_lookup.get((iso3, hz), "priority")
+        tier = breakdown["triage_tier_lookup"].get((iso3, hz), "priority")
         lines.append(f"| {iso3}_{hz} | {tier.title()} | {', '.join(sorted(qids))} |")
     lines.append("")
 
@@ -4113,60 +4415,103 @@ def emit_executive_summary(data: BundleData, out_dir: Path) -> str:
     lines.append("")
     lines.append("| Hazard | Total | Track 1 | Track 2 |")
     lines.append("|--------|-------|---------|---------|")
-    for hz in ["ACE", "DR", "FL", "TC"]:
+    for hz in EXPECTED_HS_HAZARDS:
         hz_qs = [q for q in data.questions if (q.get("hazard_code") or "").upper() == hz]
-        hz_t1 = sum(1 for q in hz_qs if q.get("track") == 1)
-        hz_t2 = sum(1 for q in hz_qs if q.get("track") == 2)
-        lines.append(f"| {hz} | {len(hz_qs)} | {hz_t1} | {hz_t2} |")
-    lines.append("")
-    lines.append(f"Total questions: {len(data.questions)} (Track 1: {len(track1_qs)}, Track 2: {len(track2_qs)})")
+        lines.append(
+            f"| {hz} | {len(hz_qs)} "
+            f"| {sum(1 for q in hz_qs if q.get('track') == 1)} "
+            f"| {sum(1 for q in hz_qs if q.get('track') == 2)} |"
+        )
     lines.append("")
 
-    # ----- Section: Structured Data Injects -----
+    # ----- Structured data injects -----
     if data.structured_data_coverage:
-        lines.append("## Structured Data Injects")
+        lines.append("## Structured data injects")
         lines.append("")
-        source_order = [
+        lines.append("| Source | Yes | No | Missing |")
+        lines.append("|--------|-----|----|---------|")
+        for label in [
             "ACLED fatalities", "IDMC displacement", "IFRC PA",
             "Conflict forecasts", "FEWS NET IPC", "IPC API",
             "ReliefWeb reports", "HDX Signals", "ENSO", "Seasonal TC",
             "NMME", "CrisisWatch", "GDACS events",
-        ]
-        lines.append("| Source | Yes | No | Missing |")
-        lines.append("|--------|-----|----|---------|")
-        for label in source_order:
+        ]:
             yes, no, missing = data.structured_data_coverage.get(label, (0, 0, []))
-            missing_str = ", ".join(missing) if missing else ""
-            lines.append(f"| {label} | {yes} | {no} | {missing_str} |")
+            lines.append(f"| {label} | {yes} | {no} | {', '.join(missing)} |")
         lines.append("")
 
-    # ----- Section: Scenarios -----
+    # ----- Scenarios -----
     if data.forecaster_run_id and data.scenario_status_rows:
         lines.append("## Scenarios")
         lines.append("")
         lines.append("Track 1 only. 1 scenario per Track 1 question.")
         track1_qids = {q.get("question_id") for q in data.questions if q.get("track") == 1}
-        t1_scenarios = [
-            r for r in data.scenario_status_rows if r.get("question_id") in track1_qids
-        ]
-        t1_yes = sum(1 for r in t1_scenarios if r.get("status") == "generated")
-        t1_failed = sum(1 for r in t1_scenarios if r.get("status") == "failed_parse")
-        t1_no = len(t1_scenarios) - t1_yes - t1_failed
-        lines.append(f"Generated (in scenarios table): {t1_yes} / {len(t1_scenarios)}")
+        t1 = [r for r in data.scenario_status_rows if r.get("question_id") in track1_qids]
+        t1_yes = sum(1 for r in t1 if r.get("status") == "generated")
+        t1_failed = sum(1 for r in t1 if r.get("status") == "failed_parse")
+        lines.append(f"Generated: {t1_yes} / {len(t1)}")
         lines.append(f"Failed to parse (attempted, not stored): {t1_failed}")
-        lines.append(f"Missing: {t1_no}")
+        lines.append(f"Missing: {len(t1) - t1_yes - t1_failed}")
         lines.append("")
 
-    lines.append("---")
-    lines.append(
-        "_Detailed artifacts: pythia-health-report, pythia-question-metrics, "
-        "pythia-evidence-packs, pythia-llm-calls-detail, pythia-spd-tables_"
+    # ----- Latency + slowest questions -----
+    if data.latency_block:
+        lines.append(data.latency_block)
+        lines.append("")
+
+    if data.question_run_metrics:
+        lines.append("## Slowest questions")
+        lines.append("")
+        lines.append("| Question | Wall (s) | ISO3 | Hazard |")
+        lines.append("|----------|----------|------|--------|")
+
+        def _wall_or_compute_ms(r: dict) -> float:
+            return float(r.get("wall_ms") or r.get("compute_ms") or 0.0)
+
+        for row in sorted(data.question_run_metrics, key=lambda r: -_wall_or_compute_ms(r))[:15]:
+            suffix = "" if row.get("wall_ms") else " (compute)"
+            lines.append(
+                f"| {row.get('question_id')} | {_wall_or_compute_ms(row) / 1000.0:.1f}{suffix} "
+                f"| {row.get('iso3') or ''} | {row.get('hazard_code') or ''} |"
+            )
+        lines.append("")
+
+    # ----- Grounding spot-checks -----
+    hs_samples, q_samples = _sample_grounding_spot_checks(
+        data.hs_web_rows, data.question_web_rows, n_hs=3, n_q=5
     )
+    if hs_samples or q_samples:
+        lines.append("## Grounding spot-checks")
+        lines.append("")
+    if hs_samples:
+        lines.append("### HS country packs (sample)")
+        lines.append("")
+        lines.append("| ISO3 | Grounded | Sources | Backend | Sample URL |")
+        lines.append("|------|----------|---------|---------|------------|")
+        for row in hs_samples:
+            urls = row.get("top_verified_urls") or []
+            lines.append(
+                f"| {row.get('iso3')} | {row.get('grounded')} | {row.get('n_verified', 0)} "
+                f"| {row.get('selected_backend') or ''} | {urls[0][:80] if urls else '(none)'} |"
+            )
+        lines.append("")
+    if q_samples:
+        lines.append("### Question evidence (sample)")
+        lines.append("")
+        lines.append("| Question | Grounded | Sources | Backend | Sample URL |")
+        lines.append("|----------|----------|---------|---------|------------|")
+        for row in q_samples:
+            urls = row.get("top_verified_urls") or []
+            lines.append(
+                f"| {row.get('question_id')} | {row.get('grounded')} | {row.get('n_verified', 0)} "
+                f"| {row.get('selected_backend') or ''} | {urls[0][:80] if urls else '(none)'} |"
+            )
+        lines.append("")
 
     md = "\n".join(lines)
-    out_path = out_dir / f"executive_summary__{data.out_run_id}.md"
+    out_path = out_dir / f"coverage_detail__{data.out_run_id}.md"
     out_path.write_text(md, encoding="utf-8")
-    print(f"Wrote executive summary to {out_path}")
+    print(f"Wrote coverage detail to {out_path}")
     return md
 
 
@@ -4475,6 +4820,62 @@ def _load_batched_call_counts(
     }
 
 
+def _question_target_month(question: dict[str, Any]) -> str:
+    """The month the question is ABOUT — its own epoch, not its last horizon.
+
+    ``questions.target_month`` is the sixth window month by convention, and
+    that column is published as ``horizon_end_month``. What a reader means
+    by the target month is the epoch in the question id (``..._2026-10``),
+    which is the window start. Derived from ``window_start_date`` where
+    there is one and from the id suffix otherwise, so a row is never blank
+    merely because one of the two is missing.
+    """
+
+    window_start = str(question.get("window_start_date") or "")
+    if len(window_start) >= 7 and window_start[4] == "-":
+        return window_start[:7]
+    qid = str(question.get("question_id") or "")
+    match = re.search(r"_(\d{4}-\d{2})$", qid)
+    return match.group(1) if match else ""
+
+
+def _reported_triage_tier(scenario_tier: Any, triage_row: dict[str, Any] | None) -> str:
+    """The tier, or an honest statement that triage never ran.
+
+    An RC-promoted hazard goes straight to Track 1 and its triage LLM calls
+    are skipped, so the tier column on its row is whatever the synthetic
+    defaults happened to carry — ``quiet`` until 2026-09-03. Printing that
+    made all 105 Track-1 questions of the September run read as quiet
+    hazards that got a full ensemble. Where the row says it was promoted,
+    say ``not_triaged``.
+    """
+
+    row = triage_row or {}
+    tier = str(scenario_tier or row.get("tier") or "").strip()
+    status = ""
+    raw = row.get("data_quality_json") or ""
+    if raw:
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(parsed, dict):
+                status = str(parsed.get("status") or "")
+        except Exception:
+            status = ""
+    if status == "rc_promoted" or tier == "rc_promoted":
+        return "not_triaged"
+    if not tier:
+        return ""
+    # Pre-2026-09-03 rows carry the synthetic default with no marker of
+    # their own; RC level >= 1 with no triage status is that case.
+    try:
+        rc_level = int(row.get("rc_level")) if row.get("rc_level") is not None else 0
+    except Exception:
+        rc_level = 0
+    if rc_level >= 1 and status == "":
+        return "not_triaged"
+    return tier
+
+
 def emit_question_metrics_csv(
     data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
 ) -> None:
@@ -4497,7 +4898,7 @@ def emit_question_metrics_csv(
                        regime_change_likelihood AS rc_likelihood,
                        regime_change_level AS rc_level,
                        regime_change_direction AS rc_direction,
-                       track
+                       track, tier, data_quality_json
                 FROM hs_triage
                 WHERE run_id = ?
                 """,
@@ -4512,13 +4913,16 @@ def emit_question_metrics_csv(
         except Exception:
             pass
 
-    # target_month is the LAST month of the six-month window (the month-
-    # anchoring convention: horizon 1 = window_start_date). The question id
-    # carries the epoch (window start), so the two columns legitimately
-    # differ by five months; window_start_date sits beside it to say so.
+    # `questions.target_month` holds the LAST month of the six-month window
+    # (the month-anchoring convention: horizon 1 = window_start_date), so
+    # printing it under a column called target_month put 2027-03 beside a
+    # question id reading 2026-10 on all 190 rows and every reader took it
+    # for a bug. It is now published as `horizon_end_month`, which is what
+    # it is, and `target_month` carries the question's OWN month — the epoch
+    # in its id, i.e. the first window month. No column was removed.
     fieldnames = [
         "question_id", "iso3", "hazard_code", "metric",
-        "window_start_date", "target_month",
+        "window_start_date", "target_month", "horizon_end_month",
         "triage_tier", "spd_status", "scenario_status",
         "wall_ms", "compute_ms", "queue_ms", "n_llm_calls", "n_batched_calls", "cost_usd",
         "n_spd_models_expected", "n_spd_models_ok", "missing_model_ids",
@@ -4558,8 +4962,11 @@ def emit_question_metrics_csv(
                 "hazard_code": q.get("hazard_code") or "",
                 "metric": q.get("metric") or "",
                 "window_start_date": str(q.get("window_start_date") or ""),
-                "target_month": q.get("target_month") or "",
-                "triage_tier": scenario.get("triage_tier") or "",
+                "target_month": _question_target_month(q),
+                "horizon_end_month": q.get("target_month") or "",
+                "triage_tier": _reported_triage_tier(
+                    scenario.get("triage_tier"), triage
+                ),
                 "spd_status": _load_spd_status(con, data.forecaster_run_id, qid) or "",
                 "scenario_status": scenario.get("status") or "",
                 "wall_ms": _cell(metrics.get("wall_ms")),
@@ -4652,7 +5059,17 @@ def emit_evidence_packs_csv(data: BundleData, out_dir: Path) -> None:
 def emit_llm_calls_detail_jsonl(
     data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
 ) -> None:
-    """Write per-call LLM detail to gzipped JSONL."""
+    """Write per-call LLM detail to gzipped JSONL, with prefixes stored once.
+
+    This file was 9 MB of a 9.2 MB bundle and nearly all of it was the same
+    static prompt prefix repeated — the V3 prompt order puts the role, the
+    buckets, the hazard guidance and the schema first, identical across
+    every question in a family. Each distinct prefix now goes once into
+    ``prompt_prefixes__<run>.json`` and each record carries its hash plus
+    its own variable tail; joining the two reproduces the prompt byte for
+    byte, and each record says so. Responses are kept in full.
+    """
+
     out_path = out_dir / f"llm_calls_detail__{data.out_run_id}.jsonl.gz"
 
     # Build a query that gets all calls for this run
@@ -4666,6 +5083,15 @@ def emit_llm_calls_detail_jsonl(
         rows = _fetch_llm_rows(con, query, params)
     except Exception:
         return
+
+    prefixes: dict[str, dict[str, Any]] = {}
+    assignment: dict[Any, tuple[str, int]] = {}
+    try:
+        prefixes, assignment = prompt_prefixes.build_prefix_index(rows)
+    except Exception as exc:  # noqa: BLE001
+        # Deduplication is an optimisation; losing it must never cost the
+        # file. Full prompts are written and the reason is recorded.
+        LOG.warning("prompt prefix indexing failed, writing full prompts: %s", exc)
 
     with gzip.open(out_path, "wt", encoding="utf-8") as f:
         for row in rows:
@@ -4688,7 +5114,22 @@ def emit_llm_calls_detail_jsonl(
                 "run_id": row.get("run_id"),
                 "hs_run_id": row.get("hs_run_id"),
             }
+            if assignment:
+                record = prompt_prefixes.apply(record, row, assignment)
             f.write(json.dumps(record, default=str) + "\n")
+
+    prefix_path = out_dir / f"prompt_prefixes__{data.out_run_id}.json"
+    payload = {
+        "note": (
+            "Each entry is a static prompt prefix shared by every call in its group. "
+            "Reconstruct a full prompt as prefixes[record.prompt_prefix_sha256].text "
+            "+ record.prompt_text. A record with prompt_is_complete=true carries its "
+            "whole prompt already."
+        ),
+        "savings": prompt_prefixes.savings(prefixes),
+        "prefixes": list(prefixes.values()),
+    }
+    prefix_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
     print(f"Wrote LLM calls detail to {out_path}")
 
@@ -5260,6 +5701,69 @@ def _timing_stage_for_call(phase: str, call_type: str, hazard_code: str) -> str 
     return None
 
 
+def _fill_spd_stage_from_forecasts(
+    con: duckdb.DuckDBPyConnection,
+    data: BundleData,
+    iso3_data: dict[str, dict[str, Any]],
+    stages: tuple[str, ...],
+) -> None:
+    """Give every question-producing country a row, and an spd span if it has none.
+
+    Never raises: a DB with no forecasts_raw simply leaves the entries as
+    llm_calls found them, and the ``spd_timing_source`` column says which
+    case each row is.
+    """
+
+    def _blank(iso3: str) -> dict[str, Any]:
+        entry: dict[str, Any] = {"iso3": iso3, "total_elapsed_ms": 0}
+        for st in stages:
+            entry[f"{st}_start_ts"] = None
+            entry[f"{st}_end_ts"] = None
+            entry[f"{st}_elapsed_ms"] = 0
+            entry[f"n_{st}_calls"] = 0
+            entry[f"n_{st}_batched"] = 0
+        return entry
+
+    questions_by_iso3: dict[str, list[str]] = {}
+    for q in data.questions or []:
+        iso3 = str(q.get("iso3") or "").upper()
+        qid = str(q.get("question_id") or "")
+        if iso3 and qid:
+            questions_by_iso3.setdefault(iso3, []).append(qid)
+
+    for entry in iso3_data.values():
+        entry.setdefault("n_questions", 0)
+        entry.setdefault("spd_timing_source", "llm_calls" if entry.get("spd_start_ts") else "")
+    for iso3 in questions_by_iso3:
+        entry = iso3_data.setdefault(iso3, _blank(iso3))
+        entry["n_questions"] = len(questions_by_iso3[iso3])
+        entry.setdefault("spd_timing_source", "llm_calls" if entry.get("spd_start_ts") else "")
+
+    if not data.forecaster_run_id or not questions_by_iso3:
+        return
+    needs = [iso3 for iso3, e in iso3_data.items() if e.get("spd_start_ts") is None]
+    if not needs:
+        return
+    qids = [qid for iso3 in needs for qid in questions_by_iso3.get(iso3, [])]
+    if not qids:
+        return
+    spans = _forecast_write_spans(con, data.forecaster_run_id, qids)
+    if not spans:
+        return
+    qid_to_iso3 = {qid: iso3 for iso3, qids_ in questions_by_iso3.items() for qid in qids_}
+    for qid, span in spans.items():
+        iso3 = qid_to_iso3.get(qid)
+        if not iso3 or iso3 not in iso3_data:
+            continue
+        entry = iso3_data[iso3]
+        start, end = span.get("started_at_utc"), span.get("finished_at_utc")
+        if start is not None and (entry["spd_start_ts"] is None or start < entry["spd_start_ts"]):
+            entry["spd_start_ts"] = start
+        if end is not None and (entry["spd_end_ts"] is None or end > entry["spd_end_ts"]):
+            entry["spd_end_ts"] = end
+        entry["spd_timing_source"] = "forecasts_raw.created_at (no spd llm_calls row)"
+
+
 def emit_timing_breakdown_csv(
     data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
 ) -> None:
@@ -5356,6 +5860,14 @@ def emit_timing_breakdown_csv(
         entry[f"n_{stage}_calls"] += int(row.get("n_calls") or 0)
         entry[f"n_{stage}_batched"] += int(row.get("n_batched") or 0)
 
+    # A country whose questions all took the Track-2 path can have no
+    # spd-stage llm_calls row at all (one batched call, replayed, and on
+    # 2026-09-01 fourteen countries were missing from this file entirely
+    # despite having produced questions). forecasts_raw dates what was
+    # WRITTEN, which is the fallback, and every country that produced a
+    # question gets a row whether or not any stage could be timed.
+    _fill_spd_stage_from_forecasts(con, data, iso3_data, stages)
+
     def _span_ms(a: Any, b: Any) -> int:
         if a is None or b is None:
             return 0
@@ -5380,6 +5892,7 @@ def emit_timing_breakdown_csv(
         fieldnames.append(f"n_{st}_calls")
     for st in stages:
         fieldnames.append(f"n_{st}_batched")
+    fieldnames += ["n_questions", "spd_timing_source"]
 
     out_path = out_dir / f"timing_breakdown__{data.out_run_id}.csv"
     with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -5562,7 +6075,7 @@ def emit_grounding_detail_csv(
     fieldnames = [
         "iso3", "hazard_code", "phase", "call_type", "stage",
         "model_id", "grounded", "n_sources",
-        "query", "error_code", "elapsed_ms", "timestamp",
+        "query", "error_code", "elapsed_ms", "timestamp", "db_phase",
     ]
 
     out_path = out_dir / f"grounding_detail__{data.out_run_id}.csv"
@@ -5600,14 +6113,22 @@ def emit_grounding_detail_csv(
             error_text = (row.get("error_text") or "")[:200]
             prompt_text = (row.get("prompt_text") or "")[:200]
 
+            stage = _grounding_stage_for_call(
+                str(row.get("call_type") or ""), str(row.get("hazard_code") or "")
+            )
             writer.writerow({
                 "iso3": row.get("iso3") or "",
                 "hazard_code": row.get("hazard_code") or "",
-                "phase": row.get("phase") or "",
+                # `phase` carries the DERIVED stage. The raw column is
+                # 'hs_triage' on every HS row — rc grounding, triage
+                # grounding and adversarial searches alike, 797 of 797 on
+                # 2026-09-01 — so as published it distinguished nothing. The
+                # raw value is kept beside it as `db_phase` so nothing is
+                # lost and the mapping stays auditable.
+                "phase": stage,
+                "db_phase": row.get("phase") or "",
                 "call_type": row.get("call_type") or "",
-                "stage": _grounding_stage_for_call(
-                    str(row.get("call_type") or ""), str(row.get("hazard_code") or "")
-                ),
+                "stage": stage,
                 "model_id": row.get("model_id") or "",
                 "grounded": grounded,
                 "n_sources": n_sources,
@@ -5621,41 +6142,398 @@ def emit_grounding_detail_csv(
 
 
 # ---------------------------------------------------------------------------
+# Operational emitters (scripts/debug_bundle/*)
+#
+# Everything below is additive and everything below is wrapped. The rule the
+# whole section is written to: nothing added here may fail the phase. A
+# collector that raises writes a stub recording the error, the anomaly list
+# gains a line saying the bundle itself failed, and the run continues.
+# ---------------------------------------------------------------------------
+
+_COLLECTOR_ERRORS: list[dict[str, Any]] = []
+
+
+def _write_stub(path: Path, collector: str, error: str) -> None:
+    """A failed collector leaves evidence, never an absent file.
+
+    An absent file is indistinguishable from a file that had nothing to
+    say, and the two want different responses.
+    """
+
+    payload = {
+        "collector": collector,
+        "error": error,
+        "note": (
+            "This collector failed. The bundle is otherwise complete; the "
+            "phase was not failed over it."
+        ),
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+    try:
+        if path.suffix == ".csv":
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["collector", "error", "note"])
+                writer.writeheader()
+                writer.writerow({k: payload[k] for k in ("collector", "error", "note")})
+        else:
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:  # pragma: no cover - defensive
+        LOG.warning("could not write stub for %s", collector)
+
+
+def _run_collector(name: str, path: Path, fn: Callable[[], Any]) -> Any:
+    """Run one collector; on failure write a stub and record the error."""
+
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001
+        message = f"{type(exc).__name__}: {exc}"
+        LOG.warning("collector %s failed: %s", name, message)
+        LOG.debug("%s", traceback.format_exc())
+        _COLLECTOR_ERRORS.append(
+            {"collector": name, "error": message, "file": path.name}
+        )
+        _write_stub(path, name, message)
+        return None
+
+
+def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: ("" if row.get(k) is None else row.get(k)) for k in fieldnames})
+
+
+def emit_operational_files(
+    data: BundleData,
+    con: duckdb.DuckDBPyConnection,
+    out_dir: Path,
+    *,
+    pipeline_id: str | None,
+    repo_root: Path,
+    health_checks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Write the operational half of the bundle; return what the summary needs."""
+
+    run = data.out_run_id
+    collected: dict[str, Any] = {}
+
+    # --- batch lifecycle -------------------------------------------------
+    bl_path = out_dir / f"batch_lifecycle__{run}.json"
+
+    def _batches() -> dict[str, Any]:
+        payload = batch_lifecycle.collect(
+            con,
+            hs_run_id=data.hs_run_id,
+            forecaster_run_id=data.forecaster_run_id,
+            pipeline_id=pipeline_id,
+        )
+        bl_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        return payload
+
+    collected["batch_lifecycle"] = _run_collector("batch_lifecycle", bl_path, _batches) or {}
+
+    # --- raw provider objects -------------------------------------------
+    po_path = out_dir / f"provider_batch_objects__{run}.json"
+    fetch_enabled = os.getenv("PYTHIA_BUNDLE_FETCH_PROVIDER_OBJECTS", "1").strip().lower() not in (
+        "0", "false", "no",
+    )
+
+    def _provider_objects() -> dict[str, Any]:
+        payload = provider_objects.collect(
+            (collected.get("batch_lifecycle") or {}).get("batches") or [],
+            enabled=fetch_enabled,
+        )
+        po_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        return payload
+
+    _run_collector("provider_batch_objects", po_path, _provider_objects)
+
+    # --- workflow logs ---------------------------------------------------
+    wl_path = out_dir / "workflow_logs" / "INDEX.json"
+    logs_enabled = os.getenv("PYTHIA_BUNDLE_WORKFLOW_LOGS", "1").strip().lower() not in (
+        "0", "false", "no",
+    )
+
+    def _logs() -> dict[str, Any]:
+        batches = (collected.get("batch_lifecycle") or {}).get("batches") or []
+        earliest = min(
+            (b.get("submitted_at") for b in batches if b.get("submitted_at")),
+            default=None,
+        )
+        return workflow_logs.collect(
+            out_dir,
+            pipeline_id=pipeline_id,
+            earliest_batch_submitted_at=earliest,
+            enabled=logs_enabled,
+        )
+
+    collected["workflow_logs"] = _run_collector("workflow_logs", wl_path, _logs) or {}
+
+    # --- env + config ----------------------------------------------------
+    ec_path = out_dir / f"env_and_config__{run}.json"
+
+    def _env() -> dict[str, Any]:
+        models_used = sorted(
+            {
+                str(m)
+                for m in (data.spd_model_ids or [])
+                if m
+            }
+            | {
+                str(r.get("model_id"))
+                for r in (collected.get("prompt_cache_rows") or [])
+                if r.get("model_id")
+            }
+        )
+        payload = env_config.collect(repo_root=repo_root, models_used=models_used)
+        ec_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        return payload
+
+    # --- prompt cache ----------------------------------------------------
+    pc_path = out_dir / f"prompt_cache_report__{run}.csv"
+
+    def _cache() -> list[dict[str, Any]]:
+        rows = prompt_cache.collect(
+            con, predicate=data.predicate, params=list(data.predicate_params)
+        )
+        _write_csv(pc_path, prompt_cache.FIELDNAMES, rows)
+        return rows
+
+    collected["prompt_cache_rows"] = _run_collector("prompt_cache_report", pc_path, _cache) or []
+    try:
+        collected["prompt_cache_summary"] = prompt_cache.summarise(collected["prompt_cache_rows"])
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("prompt cache summary failed: %s", exc)
+        collected["prompt_cache_summary"] = {}
+    _run_collector("env_and_config", ec_path, _env)
+
+    # --- code snapshot ---------------------------------------------------
+    cs_path = out_dir / "code_snapshot" / "INDEX.json"
+
+    def _code() -> dict[str, Any]:
+        return code_snapshot.collect(
+            out_dir,
+            repo_root=repo_root,
+            con=con,
+            current_hs_run_id=data.hs_run_id,
+        )
+
+    _run_collector("code_snapshot", cs_path, _code)
+
+    # --- connector freshness ---------------------------------------------
+    cf_path = out_dir / f"connector_freshness__{run}.csv"
+
+    def _connectors() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        rows, crisiswatch = connector_freshness.collect(
+            con,
+            countries=data.resolved_countries_sorted,
+            questions=data.questions,
+        )
+        fieldnames = list(rows[0].keys()) if rows else []
+        if fieldnames:
+            _write_csv(cf_path, fieldnames, rows)
+        (out_dir / f"crisiswatch_inject__{run}.json").write_text(
+            json.dumps(crisiswatch, indent=2, default=str), encoding="utf-8"
+        )
+        return rows, crisiswatch
+
+    result = _run_collector("connector_freshness", cf_path, _connectors) or ([], {})
+    collected["connector_rows"], collected["crisiswatch"] = result
+
+    # --- retries ---------------------------------------------------------
+    rr_path = out_dir / f"retry_report__{run}.csv"
+
+    def _retries() -> list[dict[str, Any]]:
+        rows = retry_report.collect(
+            con, predicate=data.predicate, params=list(data.predicate_params)
+        )
+        _write_csv(rr_path, retry_report.FIELDNAMES, rows)
+        return rows
+
+    collected["retry_rows"] = _run_collector("retry_report", rr_path, _retries) or []
+    try:
+        collected["breaker"] = retry_report.breaker_summary(
+            con, predicate=data.predicate, params=list(data.predicate_params)
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("breaker summary failed: %s", exc)
+        collected["breaker"] = {}
+
+    # --- model completeness ----------------------------------------------
+    mc_path = out_dir / f"model_completeness__{run}.csv"
+
+    def _completeness() -> dict[str, Any]:
+        rows, rollup = model_completeness.collect(
+            con,
+            run_id=data.forecaster_run_id,
+            questions=data.questions,
+            expected_models=_expected_spd_model_ids(),
+            # forecasts_raw stores Track 2 under the stable aggregate name
+            # "track2_flash" whatever model backs the track2_spd role, so
+            # PYTHIA_TRACK2_MODEL_ID must NOT be read here — it names the
+            # model id llm_calls records, which is a different column.
+            track2_model="track2_flash",
+        )
+        _write_csv(mc_path, model_completeness.FIELDNAMES, rows)
+        (out_dir / f"model_completeness_rollup__{run}.json").write_text(
+            json.dumps(rollup, indent=2, default=str), encoding="utf-8"
+        )
+        return rollup
+
+    collected["completeness_rollup"] = _run_collector(
+        "model_completeness", mc_path, _completeness
+    ) or {}
+
+    # --- run comparison ---------------------------------------------------
+    rc_path = out_dir / f"run_comparison__{run}.csv"
+
+    def _comparison() -> list[dict[str, Any]]:
+        rows = run_comparison.collect(con, current_hs_run_id=data.hs_run_id)
+        if rows:
+            _write_csv(rc_path, list(rows[0].keys()), rows)
+        return rows
+
+    collected["run_comparison"] = _run_collector("run_comparison", rc_path, _comparison) or []
+
+    # --- anomalies (last: it reads everything above) ----------------------
+    an_path = out_dir / f"anomalies__{run}.json"
+
+    def _anomalies() -> list[dict[str, Any]]:
+        entries = anomalies_mod.build(
+            health_checks=health_checks,
+            batch_lifecycle=collected.get("batch_lifecycle"),
+            prompt_cache_summary=collected.get("prompt_cache_summary"),
+            connector_rows=collected.get("connector_rows"),
+            crisiswatch=collected.get("crisiswatch"),
+            completeness_rollup=collected.get("completeness_rollup"),
+            workflow_logs_index=collected.get("workflow_logs"),
+            retry_rows=collected.get("retry_rows"),
+            breaker=collected.get("breaker"),
+            collector_errors=_COLLECTOR_ERRORS,
+            file_names={
+                "health_report": f"health_report__{run}.json",
+                "batch_lifecycle": f"batch_lifecycle__{run}.json",
+                "prompt_cache_report": f"prompt_cache_report__{run}.csv",
+                "connector_freshness": f"connector_freshness__{run}.csv",
+                "model_completeness": f"model_completeness__{run}.csv",
+                "retry_report": f"retry_report__{run}.csv",
+            },
+        )
+        an_path.write_text(
+            json.dumps(
+                {
+                    "hs_run_id": data.hs_run_id,
+                    "forecaster_run_id": data.forecaster_run_id,
+                    "counts": anomalies_mod.counts(entries),
+                    "anomalies": entries,
+                },
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+        return entries
+
+    collected["anomalies"] = _run_collector("anomalies", an_path, _anomalies) or []
+    return collected
+
+
+# ---------------------------------------------------------------------------
 # Flat ZIP packaging
 # ---------------------------------------------------------------------------
 
-def build_flat_zip(out_dir: Path, zip_path: Path) -> Path:
-    """Package all artifact files into a single flat zip (no subdirectories).
+EXCLUDE_EXTENSIONS = {".duckdb", ".db", ".wal", ".duckdb.wal"}
+EXCLUDE_SUFFIXES = {".pyc"}
+# The zip the pipeline uploads as pythia-debug-bundle. Above this the
+# workflow logs are split into their own artifact rather than dropped —
+# content that only exists in the bundle must not be traded for size.
+BUNDLE_SIZE_TARGET_BYTES = 25 * 1024 * 1024
+SUBDIRS = ("workflow_logs", "code_snapshot")
 
-    Only includes diagnostic/log files, NOT the DuckDB database.
-    Excludes any file ending in .duckdb, .db, or .wal.
+
+def _bundle_files(out_dir: Path, zip_paths: set[Path]) -> list[Path]:
+    out: list[Path] = []
+    for file_path in sorted(out_dir.rglob("*")):
+        if not file_path.is_file():
+            continue
+        if file_path.suffix in EXCLUDE_EXTENSIONS or file_path.suffix in EXCLUDE_SUFFIXES:
+            continue
+        if "__pycache__" in str(file_path) or ".git" in file_path.parts:
+            continue
+        if file_path in zip_paths or file_path.suffix == ".zip":
+            continue
+        out.append(file_path)
+    return out
+
+
+def build_flat_zip(
+    out_dir: Path,
+    zip_path: Path,
+    *,
+    exclude_top_level: tuple[str, ...] = (),
+) -> Path:
+    """Package the artifact files into one zip.
+
+    Paths are stored relative to ``out_dir``, so files at the root stay
+    flat (the layout every existing consumer parses) while
+    ``workflow_logs/`` and ``code_snapshot/`` keep the directory they were
+    written into. Never includes the DuckDB database.
     """
-    EXCLUDE_EXTENSIONS = {".duckdb", ".db", ".wal", ".duckdb.wal"}
-    EXCLUDE_SUFFIXES = {".pyc"}
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file_path in sorted(out_dir.rglob("*")):
-            if not file_path.is_file():
+        for file_path in _bundle_files(out_dir, {zip_path}):
+            rel = file_path.relative_to(out_dir)
+            if exclude_top_level and rel.parts and rel.parts[0] in exclude_top_level:
                 continue
-            if file_path.suffix in EXCLUDE_EXTENSIONS:
-                continue
-            if file_path.suffix in EXCLUDE_SUFFIXES:
-                continue
-            if "__pycache__" in str(file_path):
-                continue
-            if ".git" in file_path.parts:
-                continue
-            # Skip the zip file itself
-            if file_path == zip_path:
-                continue
-            # Flatten: use just the filename, no subdirectory structure
-            arcname = file_path.name
-            # Handle name collisions by prefixing with parent dir
-            if arcname in {e.filename for e in zf.filelist}:
-                arcname = f"{file_path.parent.name}__{arcname}"
-            zf.write(file_path, arcname)
-
+            zf.write(file_path, rel.as_posix())
     return zip_path
+
+
+def build_bundle_zips(
+    out_dir: Path, run_id: str, *, size_target: int = BUNDLE_SIZE_TARGET_BYTES
+) -> dict[str, Any]:
+    """Build the bundle zip, splitting the workflow logs out if it is too big.
+
+    The split is a last resort and it is recorded: a reader who finds the
+    logs missing must be told they exist in a second artifact, not left to
+    conclude the collector failed.
+    """
+
+    main_zip = out_dir / f"pythia_debug_bundle__{run_id}.zip"
+    build_flat_zip(out_dir, main_zip)
+    result: dict[str, Any] = {
+        "bundle_zip": main_zip.name,
+        "bundle_bytes": main_zip.stat().st_size,
+        "split": False,
+        "size_target_bytes": size_target,
+    }
+    if main_zip.stat().st_size <= size_target:
+        return result
+
+    logs_zip = out_dir / f"pythia_debug_bundle_workflow_logs__{run_id}.zip"
+    with zipfile.ZipFile(logs_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file_path in _bundle_files(out_dir, {main_zip, logs_zip}):
+            rel = file_path.relative_to(out_dir)
+            if rel.parts and rel.parts[0] == "workflow_logs":
+                zf.write(file_path, rel.as_posix())
+    main_zip.unlink(missing_ok=True)
+    build_flat_zip(out_dir, main_zip, exclude_top_level=("workflow_logs",))
+    result.update(
+        {
+            "split": True,
+            "bundle_bytes": main_zip.stat().st_size,
+            "workflow_logs_zip": logs_zip.name,
+            "workflow_logs_bytes": logs_zip.stat().st_size,
+            "split_note": (
+                "The bundle exceeded its size target, so workflow_logs/ was moved into "
+                f"{logs_zip.name} and uploaded as the pythia-debug-bundle-workflow-logs "
+                "artifact. Nothing was dropped."
+            ),
+        }
+    )
+    return result
 
 
 def build_triage_only_bundle_markdown(
@@ -6638,7 +7516,7 @@ def main() -> None:
     try:
         db_stats = _file_stats(db_path)
         counts_after = _row_counts(con, KEY_TABLES)
-        counts_before: dict[str, int | None] = {tbl: None for tbl in KEY_TABLES}
+        counts_before = _load_counts_before(args.counts_before_json)
         provenance_entry = _record_run_provenance(
             con,
             run_id=forecaster_run_id or hs_run_id,
@@ -6701,7 +7579,6 @@ def main() -> None:
                 questions=questions,
             )
 
-            emit_executive_summary(data, out_dir)
             emit_health_report_json(data, out_dir)
             emit_question_metrics_csv(data, con, out_dir)
             emit_evidence_packs_csv(data, out_dir)
@@ -6716,25 +7593,76 @@ def main() -> None:
                 ("timing_breakdown", lambda: emit_timing_breakdown_csv(data, con, out_dir)),
                 ("model_config_snapshot", lambda: emit_model_config_snapshot(data, con, out_dir)),
                 ("grounding_detail", lambda: emit_grounding_detail_csv(data, con, out_dir)),
+                ("coverage_detail", lambda: emit_coverage_detail_markdown(data, out_dir)),
             ]:
                 try:
                     emitter_fn()
                 except Exception as exc:
                     LOG.warning("Emitter %s failed: %s", emitter_name, exc)
 
-            # Package all artifacts into a flat zip
-            run_id = data.out_run_id
-            zip_path = out_dir / f"pythia_debug_bundle__{run_id}.zip"
+            # The operational half. Health checks are evaluated once here and
+            # handed to both the anomaly list and the summary — three
+            # derivations of one verdict will eventually disagree, and the
+            # reader cannot tell which is right.
+            health_checks: list[dict[str, Any]] = []
             try:
-                build_flat_zip(out_dir, zip_path)
-                LOG.info(
-                    "Debug bundle zip: %s (%.1f KB)",
-                    zip_path,
-                    zip_path.stat().st_size / 1024,
+                health_checks = _evaluate_pipeline_health(data)
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("health evaluation failed: %s", exc)
+            collected: dict[str, Any] = {}
+            try:
+                collected = emit_operational_files(
+                    data,
+                    con,
+                    out_dir,
+                    pipeline_id=args.pipeline_id or None,
+                    repo_root=Path(__file__).resolve().parents[1],
+                    health_checks=health_checks,
                 )
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("operational collectors failed: %s", exc)
+
+            # The summary is written LAST because it leads with the
+            # anomalies, and the anomalies are assembled from everything
+            # above.
+            try:
+                emit_executive_summary(
+                    data, out_dir, collected=collected, health_checks=health_checks
+                )
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("executive summary failed: %s", exc)
+
+            # Package all artifacts, then describe what landed.
+            run_id = data.out_run_id
+            try:
+                zip_result = build_bundle_zips(out_dir, run_id)
+                manifest = manifest_mod.build(
+                    out_dir,
+                    hs_run_id=data.hs_run_id,
+                    forecaster_run_id=data.forecaster_run_id,
+                    pipeline_id=args.pipeline_id or None,
+                    extra={
+                        "packaging": zip_result,
+                        "collector_errors": _COLLECTOR_ERRORS,
+                        "anomaly_counts": anomalies_mod.counts(collected.get("anomalies") or []),
+                    },
+                )
+                manifest_mod.annotate_archives(manifest, zip_result)
+                manifest_mod.write(out_dir, manifest)
+                # The manifest must travel inside the bundle, so the zip is
+                # rebuilt once it exists. The second build repeats the split
+                # decision, which is why the archive annotation is applied
+                # again against its result.
+                zip_result = build_bundle_zips(out_dir, run_id)
+                manifest_mod.annotate_archives(manifest, zip_result)
+                manifest_mod.write(out_dir, manifest)
+                zip_path = out_dir / zip_result["bundle_zip"]
                 print(
-                    f"Debug bundle zip: {zip_path} ({zip_path.stat().st_size / 1024:.1f} KB)"
+                    f"Debug bundle zip: {zip_path} "
+                    f"({zip_path.stat().st_size / 1024:.1f} KB)"
                 )
+                if zip_result.get("split"):
+                    print(f"Workflow logs split into: {zip_result['workflow_logs_zip']}")
             except Exception as exc:
                 LOG.warning("Failed to build debug bundle zip: %s", exc)
     finally:

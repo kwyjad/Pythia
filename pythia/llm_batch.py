@@ -1025,9 +1025,19 @@ def poll_batch(con, batch_id: str) -> Optional[BatchStatus]:
         LOGGER.warning("llm_batch: poll failed for %s: %s", batch_id, exc)
         return None
     new_status = result.state if result.terminal else "in_progress"
+    # first_polled_at is COALESCEd, so it records the FIRST time anything
+    # heard back about this batch. The gap from submitted_at is the poller's
+    # ignition latency, which is what turned a 5-minute hand-off into hours
+    # in August 2026 — and it was measurable nowhere.
     con.execute(
-        "UPDATE llm_batches SET status = ?, ended_at = COALESCE(ended_at, ?) WHERE batch_id = ?",
-        [new_status, _now() if result.terminal else None, batch_id],
+        """
+        UPDATE llm_batches
+        SET status = ?,
+            first_polled_at = COALESCE(first_polled_at, ?),
+            ended_at = COALESCE(ended_at, ?)
+        WHERE batch_id = ?
+        """,
+        [new_status, _now(), _now() if result.terminal else None, batch_id],
     )
     return result
 

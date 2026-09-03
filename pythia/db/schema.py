@@ -1942,6 +1942,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 error_file_id TEXT,
                 results_url TEXT,
                 submitted_at TIMESTAMP,
+                first_polled_at TIMESTAMP,
                 ended_at TIMESTAMP,
                 collected_at TIMESTAMP,
                 error_text TEXT,
@@ -1969,6 +1970,11 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "error_file_id": "TEXT",
                 "results_url": "TEXT",
                 "submitted_at": "TIMESTAMP",
+                # Added after the table shipped: the gap between submitting a
+                # batch and first hearing back is the poller's latency, and
+                # without it a pipeline parked between stages looks the same
+                # as one waiting on a slow provider.
+                "first_polled_at": "TIMESTAMP",
                 "ended_at": "TIMESTAMP",
                 "collected_at": "TIMESTAMP",
                 "error_text": "TEXT",

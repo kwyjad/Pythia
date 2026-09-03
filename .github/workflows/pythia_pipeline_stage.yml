@@ -166,7 +166,12 @@ env:
   PYTHIA_GOOGLE_SPD_TIMEOUT_PRO_SEC: "300"
   PYTHIA_GOOGLE_SPD_RETRIES: "1"
   SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
-  SIGNATURE_OPTIONAL_TABLES: scenarios
+  # forecasts_raw and snapshots are here so the db_signature written at the
+  # START of every stage covers all of the debug bundle's KEY_TABLES — that
+  # file is where the bundle's "rows before this phase" column comes from,
+  # and it was empty on every run. Optional-table regressions warn and never
+  # fail, so widening this list cannot turn a stage red.
+  SIGNATURE_OPTIONAL_TABLES: scenarios,forecasts_raw,snapshots
 
 jobs:
   # ────────────────────────────────────────────────────────────────────
@@ -1333,6 +1338,13 @@ jobs:
 
       - name: Dump Pythia v2 debug artifacts
         if: ${{ success() }}
+        env:
+          # The bundle captures this cycle's Actions logs and the raw
+          # provider batch objects. Both need credentials the job already
+          # holds; neither can fail the step (every collector writes a stub
+          # on failure), and both can be turned off without a code change.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PIPELINE_ID: ${{ inputs.pipeline_id }}
         run: |
           set -e
           mkdir -p debug diagnostics
@@ -1409,6 +1421,17 @@ jobs:
           name: pythia-debug-bundle
           path: debug/pythia_debug_bundle__*.zip
           if-no-files-found: warn
+
+      # Only produced when the bundle exceeded its size target. Splitting the
+      # logs out is preferred to dropping them, and BUNDLE_MANIFEST.json says
+      # when it happened so a reader is never left guessing.
+      - name: Upload debug bundle workflow logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-debug-bundle-workflow-logs
+          path: debug/pythia_debug_bundle_workflow_logs__*.zip
+          if-no-files-found: ignore
 
       # Additive diagnostics. `continue-on-error` is load-bearing: stages
       # 2..N of a live pipeline run whatever is on main, so a reporting bug
