@@ -182,6 +182,78 @@ def _record(record: dict[str, Any], hazard: str) -> RawRecord | None:
     )
 
 
+def _cached_window_records(
+    con: "duckdb.DuckDBPyConnection", ym: str, hazard: str, rulebook: Rulebook
+) -> int:
+    """How many cached EM-DAT records already cover this fetch window."""
+
+    start, end = fetch_window(ym, rulebook, "emdat")
+    wanted = set(event_months(start, end))
+    seen = 0
+    for record in load_raw_records(con, SOURCE, hazard=hazard):
+        months = record.get("months_overlapped") or []
+        if wanted.intersection(months):
+            seen += 1
+    return seen
+
+
+def _fall_back_to_cache(
+    con: "duckdb.DuckDBPyConnection",
+    ym: str,
+    hazard: str,
+    rulebook: Rulebook,
+    outcome: FetchOutcome,
+) -> FetchOutcome:
+    """Serve the last good pull when the live call cannot be made.
+
+    An UNREAD rung and a STALE rung are different facts, and only the first
+    should suppress an answer. ``api.emdat.be`` returned 500 on all six
+    month-hazard passes of the 2026-08 run; because the outcome said
+    ``ok=False``, every impact decision in that run recorded EM-DAT as
+    unavailable and lost its top rung — while ``haz_raw_emdat`` still held
+    the records from the previous pull, and ``records_for_country_month``
+    would happily have read them.
+
+    So a failed fetch with a populated cache is ``ok=True`` with
+    ``detail.served_from_cache`` set: the rung answers, the row records that
+    the answer came from cache and why, and the freshness question stays
+    visible rather than being converted into an absence.
+
+    A failed fetch with an EMPTY cache stays ``ok=False``. There is nothing
+    to serve, and pretending otherwise would manufacture a missing rung out
+    of an outage — the same error in the other direction.
+    """
+
+    cached = _cached_window_records(con, ym, hazard, rulebook)
+    if not cached:
+        LOG.error(
+            "[emdat] %s %s unavailable and the cache holds nothing for this "
+            "window — the rung is genuinely unread",
+            hazard, ym,
+        )
+        return outcome
+
+    LOG.warning(
+        "[emdat] %s %s unavailable (%s); serving %d cached record(s) instead — "
+        "the rung is STALE, not unread",
+        hazard, ym, outcome.error, cached,
+    )
+    outcome.ok = True
+    outcome.records = cached
+    outcome.inserted = 0
+    outcome.detail = {
+        **(outcome.detail or {}),
+        "served_from_cache": True,
+        "cached_records_in_window": cached,
+        "live_fetch_error": outcome.error,
+    }
+    # The error is preserved in detail. Clearing the field keeps it out of
+    # `unavailable_sources`, which is what decides whether the rung counts as
+    # read at all.
+    outcome.error = None
+    return outcome
+
+
 def fetch_emdat(
     con: "duckdb.DuckDBPyConnection",
     ym: str,
@@ -211,7 +283,7 @@ def fetch_emdat(
     key = _api_key()
     if not key:
         outcome.error = f"{API_KEY_ENV} not set"
-        return outcome
+        return _fall_back_to_cache(con, ym, hazard, rulebook, outcome)
 
     start, end = fetch_window(ym, rulebook, "emdat")
     post = post or _default_post
@@ -252,7 +324,7 @@ def fetch_emdat(
     except Exception as exc:
         LOG.error("[emdat] fetch failed for %s %s: %s", hazard, ym, exc)
         outcome.error = str(exc)
-        return outcome
+        return _fall_back_to_cache(con, ym, hazard, rulebook, outcome)
 
     # EM-DAT filters by year, so trim to the month window we asked for.
     wanted_months = set(event_months(start, end))

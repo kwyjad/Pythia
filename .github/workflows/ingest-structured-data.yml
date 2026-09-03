@@ -58,6 +58,11 @@ concurrency:
         required: false
         default: true
         type: boolean
+      diagnose_cast:
+        description: "Run the ACLED CAST diagnostic (read-only; decides account tier vs schema change vs upstream stop for the December 2025 vintage stall)"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # Weekly refresh of fast-changing sources (Sunday 03:00 UTC)
     - cron: "0 3 * * 0"
@@ -170,6 +175,22 @@ jobs:
             echo "sources=${{ inputs.sources }}" >> "$GITHUB_OUTPUT"
             echo "Using user-specified source list (or all if empty)"
           fi
+
+      # ACLED CAST has served a 2025-12-01 vintage since the 2026-01 cycle
+      # while the transport stays healthy, so this is not an outage. The
+      # diagnostic dumps the response ENVELOPE — the half the connector
+      # discards, and where ACLED states a quota limit — alongside the row
+      # shape, and names which of three fixes the evidence supports. It needs
+      # the ACLED credentials, which only CI holds. Read-only and always
+      # exits 0.
+      - name: Diagnose ACLED CAST
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.diagnose_cast == true || inputs.diagnose_cast == 'true') }}
+        continue-on-error: true
+        run: |
+          mkdir -p diagnostics
+          python -m scripts.ci.diagnose_acled_cast \
+            --limit 500 --out diagnostics/acled_cast_diagnostic.json \
+            2>&1 | tee diagnostics/acled_cast_diagnostic.txt
 
       - name: Prepare diagnostics directory
         run: mkdir -p diagnostics/ingestion

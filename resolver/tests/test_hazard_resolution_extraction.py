@@ -1106,3 +1106,79 @@ def test_consecutive_document_fetches_are_paced_by_the_rulebook(con, monkeypatch
     assert slept == [], "the first request waits for nothing"
     impact_mod._pace_reliefweb(paced)
     assert slept and slept[0] > 4.0
+
+
+# ---------------------------------------------------------------------------
+# The live pass must survive the nightly backcast
+# ---------------------------------------------------------------------------
+
+
+class TestLiveReserve:
+    """The backcast spends any budget it is given.
+
+    In August 2026 it consumed the whole monthly allowance by mid-month and
+    cyclone August then ran out at Jamaica, with documents fetched and never
+    read. The reserve is the calls it may never take.
+    """
+
+    def test_the_backcast_stops_at_the_reserve(self):
+        budget = extract_mod.ExtractionBudget(
+            max_calls_per_month=4000,
+            used_this_month=2000,
+            run_type="backcast",
+            backcast_max_calls_per_month=3000,
+            backcast_used_this_month=2000,
+            live_reserve_calls=1500,
+        )
+        # 4000 total - 1500 reserve - 2000 already spent = 500, even though
+        # the backcast's own share would allow 1000 more.
+        assert budget.remaining == 500
+
+    def test_a_live_run_may_use_the_reserve(self):
+        """It exists for the live run's benefit, so it does not bind it."""
+
+        budget = extract_mod.ExtractionBudget(
+            max_calls_per_month=4000,
+            used_this_month=2000,
+            run_type="live",
+            backcast_max_calls_per_month=2000,
+            backcast_used_this_month=2000,
+            live_reserve_calls=1500,
+        )
+        assert budget.remaining == 2000
+
+    def test_the_reserve_survives_a_raised_backcast_share(self):
+        """The defect the explicit key exists to close.
+
+        With the reserve implicit — total minus share — raising the share
+        silently removed it, and nothing anywhere would have noticed.
+        """
+
+        generous = extract_mod.ExtractionBudget(
+            max_calls_per_month=4000,
+            used_this_month=0,
+            run_type="backcast",
+            backcast_max_calls_per_month=4000,   # the whole month
+            live_reserve_calls=1500,
+        )
+        assert generous.remaining == 2500
+
+    def test_the_reserve_cannot_be_configured_away_silently(self):
+        """The validator holds reserve + backcast share <= total."""
+
+        from resolver.hazard_resolution.rulebook import validate_rulebook
+
+        data = make_rulebook().raw
+        data["extraction"]["live_reserve_calls"] = 2500
+        data["extraction"]["backcast_max_calls_per_month"] = 2000
+        data["extraction"]["max_calls_per_month"] = 4000
+
+        assert any(
+            "would not survive a backcast that spends its full share" in p
+            for p in validate_rulebook(data)
+        )
+
+    def test_the_shipped_reserve_is_not_zero(self):
+        """A reserve of zero is the pre-Sept-2026 arrangement by another name."""
+
+        assert int(make_rulebook().get("extraction.live_reserve_calls")) > 0

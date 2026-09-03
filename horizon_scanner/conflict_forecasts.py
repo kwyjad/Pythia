@@ -280,8 +280,53 @@ def _load_acled_cast(con, iso3: str) -> Optional[dict[str, Any]]:
         "cast_erv": erv,
         "cast_vac": vac,
         "cast_issue_date": str(latest_date),
+        # Kept for callers that read it. The PROMPT no longer does: it renders
+        # the age from the issue date via age_note(), so the label and the
+        # date beside it cannot disagree.
         "cast_stale": stale,
     }
+
+
+def age_note(issue_date: Any, *, today: Optional[date] = None) -> str:
+    """A staleness label that states the forecast's ACTUAL age.
+
+    ">45 DAYS OLD" is true of a forecast 46 days old and of one nine months
+    old, and the two are not the same claim. ACLED CAST has served a
+    2025-12-01 vintage since the 2026-01 cycle, so by the time a reader sees
+    it the label understates the problem by a factor of six — the same shape
+    as the CrisisWatch "(June 2026)" heading beside an October forecast, and
+    the same fix: say how old.
+
+    Returns "" for a fresh forecast, so a healthy source's block is
+    unchanged.
+    """
+
+    if not issue_date:
+        return ""
+    try:
+        issued = (
+            issue_date
+            if isinstance(issue_date, date)
+            else date.fromisoformat(str(issue_date)[:10])
+        )
+    except (TypeError, ValueError):
+        return ""
+
+    days = ((today or date.today()) - issued).days
+    if days <= _STALENESS_DAYS:
+        return ""
+
+    months = days // 30
+    if months >= 2:
+        age = f"{months} MONTHS"
+        counsel = (
+            " — treat it as a historical prior, not a current outlook, and "
+            "weight recent evidence above it"
+        )
+    else:
+        age = f"{days} DAYS"
+        counsel = ""
+    return f" [WARNING: THIS FORECAST IS {age} OLD{counsel}]"
 
 
 def format_conflict_forecasts_for_prompt(
@@ -301,7 +346,7 @@ def format_conflict_forecasts_for_prompt(
     views_fat = forecasts.get("views_fatalities")
     views_p25 = forecasts.get("views_p_gte25")
     if views_fat or views_p25:
-        stale_note = " [WARNING: DATA >45 DAYS OLD]" if forecasts.get("views_stale") else ""
+        stale_note = age_note(forecasts.get("views_issue_date"))
         model = forecasts.get("views_model", "fatalities003")
         issue = forecasts.get("views_issue_date", "unknown")
         parts.append(f"\n### VIEWS Early Warning System ({model}){stale_note}")
@@ -330,7 +375,7 @@ def format_conflict_forecasts_for_prompt(
     cf_intensity_3m = forecasts.get("cf_intensity_3m")
     has_cf = any(v is not None for v in (cf_risk_3m, cf_risk_12m, cf_intensity_3m))
     if has_cf:
-        stale_note = " [WARNING: DATA >45 DAYS OLD]" if forecasts.get("cf_stale") else ""
+        stale_note = age_note(forecasts.get("cf_issue_date"))
         issue = forecasts.get("cf_issue_date", "unknown")
         parts.append(f"\n### conflictforecast.org (Mueller/Rauh){stale_note}")
         parts.append(f"Forecast issued: {issue}")
@@ -351,7 +396,7 @@ def format_conflict_forecasts_for_prompt(
     cast_vac = forecasts.get("cast_vac")
     has_cast = any(v for v in (cast_total, cast_battles, cast_erv, cast_vac))
     if has_cast:
-        stale_note = " [WARNING: DATA >45 DAYS OLD]" if forecasts.get("cast_stale") else ""
+        stale_note = age_note(forecasts.get("cast_issue_date"))
         issue = forecasts.get("cast_issue_date", "unknown")
         parts.append(f"\n### ACLED CAST (Conflict Alert System Tool){stale_note}")
         parts.append(f"Forecast issued: {issue}")

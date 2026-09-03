@@ -199,12 +199,22 @@ class ExtractionBudget:
     construction, so the cap spans runs: three CLI invocations in one month
     cannot each spend the monthly allowance.
 
-    A BACKCAST run additionally honours ``backcast_max_calls_per_month`` —
-    a carve-out of the monthly total, never an addition — so the nightly
-    backcast cannot starve the live trailing-window run's rung 2 (it spent
-    all of August 2026's allowance by mid-month, leaving the first live
-    resolver_update run nothing). Live runs check only the total; the
-    difference between the two caps is in effect a live reserve.
+    A BACKCAST run is bounded twice over, so the live trailing-window run's
+    rung 2 cannot be starved (it was: the backcast spent all of August 2026's
+    allowance by mid-month, and cyclone August then ran out at Jamaica with
+    documents fetched and never read):
+
+    ``backcast_max_calls_per_month``
+        the backcast's own share, a carve-out of the monthly total and never
+        an addition;
+    ``live_reserve_calls``
+        calls the backcast may never take, whatever its share says. Until
+        Sept 2026 the reserve was implicit — whatever the total minus the
+        share happened to be — so raising or dropping the share silently
+        removed it. Stated outright, it cannot be lost by accident.
+
+    A LIVE run checks only the total: the reserve exists for its benefit, so
+    it does not also apply to it.
     """
 
     max_calls_per_month: int
@@ -216,21 +226,40 @@ class ExtractionBudget:
     run_type: str = "live"
     backcast_max_calls_per_month: int | None = None
     backcast_used_this_month: int = 0
+    live_reserve_calls: int = 0
 
     @property
     def remaining(self) -> int:
         overall = max(
             0, self.max_calls_per_month - self.used_this_month - self.calls_this_run
         )
-        if self.run_type == "backcast" and self.backcast_max_calls_per_month is not None:
-            sub = max(
-                0,
-                self.backcast_max_calls_per_month
-                - self.backcast_used_this_month
-                - self.calls_this_run,
+        if self.run_type != "backcast":
+            return overall
+
+        limits = [overall]
+        if self.backcast_max_calls_per_month is not None:
+            limits.append(
+                max(
+                    0,
+                    self.backcast_max_calls_per_month
+                    - self.backcast_used_this_month
+                    - self.calls_this_run,
+                )
             )
-            return min(overall, sub)
-        return overall
+        if self.live_reserve_calls:
+            # What the backcast may spend before it starts eating the live
+            # pass's reserve. Counted against the WHOLE month's usage, so a
+            # backcast that has already run tonight cannot ignore it.
+            limits.append(
+                max(
+                    0,
+                    self.max_calls_per_month
+                    - self.live_reserve_calls
+                    - self.used_this_month
+                    - self.calls_this_run,
+                )
+            )
+        return min(limits)
 
     @property
     def exhausted(self) -> bool:
@@ -750,12 +779,17 @@ def load_budget(
             backcast_used = calls_this_calendar_month(
                 con, today=today, backcast_only=True
             )
+    try:
+        reserve = int(rulebook.get("extraction.live_reserve_calls"))
+    except Exception:  # noqa: BLE001 - older rulebooks have no such key
+        reserve = 0
     budget = ExtractionBudget(
         max_calls_per_month=int(rulebook.get("extraction.max_calls_per_month")),
         used_this_month=calls_this_calendar_month(con, today=today),
         run_type=run_type,
         backcast_max_calls_per_month=backcast_cap,
         backcast_used_this_month=backcast_used,
+        live_reserve_calls=reserve,
     )
     LOG.info(
         "[extract] budget: %d of %d extraction calls already made this calendar "
@@ -764,7 +798,8 @@ def load_budget(
         budget.max_calls_per_month,
         budget.remaining,
         (
-            f" (backcast share: {backcast_used} of {backcast_cap})"
+            f" (backcast share: {backcast_used} of {backcast_cap}; "
+            f"live reserve: {reserve})"
             if backcast_cap is not None
             else ""
         ),

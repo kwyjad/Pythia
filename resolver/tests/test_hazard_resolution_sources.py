@@ -305,6 +305,93 @@ def test_emdat_api_failure_reports_unavailable_not_empty(con, rulebook, monkeypa
     assert outcome.records == 0
 
 
+def test_emdat_serves_the_cache_when_the_live_call_fails(con, rulebook, monkeypatch):
+    """A STALE rung and an UNREAD rung are different facts.
+
+    api.emdat.be returned 500 on all six month-hazard passes of the 2026-08
+    run, so every impact decision recorded EM-DAT as unavailable and lost its
+    top rung — while haz_raw_emdat still held the previous pull, and
+    records_for_country_month would happily have read it.
+    """
+
+    monkeypatch.setenv("EMDAT_API_KEY", "test-key")
+    emdat_mod.fetch_emdat(
+        con, "2024-03", "FL", rulebook, post=lambda *a: _emdat_response([_EMDAT_ROW])
+    )
+
+    def boom(*args):
+        raise RuntimeError("500 Internal Server Error")
+
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook, post=boom)
+
+    # The rung answered, so it is not in the run's unavailable_sources and
+    # the ladder still has a top rung to walk.
+    assert outcome.ok is True
+    assert outcome.detail["served_from_cache"] is True
+    assert "500" in outcome.detail["live_fetch_error"]
+    assert outcome.records == 1
+    # Nothing new was written: this is a read of what was already there.
+    assert outcome.inserted == 0
+
+    records = emdat_mod.records_for_country_month(con, "PHL", "2024-03", "FL")
+    assert records and records[0]["total_affected"] == 45000
+
+
+def test_emdat_serves_the_cache_when_the_key_is_missing(con, rulebook, monkeypatch):
+    """An expired key does not delete what was already fetched."""
+
+    monkeypatch.setenv("EMDAT_API_KEY", "test-key")
+    emdat_mod.fetch_emdat(
+        con, "2024-03", "FL", rulebook, post=lambda *a: _emdat_response([_EMDAT_ROW])
+    )
+
+    monkeypatch.delenv("EMDAT_API_KEY", raising=False)
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook)
+
+    assert outcome.ok is True
+    assert outcome.detail["served_from_cache"] is True
+    assert "EMDAT_API_KEY" in outcome.detail["live_fetch_error"]
+
+
+def test_emdat_with_an_empty_cache_is_still_unread(con, rulebook, monkeypatch):
+    """The error in the other direction.
+
+    With nothing to serve, claiming the rung answered would manufacture a
+    missing rung out of an outage.
+    """
+
+    monkeypatch.setenv("EMDAT_API_KEY", "test-key")
+
+    def boom(*args):
+        raise RuntimeError("500 Internal Server Error")
+
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook, post=boom)
+    assert outcome.ok is False
+    assert "500" in outcome.error
+
+
+def test_emdat_cache_fallback_only_counts_records_in_the_window(
+    con, rulebook, monkeypatch
+):
+    """A cached record from another season does not make this month answered."""
+
+    monkeypatch.setenv("EMDAT_API_KEY", "test-key")
+    old_row = {
+        **_EMDAT_ROW,
+        "disno": "2019-0001-PHL",
+        "start_year": 2019, "end_year": 2019,
+    }
+    emdat_mod.fetch_emdat(
+        con, "2019-03", "FL", rulebook, post=lambda *a: _emdat_response([old_row])
+    )
+
+    def boom(*args):
+        raise RuntimeError("500 Internal Server Error")
+
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook, post=boom)
+    assert outcome.ok is False
+
+
 def test_emdat_falls_back_to_summing_its_own_components():
     """EM-DAT defines total affected = injured + affected + homeless."""
     assert emdat_mod.affected_from_record({"total_affected": 500}) == 500

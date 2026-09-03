@@ -714,6 +714,38 @@ def _render_sample(title: str, samples: list[dict[str, Any]], *, zeros: bool) ->
     return lines
 
 
+def _headline_scope(result: AcceptanceResult) -> str:
+    """One sentence naming the hazards the headline rate is computed over.
+
+    A hazard with zero assessed cells was never run in this window, so it
+    contributes nothing to the rate — and saying so is the difference between
+    a whole-machine score and a single-hazard one wearing its clothes.
+    """
+
+    covered = sorted(h for h, r in result.rates.items() if r.cells_assessed > 0)
+    absent = sorted(h for h, r in result.rates.items() if r.cells_assessed == 0)
+
+    if not covered:
+        return (
+            "*Scope: no hazard assessed a single cell in this window, so the "
+            "headline is not a measurement of anything. Check that the machine "
+            "ran at all before reading further.*"
+        )
+
+    scope = (
+        f"*Scope: this rate covers **{', '.join(covered)}** only"
+        if len(covered) == 1
+        else f"*Scope: this rate covers **{', '.join(covered)}**"
+    )
+    if absent:
+        is_are = "is" if len(absent) == 1 else "are"
+        scope += (
+            f". {', '.join(absent)} assessed no cells in this window and "
+            f"{is_are} absent from the figure entirely — not scored at 0%"
+        )
+    return scope + ".*"
+
+
 def render_report(result: AcceptanceResult) -> str:
     """Render the whole report as markdown."""
 
@@ -731,6 +763,13 @@ def render_report(result: AcceptanceResult) -> str:
             f", against a target of {TARGET_RESOLUTION_PCT:.0f}% and a documented "
             f"IFRC-GO-only baseline of ~{DOCUMENTED_IFRC_GO_BASELINE_PCT:.0f}%.**"
         ),
+        "",
+        # WHICH hazards the headline is actually over. The August 2026 report
+        # printed 0.0% as a whole-machine score when only drought had assessed
+        # cells in the window — a number about one hazard, read as a number
+        # about the machine. A headline that does not say what it covers
+        # invites exactly that reading.
+        _headline_scope(result),
         "",
     ]
     lines += _render_rates(result)

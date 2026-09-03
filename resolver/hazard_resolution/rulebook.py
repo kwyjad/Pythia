@@ -407,6 +407,21 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
             "extraction.max_calls_per_month — the sub-cap carves a backcast "
             "share OUT of the monthly total, it does not add to it"
         )
+    _require_int_in("extraction.live_reserve_calls", 0, 1_000_000)
+    _reserve = _get("extraction.live_reserve_calls")
+    if (
+        isinstance(_reserve, int)
+        and isinstance(_sub_cap, int)
+        and isinstance(_total_cap, int)
+        and _reserve + _sub_cap > _total_cap
+    ):
+        problems.append(
+            f"extraction.live_reserve_calls ({_reserve}) + "
+            f"extraction.backcast_max_calls_per_month ({_sub_cap}) exceeds "
+            f"extraction.max_calls_per_month ({_total_cap}) — the reserve would "
+            "not survive a backcast that spends its full share, which is the "
+            "one thing it exists to guarantee"
+        )
     _require_bool("extraction.skip_when_higher_rung_populated")
 
     # Drought rule: IPC Phase 3+ delta, gated by drought indicators.
