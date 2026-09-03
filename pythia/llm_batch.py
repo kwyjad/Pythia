@@ -266,6 +266,50 @@ class BatchStatus:
 # ---------------------------------------------------------------------------
 
 
+# OpenAI submit-time guards (see _OpenAIBatch.submit). All read per call so
+# tests and operators can tune them without an import-order trap; `_sleep`
+# is a module attribute so tests can stub the waits.
+_sleep = time.sleep
+_OPENAI_FILE_POLL_SEC = 2.0
+_OPENAI_VALIDATE_POLL_SEC = 3.0
+_OPENAI_SUBMIT_RETRY_BACKOFF_SEC = 5.0
+_OPENAI_FILE_ACCESS_MARKERS = ("cannot find file", "does not have access")
+
+
+def _openai_file_ready_wait_sec() -> float:
+    return float(os.getenv("PYTHIA_OPENAI_BATCH_FILE_WAIT_SEC", "60") or 60)
+
+
+def _openai_validate_wait_sec() -> float:
+    return float(os.getenv("PYTHIA_OPENAI_BATCH_VALIDATE_WAIT_SEC", "120") or 120)
+
+
+def _openai_submit_attempts() -> int:
+    return max(1, int(os.getenv("PYTHIA_OPENAI_BATCH_SUBMIT_ATTEMPTS", "3") or 3))
+
+
+def _openai_errors_are_file_access(errors: Any) -> bool:
+    """True when OpenAI's validation errors are the input-file access race.
+
+    ``errors`` is the batch object's ``errors.data`` list (or the whole
+    ``errors`` dict). Only that failure is worth a re-upload; every other
+    validation failure is deterministic.
+    """
+
+    if isinstance(errors, dict):
+        errors = errors.get("data")
+    if not isinstance(errors, list) or not errors:
+        return False
+    for item in errors:
+        if not isinstance(item, dict):
+            return False
+        message = str(item.get("message") or "").lower()
+        param = str(item.get("param") or "")
+        if param != "file_id" and not any(m in message for m in _OPENAI_FILE_ACCESS_MARKERS):
+            return False
+    return True
+
+
 class _OpenAIBatch:
     provider = "openai"
 
@@ -277,7 +321,23 @@ class _OpenAIBatch:
         return {"Authorization": f"Bearer {self.api_key}"}
 
     def submit(self, rows: List[Tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
-        """rows: [(custom_id, request_body)] -> {provider_batch_id, input_file_id}."""
+        """rows: [(custom_id, request_body)] -> {provider_batch_id, input_file_id}.
+
+        Upload the JSONL, wait for the file to be readable, create the batch,
+        and then WATCH ITS VALIDATION: on 2026-09-01 every one of the four
+        OpenAI batches was accepted at creation and rejected seconds later by
+        OpenAI's asynchronous validator with ``invalid_request: Cannot find
+        file file-..., or organization ... does not have access to it`` — the
+        file we had just uploaded, under the same key. Nothing in this
+        adapter saw that: the batch object was persisted as ``submitted``,
+        the poller found it ``failed`` with zero counts, and all 210 requests
+        expired into synchronous full-price calls (~$10.80, a fifth of the
+        run). The same upload+create sequence had worked on 2026-08-01, so
+        this is eventual consistency on the provider side, and the only
+        defence is to notice at submit time, where a re-upload costs seconds
+        rather than a batch discount. See ``_wait_for_file`` and
+        ``_confirm_validation``.
+        """
 
         jsonl = "\n".join(
             json.dumps(
@@ -291,28 +351,126 @@ class _OpenAIBatch:
             )
             for cid, body in rows
         )
-        up = requests.post(
-            f"{self.base}/files",
-            headers=self._headers(),
-            files={"file": ("batch.jsonl", jsonl.encode("utf-8"), "application/jsonl")},
-            data={"purpose": "batch"},
-            timeout=_HTTP_TIMEOUT,
+        last_errors: Any = None
+        attempts = _openai_submit_attempts()
+        for attempt in range(1, attempts + 1):
+            up = requests.post(
+                f"{self.base}/files",
+                headers=self._headers(),
+                files={"file": ("batch.jsonl", jsonl.encode("utf-8"), "application/jsonl")},
+                data={"purpose": "batch"},
+                timeout=_HTTP_TIMEOUT,
+            )
+            up.raise_for_status()
+            input_file_id = up.json()["id"]
+            self._wait_for_file(input_file_id)
+            created = requests.post(
+                f"{self.base}/batches",
+                headers={**self._headers(), "Content-Type": "application/json"},
+                json={
+                    "input_file_id": input_file_id,
+                    "endpoint": "/v1/chat/completions",
+                    "completion_window": "24h",
+                },
+                timeout=_HTTP_TIMEOUT,
+            )
+            created.raise_for_status()
+            payload = created.json()
+            provider_batch_id = payload["id"]
+            verdict, errors = self._confirm_validation(provider_batch_id)
+            if verdict != "failed":
+                return {"provider_batch_id": provider_batch_id, "input_file_id": input_file_id}
+            last_errors = errors
+            if not _openai_errors_are_file_access(errors):
+                # A validation failure that is NOT the file-access race
+                # (mismatched_model, a malformed line, ...) will fail the same
+                # way on every re-upload: surface it instead of retrying.
+                raise RuntimeError(
+                    f"OpenAI batch {provider_batch_id} failed validation: "
+                    f"{json.dumps(errors)[:600]}"
+                )
+            LOGGER.warning(
+                "llm_batch: OpenAI batch %s rejected its own input file %s at "
+                "validation (attempt %d/%d) — re-uploading: %s",
+                provider_batch_id, input_file_id, attempt, attempts,
+                json.dumps(errors)[:400],
+            )
+            if attempt < attempts:
+                _sleep(_OPENAI_SUBMIT_RETRY_BACKOFF_SEC * attempt)
+        raise RuntimeError(
+            f"OpenAI batch validation kept rejecting the uploaded input file after "
+            f"{attempts} attempt(s): {json.dumps(last_errors)[:600]}"
         )
-        up.raise_for_status()
-        input_file_id = up.json()["id"]
-        created = requests.post(
-            f"{self.base}/batches",
-            headers={**self._headers(), "Content-Type": "application/json"},
-            json={
-                "input_file_id": input_file_id,
-                "endpoint": "/v1/chat/completions",
-                "completion_window": "24h",
-            },
-            timeout=_HTTP_TIMEOUT,
-        )
-        created.raise_for_status()
-        payload = created.json()
-        return {"provider_batch_id": payload["id"], "input_file_id": input_file_id}
+
+    def _wait_for_file(self, file_id: str) -> None:
+        """Block until the uploaded file reports ``status=processed`` (bounded).
+
+        The Files API returns an id before the file is readable by the batch
+        validator; the ``status`` field (``uploaded`` -> ``processed``) is
+        the documented way to know. Missing field or timeout: proceed —
+        ``_confirm_validation`` is the second line of defence.
+        """
+
+        deadline = time.monotonic() + _openai_file_ready_wait_sec()
+        while True:
+            try:
+                meta = requests.get(
+                    f"{self.base}/files/{file_id}",
+                    headers=self._headers(),
+                    timeout=_HTTP_TIMEOUT,
+                )
+                if meta.ok:
+                    status = str((meta.json() or {}).get("status") or "")
+                    if not status or status == "processed":
+                        return
+                    if status == "error":
+                        LOGGER.warning("llm_batch: OpenAI file %s reports status=error", file_id)
+                        return
+            except Exception as exc:  # noqa: BLE001 - the validator is the real check
+                LOGGER.debug("llm_batch: file status probe failed for %s: %s", file_id, exc)
+                return
+            if time.monotonic() >= deadline:
+                LOGGER.warning(
+                    "llm_batch: OpenAI file %s not 'processed' after %.0fs; creating the batch anyway",
+                    file_id, _openai_file_ready_wait_sec(),
+                )
+                return
+            _sleep(_OPENAI_FILE_POLL_SEC)
+
+    def _confirm_validation(self, provider_batch_id: str) -> Tuple[str, Any]:
+        """Poll a freshly created batch until it leaves ``validating`` (bounded).
+
+        Returns ``(verdict, errors)`` where verdict is ``failed`` (validation
+        rejected the batch — ``errors`` carries OpenAI's ``errors.data``),
+        ``accepted`` (it moved on to in_progress/finalizing/completed) or
+        ``unknown`` (still validating at the deadline, or the probe failed;
+        the poller takes it from here exactly as before this guard existed).
+        """
+
+        deadline = time.monotonic() + _openai_validate_wait_sec()
+        while True:
+            try:
+                resp = requests.get(
+                    f"{self.base}/batches/{provider_batch_id}",
+                    headers=self._headers(),
+                    timeout=_HTTP_TIMEOUT,
+                )
+                resp.raise_for_status()
+                payload = resp.json() or {}
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("llm_batch: validation probe failed for %s: %s", provider_batch_id, exc)
+                return "unknown", None
+            status = str(payload.get("status") or "")
+            if status == "failed":
+                errors = payload.get("errors")
+                if isinstance(errors, dict):
+                    errors = errors.get("data")
+                return "failed", errors
+            if status and status != "validating":
+                return "accepted", None
+            if time.monotonic() >= deadline:
+                return "unknown", None
+            _sleep(_OPENAI_VALIDATE_POLL_SEC)
 
     _STATE_MAP = {
         "validating": "in_progress",

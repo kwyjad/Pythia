@@ -119,9 +119,16 @@ _ACE_LOW_ACTIVITY_DEFAULTS: Dict[str, Any] = {
 
 # Default triage values for hazards promoted by RC level >= 1.
 # These hazards go straight to Track 1 — triage LLM calls are unnecessary.
+# The tier is "rc_promoted", not "quiet": these hazards were never triaged
+# (the RC assessment promoted them to Track 1 and the triage call was
+# skipped), and labelling them quiet made every Track-1 question in the
+# 2026-09-01 bundle read as a quiet hazard that somehow got a full ensemble.
+# Routing never reads this tier — _write_hs_triage assigns track from the RC
+# level first — and every tier consumer treats a non-"priority" value the
+# same way it treats "quiet".
 _RC_PROMOTED_DEFAULTS: Dict[str, Any] = {
     "triage_score": 0.0,
-    "tier": "quiet",
+    "tier": "rc_promoted",
     "drivers": [],
     "regime_shifts": [],
     "data_quality": {"status": "rc_promoted"},

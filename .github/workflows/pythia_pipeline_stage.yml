@@ -211,6 +211,33 @@ jobs:
             --optional "${SIGNATURE_OPTIONAL_TABLES}"
             --out diagnostics/db_signature_before.json
 
+      # Last chance for a current CrisisWatch edition before the scan reads
+      # it from the DB (Sep 2026): the monthly Resolver Update refresh runs on
+      # the 28th and archive.org is flaky, so a failure there used to mean a
+      # whole cycle on a stale edition — the Sep 1 run quoted June's
+      # cross-border-attack signal into an October-to-March forecast. Best
+      # effort, bounded, never fatal; --only-if-newer never regresses.
+      - name: Refresh CrisisWatch edition (Wayback, best effort)
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          IA_S3_ACCESS_KEY: ${{ secrets.IA_S3_ACCESS_KEY }}
+          IA_S3_SECRET_KEY: ${{ secrets.IA_S3_SECRET_KEY }}
+        run: |
+          set -uo pipefail
+          mkdir -p diagnostics
+          python -m scripts.refresh_crisiswatch \
+            --source wayback \
+            --only-if-newer \
+            --max-age-days 60 \
+            --verbose 2>&1 | tee diagnostics/crisiswatch_refresh.log
+          echo "[crisiswatch] refresh exit=${PIPESTATUS[0]} (non-fatal)"
+          python -c "
+          from horizon_scanner.crisiswatch import bulk_store_crisiswatch
+          n = bulk_store_crisiswatch()
+          print(f'[crisiswatch] stored {n} entries')
+          " 2>&1 | tee diagnostics/crisiswatch_store.log
+
       - name: Run Horizon Scanner — stage hs_submit
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

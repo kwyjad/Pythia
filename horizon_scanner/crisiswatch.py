@@ -751,9 +751,24 @@ def load_crisiswatch_from_db() -> Dict[str, Any] | None:
             }
 
         if result:
+            editions = sorted({(e.get("year"), _month_num_from_str(e.get("month") or ""))
+                               for e in result.values()})
             log.info(
-                "CrisisWatch: loaded %d entries from DuckDB.", len(result),
+                "CrisisWatch: loaded %d entries from DuckDB (editions: %s).",
+                len(result),
+                ", ".join(f"{y}-{m:02d}" for y, m in editions if y and m) or "unknown",
             )
+            stale = sum(
+                1 for e in result.values()
+                if (crisiswatch_edition_age_months(e) or 0) >= _STALE_EDITION_MONTHS
+            )
+            if stale:
+                log.warning(
+                    "CrisisWatch: %d of %d entries are %d+ editions old — prompts will "
+                    "carry a staleness warning for them; the Wayback refresh has not "
+                    "landed a newer edition.",
+                    stale, len(result), _STALE_EDITION_MONTHS,
+                )
         return result if result else None
     except Exception as exc:
         log.debug("CrisisWatch bulk DB load failed: %s", exc)
@@ -770,13 +785,46 @@ def load_crisiswatch_from_db() -> Dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+# An entry this many editions old (or older) gets a staleness warning in the
+# prompt. 1-2 is the normal publication lag; 3 means a whole edition was
+# missed and the "current" picture is a quarter old.
+_STALE_EDITION_MONTHS = 3
+
+
+def crisiswatch_edition_age_months(
+    entry: Dict[str, Any] | None, today: datetime | None = None
+) -> int | None:
+    """Months between the entry's edition month and *today* (None when the
+    entry carries no parseable month/year)."""
+
+    if not entry:
+        return None
+    month_str = str(entry.get("month") or "")
+    month_num = _month_num_from_str(month_str)
+    year = entry.get("year")
+    if not year:
+        m = re.search(r"(\d{4})", month_str)
+        year = int(m.group(1)) if m else 0
+    try:
+        year = int(year or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if not month_num or not year:
+        return None
+    now = today or datetime.now(timezone.utc)
+    return (now.year - year) * 12 + (now.month - month_num)
+
+
 def format_crisiswatch_for_prompt(
-    iso3: str, crisiswatch_data: Dict[str, Any] | None = None
+    iso3: str,
+    crisiswatch_data: Dict[str, Any] | None = None,
+    today: datetime | None = None,
 ) -> str | None:
     """Format CrisisWatch entry for injection into RC/triage/SPD prompts.
 
     If *crisiswatch_data* (keyed by ISO3) is provided, uses it directly.
-    Otherwise loads from DuckDB.
+    Otherwise loads from DuckDB. Entries older than ``_STALE_EDITION_MONTHS``
+    editions carry an explicit staleness warning (*today* is a test seam).
     """
     entry = None
     if crisiswatch_data:
@@ -796,6 +844,21 @@ def format_crisiswatch_for_prompt(
         return None
 
     parts = [f'ICG CRISISWATCH — {country} ({month}):']
+
+    # Edition age. CrisisWatch covers month M and is published early in M+1,
+    # so an entry one or two editions old is the normal cadence. Beyond that
+    # the prompt is quoting an event from a previous quarter as if it were
+    # the current picture — on 2026-09-01 the June edition (a cross-border
+    # attack signal) fed an October-to-March forecast with no caveat, while
+    # the 45-day VIEWS flag next to it said "stale". Say so in the prompt.
+    age = crisiswatch_edition_age_months(entry, today=today)
+    if age is not None and age >= _STALE_EDITION_MONTHS:
+        parts.append(
+            f"STALENESS WARNING: this is the {month} edition, {age} months old; no "
+            "newer CrisisWatch edition has been ingested. Treat it as background on "
+            "the situation as of that month, not as a description of current "
+            "conditions, and weight recent sources above it."
+        )
 
     if arrow:
         arrow_label = arrow.capitalize()

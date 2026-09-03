@@ -107,7 +107,11 @@ def _print_prompt_cache_stats(conn) -> None:
             print(
                 f"::warning::prompt cache produced ZERO reads for {provider} across "
                 f"{int(calls)} calls despite PYTHIA_PROMPT_CACHE_ENABLED=1 — "
-                "check that the call sites pass cache_segments/prompt_cache_key"
+                "either the call sites are not passing cache_segments/prompt_cache_key, "
+                "or every call in a prefix group was in flight before the first "
+                "finished (the sync-fallback pattern of 2026-09-01; the warm gate in "
+                "forecaster/cli.py exists for that). Batched Gemini calls never read "
+                "the implicit cache, so google is not checked here."
             )
 
 

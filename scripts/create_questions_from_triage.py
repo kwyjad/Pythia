@@ -135,10 +135,21 @@ def _db_food_security_countries(con) -> set:
 
 
 def _is_food_security_country(iso3: str, con=None) -> bool:
-    """Check if a country is monitored by FEWS NET or IPC (files first, DB fallback)."""
-    if _is_fewsnet_country(iso3) or _is_ipc_country(iso3):
-        return True
-    return iso3.upper() in _db_food_security_countries(con)
+    """Is there a resolution source for a DR Phase 3+ question in this country?
+
+    The DB decides whenever it can: a country with ``phase3plus_in_need`` rows
+    in the last 36 months can resolve, whatever list it is on, and a country
+    with none cannot — ``fewsnet_countries.json`` lists who FEWS NET
+    *monitors*, not who it *publishes numbers for* (Eritrea is on the list
+    and has never had a row, and on 2026-09-01 it got a Phase 3+ question that
+    can never resolve). The curated lists are only consulted when the DB has
+    no food-security rows at all (fresh checkout, no connection), where they
+    keep the old fail-open behaviour.
+    """
+    db_countries = _db_food_security_countries(con)
+    if db_countries:
+        return iso3.upper() in db_countries
+    return _is_fewsnet_country(iso3) or _is_ipc_country(iso3)
 
 
 def _parse_args() -> argparse.Namespace:
