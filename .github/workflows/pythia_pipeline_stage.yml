@@ -1336,102 +1336,46 @@ jobs:
           echo "SIGNATURE_OK=${signature_ok}" >> "$GITHUB_ENV"
           echo "signature_ok=${signature_ok}" >> "$GITHUB_OUTPUT"
 
-      - name: Dump Pythia v2 debug artifacts
-        if: ${{ success() }}
+      # The operational debug bundle and the LLM prompt snapshot are built
+      # in the Sibyl job since Sept 2026 (run_sibyl.yml), so that everything
+      # a cycle produces at its end is produced in one place. Two of the
+      # bundle's collectors read the job they run in — the environment
+      # snapshot and the DB signatures — so this stage writes its own here
+      # and ships them forward as pythia-stage-context; the Sibyl job places
+      # them in the bundle as stage_context/. The executive summary is no
+      # longer appended to THIS run's step summary: it depends on the bundle
+      # output and now lands in the Sibyl run's summary.
+      - name: Write stage context for the Sibyl-terminus bundle
+        if: always()
+        continue-on-error: true
         env:
-          # The bundle captures this cycle's Actions logs and the raw
-          # provider batch objects. Both need credentials the job already
-          # holds; neither can fail the step (every collector writes a stub
-          # on failure), and both can be turned off without a code change.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PIPELINE_ID: ${{ inputs.pipeline_id }}
+          STAGE_CONCLUSION: ${{ job.status }}
         run: |
-          set -e
-          mkdir -p debug diagnostics
-          if [ -n "${FORECASTER_RUN_ID:-}" ]; then
-            python -m scripts.dump_pythia_debug_bundle --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --forecaster-run-id "${FORECASTER_RUN_ID}"
-          else
-            python -m scripts.dump_pythia_debug_bundle --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}"
-          fi
-          SUMMARY_PATH=$(find debug -maxdepth 1 -type f -name "executive_summary__*.md" -print | sort | tail -n 1 || true)
-          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f "${SUMMARY_PATH}" ]; then
-            cat "${SUMMARY_PATH}" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Snapshot LLM prompt artifact
-        if: always()
-        run: |
-          set -e
+          set +e
           mkdir -p diagnostics
-          python -m scripts.ci.snapshot_prompt_artifact \
-            --db "${PYTHIA_DB_URL}" \
-            --out diagnostics/prompt_artifact.md || {
-            echo "WARNING: prompt artifact generation failed (non-fatal)"
-            exit 0
-          }
+          python -m scripts.ci.write_stage_context \
+            --out diagnostics/stage_context.json \
+            --pipeline-id "${PIPELINE_ID}" \
+            --hs-run-id "${HS_RUN_ID:-}" \
+            --forecaster-run-id "${FORECASTER_RUN_ID:-}" \
+            --conclusion "${STAGE_CONCLUSION}" \
+            --signature-before diagnostics/db_signature_before.json \
+            --signature-after diagnostics/db_signature_after.json
+          exit 0
 
-      - name: Upload health report
+      - name: Upload stage context
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: pythia-health-report
+          name: pythia-stage-context
           path: |
-            debug/executive_summary__*.md
-            debug/health_report__*.json
+            diagnostics/stage_context.json
             diagnostics/db_signature_before.json
             diagnostics/db_signature_after.json
           if-no-files-found: warn
-
-      - name: Upload LLM prompt artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-llm-prompts
-          path: diagnostics/prompt_artifact.md
-          if-no-files-found: warn
-
-      - name: Upload question metrics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-question-metrics
-          path: debug/question_metrics__*.csv
-          if-no-files-found: warn
-
-      - name: Upload LLM call detail
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-llm-calls-detail
-          path: debug/llm_calls_detail__*.jsonl.gz
-          if-no-files-found: warn
-
-      - name: Upload SPD tables
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-spd-tables
-          path: debug/spd_tables__*.csv
-          if-no-files-found: warn
-
-      - name: Upload debug bundle
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-debug-bundle
-          path: debug/pythia_debug_bundle__*.zip
-          if-no-files-found: warn
-
-      # Only produced when the bundle exceeded its size target. Splitting the
-      # logs out is preferred to dropping them, and BUNDLE_MANIFEST.json says
-      # when it happened so a reader is never left guessing.
-      - name: Upload debug bundle workflow logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-debug-bundle-workflow-logs
-          path: debug/pythia_debug_bundle_workflow_logs__*.zip
-          if-no-files-found: ignore
+          retention-days: 90
 
       # Additive diagnostics. `continue-on-error` is load-bearing: stages
       # 2..N of a live pipeline run whatever is on main, so a reporting bug
@@ -1496,8 +1440,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          gh workflow run run_sibyl.yml --ref main -f db_run_id="${GITHUB_RUN_ID}"
-          echo "Dispatched run_sibyl.yml with db_run_id=${GITHUB_RUN_ID}"
+          # pipeline_id / hs_run_id / forecaster_run_id let the Sibyl job
+          # build the operational and attribution bundles for THIS pipeline:
+          # the bundle's workflow-log collector discovers the stage runs by
+          # pipeline_id, and the bundles are pinned to this run's ids.
+          gh workflow run run_sibyl.yml --ref main \
+            -f db_run_id="${GITHUB_RUN_ID}" \
+            -f pipeline_id="${{ inputs.pipeline_id }}" \
+            -f hs_run_id="${HS_RUN_ID:-}" \
+            -f forecaster_run_id="${FORECASTER_RUN_ID:-}"
+          echo "Dispatched run_sibyl.yml with db_run_id=${GITHUB_RUN_ID} pipeline_id=${{ inputs.pipeline_id }} hs_run_id=${HS_RUN_ID:-} forecaster_run_id=${FORECASTER_RUN_ID:-}"
 
       # The canonical upload + Sibyl dispatch above are signature-gated;
       # when the gate fires, the whole month's pipeline output goes

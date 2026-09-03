@@ -919,106 +919,48 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Dump Pythia v2 debug artifacts
-        if: ${{ success() }}
+      # The operational debug bundle, the evidence-pack CSVs and the LLM
+      # prompt snapshot are built in the Sibyl job since Sept 2026
+      # (run_sibyl.yml, which chains off this workflow via workflow_run), so
+      # that everything a cycle produces at its end is produced in one place.
+      # This stage writes its own environment snapshot, DB signatures and
+      # identifiers here and ships them forward as pythia-stage-context; the
+      # Sibyl job downloads them from the triggering run. There is no
+      # pipeline_id on this synchronous path. The executive summary is no
+      # longer appended to THIS run's step summary — it lands in the Sibyl
+      # run's summary.
+      - name: Write stage context for the Sibyl-terminus bundle
+        if: always()
+        continue-on-error: true
         env:
-          RESOLVER_DB_URL: ${{ env.RESOLVER_DB_URL }}
           HS_RUN_ID: ${{ env.HS_RUN_ID }}
           FORECASTER_RUN_ID: ${{ env.FORECASTER_RUN_ID }}
+          STAGE_CONCLUSION: ${{ job.status }}
         run: |
-          set -e
-          mkdir -p debug diagnostics
-          if [ -n "${FORECASTER_RUN_ID:-}" ]; then
-            python -m scripts.dump_pythia_debug_bundle --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}" --forecaster-run-id "${FORECASTER_RUN_ID}"
-          else
-            python -m scripts.dump_pythia_debug_bundle --db "${RESOLVER_DB_URL}" --hs-run-id "${HS_RUN_ID}"
-          fi
-          # Only the executive summary goes to GITHUB_STEP_SUMMARY (target <200KB)
-          SUMMARY_PATH=$(find debug -maxdepth 1 -type f -name "executive_summary__*.md" -print | sort | tail -n 1 || true)
-          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f "${SUMMARY_PATH}" ]; then
-            cat "${SUMMARY_PATH}" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Snapshot LLM prompt artifact
-        if: always()
-        env:
-          PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
-        run: |
-          set -e
+          set +e
           mkdir -p diagnostics
-          echo "=== Generating LLM prompt snapshot artifact ==="
-          python -m scripts.ci.snapshot_prompt_artifact \
-            --db "${PYTHIA_DB_URL}" \
-            --out diagnostics/prompt_artifact.md || {
-            echo "WARNING: prompt artifact generation failed (non-fatal)"
-            exit 0
-          }
-          if [ -f diagnostics/prompt_artifact.md ]; then
-            SIZE=$(wc -c < diagnostics/prompt_artifact.md)
-            echo "Prompt artifact generated: ${SIZE} bytes"
-          fi
+          python -m scripts.ci.write_stage_context \
+            --out diagnostics/stage_context.json \
+            --pipeline-id "" \
+            --hs-run-id "${HS_RUN_ID:-}" \
+            --forecaster-run-id "${FORECASTER_RUN_ID:-}" \
+            --conclusion "${STAGE_CONCLUSION}" \
+            --signature-before diagnostics/db_signature_before.json \
+            --signature-after diagnostics/db_signature_after.json
+          exit 0
 
-      - name: Upload LLM prompt artifact
+      - name: Upload stage context
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: pythia-llm-prompts
-          path: diagnostics/prompt_artifact.md
-          if-no-files-found: warn
-
-      - name: Upload health report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-health-report
+          name: pythia-stage-context
           path: |
-            debug/executive_summary__*.md
-            debug/health_report__*.json
+            diagnostics/stage_context.json
             diagnostics/db_signature_before.json
             diagnostics/db_signature_after.json
           if-no-files-found: warn
-
-      - name: Upload question metrics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-question-metrics
-          path: debug/question_metrics__*.csv
-          if-no-files-found: warn
-
-      - name: Upload evidence packs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-evidence-packs
-          path: |
-            debug/hs_country_evidence__*.csv
-            debug/question_evidence__*.csv
-          if-no-files-found: warn
-
-      - name: Upload LLM call detail
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-llm-calls-detail
-          path: debug/llm_calls_detail__*.jsonl.gz
-          if-no-files-found: warn
-
-      - name: Upload SPD tables
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-spd-tables
-          path: debug/spd_tables__*.csv
-          if-no-files-found: warn
-
-      - name: Upload debug bundle
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pythia-debug-bundle
-          path: debug/pythia_debug_bundle__*.zip
-          if-no-files-found: warn
+          retention-days: 90
 
       - name: Upload evaluation artifacts
         if: always() && github.event_name == 'workflow_dispatch' && github.event.inputs.run_spd_eval == 'true'

@@ -94,6 +94,7 @@ DESCRIPTIONS: dict[str, str] = {
     "run_comparison": "This run's key metrics beside the previous two production runs.",
     "workflow_logs": "Actions logs for the whole cycle: this run, the pipeline stages, and the poller ticks.",
     "code_snapshot": "Verbatim copies of the files most often implicated in a bad run, plus the commit range since the last production run.",
+    "stage_context": "The forecaster stage's own environment snapshot, DB signatures, conclusion and identifiers, carried forward from fc_collect_finalize — the bundle itself is built in the Sibyl job. MISSING.json means the pythia-stage-context artifact was never downloaded.",
 }
 
 

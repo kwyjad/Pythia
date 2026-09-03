@@ -519,3 +519,266 @@ _QUESTION_RECORD_SCHEMA = """\
 - `sibyl`: status, divergences, cost; `trials` (full belief traces) present
   in case_studies/ or when built with --include-sibyl-trials=all.
 """
+
+
+# ---------------------------------------------------------------------------
+# Forecast attribution bundle
+# ---------------------------------------------------------------------------
+
+_ATTRIBUTION_CLAIMED = """\
+**Everything in `attribution/signal_ledger.parquet` is CLAIMED attribution.**
+The deltas are what a model said moved it, written after the fact in the
+same response that carried the forecast. A model can be confidently wrong
+about its own reasoning: the stated prior may be back-fitted to the answer,
+the signals may be a narrative assembled to justify a number already chosen,
+and the per-bucket deltas are arithmetic the model was asked to produce, not
+a measurement of anything. Measured influence needs ablation (re-running the
+forecast with an input removed and observing the change), and this bundle
+does not do that. Anyone who reads the ledger as causal evidence is building
+on sand. Read it as testimony: consistent, queryable, and worth comparing
+across models and months, but testimony.
+"""
+
+_ATTRIBUTION_FILES = """\
+- `attribution/signal_ledger.parquet` (+ `signal_ledger_sample.csv`, the
+  first 500 rows) — one row per (run, question, model, update). `update_index
+  = -1` is the model's stated prior (`is_prior_row = true`). A model with no
+  parseable trace gets exactly one row with `signal_class = 'no_trace'` and
+  null delta columns: absence is visible in the table, never inferred from a
+  missing row. `mass_moved_l1` is half the L1 norm of the delta, so it reads
+  as the share of probability mass relocated by that signal. `direction` is
+  the change in expected bucket index (positive = toward higher severity).
+  `delta_sums_to_zero` and `post_spd_reconciles` are the same two checks
+  `forecaster/trace_validation.py` performs, at the same tolerances.
+- `attribution/prior_anchoring.csv` — the stated prior beside the base-rate
+  anchor the prompt carried (from `forecast_deviation.baserate_json`), with
+  the Jensen-Shannon divergence and distance between them and the signed
+  change in expected bucket index. This is where narrative salience shows
+  first: a prior far from its anchor was not built from the anchor.
+- `attribution/rc_assessment.csv` — the HS regime-change flag as supplied
+  beside the model's `rc_assessment` verdict (accepted / partial / rebutted /
+  absent) and the mass it moved on signals classed `rc_flag`. A model that
+  reports acceptance and moves nothing is a finding.
+- `attribution/trace_quality.csv` — `trace_validation.py` scores per model
+  per question plus trace presence and update count. The `prior_quality`
+  component runs WITHOUT the original base-rate summary and returns its
+  neutral 0.7; trust `delta_arithmetic` and `magnitude_consistency`. The
+  by-model and by-hazard roll-up is in `MANIFEST.json` — if one member never
+  emits usable traces, everything downstream is skewed by its absence.
+- `inputs/input_inventory.csv` — one row per question: what was actually on
+  the table at forecast time (resolver history depth, base-rate anchor and
+  its provenance, structured-inject row counts, CrisisWatch edition,
+  evidence counts and ages, HS tier/score/RC level, and the mean ensemble's
+  `js_vs_baserate` / `log_ev_ratio`). It exists so somebody can ask whether
+  questions with an inject, or with heavy recent evidence, deviate further
+  from base rate than those without. That is a comparison across the panel,
+  not a causal claim.
+- `inputs/evidence_items.jsonl.gz` — every evidence item the run carried,
+  flattened from `question_research` (HS country pack, question-specific web
+  research, merged) and from the HS grounding packs the SPD prompt injected,
+  keyed by `evidence_id`. `inputs/evidence_to_signal.csv` links
+  `attribution_id` to `evidence_id` by token containment between the signal
+  text and the item's title plus text; `match_score` and `match_method` say
+  how. **This linkage is a heuristic**: a shared vocabulary is not proof the
+  model read that item, and links below the threshold in the manifest are
+  not emitted at all.
+- `inputs/base_rates.csv` — the anchor per question, with its source and
+  observation count.
+- `prompts/prompt_sections.csv`, `prompts/section_hashes.json` — each
+  distinct prompt template this run used, split into its headed sections
+  with sizes and sha256 hashes. Diff `section_hashes.json` against last
+  month's to tell in seconds whether a shift in forecasts followed a prompt
+  edit or followed the world. Text before the first heading is
+  `unclassified`, so nothing is silently dropped.
+- `prompts/token_share.csv` — per question, the share of prompt characters
+  (and estimated tokens) each section took. Token share is a weak proxy for
+  influence, but it is MEASURED rather than self-reported, and it is the
+  only measured signal in this bundle.
+- `contrasts/model_disagreement.csv` — pairwise JS divergence between
+  member SPDs per question, decomposed into disagreement already present at
+  the prior and disagreement introduced by updates. Two models landing on
+  the same number by different routes is worth knowing.
+- `contrasts/fred_vs_sibyl.csv` — the ensemble aggregate against Sibyl's
+  pooled SPD, with the signal classes each cited. Sibyl emits no reasoning
+  trace by design; its classes are inferred from its trial text.
+- `contrasts/run_over_run.csv` — matched to the previous run on (iso3,
+  hazard_code, metric): change in expected value, in the mean stated prior,
+  and in the mix of signal classes cited.
+- `hazard/<CODE>.md` — a plain-markdown brief per hazard: top classes by
+  mass and by frequency, mean prior-anchoring distance, RC acceptance rate,
+  evidence volume, and the five questions with the largest movement.
+- `questions/<question_id>.json` — the shared question record (same shape
+  as the scored bundle's) plus an `attribution` block: the ledger rows, the
+  inventory row, the prompt section fingerprint and the evidence ids.
+- `MANIFEST.json` — run ids, window, counts, lineup, taxonomy version,
+  thresholds, per-file row counts, every collector that failed and why, and
+  the `linked_bundles` block naming the operational bundle this was built
+  beside.
+- `LINKAGE.md` — the join contract with the other bundles.
+"""
+
+_ATTRIBUTION_TAXONOMY = """\
+`signal_class` comes from `scripts/ai_bundle/signal_taxonomy.csv`: ordered
+case-insensitive regular expressions with a priority; the highest-priority
+match wins, and `signal_class_confidence` rises with how much of the text
+the pattern actually matched (a six-letter hit is a weaker claim than a
+whole phrase) and with a second hit for the same class. `other` is the
+fallback and carries confidence 0.1. Classification is deterministic and
+never uses a model call, because month-over-month comparison is worthless
+if the classes drift with the classifier. The taxonomy is versioned
+(`taxonomy_version` in the manifest); compare ledgers only within one
+version.
+"""
+
+
+def build_attribution_guide(context: Mapping[str, Any]) -> str:
+    """ANALYST_GUIDE.md for the forecast attribution bundle. The claimed-
+    attribution warning is the opening paragraph, not a footnote."""
+    run_id = context.get("run_id", "?")
+    n_questions = context.get("n_questions", "?")
+    n_rows = context.get("n_ledger_rows", "?")
+    rollup = context.get("trace_quality_rollup") or {}
+    by_model = rollup.get("by_model") or {}
+    lineup_lines = []
+    for model, stats in sorted(by_model.items()):
+        lineup_lines.append(
+            f"| {model} | {stats.get('n')} | {stats.get('share_with_trace')} | "
+            f"{stats.get('mean_trace_quality')} | {stats.get('mean_updates')} |"
+        )
+    classes = [e.get("signal_class") for e in (context.get("taxonomy") or []) if e.get("signal_class")]
+    parts = [
+        "# ANALYST GUIDE — Pythia Forecast Attribution Bundle",
+        "",
+        _ATTRIBUTION_CLAIMED,
+        f"This bundle covers forecaster run `{run_id}` ({n_questions} questions, "
+        f"{n_rows} ledger rows). It answers one question the other bundles do not: "
+        "why did the models produce these numbers, and what did they say influenced "
+        "them most, per hazard. It is a forensic record with no token cap, built for "
+        "querying, not a model input.",
+        "",
+        "## Reading order",
+        "",
+        "1. `MANIFEST.json` — counts, the trace-quality roll-up (which members emitted "
+        "usable traces), collector failures.",
+        "2. `hazard/<CODE>.md` — the human-readable brief per hazard.",
+        "3. `attribution/signal_ledger_sample.csv`, then the parquet with a real query "
+        "engine (DuckDB reads it directly).",
+        "4. `attribution/prior_anchoring.csv` and `rc_assessment.csv`.",
+        "5. `inputs/input_inventory.csv` for the panel comparison.",
+        "6. `contrasts/` and `prompts/` for what changed between models and between runs.",
+        "",
+        "## The system",
+        "",
+        _PIPELINE_OVERVIEW,
+        "## Files",
+        "",
+        _ATTRIBUTION_FILES,
+        "## The signal taxonomy",
+        "",
+        _ATTRIBUTION_TAXONOMY,
+        f"Classes (taxonomy version {context.get('taxonomy_version', '?')}): "
+        + ", ".join(f"`{c}`" for c in classes),
+        "",
+        "## Trace quality in this run",
+        "",
+        "| model | calls | share with trace | mean trace quality | mean updates |",
+        "|---|---|---|---|---|",
+        *lineup_lines,
+        "",
+        "## Identifiers and join keys",
+        "",
+        _IDENTIFIERS,
+        "- `attribution_id` = sha256(\"{run_id}|{question_id}|{model_name}|{update_index}\")[:16]. "
+        "Stable and deterministic; the future resolutions bundle joins on it.",
+        "- `evidence_id` = sha256(\"{url}|{title}\")[:16].",
+        "",
+        "## Impact buckets",
+        "",
+        _bucket_tables_md(),
+        "",
+        "## Model lineup",
+        "",
+        _model_lineup_md(),
+        "## Reasoning traces",
+        "",
+        _REASONING_TRACE,
+        "## Suggested analyses",
+        "",
+        "- Which signal classes carry the most mass per hazard, and does the mix "
+        "differ by model family? (`signal_ledger`, group by hazard_code × model_family.)",
+        "- How far do stated priors sit from their anchors, and does the distance "
+        "predict `js_vs_baserate`? (`prior_anchoring` joined to `input_inventory`.)",
+        "- Do models that report accepting the RC flag actually move mass on it? "
+        "(`rc_assessment`: acceptance beside `rc_flag_mass_moved_l1`.)",
+        "- Do questions with a CrisisWatch inject or heavy recent evidence deviate "
+        "further from base rate? (`input_inventory` — a panel comparison, not a cause.)",
+        "- Did a prompt section change between runs? (`section_hashes.json` diff.)",
+        "- Where do two members agree on the answer and disagree on the route? "
+        "(`model_disagreement`: small `jsd_final`, large `jsd_prior`.)",
+        "",
+        "## Known blind spots",
+        "",
+        "- Binary EVENT_OCCURRENCE calls and Sibyl carry no reasoning trace by "
+        "design; they appear as `no_trace` rows.",
+        "- Track-2 traces are reduced (prior + rc_assessment, empty updates).",
+        "- `evidence_to_signal` is lexical. `question_research` is a placeholder in "
+        "production runs, so most evidence comes from the HS grounding packs.",
+        "- `prior_quality` in `trace_quality.csv` is the neutral 0.7 (no base-rate "
+        "summary at bundle time).",
+        "- The section parser splits on headed blocks; a prompt edit that changes a "
+        "heading shows as a removed and an added section, not a changed one.",
+    ]
+    return "\n".join(parts)
+
+
+def build_linkage_md(context: Mapping[str, Any]) -> str:
+    """LINKAGE.md: the join contract between this bundle and the others."""
+    return "\n".join(
+        [
+            "# LINKAGE — how this bundle joins the others",
+            "",
+            f"Built for forecaster run `{context.get('run_id', '?')}` "
+            f"(HS run `{context.get('hs_run_id', '?')}`).",
+            "",
+            "## Keys",
+            "",
+            "| key | recipe | where it lives | joins to |",
+            "|---|---|---|---|",
+            "| `run_id` | the forecaster run (`fc_<epoch>`) | every table | operational debug bundle "
+            "(`pythia-debug-bundle`), current-run bundle, scored bundle, `forecasts_raw`/`llm_calls` |",
+            "| `hs_run_id` | the Horizon Scanner run | ledger, manifest | `hs_triage`, "
+            "`hs_hazard_tail_packs`, the operational bundle's HS files |",
+            "| `question_id` | `<ISO3>_<HAZARD>_<METRIC>_<YYYY-MM>` | every table | every bundle; "
+            "`questions/<id>.json` here shares the scored bundle's record schema |",
+            "| `attribution_id` | `sha256(\"{run_id}|{question_id}|{model_name}|{update_index}\")[:16]` "
+            "| `signal_ledger`, `evidence_to_signal`, `questions/*.json` | the future "
+            "resolutions bundle, which attaches outcomes to it |",
+            "| `evidence_id` | `sha256(\"{url}|{title}\")[:16]` | `evidence_items`, "
+            "`evidence_to_signal` | the operational bundle's evidence CSVs by url |",
+            "| `(iso3, hazard_code, metric)` | `interpreter.persistence.match_key` | "
+            "`run_over_run` | the current-run bundle's `deltas.json` |",
+            "",
+            "## The shared question record",
+            "",
+            "`questions/<question_id>.json` is produced by the same `build_question_record` "
+            "the scored and current-run bundles use, extended with an `attribution` block "
+            "(ledger rows, inventory row, prompt section fingerprint, evidence ids). Fields "
+            "outside that block mean exactly what the scored bundle's guide says they mean.",
+            "",
+            "## The resolutions bundle (not yet built)",
+            "",
+            "A fourth bundle will attach outcomes — resolved values, realised buckets, "
+            "per-horizon scores — to `attribution_id`. That is what will eventually let "
+            "signal CLASSES be scored, rather than only forecasts: did the signals a model "
+            "moved on turn out to be the ones that mattered? Until it exists, nothing in "
+            "this bundle says whether a claimed attribution was right.",
+            "",
+            "## Intended next step: ablation",
+            "",
+            "Claimed attribution becomes measured attribution only under ablation: re-run "
+            "a forecast with one input withheld and record the change in the SPD. That "
+            "harness is out of scope for the bundle; `attribution_id` and the prompt "
+            "section fingerprints are the hooks it will need.",
+            "",
+        ]
+    )

@@ -220,3 +220,39 @@ def collect(
         list(models_used or []) + ensemble_models, repo_root
     )
     return payload
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m scripts.debug_bundle.env_config --out PATH``.
+
+    Writes the env_and_config payload for the CURRENT job. The operational
+    bundle is built in the Sibyl job since Sept 2026, so the forecaster
+    stage writes its own snapshot with this and ships it forward as the
+    ``pythia-stage-context`` artifact — otherwise the bundle would describe
+    the Sibyl job and quietly lose the stage's flags. Never fails: an
+    error is written into the file it was asked for.
+    """
+
+    import argparse  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(description="Write this job's resolved environment and config.")
+    parser.add_argument("--out", required=True, help="Path of the JSON file to write.")
+    parser.add_argument(
+        "--repo-root",
+        default=str(Path(__file__).resolve().parents[2]),
+        help="Repository root (default: derived from this file).",
+    )
+    args = parser.parse_args(argv)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        payload = collect(repo_root=Path(args.repo_root))
+    except Exception as exc:  # noqa: BLE001
+        payload = {"error": redact_text(f"{type(exc).__name__}: {exc}")}
+    out.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    print(f"env_and_config written to {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

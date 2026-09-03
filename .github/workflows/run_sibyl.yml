@@ -11,6 +11,20 @@ name: Sibyl Deep Research
 # selects from) has completed. Forecasts the top-10 highest-volatility
 # affected/fatalities questions via agentic open-web research (Opus + Brave)
 # and writes the results beside the standard track in the canonical DB.
+#
+# It is also the forecast cycle's TERMINUS (Sept 2026): every end-of-cycle
+# artifact is produced here, in this order — forecast deviation, the
+# current-run bundle, the interpreter report + PDF, the operational debug
+# bundle (moved here from fc_collect_finalize / run_horizon_scanner, with
+# the LLM prompt snapshot and its sibling uploads), the forecast attribution
+# bundle — and only then the canonical DB upload and the publish dispatch.
+# Every diagnostic step is if: always() + continue-on-error; the release
+# order pythia → Sibyl → interpreter → publish is unchanged.
+#
+# Dispatched from fc_collect_finalize it receives pipeline_id / hs_run_id /
+# forecaster_run_id; triggered by workflow_run it resolves them from the DB
+# (scripts/ci/sibyl_bundle_context.py) and fetches the stage's
+# pythia-stage-context artifact from the triggering run.
 
 on:
   workflow_run:
@@ -29,6 +43,14 @@ on:
         default: "40"
       db_run_id:
         description: "Force pythia-resolver-db from this workflow run id"
+        required: false
+        default: ""
+      pipeline_id:
+        description: "Batch pipeline id (pl_...) the forecast came from; lets the bundles find the stage runs (default: resolved from the DB)"
+        required: false
+        default: ""
+      forecaster_run_id:
+        description: "Forecaster run id (fc_...) to bundle (default: resolved from the DB)"
         required: false
         default: ""
 
@@ -269,6 +291,226 @@ jobs:
             interpreter_out/interpreter_report_latest.pdf
             interpreter_out/report_*_v*.md
             interpreter_out/report__*.html
+          if-no-files-found: warn
+          retention-days: 90
+
+      # ------------------------------------------------------------------
+      # The operational debug bundle and the forecast attribution bundle.
+      # Moved here from fc_collect_finalize / run_horizon_scanner (Sept
+      # 2026) so that everything a cycle produces at its end is produced in
+      # one job. Every step below is if: always() + continue-on-error: a
+      # diagnostics bug must never cost the run its DB upload or its
+      # publish dispatch, both of which follow.
+      # ------------------------------------------------------------------
+
+      # Dispatched from fc_collect_finalize the identifiers arrive as inputs
+      # and db_run_id IS that stage's run; from workflow_run (the legacy HS
+      # workflow) the triggering run is the source and nothing else is
+      # supplied. Either way one helper fills in what is missing from the
+      # canonical DB and fetches the stage's pythia-stage-context artifact
+      # into debug/stage_context/ (a stub when it is missing — a reader must
+      # never have to guess whether a collector failed or a file was never
+      # produced). pipeline_id matters: without it the bundle's workflow-log
+      # collector captures this job's logs and nothing else.
+      - name: Resolve bundle identifiers and fetch stage context
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_DB_RUN_ID: ${{ github.event.inputs.db_run_id }}
+          INPUT_PIPELINE_ID: ${{ github.event.inputs.pipeline_id }}
+          INPUT_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
+          INPUT_FORECASTER_RUN_ID: ${{ github.event.inputs.forecaster_run_id }}
+          TRIGGERING_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set +e
+          mkdir -p debug
+          SRC_RUN="${INPUT_DB_RUN_ID}"
+          if [ -z "${SRC_RUN}" ]; then
+            SRC_RUN="${TRIGGERING_RUN_ID}"
+          fi
+          python -m scripts.ci.sibyl_bundle_context \
+            --db "${RESOLVER_DB_URL}" \
+            --pipeline-id "${INPUT_PIPELINE_ID}" \
+            --hs-run-id "${INPUT_HS_RUN_ID}" \
+            --forecaster-run-id "${INPUT_FORECASTER_RUN_ID}" \
+            --stage-context-run-id "${SRC_RUN}" \
+            --stage-context-dir debug/stage_context \
+            --github-env "${GITHUB_ENV}"
+          exit 0
+
+      # The bundle captures this cycle's Actions logs and the raw provider
+      # batch objects, so the credentials are scoped to this step only. The
+      # row-counts-before come from the stage context (the forecaster
+      # stage's own db_signature_before), so the provenance table's before
+      # column is the stage's; its after column is this job's DB, which
+      # also carries Sibyl's rows.
+      - name: Dump Pythia v2 debug artifacts
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          mkdir -p debug diagnostics
+          if [ -z "${HS_RUN_ID:-}" ]; then
+            echo "::warning::No HS run id resolved — skipping the debug bundle."
+            exit 0
+          fi
+          if [ -n "${FORECASTER_RUN_ID:-}" ]; then
+            python -m scripts.dump_pythia_debug_bundle --db "${RESOLVER_DB_URL}" \
+              --hs-run-id "${HS_RUN_ID}" --forecaster-run-id "${FORECASTER_RUN_ID}" \
+              --pipeline-id "${PIPELINE_ID:-}" \
+              --counts-before-json debug/stage_context/db_signature_before.json
+          else
+            python -m scripts.dump_pythia_debug_bundle --db "${RESOLVER_DB_URL}" \
+              --hs-run-id "${HS_RUN_ID}" --pipeline-id "${PIPELINE_ID:-}" \
+              --counts-before-json debug/stage_context/db_signature_before.json
+          fi
+          # Only the executive summary goes to GITHUB_STEP_SUMMARY (target <200KB)
+          SUMMARY_PATH=$(find debug -maxdepth 1 -type f -name "executive_summary__*.md" -print | sort | tail -n 1)
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f "${SUMMARY_PATH}" ]; then
+            cat "${SUMMARY_PATH}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 0
+
+      - name: Snapshot LLM prompt artifact
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p diagnostics
+          python -m scripts.ci.snapshot_prompt_artifact \
+            --db "${RESOLVER_DB_URL}" \
+            --out diagnostics/prompt_artifact.md
+          if [ -f diagnostics/prompt_artifact.md ]; then
+            SIZE=$(wc -c < diagnostics/prompt_artifact.md)
+            echo "Prompt artifact generated: ${SIZE} bytes"
+          else
+            echo "WARNING: prompt artifact generation failed (non-fatal)"
+          fi
+          exit 0
+
+      - name: Upload health report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-health-report
+          path: |
+            debug/executive_summary__*.md
+            debug/health_report__*.json
+            debug/stage_context/*.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload LLM prompt artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-llm-prompts
+          path: diagnostics/prompt_artifact.md
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload question metrics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-question-metrics
+          path: debug/question_metrics__*.csv
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload evidence packs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-evidence-packs
+          path: |
+            debug/hs_country_evidence__*.csv
+            debug/question_evidence__*.csv
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload LLM call detail
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-llm-calls-detail
+          path: debug/llm_calls_detail__*.jsonl.gz
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload SPD tables
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-spd-tables
+          path: debug/spd_tables__*.csv
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload debug bundle
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-debug-bundle
+          path: debug/pythia_debug_bundle__*.zip
+          if-no-files-found: warn
+          retention-days: 90
+
+      # Only produced when the bundle exceeded its size target. Splitting the
+      # logs out is preferred to dropping them, and BUNDLE_MANIFEST.json says
+      # when it happened so a reader is never left guessing.
+      - name: Upload debug bundle workflow logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-debug-bundle-workflow-logs
+          path: debug/pythia_debug_bundle_workflow_logs__*.zip
+          if-no-files-found: ignore
+          retention-days: 90
+
+      # The forecast attribution bundle: where probability mass moved and
+      # what each model said moved it, from forecasts_raw.reasoning_trace_json.
+      # Read-only, no token cap, never fails (main() returns 0 and records
+      # any collector failure in its MANIFEST.json). Built AFTER the
+      # operational bundle so its manifest can name that artifact under the
+      # same run id.
+      - name: Build forecast attribution bundle
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          ARGS=()
+          if [ -n "${FORECASTER_RUN_ID:-}" ]; then
+            ARGS+=(--run-id "${FORECASTER_RUN_ID}")
+          fi
+          if [ -n "${HS_RUN_ID:-}" ]; then
+            ARGS+=(--hs-run-id "${HS_RUN_ID}")
+          fi
+          python -m scripts.ai_bundle.build_forecast_attribution_bundle \
+            --db "${RESOLVER_DB_URL}" --out-dir ai_bundle "${ARGS[@]}"
+          exit 0
+
+      - name: Upload forecast attribution bundle
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-forecast-attribution-bundle
+          path: ai_bundle/forecast_attribution__*.zip
           if-no-files-found: warn
           retention-days: 90
 

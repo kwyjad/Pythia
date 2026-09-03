@@ -6494,6 +6494,31 @@ def build_flat_zip(
     return zip_path
 
 
+def ensure_stage_context_dir(out_dir: Path) -> Path:
+    """Make sure ``stage_context/`` exists in the bundle, with a stub if the
+    stage's artifact never arrived."""
+
+    target = out_dir / "stage_context"
+    if target.is_dir() and any(p.is_file() for p in target.iterdir()):
+        return target
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "MISSING.json").write_text(
+        json.dumps(
+            {
+                "missing": True,
+                "artifact": "pythia-stage-context",
+                "reason": (
+                    "no stage context was placed in the bundle directory before the "
+                    "dump ran (the pythia-stage-context artifact was not downloaded)"
+                ),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return target
+
+
 def build_bundle_zips(
     out_dir: Path,
     run_id: str,
@@ -7644,6 +7669,15 @@ def main() -> None:
                 )
             except Exception as exc:  # noqa: BLE001
                 LOG.warning("executive summary failed: %s", exc)
+
+            # The forecaster stage's context travels in as stage_context/
+            # (see scripts/ci/sibyl_bundle_context.py). Its absence is a
+            # fact the reader needs stated, not inferred from a missing
+            # directory.
+            try:
+                ensure_stage_context_dir(out_dir)
+            except Exception as exc:  # noqa: BLE001
+                LOG.warning("stage_context stub failed: %s", exc)
 
             # Package all artifacts, then describe what landed.
             run_id = data.out_run_id

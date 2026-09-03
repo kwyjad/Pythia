@@ -32,7 +32,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 from scripts.ai_bundle.common import (
     column_exists,
@@ -312,12 +312,18 @@ def build_question_record(
     include_test: bool,
     include_sibyl_trials: bool,
     run_id: str | None = None,
+    extras: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the full reasoning record for one question.
 
     ``run_id`` pins the forecaster run explicitly (the current-run bundle
     knows it); when omitted it is resolved from scores/forecasts_ensemble
     (the scored bundle's behaviour, unchanged).
+
+    ``extras`` is merged into the record at the top level after everything
+    else is assembled — the attribution bundle passes its ``attribution``
+    block this way so all three bundles keep ONE record shape instead of a
+    forked builder. Keys already in the record win; extras never overwrite.
     """
     qid = str(q["question_id"])
     iso3 = q.get("iso3")
@@ -506,6 +512,10 @@ def build_question_record(
                 record["sibyl"]["trials"] = safe_json_loads(s.get("trials_json"))
             else:
                 record["sibyl"]["trials_available"] = bool(s.get("trials_json"))
+
+    if extras:
+        for key, value in extras.items():
+            record.setdefault(key, value)
 
     return record
 
