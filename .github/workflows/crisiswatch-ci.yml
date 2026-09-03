@@ -17,6 +17,7 @@ name: CrisisWatch CI
       - "scripts/refresh_crisiswatch.py"
       - "horizon_scanner/crisiswatch.py"
       - "tests/test_refresh_crisiswatch.py"
+      - "horizon_scanner/tests/test_crisiswatch_regional_merge.py"
       - "tests/fixtures/crisiswatch_*"
       - ".github/workflows/crisiswatch-ci.yml"
       - ".github/workflows/refresh-crisiswatch.yml"
@@ -25,6 +26,7 @@ name: CrisisWatch CI
       - "scripts/refresh_crisiswatch.py"
       - "horizon_scanner/crisiswatch.py"
       - "tests/test_refresh_crisiswatch.py"
+      - "horizon_scanner/tests/test_crisiswatch_regional_merge.py"
       - "tests/fixtures/crisiswatch_*"
       - ".github/workflows/crisiswatch-ci.yml"
       - ".github/workflows/refresh-crisiswatch.yml"
@@ -57,5 +59,12 @@ jobs:
           pip install pytest pytest-timeout
 
       - name: Run CrisisWatch refresh tests
+        # The merge test guards the contract BETWEEN the two files this
+        # workflow triggers on: the scraper stamps regional_source, the loader
+        # reads it. horizon-scanner-ci runs it too (it sweeps horizon_scanner/),
+        # but it does not trigger on scripts/refresh_crisiswatch.py, so a
+        # scraper-only change would re-run nothing that covers the contract.
         run: |
-          pytest -vv tests/test_refresh_crisiswatch.py
+          pytest -vv \
+            tests/test_refresh_crisiswatch.py \
+            horizon_scanner/tests/test_crisiswatch_regional_merge.py

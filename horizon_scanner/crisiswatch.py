@@ -479,6 +479,102 @@ def _parse_overview_response(text: str) -> list[dict[str, Any]]:
 _STALENESS_DAYS = 45
 
 
+# Arrow and alert strength, for merging several scraped rows onto one ISO3.
+# Higher wins.  A neutral row must never erase a signal, in either direction:
+# a regional "unchanged" row arriving after a country's own "deteriorated" one
+# used to overwrite it, which is how Ethiopia's August 2026 deterioration was
+# dropped from every ACE prompt.
+_ARROW_STRENGTH: Dict[str, int] = {
+    "deteriorated": 3,
+    "improved": 2,
+    "unchanged": 1,
+    "": 0,
+}
+
+_ALERT_STRENGTH: Dict[str, int] = {
+    "conflict_risk": 2,
+    "resolution_opportunity": 1,
+    "": 0,
+}
+
+# Ceiling on a merged summary.  Each scraped summary is already capped at ~500
+# chars by the scraper; a country carrying three rows (CHN: China-U.S.,
+# China/Japan, South China Sea) would otherwise put 1,500 chars into a prompt.
+_MERGED_SUMMARY_MAX_CHARS = 900
+
+
+def _merge_country_rows(
+    iso3: str, rows: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Merge every scraped row that resolves to *iso3* into one entry.
+
+    CrisisWatch publishes some headings that are not a single country: regional
+    entries expanded by the scraper's ``_REGIONAL_ENTRY_MAP`` (Nile Waters ->
+    ETH/SDN/EGY), bilateral headings that resolve by name (China-U.S. -> CHN,
+    India-Pakistan (Kashmir) -> IND) and territories (Somaliland -> SOM).  All
+    of them are genuine information about the country, so none is discarded.
+
+    The merge:
+
+    * ``arrow`` and ``alert_type`` take the STRONGEST value across the rows,
+      so a neutral row can never erase a signal.
+    * identity fields (``country``) come from the country's OWN entry when one
+      is present — a row the scraper did not stamp with ``regional_source`` —
+      and otherwise from the first row in document order.
+    * ``summary`` leads with the primary row's text and appends the others,
+      each labelled with the heading it came from, bounded by
+      ``_MERGED_SUMMARY_MAX_CHARS``.
+
+    A single-row country (the overwhelming majority) round-trips unchanged
+    apart from the dropped ``regional_source`` marker.
+    """
+
+    def _is_own(row: Dict[str, Any]) -> bool:
+        # Absent marker means an older JSON file or a DB row written before
+        # the scraper stamped provenance: fall back to document order, which
+        # puts a country's own entry ahead of the regional one.
+        return not (row.get("regional_source") or "").strip()
+
+    primary = next((r for r in rows if _is_own(r)), rows[0])
+
+    arrow = max(
+        (r.get("arrow") or "" for r in rows),
+        key=lambda a: _ARROW_STRENGTH.get(a, 0),
+    )
+    alert_type = max(
+        (r.get("alert_type") or "" for r in rows),
+        key=lambda a: _ALERT_STRENGTH.get(a, 0),
+    )
+
+    summary = (primary.get("summary") or "").strip()
+    seen = {summary} if summary else set()
+    for row in rows:
+        if row is primary:
+            continue
+        text = (row.get("summary") or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        label = (row.get("regional_source") or row.get("country") or "").strip()
+        # On a legacy row with no provenance marker the fallback label is the
+        # country's own name, which says nothing; drop it in that case.
+        if label == (primary.get("country") or "").strip():
+            label = ""
+        addition = f" | {label}: {text}" if label else f" | {text}"
+        if len(summary) + len(addition) > _MERGED_SUMMARY_MAX_CHARS:
+            summary += " | ..."
+            break
+        summary += addition
+
+    return {
+        "country": primary.get("country", ""),
+        "iso3": iso3,
+        "arrow": arrow,
+        "alert_type": alert_type,
+        "summary": summary,
+    }
+
+
 def _load_from_json() -> Dict[str, Any] | None:
     """Load CrisisWatch data from the scraped JSON file (primary source).
 
@@ -518,22 +614,33 @@ def _load_from_json() -> Dict[str, Any] | None:
                           fetched_at_str)
 
         # --- build ISO3-keyed result dict ---
-        result: Dict[str, Any] = {}
+        # Several scraped rows can land on one ISO3: a regional entry expanded
+        # by _REGIONAL_ENTRY_MAP (Nile Waters -> ETH/SDN/EGY), a bilateral
+        # heading that resolves by name (China-U.S. -> CHN), or a territory
+        # (Somaliland -> SOM).  They are merged, never overwritten.
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
         for entry in entries:
             iso3 = (entry.get("iso3") or "").strip().upper()
             if not iso3:
                 country = entry.get("country", "")
                 iso3 = _resolve_iso3(country) or ""
             if iso3:
-                result[iso3] = {
-                    "country": entry.get("country", ""),
-                    "iso3": iso3,
-                    "arrow": entry.get("arrow", ""),
-                    "alert_type": entry.get("alert_type", ""),
-                    "summary": entry.get("summary", ""),
-                    "month": data.get("month", ""),
-                    "year": data.get("year", 0),
-                }
+                grouped.setdefault(iso3, []).append(entry)
+
+        result: Dict[str, Any] = {}
+        for iso3, rows in grouped.items():
+            merged = _merge_country_rows(iso3, rows)
+            merged["month"] = data.get("month", "")
+            merged["year"] = data.get("year", 0)
+            result[iso3] = merged
+
+        n_collisions = sum(1 for rows in grouped.values() if len(rows) > 1)
+        if n_collisions:
+            log.info(
+                "CrisisWatch: merged %d ISO3 code(s) carrying more than one "
+                "scraped row (regional, bilateral or territory entries).",
+                n_collisions,
+            )
 
         if not result:
             return None

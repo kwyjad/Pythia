@@ -1,623 +1,619 @@
 {
-  "month": "June 2026",
+  "month": "August 2026",
   "year": 2026,
-  "fetched_at": "2026-07-10T10:49:57.049240+00:00",
-  "source": "wayback:20260710104641",
-  "outlook_month": "July 2026",
+  "fetched_at": "2026-09-03T08:36:03.479160+00:00",
+  "source": "wayback:20260903083250",
+  "outlook_month": "September 2026",
   "conflict_risk_alerts": [
-    "AFG",
-    "PAK",
-    "SDN"
+    "IRN",
+    "SAU",
+    "YEM"
   ],
-  "resolution_opportunities": [
-    "BEN",
-    "NER"
-  ],
+  "resolution_opportunities": [],
   "deteriorated": [
     "AFG",
+    "ETH",
     "NER",
-    "PAK",
-    "ZAF",
-    "ZWE"
+    "ZMB"
   ],
   "improved": [
-    "IRN"
+    "SYR"
   ],
   "entries": [
     {
       "country": "Benin",
       "iso3": "BEN",
       "arrow": "unchanged",
-      "alert_type": "resolution_opportunity",
-      "summary": "In a major step toward healing a years-long rift, President Wadagni visited the military-led Sahelian countries, raising prospects for renewed border security cooperation and the reopening of the Benin-Niger border."
+      "alert_type": "",
+      "summary": "Former President Talon was elected Senate president just months after handing power to his protégé, President Wadagni, while Benin and Nigeria continued to deepen security cooperation amid mounting cross-border insecurity."
     },
     {
       "country": "Burkina Faso",
       "iso3": "BFA",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Al-Qaeda-affiliated militants continued to attack state forces, particularly in the country’s northern regions, as authorities doubled down on their military-first approach to tackling insecurity and intensified their crackdown on dissent."
+      "summary": "President Capt. Traoré continued to assert sole authority amid the prolonged disappearance of top officials in military government; JNIM launched further attacks on government forces and rival Islamic State militants."
     },
     {
       "country": "Burundi",
       "iso3": "BDI",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Tensions persisted over preparations for the May 2027 presidential election, while restrictions on civic space and economic pressures continued."
+      "summary": "President Ndayishimiye faced mounting pressure from army commanders to withdraw troops from DR Congo, and the 2027 presidential race began to take shape."
     },
     {
       "country": "Cameroon",
       "iso3": "CMR",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "President Biya’s prolonged absence during his trip to Switzerland fuelled speculation about his health and succession, while clashes between government forces and Anglophone separatists continued."
+      "summary": "President Biya returned to Cameroon after a record 73-day absence, easing immediate concerns about a potential power vacuum, while armed conflicts continued to exact a heavy toll in the Anglophone regions and the Far North."
     },
     {
       "country": "Central African Republic",
       "iso3": "CAF",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The army leadership denied rumours of its involvement in a plot to overthrow President Touadéra, Bangui became the latest African capital to receive migrants deported from the U.S.,"
+      "summary": "The government and UN mission (MINUSCA) advanced plans to transfer some of the mission’s responsibilities to national authorities as part of its gradual drawdown, while insecurity persisted in several regions."
     },
     {
       "country": "Chad",
       "iso3": "TCD",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Amid mounting security threats, authorities leaned toward reviving their security partnership with France less than two years after French troops were expelled from Chad; intercommunal violence left several people dead"
+      "summary": "Authorities accused the Sudanese army of launching airstrikes inside Chadian territory as the war in Sudan continued to spill across borders; President Déby pardoned prominent political opponents in a move framed as a gesture toward national reconciliation."
     },
     {
       "country": "Côte d’Ivoire",
       "iso3": "CIV",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Authorities unveiled plans for a new electoral framework, drawing an initially positive response from the opposition; Abidjan signalled its openness to reviving security cooperation with its Sahelian neighbours."
+      "summary": "Some opposition parties reshuffled their leadership in a bid to regain political relevance, while a land conflict in the country’s south turned deadly."
     },
     {
       "country": "Democratic Republic of Congo",
       "iso3": "COD",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Fighting intensified in South Kivu as Kinshasa and allied militias stepped up efforts to recapture territory held by the Rwanda-backed M23 rebel group around Minembwe town"
+      "summary": "Kinshasa and the Rwanda-backed M23 agreed on a roadmap for further negotiations and implementation of commitments under the Doha process; the main opposition coalition rejected President Tshisekedi’s national dialogue process."
     },
     {
       "country": "Eritrea",
       "iso3": "ERI",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Asmara’s relations with Addis Ababa remained tense while its ties with Cairo continued to deepen; meanwhile, the UN special rapporteur drew attention to the human rights situation in Eritrea."
+      "summary": "Asmara put its forces on high alert following clashes in Ethiopia’s Tigray region and reiterated that Red Sea security should primarily be the responsibility of littoral states."
     },
     {
       "country": "Ethiopia",
       "iso3": "ETH",
-      "arrow": "unchanged",
+      "arrow": "deteriorated",
       "alert_type": "",
-      "summary": "The ruling party secured a big parliamentary majority, but elections were marred by violence and the exclusion of 46 constituencies from voting, including all of Tigray region; meanwhile, tensions between the federal government and Tigray People’s Liberation Front (TPLF) continued to escalate."
+      "summary": "Heavy clashes erupted in Tigray between the military and forces aligned with the Tigray People’s Liberation Front (TPLF), while federal drone strikes hit sites across the region, including Mekelle, in the first such attack on the regional capital since the 2022 peace deal."
     },
     {
       "country": "Guinea",
       "iso3": "GIN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The ruling coalition backing"
+      "summary": "President Doumbouya travelled abroad, fuelling speculation about his health and actual grip on power, and later dismissed scores of soldiers amid reports of tensions within the military."
+    },
+    {
+      "country": "Guinea-Bissau",
+      "iso3": "GNB",
+      "arrow": "unchanged",
+      "alert_type": "",
+      "summary": "The country held a referendum on a proposed constitution that would replace the semi-presidential system with a presidential one."
     },
     {
       "country": "Kenya",
       "iso3": "KEN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Protests at a U.S.-backed Ebola facility left several dead, while tensions between the government and the opposition mounted over a controversial finance bill."
+      "summary": "Political violence continued to intensify ahead of the 2027 presidential election as suspected goons brutally disrupted opposition meetings, leaving several dead."
     },
     {
       "country": "Mali",
       "iso3": "MLI",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Al-Qaeda-affiliated militants sustained pressure on Bamako and key western supply corridors, as government counter-insurgency operations reportedly caused civilian casualties and authorities introduced new measures to contain jihadist violence."
+      "summary": "Al-Qaeda militants retained the capacity to strike strategic military positions despite a government counteroffensive; meanwhile, Azawad rebels released captured soldiers and transitional President Gen. Goïta pardoned a French intelligence officer."
     },
     {
       "country": "Mozambique",
       "iso3": "MOZ",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Islamic State-affiliated combatants continued to operate across large swathes of the northern province of Cabo Delgado and at sea; the killing of two opposition members in May continued to fuel political tensions."
+      "summary": "Islamic State militants abducted dozens of civilians and remained active across large swathes of northern Cabo Delgado province, while the Supreme Court summoned opposition leader Venâncio Mondlane to stand trial."
     },
     {
       "country": "Niger",
       "iso3": "NER",
       "arrow": "deteriorated",
-      "alert_type": "resolution_opportunity",
-      "summary": "Benin President Romuald Wadagni’s visit to Niger marked a significant step toward rapprochement between the two neighbours and increased the prospects for reopening the border; jihadist groups escalated their campaign, launching a series of large-scale attacks, including on Niamey’s airport."
+      "alert_type": "",
+      "summary": "Gunfire and explosions rocked the capital, Niamey, as a group of soldiers attempted to stage a mutiny, marking the latest challenge to General Abdourahamane Tiani’s rule."
     },
     {
       "country": "Nigeria",
       "iso3": "NGA",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Joint operations by Nigerian and U.S. forces disrupted jihadist networks in the North East, but extremist, criminal and herder-farmer violence persisted across much of the country."
+      "summary": "Criminal, jihadist and ethnic armed groups killed and abducted hundreds of people in the North West and North Central zones, while jihadist violence remained at a low ebb in the North East."
     },
     {
       "country": "Ethiopia",
       "iso3": "ETH",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Nile Waters"
+      "summary": "Addis Ababa and Cairo sparred over dam projects on the Blue Nile."
     },
     {
       "country": "Sudan",
       "iso3": "SDN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Nile Waters"
+      "summary": "Addis Ababa and Cairo sparred over dam projects on the Blue Nile."
     },
     {
       "country": "Egypt",
       "iso3": "EGY",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Nile Waters"
+      "summary": "Addis Ababa and Cairo sparred over dam projects on the Blue Nile."
     },
     {
       "country": "Rwanda",
       "iso3": "RWA",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Kigali continued to face scrutiny over its role in the conflict in eastern DR Congo (DRC), even as it pursued diplomatic engagement abroad."
-    },
-    {
-      "country": "Senegal",
-      "iso3": "SEN",
-      "arrow": "unchanged",
-      "alert_type": "",
-      "summary": "The power struggle at the top of the state continued as the National Assembly passed a constitutional reform curbing presidential powers."
+      "summary": "Kigali and Kinshasa remained at odds over the disarmament of the FDLR rebel group, hindering implementation of the U.S.-brokered peace agreement."
     },
     {
       "country": "Somalia",
       "iso3": "SOM",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Violence erupted in Mogadishu between federal forces and militias aligned with opposition figures just weeks after President Mohamud’s original four-year term expired; the main"
+      "summary": "Mogadishu’s state and local election rollout suffered a setback after the Supreme Court annulled the Galmudug results, while political figures aligned with Mogadishu in Puntland and Jubaland switched sides; Al-Shabaab made its first territorial gain of the year."
     },
     {
       "country": "Somaliland",
       "iso3": "SOM",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Somaliland inaugurated its embassy to Israel in Jerusalem, drawing domestic and international criticism."
+      "summary": "Senior political and military figures continued to defect between Somaliland and Somalia’s North Eastern state, while Hargeisa stepped up efforts to end a deadly inter-clan conflict in the Awdal region."
     },
     {
       "country": "South Africa",
       "iso3": "ZAF",
-      "arrow": "deteriorated",
+      "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Xenophobic violence claimed several lives as anti-migrant"
+      "summary": "Anti-migrant demonstrations reduced in intensity, while criminal violence remained high."
     },
     {
       "country": "South Sudan",
       "iso3": "SSD",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Violence continued to spread, driven by government-opposition fighting alongside intercommunal conflict and resource-driven clashes; meanwhile, authorities announced elections would take place on 22 December despite insecurity and political turmoil."
+      "summary": "Heavy fighting between government and opposition forces persisted in Jonglei and Upper Nile states, intercommunal attacks left scores dead and hundreds of cattle looted, and the ruling party remained intent on holding elections in December."
     },
     {
       "country": "Sudan",
       "iso3": "SDN",
       "arrow": "unchanged",
-      "alert_type": "conflict_risk",
-      "summary": "The Rapid Support Forces (RSF) massed fighters around El Obeid in North Kordofan, fuelling fears of an imminent assault on the city and prompting the UN to warn about the risk of mass atrocities."
+      "alert_type": "",
+      "summary": "The Rapid Support Forces (RSF) made significant gains in Blue Nile state amid reports of growing Ethiopian involvement and counterattacked in North Kordofan following the army’s July advances, as both sides expanded their drone war; peace efforts remained stalled."
     },
     {
       "country": "Tanzania",
       "iso3": "TZA",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Authorities announced a ban on public rallies ahead of anti-government protests scheduled for 7 July as the main opposition party, Chadema, faced further harassment."
+      "summary": "The government announced a commission investigating responsibility for the post-October 2025 violence, while Vice President Emmanuel Nchimbi resigned amid a growing rift with President Suluhu Hassan."
+    },
+    {
+      "country": "Togo",
+      "iso3": "TGO",
+      "arrow": "unchanged",
+      "alert_type": "",
+      "summary": "President Gnassingbé conducted a military reshuffle, while authorities detained French journalists."
     },
     {
       "country": "Uganda",
       "iso3": "UGA",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "President Museveni’s son and army chief, Gen. Muhoozi Kainerugaba, led an escalating crackdown on dissent while increasingly asserting his political influence."
+      "summary": "President Museveni’s succession continued to fuel tensions as his son, Muhoozi Kainerugaba, announced his intention to run for president in 2031; opposition leader Kizza Besigye’s party launched a campaign to protest his treason trial and continued detention."
     },
     {
       "country": "Zambia",
       "iso3": "ZMB",
-      "arrow": "unchanged",
+      "arrow": "deteriorated",
       "alert_type": "",
-      "summary": "Political violence left at least one person dead ahead of 13 August general election."
+      "summary": "Following the 13 August general elections, the political climate deteriorated sharply as security forces carried out a deadly raid on the main opposition candidate’s home before detaining him on treason charges."
     },
     {
       "country": "Zimbabwe",
       "iso3": "ZWE",
-      "arrow": "deteriorated",
+      "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The political crisis escalated after Parliament passed controversial constitutional amendments extending President Mnangagwa’s term in office, deepening divisions within the military and prompting accusations of a “constitutional coup” from the opposition."
+      "summary": "President Mnangagwa solidified his grip on power after the July passing of controversial constitutional amendments that extended his term until 2030; succession jockeying continued within the ruling party."
     },
     {
       "country": "Afghanistan",
       "iso3": "AFG",
       "arrow": "deteriorated",
-      "alert_type": "conflict_risk",
-      "summary": "Kabul and Islamabad traded cross-border attacks amid worsening acrimony over militancy in Pakistan’s border provinces, raising the rospect of intensifying hostilities."
+      "alert_type": "",
+      "summary": "Armed opposition groups intensified attacks against the Taliban, potentially marking the start of a sustained challenge to the de facto rulers; internal Taliban tensions erupted into deadly clashes in the north-eastern Badakhshan province."
     },
     {
       "country": "Bangladesh",
       "iso3": "BGD",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The former ruling Awami League party stepped up its activity ahead of local elections expected to start in September, while immigration returned as a major flashpoint in relations with India."
+      "summary": "Parliament elected the ruling Bangladesh National Party’s (BNP) candidate in the first contested presidential vote in decades, while the government adopted several accountability reforms and navigated tensions with India."
     },
     {
       "country": "China-U.S.",
       "iso3": "CHN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Beijing and Washington continued to manage relations amid persistent “irritants” and trade tensions."
+      "summary": "Trade tensions and Washington’s economic warfare against Iran appeared to strain U.S.-China ties ahead of Chinese President Xi’s visit to the U.S. in September."
     },
     {
       "country": "China/Japan",
       "iso3": "CHN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Beijing continued its maritime presence in the disputed East China Sea, while the months-long diplomatic rift between Tokyo and Beijing rumbled on."
+      "summary": "China continued maritime activity in the disputed East China Sea, while a diplomatic thaw in bilateral ties appeared to be a long way off."
     },
     {
       "country": "India",
       "iso3": "IND",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The ethnic conflict in Manipur state in the far north east continued to simmer amid persistent armed violence, while immigration returned as a major flashpoint in relations with Bangladesh."
+      "summary": "Tit-for-tat attacks between the Naga and Kuki ethnic communities continued in Manipur state, while New Delhi and China made progress in dialogue on the disputed border."
     },
     {
       "country": "India-Pakistan (Kashmir)",
       "iso3": "IND",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Chief Minister Omar Abdullah continued to demand statehood for Jammu & Kashmir (J&K), while ties between India and Pakistan remained severely strained."
+      "summary": "Chief Minister Omar Abdullah continued calls to restore Jammu & Kashmir’s (J&K) statehood on the seventh anniversary of its revocation, while remarks by the U.S. ambassador to India during a visit to J&K sparked Pakistani objections."
     },
     {
       "country": "Indonesia",
       "iso3": "IDN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Economic discontent fuelled a new wave of student protests, while Jakarta continued developing regional defence ties and military capabilities."
+      "summary": "Alleged military abuses in Papua sparked local protests demanding accountability, while Jakarta expanded defence ties with Thailand and balanced relations between China and the U.S."
     },
     {
       "country": "South Korea",
       "iso3": "KOR",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "North Korea accelerated the expansion of its navy, as Seoul-Washington nuclear talks drew Pyongyang’s ire; Chinese President Xi Jinping made his first visit to North Korea since 2019."
+      "summary": "U.S. President Trump abruptly shortened annual military drills with South Korea in an apparent bid to entice North Korea into dialogue, which Pyongyang rejected."
     },
     {
       "country": "North Korea",
       "iso3": "PRK",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "North Korea accelerated the expansion of its navy, as Seoul-Washington nuclear talks drew Pyongyang’s ire; Chinese President Xi Jinping made his first visit to North Korea since 2019."
+      "summary": "U.S. President Trump abruptly shortened annual military drills with South Korea in an apparent bid to entice North Korea into dialogue, which Pyongyang rejected."
     },
     {
       "country": "Myanmar",
       "iso3": "MMR",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The military made uneven progress in its offensives in the north and west amid resistance from armed groups, while a spurt of regional engagements signalled an easing of Myanmar’s years-long diplomatic isolation."
+      "summary": "The military attempted to advance in the north and south east, while intensifying airstrikes on opposition-held areas that killed dozens of civilians; the regime courted international support."
     },
     {
       "country": "Pakistan",
       "iso3": "PAK",
-      "arrow": "deteriorated",
-      "alert_type": "conflict_risk",
-      "summary": "Islamabad and Kabul traded cross-border attacks amid worsening acrimony over militancy in the border provinces, raising the prospect of intensifying hostilities; protests in Pakistan-administered Kashmir turned deadly."
+      "arrow": "unchanged",
+      "alert_type": "",
+      "summary": "Tensions with Kabul remained high amid unabated insurgent violence in the borderlands, while supporters of imprisoned opposition leader Imran Khan staged protests and threatened a march on the capital."
     },
     {
       "country": "Philippines",
       "iso3": "PHL",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Insecurity persisted in the Bangsamoro region ahead of inaugural parliamentary elections set for September, while the military sustained pressure on Communist militants."
+      "summary": "Insecurity persisted in the Bangsamoro region ahead of inaugural elections set for 14 September, while communist rebels faced continued pressure by government forces."
     },
     {
       "country": "South China Sea",
       "iso3": "CHN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Tensions mounted between Beijing and Manila in the South China Sea (SCS) over a temporary Chinese structure at the contested Scarborough Shoal, while the Philippines deepened regional ties."
+      "summary": "Tensions persisted between Manila and Beijing in South China Sea (SCS), even as Manila signalled openness for potential energy exploration with Beijing."
     },
     {
       "country": "Sri Lanka",
       "iso3": "LKA",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The government faced criticism over its use of controversial anti-terror laws and apparent disinterest in expediting the reestablishment of provincial councils, while the investigation into the 2019 Easter bombings advanced."
+      "summary": "The government’s judicial reforms triggered domestic and international criticism, as the cabinet approved a long-promised counter-terrorism law."
     },
     {
       "country": "Taiwan Strait",
       "iso3": "TWN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "China maintained its aerial and maritime presence around Taiwan, with the South China Sea increasingly becoming a site of contestation; Taiwan conducted military exercises with an eye on a potential Chinese attack."
+      "summary": "China maintained its maritime and aerial presence around Taiwan, which held annual military drills and proposed record defence spending in a new budget."
     },
     {
       "country": "Thailand",
       "iso3": "THA",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Cambodia and Thailand agreed to begin a UN conciliation process to resolve the maritime border dispute, while militant violence in the deep south persisted."
+      "summary": "Border tensions with Cambodia remained elevated, as Bangkok took issue with a UN report on human rights in Cambodia; insurgents staged coordinated attacks across the deep south."
     },
     {
       "country": "Armenia",
       "iso3": "ARM",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Prime Minister Pashinyan’s ruling Civil Contract party swept to victory in a hotly contested parliamentary election that took on geopolitical hues; Azerbaijan responded positively to the outcome, raising hopes for sustained momentum in the peace process."
+      "summary": "Armenia and Azerbaijan, alongside the U.S., issued a joint statement marking one year since the two countries initialled a peace treaty in Washington; meanwhile, the government maintained pressure on opposition figures and announced it would apply for EU membership."
     },
     {
       "country": "Azerbaijan",
       "iso3": "AZE",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Baku appeared to welcome Armenian Prime Minister Pashinyan’s electoral victory as a positive development for the peace process; meanwhile, a U.S. media report alleged that Israel deployed military units to Azerbaijan during the Iran war."
+      "summary": "Azerbaijan and Armenia, alongside the U.S., issued a joint statement marking one year since the two countries initialled a peace treaty in Washington, while Baku navigated a turbulent relationship with Moscow."
     },
     {
       "country": "Belarus",
       "iso3": "BLR",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Tensions between Minsk and Kyiv escalated amid fears that Belarus could be dragged deeper into Russia’s war with Ukraine; meanwhile, President Lukashenko and his Chinese counterpart Xi Jinping reaffirmed strong bilateral ties."
+      "summary": "Tensions with Latvia rose over illegal migration, while Washington said it expected more prisoner releases in the near future."
     },
     {
       "country": "Georgia",
       "iso3": "GEO",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "A court handed down more prison sentences over election protests in October 2025, Tbilisi’s relations with the EU and U.S. remained strained, and the de facto leader of South Ossetia breakaway region resigned and became an adviser to Russian President Putin."
+      "summary": "A series of Facebook posts by former Prime Minister Irakli Garibashvili exposed tensions within the ruling Georgian Dream party, while the government sent fuel shipments to the breakaway region of Abkhazia."
+    },
+    {
+      "country": "Kazakhstan",
+      "iso3": "KAZ",
+      "arrow": "unchanged",
+      "alert_type": "",
+      "summary": "The newly created ruling party, Adilet, secured a widely expected victory in parliamentary elections."
     },
     {
       "country": "Kosovo",
       "iso3": "XKX",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Prime Minister Kurti’s Vetëvendosje party won snap parliamentary polls but fell short of the majority needed to govern alone, likely prolonging the political crisis; meanwhile, NATO announced cuts to peacebuilding troops in the Serb-majority north."
+      "summary": "Acting Prime Minister Albin Kurti and opposition leader Lumir Abdixhiku reached agreement on a presidential candidate, while NATO’s decision to reduce its peacekeeping presence in North Mitrovica sparked fresh concern among Kosovo Serbs."
     },
     {
       "country": "Kyrgyzstan",
       "iso3": "KGZ",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The trial against former security chief Kamchybek Tashiev continued, while Bishkek completed a land swap with Tashkent and won a non-permanent seat on the UN Security Council."
+      "summary": "Uzbekistan and Kyrgyzstan began implementing a land swap as part of the demarcation of their shared border, Bishkek sought to reduce its reliance on Russian fuel exports, and countries in the South Caucasus showed growing interest in Central Asia."
     },
     {
       "country": "Russia",
       "iso3": "RUS",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Washington’s haphazard peace efforts between Moscow and Kyiv remained on pause, Russia and Russian-occupied territory faced fuel shortages amid Ukraine’s repeated aerial attacks on logistics and key infrastructure, and Western actors piled on fresh sanctions."
+      "summary": "Ukraine’s air war expanded, causing a growing number of civilian casualties and economic disruption, the U.S. intelligence chief travelled to Russia and tensions with Europe ran high; meanwhile, Moscow cracked down on the last remnants of the anti-war opposition."
     },
     {
       "country": "Tajikistan",
       "iso3": "TJK",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Six police officers went on trial over the death of an individual in custody, while Russian fuel shortages raised concern in Tajikistan, which relies on Russia for over 80% of its fuel imports."
+      "summary": "Insecurity in the Tajik-Afghan borderlands persisted, while Dushanbe sought to reduce its reliance on Russian fuel exports."
     },
     {
       "country": "Türkiye",
       "iso3": "TUR",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The government and the Kurdistan Workers’ Party (PKK) remained committed to the peace process, as attention turned to parliament to take the next step by adopting new legislation."
+      "summary": "The government laid the legal groundwork for the dissolution of the Kurdistan Workers’ Party (PKK), marking a significant step forward; Ankara signed a defence pact with Saudi Arabia and Pakistan, while tensions soared with Israel."
     },
     {
       "country": "Ukraine",
       "iso3": "UKR",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Frontline fighting continued, though Russian advances"
+      "summary": "Kyiv and Moscow traded more aerial attacks, killing scores of civilians as Ukraine ran out of air defence missiles and raising concern over global food supplies amid strikes in the Black Sea; meanwhile, front-line fighting remained fierce and President Zelenskyy faced more political challenges at home."
     },
     {
       "country": "Uzbekistan",
       "iso3": "UZB",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Tashkent completed a land swap with Bishkek as part of their 2023 border agreement, hosted a regional dialogue and boosted economic ties with Washington."
-    },
-    {
-      "country": "Bolivia",
-      "iso3": "BOL",
-      "arrow": "unchanged",
-      "alert_type": "",
-      "summary": "Tensions eased in Bolivia after President Paz reached a deal with the country’s biggest union and announced a state of exception to remove blockades."
+      "summary": "Kyrgyzstan and Uzbekistan began implementing a land swap as part of the demarcation of their shared border, regional officials sought to deepen cooperation over water resources, and Tashkent bolstered relations with Baku."
     },
     {
       "country": "Colombia",
       "iso3": "COL",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The right-wing candidate Abelardo de la Espriella won by a razor-thin margin in a presidential run-off against left-wing Senator Iván Cepeda, a result that will likely bring an end to President Petro’s “total peace” policy in favour of a hardline security approach."
+      "summary": "President de la Espriella took office promising a tougher stance on security and subsequently launched strikes against armed and criminal groups while reinforcing ties with the U.S., Ecuador and Israel; meanwhile, the country was struck by a 7.4-magnitude earthquake."
     },
     {
       "country": "Cuba",
       "iso3": "CUB",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The U.S. piled on new sanctions, intensifying economic pressure on Cuba and deepening humanitarian harm; faced with a mounting crisis, Havana announced broad economic reforms."
+      "summary": "The U.S. continued to ramp up pressure on Cuba through its oil blockade, sanctions and increasingly confrontational military rhetoric, fuelling the energy crisis while narrowing the space for diplomacy; Havana defended its planned economic reforms."
     },
     {
       "country": "Ecuador",
       "iso3": "ECU",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "As criminal violence persisted, the government expanded emergency security measures and strengthened ties with Washington; meanwhile, a “recall” effort to remove President Noboa from office gained traction amid growing opposition to his administration."
+      "summary": "The government introduced new security measures amid persistent criminal violence, deploying additional personnel in the capital Quito and assuming control of the city’s surveillance systems; authorities also deepened ties with Argentina and Colombia."
     },
     {
       "country": "El Salvador",
       "iso3": "SLV",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "President Bukele registered his intention to run in 2027 elections, while his government maintained its draconian anti-gang measures and concern over prison conditions continued."
+      "summary": "Concerns about the government’s draconian anti-gang measures continued, including over judicial processes and prison conditions, while San Salvador’s relations with Bogotá improved."
     },
     {
       "country": "Haiti",
       "iso3": "HTI",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Security forces stepped up operations against gangs in and around the capital Port-au-Prince as the Gang Suppression Force (GSF) began patrols; meanwhile, disputes over electoral rules heightened tensions between the government and electoral authorities."
+      "summary": "Gangs killed dozens of people in a brutal attack on Kenscoff commune, which came as the Gang Suppression Force (GSF) prepared for offensive operations; meanwhile, inter-gang fighting resumed in Port-au-Prince’s Cité Soleil neighbourhood and electoral preparations continued despite slow voter registration."
     },
     {
       "country": "Mexico",
       "iso3": "MEX",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "U.S.-Mexico tensions persisted as Washington renewed pressure over organised crime and extraditions; meanwhile, the football World Cup matches proceeded without major security incidents, though violence continued in high-conflict states."
+      "summary": "Violence persisted across high-conflict areas, notably in Sinaloa and Michoacán states, while Washington targeted the Jalisco New Generation Cartel (CJNG) and increased pressure on figures in the ruling Morena party."
     },
     {
       "country": "Nicaragua",
       "iso3": "NIC",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The government continued its repression and expanded financial oversight as it faced more international pressure."
-    },
-    {
-      "country": "Peru",
-      "iso3": "PER",
-      "arrow": "unchanged",
-      "alert_type": "",
-      "summary": "Right-wing candidate Keiko Fujimori narrowly won a presidential run-off against left-wing rival Roberto Sánchez, who filed an appeal over alleged irregularities."
+      "summary": "The regime faced international criticism over its consolidation of authoritarian rule, while opposition groups reportedly coalesced around a transition plan."
     },
     {
       "country": "Venezuela",
       "iso3": "VEN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Twin earthquakes caused devastation, with hundreds of buildings either collapsed or rendered uninhabitable and thousands killed or injured; meanwhile, the U.S. and Venezuela carried out a “joint military operation” against a gang leader, while uncertainty over the political transition persisted."
+      "summary": "The first round of U.S.-sponsored talks between the interim authorities and part of the opposition produced an agreement on judicial reform, while U.S. President Trump announced that Washington had secured an ownership stake in Venezuela’s oil fields."
     },
     {
       "country": "Algeria",
       "iso3": "DZA",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "The opposition denounced the exclusion of candidates from the 2 July legislative elections, while Algeria launched construction of a strategic gas pipeline and deepened economic and security ties with the U.S."
+      "summary": "Algiers continued to mend ties with Sahelian countries as both Mali and Niger’s transitional prime ministers visited Algeria."
     },
     {
       "country": "Bahrain",
       "iso3": "BHR",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Iran and the U.S. signed a memorandum of understanding to end hostilities and reopen the Strait of Hormuz, offering a chance to restore regional calm despite Iranian attacks on Bahrain and Kuwait."
+      "summary": "The U.S.-Iran war shifted to the economic domain, offering Bahrain a reprieve from Iranian attacks even as a final settlement remained elusive."
     },
     {
       "country": "Egypt",
       "iso3": "EGY",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Cairo reinforced its role as a mediator by supporting regional efforts around the U.S.-Iran agreement and hosting Gaza ceasefire consultations, while expanding its strategic engagement in the Horn of Africa amid concerns over Red Sea and Nile water security."
+      "summary": "The government responded cautiously to drone strikes at Damietta Port and continued to call for de-escalation in the broader Iran conflict; Cairo also pressed for implementation of the Gaza ceasefire."
     },
     {
       "country": "Iran",
       "iso3": "IRN",
-      "arrow": "improved",
-      "alert_type": "",
-      "summary": "Iran and the U.S. signed a memorandum of understanding to end hostilities and reopen the Strait of Hormuz, offering a narrow pathway – littered with already evident pitfalls – toward a full-fledged settlement."
+      "arrow": "unchanged",
+      "alert_type": "conflict_risk",
+      "summary": "After June’s Memorandum of Understanding collapsed, Washington shifted focus from military attacks to a campaign of economic isolation, which could provoke Tehran’s military retaliation."
     },
     {
       "country": "Iraq",
       "iso3": "IRQ",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Despite its formal end, the U.S.-Iran war cast a long shadow over Iraq; meanwhile, two Tehran-backed factions agreed to place weapons under state authority, as hardline groups resisted any such move."
+      "summary": "The government continued its effort to rein in Iran-backed militias before its 30 September deadline as concerns mounted it could provoke a dangerous confrontation."
     },
     {
       "country": "Israel/Palestine",
       "iso3": "ISR",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Israel traded blows with Tehran before grudgingly accepting the U.S.-Iran accord, yet its occupation of southern Lebanon looked set to continue following a framework deal with Beirut; the Gaza ceasefire remained stalled, while Israel continued to repress the West Bank."
+      "summary": "Israel continued expanding settlements in the West Bank and chipped away at the decades-old status quo on Jerusalem’s Holy Esplanade, while Israeli intransigence derailed nascent progress on the Gaza ceasefire."
     },
     {
       "country": "Jordan",
       "iso3": "JOR",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Ahead of a U.S.-Iran diplomatic breakthrough, Tehran struck U.S. forces in Jordan during tit-for-tat skirmishes in early June."
+      "summary": "After a month-long hiatus, Iran launched a missile barrage at American military sites in Jordan in retaliation for a U.S. attack."
     },
     {
       "country": "Kuwait",
       "iso3": "KWT",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Iran and the U.S. signed a memorandum of understanding to end hostilities and reopen the Strait of Hormuz, offering a chance to restore regional calm despite Iranian attacks on Kuwait and Bahrain."
+      "summary": "The U.S.-Iran war shifted to the economic domain, offering Kuwait a reprieve from Iranian attacks even as a final settlement remained elusive."
     },
     {
       "country": "Lebanon",
       "iso3": "LBN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Israeli attacks killed hundreds and threatened to derail U.S.-Iran diplomacy; Hizbollah rejected a late June framework deal between Beirut and Israel, which conditions Israel’s withdrawal on the group’s disarmament."
+      "summary": "The government and Israel continued security talks without tangible progress, while Israel continued attacks in the south and Hizbollah largely refrained from retaliation."
     },
     {
       "country": "Libya",
       "iso3": "LBY",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "A U.S. initiative aimed at unifying the country’s rival governments fuelled tensions, while the U.S.-mediated unified budget deal came under increasing strain."
+      "summary": "Drone attacks on energy infrastructure in the country’s west and the assassination of the military intelligence chief in the east revived fears of wider instability, while a U.S.-led initiative to unify the country’s divided institutions made no tangible progress."
     },
     {
       "country": "Oman",
       "iso3": "OMN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Iran and the U.S. signed a memorandum of understanding to end hostilities and reopen the Strait of Hormuz, offering a chance to restore regional calm despite skirmishes."
+      "summary": "Muscat continued negotiations with Iran on reopening the Strait of Hormuz amid growing U.S. pressure to align the arrangement with Washington’s demands."
     },
     {
       "country": "Qatar",
       "iso3": "QAT",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Iran and the U.S. signed a memorandum of understanding to end hostilities and reopen the Strait of Hormuz, offering a chance to restore regional calm despite skirmishes."
+      "summary": "The U.S.-Iran war shifted to the economic domain, offering Qatar a reprieve from Iranian attacks."
     },
     {
       "country": "Saudi Arabia",
       "iso3": "SAU",
       "arrow": "unchanged",
-      "alert_type": "",
-      "summary": "Iran and the U.S. signed a memorandum of understanding to end hostilities and reopen the Strait of Hormuz, offering a chance to restore regional calm despite skirmishes."
+      "alert_type": "conflict_risk",
+      "summary": "The Houthis intensified pressure on the kingdom, raising the prospect of Riyadh being drawn deeper into Yemen’s conflict; Saudi Arabia, Türkiye and Pakistan signed a landmark defence pact."
     },
     {
       "country": "Syria",
       "iso3": "SYR",
-      "arrow": "unchanged",
+      "arrow": "improved",
       "alert_type": "",
-      "summary": "The U.S. urged the Syrian Democratic Forces (SDF) to complete its integration with the central government by the end of 2026, while several distinct security challenges came into focus."
+      "summary": "The Syrian Democratic Forces (SDF) dissolved itself and its administration in the north east, marking a major step toward integrating with the state; tensions soared between Türkiye and Israel."
     },
     {
       "country": "Tunisia",
       "iso3": "TUN",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Authorities further intensified their crackdown on civil society, while protests over deteriorating socio-economic conditions persisted and"
+      "summary": "Anti-government"
     },
     {
       "country": "United Arab Emirates",
       "iso3": "ARE",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "Iran and the U.S. signed a memorandum of understanding to end hostilities and reopen the Strait of Hormuz, offering a chance to restore regional calm despite skirmishes."
+      "summary": "As the U.S.-Iran war shifted to the economic domain, the United Arab Emirates (UAE) halted all economic dealings with Tehran."
     },
     {
       "country": "Western Sahara",
       "iso3": "ESH",
       "arrow": "unchanged",
       "alert_type": "",
-      "summary": "A"
+      "summary": "Ahead of the UN Security Council’s October review of the UN Mission in Western Sahara (MINURSO), Morocco secured a new diplomatic gain as Colombia recognised its sovereignty over the disputed territory."
     },
     {
       "country": "Yemen",
       "iso3": "YEM",
       "arrow": "unchanged",
-      "alert_type": "",
-      "summary": "The Houthis launched their first missile attack on Israel since April and their first maritime strikes in the Gulf of Aden since late 2025; along Yemeni front lines, the group intensified probing attacks on government forces."
+      "alert_type": "conflict_risk",
+      "summary": "The Houthis intensified pressure on Saudi Arabia through maritime and cross-border attacks, which could draw Riyadh deeper into the conflict, while escalating hostilities on multiple front lines between Houthi and government forces threaten to reignite all-out civil war."
     }
   ]
 }
