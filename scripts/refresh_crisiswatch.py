@@ -1164,6 +1164,9 @@ def _parse_country_entries(
             summary = summary[:497] + "..."
 
         # --- Expand regional entries into per-country rows ---
+        # Each expanded row is stamped with the heading it came from, so the
+        # consumer can tell a country's own entry from a regional one and
+        # merge rather than overwrite (see crisiswatch._merge_country_rows).
         if country_name in _REGIONAL_ENTRY_MAP:
             for sub_country, sub_iso3 in _REGIONAL_ENTRY_MAP[country_name]:
                 entries.append({
@@ -1172,6 +1175,7 @@ def _parse_country_entries(
                     "arrow": arrow,
                     "alert_type": alert_type,
                     "summary": summary,
+                    "regional_source": country_name,
                 })
             log.info(
                 "Expanded regional entry '%s' into %d countries",
@@ -1184,6 +1188,7 @@ def _parse_country_entries(
                 "arrow": arrow,
                 "alert_type": alert_type,
                 "summary": summary,
+                "regional_source": "",
             })
 
     return entries, detected_month, detected_year
