@@ -294,6 +294,12 @@ def _resolve_connectors(env: Dict[str, str]) -> List[str]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # Record every outbound HTTP call for the run's debug bundle. A no-op
+    # unless PYTHIA_RUN_LOG_DIR is set, so nothing changes outside CI.
+    from resolver.diagnostics.http_recorder import maybe_install_from_env
+
+    maybe_install_from_env()
+
     args = parse_args(argv if argv is not None else [])
     extra_args = _parse_extra_args(args.extra_args)
     extra_env = _parse_extra_env(args.extra_env)

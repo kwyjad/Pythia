@@ -1543,6 +1543,12 @@ def ingest(
 
 
 def main() -> None:
+    # Record every outbound HTTP call for the run's debug bundle. A no-op
+    # unless PYTHIA_RUN_LOG_DIR is set, so nothing changes outside CI.
+    from resolver.diagnostics.http_recorder import maybe_install_from_env
+
+    maybe_install_from_env()
+
     parser = argparse.ArgumentParser(
         description=(
             "Bulk-ingest structured data (conflict forecasts, ACAPS, IPC, "

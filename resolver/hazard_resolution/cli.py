@@ -153,9 +153,32 @@ def sweep_and_resolve_zeros(
     """
     import time
 
+    from resolver.hazard_resolution import cell_ledger
     from resolver.hazard_resolution import detect as detect_mod
     from resolver.hazard_resolution import reliefweb_sweep as sweep_mod
     from resolver.hazard_resolution import resolutions as res_mod
+
+    def ledger(row, *, outcome: str, reason: str | None, sweep: dict) -> None:
+        """One assessed non-triggered cell, and why it did or did not get a row."""
+        cell_ledger.record_cell(
+            stage=cell_ledger.STAGE_SWEEP,
+            iso3=row.iso3, hazard=result.hazard, ym=result.ym,
+            triggered=False, trigger_source=row.trigger_source,
+            status=(
+                res_mod.STATUS_RESOLVED_ZERO if outcome == res_mod.WRITE_WRITTEN else None
+            ),
+            value=0.0 if outcome == res_mod.WRITE_WRITTEN else None,
+            write_outcome=outcome, reason_code=reason,
+            run_type=run_type,
+            detail={
+                "sweep_hits": sweep.get("total_hits"),
+                "sweep_silent": sweep.get("silent"),
+                "sweep_inconclusive": sweep.get("inconclusive"),
+                "sweep_error": sweep.get("error"),
+                "coverage_ok": result.coverage_ok,
+                "coverage_note": result.coverage_note,
+            },
+        )
 
     tally = SweepTally()
     year, month = detect_mod.ym_to_year_month(result.ym)
@@ -176,6 +199,10 @@ def sweep_and_resolve_zeros(
                     con, hazard=result.hazard, iso3=row.iso3,
                     ym=result.ym, sweep_evidence=sweep,
                 )
+            ledger(
+                row, outcome="no_row",
+                reason=cell_ledger.REASON_SWEEP_INCONCLUSIVE, sweep=sweep,
+            )
             continue
 
         if not sweep["silent"]:
@@ -190,6 +217,10 @@ def sweep_and_resolve_zeros(
                     con, hazard=result.hazard, iso3=row.iso3,
                     ym=result.ym, sweep_evidence=sweep,
                 )
+            ledger(
+                row, outcome="flipped",
+                reason=cell_ledger.REASON_FLIPPED, sweep=sweep,
+            )
             continue
 
         # Silent sweep — a zero, if the detector's coverage allows one.
@@ -199,6 +230,10 @@ def sweep_and_resolve_zeros(
                 ym=result.ym, sweep_evidence=sweep,
             )
         if not result.coverage_ok:
+            ledger(
+                row, outcome="no_row",
+                reason=cell_ledger.REASON_COVERAGE_GATE, sweep=sweep,
+            )
             continue
 
         evidence = {
@@ -208,6 +243,7 @@ def sweep_and_resolve_zeros(
         }
         if dry_run:
             tally.zeros += 1
+            ledger(row, outcome="dry_run", reason=None, sweep=sweep)
             continue
         outcome = res_mod.write_zero_resolution(
             con,
@@ -221,8 +257,13 @@ def sweep_and_resolve_zeros(
         )
         if outcome == res_mod.WRITE_FROZEN_SKIP:
             tally.frozen += 1
+            ledger(
+                row, outcome=outcome,
+                reason=cell_ledger.REASON_FROZEN, sweep=sweep,
+            )
         else:
             tally.zeros += 1
+            ledger(row, outcome=outcome, reason=None, sweep=sweep)
 
     if not result.coverage_ok and non_triggered:
         LOG.warning(
@@ -821,6 +862,12 @@ def _write_run_summary(
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    # Record every outbound HTTP call for the run's debug bundle. A no-op
+    # unless PYTHIA_RUN_LOG_DIR is set, so nothing changes outside CI.
+    from resolver.diagnostics.http_recorder import maybe_install_from_env
+
+    maybe_install_from_env()
+
     parser = argparse.ArgumentParser(
         prog="resolve-hazards",
         description=(

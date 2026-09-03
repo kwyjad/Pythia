@@ -38,6 +38,11 @@ on:
       # vintage stall, and each verdict points at a different fix.
       - "scripts/ci/diagnose_acled_cast.py"
       - "scripts/ci/tests/test_diagnose_acled_cast.py"
+      # Guards resolver/tests/test_resolver_debug_bundle.py: the builder lives
+      # under scripts/ but every question it answers is a resolver question,
+      # and a lint that guards a directory must run when that directory
+      # changes.
+      - "scripts/build_resolver_debug_bundle.py"
       - "scripts/ci/make_ai_summary.py"
       - "scripts/ci/run_and_capture.sh"
       - "scripts/ci/validate_python_syntax.py"
@@ -71,6 +76,11 @@ on:
       # vintage stall, and each verdict points at a different fix.
       - "scripts/ci/diagnose_acled_cast.py"
       - "scripts/ci/tests/test_diagnose_acled_cast.py"
+      # Guards resolver/tests/test_resolver_debug_bundle.py: the builder lives
+      # under scripts/ but every question it answers is a resolver question,
+      # and a lint that guards a directory must run when that directory
+      # changes.
+      - "scripts/build_resolver_debug_bundle.py"
       - "scripts/ci/make_ai_summary.py"
       - "scripts/ci/run_and_capture.sh"
       - "scripts/ci/validate_python_syntax.py"

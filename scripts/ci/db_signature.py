@@ -54,6 +54,7 @@ def compute_signature(
     optional: Iterable[str],
     *,
     allow_missing_required: bool = False,
+    all_tables: bool = False,
 ) -> dict:
     db_file = Path(db_path)
     if not db_file.is_file():
@@ -67,9 +68,15 @@ def compute_signature(
     try:
         tables = sorted(row[0] for row in conn.execute("SHOW TABLES").fetchall())
         counts: dict[str, int | None] = {}
-        for table in required_list + optional_list:
+        # ``all_tables`` widens the baseline to every table in the DB. The
+        # signature's own guard still reads only the required/optional lists;
+        # the extra counts exist so a debug bundle can report a before/after
+        # delta for tables nobody thought to name in advance — which is
+        # exactly where an unexplained ingest gap tends to sit.
+        wanted = required_list + optional_list + (tables if all_tables else [])
+        for table in dict.fromkeys(wanted):
             counts[table] = (
-                int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) if table in tables else None
+                int(conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]) if table in tables else None
             )
     finally:
         duckdb_io.close_db(conn)
@@ -87,6 +94,8 @@ def compute_signature(
     }
     if missing:
         signature["missing_required"] = missing
+    if all_tables:
+        signature["all_counts"] = {table: counts.get(table) for table in tables}
     return signature
 
 
@@ -162,6 +171,11 @@ def _build_parser() -> argparse.ArgumentParser:
     write_parser.add_argument("--required", default="", help="Comma-separated required tables")
     write_parser.add_argument("--optional", default="", help="Comma-separated optional tables")
     write_parser.add_argument("--out", required=True, help="Where to write the signature JSON")
+    write_parser.add_argument(
+        "--all-tables",
+        action="store_true",
+        help="Also count every table in the DB (adds an all_counts block)",
+    )
 
     compare_parser = subparsers.add_parser("compare", help="Compare two database signatures")
     compare_parser.add_argument("--before", required=True, help="Path to the baseline signature JSON")
@@ -169,6 +183,11 @@ def _build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--required", default="", help="Comma-separated required tables")
     compare_parser.add_argument("--optional", default="", help="Comma-separated optional tables")
     compare_parser.add_argument("--out", required=True, help="Where to write the updated signature JSON")
+    compare_parser.add_argument(
+        "--all-tables",
+        action="store_true",
+        help="Also count every table in the DB (adds an all_counts block)",
+    )
 
     return parser
 
@@ -187,7 +206,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "write":
-            signature = compute_signature(args.db, required, optional)
+            signature = compute_signature(
+                args.db, required, optional, all_tables=bool(getattr(args, "all_tables", False))
+            )
             write_signature(signature, args.out)
             print_signature(signature, required, optional)
             return EXIT_OK
@@ -199,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
                 required,
                 optional,
                 allow_missing_required=True,
+                all_tables=bool(getattr(args, "all_tables", False)),
             )
             write_signature(after_signature, args.out)
             regressions = compare_signatures(before, after_signature, required)

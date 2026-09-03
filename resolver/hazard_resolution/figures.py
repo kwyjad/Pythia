@@ -40,6 +40,7 @@ import logging
 import re
 from typing import Any
 
+from resolver.hazard_resolution import cell_ledger
 from resolver.hazard_resolution.candidates import VALUE_AFFECTED, Candidate
 from resolver.hazard_resolution.extract import (
     SOURCE,
@@ -203,9 +204,18 @@ def apply_ceiling(
     figures: list[tuple[ExtractedFigure, float]],
     exposure_ceiling: float | None,
     rulebook: Rulebook,
+    ceiling_basis: dict[str, Any] | None = None,
 ) -> tuple[list[tuple[ExtractedFigure, float]], list[dict[str, Any]]]:
-    """Drop figures above the GDACS exposure ceiling. Returns (kept, rejected)."""
+    """Drop figures above the GDACS exposure ceiling. Returns (kept, rejected).
 
+    ``ceiling_basis`` (from :func:`candidates.exposure_ceiling_basis`) names
+    the event and the response field the ceiling came from. It is optional
+    only so existing callers keep working: without it a rejection records
+    the number and not its origin, and a ceiling of 2 against a reported
+    40,000 cannot be told apart from a genuine mis-transcription.
+    """
+
+    basis = ceiling_basis or {}
     kept: list[tuple[ExtractedFigure, float]] = []
     rejected: list[dict[str, Any]] = []
     for figure, value in figures:
@@ -221,6 +231,11 @@ def apply_ceiling(
                 "quote": figure.quote,
                 "exposed_population": exposure_ceiling,
                 "ceiling_multiplier": rulebook.get("sanity.ceiling_multiplier"),
+                "ceiling_source": basis.get("source"),
+                "ceiling_source_ref": basis.get("source_ref"),
+                "ceiling_field": basis.get("field"),
+                "ceiling_events_seen": basis.get("n_events"),
+                "ceiling_events_with_exposure": basis.get("n_events_with_exposure"),
             }
         )
     if rejected:
@@ -256,6 +271,7 @@ def build_candidates(
     hazard: str,
     rulebook: Rulebook,
     exposure_ceiling: float | None = None,
+    ceiling_basis: dict[str, Any] | None = None,
 ) -> tuple[list[Candidate], list[dict[str, Any]]]:
     """The whole deterministic pipeline: figures in, ranked candidates out.
 
@@ -275,7 +291,9 @@ def build_candidates(
     conversions = {id(figure): conversion for figure, _v, conversion in converted}
     pairs = [(figure, value) for figure, value, _c in converted]
 
-    pairs, ceiling_rejects = apply_ceiling(pairs, exposure_ceiling, rulebook)
+    pairs, ceiling_rejects = apply_ceiling(
+        pairs, exposure_ceiling, rulebook, ceiling_basis
+    )
     rejected.extend(ceiling_rejects)
 
     pairs, duplicates = deduplicate(pairs, rulebook)
@@ -319,4 +337,81 @@ def build_candidates(
         "[figures] %s %s %s: %d extracted figure(s) -> %d candidate(s), %d rejected",
         iso3, hazard, ym, len(extraction.figures), len(candidates), len(rejected),
     )
+    _record_figures(
+        iso3=iso3, ym=ym, hazard=hazard,
+        candidates=candidates, rejected=rejected,
+        exposure_ceiling=exposure_ceiling, ceiling_basis=ceiling_basis or {},
+        rulebook=rulebook,
+    )
     return candidates, rejected
+
+
+def _record_figures(
+    *,
+    iso3: str,
+    ym: str,
+    hazard: str,
+    candidates: list[Candidate],
+    rejected: list[dict[str, Any]],
+    exposure_ceiling: float | None,
+    ceiling_basis: dict[str, Any],
+    rulebook: Rulebook,
+) -> None:
+    """Append every figure and its fate to the run's evidence stream.
+
+    Kept AND rejected: a ledger listing only the survivors cannot answer
+    "what was rejected, against what ceiling", which is the question a
+    reader has when the machine resolves less than it should.
+    """
+
+    if not cell_ledger.enabled():
+        return
+    multiplier = rulebook.get("sanity.ceiling_multiplier")
+    for candidate in candidates:
+        detail = candidate.detail or {}
+        cell_ledger.record_figure(
+            iso3=iso3, hazard=hazard, ym=ym, outcome="accepted",
+            doc_id=str(detail.get("doc_id") or ""),
+            doc_url=candidate.doc_url,
+            value=candidate.value,
+            unit=str(detail.get("unit_as_stated") or ""),
+            stated_by=candidate.stated_by,
+            quote=str(detail.get("quote") or ""),
+            ceiling=exposure_ceiling,
+            ceiling_multiplier=multiplier,
+            ceiling_source=ceiling_basis.get("source"),
+            ceiling_source_ref=ceiling_basis.get("source_ref"),
+            ceiling_field=ceiling_basis.get("field"),
+            preference_rank=candidate.preference_rank,
+            detail={
+                "authority_tier": detail.get("authority_tier"),
+                "household_conversion": detail.get("household_conversion"),
+                "figure_date": detail.get("figure_date"),
+            },
+        )
+    for entry in rejected:
+        cell_ledger.record_figure(
+            iso3=iso3, hazard=hazard, ym=ym, outcome="rejected",
+            doc_id=str(entry.get("doc_id") or ""),
+            value=entry.get("value"),
+            unit=str(entry.get("unit") or ""),
+            quote=str(entry.get("quote") or ""),
+            reason=str(entry.get("reason") or ""),
+            ceiling=entry.get("exposed_population", exposure_ceiling),
+            ceiling_multiplier=entry.get("ceiling_multiplier", multiplier),
+            ceiling_source=entry.get("ceiling_source", ceiling_basis.get("source")),
+            ceiling_source_ref=entry.get(
+                "ceiling_source_ref", ceiling_basis.get("source_ref")
+            ),
+            ceiling_field=entry.get("ceiling_field", ceiling_basis.get("field")),
+            detail={
+                k: v
+                for k, v in entry.items()
+                if k
+                not in {
+                    "doc_id", "value", "unit", "quote", "reason",
+                    "exposed_population", "ceiling_multiplier",
+                    "ceiling_source", "ceiling_source_ref", "ceiling_field",
+                }
+            },
+        )

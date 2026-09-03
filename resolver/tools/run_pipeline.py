@@ -335,6 +335,12 @@ def _log_summary(result: PipelineResult) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    # Record every outbound HTTP call for the run's debug bundle. A no-op
+    # unless PYTHIA_RUN_LOG_DIR is set, so nothing changes outside CI.
+    from resolver.diagnostics.http_recorder import maybe_install_from_env
+
+    maybe_install_from_env()
+
     parser = argparse.ArgumentParser(description="Resolver pipeline orchestrator")
     parser.add_argument(
         "--connectors",
