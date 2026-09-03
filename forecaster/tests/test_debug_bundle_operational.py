@@ -221,6 +221,50 @@ def test_an_oversized_log_is_cut_from_the_middle_and_says_so():
     assert "TRUNCATED" in out
 
 
+def test_poller_runs_are_found_despite_a_naive_batch_timestamp(tmp_path: Path, monkeypatch):
+    """The window's two sides disagreed about tzinfo, and it cost every log.
+
+    GitHub returns `...Z` (aware); `llm_batches.submitted_at` is written
+    naive. Comparing them raises TypeError, which discovery swallows — so
+    the poller ticks, one of the three things this module exists to
+    capture, were dropped on every run that had a batch.
+    """
+
+    class _Api(workflow_logs.GitHubApi):
+        def get_json(self, path, params=None):
+            if "poll_llm_batches" in path:
+                return {
+                    "workflow_runs": [
+                        {"id": 111, "created_at": "2026-09-01T05:00:00Z", "conclusion": "success"},
+                        # Before the window: a tick that cannot have touched
+                        # this pipeline.
+                        {"id": 222, "created_at": "2026-08-01T05:00:00Z", "conclusion": "success"},
+                    ]
+                }
+            return {"workflow_runs": []}
+
+    monkeypatch.delenv("GITHUB_RUN_ID", raising=False)
+    index = workflow_logs.collect(
+        tmp_path,
+        pipeline_id="pl_1",
+        # Naive, exactly as pythia/llm_batch.py writes it.
+        earliest_batch_submitted_at=datetime(2026, 9, 1, 4, 0, 0).isoformat(),
+        api=_Api("t", "o/r"),
+        fetch_logs=lambda run_id: _zip_bytes("hello"),
+    )
+    assert index["problems"] == []
+    assert [r["run_id"] for r in index["runs"]] == ["111"]
+
+
+def _zip_bytes(text: str) -> bytes:
+    import io as _io
+
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("0_job/1_step.txt", text)
+    return buf.getvalue()
+
+
 def test_a_failed_log_fetch_writes_a_stub_and_keeps_going(tmp_path: Path, monkeypatch):
     class _Api(workflow_logs.GitHubApi):
         def get_json(self, path, params=None):
@@ -293,6 +337,47 @@ def test_crisiswatch_names_the_ace_questions_forecast_without_an_arrow(tmp_path:
     assert detail["ace_countries_missing_iso3s"] == ["TCD"]
     # Two ACE questions for Chad went out with no conflict arrow in them.
     assert detail["n_ace_questions_without_crisiswatch"] == 2
+
+
+def test_idmc_dates_itself_by_as_of_on_a_schema_sql_built_db(tmp_path: Path):
+    # resolver/db/schema.sql creates facts_deltas with as_of only, while
+    # duckdb_io.py's path adds as_of_date — so which one exists depends on
+    # how the DB was built. Without both in the fallback the row drops to
+    # ym and dates itself by reporting month with nothing saying so.
+    con = duckdb.connect(str(tmp_path / "d.duckdb"))
+    con.execute(
+        """
+        CREATE TABLE facts_deltas (
+            ym TEXT, iso3 TEXT, hazard_code TEXT, metric TEXT,
+            value_new DOUBLE, as_of VARCHAR, created_at TIMESTAMP
+        )
+        """
+    )
+    con.execute(
+        "INSERT INTO facts_deltas VALUES "
+        "('2026-07','SOM','ACE','new_displacements',5,'2026-08-20',now())"
+    )
+    rows, _ = connector_freshness.collect(
+        con, countries=["SOM"], run_start=datetime(2026, 9, 1).date()
+    )
+    row = next(r for r in rows if r["source"] == "IDMC displacement")
+    assert row["observation_column"] == "as_of"
+    assert row["age_days_at_run_start"] == 12
+
+
+def test_a_count_that_failed_is_not_reported_as_an_empty_table(tmp_path: Path):
+    # "we could not count it" and "it holds nothing" are different facts,
+    # and only the second is a finding about the data.
+    con = duckdb.connect(str(tmp_path / "e.duckdb"))
+    con.execute("CREATE TABLE conflict_forecasts (iso3 TEXT)")  # no forecast_issue_date
+    rows, _ = connector_freshness.collect(con, countries=["SOM"])
+    row = next(r for r in rows if r["source"] == "Conflict forecasts")
+    assert row["status"] == "empty"  # it genuinely is empty
+
+    con.execute("INSERT INTO conflict_forecasts VALUES ('SOM')")
+    rows, _ = connector_freshness.collect(con, countries=["SOM"])
+    row = next(r for r in rows if r["source"] == "Conflict forecasts")
+    assert row["status"] != "empty"
 
 
 def test_freshness_measures_the_observation_not_the_fetch(tmp_path: Path):
@@ -691,6 +776,46 @@ def test_an_oversized_bundle_splits_the_logs_out_rather_than_dropping_them(tmp_p
     with zipfile.ZipFile(tmp_path / result["workflow_logs_zip"]) as zf:
         assert "workflow_logs/big.txt" in zf.namelist()
     assert "Nothing was dropped" in result["split_note"]
+
+
+def test_the_split_decision_is_taken_once_and_repeated(tmp_path: Path):
+    """The manifest inside the zip must not contradict the one beside it.
+
+    The caller builds twice — once to size the bundle and write a manifest
+    describing it, once to put that manifest inside. If the second build
+    re-decided the split (the manifest's own bytes can tip a bundle over),
+    the copy inside the zip would claim split:false for logs that had just
+    been moved out.
+    """
+
+    from scripts.dump_pythia_debug_bundle import build_bundle_zips
+
+    (tmp_path / "executive_summary__fc_1.md").write_text("# summary\n")
+    (tmp_path / "workflow_logs").mkdir()
+    (tmp_path / "workflow_logs" / "log.txt").write_text("hello\n")
+
+    first = build_bundle_zips(tmp_path, "fc_1", size_target=10 * 1024 * 1024)
+    assert first["split"] is False
+    second = build_bundle_zips(
+        tmp_path, "fc_1", size_target=10 * 1024 * 1024, force_split=True
+    )
+    assert second["split"] is True
+    with zipfile.ZipFile(tmp_path / second["bundle_zip"]) as zf:
+        assert "workflow_logs/log.txt" not in zf.namelist()
+
+
+def test_the_manifest_declares_the_fields_that_changed_meaning():
+    # Three existing fields kept their name and changed what they hold.
+    # That breaks a consumer as surely as a rename, so the manifest says so
+    # rather than leaving it to a commit message nobody downstream reads.
+    fields = {
+        (e["file"], e["field"]) for e in manifest_mod.CHANGED_FIELD_SEMANTICS
+    }
+    assert ("question_metrics__*.csv", "target_month") in fields
+    assert ("grounding_detail__*.csv", "phase") in fields
+    assert ("llm_calls_detail__*.jsonl.gz", "prompt_text") in fields
+    for entry in manifest_mod.CHANGED_FIELD_SEMANTICS:
+        assert entry["was"] and entry["now"] and entry["moved_to"]
 
 
 # ---------------------------------------------------------------------------

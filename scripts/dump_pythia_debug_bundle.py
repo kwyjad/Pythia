@@ -5761,7 +5761,9 @@ def _fill_spd_stage_from_forecasts(
             entry["spd_start_ts"] = start
         if end is not None and (entry["spd_end_ts"] is None or end > entry["spd_end_ts"]):
             entry["spd_end_ts"] = end
-        entry["spd_timing_source"] = "forecasts_raw.created_at (no spd llm_calls row)"
+        entry["spd_timing_source"] = (
+            "forecasts_ensemble.created_at (no spd llm_calls row for this country)"
+        )
 
 
 def emit_timing_breakdown_csv(
@@ -5863,9 +5865,10 @@ def emit_timing_breakdown_csv(
     # A country whose questions all took the Track-2 path can have no
     # spd-stage llm_calls row at all (one batched call, replayed, and on
     # 2026-09-01 fourteen countries were missing from this file entirely
-    # despite having produced questions). forecasts_raw dates what was
-    # WRITTEN, which is the fallback, and every country that produced a
-    # question gets a row whether or not any stage could be timed.
+    # despite having produced questions). forecasts_ensemble.created_at
+    # dates what was WRITTEN — forecasts_raw has no created_at — and every
+    # country that produced a question gets a row whether or not any stage
+    # could be timed.
     _fill_spd_stage_from_forecasts(con, data, iso3_data, stages)
 
     def _span_ms(a: Any, b: Any) -> int:
@@ -6492,13 +6495,23 @@ def build_flat_zip(
 
 
 def build_bundle_zips(
-    out_dir: Path, run_id: str, *, size_target: int = BUNDLE_SIZE_TARGET_BYTES
+    out_dir: Path,
+    run_id: str,
+    *,
+    size_target: int = BUNDLE_SIZE_TARGET_BYTES,
+    force_split: bool = False,
 ) -> dict[str, Any]:
     """Build the bundle zip, splitting the workflow logs out if it is too big.
 
     The split is a last resort and it is recorded: a reader who finds the
     logs missing must be told they exist in a second artifact, not left to
     conclude the collector failed.
+
+    ``force_split`` repeats a decision already taken. The caller builds
+    twice — once to size the bundle and write a manifest describing it,
+    once to put that manifest inside — and the second build must reach the
+    same answer as the first, or the manifest copy in the zip contradicts
+    the one beside it.
     """
 
     main_zip = out_dir / f"pythia_debug_bundle__{run_id}.zip"
@@ -6509,7 +6522,7 @@ def build_bundle_zips(
         "split": False,
         "size_target_bytes": size_target,
     }
-    if main_zip.stat().st_size <= size_target:
+    if main_zip.stat().st_size <= size_target and not force_split:
         return result
 
     logs_zip = out_dir / f"pythia_debug_bundle_workflow_logs__{run_id}.zip"
@@ -7635,6 +7648,13 @@ def main() -> None:
             # Package all artifacts, then describe what landed.
             run_id = data.out_run_id
             try:
+                # Two builds, one decision. The first sizes the bundle; the
+                # manifest is annotated against that result and written; the
+                # second only puts the manifest inside the zip. Letting the
+                # second build re-decide the split would leave the manifest
+                # copy INSIDE the zip claiming split:false for logs that had
+                # just been moved out — which is the exact confusion
+                # annotate_archives exists to prevent.
                 zip_result = build_bundle_zips(out_dir, run_id)
                 manifest = manifest_mod.build(
                     out_dir,
@@ -7642,19 +7662,16 @@ def main() -> None:
                     forecaster_run_id=data.forecaster_run_id,
                     pipeline_id=args.pipeline_id or None,
                     extra={
-                        "packaging": zip_result,
                         "collector_errors": _COLLECTOR_ERRORS,
                         "anomaly_counts": anomalies_mod.counts(collected.get("anomalies") or []),
+                        "changed_field_semantics": manifest_mod.CHANGED_FIELD_SEMANTICS,
                     },
                 )
                 manifest_mod.annotate_archives(manifest, zip_result)
                 manifest_mod.write(out_dir, manifest)
-                # The manifest must travel inside the bundle, so the zip is
-                # rebuilt once it exists. The second build repeats the split
-                # decision, which is why the archive annotation is applied
-                # again against its result.
-                zip_result = build_bundle_zips(out_dir, run_id)
-                manifest_mod.annotate_archives(manifest, zip_result)
+                zip_result = build_bundle_zips(
+                    out_dir, run_id, force_split=bool(zip_result.get("split"))
+                )
                 manifest_mod.write(out_dir, manifest)
                 zip_path = out_dir / zip_result["bundle_zip"]
                 print(

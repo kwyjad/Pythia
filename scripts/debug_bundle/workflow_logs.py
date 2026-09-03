@@ -147,12 +147,30 @@ def _resolve_token() -> str:
 
 
 def _iso_to_dt(value: Any) -> datetime | None:
+    """Parse to an AWARE UTC datetime, whatever the input carried.
+
+    The two sides of the window comparison come from different places and
+    disagree about tzinfo: GitHub returns `...Z` (aware), while
+    `llm_batches.submitted_at` is written naive
+    (`datetime.now(timezone.utc).replace(tzinfo=None)`). Comparing them
+    raises TypeError, which the discovery loop swallows — so every poller
+    log was silently dropped whenever the pipeline had any batch at all,
+    which is every real run. Normalising here is the fix; a naive value is
+    read as UTC, which is what the writer meant.
+    """
+
     if not value:
         return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _discover_runs(
@@ -269,11 +287,6 @@ def collect(
         api = GitHubApi(token, repo)
 
     since = _iso_to_dt(earliest_batch_submitted_at)
-    if since is None and earliest_batch_submitted_at is not None:
-        try:
-            since = earliest_batch_submitted_at.replace(tzinfo=timezone.utc)
-        except Exception:
-            since = None
     if since is not None:
         # A little slack: the submit stage dispatches the poller right after
         # writing its batch state, and clocks are not identical.

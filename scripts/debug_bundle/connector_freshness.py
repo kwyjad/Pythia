@@ -64,9 +64,10 @@ SOURCES: tuple[tuple[str, str, str, str, str, int, int, str], ...] = (
      "enso_module carries the last good record forward with a STALE READING line"),
     ("Seasonal TC", "seasonal_tc_outlooks", "fetched_at", "", "", 200, 400, "none"),
     ("IPC phases (legacy, unused)", "ipc_phases", "analysis_date", "", "iso3", 0, 0, "none"),
-    # crisiswatch_entries carries no date column at all — its observation is
-    # the EDITION, which is (year, month), so its age is computed from that
-    # rather than from a column. See crisiswatch_detail.
+    # crisiswatch_entries carries no usable date column — `month` is an
+    # INTEGER 1-12, not a date — so its observation is the EDITION, and its
+    # age is computed from (year, month) by _cw_age rather than read from a
+    # column. See crisiswatch_detail.
     ("CrisisWatch", "crisiswatch_entries", "", "", "iso3", 60, 90,
      "crisiswatch.format_crisiswatch_for_prompt (STALENESS WARNING at >=3 editions)"),
 )
@@ -128,10 +129,20 @@ def _pick_observation_column(con, table: str, preferred: str) -> str | None:
     cols = _columns(con, table)
     if preferred and preferred in cols:
         return preferred
-    for candidate in ("as_of_date", "observation_date", "event_date", "date",
-                      "signal_date", "forecast_issue_date", "published_date",
-                      "snapshot_date", "entry_date", "analysis_date", "month",
-                      "ym", "period_start"):
+    # `as_of` is here because resolver/db/schema.sql creates facts_deltas
+    # with as_of only, while resolver/db/duckdb_io.py's path adds as_of_date
+    # — so which one exists depends on how the DB was built, and without
+    # both the IDMC row falls through to ym and dates itself by reporting
+    # month with nothing saying so.
+    #
+    # `month` is deliberately NOT here: crisiswatch_entries has a month
+    # INTEGER holding 1-12, and a generic MAX() over it yields "12", which
+    # is not a date. acled_monthly_fatalities names its own month column in
+    # SOURCES, so nothing needs the fallback.
+    for candidate in ("as_of_date", "as_of", "observation_date", "event_date",
+                      "date", "signal_date", "forecast_issue_date",
+                      "published_date", "snapshot_date", "entry_date",
+                      "analysis_date", "ym", "period_start"):
         if candidate in cols:
             return candidate
     for candidate in ("created_at", "fetched_at", "retrieved_at", "updated_at", "timestamp"):
@@ -180,11 +191,16 @@ def collect(
             rows.append(row)
             continue
 
+        count_ok = True
         try:
             row["row_count"] = int(
                 con.execute(f"SELECT COUNT(*) FROM {table} {where}").fetchone()[0]
             )
         except Exception as exc:  # noqa: BLE001
+            # "we could not count it" and "it holds nothing" are different
+            # facts, and only the second is a finding about the data.
+            count_ok = False
+            row["row_count"] = ""
             row["note"] = f"count failed: {exc}"
 
         column = _pick_observation_column(con, table, ts_col)
@@ -229,7 +245,9 @@ def collect(
             _cw_age(con, row, today)
 
         age = row["age_days_at_run_start"]
-        if row["row_count"] == 0:
+        if not count_ok:
+            row["status"] = "unknown"
+        elif row["row_count"] == 0:
             row["status"] = "empty"
         elif age == "":
             row["status"] = "unknown"
@@ -269,13 +287,21 @@ def _cw_age(con, row: dict[str, Any], today: date) -> None:
     row["observation_column"] = "edition (year, month)"
     row["max_data_timestamp"] = f"{year}-{month:02d}"
     row["age_days_at_run_start"] = (today - end).days
-    row["note"] = ""
+    # Drop only the generic "measured from a fetch column" note this
+    # overrides; a count or coverage failure is a different diagnostic and
+    # must survive.
+    if "age measured from" in str(row.get("note") or ""):
+        row["note"] = ""
 
 
 def crisiswatch_detail(
     con, *, questions: list[dict[str, Any]] | None = None, today: date | None = None
 ) -> dict[str, Any]:
     """CrisisWatch's editions and its ACE inject status.
+
+    The table has no date column: `month` is an INTEGER 1-12. Its
+    observation is the edition, and `_cw_age` dates the freshness row from
+    it.
 
     "Latest edition 2026-06" hid a five-month gap: the table held 2026-02
     and 2026-06, so the per-country rows were a mix of two editions four
