@@ -75,6 +75,14 @@ on:
       - "scripts/debug_bundle/**"
       - ".github/workflows/pythia_pipeline_stage.yml"
       - ".github/workflows/publish_latest_data.yml"
+      # The Sibyl-terminus bundles (Sept 2026): the workflow that builds
+      # them, the two workflows that ship their stage context to it, and
+      # the helpers + test that carry the identifiers across.
+      - ".github/workflows/run_sibyl.yml"
+      - ".github/workflows/run_horizon_scanner.yml"
+      - "scripts/ci/write_stage_context.py"
+      - "scripts/ci/sibyl_bundle_context.py"
+      - "scripts/ci/tests/test_stage_context.py"
       # Self-reference, as horizon-scanner-ci.yml already does: without it a PR
       # editing this workflow's own test list never runs the list it edited.
       - ".github/workflows/forecaster-ci.yml"
@@ -305,7 +313,8 @@ jobs:
             forecaster/tests/test_debug_bundle_batch_economics.py \
             forecaster/tests/test_debug_bundle_member_gaps.py \
             forecaster/tests/test_debug_bundle_defects.py \
-            forecaster/tests/test_debug_bundle_operational.py
+            forecaster/tests/test_debug_bundle_operational.py \
+            scripts/ci/tests/test_stage_context.py
 
       - name: Run resolver/tests suites that guard forecaster + pythia code
         run: |

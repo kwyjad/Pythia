@@ -124,3 +124,33 @@ def test_cross_package_resolver_tests_are_wired_into_a_workflow():
     assert not offenders, "Cross-package resolver/tests not wired into CI:\n" + "\n".join(
         offenders
     )
+
+
+# The operational debug bundle used to be dumped in two places (the staged
+# pipeline's fc_collect_finalize and the legacy synchronous HS workflow) and
+# was consolidated in the Sibyl job in Sept 2026 so a cycle produces one set
+# of artifacts in one place. A second invoker quietly re-splits it.
+_DEBUG_BUNDLE_INVOKER = pathlib.Path(".github/workflows/run_sibyl.yml")
+
+
+# An INVOCATION, not a mention: forecaster-ci names the script in its
+# paths: filter, which is a trigger, not a call.
+_DEBUG_BUNDLE_INVOCATION = re.compile(
+    r"python3?\s+(-m\s+scripts\.dump_pythia_debug_bundle|scripts/dump_pythia_debug_bundle\.py)\b"
+)
+
+
+def test_debug_bundle_is_dumped_from_exactly_one_workflow():
+    invokers = []
+    for path, text in _workflow_texts():
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if _DEBUG_BUNDLE_INVOCATION.search(stripped):
+                invokers.append(pathlib.Path(path))
+                break
+    assert invokers == [_DEBUG_BUNDLE_INVOKER], (
+        "scripts.dump_pythia_debug_bundle must be invoked from exactly one workflow "
+        f"({_DEBUG_BUNDLE_INVOKER}); found: {sorted(str(p) for p in invokers)}"
+    )
