@@ -87,7 +87,10 @@ def _connector_api() -> Any:
     return core
 
 
-def _event_record(event: dict[str, Any], hazard: str) -> RawRecord | None:
+def _event_record(
+    event: dict[str, Any], hazard: str,
+    geometries: "_CountryGeometries | None" = None,
+) -> RawRecord | None:
     """One discovered GDACS event as a raw-cache record."""
 
     event_id = str(event.get("eventid") or "").strip()
@@ -133,7 +136,7 @@ def _event_record(event: dict[str, Any], hazard: str) -> RawRecord | None:
     # boundaries cyclone detection already uses.
     geo_resolved: list[str] = []
     if not iso3_list:
-        geo_resolved = _iso3s_near_event(event, hazard)
+        geo_resolved = _iso3s_near_event(event, hazard, geometries)
         iso3_list = list(geo_resolved)
         primary = iso3_list[0] if iso3_list else primary
 
@@ -187,7 +190,36 @@ def _event_record(event: dict[str, Any], hazard: str) -> RawRecord | None:
 _GEOMETRY_ATTRIBUTION_KM = 500.0
 
 
-def _iso3s_near_event(event: dict[str, Any], hazard: str) -> list[str]:
+class _CountryGeometries:
+    """A once-per-fetch loader for the vendored boundaries.
+
+    Parsing the 1:50m layer costs a few hundred milliseconds, and the naive
+    version paid it per EVENT — fine for the handful of uncountried events a
+    live month sees, and not fine for a backcast month full of them. Loading
+    is still LAZY: a month in which GDACS named every country never touches
+    the file at all.
+
+    Not a module-level cache, deliberately: the tests inject synthetic
+    geometries by monkeypatching the loader, and a process-wide cache would
+    serve the first test's boundaries to every later one.
+    """
+
+    def __init__(self) -> None:
+        self._loaded = False
+        self._countries: dict[str, Any] = {}
+
+    def get(self) -> dict[str, Any]:
+        if not self._loaded:
+            from resolver.hazard_resolution.geometry import load_country_geometries
+
+            self._countries = load_country_geometries()
+            self._loaded = True
+        return self._countries
+
+
+def _iso3s_near_event(
+    event: dict[str, Any], hazard: str, geometries: "_CountryGeometries | None" = None
+) -> list[str]:
     """Countries within :data:`_GEOMETRY_ATTRIBUTION_KM` of the event's point.
 
     Never raises: an event that cannot be placed keeps no country, which is
@@ -204,12 +236,9 @@ def _iso3s_near_event(event: dict[str, Any], hazard: str) -> list[str]:
         return []
 
     try:
-        from resolver.hazard_resolution.geometry import (
-            distance_km,
-            load_country_geometries,
-        )
+        from resolver.hazard_resolution.geometry import distance_km
 
-        countries = load_country_geometries()
+        countries = (geometries or _CountryGeometries()).get()
     except Exception as exc:  # noqa: BLE001 - boundaries absent is not fatal
         LOG.warning(
             "[gdacs] cannot resolve %s %s by geometry: %s",
@@ -283,9 +312,11 @@ def fetch_gdacs_events(
     # with a logged warning and counted in the outcome detail.
     records = []
     skipped_malformed = 0
+    # One loader for the whole month, loaded only if an event needs it.
+    geometries = _CountryGeometries()
     for event in events:
         try:
-            record = _event_record(event, hazard)
+            record = _event_record(event, hazard, geometries)
         except Exception as exc:  # noqa: BLE001 - one bad event must not kill the month
             skipped_malformed += 1
             LOG.warning(

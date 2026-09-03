@@ -863,3 +863,52 @@ class TestGdacsGeometryAttribution:
 
         record = gdacs_mod._event_record(self._event(), "TC")
         assert record.payload["iso3_list"] == []
+
+    def test_the_boundaries_are_loaded_once_per_month_not_once_per_event(
+        self, monkeypatch
+    ):
+        """Parsing the 1:50m layer costs a few hundred milliseconds.
+
+        Fine for the handful of uncountried events a live month sees, and not
+        fine for a backcast month full of them.
+        """
+
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+        from resolver.hazard_resolution.geometry import load_country_geometries
+
+        calls = {"n": 0}
+
+        def counted(*_a, **_k):
+            calls["n"] += 1
+            return load_country_geometries(SYNTHETIC_COUNTRIES_GEOJSON)
+
+        monkeypatch.setattr(
+            "resolver.hazard_resolution.geometry.load_country_geometries", counted
+        )
+
+        geometries = gdacs_mod._CountryGeometries()
+        for i in range(5):
+            gdacs_mod._event_record(
+                self._event(eventid=str(i), lat=0.0, lon=12.0), "TC", geometries
+            )
+        assert calls["n"] == 1
+
+    def test_a_month_that_needs_no_geometry_never_opens_the_file(self, monkeypatch):
+        """Loading is lazy: GDACS names the country for almost every event."""
+
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+
+        def explode(*_a, **_k):  # pragma: no cover - must not be reached
+            raise AssertionError("the boundaries were loaded with nothing to place")
+
+        monkeypatch.setattr(
+            "resolver.hazard_resolution.geometry.load_country_geometries", explode
+        )
+
+        geometries = gdacs_mod._CountryGeometries()
+        record = gdacs_mod._event_record(
+            self._event(iso3="PHL", iso3_list=["PHL"], lat=0.0, lon=12.0),
+            "TC",
+            geometries,
+        )
+        assert record.payload["iso3_list"] == ["PHL"]
