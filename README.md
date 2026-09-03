@@ -338,7 +338,15 @@ python -m scripts.dump_pythia_debug_bundle \
 - If signature validation fails, the workflow rejects the candidate DB and tries the next run. A missing/failed signature is a hard-stop; confirm required tables exist or re-run with a reset DB artifact for bootstrap runs.
 
 ### Artifact outputs
-- **Debug bundle**: `debug/pytia_debug_bundle__<run_id>.md` (artifact)
+- **Debug bundle**: `pythia-debug-bundle` — `debug/pythia_debug_bundle__<run_id>.zip`, written at the end of `fc_collect_finalize`. Read `anomalies__<run>.json` first: severity, subsystem, one line on what is wrong, and the file holding the evidence. `BUNDLE_MANIFEST.json` names every other file and what it holds — per-question metrics, SPD tables, every LLM call, the provider batch lifecycle and the raw provider objects, this cycle's Actions logs, the resolved environment and LLM profile, source copies of the files most often implicated in a bad run, connector freshness, prompt-cache and retry reports, per-member forecast completeness, and this run beside the previous two. Build locally with:
+```bash
+python -m scripts.dump_pythia_debug_bundle --db duckdb:///data/resolver.duckdb \
+  --hs-run-id hs_20260901T040916 --forecaster-run-id fc_1788237725
+# PYTHIA_BUNDLE_WORKFLOW_LOGS=0 and PYTHIA_BUNDLE_FETCH_PROVIDER_OBJECTS=0 skip
+# the two collectors that need credentials; both degrade cleanly without them.
+```
+  When the zip exceeds 25 MB the workflow logs are split into `pythia-debug-bundle-workflow-logs` rather than dropped, and the manifest says so.
+- **Legacy monolithic bundle**: `python -m scripts.dump_pythia_debug_bundle --legacy` still writes the single markdown file.
 - **SPD compare JSON**: `debug/spd_compare_smoke` or `debug/spd_compare_tests`
 - **Diagnostics**: `diagnostics/` (DB signatures, compare JSON, latency summaries)
 - **HS triage coverage**: `diagnostics/hs_triage_coverage__<HS_RUN_ID>.csv` and `diagnostics/hs_triage_failures__<HS_RUN_ID>.json`

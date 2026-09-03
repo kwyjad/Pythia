@@ -67,6 +67,12 @@ on:
       - "scripts/ci/tests/test_build_release_db.py"
       - "scripts/ci/db_table_sizes.py"
       - "scripts/ci/tests/test_db_table_sizes.py"
+      # The debug bundle and its collectors. Without these the bundle could
+      # be changed with nothing running its tests — which is how it came to
+      # report "LLM Calls: OK" for a run that had lost four provider
+      # batches, and how six defects in its existing outputs survived.
+      - "scripts/dump_pythia_debug_bundle.py"
+      - "scripts/debug_bundle/**"
       - ".github/workflows/pythia_pipeline_stage.yml"
       - ".github/workflows/publish_latest_data.yml"
       # Self-reference, as horizon-scanner-ci.yml already does: without it a PR
@@ -297,7 +303,9 @@ jobs:
             forecaster/tests/test_debug_bundle_llm_calls.py \
             forecaster/tests/test_debug_bundle_adversarial_stats.py \
             forecaster/tests/test_debug_bundle_batch_economics.py \
-            forecaster/tests/test_debug_bundle_member_gaps.py
+            forecaster/tests/test_debug_bundle_member_gaps.py \
+            forecaster/tests/test_debug_bundle_defects.py \
+            forecaster/tests/test_debug_bundle_operational.py
 
       - name: Run resolver/tests suites that guard forecaster + pythia code
         run: |
