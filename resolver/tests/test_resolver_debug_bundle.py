@@ -1,0 +1,598 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+"""The resolver debug bundle: does it answer the questions it exists for?
+
+Seven questions define the bundle (see the module docstring of
+``scripts/build_resolver_debug_bundle.py``). These tests assert the four that
+can be checked without a network or a live run, plus the three properties
+that decide whether the bundle is usable at all: it never leaks a secret, it
+is always produced however little exists, and when the size ceiling binds it
+drops code before evidence and says so.
+"""
+
+from __future__ import annotations
+
+import json
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from resolver.diagnostics import redaction, run_log
+from scripts import build_resolver_debug_bundle as bundle
+
+duckdb = pytest.importorskip("duckdb")
+
+
+# --------------------------------------------------------------------------
+# Fixtures
+# --------------------------------------------------------------------------
+
+
+def _make_db(path: Path) -> None:
+    """A small database carrying every table the bundle's questions touch."""
+
+    con = duckdb.connect(str(path))
+    con.execute(
+        """
+        CREATE TABLE haz_triggers (
+            iso3 TEXT, year INTEGER, month INTEGER, hazard TEXT,
+            triggered BOOLEAN, trigger_source TEXT, trigger_detail_json TEXT,
+            evidence_of_absence_json TEXT, run_type TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE haz_resolutions (
+            iso3 TEXT, year INTEGER, month INTEGER, hazard TEXT, status TEXT,
+            value DOUBLE, provenance_json TEXT, rule_fired TEXT,
+            flagged BOOLEAN, provisional BOOLEAN, run_type TEXT,
+            frozen_at TIMESTAMP, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE haz_impact_candidates (
+            iso3 TEXT, year INTEGER, month INTEGER, hazard TEXT, value DOUBLE,
+            value_type TEXT, source TEXT, source_ref TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE haz_doc_extractions (
+            doc_id TEXT, iso3 TEXT, year INTEGER, month INTEGER, hazard TEXT,
+            model TEXT, prompt_version TEXT, status TEXT, n_figures INTEGER,
+            n_rejected INTEGER, prompt_tokens INTEGER, completion_tokens INTEGER,
+            cost_usd DOUBLE, doc_url TEXT, error TEXT, run_type TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE enso_state (
+            fetch_date DATE, enso_phase TEXT, nino34_anomaly DOUBLE, oni DOUBLE,
+            observation_date DATE, status TEXT
+        )
+        """
+    )
+    con.execute(
+        "CREATE TABLE seasonal_tc_context_cache (iso3 TEXT, context_text TEXT, "
+        "fetched_at TIMESTAMP)"
+    )
+    con.execute(
+        """
+        CREATE TABLE seasonal_tc_outlooks (
+            basin TEXT, source TEXT, forecast_season TEXT,
+            named_storms_forecast TEXT, category TEXT, raw_json TEXT,
+            fetched_at TIMESTAMP
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE conflict_forecasts (
+            source TEXT, iso3 TEXT, hazard_code TEXT, metric TEXT,
+            lead_months INTEGER, forecast_issue_date DATE, value DOUBLE
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE facts_resolved (
+            iso3 TEXT, ym TEXT, hazard_code TEXT, metric TEXT, value DOUBLE,
+            publisher TEXT, series_semantics TEXT, as_of_date DATE
+        )
+        """
+    )
+
+    # A cyclone month: one triggered cell resolved, one triggered cell with no
+    # row (the ladder found nothing before the freeze deadline), one quiet cell
+    # zeroed, and one quiet cell whose sweep could not be read.
+    con.executemany(
+        "INSERT INTO haz_triggers VALUES (?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)",
+        [
+            ("PHL", 2026, 8, "TC", True, "ibtracs", "{}", None, "live"),
+            ("VNM", 2026, 8, "TC", True, "ibtracs", "{}", None, "live"),
+            ("FJI", 2026, 8, "TC", False, "none", "{}", '{"reliefweb": {}}', "live"),
+            ("TON", 2026, 8, "TC", False, "none", "{}", None, "live"),
+        ],
+    )
+    con.executemany(
+        "INSERT INTO haz_resolutions VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,CURRENT_TIMESTAMP)",
+        [
+            ("PHL", 2026, 8, "TC", "RESOLVED_VALUE", 40000.0, "{}", "ladder:emdat",
+             False, True, "live"),
+            ("FJI", 2026, 8, "TC", "RESOLVED_ZERO", 0.0, "{}", "zero:silent_sweep",
+             False, True, "live"),
+        ],
+    )
+    con.execute(
+        "INSERT INTO haz_impact_candidates VALUES "
+        "('PHL',2026,8,'TC',40000.0,'affected','emdat','disno-1')"
+    )
+    con.execute(
+        "INSERT INTO haz_doc_extractions VALUES "
+        "('rw-1','PHL',2026,8,'TC','haiku','v1','ok',2,1,900,120,0.009,"
+        "'https://reliefweb.int/1',NULL,'live',CURRENT_TIMESTAMP)"
+    )
+    con.execute(
+        "INSERT INTO haz_doc_extractions VALUES "
+        "('rw-2','VNM',2026,8,'TC','haiku','v1','error',0,0,0,0,0.0,"
+        "'https://reliefweb.int/2','timeout','backcast',CURRENT_TIMESTAMP)"
+    )
+    con.execute("INSERT INTO facts_resolved VALUES "
+                "('PHL','2026-08','TC','affected',40000.0,'IFRC','new',DATE '2026-08-31')")
+    con.close()
+
+
+def _write_streams(directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    with open(directory / f"{run_log.STREAM_HTTP}.jsonl", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "connector": "resolver.connectors.acled_cast",
+            "method": "GET",
+            "url": "https://api.acleddata.com/cast/read?key=<redacted:sha256:deadbeef>&limit=5000",
+            "status": 200, "elapsed_ms": 1200.0, "response_bytes": 51234,
+            "redirects": 0, "from_cache": False, "error": None,
+        }) + "\n")
+        handle.write(json.dumps({
+            "connector": "resolver.hazard_resolution.emdat",
+            "method": "POST", "url": "https://api.emdat.be/v1",
+            "status": 500, "elapsed_ms": 300.0, "response_bytes": 40,
+            "redirects": 0, "from_cache": False, "error": None,
+        }) + "\n")
+    with open(directory / f"{run_log.STREAM_ENVELOPE}.jsonl", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "connector": "resolver.connectors.acled_cast",
+            "host": "api.acleddata.com", "path": "/cast/read",
+            "url": "https://api.acleddata.com/cast/read",
+            "status": 200,
+            "envelope": {
+                "json": True,
+                "top_level": {
+                    "status": 200, "success": True, "count": 9879,
+                    "last_update": "2025-12-01",
+                    "messages": "", "data_query_restrictions": "free tier",
+                    "data": "list[9879]",
+                },
+                "n_rows": 9879,
+                "columns": ["country", "month", "year", "timestamp"],
+                "max_by_date_column": {"month": "12", "year": "2025",
+                                       "timestamp": "2025-12-01T00:00:00"},
+            },
+        }) + "\n")
+    with open(directory / f"{run_log.STREAM_CELLS}.jsonl", "w", encoding="utf-8") as handle:
+        for iso3, outcome, reason in (
+            ("VNM", "pending_skip", "pending_before_freeze"),
+            ("TON", "no_row", "sweep_inconclusive"),
+        ):
+            handle.write(json.dumps({
+                "stage": "ladder", "iso3": iso3, "hazard": "TC", "ym": "2026-08",
+                "triggered": iso3 == "VNM", "write_outcome": outcome,
+                "reason_code": reason, "rungs_unavailable": ["emdat"],
+                "rungs_readable": [], "extraction": {}, "detail": {},
+            }) + "\n")
+    with open(directory / f"{run_log.STREAM_FIGURES}.jsonl", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "iso3": "PHL", "hazard": "TC", "ym": "2026-08", "outcome": "rejected",
+            "doc_id": "rw-1", "value": 120000.0, "unit": "people",
+            "reason": "exceeds_gdacs_exposure_ceiling",
+            "ceiling": 2.0, "ceiling_multiplier": 3.0, "ceiling_source": "gdacs",
+            "ceiling_source_ref": "TC-1001273",
+            "ceiling_field": "gdacs.population -> payload.exposed_population",
+            "quote": "some 120,000 people were affected",
+        }) + "\n")
+
+
+def _build(tmp_path: Path, **kwargs):
+    out = tmp_path / "bundle.zip"
+    manifest = bundle.build_bundle(
+        out_path=out,
+        db_path=kwargs.get("db_path"),
+        diagnostics_dir=kwargs.get("diagnostics_dir", tmp_path / "missing"),
+        run_log_dir=kwargs.get("run_log_dir"),
+        max_bytes=kwargs.get("max_bytes", bundle.DEFAULT_MAX_BYTES),
+        staging=tmp_path / "staging",
+        environ=kwargs.get("environ", {}),
+    )
+    return out, manifest
+
+
+@pytest.fixture()
+def full_run(tmp_path: Path):
+    db = tmp_path / "resolver.duckdb"
+    _make_db(db)
+    diagnostics = tmp_path / "diagnostics"
+    (diagnostics / "ingestion").mkdir(parents=True)
+    (diagnostics / "phase25_haz_cyclone.log").write_text(
+        "2026-08-28 03:10:00 INFO resolver.hazard_resolution.impact PHL 2026-08 ladder\n"
+        "2026-08-28 03:10:01 WARNING resolver.hazard_resolution.emdat "
+        "ladder source emdat unavailable for TC 2026-08: HTTP 500\n"
+        "2026-08-28 03:10:02 WARNING resolver.hazard_resolution.emdat "
+        "ladder source emdat unavailable for TC 2026-07: HTTP 500\n"
+        "2026-08-28 03:10:03 ERROR resolver.hazard_resolution.drought "
+        "756 cells inconclusive\n",
+        encoding="utf-8",
+    )
+    (diagnostics / "haz_run_cyclone.json").write_text(
+        json.dumps({"hazard": "cyclone", "months": {"2026-08": {
+            "cells": 4, "resolved_value": 1, "zeros": 1, "failures": 0}}}),
+        encoding="utf-8",
+    )
+    (diagnostics / "haz_run_drought.json").write_text(
+        json.dumps({"hazard": "drought", "months": {"2026-08": {
+            "cells": 756, "resolved_value": 0, "resolved_zero": 0, "failures": 0}}}),
+        encoding="utf-8",
+    )
+    (diagnostics / "db_signature_before.json").write_text(
+        json.dumps({"required_counts": {"facts_resolved": 1},
+                    "all_counts": {"facts_resolved": 1, "haz_resolutions": 0}}),
+        encoding="utf-8",
+    )
+    (diagnostics / "ingestion" / "connectors_report.jsonl").write_text(
+        json.dumps({"connector_id": "acled_client", "status": "ok",
+                    "counts": {"fetched": 380000, "normalized": 1752, "written": 1752}})
+        + "\n",
+        encoding="utf-8",
+    )
+    streams = tmp_path / "runlog"
+    _write_streams(streams)
+    return {"db": db, "diagnostics": diagnostics, "streams": streams}
+
+
+# --------------------------------------------------------------------------
+# The seven questions
+# --------------------------------------------------------------------------
+
+
+def test_which_url_did_each_connector_call_and_how_old_was_the_data(tmp_path, full_run):
+    """Q1: the URL, the response envelope and the arithmetic behind the vintage."""
+
+    out, _ = _build(tmp_path, db_path=full_run["db"],
+                    diagnostics_dir=full_run["diagnostics"],
+                    run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        requests = zf.read("http/requests.jsonl").decode()
+        envelope = zf.read(
+            "http/envelopes/resolver.connectors.acled_cast.json"
+        ).decode()
+        by_connector = zf.read("http/requests_by_connector.csv").decode()
+
+    assert "api.acleddata.com/cast/read" in requests
+    assert "api.emdat.be" in requests
+    # The half the connector discards, which is the half that says WHY a
+    # vintage has stalled: a quota restriction and an upstream stop want
+    # different fixes.
+    assert "data_query_restrictions" in envelope
+    assert "last_update" in envelope
+    # The arithmetic behind "this data is N days old", not just the verdict.
+    assert "max_by_date_column" in envelope
+    assert "resolver.hazard_resolution.emdat" in by_connector
+    assert "n_5xx" in by_connector
+
+
+def test_what_thresholds_and_windows_was_the_run_using(tmp_path, full_run):
+    """Q2: rulebook thresholds are copied, never inferred from behaviour."""
+
+    out, _ = _build(
+        tmp_path, db_path=full_run["db"], diagnostics_dir=full_run["diagnostics"],
+        run_log_dir=full_run["streams"],
+        environ={"GDACS_MONTHS": "3", "FEWSNET_MONTHS": "12", "PYTHIA_DB_URL": "duckdb:///x"},
+    )
+    with zipfile.ZipFile(out) as zf:
+        names = set(zf.namelist())
+        env = json.loads(zf.read("run/env_effective.json"))
+        rulebook = zf.read("config/rulebook.yaml").decode()
+
+    assert "config/rulebook.yaml" in names
+    assert "config/workflows/resolver_update.yml" in names
+    assert env["effective_windows"]["gdacs_months"] == "3"
+    assert env["effective_windows"]["fewsnet_months"] == "12"
+    machine = env["effective_windows"]["hazard_machine"]
+    assert machine.get("freeze_days") is not None
+    assert machine.get("ladder")
+    assert "ceiling_multiplier" in rulebook
+
+
+def test_for_any_unresolved_cell_why_did_it_produce_no_row(tmp_path, full_run):
+    """Q3: the reason code, per cell — not a subtraction between summaries."""
+
+    out, _ = _build(tmp_path, db_path=full_run["db"],
+                    diagnostics_dir=full_run["diagnostics"],
+                    run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        ledger = zf.read("hazard/cell_ledger.csv").decode()
+
+    rows = {
+        line.split(",")[0]: line
+        for line in ledger.splitlines()
+        if line and not line.startswith("#")
+    }
+    assert "PHL" in rows and "RESOLVED_VALUE" in rows["PHL"]
+    # A triggered cell with no row, and the reason the calendar gives.
+    assert "pending_before_freeze" in rows["VNM"]
+    # A quiet cell whose sweep could not be read: unproven silence, never a zero.
+    assert "sweep_inconclusive" in rows["TON"]
+    # And a cell nothing accounted for would be named as a bug, not a silence.
+    assert not any("unexplained_no_row" in line for line in rows.values())
+
+
+def test_for_any_rejected_figure_what_ceiling_and_what_source_column(tmp_path, full_run):
+    """Q4: value, ceiling, and the upstream field the ceiling came from.
+
+    A ceiling of 2 against a reported 120,000 is a GDACS enrichment failure,
+    not a mis-transcription, and only the source column says which.
+    """
+
+    out, _ = _build(tmp_path, db_path=full_run["db"],
+                    diagnostics_dir=full_run["diagnostics"],
+                    run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        figures = zf.read("hazard/figures_ledger.csv").decode()
+
+    assert "exceeds_gdacs_exposure_ceiling" in figures
+    assert "120000" in figures
+    assert "gdacs.population -> payload.exposed_population" in figures
+    assert "TC-1001273" in figures
+
+
+def test_was_the_extraction_budget_exhausted_and_by_whom(tmp_path, full_run):
+    """Q5: spend split by caller, so backcast and live draw are separable."""
+
+    out, _ = _build(tmp_path, db_path=full_run["db"],
+                    diagnostics_dir=full_run["diagnostics"],
+                    run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        budget = zf.read("hazard/extraction_budget.csv").decode()
+        calls = zf.read("hazard/extraction_calls.csv").decode()
+
+    assert "live" in budget and "backcast" in budget
+    assert "live reserve=" in budget  # the caps the spend is measured against
+    # billed_calls, not calls: a call that never reached the provider spent
+    # nothing and must cost nothing.
+    assert "billed_calls" in budget
+    assert "rw-2" in calls and "timeout" in calls
+
+
+def test_which_code_and_config_produced_this_run(tmp_path, full_run):
+    """Q6: the participating source files, verbatim, with a hashed index."""
+
+    out, _ = _build(tmp_path, db_path=full_run["db"],
+                    diagnostics_dir=full_run["diagnostics"],
+                    run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        names = set(zf.namelist())
+        index = zf.read("code/file_index.csv").decode()
+        git = json.loads(zf.read("run/git.json"))
+
+    assert "code/resolver/hazard_resolution/reconcile.py" in names
+    # The log named emdat; selection follows the log rather than a fixed list.
+    assert "code/resolver/hazard_resolution/emdat.py" in names
+    assert "sha256_16" in index
+    assert "commit" in git
+
+
+def test_do_any_two_sources_in_the_run_contradict_each_other(tmp_path, full_run):
+    """Q7: contradictions are asserted across the bundle, with both values."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    # A phase stated with no measurement behind it, and a TC narrative that
+    # flatly disagrees with the stored phase. Both were live in August 2026.
+    con.execute(
+        "INSERT INTO enso_state VALUES "
+        "(DATE '2026-08-01','Neutral',NULL,NULL,DATE '2026-08-01','fresh')"
+    )
+    con.execute(
+        "INSERT INTO seasonal_tc_context_cache VALUES "
+        "('PHL','Strong El Nino conditions persist across the basin', CURRENT_TIMESTAMP)"
+    )
+    # Two outlooks for one basin and season sharing an issue date.
+    con.executemany(
+        "INSERT INTO seasonal_tc_outlooks VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+        [
+            ("NA", "TSR", "2026", "17", "May", '{"issue_date": "2026-05-20"}'),
+            ("NA", "TSR", "2026", "19", "Aug", '{"issue_date": "2026-05-20"}'),
+        ],
+    )
+    con.execute(
+        "INSERT INTO conflict_forecasts VALUES "
+        "('ACLED_CAST','SOM','ACE','cast_total_events',1,DATE '2025-12-01',10.0)"
+    )
+    con.close()
+
+    out, manifest = _build(tmp_path, db_path=db,
+                           diagnostics_dir=full_run["diagnostics"],
+                           run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        contradictions = zf.read("checks/contradictions.md").decode()
+        reconciliation = zf.read("checks/reconciliation.md").decode()
+        readme = zf.read("README.md").decode()
+
+    failed = {c["name"] for c in manifest["checks"] if c["verdict"] == "FAIL"}
+    assert "enso_phase_never_stated_without_a_measurement" in failed
+    assert "enso_phase_matches_the_tc_context_narrative" in failed
+    assert "no_two_tc_outlooks_share_a_basin_season_and_issue_date" in failed
+    assert "no_stored_forecast_vintage_past_its_threshold" in failed
+    # A hazard reporting failures=0 while resolving nothing at all.
+    assert "no_hazard_reports_zero_failures_while_resolving_nothing" in failed
+    assert "FAIL" in contradictions
+    # The reconciliation names the semantics of each counter rather than
+    # carrying a caveat that the totals are not comparable.
+    assert "claimed written" in reconciliation and "table delta" in reconciliation
+    # The README leads with what is wrong.
+    assert "## What is wrong" in readme
+    assert "enso_phase_never_stated_without_a_measurement" in readme
+
+
+# --------------------------------------------------------------------------
+# Properties that decide whether the bundle is usable at all
+# --------------------------------------------------------------------------
+
+
+def test_redaction_rejects_a_bundle_containing_a_known_secret(tmp_path, full_run, monkeypatch):
+    """A bundle meant for a chat window cannot leak. The build must fail."""
+
+    secret = "acled-live-token-ABCDEF0123456789"
+    (full_run["diagnostics"] / "phase1_leak.log").write_text(
+        f"authenticating with token={secret}\n", encoding="utf-8"
+    )
+    # Defeat the capture-time redaction so only the final scan can catch it —
+    # that scan is the guarantee, and a test that lets redact_text do the work
+    # would pass with the scan deleted.
+    monkeypatch.setattr(bundle, "redact_text", lambda text, values=None: text)
+
+    with pytest.raises(bundle.SecretLeak) as excinfo:
+        _build(tmp_path, db_path=full_run["db"],
+               diagnostics_dir=full_run["diagnostics"],
+               run_log_dir=full_run["streams"],
+               environ={"ACLED_ACCESS_KEY": secret})
+
+    assert "logs/phase1_leak.log" in excinfo.value.hits
+    # The leak report quotes the FINGERPRINT, never the value: a report that
+    # quotes the leak is a second leak.
+    assert secret not in str(excinfo.value.hits)
+    assert excinfo.value.hits["logs/phase1_leak.log"] == [redaction.fingerprint(secret)]
+
+
+def test_redaction_passes_when_the_secret_was_redacted_at_capture(tmp_path, full_run):
+    secret = "acled-live-token-ABCDEF0123456789"
+    (full_run["diagnostics"] / "phase1_leak.log").write_text(
+        f"authenticating with token={secret}\n", encoding="utf-8"
+    )
+    out, manifest = _build(tmp_path, db_path=full_run["db"],
+                           diagnostics_dir=full_run["diagnostics"],
+                           run_log_dir=full_run["streams"],
+                           environ={"ACLED_ACCESS_KEY": secret})
+    assert manifest["redaction_scan"]["files_with_hits"] == {}
+    with zipfile.ZipFile(out) as zf:
+        log = zf.read("logs/phase1_leak.log").decode()
+    assert secret not in log
+    assert redaction.fingerprint(secret) in log
+
+
+@pytest.mark.parametrize(
+    "missing", ["db", "diagnostics", "streams", "everything"]
+)
+def test_the_builder_degrades_rather_than_failing(tmp_path, full_run, missing):
+    """A diagnostic that fails when the run failed is never there when needed."""
+
+    kwargs = {
+        "db_path": full_run["db"],
+        "diagnostics_dir": full_run["diagnostics"],
+        "run_log_dir": full_run["streams"],
+    }
+    if missing in ("db", "everything"):
+        kwargs["db_path"] = tmp_path / "no-such.duckdb"
+    if missing in ("diagnostics", "everything"):
+        kwargs["diagnostics_dir"] = tmp_path / "no-such-dir"
+    if missing in ("streams", "everything"):
+        kwargs["run_log_dir"] = None
+
+    out, manifest = _build(tmp_path, **kwargs)
+    assert out.is_file()
+    with zipfile.ZipFile(out) as zf:
+        names = set(zf.namelist())
+    # The two things a reader needs whatever else is absent.
+    assert "README.md" in names
+    assert "manifest.json" in names
+    assert "checks/contradictions.md" in names
+    # And the absence is stated, not silent.
+    if missing != "db":
+        assert manifest["sections"]["db"]["ok"]
+    else:
+        assert any("database" in p for p in manifest["problems"])
+    if missing in ("streams", "everything"):
+        assert any("PYTHIA_RUN_LOG_DIR" in p for p in manifest["problems"])
+
+
+def test_the_builder_survives_a_missing_phase_log(tmp_path, full_run):
+    for log in full_run["diagnostics"].glob("*.log"):
+        log.unlink()
+    out, manifest = _build(tmp_path, db_path=full_run["db"],
+                           diagnostics_dir=full_run["diagnostics"],
+                           run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        index = zf.read("logs/log_index.md").decode()
+        names = set(zf.namelist())
+    assert "No phase logs were found" in index
+    # Code selection falls back to the machine's own modules, so "which code
+    # produced this run" still has an answer.
+    assert "code/resolver/hazard_resolution/reconcile.py" in names
+    assert manifest["sections"]["logs"]["ok"]
+
+
+def test_the_size_ceiling_drops_code_before_evidence_and_records_it(tmp_path, full_run):
+    """Truncate loudly, never silently — and evidence outranks source."""
+
+    big = full_run["diagnostics"] / "phase3_big.log"
+    big.write_text("\n".join(f"line {i} of an enormous log" for i in range(200_000)),
+                   encoding="utf-8")
+
+    out, manifest = _build(tmp_path, db_path=full_run["db"],
+                           diagnostics_dir=full_run["diagnostics"],
+                           run_log_dir=full_run["streams"],
+                           max_bytes=60_000)
+
+    with zipfile.ZipFile(out) as zf:
+        names = set(zf.namelist())
+    assert not any(n.startswith("code/") for n in names), "code/ should go first"
+    assert "hazard/cell_ledger.csv" in names, "evidence must outlive code"
+    assert any("code/" in entry for entry in manifest["dropped"])
+    assert manifest["truncated"], "the truncation must be recorded, not silent"
+    with zipfile.ZipFile(out) as zf:
+        truncated = zf.read("logs/phase3_big.log").decode()
+    assert "TRUNCATED" in truncated
+    # The original size is stated, so a reader knows what they are missing.
+    assert "original file was" in truncated
+
+
+def test_a_truncated_stream_line_costs_one_record_not_the_file(tmp_path, full_run):
+    path = full_run["streams"] / f"{run_log.STREAM_CELLS}.jsonl"
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write('{"stage": "ladder", "iso3": "KI')  # killed mid-write
+
+    out, _ = _build(tmp_path, db_path=full_run["db"],
+                    diagnostics_dir=full_run["diagnostics"],
+                    run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        ledger = zf.read("hazard/cell_ledger.csv").decode()
+    assert "sweep_inconclusive" in ledger  # the intact records survived
+
+
+def test_normalise_db_path_handles_the_urls_the_workflow_actually_sets():
+    # The workflow writes duckdb:///<github.workspace>/data/... and
+    # github.workspace is already absolute, so the fourth slash is the path's.
+    assert bundle.normalise_db_path("duckdb:////w/data/r.duckdb") == Path("/w/data/r.duckdb")
+    assert bundle.normalise_db_path("duckdb:///a/b.duckdb") == Path("a/b.duckdb")
+    assert bundle.normalise_db_path("data/resolver.duckdb") == Path("data/resolver.duckdb")
+    assert bundle.normalise_db_path("") is None
+    assert bundle.normalise_db_path(None) is None

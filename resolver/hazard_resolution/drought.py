@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from resolver.hazard_resolution import candidates as cand_mod
+from resolver.hazard_resolution import cell_ledger
 from resolver.hazard_resolution import detect as detect_mod
 from resolver.hazard_resolution import drought_indicators as ind_mod
 from resolver.hazard_resolution import ipc as ipc_mod
@@ -619,6 +620,14 @@ def run_month(
         except Exception as exc:  # noqa: BLE001 - one bad cell must not end the month
             run.failed_cells.append(f"{iso3}: {type(exc).__name__}: {exc}")
             LOG.exception("[drought] %s %s: decision raised", iso3, ym)
+            cell_ledger.record_cell(
+                stage=cell_ledger.STAGE_DROUGHT,
+                iso3=iso3, hazard=HAZARD, ym=ym,
+                write_outcome="exception",
+                reason_code=cell_ledger.REASON_EXCEPTION,
+                detail={"error": f"{type(exc).__name__}: {exc}"},
+                run_type=run_type,
+            )
             continue
         decisions.append(decision)
         result.rows.append(
@@ -647,6 +656,9 @@ def run_month(
         run.flagged += int(decision.flagged)
 
     if dry_run:
+        for decision in decisions:
+            _ledger_decision(decision, outcome="dry_run", unavailable=unavailable,
+                             run_type=run_type)
         _log_run(run, unavailable)
         return run
 
@@ -659,6 +671,9 @@ def run_month(
             )
 
         if not decision.writes_row:
+            _ledger_decision(
+                decision, outcome="no_row", unavailable=unavailable, run_type=run_type
+            )
             continue
 
         # A source that could not be READ is not a source that was empty.
@@ -693,9 +708,59 @@ def run_month(
             )
         if outcome == res_mod.WRITE_FROZEN_SKIP:
             run.frozen_skipped += 1
+        _ledger_decision(
+            decision, outcome=outcome, unavailable=unavailable, run_type=run_type
+        )
 
     _log_run(run, unavailable)
     return run
+
+
+#: Why a drought cell carries no row. PENDING is the calendar's doing;
+#: INCONCLUSIVE means an indicator could not be read, which is fail-closed
+#: and a different repair entirely.
+_DROUGHT_NO_ROW_REASON = {
+    STATUS_PENDING: cell_ledger.REASON_PENDING,
+    STATUS_INCONCLUSIVE: cell_ledger.REASON_INCONCLUSIVE,
+}
+
+
+def _ledger_decision(
+    decision: DroughtDecision,
+    *,
+    outcome: str,
+    unavailable: list[str],
+    run_type: str,
+) -> None:
+    """Record one assessed drought cell. Never raises."""
+
+    if not cell_ledger.enabled():
+        return
+    reason = _DROUGHT_NO_ROW_REASON.get(decision.status)
+    if outcome == res_mod.WRITE_FROZEN_SKIP:
+        reason = cell_ledger.REASON_FROZEN
+    indicators = (decision.provenance.get("decision") or {}).get("indicators")
+    cell_ledger.record_cell(
+        stage=cell_ledger.STAGE_DROUGHT,
+        iso3=decision.iso3, hazard=HAZARD, ym=decision.ym,
+        triggered=decision.triggered,
+        trigger_source=decision.trigger_source,
+        status=decision.status,
+        value=decision.value,
+        rule_fired=decision.rule_fired,
+        flagged=decision.flagged,
+        provisional=decision.provisional,
+        write_outcome=outcome,
+        reason_code=reason,
+        rungs_unavailable=list(unavailable),
+        answering_rung="ipc" if decision.candidate is not None else None,
+        detail={
+            "flags": list(decision.flags),
+            "indicators": indicators,
+            "trigger_detail": decision.trigger_detail,
+        },
+        run_type=run_type,
+    )
 
 
 def _log_run(run: DroughtRun, unavailable: list[str]) -> None:

@@ -265,17 +265,43 @@ def exposure_ceiling(
     199 rejected figures were rejected against one.
     """
 
-    exposures = [
-        c.value
-        for c in _from_gdacs(
-            gdacs_mod.events_for_country_month(con, iso3.upper(), ym, hazard),
-            iso3.upper(),
-            ym,
-            hazard,
-        )
-        if c.value > 0
-    ]
-    return max(exposures) if exposures else None
+    return exposure_ceiling_basis(con, iso3, ym, hazard)["value"]
+
+
+#: The GDACS response field the ceiling is computed from, carried on every
+#: rejection so "the ceiling is broken" and "the figure is wrong" can be told
+#: apart. GDACS calls it ``population``; the raw cache stores it under the
+#: name that says what it is.
+CEILING_FIELD = "gdacs.population -> payload.exposed_population"
+
+
+def exposure_ceiling_basis(
+    con: "duckdb.DuckDBPyConnection", iso3: str, ym: str, hazard: str
+) -> dict[str, Any]:
+    """The ceiling AND where it came from: value, event, field, alternatives.
+
+    :func:`exposure_ceiling` returns only the number, which is all the
+    rejection rule needs. A reader auditing a rejection needs the rest: a
+    ceiling of 2 against a reported 40,000 is a GDACS enrichment failure,
+    not a mis-transcription, and only the event id and the field name say
+    which of the two it is.
+    """
+
+    iso3 = iso3.upper()
+    events = _from_gdacs(
+        gdacs_mod.events_for_country_month(con, iso3, ym, hazard), iso3, ym, hazard
+    )
+    positive = [c for c in events if c.value > 0]
+    binding = max(positive, key=lambda c: c.value) if positive else None
+    return {
+        "value": float(binding.value) if binding is not None else None,
+        "source": SOURCE_GDACS if binding is not None else None,
+        "source_ref": binding.source_ref if binding is not None else None,
+        "field": CEILING_FIELD,
+        "n_events": len(events),
+        "n_events_with_exposure": len(positive),
+        "all_exposures": sorted((float(c.value) for c in events), reverse=True)[:10],
+    }
 
 
 def write_candidates(

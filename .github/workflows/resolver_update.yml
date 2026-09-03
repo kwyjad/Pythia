@@ -153,6 +153,12 @@ jobs:
       IPC_API_MONTHS: ${{ inputs.reset_db && '120' || inputs.ipc_api_months || '24' }}
       GDACS_MONTHS: ${{ inputs.reset_db && '135' || inputs.gdacs_months || '3' }}
       DIAGNOSTICS_REPORT_PATH: diagnostics/ingestion/connectors_report.jsonl
+      # Run-scoped evidence streams: outbound HTTP (URL, status, timing,
+      # response envelope) and the machine's per-cell and per-figure ledgers.
+      # Setting this is what turns recording ON — the code default is off, so
+      # a local run and every test are unaffected. The debug bundle reads
+      # these; without them it can report what the logs say and no more.
+      PYTHIA_RUN_LOG_DIR: diagnostics/run_log
 
     steps:
       # === SETUP ===
@@ -228,6 +234,7 @@ jobs:
             --db data/resolver.duckdb
             --required "${SIGNATURE_REQUIRED_TABLES}"
             --optional "${SIGNATURE_OPTIONAL_TABLES}"
+            --all-tables
             --out diagnostics/db_signature_before.json
 
       - name: Record canonical DB provenance
@@ -275,6 +282,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,export_preview}
+          mkdir -p diagnostics/run_log
+          echo "PYTHIA_RUN_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
 
       # === PHASE 1: RESOLVER CONNECTORS (ground truth — fatal) ===
       - name: "Phase 1: Run IDMC (HELIX)"
@@ -791,6 +800,7 @@ jobs:
             --after-db "${BACKFILL_DB_PATH}" \
             --required "${SIGNATURE_REQUIRED_TABLES}" \
             --optional "${SIGNATURE_OPTIONAL_TABLES}" \
+            --all-tables \
             --out diagnostics/db_signature_after.json
           echo "SIGNATURE_OK=true" >> "$GITHUB_ENV"
           echo "signature_ok=true" >> "$GITHUB_OUTPUT"
@@ -808,6 +818,39 @@ jobs:
         with:
           name: pythia-resolver-db-reset
           path: data/resolver.duckdb
+
+      # One self-contained zip an analyst can open with no repo, no workflow
+      # logs and no database: URLs and response envelopes, per-cell and
+      # per-figure ledgers, the rulebook and workflows verbatim, the source
+      # files that participated, and a contradiction report across all of it.
+      # `if: always()` because the runs worth diagnosing are the ones that
+      # failed, and `continue-on-error` because a diagnostic must never be
+      # the thing that turns an otherwise good ingest red.
+      - name: Build resolver debug bundle
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          python -m scripts.build_resolver_debug_bundle \
+            --db "${BACKFILL_DB_PATH}" \
+            --diagnostics-dir diagnostics \
+            --run-log-dir diagnostics/run_log \
+            --out "debug_bundle/resolver-debug-bundle-${GITHUB_RUN_ID}.zip" \
+            2>&1 | tee diagnostics/build_debug_bundle.log \
+            || echo "::warning::resolver debug bundle build failed (non-fatal)"
+
+      - name: Upload resolver debug bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolver-debug-bundle-${{ github.run_id }}
+          # Deliberately outside diagnostics/ — the zip already carries the
+          # logs, so uploading it inside backfill-diagnostics would ship
+          # every one of them twice.
+          path: debug_bundle/
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Upload diagnostics
         if: always()

@@ -346,6 +346,15 @@ python -m scripts.dump_pythia_debug_bundle --db duckdb:///data/resolver.duckdb \
 # the two collectors that need credentials; both degrade cleanly without them.
 ```
   When the zip exceeds 25 MB the workflow logs are split into `pythia-debug-bundle-workflow-logs` rather than dropped, and the manifest says so.
+- **Resolver debug bundle**: `resolver-debug-bundle-<run_id>` — one zip per Resolver Update run, built by `if: always()` so the runs worth diagnosing are covered. It answers, from the zip alone: which URL each connector called and what came back (`http/requests.jsonl`, `http/envelopes/` — including the response fields the connectors themselves discard); what thresholds and windows the run used (`config/rulebook.yaml`, `run/env_effective.json`); why any unresolved hazard cell produced no row (`hazard/cell_ledger.csv`, one reason code per cell); what ceiling a rejected figure was measured against and where that number came from (`hazard/figures_ledger.csv`); whether the extraction budget was exhausted and by whom (`hazard/extraction_budget.csv`); which code produced the run (`code/`, `run/git.json`); and whether any two sources in the run contradict each other (`checks/contradictions.md`). Start at `README.md` inside the zip. Build locally with:
+```bash
+python -m scripts.build_resolver_debug_bundle --db duckdb:///data/resolver.duckdb \
+  --diagnostics-dir diagnostics --out debug_bundle/resolver-debug-bundle.zip
+# Set PYTHIA_RUN_LOG_DIR before the ingest to capture HTTP requests, response
+# envelopes and the machine's per-cell / per-figure ledgers; without it the
+# bundle reports what the logs say and no more.
+```
+  Hard ceiling of 80 MB compressed. When it binds, `code/` is dropped before any evidence is and the manifest names what went; nothing is truncated silently. Every file is scanned for every secret in the build environment before the zip is written, and a hit fails the build.
 - **Legacy monolithic bundle**: `python -m scripts.dump_pythia_debug_bundle --legacy` still writes the single markdown file.
 - **SPD compare JSON**: `debug/spd_compare_smoke` or `debug/spd_compare_tests`
 - **Diagnostics**: `diagnostics/` (DB signatures, compare JSON, latency summaries)

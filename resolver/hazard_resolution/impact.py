@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from resolver.hazard_resolution import candidates as cand_mod
+from resolver.hazard_resolution import cell_ledger
 from resolver.hazard_resolution import emdat as emdat_mod
 from resolver.hazard_resolution import extract as extract_mod
 from resolver.hazard_resolution import figures as figures_mod
@@ -292,15 +293,17 @@ def extract_rung_for_cell(
         call=call,
         country_name=country_name,
     )
-    ceiling = cand_mod.exposure_ceiling(con, iso3, ym, hazard)
+    ceiling_basis = cand_mod.exposure_ceiling_basis(con, iso3, ym, hazard)
     candidates, rejected = figures_mod.build_candidates(
         extraction,
         iso3=iso3,
         ym=ym,
         hazard=hazard,
         rulebook=rulebook,
-        exposure_ceiling=ceiling,
+        exposure_ceiling=ceiling_basis["value"],
+        ceiling_basis=ceiling_basis,
     )
+    provenance["exposure_ceiling"] = ceiling_basis
     provenance["extraction"] = {**extraction.as_provenance(), "rejected": rejected}
     # Lift the extractor's own skip reason (no documents, unresolvable model)
     # to the top level, so "was this cell read?" is one question with one
@@ -411,15 +414,36 @@ def resolve_triggered_cells(
             run.lower_bound += int(verdict.lower_bound)
 
             if dry_run:
+                _ledger_cell(
+                    iso3=iso3, ym=ym, hazard=hazard, verdict=verdict,
+                    outcome="dry_run", unavailable=unavailable,
+                    extraction=extraction_provenance, candidates=found,
+                    run_type=run_type,
+                )
                 continue
             outcome = res_mod.write_reconciliation(
                 con, verdict, rulebook, today=today, run_type=run_type
             )
             if outcome == res_mod.WRITE_FROZEN_SKIP:
                 run.frozen_skipped += 1
+            _ledger_cell(
+                iso3=iso3, ym=ym, hazard=hazard, verdict=verdict,
+                outcome=outcome, unavailable=unavailable,
+                extraction=extraction_provenance, candidates=found,
+                run_type=run_type,
+            )
         except Exception as exc:  # noqa: BLE001 - one bad cell must not end the month
             run.failed_cells.append(f"{iso3}: {type(exc).__name__}: {exc}")
             LOG.exception("[impact] %s %s %s: ladder walk raised", iso3, hazard, ym)
+            cell_ledger.record_cell(
+                stage=cell_ledger.STAGE_LADDER,
+                iso3=iso3, hazard=hazard, ym=ym, triggered=True,
+                write_outcome="exception",
+                reason_code=cell_ledger.REASON_EXCEPTION,
+                rungs_unavailable=unavailable,
+                detail={"error": f"{type(exc).__name__}: {exc}"},
+                run_type=run_type,
+            )
 
     LOG.info(
         "[impact] %s %s ladder: %d cells -> %d values (%d lower-bound), "
@@ -454,6 +478,68 @@ def resolve_triggered_cells(
                 budget.max_calls_per_month, ",".join(budget.capped_cells) or "(none)",
             )
     return run
+
+
+#: Write outcomes that leave no row in ``haz_resolutions``, and the reason
+#: each one is not a missing answer but a deliberate silence.
+_LADDER_NO_ROW_REASON = {
+    res_mod.WRITE_PENDING: cell_ledger.REASON_PENDING,
+    res_mod.WRITE_FROZEN_SKIP: cell_ledger.REASON_FROZEN,
+}
+
+
+def _ledger_cell(
+    *,
+    iso3: str,
+    ym: str,
+    hazard: str,
+    verdict: Any,
+    outcome: str,
+    unavailable: list[str],
+    extraction: dict[str, Any],
+    candidates: list[Any],
+    run_type: str,
+) -> None:
+    """Record one triggered cell's whole story, including why it has no row."""
+
+    if not cell_ledger.enabled():
+        return
+    stats = extraction.get("extraction") or {}
+    provenance = verdict.provenance or {}
+    decision = provenance.get("decision") or {}
+    readable = sorted({str(c.source) for c in candidates})
+    cell_ledger.record_cell(
+        stage=cell_ledger.STAGE_LADDER,
+        iso3=iso3, hazard=hazard, ym=ym,
+        triggered=True,
+        status=verdict.status,
+        value=verdict.value,
+        rule_fired=verdict.rule_fired,
+        flagged=bool(verdict.flagged),
+        provisional=bool(verdict.provisional),
+        write_outcome=outcome,
+        reason_code=_LADDER_NO_ROW_REASON.get(outcome),
+        rungs_readable=readable,
+        rungs_unavailable=list(unavailable),
+        answering_rung=str(provenance.get("winning_rung") or "") or None,
+        extraction={
+            "ran": bool(extraction.get("ran")),
+            "skipped_reason": extraction.get("skipped_reason"),
+            "docs_read": stats.get("docs_read"),
+            "calls_made": stats.get("calls_made"),
+            "cost_usd": stats.get("cost_usd"),
+            "budget_capped": stats.get("budget_capped"),
+            "n_rejected": len(stats.get("rejected") or []),
+        },
+        detail={
+            "flags": list(verdict.flags) if getattr(verdict, "flags", None) else [],
+            "rungs_populated": decision.get("rungs_populated") or [],
+            "rungs_empty": decision.get("rungs_empty") or [],
+            "ceiling": decision.get("ceiling"),
+            "n_candidates": len(candidates),
+        },
+        run_type=run_type,
+    )
 
 
 def triggered_iso3s(
