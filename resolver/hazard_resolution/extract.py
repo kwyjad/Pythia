@@ -227,39 +227,73 @@ class ExtractionBudget:
     backcast_max_calls_per_month: int | None = None
     backcast_used_this_month: int = 0
     live_reserve_calls: int = 0
+    #: Optional ceiling on ONE run's calls (``extraction.max_calls_per_run``),
+    #: for a live pass that must fit a workflow step: the budget, not a step
+    #: timeout, is then what stops it, and a budget stop is recorded per cell
+    #: while a timeout records nothing.
+    max_calls_per_run: int | None = None
 
-    @property
-    def remaining(self) -> int:
-        overall = max(
-            0, self.max_calls_per_month - self.used_this_month - self.calls_this_run
-        )
+    def _limits(self) -> list[tuple[str, int]]:
+        """Every limit in force, named, so the binding one can be reported."""
+
+        limits = [(
+            "monthly total",
+            max(0, self.max_calls_per_month - self.used_this_month - self.calls_this_run),
+        )]
+        if self.max_calls_per_run is not None:
+            limits.append(("per-run cap", max(0, self.max_calls_per_run - self.calls_this_run)))
         if self.run_type != "backcast":
-            return overall
-
-        limits = [overall]
+            return limits
         if self.backcast_max_calls_per_month is not None:
-            limits.append(
+            limits.append((
+                "backcast share",
                 max(
                     0,
                     self.backcast_max_calls_per_month
                     - self.backcast_used_this_month
                     - self.calls_this_run,
-                )
-            )
+                ),
+            ))
         if self.live_reserve_calls:
             # What the backcast may spend before it starts eating the live
             # pass's reserve. Counted against the WHOLE month's usage, so a
             # backcast that has already run tonight cannot ignore it.
-            limits.append(
+            limits.append((
+                "live reserve",
                 max(
                     0,
                     self.max_calls_per_month
                     - self.live_reserve_calls
                     - self.used_this_month
                     - self.calls_this_run,
-                )
-            )
-        return min(limits)
+                ),
+            ))
+        return limits
+
+    @property
+    def remaining(self) -> int:
+        return min(value for _, value in self._limits())
+
+    @property
+    def binding_limit(self) -> str:
+        """Which limit is the tightest, e.g. ``backcast share (2000)``.
+
+        Last night's log said "monthly cap of 3000 reached" when the 2,000
+        backcast share was what had bound; a message that names the wrong
+        limit sends the reader to the wrong knob.
+        """
+
+        name, _ = min(self._limits(), key=lambda pair: pair[1])
+        values = {
+            "monthly total": self.max_calls_per_month,
+            "per-run cap": self.max_calls_per_run,
+            "backcast share": self.backcast_max_calls_per_month,
+            "live reserve": (
+                self.max_calls_per_month - self.live_reserve_calls
+                if self.live_reserve_calls else None
+            ),
+        }
+        return f"{name} ({values.get(name)})"
 
     @property
     def exhausted(self) -> bool:
@@ -278,8 +312,11 @@ class ExtractionBudget:
             "cost_this_run_usd": round(self.cost_this_run_usd, 4),
             "remaining": self.remaining,
             "capped": self.exhausted,
+            "binding_limit": self.binding_limit,
             "run_type": self.run_type,
         }
+        if self.max_calls_per_run is not None:
+            out["max_calls_per_run"] = self.max_calls_per_run
         if self.run_type == "backcast" and self.backcast_max_calls_per_month is not None:
             out["backcast_max_calls_per_month"] = self.backcast_max_calls_per_month
             out["backcast_used_this_month_before_run"] = self.backcast_used_this_month
@@ -783,6 +820,8 @@ def load_budget(
         reserve = int(rulebook.get("extraction.live_reserve_calls"))
     except Exception:  # noqa: BLE001 - older rulebooks have no such key
         reserve = 0
+    raw_run_cap = rulebook.get("extraction.max_calls_per_run", None)
+    run_cap = int(raw_run_cap) if raw_run_cap is not None else None
     budget = ExtractionBudget(
         max_calls_per_month=int(rulebook.get("extraction.max_calls_per_month")),
         used_this_month=calls_this_calendar_month(con, today=today),
@@ -790,6 +829,7 @@ def load_budget(
         backcast_max_calls_per_month=backcast_cap,
         backcast_used_this_month=backcast_used,
         live_reserve_calls=reserve,
+        max_calls_per_run=run_cap,
     )
     LOG.info(
         "[extract] budget: %d of %d extraction calls already made this calendar "
@@ -869,6 +909,28 @@ def write_extraction(
 
     ensure_haz_schema(con)
     year, month = _year_month(ym)
+    if status != "ok":
+        # INSERT OR REPLACE would let a transient failure overwrite an ok
+        # row for the same key, and only load_cached_extraction's short
+        # circuit stood between that and a paid answer being lost. Keep the
+        # ok row; the failed attempt is logged and costs nothing.
+        existing = con.execute(
+            """
+            SELECT 1 FROM haz_doc_extractions
+            WHERE doc_id = ? AND model = ? AND prompt_version = ?
+              AND iso3 = ? AND hazard = ? AND year = ? AND month = ?
+              AND status = 'ok'
+            """,
+            [str(document.get("doc_id") or ""), model, prompt_version,
+             iso3.upper(), hazard, year, month],
+        ).fetchone()
+        if existing:
+            LOG.debug(
+                "[extract] keeping the cached ok extraction for %s %s %s doc %s "
+                "over a failed re-read (%s)",
+                iso3, hazard, ym, document.get("doc_id"), error,
+            )
+            return
     payload = {
         "figures": [f.as_dict() for f in figures],
         "rejected": rejected,
@@ -998,9 +1060,9 @@ def extract_for_cell(
                 result.budget_capped = True
                 budget.note_capped(f"{iso3}/{hazard}/{ym}")
                 LOG.warning(
-                    "[extract] monthly extraction cap (%d) reached — %s %s %s has "
+                    "[extract] extraction budget exhausted at its %s — %s %s %s has "
                     "unread documents; the rung is UNREAD, not empty",
-                    budget.max_calls_per_month, iso3, hazard, ym,
+                    budget.binding_limit, iso3, hazard, ym,
                 )
             continue
 

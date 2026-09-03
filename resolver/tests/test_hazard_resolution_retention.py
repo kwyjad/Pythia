@@ -176,3 +176,45 @@ class TestResilience:
         text = "\n".join(retention.summarize(retention.compact_all(con)))
         assert "TOTAL" in text
         assert "never truncates" in text
+
+
+class TestSwapAndKeep:
+    def test_the_live_table_is_never_unbound_and_scratch_is_cleaned(self, con):
+        # A previous kill mid-swap can leave either scratch table behind.
+        con.execute("CREATE TABLE haz_raw_gdacs__compact (x INTEGER)")
+        con.execute("CREATE TABLE haz_raw_gdacs__old (x INTEGER)")
+        _revision(con, "gdacs", "e1", {"a": 1}, iso3="PHL", ym="2024-01", hazard="FL",
+                  stamp="2024-01-01 00:00:00")
+        _revision(con, "gdacs", "e1", {"a": 2}, iso3="PHL", ym="2024-01", hazard="FL",
+                  stamp="2024-01-02 00:00:00")
+        result = retention.compact_raw_cache(con, "gdacs", apply=True)
+        assert result["rows_after"] == 1
+        tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+        assert "haz_raw_gdacs" in tables
+        assert "haz_raw_gdacs__compact" not in tables
+        assert "haz_raw_gdacs__old" not in tables
+        # The newest revision survives.
+        payloads = load_raw_records(con, "gdacs", hazard="FL")
+        assert [p["a"] for p in payloads] == [2]
+
+    def test_keep_revisions_comes_from_the_rulebook(self, con):
+        for day in (1, 2, 3):
+            _revision(con, "gdacs", "e1", {"a": day}, iso3="PHL", ym="2024-01",
+                      hazard="FL", stamp=f"2024-01-0{day} 00:00:00")
+        plan = retention.compact_raw_cache(con, "gdacs", apply=False, keep=2)
+        assert plan["rows_after"] == 2
+        applied = retention.compact_raw_cache(con, "gdacs", apply=True, keep=2)
+        assert applied["rows_after"] == 2
+        assert applied["keep"] == 2
+
+    def test_compact_all_reads_keep_revisions_per_record(self, con, monkeypatch):
+        class _RB:
+            def get(self, key, default=None):
+                assert key == "raw_cache.keep_revisions_per_record"
+                return 3
+
+        for day in (1, 2, 3, 4):
+            _revision(con, "gdacs", "e1", {"a": day}, iso3="PHL", ym="2024-01",
+                      hazard="FL", stamp=f"2024-01-0{day} 00:00:00")
+        out = retention.compact_all(con, sources=["gdacs"], apply=True, rulebook=_RB())
+        assert out["gdacs"]["rows_after"] == 3

@@ -104,6 +104,7 @@ RULE_NO_BASELINE = "no_data:no_previous_ipc_analysis"
 RULE_NOT_ATTRIBUTED = "no_data:ipc_deterioration_not_drought_attributed"
 RULE_PENDING = "pending:awaiting_ipc_analysis_before_freeze"
 RULE_INCONCLUSIVE = "inconclusive:drought_indicator_unavailable"
+RULE_NO_COVERAGE = "inconclusive:no_indicator_covers_country"
 
 FLAG_NO_ANALYSIS = "no_ipc_analysis_past_freeze"
 FLAG_NO_BASELINE = "no_baseline_analysis_past_freeze"
@@ -352,6 +353,22 @@ def decide_drought(
         )
 
     # --- Nothing happened: no drought signal AND no IPC deterioration. ---
+    # ...provided some feed actually looked at this country. Every answer
+    # inferred from absence says "no feed warned about it", which is true of
+    # a country no feed monitors, and that is not evidence it was quiet.
+    if not indicators.shows_drought and not qualifies and not indicators.has_coverage:
+        return _decide(
+            triggered=False,
+            trigger_source=TRIGGER_SOURCE_NONE,
+            status=STATUS_INCONCLUSIVE,
+            value=None,
+            rule_fired=RULE_NO_COVERAGE,
+            note=(
+                f"{indicators.present_count} indicator reading(s) named {iso3} "
+                f"(rulebook asks for {indicators.min_present_readings}); the rest "
+                "answered from absence, which is not coverage — no zero"
+            ),
+        )
     if not indicators.shows_drought and not qualifies:
         return _decide(
             triggered=False,
@@ -526,6 +543,12 @@ def decide_drought(
     )
 
 
+#: Guard on a month that zeroes nearly everything on absence alone. Below
+#: the cell floor a small country filter can legitimately be all-quiet.
+_MASS_ZERO_MIN_CELLS = 20
+_MASS_ZERO_SHARE = 0.9
+
+
 @dataclass
 class DroughtRun:
     """What one month's drought pass did."""
@@ -538,6 +561,14 @@ class DroughtRun:
     no_data: int = 0
     pending: int = 0
     inconclusive: int = 0
+    #: Of the inconclusive cells, how many were so because no feed carried a
+    #: reading for the country (RULE_NO_COVERAGE) rather than because a feed
+    #: could not be read.
+    no_coverage: int = 0
+    #: Zeros resting on evidence of absence (RULE_ZERO_ABSENCE). A month
+    #: that zeroes nearly every assessed cell this way is one alerting feed
+    #: away from having zeroed the world, and says so.
+    zero_absence: int = 0
     flagged: int = 0
     provisional: int = 0
     frozen_skipped: int = 0
@@ -560,8 +591,13 @@ def resolve_country_month(
     ym: str,
     rulebook: Rulebook,
     today: dt.date | None = None,
+    indicator_cache: dict[Any, Any] | None = None,
 ) -> DroughtDecision:
-    """Load a cell's inputs and decide it. All I/O, no rules."""
+    """Load a cell's inputs and decide it. All I/O, no rules.
+
+    ``indicator_cache`` is the per-run snapshot cache ``run_month`` owns; a
+    lone call may omit it.
+    """
 
     from resolver.hazard_resolution.impact import national_population
 
@@ -571,7 +607,9 @@ def resolve_country_month(
         iso3=iso3,
         ym=ym,
         analyses=ipc_mod.analyses_for_country(con, iso3, rulebook),
-        indicators=ind_mod.evaluate_indicators(con, iso3, ym, rulebook),
+        indicators=ind_mod.evaluate_indicators(
+            con, iso3, ym, rulebook, cache=indicator_cache
+        ),
         rulebook=rulebook,
         national_population=national_population(con, iso3, year),
         today=today,
@@ -611,11 +649,14 @@ def run_month(
         max_point_time=None,
     )
     decisions: list[DroughtDecision] = []
+    # One snapshot load per (feed, month) for the whole pass, not per country.
+    indicator_cache: dict[Any, Any] = {}
 
     for iso3 in sorted({c.upper() for c in iso3s}):
         try:
             decision = resolve_country_month(
-                con, iso3=iso3, ym=ym, rulebook=rulebook, today=today
+                con, iso3=iso3, ym=ym, rulebook=rulebook, today=today,
+                indicator_cache=indicator_cache,
             )
         except Exception as exc:  # noqa: BLE001 - one bad cell must not end the month
             run.failed_cells.append(f"{iso3}: {type(exc).__name__}: {exc}")
@@ -646,11 +687,13 @@ def run_month(
             run.provisional += int(decision.provisional)
         elif decision.status == STATUS_RESOLVED_ZERO:
             run.resolved_zero += 1
+            run.zero_absence += int(decision.rule_fired == RULE_ZERO_ABSENCE)
             run.provisional += int(decision.provisional)
         elif decision.status == STATUS_NO_DATA:
             run.no_data += 1
         elif decision.status == STATUS_INCONCLUSIVE:
             run.inconclusive += 1
+            run.no_coverage += int(decision.rule_fired == RULE_NO_COVERAGE)
         else:
             run.pending += 1
         run.flagged += int(decision.flagged)
@@ -737,6 +780,8 @@ def _ledger_decision(
     if not cell_ledger.enabled():
         return
     reason = _DROUGHT_NO_ROW_REASON.get(decision.status)
+    if decision.rule_fired == RULE_NO_COVERAGE:
+        reason = cell_ledger.REASON_NO_COVERAGE
     if outcome == res_mod.WRITE_FROZEN_SKIP:
         reason = cell_ledger.REASON_FROZEN
     indicators = (decision.provenance.get("decision") or {}).get("indicators")
@@ -771,12 +816,28 @@ def _log_run(run: DroughtRun, unavailable: list[str]) -> None:
         run.pending, run.inconclusive, run.flagged, run.provisional,
         run.frozen_skipped,
     )
-    if run.inconclusive:
+    unread = run.inconclusive - run.no_coverage
+    if unread:
         LOG.warning(
             "[drought] %s: %d cells were inconclusive because a required drought "
             "indicator could not be read — those cells have no row, which is not "
             "the same as a zero",
-            run.ym, run.inconclusive,
+            run.ym, unread,
+        )
+    if run.no_coverage:
+        LOG.warning(
+            "[drought] %s: %d cells were inconclusive because no indicator carried "
+            "a reading for the country — an alerting feed that never monitored a "
+            "country has not said it is quiet; those cells have no row",
+            run.ym, run.no_coverage,
+        )
+    if run.cells >= _MASS_ZERO_MIN_CELLS and run.zero_absence > _MASS_ZERO_SHARE * run.cells:
+        LOG.error(
+            "[drought] %s: %d of %d assessed cells resolved ZERO on evidence of "
+            "absence alone — that is one alerting feed away from zeroing the "
+            "world; check drought.indicators.min_present_readings and the feeds' "
+            "coverage before trusting these rows",
+            run.ym, run.zero_absence, run.cells,
         )
     if run.failed_cells:
         LOG.error(

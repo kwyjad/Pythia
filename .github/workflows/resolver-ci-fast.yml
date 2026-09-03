@@ -38,6 +38,17 @@ on:
       # vintage stall, and each verdict points at a different fix.
       - "scripts/ci/diagnose_acled_cast.py"
       - "scripts/ci/tests/test_diagnose_acled_cast.py"
+      # Guards resolver/hazard_resolution/emdat.py the same way.
+      - "scripts/ci/diagnose_emdat.py"
+      - "scripts/ci/tests/test_diagnose_emdat.py"
+      # The signature gate decides whether every DB-producing workflow may
+      # upload canonical; its tests ran in no workflow until Sept 2026.
+      - "scripts/ci/db_signature.py"
+      - "scripts/ci/tests/test_db_signature.py"
+      # The shell-sanity rules cover the composite action and the resolver
+      # workflow, so a change to either must run them.
+      - ".github/actions/**"
+      - ".github/workflows/resolver_update.yml"
       # Guards resolver/tests/test_resolver_debug_bundle.py: the builder lives
       # under scripts/ but every question it answers is a resolver question,
       # and a lint that guards a directory must run when that directory
@@ -76,6 +87,17 @@ on:
       # vintage stall, and each verdict points at a different fix.
       - "scripts/ci/diagnose_acled_cast.py"
       - "scripts/ci/tests/test_diagnose_acled_cast.py"
+      # Guards resolver/hazard_resolution/emdat.py the same way.
+      - "scripts/ci/diagnose_emdat.py"
+      - "scripts/ci/tests/test_diagnose_emdat.py"
+      # The signature gate decides whether every DB-producing workflow may
+      # upload canonical; its tests ran in no workflow until Sept 2026.
+      - "scripts/ci/db_signature.py"
+      - "scripts/ci/tests/test_db_signature.py"
+      # The shell-sanity rules cover the composite action and the resolver
+      # workflow, so a change to either must run them.
+      - ".github/actions/**"
+      - ".github/workflows/resolver_update.yml"
       # Guards resolver/tests/test_resolver_debug_bundle.py: the builder lives
       # under scripts/ but every question it answers is a resolver question,
       # and a lint that guards a directory must run when that directory
@@ -208,7 +230,7 @@ jobs:
           fi
 
           # Real run with JUnit
-          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest resolver/tests resolver/ingestion/tests scripts/ci/tests/test_inspect_resolver_db.py scripts/ci/tests/test_diagnose_acled_cast.py -q -n auto --dist=worksteal --junitxml $ART_DIR/pytest-junit.xml"
+          bash scripts/ci/run_and_capture.sh pytest-${{ runner.os }} "pytest resolver/tests resolver/ingestion/tests scripts/ci/tests/test_inspect_resolver_db.py scripts/ci/tests/test_diagnose_acled_cast.py scripts/ci/tests/test_diagnose_emdat.py scripts/ci/tests/test_db_signature.py -q -n auto --dist=worksteal --junitxml $ART_DIR/pytest-junit.xml"
 
           # Mirror to legacy root filename for collectors that still look there
           if [ -f "$ART_DIR/pytest-junit.xml" ]; then

@@ -359,7 +359,62 @@ _INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_haz_triggers_lookup ON haz_triggers (iso3, hazard, year, month)",
     "CREATE INDEX IF NOT EXISTS idx_haz_impact_candidates_lookup ON haz_impact_candidates (iso3, hazard, year, month)",
     "CREATE INDEX IF NOT EXISTS idx_haz_resolutions_lookup ON haz_resolutions (iso3, hazard, year, month)",
+    # The raw caches had no index at all: every per-cell reader filtered
+    # haz_raw_gdacs / haz_raw_drought_indicators by hazard (and month) with a
+    # full scan, once or twice per cell.
+) + tuple(
+    f"CREATE INDEX IF NOT EXISTS idx_{raw_table_name(source)}_lookup "
+    f"ON {raw_table_name(source)} (hazard, ym, iso3)"
+    for source in RAW_SOURCES
+    if source != "population"
 )
+
+#: UNIQUE keys the code relies on but CREATE TABLE IF NOT EXISTS cannot
+#: change once a table exists (DuckDB cannot ALTER a constraint). Checked at
+#: ensure time and WARNED about: the haz_doc_extractions key was widened in
+#: Aug 2026 (#850) and nothing verified a pre-existing table carried it —
+#: on the old key, INSERT OR REPLACE for one cell deletes another cell's
+#: cached extraction and the document is re-billed for both, forever.
+_EXPECTED_UNIQUE_KEYS: dict[str, tuple[str, ...]] = {
+    "haz_doc_extractions": (
+        "doc_id", "model", "prompt_version", "iso3", "hazard", "year", "month"
+    ),
+}
+
+
+def unique_key_problems(conn: "duckdb.DuckDBPyConnection") -> list[str]:
+    """Tables whose UNIQUE key differs from what the code expects.
+
+    Returns human-readable lines, one per mismatch; empty when every key is
+    as declared or the constraint catalogue is unavailable.
+    """
+
+    problems: list[str] = []
+    try:
+        rows = conn.execute(
+            """
+            SELECT table_name, constraint_column_names
+            FROM duckdb_constraints()
+            WHERE constraint_type IN ('UNIQUE', 'PRIMARY KEY')
+            """
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - older DuckDB, or no catalogue
+        return problems
+    found: dict[str, list[tuple[str, ...]]] = {}
+    for table, columns in rows:
+        found.setdefault(str(table), []).append(tuple(str(c) for c in (columns or [])))
+    for table, expected in _EXPECTED_UNIQUE_KEYS.items():
+        keys = found.get(table)
+        if keys is None:
+            continue  # table absent or no constraints: nothing to compare
+        if not any(set(key) == set(expected) for key in keys):
+            problems.append(
+                f"{table}: UNIQUE key is {[list(k) for k in keys]}, the code expects "
+                f"{list(expected)} — the table predates the key change and must be "
+                "rebuilt (CREATE new; INSERT; DROP; RENAME) before extraction caches "
+                "can be trusted"
+            )
+    return problems
 
 
 def haz_table_names() -> tuple[str, ...]:
@@ -425,6 +480,9 @@ def ensure_haz_schema(
 
     for ddl in _INDEX_DDL:
         conn.execute(ddl)
+
+    for problem in unique_key_problems(conn):
+        LOG.warning("[schema] %s", problem)
 
     _ENSURED_CONNECTIONS.add(conn)
     LOG.info("haz schema ensured | tables=%s", ", ".join(tables))

@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 from resolver.hazard_resolution.reliefweb_sweep import PostFn, appname, default_post
 from resolver.hazard_resolution.rulebook import (
     RULEBOOK_NAME_BY_HAZARD_CODE,
+    SWEEP_HAZARD_KEYS,
     Rulebook,
 )
 from resolver.hazard_resolution.sources import (
@@ -249,16 +250,24 @@ def fetch_documents(
     timeout = float(rulebook.get("reliefweb.documents.request_timeout_sec"))
 
     outcome = FetchOutcome(source=SOURCE, ok=False, source_urls=[api_url])
-    if hazard not in RULEBOOK_NAME_BY_HAZARD_CODE:
-        outcome.error = f"no rulebook hazard name for hazard code {hazard!r}"
+    # Guard on the hazards that HAVE a sweep block, not on every hazard the
+    # rulebook names: drought is a rulebook hazard with no
+    # reliefweb_sweep.disaster_types, and the old guard let it through to a
+    # KeyError out of a function documented "never raises".
+    hazard_key = RULEBOOK_NAME_BY_HAZARD_CODE.get(hazard)
+    if hazard_key is None or hazard_key not in SWEEP_HAZARD_KEYS:
+        outcome.error = (
+            f"no ReliefWeb document selection for hazard code {hazard!r} "
+            "(no reliefweb_sweep block in the rulebook)"
+        )
         LOG.warning("[reliefweb_docs] %s", outcome.error)
         return outcome
 
-    payload = _payload(iso3, ym, hazard, rulebook)
     post = post or default_post
     try:
+        payload = _payload(iso3, ym, hazard, rulebook)
         data = post(api_url, payload, {"appname": appname()}, timeout)
-    except Exception as exc:  # requests errors, JSON errors
+    except Exception as exc:  # requests errors, JSON errors, rulebook keys
         LOG.warning(
             "[reliefweb_docs] fetch failed for %s %s %s: %s", iso3, hazard, ym, exc
         )

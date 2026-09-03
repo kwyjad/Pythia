@@ -1,2 +1,26 @@
+# Runtime pins for every CI workflow that installs the project with
+# `pip install -c constraints-ci.txt -e '.[...]'`. Until Sept 2026 this file
+# pinned only two pytest plugins, neither of which the ingest workflows
+# install, so the 5-hour monthly Resolver Update resolved duckdb, pandas,
+# numpy and the whole geospatial stack to whatever PyPI served that morning
+# — pandas 3.0 landed there first and nowhere else. These are the versions a
+# green run installed on 2026-09-03; bump them deliberately, in a PR, with
+# the resolver tests green.
 pytest-timeout==2.3.1
 pytest-xdist==3.6.1
+duckdb==1.5.5
+pandas==2.3.3
+numpy==2.4.6
+pyarrow==25.0.1
+geopandas==1.1.4
+shapely==2.1.2
+pyproj==3.7.2
+xarray==2025.12.0
+netCDF4==1.7.4
+regionmask==0.13.0
+requests==2.34.2
+openai==1.109.1
+httpx==0.28.1
+pycountry==24.6.1
+beautifulsoup4==4.15.0
+pdfplumber==0.11.10

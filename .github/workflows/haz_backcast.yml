@@ -58,6 +58,16 @@ concurrency:
         required: false
         default: false
         type: boolean
+      no_resume_hazards:
+        description: >-
+          Hazards to re-walk from the start of their window, ignoring the
+          resume ledger (space-separated, e.g. "drought"). Use it once after a
+          fix that changes what a month resolves: the 2025-06..2026-05 drought
+          months were marked complete while every cell was INCONCLUSIVE, and
+          the ledger will skip them forever otherwise.
+        required: false
+        default: ""
+        type: string
   schedule:
     # Nightly at 20:30 UTC, sized against the 28th 03:00 UTC resolver-update
     # cron: GitHub fires crons late (observed +17 min, up to +60), so worst
@@ -69,7 +79,15 @@ concurrency:
     # (the group holds ONE pending run, so a backcast still holding it at
     # 03:00 puts the monthly ingest into the pending slot a third run can
     # cancel).
-    - cron: "30 20 * * *"
+    #
+    # The 27th and 28th are skipped outright. Crons are delivered HOURS late
+    # in this repo (the 28 Aug 2026 resolver-update tick arrived 11h41m
+    # late), so "before 03:00" is not a promise the sum above can keep, and
+    # the group's single pending slot then cancels whichever of the monthly
+    # ingest, the resolutions chain hanging off it, or this run queued last.
+    # Two nights of a self-converging replay cost nothing; a cancelled
+    # compute_resolutions costs the month's scores and calibration.
+    - cron: "30 20 1-26,29-31 * *"
 
 permissions:
   contents: read
@@ -178,6 +196,18 @@ jobs:
       - name: Prepare diagnostics directory
         run: mkdir -p diagnostics
 
+      # The population cap and the population-share ceiling read
+      # haz_raw_population, and nothing loaded it in CI until Sept 2026 —
+      # so the cap never fired and a cell with no GDACS exposure had no
+      # upper bound at all. Idempotent (delete-then-insert), seconds.
+      - name: Load national population denominators
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          python -m resolver.hazard_resolution.population 2>&1 \
+            | tee diagnostics/haz_population.log
+
       # The total budget is split evenly across the requested hazards, and a
       # hazard whose window is already covered exits in seconds — so once
       # flood converges its share flows to cyclone on the clock, not by
@@ -190,6 +220,7 @@ jobs:
           TO_YM: ${{ inputs.to_ym || '' }}
           NO_EXTRACT: ${{ github.event_name == 'workflow_dispatch' && (inputs.no_extract == true || inputs.no_extract == 'true') && 'true' || 'false' }}
           TIME_BUDGET_MIN: ${{ inputs.time_budget_min || '240' }}
+          NO_RESUME_HAZARDS: ${{ inputs.no_resume_hazards || '' }}
         run: |
           set -uo pipefail
           # Re-assigning from the env (with the same default the env mapping
@@ -210,6 +241,9 @@ jobs:
             if [ "${NO_EXTRACT}" = "true" ]; then
               CMD="${CMD} --no-extract"
             fi
+            case " ${NO_RESUME_HAZARDS} " in
+              *" ${HZ} "*) CMD="${CMD} --no-resume" ;;
+            esac
             echo "::group::backcast ${HZ}"
             if ${CMD} 2>&1 | tee "diagnostics/haz_backcast_${HZ}.log"; then
               echo "backcast ${HZ}: ok"
@@ -225,6 +259,18 @@ jobs:
         run: |
           set -euo pipefail
           python -m resolver.hazard_resolution.base_rates 2>&1 | tee diagnostics/haz_base_rates.log
+
+      # The Dartmouth Flood Observatory archive is calibration only (it never
+      # triggers, never supplies a value), but until Sept 2026 nothing ever
+      # fetched it, so every acceptance report said the archive "may be
+      # unreachable" when in fact nothing had tried. One download a night is
+      # a no-op once cached (content-hash dedup).
+      - name: Fetch DFO calibration archive
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          python -m resolver.hazard_resolution.dfo 2>&1 | tee diagnostics/haz_dfo.log
 
       # Between base rates and the regression guard on purpose: the signature
       # compare then runs over the POST-retention DB, so a retention bug is

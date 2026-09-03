@@ -69,6 +69,10 @@ _KNOWN_IPC_SOURCES = ("ipc_api", "facts_resolved")
 
 #: Drought-indicator feed shapes the machine knows how to parse.
 _KNOWN_INDICATOR_PROVIDERS = ("asap", "tabular", "pythia_table")
+#: Substrings a pythia_table indicator's where clause may not contain: each
+#: names a food-insecurity quantity, and the drought rule differences exactly
+#: that. (Matched case-insensitively against the clause text.)
+_CIRCULAR_INDICATOR_TOKENS = ("ipc_food_insecurity", "phase3plus", "fews")
 _KNOWN_INDICATOR_MATCHES = ("classes", "threshold")
 _KNOWN_INDICATOR_COMBINE = ("any", "all")
 _KNOWN_INDICATOR_DIRECTIONS = ("below", "above")
@@ -407,6 +411,14 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
             "extraction.max_calls_per_month — the sub-cap carves a backcast "
             "share OUT of the monthly total, it does not add to it"
         )
+    run_cap = _get("extraction.max_calls_per_run")
+    if run_cap is not _MISSING and run_cap is not None and (
+        not isinstance(run_cap, int) or isinstance(run_cap, bool) or run_cap < 0
+    ):
+        problems.append(
+            "extraction.max_calls_per_run must be a non-negative integer when "
+            f"set (absent means no per-run cap), got {run_cap!r}"
+        )
     _require_int_in("extraction.live_reserve_calls", 0, 1_000_000)
     _reserve = _get("extraction.live_reserve_calls")
     if (
@@ -464,6 +476,10 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     # >= 1: at zero, an outage in every feed would read as "no drought
     # anywhere" and the machine would zero the whole world.
     _require_int_in("drought.indicators.min_available", 1, 10)
+    # 0 restores the pre-Sept-2026 behaviour (a zero may rest on absence
+    # alone); the shipped rulebook asks for one reading that named the
+    # country, so an alerting feed that never monitored it cannot zero it.
+    _require_int_in("drought.indicators.min_present_readings", 0, 10)
     entries = _require("drought.indicators.entries")
     if entries is not _MISSING:
         if not isinstance(entries, list) or not entries:
@@ -589,6 +605,28 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
                             f"{where}.where must be a single SQL filter with no "
                             f"';', got {clause!r}"
                         )
+                    # An indicator may never be the quantity the rule
+                    # differences. Admitting IPC Phase 3+ (or HDX's
+                    # IPC-derived signal) as the drought gate reduces it to
+                    # "IPC rose, therefore drought, because IPC rose".
+                    if isinstance(clause, str):
+                        lowered = clause.lower()
+                        for banned in _CIRCULAR_INDICATOR_TOKENS:
+                            if banned in lowered:
+                                problems.append(
+                                    f"{where}.where admits {banned!r} as drought "
+                                    "evidence — that is the quantity the drought "
+                                    "rule differences, and it may not also be "
+                                    "the attribution gate"
+                                )
+                    offset_col = entry.get("date_offset_column")
+                    if offset_col is not None and (
+                        not isinstance(offset_col, str) or not offset_col.strip()
+                    ):
+                        problems.append(
+                            f"{where}.date_offset_column must be a non-empty "
+                            f"column name, got {offset_col!r}"
+                        )
             if len(set(names)) != len(names):
                 problems.append(f"drought.indicators.entries has duplicate names: {names}")
             # An outage in every feed must never read as "no drought
@@ -673,6 +711,8 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     # 0 disables the fallback; above 1 it would exceed the population cap it
     # is meant to sit under, which would make it inert.
     share = _get("sanity.population_fallback_share")
+    if share is _MISSING:
+        share = None  # optional: absent means 0, and 0 disables it
     if share is not None and (
         not _is_number(share) or not (0.0 <= float(share) <= 1.0)
     ):

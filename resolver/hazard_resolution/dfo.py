@@ -463,8 +463,10 @@ def cross_check(
         return CrossCheck(
             available=False,
             reason=(
-                f"no cached DFO events before {end_year} — run the fetch, or the "
-                "archive endpoint is unreachable (see rulebook dfo.url)"
+                f"no cached DFO events before {end_year} — the archive has not "
+                "been fetched into haz_raw_dfo (python -m "
+                "resolver.hazard_resolution.dfo, run nightly by haz_backcast.yml "
+                "since Sept 2026), or the fetch failed (see rulebook dfo.url)"
             ),
         )
 
@@ -550,3 +552,42 @@ def cross_check(
         divergence_factor=factor,
         n_events=len(events),
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI: fetch the archive into ``haz_raw_dfo``. Always exits 0.
+
+    Calibration only, so a failed fetch is a warning and never a red step:
+    the report says the cross-check could not run, which is a different
+    statement from "the machine agrees with DFO".
+    """
+
+    import argparse
+    import sys
+
+    from resolver.db.duckdb_io import close_db, get_db
+    from resolver.hazard_resolution.rulebook import load_rulebook
+
+    parser = argparse.ArgumentParser(description="Fetch the DFO flood archive")
+    parser.add_argument("--db", default=None, help="DuckDB path or duckdb:/// URL")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO, format="[dfo] %(message)s")
+    rulebook = load_rulebook()
+    con = get_db(args.db)
+    try:
+        outcome = fetch_dfo(con, rulebook)
+    finally:
+        close_db(con)
+    if outcome.ok:
+        print(
+            f"[haz-dfo] archive cached: {outcome.records} events "
+            f"({outcome.inserted} new)"
+        )
+    else:
+        print(f"::warning::DFO archive not fetched: {outcome.error}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI shim
+    raise SystemExit(main())

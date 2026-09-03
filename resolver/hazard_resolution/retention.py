@@ -94,10 +94,36 @@ def _table_exists(con: "duckdb.DuckDBPyConnection", table: str) -> bool:
     return bool(row and row[0])
 
 
+def _keep_revisions(rulebook: Any | None) -> int:
+    """How many revisions per cell to keep — ``raw_cache.keep_revisions_per_record``.
+
+    The rulebook owns the number; this module used to hard-code 1 while the
+    key was validated and read by nothing, which is the "hard-coding a
+    rulebook value in Python" bug the rulebook's own docstring names.
+    """
+
+    if rulebook is None:
+        try:
+            from resolver.hazard_resolution.rulebook import load_rulebook
+
+            rulebook = load_rulebook()
+        except Exception as exc:  # noqa: BLE001 - keep 1 is the safe floor
+            LOG.warning("[retention] rulebook unavailable (%s); keeping 1 revision", exc)
+            return 1
+    try:
+        return max(1, int(rulebook.get("raw_cache.keep_revisions_per_record")))
+    except Exception:  # noqa: BLE001 - older rulebooks have no such key
+        return 1
+
+
 def compact_raw_cache(
-    con: "duckdb.DuckDBPyConnection", source: str, *, apply: bool = False
+    con: "duckdb.DuckDBPyConnection",
+    source: str,
+    *,
+    apply: bool = False,
+    keep: int = 1,
 ) -> dict[str, Any]:
-    """Collapse one raw cache to the newest row per cell.
+    """Collapse one raw cache to the newest ``keep`` row(s) per cell.
 
     ``apply=False`` (the default) reports the plan and writes nothing.
     """
@@ -106,6 +132,7 @@ def compact_raw_cache(
         return {"source": source, "table": table, "present": False,
                 "rows_before": 0, "rows_after": 0, "removed": 0, "applied": False}
 
+    keep = max(1, int(keep))
     partition = ", ".join(_PARTITION)
     rows_before = int(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
     # What a reader would keep. Reported alongside rows_after so the two can be
@@ -115,17 +142,32 @@ def compact_raw_cache(
             f"SELECT COUNT(*) FROM (SELECT DISTINCT {partition} FROM {table})"
         ).fetchone()[0]
     )
+    kept_plan = int(
+        con.execute(
+            f"""
+            SELECT COUNT(*) FROM (
+                SELECT ROW_NUMBER() OVER (
+                    PARTITION BY {partition}
+                    ORDER BY retrieved_at DESC, content_hash DESC
+                ) AS rn FROM {table}
+            ) WHERE rn <= {keep}
+            """
+        ).fetchone()[0]
+    )
 
     if not apply:
         return {
             "source": source, "table": table, "present": True,
-            "rows_before": rows_before, "rows_after": distinct_cells,
-            "removed": rows_before - distinct_cells,
-            "distinct_cells": distinct_cells, "applied": False,
+            "rows_before": rows_before, "rows_after": kept_plan,
+            "removed": rows_before - kept_plan,
+            "distinct_cells": distinct_cells, "keep": keep, "applied": False,
         }
 
     tmp = f"{table}__compact"
+    old = f"{table}__old"
+    # A previous run killed mid-swap can leave either scratch table behind.
     con.execute(f"DROP TABLE IF EXISTS {tmp}")
+    con.execute(f"DROP TABLE IF EXISTS {old}")
     # Recreate from the SAME DDL, so UNIQUE (record_id, content_hash) survives
     # the rebuild. CREATE TABLE AS SELECT would silently drop it.
     con.execute(raw_ddl(source).replace(table, tmp, 1))
@@ -140,12 +182,33 @@ def compact_raw_cache(
             -- content_hash breaks ties so two rows sharing a timestamp
             -- collapse the same way on every run.
             ORDER BY retrieved_at DESC, content_hash DESC
-        ) = 1
+        ) <= {keep}
         """
     )
     rows_after = int(con.execute(f"SELECT COUNT(*) FROM {tmp}").fetchone()[0])
-    con.execute(f"DROP TABLE {table}")
-    con.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
+    # The swap is one transaction and the live name is never unbound: a
+    # kill between a DROP and a RENAME used to leave the DB with no
+    # haz_raw_reliefweb_docs at all, which ensure_haz_schema then recreated
+    # empty — the whole document cache gone, and the job carried on.
+    #
+    # The lookup index (schema._INDEX_DDL) depends on the live table, and
+    # DuckDB refuses to rename or drop a table something depends on — so it
+    # is dropped first and recreated on the new table, inside the same
+    # transaction, under the same name.
+    index_name = f"idx_{table}_lookup"
+    con.execute("BEGIN TRANSACTION")
+    try:
+        con.execute(f"DROP INDEX IF EXISTS {index_name}")
+        con.execute(f"ALTER TABLE {table} RENAME TO {old}")
+        con.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
+        con.execute(f"DROP TABLE {old}")
+        con.execute(
+            f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} (hazard, ym, iso3)"
+        )
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
 
     LOG.info(
         "[retention] %s: %d -> %d rows (%d duplicate revisions removed)",
@@ -155,7 +218,7 @@ def compact_raw_cache(
         "source": source, "table": table, "present": True,
         "rows_before": rows_before, "rows_after": rows_after,
         "removed": rows_before - rows_after,
-        "distinct_cells": distinct_cells, "applied": True,
+        "distinct_cells": distinct_cells, "keep": keep, "applied": True,
     }
 
 
@@ -164,15 +227,17 @@ def compact_all(
     *,
     sources: Iterable[str] | None = None,
     apply: bool = False,
+    rulebook: Any | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Compact every raw cache. One bad table must not lose the rest."""
 
     ensure_haz_schema(con)
+    keep = _keep_revisions(rulebook)
     wanted = tuple(sources) if sources is not None else COMPACTABLE_SOURCES
     out: dict[str, dict[str, Any]] = {}
     for source in wanted:
         try:
-            out[source] = compact_raw_cache(con, source, apply=apply)
+            out[source] = compact_raw_cache(con, source, apply=apply, keep=keep)
         except Exception as exc:
             LOG.error("[retention] %s failed: %s", source, exc)
             out[source] = {"source": source, "error": str(exc), "applied": False}

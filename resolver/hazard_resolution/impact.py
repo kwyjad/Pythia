@@ -74,6 +74,9 @@ class LadderRun:
     extraction_calls: int = 0
     extraction_cost_usd: float = 0.0
     extraction_budget_capped: bool = False
+    #: Cells reconciled with ceiling basis "none": no positive GDACS
+    #: exposure and no population denominator, so no sanity bound at all.
+    no_ceiling: int = 0
 
     @property
     def unavailable_sources(self) -> list[str]:
@@ -403,6 +406,10 @@ def resolve_triggered_cells(
             verdict.provenance["reliefweb_extraction"] = extraction_provenance
 
             run.cells += 1
+            ceiling_basis = (
+                (verdict.provenance.get("decision") or {}).get("ceiling") or {}
+            ).get("basis")
+            run.no_ceiling += int(ceiling_basis == "none")
             if verdict.status == reconcile_mod.STATUS_RESOLVED_VALUE:
                 run.resolved_value += 1
                 run.provisional += int(verdict.provisional)
@@ -473,10 +480,18 @@ def resolve_triggered_cells(
         )
         if budget.exhausted:
             LOG.warning(
-                "[impact] extraction stopped at the monthly cap of %d calls; "
+                "[impact] extraction stopped at its %s; "
                 "cells with unread documents: %s",
-                budget.max_calls_per_month, ",".join(budget.capped_cells) or "(none)",
+                budget.binding_limit, ",".join(budget.capped_cells) or "(none)",
             )
+    if run.no_ceiling:
+        LOG.warning(
+            "[impact] %s %s: %d of %d cells were reconciled with NO upper bound "
+            "(no positive GDACS exposure and no population denominator) — "
+            "a mis-transcribed figure there is caught by nothing; run "
+            "haz-population if haz_raw_population is empty",
+            hazard, ym, run.no_ceiling, run.cells,
+        )
     return run
 
 
@@ -536,6 +551,7 @@ def _ledger_cell(
             "rungs_populated": decision.get("rungs_populated") or [],
             "rungs_empty": decision.get("rungs_empty") or [],
             "ceiling": decision.get("ceiling"),
+            "ceiling_basis": (decision.get("ceiling") or {}).get("basis"),
             "n_candidates": len(candidates),
         },
         run_type=run_type,

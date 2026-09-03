@@ -245,7 +245,11 @@ def load_raw_records(
         WITH latest AS (
             SELECT record_id, payload_json, source_url, retrieved_at,
                    ROW_NUMBER() OVER (
-                       PARTITION BY record_id ORDER BY retrieved_at DESC
+                       PARTITION BY record_id
+                       -- content_hash breaks ties so two revisions written in
+                       -- the same second resolve the same way on every run,
+                       -- and the same way retention.py keeps them.
+                       ORDER BY retrieved_at DESC, content_hash DESC
                    ) AS rn
             FROM {table}
             {clause}

@@ -160,10 +160,17 @@ def sweep_and_resolve_zeros(
 
     def ledger(row, *, outcome: str, reason: str | None, sweep: dict) -> None:
         """One assessed non-triggered cell, and why it did or did not get a row."""
+        flipped = reason == cell_ledger.REASON_FLIPPED
         cell_ledger.record_cell(
             stage=cell_ledger.STAGE_SWEEP,
             iso3=row.iso3, hazard=result.hazard, ym=result.ym,
-            triggered=False, trigger_source=row.trigger_source,
+            # A flipped cell IS triggered from here on — a reader counting
+            # triggered cells from the ledger must not undercount by the
+            # number the sweep promoted.
+            triggered=flipped,
+            trigger_source=(
+                detect_mod.TRIGGER_SOURCE_RELIEFWEB if flipped else row.trigger_source
+            ),
             status=(
                 res_mod.STATUS_RESOLVED_ZERO if outcome == res_mod.WRITE_WRITTEN else None
             ),
@@ -665,6 +672,9 @@ def _log_drought_summary(ym: str, run, dry: str) -> None:
     LOG.info("  no data (flagged):         %d", run.no_data)
     LOG.info("  pending (pre-freeze):      %d", run.pending)
     LOG.info("  inconclusive (no row):     %d", run.inconclusive)
+    no_coverage = int(getattr(run, "no_coverage", 0) or 0)
+    if no_coverage:
+        LOG.info("    of which no feed covers:  %d", no_coverage)
     LOG.info("  flagged for review:        %d", run.flagged)
     LOG.info("  provisional (pre-freeze):  %d", run.provisional)
     LOG.info("  frozen (skipped, logged):  %d", run.frozen_skipped)
@@ -998,6 +1008,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         if rc != 0:
             failures += 1
             LOG.error("[cli] %s %s failed (exit %d)", hazard, ym, rc)
+        # After EVERY month, not only at the end: a step timeout kills the
+        # process between months, and a summary written only at the end
+        # then says nothing about the months that did finish.
+        if args.summary_out and len(target_months) > 1:
+            _write_run_summary(
+                args.summary_out,
+                hazard_name=hazard,
+                months=target_months,
+                month_rcs=month_rcs,
+                failures=failures,
+                started=started,
+                db_url=args.db or None,
+                dry_run=args.dry_run,
+            )
 
     if len(target_months) > 1:
         LOG.info(

@@ -200,6 +200,17 @@ drought:
     # It must stay >= 1: at zero, an outage in every feed would read as "no
     # drought anywhere" and the machine would zero the whole world.
     min_available: 1
+
+    # How many indicators must have carried a reading for THE COUNTRY ITSELF
+    # before a zero may rest on evidence of absence. An alerting feed answers
+    # for every country it does not list, so min_available alone is
+    # satisfied by one feed that has never monitored the country: with HDX
+    # Signals covering a few dozen countries, that would have zeroed every
+    # country outside its watch list on the strength of not being watched.
+    # A country no feed has a reading for is "not looked at", never "quiet"
+    # — it resolves INCONCLUSIVE (no row) with reason indicator_no_coverage.
+    # 0 restores the pre-Sept-2026 behaviour.
+    min_present_readings: 1
     entries:
       # JRC ASAP agricultural hotspot classification. Free, no key,
       # country-level. Absence from the feed means "no warning issued",
@@ -251,9 +262,13 @@ drought:
         # re-signalled every month; three months keeps a live warning in view
         # without letting last year's speak for this month.
         lookback_months: 3
-        where: >-
-          indicator IN ('jrc_agricultural_hotspots', 'ipc_food_insecurity',
-                        'wfp_market_monitor')
+        # jrc_agricultural_hotspots ONLY. The entry shipped in early Sept
+        # 2026 also admitted ipc_food_insecurity and wfp_market_monitor —
+        # the first is the very quantity the drought rule differences (the
+        # circularity the comment below refuses), and the second is a price
+        # signal, not a physical one. With three indicators sharing a
+        # country-month the pick between them was also arbitrary.
+        where: "indicator = 'jrc_agricultural_hotspots'"
         match: classes
         absence_means_no_drought: true
         drought_classes: ["high concern", "high", "medium concern", "medium", "alarm", "warning"]
@@ -272,8 +287,13 @@ drought:
         iso3_column: iso3
         value_column: anomaly_value
         date_column: forecast_issue_date
-        lookback_months: 1
-        where: "variable = 'prate' AND lead_months <= 1"
+        # NMME leads are 1-based and a forecast issued in month M at lead L
+        # is ABOUT month M+L. The observation month is therefore the issue
+        # month shifted by the lead, so the gate for month T reads the lead-1
+        # forecast issued in T-1 rather than the one issued in T about T+1.
+        date_offset_column: lead_months
+        lookback_months: 0
+        where: "variable = 'prate' AND lead_months = 1"
         match: threshold
         absence_means_no_drought: false
         # NOT -0.43. That is NMME's below-normal TERCILE boundary, which by
@@ -691,6 +711,11 @@ extraction:
   # the backcast share happened to be — so raising the backcast share, or
   # dropping it, silently removed the reserve with nothing to notice. Stated
   # here it cannot be lost by accident, and the validator holds
+  # Optional: extraction.max_calls_per_run caps ONE run's calls whatever the
+  # monthly remainder says. Rung 2 reads documents one at a time (~2.5 s a
+  # call), so a live pass handed 2,000 calls runs ~85 minutes and a workflow
+  # step that kills it records nothing — a budget stop is recorded per cell.
+  # Absent by default; set it when a step budget binds.
   # live_reserve_calls + backcast_max_calls_per_month <= max_calls_per_month.
   #
   # Sized for the live pass: three hazards over the trailing three unfrozen

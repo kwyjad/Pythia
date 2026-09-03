@@ -66,6 +66,16 @@ concurrency:
         required: false
         default: "24"
         type: string
+      force_during_pipeline:
+        description: "Run even while a staged forecast pipeline is in flight (its final canonical upload will DISCARD this run's rows)"
+        required: false
+        default: false
+        type: boolean
+      diagnose_emdat:
+        description: "Also run the EM-DAT API diagnostic (read-only; needs EMDAT_API_KEY, so only CI can run it)"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # Run at 03:00 UTC on the 28th of each month.
     #
@@ -95,11 +105,44 @@ env:
   SIGNATURE_REQUIRED_TABLES: questions,hs_triage,question_research,forecasts_ensemble,llm_calls,facts_resolved,facts_deltas,acled_monthly_fatalities
   # haz_* tables are optional: they exist only once the PA resolution machine
   # (Phase 2.5) has run at least once, and pre-machine DBs must still pass.
-  SIGNATURE_OPTIONAL_TABLES: scenarios,hdx_signals,enso_state,seasonal_tc_outlooks,seasonal_tc_context_cache,haz_triggers,haz_resolutions,haz_base_rates_occurrence,haz_base_rates_severity
+  SIGNATURE_OPTIONAL_TABLES: scenarios,hdx_signals,enso_state,seasonal_tc_outlooks,seasonal_tc_context_cache,crisiswatch_entries,haz_triggers,haz_resolutions,haz_base_rates_occurrence,haz_base_rates_severity
 
 jobs:
+  # Same rationale as haz_backcast.yml and ingest-structured-data.yml: the
+  # concurrency group serializes single runs and cannot see the multi-day
+  # staged forecast pipeline, whose final canonical upload silently discards
+  # anything written to canonical while it was in flight. The 28th cron is
+  # normally weeks clear of the 1st-of-month pipeline, but this cron has been
+  # delivered 11h late and dropped for 44 days, and a hand-dispatched recovery
+  # run is by definition off-schedule. This was the only canonical-DB writer
+  # without the guard. It fails OPEN.
+  gate:
+    name: Skip if a staged pipeline is in flight
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check for in-flight staged pipeline
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Boolean inputs are compared against BOTH the boolean and the
+          # string form — a REST-dispatched run can deliver them as strings.
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && (inputs.force_during_pipeline == true || inputs.force_during_pipeline == 'true') && 'true' || 'false' }}
+        run: python -m scripts.ci.check_pipeline_active
+
   backfill:
     name: Full pipeline backfill
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     # Self-imposed budget (GitHub's hard cap is 360 min/job on hosted runners).
     # Reset/backfill runs pull 10+ years of GDACS + 12 months of ACLED and need
@@ -113,7 +156,10 @@ jobs:
     # 60+75+20+15, Phase 3 30, Phase 4 15, Phase 5 + canonical download tails)
     # sum past 240, and a job-timeout kill BEFORE the Phase 5 canonical upload
     # wastes the entire ingest — the job must always reach that upload.
-    timeout-minutes: ${{ inputs.reset_db && 350 || 330 }}
+    # Raised to the 360 cap on 2026-09-03 when the flood and cyclone machine
+    # steps went to 90 min each (the extraction budget the 28th can spend,
+    # up to 2,000 sequential calls at ~2.5 s, no longer fit in 60/75).
+    timeout-minutes: 360
     env:
       RESOLVER_DB_URL: ${{ secrets.RESOLVER_DUCKDB_URL != '' && secrets.RESOLVER_DUCKDB_URL || format('duckdb:///{0}/data/resolver.duckdb', github.workspace) }}
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -138,11 +184,17 @@ jobs:
       IPC_API_KEY: ${{ secrets.IPC_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
+      # IFRC GO Admin API token. Optional in the client (it runs anonymously
+      # without one), but anonymous GO is rate-limited and Phase 1 is fatal,
+      # so a throttled page there is a red month. Unset secret = today's
+      # behaviour.
+      GO_API_TOKEN: ${{ secrets.GO_API_TOKEN }}
       # --- PA resolution machine (Phase 2.5) ---
       # ANTHROPIC_API_KEY backs the hazard_extraction role (ladder rung 2,
-      # Haiku-class transcription). RELIEFWEB_APPNAME identifies the silence
-      # sweep + document fetches to ReliefWeb (code falls back to
-      # 'pythia-resolution-machine' with a warning when unset). IDMC_API_KEY is
+      # Haiku-class transcription). RELIEFWEB_APPNAME identifies the machine's
+      # silence sweep + document fetches AND the Phase 3 ReliefWeb reports
+      # ingest to ReliefWeb (each falls back to its own default name with a
+      # warning when unset). IDMC_API_KEY is
       # the IDU key sent as client_id — a DIFFERENT credential from
       # IDMC_API_TOKEN (the HELIX token above); when the secret is unset the
       # IDU lower-bound rung reports UNAVAILABLE, which the rows record.
@@ -228,6 +280,13 @@ jobs:
         uses: ./.github/actions/download-canonical-db
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # This workflow uploads canonical and then runs diagnostics steps
+          # that can still fail the run. A red-after-upload run's artifact
+          # is a complete ingest, and a success-only discovery would orphan
+          # it (the haz_backcast.yml lesson: eleven nights redone).
+          # validate-cmd still rejects a bad DB.
+          include-failed-runs-from: |
+            Resolver Update
           validate-cmd: >-
             mkdir -p diagnostics &&
             python -m scripts.ci.db_signature write
@@ -278,12 +337,58 @@ jobs:
           mkdir -p data
           python -c "from pythia.db.schema import ensure_schema; ensure_schema()"
 
+      # Phases 2 and 2.5 write through RESOLVER_DB_URL; Phases 3 and 4 and
+      # the schema step write through PYTHIA_DB_URL; Phase 1, verification
+      # and the upload use BACKFILL_DB_PATH. A RESOLVER_DUCKDB_URL secret
+      # pointing anywhere else would split the ingest across two files with
+      # no error anywhere — the signature compare would only show
+      # facts_resolved flat. Refuse to start rather than find out at upload.
+      - name: Assert every phase writes one database file
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, sys
+          from pathlib import Path
+
+          def _path(url: str) -> Path:
+              url = url.strip()
+              if url.startswith("duckdb:///"):
+                  url = url[len("duckdb:///") - 1:] if url.startswith("duckdb:////") else url[len("duckdb:///"):]
+              return Path(url).resolve()
+
+          paths = {
+              "RESOLVER_DB_URL": _path(os.environ["RESOLVER_DB_URL"]),
+              "PYTHIA_DB_URL": _path(os.environ["PYTHIA_DB_URL"]),
+              "BACKFILL_DB_PATH": _path(os.environ["BACKFILL_DB_PATH"]),
+          }
+          for name, path in paths.items():
+              print(f"{name} -> {path}")
+          if len(set(paths.values())) != 1:
+              print("::error::the DB variables resolve to different files; refusing to split the ingest")
+              sys.exit(1)
+          PY
+
       - name: Prepare diagnostics directories
         run: |
           set -euo pipefail
           mkdir -p diagnostics/ingestion/{logs,raw,metrics,samples,export_preview}
           mkdir -p diagnostics/run_log
           echo "PYTHIA_RUN_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      # EM-DAT has answered HTTP 500 to every call the PA machine has ever
+      # made, and haz_raw_emdat holds no rows, so the ladder's top rung has
+      # never existed. Only CI holds EMDAT_API_KEY, so the question of WHY
+      # (query shape vs account vs upstream) can only be settled here.
+      # Read-only, exits 0, writes its verdict into the diagnostics artifact.
+      - name: "Diagnose EM-DAT API (dispatch input)"
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.diagnose_emdat == true || inputs.diagnose_emdat == 'true') }}
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          python -m scripts.ci.diagnose_emdat --out diagnostics/emdat_diagnostic.json \
+            2>&1 | tee diagnostics/emdat_diagnostic.log \
+            || echo "::warning::EM-DAT diagnostic failed (non-fatal)"
 
       # === PHASE 1: RESOLVER CONNECTORS (ground truth — fatal) ===
       - name: "Phase 1: Run IDMC (HELIX)"
@@ -452,6 +557,56 @@ jobs:
           python -m pythia.tools.ingest_structured_data --sources gdacs 2>&1 | tee diagnostics/phase2_gdacs.log || echo "WARNING: GDACS ingest failed (non-fatal)"
           echo "::endgroup::"
 
+      # === PHASE 2.4: INPUTS THE PA MACHINE READS FROM THIS SAME DB ===
+      # The drought attribution gate reads hdx_signals (JRC agricultural
+      # hotspots) and seasonal_forecasts (NMME precipitation) from the DB the
+      # job is holding, and the impact ladder's population cap reads
+      # haz_raw_population. Until 2026-09-03 the HDX store and NMME ingest
+      # ran AFTER Phase 2.5, so the gate always read last cycle's rows, and
+      # nothing loaded the population table at all. They run here instead;
+      # their phase labels below are historical.
+      - name: "Phase 2.4: Ingest NMME seasonal forecasts (read by the drought gate)"
+        timeout-minutes: 30
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'nmme') }}
+        continue-on-error: true
+        run: |
+          echo "::group::NMME"
+          python -m pythia.tools.ingest_structured_data --sources nmme 2>&1 | tee diagnostics/phase3_nmme.log || echo "WARNING: NMME ingest failed (non-fatal)"
+          echo "::endgroup::"
+
+      - name: "Phase 2.4: Store HDX Signals (read by the drought gate)"
+        timeout-minutes: 15
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'hdx_signals') }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -c "
+          from horizon_scanner.hdx_signals import bulk_fetch_and_store_hdx_signals
+          n = bulk_fetch_and_store_hdx_signals()
+          print(f'ROWS={n}')
+          " 2>&1 | tee diagnostics/phase4_hdx_signals.log || true
+          # A sentinel line is grepped rather than the last merged line: one
+          # log line emitted after the print would otherwise read as failure.
+          ROWS=$(grep -oE '^ROWS=[0-9]+$' diagnostics/phase4_hdx_signals.log | tail -1 | cut -d= -f2 || true)
+          ROWS="${ROWS:-0}"
+          if [ "$ROWS" -gt 0 ]; then
+            python -m pythia.tools.emit_phase4_diag hdx_signals ok --rows "$ROWS"
+            echo "[hdx_signals] OK: stored ${ROWS} signals"
+          else
+            python -m pythia.tools.emit_phase4_diag hdx_signals error --reason "zero-rows-returned"
+            echo "WARNING: HDX Signals fetch failed (non-fatal)"
+          fi
+
+      - name: "Phase 2.4: Load national population denominators"
+        timeout-minutes: 5
+        if: ${{ inputs.only_connector == '' }}
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python -m resolver.hazard_resolution.population 2>&1 \
+            | tee diagnostics/phase24_population.log \
+            || echo "::warning::population load failed (non-fatal) — the machine runs with no population cap"
+
       # === PHASE 2.5: PA RESOLUTION MACHINE (non-fatal, SHADOW MODE) ===
       # resolver/hazard_resolution/ resolves people-affected per
       # country-month-hazard (detection + the impact ladder) into the haz_*
@@ -501,34 +656,41 @@ jobs:
       # the warning fires; the `||` still makes the step exit 0, and
       # continue-on-error stays as belt and braces (shadow mode must never
       # fail the job).
+      # Each command runs under coreutils `timeout` set just below the step
+      # budget. A step-level timeout SIGKILLs the shell: the `|| ::warning`
+      # never fires, the summary JSON is never written, and the remaining
+      # months never run — a partial month with no annotation. `timeout`
+      # exits 124 instead, which pipefail carries to the warning branch, and
+      # the CLI writes its summary after every month so the kill loses one
+      # month, not the record of the others.
       - name: "Phase 2.5: PA machine — flood"
-        timeout-minutes: 60
+        timeout-minutes: 90
         if: ${{ inputs.only_connector == '' && steps.haz_months.outputs.months != '' }}
         continue-on-error: true
         run: |
           set -o pipefail
           echo "::group::PA machine (flood)"
-          python -m resolver.hazard_resolution.cli --hazard flood --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_flood.json 2>&1 | tee diagnostics/phase25_haz_flood.log || echo "::warning::flood resolution machine failed (non-fatal)"
+          timeout 85m python -m resolver.hazard_resolution.cli --hazard flood --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_flood.json 2>&1 | tee diagnostics/phase25_haz_flood.log || echo "::warning::flood resolution machine failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
       - name: "Phase 2.5: PA machine — cyclone"
-        timeout-minutes: 75
+        timeout-minutes: 90
         if: ${{ inputs.only_connector == '' && steps.haz_months.outputs.months != '' }}
         continue-on-error: true
         run: |
           set -o pipefail
           echo "::group::PA machine (cyclone)"
-          python -m resolver.hazard_resolution.cli --hazard cyclone --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_cyclone.json 2>&1 | tee diagnostics/phase25_haz_cyclone.log || echo "::warning::cyclone resolution machine failed (non-fatal)"
+          timeout 85m python -m resolver.hazard_resolution.cli --hazard cyclone --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_cyclone.json 2>&1 | tee diagnostics/phase25_haz_cyclone.log || echo "::warning::cyclone resolution machine failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
       - name: "Phase 2.5: PA machine — drought"
-        timeout-minutes: 20
+        timeout-minutes: 30
         if: ${{ inputs.only_connector == '' && steps.haz_months.outputs.months != '' }}
         continue-on-error: true
         run: |
           set -o pipefail
           echo "::group::PA machine (drought)"
-          python -m resolver.hazard_resolution.cli --hazard drought --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_drought.json 2>&1 | tee diagnostics/phase25_haz_drought.log || echo "::warning::drought resolution machine failed (non-fatal)"
+          timeout 27m python -m resolver.hazard_resolution.cli --hazard drought --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_drought.json 2>&1 | tee diagnostics/phase25_haz_drought.log || echo "::warning::drought resolution machine failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
       - name: "Phase 2.5: Refresh machine base rates + acceptance report"
@@ -593,15 +755,6 @@ jobs:
           python -m pythia.tools.ingest_structured_data --sources acled_political 2>&1 | tee diagnostics/phase3_acled_political.log || echo "WARNING: ACLED political ingest failed (non-fatal)"
           echo "::endgroup::"
 
-      - name: "Phase 3: Ingest NMME seasonal forecasts"
-        timeout-minutes: 30
-        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'nmme') }}
-        continue-on-error: true
-        run: |
-          echo "::group::NMME"
-          python -m pythia.tools.ingest_structured_data --sources nmme 2>&1 | tee diagnostics/phase3_nmme.log || echo "WARNING: NMME ingest failed (non-fatal)"
-          echo "::endgroup::"
-
       - name: "Phase 3: Ingest GDELT conflict indicators"
         timeout-minutes: 30
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'gdelt') }}
@@ -634,11 +787,13 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          RESULT=$(python -c "
+          python -c "
           from horizon_scanner.enso.enso_module import fetch_and_store_enso
           ok = fetch_and_store_enso()
-          print('ok' if ok else 'error')
-          " 2>&1 | tee diagnostics/phase4_enso.log | tail -1) || RESULT="error"
+          print('RESULT=ok' if ok else 'RESULT=error')
+          " 2>&1 | tee diagnostics/phase4_enso.log || true
+          RESULT=$(grep -oE '^RESULT=(ok|error)$' diagnostics/phase4_enso.log | tail -1 | cut -d= -f2 || true)
+          RESULT="${RESULT:-error}"
           if [ "$RESULT" = "ok" ]; then
             python -m pythia.tools.emit_phase4_diag enso ok --rows 1
             echo "[enso] OK"
@@ -653,39 +808,19 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          RESULT=$(python -c "
+          python -c "
           from horizon_scanner.seasonal_tc.seasonal_tc_runner import fetch_and_store_seasonal_tc
           ok = fetch_and_store_seasonal_tc()
-          print('ok' if ok else 'error')
-          " 2>&1 | tee diagnostics/phase4_seasonal_tc.log | tail -1) || RESULT="error"
+          print('RESULT=ok' if ok else 'RESULT=error')
+          " 2>&1 | tee diagnostics/phase4_seasonal_tc.log || true
+          RESULT=$(grep -oE '^RESULT=(ok|error)$' diagnostics/phase4_seasonal_tc.log | tail -1 | cut -d= -f2 || true)
+          RESULT="${RESULT:-error}"
           if [ "$RESULT" = "ok" ]; then
             python -m pythia.tools.emit_phase4_diag seasonal_tc ok --rows 1
             echo "[seasonal_tc] OK"
           else
             python -m pythia.tools.emit_phase4_diag seasonal_tc error --reason "fetch-or-store-failed"
             echo "WARNING: Seasonal TC fetch failed (non-fatal)"
-          fi
-
-      - name: "Phase 4: Store HDX Signals"
-        timeout-minutes: 15
-        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'hdx_signals') }}
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          ROWS=$(python -c "
-          from horizon_scanner.hdx_signals import bulk_fetch_and_store_hdx_signals
-          n = bulk_fetch_and_store_hdx_signals()
-          print(n)
-          " 2>&1 | tee diagnostics/phase4_hdx_signals.log | tail -1) || ROWS="0"
-          if ! echo "$ROWS" | grep -qE '^[0-9]+$'; then
-            ROWS="0"
-          fi
-          if [ "$ROWS" -gt 0 ]; then
-            python -m pythia.tools.emit_phase4_diag hdx_signals ok --rows "$ROWS"
-            echo "[hdx_signals] OK: stored ${ROWS} signals"
-          else
-            python -m pythia.tools.emit_phase4_diag hdx_signals error --reason "zero-rows-returned"
-            echo "WARNING: HDX Signals fetch failed (non-fatal)"
           fi
 
       # Refresh the CrisisWatch edition ON THE RUNNER before storing it.
@@ -730,14 +865,13 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          ROWS=$(python -c "
+          python -c "
           from horizon_scanner.crisiswatch import bulk_store_crisiswatch
           n = bulk_store_crisiswatch()
-          print(n)
-          " 2>&1 | tee diagnostics/phase4_crisiswatch.log | tail -1) || ROWS="0"
-          if ! echo "$ROWS" | grep -qE '^[0-9]+$'; then
-            ROWS="0"
-          fi
+          print(f'ROWS={n}')
+          " 2>&1 | tee diagnostics/phase4_crisiswatch.log || true
+          ROWS=$(grep -oE '^ROWS=[0-9]+$' diagnostics/phase4_crisiswatch.log | tail -1 | cut -d= -f2 || true)
+          ROWS="${ROWS:-0}"
           if [ "$ROWS" -gt 0 ]; then
             python -m pythia.tools.emit_phase4_diag crisiswatch ok --rows "$ROWS"
             echo "[crisiswatch] OK: stored ${ROWS} entries"
@@ -840,8 +974,13 @@ jobs:
             2>&1 | tee diagnostics/build_debug_bundle.log \
             || echo "::warning::resolver debug bundle build failed (non-fatal)"
 
+      # Both diagnostics uploads below run AFTER the canonical upload and are
+      # non-fatal: a 409 or a size failure here must never turn a complete
+      # ingest red, block the resolutions chain (which guards on
+      # conclusion == success) and orphan the canonical artifact.
       - name: Upload resolver debug bundle
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: resolver-debug-bundle-${{ github.run_id }}
@@ -854,6 +993,7 @@ jobs:
 
       - name: Upload diagnostics
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: backfill-diagnostics
