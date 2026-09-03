@@ -603,6 +603,22 @@ jobs:
           echo "::endgroup::"
 
       # === PHASE 4: CONTEXT SOURCES (non-fatal) ===
+      # The published ONI table is the whole ENSO record, 1950 to present, in
+      # one small file. Seeding it every cycle is idempotent (the table's PK
+      # is the observation date and the ONI table is itself the record) and
+      # costs one request. It is what gives the continuity check something to
+      # compare against, and RC and base-rate work a real ENSO history rather
+      # than the three rows the scrape-only design left behind.
+      - name: "Phase 4: Backfill ENSO history from the published ONI table"
+        timeout-minutes: 10
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'enso') }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m horizon_scanner.enso.enso_module --backfill-oni \
+            2>&1 | tee diagnostics/phase4_enso_backfill.log \
+            || echo "WARNING: ENSO ONI backfill failed (non-fatal)"
+
       - name: "Phase 4: Fetch + store ENSO state"
         timeout-minutes: 15
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'enso') }}

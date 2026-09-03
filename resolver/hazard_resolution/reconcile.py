@@ -135,8 +135,43 @@ def _ceiling(candidates: list[Candidate]) -> float | None:
     is the binding one, since any of them could account for the figure.
     """
 
-    ceilings = [c.value for c in ceiling_candidates(candidates)]
+    # A zero or negative exposure is GDACS declining to say, not GDACS
+    # saying nobody was exposed: discovery carries no population figure and
+    # the per-event RSS fetch that fills it in tolerates 404s. Filtering
+    # those out here means an event with no usable exposure contributes no
+    # ceiling, rather than contributing a ceiling of zero.
+    ceilings = [c.value for c in ceiling_candidates(candidates) if c.value > 0]
     return max(ceilings) if ceilings else None
+
+
+def effective_ceiling(
+    candidates: list[Candidate],
+    rulebook: Rulebook,
+    national_population: float | None,
+) -> tuple[float | None, str]:
+    """The ceiling actually in force, and where it came from.
+
+    GDACS exposure when there is one. When there is not — its discovery
+    response carries no population figure and the per-event RSS fetch that
+    fills it in tolerates 404s — a share of the national population stands
+    in, so a silent GDACS leaves a bound rather than none at all.
+
+    Returns (ceiling, basis) where basis is one of ``gdacs_exposed``,
+    ``population_share`` or ``none``. The basis travels into provenance:
+    a reader must be able to see WHICH bound a flag was raised against.
+    """
+
+    gdacs = _ceiling(candidates)
+    if gdacs is not None:
+        return gdacs, "gdacs_exposed"
+
+    try:
+        share = float(rulebook.get("sanity.population_fallback_share"))
+    except Exception:  # noqa: BLE001 - older rulebooks have no such key
+        share = 0.0
+    if share > 0 and national_population and national_population > 0:
+        return float(national_population) * share, "population_share"
+    return None, "none"
 
 
 def reconcile(
@@ -156,7 +191,9 @@ def reconcile(
     ladder = [str(rung) for rung in rulebook.get("ladder")]
 
     usable = ladder_candidates(candidates)
-    exposure_ceiling = _ceiling(candidates)
+    exposure_ceiling, ceiling_basis = effective_ceiling(
+        candidates, rulebook, national_population
+    )
 
     # Which rungs actually have something, in ladder order.
     populated: list[tuple[str, Candidate]] = []
@@ -172,6 +209,10 @@ def reconcile(
         "candidates": [c.provenance() for c in candidates],
         "ceiling": {
             "source": rulebook.get("sanity.ceiling_source"),
+            # WHICH bound is in force. A flag raised against a population
+            # share is a different statement from one raised against a GDACS
+            # footprint, and a reader must be able to tell them apart.
+            "basis": ceiling_basis,
             "multiplier": rulebook.get("sanity.ceiling_multiplier"),
             "exposed_population": exposure_ceiling,
             "national_population": national_population,

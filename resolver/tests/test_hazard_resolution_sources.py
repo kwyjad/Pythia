@@ -45,7 +45,10 @@ from resolver.hazard_resolution.sources import (
     stable_payload,
     store_raw_records,
 )
-from resolver.tests.hazard_resolution_utils import make_rulebook
+from resolver.tests.hazard_resolution_utils import (
+    SYNTHETIC_COUNTRIES_GEOJSON,
+    make_rulebook,
+)
 
 
 @pytest.fixture()
@@ -300,6 +303,93 @@ def test_emdat_api_failure_reports_unavailable_not_empty(con, rulebook, monkeypa
     assert outcome.ok is False
     assert "503" in outcome.error
     assert outcome.records == 0
+
+
+def test_emdat_serves_the_cache_when_the_live_call_fails(con, rulebook, monkeypatch):
+    """A STALE rung and an UNREAD rung are different facts.
+
+    api.emdat.be returned 500 on all six month-hazard passes of the 2026-08
+    run, so every impact decision recorded EM-DAT as unavailable and lost its
+    top rung — while haz_raw_emdat still held the previous pull, and
+    records_for_country_month would happily have read it.
+    """
+
+    monkeypatch.setenv("EMDAT_API_KEY", "test-key")
+    emdat_mod.fetch_emdat(
+        con, "2024-03", "FL", rulebook, post=lambda *a: _emdat_response([_EMDAT_ROW])
+    )
+
+    def boom(*args):
+        raise RuntimeError("500 Internal Server Error")
+
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook, post=boom)
+
+    # The rung answered, so it is not in the run's unavailable_sources and
+    # the ladder still has a top rung to walk.
+    assert outcome.ok is True
+    assert outcome.detail["served_from_cache"] is True
+    assert "500" in outcome.detail["live_fetch_error"]
+    assert outcome.records == 1
+    # Nothing new was written: this is a read of what was already there.
+    assert outcome.inserted == 0
+
+    records = emdat_mod.records_for_country_month(con, "PHL", "2024-03", "FL")
+    assert records and records[0]["total_affected"] == 45000
+
+
+def test_emdat_serves_the_cache_when_the_key_is_missing(con, rulebook, monkeypatch):
+    """An expired key does not delete what was already fetched."""
+
+    monkeypatch.setenv("EMDAT_API_KEY", "test-key")
+    emdat_mod.fetch_emdat(
+        con, "2024-03", "FL", rulebook, post=lambda *a: _emdat_response([_EMDAT_ROW])
+    )
+
+    monkeypatch.delenv("EMDAT_API_KEY", raising=False)
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook)
+
+    assert outcome.ok is True
+    assert outcome.detail["served_from_cache"] is True
+    assert "EMDAT_API_KEY" in outcome.detail["live_fetch_error"]
+
+
+def test_emdat_with_an_empty_cache_is_still_unread(con, rulebook, monkeypatch):
+    """The error in the other direction.
+
+    With nothing to serve, claiming the rung answered would manufacture a
+    missing rung out of an outage.
+    """
+
+    monkeypatch.setenv("EMDAT_API_KEY", "test-key")
+
+    def boom(*args):
+        raise RuntimeError("500 Internal Server Error")
+
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook, post=boom)
+    assert outcome.ok is False
+    assert "500" in outcome.error
+
+
+def test_emdat_cache_fallback_only_counts_records_in_the_window(
+    con, rulebook, monkeypatch
+):
+    """A cached record from another season does not make this month answered."""
+
+    monkeypatch.setenv("EMDAT_API_KEY", "test-key")
+    old_row = {
+        **_EMDAT_ROW,
+        "disno": "2019-0001-PHL",
+        "start_year": 2019, "end_year": 2019,
+    }
+    emdat_mod.fetch_emdat(
+        con, "2019-03", "FL", rulebook, post=lambda *a: _emdat_response([old_row])
+    )
+
+    def boom(*args):
+        raise RuntimeError("500 Internal Server Error")
+
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook, post=boom)
+    assert outcome.ok is False
 
 
 def test_emdat_falls_back_to_summing_its_own_components():
@@ -669,3 +759,156 @@ def test_gdacs_fetch_survives_one_malformed_event(con, rulebook, monkeypatch):
     assert outcome.ok is True
     assert outcome.records == 1
     assert outcome.detail["events_skipped_malformed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# GDACS names no country for an event still over open ocean
+# ---------------------------------------------------------------------------
+
+
+class TestGdacsGeometryAttribution:
+    """An event with no country is written and then read by no cell.
+
+    GDACS leaves ``affectedcountries`` empty while a tropical cyclone is
+    still offshore, and 16 TC events were dropped that way in the 2026-08 run
+    (ids 1001273..1001315). The event's own position resolves it, against the
+    same vendored boundaries cyclone detection already uses.
+    """
+
+    @staticmethod
+    def _event(**overrides):
+        event = {
+            "eventid": "1001273",
+            "eventtype": "TC",
+            "iso3": "",
+            "iso3_list": [],
+            "country": "",
+            "fromdate": dt.date(2024, 3, 5),
+            "todate": dt.date(2024, 3, 9),
+            "alertlevel": "Orange",
+            "population": 250_000.0,
+        }
+        event.update(overrides)
+        return event
+
+    def test_a_point_inside_a_country_resolves_to_it(self, monkeypatch):
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+        from resolver.hazard_resolution.geometry import load_country_geometries
+
+        monkeypatch.setattr(
+            "resolver.hazard_resolution.geometry.load_country_geometries",
+            lambda *a, **k: load_country_geometries(SYNTHETIC_COUNTRIES_GEOJSON),
+        )
+        # Squareland spans lon 10..15, lat -2..2.
+        record = gdacs_mod._event_record(self._event(lat=0.0, lon=12.0), "TC")
+
+        assert record is not None
+        assert record.payload["iso3_list"] == ["AAA"]
+        assert record.iso3 == "AAA"
+        # Provenance: a derived attribution is a weaker claim than a stated
+        # one, and the row says which this was.
+        assert record.payload["iso3_from_geometry"] == ["AAA"]
+
+    def test_an_offshore_point_still_resolves_to_the_nearby_coast(self, monkeypatch):
+        """A cyclone eye sits well off the coast it is about to hit."""
+
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+        from resolver.hazard_resolution.geometry import load_country_geometries
+
+        monkeypatch.setattr(
+            "resolver.hazard_resolution.geometry.load_country_geometries",
+            lambda *a, **k: load_country_geometries(SYNTHETIC_COUNTRIES_GEOJSON),
+        )
+        # ~2 degrees east of Squareland's edge, roughly 220 km at the equator.
+        record = gdacs_mod._event_record(self._event(lat=0.0, lon=17.0), "TC")
+
+        assert record.payload["iso3_list"] == ["AAA"]
+
+    def test_a_point_in_the_middle_of_an_ocean_resolves_to_nothing(self, monkeypatch):
+        """Failing to place an event leaves it exactly as it was.
+
+        Attribution by proximity must not become attribution by guesswork.
+        """
+
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+        from resolver.hazard_resolution.geometry import load_country_geometries
+
+        monkeypatch.setattr(
+            "resolver.hazard_resolution.geometry.load_country_geometries",
+            lambda *a, **k: load_country_geometries(SYNTHETIC_COUNTRIES_GEOJSON),
+        )
+        record = gdacs_mod._event_record(self._event(lat=-40.0, lon=-140.0), "TC")
+
+        assert record.payload["iso3_list"] == []
+        assert record.payload["iso3_from_geometry"] == []
+
+    def test_a_stated_country_is_never_overridden_by_geometry(self, monkeypatch):
+        """GDACS's own attribution outranks anything derived here."""
+
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+
+        def explode(*_a, **_k):  # pragma: no cover - must not be reached
+            raise AssertionError("geometry must not run when GDACS named a country")
+
+        monkeypatch.setattr(gdacs_mod, "_iso3s_near_event", explode)
+        record = gdacs_mod._event_record(
+            self._event(iso3="PHL", iso3_list=["PHL"], lat=0.0, lon=12.0), "TC"
+        )
+
+        assert record.payload["iso3_list"] == ["PHL"]
+        assert record.payload["iso3_from_geometry"] == []
+
+    def test_an_event_with_no_position_is_not_a_crash(self):
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+
+        record = gdacs_mod._event_record(self._event(), "TC")
+        assert record.payload["iso3_list"] == []
+
+    def test_the_boundaries_are_loaded_once_per_month_not_once_per_event(
+        self, monkeypatch
+    ):
+        """Parsing the 1:50m layer costs a few hundred milliseconds.
+
+        Fine for the handful of uncountried events a live month sees, and not
+        fine for a backcast month full of them.
+        """
+
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+        from resolver.hazard_resolution.geometry import load_country_geometries
+
+        calls = {"n": 0}
+
+        def counted(*_a, **_k):
+            calls["n"] += 1
+            return load_country_geometries(SYNTHETIC_COUNTRIES_GEOJSON)
+
+        monkeypatch.setattr(
+            "resolver.hazard_resolution.geometry.load_country_geometries", counted
+        )
+
+        geometries = gdacs_mod._CountryGeometries()
+        for i in range(5):
+            gdacs_mod._event_record(
+                self._event(eventid=str(i), lat=0.0, lon=12.0), "TC", geometries
+            )
+        assert calls["n"] == 1
+
+    def test_a_month_that_needs_no_geometry_never_opens_the_file(self, monkeypatch):
+        """Loading is lazy: GDACS names the country for almost every event."""
+
+        from resolver.hazard_resolution import gdacs as gdacs_mod
+
+        def explode(*_a, **_k):  # pragma: no cover - must not be reached
+            raise AssertionError("the boundaries were loaded with nothing to place")
+
+        monkeypatch.setattr(
+            "resolver.hazard_resolution.geometry.load_country_geometries", explode
+        )
+
+        geometries = gdacs_mod._CountryGeometries()
+        record = gdacs_mod._event_record(
+            self._event(iso3="PHL", iso3_list=["PHL"], lat=0.0, lon=12.0),
+            "TC",
+            geometries,
+        )
+        assert record.payload["iso3_list"] == ["PHL"]

@@ -165,7 +165,7 @@ Pythia pulls structured humanitarian, climate, and conflict-forecast data from a
 | **IPC Phases** | `pythia/ipc_phases.py` | Food security phase populations (Phase 3+ = Crisis) | `ipc_phases` |
 | **ACLED Political Events** | `pythia/acled_political.py` | Event-level political data (ACE/DI hazards only) | `acled_political_events` |
 | **NMME Seasonal Forecasts** | `resolver/tools/ingest_nmme.py` | Temp/precip anomalies, 7-month lead (DR/FL/TC) | `seasonal_forecasts` |
-| **ENSO State/Forecast** | `horizon_scanner/enso/enso_module.py` | ENSO state, Niño 3.4 anomaly, 9-season probabilistic outlook, IOD (DR/FL/TC) | `enso_state` (DB-first, falls back to live scrape) |
+| **ENSO State/Forecast** | `horizon_scanner/enso/` | ENSO phase + strength COMPUTED from the ONI (NOAA ERDDAP → CPC weekly → CPC ONI table), plus the IRI Quick Look's 9-season outlook, plume and IOD (DR/FL/TC) | `enso_state` (DB-first; a run that resolves no index carries the last good record forward, labelled stale) |
 | **Seasonal TC Forecasts** | `horizon_scanner/seasonal_tc/` | Basin-level TC activity forecasts from TSR, NOAA CPC, BoM, Météo-France La Réunion (SWI), and an IMD/NIO climatology block across 8 basins (TC only) | `seasonal_tc_outlooks`, `seasonal_tc_context_cache` (DB-first) |
 | **HDX Signals** | `horizon_scanner/hdx_signals.py` | OCHA automated crisis alerts: conflict, displacement, food insecurity, agricultural stress (all hazards) | `hdx_signals` (DB-first, falls back to CSV) |
 | **VIEWS** | `resolver/connectors/views.py` | ML-based conflict fatality predictions (ACE, 1–6 month leads) | `conflict_forecasts` |

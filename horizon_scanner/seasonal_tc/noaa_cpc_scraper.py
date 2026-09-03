@@ -423,21 +423,75 @@ KNOWN_URLS = {
     },
 }
 
+# NOAA titles its press release after the forecast it contains, so the slug
+# cannot be templated exactly — it says "above-normal" or "near-normal" or
+# "below-normal" depending on the year. Generating all three costs three HEAD
+# requests and removes the hand-maintenance that was the actual failure: the
+# dict above stopped at 2025, so every 2026 run asked for nothing, got
+# nothing, and reported success. Explicit KNOWN_URLS still win where present.
+_ACTIVITY_WORDS = ("above-normal", "near-normal", "below-normal")
+
+_ATL_TEMPLATES = (
+    "https://www.noaa.gov/news-release/noaa-predicts-{activity}-{year}-atlantic-hurricane-season",
+    "https://www.noaa.gov/news-release/noaa-{year}-atlantic-hurricane-season-outlook",
+)
+_CP_TEMPLATES = (
+    "https://www.noaa.gov/news-release/noaa-predicts-{activity}-{year}-central-pacific-hurricane-season",
+)
+_ENP_TEMPLATES = (
+    "https://www.noaa.gov/news-release/noaa-predicts-{activity}-{year}-eastern-pacific-hurricane-season",
+)
+
+
+def candidate_urls(year: int) -> dict[str, str]:
+    """Every URL worth trying for a season year, keyed by basin role.
+
+    Curated entries first, then the generated variants. Keys carry an index
+    so several candidates for one basin coexist; the ATL/CP/ENP prefixes are
+    what ``process_known_urls`` dispatches on, so the shape is unchanged.
+    """
+
+    urls: dict[str, str] = dict(KNOWN_URLS.get(year, {}))
+    for prefix, templates in (
+        ("ATL", _ATL_TEMPLATES), ("CP", _CP_TEMPLATES), ("ENP", _ENP_TEMPLATES)
+    ):
+        index = 0
+        for template in templates:
+            words = _ACTIVITY_WORDS if "{activity}" in template else ("",)
+            for activity in words:
+                url = template.format(year=year, activity=activity)
+                if url in urls.values():
+                    continue
+                urls[f"{prefix}_generated_{index}"] = url
+                index += 1
+    return urls
+
 
 def process_known_urls(year: int) -> list[SeasonalForecast]:
-    """Process all known URLs for a given year."""
-    urls = KNOWN_URLS.get(year, {})
+    """Process every candidate URL for a given year.
+
+    A year with no reachable release yields nothing and SAYS SO. Before this
+    the hand-maintained dict simply had no 2026 entry, so the step returned
+    an empty list and the run reported it as a success.
+    """
+
+    urls = candidate_urls(year)
     results = []
     
+    tried = 0
     for key, url in urls.items():
+        generated = "_generated_" in key
         try:
-            logger.info(f"Fetching: {key} -> {url}")
+            logger.debug("Fetching: %s -> %s", key, url)
             text = fetch_page(url)
-            
+            tried += 1
+
+            # startswith for every basin: a generated key is "CP_generated_0",
+            # and an equality test on "CP" silently dropped all of them.
             if key.startswith("ATL"):
                 atl = extract_atlantic(text, url)
                 results.append(atl)
-                
+
                 # Also try to extract cross-references for other basins
                 enp = extract_eastern_pacific_from_atlantic(text, url)
                 if enp:
@@ -445,16 +499,31 @@ def process_known_urls(year: int) -> list[SeasonalForecast]:
                 cp = extract_central_pacific_from_atlantic(text, url)
                 if cp:
                     results.append(cp)
-            
-            elif key == "CP":
+
+            elif key.startswith("CP"):
                 results.append(extract_central_pacific(text, url))
-            
-            elif key == "ENP":
+
+            elif key.startswith("ENP"):
                 results.append(extract_eastern_pacific(text, url))
-        
+
         except Exception as e:
-            logger.error(f"Failed to process {key} ({url}): {e}")
-    
+            # A generated candidate that 404s is the normal case — only one of
+            # the three activity wordings can be right — so it is not an error.
+            if generated:
+                logger.debug("No release at %s: %s", url, e)
+            else:
+                logger.error(f"Failed to process {key} ({url}): {e}")
+
+    if not results:
+        # The defect this replaces: KNOWN_URLS stopped at 2025, so a 2026 run
+        # asked for nothing, got nothing, and said nothing. A source that
+        # contributes zero must say which URLs it tried.
+        logger.warning(
+            "[noaa_cpc] no %d forecast found. Tried %d candidate URL(s); "
+            "%d reachable. NOAA titles its release after the forecast, so if "
+            "the wording has changed again, add the real URL to KNOWN_URLS[%d].",
+            year, len(urls), tried, year,
+        )
     return results
 
 

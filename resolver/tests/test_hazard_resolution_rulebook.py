@@ -47,7 +47,10 @@ def test_shipped_rulebook_loads_and_validates():
     assert rb.get("freeze_days") == 60
     assert rb.get("ladder") == ["emdat", "reliefweb_extracted", "ifrc_go", "idmc_idu"]
     assert rb.get("sanity.ceiling_source") == "gdacs_exposed"
-    assert rb.get("sanity.ceiling_multiplier") == 1.0
+    # Above 1.0 since Sept 2026: at exactly 1.0 there was no room between a
+    # modelled estimate and a reported one, so every report above the model
+    # was flagged. The mechanism is what matters, not the number.
+    assert float(rb.get("sanity.ceiling_multiplier")) > 1.0
     assert rb.get("sanity.population_cap") is True
     assert rb.get("conflict_rule") == "ladder_with_flag"
     assert rb.get("severity_base_rate_window_start") == 2015
@@ -154,16 +157,56 @@ def test_changing_freeze_days_moves_the_freeze_deadline(tmp_path):
 
 def test_changing_ceiling_multiplier_changes_sanity_check(tmp_path):
     baseline = load_rulebook()
-    # Default multiplier 1.0: a figure above GDACS exposure fails the ceiling.
-    assert within_sanity_ceiling(120_000, exposed_population=100_000, rulebook=baseline) is False
-    assert within_sanity_ceiling(80_000, exposed_population=100_000, rulebook=baseline) is True
+    multiplier = float(baseline.get("sanity.ceiling_multiplier"))
+    exposure = 100_000
+
+    # Derived from the shipped multiplier, not hardcoded: the value moved
+    # 1.0 -> 3.0 and a test that pins the number has to be edited whenever
+    # policy does, which teaches nothing about the mechanism.
+    assert within_sanity_ceiling(
+        exposure * multiplier * 1.5, exposed_population=exposure, rulebook=baseline
+    ) is False
+    assert within_sanity_ceiling(
+        exposure * multiplier * 0.5, exposed_population=exposure, rulebook=baseline
+    ) is True
     # No exposure estimate -> no ceiling to apply.
-    assert within_sanity_ceiling(120_000, exposed_population=None, rulebook=baseline) is True
+    assert within_sanity_ceiling(
+        exposure * 90, exposed_population=None, rulebook=baseline
+    ) is True
 
     data = _shipped_data()
-    data["sanity"]["ceiling_multiplier"] = 1.5
+    data["sanity"]["ceiling_multiplier"] = multiplier * 2
     looser = load_rulebook(_write_rulebook(tmp_path, data))
-    assert within_sanity_ceiling(120_000, exposed_population=100_000, rulebook=looser) is True
+    assert within_sanity_ceiling(
+        exposure * multiplier * 1.5, exposed_population=exposure, rulebook=looser
+    ) is True
+
+
+def test_a_zero_exposure_is_not_a_ceiling_of_zero():
+    """It means GDACS declined to say, and unknown imposes no bound.
+
+    GDACS discovery carries no population figure; the per-event RSS fetch
+    that fills it in tolerates 404s and leaves the field at its 0.0 default.
+    Read as a ceiling, that rejected every figure for the event — 147 of the
+    199 extracted figures rejected in the August 2026 run were rejected
+    against a ceiling of zero.
+    """
+
+    baseline = load_rulebook()
+    assert within_sanity_ceiling(
+        250_000, exposed_population=0.0, rulebook=baseline
+    ) is True
+    # A real exposure still binds.
+    assert within_sanity_ceiling(
+        250_000, exposed_population=1.0, rulebook=baseline
+    ) is False
+
+
+def test_the_population_fallback_share_is_a_fraction():
+    """0 disables it; above 1 it would sit above the population cap and be inert."""
+
+    share = load_rulebook().get("sanity.population_fallback_share")
+    assert 0.0 <= float(share) <= 1.0
 
 
 # ---------------------------------------------------------------------------

@@ -257,7 +257,12 @@ def exposure_ceiling(
     transcriptions at candidate stage, which is upstream of the full
     candidate set — so it is computed from the GDACS cache directly.
     Mirrors :func:`reconcile._ceiling`: several overlapping events each
-    bound the month, and the largest is the binding one.
+    bound the month, and the largest is the binding one — and, as there, a
+    non-positive exposure is GDACS declining to say rather than GDACS saying
+    nobody was exposed, so it contributes no ceiling instead of a ceiling of
+    zero. Extraction is where that mattered most: a ceiling of zero rejects
+    every transcribed figure for the cell, and in the August 2026 run 147 of
+    199 rejected figures were rejected against one.
     """
 
     exposures = [
@@ -268,6 +273,7 @@ def exposure_ceiling(
             ym,
             hazard,
         )
+        if c.value > 0
     ]
     return max(exposures) if exposures else None
 

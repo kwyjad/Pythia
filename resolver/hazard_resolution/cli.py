@@ -289,6 +289,19 @@ def _log_summary(hazard: str, ym: str, result, tally: SweepTally, ladder, dry: s
         LOG.info("  flagged for review:        %d", ladder.flagged)
         LOG.info("  provisional (pre-freeze):  %d", ladder.provisional)
         LOG.info("  frozen (skipped, logged):  %d", ladder.frozen_skipped)
+        # Cells the ladder walked that produced no row of any kind. They are
+        # neither resolved nor flagged, so every other line above counts past
+        # them — flood June 2026 had 85 and cyclone June 101, and the summary
+        # named none of them.
+        no_row = ladder.cells - (
+            ladder.resolved_value + ladder.no_data + ladder.pending
+            + ladder.frozen_skipped
+        )
+        if no_row > 0:
+            LOG.warning(
+                "  cells with NO row written:  %d — these are unresolved, not quiet",
+                no_row,
+            )
         LOG.info("  --- rung 2: ReliefWeb extraction ---")
         LOG.info("  cells read:                %d", ladder.cells_extracted)
         LOG.info("  cells skipped:             %d", ladder.cells_extraction_skipped)
@@ -441,7 +454,16 @@ def run_cyclone_month(
     )
     # Failed cells left the month partially resolved: everything written
     # stands, but the exit code says a re-run is needed to finish it.
-    return 1 if (ladder is not None and ladder.failed_cells) else 0
+    if ladder is not None and ladder.failed_cells:
+        return 1
+    # And a month that walked cells, wrote nothing, and could not read a
+    # source has not succeeded either — see the drought case, where a green
+    # step hid 756 unresolved cells.
+    reason = wrote_nothing_because_a_source_was_unreadable(ladder)
+    if reason and not dry_run:
+        LOG.error("[cli] %s %s resolved nothing: %s", result.hazard, ym, reason)
+        return 1
+    return 0
 
 
 def run_flood_month(
@@ -553,7 +575,44 @@ def run_flood_month(
         )
 
     _log_summary(hazard, ym, result, tally, ladder, " (dry-run)" if dry_run else "")
-    return 1 if (ladder is not None and ladder.failed_cells) else 0
+    if ladder is not None and ladder.failed_cells:
+        return 1
+    # A month that walked cells, wrote nothing, and could not read a source
+    # has not succeeded — see the drought case, where a green step hid 756
+    # unresolved cells.
+    reason = wrote_nothing_because_a_source_was_unreadable(ladder)
+    if reason and not dry_run:
+        LOG.error("[cli] %s %s resolved nothing: %s", hazard, ym, reason)
+        return 1
+    return 0
+
+
+def wrote_nothing_because_a_source_was_unreadable(run) -> str:
+    """Reason a month resolved nothing readable, or "" if that is not what happened.
+
+    A month can walk every cell without raising and still write no row —
+    that is what an unreadable required source produces, cell by cell, and
+    ``haz_run_drought.json`` recorded ``failures: 0`` against 756 unresolved
+    cells because nothing distinguished it from a genuinely quiet month.
+
+    The distinction is: cells were assessed, no row was written, and at least
+    one source could not be read. All three, or this is not it.
+    """
+
+    cells = int(getattr(run, "cells", 0) or 0)
+    written = (
+        int(getattr(run, "resolved_value", 0) or 0)
+        + int(getattr(run, "resolved_zero", 0) or 0)
+        + int(getattr(run, "no_data", 0) or 0)
+        + int(getattr(run, "frozen_skipped", 0) or 0)
+    )
+    unavailable = list(getattr(run, "unavailable_sources", []) or [])
+    if cells and not written and unavailable:
+        return (
+            f"{cells} cell(s) assessed, no row written, and these sources could "
+            f"not be read: {','.join(unavailable)}"
+        )
+    return ""
 
 
 def _log_drought_summary(ym: str, run, dry: str) -> None:
@@ -568,6 +627,15 @@ def _log_drought_summary(ym: str, run, dry: str) -> None:
     LOG.info("  flagged for review:        %d", run.flagged)
     LOG.info("  provisional (pre-freeze):  %d", run.provisional)
     LOG.info("  frozen (skipped, logged):  %d", run.frozen_skipped)
+    no_row = run.cells - (
+        run.resolved_value + run.resolved_zero + run.no_data + run.pending
+        + run.inconclusive + run.frozen_skipped
+    )
+    if no_row > 0:
+        LOG.warning(
+            "  cells with NO row written:  %d — these are unresolved, not quiet",
+            no_row,
+        )
     if run.unavailable_sources:
         LOG.warning(
             "  sources UNAVAILABLE: %s (their answers are unread, not empty)",
@@ -676,7 +744,17 @@ def run_drought_month(
         run_type=run_type,
     )
     _log_drought_summary(ym, run, " (dry-run)" if dry_run else "")
-    return 1 if run.failed_cells else 0
+    if run.failed_cells:
+        return 1
+    # Walking every cell without raising is not the same as resolving the
+    # month. A run that assessed cells, wrote nothing and could not read a
+    # source has not succeeded, and reporting 0 here is what let a whole
+    # month of drought disappear behind a green step.
+    reason = wrote_nothing_because_a_source_was_unreadable(run)
+    if reason and not dry_run:
+        LOG.error("[cli] drought %s resolved nothing: %s", ym, reason)
+        return 1
+    return 0
 
 
 def _write_run_summary(

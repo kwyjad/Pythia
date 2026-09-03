@@ -125,12 +125,27 @@ def within_sanity_ceiling(
     population. With no exposure estimate available there is no ceiling to
     apply and the value passes (the national population cap is a separate
     check owned by reconciliation).
+
+    **An exposure of zero is not a ceiling of zero.** GDACS discovery carries
+    no population figure at all — it is filled in by a per-event RSS fetch
+    that tolerates 404s and network errors, leaving the field at its 0.0
+    default. Reading that as "no more than zero people may have been
+    affected" rejected every figure for the event, and did so most often for
+    the events GDACS knew least about. In the August 2026 run 147 of 199
+    rejected extracted figures were rejected against a ceiling of zero.
+
+    So a non-positive exposure means UNKNOWN, and unknown means no ceiling.
+    The national population cap still applies, and it is the check that
+    actually bounds a figure when GDACS is silent.
     """
 
     if exposed_population is None:
         return True
+    ceiling_basis = float(exposed_population)
+    if ceiling_basis <= 0:
+        return True
     multiplier = float(rulebook.get("sanity.ceiling_multiplier"))
-    return float(value) <= multiplier * float(exposed_population)
+    return float(value) <= multiplier * ceiling_basis
 
 
 def within_population_cap(

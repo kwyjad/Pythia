@@ -187,19 +187,110 @@ drought:
     # entry's url at a per-month archive (it may contain {ym}, {year} and
     # {month}) to backcast properly.
     max_observation_age_months: 1
+
+    # How many entries must have ANSWERED before a verdict is possible.
+    #
+    # Until Sept 2026 the only protection against a total outage was that one
+    # entry carried required: true — and that entry was ASAP, so one dead URL
+    # made every drought cell in the run INCONCLUSIVE (756 of them). Naming a
+    # different indicator as the required one just relocates that failure.
+    # What the gate actually needs is SOME independent physical evidence, not
+    # one nominated feed, and that is what this counts.
+    #
+    # It must stay >= 1: at zero, an outage in every feed would read as "no
+    # drought anywhere" and the machine would zero the whole world.
+    min_available: 1
     entries:
       # JRC ASAP agricultural hotspot classification. Free, no key,
       # country-level. Absence from the feed means "no warning issued",
       # which is what makes it usable as evidence of absence.
       - name: asap
         provider: asap
-        url: "https://agricultural-production-hotspots.ec.europa.eu/data/asap_warnings/asap_warning_countries.json"
-        required: true
+        # Candidate download routes, tried in order; the first that parses
+        # wins. The portal has moved its export route without moving the
+        # data, and a moved route should cost a YAML edit rather than an
+        # outage. The last entry is the route this repo used until Sept 2026.
+        urls:
+          - "https://agricultural-production-hotspots.ec.europa.eu/data/asap_warnings/asap_warning_countries.json"
+          - "https://agricultural-production-hotspots.ec.europa.eu/api/warnings/countries"
+          - "https://agricultural-production-hotspots.ec.europa.eu/data/warnings/asap_warning_countries.json"
+        url: ""
+        # Downgraded from required: true in Sept 2026. It was the ONLY
+        # required indicator, so a single dead URL made every drought cell in
+        # the run INCONCLUSIVE — 756 of them. Nothing is required now;
+        # min_available above asks for independent evidence without naming
+        # which feed must supply it.
+        required: false
         request_timeout_sec: 60
         # Classes that count as drought conditions, matched
         # case-insensitively against whatever the feed states (ASAP has used
         # both numeric levels and words across versions).
         drought_classes: ["2", "3", "4", "warning", "alarm", "drought"]
+
+      # --- Indicators read from tables this repo already ingests. ---
+      # No new request, no new credential, and no new failure mode: if the
+      # monthly ingest ran, the evidence is already in the DB the machine is
+      # holding.
+      #
+      # HDX Signals is OCHA's automated crisis monitoring, and its
+      # jrc_agricultural_hotspots indicator IS ASAP — the same underlying
+      # signal, reached through a connector with its own retries, its own
+      # CKAN fallback and its own tests. Like ASAP it is an ALERTING feed
+      # (it publishes signals, not a global status), so a country's absence
+      # is the statement that no signal was issued.
+      - name: hdx_agricultural_stress
+        provider: pythia_table
+        table: hdx_signals
+        url: ""
+        required: false
+        request_timeout_sec: 60
+        iso3_column: iso3
+        value_column: concern_level
+        date_column: signal_date
+        # HDX signals are published on their own cadence and a country is not
+        # re-signalled every month; three months keeps a live warning in view
+        # without letting last year's speak for this month.
+        lookback_months: 3
+        where: >-
+          indicator IN ('jrc_agricultural_hotspots', 'ipc_food_insecurity',
+                        'wfp_market_monitor')
+        match: classes
+        absence_means_no_drought: true
+        drought_classes: ["high concern", "high", "medium concern", "medium", "alarm", "warning"]
+
+      # NMME country-mean precipitation anomaly, in sigma units, already
+      # ingested monthly into seasonal_forecasts. Supporting evidence, never
+      # a primary gate: this is a FORECAST for the month rather than an
+      # observation of it, which is why it is required: false. A country
+      # absent from NMME is unknown, not dry.
+      - name: nmme_precip_anomaly
+        provider: pythia_table
+        table: seasonal_forecasts
+        url: ""
+        required: false
+        request_timeout_sec: 60
+        iso3_column: iso3
+        value_column: anomaly_value
+        date_column: forecast_issue_date
+        lookback_months: 1
+        where: "variable = 'prate' AND lead_months <= 1"
+        match: threshold
+        absence_means_no_drought: false
+        # NOT -0.43. That is NMME's below-normal TERCILE boundary, which by
+        # construction covers a third of countries in any month — under
+        # combine: any it would attribute a third of the world's food
+        # insecurity to drought, which is precisely the conflict-driven
+        # deterioration this gate exists to keep out. -1.0 sigma is roughly
+        # the driest sixth of the distribution: a statement that conditions
+        # are dry, rather than a statement that they are on the dry side.
+        threshold: -1.0
+        direction: below
+
+      # NOT offered, deliberately: FEWS NET / IPC Phase 3+. That is the very
+      # quantity the drought rule differences, so admitting it here would
+      # reduce the attribution gate to "IPC rose, therefore drought, because
+      # IPC rose" — and filing conflict-driven food insecurity as drought is
+      # the exact failure the gate exists to prevent.
       # Country-aggregated rainfall / water-balance anomaly feeds. CHIRPS and
       # SPEI are gridded rasters; turning them into a country number needs
       # zonal statistics, which does not belong in the resolution path. The
@@ -269,8 +360,32 @@ sanity:
   # population for the event, nor (when population_cap is true) the national
   # population. GDACS exposure is a ceiling, never a resolution value.
   ceiling_source: gdacs_exposed
-  ceiling_multiplier: 1.0
+
+  # Raised 1.0 -> 3.0 in Sept 2026. At 1.0 there was NO room between a
+  # modelled estimate and a reported one, so any reported figure above the
+  # model was rejected — and reported impact routinely exceeds modelled
+  # exposure for good reasons: the footprint is a hazard envelope rather
+  # than an impact assessment, gridded population is coarse, and "affected"
+  # counts people beyond those inside the envelope (displaced, cut off,
+  # dependent on a destroyed service). The ceiling exists to catch a
+  # mis-transcription — a figure ten times exposure — not to hold reports to
+  # a model's arithmetic. It still flags rather than rewrites: conflict_rule
+  # is ladder_with_flag, and a breach is recorded on the row either way.
+  ceiling_multiplier: 3.0
+
   population_cap: true
+
+  # When GDACS says nothing about exposure — its discovery response carries
+  # no population figure, and the per-event RSS fetch that fills it in
+  # tolerates 404s — a share of the national population stands in as the
+  # ceiling. Without it a silent GDACS meant NO ceiling at all, so the only
+  # remaining bound was the whole national population.
+  #
+  # A hazard cannot plausibly affect this share of a country in one month
+  # without being the largest disaster in its history; above it, a
+  # mis-transcribed figure is the likelier reading. Set to 0 to disable the
+  # fallback and rely on the population cap alone.
+  population_fallback_share: 0.5
 
 # When rungs disagree wildly the ladder still decides the number, but the
 # row is flagged for human review. "Wildly" is defined, not judged:
@@ -563,7 +678,24 @@ extraction:
   # instead of quietly spending. Cells skipped by the cap record
   # extraction_budget_capped in their provenance; they are never silently
   # treated as "ReliefWeb had nothing".
-  max_calls_per_month: 3000
+  # Raised 3000 -> 4000 in Sept 2026. The August split gave the live pass a
+  # 1000-call reserve and cyclone August exhausted it partway through,
+  # stopping at Jamaica with documents fetched and never read. At roughly
+  # USD 0.009 a call this is about USD 36/month, still inside the USD 50
+  # ceiling above.
+  max_calls_per_month: 4000
+
+  # Calls the backcast may NEVER take, whatever its own share says.
+  #
+  # Until Sept 2026 the live reserve was implicit — whatever the total minus
+  # the backcast share happened to be — so raising the backcast share, or
+  # dropping it, silently removed the reserve with nothing to notice. Stated
+  # here it cannot be lost by accident, and the validator holds
+  # live_reserve_calls + backcast_max_calls_per_month <= max_calls_per_month.
+  #
+  # Sized for the live pass: three hazards over the trailing three unfrozen
+  # months, which is what resolver_update Phase 2.5 runs on the 28th.
+  live_reserve_calls: 1500
   # The nightly backcast's share of that monthly total (it is a carve-out,
   # never an addition — the validator enforces sub-cap <= total). The live
   # trailing-window runs check only the total, so the difference is in

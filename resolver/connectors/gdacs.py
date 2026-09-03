@@ -285,6 +285,35 @@ def _attr(element: ET.Element | None, tag: str, attr: str,
 # ---------------------------------------------------------------------------
 
 
+def _feature_point(feature: dict[str, Any], props: dict[str, Any]) -> tuple[float | None, float | None]:
+    """(lat, lon) for a GDACS GeoJSON feature, or (None, None).
+
+    Reads the feature geometry first and falls back to the latitude and
+    longitude GDACS also puts in the properties block. Only a Point is used:
+    the centroid of a cyclone track or a flood polygon is not a landfall, and
+    guessing one would attribute an event to whichever country happened to be
+    nearest the middle of it.
+    """
+
+    geometry = feature.get("geometry") or {}
+    if str(geometry.get("type") or "").lower() == "point":
+        coords = geometry.get("coordinates") or []
+        if len(coords) >= 2:
+            try:
+                # GeoJSON is (lon, lat).
+                return float(coords[1]), float(coords[0])
+            except (TypeError, ValueError):
+                pass
+    try:
+        lat = props.get("latitude")
+        lon = props.get("longitude")
+        if lat is not None and lon is not None:
+            return float(lat), float(lon)
+    except (TypeError, ValueError):
+        pass
+    return None, None
+
+
 class GdacsConnector:
     """Fetch GDACS disaster events and return a canonical DataFrame."""
 
@@ -637,12 +666,21 @@ class GdacsConnector:
             if not todate:
                 todate = fromdate
 
+            # Keep the feature's own coordinates. GDACS names no country for
+            # an event whose affectedcountries list is empty — routine for a
+            # tropical cyclone still over open ocean — and without a position
+            # such an event can only be dropped. With one it can be resolved
+            # against the boundaries the PA machine already ships.
+            lat, lon = _feature_point(feat, props)
+
             events.append({
                 "eventtype": eventtype,
                 "eventid": props.get("eventid"),
                 "iso3": primary_iso3 or (iso3_list[0] if iso3_list else ""),
                 "iso3_list": iso3_list,
                 "country": props.get("country", ""),
+                "lat": lat,
+                "lon": lon,
                 "fromdate": fromdate,
                 "todate": todate,
                 "alertlevel": props.get("alertlevel", "Green"),

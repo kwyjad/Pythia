@@ -30,7 +30,7 @@ import re
 import json
 import argparse
 import logging
-from datetime import datetime
+from datetime import date, datetime
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 from pathlib import Path
@@ -55,6 +55,70 @@ HEADERS = {
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
+
+# Southern-hemisphere seasons span two calendar years and BoM writes them as
+# "2025-26". So do the climatology baselines its pages quote — "since
+# 1980-81", "the 1981-2010 average" — and a plain first-match regex picked
+# those up: both the Australian Region and South Pacific outlooks were stored
+# as season 1980-81 in the 2026-08 run, which is not a season anyone
+# forecast. Two defences, in order.
+_SEASON_PHRASE = re.compile(
+    r"(\d{4})[–\-/](\d{2,4})\s+(?:Australian\s+(?:region\s+)?|South\s+Pacific\s+)?"
+    r"(?:tropical\s+cyclone\s+)?season",
+    re.IGNORECASE,
+)
+_SEASON_ANY = re.compile(r"(\d{4})[–\-/](\d{2,4})")
+
+#: How far from the current year a season's start may sit and still be this
+#: outlook's. Generous by one year in each direction: an outlook is issued in
+#: October for the season that follows, and a page fetched mid-year still
+#: legitimately describes the season just past.
+_SEASON_PLAUSIBLE_YEARS = 1
+
+
+def _season_from_pair(start_text: str, end_text: str) -> tuple[str, int] | None:
+    try:
+        start_year = int(start_text)
+    except (TypeError, ValueError):
+        return None
+    end_suffix = str(end_text)
+    if len(end_suffix) == 2:
+        end_year = int(str(start_year)[:2] + end_suffix)
+    else:
+        try:
+            end_year = int(end_suffix)
+        except (TypeError, ValueError):
+            return None
+    return f"{start_year}-{str(end_year)[-2:]}", start_year
+
+
+def extract_season(text: str, today: date | None = None) -> tuple[str, int] | None:
+    """(season label, start year) for a BoM outlook page, or None.
+
+    A year pair written as part of a SEASON phrase wins outright — that is
+    the outlook naming itself. Failing that, the latest pair whose start year
+    is plausible for today is used, which is what keeps a climatology
+    baseline from being read as a forecast. A page with neither yields
+    nothing, and nothing is better than 1980-81.
+    """
+
+    phrase = _SEASON_PHRASE.search(text)
+    if phrase:
+        parsed = _season_from_pair(phrase.group(1), phrase.group(2))
+        if parsed:
+            return parsed
+
+    year = (today or date.today()).year
+    plausible: list[tuple[str, int]] = []
+    for match in _SEASON_ANY.finditer(text):
+        parsed = _season_from_pair(match.group(1), match.group(2))
+        if parsed and abs(parsed[1] - year) <= _SEASON_PLAUSIBLE_YEARS:
+            plausible.append(parsed)
+    if plausible:
+        return max(plausible, key=lambda pair: pair[1])
+    return None
+
+
 
 @dataclass
 class SubregionForecast:
@@ -178,17 +242,11 @@ def extract_australian_outlook(text: str, url: str = "") -> SeasonalForecast:
     f = SeasonalForecast(basin="AUS", basin_full="Australian Region", url=url)
     f.extracted_at = datetime.utcnow().isoformat() + "Z"
 
-    # Season detection: "2024-25" or "2025-26" or "2025/26"
-    season_m = re.search(r"(\d{4})[–\-/](\d{2,4})", text)
-    if season_m:
-        start_year = int(season_m.group(1))
-        end_suffix = season_m.group(2)
-        if len(end_suffix) == 2:
-            end_year = int(str(start_year)[:2] + end_suffix)
-        else:
-            end_year = int(end_suffix)
-        f.season = f"{start_year}-{str(end_year)[-2:]}"
-        f.season_year = start_year
+    # Season detection, anchored to a season PHRASE first — the page also
+    # quotes climatology baselines in the same "1980-81" shape.
+    parsed = extract_season(text)
+    if parsed:
+        f.season, f.season_year = parsed
 
     # Issue date — BoM typically issues in October
     date_m = re.search(r"(?:Issued|Last\s+updated)[:\s]*(\w+\s+\d{4})", text)
@@ -302,17 +360,10 @@ def extract_south_pacific_outlook(text: str, url: str = "") -> SeasonalForecast:
     f = SeasonalForecast(basin="SP", basin_full="South Pacific", url=url)
     f.extracted_at = datetime.utcnow().isoformat() + "Z"
 
-    # Season
-    season_m = re.search(r"(\d{4})[–\-/](\d{2,4})", text)
-    if season_m:
-        start_year = int(season_m.group(1))
-        end_suffix = season_m.group(2)
-        if len(end_suffix) == 2:
-            end_year = int(str(start_year)[:2] + end_suffix)
-        else:
-            end_year = int(end_suffix)
-        f.season = f"{start_year}-{str(end_year)[-2:]}"
-        f.season_year = start_year
+    # Season, anchored to a season PHRASE first (see extract_season).
+    parsed = extract_season(text)
+    if parsed:
+        f.season, f.season_year = parsed
     else:
         # Fallback: "July 2010 to June 2011"
         season_m2 = re.search(r"(?:July|from)\s+(\d{4})\s+to\s+(?:June\s+)?(\d{4})", text, re.IGNORECASE)

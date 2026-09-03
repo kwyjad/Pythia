@@ -396,3 +396,60 @@ def test_an_unavailable_cross_check_says_so_rather_than_going_quiet(con, ruleboo
     assert "Dartmouth Flood Observatory" in report
     assert "Unavailable" in report
     assert "affects no resolved row" in report
+
+
+# ---------------------------------------------------------------------------
+# The headline must say what it is a headline about
+# ---------------------------------------------------------------------------
+
+
+def _scope_result(**assessed):
+    from resolver.hazard_resolution.acceptance import AcceptanceResult, HazardRates
+
+    return AcceptanceResult(
+        first_ym="2025-08",
+        last_ym="2026-07",
+        months=12,
+        rates={
+            hazard: HazardRates(hazard=hazard, cells_assessed=cells)
+            for hazard, cells in assessed.items()
+        },
+    )
+
+
+def test_the_headline_names_the_hazards_it_covers():
+    """The August 2026 report printed 0.0% as a whole-machine score when only
+    drought had assessed cells — a number about one hazard, read as a number
+    about the machine."""
+
+    from resolver.hazard_resolution.acceptance import _headline_scope
+
+    scope = _headline_scope(_scope_result(DR=756, FL=0, TC=0))
+    assert "DR" in scope and "only" in scope
+    assert "FL, TC" in scope
+    assert "not scored at 0%" in scope
+
+
+def test_a_window_where_nothing_ran_says_so_outright():
+    """A headline over no assessed cells is not a measurement of anything."""
+
+    from resolver.hazard_resolution.acceptance import _headline_scope
+
+    scope = _headline_scope(_scope_result(DR=0, FL=0, TC=0))
+    assert "not a measurement of anything" in scope
+
+
+def test_full_coverage_needs_no_caveat():
+    from resolver.hazard_resolution.acceptance import _headline_scope
+
+    scope = _headline_scope(_scope_result(DR=10, FL=20, TC=30))
+    assert "DR, FL, TC" in scope
+    assert "absent" not in scope
+
+
+def test_the_scope_line_reaches_the_rendered_report():
+    """A guard that exists only in a helper is a guard nobody reads."""
+
+    from resolver.hazard_resolution.acceptance import render_report
+
+    assert "Scope:" in render_report(_scope_result(DR=756, FL=0, TC=0))

@@ -185,22 +185,77 @@ def detect_basin(text: str) -> dict:
 # Core extraction (regex-based)
 # ---------------------------------------------------------------------------
 
-def extract_issue_date(text: str) -> str:
-    """Extract the issue date from the PDF header."""
-    # Pattern: "Issued: 11th December 2025" or "Issued: 8th July 2025"
-    m = re.search(r"Issued:\s*(\d{1,2})\s*(?:st|nd|rd|th)?\s+(\w+)\s+(\d{4})", text)
-    if m:
-        day, month_str, year = m.group(1), m.group(2), m.group(3)
+_ISSUED_RE = re.compile(
+    r"Issued:\s*(\d{1,2})\s*(?:st|nd|rd|th)?\s+(\w+)\s+(\d{4})"
+)
+
+#: How much of a TSR PDF counts as its header. Its own issue line sits at the
+#: top; the dates further down belong to the earlier forecasts it compares
+#: itself against.
+_HEADER_CHARS = 1500
+
+
+def _issued_dates(text: str) -> list[datetime]:
+    out = []
+    for match in _ISSUED_RE.finditer(text):
+        day, month_str, year = match.group(1), match.group(2), match.group(3)
         try:
-            dt = datetime.strptime(f"{day} {month_str} {year}", "%d %B %Y")
-            return dt.strftime("%Y-%m-%d")
+            out.append(datetime.strptime(f"{day} {month_str} {year}", "%d %B %Y"))
         except ValueError:
-            return f"{year}-{month_str}-{day}"
+            continue
+    return out
+
+
+def extract_issue_date(text: str) -> str:
+    """The date THIS document was issued.
+
+    A TSR update quotes the forecasts it supersedes — "our pre-season
+    forecast issued 21st May" — and a first-match search over the whole text
+    picked those up: the August 2026 Atlantic update was stored under the May
+    issue date, which collided with the real May forecast on the dedup key
+    and replaced it.
+
+    So: the header's own line first, and where several dates are in play the
+    LATEST wins. A document cannot have been issued before the forecasts it
+    discusses.
+    """
+
+    header = _issued_dates(text[:_HEADER_CHARS])
+    if header:
+        return header[0].strftime("%Y-%m-%d")
+    everywhere = _issued_dates(text)
+    if everywhere:
+        return max(everywhere).strftime("%Y-%m-%d")
     return ""
 
 
-def extract_forecast_type(text: str, issue_date: str) -> str:
-    """Infer the forecast type from the title and issue date."""
+#: TSR names its own products in its filenames, and a filename is not prose.
+#: The August update's opening summary discusses the pre-season forecast, so
+#: sniffing the first 500 characters typed it "pre_season" — the URL said
+#: "August" all along.
+_TYPE_BY_ISSUE_MONTH = {
+    "december": "extended_range",
+    "january": "extended_range",
+    "april": "early_april",
+    "may": "pre_season",
+    "may/june": "pre_season",
+    "preseason": "pre_season",
+    "june": "june_update",
+    "july": "july_update",
+    "august": "august_update",
+    "october": "october_outlook",
+    "november": "november_outlook",
+}
+
+
+def extract_forecast_type(text: str, issue_date: str, issue_month: str = "") -> str:
+    """The forecast type, preferring what the source URL already told us."""
+
+    if issue_month:
+        known = _TYPE_BY_ISSUE_MONTH.get(str(issue_month).strip().lower())
+        if known:
+            return known
+
     text_lower = text[:500].lower()
     if "extended range" in text_lower:
         return "extended_range"
@@ -403,7 +458,9 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
 # Main extraction orchestrator
 # ---------------------------------------------------------------------------
 
-def extract_forecast(text: str, pdf_url: str = "", pdf_path: str = "") -> SeasonalForecast:
+def extract_forecast(
+    text: str, pdf_url: str = "", pdf_path: str = "", issue_month: str = ""
+) -> SeasonalForecast:
     """Run the full extraction pipeline on extracted PDF text."""
     forecast = SeasonalForecast()
     forecast.pdf_url = pdf_url
@@ -418,7 +475,9 @@ def extract_forecast(text: str, pdf_url: str = "", pdf_path: str = "") -> Season
     # Issue date & forecast type
     forecast.issue_date = extract_issue_date(text)
     forecast.season_year = extract_season_year(text)
-    forecast.forecast_type = extract_forecast_type(text, forecast.issue_date)
+    forecast.forecast_type = extract_forecast_type(
+        text, forecast.issue_date, issue_month=issue_month
+    )
     logger.info(f"  Season: {forecast.season_year}, Type: {forecast.forecast_type}, Issued: {forecast.issue_date}")
     
     # Core forecast table
@@ -450,12 +509,18 @@ def extract_forecast(text: str, pdf_url: str = "", pdf_path: str = "") -> Season
     return forecast
 
 
-def process_url(url: str) -> SeasonalForecast:
-    """Download a PDF from URL, extract text, run extraction."""
+def process_url(url: str, issue_month: str = "") -> SeasonalForecast:
+    """Download a PDF from URL, extract text, run extraction.
+
+    ``issue_month`` comes from the discovery URL, which names TSR's own
+    product ("...ForecastAugust2026.pdf"). It is not prose and cannot be
+    confused by the document discussing an earlier forecast.
+    """
+
     logger.info(f"Processing: {url}")
     pdf_path = download_pdf(url)
     text = extract_text_from_pdf(pdf_path)
-    return extract_forecast(text, pdf_url=url)
+    return extract_forecast(text, pdf_url=url, issue_month=issue_month)
 
 
 def process_file(filepath: str) -> SeasonalForecast:
@@ -543,7 +608,7 @@ def discover_and_extract(year: int) -> list[SeasonalForecast]:
             resp = requests.head(url, timeout=10, allow_redirects=True)
             if resp.status_code == 200:
                 logger.info(f"  Found: {url}")
-                forecast = process_url(url)
+                forecast = process_url(url, issue_month=candidate.get("issue_month", ""))
                 results.append(forecast)
             else:
                 logger.debug(f"  Not found ({resp.status_code}): {url}")
@@ -554,7 +619,40 @@ def discover_and_extract(year: int) -> list[SeasonalForecast]:
             # already extracted from the others — skip this URL and continue.
             logger.warning(f"  Skipping {url} — extraction failed: {e}")
     
+    _warn_on_colliding_issue_dates(results)
     return results
+
+
+def _warn_on_colliding_issue_dates(forecasts: list[SeasonalForecast]) -> list[str]:
+    """Two outlooks for one basin and season cannot share an issue date.
+
+    When they do, one of them has been misread — which is exactly what
+    happened to the August 2026 Atlantic update, stored under the May issue
+    date with the May figures. It is reported rather than raised: a
+    diagnostic that stops the whole batch would lose the forecasts that
+    parsed correctly.
+    """
+
+    seen: dict[tuple, list[SeasonalForecast]] = {}
+    for forecast in forecasts:
+        if not forecast.issue_date:
+            continue
+        seen.setdefault(
+            (forecast.basin, forecast.season_year, forecast.issue_date), []
+        ).append(forecast)
+
+    problems = []
+    for (basin, season, issued), group in seen.items():
+        if len(group) < 2:
+            continue
+        types = ", ".join(sorted(f.forecast_type or "?" for f in group))
+        problem = (
+            f"{basin} {season}: {len(group)} outlooks share the issue date "
+            f"{issued} ({types}) — at least one has been misread from its PDF"
+        )
+        problems.append(problem)
+        logger.warning("  %s", problem)
+    return problems
 
 
 # ---------------------------------------------------------------------------

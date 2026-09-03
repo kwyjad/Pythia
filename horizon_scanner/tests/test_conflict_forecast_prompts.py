@@ -155,7 +155,36 @@ class TestFormatConflictForecastsForPrompt:
     def test_stale_data_contains_warning(self):
         result = format_conflict_forecasts_for_prompt(_stale_forecast_data())
         assert "WARNING" in result
-        assert ">45 DAYS OLD" in result
+        assert "MONTHS OLD" in result
+
+    def test_the_warning_states_the_forecast_s_actual_age(self):
+        """">45 DAYS OLD" is true of a 46-day-old forecast and of a nine-month
+        one, and they are not the same claim.
+
+        ACLED CAST has served a 2025-12-01 vintage since the 2026-01 cycle,
+        so the fixed label understated the problem by a factor of six.
+        """
+
+        import datetime as dt
+
+        from horizon_scanner.conflict_forecasts import age_note
+
+        note = age_note("2025-12-01", today=dt.date(2026, 9, 3))
+        assert "9 MONTHS OLD" in note
+        assert "historical prior" in note
+
+    def test_a_fresh_forecast_carries_no_warning(self):
+        import datetime as dt
+
+        from horizon_scanner.conflict_forecasts import age_note
+
+        assert age_note("2026-08-25", today=dt.date(2026, 9, 3)) == ""
+
+    def test_an_unparseable_issue_date_is_silent_rather_than_wrong(self):
+        from horizon_scanner.conflict_forecasts import age_note
+
+        assert age_note("unknown") == ""
+        assert age_note(None) == ""
 
     def test_full_data_contains_cast_section(self):
         result = format_conflict_forecasts_for_prompt(_full_forecast_data())
