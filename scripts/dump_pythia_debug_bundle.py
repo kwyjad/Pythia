@@ -1042,6 +1042,18 @@ def _compute_question_run_metrics(
                 continue
             present_by_qid.setdefault(qid, set()).add(model_id)
 
+        # llm_calls says the CALL succeeded; forecasts_raw says whether the
+        # output became a forecast. A member whose response failed to parse
+        # leaves an ok call and a single no_forecast row, and until
+        # 2026-09-01 that still counted as present — three such members made
+        # every health view report 5/5. Where forecasts_raw carries rows for
+        # a question, a model counts only with a complete ok SPD.
+        complete_by_qid = _complete_member_spds_by_question(con, run_id, list(base_rows))
+        if complete_by_qid:
+            for qid, present in list(present_by_qid.items()):
+                if qid in complete_by_qid:
+                    present_by_qid[qid] = {m for m in present if m in complete_by_qid[qid]}
+
     rows_to_upsert: list[dict[str, Any]] = []
     for qid, row in sorted(base_rows.items()):
         phase_max = phase_max_by_qid.get(qid, {})
@@ -1088,6 +1100,50 @@ def _compute_question_run_metrics(
 
     frame = pd.DataFrame(rows_to_upsert)
     duckdb_io.upsert_dataframe(con, "question_run_metrics", frame, keys=["run_id", "question_id"])
+
+
+def _complete_member_spds_by_question(
+    con: duckdb.DuckDBPyConnection, run_id: str, question_ids: list[str]
+) -> dict[str, set[str]]:
+    """{question_id: {model_name with an ok SPD covering every window month}}.
+
+    Only questions that have ANY forecasts_raw row are keyed, so a DB that
+    never wrote member rows (older runs, tests) is left to the llm_calls
+    answer. Never raises — a missing column returns {}.
+    """
+
+    if not question_ids:
+        return {}
+    try:
+        from pythia.buckets import NUM_HORIZONS as _n_horizons  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        _n_horizons = 6
+    in_clause, params = _build_in_clause(question_ids)
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT
+                question_id,
+                model_name,
+                COUNT(DISTINCT CASE WHEN status = 'ok' THEN month_index END) AS n_months_ok
+            FROM forecasts_raw
+            WHERE run_id = ? AND question_id IN {in_clause}
+            GROUP BY question_id, model_name
+            """,
+            [run_id, *params],
+        )
+    except Exception:
+        return {}
+    out: dict[str, set[str]] = {}
+    for row in rows:
+        qid = str(row.get("question_id") or "")
+        if not qid:
+            continue
+        bucket = out.setdefault(qid, set())
+        if int(row.get("n_months_ok") or 0) >= _n_horizons:
+            bucket.add(str(row.get("model_name") or ""))
+    return out
 
 
 def _load_question_run_metrics(
@@ -1454,17 +1510,39 @@ def _get_bucket_labels_for_question(question: Dict[str, Any]) -> List[str]:
 def _load_forecasts_raw_counts(
     con: duckdb.DuckDBPyConnection, run_id: str
 ) -> list[dict[str, Any]]:
-    return _fetch_llm_rows(
-        con,
-        """
-        SELECT model_name, COUNT(*) AS n_rows
-        FROM forecasts_raw
-        WHERE run_id = ?
-        GROUP BY 1
-        ORDER BY n_rows DESC, model_name
-        """,
-        [run_id],
-    )
+    """Per-model forecasts_raw rows, plus the two counts that made the
+    2026-09-01 shortfall visible: how many questions the model actually
+    answered with an ok SPD, and how many no_forecast rows it left behind.
+    Falls back to the bare row count on DBs without a status column."""
+
+    try:
+        return _fetch_llm_rows(
+            con,
+            """
+            SELECT
+                model_name,
+                COUNT(*) AS n_rows,
+                COUNT(DISTINCT CASE WHEN status = 'ok' THEN question_id END) AS n_questions_ok,
+                COUNT(*) FILTER (WHERE status = 'no_forecast') AS n_no_forecast
+            FROM forecasts_raw
+            WHERE run_id = ?
+            GROUP BY 1
+            ORDER BY n_rows DESC, model_name
+            """,
+            [run_id],
+        )
+    except Exception:
+        return _fetch_llm_rows(
+            con,
+            """
+            SELECT model_name, COUNT(*) AS n_rows
+            FROM forecasts_raw
+            WHERE run_id = ?
+            GROUP BY 1
+            ORDER BY n_rows DESC, model_name
+            """,
+            [run_id],
+        )
 
 
 def _load_forecasts_ensemble_counts(
@@ -1794,11 +1872,36 @@ def _ensemble_participation_summary(
     spd_model_ids: list[str],
 ) -> list[str]:
     present = {row.get("model_name"): int(row.get("n_rows", 0) or 0) for row in forecasts_raw_counts}
+    by_name = {row.get("model_name"): row for row in forecasts_raw_counts}
     present_spd_models = {mid for mid in spd_model_ids if mid}
     lines: list[str] = []
     if present:
         for model_name in sorted(present):
-            lines.append(f"- Model `{model_name}` wrote {present[model_name]} forecasts_raw rows.")
+            row = by_name.get(model_name) or {}
+            extra = ""
+            if row.get("n_questions_ok") is not None:
+                extra = f" ({int(row.get('n_questions_ok') or 0)} questions with an ok SPD"
+                n_nf = int(row.get("n_no_forecast") or 0)
+                extra += f", {n_nf} no_forecast" if n_nf else ""
+                extra += ")"
+            lines.append(f"- Model `{model_name}` wrote {present[model_name]} forecasts_raw rows{extra}.")
+        # A member that answered fewer questions than its peers is the
+        # silent-partial-ensemble signature (2026-09-01: Opus 69/71,
+        # gpt-5.6-luna 70/71 while the health line said 5/5).
+        member_cov = {
+            name: int((by_name.get(name) or {}).get("n_questions_ok") or 0)
+            for name in present
+            if name in present_spd_models and (by_name.get(name) or {}).get("n_questions_ok") is not None
+        }
+        if member_cov:
+            top = max(member_cov.values())
+            short = {n: c for n, c in member_cov.items() if c < top}
+            if short:
+                lines.append(
+                    "- **Partial ensemble**: "
+                    + ", ".join(f"`{n}` answered {c}/{top} questions" for n, c in sorted(short.items()))
+                    + " — those questions were aggregated from fewer members."
+                )
     else:
         lines.append("- No forecasts_raw rows found for this run.")
 
@@ -3147,6 +3250,48 @@ def _categorise_error(error_text: str) -> str:
 # Traffic-light health evaluator
 # ---------------------------------------------------------------------------
 
+def _member_gap_summary(question_run_metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count Track-1 (question, member) cells with no usable SPD.
+
+    Reads the per-question ``missing_model_ids_json`` the metrics table
+    carries (which, since 2026-09-01, requires a complete ok SPD in
+    forecasts_raw, not merely an ok llm_calls row). Track-2 questions are
+    excluded: their single model is judged separately.
+    """
+
+    by_model: dict[str, int] = {}
+    n_missing = 0
+    n_expected = 0
+    n_questions = 0
+    for row in question_run_metrics or []:
+        expected = row.get("n_spd_models_expected")
+        try:
+            expected_n = int(expected or 0)
+        except (TypeError, ValueError):
+            expected_n = 0
+        if expected_n <= 1:
+            continue  # Track 2 or unknown
+        n_expected += expected_n
+        raw = row.get("missing_model_ids_json")
+        try:
+            missing = json.loads(raw) if isinstance(raw, str) and raw else (raw or [])
+        except Exception:
+            missing = []
+        if not isinstance(missing, list) or not missing:
+            continue
+        n_questions += 1
+        for m in missing:
+            name = str(m)
+            by_model[name] = by_model.get(name, 0) + 1
+            n_missing += 1
+    return {
+        "n_cells_missing": n_missing,
+        "n_cells_expected": n_expected,
+        "n_questions_affected": n_questions,
+        "by_model": by_model,
+    }
+
+
 def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
     """Return list of {subsystem, status, detail} dicts for the executive summary."""
     checks: list[dict[str, Any]] = []
@@ -3204,10 +3349,20 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
             parts.append(f"{n_alerts} alerts")
         if latest[0]:
             parts.append(f"latest: {latest[0]}-{latest[1]:02d}" if latest[1] else f"latest: {latest[0]}")
-        # Staleness: CrisisWatch is refreshed by a manual LOCAL Playwright run
-        # (CI is Cloudflare-blocked) — data older than ~45 days means the
-        # monthly local refresh was missed. Fail loudly instead of the old
-        # silent WARN (the July 2026 run was serving February data).
+        # Which editions the table actually holds: on 2026-09-01 it held
+        # February and June only, and "latest 2026-06" understated that the
+        # per-country rows were a mix of two editions three months apart.
+        edition_labels = [
+            f"{y}-{int(m):02d}" if m else str(y) for (y, m) in months if y
+        ]
+        if edition_labels:
+            parts.append(f"editions in table: {', '.join(edition_labels)}")
+        # Staleness: the edition is refreshed from the Wayback Machine by
+        # resolver_update Phase 4 (monthly), the weekly structured-data
+        # ingest and the hs_submit stage; refresh-crisiswatch.yml is the
+        # early-month monitor. Data older than two editions means every one
+        # of those paths failed to land a newer edition. Fail loudly instead
+        # of the old silent WARN (the July 2026 run was serving February data).
         stale_months = False
         if latest[0]:
             try:
@@ -3224,8 +3379,11 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         if stale_months:
             cw_status = "FAIL"
             cw_detail = (
-                f"STALE — {'; '.join(parts)}. Run the local refresh: "
-                "python -m scripts.refresh_crisiswatch (CI is Cloudflare-blocked)."
+                f"STALE — {'; '.join(parts)}. Prompts now carry a staleness note "
+                "for entries older than two editions. Dispatch Ingest Structured "
+                "Data with sources=crisiswatch (Wayback refresh + DB store), or run "
+                "python -m scripts.refresh_crisiswatch --source wayback locally and "
+                "store the JSON."
             )
         elif n_entries < 10:
             cw_status = "WARN"
@@ -3459,6 +3617,22 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         else:
             e_status = "FAIL"
             e_detail = f"{len(present_models)}/{len(expected_models)} models, missing: {', '.join(missing_models)}"
+        # Member completeness: every model present somewhere is not the same
+        # as every question aggregated from every member. Count the
+        # (question, member) cells that produced no usable SPD.
+        gaps = _member_gap_summary(data.question_run_metrics)
+        if gaps["n_cells_missing"]:
+            n_cells = gaps["n_cells_expected"]
+            share = (gaps["n_cells_missing"] / n_cells) if n_cells else 0.0
+            per_model = ", ".join(
+                f"{m}: {c}" for m, c in sorted(gaps["by_model"].items(), key=lambda kv: (-kv[1], kv[0]))
+            )
+            e_detail += (
+                f" · {gaps['n_cells_missing']} of {n_cells} Track-1 member SPDs missing "
+                f"({per_model}) — {gaps['n_questions_affected']} question(s) aggregated from fewer members"
+            )
+            if e_status == "OK":
+                e_status = "FAIL" if share > 0.10 else "WARN"
         checks.append({"subsystem": "SPD Ensemble", "status": e_status, "detail": e_detail})
 
         # Scenarios
@@ -4257,6 +4431,50 @@ def emit_health_report_json(data: BundleData, out_dir: Path) -> None:
 # Emitter: Question Metrics CSV
 # ---------------------------------------------------------------------------
 
+def _load_batched_call_counts(
+    con: duckdb.DuckDBPyConnection, run_id: str | None
+) -> dict[str, dict[str, int]]:
+    """{question_id: {n_calls, n_batched}} for one forecaster run.
+
+    A batched call is replayed from the provider batch and records
+    elapsed_ms=0 with the replay timestamp, so a question whose calls were
+    all batched legitimately has compute_ms=0 and a wall clock that measures
+    the collect stage, not the models. This count says which case a row is.
+    """
+
+    if not run_id:
+        return {}
+    llm_columns = _llm_calls_columns(con)
+    if "question_id" not in llm_columns:
+        return {}
+    batched_expr = (
+        "COUNT(*) FILTER (WHERE usage_json LIKE '%\"service_tier\": \"batch\"%')"
+        if "usage_json" in llm_columns
+        else "0"
+    )
+    try:
+        rows = _fetch_llm_rows(
+            con,
+            f"""
+            SELECT question_id, COUNT(*) AS n_calls, {batched_expr} AS n_batched
+            FROM llm_calls
+            WHERE run_id = ? AND question_id IS NOT NULL AND question_id <> ''
+            GROUP BY question_id
+            """,
+            [run_id],
+        )
+    except Exception:
+        return {}
+    return {
+        str(r.get("question_id")): {
+            "n_calls": int(r.get("n_calls") or 0),
+            "n_batched": int(r.get("n_batched") or 0),
+        }
+        for r in rows
+        if r.get("question_id")
+    }
+
+
 def emit_question_metrics_csv(
     data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
 ) -> None:
@@ -4294,14 +4512,26 @@ def emit_question_metrics_csv(
         except Exception:
             pass
 
+    # target_month is the LAST month of the six-month window (the month-
+    # anchoring convention: horizon 1 = window_start_date). The question id
+    # carries the epoch (window start), so the two columns legitimately
+    # differ by five months; window_start_date sits beside it to say so.
     fieldnames = [
-        "question_id", "iso3", "hazard_code", "metric", "target_month",
+        "question_id", "iso3", "hazard_code", "metric",
+        "window_start_date", "target_month",
         "triage_tier", "spd_status", "scenario_status",
-        "wall_ms", "compute_ms", "queue_ms", "cost_usd",
+        "wall_ms", "compute_ms", "queue_ms", "n_llm_calls", "n_batched_calls", "cost_usd",
         "n_spd_models_expected", "n_spd_models_ok", "missing_model_ids",
         "research_grounded", "n_verified_sources", "n_unverified_sources",
         "triage_score", "rc_likelihood", "rc_level", "rc_direction", "track",
     ]
+    batched_by_qid = _load_batched_call_counts(con, data.forecaster_run_id)
+
+    def _cell(value: Any) -> Any:
+        # 0 is a measurement (a batched replay has no client-side duration);
+        # only None is "unknown". `or ""` turned every Track-2 timing into
+        # a blank on 2026-09-01.
+        return "" if value is None else value
 
     out_path = out_dir / f"question_metrics__{data.out_run_id}.csv"
     with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -4327,16 +4557,19 @@ def emit_question_metrics_csv(
                 "iso3": q.get("iso3") or "",
                 "hazard_code": q.get("hazard_code") or "",
                 "metric": q.get("metric") or "",
+                "window_start_date": str(q.get("window_start_date") or ""),
                 "target_month": q.get("target_month") or "",
                 "triage_tier": scenario.get("triage_tier") or "",
                 "spd_status": _load_spd_status(con, data.forecaster_run_id, qid) or "",
                 "scenario_status": scenario.get("status") or "",
-                "wall_ms": metrics.get("wall_ms") or "",
-                "compute_ms": metrics.get("compute_ms") or "",
-                "queue_ms": metrics.get("queue_ms") or "",
-                "cost_usd": metrics.get("cost_usd") or "",
-                "n_spd_models_expected": metrics.get("n_spd_models_expected") or "",
-                "n_spd_models_ok": metrics.get("n_spd_models_ok") or "",
+                "wall_ms": _cell(metrics.get("wall_ms")),
+                "compute_ms": _cell(metrics.get("compute_ms")),
+                "queue_ms": _cell(metrics.get("queue_ms")),
+                "n_llm_calls": _cell((batched_by_qid.get(qid) or {}).get("n_calls")),
+                "n_batched_calls": _cell((batched_by_qid.get(qid) or {}).get("n_batched")),
+                "cost_usd": _cell(metrics.get("cost_usd")),
+                "n_spd_models_expected": _cell(metrics.get("n_spd_models_expected")),
+                "n_spd_models_ok": _cell(metrics.get("n_spd_models_ok")),
                 "missing_model_ids": metrics.get("missing_model_ids_json") or "",
                 "research_grounded": web.get("grounded", ""),
                 "n_verified_sources": web.get("n_verified", ""),
@@ -4989,22 +5222,59 @@ def emit_data_inject_inventory_csv(
 # Emitter: Timing Breakdown CSV
 # ---------------------------------------------------------------------------
 
+def _timing_stage_for_call(phase: str, call_type: str, hazard_code: str) -> str | None:
+    """Map one llm_calls row to a timing stage: rc / triage / adversarial /
+    research / spd. ``call_type`` is authoritative (rc_pass_N, rc_grounding,
+    triage_pass_N, triage_grounding, adversarial_search, adversarial_synthesis,
+    spd_v2, binary_v2, ...); the synthetic UPPERCASED hazard_code is the
+    fallback for rows written before call_type existed. Every HS row carries
+    phase='hs_triage', which is why phase alone cannot split RC from triage —
+    the 2026-09-01 bundle reported rc_elapsed_ms == triage_elapsed_ms for all
+    122 countries because it did exactly that."""
+
+    ct = (call_type or "").lower()
+    hz = (hazard_code or "").upper()
+    ph = (phase or "").lower()
+    if ct.startswith("rc_"):
+        return "rc"
+    if ct.startswith("triage_"):
+        return "triage"
+    if ct.startswith("adversarial_"):
+        return "adversarial"
+    if ct in ("spd_v2", "binary_v2", "track2_spd") or ph in ("spd_v2", "binary_v2"):
+        return "spd"
+    if ct in ("research_v2", "research_web_research", "hs_web_research") or ph in (
+        "research_v2", "research_web_research", "hs_web_research"
+    ):
+        return "research"
+    if hz.startswith("ADVERSARIAL_"):
+        return "adversarial"
+    if hz.startswith("TRIAGE_"):
+        return "triage"
+    if hz.startswith("RC_") or hz.startswith("GROUNDING_"):
+        return "rc"
+    if ph == "hs_triage":
+        # Legacy row with no call_type and a plain hazard code: a triage
+        # pass (RC rows always carried the RC_ prefix).
+        return "triage"
+    return None
+
+
 def emit_timing_breakdown_csv(
     data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
 ) -> None:
-    """Export a CSV with per-country timing breakdown from llm_calls."""
+    """Export a CSV with per-country timing breakdown from llm_calls.
+
+    Each stage's elapsed is the span from its first to its last call for the
+    country (never a sum of per-group spans, which double counts overlapping
+    calls). Batched calls record elapsed_ms=0 and their timestamps are the
+    replay time, so under the staged pipeline the spd stage measures the
+    collect stage's replay, not model latency — n_*_batched says how much of
+    each stage that applies to.
+    """
     if not data.hs_run_id:
         return
 
-    # Map phases to their column prefixes
-    phase_map = {
-        "rc": ("hs_triage",),
-        "triage": ("hs_triage",),
-        "research": ("research_v2", "research_web_research", "hs_web_research"),
-        "spd": ("spd_v2",),
-    }
-
-    # Build the combined predicate from data
     predicate_parts: list[str] = []
     params: list[Any] = []
     if data.hs_run_id:
@@ -5018,6 +5288,13 @@ def emit_timing_breakdown_csv(
         return
 
     scope = " OR ".join(predicate_parts)
+    llm_columns = _llm_calls_columns(con)
+    call_type_expr = "call_type" if "call_type" in llm_columns else "NULL AS call_type"
+    batched_expr = (
+        "COUNT(*) FILTER (WHERE usage_json LIKE '%\"service_tier\": \"batch\"%') AS n_batched"
+        if "usage_json" in llm_columns
+        else "0 AS n_batched"
+    )
 
     try:
         rows = _fetch_llm_rows(
@@ -5026,16 +5303,17 @@ def emit_timing_breakdown_csv(
             SELECT
                 iso3,
                 phase,
-                call_type,
+                {call_type_expr},
+                hazard_code,
                 MIN(timestamp) AS min_ts,
                 MAX(timestamp) AS max_ts,
-                CAST(date_diff('millisecond', MIN(timestamp), MAX(timestamp)) AS BIGINT) AS elapsed_ms,
-                COUNT(*) AS n_calls
+                COUNT(*) AS n_calls,
+                {batched_expr}
             FROM llm_calls
             WHERE ({scope})
               AND iso3 IS NOT NULL
               AND timestamp IS NOT NULL
-            GROUP BY iso3, phase, call_type
+            GROUP BY iso3, phase, call_type, hazard_code
             ORDER BY iso3, phase
             """,
             params,
@@ -5044,62 +5322,64 @@ def emit_timing_breakdown_csv(
         LOG.warning("emit_timing_breakdown_csv failed: %s", exc)
         return
 
-    # Aggregate by iso3
+    stages = ("rc", "triage", "adversarial", "research", "spd")
     iso3_data: dict[str, dict[str, Any]] = {}
     for row in rows:
         iso3 = str(row.get("iso3") or "")
         if not iso3:
             continue
-        entry = iso3_data.setdefault(iso3, {
-            "iso3": iso3,
-            "rc_start_ts": None, "rc_end_ts": None, "rc_elapsed_ms": 0,
-            "triage_start_ts": None, "triage_end_ts": None, "triage_elapsed_ms": 0,
-            "research_start_ts": None, "research_end_ts": None, "research_elapsed_ms": 0,
-            "spd_start_ts": None, "spd_end_ts": None, "spd_elapsed_ms": 0,
-            "total_elapsed_ms": 0,
-            "n_rc_calls": 0, "n_triage_calls": 0, "n_research_calls": 0, "n_spd_calls": 0,
-        })
+        entry = iso3_data.get(iso3)
+        if entry is None:
+            entry = {"iso3": iso3, "total_elapsed_ms": 0}
+            for st in stages:
+                entry[f"{st}_start_ts"] = None
+                entry[f"{st}_end_ts"] = None
+                entry[f"{st}_elapsed_ms"] = 0
+                entry[f"n_{st}_calls"] = 0
+                entry[f"n_{st}_batched"] = 0
+            iso3_data[iso3] = entry
 
-        phase = str(row.get("phase") or row.get("call_type") or "")
+        stage = _timing_stage_for_call(
+            str(row.get("phase") or ""),
+            str(row.get("call_type") or ""),
+            str(row.get("hazard_code") or ""),
+        )
+        if stage is None:
+            continue
         min_ts = row.get("min_ts")
         max_ts = row.get("max_ts")
-        elapsed = int(row.get("elapsed_ms") or 0)
-        n_calls = int(row.get("n_calls") or 0)
+        start_key, end_key = f"{stage}_start_ts", f"{stage}_end_ts"
+        if min_ts is not None and (entry[start_key] is None or min_ts < entry[start_key]):
+            entry[start_key] = min_ts
+        if max_ts is not None and (entry[end_key] is None or max_ts > entry[end_key]):
+            entry[end_key] = max_ts
+        entry[f"n_{stage}_calls"] += int(row.get("n_calls") or 0)
+        entry[f"n_{stage}_batched"] += int(row.get("n_batched") or 0)
 
-        # Determine which prefix this maps to
-        hazard_like_rc = "RC_" in str(row.get("hazard_code") or "")
-        for prefix, phases in phase_map.items():
-            if phase in phases or (prefix == "rc" and hazard_like_rc):
-                start_key = f"{prefix}_start_ts"
-                end_key = f"{prefix}_end_ts"
-                elapsed_key = f"{prefix}_elapsed_ms"
-                calls_key = f"n_{prefix}_calls"
+    def _span_ms(a: Any, b: Any) -> int:
+        if a is None or b is None:
+            return 0
+        try:
+            return max(int((b - a).total_seconds() * 1000), 0)
+        except Exception:
+            return 0
 
-                if min_ts and (entry[start_key] is None or str(min_ts) < str(entry[start_key])):
-                    entry[start_key] = min_ts
-                if max_ts and (entry[end_key] is None or str(max_ts) > str(entry[end_key])):
-                    entry[end_key] = max_ts
-                entry[elapsed_key] = entry.get(elapsed_key, 0) + elapsed
-                entry[calls_key] = entry.get(calls_key, 0) + n_calls
-
-    # Compute totals
     for entry in iso3_data.values():
-        entry["total_elapsed_ms"] = (
-            entry.get("rc_elapsed_ms", 0) +
-            entry.get("triage_elapsed_ms", 0) +
-            entry.get("research_elapsed_ms", 0) +
-            entry.get("spd_elapsed_ms", 0)
-        )
+        total = 0
+        for st in stages:
+            elapsed = _span_ms(entry[f"{st}_start_ts"], entry[f"{st}_end_ts"])
+            entry[f"{st}_elapsed_ms"] = elapsed
+            total += elapsed
+        entry["total_elapsed_ms"] = total
 
-    fieldnames = [
-        "iso3",
-        "rc_start_ts", "rc_end_ts", "rc_elapsed_ms",
-        "triage_start_ts", "triage_end_ts", "triage_elapsed_ms",
-        "research_start_ts", "research_end_ts", "research_elapsed_ms",
-        "spd_start_ts", "spd_end_ts", "spd_elapsed_ms",
-        "total_elapsed_ms",
-        "n_rc_calls", "n_triage_calls", "n_research_calls", "n_spd_calls",
-    ]
+    fieldnames = ["iso3"]
+    for st in stages:
+        fieldnames += [f"{st}_start_ts", f"{st}_end_ts", f"{st}_elapsed_ms"]
+    fieldnames.append("total_elapsed_ms")
+    for st in stages:
+        fieldnames.append(f"n_{st}_calls")
+    for st in stages:
+        fieldnames.append(f"n_{st}_batched")
 
     out_path = out_dir / f"timing_breakdown__{data.out_run_id}.csv"
     with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -5107,7 +5387,7 @@ def emit_timing_breakdown_csv(
         writer.writeheader()
         for iso3 in sorted(iso3_data.keys()):
             entry = iso3_data[iso3]
-            writer.writerow({fn: entry.get(fn, "") for fn in fieldnames})
+            writer.writerow({fn: ("" if entry.get(fn) is None else entry.get(fn)) for fn in fieldnames})
 
     print(f"Wrote timing breakdown to {out_path}")
 
@@ -5202,6 +5482,23 @@ def emit_model_config_snapshot(
 # Emitter: Grounding Detail CSV
 # ---------------------------------------------------------------------------
 
+def _grounding_stage_for_call(call_type: str, hazard_code: str) -> str:
+    """rc_grounding / triage_grounding / adversarial_search / other, from
+    call_type first and the synthetic hazard_code second."""
+
+    ct = (call_type or "").lower()
+    if ct in ("rc_grounding", "triage_grounding", "adversarial_search"):
+        return ct
+    hz = (hazard_code or "").upper()
+    if hz.startswith("TRIAGE_GROUNDING_"):
+        return "triage_grounding"
+    if hz.startswith("GROUNDING_"):
+        return "rc_grounding"
+    if hz.startswith("ADVERSARIAL_") and not hz.startswith("ADVERSARIAL_SYNTH_"):
+        return "adversarial_search"
+    return "other"
+
+
 def emit_grounding_detail_csv(
     data: BundleData, con: duckdb.DuckDBPyConnection, out_dir: Path
 ) -> None:
@@ -5219,6 +5516,9 @@ def emit_grounding_detail_csv(
         return
 
     scope = " OR ".join(predicate_parts)
+    gd_call_type_expr = (
+        "call_type" if "call_type" in _llm_calls_columns(con) else "NULL AS call_type"
+    )
 
     try:
         rows = _fetch_llm_rows(
@@ -5228,6 +5528,7 @@ def emit_grounding_detail_csv(
                 iso3,
                 hazard_code,
                 phase,
+                {gd_call_type_expr},
                 model_id,
                 response_text,
                 error_text,
@@ -5254,8 +5555,12 @@ def emit_grounding_detail_csv(
         LOG.warning("emit_grounding_detail_csv failed: %s", exc)
         return
 
+    # `phase` is 'hs_triage' for EVERY HS row (RC grounding, triage grounding
+    # and adversarial searches alike — 797 of 797 on 2026-09-01), so the
+    # stage is derived from call_type, with the synthetic hazard_code prefix
+    # as the fallback for rows that predate call_type.
     fieldnames = [
-        "iso3", "hazard_code", "phase",
+        "iso3", "hazard_code", "phase", "call_type", "stage",
         "model_id", "grounded", "n_sources",
         "query", "error_code", "elapsed_ms", "timestamp",
     ]
@@ -5299,6 +5604,10 @@ def emit_grounding_detail_csv(
                 "iso3": row.get("iso3") or "",
                 "hazard_code": row.get("hazard_code") or "",
                 "phase": row.get("phase") or "",
+                "call_type": row.get("call_type") or "",
+                "stage": _grounding_stage_for_call(
+                    str(row.get("call_type") or ""), str(row.get("hazard_code") or "")
+                ),
                 "model_id": row.get("model_id") or "",
                 "grounded": grounded,
                 "n_sources": n_sources,
@@ -5810,7 +6119,7 @@ def build_debug_bundle_markdown(
     lines.append(f"- Total questions: `{len(question_ids)}`")
     lines.append("- Question IDs: " + (", ".join(question_ids) if question_ids else "(none)"))
     lines.append("")
-    lines.append("| question_id | iso3 | hazard | metric | target_month | wording |")
+    lines.append("| question_id | iso3 | hazard | metric | target_month (window end) | wording |")
     lines.append("| ----------- | ---- | ------ | ------ | ------------ | ------- |")
     if questions:
         for q in sorted(
@@ -5855,6 +6164,15 @@ def build_debug_bundle_markdown(
     if question_run_metrics_warning:
         lines.append(f"_Note: {question_run_metrics_warning}_")
         lines.append("")
+    lines.append(
+        "_wall_ms spans a question's first to last llm_calls timestamp; under the "
+        "staged pipeline that includes provider batch latency and the poller's "
+        "ticks, so queue_ms (wall minus compute) measures batch wait, not model "
+        "queueing. compute_ms sums the slowest call per phase; a batched call "
+        "records elapsed_ms=0, so a fully batched question (every Track-2 "
+        "question on a normal cycle) legitimately reads 0._"
+    )
+    lines.append("")
     wall_values = [
         float(row.get("wall_ms"))
         for row in question_run_metrics

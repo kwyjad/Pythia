@@ -390,6 +390,13 @@ class TestBodyParity:
 
         monkeypatch.setenv("OPENAI_API_KEY", "k")
         monkeypatch.setattr(llm_batch.requests, "post", _fake_post)
+        # The submit-time guards probe the file and the batch; answer both
+        # as "ready" so this test stays about the JSONL shape.
+        monkeypatch.setattr(
+            llm_batch.requests, "get",
+            lambda url, **kw: _FakeGet({"status": "processed"} if "/files/" in url else {"status": "in_progress"}),
+        )
+        monkeypatch.setattr(llm_batch, "_sleep", lambda _s: None)
         adapter = llm_batch._OpenAIBatch()
         adapter.submit([("cid-1", {"model": "gpt-5.6-sol", "messages": []})])
         line = json.loads(captured["jsonl"].splitlines()[0])
@@ -399,6 +406,121 @@ class TestBodyParity:
             "url": "/v1/chat/completions",
             "body": {"model": "gpt-5.6-sol", "messages": []},
         }
+
+
+class _FakeGet:
+    def __init__(self, payload, ok=True):
+        self._payload = payload
+        self.ok = ok
+        self.status_code = 200 if ok else 500
+
+    def raise_for_status(self):
+        if not self.ok:
+            raise RuntimeError("http error")
+
+    def json(self):
+        return self._payload
+
+
+_FILE_ACCESS_ERROR = {
+    "object": "list",
+    "data": [{
+        "code": "invalid_request",
+        "message": (
+            "Cannot find file file-7wYyFx3ukHp3twZpEfpXHG, or organization "
+            "org-bfatceYjmHrvj9PuKL8lDweY does not have access to it."
+        ),
+        "param": "file_id",
+        "line": None,
+    }],
+}
+
+
+class TestOpenAISubmitValidationGuard:
+    """The 2026-09-01 failure: OpenAI accepted every batch at creation and its
+    asynchronous validator then rejected the input file we had just uploaded.
+    The adapter must see that at submit time and re-upload, not persist a
+    doomed batch that expires 210 requests into full-price sync calls."""
+
+    def _wire(self, monkeypatch, validation_outcomes):
+        """validation_outcomes: per created batch, the status sequence the
+        batch GET returns (list of payload dicts)."""
+        state = {"uploads": 0, "batches": 0, "batch_polls": {}}
+
+        def _fake_post(url, **kwargs):
+            if url.endswith("/files"):
+                state["uploads"] += 1
+                return _FakeGet({"id": f"file-{state['uploads']}"})
+            if url.endswith("/batches"):
+                state["batches"] += 1
+                state[f"batch-{state['batches']}_file"] = kwargs["json"]["input_file_id"]
+                return _FakeGet({"id": f"batch-{state['batches']}", "status": "validating"})
+            raise AssertionError(url)
+
+        def _fake_get(url, **kwargs):
+            if "/files/" in url:
+                return _FakeGet({"status": "processed"})
+            bid = url.rsplit("/", 1)[-1]
+            seq = validation_outcomes[int(bid.split("-")[1]) - 1]
+            n = state["batch_polls"].get(bid, 0)
+            state["batch_polls"][bid] = n + 1
+            return _FakeGet(seq[min(n, len(seq) - 1)])
+
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        monkeypatch.setattr(llm_batch.requests, "post", _fake_post)
+        monkeypatch.setattr(llm_batch.requests, "get", _fake_get)
+        monkeypatch.setattr(llm_batch, "_sleep", lambda _s: None)
+        return state
+
+    def test_file_access_rejection_reuploads_and_returns_the_good_batch(self, monkeypatch):
+        state = self._wire(monkeypatch, [
+            [{"status": "validating"}, {"status": "failed", "errors": _FILE_ACCESS_ERROR}],
+            [{"status": "validating"}, {"status": "in_progress"}],
+        ])
+        info = llm_batch._OpenAIBatch().submit([("cid-1", {"model": "gpt-5.6-sol", "messages": []})])
+        assert info["provider_batch_id"] == "batch-2"
+        assert info["input_file_id"] == "file-2"
+        assert state["uploads"] == 2
+        # The retry uploads a FRESH file rather than re-pointing at the one
+        # the validator could not see.
+        assert state["batch-2_file"] == "file-2"
+
+    def test_other_validation_failures_are_not_retried(self, monkeypatch):
+        mismatched = {"object": "list", "data": [{"code": "mismatched_model",
+                      "message": "Each batch must contain requests for a single model",
+                      "param": None, "line": None}]}
+        state = self._wire(monkeypatch, [
+            [{"status": "failed", "errors": mismatched}],
+        ])
+        with pytest.raises(RuntimeError, match="mismatched_model"):
+            llm_batch._OpenAIBatch().submit([("cid-1", {"model": "gpt-5.6-sol", "messages": []})])
+        assert state["uploads"] == 1
+
+    def test_gives_up_after_the_attempt_cap(self, monkeypatch):
+        monkeypatch.setenv("PYTHIA_OPENAI_BATCH_SUBMIT_ATTEMPTS", "2")
+        state = self._wire(monkeypatch, [
+            [{"status": "failed", "errors": _FILE_ACCESS_ERROR}],
+            [{"status": "failed", "errors": _FILE_ACCESS_ERROR}],
+        ])
+        with pytest.raises(RuntimeError, match="kept rejecting"):
+            llm_batch._OpenAIBatch().submit([("cid-1", {"model": "gpt-5.6-sol", "messages": []})])
+        assert state["uploads"] == 2
+
+    def test_still_validating_at_the_deadline_is_accepted(self, monkeypatch):
+        monkeypatch.setenv("PYTHIA_OPENAI_BATCH_VALIDATE_WAIT_SEC", "0")
+        state = self._wire(monkeypatch, [[{"status": "validating"}]])
+        info = llm_batch._OpenAIBatch().submit([("cid-1", {"model": "gpt-5.6-sol", "messages": []})])
+        assert info["provider_batch_id"] == "batch-1"
+        assert state["uploads"] == 1
+
+    def test_file_access_classifier(self):
+        assert llm_batch._openai_errors_are_file_access(_FILE_ACCESS_ERROR)
+        assert llm_batch._openai_errors_are_file_access(_FILE_ACCESS_ERROR["data"])
+        assert not llm_batch._openai_errors_are_file_access(None)
+        assert not llm_batch._openai_errors_are_file_access([])
+        assert not llm_batch._openai_errors_are_file_access(
+            [{"code": "mismatched_model", "message": "single model", "param": None}]
+        )
 
 
 class TestPipelineScoping:

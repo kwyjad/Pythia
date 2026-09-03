@@ -37,6 +37,7 @@ import importlib.util
 import json
 import os
 import logging
+import re
 import threading
 from collections import Counter
 from urllib.parse import urlparse
@@ -426,6 +427,71 @@ def _safe_json_loads(text: str) -> Any:
                 pass
         # Re-raise the original error, not the repaired one.
         raise
+
+
+def _find_balanced_object(s: str, start: int) -> Optional[str]:
+    """Return the ``{...}`` object starting at ``s[start]`` (string-aware brace scan)."""
+
+    if start < 0 or start >= len(s) or s[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1]
+    return None
+
+
+def _salvage_spds_object(text: str) -> Optional[dict]:
+    """Recover the ``spds`` block from an SPD response whose JSON does not parse.
+
+    Last resort after :func:`_safe_json_loads` has given up. On 2026-09-01
+    three member responses (two Opus, one gpt-5.6-luna) were discarded whole
+    for a broken prose field — an unescaped quote in ``human_explanation``,
+    an unquoted key in the reasoning trace — while their ``spds`` block, the
+    only part that becomes a forecast, was well formed. The call was billed
+    and the ensemble for those questions quietly ran on four members.
+
+    Locates the first ``"spds"`` key, takes the balanced object that follows
+    it, and parses just that (with the unary-plus repair). Returns
+    ``{"spds": ..., "_salvaged": True}`` so the caller can log that the
+    explanation and reasoning trace were lost, or ``None`` when there is no
+    parseable block — never an exception.
+    """
+
+    if not text:
+        return None
+    s = str(text)
+    m = re.search(r'"spds"\s*:\s*', s)
+    if not m:
+        return None
+    fragment = _find_balanced_object(s, m.end())
+    if not fragment:
+        return None
+    for candidate in (fragment, strip_unary_plus_outside_strings(fragment)):
+        try:
+            spds = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(spds, dict) and spds:
+            return {"spds": spds, "_salvaged": True}
+    return None
 
 
 def _json_dumps_for_db(obj: Any, **kwargs: Any) -> str:
@@ -2698,6 +2764,80 @@ async def _call_spd_model(
     )
 
 
+# ---------------------------------------------------------------------------
+# Prompt-cache warm gate
+# ---------------------------------------------------------------------------
+#
+# Provider prompt caches (OpenAI automatic caching, Anthropic cache_control,
+# Gemini implicit caching) can only be READ once the first request carrying
+# a prefix has been processed. The synchronous SPD path fires every member
+# call of a question at once and works through questions six at a time, so
+# when a whole family falls back to sync — the 2026-09-01 run, where all 210
+# OpenAI requests did after their batches failed validation — every call in
+# a (model, prefix) group is in flight before the first one returns, and the
+# cache is never warm for any of them: 0 cached tokens across 210 calls that
+# qualified on prefix length alone.
+#
+# The gate lets the FIRST call per (loop, provider, model, cache key) run
+# alone; every later caller waits for it to finish, then proceeds without
+# further serialisation. The cost is at most one call's latency per group
+# per run; the benefit is that the shared prefix is cached for everything
+# that follows. Keyed by event loop because asyncio primitives are bound to
+# the loop that created them and the v2 pipeline runs one loop per batch.
+
+_CACHE_WARM_GATES: dict[tuple, asyncio.Lock] = {}
+_CACHE_WARMED: set[tuple] = set()
+
+
+def _reset_cache_warm_gates() -> None:
+    _CACHE_WARM_GATES.clear()
+    _CACHE_WARMED.clear()
+
+
+class _prompt_cache_warm_gate:
+    """``async with _prompt_cache_warm_gate(key):`` — first caller alone, then all."""
+
+    def __init__(self, key: tuple | None) -> None:
+        self._key = key
+        self._held: asyncio.Lock | None = None
+
+    async def __aenter__(self) -> None:
+        key = self._key
+        if key is None or key in _CACHE_WARMED:
+            return
+        lock = _CACHE_WARM_GATES.setdefault(key, asyncio.Lock())
+        await lock.acquire()
+        if key in _CACHE_WARMED:
+            # Warmed while we waited: release and run concurrently.
+            lock.release()
+            return
+        self._held = lock
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._held is not None:
+            _CACHE_WARMED.add(self._key)
+            self._held.release()
+            self._held = None
+
+
+def _cache_warm_key(ms: "ModelSpec", prompt_cache_key: str | None) -> tuple | None:
+    """The warm-gate key for one call, or None when caching is off for it."""
+
+    if not prompt_cache_key:
+        return None
+    try:
+        from .providers import _prompt_cache_enabled  # noqa: PLC0415
+        if not _prompt_cache_enabled():
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        loop_id = id(asyncio.get_running_loop())
+    except RuntimeError:
+        return None
+    return (loop_id, str(ms.provider or "").lower(), str(ms.model_id or ""), prompt_cache_key)
+
+
 async def _call_spd_model_for_spec(
     ms: ModelSpec,
     prompt: str,
@@ -2941,18 +3081,19 @@ async def _call_spd_model_for_spec(
 
     start = time.time()
     try:
-        text, usage, error = await call_chat_ms(
-            ms,
-            prompt_with_evidence,
-            temperature=0.2,
-            prompt_key="spd.v2",
-            prompt_version="1.0.0",
-            component="Forecaster",
-            run_id=run_id,
-            log_call=False,  # rich-logged via log_forecaster_llm_call (spd_v2)
-            cache_segments=cache_segments,
-            prompt_cache_key=prompt_cache_key,
-        )
+        async with _prompt_cache_warm_gate(_cache_warm_key(ms, prompt_cache_key)):
+            text, usage, error = await call_chat_ms(
+                ms,
+                prompt_with_evidence,
+                temperature=0.2,
+                prompt_key="spd.v2",
+                prompt_version="1.0.0",
+                component="Forecaster",
+                run_id=run_id,
+                log_call=False,  # rich-logged via log_forecaster_llm_call (spd_v2)
+                cache_segments=cache_segments,
+                prompt_cache_key=prompt_cache_key,
+            )
     except Exception as exc:  # noqa: BLE001
         elapsed_ms = int((time.time() - start) * 1000)
         return "", {"elapsed_ms": elapsed_ms}, f"provider call error: {exc}", ms
@@ -3200,18 +3341,34 @@ async def _call_spd_members_v2(
         except Exception as exc:  # noqa: BLE001
             # Never swallow this silently: the call succeeded and was billed,
             # so a discarded member is invisible in llm_calls (status='ok') and
-            # only shows up as a quietly smaller ensemble.
-            LOG.warning(
-                "SPD member response failed to parse for %s / %s: %s "
-                "(response %d chars, discarded)",
-                question_id,
-                getattr(ms_val, "model_id", "") or getattr(ms_val, "name", ""),
-                exc,
-                len(str(text)),
-            )
-            per_model_spds.append(model_spd)
-            model_success.append((getattr(ms_val, "provider", ""), False))
-            continue
+            # only shows up as a quietly smaller ensemble. Before discarding,
+            # try to keep the one block that becomes a forecast: on 2026-09-01
+            # three members were lost to a broken prose field beside a valid
+            # spds block.
+            salvaged = _salvage_spds_object(str(text))
+            if salvaged is not None:
+                LOG.warning(
+                    "SPD member response failed to parse for %s / %s: %s "
+                    "(response %d chars) — salvaged the spds block; the "
+                    "reasoning trace and explanation for this member are lost",
+                    question_id,
+                    getattr(ms_val, "model_id", "") or getattr(ms_val, "name", ""),
+                    exc,
+                    len(str(text)),
+                )
+                spd_obj = salvaged
+            else:
+                LOG.warning(
+                    "SPD member response failed to parse for %s / %s: %s "
+                    "(response %d chars, discarded)",
+                    question_id,
+                    getattr(ms_val, "model_id", "") or getattr(ms_val, "name", ""),
+                    exc,
+                    len(str(text)),
+                )
+                per_model_spds.append(model_spd)
+                model_success.append((getattr(ms_val, "provider", ""), False))
+                continue
 
         if not isinstance(spd_obj, dict):
             LOG.warning(
@@ -6054,6 +6211,36 @@ def main() -> None:
                         [run_id, qid],
                     ).fetchall()
                     ok_model_ids = [str(r[0]) for r in ok_rows if r and r[0]]
+                    # A billed call whose output never became a forecast is
+                    # NOT an ok member: on 2026-09-01 three members failed
+                    # JSON parsing after status='ok' calls and the metrics
+                    # still said 5/5. Require a complete, ok SPD in
+                    # forecasts_raw (every window month) for the model to
+                    # count. Track 2 and legacy DBs (no rows for this
+                    # question) keep the llm_calls answer.
+                    try:
+                        raw_rows = con.execute(
+                            """
+                            SELECT model_name, COUNT(DISTINCT month_index)
+                            FROM forecasts_raw
+                            WHERE run_id = ? AND question_id = ?
+                              AND status = 'ok' AND month_index IS NOT NULL
+                            GROUP BY model_name
+                            """,
+                            [run_id, qid],
+                        ).fetchall()
+                        complete = {
+                            str(r[0]) for r in raw_rows
+                            if r and r[0] and int(r[1] or 0) >= NUM_HORIZONS
+                        }
+                        any_member_rows = con.execute(
+                            "SELECT COUNT(*) FROM forecasts_raw WHERE run_id = ? AND question_id = ?",
+                            [run_id, qid],
+                        ).fetchone()
+                        if any_member_rows and int(any_member_rows[0] or 0) > 0:
+                            ok_model_ids = [m for m in ok_model_ids if m in complete]
+                    except Exception as exc:  # noqa: BLE001
+                        LOG.debug("forecasts_raw completeness probe failed for %s: %s", qid, exc)
                     missing_model_ids = sorted(set(expected_model_ids) - set(ok_model_ids))
                     con.execute(
                         "DELETE FROM question_run_metrics WHERE run_id = ? AND question_id = ?",

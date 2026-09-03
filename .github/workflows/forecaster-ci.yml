@@ -296,7 +296,8 @@ jobs:
             forecaster/tests/test_debug_bundle.py \
             forecaster/tests/test_debug_bundle_llm_calls.py \
             forecaster/tests/test_debug_bundle_adversarial_stats.py \
-            forecaster/tests/test_debug_bundle_batch_economics.py
+            forecaster/tests/test_debug_bundle_batch_economics.py \
+            forecaster/tests/test_debug_bundle_member_gaps.py
 
       - name: Run resolver/tests suites that guard forecaster + pythia code
         run: |

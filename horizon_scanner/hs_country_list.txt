@@ -57,7 +57,7 @@ Israel
 Jordan
 Kazakhstan
 Kenya
-Kosovo
+# Kosovo — removed 2026-09-03: no ACLED, IDMC, IFRC, conflict-forecast, food-security or HDX coverage; only GDACS flood rows, so its two flood questions had no evidence behind them
 Kyrgyzstan
 Laos
 Lebanon
@@ -117,7 +117,7 @@ Ukraine
 Uzbekistan
 Venezuela
 Vietnam
-Western Sahara
+# Western Sahara — removed 2026-09-03: no data in any source (ACLED, IDMC, IFRC, conflict forecasts, food security, ReliefWeb, HDX, GDACS); every scan produced nothing
 Yemen
 Zambia
 Zimbabwe

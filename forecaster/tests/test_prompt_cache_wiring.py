@@ -263,3 +263,99 @@ def test_return_parts_join_equals_full_prompt(track, monkeypatch):
     )
     assert prefix + suffix == full
     assert len(prefix) > 1000  # a real cacheable static block under V3
+
+
+# ---------------------------------------------------------------------------
+# Prompt-cache warm gate: the first call per (provider, model, key) runs alone
+# ---------------------------------------------------------------------------
+
+
+def test_warm_gate_serialises_only_the_first_call(monkeypatch):
+    """On 2026-09-01 all 210 OpenAI SPD calls ran sync at once and read zero
+    cached tokens: none of them could hit a cache no earlier call had written.
+    The gate must let exactly one call per key finish before the rest start,
+    and then let the rest overlap freely."""
+    monkeypatch.setenv("PYTHIA_PROMPT_CACHE_ENABLED", "1")
+    cli._reset_cache_warm_gates()
+
+    async def _scenario():
+        ms = ModelSpec(provider="openai", model_id="gpt-5.6-sol", name="sol")
+        key = cli._cache_warm_key(ms, "pythia:spd_v2:ACE:PA:t1")
+        assert key is not None
+        in_flight = 0
+        peak_before_first_done = 0
+        peak_after_first_done = 0
+        first_done = False
+        order: list[int] = []
+
+        async def _call(i: int):
+            nonlocal in_flight, peak_before_first_done, peak_after_first_done, first_done
+            async with cli._prompt_cache_warm_gate(key):
+                in_flight += 1
+                if first_done:
+                    peak_after_first_done = max(peak_after_first_done, in_flight)
+                else:
+                    peak_before_first_done = max(peak_before_first_done, in_flight)
+                order.append(i)
+                await asyncio.sleep(0.01)
+                in_flight -= 1
+                first_done = True
+
+        await asyncio.gather(*(_call(i) for i in range(6)))
+        return peak_before_first_done, peak_after_first_done, order
+
+    before, after, order = asyncio.run(_scenario())
+    assert before == 1, "the first call must run alone"
+    assert after >= 2, "later calls must overlap once the cache is warm"
+    assert len(order) == 6
+
+
+def test_warm_gate_is_a_no_op_when_caching_is_off_or_keyless(monkeypatch):
+    monkeypatch.setenv("PYTHIA_PROMPT_CACHE_ENABLED", "0")
+    cli._reset_cache_warm_gates()
+
+    async def _scenario():
+        ms = ModelSpec(provider="openai", model_id="gpt-5.6-sol", name="sol")
+        assert cli._cache_warm_key(ms, "pythia:spd_v2:ACE:PA:t1") is None
+        monkeypatch.setenv("PYTHIA_PROMPT_CACHE_ENABLED", "1")
+        assert cli._cache_warm_key(ms, None) is None
+        peak = 0
+        in_flight = 0
+
+        async def _call():
+            nonlocal peak, in_flight
+            async with cli._prompt_cache_warm_gate(None):
+                in_flight += 1
+                peak = max(peak, in_flight)
+                await asyncio.sleep(0.01)
+                in_flight -= 1
+
+        await asyncio.gather(*(_call() for _ in range(4)))
+        return peak
+
+    assert asyncio.run(_scenario()) == 4
+
+
+def test_warm_gate_releases_when_the_first_call_raises(monkeypatch):
+    monkeypatch.setenv("PYTHIA_PROMPT_CACHE_ENABLED", "1")
+    cli._reset_cache_warm_gates()
+
+    async def _scenario():
+        ms = ModelSpec(provider="anthropic", model_id="claude-opus-5", name="claude")
+        key = cli._cache_warm_key(ms, "pythia:spd_v2:FL:PA:t1")
+        ran: list[str] = []
+
+        async def _first():
+            async with cli._prompt_cache_warm_gate(key):
+                raise RuntimeError("provider down")
+
+        async def _second():
+            async with cli._prompt_cache_warm_gate(key):
+                ran.append("second")
+
+        results = await asyncio.gather(_first(), _second(), return_exceptions=True)
+        return results, ran
+
+    results, ran = asyncio.run(_scenario())
+    assert isinstance(results[0], RuntimeError)
+    assert ran == ["second"]

@@ -53,6 +53,11 @@ concurrency:
         required: false
         default: false
         type: boolean
+      refresh_crisiswatch:
+        description: "Also refresh the ICG CrisisWatch edition from the Wayback Machine and store it in the DB (always on for scheduled runs)"
+        required: false
+        default: true
+        type: boolean
   schedule:
     # Weekly refresh of fast-changing sources (Sunday 03:00 UTC)
     - cron: "0 3 * * 0"
@@ -195,6 +200,41 @@ jobs:
 
           $CMD
           echo "=== Structured data ingestion completed ==="
+
+      # CrisisWatch rides along with the weekly refresh (Sep 2026). The
+      # edition reaches the DB only through a runner that holds the canonical
+      # DB — resolver_update Phase 4 (monthly) and hs_submit (the 1st) — and
+      # archive.org refuses connections often enough that a single attempt a
+      # month is not enough: the Aug 28 Resolver Update ran BEFORE the
+      # on-runner refresh existed, so the Sep 1 forecast was fed the June
+      # edition. Four weekly attempts plus the two above make a missed month
+      # the exception. --only-if-newer keeps it idempotent and never
+      # regresses; continue-on-error keeps a refused archive from failing
+      # the ingest. Boolean input compared in both forms (poller rule).
+      - name: Refresh CrisisWatch edition (Wayback) and store it
+        if: >-
+          inputs.dry_run != true && inputs.dry_run != 'true' &&
+          (github.event_name == 'schedule' || inputs.refresh_crisiswatch == true || inputs.refresh_crisiswatch == 'true')
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          IA_S3_ACCESS_KEY: ${{ secrets.IA_S3_ACCESS_KEY }}
+          IA_S3_SECRET_KEY: ${{ secrets.IA_S3_SECRET_KEY }}
+        run: |
+          set -uo pipefail
+          mkdir -p diagnostics
+          python -m scripts.refresh_crisiswatch \
+            --source wayback \
+            --only-if-newer \
+            --max-age-days 60 \
+            --expect-edition-by-day 7 \
+            --verbose 2>&1 | tee diagnostics/crisiswatch_refresh.log
+          echo "[crisiswatch] refresh exit=${PIPESTATUS[0]} (non-fatal; storing whatever edition is on disk)"
+          python -c "
+          from horizon_scanner.crisiswatch import bulk_store_crisiswatch
+          n = bulk_store_crisiswatch()
+          print(f'[crisiswatch] stored {n} entries')
+          " 2>&1 | tee diagnostics/crisiswatch_store.log
 
       - name: Summarize DuckDB contents
         if: always()

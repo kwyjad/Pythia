@@ -365,12 +365,36 @@ def test_food_security_db_fallback_covers_ipc_only_country(
             "INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value) VALUES ('2019-01', 'XKX', 'DR', 'phase3plus_in_need', 5000)"
         )
 
-        assert cq._is_food_security_country("ETH", con) is True  # FEWS NET file
-        assert cq._is_food_security_country("COL", con) is True  # DB fallback
+        # The DB has food-security rows, so the DB decides: COL resolves.
+        assert cq._is_food_security_country("COL", con) is True
+        # ETH is on the FEWS NET list but has no rows in the window — a
+        # question for it could never resolve (the 2026-09-01 ERI case).
+        assert cq._is_food_security_country("ETH", con) is False
         # Older than the 36-month lookback: not resurrected
         assert cq._is_food_security_country("XKX", con) is False
         # No data anywhere
         assert cq._is_food_security_country("ZZZ", con) is False
+    finally:
+        cq._FOOD_SECURITY_DB_CACHE.clear()
+        con.close()
+
+
+def test_food_security_lists_only_decide_when_the_db_has_no_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no phase3plus_in_need rows at all (fresh checkout, no source
+    ingested yet) the curated lists keep their old fail-open role."""
+    import scripts.create_questions_from_triage as cq
+
+    _write_country_files(monkeypatch, tmp_path, ["ETH"])
+    cq._FOOD_SECURITY_DB_CACHE.clear()
+
+    con = duckdb.connect(str(tmp_path / "fs_empty.duckdb"))
+    try:
+        con.execute(_FACTS_RESOLVED_DDL)
+        assert cq._is_food_security_country("ETH", con) is True
+        assert cq._is_food_security_country("ERI", con) is False
+        assert cq._is_food_security_country("ETH", None) is True
     finally:
         cq._FOOD_SECURITY_DB_CACHE.clear()
         con.close()

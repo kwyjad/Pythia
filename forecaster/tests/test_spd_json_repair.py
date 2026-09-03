@@ -120,3 +120,62 @@ class TestSafeJsonLoadsRepair:
     def test_none_still_raises(self):
         with pytest.raises(json.JSONDecodeError):
             _safe_json_loads(None)
+
+
+class TestSalvageSpdsBlock:
+    """Regression cover for the 2026-09-01 run: three member responses were
+    discarded whole for a broken prose field beside a valid ``spds`` block."""
+
+    def _broken_prose_response(self) -> str:
+        # The explanation carries an unescaped quote — json.loads fails at it —
+        # while the spds block that precedes it is well formed.
+        payload = _spd_payload("[0.0, -0.05, 0.05]")
+        assert '"human_explanation": "RC: accepted."' in payload
+        return payload.replace(
+            '"human_explanation": "RC: accepted."',
+            '"human_explanation": "RC: "partially" accepted."',
+        )
+
+    def test_broken_prose_no_longer_loses_the_forecast(self):
+        from forecaster.cli import _salvage_spds_object
+
+        text = self._broken_prose_response()
+        with pytest.raises(json.JSONDecodeError):
+            _safe_json_loads(text)
+        salvaged = _salvage_spds_object(text)
+        assert salvaged is not None and salvaged["_salvaged"] is True
+        assert len(salvaged["spds"]) == 6
+        assert salvaged["spds"]["2026-09"]["probs"][3] == 0.42
+
+    def test_salvage_applies_the_unary_plus_repair_inside_the_block(self):
+        from forecaster.cli import _salvage_spds_object
+
+        text = self._broken_prose_response().replace("0.42", "+0.42")
+        salvaged = _salvage_spds_object(text)
+        assert salvaged is not None
+        assert salvaged["spds"]["2026-10"]["probs"][3] == 0.42
+
+    def test_no_spds_key_means_nothing_to_salvage(self):
+        from forecaster.cli import _salvage_spds_object
+
+        assert _salvage_spds_object('{"reasoning_trace": {"prior": [0.5, 0.5]}') is None
+        assert _salvage_spds_object("") is None
+        assert _salvage_spds_object(None) is None
+
+    def test_broken_spds_block_is_not_salvaged(self):
+        from forecaster.cli import _salvage_spds_object
+
+        text = self._broken_prose_response().replace('"probs": [0.03,', '"probs": [0.03 0.03,', 1)
+        assert _salvage_spds_object(text) is None
+
+    def test_braces_inside_strings_do_not_confuse_the_scan(self):
+        from forecaster.cli import _salvage_spds_object
+
+        text = (
+            '{"human_explanation": "see {this} and \\"that\\"", '
+            '"spds": {"month_1": {"probs": [0.5, 0.5], "note": "a } brace"}}, '
+            '"tail": broken'
+        )
+        salvaged = _salvage_spds_object(text)
+        assert salvaged is not None
+        assert salvaged["spds"]["month_1"]["probs"] == [0.5, 0.5]
