@@ -7,10 +7,15 @@ import pathlib
 import re
 
 WF_DIR = pathlib.Path(".github/workflows")
+# The composite actions carry as much shell as a workflow (the canonical-DB
+# discovery loop is ~165 lines of bash) and were outside every rule here.
+ACTIONS_DIR = pathlib.Path(".github/actions")
 
 
 def _workflow_texts():
     for path in WF_DIR.glob("*.y*ml"):
+        yield path, path.read_text(encoding="utf-8", errors="replace")
+    for path in sorted(ACTIONS_DIR.glob("*/action.y*ml")):
         yield path, path.read_text(encoding="utf-8", errors="replace")
 
 
@@ -28,7 +33,8 @@ def test_no_yaml_list_under_upload_artifact_path():
 def test_bracket_test_spacing():
     offenders = []
     for path, text in _workflow_texts():
-        if re.search(r"\[\[[^\s].*[^\s]\]\]", text):
+        # A POSIX character class ([[:space:]]) in sed is not a bash test.
+        if re.search(r"\[\[(?!:)[^\s].*[^\s]\]\]", text):
             offenders.append(str(path))
     assert not offenders, "Missing spaces in '[[ ... ]]' tests: " + ", ".join(offenders)
 

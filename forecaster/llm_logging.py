@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import weakref
 import time
 import inspect
 from datetime import datetime, timezone
@@ -32,6 +33,30 @@ def _safe_get(d: Dict[str, Any], key: str, default: Any = 0) -> Any:
         return v if v is not None else default
     except Exception:
         return default
+
+
+# ensure_schema is ~48 CREATE TABLE IF NOT EXISTS + ~48 PRAGMA table_info
+# statements, and this logger runs once per LLM call — thousands of times in
+# a PA-machine extraction pass on the same pooled connection. Once per
+# connection is what it means. (A WeakSet, as ensure_haz_schema does; a
+# closed and recreated connection is a new object and is ensured again.)
+_SCHEMA_ENSURED: "weakref.WeakSet[object]" = weakref.WeakSet()
+
+
+def _ensure_schema_once(con) -> None:
+    try:
+        if con in _SCHEMA_ENSURED:
+            return
+    except TypeError:  # pragma: no cover - not hashable: ensure every time
+        ensure_schema(con)
+        ensure_llm_calls_columns(con)
+        return
+    ensure_schema(con)
+    ensure_llm_calls_columns(con)
+    try:
+        _SCHEMA_ENSURED.add(con)
+    except TypeError:  # pragma: no cover - not weak-referenceable
+        pass
 
 
 async def log_forecaster_llm_call(
@@ -186,8 +211,7 @@ async def log_forecaster_llm_call(
 
     try:
         con = connect(read_only=False)
-        ensure_schema(con)
-        ensure_llm_calls_columns(con)
+        _ensure_schema_once(con)
         cols = [
             "call_id",
             "run_id",

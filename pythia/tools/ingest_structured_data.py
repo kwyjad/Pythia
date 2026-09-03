@@ -779,7 +779,9 @@ def _bulk_fetch_reliefweb(
 
     since = datetime.now(timezone.utc) - timedelta(days=days_back)
     since_iso = since.strftime("%Y-%m-%dT00:00:00+00:00")
-    appname = "UNICEF-Resolver-P1L1T6"
+    # The same ReliefWeb identity the PA machine sends (RELIEFWEB_APPNAME);
+    # the literal is the historical default when the secret is unset.
+    appname = os.environ.get("RELIEFWEB_APPNAME", "").strip() or "UNICEF-Resolver-P1L1T6"
 
     # Fetch in pages of 1000
     all_reports: list[dict] = []

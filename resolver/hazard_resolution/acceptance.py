@@ -116,6 +116,10 @@ class AcceptanceResult:
     rates: dict[str, HazardRates] = field(default_factory=dict)
     provenance_mix: dict[str, dict[str, int]] = field(default_factory=dict)
     flag_counts: dict[str, int] = field(default_factory=dict)
+    #: Resolved values by the ceiling basis they were reconciled against
+    #: (gdacs_exposed / population_share / none). "none" is a value with no
+    #: upper bound at all, and a reviewer should know how many there are.
+    ceiling_basis_counts: dict[str, int] = field(default_factory=dict)
     zero_samples: list[dict[str, Any]] = field(default_factory=list)
     value_samples: list[dict[str, Any]] = field(default_factory=list)
     cross_check: Any = None
@@ -307,6 +311,28 @@ def compute_flag_counts(
     return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
+def compute_ceiling_basis_counts(
+    con: "duckdb.DuckDBPyConnection", *, first_ym: str, last_ym: str
+) -> dict[str, int]:
+    """Resolved values by the sanity ceiling they were checked against.
+
+    ``none`` means no positive GDACS exposure AND no population denominator
+    — a figure nothing bounded. Until Sept 2026 that was every cell whose
+    GDACS exposure was absent, because the population table was never
+    loaded in CI; the count is what makes that visible.
+    """
+
+    bounds = list(_ym_bounds(first_ym, last_ym))
+    counts: dict[str, int] = {}
+    for provenance in _provenances(
+        con, hazard=None, bounds=bounds, status="RESOLVED_VALUE"
+    ):
+        basis = ((provenance.get("decision") or {}).get("ceiling") or {}).get("basis")
+        key = str(basis or "unrecorded")
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def sample_resolutions(
     con: "duckdb.DuckDBPyConnection",
     *,
@@ -441,6 +467,9 @@ def build_result(
         con, first_ym=first_ym, last_ym=last_ym, hazards=targets
     )
     result.flag_counts = compute_flag_counts(con, first_ym=first_ym, last_ym=last_ym)
+    result.ceiling_basis_counts = compute_ceiling_basis_counts(
+        con, first_ym=first_ym, last_ym=last_ym
+    )
     result.zero_samples = sample_resolutions(
         con, status="RESOLVED_ZERO", first_ym=first_ym, last_ym=last_ym,
         n=sample_size, seed=seed,
@@ -616,6 +645,28 @@ def _render_flags(result: AcceptanceResult) -> list[str]:
         for flag, count in result.flag_counts.items():
             lines.append(f"| `{flag}` | {count:,} |")
         lines.append("")
+    if result.ceiling_basis_counts:
+        none_count = result.ceiling_basis_counts.get("none", 0)
+        lines += [
+            "### What bounded each resolved value",
+            "",
+            "A sanity ceiling flags a figure above modelled exposure; `none` "
+            "means no positive GDACS exposure and no population denominator "
+            "were available, so nothing bounded the figure at all.",
+            "",
+            "| ceiling basis | resolved values |",
+            "|---|---:|",
+        ]
+        for basis, count in result.ceiling_basis_counts.items():
+            lines.append(f"| `{basis}` | {count:,} |")
+        lines.append("")
+        if none_count:
+            lines += [
+                f"**{none_count:,}** resolved value(s) had no upper bound. If "
+                "`haz_raw_population` is empty, run `haz-population` — the cap "
+                "cannot fire without a denominator.",
+                "",
+            ]
     return lines
 
 

@@ -42,6 +42,7 @@ Usage:
 """
 
 import re
+import sys
 import json
 import argparse
 import logging
@@ -1169,6 +1170,12 @@ def fetch_and_store_enso(*, get=None, today=None, fetch_page: bool = True) -> bo
                     "record to carry forward — writing nothing, which is correct: "
                     "an absent row is honest, a defaulted Neutral is not"
                 )
+                print(
+                    "::warning::ENSO wrote no row this run (no numeric source "
+                    "answered and no previous record exists) — the prompt block "
+                    "will be absent until a source answers",
+                    file=sys.stderr,
+                )
                 return False
             record = carry_forward(previous, today=today)
             logger.warning(
@@ -1418,6 +1425,12 @@ def main():
     if args.backfill_oni:
         written = backfill_oni_history()
         print(f"backfilled {written} ONI observations")
+        # Zero rows is a failure, whatever the reason: this step seeds the
+        # record fetch_and_store_enso carries forward, and a green step that
+        # wrote nothing is exactly the silent loss the step exists to end.
+        if written == 0:
+            print("::warning::ENSO ONI backfill wrote no rows", file=sys.stderr)
+            raise SystemExit(1)
         return
 
     if args.recompute:

@@ -72,7 +72,8 @@ _LATEST_REVISION_CTE = """
     WITH latest AS (
         SELECT record_id, payload_json, source_url, retrieved_at,
                ROW_NUMBER() OVER (
-                   PARTITION BY record_id ORDER BY retrieved_at DESC
+                   PARTITION BY record_id
+                   ORDER BY retrieved_at DESC, content_hash DESC
                ) AS rn
         FROM haz_raw_ibtracs
         WHERE hazard = ?

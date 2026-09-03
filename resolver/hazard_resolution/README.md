@@ -761,13 +761,19 @@ which is how CrisisWatch and the HS grounding packs were both lost.
 
 The machine runs in two workflows, and its answers grade nothing yet:
 
-- **`resolver_update.yml` Phase 2.5** (28th monthly): `resolve-hazards` over
-  the trailing three months for flood, cyclone and drought (provisional
-  answers are revised each cycle until their 60-day freeze), then
+- **`resolver_update.yml` Phase 2.4 + 2.5** (28th monthly): Phase 2.4 first
+  refreshes what the machine reads from the same DB — the NMME ingest and
+  the HDX Signals store (the drought gate's evidence) and `haz-population`
+  (the ladder's cap; until Sept 2026 nothing loaded it, so the cap never
+  fired). Phase 2.5 then runs `resolve-hazards` over the trailing three
+  months for flood, cyclone and drought (provisional answers are revised
+  each cycle until their 60-day freeze; each step under coreutils `timeout`
+  so a kill is annotated, the summary written after every month), then
   `haz-base-rates` so the 1st-of-month forecast reads fresh base rates from
   the same DB artifact, then `haz-acceptance` into the `backfill-diagnostics`
-  artifact. Non-fatal end to end: a machine failure never blocks the ingest.
-- **`haz_backcast.yml`** (nightly 22:00 UTC): a time-boxed chunk of the
+  artifact, then `retention --apply` to collapse the raw caches. Non-fatal
+  end to end: a machine failure never blocks the ingest.
+- **`haz_backcast.yml`** (nightly 20:30 UTC, skipping the 27th and 28th): a time-boxed chunk of the
   historical replay per hazard (`haz-backcast --time-budget-min`), resumed
   from the `haz_backcast_progress` ledger, then a base-rate refresh and a
   canonical-DB re-upload. Self-converging: once the window is covered the

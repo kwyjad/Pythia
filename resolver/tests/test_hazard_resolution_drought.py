@@ -381,7 +381,15 @@ class TestIndicatorSourcesBeyondAsap:
             )
 
     @staticmethod
-    def _seed_nmme(con, values: dict[str, float], issue_date: str = "2024-03-01"):
+    def _seed_nmme(con, values: dict[str, float], issue_date: str = "2024-02-01"):
+        """NMME rows as the ingest writes them.
+
+        A lead-1 forecast issued in February is ABOUT March (leads are
+        1-based and count from the issue month), so the row that speaks
+        for the test month YM=2024-03 is issued the month before. Seeding it
+        with a March issue date would describe April.
+        """
+
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS seasonal_forecasts (
@@ -1211,3 +1219,110 @@ def test_rulebook_loader_rejects_a_broken_drought_block(tmp_path):
         load_rulebook(path)
     message = str(excinfo.value)
     assert "month_attribution" in message and "lookback_months" in message
+
+
+class TestCoverageBeforeAZero:
+    """A country no feed looked at is "not looked at", never "quiet".
+
+    An alerting feed answers for every country it does not list, so
+    ``min_available`` alone was satisfied by one feed that had never
+    monitored the country. With HDX Signals covering a few dozen countries,
+    that would have zeroed every country outside its watch list on the
+    strength of not being watched.
+    """
+
+    _seed_hdx = staticmethod(TestIndicatorSourcesBeyondAsap._seed_hdx)
+    _refresh = staticmethod(TestIndicatorSourcesBeyondAsap._refresh)
+
+    def test_absence_alone_is_not_coverage(self, con, rulebook):
+        self._seed_hdx(con, {"ETH": "High concern"})
+        self._refresh(con, rulebook)
+        verdict = _verdict(con, "SOM", rulebook)
+        assert verdict.available
+        assert verdict.present_count == 0
+        assert not verdict.has_coverage
+
+    def test_a_reading_that_names_the_country_is_coverage(self, con, rulebook):
+        self._seed_hdx(con, {"ETH": "High concern", "SOM": "Low concern"})
+        self._refresh(con, rulebook)
+        verdict = _verdict(con, "SOM", rulebook)
+        assert verdict.present_count == 1
+        assert verdict.has_coverage
+        assert not verdict.shows_drought
+
+    def test_no_coverage_resolves_inconclusive_never_zero(self, con, rulebook):
+        self._seed_hdx(con, {"ETH": "High concern"})
+        self._refresh(con, rulebook)
+        decision = drought_mod.decide_drought(
+            iso3="SOM", ym=YM, analyses=[],
+            indicators=_verdict(con, "SOM", rulebook),
+            rulebook=rulebook, today=AFTER_FREEZE,
+        )
+        assert decision.status == drought_mod.STATUS_INCONCLUSIVE
+        assert decision.rule_fired == drought_mod.RULE_NO_COVERAGE
+        assert not decision.writes_row
+
+    def test_coverage_plus_quiet_ipc_still_resolves_zero(self, con, rulebook):
+        self._seed_hdx(con, {"SOM": "Low concern"})
+        self._refresh(con, rulebook)
+        decision = drought_mod.decide_drought(
+            iso3="SOM", ym=YM, analyses=[],
+            indicators=_verdict(con, "SOM", rulebook),
+            rulebook=rulebook, today=AFTER_FREEZE,
+        )
+        assert decision.status == drought_mod.STATUS_RESOLVED_ZERO
+        assert decision.rule_fired == drought_mod.RULE_ZERO_ABSENCE
+
+    def test_zero_min_present_readings_restores_the_old_behaviour(self, con):
+        rulebook = make_rulebook({"drought": {"indicators": {"min_present_readings": 0}}})
+        self._seed_hdx(con, {"ETH": "High concern"})
+        self._refresh(con, rulebook)
+        decision = drought_mod.decide_drought(
+            iso3="SOM", ym=YM, analyses=[],
+            indicators=_verdict(con, "SOM", rulebook),
+            rulebook=rulebook, today=AFTER_FREEZE,
+        )
+        assert decision.status == drought_mod.STATUS_RESOLVED_ZERO
+
+    def test_the_pick_between_two_rows_in_one_month_is_the_warning(self, con, rulebook):
+        """Several rows for one country-month must resolve the same way every run."""
+
+        self._seed_hdx(con, {"SOM": "Low concern"}, signal_date="2024-03-02")
+        self._seed_hdx(con, {"SOM": "High concern"}, signal_date="2024-03-20")
+        self._refresh(con, rulebook)
+        assert _verdict(con, "SOM", rulebook).state == ind_mod.STATE_DROUGHT
+
+    def test_the_hdx_entry_reads_agricultural_hotspots_only(self, rulebook):
+        entry = next(
+            e for e in rulebook.get("drought.indicators.entries")
+            if e["name"] == "hdx_agricultural_stress"
+        )
+        assert "jrc_agricultural_hotspots" in entry["where"]
+        assert "ipc_food_insecurity" not in entry["where"]
+
+    def test_a_circular_indicator_is_refused_by_the_validator(self, rulebook):
+        data = json.loads(json.dumps(rulebook.raw))
+        entries = data["drought"]["indicators"]["entries"]
+        hdx = next(e for e in entries if e["name"] == "hdx_agricultural_stress")
+        hdx["where"] = "indicator IN ('jrc_agricultural_hotspots', 'ipc_food_insecurity')"
+        problems = validate_rulebook(data)
+        assert any("ipc_food_insecurity" in p for p in problems), problems
+
+    def test_the_snapshot_cache_answers_the_same_question_once(self, con, rulebook, monkeypatch):
+        self._seed_hdx(con, {"SOM": "High concern"})
+        self._refresh(con, rulebook)
+        calls = []
+        real = ind_mod.load_raw_records
+
+        def counting(*args, **kwargs):
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(ind_mod, "load_raw_records", counting)
+        cache: dict = {}
+        ind_mod.evaluate_indicators(con, "SOM", YM, rulebook, cache=cache)
+        after_first = len(calls)
+        assert after_first >= 1
+        for iso3 in ("ETH", "KEN", "NGA"):
+            ind_mod.evaluate_indicators(con, iso3, YM, rulebook, cache=cache)
+        assert len(calls) == after_first

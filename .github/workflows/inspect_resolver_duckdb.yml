@@ -29,6 +29,10 @@ permissions:
 jobs:
   inspect-resolver-db:
     runs-on: ubuntu-latest
+    # A Resolver Update that died in Phase 1 has no pythia-resolver-db
+    # artifact; inspecting it would only add a second red run beside the
+    # real one. Same guard every other consumer of this workflow carries.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
 
     steps:
       - name: Checkout repo

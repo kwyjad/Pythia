@@ -157,6 +157,10 @@ class IndicatorReading:
     value: Any = None
     source_url: str | None = None
     error: str | None = None
+    #: The feed carried a reading FOR THIS COUNTRY. False for an answer
+    #: inferred from absence (an alerting feed that did not list it) — that
+    #: is still an answer, but it is not coverage.
+    present: bool = False
 
     def as_evidence(self) -> dict[str, Any]:
         return {
@@ -168,6 +172,7 @@ class IndicatorReading:
             "value": self.value,
             "source_url": self.source_url,
             "error": self.error,
+            "present": self.present,
         }
 
 
@@ -181,6 +186,10 @@ class IndicatorVerdict:
     note: str
     combine: str
     readings: list[IndicatorReading] = field(default_factory=list)
+    #: How many readings named the country itself (see IndicatorReading.present).
+    present_count: int = 0
+    #: The rulebook's floor on that count before a zero may rest on absence.
+    min_present_readings: int = 0
 
     @property
     def shows_drought(self) -> bool:
@@ -190,11 +199,24 @@ class IndicatorVerdict:
     def available(self) -> bool:
         return self.state != STATE_UNAVAILABLE
 
+    @property
+    def has_coverage(self) -> bool:
+        """Did any feed actually look at this country?
+
+        A verdict can be available (enough feeds answered) with every answer
+        inferred from absence. That supports "no feed warned about it"; it
+        does not support "it was quiet", and only the second earns a zero.
+        """
+
+        return self.present_count >= self.min_present_readings
+
     def as_evidence(self) -> dict[str, Any]:
         return {
             "state": self.state,
             "combine": self.combine,
             "note": self.note,
+            "present_count": self.present_count,
+            "min_present_readings": self.min_present_readings,
             "readings": [r.as_evidence() for r in self.readings],
         }
 
@@ -397,44 +419,83 @@ def _snapshot_from_pythia_table(
     iso_column = str(entry.get("iso3_column") or "iso3")
     value_column = str(entry.get("value_column") or "value")
     date_column = str(entry.get("date_column") or "")
+    offset_column = str(entry.get("date_offset_column") or "")
     where = str(entry.get("where") or "").strip()
     lookback = int(entry.get("lookback_months") or 0)
+    oldest = shift_month(ym, -max(lookback, 0))
 
     # The DB travels between runs and holds every month, so the snapshot has
     # to be cut to the window this cell may see. Reading the newest row
     # regardless of date would let a September signal answer for June.
+    #
+    # When the row's date is an ISSUE date and the row is ABOUT a later
+    # month (an NMME forecast issued in M at lead L is about M+L), the
+    # observation month is the issue month plus the offset column, and the
+    # window is applied to that in Python — the SQL keeps only a generous
+    # lower bound so a forecast issued well before the window is not read.
     clauses = [f"{iso_column} IS NOT NULL", f"{value_column} IS NOT NULL"]
     params: list[Any] = []
     if where:
         clauses.append(f"({where})")
-    if date_column:
-        oldest = shift_month(ym, -max(lookback, 0))
+    if date_column and not offset_column:
         clauses.append(f"substr(CAST({date_column} AS VARCHAR), 1, 7) <= ?")
         params.append(ym)
         clauses.append(f"substr(CAST({date_column} AS VARCHAR), 1, 7) >= ?")
         params.append(oldest)
+    elif date_column:
+        clauses.append(f"substr(CAST({date_column} AS VARCHAR), 1, 7) <= ?")
+        params.append(ym)
+        clauses.append(f"substr(CAST({date_column} AS VARCHAR), 1, 7) >= ?")
+        params.append(shift_month(oldest, -_MAX_DATE_OFFSET_MONTHS))
 
-    order = f"substr(CAST({date_column} AS VARCHAR), 1, 7)" if date_column else "1"
+    order = f"substr(CAST({date_column} AS VARCHAR), 1, 7)" if date_column else "'1'"
+    offset_sel = f"{offset_column}" if offset_column else "0"
+    # A fully specified ORDER BY: the pick between two rows for one country
+    # and month below must not depend on the table's physical order.
     sql = (
         f"SELECT {iso_column} AS iso3, {value_column} AS value, "
-        f"{order} AS observed_ym FROM {table} "
-        f"WHERE {' AND '.join(clauses)} ORDER BY observed_ym"
+        f"{order} AS observed_ym, {offset_sel} AS date_offset FROM {table} "
+        f"WHERE {' AND '.join(clauses)} "
+        f"ORDER BY observed_ym, iso3, CAST(value AS VARCHAR), date_offset"
     )
     rows = con.execute(sql, params).fetchall()
 
-    values: dict[str, Any] = {}
+    # For a class-shaped feed, a drought-class reading outranks any other
+    # reading from the same month: several rows for one country in one month
+    # (several signal types, several issues) must resolve the same way on
+    # every run, and the one that says "warning" is the one that matters.
+    preferred = {
+        str(c).strip().lower() for c in (entry.get("drought_classes") or [])
+    }
+    picked: dict[str, tuple[str, Any]] = {}
     observed: set[str] = set()
     unresolved = 0
-    for iso3_raw, value, observed_ym in rows:
+    for iso3_raw, value, observed_raw, date_offset in rows:
         code = str(iso3_raw or "").strip().upper()
         if len(code) != 3 or not code.isalpha():
             unresolved += 1
             continue
-        # Ordered oldest-first, so the last write per country is its newest
-        # reading inside the window.
-        values[code] = value
+        observed_ym = str(observed_raw or "") if date_column else ""
+        if offset_column and observed_ym:
+            try:
+                observed_ym = shift_month(observed_ym, int(date_offset or 0))
+            except (TypeError, ValueError):
+                unresolved += 1
+                continue
+            if observed_ym > ym or observed_ym < oldest:
+                continue
+        current = picked.get(code)
+        if current is None:
+            picked[code] = (observed_ym, value)
+        else:
+            cur_ym, cur_value = current
+            new_pref = str(value).strip().lower() in preferred
+            cur_pref = str(cur_value).strip().lower() in preferred
+            if observed_ym > cur_ym or (observed_ym == cur_ym and new_pref and not cur_pref):
+                picked[code] = (observed_ym, value)
         if date_column and observed_ym:
-            observed.add(str(observed_ym))
+            observed.add(observed_ym)
+    values: dict[str, Any] = {code: pair[1] for code, pair in picked.items()}
 
     observed_ym = max(observed) if observed else ym
     return {
@@ -602,8 +663,18 @@ def fetch_indicators(
     return outcome
 
 
+#: How far before the lookback window an ISSUE date may sit when the entry
+#: carries a date_offset_column. NMME publishes seven leads; nothing offsets
+#: further than that.
+_MAX_DATE_OFFSET_MONTHS = 12
+
+
 def _snapshot_for(
-    con: "duckdb.DuckDBPyConnection", name: str, ym: str, max_age_months: int
+    con: "duckdb.DuckDBPyConnection",
+    name: str,
+    ym: str,
+    max_age_months: int,
+    cache: dict[Any, Any] | None = None,
 ) -> dict[str, Any] | None:
     """The newest cached snapshot of ``name`` that may speak for ``ym``.
 
@@ -611,7 +682,17 @@ def _snapshot_for(
     or up to ``max_age_months`` earlier. A LATER snapshot is not used: it
     describes conditions after the month in question, and reading a
     September warning back onto June would invent hindsight.
+
+    ``cache`` is a per-run dict the caller owns. Every call loads and parses
+    the whole indicator cache (one JSON payload of ~250 countries per feed
+    per month), and the drought pass asks the same question once per
+    country — 3,750 loads per live month, ~140,000 per backcast — for an
+    answer that cannot change between countries.
     """
+
+    key = (name, ym, int(max_age_months))
+    if cache is not None and key in cache:
+        return cache[key]
 
     oldest = shift_month(ym, -int(max_age_months))
     best: dict[str, Any] | None = None
@@ -623,6 +704,8 @@ def _snapshot_for(
             continue
         if best is None or observed > str(best.get("observed_ym") or ""):
             best = payload
+    if cache is not None:
+        cache[key] = best
     return best
 
 
@@ -632,6 +715,7 @@ def _reading_for_entry(
     iso3: str,
     ym: str,
     max_age_months: int,
+    cache: dict[Any, Any] | None = None,
 ) -> IndicatorReading:
     name = str(entry.get("name"))
     provider = str(entry.get("provider"))
@@ -648,7 +732,7 @@ def _reading_for_entry(
             required=required, error="no url configured",
         )
 
-    snapshot = _snapshot_for(con, name, ym, max_age_months)
+    snapshot = _snapshot_for(con, name, ym, max_age_months, cache=cache)
     if snapshot is None:
         return IndicatorReading(
             name=name, provider=provider, state=STATE_UNAVAILABLE, required=required,
@@ -697,6 +781,7 @@ def _reading_for_entry(
         return IndicatorReading(
             name=name, provider=provider, state=state, required=required,
             observed_ym=observed_ym, value=raw_value, source_url=snapshot.get("url"),
+            present=True,
         )
 
     number = _signed_number(raw_value)
@@ -713,12 +798,17 @@ def _reading_for_entry(
         name=name, provider=provider,
         state=STATE_DROUGHT if dry else STATE_NO_DROUGHT,
         required=required, observed_ym=observed_ym, value=number,
-        source_url=snapshot.get("url"),
+        source_url=snapshot.get("url"), present=True,
     )
 
 
 def evaluate_indicators(
-    con: "duckdb.DuckDBPyConnection", iso3: str, ym: str, rulebook: Rulebook
+    con: "duckdb.DuckDBPyConnection",
+    iso3: str,
+    ym: str,
+    rulebook: Rulebook,
+    *,
+    cache: dict[Any, Any] | None = None,
 ) -> IndicatorVerdict:
     """Combine every configured indicator into one verdict for a cell.
 
@@ -744,11 +834,17 @@ def evaluate_indicators(
         min_available = int(rulebook.get("drought.indicators.min_available"))
     except Exception:  # noqa: BLE001 - older rulebooks have no such key
         min_available = 1
+    try:
+        min_present = int(rulebook.get("drought.indicators.min_present_readings"))
+    except Exception:  # noqa: BLE001 - older rulebooks have no such key
+        min_present = 0
 
     readings = [
-        _reading_for_entry(con, entry, iso3, ym, max_age) for entry in entries
+        _reading_for_entry(con, entry, iso3, ym, max_age, cache=cache)
+        for entry in entries
     ]
     answered = [r for r in readings if r.state != STATE_UNAVAILABLE]
+    present_count = sum(1 for r in answered if r.present)
     missing_required = [
         r for r in readings if r.state == STATE_UNAVAILABLE and r.required
     ]
@@ -757,7 +853,8 @@ def evaluate_indicators(
         names = ", ".join(r.name for r in missing_required)
         return IndicatorVerdict(
             iso3=iso3, ym=ym, state=STATE_UNAVAILABLE, combine=combine,
-            readings=readings,
+            readings=readings, present_count=present_count,
+            min_present_readings=min_present,
             note=(
                 f"required indicator(s) unavailable: {names} — no drought verdict, "
                 "and no zero"
@@ -772,7 +869,8 @@ def evaluate_indicators(
         )
         return IndicatorVerdict(
             iso3=iso3, ym=ym, state=STATE_UNAVAILABLE, combine=combine,
-            readings=readings,
+            readings=readings, present_count=present_count,
+            min_present_readings=min_present,
             note=(
                 f"{len(answered)} of {len(readings)} indicator(s) answered, "
                 f"below min_available={min_available}"
@@ -787,10 +885,12 @@ def evaluate_indicators(
         state = STATE_DROUGHT if dry else STATE_NO_DROUGHT
 
     note = (
-        f"{len(dry)}/{len(answered)} indicator(s) show drought (combine={combine})"
+        f"{len(dry)}/{len(answered)} indicator(s) show drought (combine={combine}); "
+        f"{present_count} named the country"
     )
     return IndicatorVerdict(
-        iso3=iso3, ym=ym, state=state, combine=combine, readings=readings, note=note
+        iso3=iso3, ym=ym, state=state, combine=combine, readings=readings, note=note,
+        present_count=present_count, min_present_readings=min_present,
     )
 
 

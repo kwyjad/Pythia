@@ -1182,3 +1182,46 @@ class TestLiveReserve:
         """A reserve of zero is the pre-Sept-2026 arrangement by another name."""
 
         assert int(make_rulebook().get("extraction.live_reserve_calls")) > 0
+
+
+def test_the_budget_names_the_limit_that_binds():
+    """Last night's log said "monthly cap of 3000" when the 2,000 backcast
+    share was what had bound; a message naming the wrong limit sends the
+    reader to the wrong knob."""
+
+    backcast = extract_mod.ExtractionBudget(
+        max_calls_per_month=4000, used_this_month=2000,
+        run_type="backcast", backcast_max_calls_per_month=2000,
+        backcast_used_this_month=2000, live_reserve_calls=1500,
+    )
+    assert backcast.remaining == 0
+    assert backcast.binding_limit.startswith("backcast share")
+
+    live = extract_mod.ExtractionBudget(max_calls_per_month=4000, used_this_month=2000)
+    assert live.remaining == 2000
+    assert live.binding_limit.startswith("monthly total")
+
+    capped = extract_mod.ExtractionBudget(
+        max_calls_per_month=4000, used_this_month=2000, max_calls_per_run=300
+    )
+    assert capped.remaining == 300
+    assert capped.binding_limit.startswith("per-run cap")
+    assert capped.as_provenance()["max_calls_per_run"] == 300
+
+
+def test_a_failed_reread_never_overwrites_a_cached_ok_extraction(con, rulebook):
+    doc = {"doc_id": "d-1", "url": "https://example.org/d-1"}
+    extract_mod.write_extraction(
+        con, document=doc, iso3="PHL", ym="2024-01", hazard="TC", model="m",
+        prompt_version="v1", status="ok", figures=[], rejected=[],
+        usage={"prompt_tokens": 10, "completion_tokens": 5}, cost_usd=0.01, error=None,
+    )
+    extract_mod.write_extraction(
+        con, document=doc, iso3="PHL", ym="2024-01", hazard="TC", model="m",
+        prompt_version="v1", status="error", figures=[], rejected=[],
+        usage={}, cost_usd=0.0, error="timeout",
+    )
+    cached = extract_mod.load_cached_extraction(
+        con, "d-1", "m", "v1", iso3="PHL", hazard="TC", ym="2024-01"
+    )
+    assert cached is not None

@@ -203,6 +203,21 @@ def _cached_secrets() -> list[str]:
     return _SECRETS
 
 
+def _is_unread_stream(response: Any) -> bool:
+    """True when the body has not been read and reading it would fetch it."""
+
+    if response is None:
+        return False
+    consumed = getattr(response, "_content_consumed", None)
+    if consumed is None:
+        return False
+    if consumed:
+        return False
+    # ``_content`` is False until requests has read the body; a raw stream
+    # still attached means the transfer is the caller's to make.
+    return getattr(response, "_content", False) is False
+
+
 def _record(
     *,
     method: str,
@@ -218,8 +233,22 @@ def _record(
 
     status = getattr(response, "status_code", None)
     history = getattr(response, "history", None) or []
-    content = getattr(response, "content", None)
+    # ``Response.content`` DOWNLOADS the body. On a ``stream=True`` response
+    # the caller has deliberately not done that yet (IDMC's spill-to-disk
+    # path, the ~300 MB IBTrACS archive), and reading it here would buffer
+    # the whole body in RAM behind the caller's back. A streamed, unread
+    # response is recorded by its Content-Length and its envelope is skipped.
+    streamed = _is_unread_stream(response)
+    content = None if streamed else getattr(response, "content", None)
     from_cache = bool(getattr(response, "from_cache", False))
+    if streamed:
+        header_len = (getattr(response, "headers", None) or {}).get("Content-Length")
+        try:
+            response_bytes: int | None = int(header_len) if header_len else None
+        except (TypeError, ValueError):
+            response_bytes = None
+    else:
+        response_bytes = len(content) if content is not None else None
 
     run_log.record(
         run_log.STREAM_HTTP,
@@ -230,7 +259,8 @@ def _record(
             "request_body": _body_shape(body),
             "status": status,
             "elapsed_ms": round(elapsed_ms, 1),
-            "response_bytes": len(content) if content is not None else None,
+            "response_bytes": response_bytes,
+            "streamed": streamed,
             "redirects": len(history),
             "from_cache": from_cache,
             "error": redact_text(error, secrets) if error else None,
@@ -238,7 +268,7 @@ def _record(
         },
     )
 
-    if response is None or status is None:
+    if response is None or status is None or streamed:
         return
     try:
         from urllib.parse import urlsplit

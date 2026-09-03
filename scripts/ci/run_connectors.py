@@ -46,10 +46,14 @@ DEFAULT_CONNECTORS: List[str] = [
     "idmc",
 ]
 
+# Python does no shell expansion: a literal "${IDMC_REQ_PER_SEC:-0.3}" here
+# would have overwritten the job-level pacing with a string the rate limiter
+# cannot parse. Read the job env at import and fall back to the documented
+# defaults instead.
 _IDMC_DEFAULT_ENV = {
     "IDMC_SOFT_TIMEOUTS": "1",
-    "IDMC_REQ_PER_SEC": "${IDMC_REQ_PER_SEC:-0.3}",
-    "IDMC_MAX_CONCURRENCY": "${IDMC_MAX_CONCURRENCY:-1}",
+    "IDMC_REQ_PER_SEC": os.environ.get("IDMC_REQ_PER_SEC", "0.3"),
+    "IDMC_MAX_CONCURRENCY": os.environ.get("IDMC_MAX_CONCURRENCY", "1"),
 }
 
 CONNECTOR_METADATA: Dict[str, ConnectorMetadata] = {
@@ -68,7 +72,14 @@ CONNECTOR_METADATA: Dict[str, ConnectorMetadata] = {
 }
 
 LOGS_DIR = Path("diagnostics") / "ingestion" / "logs"
-REPORT_PATH = Path("diagnostics") / "ingestion" / "connectors_report.jsonl"
+# Every other writer of the connectors report (the inline IDMC HELIX block in
+# resolver_update.yml, pythia/tools/emit_phase4_diag.py) honours
+# DIAGNOSTICS_REPORT_PATH; this one used to hard-code the same path, so the
+# two agreed by coincidence only.
+REPORT_PATH = Path(
+    os.environ.get("DIAGNOSTICS_REPORT_PATH")
+    or str(Path("diagnostics") / "ingestion" / "connectors_report.jsonl")
+)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -97,6 +108,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Optional connector-specific environment overrides. Can be repeated, e.g. "
             "--extra-env 'dtm_client=DTM_NO_DATE_FILTER=1'"
+        ),
+    )
+    parser.add_argument(
+        "--reset-report",
+        action="store_true",
+        help=(
+            "Truncate the connectors report before running. Off by default: the "
+            "workflow appends an IDMC record to the same file one step earlier."
         ),
     )
     if argv is None:
@@ -320,17 +339,23 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     logs_dir.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    reset_message = "initialised"
-    try:
-        report_path.write_text("", encoding="utf-8")
-        reset_message = "reset"
-    except OSError:
+    # APPEND, never truncate. resolver_update.yml writes the IDMC HELIX
+    # record to this file one step BEFORE this runner starts; blanking it
+    # here erased that record on every scheduled run, and the step summary
+    # then reported IDMC as "skipped" beside a successful HELIX pull. A
+    # caller that wants a clean file passes --reset-report.
+    reset_message = "appending to"
+    if args.reset_report or not report_path.exists():
         try:
-            report_path.unlink()
-            report_path.touch()
+            report_path.write_text("", encoding="utf-8")
             reset_message = "reset"
         except OSError:
-            pass
+            try:
+                report_path.unlink()
+                report_path.touch()
+                reset_message = "reset"
+            except OSError:
+                pass
     print(f"{reset_message} connectors report at {report_path}")
 
     env = os.environ.copy()

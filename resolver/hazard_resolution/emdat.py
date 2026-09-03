@@ -86,9 +86,20 @@ def _api_key() -> str | None:
     return key
 
 
+#: How much of a failed response body travels in the error. api.emdat.be
+#: has answered 500 on every call this machine has ever made and the body
+#: was never kept, so nothing could say whether the query shape or the
+#: account was at fault. The status line alone is not a diagnosis.
+_ERROR_BODY_CHARS = 500
+
+
 def _default_post(url: str, payload: dict, headers: dict, timeout: float) -> dict:
     resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        body = (resp.text or "").strip().replace("\n", " ")[:_ERROR_BODY_CHARS]
+        raise RuntimeError(
+            f"HTTP {resp.status_code} from {url}: {body or '<empty body>'}"
+        )
     return resp.json()
 
 

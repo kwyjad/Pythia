@@ -139,3 +139,64 @@ def test_backfill_has_context_source_phases() -> None:
     assert any("Seasonal TC" in n for n in names)
     assert any("HDX" in n for n in names)
     assert any("CrisisWatch" in n for n in names)
+
+
+def test_machine_inputs_land_before_the_drought_step() -> None:
+    """The drought gate reads hdx_signals and seasonal_forecasts from the DB
+    the job is holding, and the ladder's cap reads haz_raw_population. Until
+    2026-09-03 the HDX store and NMME ingest ran AFTER Phase 2.5, so the gate
+    always read last cycle's rows, and nothing loaded the population table.
+    """
+
+    data = _load_yaml(WF_BACKFILL)
+    steps = data["jobs"]["backfill"]["steps"]
+    names = [step.get("name", "") for step in steps if isinstance(step, dict)]
+
+    def _index(fragment: str) -> int:
+        matches = [i for i, n in enumerate(names) if fragment in n]
+        assert matches, f"no step named like {fragment!r}: {names}"
+        return matches[0]
+
+    drought = _index("PA machine — drought")
+    assert _index("HDX Signals") < drought
+    assert _index("NMME") < drought
+    assert _index("population") < drought
+    # And the base rates read the drought rows, so they stay after it.
+    assert _index("base rates") > drought
+
+
+def test_machine_steps_are_wrapped_in_timeout_and_budgeted() -> None:
+    """A step-level timeout SIGKILLs the shell and the ::warning branch never
+    fires; coreutils `timeout` exits 124 which pipefail carries to it."""
+
+    data = _load_yaml(WF_BACKFILL)
+    steps = data["jobs"]["backfill"]["steps"]
+    machine = [
+        step for step in steps
+        if isinstance(step, dict) and "PA machine —" in step.get("name", "")
+    ]
+    assert len(machine) == 3
+    for step in machine:
+        run = step.get("run", "")
+        assert "timeout " in run and "python -m resolver.hazard_resolution.cli" in run
+        assert int(step.get("timeout-minutes", 0)) >= 30
+
+
+def test_post_upload_diagnostics_never_red_the_ingest() -> None:
+    data = _load_yaml(WF_BACKFILL)
+    steps = data["jobs"]["backfill"]["steps"]
+    names = [step.get("name", "") for step in steps if isinstance(step, dict)]
+    upload = names.index("Upload canonical resolver DB")
+    for step in steps[upload + 1:]:
+        if not isinstance(step, dict) or "uses" not in step:
+            continue
+        if "upload-artifact" in step["uses"] and "reset" not in step.get("name", ""):
+            assert step.get("continue-on-error") is True, step.get("name")
+
+
+def test_resolver_update_is_gated_on_the_staged_pipeline() -> None:
+    data = _load_yaml(WF_BACKFILL)
+    jobs = data["jobs"]
+    assert "gate" in jobs
+    assert jobs["backfill"].get("needs") == "gate"
+    assert "proceed" in str(jobs["backfill"].get("if", ""))

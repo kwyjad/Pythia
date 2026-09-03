@@ -519,10 +519,11 @@ def flip_trigger_from_sweep(
             """
             INSERT INTO haz_triggers
                 (iso3, year, month, hazard, triggered, trigger_source,
-                 trigger_detail_json, evidence_of_absence_json)
-            VALUES (?, ?, ?, ?, TRUE, ?, ?, NULL)
+                 trigger_detail_json, evidence_of_absence_json, run_type)
+            VALUES (?, ?, ?, ?, TRUE, ?, ?, NULL, ?)
             """,
-            [iso3, year, month, hazard, TRIGGER_SOURCE_RELIEFWEB, json.dumps(detail)],
+            [iso3, year, month, hazard, TRIGGER_SOURCE_RELIEFWEB, json.dumps(detail),
+             RUN_TYPE_LIVE],
         )
 
 

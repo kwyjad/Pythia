@@ -47,6 +47,10 @@ REASON_SWEEP_INCONCLUSIVE = "sweep_inconclusive"
 REASON_COVERAGE_GATE = "coverage_gate_suppressed_zero"
 #: A required drought indicator could not be read (fail-closed).
 REASON_INCONCLUSIVE = "indicator_inconclusive"
+#: The indicators were read, but none of them carried a reading for THIS
+#: country — every answer was inferred from absence. An alerting feed that
+#: never monitored a country has not said it is quiet, so no zero.
+REASON_NO_COVERAGE = "indicator_no_coverage"
 #: The cell already carries a frozen answer; this run's verdict was audited
 #: to haz_revisions and the stored row stands.
 REASON_FROZEN = "frozen_row_unchanged"

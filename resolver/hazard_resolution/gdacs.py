@@ -236,7 +236,7 @@ def _iso3s_near_event(
         return []
 
     try:
-        from resolver.hazard_resolution.geometry import distance_km
+        from resolver.hazard_resolution.geometry import distance_km, point_near_bounds
 
         countries = (geometries or _CountryGeometries()).get()
     except Exception as exc:  # noqa: BLE001 - boundaries absent is not fatal
@@ -249,6 +249,11 @@ def _iso3s_near_event(
     hits: list[tuple[float, str]] = []
     for iso3, country in countries.items():
         try:
+            # The bounding-box test is the cheap pre-filter distance_km's
+            # projection exists to be spared by: ~250 polygons per event
+            # otherwise each pay for a clip.
+            if not point_near_bounds(country, lat_f, lon_f, _GEOMETRY_ATTRIBUTION_KM):
+                continue
             distance = distance_km(country, lat_f, lon_f, _GEOMETRY_ATTRIBUTION_KM)
         except Exception:  # noqa: BLE001 - one bad polygon must not lose the event
             continue
@@ -346,6 +351,33 @@ def fetch_gdacs_events(
     return outcome
 
 
+#: Per-process memo of the parsed GDACS cache: (connection id, hazard, row
+#: count) -> events. The ladder asks for a cell's events twice per triggered
+#: cell (candidates, then the ceiling basis), and every ask used to load and
+#: JSON-parse the whole hazard's cache. The row count is part of the key so
+#: any insert or retention delete invalidates it; the connection id keeps
+#: one test's database from answering for the next.
+_EVENTS_MEMO: dict[tuple[int, str, int], list[dict[str, Any]]] = {}
+
+
+def _all_events(con: "duckdb.DuckDBPyConnection", hazard: str) -> list[dict[str, Any]]:
+    try:
+        count = int(
+            con.execute(
+                "SELECT COUNT(*) FROM haz_raw_gdacs WHERE hazard = ?", [hazard]
+            ).fetchone()[0]
+        )
+    except Exception:  # noqa: BLE001 - a missing table is an empty cache
+        return load_raw_records(con, SOURCE, hazard=hazard)
+    key = (id(con), hazard, count)
+    events = _EVENTS_MEMO.get(key)
+    if events is None:
+        events = load_raw_records(con, SOURCE, hazard=hazard)
+        _EVENTS_MEMO.clear()  # one hazard at a time; never let the memo grow
+        _EVENTS_MEMO[key] = events
+    return events
+
+
 def events_for_country_month(
     con: "duckdb.DuckDBPyConnection", iso3: str, ym: str, hazard: str
 ) -> list[dict[str, Any]]:
@@ -358,7 +390,7 @@ def events_for_country_month(
 
     iso3 = iso3.upper()
     out = []
-    for event in load_raw_records(con, SOURCE, hazard=hazard):
+    for event in _all_events(con, hazard):
         if iso3 not in (event.get("iso3_list") or []):
             continue
         if ym not in (event.get("months_overlapped") or []):
