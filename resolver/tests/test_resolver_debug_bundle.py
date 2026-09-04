@@ -596,3 +596,55 @@ def test_normalise_db_path_handles_the_urls_the_workflow_actually_sets():
     assert bundle.normalise_db_path("data/resolver.duckdb") == Path("data/resolver.duckdb")
     assert bundle.normalise_db_path("") is None
     assert bundle.normalise_db_path(None) is None
+
+
+def test_the_enso_ladder_must_have_two_live_ranks(tmp_path, full_run):
+    """Run 33841370196 had one working index source and nothing to compare it to."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute("ALTER TABLE enso_state ADD COLUMN index_evidence_json TEXT")
+    con.execute("ALTER TABLE enso_state ADD COLUMN row_kind TEXT")
+    one_rank = json.dumps({
+        "readings": [
+            {"rank": 1, "ok": False, "error": "HTTP 400", "newest_observation": None},
+            {"rank": 2, "ok": False, "error": "2046 days old", "newest_observation": "2021-01-27"},
+            {"rank": 3, "ok": True, "newest_observation": "2026-07-01"},
+        ]
+    })
+    con.execute(
+        "INSERT INTO enso_state VALUES "
+        "(DATE '2026-09-04','El Niño',1.8,1.8,DATE '2026-07-01','fresh',?, 'live')",
+        [one_rank],
+    )
+    # A historical row with everything alive must not rescue a live run.
+    con.execute(
+        "INSERT INTO enso_state VALUES "
+        "(DATE '1950-01-01','La Niña',-1.5,-1.5,DATE '1950-01-01','historical',?, 'historical')",
+        [json.dumps({"readings": [{"rank": 1, "ok": True}, {"rank": 2, "ok": True}]})],
+    )
+    con.close()
+
+    _out, manifest = _build(tmp_path, db_path=db,
+                            diagnostics_dir=full_run["diagnostics"],
+                            run_log_dir=full_run["streams"])
+    checks = {c["name"]: c for c in manifest["checks"]}
+    check = checks["enso_ladder_has_two_live_ranks_in_the_last_30_days"]
+    assert check["verdict"] == "FAIL"
+    assert "[3]" in check["left"]
+
+    con = duckdb.connect(str(db))
+    con.execute(
+        "UPDATE enso_state SET index_evidence_json = ? WHERE fetch_date = DATE '2026-09-04'",
+        [json.dumps({"readings": [
+            {"rank": 1, "ok": True, "newest_observation": "2026-08-19"},
+            {"rank": 2, "ok": False},
+            {"rank": 3, "ok": True, "newest_observation": "2026-07-01"},
+        ]})],
+    )
+    con.close()
+    _out, manifest = _build(tmp_path / "again", db_path=db,
+                            diagnostics_dir=full_run["diagnostics"],
+                            run_log_dir=full_run["streams"])
+    checks = {c["name"]: c for c in manifest["checks"]}
+    assert checks["enso_ladder_has_two_live_ranks_in_the_last_30_days"]["verdict"] == "PASS"

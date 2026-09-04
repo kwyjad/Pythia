@@ -1375,6 +1375,7 @@ class BundleBuilder:
         for check in (
             self._check_enso_vs_tc_narrative,
             self._check_enso_phase_without_index,
+            self._check_enso_two_ranks_alive,
             self._check_connector_rows_vs_table_delta,
             self._check_hazard_zero_failures,
             self._check_tc_duplicate_issue_dates,
@@ -1405,9 +1406,14 @@ class BundleBuilder:
         name = "enso_phase_matches_the_tc_context_narrative"
         if not {"enso_state", "seasonal_tc_context_cache"} <= self.tables():
             return self._check(name, "SKIP", "", "", "one of the two tables is absent")
+        columns = {c for c, _t in self.columns_of("enso_state")}
+        kind = (
+            "WHERE COALESCE(row_kind, 'live') <> 'historical' "
+            if "row_kind" in columns else ""
+        )
         stored = self.query(
             "SELECT enso_phase, oni, observation_date FROM enso_state "
-            "ORDER BY fetch_date DESC LIMIT 1"
+            f"{kind}ORDER BY fetch_date DESC LIMIT 1"
         )
         if not stored or not stored[1]:
             return self._check(name, "SKIP", "", "", "enso_state is empty")
@@ -1455,6 +1461,62 @@ class BundleBuilder:
             "A phase beside a null Niño 3.4 and a null ONI is a classification "
             "with nothing behind it. The absence of a measurement is never a "
             "default value.",
+        )
+
+    def _check_enso_two_ranks_alive(self) -> None:
+        """At least two ranks of the ENSO ladder answered in the last 30 days.
+
+        The continuity and corroboration checks compare one source against
+        another, and on 2026-09-04 there was nothing to compare: ERDDAP
+        answered HTTP 400, the CPC weekly file had frozen in January 2021,
+        and only the ONI table worked. The ladder now reads every rank on
+        every run and records which answered in ``index_evidence_json``;
+        this check reads that record over the live rows of the last 30 days
+        (anchored on the newest live row, so a bundle built later still
+        judges the run it describes).
+        """
+
+        name = "enso_ladder_has_two_live_ranks_in_the_last_30_days"
+        if "enso_state" not in self.tables():
+            return self._check(name, "SKIP", "", "", "enso_state is absent")
+        columns = {c for c, _t in self.columns_of("enso_state")}
+        if "index_evidence_json" not in columns:
+            return self._check(name, "SKIP", "", "", "no index_evidence_json column")
+        kind = "COALESCE(row_kind, 'live')" if "row_kind" in columns else "'live'"
+        result = self.query(
+            f"SELECT fetch_date, index_evidence_json FROM enso_state "
+            f"WHERE {kind} <> 'historical' AND index_evidence_json IS NOT NULL "
+            f"AND fetch_date >= (SELECT MAX(fetch_date) FROM enso_state "
+            f"WHERE {kind} <> 'historical') - INTERVAL 30 DAY "
+            f"ORDER BY fetch_date DESC"
+        )
+        if result is None or not result[1]:
+            return self._check(
+                name, "SKIP", "", "",
+                "no live enso_state row carries index evidence",
+            )
+        ranks_ok: set[int] = set()
+        newest: dict[int, str] = {}
+        for _fetch_date, evidence in result[1]:
+            try:
+                payload = json.loads(evidence)
+            except Exception:
+                continue
+            for reading in payload.get("readings", []) or []:
+                if reading.get("ok"):
+                    rank = int(reading.get("rank", 0))
+                    ranks_ok.add(rank)
+                    newest.setdefault(rank, str(reading.get("newest_observation")))
+        detail = (
+            "The continuity and corroboration checks compare one numeric source "
+            "against another. With one rank alive there is nothing to compare, "
+            "and a changed column in that one source is indistinguishable from "
+            "a changed ocean. Ranks answering, with each rank's newest "
+            f"observation: {dict(sorted(newest.items()))}."
+        )
+        self._check(
+            name, "PASS" if len(ranks_ok) >= 2 else "FAIL",
+            f"{len(ranks_ok)} rank(s) usable: {sorted(ranks_ok)}", ">= 2 ranks", detail,
         )
 
     def _check_connector_rows_vs_table_delta(self) -> None:

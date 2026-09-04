@@ -909,6 +909,14 @@ def _ensure_enso_state_table(con: duckdb.DuckDBPyConnection) -> None:
             scraped_phase VARCHAR,
             index_evidence_json VARCHAR,
             warnings_json VARCHAR,
+            -- The newest WEEKLY Niño 3.4 reading, NULL when only the seasonal
+            -- ONI table answered (never filled from the ONI).
+            nino34_weekly DOUBLE,
+            -- 'live' (what a run wrote), 'historical' (the published ONI
+            -- table, one row per season, keyed on its observation date) or
+            -- 'repaired' (a pre-fix live row rebuilt from the ONI history).
+            -- "The state as of today" reads live/repaired rows only.
+            row_kind VARCHAR,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (fetch_date)
         );
@@ -932,6 +940,8 @@ def _ensure_enso_state_table(con: duckdb.DuckDBPyConnection) -> None:
             "scraped_phase": "VARCHAR",
             "index_evidence_json": "VARCHAR",
             "warnings_json": "VARCHAR",
+            "nino34_weekly": "DOUBLE",
+            "row_kind": "VARCHAR",
             "created_at": "TIMESTAMP",
         },
     )

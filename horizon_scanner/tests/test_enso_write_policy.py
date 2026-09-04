@@ -305,7 +305,8 @@ def test_backfill_seeds_history_from_the_published_oni_table(db):
     assert by_observed["1950-01-01"][1] == "La Niña"
     assert by_observed["1950-01-01"][4] == "strong"
     assert by_observed["2026-08-01"][1] == "El Niño"
-    assert all(r[6] == "fresh" for r in rows)
+    # The published table is the record's past, never a reading a run took.
+    assert all(r[6] == "historical" for r in rows)
 
 
 def test_recompute_overwrites_a_stored_row_from_the_oni_table(db):

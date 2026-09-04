@@ -20,9 +20,36 @@ load-bearing for the phase.
 Rank   Source                                       Gives
 ===== ============================================ =========================
 1      NOAA ERDDAP ``ncepNinoSSTwk`` (tabledap)     Weekly Niño 3.4 anomaly
-2      CPC ``data/indices/wksst8110.for``           Weekly Niño 3.4 anomaly
+2      CPC ``data/indices/wksst9120.for``           Weekly Niño 3.4 anomaly
 3      CPC ``data/indices/oni.ascii.txt``           Three-month ONI
 ===== ============================================ =========================
+
+**Every rank is read on every run** (Sept 2026). Until then the ladder
+stopped at the first usable answer, so the record could never say whether a
+SECOND source agreed with it, and the corroboration machinery had nothing
+to compare against. Three small requests a run is the price of knowing that
+two independent sources are alive; each rank's newest observation is
+recorded in the evidence whether or not it was the one used.
+
+**Rank 2 moved from ``wksst8110.for`` to ``wksst9120.for``** (Sept 2026).
+CPC changed its base period from 1981-2010 to 1991-2020 in early 2021 and
+stopped updating the old file; its last line is dated 2021-01-27, which is
+why the run of 2026-09-04 found it 2,046 days stale. The new file has the
+same fixed-width layout, so the parser is unchanged.
+
+**Rank 1 asks for the whole table, not named columns** (Sept 2026). The
+request used to project ``time,NINO3_4,ANOM3_4`` and ERDDAP answered HTTP
+400 — its response to an unrecognised variable name. The dataset publishes
+its columns under names this code cannot verify from the build environment
+(the info page reads ``Nino34_ssta``-style), so the request now asks for
+every column and the parser finds the Niño 3.4 anomaly by pattern. A
+renamed column is then a parse failure that names the columns it saw,
+never an HTTP 400 that names nothing.
+
+**The weekly reading and the ONI are two numbers.** A seasonal source (rank
+3) IS the ONI and carries no weekly value; the record says the weekly
+reading is absent rather than printing the ONI under a weekly label, so a
+run that could only read the published table is visibly one source short.
 
 **ONI, and what stands in for it.** The operational definition is stated on
 the ONI: the three-month running mean of Niño 3.4 anomalies. Rank 3 serves
@@ -95,11 +122,15 @@ ONI_AGREEMENT_TOLERANCE = 0.5
 #: of ANY source may be before the record is refused as current.
 MAX_OBSERVATION_AGE_DAYS = 120
 
-ERDDAP_URL = (
-    "https://coastwatch.pfeg.noaa.gov/erddap/tabledap/ncepNinoSSTwk.csv"
-    "?time,NINO3_4,ANOM3_4"
-)
-CPC_WEEKLY_URL = "https://www.cpc.ncep.noaa.gov/data/indices/wksst8110.for"
+#: ERDDAP tabledap. No variable projection: a leading ``&`` asks for every
+#: column, and the parser picks the Niño 3.4 anomaly by name pattern. The
+#: projected form (``?time,NINO3_4,ANOM3_4``) drew HTTP 400 from the live
+#: server, which is what ERDDAP returns for a variable it does not have.
+ERDDAP_URL = "https://coastwatch.pfeg.noaa.gov/erddap/tabledap/ncepNinoSSTwk.csv?"
+#: The 1991-2020 base-period file, updated weekly. ``wksst8110.for`` (the
+#: 1981-2010 base) froze at 2021-01-27 when CPC changed base period.
+CPC_WEEKLY_URL = "https://www.cpc.ncep.noaa.gov/data/indices/wksst9120.for"
+CPC_WEEKLY_URL_FROZEN = "https://www.cpc.ncep.noaa.gov/data/indices/wksst8110.for"
 CPC_ONI_URL = "https://www.cpc.ncep.noaa.gov/data/indices/oni.ascii.txt"
 
 BASIS_ONI_TABLE = "oni_table"
@@ -148,6 +179,12 @@ class IndexReading:
     #: True when the source already publishes a three-month mean (the ONI
     #: table), false when this module has to compute one from weekly values.
     seasonal: bool = False
+    #: What this rank would have answered, recorded whether or not it was
+    #: the rank used. The two-sources-alive check reads these.
+    newest_observation: dt.date | None = None
+    nino34: float | None = None
+    oni: float | None = None
+    oni_basis: str | None = None
 
     def as_evidence(self) -> dict:
         return {
@@ -158,6 +195,12 @@ class IndexReading:
             "error": self.error,
             "observations": len(self.observations),
             "seasonal": self.seasonal,
+            "newest_observation": (
+                self.newest_observation.isoformat() if self.newest_observation else None
+            ),
+            "nino34": self.nino34,
+            "oni": self.oni,
+            "oni_basis": self.oni_basis,
         }
 
 
@@ -165,7 +208,14 @@ class IndexReading:
 class IndexResolution:
     """The numeric record, assembled from whichever rank answered first."""
 
+    #: The Niño 3.4 anomaly the phase rests on. For a weekly source this is
+    #: the newest weekly value; for the ONI table it is the ONI itself (a
+    #: three-month mean of the same index).
     nino34: float | None = None
+    #: The newest WEEKLY Niño 3.4 reading, or None when the rank that
+    #: answered publishes only the seasonal ONI. Never filled from the ONI:
+    #: an absent weekly reading must be visible as absent.
+    nino34_weekly: float | None = None
     oni: float | None = None
     oni_basis: str | None = None
     observation_date: dt.date | None = None
@@ -185,6 +235,7 @@ class IndexResolution:
     def as_evidence(self) -> dict:
         return {
             "nino34": self.nino34,
+            "nino34_weekly": self.nino34_weekly,
             "oni": self.oni,
             "oni_basis": self.oni_basis,
             "observation_date": (
@@ -194,8 +245,15 @@ class IndexResolution:
             "source_name": self.source_name,
             "source_url": self.source_url,
             "n_observations": self.n_observations,
+            "ranks_ok": sorted(r.rank for r in self.readings if r.ok),
             "readings": [r.as_evidence() for r in self.readings],
         }
+
+    @property
+    def usable_readings(self) -> list["IndexReading"]:
+        """Every rank that answered with a current observation, best first."""
+
+        return sorted((r for r in self.readings if r.ok), key=lambda r: r.rank)
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +329,12 @@ def parse_erddap_csv(body: str) -> list[Observation]:
     ERDDAP writes a column-name row, then a units row, then data. The units
     row is skipped by requiring the time cell to parse as a date, which also
     survives a column reordering.
+
+    The anomaly column is found by NAME PATTERN, not by a fixed spelling:
+    the request asks for every column (see ``ERDDAP_URL``) precisely because
+    the live spelling could not be verified. A body with no recognisable
+    Niño 3.4 anomaly column raises, naming the columns it saw, so the ladder
+    records the real reason rather than "no usable observation".
     """
 
     out: list[Observation] = []
@@ -278,9 +342,12 @@ def parse_erddap_csv(body: str) -> list[Observation]:
     if not reader.fieldnames:
         return out
     time_key = _match_key(reader.fieldnames, ("time", "date"))
-    anom_key = _match_key(reader.fieldnames, ("ANOM3_4", "anom3_4", "ANOM_3_4"))
+    anom_key = erddap_anomaly_column(reader.fieldnames)
     if not time_key or not anom_key:
-        return out
+        raise ValueError(
+            "no Niño 3.4 anomaly column recognised; columns were "
+            + ", ".join(str(c) for c in reader.fieldnames)
+        )
     for row in reader:
         moment = _parse_iso_date(str(row.get(time_key) or ""))
         anomaly = valid_anomaly(row.get(anom_key))
@@ -358,6 +425,31 @@ def _match_key(fieldnames: Sequence[str], candidates: tuple[str, ...]) -> str | 
         hit = lowered.get(candidate.lower())
         if hit:
             return hit
+    return None
+
+
+#: Column-name patterns for the Niño 3.4 ANOMALY, tried in order. The first
+#: two are the spellings this code has used; the rest cover the
+#: ``Nino34_ssta`` / ``NINO3.4 anom`` families ERDDAP datasets publish. A
+#: plain SST column (``Nino34_sst``) never matches — it must say anomaly.
+_ERDDAP_ANOMALY_PATTERNS = (
+    re.compile(r"^anom3[._]?4$", re.IGNORECASE),
+    re.compile(r"^anom[._]?3[._]?4$", re.IGNORECASE),
+    re.compile(r"^nino[._ ]?3[._]?4[._ ]?(ssta|anom\w*)$", re.IGNORECASE),
+    re.compile(r"^(ssta|anom\w*)[._ ]?nino[._ ]?3[._]?4$", re.IGNORECASE),
+    re.compile(r"nino[._ ]?3[._]?4.*(anom|ssta)", re.IGNORECASE),
+    re.compile(r"(anom|ssta).*nino[._ ]?3[._]?4", re.IGNORECASE),
+)
+
+
+def erddap_anomaly_column(fieldnames: Sequence[str]) -> str | None:
+    """The column holding the Niño 3.4 anomaly, whatever ERDDAP calls it."""
+
+    names = [str(name).strip() for name in fieldnames if name]
+    for pattern in _ERDDAP_ANOMALY_PATTERNS:
+        for name in names:
+            if pattern.search(name):
+                return name
     return None
 
 
@@ -442,7 +534,11 @@ def _default_get(url: str, timeout: float) -> str:
         timeout=timeout,
         headers={"User-Agent": "PythiaBot/1.0 (humanitarian forecasting research)"},
     )
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        # ERDDAP puts the reason in the body ("Unrecognized variable=...");
+        # a bare status code sent the September 2026 diagnosis nowhere.
+        snippet = re.sub(r"\s+", " ", (resp.text or ""))[:200]
+        raise RuntimeError(f"HTTP {resp.status_code} from {url}: {snippet}")
     return resp.text
 
 
@@ -450,7 +546,7 @@ def _erddap_url(today: dt.date, lookback_days: int) -> str:
     """ERDDAP with a trailing-window constraint, so we fetch weeks not decades."""
 
     start = today - dt.timedelta(days=lookback_days)
-    return f"{ERDDAP_URL}&time%3E={start.isoformat()}"
+    return f"{ERDDAP_URL}&time%3E={start.isoformat()}T00:00:00Z"
 
 
 def source_ladder(today: dt.date, *, lookback_days: int = 400) -> list[dict]:
@@ -465,7 +561,7 @@ def source_ladder(today: dt.date, *, lookback_days: int = 400) -> list[dict]:
             "seasonal": False,
         },
         {
-            "name": "cpc_wksst8110",
+            "name": "cpc_wksst9120",
             "rank": 2,
             "url": CPC_WEEKLY_URL,
             "parse": parse_cpc_weekly,
@@ -481,6 +577,65 @@ def source_ladder(today: dt.date, *, lookback_days: int = 400) -> list[dict]:
     ]
 
 
+def read_rank(
+    spec: dict,
+    *,
+    getter: GetFn,
+    today: dt.date,
+    timeout: float,
+    max_age_days: int,
+) -> IndexReading:
+    """Read ONE rank and say what it would answer. Never raises.
+
+    A reading is ``ok`` only when the body parsed, at least one observation
+    survived the range check, and the newest observation is within
+    ``max_age_days``. An archived copy of last year's file is recorded as
+    stale, never read as current.
+    """
+
+    reading = IndexReading(
+        name=str(spec["name"]),
+        rank=int(spec["rank"]),
+        url=str(spec["url"]),
+        seasonal=bool(spec["seasonal"]),
+    )
+    try:
+        body = getter(reading.url, timeout)
+        reading.observations = list(spec["parse"](body))
+    except Exception as exc:  # noqa: BLE001 - a dead source is a fact, not a crash
+        reading.error = f"{type(exc).__name__}: {exc}"
+        LOG.warning("[enso] rank %d (%s) failed: %s", reading.rank, reading.name, exc)
+        return reading
+
+    if not reading.observations:
+        reading.error = "no usable observation parsed from the response"
+        LOG.warning("[enso] rank %d (%s): %s", reading.rank, reading.name, reading.error)
+        return reading
+
+    nino34, oni, observed, basis, _n_used = oni_from_observations(
+        reading.observations, seasonal=reading.seasonal
+    )
+    reading.newest_observation = observed
+    reading.nino34 = nino34
+    reading.oni = oni
+    reading.oni_basis = basis
+    age = (today - observed).days if observed else None
+    if age is not None and age > max_age_days:
+        reading.error = (
+            f"newest observation {observed.isoformat()} is {age} days old "
+            f"(limit {max_age_days})"
+        )
+        LOG.warning("[enso] rank %d (%s): %s", reading.rank, reading.name, reading.error)
+        return reading
+
+    reading.ok = True
+    LOG.info(
+        "[enso] rank %d (%s): Niño 3.4 %+.2f °C on %s, ONI %+.2f (%s)",
+        reading.rank, reading.name, nino34, observed.isoformat(), oni, basis,
+    )
+    return reading
+
+
 def resolve_indices(
     *,
     get: GetFn | None = None,
@@ -488,13 +643,18 @@ def resolve_indices(
     timeout: float = 60.0,
     max_age_days: int = MAX_OBSERVATION_AGE_DAYS,
 ) -> IndexResolution:
-    """Walk the numeric ladder and return the first usable answer. Never raises.
+    """Read EVERY rank, record what each said, and answer from the best. Never raises.
 
-    "Usable" means: the body parsed, at least one observation survived the
-    range check, and the newest observation is within ``max_age_days``. A
-    rank that returns a stale series is recorded as an error and the ladder
-    moves on — an archived copy of last year's file is not a reading about
-    this month.
+    The record is taken from the lowest-ranked usable reading. Every other
+    rank's answer travels in the evidence, so a run can state how many
+    independent sources were alive and whether they agreed — which is what
+    the continuity and corroboration checks need, and what the
+    two-ranks-alive contradiction check reads.
+
+    The weekly Niño 3.4 (``nino34_weekly``) is filled ONLY from a weekly
+    rank. When the ONI table is the only source that answered, the weekly
+    reading is None and stays None: printing the ONI under a weekly label
+    would hide that the run was one source short.
     """
 
     getter = get or _default_get
@@ -502,62 +662,51 @@ def resolve_indices(
     resolution = IndexResolution()
 
     for spec in source_ladder(day):
-        reading = IndexReading(
-            name=str(spec["name"]),
-            rank=int(spec["rank"]),
-            url=str(spec["url"]),
-            seasonal=bool(spec["seasonal"]),
+        resolution.readings.append(
+            read_rank(spec, getter=getter, today=day, timeout=timeout,
+                      max_age_days=max_age_days)
         )
-        try:
-            body = getter(reading.url, timeout)
-            reading.observations = list(spec["parse"](body))
-        except Exception as exc:  # noqa: BLE001 - a dead source is a fact, not a crash
-            reading.error = f"{type(exc).__name__}: {exc}"
-            LOG.warning("[enso] rank %d (%s) failed: %s", reading.rank, reading.name, exc)
-            resolution.readings.append(reading)
-            continue
 
-        if not reading.observations:
-            reading.error = "no usable observation parsed from the response"
-            LOG.warning("[enso] rank %d (%s): %s", reading.rank, reading.name, reading.error)
-            resolution.readings.append(reading)
-            continue
-
-        nino34, oni, observed, basis, n_used = oni_from_observations(
-            reading.observations, seasonal=reading.seasonal
-        )
-        age = (day - observed).days if observed else None
-        if age is not None and age > max_age_days:
-            reading.error = (
-                f"newest observation {observed.isoformat()} is {age} days old "
-                f"(limit {max_age_days})"
-            )
-            LOG.warning("[enso] rank %d (%s): %s", reading.rank, reading.name, reading.error)
-            resolution.readings.append(reading)
-            continue
-
-        reading.ok = True
-        resolution.readings.append(reading)
-        resolution.nino34 = nino34
-        resolution.oni = oni
-        resolution.oni_basis = basis
-        resolution.observation_date = observed
-        resolution.source_rank_used = reading.rank
-        resolution.source_name = reading.name
-        resolution.source_url = reading.url
-        resolution.n_observations = n_used
-        LOG.info(
-            "[enso] rank %d (%s): Niño 3.4 %+.2f °C on %s, ONI %+.2f (%s)",
-            reading.rank, reading.name, nino34, observed.isoformat(), oni, basis,
-        )
-        break
-
-    if not resolution.resolved:
+    usable = resolution.usable_readings
+    if not usable:
         LOG.error(
             "[enso] every numeric source failed — no phase may be computed; "
             "the caller must carry the last good record forward, never default"
         )
+        return resolution
+
+    chosen = usable[0]
+    resolution.nino34 = chosen.nino34
+    resolution.nino34_weekly = None if chosen.seasonal else chosen.nino34
+    resolution.oni = chosen.oni
+    resolution.oni_basis = chosen.oni_basis
+    resolution.observation_date = chosen.newest_observation
+    resolution.source_rank_used = chosen.rank
+    resolution.source_name = chosen.name
+    resolution.source_url = chosen.url
+    resolution.n_observations = (
+        1 if chosen.seasonal else _window_size(chosen.observations)
+    )
+    if resolution.nino34_weekly is None:
+        LOG.info(
+            "[enso] no weekly Niño 3.4 reading this run: rank %d (%s) publishes "
+            "the seasonal ONI only; the weekly field is stored as absent",
+            chosen.rank, chosen.name,
+        )
+    if len(usable) < 2:
+        LOG.warning(
+            "[enso] only one numeric source answered (rank %d); nothing can "
+            "corroborate this reading", chosen.rank,
+        )
     return resolution
+
+
+def _window_size(observations: Iterable[Observation]) -> int:
+    ordered = sorted(observations, key=lambda obs: obs.date)
+    if not ordered:
+        return 0
+    cutoff = ordered[-1].date - dt.timedelta(days=ONI_PROXY_WINDOW_DAYS)
+    return max(1, sum(1 for obs in ordered if obs.date > cutoff))
 
 
 def fetch_oni_history(
@@ -588,46 +737,55 @@ def corroborate(
 ) -> IndexResolution | None:
     """A SECOND numeric reading, from a rank the first answer did not use.
 
-    Only called when the continuity check trips — a jump larger than
-    ``ONI_JUMP_LIMIT`` or a phase transition that skips Neutral. Corroboration
-    costs a request, and the ordinary case does not need one; an
-    extraordinary move does, because the cheapest explanation for it is a
-    changed column rather than a changed ocean.
+    Since every rank is read on every run, the second opinion is usually
+    already in ``resolution.readings`` and costs nothing. A resolution
+    assembled some other way (tests, the recompute path) falls back to
+    fetching the other ranks.
 
     Returns None when no other rank answers, which the caller must treat as
     "uncorroborated", never as agreement.
     """
 
+    used = resolution.source_rank_used
+    for reading in resolution.usable_readings:
+        if reading.rank == used or reading.oni is None:
+            continue
+        other = IndexResolution(
+            nino34=reading.nino34,
+            nino34_weekly=None if reading.seasonal else reading.nino34,
+            oni=reading.oni,
+            oni_basis=reading.oni_basis,
+            observation_date=reading.newest_observation,
+            source_rank_used=reading.rank,
+            source_name=reading.name,
+            source_url=reading.url,
+        )
+        LOG.info(
+            "[enso] corroborating rank %d (%s): ONI %+.2f (already read this run)",
+            other.source_rank_used, other.source_name, other.oni,
+        )
+        return other
+
     getter = get or _default_get
     day = today or dt.date.today()
-    used = resolution.source_rank_used
-
     for spec in source_ladder(day):
         if int(spec["rank"]) == used:
             continue
-        try:
-            observations = list(spec["parse"](getter(str(spec["url"]), timeout)))
-        except Exception as exc:  # noqa: BLE001
-            LOG.warning(
-                "[enso] corroborating rank %s failed: %s", spec["rank"], exc
-            )
-            continue
-        if not observations:
-            continue
-        nino34, oni, observed, basis, n_used = oni_from_observations(
-            observations, seasonal=bool(spec["seasonal"])
-        )
-        if observed is None or (day - observed).days > max_age_days:
+        if any(r.rank == int(spec["rank"]) for r in resolution.readings):
+            continue  # read this run and found unusable; do not ask again
+        reading = read_rank(spec, getter=getter, today=day, timeout=timeout,
+                            max_age_days=max_age_days)
+        if not reading.ok or reading.oni is None:
             continue
         other = IndexResolution(
-            nino34=nino34,
-            oni=oni,
-            oni_basis=basis,
-            observation_date=observed,
-            source_rank_used=int(spec["rank"]),
-            source_name=str(spec["name"]),
-            source_url=str(spec["url"]),
-            n_observations=n_used,
+            nino34=reading.nino34,
+            nino34_weekly=None if reading.seasonal else reading.nino34,
+            oni=reading.oni,
+            oni_basis=reading.oni_basis,
+            observation_date=reading.newest_observation,
+            source_rank_used=reading.rank,
+            source_name=reading.name,
+            source_url=reading.url,
         )
         LOG.info(
             "[enso] corroborating rank %d (%s): ONI %+.2f",

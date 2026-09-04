@@ -41,7 +41,7 @@ UTC,degree_C,degree_C
 2026-08-19T00:00:00Z,28.70,1.95
 """
 
-# CPC wksst8110.for: four SST/SSTA pairs per line — Niño 1+2, 3, 3.4, 4 —
+# CPC wksst9120.for (1991-2020 base; the 8110 file froze in Jan 2021): four SST/SSTA pairs per line — Niño 1+2, 3, 3.4, 4 —
 # so the Niño 3.4 anomaly is the sixth number after the week label.
 CPC_WEEKLY = """ Nino1+2      Nino3        Nino34        Nino4
 Week          SST SSTA     SST SSTA     SST SSTA     SST SSTA
@@ -193,7 +193,7 @@ def test_valid_anomaly_accepts_the_real_range():
 
 def test_the_ladder_falls_through_to_the_next_rank():
     resolution = idx.resolve_indices(
-        get=_getter({"wksst8110": CPC_WEEKLY}), today=TODAY
+        get=_getter({"wksst9120": CPC_WEEKLY}), today=TODAY
     )
     assert resolution.resolved
     assert resolution.source_rank_used == 2

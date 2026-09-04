@@ -33,6 +33,21 @@ as of 19 August, 40 days old" instead of reading a stale row as current.
 Neutral is a computed result and is never what the code says when it does
 not know.
 
+**Three kinds of row share the table** (``row_kind``, Sept 2026). ``live``
+rows are what a run wrote about the state as of that run; ``historical``
+rows are the published ONI table, one per season, seeded by
+``--backfill-oni`` and keyed on their own observation date; ``repaired``
+rows are pre-fix live rows that stated a phase with no measurement behind
+it and were rebuilt from the ONI history. A consumer that wants "the state
+as of today" reads live or repaired rows only — a 1950 row must never be
+the newest thing a caller sees.
+
+**The repair pass runs every run.** ``repair_unbacked_rows`` finds every
+row stating a phase beside a null ONI or Niño 3.4, rebuilds it from the
+newest ONI observation at or before the row's date, and DELETES it when no
+such observation exists. It logs repaired, deleted and untouched counts, so
+a run that repaired nothing is visible as such.
+
 Usage:
     python -m horizon_scanner.enso.enso_module                 # show the record
     python -m horizon_scanner.enso.enso_module --prompt-context
@@ -105,6 +120,11 @@ class ENSOForecast:
     current_state: str = ""      # "La Niña", "Neutral", "El Niño"
     strength: str = ""           # "weak" | "moderate" | "strong" | "very strong"
     oni: Optional[float] = None  # three-month mean Niño 3.4 anomaly, °C
+    # The Niño 3.4 anomaly the phase rests on: the newest weekly value when a
+    # weekly source answered, the ONI itself when only the seasonal table
+    # did. This is what the DB column nino34_anomaly holds. It is distinct
+    # from nino34_latest_weekly, which is ONLY ever a weekly reading.
+    nino34_anomaly: Optional[float] = None
     oni_basis: str = ""          # "oni_table" | "weekly_3month_mean"
     observation_date: str = ""   # the date the index was OBSERVED, not fetched
     source_rank_used: Optional[int] = None
@@ -113,8 +133,9 @@ class ENSOForecast:
     # Was this run's record read fresh, or carried forward from the last good
     # one? A carried-forward record keeps its ORIGINAL observation date and
     # states its own age, so nothing downstream reads it as current.
-    status: str = "fresh"        # "fresh" | "carried_forward"
+    status: str = "fresh"        # "fresh" | "carried_forward" | "historical"
     age_days: Optional[int] = None
+    row_kind: str = "live"       # "live" | "historical" | "repaired"
 
     # What the IRI page said about the phase. Kept for the disagreement
     # check and never used as the answer.
@@ -122,7 +143,10 @@ class ENSOForecast:
     state_disagreement: str = ""
 
     alert_status: str = ""       # CPC alert: "La Niña Advisory", "El Niño Watch", etc.
-    nino34_latest_weekly: Optional[float] = None  # latest weekly Niño 3.4 anomaly
+    # The newest WEEKLY Niño 3.4 anomaly, or None when no weekly source
+    # answered. Never filled from the ONI: a run that could only read the
+    # seasonal table is one source short, and the prompt says so.
+    nino34_latest_weekly: Optional[float] = None
     nino34_latest_season: Optional[float] = None  # latest 3-month Niño 3.4 anomaly
     nino34_latest_season_label: str = ""           # e.g. "Aug-Oct 2025"
 
@@ -184,6 +208,8 @@ class ENSOForecast:
                 state_line += f". ONI (3-month mean Niño 3.4): {self.oni:+.2f}°C"
             if self.nino34_latest_weekly is not None:
                 state_line += f". Latest weekly Niño 3.4: {self.nino34_latest_weekly:+.1f}°C"
+            elif self.oni is not None:
+                state_line += ". No independent weekly Niño 3.4 reading this run"
             if self.observation_date:
                 state_line += f". Observed {self.observation_date}"
             state_line += "."
@@ -408,8 +434,8 @@ def _build_context(f: ENSOForecast):
         parts.append(f"Current ENSO state: {describe_phase(f.current_state, f.strength)}")
         if f.oni is not None:
             parts.append(f"(ONI: {f.oni:+.2f}°C)")
-        elif f.nino34_latest_weekly is not None:
-            parts.append(f"(Niño 3.4: {f.nino34_latest_weekly:+.1f}°C)")
+        elif f.nino34_anomaly is not None:
+            parts.append(f"(Niño 3.4: {f.nino34_anomaly:+.1f}°C)")
 
     if f.probability_forecast:
         # Find the transition point — when does the dominant state change?
@@ -529,6 +555,23 @@ def get_enso_prompt_context(cache_path: Optional[Path] = None) -> str:
 
 STATUS_FRESH = "fresh"
 STATUS_CARRIED_FORWARD = "carried_forward"
+#: The published ONI table, seeded by --backfill-oni. Never "fresh": a row
+#: for January 1950 is not a reading any run took.
+STATUS_HISTORICAL = "historical"
+
+ROW_KIND_LIVE = "live"
+ROW_KIND_HISTORICAL = "historical"
+ROW_KIND_REPAIRED = "repaired"
+
+#: How old the newest stored observation may be before the DB record is
+#: refused and a consumer falls back to a live fetch. 100, not 30: the ONI
+#: is a three-month running mean published monthly, so its observation date
+#: (the centre month) is structurally 30 to 70 days behind the calendar. At
+#: 30 the seasonal TC module discarded a correctly detected strong El Niño
+#: as stale on 2026-09-04 ("65 days old (max 30)") and built its context
+#: with no ENSO signal at all. The ladder itself admits observations up to
+#: indices.MAX_OBSERVATION_AGE_DAYS (120); this bound sits just under it.
+DB_MAX_OBSERVATION_AGE_DAYS = 100
 
 
 def _run_stamp(today=None) -> str:
@@ -558,7 +601,8 @@ def apply_indices(f: ENSOForecast, resolution: IndexResolution) -> ENSOForecast:
         f.strength = ""
         return f
 
-    f.nino34_latest_weekly = resolution.nino34
+    f.nino34_anomaly = resolution.nino34
+    f.nino34_latest_weekly = resolution.nino34_weekly
     f.oni = resolution.oni
     f.oni_basis = resolution.oni_basis or ""
     f.observation_date = (
@@ -730,18 +774,21 @@ def validation_problems(f: ENSOForecast) -> list[str]:
     if f.status == STATUS_CARRIED_FORWARD:
         # A carried-forward record is a copy of one that already passed.
         return problems
-    if f.current_state and valid_anomaly(f.nino34_latest_weekly) is None:
+    if f.current_state and valid_anomaly(f.nino34_anomaly) is None:
         problems.append(
             f"phase {f.current_state!r} stated with no valid Niño 3.4 anomaly "
-            f"({f.nino34_latest_weekly!r})"
+            f"({f.nino34_anomaly!r})"
         )
     if f.current_state and f.oni is None:
         problems.append(f"phase {f.current_state!r} stated with no ONI")
-    if f.nino34_latest_weekly is not None and valid_anomaly(f.nino34_latest_weekly) is None:
-        problems.append(
-            f"Niño 3.4 {f.nino34_latest_weekly!r} is outside "
-            f"[{idx.NINO34_MIN}, {idx.NINO34_MAX}] °C"
-        )
+    for label, value in (
+        ("Niño 3.4", f.nino34_anomaly),
+        ("weekly Niño 3.4", f.nino34_latest_weekly),
+    ):
+        if value is not None and valid_anomaly(value) is None:
+            problems.append(
+                f"{label} {value!r} is outside [{idx.NINO34_MIN}, {idx.NINO34_MAX}] °C"
+            )
     return problems
 
 
@@ -909,13 +956,14 @@ def store_enso_state(forecast: ENSOForecast) -> bool:
                      forecast_json, plume_json, raw_context,
                      oni, enso_strength, oni_basis, observation_date,
                      source_rank_used, nino34_source, status, age_days,
-                     scraped_phase, index_evidence_json, warnings_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     scraped_phase, index_evidence_json, warnings_json,
+                     nino34_weekly, row_kind)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     fetch_date_str,
                     forecast.current_state or None,
-                    forecast.nino34_latest_weekly,
+                    forecast.nino34_anomaly,
                     forecast.iod_state or None,
                     forecast_json,
                     plume_json,
@@ -931,6 +979,8 @@ def store_enso_state(forecast: ENSOForecast) -> bool:
                     forecast.scraped_state or None,
                     evidence_json,
                     warnings_json,
+                    forecast.nino34_latest_weekly,
+                    forecast.row_kind or ROW_KIND_LIVE,
                 ],
             )
             logger.info(
@@ -948,11 +998,17 @@ def store_enso_state(forecast: ENSOForecast) -> bool:
         return False
 
 
-def load_enso_state_from_db(max_age_days: int = 30) -> Optional[ENSOForecast]:
+def load_enso_state_from_db(
+    max_age_days: int = DB_MAX_OBSERVATION_AGE_DAYS,
+) -> Optional[ENSOForecast]:
     """
-    Load the most recent ENSO state from the DB.
+    Load the most recent ENSO state from the DB: the newest LIVE (or
+    repaired) row. Historical ONI rows are never a candidate — they are the
+    record's past, not its present.
 
-    Returns None if no data, data is too old, or on any DB error.
+    Returns None if no data, data is too old (see
+    ``DB_MAX_OBSERVATION_AGE_DAYS`` for why the bound is 100 days), or on
+    any DB error.
     """
     try:
         from pythia.db.schema import connect, ensure_schema
@@ -969,8 +1025,9 @@ def load_enso_state_from_db(max_age_days: int = 30) -> Optional[ENSOForecast]:
                        forecast_json, plume_json, raw_context,
                        oni, enso_strength, oni_basis, observation_date,
                        source_rank_used, nino34_source, status, age_days,
-                       scraped_phase
+                       scraped_phase, nino34_weekly, row_kind
                 FROM enso_state
+                WHERE COALESCE(row_kind, 'live') <> 'historical'
                 ORDER BY fetch_date DESC
                 LIMIT 1
                 """
@@ -1025,7 +1082,7 @@ def load_enso_state_from_db(max_age_days: int = 30) -> Optional[ENSOForecast]:
             f = ENSOForecast()
             f.fetch_date = str(fetch_date_val) if fetch_date_val else ""
             f.current_state = row[1] or ""
-            f.nino34_latest_weekly = row[2]
+            f.nino34_anomaly = row[2]
             f.iod_state = row[3] or ""
             f.oni = row[7]
             f.strength = row[8] or ""
@@ -1036,6 +1093,8 @@ def load_enso_state_from_db(max_age_days: int = 30) -> Optional[ENSOForecast]:
             f.status = row[13] or STATUS_FRESH
             f.age_days = row[14]
             f.scraped_state = row[15] or ""
+            f.nino34_latest_weekly = row[16]
+            f.row_kind = row[17] or ROW_KIND_LIVE
 
             # Restore probability forecast
             if row[4]:
@@ -1085,10 +1144,15 @@ def load_last_good_record() -> Optional[ENSOForecast]:
                 """
                 SELECT enso_phase, nino34_anomaly, iod_phase, forecast_json,
                        plume_json, oni, enso_strength, oni_basis,
-                       observation_date, source_rank_used, nino34_source
+                       observation_date, source_rank_used, nino34_source,
+                       nino34_weekly
                 FROM enso_state
                 WHERE oni IS NOT NULL AND enso_phase IS NOT NULL
-                ORDER BY observation_date DESC NULLS LAST, fetch_date DESC
+                  AND nino34_anomaly IS NOT NULL
+                ORDER BY observation_date DESC NULLS LAST,
+                         CASE WHEN COALESCE(row_kind, 'live') = 'historical'
+                              THEN 1 ELSE 0 END,
+                         fetch_date DESC
                 LIMIT 1
                 """
             ).fetchall()
@@ -1103,7 +1167,7 @@ def load_last_good_record() -> Optional[ENSOForecast]:
     row = rows[0]
     f = ENSOForecast()
     f.current_state = row[0] or ""
-    f.nino34_latest_weekly = row[1]
+    f.nino34_anomaly = row[1]
     f.iod_state = row[2] or ""
     if row[3]:
         try:
@@ -1121,6 +1185,7 @@ def load_last_good_record() -> Optional[ENSOForecast]:
     f.observation_date = str(row[8]) if row[8] else ""
     f.source_rank_used = row[9]
     f.nino34_source = row[10] or ""
+    f.nino34_latest_weekly = row[11]
     return f
 
 
@@ -1138,7 +1203,28 @@ def fetch_and_store_enso(*, get=None, today=None, fetch_page: bool = True) -> bo
       its original observation date, with its age stated.
 
     Neutral is never what this function writes because it did not know.
+
+    Whatever the outcome, the row-kind migration and the repair pass run
+    afterwards (see :func:`repair_unbacked_rows`): the repair sources its
+    ONI from the history the workflow backfilled one step earlier, so it
+    works with no network and runs on every Resolver Update.
     """
+
+    try:
+        ok = _fetch_and_store_this_run(get=get, today=today, fetch_page=fetch_page)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fetch_and_store_enso failed: %s", exc)
+        ok = False
+    try:
+        classify_row_kinds()
+        repair_unbacked_rows(today=today)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[enso] repair pass failed: %s", exc)
+    return ok
+
+
+def _fetch_and_store_this_run(*, get=None, today=None, fetch_page: bool = True) -> bool:
+    """The write for THIS run; see :func:`fetch_and_store_enso` for the policy."""
 
     try:
         previous = load_last_good_record()
@@ -1199,14 +1285,233 @@ def fetch_and_store_enso(*, get=None, today=None, fetch_page: bool = True) -> bo
         return False
 
 
+# ---------------------------------------------------------------------------
+# Repair: rows that state a phase with nothing behind it
+# ---------------------------------------------------------------------------
+
+_ROW_KIND_MIGRATION_SQL = """
+    UPDATE enso_state
+       SET row_kind = CASE
+             WHEN oni_basis = 'oni_table'
+              AND nino34_source = 'cpc_oni_ascii'
+              AND observation_date IS NOT NULL
+              AND fetch_date = observation_date
+              AND COALESCE(age_days, 0) = 0
+             THEN 'historical'
+             ELSE 'live'
+           END
+     WHERE row_kind IS NULL
+"""
+
+
+def classify_row_kinds(con=None) -> dict:
+    """Stamp ``row_kind`` on rows written before the column existed. Idempotent.
+
+    A backfilled ONI row is recognisable by its own signature: the ONI
+    table as basis and source, keyed on its observation date, age zero. A
+    live run using rank 3 can never match, because the ONI for a centre
+    month is published after the following month ends, so its fetch date
+    is always later than its observation date. Everything else is live.
+    Historical rows also get ``status='historical'``: "fresh" on a row for
+    January 1950 said the run had read it, and no run had.
+    """
+
+    own = con is None
+    if own:
+        try:
+            from pythia.db.schema import connect, ensure_schema
+        except ImportError:
+            return {"historical": 0, "live": 0}
+        con = connect(read_only=False)
+        ensure_schema(con)
+    try:
+        before = con.execute(
+            "SELECT COUNT(*) FROM enso_state WHERE row_kind IS NULL"
+        ).fetchone()[0]
+        if not before:
+            return {"historical": 0, "live": 0}
+        con.execute(_ROW_KIND_MIGRATION_SQL)
+        relabelled = con.execute(
+            "SELECT COUNT(*) FROM enso_state "
+            "WHERE row_kind = 'historical' AND COALESCE(status, '') <> 'historical'"
+        ).fetchone()[0]
+        con.execute(
+            "UPDATE enso_state SET status = ? WHERE row_kind = 'historical'",
+            [STATUS_HISTORICAL],
+        )
+        counts = dict(con.execute(
+            "SELECT row_kind, COUNT(*) FROM enso_state GROUP BY row_kind"
+        ).fetchall())
+        logger.info(
+            "[enso] row_kind migration: %d rows classified (%s); %d historical "
+            "rows relabelled from 'fresh' to 'historical'",
+            before, counts, relabelled,
+        )
+        return {"historical": int(counts.get("historical", 0)),
+                "live": int(counts.get("live", 0))}
+    finally:
+        if own:
+            con.close()
+
+
+def repair_unbacked_rows(con=None, *, today=None) -> dict:
+    """Rebuild every row that states a phase beside a null measurement.
+
+    Runs at the end of every ``fetch_and_store_enso``, after the workflow's
+    ONI backfill, so the newest ONI observation at or before each bad row's
+    date is already in the table (``oni_basis='oni_table'``) and no network
+    is needed. For each such row at date D:
+
+    * found — write oni, nino34_anomaly (the ONI: a seasonal series is the
+      index), observation_date, basis, source, rank 3, age_days and the
+      phase and strength recomputed with ``classify_oni``; move the row's
+      original phase word into ``scraped_phase``; append the repair to
+      ``warnings_json``; ``row_kind='repaired'``, ``status='carried_forward'``
+      (which is what it is: the last good observation as of D, its age on
+      the row);
+    * not found — DELETE the row. An absent row is honest; a phase with
+      nothing behind it is not.
+
+    Returns and logs ``{"repaired": N, "deleted": M, "untouched": K}`` where
+    K counts the phase-bearing rows that needed nothing, so a run that
+    repaired nothing is visible as such.
+    """
+
+    from datetime import date as _date
+
+    own = con is None
+    if own:
+        try:
+            from pythia.db.schema import connect, ensure_schema
+        except ImportError:
+            return {"repaired": 0, "deleted": 0, "untouched": 0}
+        con = connect(read_only=False)
+        ensure_schema(con)
+    day = today or datetime.now(timezone.utc).date()
+    stamp = day.isoformat()
+    summary = {"repaired": 0, "deleted": 0, "untouched": 0}
+    try:
+        bad = con.execute(
+            """
+            SELECT fetch_date, enso_phase, warnings_json
+            FROM enso_state
+            WHERE enso_phase IS NOT NULL
+              AND (oni IS NULL OR nino34_anomaly IS NULL)
+            ORDER BY fetch_date
+            """
+        ).fetchall()
+        summary["untouched"] = int(con.execute(
+            "SELECT COUNT(*) FROM enso_state WHERE enso_phase IS NOT NULL "
+            "AND oni IS NOT NULL AND nino34_anomaly IS NOT NULL"
+        ).fetchone()[0])
+
+        for fetch_date, phase_word, warnings_json in bad:
+            row_day = (
+                fetch_date if isinstance(fetch_date, _date)
+                else _date.fromisoformat(str(fetch_date)[:10])
+            )
+            found = con.execute(
+                """
+                SELECT observation_date, oni
+                FROM enso_state
+                WHERE oni_basis = 'oni_table'
+                  AND oni IS NOT NULL
+                  AND observation_date IS NOT NULL
+                  AND observation_date <= ?
+                ORDER BY observation_date DESC, fetch_date DESC
+                LIMIT 1
+                """,
+                [row_day],
+            ).fetchone()
+            if found is None:
+                con.execute("DELETE FROM enso_state WHERE fetch_date = ?", [row_day])
+                summary["deleted"] += 1
+                logger.warning(
+                    "[enso] repair: deleted the %s row — it stated %r with no "
+                    "measurement and no ONI observation predates it",
+                    row_day, phase_word,
+                )
+                continue
+
+            observed_raw, oni = found
+            observed = (
+                observed_raw if isinstance(observed_raw, _date)
+                else _date.fromisoformat(str(observed_raw)[:10])
+            )
+            oni = float(oni)
+            phase, strength = classify_oni(oni)
+            age_days = (row_day - observed).days
+            try:
+                warnings = json.loads(warnings_json) if warnings_json else []
+                if not isinstance(warnings, list):
+                    warnings = [warnings]
+            except (json.JSONDecodeError, TypeError):
+                warnings = [str(warnings_json)]
+            warnings.append(
+                f"repaired on {stamp}: this row stated {phase_word!r} with no "
+                f"measurement; ONI {oni:+.2f} observed {observed.isoformat()} "
+                f"({age_days} days before this row) substituted from the CPC "
+                f"ONI table and the phase recomputed"
+            )
+            record = ENSOForecast()
+            record.current_state, record.strength = phase, strength
+            record.oni = oni
+            record.nino34_anomaly = oni
+            record.nino34_latest_weekly = None
+            record.oni_basis = idx.BASIS_ONI_TABLE
+            record.observation_date = observed.isoformat()
+            record.status = STATUS_CARRIED_FORWARD
+            record.age_days = age_days
+            record.scraped_state = str(phase_word)
+            _build_context(record)
+            con.execute(
+                """
+                UPDATE enso_state
+                   SET enso_phase = ?, enso_strength = ?, oni = ?,
+                       nino34_anomaly = ?, nino34_weekly = NULL,
+                       observation_date = ?, oni_basis = ?,
+                       nino34_source = 'cpc_oni_ascii', source_rank_used = 3,
+                       age_days = ?, status = ?, scraped_phase = ?,
+                       warnings_json = ?, row_kind = ?, raw_context = ?
+                 WHERE fetch_date = ?
+                """,
+                [
+                    phase, strength or None, oni, oni, observed,
+                    idx.BASIS_ONI_TABLE, age_days, STATUS_CARRIED_FORWARD,
+                    str(phase_word), json.dumps(warnings), ROW_KIND_REPAIRED,
+                    record.to_prompt_context(), row_day,
+                ],
+            )
+            summary["repaired"] += 1
+            logger.warning(
+                "[enso] repair: %s row rebuilt — %r with no measurement became "
+                "%s (ONI %+.2f observed %s, %d days old)",
+                row_day, phase_word, describe_phase(phase, strength), oni,
+                observed.isoformat(), age_days,
+            )
+    finally:
+        if own:
+            con.close()
+
+    logger.info(
+        "[enso] repair pass: repaired %d, deleted %d, untouched %d",
+        summary["repaired"], summary["deleted"], summary["untouched"],
+    )
+    return summary
+
+
 def backfill_oni_history(*, get=None) -> int:
     """Seed ``enso_state`` from the published ONI table, 1950 to present.
 
     ONI is a complete historical table, so this is one pass. It gives the
     continuity check something to compare against and gives base-rate and RC
-    work a real ENSO history rather than three rows. Rows are written with
-    ``status='fresh'`` and the season's own observation date; a month that
-    already has a row is replaced, since the ONI table itself is the record.
+    work a real ENSO history rather than three rows. Rows are written as
+    ``row_kind='historical'`` / ``status='historical'`` under the season's
+    own observation date; a historical row already present is replaced,
+    since the ONI table itself is the record. A LIVE row whose fetch date
+    happens to equal a season's centre date is left alone and counted — the
+    table's key is the date, and a run's own reading must not be overwritten
+    by the table it will be compared against.
     """
 
     observations = idx.fetch_oni_history(get=get)
@@ -1221,21 +1526,32 @@ def backfill_oni_history(*, get=None) -> int:
         return 0
 
     written = 0
+    skipped_live = 0
     try:
         con = connect(read_only=False)
         try:
             ensure_schema(con)
+            classify_row_kinds(con)
+            live_dates = {
+                str(row[0])[:10] for row in con.execute(
+                    "SELECT fetch_date FROM enso_state "
+                    "WHERE COALESCE(row_kind, 'live') <> 'historical'"
+                ).fetchall()
+            }
             for observation in observations:
                 phase, strength = classify_oni(observation.anomaly)
                 stamp = observation.date.isoformat()
+                if stamp in live_dates:
+                    skipped_live += 1
+                    continue
                 con.execute(
                     """
                     INSERT OR REPLACE INTO enso_state
                         (fetch_date, enso_phase, nino34_anomaly, oni,
                          enso_strength, oni_basis, observation_date,
                          source_rank_used, nino34_source, status, age_days,
-                         raw_context)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         raw_context, row_kind, nino34_weekly)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                     """,
                     [
                         stamp,
@@ -1247,11 +1563,12 @@ def backfill_oni_history(*, get=None) -> int:
                         stamp,
                         3,
                         "cpc_oni_ascii",
-                        STATUS_FRESH,
+                        STATUS_HISTORICAL,
                         0,
                         f"## ENSO State (CPC ONI table)\n"
-                        f"Current state: {describe_phase(phase, strength)}. "
+                        f"ENSO state for {stamp[:7]}: {describe_phase(phase, strength)}. "
                         f"ONI: {observation.anomaly:+.2f}°C. Observed {stamp}.",
+                        ROW_KIND_HISTORICAL,
                     ],
                 )
                 written += 1
@@ -1262,10 +1579,12 @@ def backfill_oni_history(*, get=None) -> int:
         return written
 
     logger.info(
-        "[enso] backfilled %d ONI observations (%s .. %s)",
+        "[enso] backfilled %d ONI observations (%s .. %s) as historical rows; "
+        "%d dates left alone because a live row holds them",
         written,
         observations[0].date.isoformat(),
         observations[-1].date.isoformat(),
+        skipped_live,
     )
     return written
 
@@ -1306,7 +1625,8 @@ def recompute_record(fetch_date: str, *, get=None) -> Optional[ENSOForecast]:
     record.current_state = phase
     record.strength = strength
     record.oni = observation.anomaly
-    record.nino34_latest_weekly = observation.anomaly
+    record.nino34_anomaly = observation.anomaly
+    record.nino34_latest_weekly = None    # a seasonal table has no weekly reading
     record.oni_basis = idx.BASIS_ONI_TABLE
     record.observation_date = observation.date.isoformat()
     record.source_rank_used = 3
@@ -1353,7 +1673,8 @@ def consumers_of_record(fetch_date: str) -> dict:
             # own date until the next record superseded it.
             bounds = con.execute(
                 """
-                SELECT MIN(fetch_date) FROM enso_state WHERE fetch_date > ?
+                SELECT MIN(fetch_date) FROM enso_state
+                WHERE fetch_date > ? AND COALESCE(row_kind, 'live') <> 'historical'
                 """,
                 [fetch_date],
             ).fetchall()
