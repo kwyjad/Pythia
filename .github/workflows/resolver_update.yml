@@ -76,6 +76,11 @@ concurrency:
         required: false
         default: false
         type: boolean
+      diagnose_acled_auth:
+        description: "Also run the ACLED OAuth diagnostic (read-only; needs the ACLED secrets, so only CI can run it)"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # Run at 03:00 UTC on the 28th of each month.
     #
@@ -389,6 +394,24 @@ jobs:
           python -m scripts.ci.diagnose_emdat --out diagnostics/emdat_diagnostic.json \
             2>&1 | tee diagnostics/emdat_diagnostic.log \
             || echo "::warning::EM-DAT diagnostic failed (non-fatal)"
+
+      # The 2026-09-03 run died in Phase 1: both ACLED OAuth grants were
+      # answered HTTP 200 with a body that was not JSON, and nothing recorded
+      # the status, the content type, the URL reached or one character of the
+      # body. A WAF page, a moved route, content negotiation and a dead
+      # credential all look identical from a JSONDecodeError and want
+      # different repairs. Only CI holds the ACLED secrets, so this can be
+      # settled nowhere else. Read-only, exits 0, verdict lands in the
+      # diagnostics artifact.
+      - name: "Diagnose ACLED OAuth (dispatch input)"
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.diagnose_acled_auth == true || inputs.diagnose_acled_auth == 'true') }}
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          python -m scripts.ci.diagnose_acled_auth --out diagnostics/acled_auth_diagnostic.json \
+            2>&1 | tee diagnostics/acled_auth_diagnostic.log \
+            || echo "::warning::ACLED OAuth diagnostic failed (non-fatal)"
 
       # === PHASE 1: RESOLVER CONNECTORS (ground truth — fatal) ===
       - name: "Phase 1: Run IDMC (HELIX)"

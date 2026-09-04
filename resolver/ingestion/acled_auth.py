@@ -20,6 +20,28 @@ OAUTH_TOKEN_URL = "https://acleddata.com/oauth/token"
 OAUTH_CLIENT_ID = "acled"
 _MIN_TTL = 300  # seconds
 
+# ACLED's token endpoint sits behind a WAF, and on 2026-09-03 both grants were
+# answered HTTP 200 with a body that was not JSON: the status check passed and
+# resp.json() then raised, so the whole monthly ingest died on a bare
+# JSONDecodeError naming neither the status, the body, nor the URL actually
+# reached. A bare python-requests User-Agent with no Accept header is the
+# request shape most likely to be handed a website instead of an API; this repo
+# has hit the same wall at BoM (403 on a generic UA) and at crisisgroup.org.
+# Asking for JSON explicitly costs nothing and removes one of the candidates.
+_DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; Pythia/1.0; +https://github.com/kwyjad/Pythia)"
+
+
+def _user_agent() -> str:
+    return (os.environ.get("ACLED_USER_AGENT") or "").strip() or _DEFAULT_USER_AGENT
+
+
+def _token_headers() -> Dict[str, str]:
+    return {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "User-Agent": _user_agent(),
+    }
+
 _LOG = logging.getLogger("resolver.ingestion.acled.auth")
 
 _CACHE: Dict[str, Optional[str | int]] = {
@@ -78,30 +100,118 @@ def _describe_token(token: Optional[str], expiry: Optional[int]) -> Dict[str, Op
     }
 
 
-def _body_snippet(resp: requests.Response, *, limit: int = 300) -> str:
-    """Return a short, single-line snippet of the response body for error messages."""
+def _redact(text: str) -> str:
+    """Strip anything matching a credential in this process's environment.
+
+    An OAuth refusal routinely quotes the username back, and these strings go
+    to a public build log and into the diagnostics artifact.
+    """
+
     try:
-        text = (resp.text or "").strip().replace("\n", " ")
+        from resolver.diagnostics.redaction import redact_text
+
+        return redact_text(text)
+    except Exception:  # pragma: no cover - redaction must never break auth
+        return text
+
+
+def _body_snippet(resp: requests.Response, *, limit: int = 300) -> str:
+    """Return a short, single-line, credential-free snippet of the response body."""
+    try:
+        text = (resp.text or "").strip()
     except Exception:  # pragma: no cover - defensive
         return "<unable to read body>"
-    return text[:limit]
+    return _redact(" ".join(text.split()))[:limit]
+
+
+def _looks_like_html(text: str, content_type: str) -> bool:
+    if "html" in content_type.lower():
+        return True
+    head = text.lstrip()[:200].lower()
+    return head.startswith("<!doctype html") or head.startswith("<html") or "<title" in head
+
+
+def describe_response(resp: requests.Response) -> str:
+    """Say what actually came back, in one line, with no credentials in it.
+
+    A token endpoint has three ways to disappoint us and they want three
+    different repairs: a refusal that names the account, a WAF page where the
+    API should be, and a moved route. Only the status, the content type, the
+    URL reached after redirects and the first of the body can tell them apart,
+    so all four are named. The body is redacted against the environment's own
+    secrets, because an OAuth error routinely quotes the username back and
+    this string is printed to a public build log.
+    """
+
+    content_type = ""
+    try:
+        content_type = resp.headers.get("Content-Type", "") or ""
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+    parts = [f"status={resp.status_code}", f"content_type={content_type!r}"]
+
+    final_url = ""
+    try:
+        final_url = resp.url or ""
+    except Exception:  # pragma: no cover - defensive
+        pass
+    if final_url and final_url != OAUTH_TOKEN_URL:
+        parts.append(f"final_url={_redact(final_url)!r}")
+
+    try:
+        hops = [str(h.status_code) for h in (resp.history or [])]
+    except Exception:  # pragma: no cover - defensive
+        hops = []
+    if hops:
+        parts.append(f"redirects={'->'.join(hops)}")
+
+    body = _body_snippet(resp)
+    if _looks_like_html(body, content_type):
+        parts.append("body_shape=html")
+    parts.append(f"body={body!r}")
+    return " ".join(parts)
 
 
 def _log_token_http(resp: requests.Response, *, flow: str) -> None:
-    try:
-        body = resp.text[:400]
-    except Exception:  # pragma: no cover - defensive logging guard
-        body = "<unable to read body>"
+    # Deliberately not ``extra=``: those fields render in no default formatter,
+    # which is why the 2026-09-03 failure left the body recorded nowhere at
+    # all. The description goes in the message itself.
+    _LOG.debug("ACLED OAuth %s grant response | %s", flow, describe_response(resp))
 
-    _LOG.debug(
-        "ACLED OAuth HTTP response",
-        extra={
-            "flow": flow,
-            "status": resp.status_code,
-            "url": OAUTH_TOKEN_URL,
-            "body_snippet": body,
-        },
+
+def _token_request(data: Dict[str, str], *, flow: str) -> Dict[str, str]:
+    """POST the token endpoint and return its JSON object, or raise saying why not."""
+
+    resp = requests.post(
+        OAUTH_TOKEN_URL,
+        data=data,
+        headers=_token_headers(),
+        timeout=30,
     )
+    _log_token_http(resp, flow=flow)
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"ACLED OAuth {flow} grant failed: {describe_response(resp)}")
+
+    # A 200 is not an answer. Until 2026-09-03 this branch was a bare
+    # resp.json(), so a WAF page served with a 200 surfaced as "Expecting
+    # value: line 1 column 1 (char 0)" and killed the monthly ingest with
+    # nothing recorded about what had actually been served.
+    try:
+        payload = resp.json()
+    except ValueError:
+        raise RuntimeError(
+            f"ACLED OAuth {flow} grant returned HTTP 200 with a body that is not JSON: "
+            f"{describe_response(resp)}"
+        ) from None
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(
+            f"ACLED OAuth {flow} grant returned a JSON {type(payload).__name__}, not an object: "
+            f"{describe_response(resp)}"
+        )
+    return payload
 
 
 def _password_grant(username: str, password: str) -> Dict[str, str]:
@@ -116,18 +226,7 @@ def _password_grant(username: str, password: str) -> Dict[str, str]:
         "scope": "authenticated",
     }
     _LOG.debug("ACLED password grant for username=%s", data["username"])
-    resp = requests.post(
-        OAUTH_TOKEN_URL,
-        data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
-    _log_token_http(resp, flow="password")
-    if resp.status_code != 200:
-        raise RuntimeError(
-            f"ACLED OAuth password grant failed: status={resp.status_code} body={_body_snippet(resp)}"
-        )
-    return resp.json()
+    return _token_request(data, flow="password")
 
 
 def _refresh_grant(refresh_token: str) -> Dict[str, str]:
@@ -136,18 +235,7 @@ def _refresh_grant(refresh_token: str) -> Dict[str, str]:
         "grant_type": "refresh_token",
         "client_id": OAUTH_CLIENT_ID,
     }
-    resp = requests.post(
-        OAUTH_TOKEN_URL,
-        data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
-    _log_token_http(resp, flow="refresh")
-    if resp.status_code != 200:
-        raise RuntimeError(
-            f"ACLED OAuth refresh grant failed: status={resp.status_code} body={_body_snippet(resp)}"
-        )
-    return resp.json()
+    return _token_request(data, flow="refresh")
 
 
 def _set_cache(token: str, refresh_token: Optional[str]) -> None:
