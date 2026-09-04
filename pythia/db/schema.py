@@ -430,71 +430,6 @@ def _ensure_acled_political_events_table(con: duckdb.DuckDBPyConnection) -> None
     )
 
 
-def _ensure_ipc_phases_table(con: duckdb.DuckDBPyConnection) -> None:
-    """Ensure the ipc_phases table exists."""
-
-    _ensure_table_and_columns(
-        con,
-        "ipc_phases",
-        """
-        CREATE TABLE IF NOT EXISTS ipc_phases (
-            iso3                     VARCHAR NOT NULL,
-            analysis_id              VARCHAR NOT NULL,
-            analysis_date            VARCHAR,
-            analysis_period          VARCHAR,
-            projection_period        VARCHAR,
-            total_population         BIGINT,
-            current_phase1           BIGINT,
-            current_phase2           BIGINT,
-            current_phase3           BIGINT,
-            current_phase4           BIGINT,
-            current_phase5           BIGINT,
-            current_phase3plus       BIGINT,
-            current_phase3plus_pct   DOUBLE,
-            projected_phase3         BIGINT,
-            projected_phase4         BIGINT,
-            projected_phase5         BIGINT,
-            projected_phase3plus     BIGINT,
-            projected_phase3plus_pct DOUBLE,
-            projected_period         VARCHAR,
-            trend                    VARCHAR,
-            areas_in_phase5          VARCHAR,
-            fetched_at               VARCHAR,
-            PRIMARY KEY (iso3, analysis_id)
-        );
-        """,
-        {
-            "iso3": "VARCHAR",
-            "analysis_id": "VARCHAR",
-            "analysis_date": "VARCHAR",
-            "analysis_period": "VARCHAR",
-            "projection_period": "VARCHAR",
-            "total_population": "BIGINT",
-            "current_phase1": "BIGINT",
-            "current_phase2": "BIGINT",
-            "current_phase3": "BIGINT",
-            "current_phase4": "BIGINT",
-            "current_phase5": "BIGINT",
-            "current_phase3plus": "BIGINT",
-            "current_phase3plus_pct": "DOUBLE",
-            "projected_phase3": "BIGINT",
-            "projected_phase4": "BIGINT",
-            "projected_phase5": "BIGINT",
-            "projected_phase3plus": "BIGINT",
-            "projected_phase3plus_pct": "DOUBLE",
-            "projected_period": "VARCHAR",
-            "trend": "VARCHAR",
-            "areas_in_phase5": "VARCHAR",
-            "fetched_at": "VARCHAR",
-        },
-    )
-
-
-# ---------------------------------------------------------------------------
-# ACAPS tables
-# ---------------------------------------------------------------------------
-
-
 def _ensure_acaps_inform_severity_table(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure the acaps_inform_severity table exists."""
 
@@ -1143,6 +1078,65 @@ def _ensure_seasonal_tc_context_cache_table(con: duckdb.DuckDBPyConnection) -> N
             "fetched_at": "TIMESTAMP",
         },
     )
+
+
+#: Tables this schema once declared that nothing has ever written. Each was
+#: created on every startup, counted by every diagnostic, and carried zero
+#: rows through every run — so the empty-table check could not tell them
+#: from a writer that had failed. ``ipc_phases`` belonged to the retired
+#: ``pythia/ipc_phases.py`` connector; ``pm_checks`` to a prediction-market
+#: check that was never built; ``meta_runs`` and the two ``gtmc1_*`` tables
+#: to designs that never gained a writer. A table is dropped only when it is
+#: EMPTY: a row somebody wrote is evidence, and evidence is never deleted by
+#: a startup migration.
+DEAD_TABLES: tuple[str, ...] = (
+    "ipc_phases",
+    "pm_checks",
+    "meta_runs",
+    "gtmc1_runs",
+    "gtmc1_actors",
+)
+
+
+def drop_dead_tables(
+    con: duckdb.DuckDBPyConnection, tables: Sequence[str] = DEAD_TABLES
+) -> dict[str, str]:
+    """Drop each dead table that exists and is empty. Idempotent, never raises.
+
+    Returns ``{table: "dropped" | "kept_non_empty" | "absent"}``.
+    """
+
+    outcome: dict[str, str] = {}
+    try:
+        existing = {
+            str(r[0])
+            for r in con.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+            ).fetchall()
+        }
+    except Exception as exc:  # pragma: no cover - a listing failure is not fatal
+        logger.warning("drop_dead_tables: could not list tables: %s", exc)
+        return outcome
+    for table in tables:
+        if table not in existing:
+            outcome[table] = "absent"
+            continue
+        try:
+            n = int(con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+            if n:
+                outcome[table] = "kept_non_empty"
+                logger.warning(
+                    "drop_dead_tables: %s has no writer but holds %d rows; kept",
+                    table, n,
+                )
+                continue
+            con.execute(f'DROP TABLE IF EXISTS "{table}"')
+            outcome[table] = "dropped"
+            logger.info("drop_dead_tables: dropped empty dead table %s", table)
+        except Exception as exc:  # noqa: BLE001 - a migration must not fail startup
+            outcome[table] = f"error: {exc}"
+            logger.warning("drop_dead_tables: could not drop %s: %s", table, exc)
+    return outcome
 
 
 def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
@@ -2078,43 +2072,6 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
 
         _ensure_table_and_columns(
             con,
-            "pm_checks",
-            """
-            CREATE TABLE IF NOT EXISTS pm_checks (
-                pm_check_id TEXT,
-                run_id TEXT,
-                question_id TEXT,
-                market_source TEXT,
-                market_id TEXT,
-                market_url TEXT,
-                as_of_time TIMESTAMP,
-                price DOUBLE,
-                volume DOUBLE,
-                liquidity DOUBLE,
-                pm_json TEXT,
-                llm_call_id TEXT,
-                pm_summary_text TEXT
-            );
-            """,
-            {
-                "pm_check_id": "TEXT",
-                "run_id": "TEXT",
-                "question_id": "TEXT",
-                "market_source": "TEXT",
-                "market_id": "TEXT",
-                "market_url": "TEXT",
-                "as_of_time": "TIMESTAMP",
-                "price": "DOUBLE",
-                "volume": "DOUBLE",
-                "liquidity": "DOUBLE",
-                "pm_json": "TEXT",
-                "llm_call_id": "TEXT",
-                "pm_summary_text": "TEXT",
-            },
-        )
-
-        _ensure_table_and_columns(
-            con,
             "gtmc1_runs",
             """
             CREATE TABLE IF NOT EXISTS gtmc1_runs (
@@ -2172,41 +2129,6 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "capability": "DOUBLE",
                 "salience": "DOUBLE",
                 "risk_threshold": "DOUBLE",
-            },
-        )
-
-        _ensure_table_and_columns(
-            con,
-            "meta_runs",
-            """
-            CREATE TABLE IF NOT EXISTS meta_runs (
-                run_id TEXT,
-                run_type TEXT,
-                hs_run_id TEXT,
-                forecaster_models_json TEXT,
-                git_sha TEXT,
-                config_profile TEXT,
-                started_at TIMESTAMP,
-                finished_at TIMESTAMP,
-                total_cost_usd DOUBLE,
-                total_tokens INTEGER,
-                status TEXT,
-                notes TEXT
-            );
-            """,
-            {
-                "run_id": "TEXT",
-                "run_type": "TEXT",
-                "hs_run_id": "TEXT",
-                "forecaster_models_json": "TEXT",
-                "git_sha": "TEXT",
-                "config_profile": "TEXT",
-                "started_at": "TIMESTAMP",
-                "finished_at": "TIMESTAMP",
-                "total_cost_usd": "DOUBLE",
-                "total_tokens": "INTEGER",
-                "status": "TEXT",
-                "notes": "TEXT",
             },
         )
 
@@ -2321,7 +2243,6 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         _ensure_question_research_table(con)
         _ensure_scenarios_table(con)
         _ensure_acled_political_events_table(con)
-        _ensure_ipc_phases_table(con)
         _ensure_acaps_inform_severity_table(con)
         _ensure_acaps_inform_severity_trend_table(con)
         _ensure_acaps_risk_radar_table(con)
@@ -2335,6 +2256,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         _ensure_seasonal_tc_outlooks_table(con)
         _ensure_seasonal_tc_context_cache_table(con)
         _ensure_source_coverage_table(con)
+        drop_dead_tables(con)
     finally:
         if own_con and con is not None:
             con.close()

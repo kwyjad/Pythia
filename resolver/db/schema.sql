@@ -71,14 +71,6 @@ CREATE TABLE IF NOT EXISTS manifests (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS meta_runs (
-    run_id TEXT PRIMARY KEY,
-    started_at TIMESTAMP,
-    finished_at TIMESTAMP,
-    status TEXT,
-    notes TEXT
-);
-
 CREATE TABLE IF NOT EXISTS snapshots (
     ym TEXT PRIMARY KEY,
     created_at TIMESTAMP,

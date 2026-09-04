@@ -753,12 +753,24 @@ class BundleBuilder:
                 continue
             threshold = self._STALENESS_DAYS.get(table)
             for column in date_columns:
+                # The newest value AT OR BEFORE now is what freshness is
+                # measured from. A value after now is a period end (an IPC
+                # projection window, the current month) or a defect (a
+                # publication date in the future); either way its age is
+                # negative and "fresh" is the wrong word for it, so it is
+                # counted separately rather than allowed to set the verdict.
                 result = self.query(
-                    f'SELECT MAX(TRY_CAST("{column}" AS TIMESTAMP)), COUNT(*) FROM "{table}"'
+                    f'SELECT MAX(CASE WHEN TRY_CAST("{column}" AS TIMESTAMP) <= CURRENT_TIMESTAMP '
+                    f'THEN TRY_CAST("{column}" AS TIMESTAMP) END), '
+                    f'COUNT(*), '
+                    f'SUM(CASE WHEN TRY_CAST("{column}" AS TIMESTAMP) > CURRENT_TIMESTAMP THEN 1 ELSE 0 END), '
+                    f'MAX(TRY_CAST("{column}" AS TIMESTAMP)) '
+                    f'FROM "{table}"'
                 )
                 if result is None or not result[1]:
                     continue
-                newest, n_rows = result[1][0]
+                newest, n_rows, n_future, newest_any = result[1][0]
+                n_future = int(n_future or 0)
                 age = None
                 if newest is not None:
                     age_result = self.query(
@@ -769,21 +781,32 @@ class BundleBuilder:
                         age = age_result[1][0][0]
                 if n_rows == 0:
                     verdict = "absent"
+                elif newest is None and n_future:
+                    verdict = "future_only"
                 elif newest is None:
                     verdict = "no_dates"
                 elif threshold is None or age is None:
                     verdict = "no_threshold"
                 else:
                     verdict = "stale" if age > threshold else "fresh"
-                rows.append([table, column, newest, age, threshold, n_rows, verdict])
+                rows.append([
+                    table, column, newest, age, threshold, n_rows, verdict,
+                    n_future, newest_any if n_future else "",
+                ])
         write_csv(
             dest / "freshness.csv", rows,
             ["table", "date_column", "max_value", "age_days",
-             "staleness_threshold_days", "rows", "verdict"],
+             "staleness_threshold_days", "rows", "verdict",
+             "n_future", "max_value_in_future"],
             preamble=(
                 "Every date-typed or date-named column in every table, with its\n"
-                "maximum and its age. `no_threshold` means nothing is configured\n"
-                "for that table, not that the value is fine."
+                "newest value AT OR BEFORE the bundle time and that value's age.\n"
+                "`no_threshold` means nothing is configured for that table, not\n"
+                "that the value is fine. `n_future` counts values after the bundle\n"
+                "time: a period end that has not arrived (an IPC projection window,\n"
+                "the current month) is expected; a publication_date there is a\n"
+                "defect, and `no_fact_carries_a_publication_date_after_the_run_date`\n"
+                "fails on it."
             ),
         )
 
@@ -994,7 +1017,45 @@ class BundleBuilder:
         figures = self._figures_ledger(dest)
         self._extraction_budget(dest)
         self._backcast_progress(dest)
-        return {"cells": cells, "figures": figures}
+        fetches = self._source_fetches(dest)
+        return {"cells": cells, "figures": figures, "source_fetches": fetches}
+
+    #: The run-log stream the EM-DAT connector (and any source that adopts
+    #: the same record) writes one line per (source, hazard, month) fetch to.
+    SOURCE_FETCH_STREAM = "source_fetches"
+
+    def _source_fetches(self, dest: Path) -> int:
+        """One row per source fetch: read, served from cache, or refused, and why.
+
+        The September 2026 run's EM-DAT lockout ("Invalid key passed or
+        insufficient user access") existed as a log line inside a
+        continue-on-error step and nowhere else. This is where it lives now.
+        """
+
+        stream = self._stream_file(self.SOURCE_FETCH_STREAM)
+        records = list(run_log.read_stream(stream)) if stream else []
+        rows = [
+            [
+                r.get("source"), r.get("hazard"), r.get("ym"), r.get("ok"),
+                r.get("records"), r.get("inserted"), r.get("served_from_cache"),
+                r.get("failure_class"), redact_text(str(r.get("error") or ""), self.secrets),
+            ]
+            for r in records
+        ]
+        write_csv(
+            dest / "source_fetches.csv", rows,
+            ["source", "hazard", "ym", "ok", "records", "inserted",
+             "served_from_cache", "failure_class", "error"],
+            preamble=(
+                "One row per source fetch the PA machine made this run. `ok` with\n"
+                "`served_from_cache` is a STALE rung (the live call failed and the\n"
+                "cache answered); `ok=false` is an UNREAD rung. `failure_class` is\n"
+                "`auth_rejected`, `server_error`, `network`, `no_key` or `other`;\n"
+                "only the first never recovers on its own. Empty when the run\n"
+                "log was off (PYTHIA_RUN_LOG_DIR unset) or no ladder hazard ran."
+            ),
+        )
+        return len(rows)
 
     def _cell_ledger(self, dest: Path) -> int:
         """One row per assessed cell, DB-first with the run stream layered on.
@@ -1411,6 +1472,9 @@ class BundleBuilder:
             self._check_nmme_read_when_table_covers_month,
             self._check_no_zero_rests_on_one_feed,
             self._check_no_drought_verdict_for_a_month_in_progress,
+            self._check_no_future_publication_date,
+            self._check_declared_active_tables_hold_rows,
+            self._check_emdat_read_when_enabled,
         ):
             try:
                 check()
@@ -2161,6 +2225,252 @@ class BundleBuilder:
             "0",
             "; ".join(f"{ym}: {n}" for ym, n in found)
             or "No drought row for a month that has not ended.",
+        )
+
+    def _check_no_future_publication_date(self) -> None:
+        """A publication date after the run date is false in the plain sense.
+
+        ``facts_resolved`` and ``facts_deltas`` carried ``2027-03-01`` as a
+        publication date (the END of an IPC projection window, copied into
+        the column by two different writers) and the freshness report,
+        measuring age from the maximum, called both tables fresh.
+        """
+
+        name = "no_fact_carries_a_publication_date_after_the_run_date"
+        tables = [t for t in ("facts_resolved", "facts_deltas", "emdat_pa") if t in self.tables()]
+        if not tables:
+            return self._check(name, "SKIP", "", "", "no facts tables")
+        found: list[str] = []
+        total = 0
+        for table in tables:
+            if "publication_date" not in {c for c, _t in self.columns_of(table)}:
+                continue
+            result = self.query(
+                f'SELECT COUNT(*), MAX(TRY_CAST(publication_date AS DATE)) FROM "{table}" '
+                f'WHERE TRY_CAST(publication_date AS DATE) > CURRENT_DATE'
+            )
+            if not result or not result[1]:
+                continue
+            n, newest = result[1][0]
+            n = int(n or 0)
+            total += n
+            if n:
+                found.append(f"{table}: {n} rows, latest {newest}")
+        self._check(
+            name, "FAIL" if total else "PASS",
+            f"{total} rows dated after today", "0",
+            "; ".join(found)
+            or "No fact claims to have been published on a day that has not happened. "
+            "`resolver/tools/repair_publication_dates.py` runs on every Resolver Update "
+            "and is what keeps this true for rows written before the fix.",
+        )
+
+    #: Tables the Resolver Update itself writes, by phase. Every one of them
+    #: should hold rows after a full run; an empty one is a writer that did
+    #: not write, whatever the step's exit code said. Tables the FORECAST
+    #: chain writes (scores, resolutions, calibration_*, forecasts_*) travel
+    #: in the same file but are not this workflow's to fill, so they are
+    #: reported separately and never fail this check.
+    RESOLVER_UPDATE_WRITES: dict[str, str] = {
+        "facts_resolved": "phase 1-2 connectors",
+        "facts_deltas": "phase 1-2 connectors",
+        "acled_monthly_fatalities": "phase 1 ACLED monthly fatalities",
+        "haz_triggers": "phase 2.5 PA machine",
+        "haz_resolutions": "phase 2.5 PA machine",
+        "haz_raw_gdacs": "phase 2.5 flood detection",
+        "haz_raw_ibtracs": "phase 2.5 cyclone detection",
+        "haz_raw_ipc": "phase 2.5 drought (IPC analyses)",
+        "haz_raw_drought_indicators": "phase 2.5 drought indicators",
+        "haz_raw_population": "phase 2.4 population denominators",
+        "haz_base_rates_occurrence": "phase 2.5 base-rate refresh",
+        "seasonal_forecasts": "phase 2.4 NMME",
+        "hdx_signals": "phase 2.4 HDX Signals",
+        "conflict_forecasts": "phase 3 conflict forecasts",
+        "acaps_inform_severity": "phase 3 ACAPS",
+        "acaps_risk_radar": "phase 3 ACAPS",
+        "acaps_daily_monitoring": "phase 3 ACAPS",
+        "acaps_humanitarian_access": "phase 3 ACAPS",
+        "reliefweb_reports": "phase 3 ReliefWeb",
+        "acled_political_events": "phase 3 ACLED political",
+        "gdelt_conflict_indicators": "phase 3 GDELT",
+        "enso_state": "phase 4 ENSO",
+        "seasonal_tc_outlooks": "phase 4 seasonal TC",
+        "seasonal_tc_context_cache": "phase 4 seasonal TC",
+        "crisiswatch_entries": "phase 4 CrisisWatch",
+    }
+
+    #: Tables another workflow fills and this file merely carries. Empty is a
+    #: statement about the CHAIN, not about this run, so it is reported and
+    #: never failed here. The value names the writer.
+    CARRIED_TABLES: dict[str, str] = {
+        "resolutions": "compute_resolutions (after Resolver Update)",
+        "scores": "compute_scores (after resolutions)",
+        "eiv_scores": "compute_scores",
+        "baseline_scored_forecasts": "score_baselines (compute_scores.yml)",
+        "views_scored_forecasts": "score_views (compute_scores.yml)",
+        "calibration_weights": "compute_calibration_pythia (needs 20 resolved questions per hazard/metric)",
+        "calibration_advice": "compute_calibration_pythia + generate_calibration_advice",
+        "forecasts_raw": "forecaster (pythia_pipeline_stage)",
+        "forecasts_ensemble": "forecaster (pythia_pipeline_stage)",
+        "questions": "create_questions_from_triage (HS)",
+        "hs_runs": "horizon scanner",
+        "hs_triage": "horizon scanner",
+        "interpretations": "interpreter (run_sibyl)",
+        "forecast_deviation": "compute_deviation (run_sibyl)",
+    }
+
+    def _check_declared_active_tables_hold_rows(self) -> None:
+        name = "no_declared_active_table_is_empty_after_the_run"
+        if self.con is None:
+            return self._check(name, "SKIP", "", "", "database unreadable")
+        present = self.tables()
+        counts: dict[str, int] = {}
+        for table in list(self.RESOLVER_UPDATE_WRITES) + list(self.CARRIED_TABLES):
+            if table not in present:
+                continue
+            result = self.query(f'SELECT COUNT(*) FROM "{table}"')
+            if result and result[1]:
+                counts[table] = int(result[1][0][0] or 0)
+
+        empty_here = sorted(
+            t for t in self.RESOLVER_UPDATE_WRITES if t in present and counts.get(t, 0) == 0
+        )
+        absent_here = sorted(t for t in self.RESOLVER_UPDATE_WRITES if t not in present)
+        empty_carried = sorted(
+            t for t in self.CARRIED_TABLES if t in present and counts.get(t, 0) == 0
+        )
+
+        notes: list[str] = []
+        if empty_here:
+            notes.append(
+                "empty after this run: "
+                + ", ".join(f"{t} ({self.RESOLVER_UPDATE_WRITES[t]})" for t in empty_here)
+            )
+        if absent_here:
+            notes.append("never created: " + ", ".join(absent_here))
+        if empty_carried:
+            explained = []
+            for t in empty_carried:
+                why = self.CARRIED_TABLES[t]
+                if t == "calibration_weights":
+                    why = self._calibration_weights_explanation() or why
+                explained.append(f"{t} ({why})")
+            notes.append(
+                "carried from another workflow and empty (not this run's to fill): "
+                + ", ".join(explained)
+            )
+        self._check(
+            name, "FAIL" if (empty_here or absent_here) else "PASS",
+            f"{len(empty_here) + len(absent_here)} of {len(self.RESOLVER_UPDATE_WRITES)} "
+            "tables this workflow writes are empty or absent",
+            "0",
+            "; ".join(notes)
+            or "Every table the Resolver Update writes holds rows, and every table "
+            "the forecast chain carries in this file holds rows too.",
+        )
+
+    def _calibration_weights_explanation(self) -> str:
+        """Why calibration_weights is empty, in the writer's own terms.
+
+        The writer skips a (hazard, metric) below ``MIN_QUESTIONS`` resolved
+        questions with member Brier scores and logs one line about it. An
+        empty table therefore has a legitimate reading, and the check has to
+        re-derive it or it cannot tell that reading from a failed writer.
+        """
+
+        try:
+            from pythia.tools.compute_calibration_pythia import (
+                AGGREGATE_MODEL_NAMES, MIN_QUESTIONS,
+            )
+        except Exception:  # noqa: BLE001 - the bundle must build without pythia
+            AGGREGATE_MODEL_NAMES, MIN_QUESTIONS = frozenset(), 20  # type: ignore[assignment]
+        if not {"scores", "questions", "resolutions"} <= self.tables():
+            return ""
+        result = self.query(
+            """
+            SELECT q.hazard_code, s.metric, COUNT(DISTINCT s.question_id) AS n
+            FROM scores s
+            JOIN questions q ON q.question_id = s.question_id
+            JOIN resolutions r ON r.question_id = s.question_id AND r.horizon_m = s.horizon_m
+            WHERE s.score_type = 'brier'
+              AND s.model_name IS NOT NULL
+              AND s.model_name NOT LIKE '__ext_%'
+              AND COALESCE(q.is_test, FALSE) = FALSE
+            GROUP BY 1, 2 ORDER BY 3 DESC
+            """
+        )
+        if not result or not result[1]:
+            return "no scored, resolved questions yet"
+        best = [
+            (str(h), str(m), int(n))
+            for h, m, n in result[1]
+            if str(m).upper() != "EVENT_OCCURRENCE"
+        ]
+        best = [(h, m, n) for h, m, n in best if h and m]
+        if not best:
+            return "no scored, resolved SPD questions yet"
+        # Member-only counts: aggregate names are excluded by the writer.
+        h, m, n = best[0]
+        _ = AGGREGATE_MODEL_NAMES
+        return (
+            f"writer needs {MIN_QUESTIONS} resolved questions per hazard/metric; "
+            f"the largest pool is {h}/{m} at {n}"
+        )
+
+    def _check_emdat_read_when_enabled(self) -> None:
+        """When a key is configured, the top rung must have been READ.
+
+        EM-DAT rejected the September 2026 run's key on every call ("Invalid
+        key passed or insufficient user access"); ``haz_raw_emdat`` held zero
+        rows and the cyclone pass exited non-zero, and nothing in the
+        artifact named the cause. A configured key with an empty cache after
+        a ladder run is a contradiction; a fetch record classed
+        ``auth_rejected`` is one whatever the cache holds.
+        """
+
+        name = "emdat_is_read_when_a_key_is_configured"
+        key_present = bool(self.env.get("EMDAT_API_KEY"))
+        stream = self._stream_file(self.SOURCE_FETCH_STREAM)
+        fetches = [
+            r for r in (run_log.read_stream(stream) if stream else [])
+            if str(r.get("source") or "") == "emdat"
+        ]
+        ran_ladder = bool(fetches) or any(
+            self.diagnostics_dir.glob(f"haz_run_{hz}.json") for hz in ("flood", "cyclone")
+        )
+        if not key_present:
+            return self._check(
+                name, "SKIP", "", "",
+                "EMDAT_API_KEY is not set for this run; the rung is expected unread",
+            )
+        if not ran_ladder:
+            return self._check(name, "SKIP", "", "", "no flood or cyclone pass ran")
+        rejected = [r for r in fetches if r.get("failure_class") == "auth_rejected"]
+        cached = 0
+        if "haz_raw_emdat" in self.tables():
+            result = self.query("SELECT COUNT(*) FROM haz_raw_emdat")
+            cached = int(result[1][0][0] or 0) if result and result[1] else 0
+        live_ok = [r for r in fetches if r.get("ok") and not r.get("served_from_cache")]
+        problems: list[str] = []
+        if rejected:
+            sample = str(rejected[0].get("error") or "")[:160]
+            problems.append(
+                f"{len(rejected)} fetch(es) rejected the key ({sample}) — renew "
+                "EMDAT_API_KEY or raise the account tier; a re-run will not fix this"
+            )
+        if cached == 0:
+            problems.append("haz_raw_emdat holds 0 rows after a ladder run with a key configured")
+        elif fetches and not live_ok:
+            problems.append(
+                f"no live EM-DAT fetch succeeded this run ({len(fetches)} attempted); "
+                f"the {cached} cached rows are the previous pull"
+            )
+        self._check(
+            name, "FAIL" if problems else "PASS",
+            f"{len(live_ok)} live fetch(es) ok, {len(rejected)} rejected, {cached} cached rows",
+            "a live fetch and a populated cache",
+            "; ".join(problems)
+            or "EM-DAT answered at least one live call and its cache holds rows.",
         )
 
     # -- README + manifest --------------------------------------------------

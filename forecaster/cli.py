@@ -2348,14 +2348,6 @@ def _load_structured_data(
             pass
 
     try:
-        from pythia.ipc_phases import load_ipc_phases
-        ipc = load_ipc_phases(iso3)
-        if ipc:
-            sd["ipc_phases"] = ipc
-    except Exception:
-        pass
-
-    try:
         from pythia.food_security import load_food_security
         food_sec = load_food_security(iso3)
         if food_sec:

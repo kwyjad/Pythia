@@ -1513,11 +1513,6 @@ def build_report(
             L("_Table does not exist._")
         L()
 
-    L("_`ipc_phases` is a legacy table from the retired `pythia/ipc_phases.py` "
-      "connector (dead code) — deliberately not tracked here; the active IPC "
-      "path writes `facts_resolved` via `resolver/connectors/ipc_api.py`._")
-    L()
-
     # --- CrisisWatch (ICG) edition detail ---
     # Explicit answer to "what month is CrisisWatch on?" — the store step
     # accumulates one edition per (year, month), so list every edition,
@@ -1714,7 +1709,7 @@ def build_report(
     L("## 8. Game-Theoretic & Prediction Market Tables")
     L()
 
-    for tbl_name in ["gtmc1_runs", "gtmc1_actors", "pm_checks"]:
+    for tbl_name in ["gtmc1_runs", "gtmc1_actors"]:
         L(f"### {tbl_name}")
         if table_exists(con, tbl_name):
             n = row_count(con, tbl_name)
@@ -1747,7 +1742,7 @@ def build_report(
     L("## 9. Provenance & Metadata")
     L()
 
-    for tbl_name in ["run_provenance", "meta_runs", "manifests", "snapshots"]:
+    for tbl_name in ["run_provenance", "manifests", "snapshots"]:
         L(f"### {tbl_name}")
         if table_exists(con, tbl_name):
             n = row_count(con, tbl_name)

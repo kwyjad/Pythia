@@ -693,10 +693,24 @@ def wrote_nothing_because_a_source_was_unreadable(run) -> str:
     )
     unavailable = list(getattr(run, "unavailable_sources", []) or [])
     if cells and not written and unavailable:
-        return (
+        reason = (
             f"{cells} cell(s) assessed, no row written, and these sources could "
             f"not be read: {','.join(unavailable)}"
         )
+        # Name the failure that will not fix itself. A rejected EM-DAT key
+        # read as "500 from api.emdat.be" for a month; the class on the
+        # outcome is what tells a reader which knob to turn.
+        fetches = getattr(run, "fetches", None) or {}
+        for source in unavailable:
+            entry = fetches.get(source) if isinstance(fetches, dict) else None
+            detail = (entry or {}).get("detail") if isinstance(entry, dict) else None
+            failure_class = (detail or {}).get("failure_class") if isinstance(detail, dict) else None
+            if failure_class == "auth_rejected":
+                reason += (
+                    f"; {source} rejected the credential (renew EMDAT_API_KEY or "
+                    "the account tier — a re-run will not fix this)"
+                )
+        return reason
     return ""
 
 

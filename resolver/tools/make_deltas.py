@@ -138,6 +138,13 @@ def process_group(group: pd.DataFrame) -> List[dict]:
             "first_observation": 0,
             "delta_negative_clamped": 0,
         }
+        # The delta inherits the publication date of the fact it was derived
+        # from. Without this the storage layer fills the column from
+        # ``as_of_date`` — the period END — so a delta on a projection window
+        # ending in March 2027 said it was published in March 2027.
+        publication = row.get("publication_date") if hasattr(row, "get") else None
+        if publication is not None and not pd.isna(publication) and str(publication).strip():
+            base_record["publication_date"] = str(publication).strip()
 
         if semantics == "new":
             base_record["value_new"] = clamp_non_negative(value)

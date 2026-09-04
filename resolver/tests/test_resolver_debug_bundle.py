@@ -871,3 +871,124 @@ def test_no_drought_row_may_exist_for_a_month_still_in_progress(tmp_path, full_r
     con.close()
     assert _checks(tmp_path, db, full_run, "again")[
         "no_drought_resolution_for_a_month_still_in_progress"]["verdict"] == "PASS"
+
+
+# --------------------------------------------------------------------------
+# Group E (run 33841370196): EM-DAT lockout, empty tables, future dates
+# --------------------------------------------------------------------------
+
+
+def test_a_publication_date_after_the_run_date_is_a_contradiction(tmp_path, full_run):
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute("ALTER TABLE facts_resolved ADD COLUMN publication_date VARCHAR")
+    con.execute(
+        "INSERT INTO facts_resolved (iso3, ym, hazard_code, metric, value, publisher, "
+        "series_semantics, as_of_date, publication_date) VALUES "
+        "('SWZ','2027-03','DR','phase3plus_projection',10.0,'IPC','stock',DATE '2027-03-01','2027-03-01')"
+    )
+    con.close()
+    checks = _checks(tmp_path, db, full_run, "e1")
+    check = checks["no_fact_carries_a_publication_date_after_the_run_date"]
+    assert check["verdict"] == "FAIL"
+    assert "facts_resolved: 1 rows" in check["detail"]
+
+
+def test_freshness_measures_from_the_newest_value_that_has_happened(tmp_path, full_run):
+    """A period end in 2027 must not make facts_resolved read as fresh."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO facts_resolved (iso3, ym, hazard_code, metric, value, publisher, "
+        "series_semantics, as_of_date) VALUES "
+        "('SWZ','2027-03','DR','phase3plus_projection',10.0,'IPC','stock',DATE '2027-03-01')"
+    )
+    con.close()
+    out, _manifest = _build(tmp_path / "e2", db_path=db, diagnostics_dir=full_run["diagnostics"])
+    with zipfile.ZipFile(out) as zf:
+        text = zf.read("db/freshness.csv").decode("utf-8")
+    row = next(
+        line for line in text.splitlines()
+        if line.startswith("facts_resolved,as_of_date")
+    )
+    fields = row.split(",")
+    # max_value is the newest value at or before now; the 2027 period end is
+    # counted under n_future and named, never allowed to set the verdict.
+    assert "2027" not in fields[2]
+    assert fields[-2] == "1" and fields[-1].startswith("2027-03-01")
+
+
+def test_a_table_this_workflow_writes_may_not_be_empty_after_the_run(tmp_path, full_run):
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute("CREATE TABLE acled_monthly_fatalities (iso3 TEXT, month DATE, fatalities BIGINT)")
+    con.execute("CREATE TABLE scores (question_id TEXT, horizon_m INTEGER, score_type TEXT, "
+                "model_name TEXT, value DOUBLE, metric TEXT)")
+    con.close()
+    checks = _checks(tmp_path, db, full_run, "e3")
+    check = checks["no_declared_active_table_is_empty_after_the_run"]
+    assert check["verdict"] == "FAIL"
+    assert "acled_monthly_fatalities" in check["detail"]
+    # A table another workflow fills is reported, never failed on.
+    assert "carried from another workflow" in check["detail"]
+    assert "scores" in check["detail"]
+
+
+def test_an_empty_calibration_weights_is_explained_in_the_writers_terms(tmp_path, full_run):
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute("CREATE TABLE calibration_weights (as_of_month TEXT, hazard_code TEXT, "
+                "metric TEXT, model_name TEXT, weight DOUBLE)")
+    con.execute("CREATE TABLE scores (question_id TEXT, horizon_m INTEGER, score_type TEXT, "
+                "model_name TEXT, value DOUBLE, metric TEXT)")
+    con.execute("CREATE TABLE questions (question_id TEXT, hazard_code TEXT, metric TEXT, "
+                "is_test BOOLEAN)")
+    con.execute("CREATE TABLE resolutions (question_id TEXT, horizon_m INTEGER, value DOUBLE)")
+    con.execute("INSERT INTO questions VALUES ('SOM_ACE_FATALITIES_2026-08','ACE','FATALITIES',FALSE)")
+    con.execute("INSERT INTO resolutions VALUES ('SOM_ACE_FATALITIES_2026-08',1,415.0)")
+    con.execute("INSERT INTO scores VALUES ('SOM_ACE_FATALITIES_2026-08',1,'brier','gemini-3.5-flash',0.4,'FATALITIES')")
+    con.close()
+    checks = _checks(tmp_path, db, full_run, "e4")
+    check = checks["no_declared_active_table_is_empty_after_the_run"]
+    assert "calibration_weights (writer needs 20 resolved questions" in check["detail"]
+    assert "ACE/FATALITIES at 1" in check["detail"]
+
+
+def test_emdat_must_be_read_when_a_key_is_configured(tmp_path, full_run):
+    """E1: a configured key, a ladder run, and an empty cache is a contradiction."""
+
+    from resolver.diagnostics import run_log
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute("CREATE TABLE haz_raw_emdat (record_id TEXT, payload_json TEXT)")
+    con.close()
+    streams = full_run["streams"]
+    with open(streams / "source_fetches.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "source": "emdat", "hazard": "TC", "ym": "2026-08", "ok": False,
+            "records": 0, "inserted": 0, "served_from_cache": False,
+            "failure_class": "auth_rejected",
+            "error": 'EM-DAT GraphQL errors: [{"message": "Invalid key passed or insufficient user access"}]',
+        }) + "\n")
+
+    _out, manifest = _build(tmp_path / "e5", db_path=db,
+                            diagnostics_dir=full_run["diagnostics"],
+                            run_log_dir=streams,
+                            environ={"EMDAT_API_KEY": "dead-key"})
+    checks = {c["name"]: c for c in manifest["checks"]}
+    check = checks["emdat_is_read_when_a_key_is_configured"]
+    assert check["verdict"] == "FAIL"
+    assert "rejected the key" in check["detail"] and "EMDAT_API_KEY" in check["detail"]
+    assert "0 rows" in check["detail"]
+
+    with zipfile.ZipFile(_out) as zf:
+        fetches = zf.read("hazard/source_fetches.csv").decode("utf-8")
+    assert "auth_rejected" in fetches
+    _ = run_log
+
+
+def test_emdat_check_is_skipped_without_a_key(tmp_path, full_run):
+    checks = _checks(tmp_path, full_run["db"], full_run, "e6")
+    assert checks["emdat_is_read_when_a_key_is_configured"]["verdict"] == "SKIP"

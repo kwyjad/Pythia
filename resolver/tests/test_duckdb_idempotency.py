@@ -84,7 +84,10 @@ def test_init_schema_creates_all_tables_and_keys(tmp_path: Path) -> None:
                 """
             ).fetchall()
         }
-        expected = {"facts_resolved", "facts_deltas", "manifests", "meta_runs", "snapshots"}
+        expected = {"facts_resolved", "facts_deltas", "manifests", "snapshots"}
+        # meta_runs was declared here for a year and written by nothing;
+        # it is dropped, and a fresh schema must not recreate it.
+        assert "meta_runs" not in tables
         assert expected.issubset(tables)
 
         assert duckdb_io._has_declared_key(
@@ -95,8 +98,6 @@ def test_init_schema_creates_all_tables_and_keys(tmp_path: Path) -> None:
         )
         manifest_constraints = duckdb_io._constraint_column_sets(conn, "manifests")
         assert ["path"] in [[col.lower() for col in cols] for cols in manifest_constraints]
-        meta_constraints = duckdb_io._constraint_column_sets(conn, "meta_runs")
-        assert ["run_id"] in [[col.lower() for col in cols] for cols in meta_constraints]
 
         duckdb_io.init_schema(conn)
     finally:

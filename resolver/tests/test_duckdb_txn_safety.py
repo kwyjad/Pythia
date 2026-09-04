@@ -20,7 +20,6 @@ _EXPECTED_TABLES = {
     "facts_resolved",
     "facts_deltas",
     "manifests",
-    "meta_runs",
     "snapshots",
 }
 

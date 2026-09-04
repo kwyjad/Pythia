@@ -63,7 +63,6 @@ SOURCES: tuple[tuple[str, str, str, str, str, int, int, str], ...] = (
     ("ENSO", "enso_state", "observation_date", "", "", 60, 120,
      "enso_module carries the last good record forward with a STALE READING line"),
     ("Seasonal TC", "seasonal_tc_outlooks", "fetched_at", "", "", 200, 400, "none"),
-    ("IPC phases (legacy, unused)", "ipc_phases", "analysis_date", "", "iso3", 0, 0, "none"),
     # crisiswatch_entries carries no usable date column — `month` is an
     # INTEGER 1-12, not a date — so its observation is the EDITION, and its
     # age is computed from (year, month) by _cw_age rather than read from a

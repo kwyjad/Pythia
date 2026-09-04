@@ -905,6 +905,24 @@ def _ensure_table_has_columns(
     return added
 
 
+def _publication_date_fallback(as_of_date: pd.Series) -> pd.Series:
+    """``as_of_date`` as a publication date, never later than today.
+
+    A frame with no publication date gets its ``as_of_date`` — the end of the
+    period the figure describes. For a month still in progress, or a
+    projection window, that end lies in the future, and a publication date in
+    the future is false in the plain sense. The day we stored the row is the
+    latest it can have been published, so the fallback is capped there.
+    """
+
+    today = pd.Timestamp(dt.date.today())
+    parsed = pd.to_datetime(as_of_date, errors="coerce")
+    capped = parsed.where(parsed <= today, today)
+    out = capped.dt.strftime("%Y-%m-%d")
+    # Unparseable values keep whatever they were rather than becoming NaT.
+    return out.where(parsed.notna(), as_of_date)
+
+
 def _ensure_frame_has_columns(
     frame: pd.DataFrame, table: str, columns: Sequence[str]
 ) -> pd.DataFrame:
@@ -922,7 +940,7 @@ def _ensure_frame_has_columns(
         if column == "as_of_date" and "as_of" in working.columns:
             working[column] = working["as_of"]
         elif column == "publication_date" and "as_of_date" in working.columns:
-            working[column] = working["as_of_date"]
+            working[column] = _publication_date_fallback(working["as_of_date"])
         elif column == "source_id" and "source" in working.columns:
             working[column] = working["source"]
         elif column == "series_semantics" and "semantics" in working.columns:
@@ -1395,7 +1413,6 @@ def init_schema(
         "facts_resolved",
         "facts_deltas",
         "manifests",
-        "meta_runs",
         "snapshots",
     }
     existing_tables = {
@@ -1442,6 +1459,23 @@ def init_schema(
             continue
         _run_ddl_batch(conn, [ddl], label=f"schema:{table_name}")
         existing_tables.add(table_name)
+
+    # ``meta_runs`` was declared by this schema for a year and written by
+    # nothing. Drop it where it is empty; a row somebody wrote is evidence
+    # and a startup migration never deletes evidence.
+    if "meta_runs" in existing_tables:
+        try:
+            n = int(conn.execute("SELECT COUNT(*) FROM meta_runs").fetchone()[0])
+            if n == 0:
+                conn.execute("DROP TABLE meta_runs")
+                existing_tables.discard("meta_runs")
+                LOGGER.info("duckdb.schema.dropped_dead_table | table=meta_runs")
+            else:
+                LOGGER.warning(
+                    "duckdb.schema.dead_table_kept | table=meta_runs rows=%d", n
+                )
+        except Exception as exc:  # noqa: BLE001 - never fail schema init over this
+            LOGGER.warning("duckdb.schema.dead_table_drop_failed | table=meta_runs err=%s", exc)
 
     core_tables = {"facts_resolved", "facts_deltas"}
     if core_tables.issubset(existing_tables):
@@ -1660,7 +1694,7 @@ def init_schema(
             SELECT table_name, column_name, ordinal_position
             FROM information_schema.columns
             WHERE table_schema = 'main'
-              AND table_name IN ('facts_resolved','facts_deltas','manifests','meta_runs','snapshots')
+              AND table_name IN ('facts_resolved','facts_deltas','manifests','snapshots')
             ORDER BY table_name, ordinal_position
             """
         ).fetchall()
