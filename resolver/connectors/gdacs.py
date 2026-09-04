@@ -280,6 +280,79 @@ def _attr(element: ET.Element | None, tag: str, attr: str,
     return None
 
 
+#: ``gdacs:population`` unit strings that mean the value is already a count of
+#: people. GDACS labels the MEASURE, not a multiplier: the public fixtures
+#: read ``unit="Pop74"`` (people under Category 1 winds or higher, TC),
+#: ``unit="Population in 100km"`` (EQ), ``unit=""`` (DR, value 0), and the
+#: flood feed ``unit="people"``. Compared case-insensitively after trimming.
+_POPULATION_PEOPLE_UNITS = frozenset({
+    "", "people", "persons", "population", "pop74", "pop_total", "population in 100km",
+})
+#: Multiplicative unit words, in case a feed ever states exposure in
+#: thousands or millions: the bare number would then be 1,000x or
+#: 1,000,000x too small, which is exactly the shape of a ceiling of 5.
+_POPULATION_MULTIPLIERS: dict[str, float] = {
+    "thousand": 1_000.0, "thousands": 1_000.0, "k": 1_000.0,
+    "million": 1_000_000.0, "millions": 1_000_000.0, "m": 1_000_000.0,
+    "mln": 1_000_000.0,
+}
+
+
+def parse_gdacs_population(
+    value: str | None, unit: str | None, text: str | None = None
+) -> tuple[float | None, dict[str, Any]]:
+    """The exposed population as a count of PEOPLE, or None when it cannot be read.
+
+    Returns ``(people, detail)``. ``detail`` carries the raw ``value``,
+    ``unit`` and element text verbatim plus the outcome, so the stored record
+    says what GDACS actually published — the September 2026 figures ledger
+    showed ceilings of 5, 20 and 955 and nothing in the artifact could say
+    whether the feed had said "5 people", "5 thousand" or "5 Million".
+
+    * a unit in ``_POPULATION_PEOPLE_UNITS``: the value is people;
+    * a multiplicative unit ("Million", "Thousand"): the value is scaled;
+    * a unit that starts with "population" or "pop" (GDACS names measures
+      that way): people, recorded as ``assumed_people``;
+    * anything else: UNKNOWN (None), logged, never the bare number.
+    """
+
+    raw_value = "" if value is None else str(value).strip()
+    raw_unit = "" if unit is None else str(unit).strip()
+    detail: dict[str, Any] = {
+        "raw_value": raw_value,
+        "raw_unit": raw_unit,
+        "text": (text or "").strip()[:200],
+        "outcome": "",
+        "multiplier": 1.0,
+    }
+    if not raw_value:
+        detail["outcome"] = "no_value"
+        return None, detail
+    try:
+        number = float(raw_value.replace(",", ""))
+    except (TypeError, ValueError):
+        detail["outcome"] = "value_not_a_number"
+        return None, detail
+    key = raw_unit.lower()
+    if key in _POPULATION_PEOPLE_UNITS:
+        detail["outcome"] = "people"
+        return number, detail
+    if key in _POPULATION_MULTIPLIERS:
+        detail["multiplier"] = _POPULATION_MULTIPLIERS[key]
+        detail["outcome"] = "scaled"
+        return number * _POPULATION_MULTIPLIERS[key], detail
+    if key.startswith("population") or key.startswith("pop"):
+        detail["outcome"] = "assumed_people"
+        return number, detail
+    detail["outcome"] = "unrecognised_unit"
+    LOG.warning(
+        "[gdacs] gdacs:population unit %r is not recognised (value=%r, text=%r) — "
+        "the exposure is UNKNOWN for this event, not %s",
+        raw_unit, raw_value, detail["text"][:80], raw_value,
+    )
+    return None, detail
+
+
 # ---------------------------------------------------------------------------
 # GdacsConnector
 # ---------------------------------------------------------------------------
@@ -489,14 +562,19 @@ class GdacsConnector:
         if not eventid:
             return None
 
-        # Population exposed
+        # Population exposed. The element carries value AND unit attributes
+        # and a descriptive text; all three are kept verbatim on the event
+        # so the stored record can answer what GDACS actually said. A value
+        # that cannot be read as people is UNKNOWN (0.0 here, the connector's
+        # long-standing "no figure" convention), never the bare number.
+        pop_element = item.find("gdacs:population", _NS)
         pop_value = _attr(item, "gdacs:population", "value")
-        population = 0.0
-        if pop_value:
-            try:
-                population = float(pop_value)
-            except (ValueError, TypeError):
-                pass
+        pop_unit = _attr(item, "gdacs:population", "unit")
+        pop_text = (pop_element.text or "") if pop_element is not None else ""
+        parsed_population, population_detail = parse_gdacs_population(
+            pop_value, pop_unit, pop_text
+        )
+        population = parsed_population if parsed_population is not None else 0.0
 
         # ISO3 — try direct field first, then resolve from country name
         iso3 = _text(item, "gdacs:iso3")
@@ -527,6 +605,10 @@ class GdacsConnector:
             "eventtype": eventtype,
             "eventid": eventid,
             "population": population,
+            "population_unit": pop_unit or "",
+            "population_text": population_detail["text"],
+            "population_raw": population_detail["raw_value"],
+            "population_parse": population_detail["outcome"],
             "iso3": iso3,
             "country": country,
             "fromdate": fromdate,
@@ -719,6 +801,8 @@ class GdacsConnector:
                 # Take the latest episode (highest todate)
                 best = max(rss_events, key=lambda e: (e["todate"], e.get("pub_date") or e["todate"]))
                 ev["population"] = best["population"]
+                for key in ("population_unit", "population_text", "population_raw", "population_parse"):
+                    ev[key] = best.get(key, ev.get(key, ""))
                 # Also update iso3/country if the RSS has better data
                 if best.get("iso3") and not ev.get("iso3"):
                     ev["iso3"] = best["iso3"]

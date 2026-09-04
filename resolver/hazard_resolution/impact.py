@@ -296,7 +296,7 @@ def extract_rung_for_cell(
         call=call,
         country_name=country_name,
     )
-    ceiling_basis = cand_mod.exposure_ceiling_basis(con, iso3, ym, hazard)
+    ceiling_basis = cand_mod.exposure_ceiling_basis(con, iso3, ym, hazard, rulebook)
     candidates, rejected = figures_mod.build_candidates(
         extraction,
         iso3=iso3,
@@ -493,6 +493,112 @@ def resolve_triggered_cells(
             hazard, ym, run.no_ceiling, run.cells,
         )
     return run
+
+
+#: The rejection reason a corrected ceiling can overturn. Named once so the
+#: reconsideration pass and the figures pipeline agree on the string.
+CEILING_REJECTION_REASON = "exceeds_gdacs_exposure_ceiling"
+
+
+def cells_with_ceiling_rejections(
+    con: "duckdb.DuckDBPyConnection", hazard: str
+) -> dict[str, list[str]]:
+    """``{ym: [iso3, ...]}`` for every resolved cell that rejected a figure on the ceiling.
+
+    The rejections live in the resolution's own provenance
+    (``reliefweb_extraction.extraction.rejected``), which is the record
+    the run left of what it turned away — so a corrected ceiling rule can
+    find exactly the cells it would have changed, without re-reading a
+    document or re-calling a model.
+    """
+
+    rows = con.execute(
+        """
+        SELECT iso3, year, month FROM haz_resolutions
+        WHERE hazard = ? AND provenance_json LIKE ?
+        ORDER BY year, month, iso3
+        """,
+        [hazard, f"%{CEILING_REJECTION_REASON}%"],
+    ).fetchall()
+    out: dict[str, list[str]] = {}
+    for iso3, year, month in rows:
+        out.setdefault(f"{int(year):04d}-{int(month):02d}", []).append(str(iso3).upper())
+    return out
+
+
+def reconsider_rejected_cells(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    hazard: str,
+    rulebook: Rulebook,
+    today: dt.date | None = None,
+    run_type: str = RUN_TYPE_LIVE,
+    call: "extract_mod.CallFn | None" = None,
+) -> dict[str, Any]:
+    """Re-run the ladder for every cell that once rejected a figure on the ceiling.
+
+    The corrected ceiling rule (a unit-aware exposure and a plausibility
+    floor) must reach the rows it would have changed, not only future
+    runs. Extraction is replayed from ``haz_doc_extractions`` — a cache
+    hit costs nothing and no document is re-fetched — and the ladder's
+    other rungs are read from their raw caches. Unfrozen cells are
+    rewritten in place; a frozen cell is never reopened, so the attempt
+    lands in ``haz_revisions`` and is counted here as ``frozen_logged``.
+    Idempotent: a cell whose figures now survive the ceiling no longer
+    carries the rejection reason and drops out of the next pass.
+    """
+
+    by_month = cells_with_ceiling_rejections(con, hazard)
+    summary: dict[str, Any] = {
+        "hazard": hazard,
+        "cells_reconsidered": 0,
+        "cells_rewritten": 0,
+        "frozen_logged": 0,
+        "no_data": 0,
+        "pending": 0,
+        "failed": 0,
+        "months": sorted(by_month),
+    }
+    if not by_month:
+        LOG.info(
+            "[impact] %s: no resolved cell carries a %s rejection — nothing to reconsider",
+            hazard, CEILING_REJECTION_REASON,
+        )
+        return summary
+    for ym, iso3s in sorted(by_month.items()):
+        fetches = fetch_ladder_sources(con, ym, hazard, rulebook, skip_fetch=True)
+        run = resolve_triggered_cells(
+            con,
+            ym=ym,
+            hazard=hazard,
+            iso3s=iso3s,
+            rulebook=rulebook,
+            fetches=fetches,
+            today=today,
+            extract=True,
+            fetch_documents=False,
+            call=call,
+            run_type=run_type,
+        )
+        summary["cells_reconsidered"] += run.cells
+        summary["frozen_logged"] += run.frozen_skipped
+        summary["no_data"] += run.no_data
+        summary["pending"] += run.pending
+        summary["failed"] += len(run.failed_cells)
+        summary["cells_rewritten"] += run.resolved_value
+        LOG.info(
+            "[impact] %s %s reconsidered %d cell(s) with ceiling rejections: "
+            "%d resolved to a value, %d no-data, %d pending, %d frozen (revision logged), %d failed",
+            hazard, ym, run.cells, run.resolved_value, run.no_data, run.pending,
+            run.frozen_skipped, len(run.failed_cells),
+        )
+    LOG.info(
+        "[impact] %s reconsideration: %d cells, %d rewritten with a value, "
+        "%d frozen (logged to haz_revisions), %d no-data, %d pending, %d failed",
+        hazard, summary["cells_reconsidered"], summary["cells_rewritten"],
+        summary["frozen_logged"], summary["no_data"], summary["pending"], summary["failed"],
+    )
+    return summary
 
 
 #: Write outcomes that leave no row in ``haz_resolutions``, and the reason

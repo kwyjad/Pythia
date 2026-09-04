@@ -116,15 +116,8 @@ def is_provisional(
     return not is_frozen(year, month, rulebook, today=today)
 
 
-def within_sanity_ceiling(
-    value: float, exposed_population: float | None, rulebook: Rulebook
-) -> bool:
-    """True when ``value`` respects the GDACS exposure ceiling.
-
-    The ceiling is ``sanity.ceiling_multiplier`` x the GDACS exposed
-    population. With no exposure estimate available there is no ceiling to
-    apply and the value passes (the national population cap is a separate
-    check owned by reconciliation).
+def usable_exposure(exposed_population: float | None, rulebook: Rulebook) -> float | None:
+    """The GDACS exposure as a ceiling basis, or None when it means UNKNOWN.
 
     **An exposure of zero is not a ceiling of zero.** GDACS discovery carries
     no population figure at all — it is filled in by a per-event RSS fetch
@@ -134,15 +127,49 @@ def within_sanity_ceiling(
     the events GDACS knew least about. In the August 2026 run 147 of 199
     rejected extracted figures were rejected against a ceiling of zero.
 
-    So a non-positive exposure means UNKNOWN, and unknown means no ceiling.
-    The national population cap still applies, and it is the check that
-    actually bounds a figure when GDACS is silent.
+    **An exposure below a plausible national monthly minimum is the same
+    fault in a different coat.** The September 2026 figures ledger carried
+    exactly three distinct ceilings across 310 rows — 5, 20 and 955 — which
+    at the 3x multiplier implies GDACS exposures of 1.67, 6.67 and 318
+    people for national monthly flood totals, and 72 well-sourced figures
+    were rejected against them ("306 houses were affected, impacting 1,917
+    people" against a ceiling of 20). Whatever produced them (a unit the
+    parser ignored, a population split across countries, a footprint a few
+    pixels wide), an exposure that small is a parse failure, not a bound.
+    ``sanity.min_plausible_exposure`` draws the line, and below it the
+    exposure means UNKNOWN exactly as a zero does: no ceiling from GDACS,
+    and the population-share fallback and national cap take over.
     """
 
     if exposed_population is None:
-        return True
-    ceiling_basis = float(exposed_population)
-    if ceiling_basis <= 0:
+        return None
+    basis = float(exposed_population)
+    if basis <= 0:
+        return None
+    try:
+        floor = float(rulebook.get("sanity.min_plausible_exposure"))
+    except Exception:  # noqa: BLE001 - older rulebooks have no such key
+        floor = 0.0
+    if basis < floor:
+        return None
+    return basis
+
+
+def within_sanity_ceiling(
+    value: float, exposed_population: float | None, rulebook: Rulebook
+) -> bool:
+    """True when ``value`` respects the GDACS exposure ceiling.
+
+    The ceiling is ``sanity.ceiling_multiplier`` x the GDACS exposed
+    population. With no exposure estimate available there is no ceiling to
+    apply and the value passes (the national population cap is a separate
+    check owned by reconciliation). A non-positive exposure, or one below
+    ``sanity.min_plausible_exposure``, is UNKNOWN and applies no ceiling —
+    see :func:`usable_exposure` for both halves of that argument.
+    """
+
+    ceiling_basis = usable_exposure(exposed_population, rulebook)
+    if ceiling_basis is None:
         return True
     multiplier = float(rulebook.get("sanity.ceiling_multiplier"))
     return float(value) <= multiplier * ceiling_basis

@@ -79,6 +79,7 @@ _FIELDS = [
     "format.name",
     "disaster_type.name",
     "primary_country.iso3",
+    "country.iso3",
 ]
 
 
@@ -128,6 +129,32 @@ def _created(item: dict[str, Any]) -> str:
     return ""
 
 
+def _original(item: dict[str, Any]) -> str:
+    """ReliefWeb's ``date.original``: when the source published the document."""
+
+    date_obj = item.get("date") or {}
+    if isinstance(date_obj, dict):
+        return str(date_obj.get("original") or "")
+    return ""
+
+
+def _primary_country(item: dict[str, Any]) -> str:
+    primary = item.get("primary_country") or {}
+    if isinstance(primary, dict):
+        return str(primary.get("iso3") or "").upper()
+    return ""
+
+
+def _country_iso3s(item: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for entry in item.get("country") or []:
+        if isinstance(entry, dict):
+            code = str(entry.get("iso3") or "").upper()
+            if code:
+                out.append(code)
+    return out
+
+
 def _document(
     item: dict[str, Any], iso3: str, ym: str, hazard: str, rulebook: Rulebook
 ) -> dict[str, Any] | None:
@@ -157,6 +184,14 @@ def _document(
         "body_truncated": truncated,
         "body_chars": min(len(body), limit),
         "date_created": _created(fields),
+        "date_original": _original(fields),
+        # Attribution evidence: which country the document is ABOUT, and
+        # every country it is filed under. A regional round-up filed under
+        # twenty countries is filed under this one too, and that is how two
+        # Spanish-language flood reports about March to May landed on
+        # AFG / FL / 2026-07 in the September 2026 run.
+        "primary_country_iso3": _primary_country(fields),
+        "country_iso3s": _country_iso3s(fields),
         "sources": publishers,
         "formats": _text_of(fields, "format"),
         "disaster_types": _text_of(fields, "disaster_type"),

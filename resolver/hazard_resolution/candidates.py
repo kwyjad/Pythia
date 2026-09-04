@@ -42,6 +42,7 @@ from resolver.hazard_resolution import emdat as emdat_mod
 from resolver.hazard_resolution import gdacs as gdacs_mod
 from resolver.hazard_resolution import idmc_idu as idu_mod
 from resolver.hazard_resolution import ifrc_go as go_mod
+from resolver.hazard_resolution.rules import usable_exposure
 from resolver.hazard_resolution.rulebook import Rulebook
 from resolver.hazard_resolution.schema import ensure_haz_schema
 
@@ -249,7 +250,8 @@ def build_candidates(
 
 
 def exposure_ceiling(
-    con: "duckdb.DuckDBPyConnection", iso3: str, ym: str, hazard: str
+    con: "duckdb.DuckDBPyConnection", iso3: str, ym: str, hazard: str,
+    rulebook: Rulebook | None = None,
 ) -> float | None:
     """The GDACS exposure ceiling for a cell, before candidates are built.
 
@@ -265,7 +267,7 @@ def exposure_ceiling(
     199 rejected figures were rejected against one.
     """
 
-    return exposure_ceiling_basis(con, iso3, ym, hazard)["value"]
+    return exposure_ceiling_basis(con, iso3, ym, hazard, rulebook)["value"]
 
 
 #: The GDACS response field the ceiling is computed from, carried on every
@@ -276,7 +278,8 @@ CEILING_FIELD = "gdacs.population -> payload.exposed_population"
 
 
 def exposure_ceiling_basis(
-    con: "duckdb.DuckDBPyConnection", iso3: str, ym: str, hazard: str
+    con: "duckdb.DuckDBPyConnection", iso3: str, ym: str, hazard: str,
+    rulebook: Rulebook | None = None,
 ) -> dict[str, Any]:
     """The ceiling AND where it came from: value, event, field, alternatives.
 
@@ -288,11 +291,21 @@ def exposure_ceiling_basis(
     """
 
     iso3 = iso3.upper()
-    events = _from_gdacs(
-        gdacs_mod.events_for_country_month(con, iso3, ym, hazard), iso3, ym, hazard
-    )
-    positive = [c for c in events if c.value > 0]
+    raw_events = gdacs_mod.events_for_country_month(con, iso3, ym, hazard)
+    events = _from_gdacs(raw_events, iso3, ym, hazard)
+    # Below the rulebook's plausibility floor an exposure is a parse
+    # failure, not a bound (rules.usable_exposure); without a rulebook the
+    # historical "> 0" test applies.
+    if rulebook is not None:
+        positive = [c for c in events if usable_exposure(c.value, rulebook) is not None]
+    else:
+        positive = [c for c in events if c.value > 0]
+    implausible = [c for c in events if c.value > 0 and c not in positive]
     binding = max(positive, key=lambda c: c.value) if positive else None
+    units = sorted({
+        str(e.get("exposed_population_unit") or "") for e in raw_events
+        if e.get("exposed_population_unit") is not None
+    })
     return {
         "value": float(binding.value) if binding is not None else None,
         "source": SOURCE_GDACS if binding is not None else None,
@@ -300,6 +313,8 @@ def exposure_ceiling_basis(
         "field": CEILING_FIELD,
         "n_events": len(events),
         "n_events_with_exposure": len(positive),
+        "n_events_below_plausible_floor": len(implausible),
+        "exposure_units_seen": units,
         "all_exposures": sorted((float(c.value) for c in events), reverse=True)[:10],
     }
 

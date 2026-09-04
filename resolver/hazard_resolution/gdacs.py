@@ -151,6 +151,12 @@ def _event_record(
         # GDACS "population" is MODELLED EXPOSURE, never reported impact.
         # The key name says so, so no downstream reader can mistake it.
         "exposed_population": parse_number(event.get("population")) or 0.0,
+        # What the feed's gdacs:population element actually said, verbatim,
+        # so a ceiling of 5 can be traced to "5 people" or "5 Million".
+        "exposed_population_unit": str(event.get("population_unit") or ""),
+        "exposed_population_text": str(event.get("population_text") or "")[:200],
+        "exposed_population_raw": str(event.get("population_raw") or ""),
+        "exposed_population_parse": str(event.get("population_parse") or ""),
         "start_date": start.isoformat(),
         "end_date": (end or start).isoformat(),
         # Always present; None unless the reversed-dates clamp above fired.

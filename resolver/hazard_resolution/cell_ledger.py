@@ -140,8 +140,24 @@ def record_figure(
     ceiling_field: str | None = None,
     preference_rank: int | None = None,
     detail: dict[str, Any] | None = None,
+    stated_value: float | None = None,
+    stated_unit: str | None = None,
+    value_persons: int | None = None,
+    conversion_factor: float | None = None,
+    figure_date: str | None = None,
+    doc_date: str | None = None,
+    doc_date_original: str | None = None,
+    doc_primary_country: str | None = None,
 ) -> None:
     """Append one extracted figure and what became of it. Never raises.
+
+    ``value`` is the figure as the ladder uses it (people). Since Sept 2026
+    the row also carries what the SOURCE said — ``stated_value`` in
+    ``stated_unit`` — beside ``value_persons`` (a whole number) and the
+    ``conversion_factor`` that joins them, because "187 families affected"
+    was being written as value 935 under unit "households", which is two
+    facts wearing one label. The document's dates and primary country ride
+    along so the attribution check can be run over the ledger alone.
 
     ``ceiling_source``/``ceiling_field`` matter as much as the ceiling: the
     August 2026 run rejected 199 figures against ceilings of 0, 2, 5 and 20
@@ -170,6 +186,14 @@ def record_figure(
             "ceiling_source_ref": ceiling_source_ref,
             "ceiling_field": ceiling_field,
             "preference_rank": preference_rank,
+            "stated_value": stated_value,
+            "stated_unit": stated_unit,
+            "value_persons": value_persons,
+            "conversion_factor": conversion_factor,
+            "figure_date": figure_date,
+            "doc_date": doc_date,
+            "doc_date_original": doc_date_original,
+            "doc_primary_country": doc_primary_country,
             "detail": detail or {},
         },
     )

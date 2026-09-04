@@ -62,6 +62,7 @@ unresolved rather than becoming false zeros.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -278,6 +279,32 @@ def sweep_and_resolve_zeros(
             result.ym, result.coverage_note,
         )
     return tally
+
+
+def run_reconsider_rejected(*, hazard: str, db_url: str | None, summary_out: str | None) -> int:
+    """The ``--reconsider-rejected`` mode: see ``impact.reconsider_rejected_cells``."""
+
+    from resolver.db.duckdb_io import get_db
+    from resolver.hazard_resolution import impact as impact_mod
+    from resolver.hazard_resolution.rulebook import (
+        HAZARD_CODE_BY_RULEBOOK_NAME,
+        load_rulebook,
+    )
+    from resolver.hazard_resolution.schema import ensure_haz_schema
+
+    if hazard == "drought":
+        LOG.info("[cli] --reconsider-rejected does not apply to drought (no ladder, no ceiling)")
+        return 0
+    rulebook = load_rulebook()
+    con = get_db(db_url)
+    ensure_haz_schema(con)
+    code = HAZARD_CODE_BY_RULEBOOK_NAME[hazard]
+    summary = impact_mod.reconsider_rejected_cells(con, hazard=code, rulebook=rulebook)
+    if summary_out:
+        path = Path(summary_out)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"mode": "reconsider_rejected", **summary}, indent=2))
+    return 1 if summary.get("failed") else 0
 
 
 def run_impact_ladder(
@@ -905,6 +932,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         metavar="YYYY-MM",
         help="Several target months, run in order (each is independent)",
     )
+    months.add_argument(
+        "--reconsider-rejected",
+        action="store_true",
+        help=(
+            "Instead of target months: re-run the ladder for every resolved "
+            "cell of this hazard that rejected an extracted figure against the "
+            "GDACS exposure ceiling, so a corrected ceiling rule reaches the "
+            "rows it would have changed. Extraction replays from the cache "
+            "(no model is called, no document is fetched); unfrozen cells are "
+            "rewritten, frozen cells log a revision. Idempotent"
+        ),
+    )
     parser.add_argument(
         "--db",
         default=os.getenv("RESOLVER_DB_URL", ""),
@@ -974,6 +1013,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
 
     hazard = _HAZARD_ALIASES[args.hazard]
+
+    if args.reconsider_rejected:
+        raise SystemExit(
+            run_reconsider_rejected(
+                hazard=hazard, db_url=args.db or None, summary_out=args.summary_out,
+            )
+        )
+
     target_months = args.months or [args.month]
 
     started = datetime.now(timezone.utc)

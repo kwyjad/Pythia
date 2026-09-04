@@ -36,6 +36,7 @@ figures always produce the same candidates.
 from __future__ import annotations
 
 import hashlib
+import datetime as dt
 import logging
 import re
 from typing import Any
@@ -101,7 +102,11 @@ def convert_units(
     if figure.unit != UNIT_HOUSEHOLDS:
         return float(figure.value), None
     multiplier, origin = household_multiplier(iso3, rulebook)
-    converted = float(figure.value) * multiplier
+    # People are counted in whole persons. 15,600 households x 4.1 is
+    # 63,960 people, not 63,959.99999999 — the fractional counts in the
+    # September 2026 ledger were the tell that the unit column and the
+    # value column had come apart.
+    converted = float(round(float(figure.value) * multiplier))
     return converted, {
         "from_unit": UNIT_HOUSEHOLDS,
         "to_unit": UNIT_PEOPLE,
@@ -200,6 +205,121 @@ def deduplicate(
     return kept, dropped
 
 
+REASON_PRIMARY_COUNTRY_MISMATCH = "document_primary_country_mismatch"
+REASON_OUTSIDE_WINDOW = "outside_reporting_window"
+
+
+def figure_window_date(figure: ExtractedFigure) -> tuple["dt.date | None", str]:
+    """The date a figure is about, and which field supplied it.
+
+    The figure's own stated date first (the extractor asks for "the date
+    the figure refers to"); failing that the document's ``date.original``
+    (when its source published it); failing that ``date.created`` (when
+    ReliefWeb filed it). Returns (None, "") when none parses.
+    """
+
+    from resolver.hazard_resolution.sources import parse_date
+
+    for field, raw in (
+        ("figure_date", figure.date),
+        ("doc_date_original", figure.doc_date_original),
+        ("doc_date", figure.doc_date),
+    ):
+        parsed = parse_date(raw)
+        if parsed is not None:
+            return parsed, field
+    return None, ""
+
+
+def reporting_window(ym: str, rulebook: Rulebook) -> tuple["dt.date", "dt.date"]:
+    """The dates a figure may be about and still belong to the cell ``ym``.
+
+    Month start to month end plus ``reliefweb.documents.publication_pad_days``:
+    a figure is attributed to the month its event STARTED (rules.attribution_month),
+    and a report published in the pad after month end may restate it.
+    """
+
+    from resolver.hazard_resolution.sources import month_bounds
+
+    start, end = month_bounds(ym)
+    pad = int(rulebook.get("reliefweb.documents.publication_pad_days"))
+    return start, end + dt.timedelta(days=pad)
+
+
+def apply_attribution(
+    pairs: list[tuple[ExtractedFigure, float]],
+    iso3: str,
+    ym: str,
+    rulebook: Rulebook,
+) -> tuple[list[tuple[ExtractedFigure, float]], list[dict[str, Any]]]:
+    """Keep only figures whose document is about THIS country and THIS window.
+
+    Two tests, both from the September 2026 run, where documents 4222929
+    and 4222839 — Spanish and English accounts of floods between March and
+    May affecting 82,000 people — were filed under AFG / FL / 2026-07 and
+    only failed to land because the broken ceiling rejected them:
+
+    * **country** — the document's ``primary_country`` must be the cell's
+      country. ReliefWeb files a regional round-up under every country it
+      mentions, and the API's ``country.iso3`` filter matches any of them.
+      A document with no recorded primary country (cached before Sept
+      2026) passes this test; the window test still applies.
+    * **window** — the date the figure is about (its own date, else the
+      document's source-publication date, else its ReliefWeb date) must
+      fall inside :func:`reporting_window`. A figure with no parseable date
+      at all is kept: the prompt already confines the model to the period,
+      and rejecting the undated would cost real figures for a guess.
+
+    Both are rulebook switches (``reliefweb.documents.require_primary_country``,
+    ``reliefweb.documents.enforce_reporting_window``), on by default.
+    """
+
+    iso3 = iso3.upper()
+    require_primary = bool(rulebook.get("reliefweb.documents.require_primary_country"))
+    enforce_window = bool(rulebook.get("reliefweb.documents.enforce_reporting_window"))
+    start, end = reporting_window(ym, rulebook)
+    kept: list[tuple[ExtractedFigure, float]] = []
+    rejected: list[dict[str, Any]] = []
+    for figure, value in pairs:
+        primary = (figure.doc_primary_country or "").upper()
+        if require_primary and primary and primary != iso3:
+            rejected.append({
+                "doc_id": figure.doc_id,
+                "reason": REASON_PRIMARY_COUNTRY_MISMATCH,
+                "value": value,
+                "unit": figure.unit,
+                "quote": figure.quote,
+                "doc_primary_country": primary,
+                "doc_country_iso3s": list(figure.doc_country_iso3s),
+                "cell_iso3": iso3,
+            })
+            continue
+        about, field = figure_window_date(figure)
+        if enforce_window and about is not None and not (start <= about <= end):
+            rejected.append({
+                "doc_id": figure.doc_id,
+                "reason": REASON_OUTSIDE_WINDOW,
+                "value": value,
+                "unit": figure.unit,
+                "quote": figure.quote,
+                "figure_about": about.isoformat(),
+                "figure_about_field": field,
+                "window_start": start.isoformat(),
+                "window_end": end.isoformat(),
+                "cell_ym": ym,
+            })
+            continue
+        kept.append((figure, value))
+    if rejected:
+        LOG.info(
+            "[figures] %s %s: %d figure(s) rejected as not attributable to this cell "
+            "(%s)",
+            iso3, ym, len(rejected),
+            ", ".join(sorted({str(r["reason"]) for r in rejected})),
+        )
+    return kept, rejected
+
+
 def apply_ceiling(
     figures: list[tuple[ExtractedFigure, float]],
     exposure_ceiling: float | None,
@@ -291,6 +411,9 @@ def build_candidates(
     conversions = {id(figure): conversion for figure, _v, conversion in converted}
     pairs = [(figure, value) for figure, value, _c in converted]
 
+    pairs, attribution_rejects = apply_attribution(pairs, iso3, ym, rulebook)
+    rejected.extend(attribution_rejects)
+
     pairs, ceiling_rejects = apply_ceiling(
         pairs, exposure_ceiling, rulebook, ceiling_basis
     )
@@ -328,6 +451,8 @@ def build_candidates(
                     "doc_id": figure.doc_id,
                     "doc_title": figure.doc_title,
                     "doc_date": figure.doc_date,
+                    "doc_date_original": figure.doc_date_original,
+                    "doc_primary_country": figure.doc_primary_country,
                     "household_conversion": conversion,
                 },
             )
@@ -369,12 +494,21 @@ def _record_figures(
     multiplier = rulebook.get("sanity.ceiling_multiplier")
     for candidate in candidates:
         detail = candidate.detail or {}
+        conversion = detail.get("household_conversion") or {}
         cell_ledger.record_figure(
             iso3=iso3, hazard=hazard, ym=ym, outcome="accepted",
             doc_id=str(detail.get("doc_id") or ""),
             doc_url=candidate.doc_url,
             value=candidate.value,
             unit=str(detail.get("unit_as_stated") or ""),
+            stated_value=detail.get("stated_value"),
+            stated_unit=str(detail.get("unit_as_stated") or ""),
+            value_persons=int(round(float(candidate.value))),
+            conversion_factor=conversion.get("multiplier") if conversion else 1.0,
+            figure_date=str(detail.get("figure_date") or ""),
+            doc_date=str(detail.get("doc_date") or ""),
+            doc_date_original=str(detail.get("doc_date_original") or ""),
+            doc_primary_country=str(detail.get("doc_primary_country") or ""),
             stated_by=candidate.stated_by,
             quote=str(detail.get("quote") or ""),
             ceiling=exposure_ceiling,
@@ -395,6 +529,10 @@ def _record_figures(
             doc_id=str(entry.get("doc_id") or ""),
             value=entry.get("value"),
             unit=str(entry.get("unit") or ""),
+            stated_value=entry.get("stated_value", entry.get("value")),
+            stated_unit=str(entry.get("unit") or ""),
+            figure_date=str(entry.get("figure_about") or entry.get("figure_date") or ""),
+            doc_primary_country=str(entry.get("doc_primary_country") or ""),
             quote=str(entry.get("quote") or ""),
             reason=str(entry.get("reason") or ""),
             ceiling=entry.get("exposed_population", exposure_ceiling),
