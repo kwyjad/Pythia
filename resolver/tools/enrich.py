@@ -49,14 +49,16 @@ def derive_ym(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def enrich(df: pd.DataFrame) -> pd.DataFrame:
+def enrich(df: pd.DataFrame, *, today: dt.date | None = None) -> pd.DataFrame:
     """Enrich a canonical DataFrame with registry lookups and defaults.
 
     - Fills ``country_name`` from ``data/countries.csv`` where missing
     - Fills ``hazard_label`` and ``hazard_class`` from ``data/shocks.csv``
     - Normalises ``iso3`` to uppercase
     - Defaults ``metric`` to ``"affected"`` and ``unit`` to ``"persons"``
-    - Fixes ``publication_date`` (must be >= as_of_date, <= today)
+    - Fixes ``publication_date`` (see :func:`fix_publication_date`): a date the
+      source stated is kept; a missing one is filled from ``as_of_date`` only
+      when that date has passed; and nothing is ever dated after ``today``
     - Generates ``event_id`` for rows that lack one
     """
     if df is None or df.empty:
@@ -112,23 +114,28 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
         facts.loc[empty_unit, "unit"] = "persons"
 
     # --- Publication date fix ---
-    today = dt.date.today()
+    today = today or dt.date.today()
     facts["publication_date"] = facts["publication_date"].fillna("").astype(str)
     facts["as_of_date"] = facts["as_of_date"].fillna("").astype(str)
 
+    counts = {"supplied": 0, "filled": 0, "raised_to_as_of": 0, "clamped_to_today": 0}
+
     def _fix_pub(row: pd.Series) -> str:
-        pub = _parse_date(row.get("publication_date", ""))
-        as_of = _parse_date(row.get("as_of_date", ""))
-        if pub is None:
-            pub = as_of or today
-        if as_of and pub < as_of:
-            pub = as_of
-        if pub > today:
-            pub = today
-        return pub.isoformat()
+        pub, why = fix_publication_date(
+            row.get("publication_date", ""), row.get("as_of_date", ""), today
+        )
+        counts[why] += 1
+        return pub
 
     if len(facts):
         facts["publication_date"] = facts.apply(_fix_pub, axis=1)
+        if counts["clamped_to_today"] or counts["raised_to_as_of"]:
+            LOG.info(
+                "[enrich] publication_date: %d supplied, %d filled from the period "
+                "end, %d raised to as_of_date, %d clamped to today",
+                counts["supplied"], counts["filled"],
+                counts["raised_to_as_of"], counts["clamped_to_today"],
+            )
 
     # --- Revision default ---
     if "revision" in facts.columns:
@@ -168,6 +175,47 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
         facts.loc[missing_eid, "event_id"] = fallback
 
     return facts
+
+
+def fix_publication_date(publication: Any, as_of: Any, today: dt.date) -> tuple[str, str]:
+    """The publication date a row is stored with, and why.
+
+    Returns ``(iso_date, reason)`` with reason one of ``supplied``, ``filled``,
+    ``raised_to_as_of``, ``clamped_to_today``.
+
+    Three rules, in order. A date the source stated is kept as stated. A
+    missing date is filled from ``as_of_date`` when that date has passed (an
+    observation cannot be published before it is made); when ``as_of_date``
+    is still in the future the row describes a period that has not ended (an
+    IPC projection window, the current month) and the fill is ``today``, the
+    day this run first saw it. And no row is ever dated after ``today``.
+
+    The rule this replaces raised EVERY publication date to ``as_of_date``
+    and then clamped it to today. For a FEWS NET projection whose window ends
+    in March 2027 that turned the reporting date the connector supplied into
+    the run date, on every run, so the row said it was published today each
+    time it was rewritten — and the freshness report read a projection about
+    next year as the newest publication in the table.
+    """
+
+    pub = _parse_date(publication)
+    as_of_date = _parse_date(as_of)
+    why = "supplied"
+    if pub is None:
+        why = "filled"
+        if as_of_date is not None and as_of_date <= today:
+            pub = as_of_date
+        else:
+            pub = today
+    elif as_of_date is not None and as_of_date <= today and pub < as_of_date:
+        # An observation dated before it was observed: the source's period
+        # end is the earliest it can have been published.
+        pub = as_of_date
+        why = "raised_to_as_of"
+    if pub > today:
+        pub = today
+        why = "clamped_to_today"
+    return pub.isoformat(), why
 
 
 def _parse_date(text: Any) -> Optional[dt.date]:

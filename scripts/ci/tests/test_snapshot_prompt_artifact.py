@@ -107,7 +107,7 @@ def test_load_question_for_hazard_none_when_absent(tmp_path: Path) -> None:
 def test_connect_reopens_after_shared_connection_closed(tmp_path: Path) -> None:
     """Guards the structured-data connection fix.
 
-    ``_load_structured_data``'s sub-loaders (ipc_phases / acaps) call
+    ``_load_structured_data``'s sub-loaders (food_security / acaps) call
     ``duckdb_io.get_db()`` (a cache HIT returns the artifact's own shared
     connection) then ``close_db()`` it, which closes AND evicts the shared
     handle. The artifact reopens via ``_connect(db_url)`` afterwards; this test

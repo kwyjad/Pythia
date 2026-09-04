@@ -926,6 +926,23 @@ jobs:
           fi
 
       # === PHASE 5: VERIFY + EXPORT ===
+      # A publication date after today is false in the plain sense. The two
+      # writers that produced one (enrich raising every date to the period
+      # end, the deltas fallback copying it) are fixed; this pass repairs the
+      # rows they already wrote, in place, idempotently, on every update.
+      # Non-fatal: a repair must never cost the ingest that carried it.
+      - name: "Phase 5: Repair publication dates in the future"
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          python -m resolver.tools.repair_publication_dates \
+            --db "${BACKFILL_DB_PATH}" \
+            --summary-out diagnostics/repair_publication_dates.json \
+            2>&1 | tee diagnostics/phase5_repair_publication_dates.log \
+            || echo "::warning::publication-date repair left future-dated rows behind or failed (non-fatal; exit $?)"
+
       - name: Verify DuckDB counts
         run: |
           set -euo pipefail

@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import requests
 
+from resolver.diagnostics import run_log
 from resolver.hazard_resolution.rulebook import Rulebook
 from resolver.hazard_resolution.rules import event_months
 from resolver.hazard_resolution.sources import (
@@ -91,6 +92,73 @@ def _api_key() -> str | None:
 #: was never kept, so nothing could say whether the query shape or the
 #: account was at fault. The status line alone is not a diagnosis.
 _ERROR_BODY_CHARS = 500
+
+
+#: Why a fetch failed, in a word a check can act on. ``auth_rejected`` is the
+#: one that never recovers on its own: EM-DAT answered every call of the
+#: September 2026 run with "Invalid key passed or insufficient user access",
+#: ``haz_raw_emdat`` held 0 rows, and the only trace was a log line inside a
+#: continue-on-error step. A rejected key is the owner's to renew (the secret
+#: is ``EMDAT_API_KEY``; the account tier may need raising), and until it is
+#: the ladder has no top rung.
+FAILURE_AUTH = "auth_rejected"
+FAILURE_SERVER = "server_error"
+FAILURE_NETWORK = "network"
+FAILURE_NO_KEY = "no_key"
+FAILURE_OTHER = "other"
+
+_AUTH_MARKERS = (
+    "invalid key", "insufficient user access", "unauthori", "forbidden",
+    "not authenticated", "access denied", "http 401", "http 403",
+)
+
+#: The run-log stream every source fetch is recorded on, so the bundle can
+#: say which rung was read, which was served from cache, and which was
+#: refused — per (source, hazard, month) — without parsing log prose.
+STREAM_SOURCE_FETCHES = "source_fetches"
+
+
+def classify_failure(error: str | None) -> str:
+    """Name the kind of failure an error string describes."""
+
+    text = (error or "").lower()
+    if not text:
+        return FAILURE_OTHER
+    if any(marker in text for marker in _AUTH_MARKERS):
+        return FAILURE_AUTH
+    if "http 5" in text or "internal server error" in text or "bad gateway" in text:
+        return FAILURE_SERVER
+    if any(
+        marker in text
+        for marker in ("timed out", "timeout", "connection", "name resolution", "dns")
+    ):
+        return FAILURE_NETWORK
+    return FAILURE_OTHER
+
+
+def _annotate_error(message: str) -> None:
+    """A GitHub Actions error annotation, printed only where one is read."""
+
+    if os.getenv("GITHUB_ACTIONS", "").lower() == "true":
+        print(f"::error::{message}", flush=True)
+
+
+def _record_fetch(outcome: FetchOutcome, *, hazard: str, ym: str, failure_class: str | None) -> None:
+    detail = outcome.detail or {}
+    run_log.record(
+        STREAM_SOURCE_FETCHES,
+        {
+            "source": SOURCE,
+            "hazard": hazard,
+            "ym": ym,
+            "ok": bool(outcome.ok),
+            "records": int(outcome.records or 0),
+            "inserted": int(outcome.inserted or 0),
+            "served_from_cache": bool(detail.get("served_from_cache")),
+            "failure_class": failure_class,
+            "error": outcome.error or detail.get("live_fetch_error"),
+        },
+    )
 
 
 def _default_post(url: str, payload: dict, headers: dict, timeout: float) -> dict:
@@ -294,7 +362,10 @@ def fetch_emdat(
     key = _api_key()
     if not key:
         outcome.error = f"{API_KEY_ENV} not set"
-        return _fall_back_to_cache(con, ym, hazard, rulebook, outcome)
+        outcome.detail = {**(outcome.detail or {}), "failure_class": FAILURE_NO_KEY}
+        outcome = _fall_back_to_cache(con, ym, hazard, rulebook, outcome)
+        _record_fetch(outcome, hazard=hazard, ym=ym, failure_class=FAILURE_NO_KEY)
+        return outcome
 
     start, end = fetch_window(ym, rulebook, "emdat")
     post = post or _default_post
@@ -333,9 +404,23 @@ def fetch_emdat(
                 max_pages, len(rows),
             )
     except Exception as exc:
-        LOG.error("[emdat] fetch failed for %s %s: %s", hazard, ym, exc)
+        failure_class = classify_failure(str(exc))
+        LOG.error(
+            "[emdat] fetch failed for %s %s (%s): %s", hazard, ym, failure_class, exc
+        )
+        if failure_class == FAILURE_AUTH:
+            # The one failure a re-run cannot fix. Say so where a reader
+            # looks, and name what has to change.
+            _annotate_error(
+                f"EM-DAT rejected the API key for {hazard} {ym} "
+                f"({str(exc)[:160]}). Renew {API_KEY_ENV} or raise the account "
+                "tier; until then the ladder's top rung is unread on every cell."
+            )
         outcome.error = str(exc)
-        return _fall_back_to_cache(con, ym, hazard, rulebook, outcome)
+        outcome.detail = {**(outcome.detail or {}), "failure_class": failure_class}
+        outcome = _fall_back_to_cache(con, ym, hazard, rulebook, outcome)
+        _record_fetch(outcome, hazard=hazard, ym=ym, failure_class=failure_class)
+        return outcome
 
     # EM-DAT filters by year, so trim to the month window we asked for.
     wanted_months = set(event_months(start, end))
@@ -361,6 +446,7 @@ def fetch_emdat(
         "[emdat] %s %s: %d rows returned, %d in window (%d new)",
         hazard, ym, len(rows), stored["records"], stored["inserted"],
     )
+    _record_fetch(outcome, hazard=hazard, ym=ym, failure_class=None)
     return outcome
 
 

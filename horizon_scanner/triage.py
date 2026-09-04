@@ -773,15 +773,6 @@ def _run_triage_for_single_hazard(
         except Exception as exc:
             logger.debug("ACLED political load failed for %s: %s", iso3, exc)
 
-    # IPC food security phases (all hazards)
-    try:
-        from pythia.ipc_phases import load_ipc_phases
-        ipc = load_ipc_phases(iso3)
-        if ipc:
-            new_data_kwargs["ipc_phases"] = ipc
-    except Exception as exc:
-        logger.debug("IPC phases load failed for %s: %s", iso3, exc)
-
     # FEWS NET food security (all hazards)
     try:
         from pythia.food_security import load_food_security

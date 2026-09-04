@@ -162,7 +162,6 @@ Pythia pulls structured humanitarian, climate, and conflict-forecast data from a
 | **ACAPS Risk Radar** | `pythia/acaps.py` | Forward-looking risk with triggers | `acaps_risk_radar` |
 | **ACAPS Daily Monitoring** | `pythia/acaps.py` | Analyst-curated daily updates | `acaps_daily_monitoring` |
 | **ACAPS Humanitarian Access** | `pythia/acaps.py` | Access constraint scores (HS triage only) | `acaps_humanitarian_access` |
-| **IPC Phases** | `pythia/ipc_phases.py` | Food security phase populations (Phase 3+ = Crisis) | `ipc_phases` |
 | **ACLED Political Events** | `pythia/acled_political.py` | Event-level political data (ACE/DI hazards only) | `acled_political_events` |
 | **NMME Seasonal Forecasts** | `resolver/tools/ingest_nmme.py` | Temp/precip anomalies, 7-month lead (DR/FL/TC) | `seasonal_forecasts` |
 | **ENSO State/Forecast** | `horizon_scanner/enso/` | ENSO phase + strength COMPUTED from the ONI (NOAA ERDDAP → CPC weekly → CPC ONI table), plus the IRI Quick Look's 9-season outlook, plume and IOD (DR/FL/TC) | `enso_state` (DB-first; a run that resolves no index carries the last good record forward, labelled stale) |
@@ -196,7 +195,7 @@ Key tables (see [`pythia/db/schema.py`](pythia/db/schema.py) and [`SCHEMAS.md`](
 - **HS**: `hs_runs`, `hs_triage` (includes RC columns), `hs_country_reports`, `hs_hazard_tail_packs`, `hs_adversarial_checks`
 - **Seasonal climate**: `seasonal_forecasts` (NMME country-level temp/precip anomalies)
 - **Conflict forecasts**: `conflict_forecasts` (VIEWS + conflictforecast.org + ACLED CAST predicted fatalities, risk scores, and event counts)
-- **Structured data**: `reliefweb_reports`, `acled_political_events`, `ipc_phases`, `acaps_inform_severity`, `acaps_inform_severity_trend`, `acaps_risk_radar`, `acaps_daily_monitoring`, `acaps_humanitarian_access`
+- **Structured data**: `reliefweb_reports`, `acled_political_events`, `acaps_inform_severity`, `acaps_inform_severity_trend`, `acaps_risk_radar`, `acaps_daily_monitoring`, `acaps_humanitarian_access`
 - **Context sources**: `enso_state`, `seasonal_tc_outlooks`, `seasonal_tc_context_cache`, `hdx_signals`, `crisiswatch_entries`
 - **Questions + research**: `questions`, `question_research`
 - **Forecasts**: `forecasts_raw`, `forecasts_ensemble` (both include `reasoning_trace_json`)
@@ -204,7 +203,7 @@ Key tables (see [`pythia/db/schema.py`](pythia/db/schema.py) and [`SCHEMAS.md`](
 - **Resolutions + scoring**: `resolutions`, `scores`, `eiv_scores`
 - **Calibration**: `calibration_weights`, `calibration_advice`, `bucket_centroids`, `bucket_definitions`
 - **Diagnostics**: `llm_calls`, `question_run_metrics`
-- **Resolver**: `facts_resolved`, `facts_deltas`, `snapshots`, `manifests`, `meta_runs`
+- **Resolver**: `facts_resolved`, `facts_deltas`, `snapshots`, `manifests` (the last two are written only by the snapshot export CLI, never by the pipeline)
 - **Hazard resolution machine** ([`resolver/hazard_resolution/`](resolver/hazard_resolution/README.md)): `haz_raw_*` per-source caches, `haz_triggers`, `haz_impact_candidates`, `haz_resolutions`, `haz_revisions`, `haz_base_rates_occurrence`, `haz_base_rates_severity` — created by `haz-migrate` (or any machine entry point); behaviour configured in [`rulebook.yaml`](resolver/hazard_resolution/rulebook.yaml). CLIs: `resolve-hazards --hazard {cyclone,flood,drought} --month YYYY-MM [--summary-out PATH]`, `haz-backcast [--time-budget-min N]`, `haz-base-rates`, `haz-acceptance`. **Runs in production since Aug 2026 (shadow mode)**: `resolver_update.yml` Phase 2.5 resolves the trailing 3 months each cycle, and the nightly `haz_backcast.yml` fills history in time-boxed chunks; its answers do not yet feed `compute_resolutions` — that flip is gated on the monthly acceptance report in the `backfill-diagnostics` artifact
 
 ## Model management
@@ -517,7 +516,7 @@ See [PUBLIC_APIS.md](PUBLIC_APIS.md) for canonical API contracts.
 - ACLED CAST connector: [`resolver/connectors/acled_cast.py`](resolver/connectors/acled_cast.py)
 - Conflict forecasts loader: [`horizon_scanner/conflict_forecasts.py`](horizon_scanner/conflict_forecasts.py)
 - CrisisWatch: [`horizon_scanner/crisiswatch.py`](horizon_scanner/crisiswatch.py), [`scripts/refresh_crisiswatch.py`](scripts/refresh_crisiswatch.py)
-- Structured data: [`pythia/acaps.py`](pythia/acaps.py), [`pythia/ipc_phases.py`](pythia/ipc_phases.py), [`horizon_scanner/reliefweb.py`](horizon_scanner/reliefweb.py), [`pythia/acled_political.py`](pythia/acled_political.py)
+- Structured data: [`pythia/acaps.py`](pythia/acaps.py), [`pythia/food_security.py`](pythia/food_security.py), [`horizon_scanner/reliefweb.py`](horizon_scanner/reliefweb.py), [`pythia/acled_political.py`](pythia/acled_political.py)
 - Adversarial checks: [`pythia/adversarial_check.py`](pythia/adversarial_check.py)
 - Calibration advice: [`pythia/tools/generate_calibration_advice.py`](pythia/tools/generate_calibration_advice.py)
 - Schema: [`pythia/db/schema.py`](pythia/db/schema.py)

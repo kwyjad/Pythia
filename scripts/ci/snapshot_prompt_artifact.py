@@ -403,7 +403,7 @@ def _load_structured_data_for_artifact(
     contains the same conflict-forecast / adversarial / HS-grounding / GDACS /
     CrisisWatch / food-security context the live SPD prompt receives.
 
-    IMPORTANT: several of these sub-loaders (``pythia/ipc_phases.py``,
+    IMPORTANT: several of these sub-loaders (``pythia/food_security.py``,
     ``pythia/acaps.py``) call ``resolver.db.duckdb_io.get_db()`` — a cache HIT
     returns the artifact's own shared connection — and then ``close_db()`` it,
     which closes AND evicts that shared handle. The caller must therefore

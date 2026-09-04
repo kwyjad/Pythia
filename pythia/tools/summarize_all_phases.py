@@ -71,7 +71,6 @@ _CONNECTORS: dict[str, tuple[int, Optional[str], Optional[str], Optional[str]]] 
     "acled_political_events":  (3, "acled_political_events", None, "iso3"),
     "nmme_seasonal_forecasts": (3, "seasonal_forecasts", None, "iso3"),
     "gdelt_conflict_indicators": (3, "gdelt_conflict_indicators", None, "iso3"),
-    "ipc_phases":              (3, "ipc_phases", None, "iso3"),
     # Phase 4 — Context sources
     "enso":                    (4, "enso_state", None, None),
     "seasonal_tc":             (4, "seasonal_tc_outlooks", None, None),

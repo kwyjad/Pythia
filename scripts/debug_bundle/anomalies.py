@@ -33,7 +33,10 @@ CACHE_HIT_WARN_PCT = 5.0
 BATCH_FALLBACK_WARN_PCT = 20.0
 
 # Sources whose emptiness is the intended state, so it is not a finding.
-SILENT_SOURCES = frozenset({"IPC phases (legacy, unused)"})
+#: Connector rows whose empty table is the intended state. Empty since the
+#: legacy ``ipc_phases`` table was dropped (Sept 2026); kept so a future
+#: deliberately-silent source has somewhere to be declared.
+SILENT_SOURCES: frozenset[str] = frozenset()
 
 
 def _entry(severity: str, subsystem: str, description: str, evidence: str, **extra: Any) -> dict[str, Any]:
@@ -133,8 +136,7 @@ def build(
     for row in connector_rows or []:
         status = str(row.get("status") or "")
         if str(row.get("source") or "") in SILENT_SOURCES:
-            # `ipc_phases` is documented dead code superseded by the IPC API
-            # connector. An empty table there is the intended state, and a
+            # An empty table that is the intended state must not warn: a
             # warning about it teaches readers to skim this list.
             continue
         if status == "stale":

@@ -8,7 +8,7 @@
 The report logic previously lived as a ~1,400-line heredoc inside
 ``inspect_resolver_duckdb.yml`` and was untestable; these fixture-based tests
 pin the July-2026 fixes: chronological ACAPS "%b%Y" date handling, the
-observation/projection freshness split, the retired ipc_phases false alarm,
+observation/projection freshness split, the dropped legacy ipc_phases table,
 the informational (not warning) IDMC/IDU note, and the target-list inject
 readiness section.
 """
@@ -83,7 +83,6 @@ def fixture_paths(tmp_path):
         "('SOM',2026,6,'unchanged',NULL),('ETH',2026,6,'deteriorated',NULL),"
         "('SOM',2026,2,'unchanged',NULL)"
     )
-    con.execute("CREATE TABLE ipc_phases (iso3 TEXT, analysis_date TEXT)")  # dead code
     con.execute("CREATE TABLE reliefweb_reports (iso3 TEXT, published_date TEXT)")
     con.execute(
         "INSERT INTO reliefweb_reports VALUES ('SOM','2026-07-15T07:00:00+00:00')"
@@ -151,12 +150,11 @@ def test_freshness_splits_observations_from_projections(report):
     assert "2027-02" in proj_line and "future-dated" in proj_line
 
 
-def test_ipc_phases_not_flagged_as_empty_connector(report):
-    # The dead-code table must not raise a permanent false alarm.
-    assert "EMPTY CONNECTOR TABLES" not in report or "ipc_phases" not in report.split(
-        "EMPTY CONNECTOR TABLES"
-    )[1].split("\n")[0]
-    assert "legacy table from the retired" in report
+def test_the_dropped_legacy_ipc_table_is_not_mentioned(report):
+    # `ipc_phases` was dead code for a year and is dropped (Sept 2026); the
+    # report must neither warn about it nor carry the old apology for it.
+    assert "ipc_phases" not in report
+    assert "legacy table from the retired" not in report
 
 
 def test_idmc_idu_is_informational_not_warning(report):

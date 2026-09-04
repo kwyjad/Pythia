@@ -18,7 +18,7 @@ Expected runtime: ~5-10 minutes (down from 6+ hours).
 Usage:
     python -m pythia.tools.ingest_structured_data
     python -m pythia.tools.ingest_structured_data --sources acaps reliefweb nmme
-    python -m pythia.tools.ingest_structured_data --sources conflict ipc
+    python -m pythia.tools.ingest_structured_data --sources conflict fewsnet_ipc ipc_api
     python -m pythia.tools.ingest_structured_data --sources views acledcast
     python -m pythia.tools.ingest_structured_data --iso3 AFG,SYR,YEM
     python -m pythia.tools.ingest_structured_data --dry-run
@@ -83,7 +83,6 @@ _SOURCE_GROUPS: dict[str, list[str]] = {
     "acaps_risk_radar": ["acaps_risk_radar"],
     "acaps_daily_monitoring": ["acaps_daily_monitoring"],
     "acaps_humanitarian_access": ["acaps_humanitarian_access"],
-    "ipc": ["ipc_phases"],
     "reliefweb": ["reliefweb_reports"],
     "acled_political": ["acled_political_events"],
     "nmme": ["nmme_seasonal_forecasts"],
@@ -910,39 +909,6 @@ def _bulk_fetch_reliefweb(
     return dict(by_country)
 
 
-# ----- IPC (per-country, but concurrent) -----
-
-def _bulk_fetch_ipc(
-    countries: set[str],
-    max_workers: int = 4,
-) -> dict[str, dict]:
-    """Fetch IPC phases — per-country (API requires it), but concurrent."""
-    api_key = os.getenv("IPC_API_KEY", "").strip()
-    if not api_key:
-        LOG.warning("IPC_API_KEY not set — skipping IPC ingestion.")
-        return {}
-
-    from pythia.ipc_phases import fetch_ipc_phases
-
-    results: dict[str, dict] = {}
-
-    def _fetch_one(iso3: str) -> tuple[str, dict | None]:
-        try:
-            return iso3, fetch_ipc_phases(iso3)
-        except Exception as exc:
-            LOG.warning("IPC fetch failed for %s: %s", iso3, exc)
-            return iso3, None
-
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_fetch_one, c): c for c in countries}
-        for future in as_completed(futures):
-            iso3, data = future.result()
-            if data:
-                results[iso3] = data
-
-    LOG.info("IPC: data for %d countries", len(results))
-    return results
-
 
 # ===================================================================
 # ACLED Political — per-country via pythia.acled_political
@@ -1284,9 +1250,6 @@ def _store_all(
             elif label == "acaps_humanitarian_access":
                 from pythia.acaps import store_humanitarian_access
                 store_humanitarian_access(iso3, data)
-            elif label == "ipc_phases":
-                from pythia.ipc_phases import store_ipc_phases
-                store_ipc_phases(iso3, data)
             elif label == "reliefweb_reports":
                 from horizon_scanner.reliefweb import store_reliefweb_reports
                 store_reliefweb_reports(iso3, data)
@@ -1374,8 +1337,6 @@ def ingest(
                 result = _bulk_fetch_daily_monitoring(countries)
             elif label == "acaps_humanitarian_access":
                 result = _bulk_fetch_humanitarian_access(countries)
-            elif label == "ipc_phases":
-                result = _bulk_fetch_ipc(countries)
             elif label == "reliefweb_reports":
                 result = _bulk_fetch_reliefweb(countries)
             elif label == "nmme_seasonal_forecasts":
@@ -1624,7 +1585,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Normalise --sources: accept comma-separated, space-separated, or mixed.
-    # e.g. "acaps,ipc,reliefweb" or "acaps, ipc" or "acaps ipc reliefweb"
+    # e.g. "acaps,ipc_api,reliefweb" or "acaps, gdacs" or "acaps gdacs reliefweb"
     if args.sources:
         normalised: list[str] = []
         for token in args.sources:

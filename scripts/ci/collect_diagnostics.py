@@ -244,7 +244,6 @@ def _duckdb_inspect(db_path: Path) -> Mapping[str, object]:
             "facts_deltas",
             "facts_monthly_deltas",
             "manifests",
-            "meta_runs",
             "snapshots",
         ]
         for table in targets:

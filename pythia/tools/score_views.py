@@ -148,6 +148,12 @@ def _load_views_forecast_pairs(conn) -> List[Dict]:
     # scoring joins each forecast to the OUTCOME of its target month, so every
     # row it wants has a target month in the past by construction. It serves
     # nothing to a forecaster; it grades what was served.
+    #
+    # The connector writes ``source = 'VIEWS'`` (resolver/connectors/views.py)
+    # and this filter compared against the lowercase ``'views'`` from the day
+    # it was written, so no row ever matched and ``views_scored_forecasts``
+    # stayed empty through every scoring round while the step logged
+    # "nothing to score" and went green. Compare case-insensitively.
     sql = """
         WITH ranked_views AS (
             SELECT
@@ -162,7 +168,7 @@ def _load_views_forecast_pairs(conn) -> List[Dict]:
                     ORDER BY cf.forecast_issue_date DESC
                 ) AS rn
             FROM conflict_forecasts cf
-            WHERE cf.source = 'views'
+            WHERE upper(cf.source) = 'VIEWS'
               AND upper(cf.metric) = 'FATALITIES'
         )
         SELECT

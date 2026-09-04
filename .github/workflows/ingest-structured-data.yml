@@ -27,8 +27,8 @@ concurrency:
           Optional source filter (default: fast-changing sources for scheduled runs,
           all for manual). Options: views, conflictforecast, acledcast, acaps (alias
           for all 4 ACAPS sources), acaps_inform_severity, acaps_risk_radar,
-          acaps_daily_monitoring, acaps_humanitarian_access, ipc, reliefweb, nmme,
-          gdacs, fewsnet_ipc, gdelt. Also accepts: conflict (alias for
+          acaps_daily_monitoring, acaps_humanitarian_access, reliefweb, nmme,
+          gdacs, fewsnet_ipc, ipc_api, gdelt. Also accepts: conflict (alias for
           views+conflictforecast+acledcast). Comma or space separated.
         required: false
         default: ""
