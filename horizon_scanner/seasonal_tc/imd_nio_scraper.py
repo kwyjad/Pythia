@@ -232,6 +232,12 @@ def _load_enso_context() -> Optional[str]:
     try:
         from horizon_scanner.enso.enso_module import load_enso_state_from_db
 
+        # The default age bound is 100 days (DB_MAX_OBSERVATION_AGE_DAYS),
+        # not 30: the ONI is a three-month running mean published monthly,
+        # so its observation date sits 30 to 70 days behind the calendar by
+        # construction. At 30 this call discarded a correctly detected
+        # strong El Niño as "65 days old" on 2026-09-04 and the TC context
+        # ran with no ENSO signal.
         snapshot = load_enso_state_from_db()
         if snapshot and getattr(snapshot, "current_state", ""):
             return str(snapshot.current_state)
