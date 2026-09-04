@@ -175,7 +175,10 @@ def test_machine_steps_are_wrapped_in_timeout_and_budgeted() -> None:
         step for step in steps
         if isinstance(step, dict) and "PA machine —" in step.get("name", "")
     ]
-    assert len(machine) == 3
+    # flood, cyclone, drought, plus the ceiling reconsideration pass (Sept 2026)
+    names = [step.get("name", "") for step in machine]
+    assert len(machine) == 4, names
+    assert any("reconsider ceiling rejections" in name for name in names), names
     for step in machine:
         run = step.get("run", "")
         assert "timeout " in run and "python -m resolver.hazard_resolution.cli" in run

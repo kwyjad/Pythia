@@ -393,6 +393,16 @@ sanity:
   # is ladder_with_flag, and a breach is recorded on the row either way.
   ceiling_multiplier: 3.0
 
+  # A GDACS exposure BELOW this many people is a parse failure, not a bound,
+  # and means UNKNOWN exactly as a zero does (Sept 2026). The figures ledger
+  # of run 33841370196 carried three distinct ceilings across 310 rows: 5,
+  # 20 and 955 — exposures of 1.67, 6.67 and 318 people for national
+  # monthly flood totals — and 72 well-sourced figures were rejected against
+  # them. No national monthly flood or cyclone exposure GDACS would alert on
+  # is smaller than this; below it, the population-share fallback and the
+  # national cap are the bounds in force.
+  min_plausible_exposure: 1000
+
   population_cap: true
 
   # When GDACS says nothing about exposure — its discovery response carries
@@ -575,6 +585,19 @@ reliefweb:
     # must be comfortably larger than the cap or "most authoritative first"
     # degenerates into "most recent first".
     candidate_pool_size: 100
+    # A document may supply a figure to a cell only if it is ABOUT that
+    # country and that window (Sept 2026). ReliefWeb files a regional
+    # round-up under every country it mentions, and the API's country.iso3
+    # filter matches any of them: two Spanish- and English-language
+    # accounts of March-to-May floods affecting 82,000 people were filed
+    # under AFG / FL / 2026-07, and only failed to land because the broken
+    # ceiling rejected them. require_primary_country demands the document's
+    # primary_country be the cell's; enforce_reporting_window demands the
+    # date a figure is about (its own date, else the source's publication
+    # date, else ReliefWeb's) fall inside month start .. month end +
+    # publication_pad_days. A figure with no parseable date at all is kept.
+    require_primary_country: true
+    enforce_reporting_window: true
     # Publication window: month start .. month end + publication_pad_days
     # (a report about a late-month flood publishes into the next month).
     publication_pad_days: 14

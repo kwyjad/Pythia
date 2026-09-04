@@ -710,6 +710,24 @@ jobs:
           timeout 85m python -m resolver.hazard_resolution.cli --hazard cyclone --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_cyclone.json 2>&1 | tee diagnostics/phase25_haz_cyclone.log || echo "::warning::cyclone resolution machine failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
+      # A corrected ceiling rule must reach the rows it would have changed,
+      # not only future runs (Sept 2026: three distinct ceilings of 5, 20 and
+      # 955 across 310 ledger rows rejected 72 well-sourced figures). This
+      # replays the ladder for every resolved cell that rejected a figure
+      # against the ceiling: extraction from the cache (no model call, no
+      # fetch), unfrozen cells rewritten in place, frozen cells logged to
+      # haz_revisions. Idempotent, so it runs on every scheduled update.
+      - name: "Phase 2.5: PA machine — reconsider ceiling rejections (flood + cyclone)"
+        timeout-minutes: 30
+        if: ${{ inputs.only_connector == '' }}
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p diagnostics
+          for hz in flood cyclone; do
+            timeout 12m python -m resolver.hazard_resolution.cli --hazard "$hz" --reconsider-rejected --summary-out "diagnostics/haz_reconsider_${hz}.json" 2>&1 | tee "diagnostics/phase25_haz_reconsider_${hz}.log" || echo "::warning::$hz ceiling reconsideration failed or timed out (non-fatal; exit $?)"
+          done
+
       - name: "Phase 2.5: PA machine — drought"
         timeout-minutes: 30
         if: ${{ inputs.only_connector == '' && steps.haz_months.outputs.months != '' }}

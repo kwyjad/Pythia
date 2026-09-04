@@ -172,6 +172,14 @@ class ExtractedFigure:
     doc_date: str
     doc_source_rank: int
     model: str
+    #: When the SOURCE published the document (ReliefWeb ``date.original``),
+    #: which is the reporting window's best proxy when the figure itself
+    #: carries no date. Empty for a cached document written before Sept 2026.
+    doc_date_original: str = ""
+    #: The country the document is ABOUT (``primary_country.iso3``). Empty
+    #: for a cached document written before Sept 2026.
+    doc_primary_country: str = ""
+    doc_country_iso3s: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -186,6 +194,9 @@ class ExtractedFigure:
             "doc_url": self.doc_url,
             "doc_title": self.doc_title,
             "doc_date": self.doc_date,
+            "doc_date_original": self.doc_date_original,
+            "doc_primary_country": self.doc_primary_country,
+            "doc_country_iso3s": list(self.doc_country_iso3s),
             "doc_source_rank": self.doc_source_rank,
             "model": self.model,
         }
@@ -743,6 +754,11 @@ def parse_response(
                 doc_date=str(document.get("date_created") or ""),
                 doc_source_rank=int(document.get("source_rank") or 0),
                 model=model,
+                doc_date_original=str(document.get("date_original") or ""),
+                doc_primary_country=str(document.get("primary_country_iso3") or "").upper(),
+                doc_country_iso3s=tuple(
+                    str(c).upper() for c in (document.get("country_iso3s") or [])
+                ),
             )
         )
 

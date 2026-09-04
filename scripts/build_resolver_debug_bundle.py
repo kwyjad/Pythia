@@ -1113,6 +1113,8 @@ class BundleBuilder:
         records = list(run_log.read_stream(stream)) if stream else []
         header = [
             "iso3", "hazard", "ym", "outcome", "doc_id", "value", "unit",
+            "stated_value", "stated_unit", "value_persons", "conversion_factor",
+            "figure_date", "doc_date", "doc_date_original", "doc_primary_country",
             "stated_by", "reason", "ceiling", "ceiling_multiplier",
             "ceiling_source", "ceiling_source_ref", "ceiling_field",
             "preference_rank", "quote", "doc_url",
@@ -1126,6 +1128,9 @@ class BundleBuilder:
             dest / "figures_ledger.csv", rows, header,
             preamble=(
                 "Every LLM-extracted figure and what became of it.\n"
+                "stated_value/stated_unit are what the SOURCE said; value_persons is\n"
+                "the whole-person count the ladder uses and conversion_factor joins\n"
+                "them. value keeps the legacy meaning (people, as used).\n"
                 "ceiling_field names the upstream field the ceiling came from: a\n"
                 "ceiling of 2 against a reported 40,000 is a GDACS enrichment\n"
                 "failure, not a mis-transcription, and only that column says which.\n"
@@ -1383,6 +1388,7 @@ class BundleBuilder:
             self._check_resolution_above_rejection_ceiling,
             self._check_acled_html_responses,
             self._check_no_past_target_month_served,
+            self._check_figures_inside_their_document_window,
         ):
             try:
                 check()
@@ -1731,6 +1737,73 @@ class BundleBuilder:
             "0",
             f"Reader predicate: {SERVED_TARGET_FILTER_SQL}. Rows in the table whose "
             f"target month has passed (stored, flagged, not served): {stale_rows or 'none'}.",
+        )
+
+    def _check_figures_inside_their_document_window(self) -> None:
+        """No accepted figure is about a date outside its cell's reporting window.
+
+        Documents 4222929 and 4222839 (floods between March and May) were
+        filed under AFG / FL / 2026-07 in the September 2026 run. The
+        ledger now carries the date each figure is about and the
+        document's primary country; this check re-runs the window test
+        over the accepted rows alone, so it fails the day the attribution
+        stage stops rejecting them.
+        """
+
+        name = "no_accepted_figure_lies_outside_its_cell_reporting_window"
+        ledger = self.path("hazard", "figures_ledger.csv")
+        if not ledger.is_file():
+            return self._check(name, "SKIP", "", "", "no figures ledger")
+        try:
+            from resolver.hazard_resolution.figures import reporting_window
+            from resolver.hazard_resolution.rulebook import load_rulebook
+            from resolver.hazard_resolution.sources import parse_date
+
+            rulebook = load_rulebook()
+        except Exception as exc:  # noqa: BLE001
+            return self._check(name, "SKIP", "", "", f"rulebook unavailable: {exc}")
+        with open(ledger, encoding="utf-8", newline="") as handle:
+            body = "".join(line for line in handle if not line.startswith("#"))
+        offenders: list[str] = []
+        accepted = 0
+        undated = 0
+        for record in csv.DictReader(io.StringIO(body)):
+            if str(record.get("outcome")) != "accepted":
+                continue
+            accepted += 1
+            about = None
+            for field in ("figure_date", "doc_date_original", "doc_date"):
+                about = parse_date(record.get(field) or "")
+                if about is not None:
+                    break
+            if about is None:
+                undated += 1
+                continue
+            ym = str(record.get("ym") or "")
+            try:
+                start, end = reporting_window(ym, rulebook)
+            except Exception:
+                continue
+            if not (start <= about <= end):
+                offenders.append(
+                    f"{record.get('iso3')}/{record.get('hazard')}/{ym} doc {record.get('doc_id')} "
+                    f"about {about.isoformat()} (window {start}..{end})"
+                )
+            primary = str(record.get("doc_primary_country") or "").upper()
+            if primary and primary != str(record.get("iso3") or "").upper():
+                offenders.append(
+                    f"{record.get('iso3')}/{record.get('hazard')}/{ym} doc {record.get('doc_id')} "
+                    f"is about {primary}"
+                )
+        if not accepted:
+            return self._check(name, "SKIP", "", "", "no accepted figures in the ledger")
+        self._check(
+            name, "FAIL" if offenders else "PASS",
+            f"{len(offenders)} of {accepted} accepted figures ({undated} undated, not tested)",
+            "0",
+            "; ".join(offenders[:10])
+            or "Every accepted figure with a date is about a date inside its cell's "
+            "reporting window, and about the cell's own country.",
         )
 
     def _check_resolution_above_rejection_ceiling(self) -> None:

@@ -196,9 +196,10 @@ def test_a_zero_exposure_is_not_a_ceiling_of_zero():
     assert within_sanity_ceiling(
         250_000, exposed_population=0.0, rulebook=baseline
     ) is True
-    # A real exposure still binds.
+    # A real exposure still binds. (1.0 would not: below the plausibility
+    # floor an exposure is a parse failure, not a bound — see the floor test.)
     assert within_sanity_ceiling(
-        250_000, exposed_population=1.0, rulebook=baseline
+        250_000, exposed_population=10_000.0, rulebook=baseline
     ) is False
 
 

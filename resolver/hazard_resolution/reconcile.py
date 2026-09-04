@@ -55,6 +55,7 @@ from resolver.hazard_resolution.rules import (
     is_provisional,
     orders_of_magnitude_apart,
     within_population_cap,
+    usable_exposure,
     within_sanity_ceiling,
 )
 
@@ -128,7 +129,7 @@ def _best_on_rung(candidates: list[Candidate], rung: str) -> Candidate | None:
     return max(on_rung, key=lambda c: (c.value, str(c.source_ref)))
 
 
-def _ceiling(candidates: list[Candidate]) -> float | None:
+def _ceiling(candidates: list[Candidate], rulebook: Rulebook | None = None) -> float | None:
     """The GDACS exposure ceiling for this cell, or None if unknown.
 
     Several overlapping events each bound the month; the largest exposure
@@ -136,11 +137,19 @@ def _ceiling(candidates: list[Candidate]) -> float | None:
     """
 
     # A zero or negative exposure is GDACS declining to say, not GDACS
-    # saying nobody was exposed: discovery carries no population figure and
-    # the per-event RSS fetch that fills it in tolerates 404s. Filtering
-    # those out here means an event with no usable exposure contributes no
-    # ceiling, rather than contributing a ceiling of zero.
-    ceilings = [c.value for c in ceiling_candidates(candidates) if c.value > 0]
+    # saying nobody was exposed, and so is one below the rulebook's
+    # plausibility floor (rules.usable_exposure). Filtering those out here
+    # means an event with no usable exposure contributes no ceiling, rather
+    # than contributing a ceiling of zero — or of five.
+    ceilings = []
+    for candidate in ceiling_candidates(candidates):
+        usable = (
+            usable_exposure(candidate.value, rulebook)
+            if rulebook is not None
+            else (float(candidate.value) if candidate.value > 0 else None)
+        )
+        if usable is not None:
+            ceilings.append(usable)
     return max(ceilings) if ceilings else None
 
 
@@ -161,7 +170,7 @@ def effective_ceiling(
     a reader must be able to see WHICH bound a flag was raised against.
     """
 
-    gdacs = _ceiling(candidates)
+    gdacs = _ceiling(candidates, rulebook)
     if gdacs is not None:
         return gdacs, "gdacs_exposed"
 

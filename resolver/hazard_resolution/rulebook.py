@@ -302,6 +302,8 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     _require_int_in("reliefweb.documents.max_docs_per_cell", 1, 200)
     _require_int_in("reliefweb.documents.candidate_pool_size", 1, 1000)
     _require_int_in("reliefweb.documents.publication_pad_days", 0, 90)
+    _require_bool("reliefweb.documents.require_primary_country")
+    _require_bool("reliefweb.documents.enforce_reporting_window")
     _require_str_list("reliefweb.documents.source_priority")
     _require_int_in("reliefweb.documents.body_char_limit", 500, 500_000)
     _require_positive_number("reliefweb.documents.request_timeout_sec")
@@ -708,6 +710,12 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     _require_choice("sanity.ceiling_source", _KNOWN_CEILING_SOURCES)
     _require_positive_number("sanity.ceiling_multiplier")
     _require_bool("sanity.population_cap")
+    floor = _get("sanity.min_plausible_exposure")
+    if floor is not _MISSING and (not _is_number(floor) or float(floor) < 0):
+        problems.append(
+            "sanity.min_plausible_exposure must be a non-negative number "
+            f"(0 disables the floor), got {floor!r}"
+        )
     # 0 disables the fallback; above 1 it would exceed the population cap it
     # is meant to sit under, which would make it inert.
     share = _get("sanity.population_fallback_share")
