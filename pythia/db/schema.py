@@ -1028,35 +1028,152 @@ def _ensure_gdelt_conflict_indicators_table(con: duckdb.DuckDBPyConnection) -> N
     )
 
 
-def _ensure_seasonal_tc_outlooks_table(con: duckdb.DuckDBPyConnection) -> None:
-    """Ensure the seasonal_tc_outlooks table exists."""
+#: The outlook table's shape since Sept 2026. The old table was keyed on
+#: ``(basin, source, fetched_at)``, which is a key on the CLOCK: every run
+#: appended a complete copy of every outlook it found, 56 rows held 8
+#: outlooks, and the duplicates masked the one real misread among them.
+#: ``issue_date_key`` is the ISO issue date, or the reason it is absent —
+#: a primary key cannot hold NULL, and an undated outlook still has to
+#: upsert onto itself rather than append.
+SEASONAL_TC_OUTLOOKS_DDL = """
+CREATE TABLE IF NOT EXISTS seasonal_tc_outlooks (
+    basin VARCHAR NOT NULL,
+    source VARCHAR NOT NULL,
+    forecast_season VARCHAR NOT NULL,
+    category VARCHAR NOT NULL,
+    issue_date DATE,
+    issue_date_key VARCHAR NOT NULL,
+    issue_date_reason VARCHAR,
+    season_reason VARCHAR,
+    named_storms_forecast VARCHAR,
+    named_storms_reason VARCHAR,
+    raw_json VARCHAR,
+    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (basin, source, forecast_season, issue_date_key, category)
+);
+"""
 
+
+def _ensure_seasonal_tc_outlooks_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the seasonal_tc_outlooks table exists in its keyed shape.
+
+    A table in the pre-September-2026 shape (no ``issue_date_key``) is
+    rebuilt: its rows are carried over with the issue date parsed out of
+    ``raw_json`` (free text such as "October 2025" becomes the first of the
+    month with a reason; nothing becomes NULL with a reason), deduplicated
+    on the new key keeping the EARLIEST ``fetched_at``, and the old table
+    is dropped only after the new one holds them. Idempotent.
+    """
+
+    existing = _existing_columns(con, "seasonal_tc_outlooks")
+    if existing and "issue_date_key" not in existing:
+        _migrate_seasonal_tc_outlooks(con)
+        return
     _ensure_table_and_columns(
         con,
         "seasonal_tc_outlooks",
-        """
-        CREATE TABLE IF NOT EXISTS seasonal_tc_outlooks (
-            basin VARCHAR NOT NULL,
-            source VARCHAR NOT NULL,
-            forecast_season VARCHAR,
-            named_storms_forecast VARCHAR,
-            category VARCHAR,
-            raw_json VARCHAR,
-            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (basin, source, fetched_at)
-        );
-        """,
+        SEASONAL_TC_OUTLOOKS_DDL,
         {
             "basin": "VARCHAR",
             "source": "VARCHAR",
             "forecast_season": "VARCHAR",
-            "named_storms_forecast": "VARCHAR",
             "category": "VARCHAR",
+            "issue_date": "DATE",
+            "issue_date_key": "VARCHAR",
+            "issue_date_reason": "VARCHAR",
+            "season_reason": "VARCHAR",
+            "named_storms_forecast": "VARCHAR",
+            "named_storms_reason": "VARCHAR",
             "raw_json": "VARCHAR",
             "fetched_at": "TIMESTAMP",
+            "updated_at": "TIMESTAMP",
         },
     )
 
+
+def _migrate_seasonal_tc_outlooks(con: duckdb.DuckDBPyConnection) -> dict:
+    """Rebuild the clock-keyed table on the outlook key. Returns counts."""
+
+    from horizon_scanner.seasonal_tc.dates import parse_issue_date
+
+    rows = con.execute(
+        "SELECT basin, source, forecast_season, named_storms_forecast, category, "
+        "raw_json, fetched_at FROM seasonal_tc_outlooks ORDER BY fetched_at"
+    ).fetchall()
+    import json as _json
+
+    kept: dict[tuple, list] = {}
+    dropped_baselines = 0
+    for basin, source, season, storms, category, raw_json, fetched_at in rows:
+        try:
+            raw = _json.loads(raw_json) if raw_json else {}
+        except Exception:
+            raw = {}
+        iso, reason = parse_issue_date(raw.get("issue_date"))
+        if not iso and str(raw.get("forecast_type") or "") == "climatology_context":
+            reason = "climatology_context_has_no_issue_date"
+        season_label = str(season or raw.get("season") or raw.get("season_year") or "")
+        # A season that starts three or more years before the row was
+        # fetched is a climatology baseline read as a season ("1980-81",
+        # from BoM's "averages since 1980-81"). Nobody forecast it; an
+        # absent row is honest and this one is not.
+        try:
+            start_year = int(str(season_label)[:4])
+        except ValueError:
+            start_year = None
+        if (
+            start_year is not None and fetched_at is not None
+            and start_year < fetched_at.year - 2
+        ):
+            dropped_baselines += 1
+            continue
+        key = (
+            str(basin or ""), str(source or ""), season_label,
+            iso or f"undated:{reason}", str(category or raw.get("forecast_type") or ""),
+        )
+        if key in kept:
+            continue  # rows are ordered by fetched_at: the first is the earliest
+        kept[key] = [
+            key[0], key[1], key[2], key[4], iso, key[3], reason,
+            None if season_label else "legacy_row_carried_no_season",
+            str(storms) if storms not in (None, "") else None,
+            None if storms not in (None, "") else "legacy_row_carried_no_count",
+            raw_json, fetched_at, fetched_at,
+        ]
+
+    con.execute("BEGIN")
+    try:
+        con.execute("DROP TABLE IF EXISTS seasonal_tc_outlooks__migrated")
+        con.execute(SEASONAL_TC_OUTLOOKS_DDL.replace(
+            "seasonal_tc_outlooks (", "seasonal_tc_outlooks__migrated ("
+        ))
+        if kept:
+            con.executemany(
+                "INSERT INTO seasonal_tc_outlooks__migrated VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                list(kept.values()),
+            )
+        con.execute("ALTER TABLE seasonal_tc_outlooks RENAME TO seasonal_tc_outlooks__legacy")
+        con.execute("ALTER TABLE seasonal_tc_outlooks__migrated RENAME TO seasonal_tc_outlooks")
+        con.execute("DROP TABLE seasonal_tc_outlooks__legacy")
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    counts = {
+        "rows_before": len(rows), "rows_after": len(kept),
+        "collapsed": len(rows) - len(kept) - dropped_baselines,
+        "dropped_baseline_misreads": dropped_baselines,
+    }
+    logger.info(
+        "seasonal_tc_outlooks: rebuilt on the outlook key — %d rows became %d "
+        "(%d duplicate fetches collapsed, earliest fetched_at kept; %d climatology "
+        "baselines misread as seasons deleted)",
+        counts["rows_before"], counts["rows_after"], counts["collapsed"],
+        counts["dropped_baseline_misreads"],
+    )
+    return counts
 
 def _ensure_seasonal_tc_context_cache_table(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure the seasonal_tc_context_cache table exists."""

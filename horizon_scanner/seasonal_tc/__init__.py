@@ -305,13 +305,80 @@ def load_seasonal_tc_context_from_db(
         return None
 
 
+#: Reasons the store attaches when a scraper supplied no count.
+_NO_COUNT_REASON_BY_SOURCE = {
+    "BoM": "source_publishes_probabilities_not_counts",
+    "IMD_RSMC_NewDelhi": "climatology_context_has_no_count",
+    "MeteoFrance_LaReunion": "source_publishes_a_range_see_raw_json",
+}
+
+
+def canonical_outlook_row(f: dict) -> dict:
+    """The columns one outlook occupies in ``seasonal_tc_outlooks``.
+
+    Every field is either a value or a reason for its absence. Nothing is
+    free text in a date column and nothing is silently blank.
+    """
+
+    from horizon_scanner.seasonal_tc.dates import parse_issue_date
+
+    iso, reason = parse_issue_date(f.get("issue_date"))
+    scraper_reason = str(f.get("issue_date_reason") or "")
+    if iso is None and scraper_reason:
+        reason = scraper_reason
+    elif iso and reason is None and scraper_reason:
+        # A date the scraper qualified (metadata, a disagreement) keeps the
+        # qualification beside it.
+        reason = scraper_reason
+
+    season = str(
+        f.get("forecast_season") or f.get("season") or f.get("season_year") or ""
+    ).strip()
+    season_reason = str(f.get("season_reason") or "") or (
+        "" if season else "no_season_in_source"
+    )
+
+    category = str(f.get("category") or f.get("forecast_type") or "").strip() or "unknown"
+
+    storms = f.get("named_storms_forecast", f.get("named_storms"))
+    if storms in (None, ""):
+        storms_text = None
+        storms_reason = (
+            str(f.get("named_storms_reason") or "")
+            or _NO_COUNT_REASON_BY_SOURCE.get(str(f.get("source") or ""), "no_count_in_source")
+        )
+    else:
+        storms_text, storms_reason = str(storms), None
+
+    return {
+        "basin": str(f.get("basin") or ""),
+        "source": str(f.get("source") or ""),
+        "forecast_season": season,
+        "category": category,
+        "issue_date": iso,
+        "issue_date_key": iso or f"undated:{reason}",
+        "issue_date_reason": reason or None,
+        "season_reason": season_reason or None,
+        "named_storms_forecast": storms_text,
+        "named_storms_reason": storms_reason,
+    }
+
+
 def store_seasonal_tc_outlooks(outlooks: list[dict]) -> int:
-    """Persist raw seasonal TC outlook dicts to the DB.
+    """Persist seasonal TC outlooks by upsert on the outlook key.
 
     Takes the list of forecast dicts produced by
     :func:`seasonal_tc_runner.collect_all` (after deduplication).
-    Returns the number of rows successfully stored.
-    Non-fatal on DB errors.
+    Returns the number of rows successfully stored. Non-fatal on DB errors.
+
+    One outlook is one row. A re-fetch of the same outlook updates the row
+    in place and keeps its original ``fetched_at`` (the first time Fred saw
+    it); the previous store keyed on the fetch time and appended a full copy
+    every run. When a re-parse of the same product yields a DIFFERENT issue
+    date — the August 2026 Atlantic update was first stored under the May
+    date — the older row for that product is superseded and deleted, and
+    the log says so: a corrected reading replaces a misread one rather than
+    sitting beside it.
     """
     if not outlooks:
         return 0
@@ -321,29 +388,80 @@ def store_seasonal_tc_outlooks(outlooks: list[dict]) -> int:
 
         con = connect()
         ensure_schema(con)
-        stored = 0
+        stored = inserted = updated = superseded = 0
         for f in outlooks:
             try:
+                row = canonical_outlook_row(f)
+                key = [row["basin"], row["source"], row["forecast_season"],
+                       row["issue_date_key"], row["category"]]
+                existed = con.execute(
+                    "SELECT COUNT(*) FROM seasonal_tc_outlooks WHERE basin = ? AND source = ? "
+                    "AND forecast_season = ? AND issue_date_key = ? AND category = ?",
+                    key,
+                ).fetchone()[0]
                 con.execute(
                     """
-                    INSERT OR REPLACE INTO seasonal_tc_outlooks
-                        (basin, source, forecast_season,
-                         named_storms_forecast, category, raw_json, fetched_at)
-                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    INSERT INTO seasonal_tc_outlooks
+                        (basin, source, forecast_season, category, issue_date,
+                         issue_date_key, issue_date_reason, season_reason,
+                         named_storms_forecast, named_storms_reason, raw_json,
+                         fetched_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())
+                    ON CONFLICT (basin, source, forecast_season, issue_date_key, category)
+                    DO UPDATE SET
+                        issue_date = excluded.issue_date,
+                        issue_date_reason = excluded.issue_date_reason,
+                        season_reason = excluded.season_reason,
+                        named_storms_forecast = excluded.named_storms_forecast,
+                        named_storms_reason = excluded.named_storms_reason,
+                        raw_json = excluded.raw_json,
+                        updated_at = now()
                     """,
                     [
-                        f.get("basin", ""),
-                        f.get("source", ""),
-                        f.get("forecast_season", f.get("season", "")),
-                        f.get("named_storms_forecast", f.get("named_storms", "")),
-                        f.get("category", f.get("forecast_type", "")),
-                        _json.dumps(f, default=str),
+                        row["basin"], row["source"], row["forecast_season"], row["category"],
+                        row["issue_date"], row["issue_date_key"], row["issue_date_reason"],
+                        row["season_reason"], row["named_storms_forecast"],
+                        row["named_storms_reason"], _json.dumps(f, default=str),
                     ],
                 )
                 stored += 1
+                if existed:
+                    updated += 1
+                else:
+                    inserted += 1
+                # One product per basin, source, season and category. A row
+                # for the same product under another issue date is the
+                # earlier misread of this document.
+                if row["issue_date"]:
+                    stale = con.execute(
+                        "SELECT issue_date_key FROM seasonal_tc_outlooks WHERE basin = ? "
+                        "AND source = ? AND forecast_season = ? AND category = ? "
+                        "AND issue_date_key <> ?",
+                        [row["basin"], row["source"], row["forecast_season"],
+                         row["category"], row["issue_date_key"]],
+                    ).fetchall()
+                    if stale:
+                        con.execute(
+                            "DELETE FROM seasonal_tc_outlooks WHERE basin = ? AND source = ? "
+                            "AND forecast_season = ? AND category = ? AND issue_date_key <> ?",
+                            [row["basin"], row["source"], row["forecast_season"],
+                             row["category"], row["issue_date_key"]],
+                        )
+                        superseded += len(stale)
+                        log.warning(
+                            "store_seasonal_tc_outlooks: %s/%s %s %s re-parsed as issued %s; "
+                            "superseded %d earlier row(s) dated %s",
+                            row["basin"], row["source"], row["forecast_season"],
+                            row["category"], row["issue_date"], len(stale),
+                            ", ".join(str(r[0]) for r in stale),
+                        )
             except Exception as row_exc:
                 log.warning("store_seasonal_tc_outlooks row error: %s", row_exc)
-        log.info("store_seasonal_tc_outlooks: stored %d / %d outlooks", stored, len(outlooks))
+        log.info(
+            "store_seasonal_tc_outlooks: stored %d / %d outlooks (%d new, %d updated in "
+            "place, %d superseded misreads deleted)",
+            stored, len(outlooks), inserted, updated, superseded,
+        )
         return stored
     except Exception as exc:
         log.warning("store_seasonal_tc_outlooks: %s", exc)

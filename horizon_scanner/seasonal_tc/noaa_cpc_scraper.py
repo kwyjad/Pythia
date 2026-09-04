@@ -76,7 +76,8 @@ class SeasonalForecast:
     def to_prompt_context(self) -> str:
         basin_label = self.basin_full or self.basin
         lines = [
-            f"## {basin_label} — {self.season_year} Seasonal Outlook (NOAA CPC, {self.forecast_type}, issued {self.issue_date})"
+            f"## {basin_label} — {self.season_year} Seasonal Outlook (NOAA CPC, {self.forecast_type}, "
+            f"issued {self.issue_date or 'date not stated'})"
         ]
         if self.summary:
             lines.append(self.summary)
@@ -114,13 +115,27 @@ class SeasonalForecast:
 # HTML fetching
 # ---------------------------------------------------------------------------
 
+#: A desktop browser UA. The 2026 run tried ten candidate URLs and reported
+#: "0 reachable" while the below-normal release existed at exactly the URL
+#: the first template generates: noaa.gov, like bom.gov.au before it, does
+#: not serve a generic bot UA. The Accept header asks for the page, not a
+#: JSON API.
 HEADERS = {
-    "User-Agent": "PythiaBot/1.0 (humanitarian forecasting research)"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 def fetch_page(url: str) -> str:
     """Fetch and return the text content of a web page."""
     resp = requests.get(url, headers=HEADERS, timeout=30)
+    if resp.status_code != 200:
+        # Name the status: "0 reachable" told nobody whether the release
+        # was missing (404) or the runner was refused (403).
+        logger.info("[noaa_cpc] HTTP %s from %s", resp.status_code, resp.url)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
     # Get just the main content text, stripping nav/footer
@@ -415,6 +430,16 @@ def _log_forecast(f: SeasonalForecast):
 # ---------------------------------------------------------------------------
 
 KNOWN_URLS = {
+    2026: {
+        # Found by search on 2026-09-04 (noaa.gov is not reachable from the
+        # build sandbox, so the pages were not read here): the May outlook
+        # said below-normal (8-14 named storms), the 6 August update kept it.
+        "ATL_initial": "https://www.noaa.gov/news-release/noaa-predicts-below-normal-2026-atlantic-hurricane-season",
+        "ATL_update": "https://www.noaa.gov/news-release/noaa-maintains-prediction-for-below-normal-atlantic-hurricane-season",
+        # The 2026 Central Pacific outlook (above-normal, 5-13 cyclones) was
+        # published on the Honolulu forecast office's site.
+        "CP": "https://www.weather.gov/hfo/hurricaneOutlook2026",
+    },
     2025: {
         "ATL_initial": "https://www.noaa.gov/news-release/noaa-predicts-above-normal-2025-atlantic-hurricane-season",
         "ATL_update": "https://www.noaa.gov/news-release/prediction-remains-on-track-for-above-normal-atlantic-hurricane-season",

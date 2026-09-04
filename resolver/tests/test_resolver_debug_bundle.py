@@ -90,9 +90,10 @@ def _make_db(path: Path) -> None:
     con.execute(
         """
         CREATE TABLE seasonal_tc_outlooks (
-            basin TEXT, source TEXT, forecast_season TEXT,
-            named_storms_forecast TEXT, category TEXT, raw_json TEXT,
-            fetched_at TIMESTAMP
+            basin TEXT, source TEXT, forecast_season TEXT, category TEXT,
+            issue_date DATE, issue_date_key TEXT, issue_date_reason TEXT,
+            season_reason TEXT, named_storms_forecast TEXT, named_storms_reason TEXT,
+            raw_json TEXT, fetched_at TIMESTAMP, updated_at TIMESTAMP
         )
         """
     )
@@ -417,10 +418,13 @@ def test_do_any_two_sources_in_the_run_contradict_each_other(tmp_path, full_run)
     )
     # Two outlooks for one basin and season sharing an issue date.
     con.executemany(
-        "INSERT INTO seasonal_tc_outlooks VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+        "INSERT INTO seasonal_tc_outlooks VALUES "
+        "(?,?,?,?,?,?,NULL,NULL,?,NULL,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
         [
-            ("NA", "TSR", "2026", "17", "May", '{"issue_date": "2026-05-20"}'),
-            ("NA", "TSR", "2026", "19", "Aug", '{"issue_date": "2026-05-20"}'),
+            ("NA", "TSR", "2026", "pre_season", "2026-05-20", "2026-05-20", "17",
+             '{"issue_date": "2026-05-20"}'),
+            ("NA", "TSR", "2026", "august_update", "2026-05-20", "2026-05-20", "19",
+             '{"issue_date": "2026-05-20"}'),
         ],
     )
     con.execute(
@@ -992,3 +996,56 @@ def test_emdat_must_be_read_when_a_key_is_configured(tmp_path, full_run):
 def test_emdat_check_is_skipped_without_a_key(tmp_path, full_run):
     checks = _checks(tmp_path, full_run["db"], full_run, "e6")
     assert checks["emdat_is_read_when_a_key_is_configured"]["verdict"] == "SKIP"
+# Group F (run 33841370196): every outlook carries a date or a reason
+# --------------------------------------------------------------------------
+
+
+def test_an_outlook_with_neither_a_date_nor_a_reason_is_a_contradiction(tmp_path, full_run):
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.executemany(
+        "INSERT INTO seasonal_tc_outlooks VALUES "
+        "(?,?,?,?,?,?,?,NULL,NULL,NULL,'{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
+        [
+            ("AUS", "BoM", "2025-26", "seasonal_outlook", "2025-10-01", "2025-10-01",
+             "month_precision_only"),
+            ("NIO", "IMD_RSMC_NewDelhi", "2026", "climatology_context", None,
+             "undated:climatology_context_has_no_issue_date",
+             "climatology_context_has_no_issue_date"),
+            ("SP", "BoM", "2025-26", "seasonal_outlook", None, "undated:", None),
+        ],
+    )
+    con.close()
+    checks = _checks(tmp_path, db, full_run, "f1")
+    check = checks["every_tc_outlook_has_a_parseable_issue_date_or_a_reason"]
+    assert check["verdict"] == "FAIL"
+    assert "1 undated with none" in check["left"]
+    assert "SP/BoM" in check["detail"]
+
+
+def test_an_undated_outlook_with_a_reason_passes(tmp_path, full_run):
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO seasonal_tc_outlooks VALUES "
+        "('NIO','IMD_RSMC_NewDelhi','2026','climatology_context',NULL,"
+        "'undated:climatology_context_has_no_issue_date',"
+        "'climatology_context_has_no_issue_date',NULL,NULL,NULL,'{}',"
+        "CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
+    )
+    con.close()
+    checks = _checks(tmp_path, db, full_run, "f2")
+    assert checks["every_tc_outlook_has_a_parseable_issue_date_or_a_reason"]["verdict"] == "PASS"
+
+
+def test_a_legacy_outlook_table_shape_fails_the_date_check(tmp_path, full_run):
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute("DROP TABLE seasonal_tc_outlooks")
+    con.execute(
+        "CREATE TABLE seasonal_tc_outlooks (basin TEXT, source TEXT, forecast_season TEXT, "
+        "named_storms_forecast TEXT, category TEXT, raw_json TEXT, fetched_at TIMESTAMP)"
+    )
+    con.close()
+    checks = _checks(tmp_path, db, full_run, "f3")
+    assert checks["every_tc_outlook_has_a_parseable_issue_date_or_a_reason"]["verdict"] == "FAIL"
