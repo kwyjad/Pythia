@@ -71,16 +71,20 @@ concurrency:
         required: false
         default: false
         type: boolean
-      diagnose_emdat:
-        description: "Also run the EM-DAT API diagnostic (read-only; needs EMDAT_API_KEY, so only CI can run it)"
+      # One slot for the whole family of read-only upstream diagnostics.
+      # GitHub caps workflow_dispatch at TEN inputs and this workflow is at the
+      # cap, so a boolean per diagnostic does not scale; a choice does. Each
+      # needs credentials only CI holds, so none can be run anywhere else.
+      diagnostics:
+        description: "Read-only upstream diagnostic to run before Phase 1 (needs CI-only credentials)"
         required: false
-        default: false
-        type: boolean
-      diagnose_acled_auth:
-        description: "Also run the ACLED OAuth diagnostic (read-only; needs the ACLED secrets, so only CI can run it)"
-        required: false
-        default: false
-        type: boolean
+        default: "none"
+        type: choice
+        options:
+          - none
+          - emdat
+          - acled_auth
+          - all
   schedule:
     # Run at 03:00 UTC on the 28th of each month.
     #
@@ -386,7 +390,7 @@ jobs:
       # (query shape vs account vs upstream) can only be settled here.
       # Read-only, exits 0, writes its verdict into the diagnostics artifact.
       - name: "Diagnose EM-DAT API (dispatch input)"
-        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.diagnose_emdat == true || inputs.diagnose_emdat == 'true') }}
+        if: ${{ inputs.diagnostics == 'emdat' || inputs.diagnostics == 'all' }}
         continue-on-error: true
         timeout-minutes: 10
         run: |
@@ -404,7 +408,7 @@ jobs:
       # settled nowhere else. Read-only, exits 0, verdict lands in the
       # diagnostics artifact.
       - name: "Diagnose ACLED OAuth (dispatch input)"
-        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.diagnose_acled_auth == true || inputs.diagnose_acled_auth == 'true') }}
+        if: ${{ inputs.diagnostics == 'acled_auth' || inputs.diagnostics == 'all' }}
         continue-on-error: true
         timeout-minutes: 10
         run: |
