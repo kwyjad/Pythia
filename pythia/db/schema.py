@@ -2253,6 +2253,12 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 forecast_issue_date DATE NOT NULL,
                 target_month        DATE NOT NULL,
                 model_version       VARCHAR,
+                -- Stamped at write time from each source's own staleness
+                -- threshold (resolver.tools.fetch_conflict_forecasts), and
+                -- re-stamped on every write so the age is current. A stale
+                -- vintage is flagged on the row, never only in a log line.
+                is_stale_vintage    BOOLEAN,
+                vintage_age_days    INTEGER,
                 created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (source, iso3, hazard_code, metric, lead_months, forecast_issue_date)
             );
@@ -2267,6 +2273,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "forecast_issue_date": "DATE",
                 "target_month": "DATE",
                 "model_version": "VARCHAR",
+                "is_stale_vintage": "BOOLEAN",
+                "vintage_age_days": "INTEGER",
                 "created_at": "TIMESTAMP",
             },
         )

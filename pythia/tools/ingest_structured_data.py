@@ -962,6 +962,12 @@ def _bulk_fetch_acled_political(
     )
 
     reset_attribution_drop_stats()
+    try:
+        from pythia.acled_political import reset_html_failure_stats
+
+        reset_html_failure_stats()
+    except Exception:  # pragma: no cover - diagnostics only
+        pass
 
     # Self-heal: wipe rows written by the pre-July-2026 fetcher, which stored
     # the same GLOBAL events under every country (iso3 filter param ignored).
@@ -1479,19 +1485,42 @@ def ingest(
             extras["total_facts"] = data.get("__pipeline_total_facts__", 0)
             extras["resolved_rows"] = data.get("__pipeline_resolved_rows__", 0)
             extras["delta_rows"] = data.get("__pipeline_delta_rows__", 0)
-        # Conflict sources: stash row count
-        if lbl in _CONFLICT_SOURCE_MAP and data:
-            extras["conflict_rows"] = data.get("__conflict_rows__", 0)
+        # Conflict sources: stash row count and what the connector found
+        # (target months, dropped country-months, duplicates), so the run
+        # summary states the vintage's actual months rather than inferring
+        # six from a gap.
+        if lbl in _CONFLICT_SOURCE_MAP:
+            extras["conflict_rows"] = data.get("__conflict_rows__", 0) if data else 0
+            try:
+                from resolver.tools.fetch_conflict_forecasts import LAST_RUN_SUMMARIES
+
+                summary = LAST_RUN_SUMMARIES.get(_CONFLICT_SOURCE_MAP[lbl])
+                if summary:
+                    extras["connector_summary"] = summary
+            except Exception:  # pragma: no cover - diagnostics only
+                pass
         # ACLED political: surface whole-country attribution drops so the
-        # run summary can flag silent per-country coverage loss.
+        # run summary can flag silent per-country coverage loss, and any
+        # call ACLED answered with a WEB PAGE — which is a connector failure,
+        # never zero events, so a run cannot report ok=N fail=0 while
+        # receiving the gateway's "Unauthorized" page.
         if lbl == "acled_political_events":
             try:
-                from pythia.acled_political import get_attribution_drop_stats
+                from pythia.acled_political import (
+                    get_attribution_drop_stats,
+                    get_html_failure_stats,
+                )
 
                 drops = get_attribution_drop_stats()
                 if drops:
                     extras["attribution_dropped_countries"] = sorted(drops)
                     extras["attribution_dropped_events"] = sum(drops.values())
+                html = get_html_failure_stats()
+                if html:
+                    extras["html_responses"] = len(html)
+                    extras["html_response_sample"] = next(iter(html.values()))
+                    diag_status = "error"
+                    diag_reason = f"html-response ({len(html)} call(s) answered with a web page)"
             except Exception:  # pragma: no cover - diagnostics only
                 pass
 

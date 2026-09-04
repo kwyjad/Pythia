@@ -43,6 +43,8 @@ on:
       - "resolver/tests/test_hs_triage_resilience_and_rerun_lists.py"
       - "resolver/tests/test_forecaster_llm_logging_inserts_row.py"
       - "resolver/tests/test_conflict_forecasts_table.py"
+      - "resolver/tests/test_conflict_forecasts_served.py"
+      - "resolver/tests/test_acled_html_response.py"
       - "resolver/tests/test_eiv_scoring.py"
       - "resolver/tests/test_risk_index_prefers_bayesmc.py"
       # The PA resolution machine's base-rate block is rendered into every
@@ -327,6 +329,8 @@ jobs:
             resolver/tests/test_hs_triage_resilience_and_rerun_lists.py \
             resolver/tests/test_forecaster_llm_logging_inserts_row.py \
             resolver/tests/test_conflict_forecasts_table.py \
+            resolver/tests/test_conflict_forecasts_served.py \
+            resolver/tests/test_acled_html_response.py \
             resolver/tests/test_eiv_scoring.py \
             resolver/tests/test_risk_index_prefers_bayesmc.py
 

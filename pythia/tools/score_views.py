@@ -143,6 +143,11 @@ def _load_views_forecast_pairs(conn) -> List[Dict]:
         question_id, horizon_m, iso3, resolved_value, metric,
         views_value, views_issue_date, views_model_version
     """
+    # This reader deliberately does NOT apply the prompt readers' served-target
+    # filter (horizon_scanner.conflict_forecasts.SERVED_TARGET_FILTER_SQL):
+    # scoring joins each forecast to the OUTCOME of its target month, so every
+    # row it wants has a target month in the past by construction. It serves
+    # nothing to a forecaster; it grades what was served.
     sql = """
         WITH ranked_views AS (
             SELECT

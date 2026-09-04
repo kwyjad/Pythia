@@ -24,6 +24,8 @@ _ENV_VARS = [
 def _reload(monkeypatch, **env):
     for name in _ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+    # The cross-process token cache must not leak a token between tests.
+    monkeypatch.setenv("ACLED_TOKEN_CACHE_PATH", "")
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     module = importlib.reload(acled_auth_module)

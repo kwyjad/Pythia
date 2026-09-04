@@ -550,32 +550,22 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
                 "params_keys": sorted(params.keys()),
             },
         )
-        if status != 200:
-            try:
-                body_snippet = resp.text[:500]
-            except Exception:  # pragma: no cover - defensive fallback
-                body_snippet = "<unreadable response>"
-            LOG.error(
-                "ACLED HTTP error",
-                extra={
-                    "status": status,
-                    "url": f"{safe_base_url}?...",
-                    "body_snippet": body_snippet,
-                },
-            )
-            raise RuntimeError(f"ACLED read failed: HTTP {status}")
+        # One error path for every ACLED response (acled_auth.parse_json_response):
+        # an HTML body is a named failure whatever the status says, and a
+        # non-200 or a non-JSON body carries describe_response() — status,
+        # content type, final URL, redirects and a redacted snippet — because
+        # a bare "HTTP 401" or "Expecting value" is four different faults.
         try:
-            payload = resp.json() or {}
-        except ValueError as exc:  # pragma: no cover - JSON decode errors
-            try:
-                body_snippet = resp.text[:500]
-            except Exception:  # pragma: no cover - defensive
-                body_snippet = "<unreadable response>"
-            LOG.error(
-                "ACLED JSON decode error",
-                extra={"status": status, "url": f"{safe_base_url}?...", "body_snippet": body_snippet},
-            )
-            raise RuntimeError("ACLED payload was not valid JSON") from exc
+            payload = acled_auth.parse_json_response(resp, what="event read") or {}
+        except acled_auth.AcledHtmlResponse as exc:
+            diagnostics_meta["html_response"] = True
+            diagnostics_meta["error"] = str(exc)
+            LOG.error("ACLED served a web page instead of the event feed: %s", exc)
+            raise
+        except acled_auth.AcledResponseError as exc:
+            diagnostics_meta["error"] = str(exc)
+            LOG.error("ACLED HTTP error: %s", exc)
+            raise RuntimeError(f"ACLED read failed: HTTP {status}: {exc}") from exc
         if not isinstance(payload, dict):
             LOG.error(
                 "ACLED payload unexpected type",
@@ -1337,23 +1327,18 @@ class ACLEDClient:
                     response.raise_for_status()
                 time.sleep(wait)
                 continue
-            if response.status_code != 200:
-                snippet = ""
-                try:
-                    snippet = response.text[:500]
-                except Exception:  # pragma: no cover - defensive
-                    snippet = "<unreadable response>"
-                self.logger.error(
-                    "ACLED HTTP error",
-                    extra={"status": response.status_code, "url": safe_url, "body_snippet": snippet},
-                )
-                raise RuntimeError(f"ACLED read failed: HTTP {response.status_code}")
-            response.raise_for_status()
+            # The single ACLED error path: HTML is a named failure whatever
+            # the status, and every other refusal carries describe_response().
             try:
-                payload = response.json()
-            except ValueError as exc:  # pragma: no cover - requests already validated status
-                self.logger.debug("ACLED response was not valid JSON", extra={"error": str(exc)})
-                raise RuntimeError("ACLED response was not valid JSON") from exc
+                payload = acled_auth.parse_json_response(response, what="monthly-fatalities read")
+            except acled_auth.AcledHtmlResponse as exc:
+                self.logger.error("ACLED served a web page instead of the event feed: %s", exc)
+                raise
+            except acled_auth.AcledResponseError as exc:
+                self.logger.error("ACLED HTTP error: %s", exc)
+                raise RuntimeError(f"ACLED read failed: {exc}") from exc
+            if not isinstance(payload, dict):
+                raise RuntimeError("ACLED payload missing expected fields (data/results/count)")
             if payload.get("status") not in (200, "200", None):
                 self.logger.error(
                     "ACLED API returned non-200 status in JSON",

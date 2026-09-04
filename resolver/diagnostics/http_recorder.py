@@ -250,6 +250,10 @@ def _record(
     else:
         response_bytes = len(content) if content is not None else None
 
+    try:
+        content_type = str((getattr(response, "headers", None) or {}).get("Content-Type", "") or "")
+    except Exception:  # pragma: no cover - defensive
+        content_type = ""
     run_log.record(
         run_log.STREAM_HTTP,
         {
@@ -258,6 +262,11 @@ def _record(
             "url": safe_url,
             "request_body": _body_shape(body),
             "status": status,
+            # The content type travels with EVERY call, not only the envelope
+            # (which is recorded once per route): an ACLED call answered
+            # with text/html is a connector failure, and the bundle's check
+            # needs to see each one.
+            "content_type": content_type[:80],
             "elapsed_ms": round(elapsed_ms, 1),
             "response_bytes": response_bytes,
             "streamed": streamed,
