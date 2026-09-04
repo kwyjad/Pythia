@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from resolver.hazard_resolution import candidates as cand_mod
 from resolver.hazard_resolution import cell_ledger
+from resolver.hazard_resolution import detect as detect_mod
 from resolver.hazard_resolution import emdat as emdat_mod
 from resolver.hazard_resolution import extract as extract_mod
 from resolver.hazard_resolution import figures as figures_mod
@@ -433,6 +434,13 @@ def resolve_triggered_cells(
             )
             if outcome == res_mod.WRITE_FROZEN_SKIP:
                 run.frozen_skipped += 1
+            if outcome == res_mod.WRITE_PENDING:
+                # No row before the freeze deadline: say so on the trigger row.
+                detect_mod.record_no_row_reason(
+                    con, hazard=hazard, iso3=iso3, ym=ym,
+                    reason=cell_ledger.REASON_PENDING,
+                    note="no candidate figure yet; the freeze deadline has not passed",
+                )
             _ledger_cell(
                 iso3=iso3, ym=ym, hazard=hazard, verdict=verdict,
                 outcome=outcome, unavailable=unavailable,

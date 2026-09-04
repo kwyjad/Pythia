@@ -51,6 +51,13 @@ REASON_INCONCLUSIVE = "indicator_inconclusive"
 #: country — every answer was inferred from absence. An alerting feed that
 #: never monitored a country has not said it is quiet, so no zero.
 REASON_NO_COVERAGE = "indicator_no_coverage"
+#: The indicators were read and answered, but too few feeds answered for a
+#: zero to rest on their silence (``drought.indicators.min_answered_for_zero``).
+#: One surviving feed is not evidence of quiet.
+REASON_TOO_FEW_FEEDS = "indicator_too_few_feeds_for_zero"
+#: The month has not ended. Nothing can have observed it in full, so a
+#: drought verdict for it is PENDING whatever the feeds say today.
+REASON_MONTH_IN_PROGRESS = "month_in_progress"
 #: The cell already carries a frozen answer; this run's verdict was audited
 #: to haz_revisions and the stored row stands.
 REASON_FROZEN = "frozen_row_unchanged"
@@ -59,6 +66,14 @@ REASON_EXCEPTION = "cell_raised"
 #: The sweep found reports, so the cell became triggered and the ladder owns
 #: it — this row is the sweep's half of the story, not a missing answer.
 REASON_FLIPPED = "flipped_to_triggered_by_sweep"
+
+#: Every reason a cell may carry no row, so a reader (the debug bundle, a
+#: contradiction check) can tell a known silence from an unexplained one.
+NO_ROW_REASONS = frozenset({
+    REASON_PENDING, REASON_SWEEP_INCONCLUSIVE, REASON_COVERAGE_GATE,
+    REASON_INCONCLUSIVE, REASON_NO_COVERAGE, REASON_TOO_FEW_FEEDS,
+    REASON_MONTH_IN_PROGRESS, REASON_FROZEN, REASON_EXCEPTION, REASON_FLIPPED,
+})
 
 #: Stage names, so a reader can tell which half of the machine spoke.
 STAGE_SWEEP = "sweep"

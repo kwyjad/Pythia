@@ -154,6 +154,9 @@ class BaseRateRun:
     kind: str
     rows_written: int = 0
     rows_skipped_thin: int = 0
+    #: (iso3, calendar month) cells whose every trigger row was UNASSESSED
+    #: (an inconclusive drought verdict) and so had no denominator at all.
+    cells_unassessed: int = 0
     hazards: dict[str, int] = field(default_factory=dict)
     windows: dict[str, str] = field(default_factory=dict)
 
@@ -188,26 +191,48 @@ def compute_occurrence(
         # assessed — i.e. it has a trigger row. The final partial year is
         # handled by the same rule, with no special case: its unassessed
         # months simply have no rows.
+        # A trigger row whose verdict was INCONCLUSIVE (the drought gate
+        # could not be read, or too few feeds answered) is not an assessed
+        # quiet year: the machine did not decide the cell. Counting it would
+        # manufacture a near-zero drought occurrence rate out of a decade
+        # the indicators never covered — which is exactly what the 2017-2025
+        # drought backcast did before Sept 2026. Such rows carry
+        # trigger_detail_json.assessed = false and are left out here.
         rows = con.execute(
             """
             SELECT iso3, month,
                    COUNT(DISTINCT year) AS n_years,
-                   COUNT(DISTINCT CASE WHEN triggered THEN year END) AS n_triggered
-            FROM haz_triggers
-            WHERE hazard = ?
-              AND year >= ?
-              AND (year < ? OR (year = ? AND month <= ?))
+                   COUNT(DISTINCT CASE WHEN triggered THEN year END) AS n_triggered,
+                   COUNT(DISTINCT CASE WHEN NOT assessed THEN year END) AS n_unassessed
+            FROM (
+                SELECT iso3, month, year, triggered,
+                       COALESCE(
+                           NOT (trigger_detail_json LIKE '%"assessed": false%'),
+                           TRUE
+                       ) AS assessed
+                FROM haz_triggers
+                WHERE hazard = ?
+                  AND year >= ?
+                  AND (year < ? OR (year = ? AND month <= ?))
+            )
             GROUP BY iso3, month
             ORDER BY iso3, month
             """,
             [hazard, first_year, last_year, last_year, last_month],
         ).fetchall()
+        rows = [
+            (iso3, month, int(n_years) - int(n_unassessed), n_triggered)
+            for iso3, month, n_years, n_triggered, n_unassessed in rows
+        ]
+        run.cells_unassessed += sum(
+            1 for _iso3, _month, n_years, _n in rows if int(n_years) <= 0
+        )
 
         written = 0
         skipped_before = run.rows_skipped_thin
         payload: list[list[Any]] = []
         for iso3, month, n_years, n_triggered in rows:
-            if int(n_years) < min_years:
+            if int(n_years) <= 0 or int(n_years) < min_years:
                 run.rows_skipped_thin += 1
                 continue
             payload.append(

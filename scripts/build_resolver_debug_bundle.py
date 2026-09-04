@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dt
 import io
 import json
 import os
@@ -1013,7 +1014,7 @@ class BundleBuilder:
                    t.evidence_of_absence_json IS NOT NULL AS has_absence_evidence,
                    r.status, r.value, r.rule_fired, r.flagged, r.provisional,
                    r.frozen_at IS NOT NULL AS frozen,
-                   c.n_candidates, c.sources
+                   c.n_candidates, c.sources, t.trigger_detail_json
             FROM haz_triggers t
             LEFT JOIN haz_resolutions r
               ON r.iso3 = t.iso3 AND r.year = t.year
@@ -1032,6 +1033,11 @@ class BundleBuilder:
         if result is not None:
             for row in result[1]:
                 key = (str(row[0]), str(row[1]), str(row[2]))
+                # The trigger row itself says why a cell has no resolution
+                # row (drought stamps it at decision time; the sweep and
+                # the ladder stamp it when they write nothing) and whether
+                # the cell counts as assessed at all.
+                db_reason, assessed = _no_row_reason_from_detail(row[15])
                 merged[key] = {
                     "iso3": row[0], "hazard": row[1], "ym": row[2],
                     "triggered": row[3], "trigger_source": row[4], "run_type": row[5],
@@ -1039,9 +1045,10 @@ class BundleBuilder:
                     "rule_fired": row[9], "flagged": row[10], "provisional": row[11],
                     "frozen": row[12], "n_candidates": row[13] or 0,
                     "candidate_sources": row[14] or "",
-                    "stage": "", "write_outcome": "", "reason_code": "",
+                    "stage": "", "write_outcome": "",
+                    "reason_code": db_reason if row[7] is None else "",
                     "answering_rung": "", "rungs_readable": "", "rungs_unavailable": "",
-                    "extraction": "", "detail": "",
+                    "extraction": "", "detail": "", "assessed": assessed,
                 }
 
         stream = self._stream_file(run_log.STREAM_CELLS)
@@ -1061,7 +1068,7 @@ class BundleBuilder:
                     "frozen": None, "n_candidates": 0, "candidate_sources": "",
                     "stage": "", "write_outcome": "", "reason_code": "",
                     "answering_rung": "", "rungs_readable": "", "rungs_unavailable": "",
-                    "extraction": "", "detail": "",
+                    "extraction": "", "detail": "", "assessed": None,
                 },
             )
             entry["stage"] = record.get("stage") or entry["stage"]
@@ -1081,9 +1088,16 @@ class BundleBuilder:
 
         # A cell assessed with no row and no recorded reason is itself a
         # finding: it means some path writes nothing and says nothing.
+        unexplained = 0
         for entry in merged.values():
             if entry["status"] is None and not entry["reason_code"]:
                 entry["reason_code"] = "unexplained_no_row"
+                unexplained += 1
+        self.cell_ledger_summary = {
+            "rows": len(merged),
+            "unexplained_no_row": unexplained,
+            "no_row": sum(1 for e in merged.values() if e["status"] is None),
+        }
 
         header = [
             "iso3", "hazard", "ym", "stage", "triggered", "trigger_source",
@@ -1091,6 +1105,7 @@ class BundleBuilder:
             "provisional", "frozen", "write_outcome", "reason_code",
             "answering_rung", "rungs_readable", "rungs_unavailable",
             "n_candidates", "candidate_sources", "extraction", "detail", "run_type",
+            "assessed",
         ]
         rows = [[entry.get(col) for col in header] for _, entry in sorted(merged.items())]
         write_csv(
@@ -1100,6 +1115,8 @@ class BundleBuilder:
                 "status blank = no row in haz_resolutions; reason_code says why.\n"
                 "reason_code=unexplained_no_row means neither the database nor the\n"
                 "run stream accounted for the cell — that is a bug, not a silence.\n"
+                "assessed=False means the machine did not decide the cell (an\n"
+                "inconclusive drought gate); such rows are outside every base rate.\n"
                 f"Rows from the database: {len(result[1]) if result else 0}; "
                 f"records from the run stream: {n_stream}."
             ),
@@ -1389,6 +1406,11 @@ class BundleBuilder:
             self._check_acled_html_responses,
             self._check_no_past_target_month_served,
             self._check_figures_inside_their_document_window,
+            self._check_no_unexplained_no_row,
+            self._check_drought_severity_base_rates,
+            self._check_nmme_read_when_table_covers_month,
+            self._check_no_zero_rests_on_one_feed,
+            self._check_no_drought_verdict_for_a_month_in_progress,
         ):
             try:
                 check()
@@ -1921,6 +1943,226 @@ class BundleBuilder:
             )
         write_text(path, "\n".join(lines) + "\n" + counts_meaning)
 
+    def _check_no_unexplained_no_row(self) -> None:
+        """Every assessed cell with no resolution row names its reason (D1).
+
+        Run 33841370196 carried 29,136 cells labelled unexplained_no_row —
+        28,728 of them drought, every year 2017 to 2025 — because the
+        drought pass wrote its reason only to the run stream, which the
+        nightly backcast never enables. The reason now lives on the trigger
+        row itself, so this must be zero from a database alone.
+        """
+
+        name = "no_assessed_cell_lacks_a_reason_for_having_no_row"
+        summary = getattr(self, "cell_ledger_summary", None)
+        if not summary or not summary.get("rows"):
+            return self._check(name, "SKIP", "", "", "no cell ledger built")
+        unexplained = int(summary.get("unexplained_no_row") or 0)
+        self._check(
+            name, "FAIL" if unexplained else "PASS",
+            f"{unexplained} of {summary.get('no_row')} no-row cells unexplained",
+            "0",
+            "A trigger row with no resolution row must carry "
+            "trigger_detail_json.no_row_reason (or the run stream must name it). "
+            "unexplained_no_row is a bug in whichever path wrote nothing silently.",
+        )
+
+    def _check_drought_severity_base_rates(self) -> None:
+        """Drought severity base rates exist wherever a frozen drought value does (D1).
+
+        haz_base_rates_severity held 307 rows for FL and TC and none for
+        DR, because the drought backcast produced no resolutions at all.
+        The severity table is a pure derivation of frozen RESOLVED_VALUE
+        rows, so every country with one must have a DR row; and the share
+        of the assessed DR universe with one is printed, because the
+        acceptance criterion is a substantial share, not one row.
+        """
+
+        name = "drought_severity_base_rates_exist"
+        needed = {"haz_base_rates_severity", "haz_resolutions", "haz_triggers"}
+        if not needed <= self.tables():
+            return self._check(name, "SKIP", "", "", "machine tables absent")
+        severity = self.query(
+            "SELECT COUNT(DISTINCT iso3) FROM haz_base_rates_severity WHERE hazard = 'DR'"
+        )
+        frozen_values = self.query(
+            """
+            SELECT COUNT(DISTINCT iso3) FROM haz_resolutions
+            WHERE hazard = 'DR' AND status = 'RESOLVED_VALUE' AND value IS NOT NULL
+              AND COALESCE(provisional, FALSE) = FALSE
+            """
+        )
+        universe = self.query(
+            "SELECT COUNT(DISTINCT iso3) FROM haz_triggers WHERE hazard = 'DR'"
+        )
+        n_sev = int((severity or (None, [[0]]))[1][0][0] or 0)
+        n_val = int((frozen_values or (None, [[0]]))[1][0][0] or 0)
+        n_uni = int((universe or (None, [[0]]))[1][0][0] or 0)
+        if not n_uni:
+            return self._check(name, "SKIP", "", "", "no drought cells assessed")
+        share = n_sev / n_uni
+        verdict = "PASS" if n_sev > 0 and n_sev >= n_val else "FAIL"
+        self._check(
+            name, verdict,
+            f"{n_sev} DR severity rows ({share:.0%} of {n_uni} assessed DR countries)",
+            f">= {n_val} (countries holding a frozen drought value) and > 0",
+            "Severity quantiles admit FROZEN resolved values only. Zero DR rows "
+            "beside assessed DR cells means the drought path resolved nothing the "
+            "backcast could freeze — check the indicator feeds' reach into the "
+            "backcast window (asap_hotspots is the only one that reaches 2016).",
+        )
+
+    def _check_nmme_read_when_table_covers_month(self) -> None:
+        """The NMME indicator is read for every month seasonal_forecasts covers (D2).
+
+        ingest_nmme merged 2,408 rows and the drought pass then logged
+        "seasonal_forecasts holds no usable rows" for every month. A month
+        some vintage forecasts (issue + lead = month) must have an
+        nmme_precip_anomaly snapshot in the indicator cache.
+        """
+
+        name = "nmme_indicator_read_for_every_month_seasonal_forecasts_covers"
+        needed = {"seasonal_forecasts", "haz_raw_drought_indicators", "haz_triggers"}
+        if not needed <= self.tables():
+            return self._check(name, "SKIP", "", "", "a table is absent")
+        months = self.query(
+            """
+            SELECT DISTINCT printf('%04d-%02d', year, month) AS ym
+            FROM haz_triggers WHERE hazard = 'DR'
+            ORDER BY ym DESC LIMIT 3
+            """
+        )
+        assessed = [str(r[0]) for r in (months[1] if months else [])]
+        if not assessed:
+            return self._check(name, "SKIP", "", "", "no drought months assessed")
+        vintages = self.query(
+            """
+            SELECT DISTINCT substr(CAST(forecast_issue_date AS VARCHAR), 1, 7),
+                   lead_months
+            FROM seasonal_forecasts WHERE variable = 'prate'
+            """
+        )
+        covered: set[str] = set()
+        for issue, lead in (vintages[1] if vintages else []):
+            try:
+                year, month = (int(p) for p in str(issue).split("-"))
+                index = year * 12 + month - 1 + int(lead)
+                covered.add(f"{index // 12:04d}-{index % 12 + 1:02d}")
+            except (TypeError, ValueError):
+                continue
+        cached = self.query(
+            """
+            SELECT DISTINCT ym FROM haz_raw_drought_indicators
+            WHERE payload_json LIKE '%"name":"nmme_precip_anomaly"%'
+               OR payload_json LIKE '%"name": "nmme_precip_anomaly"%'
+            """
+        )
+        have = {str(r[0]) for r in (cached[1] if cached else [])}
+        due = [ym for ym in assessed if ym in covered]
+        missing = [ym for ym in due if ym not in have]
+        if not due:
+            return self._check(
+                name, "SKIP", "", "",
+                f"seasonal_forecasts forecasts none of the assessed months {assessed}",
+            )
+        self._check(
+            name, "FAIL" if missing else "PASS",
+            f"{len(due) - len(missing)} of {len(due)} covered months read",
+            f"{len(due)} ({due})",
+            "Missing: " + (", ".join(missing) or "none") + ". A month a vintage "
+            "forecasts (issue + lead_months) must yield an nmme_precip_anomaly "
+            "snapshot; a miss means the lookup, not the ingest, is broken.",
+        )
+
+    def _check_no_zero_rests_on_one_feed(self) -> None:
+        """No drought zero rests on fewer feeds than the rulebook demands (D3).
+
+        159 provisional zeros a month were written on the word of the one
+        feed of three that answered. A zero on evidence of absence must
+        carry at least min_answered_for_zero answering readings in its
+        provenance; a pre-fix row carries the readings and no count, so
+        the count is taken from the readings.
+        """
+
+        name = "no_drought_zero_rests_on_fewer_feeds_than_the_rulebook_demands"
+        if "haz_resolutions" not in self.tables():
+            return self._check(name, "SKIP", "", "", "haz_resolutions absent")
+        try:
+            from resolver.hazard_resolution.rulebook import load_rulebook
+
+            floor = int(load_rulebook().get("drought.indicators.min_answered_for_zero"))
+        except Exception as exc:  # noqa: BLE001
+            return self._check(name, "SKIP", "", "", f"rulebook unavailable: {exc}")
+        rows = self.query(
+            """
+            SELECT iso3, printf('%04d-%02d', year, month), provenance_json
+            FROM haz_resolutions
+            WHERE hazard = 'DR' AND status = 'RESOLVED_ZERO'
+              AND rule_fired = 'drought_zero:no_indicator_signal+no_ipc_deterioration'
+            """
+        )
+        offenders: list[str] = []
+        checked = 0
+        for iso3, ym, provenance_json in (rows[1] if rows else []):
+            checked += 1
+            try:
+                provenance = json.loads(provenance_json or "{}")
+            except (TypeError, ValueError):
+                provenance = {}
+            decision = provenance.get("decision") or {}
+            if decision.get("delta") is not None:
+                # Both IPC analyses were read: the zero rests on IPC too.
+                continue
+            indicators = decision.get("indicators") or {}
+            answered = indicators.get("answered_count")
+            if answered is None:
+                answered = sum(
+                    1 for r in (indicators.get("readings") or [])
+                    if isinstance(r, dict) and r.get("state") in ("drought", "no_drought")
+                )
+            if int(answered or 0) < floor:
+                offenders.append(f"{iso3}/{ym} ({answered} feed(s))")
+        if not checked:
+            return self._check(name, "SKIP", "", "", "no drought zeros on absence")
+        self._check(
+            name, "FAIL" if offenders else "PASS",
+            f"{len(offenders)} of {checked} absence zeros below the floor",
+            f"0 (floor {floor})",
+            "; ".join(offenders[:20]) + ("…" if len(offenders) > 20 else "")
+            if offenders else "Every absence zero rests on enough answering feeds.",
+        )
+
+    def _check_no_drought_verdict_for_a_month_in_progress(self) -> None:
+        """No drought resolution exists for a month that has not ended (D4).
+
+        The 2026-09 pass wrote 159 zeros on 4 September. Drought has no
+        detector coverage gate, so the month rule is the gate: a month
+        still in progress on the day this bundle is built may carry no
+        drought row at all.
+        """
+
+        name = "no_drought_resolution_for_a_month_still_in_progress"
+        if "haz_resolutions" not in self.tables():
+            return self._check(name, "SKIP", "", "", "haz_resolutions absent")
+        today = dt.date.today()
+        rows = self.query(
+            """
+            SELECT printf('%04d-%02d', year, month) AS ym, COUNT(*)
+            FROM haz_resolutions
+            WHERE hazard = 'DR' AND (year > ? OR (year = ? AND month >= ?))
+            GROUP BY ym ORDER BY ym
+            """,
+            [today.year, today.year, today.month],
+        )
+        found = [(str(r[0]), int(r[1])) for r in (rows[1] if rows else [])]
+        self._check(
+            name, "FAIL" if found else "PASS",
+            f"{sum(n for _, n in found)} drought rows in months at or after {today:%Y-%m}",
+            "0",
+            "; ".join(f"{ym}: {n}" for ym, n in found)
+            or "No drought row for a month that has not ended.",
+        )
+
     # -- README + manifest --------------------------------------------------
 
     def build_readme(self, manifest: dict[str, Any]) -> None:
@@ -2006,6 +2248,11 @@ class BundleBuilder:
             "  covered the month, so an ingestion gap must not read as quiet.",
             "- `indicator_inconclusive` — a drought indicator was unreadable.",
             "- `cell_raised` — the walk threw. A re-run retries exactly this cell.",
+            "- `indicator_inconclusive` — a drought indicator feed could not be read.",
+            "- `indicator_no_coverage` — no feed carried a reading for the country.",
+            "- `indicator_too_few_feeds_for_zero` — feeds answered, but too few for a",
+            "  zero to rest on their silence (drought.indicators.min_answered_for_zero).",
+            "- `month_in_progress` — the month had not ended when the pass ran.",
             "- `unexplained_no_row` — nothing accounted for the cell. That is a bug.",
             "",
             "`hazard/figures_ledger.csv` carries every extracted figure and its",
@@ -2046,6 +2293,22 @@ def _rows_written(record: dict[str, Any]) -> int:
         if value:
             return value
     return 0
+
+
+def _no_row_reason_from_detail(detail_json: Any) -> tuple[str, Any]:
+    """``(no_row_reason, assessed)`` from a trigger row's detail JSON."""
+
+    if not detail_json:
+        return "", None
+    try:
+        detail = json.loads(detail_json)
+    except (TypeError, ValueError):
+        return "", None
+    if not isinstance(detail, dict):
+        return "", None
+    reason = str(detail.get("no_row_reason") or "")
+    assessed = detail.get("assessed")
+    return reason, (assessed if isinstance(assessed, bool) else None)
 
 
 def _deep_int(payload: Any, key: str) -> int | None:

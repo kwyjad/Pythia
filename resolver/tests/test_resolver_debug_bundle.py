@@ -693,3 +693,181 @@ def test_a_conflict_forecast_reader_never_serves_a_past_target_month(tmp_path, f
     check = checks["no_conflict_forecast_served_has_a_target_month_in_the_past"]
     assert check["verdict"] == "PASS"
     assert "target_month" in check["detail"]
+
+
+# --------------------------------------------------------------------------
+# Group D (run 33841370196): the drought path's contradiction checks
+# --------------------------------------------------------------------------
+
+
+def _checks(tmp_path, db, full_run, sub="d"):
+    _out, manifest = _build(tmp_path / sub, db_path=db,
+                            diagnostics_dir=full_run["diagnostics"])
+    return {c["name"]: c for c in manifest["checks"]}
+
+
+def test_a_no_row_cell_with_a_reason_on_its_trigger_row_is_explained(tmp_path, full_run):
+    """D1: 28,728 drought cells read unexplained_no_row because the reason
+    lived only in the run stream, which the backcast never enables. The
+    trigger row now carries it, so a bundle built from the DB alone knows."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "UPDATE haz_triggers SET trigger_detail_json = ? WHERE iso3 = 'TON'",
+        [json.dumps({"no_row_reason": "sweep_inconclusive", "no_row_note": "HTTP 503"})],
+    )
+    con.execute(
+        "INSERT INTO haz_triggers VALUES ('SOM', 2024, 3, 'DR', FALSE, 'none', ?, "
+        "NULL, 'backcast', CURRENT_TIMESTAMP)",
+        [json.dumps({"no_row_reason": "indicator_inconclusive", "assessed": False})],
+    )
+    con.close()
+    # No run log at all: the DB is the only account.
+    out, manifest = _build(tmp_path, db_path=db, diagnostics_dir=full_run["diagnostics"])
+    with zipfile.ZipFile(out) as zf:
+        ledger = zf.read("hazard/cell_ledger.csv").decode()
+    rows = {l.split(",")[0]: l for l in ledger.splitlines() if l and not l.startswith("#")}
+    assert "sweep_inconclusive" in rows["TON"]
+    assert "indicator_inconclusive" in rows["SOM"] and "False" in rows["SOM"]
+    # VNM has a trigger row, no resolution and no reason: the one bug left.
+    assert "unexplained_no_row" in rows["VNM"]
+    checks = {c["name"]: c for c in manifest["checks"]}
+    assert checks["no_assessed_cell_lacks_a_reason_for_having_no_row"]["verdict"] == "FAIL"
+    assert checks["no_assessed_cell_lacks_a_reason_for_having_no_row"]["left"].startswith("1 of")
+
+    con = duckdb.connect(str(db))
+    con.execute(
+        "UPDATE haz_triggers SET trigger_detail_json = ? WHERE iso3 = 'VNM'",
+        [json.dumps({"no_row_reason": "pending_before_freeze"})],
+    )
+    con.close()
+    checks = _checks(tmp_path, db, full_run, "again")
+    assert checks["no_assessed_cell_lacks_a_reason_for_having_no_row"]["verdict"] == "PASS"
+
+
+def test_drought_severity_base_rates_must_exist_beside_assessed_drought_cells(tmp_path, full_run):
+    """D1: 307 severity rows for FL and TC and not one for DR."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "CREATE TABLE haz_base_rates_severity (iso3 TEXT, hazard TEXT, q10 DOUBLE, "
+        "q25 DOUBLE, q50 DOUBLE, q75 DOUBLE, q90 DOUBLE, n_events INTEGER)"
+    )
+    con.execute(
+        "INSERT INTO haz_triggers VALUES ('SOM', 2024, 3, 'DR', TRUE, 'drought_indicators', "
+        "'{}', NULL, 'backcast', CURRENT_TIMESTAMP)"
+    )
+    con.execute(
+        "INSERT INTO haz_resolutions VALUES ('SOM', 2024, 3, 'DR', 'RESOLVED_VALUE', "
+        "140000.0, '{}', 'drought:ipc_phase3plus_delta', FALSE, FALSE, 'backcast', "
+        "TIMESTAMP '2024-05-30', CURRENT_TIMESTAMP)"
+    )
+    con.close()
+    checks = _checks(tmp_path, db, full_run)
+    check = checks["drought_severity_base_rates_exist"]
+    assert check["verdict"] == "FAIL"
+    assert "0 DR severity rows" in check["left"]
+
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO haz_base_rates_severity VALUES ('SOM', 'DR', 1, 2, 3, 4, 5, 1)"
+    )
+    con.close()
+    checks = _checks(tmp_path, db, full_run, "again")
+    assert checks["drought_severity_base_rates_exist"]["verdict"] == "PASS"
+
+
+def test_nmme_must_be_read_for_a_month_seasonal_forecasts_covers(tmp_path, full_run):
+    """D2: 2,408 NMME rows merged, "no usable rows" logged for every month."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "CREATE TABLE seasonal_forecasts (iso3 TEXT, variable TEXT, lead_months INTEGER, "
+        "anomaly_value DOUBLE, forecast_issue_date DATE)"
+    )
+    con.execute(
+        "INSERT INTO seasonal_forecasts VALUES ('SOM', 'prate', 1, -1.2, DATE '2026-07-08')"
+    )
+    con.execute(
+        "CREATE TABLE haz_raw_drought_indicators (record_id TEXT, iso3 TEXT, ym TEXT, "
+        "hazard TEXT, payload_json TEXT)"
+    )
+    con.execute(
+        "INSERT INTO haz_triggers VALUES ('SOM', 2026, 8, 'DR', FALSE, 'none', "
+        "'{}', NULL, 'live', CURRENT_TIMESTAMP)"
+    )
+    con.close()
+    checks = _checks(tmp_path, db, full_run)
+    check = checks["nmme_indicator_read_for_every_month_seasonal_forecasts_covers"]
+    assert check["verdict"] == "FAIL"
+    assert "2026-08" in check["detail"]
+
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO haz_raw_drought_indicators VALUES ('nmme_precip_anomaly-2026-08', NULL, "
+        "'2026-08', 'DR', '{\"name\":\"nmme_precip_anomaly\",\"values\":{\"SOM\":-1.2}}')"
+    )
+    con.close()
+    checks = _checks(tmp_path, db, full_run, "again")
+    assert checks["nmme_indicator_read_for_every_month_seasonal_forecasts_covers"]["verdict"] == "PASS"
+
+
+def test_a_drought_zero_on_one_feed_is_a_contradiction(tmp_path, full_run):
+    """D3: 159 zeros a month rested on the one feed of three that answered."""
+
+    db = full_run["db"]
+    one_feed = json.dumps({"decision": {"delta": None, "indicators": {"readings": [
+        {"name": "asap", "state": "unavailable"},
+        {"name": "hdx_agricultural_stress", "state": "no_drought"},
+        {"name": "nmme_precip_anomaly", "state": "unavailable"},
+    ]}}})
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO haz_resolutions VALUES ('SOM', 2026, 8, 'DR', 'RESOLVED_ZERO', 0.0, ?, "
+        "'drought_zero:no_indicator_signal+no_ipc_deterioration', FALSE, TRUE, 'live', "
+        "TIMESTAMP '2026-10-30', CURRENT_TIMESTAMP)",
+        [one_feed],
+    )
+    con.close()
+    checks = _checks(tmp_path, db, full_run)
+    check = checks["no_drought_zero_rests_on_fewer_feeds_than_the_rulebook_demands"]
+    assert check["verdict"] == "FAIL"
+    assert "SOM/2026-08 (1 feed(s))" in check["detail"]
+
+    two_feeds = json.dumps({"decision": {"delta": None, "indicators": {
+        "answered_count": 2, "readings": []}}})
+    con = duckdb.connect(str(db))
+    con.execute("UPDATE haz_resolutions SET provenance_json = ? WHERE hazard = 'DR'", [two_feeds])
+    con.close()
+    checks = _checks(tmp_path, db, full_run, "again")
+    assert checks["no_drought_zero_rests_on_fewer_feeds_than_the_rulebook_demands"]["verdict"] == "PASS"
+
+
+def test_no_drought_row_may_exist_for_a_month_still_in_progress(tmp_path, full_run):
+    """D4: the 2026-09 pass wrote 159 zeros on 4 September."""
+
+    import datetime as dt
+
+    db = full_run["db"]
+    today = dt.date.today()
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO haz_resolutions VALUES ('SOM', ?, ?, 'DR', 'RESOLVED_ZERO', 0.0, '{}', "
+        "'drought_zero:no_indicator_signal+no_ipc_deterioration', FALSE, TRUE, 'live', "
+        "NULL, CURRENT_TIMESTAMP)",
+        [today.year, today.month],
+    )
+    con.close()
+    checks = _checks(tmp_path, db, full_run)
+    check = checks["no_drought_resolution_for_a_month_still_in_progress"]
+    assert check["verdict"] == "FAIL"
+    assert f"{today:%Y-%m}: 1" in check["detail"]
+
+    con = duckdb.connect(str(db))
+    con.execute("DELETE FROM haz_resolutions WHERE hazard = 'DR'")
+    con.close()
+    assert _checks(tmp_path, db, full_run, "again")[
+        "no_drought_resolution_for_a_month_still_in_progress"]["verdict"] == "PASS"

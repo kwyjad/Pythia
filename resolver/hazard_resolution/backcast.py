@@ -168,12 +168,15 @@ def check_backcastable(hazard_name: str, rulebook: Rulebook) -> BackcastableChec
 
         # An HTTP feed serving only a "latest" snapshot cannot speak for a
         # past month: it is stamped with its RETRIEVAL month and correctly
-        # falls outside the observation-age window.
+        # falls outside the observation-age window. A feed declared as a
+        # time series (every record dated — the ASAP hotspot archive) is
+        # parsed into one snapshot per month and CAN speak for the past.
         undated = [
             str(entry.get("name"))
             for entry in entries
             if str(entry.get("provider")) != "pythia_table"
             and _addresses(entry)
+            and not bool(entry.get("time_series"))
             and not any(
                 token in address
                 for address in _addresses(entry)
@@ -181,12 +184,16 @@ def check_backcastable(hazard_name: str, rulebook: Rulebook) -> BackcastableChec
             )
         ]
         # A table this repo ingests carries its own dates per row, so it CAN
-        # answer for a past month — as far back as the ingest goes.
+        # answer for a past month — as far back as the ingest goes. So can a
+        # dated time-series archive, as far back as it is published.
         dated = [
             str(entry.get("name"))
             for entry in entries
-            if str(entry.get("provider")) == "pythia_table"
-            and str(entry.get("date_column") or "").strip()
+            if (
+                str(entry.get("provider")) == "pythia_table"
+                and str(entry.get("date_column") or "").strip()
+            )
+            or (bool(entry.get("time_series")) and _addresses(entry))
         ]
 
         if undated:

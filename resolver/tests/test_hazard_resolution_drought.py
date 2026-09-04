@@ -55,9 +55,53 @@ AFTER_FREEZE = dt.date(2024, 9, 1)
 BEFORE_FREEZE = dt.date(2024, 4, 1)
 
 
+#: Two fake routes for the legacy ASAP warnings feed, so the candidate-list
+#: tests below can exercise "first route dead, second answers".
+LEGACY_ASAP_URLS = [
+    "https://example.test/asap/warnings_v1.json",
+    "https://example.test/asap/warnings_v2.json",
+]
+
+
+def legacy_feed_rulebook(overrides: dict | None = None):
+    """The shipped rulebook with the LEGACY single-feed mechanics restored.
+
+    This module pins the drought rule's mechanics as they were built: one
+    ASAP warnings feed, a zero resting on its silence. Since Sept 2026 the
+    shipped rulebook (a) leaves the legacy ``asap`` entry dormant, because
+    JRC no longer publishes the warnings file, and reads the hotspot time
+    series through ``asap_hotspots`` instead, and (b) demands
+    ``min_answered_for_zero: 2`` feeds before a zero may rest on absence.
+    Both are tested on the SHIPPED values in
+    ``test_hazard_resolution_drought_group_d.py``; here they are set back so
+    each existing case keeps asserting the one thing it was written for.
+    """
+
+    data = make_rulebook()._data
+    entries = []
+    for entry in data["drought"]["indicators"]["entries"]:
+        entry = dict(entry)
+        if entry["name"] == "asap":
+            entry["urls"] = list(LEGACY_ASAP_URLS)
+        if entry["name"] == "asap_hotspots":
+            entry["urls"] = []
+            entry["url"] = ""
+        entries.append(entry)
+    base = {
+        "drought": {
+            "indicators": {"entries": entries, "min_answered_for_zero": 1}
+        }
+    }
+    if overrides:
+        from resolver.tests.hazard_resolution_utils import _deep_merge
+
+        base = _deep_merge(base, overrides)
+    return make_rulebook(base)
+
+
 @pytest.fixture()
 def rulebook():
-    return make_rulebook()
+    return legacy_feed_rulebook()
 
 
 @pytest.fixture()
@@ -91,7 +135,8 @@ def _raise_dead():
 
 
 class TestRulebook:
-    def test_shipped_rulebook_configures_the_drought_rule(self, rulebook):
+    def test_shipped_rulebook_configures_the_drought_rule(self):
+        rulebook = make_rulebook()  # the SHIPPED values, not the legacy fixture
         assert rulebook.get("drought.rule") == "ipc_phase3plus_delta"
         assert rulebook.get("drought.month_attribution") in (
             "analysis_window",
@@ -110,10 +155,16 @@ class TestRulebook:
         )
         # The ASAP endpoint is configurable, never hard-coded in Python —
         # and since Sept 2026 it is a candidate LIST, because the portal has
-        # moved its download route without moving the data.
-        asap = next(e for e in entries if e["name"] == "asap")
+        # moved its download route without moving the data. The warnings
+        # feed (`asap`) is dormant; the hotspot time series carries the
+        # addresses, and reaches HDX's mirror through the CKAN API.
+        asap = next(e for e in entries if e["name"] == "asap_hotspots")
         addresses = list(asap.get("urls") or []) + [asap.get("url") or ""]
         assert any(a.startswith("https://") for a in addresses)
+        assert any(a.startswith("hdx-ckan://") for a in addresses)
+        assert asap.get("time_series") is True
+        assert asap.get("absence_means_no_drought") is False
+        assert int(rulebook.get("drought.indicators.min_answered_for_zero")) >= 2
 
     def test_a_required_indicator_with_nothing_to_read_is_rejected(self):
         """It could never be read, so it would suppress every drought zero."""
@@ -583,12 +634,16 @@ class TestIndicators:
         """Retuning the rulebook changes the verdict with no re-fetch."""
 
         seed_indicator_snapshot(con, values={"SOM": "1"})
-        strict = make_rulebook()  # shipped drought_classes: 2, 3, 4, …
+        strict = legacy_feed_rulebook()  # shipped drought_classes: 2, 3, 4, …
         assert _verdict(con, "SOM", strict).state == ind_mod.STATE_NO_DROUGHT
 
-        entries = make_rulebook().get("drought.indicators.entries")
-        loosened = [{**entries[0], "drought_classes": ["1", "2", "3", "4"]}, *entries[1:]]
-        loose = make_rulebook({"drought": {"indicators": {"entries": loosened}}})
+        entries = legacy_feed_rulebook().get("drought.indicators.entries")
+        loosened = [
+            {**entry, "drought_classes": ["1", "2", "3", "4"]}
+            if entry["name"] == "asap" else entry
+            for entry in entries
+        ]
+        loose = legacy_feed_rulebook({"drought": {"indicators": {"entries": loosened}}})
         # Same cached snapshot, different rulebook, different verdict.
         assert _verdict(con, "SOM", loose).state == ind_mod.STATE_DROUGHT
 
@@ -1274,7 +1329,9 @@ class TestCoverageBeforeAZero:
         assert decision.rule_fired == drought_mod.RULE_ZERO_ABSENCE
 
     def test_zero_min_present_readings_restores_the_old_behaviour(self, con):
-        rulebook = make_rulebook({"drought": {"indicators": {"min_present_readings": 0}}})
+        rulebook = legacy_feed_rulebook(
+            {"drought": {"indicators": {"min_present_readings": 0}}}
+        )
         self._seed_hdx(con, {"ETH": "High concern"})
         self._refresh(con, rulebook)
         decision = drought_mod.decide_drought(

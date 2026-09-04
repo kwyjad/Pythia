@@ -47,6 +47,30 @@ The five outcomes, and why each is what it is:
     A required indicator could not be read. Not a zero, not a value —
     fail-closed, exactly as a failed ReliefWeb sweep is for the other
     hazards. Nothing is written; the trigger row keeps the evidence.
+    Since Sept 2026 the same verdict covers a zero that would rest on too
+    FEW feeds (``drought.indicators.min_answered_for_zero``): with two of
+    three feeds dead, the one that answered zeroed 159 countries a month.
+
+Two rules added after run 33841370196 (Sept 2026):
+
+* **A month still in progress is PENDING, whatever the feeds say.** The
+  workflow runs the trailing three months including the current one, and
+  drought has no detector coverage gate (cyclone and flood suppress zeros
+  when their detector's newest point does not reach month-end). On
+  4 September the September pass wrote 159 zeros for a month with 26 days
+  to run. Nothing can have observed a month that has not ended.
+* **A row this run cannot support is retracted, not left standing.**
+  PENDING and INCONCLUSIVE write nothing, so a provisional zero written by
+  an earlier, weaker rule survived every later run that could no longer
+  justify it. :func:`retract_unsupported_rows` deletes an unfrozen row the
+  current verdict contradicts and counts what it repaired, deleted and
+  left alone. A frozen row is never touched — hard rule 4.
+
+Every no-row verdict also stamps ``no_row_reason`` into the trigger row's
+``trigger_detail_json``, and an INCONCLUSIVE one stamps ``assessed: false``,
+so a bundle built from the database alone can say why a cell has no row
+and the occurrence base rate does not count an undecided cell as a quiet
+year.
 """
 
 from __future__ import annotations
@@ -71,6 +95,15 @@ from resolver.hazard_resolution.rules import (
     is_provisional,
     within_population_cap,
 )
+
+
+def month_end(year: int, month: int) -> dt.date:
+    """The last calendar day of a month."""
+
+    import calendar
+
+    return dt.date(year, month, calendar.monthrange(year, month)[1])
+from resolver.hazard_resolution.rules import freeze_deadline as rules_freeze_deadline
 from resolver.hazard_resolution.schema import RUN_TYPE_LIVE, ensure_haz_schema
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -105,11 +138,30 @@ RULE_NOT_ATTRIBUTED = "no_data:ipc_deterioration_not_drought_attributed"
 RULE_PENDING = "pending:awaiting_ipc_analysis_before_freeze"
 RULE_INCONCLUSIVE = "inconclusive:drought_indicator_unavailable"
 RULE_NO_COVERAGE = "inconclusive:no_indicator_covers_country"
+RULE_TOO_FEW_FEEDS = "inconclusive:too_few_indicators_answered_for_zero"
+RULE_MONTH_IN_PROGRESS = "pending:month_in_progress"
+
+#: Rules whose verdict says nothing about the month (the machine did not
+#: decide the cell). A trigger row under one of these must not count as an
+#: assessed quiet year in the occurrence base rate.
+UNASSESSED_RULES = frozenset({
+    RULE_INCONCLUSIVE, RULE_NO_COVERAGE, RULE_TOO_FEW_FEEDS, RULE_MONTH_IN_PROGRESS,
+})
 
 FLAG_NO_ANALYSIS = "no_ipc_analysis_past_freeze"
 FLAG_NO_BASELINE = "no_baseline_analysis_past_freeze"
 FLAG_NOT_ATTRIBUTED = "ipc_deterioration_without_drought_indicator"
 FLAG_POPULATION_EXCEEDED = reconcile_mod.FLAG_POPULATION_EXCEEDED
+
+#: Why a no-row verdict wrote nothing, in the ledger's vocabulary. Stamped
+#: on the trigger row AND in the run stream, so the two can never disagree.
+NO_ROW_REASON_BY_RULE = {
+    RULE_PENDING: cell_ledger.REASON_PENDING,
+    RULE_INCONCLUSIVE: cell_ledger.REASON_INCONCLUSIVE,
+    RULE_NO_COVERAGE: cell_ledger.REASON_NO_COVERAGE,
+    RULE_TOO_FEW_FEEDS: cell_ledger.REASON_TOO_FEW_FEEDS,
+    RULE_MONTH_IN_PROGRESS: cell_ledger.REASON_MONTH_IN_PROGRESS,
+}
 
 
 @dataclass
@@ -268,7 +320,9 @@ def decide_drought(
 
     iso3 = iso3.upper()
     year, month = (int(p) for p in ym.split("-"))
+    today = today or dt.date.today()
     provisional = is_provisional(year, month, rulebook, today=today)
+    month_in_progress = today <= month_end(year, month)
 
     current = ipc_mod.covering_analysis(analyses, ym)
     previous = ipc_mod.previous_analysis(analyses, current) if current else None
@@ -322,6 +376,19 @@ def decide_drought(
             provenance["note"] = note
         if flags:
             provenance["decision"]["flags"] = list(flags)
+        # The database is the record: a cell with no row says why on its
+        # trigger row, and an undecided cell says it was not assessed.
+        reason = NO_ROW_REASON_BY_RULE.get(rule_fired)
+        if status in (STATUS_PENDING, STATUS_INCONCLUSIVE):
+            trigger_detail["no_row_reason"] = reason or (
+                cell_ledger.REASON_PENDING
+                if status == STATUS_PENDING
+                else cell_ledger.REASON_INCONCLUSIVE
+            )
+            trigger_detail["assessed"] = rule_fired not in UNASSESSED_RULES
+        else:
+            trigger_detail.pop("no_row_reason", None)
+            trigger_detail["assessed"] = True
         return DroughtDecision(
             iso3=iso3,
             ym=ym,
@@ -336,6 +403,21 @@ def decide_drought(
             provenance=provenance,
             trigger_detail=trigger_detail,
             evidence_of_absence=evidence_of_absence,
+        )
+
+    # --- The month has not ended: nothing has observed it in full. ---
+    if month_in_progress:
+        return _decide(
+            triggered=False,
+            trigger_source=TRIGGER_SOURCE_NONE,
+            status=STATUS_PENDING,
+            value=None,
+            rule_fired=RULE_MONTH_IN_PROGRESS,
+            note=(
+                f"{ym} has not ended on {today.isoformat()}: no indicator or IPC "
+                "analysis can have observed the whole month, so no verdict is "
+                "written and any earlier provisional row for the cell is retracted"
+            ),
         )
 
     # --- A required indicator could not be read: no verdict is honest. ---
@@ -367,6 +449,28 @@ def decide_drought(
                 f"{indicators.present_count} indicator reading(s) named {iso3} "
                 f"(rulebook asks for {indicators.min_present_readings}); the rest "
                 "answered from absence, which is not coverage — no zero"
+            ),
+        )
+    # A zero resting on the feeds' silence needs enough feeds to have
+    # answered. When BOTH IPC analyses were read and show no increase, the
+    # zero rests on IPC's measurement as well and the floor does not apply.
+    if (
+        not indicators.shows_drought
+        and not qualifies
+        and delta is None
+        and not indicators.supports_zero
+    ):
+        return _decide(
+            triggered=False,
+            trigger_source=TRIGGER_SOURCE_NONE,
+            status=STATUS_INCONCLUSIVE,
+            value=None,
+            rule_fired=RULE_TOO_FEW_FEEDS,
+            note=(
+                f"{indicators.answered_count} indicator feed(s) answered for {iso3} "
+                f"(rulebook asks for {indicators.min_answered_for_zero} before a zero "
+                "may rest on their silence); one surviving feed is not evidence of "
+                "quiet — no zero"
             ),
         )
     if not indicators.shows_drought and not qualifies:
@@ -572,6 +676,13 @@ class DroughtRun:
     flagged: int = 0
     provisional: int = 0
     frozen_skipped: int = 0
+    #: The retraction pass: unfrozen rows an earlier run wrote that this
+    #: run's verdict no longer supports, deleted; and no-row cells whose
+    #: existing row was left standing because this run could not judge it.
+    retracted: int = 0
+    retained_unsupported: int = 0
+    #: Rows this run wrote (new or overwritten in place).
+    written: int = 0
     fetches: dict[str, Any] = field(default_factory=dict)
     # Countries whose decision raised — undecided this run, everyone else's
     # answer stands. "iso3: error" strings, mirrored from LadderRun.
@@ -714,8 +825,15 @@ def run_month(
             )
 
         if not decision.writes_row:
+            verdict = retract_unsupported_row(con, decision, rulebook, today=today)
+            if verdict == RETRACT_DELETED:
+                run.retracted += 1
+            elif verdict == RETRACT_RETAINED:
+                run.retained_unsupported += 1
             _ledger_decision(
-                decision, outcome="no_row", unavailable=unavailable, run_type=run_type
+                decision,
+                outcome="retracted" if verdict == RETRACT_DELETED else "no_row",
+                unavailable=unavailable, run_type=run_type,
             )
             continue
 
@@ -751,12 +869,87 @@ def run_month(
             )
         if outcome == res_mod.WRITE_FROZEN_SKIP:
             run.frozen_skipped += 1
+        elif outcome == res_mod.WRITE_WRITTEN:
+            run.written += 1
         _ledger_decision(
             decision, outcome=outcome, unavailable=unavailable, run_type=run_type
         )
 
     _log_run(run, unavailable)
     return run
+
+
+RETRACT_DELETED = "deleted"
+RETRACT_RETAINED = "retained"
+RETRACT_NONE = "no_row_to_retract"
+
+
+def retract_unsupported_row(
+    con: "duckdb.DuckDBPyConnection",
+    decision: DroughtDecision,
+    rulebook: Rulebook,
+    *,
+    today: dt.date | None = None,
+) -> str:
+    """Delete an unfrozen row the current no-row verdict contradicts.
+
+    PENDING and INCONCLUSIVE write nothing, which used to leave whatever an
+    earlier run wrote standing. Which existing rows a verdict contradicts:
+
+    * ``month_in_progress`` — any provisional row: nothing could have
+      supported a verdict for a month that has not ended.
+    * ``too_few_feeds`` / ``no_coverage`` — a provisional zero that rests
+      on the feeds' silence (``RULE_ZERO_ABSENCE``). A measured zero or a
+      value from IPC rests on IPC, and stands.
+    * an unreadable indicator, or an ordinary pre-freeze pending — nothing.
+      "We could not check today" does not overturn "we checked last month".
+
+    A frozen row is never touched, whatever the verdict (hard rule 4).
+    Returns ``deleted``, ``retained`` or ``no_row_to_retract``.
+    """
+
+    year, month = detect_mod.ym_to_year_month(decision.ym)
+    existing = con.execute(
+        """
+        SELECT status, rule_fired, COALESCE(provisional, FALSE), frozen_at
+        FROM haz_resolutions
+        WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ?
+        """,
+        [decision.iso3, year, month, HAZARD],
+    ).fetchone()
+    if existing is None:
+        return RETRACT_NONE
+    status, rule_fired, provisional, frozen_at = existing
+    today = today or dt.date.today()
+    deadline = (
+        frozen_at.date() if isinstance(frozen_at, dt.datetime)
+        else rules_freeze_deadline(year, month, rulebook)
+    )
+    if today > deadline or not provisional:
+        return RETRACT_RETAINED
+
+    contradicted = False
+    if decision.rule_fired == RULE_MONTH_IN_PROGRESS:
+        contradicted = True
+    elif decision.rule_fired in (RULE_TOO_FEW_FEEDS, RULE_NO_COVERAGE):
+        contradicted = rule_fired == RULE_ZERO_ABSENCE
+    if not contradicted:
+        return RETRACT_RETAINED
+
+    con.execute(
+        """
+        DELETE FROM haz_resolutions
+        WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ?
+        """,
+        [decision.iso3, year, month, HAZARD],
+    )
+    LOG.info(
+        "[drought] %s/%s: retracted provisional %s (%s) — this run's verdict is %s "
+        "(%s) and cannot support it",
+        decision.iso3, decision.ym, status, rule_fired, decision.status,
+        decision.rule_fired,
+    )
+    return RETRACT_DELETED
 
 
 #: Why a drought cell carries no row. PENDING is the calendar's doing;
@@ -779,9 +972,9 @@ def _ledger_decision(
 
     if not cell_ledger.enabled():
         return
-    reason = _DROUGHT_NO_ROW_REASON.get(decision.status)
-    if decision.rule_fired == RULE_NO_COVERAGE:
-        reason = cell_ledger.REASON_NO_COVERAGE
+    reason = NO_ROW_REASON_BY_RULE.get(
+        decision.rule_fired, _DROUGHT_NO_ROW_REASON.get(decision.status)
+    )
     if outcome == res_mod.WRITE_FROZEN_SKIP:
         reason = cell_ledger.REASON_FROZEN
     indicators = (decision.provenance.get("decision") or {}).get("indicators")
@@ -815,6 +1008,13 @@ def _log_run(run: DroughtRun, unavailable: list[str]) -> None:
         run.ym, run.cells, run.resolved_value, run.resolved_zero, run.no_data,
         run.pending, run.inconclusive, run.flagged, run.provisional,
         run.frozen_skipped,
+    )
+    # The repair pass's own account of itself, so a run that repaired
+    # nothing is visible: rows written over, rows deleted, rows left alone.
+    LOG.info(
+        "[drought] %s: repair pass — %d rows written in place, %d unsupported "
+        "rows retracted, %d existing rows left untouched by a no-row verdict",
+        run.ym, run.written, run.retracted, run.retained_unsupported,
     )
     unread = run.inconclusive - run.no_coverage
     if unread:

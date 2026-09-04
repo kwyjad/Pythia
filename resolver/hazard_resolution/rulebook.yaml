@@ -211,20 +211,65 @@ drought:
     # — it resolves INCONCLUSIVE (no row) with reason indicator_no_coverage.
     # 0 restores the pre-Sept-2026 behaviour.
     min_present_readings: 1
+
+    # How many indicator feeds must have ANSWERED (drought or no drought)
+    # before a zero may rest on their silence. In September 2026 two of the
+    # three feeds were dead (ASAP 404, NMME unread) and the survivor zeroed
+    # 159 countries a month on its own. A zero from one of three feeds is
+    # not evidence of quiet: below this floor the cell is INCONCLUSIVE (no
+    # row, reason indicator_too_few_feeds_for_zero) and any provisional
+    # zero an earlier run wrote on thinner evidence is retracted. A measured
+    # zero (both IPC analyses read, no increase) rests on IPC and is exempt.
+    # 1 restores the pre-Sept-2026 behaviour.
+    min_answered_for_zero: 2
     entries:
       # JRC ASAP agricultural hotspot classification. Free, no key,
       # country-level. Absence from the feed means "no warning issued",
       # which is what makes it usable as evidence of absence.
+      # --- The JRC ASAP hotspot assessment, as a monthly time series. ---
+      # The warnings endpoint the entry below was written against vanished
+      # in August 2026 (all three candidate routes 404 on every month).
+      # What JRC still publishes is the hotspot ASSESSMENT: one CSV holding
+      # every monthly assessment since October 2016, for the ~80 food
+      # insecure countries it monitors, as files/hotspots_ts.zip (HDX
+      # mirrors it as the asap-hotspots-monthly dataset, which the third
+      # candidate reaches through the CKAN API rather than a guessed path).
+      # Columns as HDX Signals reads them: asap0_id (a JRC unit id),
+      # date, hs_code / hs_name (0 no hotspot, 1 hotspot, 2 major hotspot,
+      # 3 not assessed), comment. The parser resolves the country from an
+      # iso3 column or a country name where the file carries one; a file
+      # carrying only asap0_id resolves 0 of N records and is REFUSED with
+      # the columns named, never cached as "no drought anywhere".
+      #
+      # Because every record carries its date, the file is parsed into one
+      # snapshot per month: a backcast month reads the assessment made for
+      # it. This is what lets the drought backcast reach 2016.
+      #
+      # Absence means UNKNOWN: ASAP assesses ~80 countries, so a country it
+      # does not list was not looked at, not found quiet. "Not assessed"
+      # (hs_code 3) is likewise no reading at all.
+      - name: asap_hotspots
+        provider: asap
+        time_series: true
+        urls:
+          - "https://agricultural-production-hotspots.ec.europa.eu/files/hotspots_ts.zip"
+          - "https://agricultural-production-hotspots.ec.europa.eu/files/hotspots_html_ts.zip"
+          - "hdx-ckan://asap-hotspots-monthly"
+        url: ""
+        required: false
+        request_timeout_sec: 120
+        match: classes
+        absence_means_no_drought: false
+        drought_classes: ["1", "2", "hotspot", "major hotspot"]
+        unassessed_classes: ["3", "not assessed"]
+
+      # The legacy warnings feed. Dormant since Sept 2026: no url, so it is
+      # never consulted, but the entry stays so the snapshots it cached
+      # while it worked still evaluate under the classes it published.
+      # Restore a url here only if JRC publishes the warnings again.
       - name: asap
         provider: asap
-        # Candidate download routes, tried in order; the first that parses
-        # wins. The portal has moved its export route without moving the
-        # data, and a moved route should cost a YAML edit rather than an
-        # outage. The last entry is the route this repo used until Sept 2026.
-        urls:
-          - "https://agricultural-production-hotspots.ec.europa.eu/data/asap_warnings/asap_warning_countries.json"
-          - "https://agricultural-production-hotspots.ec.europa.eu/api/warnings/countries"
-          - "https://agricultural-production-hotspots.ec.europa.eu/data/warnings/asap_warning_countries.json"
+        urls: []
         url: ""
         # Downgraded from required: true in Sept 2026. It was the ONLY
         # required indicator, so a single dead URL made every drought cell in
@@ -293,7 +338,11 @@ drought:
         # forecast issued in T-1 rather than the one issued in T about T+1.
         date_offset_column: lead_months
         lookback_months: 0
-        where: "variable = 'prate' AND lead_months = 1"
+        # Every vintage that speaks for the month is a candidate and the
+        # shortest lead (the most recent issue) wins — pinning lead_months
+        # here meant a month whose lead-1 vintage was not in the table read
+        # as "no usable rows" while other vintages about it were.
+        where: "variable = 'prate'"
         match: threshold
         absence_means_no_drought: false
         # NOT -0.43. That is NMME's below-normal TERCILE boundary, which by
