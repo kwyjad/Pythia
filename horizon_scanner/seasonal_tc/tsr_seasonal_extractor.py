@@ -46,7 +46,12 @@ class SeasonalForecast:
     basin_full: str = ""
     season_year: int = 0
     issue_date: str = ""
+    #: Why issue_date is approximate or absent (see seasonal_tc.dates); empty
+    #: when the header's own Issued line supplied it.
+    issue_date_reason: str = ""
     forecast_type: str = ""  # e.g. "extended_range", "pre_season", "july_update"
+    #: Where forecast_type came from: "title", "url" or "issue_month".
+    forecast_type_source: str = ""
     
     # Core forecast numbers
     named_storms: Optional[int] = None
@@ -93,7 +98,8 @@ class SeasonalForecast:
             intense_label = "intense tropical cyclones"
         
         lines = [
-            f"## {basin_label} — {self.season_year} Seasonal Forecast (TSR, {self.forecast_type}, issued {self.issue_date})"
+            f"## {basin_label} — {self.season_year} Seasonal Forecast (TSR, {self.forecast_type}, "
+            f"issued {self.issue_date or 'date not stated'})"
         ]
         if self.summary:
             lines.append(self.summary)
@@ -206,27 +212,84 @@ def _issued_dates(text: str) -> list[datetime]:
     return out
 
 
-def extract_issue_date(text: str) -> str:
-    """The date THIS document was issued.
+def extract_issue_date(
+    text: str, issue_month: str = "", document_date: str | None = None
+) -> str:
+    """The date THIS document was issued (ISO), or "" — see :func:`resolve_issue_date`."""
+
+    return resolve_issue_date(text, issue_month=issue_month, document_date=document_date)[0]
+
+
+def resolve_issue_date(
+    text: str, issue_month: str = "", document_date: str | None = None
+) -> tuple[str, str]:
+    """``(iso_date, reason)`` for the date THIS document was issued.
 
     A TSR update quotes the forecasts it supersedes — "our pre-season
-    forecast issued 21st May" — and a first-match search over the whole text
-    picked those up: the August 2026 Atlantic update was stored under the May
-    issue date, which collided with the real May forecast on the dedup key
-    and replaced it.
+    forecast, Issued: 28th May 2026" — and on the August 2026 Atlantic update
+    that quote sat inside the first 1,500 characters, ahead of the document's
+    own line, so a header-first search still returned May. The stored August
+    row carried the May date beside the August figures, and the two rows
+    collided on the dedup key.
 
-    So: the header's own line first, and where several dates are in play the
-    LATEST wins. A document cannot have been issued before the forecasts it
-    discusses.
+    Three sources, used in this order, and the URL month is the arbiter:
+
+    1. an ``Issued:`` line whose month matches ``issue_month`` (the month
+       TSR wrote into its own filename), the latest such line winning;
+    2. failing that, the latest ``Issued:`` line anywhere — a document
+       cannot have been issued before the forecasts it discusses — but when
+       that month contradicts the filename and the PDF's own metadata
+       creation date agrees with the filename, the metadata date wins
+       (reason ``pdf_metadata_creation_date``);
+    3. failing both, the metadata date alone, or nothing.
+
+    A date that survives while contradicting the filename month is kept and
+    flagged (``issued_line_disagrees_with_url_month``): an honest disagreement
+    beats a silent one.
     """
 
+    from horizon_scanner.seasonal_tc.dates import (
+        REASON_NO_DATE_IN_SOURCE,
+        REASON_PDF_METADATA,
+        REASON_URL_MONTH_DISAGREES,
+        month_number,
+    )
+
+    wanted = month_number(str(issue_month).split("/")[0]) if issue_month else None
     header = _issued_dates(text[:_HEADER_CHARS])
-    if header:
-        return header[0].strftime("%Y-%m-%d")
     everywhere = _issued_dates(text)
-    if everywhere:
-        return max(everywhere).strftime("%Y-%m-%d")
-    return ""
+    metadata = None
+    if document_date:
+        try:
+            metadata = datetime.strptime(document_date[:10], "%Y-%m-%d")
+        except ValueError:
+            metadata = None
+
+    if wanted:
+        matching = [d for d in (header or everywhere) if d.month == wanted]
+        if matching:
+            return max(matching).strftime("%Y-%m-%d"), ""
+    candidates = header or everywhere
+    if candidates:
+        chosen = max(candidates)
+        if wanted and chosen.month != wanted:
+            if metadata is not None and metadata.month == wanted:
+                logger.warning(
+                    "  Issued line says %s but the filename says month %s; "
+                    "using the PDF's own creation date %s",
+                    chosen.date(), wanted, metadata.date(),
+                )
+                return metadata.strftime("%Y-%m-%d"), REASON_PDF_METADATA
+            logger.warning(
+                "  Issued line %s disagrees with the filename month %s and no "
+                "PDF metadata date can settle it — kept and flagged",
+                chosen.date(), wanted,
+            )
+            return chosen.strftime("%Y-%m-%d"), REASON_URL_MONTH_DISAGREES
+        return chosen.strftime("%Y-%m-%d"), ""
+    if metadata is not None:
+        return metadata.strftime("%Y-%m-%d"), REASON_PDF_METADATA
+    return "", REASON_NO_DATE_IN_SOURCE
 
 
 #: TSR names its own products in its filenames, and a filename is not prose.
@@ -248,21 +311,61 @@ _TYPE_BY_ISSUE_MONTH = {
 }
 
 
+#: What TSR calls the product in its own title, first line of the PDF.
+#: "Extended Range Forecast for ...", "Pre-Season Forecast for ...",
+#: "July Forecast Update for ...", "August Forecast Update for ...".
+_TITLE_TYPE_RES = (
+    (re.compile(r"extended[\s-]*range", re.IGNORECASE), "extended_range"),
+    (re.compile(r"pre[\s-]*season", re.IGNORECASE), "pre_season"),
+    (re.compile(r"\bapril\b[^\n]{0,40}forecast", re.IGNORECASE), "early_april"),
+    (re.compile(r"\bjune\b[^\n]{0,40}(?:forecast|update)", re.IGNORECASE), "june_update"),
+    (re.compile(r"\bjuly\b[^\n]{0,40}(?:forecast|update)", re.IGNORECASE), "july_update"),
+    (re.compile(r"\baugust\b[^\n]{0,40}(?:forecast|update)", re.IGNORECASE), "august_update"),
+    (re.compile(r"\boctober\b[^\n]{0,40}(?:forecast|outlook)", re.IGNORECASE), "october_outlook"),
+    (re.compile(r"\bnovember\b[^\n]{0,40}(?:forecast|outlook)", re.IGNORECASE), "november_outlook"),
+)
+
+#: The title is the first line or two of the PDF. The summary paragraph
+#: that follows discusses earlier forecasts ("our pre-season forecast ...")
+#: and is exactly what must not be read for the product name.
+_TITLE_LINES = 2
+
+
+def _title(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return " | ".join(lines[:_TITLE_LINES])
+
+
 def extract_forecast_type(text: str, issue_date: str, issue_month: str = "") -> str:
-    """The forecast type, preferring what the source URL already told us."""
+    """The forecast type, as the document names itself."""
+
+    return resolve_forecast_type(text, issue_date, issue_month=issue_month)[0]
+
+
+def resolve_forecast_type(
+    text: str, issue_date: str, issue_month: str = ""
+) -> tuple[str, str]:
+    """``(forecast_type, source)`` with source in ``title``/``url``/``issue_month``/``none``.
+
+    The same NWP outlook of 11 May 2026 was stored as ``extended_range`` by
+    runs that sniffed the text and as ``pre_season`` by the run that trusted
+    the URL month, because "May" means pre-season for the Atlantic and the
+    extended-range product for the NW Pacific. Only the document knows which
+    it is, and it says so in its title. The URL month is the fallback for a
+    title that names no product, and the issue date's month the fallback for
+    that.
+    """
+
+    title = _title(text)
+    for pattern, kind in _TITLE_TYPE_RES:
+        if pattern.search(title):
+            return kind, "title"
 
     if issue_month:
         known = _TYPE_BY_ISSUE_MONTH.get(str(issue_month).strip().lower())
         if known:
-            return known
+            return known, "url"
 
-    text_lower = text[:500].lower()
-    if "extended range" in text_lower:
-        return "extended_range"
-    if "pre-season" in text_lower or "pre season" in text_lower:
-        return "pre_season"
-    
-    # Infer from month
     if issue_date:
         try:
             month = datetime.strptime(issue_date, "%Y-%m-%d").month
@@ -272,10 +375,10 @@ def extract_forecast_type(text: str, issue_date: str, issue_month: str = "") -> 
                 6: "june_update", 7: "july_update",
                 8: "august_update"
             }
-            return month_names.get(month, "update")
+            return month_names.get(month, "update"), "issue_month"
         except ValueError:
             pass
-    return "seasonal"
+    return "seasonal", "none"
 
 
 def extract_season_year(text: str) -> int:
@@ -443,6 +546,32 @@ def download_pdf(url: str, cache_dir: Path = Path(__file__).parent / "output" / 
     return local_path
 
 
+_PDF_DATE_RE = re.compile(r"D:?(\d{4})(\d{2})(\d{2})")
+
+
+def extract_pdf_document_date(pdf_path: Path) -> str | None:
+    """The PDF's own CreationDate (ISO), or None. Never raises.
+
+    A second witness for the issue date: the file TSR wrote carries the day
+    it was written, and unlike the prose it never quotes an earlier forecast.
+    """
+
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            meta = pdf.metadata or {}
+    except Exception:  # noqa: BLE001 - metadata is a bonus, never a blocker
+        return None
+    for key in ("CreationDate", "ModDate"):
+        raw = str(meta.get(key) or "")
+        m = _PDF_DATE_RE.search(raw)
+        if m:
+            try:
+                return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+    return None
+
+
 def extract_text_from_pdf(pdf_path: Path) -> str:
     """Extract all text from a PDF using pdfplumber."""
     text_parts = []
@@ -459,7 +588,11 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def extract_forecast(
-    text: str, pdf_url: str = "", pdf_path: str = "", issue_month: str = ""
+    text: str,
+    pdf_url: str = "",
+    pdf_path: str = "",
+    issue_month: str = "",
+    document_date: str | None = None,
 ) -> SeasonalForecast:
     """Run the full extraction pipeline on extracted PDF text."""
     forecast = SeasonalForecast()
@@ -473,12 +606,18 @@ def extract_forecast(
     logger.info(f"  Basin: {forecast.basin_full}")
     
     # Issue date & forecast type
-    forecast.issue_date = extract_issue_date(text)
+    forecast.issue_date, forecast.issue_date_reason = resolve_issue_date(
+        text, issue_month=issue_month, document_date=document_date
+    )
     forecast.season_year = extract_season_year(text)
-    forecast.forecast_type = extract_forecast_type(
+    forecast.forecast_type, forecast.forecast_type_source = resolve_forecast_type(
         text, forecast.issue_date, issue_month=issue_month
     )
-    logger.info(f"  Season: {forecast.season_year}, Type: {forecast.forecast_type}, Issued: {forecast.issue_date}")
+    logger.info(
+        f"  Season: {forecast.season_year}, Type: {forecast.forecast_type} "
+        f"(from {forecast.forecast_type_source}), Issued: {forecast.issue_date}"
+        + (f" [{forecast.issue_date_reason}]" if forecast.issue_date_reason else "")
+    )
     
     # Core forecast table
     table_data = extract_forecast_table(text, basin_info)
@@ -520,14 +659,19 @@ def process_url(url: str, issue_month: str = "") -> SeasonalForecast:
     logger.info(f"Processing: {url}")
     pdf_path = download_pdf(url)
     text = extract_text_from_pdf(pdf_path)
-    return extract_forecast(text, pdf_url=url, issue_month=issue_month)
+    return extract_forecast(
+        text, pdf_url=url, issue_month=issue_month,
+        document_date=extract_pdf_document_date(pdf_path),
+    )
 
 
 def process_file(filepath: str) -> SeasonalForecast:
     """Extract from a local PDF file."""
     logger.info(f"Processing local file: {filepath}")
     text = extract_text_from_pdf(Path(filepath))
-    return extract_forecast(text, pdf_path=filepath)
+    return extract_forecast(
+        text, pdf_path=filepath, document_date=extract_pdf_document_date(Path(filepath))
+    )
 
 
 # ---------------------------------------------------------------------------

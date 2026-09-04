@@ -120,14 +120,16 @@ class TestTsrIssueDateAndType:
             self.AUGUST_PDF, "2026-08-05", issue_month="August"
         ) == "august_update"
 
-    def test_text_sniffing_alone_reproduces_the_defect(self):
-        """Kept as evidence: this is what the run actually did."""
+    def test_the_title_decides_even_without_the_url(self):
+        """The run once sniffed the first 500 characters and typed the August
+        update "pre_season" because the summary discussed the pre-season
+        forecast. Only the title names the product (Group F, Sept 2026)."""
 
         from horizon_scanner.seasonal_tc.tsr_seasonal_extractor import (
             extract_forecast_type,
         )
 
-        assert extract_forecast_type(self.AUGUST_PDF, "2026-08-05") == "pre_season"
+        assert extract_forecast_type(self.AUGUST_PDF, "2026-08-05") == "august_update"
 
     def test_two_outlooks_for_one_basin_and_season_cannot_share_a_date(self):
         from horizon_scanner.seasonal_tc.tsr_seasonal_extractor import (
@@ -180,10 +182,10 @@ class TestNoaaCandidates:
             candidate_urls,
         )
 
-        assert 2026 not in KNOWN_URLS
-        urls = candidate_urls(2026)
+        assert 2027 not in KNOWN_URLS
+        urls = candidate_urls(2027)
         assert urls
-        assert all("2026" in url for url in urls.values())
+        assert all("2027" in url for url in urls.values())
 
     def test_all_three_activity_wordings_are_tried(self):
         """NOAA titles the release after the forecast, so the slug cannot be

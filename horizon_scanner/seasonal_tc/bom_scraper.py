@@ -92,6 +92,33 @@ def _season_from_pair(start_text: str, end_text: str) -> tuple[str, int] | None:
     return f"{start_year}-{str(end_year)[-2:]}", start_year
 
 
+_ISSUED_LINE_RE = re.compile(
+    r"(?:Issued|Last\s+updated|Updated|Published)\s*(?:on)?[:\s]+"
+    r"((?:\d{1,2}\s+)?[A-Za-z]+\s+\d{4})",
+    re.IGNORECASE,
+)
+
+
+def extract_issue_date(text: str) -> tuple[str, str]:
+    """``(iso_date, reason)`` from a BoM outlook page's own dating line.
+
+    "Issued: 10 October 2025" gives the date; "Issued October 2025" gives the
+    first of October with ``month_precision_only``; no line at all gives
+    ``("", "no_issue_date_in_source")``. Nothing is invented.
+    """
+
+    from horizon_scanner.seasonal_tc.dates import (
+        REASON_NO_DATE_IN_SOURCE,
+        parse_issue_date,
+    )
+
+    m = _ISSUED_LINE_RE.search(text)
+    if not m:
+        return "", REASON_NO_DATE_IN_SOURCE
+    iso, reason = parse_issue_date(m.group(1))
+    return (iso or ""), (reason or "")
+
+
 def extract_season(text: str, today: date | None = None) -> tuple[str, int] | None:
     """(season label, start year) for a BoM outlook page, or None.
 
@@ -138,6 +165,10 @@ class SeasonalForecast:
     season: str = ""  # e.g. "2025-26"
     season_year: int = 0  # the year the season starts in (for Southern Hemisphere)
     issue_date: str = ""
+    #: Why issue_date is approximate or absent (seasonal_tc.dates reasons).
+    issue_date_reason: str = ""
+    #: Why season is absent, when it is.
+    season_reason: str = ""
     forecast_type: str = "seasonal_outlook"
 
     # Whole-region forecast
@@ -176,7 +207,8 @@ class SeasonalForecast:
     def to_prompt_context(self) -> str:
         basin_label = self.basin_full or self.basin
         lines = [
-            f"## {basin_label} — {self.season} Seasonal Outlook (BoM, issued {self.issue_date})"
+            f"## {basin_label} — {self.season or 'season not stated'} Seasonal Outlook "
+            f"(BoM, issued {self.issue_date or 'date not stated'})"
         ]
         if self.summary:
             lines.append(self.summary)
@@ -248,12 +280,13 @@ def extract_australian_outlook(text: str, url: str = "") -> SeasonalForecast:
     if parsed:
         f.season, f.season_year = parsed
 
-    # Issue date — BoM typically issues in October
-    date_m = re.search(r"(?:Issued|Last\s+updated)[:\s]*(\w+\s+\d{4})", text)
-    if date_m:
-        f.issue_date = date_m.group(1)
-    elif f.season_year:
-        f.issue_date = f"October {f.season_year}"
+    # Issue date, from the page's own Issued / Last updated line. A month
+    # alone becomes the first of that month and says so; a page with no
+    # such line stores nothing and says that. "October {season_year}" was
+    # invented here for years and stored as free text in a date column.
+    f.issue_date, f.issue_date_reason = extract_issue_date(text)
+    if not f.season:
+        f.season_reason = "no_season_phrase_or_plausible_year_pair_on_page"
     f.forecast_type = "seasonal_outlook"
 
     # Whole-region probability
@@ -372,6 +405,9 @@ def extract_south_pacific_outlook(text: str, url: str = "") -> SeasonalForecast:
             end_year = int(season_m2.group(2))
             f.season = f"{start_year}-{str(end_year)[-2:]}"
             f.season_year = start_year
+    f.issue_date, f.issue_date_reason = extract_issue_date(text)
+    if not f.season:
+        f.season_reason = "no_season_phrase_or_plausible_year_pair_on_page"
     f.forecast_type = "seasonal_outlook"
 
     # Total count range — numeric or spelled-out numbers

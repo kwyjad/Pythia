@@ -86,6 +86,8 @@ class SeasonalForecast:
     season: str = ""
     season_year: int = 0
     issue_date: str = ""
+    #: This block is climatology assembled by Fred; nobody issued it.
+    issue_date_reason: str = "climatology_context_has_no_issue_date"
     forecast_type: str = "climatology_context"
 
     climatology_note: str = ""

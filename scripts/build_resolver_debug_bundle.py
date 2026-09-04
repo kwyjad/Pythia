@@ -897,12 +897,13 @@ class BundleBuilder:
             "seasonal_tc_outlooks_full",
             ("seasonal_tc_outlooks",),
             """
-            SELECT basin, source, forecast_season, named_storms_forecast, category,
-                   fetched_at,
-                   TRY_CAST(json_extract_string(raw_json, '$.issue_date') AS VARCHAR)
-                       AS issue_date
+            SELECT basin, source, forecast_season, category,
+                   COALESCE(TRY_CAST(issue_date AS VARCHAR),
+                            json_extract_string(raw_json, '$.issue_date')) AS issue_date,
+                   issue_date_reason, season_reason,
+                   named_storms_forecast, named_storms_reason, fetched_at, updated_at
             FROM seasonal_tc_outlooks
-            ORDER BY basin, source, fetched_at DESC
+            ORDER BY basin, source, forecast_season, category, issue_date
             """,
         ),
         (
@@ -1462,6 +1463,7 @@ class BundleBuilder:
             self._check_connector_rows_vs_table_delta,
             self._check_hazard_zero_failures,
             self._check_tc_duplicate_issue_dates,
+            self._check_tc_outlook_issue_dates_parse,
             self._check_forecast_vintages,
             self._check_resolution_above_rejection_ceiling,
             self._check_acled_html_responses,
@@ -1691,13 +1693,21 @@ class BundleBuilder:
         name = "no_two_tc_outlooks_share_a_basin_season_and_issue_date"
         if "seasonal_tc_outlooks" not in self.tables():
             return self._check(name, "SKIP", "", "", "seasonal_tc_outlooks is absent")
+        columns = {c for c, _t in self.columns_of("seasonal_tc_outlooks")}
+        date_expr = (
+            "TRY_CAST(issue_date AS VARCHAR)" if "issue_date" in columns
+            else "json_extract_string(raw_json, '$.issue_date')"
+        )
+        # Since the table is keyed on the outlook (Sept 2026) a duplicate
+        # fetch cannot exist; what this catches now is two CATEGORIES of one
+        # basin and season sharing a date — the August update stored under
+        # the May date beside the May forecast.
         result = self.query(
-            """
-            SELECT basin, source, forecast_season,
-                   json_extract_string(raw_json, '$.issue_date') AS issue_date,
-                   COUNT(*) AS n
+            f"""
+            SELECT basin, source, forecast_season, {date_expr} AS issue_date,
+                   COUNT(*) AS n, string_agg(DISTINCT category, '+') AS categories
             FROM seasonal_tc_outlooks
-            WHERE json_extract_string(raw_json, '$.issue_date') IS NOT NULL
+            WHERE {date_expr} IS NOT NULL
             GROUP BY basin, source, forecast_season, issue_date
             HAVING COUNT(*) > 1
             """
@@ -1707,9 +1717,57 @@ class BundleBuilder:
         rows = result[1]
         self._check(
             name, "FAIL" if rows else "PASS", f"{len(rows)} collisions", "0",
-            "; ".join(f"{r[0]}/{r[1]}/{r[2]} @ {r[3]} x{r[4]}" for r in rows[:10])
+            "; ".join(f"{r[0]}/{r[1]}/{r[2]} @ {r[3]} x{r[4]} ({r[5]})" for r in rows[:10])
             or "Two records of the same thing for the same period cannot share an "
             "issue date; when they do, one has been misread.",
+        )
+
+    def _check_tc_outlook_issue_dates_parse(self) -> None:
+        """Every stored outlook has a parseable issue date, or says why not.
+
+        The old table held "October 2025" in the date field for AUS, nothing
+        at all for SP, SWI and NIO, and a fetch-time key that appended a copy
+        of every row on every run. A date column holds a date; where the
+        source stated none the row carries the reason, and a row with
+        neither is a writer that skipped the question.
+        """
+
+        name = "every_tc_outlook_has_a_parseable_issue_date_or_a_reason"
+        if "seasonal_tc_outlooks" not in self.tables():
+            return self._check(name, "SKIP", "", "", "seasonal_tc_outlooks is absent")
+        columns = {c for c, _t in self.columns_of("seasonal_tc_outlooks")}
+        if "issue_date" not in columns:
+            return self._check(
+                name, "FAIL", "legacy table shape", "issue_date DATE column",
+                "seasonal_tc_outlooks predates the keyed shape; ensure_schema rebuilds it",
+            )
+        result = self.query(
+            """
+            SELECT
+              COUNT(*) AS n,
+              SUM(CASE WHEN issue_date IS NOT NULL THEN 1 ELSE 0 END) AS dated,
+              SUM(CASE WHEN issue_date IS NULL AND COALESCE(issue_date_reason, '') <> ''
+                       THEN 1 ELSE 0 END) AS undated_with_reason,
+              SUM(CASE WHEN issue_date IS NULL AND COALESCE(issue_date_reason, '') = ''
+                       THEN 1 ELSE 0 END) AS undated_without_reason,
+              string_agg(DISTINCT CASE WHEN issue_date IS NULL THEN
+                         basin || '/' || source || ':' || COALESCE(issue_date_reason, '?') END, '; ')
+            FROM seasonal_tc_outlooks
+            """
+        )
+        if not result or not result[1]:
+            return
+        n, dated, with_reason, without_reason, undated = result[1][0]
+        n = int(n or 0)
+        if n == 0:
+            return self._check(name, "SKIP", "", "", "no outlooks stored")
+        without_reason = int(without_reason or 0)
+        self._check(
+            name, "FAIL" if without_reason else "PASS",
+            f"{int(dated or 0)} dated, {int(with_reason or 0)} undated with a reason, "
+            f"{without_reason} undated with none, of {n}",
+            "0 undated without a reason",
+            (f"undated: {undated}" if undated else "Every stored outlook carries a date."),
         )
 
     def _check_forecast_vintages(self) -> None:

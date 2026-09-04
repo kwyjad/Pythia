@@ -89,6 +89,8 @@ class SeasonalForecast:
     season: str = ""            # e.g. "2025-26"
     season_year: int = 0        # year the season starts in (Nov)
     issue_date: str = ""
+    issue_date_reason: str = ""
+    season_reason: str = ""
     forecast_type: str = "seasonal_outlook"
 
     # Activity forecast
@@ -245,6 +247,28 @@ _CATEGORICAL_PATTERNS = [
 ]
 
 
+_DATE_LINE_RE = re.compile(
+    r"(?:publi[ée]e?\s+le|mis\s+à\s+jour\s+le|date\s*:?|le)\s+"
+    r"(\d{1,2}(?:er)?\s+[a-zéû]+\s+\d{4})",
+    re.IGNORECASE,
+)
+
+
+def extract_issue_date(text: str) -> tuple[str, str]:
+    """``(iso_date, reason)`` from the article's own date, or nothing and why."""
+
+    from horizon_scanner.seasonal_tc.dates import (
+        REASON_NO_DATE_IN_SOURCE,
+        parse_issue_date,
+    )
+
+    m = _DATE_LINE_RE.search(text)
+    if not m:
+        return "", REASON_NO_DATE_IN_SOURCE
+    iso, reason = parse_issue_date(m.group(1))
+    return (iso or ""), (reason or "")
+
+
 def extract_swio_outlook(text: str, url: str = "") -> SeasonalForecast:
     """Extract a SeasonalForecast from the French article text.
 
@@ -260,6 +284,13 @@ def extract_swio_outlook(text: str, url: str = "") -> SeasonalForecast:
         end_short = end[-2:]
         f.season = f"{start_year}-{end_short}"
         f.season_year = start_year
+    else:
+        f.season_reason = "no_saison_phrase_in_article"
+
+    # The article's own date line ("Publié le 21 octobre 2025", "Mis à jour
+    # le ..."), or the first full French date in the text. A page with
+    # neither stores no date and says so.
+    f.issue_date, f.issue_date_reason = extract_issue_date(text)
 
     m = _SYSTEMS_RE.search(text)
     if m:
