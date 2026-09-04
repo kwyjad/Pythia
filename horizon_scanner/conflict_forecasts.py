@@ -24,6 +24,14 @@ log = logging.getLogger(__name__)
 
 _STALENESS_DAYS = 45
 
+#: The one predicate every prompt reader applies: a forecast is served only
+#: for a target month that has not passed. Filter on the TARGET month, never
+#: on lead_months — lead is computed from the issue date, so on a frozen
+#: vintage "leads 1 to 3" in September 2026 meant January to March 2026.
+#: The resolver debug bundle imports this so its contradiction check runs
+#: the same predicate the readers do.
+SERVED_TARGET_FILTER_SQL = "target_month >= date_trunc('month', CURRENT_DATE)"
+
 
 def _db_url() -> str:
     """Resolve the Pythia DuckDB URL."""
@@ -131,10 +139,10 @@ def load_conflict_forecasts(
 def _load_views(con, iso3: str) -> Optional[dict[str, Any]]:
     """Load VIEWS forecast data for a country."""
     row = con.execute(
-        """
+        f"""
         SELECT MAX(forecast_issue_date)
         FROM conflict_forecasts
-        WHERE source = 'VIEWS' AND iso3 = ?
+        WHERE source = 'VIEWS' AND iso3 = ? AND {SERVED_TARGET_FILTER_SQL}
         """,
         [iso3.upper()],
     ).fetchone()
@@ -144,10 +152,11 @@ def _load_views(con, iso3: str) -> Optional[dict[str, Any]]:
     latest_date = row[0]
 
     result = con.execute(
-        """
+        f"""
         SELECT metric, lead_months, value, model_version
         FROM conflict_forecasts
         WHERE source = 'VIEWS' AND iso3 = ? AND forecast_issue_date = ?
+          AND {SERVED_TARGET_FILTER_SQL}
         ORDER BY metric, lead_months
         """,
         [iso3.upper(), latest_date],
@@ -183,10 +192,10 @@ def _load_views(con, iso3: str) -> Optional[dict[str, Any]]:
 def _load_conflictforecast_org(con, iso3: str) -> Optional[dict[str, Any]]:
     """Load conflictforecast.org data for a country."""
     row = con.execute(
-        """
+        f"""
         SELECT MAX(forecast_issue_date)
         FROM conflict_forecasts
-        WHERE source = 'conflictforecast_org' AND iso3 = ?
+        WHERE source = 'conflictforecast_org' AND iso3 = ? AND {SERVED_TARGET_FILTER_SQL}
         """,
         [iso3.upper()],
     ).fetchone()
@@ -196,10 +205,11 @@ def _load_conflictforecast_org(con, iso3: str) -> Optional[dict[str, Any]]:
     latest_date = row[0]
 
     result = con.execute(
-        """
+        f"""
         SELECT metric, value
         FROM conflict_forecasts
         WHERE source = 'conflictforecast_org' AND iso3 = ? AND forecast_issue_date = ?
+          AND {SERVED_TARGET_FILTER_SQL}
         """,
         [iso3.upper(), latest_date],
     ).fetchall()
@@ -226,10 +236,10 @@ def _load_conflictforecast_org(con, iso3: str) -> Optional[dict[str, Any]]:
 def _load_acled_cast(con, iso3: str) -> Optional[dict[str, Any]]:
     """Load ACLED CAST forecast data for a country."""
     row = con.execute(
-        """
+        f"""
         SELECT MAX(forecast_issue_date)
         FROM conflict_forecasts
-        WHERE source = 'ACLED_CAST' AND iso3 = ?
+        WHERE source = 'ACLED_CAST' AND iso3 = ? AND {SERVED_TARGET_FILTER_SQL}
         """,
         [iso3.upper()],
     ).fetchone()
@@ -239,10 +249,11 @@ def _load_acled_cast(con, iso3: str) -> Optional[dict[str, Any]]:
     latest_date = row[0]
 
     result = con.execute(
-        """
+        f"""
         SELECT metric, lead_months, value
         FROM conflict_forecasts
         WHERE source = 'ACLED_CAST' AND iso3 = ? AND forecast_issue_date = ?
+          AND {SERVED_TARGET_FILTER_SQL}
         ORDER BY metric, lead_months
         """,
         [iso3.upper(), latest_date],

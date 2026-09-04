@@ -648,3 +648,48 @@ def test_the_enso_ladder_must_have_two_live_ranks(tmp_path, full_run):
                             run_log_dir=full_run["streams"])
     checks = {c["name"]: c for c in manifest["checks"]}
     assert checks["enso_ladder_has_two_live_ranks_in_the_last_30_days"]["verdict"] == "PASS"
+
+
+def test_an_acled_web_page_beside_an_ok_connector_is_a_contradiction(tmp_path, full_run):
+    """B1.3(d): a run cannot report ok while receiving ACLED's Unauthorized page."""
+
+    from resolver.diagnostics import run_log
+
+    streams = full_run["streams"]
+    with open(streams / f"{run_log.STREAM_HTTP}.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "connector": "acled_client", "method": "GET",
+            "url": "https://acleddata.com/api/acled/read?page=1",
+            "status": 200, "content_type": "text/html; charset=UTF-8",
+            "elapsed_ms": 12.0, "response_bytes": 5120, "redirects": 0,
+        }) + "\n")
+    report = full_run["diagnostics"] / "ingestion" / "connectors_report.jsonl"
+    with open(report, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"connector_id": "acled_client", "status": "ok",
+                                 "counts": {"written": 0}}) + "\n")
+
+    _out, manifest = _build(tmp_path, db_path=full_run["db"],
+                            diagnostics_dir=full_run["diagnostics"],
+                            run_log_dir=streams)
+    checks = {c["name"]: c for c in manifest["checks"]}
+    check = checks["acled_html_responses_are_recorded_as_connector_failures"]
+    assert check["verdict"] == "FAIL"
+    assert "acled_client" in check["left"]
+
+
+def test_a_conflict_forecast_reader_never_serves_a_past_target_month(tmp_path, full_run):
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute("ALTER TABLE conflict_forecasts ADD COLUMN target_month DATE")
+    con.execute(
+        "INSERT INTO conflict_forecasts VALUES "
+        "('ACLED_CAST','SOM','ACE','cast_total_events',1,DATE '2025-12-01',10.0,DATE '2026-01-01')"
+    )
+    con.close()
+    _out, manifest = _build(tmp_path, db_path=db,
+                            diagnostics_dir=full_run["diagnostics"],
+                            run_log_dir=full_run["streams"])
+    checks = {c["name"]: c for c in manifest["checks"]}
+    check = checks["no_conflict_forecast_served_has_a_target_month_in_the_past"]
+    assert check["verdict"] == "PASS"
+    assert "target_month" in check["detail"]

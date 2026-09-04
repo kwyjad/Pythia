@@ -23,6 +23,7 @@ on:
       - "resolver/tests/test_hs_tail_trigger_query.py"
       - "resolver/tests/test_rc_calibration.py"
       - "resolver/tests/test_hs_triage_resilience_and_rerun_lists.py"
+      - "resolver/tests/test_conflict_forecasts_served.py"
       - "pythia/db/schema.py"
       - "pythia/buckets.py"
       - ".github/workflows/horizon-scanner-ci.yml"
@@ -41,6 +42,7 @@ on:
       - "resolver/tests/test_hs_tail_trigger_query.py"
       - "resolver/tests/test_rc_calibration.py"
       - "resolver/tests/test_hs_triage_resilience_and_rerun_lists.py"
+      - "resolver/tests/test_conflict_forecasts_served.py"
       - "pythia/db/schema.py"
       - "pythia/buckets.py"
       - ".github/workflows/horizon-scanner-ci.yml"
@@ -89,4 +91,5 @@ jobs:
             resolver/tests/test_hs_tail_trigger_query.py \
             resolver/tests/test_rc_calibration.py \
             resolver/tests/test_hs_triage_resilience_and_rerun_lists.py \
+            resolver/tests/test_conflict_forecasts_served.py \
             -m "not allow_network and not network"

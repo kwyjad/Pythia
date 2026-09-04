@@ -3,22 +3,85 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""Helper utilities for authenticating against the ACLED API."""
+"""Helper utilities for authenticating against the ACLED API.
+
+Three things this module settles for every ACLED caller (Sept 2026, from
+run 33841370196):
+
+**One token per run.** Tokens are valid for 86,400 seconds, and the run made
+separate token requests for ``acled_client``, ``acled_cast`` and
+``pythia.acled_political`` plus retries, because each runs in its own
+process and the cache was a module dict. The cache is now also a small
+file (``ACLED_TOKEN_CACHE_PATH``, default under the system temp directory,
+never inside the workspace an artifact upload could sweep up) that every
+process reads before asking for a token and writes after obtaining one.
+
+**The password grant comes first.** The stored refresh token has a ~14-day
+TTL and the ingest runs monthly, so the refresh grant's normal, expected
+outcome was ``invalid_grant`` — seven ERROR lines a run that trained the
+reader to skip them. When password credentials exist they are used
+directly; the refresh grant is tried only when they do not.
+
+**An HTML body is a failure, never an empty result.** ACLED's gateway
+answers an unauthenticated API call with a Drupal page titled
+"Unauthorized" — with HTTP 200, and even when the request sets ``Accept:
+application/json`` — so a 401, a WAF interstitial and a session expiry are
+indistinguishable by status alone. :func:`parse_json_response` is the one
+place every ACLED response is turned into JSON: it checks the content
+type and the leading character before parsing and raises
+:class:`AcledHtmlResponse` (status, URL, first 200 characters) on a page.
+"""
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
+import tempfile
 import time
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import requests
 
 OAUTH_TOKEN_URL = "https://acleddata.com/oauth/token"
 OAUTH_CLIENT_ID = "acled"
 _MIN_TTL = 300  # seconds
+
+#: Where the cross-process token cache lives. Empty string disables it.
+#: Deliberately outside the repository checkout: ``resolver/staging`` and
+#: ``diagnostics/`` are uploaded as artifacts, and a bearer token must never
+#: travel in one.
+_TOKEN_CACHE_ENV = "ACLED_TOKEN_CACHE_PATH"
+_TOKEN_CACHE_DEFAULT = str(Path(tempfile.gettempdir()) / "pythia_acled_token.json")
+
+
+class AcledResponseError(RuntimeError):
+    """An ACLED response that cannot be used, described so the cause is readable."""
+
+
+class AcledHtmlResponse(AcledResponseError):
+    """ACLED served a web page where JSON was expected.
+
+    This is the shape of an unauthenticated call, a WAF challenge and a
+    session expiry alike, and it has already killed one monthly ingest. It
+    is never zero records.
+    """
+
+    def __init__(self, *, what: str, status: int, url: str, snippet: str,
+                 description: str = "") -> None:
+        self.status = status
+        self.url = url
+        self.snippet = snippet
+        message = (
+            f"ACLED {what} returned an HTML page, not JSON "
+            f"(status={status}, url={url!r}): {snippet!r}"
+        )
+        if description:
+            message += f" | {description}"
+        super().__init__(message)
 
 # ACLED's token endpoint sits behind a WAF, and on 2026-09-03 both grants were
 # answered HTTP 200 with a body that was not JSON: the status check passed and
@@ -131,6 +194,75 @@ def _looks_like_html(text: str, content_type: str) -> bool:
     return head.startswith("<!doctype html") or head.startswith("<html") or "<title" in head
 
 
+def body_shape(resp: Any) -> str:
+    """'html', 'json' or 'other', from the content type and the body's first character."""
+
+    content_type = ""
+    try:
+        raw_type = resp.headers.get("Content-Type", "")
+        content_type = raw_type if isinstance(raw_type, str) else ""
+    except Exception:  # pragma: no cover - defensive
+        pass
+    head = ""
+    try:
+        text = resp.text
+        head = text.lstrip()[:200] if isinstance(text, str) else ""
+    except Exception:  # pragma: no cover - defensive
+        head = ""
+    if _looks_like_html(head, content_type):
+        return "html"
+    if "json" in content_type.lower() or head[:1] in ("{", "["):
+        return "json"
+    return "other"
+
+
+def _status_of(resp: Any) -> Optional[int]:
+    status = getattr(resp, "status_code", None)
+    if isinstance(status, bool) or not isinstance(status, int):
+        return None
+    return status
+
+
+def parse_json_response(resp: Any, *, what: str) -> Any:
+    """The single path from an ACLED HTTP response to its JSON payload.
+
+    Raises :class:`AcledHtmlResponse` when the body is a web page — whatever
+    the status code says, because the gateway serves its "Unauthorized" page
+    with a 200 — and :class:`AcledResponseError` for a non-200 status or a
+    body that will not parse. Every message carries
+    :func:`describe_response`, so the status, the content type, the URL
+    reached after redirects and a redacted body snippet are in the log, and
+    the four causes of "not JSON" can be told apart.
+    """
+
+    shape = body_shape(resp)
+    if shape == "html":
+        status = _status_of(resp) or 0
+        url = ""
+        try:
+            url = _redact(str(resp.url or ""))
+        except Exception:  # pragma: no cover - defensive
+            pass
+        snippet = _body_snippet(resp, limit=200)
+        description = describe_response(resp)
+        _LOG.error("ACLED %s served HTML | %s", what, description)
+        raise AcledHtmlResponse(
+            what=what, status=status, url=url, snippet=snippet, description=description,
+        )
+
+    status = _status_of(resp)
+    if status is not None and status != 200:
+        raise AcledResponseError(f"ACLED {what} failed: {describe_response(resp)}")
+
+    try:
+        return resp.json()
+    except ValueError:
+        raise AcledResponseError(
+            f"ACLED {what} returned HTTP 200 with a body that is not JSON: "
+            f"{describe_response(resp)}"
+        ) from None
+
+
 def describe_response(resp: requests.Response) -> str:
     """Say what actually came back, in one line, with no credentials in it.
 
@@ -191,20 +323,11 @@ def _token_request(data: Dict[str, str], *, flow: str) -> Dict[str, str]:
     )
     _log_token_http(resp, flow=flow)
 
-    if resp.status_code != 200:
-        raise RuntimeError(f"ACLED OAuth {flow} grant failed: {describe_response(resp)}")
-
     # A 200 is not an answer. Until 2026-09-03 this branch was a bare
     # resp.json(), so a WAF page served with a 200 surfaced as "Expecting
     # value: line 1 column 1 (char 0)" and killed the monthly ingest with
     # nothing recorded about what had actually been served.
-    try:
-        payload = resp.json()
-    except ValueError:
-        raise RuntimeError(
-            f"ACLED OAuth {flow} grant returned HTTP 200 with a body that is not JSON: "
-            f"{describe_response(resp)}"
-        ) from None
+    payload = parse_json_response(resp, what=f"OAuth {flow} grant")
 
     if not isinstance(payload, dict):
         raise RuntimeError(
@@ -243,6 +366,102 @@ def _set_cache(token: str, refresh_token: Optional[str]) -> None:
     _CACHE["expiry"] = _jwt_exp(token)
     if refresh_token:
         _CACHE["refresh_token"] = refresh_token
+    _save_file_cache(token, refresh_token)
+
+
+# ---------------------------------------------------------------------------
+# The cross-process cache: one token per run
+# ---------------------------------------------------------------------------
+
+def _token_cache_path() -> Optional[Path]:
+    raw = os.environ.get(_TOKEN_CACHE_ENV)
+    if raw is None:
+        raw = _TOKEN_CACHE_DEFAULT
+    raw = raw.strip()
+    return Path(raw) if raw else None
+
+
+def _credential_fingerprint() -> str:
+    """Which account the cached token belongs to, without naming it."""
+
+    username = (os.environ.get("ACLED_USERNAME") or "").strip()
+    return hashlib.sha256(username.encode("utf-8")).hexdigest()[:12] if username else ""
+
+
+def _load_file_cache() -> Optional[Dict[str, Any]]:
+    path = _token_cache_path()
+    if path is None:
+        return None
+    try:
+        if not path.is_file():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - a corrupt cache costs one grant
+        _LOG.debug("ACLED token cache unreadable (%s); ignoring", exc)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("fingerprint") != _credential_fingerprint():
+        return None
+    return payload
+
+
+def _save_file_cache(token: str, refresh_token: Optional[str]) -> None:
+    path = _token_cache_path()
+    if path is None:
+        return
+    expiry = _jwt_exp(token)
+    if not expiry:
+        # An opaque token has no expiry to judge it by; caching it could
+        # serve a dead token to every later process.
+        return
+    previous = _load_file_cache() or {}
+    payload = {
+        "access_token": token,
+        "refresh_token": refresh_token or previous.get("refresh_token"),
+        "expiry": expiry,
+        "fingerprint": _credential_fingerprint(),
+        "saved_at": int(time.time()),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception as exc:  # noqa: BLE001 - caching is a saving, never a requirement
+        _LOG.debug("ACLED token cache not written (%s)", exc)
+
+
+def _resolve_file_cached_token() -> Optional[str]:
+    cached = _load_file_cache()
+    if not cached:
+        return None
+    token = cached.get("access_token")
+    expiry = cached.get("expiry")
+    if not token or not isinstance(expiry, int):
+        return None
+    if (expiry - int(time.time())) <= _MIN_TTL:
+        return None
+    _CACHE["access_token"] = str(token)
+    _CACHE["expiry"] = expiry
+    if cached.get("refresh_token"):
+        _CACHE["refresh_token"] = str(cached["refresh_token"])
+    return str(token)
+
+
+def clear_token_cache() -> None:
+    """Forget every cached token (tests, and a deliberate re-authentication)."""
+
+    _CACHE.update({"access_token": None, "refresh_token": None, "expiry": None})
+    path = _token_cache_path()
+    if path is not None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:  # pragma: no cover - defensive
+            pass
 
 
 def _resolve_refresh_token() -> Optional[str]:
@@ -279,7 +498,15 @@ def _resolve_existing_token() -> Optional[str]:
 
 
 def get_access_token() -> str:
-    """Return a valid ACLED access token, refreshing credentials when required."""
+    """Return a valid ACLED access token, obtaining one only when none is cached.
+
+    Order: the in-process cache, the cross-process file cache (the token
+    the previous process of this run obtained), an environment-provided
+    token, the password grant, and only then the refresh grant. The
+    password grant precedes the refresh grant because the stored refresh
+    token expires in ~14 days and the ingest runs monthly, so a refresh
+    attempt's expected outcome was a failure line on every run.
+    """
 
     now = int(time.time())
     cached_token = _CACHE.get("access_token")
@@ -290,6 +517,12 @@ def get_access_token() -> str:
             extra=_describe_token(cached_token, cached_expiry),
         )
         return cached_token
+
+    file_cached = _resolve_file_cached_token()
+    if file_cached:
+        _LOG.info("[acled_auth] using the access token cached by an earlier process of this run")
+        print("[acled_auth] Using the token cached by an earlier process of this run")
+        return file_cached
 
     existing = _resolve_existing_token()
     if existing and _jwt_is_usable(existing):
@@ -302,35 +535,7 @@ def get_access_token() -> str:
         _set_cache(existing, os.environ.get("ACLED_REFRESH_TOKEN"))
         return existing
     elif existing:
-        _LOG.debug("Environment-provided ACLED token is an expired JWT; falling through to refresh/password grant")
-
-    refresh_token = _resolve_refresh_token()
-    if refresh_token:
-        _LOG.debug(
-            "Attempting ACLED refresh grant",
-            extra={"token_length": len(refresh_token)},
-        )
-        print("[acled_auth] Attempting refresh grant...")
-        try:
-            tokens = _refresh_grant(refresh_token)
-        except Exception as exc:  # pragma: no cover - network stack errors
-            _LOG.debug("ACLED refresh grant failed", extra={"error": str(exc)})
-            print(f"[acled_auth] Refresh grant failed: {exc}; trying password grant")
-        else:
-            access_token = tokens.get("access_token")
-            if not access_token:
-                raise RuntimeError("ACLED refresh grant response missing access_token")
-            new_refresh = tokens.get("refresh_token") or refresh_token
-            os.environ["ACLED_ACCESS_TOKEN"] = access_token
-            os.environ["ACLED_REFRESH_TOKEN"] = new_refresh
-            _set_cache(access_token, new_refresh)
-            expiry = _CACHE.get("expiry") if isinstance(_CACHE.get("expiry"), int) else _jwt_exp(access_token)
-            _LOG.debug(
-                "Obtained ACLED access token via refresh",
-                extra=_describe_token(access_token, expiry if isinstance(expiry, int) else None),
-            )
-            print("[acled_auth] Refresh grant succeeded")
-            return access_token
+        _LOG.debug("Environment-provided ACLED token is an expired JWT; falling through to the grants")
 
     password_creds = _resolve_password_creds()
     if password_creds:
@@ -353,10 +558,33 @@ def get_access_token() -> str:
         print("[acled_auth] Password grant succeeded")
         return access_token
 
+    refresh_token = _resolve_refresh_token()
+    if refresh_token:
+        _LOG.debug(
+            "Attempting ACLED refresh grant (no password credentials configured)",
+            extra={"token_length": len(refresh_token)},
+        )
+        print("[acled_auth] No password credentials; attempting refresh grant...")
+        tokens = _refresh_grant(refresh_token)
+        access_token = tokens.get("access_token")
+        if not access_token:
+            raise RuntimeError("ACLED refresh grant response missing access_token")
+        new_refresh = tokens.get("refresh_token") or refresh_token
+        os.environ["ACLED_ACCESS_TOKEN"] = access_token
+        os.environ["ACLED_REFRESH_TOKEN"] = new_refresh
+        _set_cache(access_token, new_refresh)
+        expiry = _CACHE.get("expiry") if isinstance(_CACHE.get("expiry"), int) else _jwt_exp(access_token)
+        _LOG.debug(
+            "Obtained ACLED access token via refresh",
+            extra=_describe_token(access_token, expiry if isinstance(expiry, int) else None),
+        )
+        print("[acled_auth] Refresh grant succeeded")
+        return access_token
+
     print("[acled_auth] All auth methods exhausted — no valid credentials found")
     raise RuntimeError(
         "ACLED authentication failed: set ACLED_ACCESS_TOKEN/ACLED_TOKEN or "
-        "ACLED_REFRESH_TOKEN or ACLED_USERNAME/ACLED_PASSWORD."
+        "ACLED_USERNAME/ACLED_PASSWORD (or ACLED_REFRESH_TOKEN)."
     )
 
 

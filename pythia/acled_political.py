@@ -40,6 +40,26 @@ _ATTRIBUTION_DROPS: dict[str, int] = {}
 _ATTRIBUTION_DROPS_LOCK = threading.Lock()
 
 
+_HTML_FAILURES: dict[str, str] = {}
+
+
+def _record_html_failure(key: str, exc: Exception) -> None:
+    with _ATTRIBUTION_DROPS_LOCK:
+        _HTML_FAILURES[key or "?"] = str(exc)[:300]
+
+
+def get_html_failure_stats() -> dict[str, str]:
+    """Calls ACLED answered with a web page this run, keyed by request country."""
+
+    with _ATTRIBUTION_DROPS_LOCK:
+        return dict(_HTML_FAILURES)
+
+
+def reset_html_failure_stats() -> None:
+    with _ATTRIBUTION_DROPS_LOCK:
+        _HTML_FAILURES.clear()
+
+
 def reset_attribution_drop_stats() -> None:
     """Clear the per-run attribution-drop counters (call at bulk-fetch start)."""
     with _ATTRIBUTION_DROPS_LOCK:
@@ -369,16 +389,28 @@ def _fetch_with_retry(
                 continue
             return []
 
-        if resp.status_code != 200:
-            log.warning("ACLED political events HTTP %d", resp.status_code)
-            return []
+        # The single ACLED error path. An HTML body — the gateway's
+        # "Unauthorized" page, served with a 200 even to a request that asked
+        # for JSON — is a named connector failure and is never read as zero
+        # events for the country. It propagates; _record_html_failure counts
+        # it so the bulk ingest reports the connector as failed.
+        from resolver.ingestion.acled_auth import (
+            AcledHtmlResponse,
+            AcledResponseError,
+            parse_json_response,
+        )
 
         try:
-            payload = resp.json()
-        except ValueError:
-            log.warning("ACLED political events response was not valid JSON")
+            payload = parse_json_response(resp, what="political events read")
+        except AcledHtmlResponse as exc:
+            _record_html_failure(str(params.get("iso") or ""), exc)
+            raise
+        except AcledResponseError as exc:
+            log.warning("ACLED political events: %s", exc)
             return []
 
+        if not isinstance(payload, dict):
+            return []
         data = payload.get("data") or payload.get("results") or []
         return data if isinstance(data, list) else []
 

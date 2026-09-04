@@ -38,7 +38,8 @@ class _Resp:
 
 
 @pytest.fixture(autouse=True)
-def _clear_cache():
+def _clear_cache(monkeypatch):
+    monkeypatch.setenv("ACLED_TOKEN_CACHE_PATH", "")
     acled_auth._CACHE.update({"access_token": None, "refresh_token": None, "expiry": None})
     yield
     acled_auth._CACHE.update({"access_token": None, "refresh_token": None, "expiry": None})

@@ -58,6 +58,68 @@ def _import_connector(dotted_path: str):
     return getattr(mod, class_name)
 
 
+#: Each source's own staleness threshold, in days from its issue date.
+#: VIEWS and CAST are issued monthly and conflictforecast.org refreshes
+#: monthly, so 45 days is one missed edition plus slack. Stamped onto every
+#: row as ``is_stale_vintage`` / ``vintage_age_days`` by
+#: :func:`stamp_vintage_flags`, so a stale vintage is a fact on the row and
+#: not only a warning in a log the reader has learned to skip.
+STALENESS_THRESHOLD_DAYS: dict[str, int] = {
+    "VIEWS": 45,
+    "conflictforecast_org": 45,
+    "ACLED_CAST": 45,
+}
+DEFAULT_STALENESS_THRESHOLD_DAYS = 45
+
+#: What each connector found on its last fetch (target months, dropped
+#: country-months, duplicates), keyed by source name, for the run summary.
+LAST_RUN_SUMMARIES: dict[str, dict] = {}
+
+
+def stamp_vintage_flags(con, *, today: date | None = None) -> dict[str, int]:
+    """Set ``is_stale_vintage`` and ``vintage_age_days`` on EVERY row.
+
+    Re-run on every write (and idempotent on its own), because the age of a
+    vintage is a function of today, and a row stamped fresh in December is
+    stale by February whether or not anything was written since. Returns
+    the count of rows flagged stale per source.
+    """
+
+    day = today or date.today()
+    con.execute(
+        "UPDATE conflict_forecasts SET vintage_age_days = "
+        "date_diff('day', CAST(forecast_issue_date AS DATE), CAST(? AS DATE))",
+        [day],
+    )
+    sources = [r[0] for r in con.execute(
+        "SELECT DISTINCT source FROM conflict_forecasts"
+    ).fetchall()]
+    stale_by_source: dict[str, int] = {}
+    for source_name in sources:
+        threshold = STALENESS_THRESHOLD_DAYS.get(
+            str(source_name), DEFAULT_STALENESS_THRESHOLD_DAYS
+        )
+        con.execute(
+            "UPDATE conflict_forecasts SET is_stale_vintage = (vintage_age_days > ?) "
+            "WHERE source = ?",
+            [threshold, source_name],
+        )
+        stale_by_source[str(source_name)] = int(con.execute(
+            "SELECT COUNT(*) FROM conflict_forecasts "
+            "WHERE source = ? AND is_stale_vintage",
+            [source_name],
+        ).fetchone()[0])
+    for source_name, n in stale_by_source.items():
+        if n:
+            LOG.warning(
+                "[fetch_conflict_forecasts] %s: %d row(s) carry a stale vintage "
+                "(older than %d days) and are flagged is_stale_vintage",
+                source_name, n,
+                STALENESS_THRESHOLD_DAYS.get(source_name, DEFAULT_STALENESS_THRESHOLD_DAYS),
+            )
+    return stale_by_source
+
+
 def fetch_and_store(
     *,
     db_url: str | None = None,
@@ -96,7 +158,11 @@ def fetch_and_store(
         except Exception as exc:
             LOG.error("[fetch_conflict_forecasts] %s failed: %s", name, exc)
             row_counts[name] = 0
+            LAST_RUN_SUMMARIES[name] = {"error": str(exc)[:300]}
             continue
+        summary = getattr(connector, "summary", None)
+        if isinstance(summary, dict):
+            LAST_RUN_SUMMARIES[name] = dict(summary)
 
         if df.empty:
             LOG.info("[fetch_conflict_forecasts] %s returned 0 rows", name)
@@ -210,6 +276,10 @@ def _write_to_db(df: pd.DataFrame, *, db_url: str | None = None) -> None:
             "       forecast_issue_date, target_month, model_version "
             "FROM df"
         )
+        # Every row, not only the new ones: a vintage's age is a function of
+        # today, and the flag must be true on the row whenever it is true in
+        # the world.
+        stamp_vintage_flags(con)
     finally:
         con.close()
 

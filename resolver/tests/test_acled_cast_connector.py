@@ -503,24 +503,24 @@ class TestYearFilterAndStaleness:
     @patch("resolver.connectors.acled_cast.requests.get")
     @patch("resolver.ingestion.acled_auth.get_auth_header",
            return_value={"Authorization": "Bearer test"})
-    def test_falls_back_to_unfiltered_when_year_empty(self, mock_auth, mock_get, mock_iso3):
+    def test_an_empty_result_stays_empty_with_no_unfiltered_fallback(self, mock_auth, mock_get, mock_iso3):
+        """The unfiltered endpoint pages the archive OLDEST first (page 1 is
+        2023-24 rows), so a fallback written to avoid regressing to zero
+        data would ingest two-year-old forecasts and report success. Older
+        data presented as current is worse than none."""
         empty = MagicMock()
         empty.json.return_value = _make_api_response([])
         empty.raise_for_status = MagicMock()
-        full = MagicMock()
-        full.json.return_value = _make_api_response(
-            [_make_cast_record(month="March", year=2026)]
-        )
-        full.raise_for_status = MagicMock()
-        # Both year-filtered pulls (current, current+1) return empty → the
-        # third call (unfiltered) has data.
-        mock_get.side_effect = [empty, empty, full]
+        empty.headers = {"Content-Type": "application/json"}
+        empty.status_code = 200
+        empty.text = "{}"
+        mock_get.return_value = empty
 
         df = AcledCastConnector().fetch_forecasts()
-        assert not df.empty
-        # Third request must NOT carry the year filter.
-        _args, kwargs = mock_get.call_args_list[2]
-        assert "year" not in kwargs["params"]
+        assert df.empty
+        # Exactly the two year-filtered pulls; no third, unfiltered request.
+        assert len(mock_get.call_args_list) == 2
+        assert all("year" in kwargs["params"] for _a, kwargs in mock_get.call_args_list)
 
     @patch("resolver.ingestion.utils.iso_normalize.to_iso3", return_value="NGA")
     @patch("resolver.connectors.acled_cast.requests.get")

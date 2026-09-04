@@ -20,6 +20,31 @@ Data source:
 CAST is the only conflict forecast source that disaggregates by event type
 (battles vs. explosions/remote violence vs. violence against civilians).
 It predicts event *counts*, not fatalities.
+
+What the September 2026 review settled, verified against the live API with
+a valid token on 2026-09-04 (see CLAUDE.md, run 33841370196, Group B):
+
+* ``year`` filters the TARGET year; ``year=2026`` returns 9,879 records on
+  two pages, every one stamped 2025-12-10, and ``year=2027`` returns none.
+  The feed is frozen upstream; the connector, credentials and pagination
+  all work. The stale vintage is therefore FLAGGED on every row it writes
+  (``conflict_forecasts.is_stale_vintage`` / ``vintage_age_days``) and the
+  prompt readers serve only rows whose target month has not passed.
+* The unfiltered fallback is GONE. The unfiltered endpoint pages the
+  archive oldest first (page 1 is 2023-24 rows), so a fallback written to
+  avoid regressing to zero data would have ingested two-year-old forecasts
+  and reported success. An empty result stays empty.
+* Pagination loses nothing today (9,879 rows, 9,879 distinct (country,
+  admin1, month, year) keys), but ``_aggregate_to_country`` SUMS across
+  every record, so a paging change that repeated a row across a boundary
+  would double the counts silently. Records are deduplicated on that key
+  first and the drop count is logged beside the raw count.
+* A vintage carries the months it carries. December 2025 has five target
+  months, January to May 2026; June is absent from the API, not lost here.
+  The target months found are logged and reported, never inferred from
+  ``_MAX_LEAD_MONTHS``.
+* Every country-month that leaves the pipeline between aggregation and the
+  written rows is named, with its reason (no ISO3, lead outside 1..6).
 """
 
 from __future__ import annotations
@@ -27,7 +52,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -104,6 +129,11 @@ class AcledCastConnector:
 
     name: str = "acled_cast"
 
+    def __init__(self) -> None:
+        #: What the last fetch found, for the run summary. Filled by
+        #: fetch_forecasts; read by resolver.tools.fetch_conflict_forecasts.
+        self.summary: Dict[str, Any] = {}
+
     def fetch_forecasts(self) -> pd.DataFrame:
         """Fetch the latest ACLED CAST forecasts, aggregated to country level.
 
@@ -111,18 +141,14 @@ class AcledCastConnector:
         table: source, iso3, hazard_code, metric, lead_months, value,
         forecast_issue_date, target_month, model_version.
         """
+        self.summary = {}
         try:
-            # Prefer the current calendar year's forecasts (ACLED's documented
-            # `year` filter). This is defensive: if the no-param default view
-            # is ever stale/truncated, the year filter surfaces the latest
-            # issue. Falls back to an unfiltered pull when the year filters
-            # return nothing, so we never regress to zero data.
-            #
             # `year` filters the forecast TARGET year, and CAST issues
-            # 6-month-ahead forecasts — so late in the year the freshest
-            # issue's target months spill into next year. Fetch BOTH target
-            # years and merge; otherwise a non-empty-but-stale current-year
-            # response would mask the new issue and skip the fallback.
+            # forecasts up to six months ahead — so late in the year the
+            # freshest issue's target months spill into next year. Fetch
+            # BOTH target years and merge. There is deliberately NO
+            # unfiltered fallback: that endpoint pages the archive oldest
+            # first, and older data presented as current is worse than none.
             current_year = date.today().year
             records = self._fetch_all_records(year=current_year)
             try:
@@ -141,32 +167,37 @@ class AcledCastConnector:
                 rec for rec in next_records
                 if str(rec.get("year", "")).strip() == str(current_year + 1)
             ]
-            if not records:
-                LOG.info(
-                    "[acled_cast] no records for year in (%d, %d) — retrying unfiltered",
-                    current_year, current_year + 1,
-                )
-                records = self._fetch_all_records()
         except Exception as exc:
             LOG.error(
                 "[acled_cast] fetch failed — CAST forecasts will be MISSING "
                 "from this ingest cycle: %s", exc,
             )
+            self.summary = {"error": str(exc)[:300]}
             return pd.DataFrame()
 
         if not records:
-            LOG.info("[acled_cast] no records returned from API")
+            LOG.info(
+                "[acled_cast] no records for target years %d or %d — writing "
+                "nothing (an empty result stays empty; there is no unfiltered "
+                "fallback because it serves the archive oldest first)",
+                current_year, current_year + 1,
+            )
+            self.summary = {"records_fetched": 0}
             return pd.DataFrame()
 
         issue_date = self._derive_issue_date(records)
         age_days = (date.today() - issue_date).days
+        self.summary["records_fetched"] = len(records)
+        self.summary["issue_date"] = issue_date.isoformat()
+        self.summary["vintage_age_days"] = age_days
         if age_days > _STALENESS_WARN_DAYS:
             LOG.warning(
                 "[acled_cast] latest forecast issue date %s is %d days old "
-                "(> %d) — the ACLED CAST API may not be serving current "
-                "forecasts. conflict_forecasts will carry a stale CAST "
-                "vintage; if this persists, escalate to ACLED (the connector "
-                "and auth are working — it fetched %d records).",
+                "(> %d) — the ACLED CAST API is not serving current forecasts. "
+                "Every row written carries is_stale_vintage=true, and the "
+                "prompt readers serve only target months that have not "
+                "passed. Escalate to ACLED; the connector and auth are "
+                "working (it fetched %d records).",
                 issue_date.isoformat(), age_days, _STALENESS_WARN_DAYS,
                 len(records),
             )
@@ -183,7 +214,36 @@ class AcledCastConnector:
             return pd.DataFrame()
 
         df = pd.DataFrame(rows)
-        LOG.info("[acled_cast] produced %d forecast rows", len(df))
+        target_months = sorted({str(t) for t in df["target_month"]})
+        country_months = df[["iso3", "target_month"]].drop_duplicates()
+        self.summary["target_months"] = target_months
+        self.summary["countries"] = int(df["iso3"].nunique())
+        self.summary["country_months_written"] = int(len(country_months))
+        # Which countries carry fewer target months than the vintage does:
+        # 88 countries x 5 months is 440, and 438 was what the September run
+        # produced. A country with a month missing upstream is named here.
+        per_country = country_months.groupby("iso3").size()
+        gaps = {
+            str(iso3): int(len(target_months) - n)
+            for iso3, n in per_country.items() if n < len(target_months)
+        }
+        self.summary["countries_with_month_gaps"] = gaps
+        LOG.info(
+            "[acled_cast] produced %d forecast rows: %d countries x target "
+            "months %s (%d country-months; %d expected if every country "
+            "carried every month; countries with gaps: %s)",
+            len(df), self.summary["countries"], target_months,
+            len(country_months), self.summary["countries"] * len(target_months),
+            gaps or "none",
+        )
+        if len(target_months) < _MAX_LEAD_MONTHS:
+            LOG.warning(
+                "[acled_cast] the %s vintage carries %d target month(s) %s, "
+                "not the documented %d — the missing months are absent from "
+                "the API, not dropped here",
+                issue_date.isoformat(), len(target_months), target_months,
+                _MAX_LEAD_MONTHS,
+            )
         return df
 
     # ------------------------------------------------------------------
@@ -220,8 +280,12 @@ class AcledCastConnector:
                 headers=headers,
                 timeout=_TIMEOUT,
             )
-            resp.raise_for_status()
-            body = resp.json()
+            # The single ACLED error path: an HTML page (the gateway's
+            # "Unauthorized" page comes with a 200) raises a named failure
+            # and is never read as an empty page of records.
+            from resolver.ingestion.acled_auth import parse_json_response
+
+            body = parse_json_response(resp, what="CAST read")
 
             # Extract data array from response
             data: list = []
@@ -262,7 +326,42 @@ class AcledCastConnector:
         rows: List[Dict[str, Any]] = []
         unmapped_countries: set[str] = set()
 
+        # Deduplicate on the admin1 key BEFORE the SUM below. ACLED orders
+        # by month and splits a month across the page boundary; today that
+        # repeats nothing (9,879 rows, 9,879 distinct keys on 2026-09-04),
+        # but a paging change that repeated a row would double every count
+        # silently. The distinct-key count is logged beside the raw count
+        # so "fetched N records" can never mean N rows of which some are
+        # the same row twice.
+        seen: set[tuple] = set()
+        deduplicated: List[Dict[str, Any]] = []
         for rec in records:
+            key = (
+                (rec.get("country") or "").strip(),
+                (rec.get("admin1") or "").strip(),
+                (rec.get("month") or "").strip().lower(),
+                str(rec.get("year") or "").strip(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduplicated.append(rec)
+        dropped = len(records) - len(deduplicated)
+        self.summary["distinct_admin1_keys"] = len(deduplicated)
+        self.summary["duplicate_records_dropped"] = dropped
+        LOG.info(
+            "[acled_cast] %d records fetched, %d distinct (country, admin1, "
+            "month, year) keys, %d duplicate record(s) dropped before "
+            "aggregation",
+            len(records), len(deduplicated), dropped,
+        )
+        if dropped:
+            LOG.warning(
+                "[acled_cast] ACLED's paging repeated %d record(s) across a "
+                "boundary — the SUM would have doubled them", dropped,
+            )
+
+        for rec in deduplicated:
             country = (rec.get("country") or "").strip()
             month_str = (rec.get("month") or "").strip().lower()
             year = rec.get("year")
@@ -313,12 +412,22 @@ class AcledCastConnector:
 
         grouped["iso3"] = iso3_codes
 
+        self.summary["country_months_aggregated"] = int(len(grouped))
         if unmapped_countries:
-            LOG.warning(
-                "[acled_cast] %d countries could not be mapped to ISO3: %s",
-                len(unmapped_countries),
-                sorted(unmapped_countries),
+            lost = grouped[grouped["iso3"].isna()]
+            named = sorted(
+                f"{r.country} {int(r.year)}-{int(r.month_num):02d}"
+                for r in lost.itertuples()
             )
+            self.summary["country_months_dropped_no_iso3"] = named
+            LOG.warning(
+                "[acled_cast] %d countries could not be mapped to ISO3 (%s); "
+                "%d country-month(s) dropped: %s",
+                len(unmapped_countries), sorted(unmapped_countries),
+                len(named), named,
+            )
+        else:
+            self.summary["country_months_dropped_no_iso3"] = []
 
         # Drop rows without ISO3
         grouped = grouped[grouped["iso3"].notna()].copy()
@@ -342,16 +451,19 @@ class AcledCastConnector:
             if ts is None:
                 continue
             try:
+                # Epoch timestamps are read in UTC: datetime.fromtimestamp
+                # without a zone is runner-local, and a runner in another
+                # zone would file a 23:00 UTC issue under the next day.
                 if isinstance(ts, (int, float)):
-                    dt = datetime.fromtimestamp(float(ts))
+                    dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
                 elif isinstance(ts, str):
                     # Try ISO format first, then epoch string
                     try:
-                        dt = datetime.fromisoformat(
-                            ts.replace("Z", "+00:00")
-                        )
+                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
                     except ValueError:
-                        dt = datetime.fromtimestamp(float(ts))
+                        dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
                 else:
                     continue
                 if max_dt is None or dt > max_dt:
@@ -378,18 +490,21 @@ class AcledCastConnector:
         """
         base_year, base_month = issue_date.year, issue_date.month
         rows: List[Dict[str, Any]] = []
+        dropped_lead: List[str] = []
+        dropped_iso3: List[str] = []
 
         for _, rec in aggregated.iterrows():
             iso3 = rec.get("iso3")
-            if not iso3 or not isinstance(iso3, str) or len(iso3) != 3:
-                continue
-
             year = int(rec["year"])
             month = int(rec["month_num"])
+            if not iso3 or not isinstance(iso3, str) or len(iso3) != 3:
+                dropped_iso3.append(f"{rec.get('country')} {year}-{month:02d}")
+                continue
 
             # Compute lead months from issue date
             lead = (year - base_year) * 12 + (month - base_month)
             if lead < 1 or lead > _MAX_LEAD_MONTHS:
+                dropped_lead.append(f"{iso3} {year}-{month:02d} (lead {lead})")
                 continue
 
             target = date(year, month, 1)
@@ -417,4 +532,17 @@ class AcledCastConnector:
                     }
                 )
 
+        # A country-month that vanishes silently is the same class of fault
+        # as a figure that vanishes silently: name each one and its reason.
+        self.summary["country_months_dropped_by_lead_filter"] = dropped_lead
+        if dropped_iso3:
+            self.summary.setdefault("country_months_dropped_no_iso3", [])
+            self.summary["country_months_dropped_no_iso3"] += dropped_iso3
+        if dropped_lead:
+            LOG.warning(
+                "[acled_cast] %d country-month(s) dropped by the lead filter "
+                "(outside 1..%d months from the %s issue): %s",
+                len(dropped_lead), _MAX_LEAD_MONTHS, issue_date.isoformat(),
+                dropped_lead,
+            )
         return rows

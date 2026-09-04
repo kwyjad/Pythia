@@ -1381,6 +1381,8 @@ class BundleBuilder:
             self._check_tc_duplicate_issue_dates,
             self._check_forecast_vintages,
             self._check_resolution_above_rejection_ceiling,
+            self._check_acled_html_responses,
+            self._check_no_past_target_month_served,
         ):
             try:
                 check()
@@ -1639,6 +1641,96 @@ class BundleBuilder:
             f"{len(stale)} of {len(result[1])} sources", f"at most {threshold} days",
             "; ".join(f"{r[0]} latest={r[1]} ({r[2]}d)" for r in stale)
             or "Every conflict-forecast source is inside its staleness threshold.",
+        )
+
+    #: The connectors whose calls go to acleddata.com, by the ids the
+    #: connectors report uses for them.
+    _ACLED_CONNECTOR_IDS = ("acled_client", "acled", "acledcast_forecasts", "acled_cast",
+                            "acled_political_events", "acled_political")
+
+    def _check_acled_html_responses(self) -> None:
+        """Any ACLED call answered with a web page is recorded as a failure.
+
+        ACLED's gateway serves its "Unauthorized" page with HTTP 200, even
+        to a request that asked for JSON, so a 401, a WAF interstitial and
+        a session expiry are indistinguishable by status code. A run must
+        not report ok=N fail=0 while receiving web pages.
+        """
+
+        name = "acled_html_responses_are_recorded_as_connector_failures"
+        stream = self._stream_file(run_log.STREAM_HTTP)
+        if stream is None:
+            return self._check(name, "SKIP", "", "", "no HTTP stream recorded")
+        html_calls: list[str] = []
+        for record in run_log.read_stream(stream):
+            url = str(record.get("url") or "")
+            if "acleddata.com" not in url:
+                continue
+            content_type = str(record.get("content_type") or "").lower()
+            if "html" in content_type:
+                html_calls.append(
+                    f"{record.get('connector')} {record.get('status')} {url[:80]}"
+                )
+        if not html_calls:
+            return self._check(
+                name, "PASS", "0 HTML responses from acleddata.com", "0",
+                "No ACLED call was answered with a web page.",
+            )
+        report = self.diagnostics_dir / "ingestion" / "connectors_report.jsonl"
+        ok_connectors: list[str] = []
+        if report.is_file():
+            for record in run_log.read_stream(report):
+                cid = str(record.get("connector_id") or record.get("connector") or "")
+                if cid in self._ACLED_CONNECTOR_IDS and str(record.get("status")) == "ok" \
+                        and not record.get("reason"):
+                    ok_connectors.append(cid)
+        verdict = "FAIL" if ok_connectors else "PASS"
+        self._check(
+            name, verdict,
+            f"{len(html_calls)} HTML response(s); ACLED connectors reporting ok: {ok_connectors or 'none'}",
+            "every ACLED connector that received a web page reports a failure",
+            "HTML from acleddata.com is the shape of an unauthenticated call, a WAF "
+            "challenge and a session expiry alike; it is never zero records. "
+            "Calls: " + "; ".join(html_calls[:10]),
+        )
+
+    def _check_no_past_target_month_served(self) -> None:
+        """No conflict_forecasts row a prompt reader serves has a past target month.
+
+        Runs the SAME predicate the readers apply (imported, not copied), so
+        the check fails the day someone replaces it with a lead-months
+        filter — which on a frozen vintage served January under the name of
+        "lead 1" in September.
+        """
+
+        name = "no_conflict_forecast_served_has_a_target_month_in_the_past"
+        if "conflict_forecasts" not in self.tables():
+            return self._check(name, "SKIP", "", "", "conflict_forecasts is absent")
+        if "target_month" not in {c for c, _t in self.columns_of("conflict_forecasts")}:
+            return self._check(name, "SKIP", "", "", "conflict_forecasts has no target_month column")
+        try:
+            from horizon_scanner.conflict_forecasts import SERVED_TARGET_FILTER_SQL
+        except Exception as exc:  # noqa: BLE001
+            return self._check(name, "SKIP", "", "", f"reader predicate unavailable: {exc}")
+        result = self.query(
+            f"SELECT source, COUNT(*) FROM conflict_forecasts "
+            f"WHERE ({SERVED_TARGET_FILTER_SQL}) "
+            f"AND target_month < date_trunc('month', CURRENT_DATE) GROUP BY source"
+        )
+        if result is None:
+            return
+        served_past = {str(r[0]): int(r[1]) for r in result[1]}
+        stale = self.query(
+            "SELECT source, COUNT(*) FROM conflict_forecasts "
+            "WHERE target_month < date_trunc('month', CURRENT_DATE) GROUP BY source"
+        )
+        stale_rows = {str(r[0]): int(r[1]) for r in (stale[1] if stale else [])}
+        self._check(
+            name, "FAIL" if served_past else "PASS",
+            f"{sum(served_past.values())} served rows with a past target month",
+            "0",
+            f"Reader predicate: {SERVED_TARGET_FILTER_SQL}. Rows in the table whose "
+            f"target month has passed (stored, flagged, not served): {stale_rows or 'none'}.",
         )
 
     def _check_resolution_above_rejection_ceiling(self) -> None:
