@@ -700,7 +700,17 @@ def collect_rows() -> List[List[str]]:
 
     return rows
 
+#: Set by :func:`main` when IFRC GO could not be READ, cleared when it could.
+#: "IFRC published nothing" and "we never reached IFRC" are different facts and
+#: only the second may fail the build. See acled_client._UNREAD_REASON: the
+#: same hole existed here, one connector along in the same fatal Phase 1 step.
+_UNREAD_REASON = None
+
+
 def main():
+    global _UNREAD_REASON
+    _UNREAD_REASON = None
+
     default_path = ROOT / "staging" / "ifrc_go.csv"
     out = resolve_output_path(default_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -709,15 +719,38 @@ def main():
         rows = collect_rows()
     except Exception as e:
         dbg(f"ERROR: {e}")
+        _UNREAD_REASON = str(e)
         rows = []
 
     if not rows:
         pd.DataFrame(columns=COLUMNS).to_csv(out, index=False)
-        print(f"wrote empty {out}")
+        if _UNREAD_REASON:
+            print(f"wrote empty {out} (error: {_UNREAD_REASON})")
+        else:
+            print(f"wrote empty {out}")
         return
 
     pd.DataFrame(rows, columns=COLUMNS).to_csv(out, index=False)
     print(f"wrote {out} rows={len(rows)}")
 
-if __name__ == "__main__":
+
+def cli_main() -> int:
+    """Run the connector and return a process exit code.
+
+    Non-zero ONLY when IFRC GO could not be read; a deliberate skip and an
+    empty window both exit 0.
+    """
+
     main()
+    if _UNREAD_REASON is None:
+        return 0
+    print(
+        "::error title=IFRC GO could not be read::"
+        f"IFRC GO returned no data because the source was unreachable: {_UNREAD_REASON}. "
+        "This is not an empty window; no IFRC rows will reach facts_resolved."
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli_main())

@@ -71,11 +71,20 @@ concurrency:
         required: false
         default: false
         type: boolean
-      diagnose_emdat:
-        description: "Also run the EM-DAT API diagnostic (read-only; needs EMDAT_API_KEY, so only CI can run it)"
+      # One slot for the whole family of read-only upstream diagnostics.
+      # GitHub caps workflow_dispatch at TEN inputs and this workflow is at the
+      # cap, so a boolean per diagnostic does not scale; a choice does. Each
+      # needs credentials only CI holds, so none can be run anywhere else.
+      diagnostics:
+        description: "Read-only upstream diagnostic to run before Phase 1 (needs CI-only credentials)"
         required: false
-        default: false
-        type: boolean
+        default: "none"
+        type: choice
+        options:
+          - none
+          - emdat
+          - acled_auth
+          - all
   schedule:
     # Run at 03:00 UTC on the 28th of each month.
     #
@@ -381,7 +390,7 @@ jobs:
       # (query shape vs account vs upstream) can only be settled here.
       # Read-only, exits 0, writes its verdict into the diagnostics artifact.
       - name: "Diagnose EM-DAT API (dispatch input)"
-        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.diagnose_emdat == true || inputs.diagnose_emdat == 'true') }}
+        if: ${{ inputs.diagnostics == 'emdat' || inputs.diagnostics == 'all' }}
         continue-on-error: true
         timeout-minutes: 10
         run: |
@@ -389,6 +398,24 @@ jobs:
           python -m scripts.ci.diagnose_emdat --out diagnostics/emdat_diagnostic.json \
             2>&1 | tee diagnostics/emdat_diagnostic.log \
             || echo "::warning::EM-DAT diagnostic failed (non-fatal)"
+
+      # The 2026-09-03 run died in Phase 1: both ACLED OAuth grants were
+      # answered HTTP 200 with a body that was not JSON, and nothing recorded
+      # the status, the content type, the URL reached or one character of the
+      # body. A WAF page, a moved route, content negotiation and a dead
+      # credential all look identical from a JSONDecodeError and want
+      # different repairs. Only CI holds the ACLED secrets, so this can be
+      # settled nowhere else. Read-only, exits 0, verdict lands in the
+      # diagnostics artifact.
+      - name: "Diagnose ACLED OAuth (dispatch input)"
+        if: ${{ inputs.diagnostics == 'acled_auth' || inputs.diagnostics == 'all' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          python -m scripts.ci.diagnose_acled_auth --out diagnostics/acled_auth_diagnostic.json \
+            2>&1 | tee diagnostics/acled_auth_diagnostic.log \
+            || echo "::warning::ACLED OAuth diagnostic failed (non-fatal)"
 
       # === PHASE 1: RESOLVER CONNECTORS (ground truth — fatal) ===
       - name: "Phase 1: Run IDMC (HELIX)"

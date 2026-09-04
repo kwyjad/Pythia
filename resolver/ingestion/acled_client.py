@@ -1601,7 +1601,18 @@ class ACLEDClient:
         return grouped
 
 
+#: Set by :func:`main` when the source could not be READ, and cleared when it
+#: could. "ACLED reported nothing this month" and "we never reached ACLED" are
+#: different facts, and only the second may fail the build; the bool
+#: :func:`main` returns is False for either, so it cannot decide the exit code
+#: and this carries the distinction to the ``__main__`` shim.
+_UNREAD_REASON: Optional[str] = None
+
+
 def main() -> bool:
+    global _UNREAD_REASON
+    _UNREAD_REASON = None
+
     if os.getenv("RESOLVER_SKIP_ACLED") == "1":
         dbg("RESOLVER_SKIP_ACLED=1 — skipping ACLED pull")
         _write_header_only(OUT_PATH)
@@ -1610,8 +1621,9 @@ def main() -> bool:
 
     try:
         rows = collect_rows()
-    except Exception as exc:  # fail-soft
+    except Exception as exc:  # fail-soft for the caller, but never silent
         dbg(f"collect_rows failed: {exc}")
+        _UNREAD_REASON = str(exc)
         _write_header_only(OUT_PATH)
         print(f"wrote {OUT_PATH} rows=0 (error: {exc})")
         _write_run_summary(
@@ -1633,5 +1645,28 @@ def main() -> bool:
     return True
 
 
-if __name__ == "__main__":
+def cli_main() -> int:
+    """Run the connector and return a process exit code.
+
+    Non-zero ONLY when ACLED could not be read. A deliberate skip and a
+    genuinely empty window both exit 0, because those are answers. Until
+    2026-09-03 this shim discarded :func:`main`'s result entirely, so a total
+    authentication failure exited 0: the fatal Phase 1 connectors step went
+    green having written no tier-0 conflict rows at all, and the run only died
+    a step later, in the monthly-fatalities CLI, on a bare traceback.
+    """
+
     main()
+    if _UNREAD_REASON is None:
+        return 0
+    print(
+        "::error title=ACLED could not be read::"
+        f"ACLED returned no data because the source was unreachable: {_UNREAD_REASON}. "
+        "This is not an empty month; no ACLED rows will reach facts_resolved. "
+        "Re-run the workflow with the diagnose_acled_auth input to identify the cause."
+    )
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli_main())
