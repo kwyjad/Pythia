@@ -229,7 +229,7 @@ def store_reliefweb_reports(
     iso3: str,
     reports: list[dict[str, Any]],
     db_url: str | None = None,
-) -> None:
+) -> int:
     """Upsert ReliefWeb reports into the Pythia DuckDB database.
 
     Parameters
@@ -243,13 +243,13 @@ def store_reliefweb_reports(
         DuckDB connection URL. Resolved via :func:`_db_url` if not given.
     """
     if not reports:
-        return
+        return 0
 
     try:
         from resolver.db.duckdb_io import get_db
     except Exception:
         log.debug("DuckDB helpers unavailable — skipping ReliefWeb store.")
-        return
+        return 0
 
     db_url = db_url or _db_url()
 
@@ -257,8 +257,9 @@ def store_reliefweb_reports(
         con = get_db(db_url)
     except Exception:
         log.debug("Could not connect to DuckDB at %s", db_url)
-        return
+        return 0
 
+    stored = 0
     try:
         con.execute(_CREATE_TABLE_SQL)
 
@@ -283,12 +284,14 @@ def store_reliefweb_reports(
                     r["fetched_at"],
                 ],
             )
+            stored += 1
 
-        log.info("Stored %d ReliefWeb reports for %s", len(reports), iso3)
+        log.info("Stored %d ReliefWeb reports for %s", stored, iso3)
     except Exception as exc:
         log.warning("Failed to store ReliefWeb reports for %s: %s", iso3, exc)
     finally:
         pass  # Let the resolver connection cache manage lifecycle.
+    return stored
 
 
 # ---------------------------------------------------------------------------

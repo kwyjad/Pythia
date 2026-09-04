@@ -425,7 +425,7 @@ def store_acled_political_events(
     iso3: str,
     events: list[dict],
     db_url: str | None = None,
-) -> None:
+) -> int:
     """Upsert political events into DuckDB.
 
     Parameters
@@ -438,20 +438,21 @@ def store_acled_political_events(
         Optional DuckDB URL override.
     """
     if not events:
-        return
+        return 0
 
     try:
         from pythia.db.schema import connect, ensure_schema
     except Exception:
         log.debug("Pythia DB helpers unavailable — skipping store.")
-        return
+        return 0
 
     try:
         con = connect(read_only=False)
     except Exception:
         log.warning("Could not connect to DuckDB for political events store.")
-        return
+        return 0
 
+    stored = 0
     try:
         ensure_schema(con)
         now = datetime.now(timezone.utc).isoformat()
@@ -491,10 +492,12 @@ def store_acled_political_events(
                     now,
                 ],
             )
+            stored += 1
     except Exception as exc:
         log.warning("Failed to store political events for %s: %s", iso3, exc)
     finally:
         con.close()
+    return stored
 
 
 # ---------------------------------------------------------------------------

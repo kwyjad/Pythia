@@ -48,6 +48,10 @@ on:
       - "resolver/tests/test_group_e_repairs.py"
       - "pythia/tools/score_views.py"
       - "pythia/db/schema.py"
+      - "pythia/tests/test_ingest_rows_written.py"
+      - "pythia/tools/ingest_structured_data.py"
+      - "pythia/acaps.py"
+      - "pythia/acled_political.py"
       - "resolver/tests/test_eiv_scoring.py"
       - "resolver/tests/test_risk_index_prefers_bayesmc.py"
       # The PA resolution machine's base-rate block is rendered into every
@@ -335,6 +339,7 @@ jobs:
             resolver/tests/test_conflict_forecasts_served.py \
             resolver/tests/test_acled_html_response.py \
             resolver/tests/test_group_e_repairs.py \
+            pythia/tests/test_ingest_rows_written.py \
             resolver/tests/test_eiv_scoring.py \
             resolver/tests/test_risk_index_prefers_bayesmc.py
 

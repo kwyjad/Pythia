@@ -1326,6 +1326,46 @@ def close_db(conn: "duckdb.DuckDBPyConnection" | None) -> None:
                 db_cache.pop(key, None)
 
 
+WRITE_STAMP_COLUMN = "updated_at"
+
+
+def _ensure_updated_at_column(conn: "duckdb.DuckDBPyConnection", table: str) -> None:
+    """Add the ``updated_at`` write stamp to a table that predates it."""
+
+    try:
+        existing, _ = _table_columns(conn, table)
+    except Exception:  # noqa: BLE001 - a listing failure is not fatal here
+        return
+    if WRITE_STAMP_COLUMN in {c.lower() for c in existing}:
+        return
+    try:
+        conn.execute(
+            f"ALTER TABLE {_quote_identifier(table)} ADD COLUMN "
+            f"{_quote_identifier(WRITE_STAMP_COLUMN)} TIMESTAMP"
+        )
+        LOGGER.info("duckdb.schema.column_added | table=%s column=%s", table, WRITE_STAMP_COLUMN)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning(
+            "duckdb.schema.column_add_failed | table=%s column=%s err=%s",
+            table, WRITE_STAMP_COLUMN, exc,
+        )
+
+
+def _stamp_write(frame: "pd.DataFrame", when: "dt.datetime") -> "pd.DataFrame":
+    """``updated_at = when`` on every row about to be written.
+
+    ``created_at`` defaults on INSERT and a MERGE that matches an existing
+    row never touches it, so an idempotent re-ingest leaves no trace in the
+    table. The reconciliation needs a stamp that moves on every write —
+    matched or new — or a connector that re-upserted 2,408 identical rows
+    reads as one that wrote nothing.
+    """
+
+    stamped = frame.copy()
+    stamped[WRITE_STAMP_COLUMN] = when
+    return stamped
+
+
 def write_facts_tables(
     conn: "duckdb.DuckDBPyConnection",
     *,
@@ -1339,6 +1379,11 @@ def write_facts_tables(
         return results
 
     init_schema(conn)
+    write_time = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    if facts_resolved is not None and len(facts_resolved):
+        facts_resolved = _stamp_write(facts_resolved, write_time)
+    if facts_deltas is not None and len(facts_deltas):
+        facts_deltas = _stamp_write(facts_deltas, write_time)
 
     resolved_count = int(len(facts_resolved)) if facts_resolved is not None else 0
     deltas_count = int(len(facts_deltas)) if facts_deltas is not None else 0
@@ -1476,6 +1521,12 @@ def init_schema(
                 )
         except Exception as exc:  # noqa: BLE001 - never fail schema init over this
             LOGGER.warning("duckdb.schema.dead_table_drop_failed | table=meta_runs err=%s", exc)
+
+    # The write stamp the reconciliation reads (Sept 2026). A pre-stamp
+    # table gains the column here; a fresh one has it from the DDL.
+    for table_name in ("facts_resolved", "facts_deltas"):
+        if table_name in existing_tables:
+            _ensure_updated_at_column(conn, table_name)
 
     core_tables = {"facts_resolved", "facts_deltas"}
     if core_tables.issubset(existing_tables):

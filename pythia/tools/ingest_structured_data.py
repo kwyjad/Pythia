@@ -994,15 +994,17 @@ def _bulk_fetch_nmme(dry_run: bool = False) -> dict[str, Any]:
     if dry_run:
         argv.append("--dry-run")
     try:
-        nmme_main(argv)
+        outcome = nmme_main(argv)
     except Exception as exc:
         LOG.warning(
             "NMME ingestion failed (FTP files may not be published yet — non-fatal): %s",
             exc,
         )
         return {}
-    # Return a sentinel so the orchestrator treats this as "has data".
-    return {"__nmme_done__": True}
+    # A sentinel so the orchestrator treats this as "has data", carrying the
+    # rows the upsert actually wrote — the count the reconciliation compares.
+    rows_written = int((outcome or {}).get("rows_written") or 0) if isinstance(outcome, dict) else 0
+    return {"__nmme_done__": True, "__rows_written__": rows_written}
 
 
 # ===================================================================
@@ -1218,6 +1220,24 @@ def _bulk_fetch_conflict(label: str, dry_run: bool = False) -> dict[str, Any]:
 # ===================================================================
 
 
+#: Sentinel keys a self-storing fetcher uses to report the rows its own
+#: writer put in the table — the MERGE count, not a country count.
+_SELF_STORED_ROW_KEYS = (
+    "__rows_written__", "__conflict_rows__", "__gdelt_rows__",
+    "__pipeline_resolved_rows__",
+)
+
+
+def _self_stored_rows(data: Any) -> int:
+    if not isinstance(data, dict):
+        return 0
+    for key in _SELF_STORED_ROW_KEYS:
+        value = data.get(key)
+        if isinstance(value, int):
+            return value
+    return 0
+
+
 def _store_all(
     label: str,
     data_by_country: dict[str, Any],
@@ -1225,9 +1245,16 @@ def _store_all(
 ) -> dict[str, int]:
     """Store bulk-fetched data using existing per-country store functions.
 
-    Returns {"success": N, "empty": N, "fail": N}.
+    Returns {"success": N, "empty": N, "fail": N, "rows_written": N}.
+
+    ``success`` counts COUNTRIES whose store ran; ``rows_written`` counts the
+    ROWS the stores reported writing (inserted or replaced). The two were
+    conflated in the connectors report for a year — a per-country source
+    said "written: 71" meaning countries, a self-storing one meaning rows —
+    and the debug bundle's reconciliation then compared either against a
+    table delta, which an idempotent upsert never moves.
     """
-    stats = {"success": 0, "empty": 0, "fail": 0}
+    stats = {"success": 0, "empty": 0, "fail": 0, "rows_written": 0}
 
     if not data_by_country:
         return stats
@@ -1236,29 +1263,35 @@ def _store_all(
         stats["success"] = len(data_by_country)
         return stats
 
+    if label in _SELF_STORING_LABELS:
+        # The whole dict is the fetcher's sentinel, not a per-country map;
+        # the MERGE count rides on it once.
+        stats["rows_written"] = _self_stored_rows(data_by_country)
+
     for iso3, data in data_by_country.items():
         try:
             if label == "acaps_inform_severity":
                 from pythia.acaps import store_inform_severity
-                store_inform_severity(iso3, data)
+                rows = store_inform_severity(iso3, data)
             elif label == "acaps_risk_radar":
                 from pythia.acaps import store_risk_radar
-                store_risk_radar(iso3, data)
+                rows = store_risk_radar(iso3, data)
             elif label == "acaps_daily_monitoring":
                 from pythia.acaps import store_daily_monitoring
-                store_daily_monitoring(iso3, data)
+                rows = store_daily_monitoring(iso3, data)
             elif label == "acaps_humanitarian_access":
                 from pythia.acaps import store_humanitarian_access
-                store_humanitarian_access(iso3, data)
+                rows = store_humanitarian_access(iso3, data)
             elif label == "reliefweb_reports":
                 from horizon_scanner.reliefweb import store_reliefweb_reports
-                store_reliefweb_reports(iso3, data)
+                rows = store_reliefweb_reports(iso3, data)
             elif label == "acled_political_events":
                 from pythia.acled_political import store_acled_political_events
-                store_acled_political_events(iso3, data)
+                rows = store_acled_political_events(iso3, data)
             elif label in _SELF_STORING_LABELS:
                 # These sources handle their own DB writes in their
-                # bulk-fetch functions (_bulk_fetch_nmme, _bulk_fetch_conflict).
+                # bulk-fetch functions (_bulk_fetch_nmme, _bulk_fetch_conflict),
+                # and reported the rows they wrote through a sentinel key above.
                 stats["success"] += 1
                 continue
             else:
@@ -1267,6 +1300,7 @@ def _store_all(
                 continue
 
             stats["success"] += 1
+            stats["rows_written"] += int(rows or 0)
         except Exception as exc:
             LOG.error("Store failed for %s / %s: %s", iso3, label, exc)
             stats["fail"] += 1
@@ -1501,6 +1535,7 @@ def ingest(
             counts={
                 "fetched": fetched_count,
                 "written": s["success"],
+                "rows_written": int(s.get("rows_written", 0)),
                 "failed": s["fail"],
                 "empty": s["empty"],
             },

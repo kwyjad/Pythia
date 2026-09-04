@@ -449,7 +449,7 @@ def store_inform_severity(
     iso3: str,
     data: dict,
     db_url: str | None = None,
-) -> None:
+) -> int:
     """Upsert INFORM Severity data into DuckDB.
 
     Parameters
@@ -462,20 +462,21 @@ def store_inform_severity(
         Optional DuckDB URL override.
     """
     if not data:
-        return
+        return 0
 
     try:
         from pythia.db.schema import connect, ensure_schema
     except Exception:
         log.debug("Pythia DB helpers unavailable -- skipping store.")
-        return
+        return 0
 
     try:
         con = connect(read_only=False)
     except Exception:
         log.warning("Could not connect to DuckDB for INFORM Severity store.")
-        return
+        return 0
 
+    stored = 0
     try:
         ensure_schema(con)
         now = data.get("fetched_at", datetime.now(timezone.utc).isoformat())
@@ -503,6 +504,7 @@ def store_inform_severity(
                 now,
             ],
         )
+        stored += 1
 
         # Store trend entries
         for entry in data.get("trend_6m", []):
@@ -514,10 +516,12 @@ def store_inform_severity(
                 """,
                 [iso3.upper(), entry["date"], entry["score"], now],
             )
+            stored += 1
     except Exception as exc:
         log.warning("Failed to store INFORM Severity for %s: %s", iso3, exc)
     finally:
         con.close()
+    return stored
 
 
 def load_inform_severity(
@@ -844,7 +848,7 @@ def store_risk_radar(
     iso3: str,
     data: dict,
     db_url: str | None = None,
-) -> None:
+) -> int:
     """Upsert Risk Radar data into DuckDB.
 
     Parameters
@@ -857,20 +861,21 @@ def store_risk_radar(
         Optional DuckDB URL override.
     """
     if not data or not data.get("risks"):
-        return
+        return 0
 
     try:
         from pythia.db.schema import connect, ensure_schema
     except Exception:
         log.debug("Pythia DB helpers unavailable -- skipping store.")
-        return
+        return 0
 
     try:
         con = connect(read_only=False)
     except Exception:
         log.warning("Could not connect to DuckDB for Risk Radar store.")
-        return
+        return 0
 
+    stored = 0
     try:
         ensure_schema(con)
         now = data.get("fetched_at", datetime.now(timezone.utc).isoformat())
@@ -902,10 +907,12 @@ def store_risk_radar(
                     now,
                 ],
             )
+            stored += 1
     except Exception as exc:
         log.warning("Failed to store Risk Radar for %s: %s", iso3, exc)
     finally:
         con.close()
+    return stored
 
 
 def load_risk_radar(
@@ -1207,7 +1214,7 @@ def store_daily_monitoring(
     iso3: str,
     entries: list[dict],
     db_url: str | None = None,
-) -> None:
+) -> int:
     """Upsert Daily Monitoring entries into DuckDB.
 
     Parameters
@@ -1220,20 +1227,21 @@ def store_daily_monitoring(
         Optional DuckDB URL override.
     """
     if not entries:
-        return
+        return 0
 
     try:
         from pythia.db.schema import connect, ensure_schema
     except Exception:
         log.debug("Pythia DB helpers unavailable -- skipping store.")
-        return
+        return 0
 
     try:
         con = connect(read_only=False)
     except Exception:
         log.warning("Could not connect to DuckDB for Daily Monitoring store.")
-        return
+        return 0
 
+    stored = 0
     try:
         ensure_schema(con)
         now = datetime.now(timezone.utc).isoformat()
@@ -1256,10 +1264,12 @@ def store_daily_monitoring(
                     now,
                 ],
             )
+            stored += 1
     except Exception as exc:
         log.warning("Failed to store Daily Monitoring for %s: %s", iso3, exc)
     finally:
         con.close()
+    return stored
 
 
 def load_daily_monitoring(
@@ -1491,7 +1501,7 @@ def store_humanitarian_access(
     iso3: str,
     data: dict,
     db_url: str | None = None,
-) -> None:
+) -> int:
     """Upsert Humanitarian Access data into DuckDB.
 
     Parameters
@@ -1504,20 +1514,21 @@ def store_humanitarian_access(
         Optional DuckDB URL override.
     """
     if not data:
-        return
+        return 0
 
     try:
         from pythia.db.schema import connect, ensure_schema
     except Exception:
         log.debug("Pythia DB helpers unavailable -- skipping store.")
-        return
+        return 0
 
     try:
         con = connect(read_only=False)
     except Exception:
         log.warning("Could not connect to DuckDB for Humanitarian Access store.")
-        return
+        return 0
 
+    stored = 0
     try:
         ensure_schema(con)
         now = data.get("fetched_at", datetime.now(timezone.utc).isoformat())
@@ -1538,12 +1549,14 @@ def store_humanitarian_access(
                 now,
             ],
         )
+        stored += 1
     except Exception as exc:
         log.warning(
             "Failed to store Humanitarian Access for %s: %s", iso3, exc,
         )
     finally:
         con.close()
+    return stored
 
 
 def load_humanitarian_access(

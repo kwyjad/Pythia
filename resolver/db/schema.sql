@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS facts_resolved (
     provenance_rank INTEGER,
     series TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Stamped by write_facts_tables on EVERY write, matched or new: created_at
+    -- marks the first insert and an idempotent re-upsert never moves it.
+    updated_at TIMESTAMP,
     CONSTRAINT facts_resolved_unique UNIQUE (ym, iso3, hazard_code, metric, series_semantics)
 );
 
@@ -56,6 +59,7 @@ CREATE TABLE IF NOT EXISTS facts_deltas (
     first_observation INTEGER,
     delta_negative_clamped INTEGER,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP,
     CONSTRAINT facts_deltas_unique UNIQUE (ym, iso3, hazard_code, metric)
 );
 

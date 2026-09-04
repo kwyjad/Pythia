@@ -45,7 +45,7 @@ def _default_db_url() -> str:
     return DEFAULT_DB_URL
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> dict | None:
     parser = argparse.ArgumentParser(
         description="Ingest NMME seasonal forecasts into Pythia DuckDB."
     )
@@ -132,6 +132,11 @@ def main(argv: list[str] | None = None) -> None:
             result.rows_before,
             result.rows_after,
         )
+        return {
+            "rows_written": int(result.rows_written),
+            "rows_before": int(result.rows_before),
+            "rows_after": int(result.rows_after),
+        }
     finally:
         from resolver.db.duckdb_io import close_db
         close_db(con)
