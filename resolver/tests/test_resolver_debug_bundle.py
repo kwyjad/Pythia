@@ -1049,3 +1049,24 @@ def test_a_legacy_outlook_table_shape_fails_the_date_check(tmp_path, full_run):
     con.close()
     checks = _checks(tmp_path, db, full_run, "f3")
     assert checks["every_tc_outlook_has_a_parseable_issue_date_or_a_reason"]["verdict"] == "FAIL"
+
+
+# --------------------------------------------------------------------------
+# Group G (run 33841370196): the checks the review asked for all exist
+# --------------------------------------------------------------------------
+
+
+def test_the_six_requested_contradiction_checks_are_all_registered(tmp_path, full_run):
+    """G3: each item on the review's list is a named check the bundle runs."""
+
+    checks = _checks(tmp_path, full_run["db"], full_run, "g3")
+    for name in (
+        "no_assessed_cell_lacks_a_reason_for_having_no_row",       # unexplained_no_row = 0
+        "no_declared_active_table_is_empty_after_the_run",          # active tables non-empty
+        "no_fact_carries_a_publication_date_after_the_run_date",    # publication_date <= today
+        "enso_ladder_has_two_live_ranks_in_the_last_30_days",       # two ENSO ranks alive
+        "no_conflict_forecast_served_has_a_target_month_in_the_past",
+        "no_accepted_figure_lies_outside_its_cell_reporting_window",
+        "connectors_claiming_rows_touched_their_source_rows",       # G1 + G2
+    ):
+        assert name in checks, name

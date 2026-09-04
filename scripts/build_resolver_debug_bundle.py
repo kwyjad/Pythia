@@ -1460,7 +1460,7 @@ class BundleBuilder:
             self._check_enso_vs_tc_narrative,
             self._check_enso_phase_without_index,
             self._check_enso_two_ranks_alive,
-            self._check_connector_rows_vs_table_delta,
+            self._check_connector_rows_touched_in_run,
             self._check_hazard_zero_failures,
             self._check_tc_duplicate_issue_dates,
             self._check_tc_outlook_issue_dates_parse,
@@ -1615,34 +1615,113 @@ class BundleBuilder:
             f"{len(ranks_ok)} rank(s) usable: {sorted(ranks_ok)}", ">= 2 ranks", detail,
         )
 
-    def _check_connector_rows_vs_table_delta(self) -> None:
-        name = "connectors_claiming_rows_show_a_table_delta"
-        report = self.diagnostics_dir / "ingestion" / "connectors_report.jsonl"
-        counts = self._table_delta_map()
-        if not report.is_file():
-            return self._check(name, "SKIP", "", "", "no connectors_report.jsonl")
+    #: Write-stamp columns, in order of preference. ``updated_at`` moves on
+    #: every MERGE (facts tables since Sept 2026); ``fetched_at`` is set by
+    #: the Pythia stores on every INSERT OR REPLACE; ``created_at`` only on a
+    #: genuine insert; ``fetch_date`` is enso_state's.
+    _WRITE_STAMPS = ("updated_at", "fetched_at", "created_at", "fetch_date")
+
+    def _write_stamp_column(self, table: str) -> str | None:
+        columns = {c for c, _t in self.columns_of(table)}
+        for candidate in self._WRITE_STAMPS:
+            if candidate in columns:
+                return candidate
+        return None
+
+    def _run_started_at(self) -> str | None:
+        raw = (self.env.get("PYTHIA_RUN_STARTED_AT") or "").strip()
+        return raw or None
+
+    def _touched_since(self, table: str, where: str | None, started_at: str) -> int | None:
+        """Rows of ``table`` (within ``where``) written at or after ``started_at``.
+
+        None when the table has no write stamp to ask.
+        """
+
+        stamp = self._write_stamp_column(table)
+        if stamp is None:
+            return None
+        clause = f" AND ({where})" if where else ""
+        result = self.query(
+            f'SELECT COUNT(*) FROM "{table}" WHERE TRY_CAST("{stamp}" AS TIMESTAMP) '
+            f">= TRY_CAST(? AS TIMESTAMP){clause}",
+            [started_at],
+        )
+        if not result or not result[1]:
+            return None
+        return int(result[1][0][0] or 0)
+
+    def _connector_targets(self) -> dict[str, tuple[str | None, str | None]]:
+        """connector_id -> (table, per-source WHERE) from the run summary's map."""
+
         try:
             from pythia.tools.summarize_all_phases import _CONNECTORS  # type: ignore
         except Exception:
-            _CONNECTORS = {}
-        offenders = []
+            return {}
+        return {cid: (spec[1], spec[2]) for cid, spec in _CONNECTORS.items()}
+
+    def _check_connector_rows_touched_in_run(self) -> None:
+        """A connector that claims rows must have touched rows OF ITS OWN.
+
+        Two false readings this replaces. The old check compared a claim
+        against ``rows_after - rows_before`` of the target table, and an
+        idempotent upsert moves no count: NMME merged 2,408 rows into a table
+        that stayed at 4,816 and was flagged. And it compared per TABLE, so
+        VIEWS, conflictforecast and ACLED CAST all "agreed" against one delta
+        of 546 on ``conflict_forecasts`` — had CAST written nothing, the
+        check would still have passed.
+
+        Now: the rows counted are the ones carrying THIS run's write stamp,
+        within the connector's own source filter. A MERGE that matched every
+        row still stamps every row.
+        """
+
+        name = "connectors_claiming_rows_touched_their_source_rows"
+        report = self.diagnostics_dir / "ingestion" / "connectors_report.jsonl"
+        if not report.is_file():
+            return self._check(name, "SKIP", "", "", "no connectors_report.jsonl")
+        started_at = self._run_started_at()
+        if not started_at:
+            return self._check(
+                name, "SKIP", "", "",
+                "PYTHIA_RUN_STARTED_AT is unset, so no write can be attributed to this run",
+            )
+        if self.con is None:
+            return self._check(name, "SKIP", "", "", "database unreadable")
+        targets = self._connector_targets()
+        offenders: list[str] = []
+        unattributable: list[str] = []
+        checked = 0
         for record in run_log.read_stream(report):
             cid = str(record.get("connector_id") or record.get("connector") or "")
-            written = _rows_written(record)
-            if not cid or not written:
+            claimed = _rows_written(record)
+            if not cid or not claimed:
                 continue
-            table = (_CONNECTORS.get(cid) or (None, None, None, None))[1]
-            if not table or table not in counts:
+            table, where = targets.get(cid, (None, None))
+            if not table or table not in self.tables():
                 continue
-            delta = counts[table]
-            if delta is not None and delta <= 0:
-                offenders.append(f"{cid} claimed {written} rows; {table} delta={delta}")
+            touched = self._touched_since(table, where, started_at)
+            checked += 1
+            if touched is None:
+                unattributable.append(f"{cid} ({table} has no write stamp)")
+                continue
+            if touched == 0:
+                offenders.append(
+                    f"{cid} claimed {claimed} rows; 0 rows of {table}"
+                    + (f" where {where}" if where else "")
+                    + f" carry a write stamp since {started_at}"
+                )
+        detail = "; ".join(offenders)
+        if unattributable:
+            detail += ("; " if detail else "") + "unattributable: " + ", ".join(unattributable)
         self._check(
             name, "FAIL" if offenders else "PASS",
-            f"{len(offenders)} connectors", "0",
-            "; ".join(offenders[:10])
-            or "Every connector claiming rows moved its target table. A claim "
-            "without a delta means the write went somewhere else, or nowhere.",
+            f"{len(offenders)} of {checked} claiming connectors", "0",
+            detail
+            or "Every connector claiming rows left rows of its own source carrying "
+            "this run's write stamp. Counted per source filter, never per table, "
+            "and by stamp, never by table delta: an idempotent upsert moves no "
+            "count, and three sources on one table share one delta.",
         )
 
     def _table_delta_map(self) -> dict[str, int | None]:
@@ -2015,53 +2094,73 @@ class BundleBuilder:
         write_text(path, "\n".join(lines) + "\n")
 
     def _write_reconciliation(self, path: Path) -> None:
-        """Rows fetched, normalised, claimed written, and the actual delta.
+        """Rows fetched, normalised, claimed, and what the table says per source.
 
         The existing connector summary carries a caveat that its totals are
         not comparable across connectors. Naming the semantics of each
-        counter makes them comparable instead.
+        counter makes them comparable instead. Since Sept 2026 the figure
+        that decides agreement is ``touched since run start`` — rows of the
+        connector's OWN source carrying this run's write stamp — because a
+        table delta is zero for an idempotent upsert and undivided between
+        the sources sharing a table.
         """
 
         report = self.diagnostics_dir / "ingestion" / "connectors_report.jsonl"
         deltas = self._table_delta_map()
-        try:
-            from pythia.tools.summarize_all_phases import _CONNECTORS  # type: ignore
-        except Exception:
-            _CONNECTORS = {}
+        targets = self._connector_targets()
+        started_at = self._run_started_at()
 
         lines = [
             "# Reconciliation",
             "",
-            "| connector | status | fetched | normalised | claimed written | target table | table delta | agrees |",
-            "| --- | --- | ---: | ---: | ---: | --- | ---: | --- |",
+            f"Run start: `{started_at or 'unknown (PYTHIA_RUN_STARTED_AT unset)'}`",
+            "",
+            "| connector | status | fetched | normalised | claimed written | rows written (MERGE) "
+            "| target table | source filter | touched since run start | table delta | agrees |",
+            "| --- | --- | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: | --- |",
         ]
         counts_meaning = (
             "\n**What each counter means.** `fetched` is upstream records the "
             "connector received; `normalised` is rows it produced in the canonical "
             "shape; `claimed written` is the connector's own report, which for "
             "per-country sources counts COUNTRIES and for self-storing globals "
-            "counts ROWS — which is why the raw numbers were never comparable. "
-            "`table delta` is the only figure measured the same way for every "
-            "connector: rows_after minus rows_before in the target table.\n"
+            "counts ROWS — which is why the raw numbers were never comparable; "
+            "`rows written (MERGE)` is the rows the connector's own writer reported "
+            "inserting or replacing, where the writer reports it. `touched since "
+            "run start` is rows of the target table, within the connector's source "
+            "filter, whose write stamp (`updated_at` / `fetched_at` / `created_at`) "
+            "is at or after the run started — the figure `agrees` is decided on. "
+            "`table delta` (rows_after minus rows_before) is kept for context only: "
+            "an idempotent upsert moves no count, and three sources sharing one "
+            "table share one delta.\n"
         )
         if not report.is_file():
-            lines.append("| _(no connectors_report.jsonl)_ | | | | | | | |")
+            lines.append("| _(no connectors_report.jsonl)_ | | | | | | | | | | |")
             write_text(path, "\n".join(lines) + "\n" + counts_meaning)
             return
 
         for record in run_log.read_stream(report):
             cid = str(record.get("connector_id") or record.get("connector") or "?")
-            table = (_CONNECTORS.get(cid) or (None, None, None, None))[1] or ""
+            table, where = targets.get(cid, (None, None))
+            table = table or ""
             delta = deltas.get(table)
-            written = _rows_written(record)
+            claimed = _rows_written(record)
             counts = record.get("counts") or {}
+            merge_rows = counts.get("rows_written")
+            touched = None
+            if started_at and table and table in self.tables() and self.con is not None:
+                touched = self._touched_since(table, where, started_at)
             agrees = "—"
-            if written and delta is not None:
-                agrees = "yes" if delta > 0 else "**NO**"
+            if claimed and touched is not None:
+                agrees = "yes" if touched > 0 else "**NO**"
+            elif claimed and touched is None and delta is not None:
+                agrees = "delta only: " + ("yes" if delta > 0 else "unproven")
             lines.append(
                 f"| {cid} | {record.get('status', '?')} | "
                 f"{counts.get('fetched', '')} | {counts.get('normalized', counts.get('normalised', ''))} | "
-                f"{written or ''} | {table} | {'' if delta is None else delta} | {agrees} |"
+                f"{claimed or ''} | {'' if merge_rows is None else merge_rows} | {table} | "
+                f"{where or ''} | {'' if touched is None else touched} | "
+                f"{'' if delta is None else delta} | {agrees} |"
             )
         write_text(path, "\n".join(lines) + "\n" + counts_meaning)
 

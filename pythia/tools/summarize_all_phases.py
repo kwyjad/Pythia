@@ -143,12 +143,17 @@ def _rows_written_this_run(entry: dict) -> Optional[int]:
     *countries* in ``written`` (they carry an ``empty`` key) — return None so
     the caller shows the authoritative DB count / country count instead.
     """
+    counts = entry.get("counts") or {}
+    # Since Sept 2026 the orchestrator reports the rows its writers actually
+    # inserted or replaced (the MERGE count) beside the country count.
+    merge_rows = counts.get("rows_written")
+    if isinstance(merge_rows, int):
+        return merge_rows
     extras = entry.get("extras") or {}
     for key in ("conflict_rows", "total_facts", "resolved_rows"):
         val = extras.get(key)
         if isinstance(val, int):
             return val
-    counts = entry.get("counts") or {}
     if "empty" in counts:  # per-country loop → written is a country count
         return None
     val = counts.get("written")
@@ -649,7 +654,8 @@ def build_phase_summary(entries: list[dict], con=None) -> str:
 
     lines.append(
         "\n_Rows in DB = authoritative count in the target table after this run. "
-        "Δ this run = rows written this cycle (self-storing/direct sources only). "
+        "Δ this run = rows the writer inserted or replaced this cycle (the MERGE count; "
+        "blank where a source reports countries only). "
         "Countries = distinct iso3 in the table._"
     )
     lines.append("")
