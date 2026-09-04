@@ -39,6 +39,18 @@ with no re-fetch and no code change.
     lets a maintainer point the machine at whatever country-level anomaly
     product they already produce. Unlike ASAP, a country absent from an
     anomaly feed is UNKNOWN, not dry.
+
+**A feed is a time series when its records carry dates (Sept 2026).** The
+JRC ASAP warnings endpoint the ``asap`` provider was written against
+vanished in August 2026 (every candidate route 404s), and what JRC still
+publishes is the monthly hotspot ASSESSMENT as one CSV from October 2016
+to date (``files/hotspots_ts.zip``; HDX mirrors it as
+``asap-hotspots-monthly``). A body whose records carry dates is parsed
+into ONE SNAPSHOT PER MONTH rather than collapsed onto its newest date, so
+a backcast month reads the assessment made for that month and a live month
+reads the latest one. That is also what makes a historical drought record
+possible at all: the other two feeds the repo ingests reach back only as
+far as their own tables do.
 """
 
 from __future__ import annotations
@@ -118,8 +130,33 @@ def _entry_urls(entry: Mapping[str, Any]) -> list[str]:
         out.append(single)
     return out
 
-#: Injectable transport seam for tests: (url, timeout) -> (text, content_type).
-GetFn = Callable[[str, float], "tuple[str, str]"]
+#: Injectable transport seam for tests: (url, timeout) -> (body, content_type).
+#: The body may be text or bytes — a zipped CSV archive arrives as bytes and
+#: is unpacked by :func:`_rows_from_text`; every existing text getter still
+#: works unchanged.
+GetFn = Callable[[str, float], "tuple[str | bytes, str]"]
+
+#: An HDX CKAN candidate: ``hdx-ckan://<dataset-name>`` resolves, through
+#: the CKAN ``package_show`` API, to the first CSV or zip resource the
+#: dataset publishes. HDX mirrors the ASAP hotspot assessment, and a mirror
+#: reached through a stable API is worth more than a guessed file path on a
+#: portal that has already moved its routes once.
+HDX_CKAN_SCHEME = "hdx-ckan://"
+HDX_CKAN_API = "https://data.humdata.org/api/3/action/package_show?id="
+
+#: Parsed time-series feeds, per process, keyed by expanded url. A time
+#: series is one archive for every month, and the backcast asks for it once
+#: per month for a decade: parsing the same zip 120 times is 120 downloads
+#: of the same bytes. Only entries declaring ``time_series: true`` use it,
+#: so a feed whose body legitimately changes between calls (a test seam, a
+#: latest-snapshot endpoint) is never served stale.
+_SERIES_CACHE: dict[str, list[dict[str, Any]]] = {}
+
+
+def reset_for_tests() -> None:
+    """Clear the per-process time-series cache."""
+
+    _SERIES_CACHE.clear()
 
 #: Field names a feed might use for the country, the observation date and
 #: the value. Deliberately generous: these are third-party feeds whose
@@ -129,6 +166,10 @@ _ISO3_KEYS = ("iso3", "ISO3", "iso_3", "country_iso3", "adm0_iso3", "#country+co
 _NAME_KEYS = ("country", "country_name", "name", "adm0_name", "asap0_name")
 _DATE_KEYS = ("ym", "month", "date", "period", "observed_ym", "reference_date")
 _CLASS_KEYS = (
+    # The ASAP hotspot time series: hs_code 0 no hotspot, 1 hotspot,
+    # 2 major hotspot, 3 not assessed (hs_name spells the same thing out).
+    "hs_code",
+    "hs_name",
     "asap_warning",
     "warning",
     "warning_class",
@@ -162,6 +203,10 @@ class IndicatorReading:
     #: is still an answer, but it is not coverage.
     present: bool = False
 
+    @property
+    def answered(self) -> bool:
+        return self.state != STATE_UNAVAILABLE
+
     def as_evidence(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -190,6 +235,13 @@ class IndicatorVerdict:
     present_count: int = 0
     #: The rulebook's floor on that count before a zero may rest on absence.
     min_present_readings: int = 0
+    #: How many feeds ANSWERED (drought or no drought) for this cell.
+    answered_count: int = 0
+    #: The rulebook's floor on that count before a zero may rest on the
+    #: feeds' silence. One surviving feed is not evidence of quiet: with two
+    #: of three feeds dead in September 2026, 159 countries were zeroed on
+    #: the word of the one that answered.
+    min_answered_for_zero: int = 1
 
     @property
     def shows_drought(self) -> bool:
@@ -210,6 +262,17 @@ class IndicatorVerdict:
 
         return self.present_count >= self.min_present_readings
 
+    @property
+    def supports_zero(self) -> bool:
+        """May a zero rest on these feeds' silence?
+
+        Requires coverage (some feed named the country) AND enough feeds
+        answering. The second test is what keeps one feed's survival from
+        zeroing every country the dead feeds would have warned about.
+        """
+
+        return self.has_coverage and self.answered_count >= self.min_answered_for_zero
+
     def as_evidence(self) -> dict[str, Any]:
         return {
             "state": self.state,
@@ -217,6 +280,8 @@ class IndicatorVerdict:
             "note": self.note,
             "present_count": self.present_count,
             "min_present_readings": self.min_present_readings,
+            "answered_count": self.answered_count,
+            "min_answered_for_zero": self.min_answered_for_zero,
             "readings": [r.as_evidence() for r in self.readings],
         }
 
@@ -227,10 +292,45 @@ def indicator_entries(rulebook: Rulebook) -> list[dict[str, Any]]:
     return [dict(entry) for entry in rulebook.get("drought.indicators.entries")]
 
 
-def _default_get(url: str, timeout: float) -> tuple[str, str]:
-    resp = requests.get(url, timeout=timeout, headers={"Accept": "application/json"})
+def _default_get(url: str, timeout: float) -> tuple[bytes, str]:
+    resp = requests.get(
+        url,
+        timeout=timeout,
+        headers={
+            "Accept": "application/json, text/csv, application/zip, */*",
+            "User-Agent": "pythia-resolution-machine/1.0 (+https://fredforecaster.org)",
+        },
+    )
     resp.raise_for_status()
-    return resp.text, str(resp.headers.get("Content-Type") or "")
+    return resp.content, str(resp.headers.get("Content-Type") or "")
+
+
+def _resolve_candidate(url: str, getter: GetFn, timeout: float) -> str:
+    """Turn a candidate address into the url to fetch.
+
+    ``hdx-ckan://<dataset>`` asks HDX which file the dataset currently
+    serves; anything else is fetched as written.
+    """
+
+    if not url.startswith(HDX_CKAN_SCHEME):
+        return url
+    dataset = url[len(HDX_CKAN_SCHEME):].strip("/")
+    body, _content_type = getter(HDX_CKAN_API + dataset, timeout)
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
+    payload = json.loads(text)
+    result = payload.get("result") if isinstance(payload, Mapping) else None
+    resources = (result or {}).get("resources") if isinstance(result, Mapping) else None
+    for resource in resources or []:
+        if not isinstance(resource, Mapping):
+            continue
+        resource_url = str(resource.get("url") or "").strip()
+        fmt = str(resource.get("format") or "").strip().lower()
+        if resource_url and (
+            fmt in ("csv", "zip", "zipped csv")
+            or resource_url.lower().endswith((".csv", ".zip"))
+        ):
+            return resource_url
+    raise ValueError(f"HDX dataset {dataset!r} publishes no CSV or zip resource")
 
 
 def _expand_url(url: str, ym: str) -> str:
@@ -245,9 +345,34 @@ def _expand_url(url: str, ym: str) -> str:
     return url.replace("{ym}", ym).replace("{year}", year).replace("{month}", month)
 
 
-def _rows_from_text(text: str, content_type: str) -> list[dict[str, Any]]:
-    """Parse a feed body into a list of records (JSON or CSV)."""
+_ZIP_MAGIC = b"PK\x03\x04"
 
+
+def _unzip_first_table(blob: bytes) -> tuple[str, str]:
+    """The first CSV (else JSON) member of a zip archive, decoded."""
+
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        names = [n for n in archive.namelist() if not n.endswith("/")]
+        tables = [n for n in names if n.lower().endswith(".csv")] or [
+            n for n in names if n.lower().endswith(".json")
+        ]
+        if not tables:
+            raise ValueError(f"zip archive holds no CSV or JSON member: {names[:10]}")
+        member = tables[0]
+        text = archive.read(member).decode("utf-8-sig", errors="replace")
+        return text, ("application/json" if member.lower().endswith(".json") else "text/csv")
+
+
+def _rows_from_text(text: str | bytes, content_type: str) -> list[dict[str, Any]]:
+    """Parse a feed body into a list of records (JSON, CSV, or a zipped CSV)."""
+
+    if isinstance(text, bytes):
+        if text[:4] == _ZIP_MAGIC:
+            text, content_type = _unzip_first_table(text)
+        else:
+            text = text.decode("utf-8-sig", errors="replace")
     body = text.strip()
     if not body:
         return []
@@ -336,22 +461,35 @@ def _record_ym(record: Mapping[str, Any]) -> str | None:
     return parsed.strftime("%Y-%m") if parsed else None
 
 
-def _parse_feed(
-    entry: Mapping[str, Any], text: str, content_type: str, fallback_ym: str
-) -> dict[str, Any]:
-    """Turn a feed body into the cached ``{iso3: value}`` snapshot.
+def _parse_feed_series(
+    entry: Mapping[str, Any], text: str | bytes, content_type: str, fallback_ym: str
+) -> list[dict[str, Any]]:
+    """Turn a feed body into cached ``{iso3: value}`` snapshots, one per month.
 
     Values are stored verbatim. The thresholds that turn them into a verdict
     live in the rulebook and are applied at evaluation time, so a retuned
     threshold takes effect without a re-fetch.
+
+    A record with a date lands in that month's snapshot; records with none
+    land in ONE snapshot stamped with the retrieval month (a "latest" feed
+    describes the moment it was fetched, and stamping it with the target
+    month would pass the staleness test for any backcast month). Collapsing
+    a dated series onto its newest month — what the pre-Sept-2026 parser
+    did — reads a decade of monthly assessments as one, and the wrong one.
     """
 
     provider = str(entry.get("provider"))
-    keys = _CLASS_KEYS if provider == PROVIDER_ASAP else _VALUE_KEYS
+    match = str(entry.get("match") or "").strip().lower()
+    class_shaped = match == _MATCH_CLASSES or (not match and provider == PROVIDER_ASAP)
+    keys = _CLASS_KEYS if class_shaped else _VALUE_KEYS
+    preferred = {str(c).strip().lower() for c in (entry.get("drought_classes") or [])}
     rows = _rows_from_text(text, content_type)
+    columns: list[str] = []
+    for row in rows[:1]:
+        columns = [str(k) for k in row.keys()]
 
-    values: dict[str, Any] = {}
-    observed: set[str] = set()
+    per_month: dict[str, dict[str, Any]] = {}
+    sources: dict[str, str] = {}
     unresolved = 0
     for row in rows:
         iso3 = _record_iso3(row)
@@ -361,28 +499,99 @@ def _parse_feed(
         value = _first(row, keys)
         if value is None:
             continue
-        values[iso3] = value
         ym = _record_ym(row)
         if ym:
-            observed.add(ym)
+            sources[ym] = "feed"
+        else:
+            ym = fallback_ym
+            sources.setdefault(ym, "retrieval")
+        values = per_month.setdefault(ym, {})
+        current = values.get(iso3)
+        # Several records for one country in one month (an assessment
+        # revised, a class per sub-unit) resolve the same way on every run:
+        # the one that says drought wins, else the later record.
+        if current is None or not (
+            str(current).strip().lower() in preferred
+            and str(value).strip().lower() not in preferred
+        ):
+            values[iso3] = value
 
-    if observed:
-        observed_ym, ym_source = max(observed), "feed"
-    else:
-        # No date anywhere in the feed: it is a "latest" snapshot and
-        # describes the moment it was retrieved. Stamping it with the target
-        # month instead would silently pass the staleness test for any
-        # backcast month and manufacture indicator coverage we do not have.
-        observed_ym, ym_source = fallback_ym, "retrieval"
+    snapshots = [
+        {
+            "values": values,
+            "observed_ym": ym,
+            "observed_ym_source": sources.get(ym, "retrieval"),
+            "n_records": len(rows),
+            "n_countries": len(values),
+            "n_unresolved": unresolved,
+            "columns": columns,
+        }
+        for ym, values in sorted(per_month.items())
+    ]
+    if not snapshots:
+        snapshots = [
+            {
+                "values": {},
+                "observed_ym": fallback_ym,
+                "observed_ym_source": "retrieval",
+                "n_records": len(rows),
+                "n_countries": 0,
+                "n_unresolved": unresolved,
+                "columns": columns,
+            }
+        ]
+    return snapshots
 
-    return {
-        "values": values,
-        "observed_ym": observed_ym,
-        "observed_ym_source": ym_source,
-        "n_records": len(rows),
-        "n_countries": len(values),
-        "n_unresolved": unresolved,
-    }
+
+def _parse_feed(
+    entry: Mapping[str, Any], text: str | bytes, content_type: str, fallback_ym: str
+) -> dict[str, Any]:
+    """The newest snapshot of :func:`_parse_feed_series` (kept for callers
+    that want one answer: the live month reads the latest assessment)."""
+
+    return _parse_feed_series(entry, text, content_type, fallback_ym)[-1]
+
+
+def describe_pythia_table(
+    con: "duckdb.DuckDBPyConnection", entry: Mapping[str, Any]
+) -> str:
+    """What a pythia_table source actually holds, for the error a miss prints.
+
+    "holds no usable rows for 2026-07" was the whole diagnosis in run
+    33841370196 while the table held 4,816 rows — the reader could not tell
+    an empty table from a filter that matched nothing from a lookup that
+    mis-derived the month. Never raises: the description decorates an
+    error and must not replace it with another.
+    """
+
+    table = str(entry.get("table") or "")
+    date_column = str(entry.get("date_column") or "")
+    offset_column = str(entry.get("date_offset_column") or "")
+    where = str(entry.get("where") or "").strip()
+    try:
+        total = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        parts = [f"{table}: {int(total)} rows"]
+        if where:
+            matching = con.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE ({where})"
+            ).fetchone()[0]
+            parts.append(f"{int(matching)} match where=({where})")
+        if date_column:
+            lo, hi = con.execute(
+                f"SELECT MIN(CAST({date_column} AS VARCHAR)), "
+                f"MAX(CAST({date_column} AS VARCHAR)) FROM {table}"
+            ).fetchone()
+            parts.append(f"{date_column} spans {lo}..{hi}")
+        if offset_column:
+            offsets = con.execute(
+                f"SELECT DISTINCT {offset_column} FROM {table} ORDER BY 1"
+            ).fetchall()
+            parts.append(
+                f"{offset_column} in {{{', '.join(str(o[0]) for o in offsets[:12])}}}"
+            )
+        return "; ".join(parts)
+    except Exception as exc:  # noqa: BLE001 - a description must not raise
+        return f"{table}: could not be described ({type(exc).__name__}: {exc})"
 
 
 def _snapshot_from_pythia_table(
@@ -464,10 +673,15 @@ def _snapshot_from_pythia_table(
     # reading from the same month: several rows for one country in one month
     # (several signal types, several issues) must resolve the same way on
     # every run, and the one that says "warning" is the one that matters.
+    # For an offset feed (a forecast issued in M about M+L), every vintage
+    # that speaks for the month is a candidate and the SHORTEST lead — the
+    # most recent issue — wins. Pinning one lead in the where clause meant
+    # a month whose lead-1 vintage had not been ingested read as "no usable
+    # rows" while three other vintages about it sat in the table.
     preferred = {
         str(c).strip().lower() for c in (entry.get("drought_classes") or [])
     }
-    picked: dict[str, tuple[str, Any]] = {}
+    picked: dict[str, tuple[str, int, Any]] = {}
     observed: set[str] = set()
     unresolved = 0
     for iso3_raw, value, observed_raw, date_offset in rows:
@@ -476,9 +690,11 @@ def _snapshot_from_pythia_table(
             unresolved += 1
             continue
         observed_ym = str(observed_raw or "") if date_column else ""
+        offset = 0
         if offset_column and observed_ym:
             try:
-                observed_ym = shift_month(observed_ym, int(date_offset or 0))
+                offset = int(date_offset or 0)
+                observed_ym = shift_month(observed_ym, offset)
             except (TypeError, ValueError):
                 unresolved += 1
                 continue
@@ -486,16 +702,20 @@ def _snapshot_from_pythia_table(
                 continue
         current = picked.get(code)
         if current is None:
-            picked[code] = (observed_ym, value)
+            picked[code] = (observed_ym, offset, value)
         else:
-            cur_ym, cur_value = current
+            cur_ym, cur_offset, cur_value = current
             new_pref = str(value).strip().lower() in preferred
             cur_pref = str(cur_value).strip().lower() in preferred
-            if observed_ym > cur_ym or (observed_ym == cur_ym and new_pref and not cur_pref):
-                picked[code] = (observed_ym, value)
+            if (
+                observed_ym > cur_ym
+                or (observed_ym == cur_ym and offset < cur_offset)
+                or (observed_ym == cur_ym and offset == cur_offset and new_pref and not cur_pref)
+            ):
+                picked[code] = (observed_ym, offset, value)
         if date_column and observed_ym:
             observed.add(observed_ym)
-    values: dict[str, Any] = {code: pair[1] for code, pair in picked.items()}
+    values: dict[str, Any] = {code: triple[2] for code, triple in picked.items()}
 
     observed_ym = max(observed) if observed else ym
     return {
@@ -550,12 +770,14 @@ def fetch_indicators(
             if not snapshot["values"]:
                 error = (
                     f"{entry.get('table')} holds no usable rows for {ym} — the "
-                    "indicator is unavailable, which is not the same as no drought"
+                    "indicator is unavailable, which is not the same as no drought. "
+                    f"Table: {describe_pythia_table(con, entry)}"
                 )
                 LOG.warning("[drought_indicators] %s: %s", name, error)
                 detail["entries"][name] = {"ok": False, "error": error}
                 continue
             attempts: list[dict[str, Any]] = []
+            snapshots = [snapshot]
         else:
             candidates = _entry_urls(entry)
             if not candidates:
@@ -567,16 +789,25 @@ def fetch_indicators(
             # route has not lost the data, and the first candidate that parses
             # is the answer.
             snapshot = None
+            snapshots = []
             used_url = ""
             attempts = []
+            timeout = float(entry.get("request_timeout_sec") or 60)
+            series = bool(entry.get("time_series"))
             for candidate in candidates:
                 expanded = _expand_url(candidate, ym)
                 outcome.source_urls.append(expanded)
                 try:
-                    text, content_type = getter(
-                        expanded, float(entry.get("request_timeout_sec") or 60)
-                    )
-                    parsed = _parse_feed(entry, text, content_type, retrieval_ym)
+                    if series and expanded in _SERIES_CACHE:
+                        parsed_series = _SERIES_CACHE[expanded]
+                    else:
+                        resolved = _resolve_candidate(expanded, getter, timeout)
+                        text, content_type = getter(resolved, timeout)
+                        parsed_series = _parse_feed_series(
+                            entry, text, content_type, retrieval_ym
+                        )
+                        if series:
+                            _SERIES_CACHE[expanded] = parsed_series
                 except Exception as exc:
                     attempts.append({"url": expanded, "error": str(exc)})
                     LOG.warning(
@@ -587,18 +818,21 @@ def fetch_indicators(
                 # Every record failing to resolve to a country means the feed's
                 # shape changed, not that the world is drought-free. Refuse the
                 # snapshot rather than cache a feed that says nothing about
-                # anywhere.
-                if parsed["n_records"] and not parsed["values"]:
+                # anywhere — and name the columns seen, because the repair is
+                # a key name in this module or a mapping, not a guess.
+                newest = parsed_series[-1]
+                if newest["n_records"] and not any(s["values"] for s in parsed_series):
                     error = (
-                        f"0 of {parsed['n_records']} records resolved to a country "
-                        f"({parsed['n_unresolved']} unresolved) — the feed's shape has "
-                        "probably changed"
+                        f"0 of {newest['n_records']} records resolved to a country "
+                        f"({newest['n_unresolved']} unresolved) — the feed's shape has "
+                        f"probably changed; columns seen: {newest.get('columns')}"
                     )
                     attempts.append({"url": expanded, "error": error})
                     LOG.error("[drought_indicators] %s: %s", name, error)
                     continue
 
-                snapshot = parsed
+                snapshots = [s for s in parsed_series if s["values"]] or [newest]
+                snapshot = snapshots[-1]
                 used_url = expanded
                 break
 
@@ -623,22 +857,25 @@ def fetch_indicators(
             "observed_ym_source": snapshot["observed_ym_source"],
             "countries": snapshot["n_countries"],
             "unresolved": snapshot["n_unresolved"],
+            "months": len(snapshots),
+            "month_range": f"{snapshots[0]['observed_ym']}..{snapshots[-1]['observed_ym']}",
             **({"attempts": attempts} if attempts else {}),
         }
-        records.append(
-            RawRecord(
-                record_id=f"{name}-{snapshot['observed_ym']}",
-                payload={
-                    "name": name,
-                    "provider": provider,
-                    "url": used_url,
-                    **snapshot,
-                },
-                ym=snapshot["observed_ym"],
-                hazard="DR",
-                source_url=used_url,
+        for stored_snapshot in snapshots:
+            records.append(
+                RawRecord(
+                    record_id=f"{name}-{stored_snapshot['observed_ym']}",
+                    payload={
+                        "name": name,
+                        "provider": provider,
+                        "url": used_url,
+                        **stored_snapshot,
+                    },
+                    ym=stored_snapshot["observed_ym"],
+                    hazard="DR",
+                    source_url=used_url,
+                )
             )
-        )
 
     if records:
         stored = store_raw_records(con, SOURCE, records)
@@ -726,19 +963,17 @@ def _reading_for_entry(
         else (_entry_urls(entry)[0] if _entry_urls(entry) else "")
     )
 
-    if not url:
-        return IndicatorReading(
-            name=name, provider=provider, state=STATE_UNAVAILABLE,
-            required=required, error="no url configured",
-        )
-
+    # A dormant entry (no url: the legacy ASAP warnings feed) is never
+    # FETCHED, but the snapshots it cached while it worked are still
+    # readings, and a month they cover still gets its answer from them.
     snapshot = _snapshot_for(con, name, ym, max_age_months, cache=cache)
     if snapshot is None:
         return IndicatorReading(
             name=name, provider=provider, state=STATE_UNAVAILABLE, required=required,
-            source_url=url,
+            source_url=url or None,
             error=(
                 f"no cached observation within {max_age_months} month(s) of {ym}"
+                + ("" if url else " (entry has no url and is never fetched)")
             ),
         )
 
@@ -773,6 +1008,19 @@ def _reading_for_entry(
 
     if match == _MATCH_CLASSES:
         classes = {str(c).strip().lower() for c in entry.get("drought_classes") or []}
+        unassessed = {
+            str(c).strip().lower() for c in entry.get("unassessed_classes") or []
+        }
+        # "Not assessed" is the feed saying it did not look, which is not a
+        # reading of any kind: neither drought nor its absence, and not
+        # coverage either.
+        if str(raw_value).strip().lower() in unassessed:
+            return IndicatorReading(
+                name=name, provider=provider, state=STATE_UNAVAILABLE,
+                required=required, observed_ym=observed_ym, value=raw_value,
+                source_url=snapshot.get("url"),
+                error=f"{iso3} was not assessed by {name} in {observed_ym}",
+            )
         state = (
             STATE_DROUGHT
             if str(raw_value).strip().lower() in classes
@@ -838,6 +1086,10 @@ def evaluate_indicators(
         min_present = int(rulebook.get("drought.indicators.min_present_readings"))
     except Exception:  # noqa: BLE001 - older rulebooks have no such key
         min_present = 0
+    try:
+        min_for_zero = int(rulebook.get("drought.indicators.min_answered_for_zero"))
+    except Exception:  # noqa: BLE001 - older rulebooks have no such key
+        min_for_zero = 1
 
     readings = [
         _reading_for_entry(con, entry, iso3, ym, max_age, cache=cache)
@@ -854,7 +1106,8 @@ def evaluate_indicators(
         return IndicatorVerdict(
             iso3=iso3, ym=ym, state=STATE_UNAVAILABLE, combine=combine,
             readings=readings, present_count=present_count,
-            min_present_readings=min_present,
+            min_present_readings=min_present, answered_count=len(answered),
+            min_answered_for_zero=min_for_zero,
             note=(
                 f"required indicator(s) unavailable: {names} — no drought verdict, "
                 "and no zero"
@@ -870,7 +1123,8 @@ def evaluate_indicators(
         return IndicatorVerdict(
             iso3=iso3, ym=ym, state=STATE_UNAVAILABLE, combine=combine,
             readings=readings, present_count=present_count,
-            min_present_readings=min_present,
+            min_present_readings=min_present, answered_count=len(answered),
+            min_answered_for_zero=min_for_zero,
             note=(
                 f"{len(answered)} of {len(readings)} indicator(s) answered, "
                 f"below min_available={min_available}"
@@ -886,11 +1140,13 @@ def evaluate_indicators(
 
     note = (
         f"{len(dry)}/{len(answered)} indicator(s) show drought (combine={combine}); "
-        f"{present_count} named the country"
+        f"{present_count} named the country; {len(answered)} answered "
+        f"(a zero needs {min_for_zero})"
     )
     return IndicatorVerdict(
         iso3=iso3, ym=ym, state=state, combine=combine, readings=readings, note=note,
         present_count=present_count, min_present_readings=min_present,
+        answered_count=len(answered), min_answered_for_zero=min_for_zero,
     )
 
 

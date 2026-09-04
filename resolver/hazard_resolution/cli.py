@@ -162,6 +162,16 @@ def sweep_and_resolve_zeros(
     def ledger(row, *, outcome: str, reason: str | None, sweep: dict) -> None:
         """One assessed non-triggered cell, and why it did or did not get a row."""
         flipped = reason == cell_ledger.REASON_FLIPPED
+        # The database is the record: a cell with no row says why on its own
+        # trigger row, so a bundle built without the run stream (the nightly
+        # backcast never enables it) does not label the cell unexplained.
+        if outcome == "no_row" and reason and not dry_run:
+            detect_mod.record_no_row_reason(
+                con, hazard=result.hazard, iso3=row.iso3, ym=result.ym,
+                reason=reason,
+                note=sweep.get("error") if reason == cell_ledger.REASON_SWEEP_INCONCLUSIVE
+                else result.coverage_note,
+            )
         cell_ledger.record_cell(
             stage=cell_ledger.STAGE_SWEEP,
             iso3=row.iso3, hazard=result.hazard, ym=result.ym,

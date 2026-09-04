@@ -527,6 +527,54 @@ def flip_trigger_from_sweep(
         )
 
 
+def record_no_row_reason(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    hazard: str,
+    iso3: str,
+    ym: str,
+    reason: str,
+    note: str | None = None,
+) -> None:
+    """Stamp WHY an assessed cell carries no resolution row, on the trigger row.
+
+    The run-log ledger carries the same code, but the ledger is off unless
+    ``PYTHIA_RUN_LOG_DIR`` is set (the nightly backcast never sets it) and a
+    bundle built from the database alone then labels every such cell
+    ``unexplained_no_row``. The database is the record, so the reason lives
+    in ``trigger_detail_json.no_row_reason`` beside the evidence it rests
+    on. Idempotent: a later run that writes a row replaces the trigger row
+    (``write_triggers`` deletes first) and the stamp goes with it.
+    """
+
+    year, month = ym_to_year_month(ym)
+    row = con.execute(
+        """
+        SELECT trigger_detail_json FROM haz_triggers
+        WHERE hazard = ? AND iso3 = ? AND year = ? AND month = ?
+        """,
+        [hazard, iso3, year, month],
+    ).fetchone()
+    if row is None:
+        return
+    try:
+        detail = json.loads(row[0]) if row[0] else {}
+    except (TypeError, ValueError):
+        detail = {}
+    if not isinstance(detail, dict):
+        detail = {"detail": detail}
+    detail["no_row_reason"] = reason
+    if note:
+        detail["no_row_note"] = note
+    con.execute(
+        """
+        UPDATE haz_triggers SET trigger_detail_json = ?
+        WHERE hazard = ? AND iso3 = ? AND year = ? AND month = ?
+        """,
+        [json.dumps(detail), hazard, iso3, year, month],
+    )
+
+
 def record_sweep_on_trigger(
     con: "duckdb.DuckDBPyConnection",
     *,

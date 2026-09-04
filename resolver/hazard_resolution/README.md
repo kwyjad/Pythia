@@ -455,8 +455,22 @@ and no code change. Two providers:
 
 | provider | shape | absence of a country means |
 |---|---|---|
-| `asap` | JRC ASAP agricultural hotspot classes, free, no key | **no warning issued** — which is what makes it usable as evidence of absence |
+| `asap` | JRC ASAP hotspot classes, free, no key. Since Sept 2026 the shipped entry `asap_hotspots` reads the monthly hotspot ASSESSMENT time series (one zipped CSV since Oct 2016, `time_series: true`, HDX-mirrored via `hdx-ckan://asap-hotspots-monthly`), parsed into one snapshot per month; the legacy warnings entry `asap` is dormant (no url) because JRC stopped publishing the file | **unknown** for the assessment (it covers ~80 countries; `absence_means_no_drought: false`), and `hs_code 3` "not assessed" is no reading at all. The legacy warnings feed was an alerting feed where absence meant **no warning issued** |
 | `tabular` | a pre-computed `(iso3, ym, value)` CSV/JSON anomaly feed compared against a threshold | **unknown** — an anomaly feed that omits a country says nothing about it |
+| `pythia_table` | a table this repo already ingests (`hdx_signals`, `seasonal_forecasts`); for an offset feed every vintage that speaks for the month is a candidate and the shortest lead wins | per entry (`absence_means_no_drought`) |
+
+**Two rules before a zero (Sept 2026).** A zero on evidence of absence needs
+`drought.indicators.min_answered_for_zero` (2) feeds to have ANSWERED, or the
+cell is INCONCLUSIVE (`indicator_too_few_feeds_for_zero`) — one surviving
+feed of three zeroed 159 countries a month in September 2026. And a month
+still in progress is PENDING whatever the feeds say (`month_in_progress`).
+PENDING and INCONCLUSIVE write nothing, so `drought.retract_unsupported_row`
+deletes an UNFROZEN row the verdict contradicts (any provisional row for an
+in-progress month; a provisional absence zero under the feed floor) and the
+run logs written / retracted / retained counts. Every no-row verdict stamps
+`no_row_reason` (and `assessed: false` when undecided) into the trigger row's
+`trigger_detail_json`, and `base_rates.compute_occurrence` leaves unassessed
+rows out of its denominator.
 
 CHIRPS and SPEI are gridded rasters, and turning those into a country
 number needs zonal statistics that have no business running inside the

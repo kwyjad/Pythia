@@ -74,6 +74,12 @@ _KNOWN_INDICATOR_PROVIDERS = ("asap", "tabular", "pythia_table")
 #: that. (Matched case-insensitively against the clause text.)
 _CIRCULAR_INDICATOR_TOKENS = ("ipc_food_insecurity", "phase3plus", "fews")
 _KNOWN_INDICATOR_MATCHES = ("classes", "threshold")
+
+
+def _is_feed_address(value: str) -> bool:
+    """An indicator feed address: an https URL, or an HDX CKAN dataset."""
+
+    return value.startswith("https://") or value.startswith("hdx-ckan://")
 _KNOWN_INDICATOR_COMBINE = ("any", "all")
 _KNOWN_INDICATOR_DIRECTIONS = ("below", "above")
 _KNOWN_CEILING_SOURCES = ("gdacs_exposed",)
@@ -482,6 +488,10 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     # alone); the shipped rulebook asks for one reading that named the
     # country, so an alerting feed that never monitored it cannot zero it.
     _require_int_in("drought.indicators.min_present_readings", 0, 10)
+    # >= 1: how many feeds must ANSWER before a zero may rest on their
+    # silence. The shipped rulebook asks for two, because one surviving feed
+    # of three zeroed 159 countries a month in September 2026.
+    _require_int_in("drought.indicators.min_answered_for_zero", 1, 10)
     entries = _require("drought.indicators.entries")
     if entries is not _MISSING:
         if not isinstance(entries, list) or not entries:
@@ -512,17 +522,34 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
                     problems.append(
                         f"{where}.url must be a string (empty means 'not consulted'), got {url!r}"
                     )
-                elif url.strip() and not url.startswith("https://"):
-                    problems.append(f"{where}.url must be an https:// URL, got {url!r}")
+                elif url.strip() and not _is_feed_address(url):
+                    problems.append(
+                        f"{where}.url must be an https:// URL or hdx-ckan://<dataset>, got {url!r}"
+                    )
                 # `urls` is the candidate list a moved download route needs.
                 urls = entry.get("urls")
                 if urls is not None:
                     if not isinstance(urls, list) or not all(
-                        isinstance(u, str) and u.startswith("https://") for u in urls
+                        isinstance(u, str) and _is_feed_address(u) for u in urls
                     ):
                         problems.append(
-                            f"{where}.urls must be a list of https:// URLs, got {urls!r}"
+                            f"{where}.urls must be a list of https:// URLs or "
+                            f"hdx-ckan://<dataset> addresses, got {urls!r}"
                         )
+                series = entry.get("time_series")
+                if series is not None and not isinstance(series, bool):
+                    problems.append(
+                        f"{where}.time_series must be a boolean, got {series!r}"
+                    )
+                unassessed = entry.get("unassessed_classes")
+                if unassessed is not None and (
+                    not isinstance(unassessed, list)
+                    or not all(str(c).strip() for c in unassessed)
+                ):
+                    problems.append(
+                        f"{where}.unassessed_classes must be a list of non-empty "
+                        f"class labels, got {unassessed!r}"
+                    )
                 match = entry.get("match")
                 if match is not None and match not in _KNOWN_INDICATOR_MATCHES:
                     problems.append(
