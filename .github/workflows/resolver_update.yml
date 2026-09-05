@@ -1026,6 +1026,11 @@ jobs:
         if: always()
         continue-on-error: true
         timeout-minutes: 15
+        env:
+          # The bundle reads this run's step timings from the jobs API
+          # (actions: read) — the workflow never wrote a timing file, so
+          # run/step_timings.csv shipped empty on every run before Sept 2026.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -o pipefail
           python -m scripts.build_resolver_debug_bundle \

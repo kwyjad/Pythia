@@ -930,6 +930,7 @@ def _ensure_crisiswatch_entries_table(con: duckdb.DuckDBPyConnection) -> None:
             summary VARCHAR,
             country_name VARCHAR,
             fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            content_hash VARCHAR,
             PRIMARY KEY (iso3, year, month)
         );
         """,
@@ -942,6 +943,11 @@ def _ensure_crisiswatch_entries_table(con: duckdb.DuckDBPyConnection) -> None:
             "summary": "VARCHAR",
             "country_name": "VARCHAR",
             "fetched_at": "TIMESTAMP",
+            # sha256 over (arrow, alert_type, summary, country_name): the
+            # DB writer rewrites a row, and moves fetched_at, only when this
+            # changes. A republished edition with identical content leaves
+            # the row untouched (Sept 2026).
+            "content_hash": "VARCHAR",
         },
     )
 

@@ -60,7 +60,7 @@ import tempfile
 import zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import convenience
@@ -166,6 +166,96 @@ def _run_git(args: list[str]) -> str:
         return ""
 
 
+_MONTH_NAMES = {
+    name.lower(): index
+    for index, name in enumerate(
+        ["", "january", "february", "march", "april", "may", "june", "july",
+         "august", "september", "october", "november", "december"]
+    )
+    if name
+}
+
+
+def _month_of_edition(edition: str) -> int:
+    """``"August 2026"`` -> 8; 0 when unparseable."""
+
+    short = {name[:3]: index for name, index in _MONTH_NAMES.items()}
+    for word in str(edition or "").lower().replace(",", " ").split():
+        if word in _MONTH_NAMES:
+            return _MONTH_NAMES[word]
+        if len(word) == 3 and word in short:
+            return short[word]
+    return 0
+
+
+def _year_of_edition(edition: str) -> int:
+    match = re.search(r"(20\d{2})", str(edition or ""))
+    return int(match.group(1)) if match else 0
+
+
+def _pick_this_job(jobs: list[dict[str, Any]], env: Mapping[str, str]) -> dict[str, Any] | None:
+    """The job the bundle is running in, from a run's job list.
+
+    The API returns display names, never the job KEY that ``GITHUB_JOB``
+    carries, so the match is made on evidence the runner has: the job with
+    a step still ``in_progress`` (the bundle step itself), then the job on
+    this runner by name, then the job with the most steps. A run with one
+    job needs none of it.
+    """
+
+    if not jobs:
+        return None
+    if len(jobs) == 1:
+        return jobs[0]
+    live = [
+        j for j in jobs
+        if any((st.get("status") == "in_progress") for st in (j.get("steps") or []))
+    ]
+    if len(live) == 1:
+        return live[0]
+    runner = env.get("RUNNER_NAME") or ""
+    if runner:
+        same = [j for j in jobs if j.get("runner_name") == runner]
+        if len(same) == 1:
+            return same[0]
+    return max(jobs, key=lambda j: len(j.get("steps") or []))
+
+
+def _step_timings_payload(job: dict[str, Any], url: str) -> dict[str, Any]:
+    """The jobs-API job reduced to what the bundle records, durations computed."""
+
+    steps: list[dict[str, Any]] = []
+    for st in job.get("steps") or []:
+        started, completed = st.get("started_at"), st.get("completed_at")
+        duration = None
+        try:
+            if started and completed:
+                a = dt.datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+                b = dt.datetime.fromisoformat(str(completed).replace("Z", "+00:00"))
+                duration = round((b - a).total_seconds(), 1)
+        except ValueError:
+            duration = None
+        steps.append({
+            "number": st.get("number"),
+            "name": st.get("name"),
+            "status": st.get("status"),
+            "conclusion": st.get("conclusion"),
+            "started_at": started,
+            "completed_at": completed,
+            "duration_sec": duration,
+        })
+    return {
+        "source": url,
+        "job_id": job.get("id"),
+        "job_name": job.get("name"),
+        "job_url": job.get("html_url"),
+        "job_status": job.get("status"),
+        "job_started_at": job.get("started_at"),
+        "runner_name": job.get("runner_name"),
+        "steps": steps,
+    }
+
+
 def _normalise_log_line(line: str) -> str:
     """Collapse a log line to its shape so recurring faults count as one.
 
@@ -215,6 +305,7 @@ class BundleBuilder:
         self.notes: list[str] = []
         self.sections: dict[str, dict[str, Any]] = {}
         self.checks: list[dict[str, Any]] = []
+        self.git_info: dict[str, Any] = {}
         self._con = None
         self._db_reported = False
         self._tables: set[str] | None = None
@@ -371,24 +462,8 @@ class BundleBuilder:
         effective["variables"] = redact_obj(effective["variables"], self.secrets)
         write_json(self.path("run", "env_effective.json"), effective)
 
-        write_json(
-            self.path("run", "git.json"),
-            {
-                "commit": _run_git(["rev-parse", "HEAD"]) or env.get("GITHUB_SHA") or None,
-                "branch": _run_git(["rev-parse", "--abbrev-ref", "HEAD"]) or None,
-                "dirty": bool(_run_git(["status", "--porcelain"])),
-                "recent_commits": [
-                    line
-                    for line in _run_git(
-                        [
-                            "log", "-20", "--date=short",
-                            "--pretty=%h|%ad|%s", "--", "resolver", "horizon_scanner",
-                        ]
-                    ).splitlines()
-                    if line
-                ],
-            },
-        )
+        self.git_info = self._git_state(env)
+        write_json(self.path("run", "git.json"), self.git_info)
 
         freeze = ""
         try:
@@ -477,34 +552,151 @@ class BundleBuilder:
         except Exception as exc:  # noqa: BLE001
             return {"unavailable": f"{type(exc).__name__}: {exc}"}
 
+    @staticmethod
+    def _git_state(env: Mapping[str, str]) -> dict[str, Any]:
+        """What the runner actually checked out, stated so it can be checked.
+
+        The September 2026 bundle said ``dirty: true`` for a CI run and put a
+        commit in ``commit`` that was not the head of ``recent_commits``.
+        Both were artefacts of how the file was built, not facts about the
+        checkout: ``dirty`` was ``git status --porcelain`` taken whole, and a
+        run leaves hundreds of UNTRACKED files (``diagnostics/``, the DB)
+        which is not the same claim as a modified source file; and the
+        commit list was filtered to ``resolver/`` and ``horizon_scanner/``,
+        so its first entry was the newest commit that touched those
+        directories rather than HEAD. Now: tracked changes and untracked
+        files are counted apart, ``dirty`` means tracked changes only, the
+        log starts at HEAD with no path filter, and HEAD is compared with
+        the ``GITHUB_SHA`` the workflow was dispatched at, so the file
+        cannot quietly disagree with the Actions page.
+        """
+
+        head = _run_git(["rev-parse", "HEAD"]) or None
+        github_sha = env.get("GITHUB_SHA") or None
+        porcelain = [
+            line for line in _run_git(["status", "--porcelain"]).splitlines() if line
+        ]
+        tracked = [line for line in porcelain if not line.startswith("??")]
+        untracked = [line[3:] for line in porcelain if line.startswith("??")]
+        recent = [
+            line
+            for line in _run_git(["log", "-20", "--date=short", "--pretty=%h|%ad|%s"]).splitlines()
+            if line
+        ]
+        shallow = _run_git(["rev-parse", "--is-shallow-repository"]).strip().lower()
+        head_short = head[:7] if head else None
+        return {
+            "commit": head or github_sha,
+            "github_sha": github_sha,
+            "head_matches_github_sha": (
+                None if not (head and github_sha) else head == github_sha
+            ),
+            "branch": _run_git(["rev-parse", "--abbrev-ref", "HEAD"]) or None,
+            "github_ref": env.get("GITHUB_REF") or None,
+            "shallow_clone": (None if shallow not in ("true", "false") else shallow == "true"),
+            # Only a modified or staged TRACKED file makes a checkout dirty.
+            # A run's own outputs are untracked and are reported separately.
+            "dirty": bool(tracked),
+            "tracked_changes": tracked[:50],
+            "n_tracked_changes": len(tracked),
+            "n_untracked_files": len(untracked),
+            "untracked_sample": untracked[:20],
+            "recent_commits": recent,
+            "head_is_first_recent_commit": (
+                None if not (recent and head_short) else recent[0].startswith(head_short)
+            ),
+            "note": (
+                "recent_commits starts at HEAD with no path filter; dirty counts "
+                "tracked changes only, untracked files are the run's own outputs"
+            ),
+        }
+
     def _step_timings(self) -> None:
-        """Per-step name, status and duration — from CI when it is there."""
+        """Per-step name, status and duration — from CI when it is there.
+
+        Two sources, in order. A JSON file named by ``PYTHIA_STEP_TIMINGS_JSON``
+        (an operator override, and what a local replay can supply). Otherwise
+        the GitHub jobs API for this very run, which is the record GitHub
+        itself keeps: the workflow never wrote the JSON file, so every bundle
+        before September 2026 shipped an empty CSV under a preamble
+        explaining why. The API needs ``GITHUB_TOKEN`` (``actions: read``),
+        which the bundle step now holds; without it the file says so.
+        The step that builds the bundle is itself still ``in_progress`` when
+        the API is read, and the steps after it are ``pending`` — the CSV
+        states that rather than pretending the run had finished.
+        """
 
         rows: list[list[Any]] = []
         source = "unavailable"
+        raw_payload: dict[str, Any] | None = None
         raw = self.env.get("PYTHIA_STEP_TIMINGS_JSON", "")
         if raw and Path(raw).is_file():
             try:
-                payload = json.loads(Path(raw).read_text(encoding="utf-8"))
+                raw_payload = json.loads(Path(raw).read_text(encoding="utf-8"))
                 source = raw
-                for step in payload.get("steps", payload if isinstance(payload, list) else []):
-                    rows.append([
-                        step.get("name"), step.get("status"), step.get("conclusion"),
-                        step.get("started_at"), step.get("completed_at"),
-                        step.get("duration_sec"),
-                    ])
             except Exception as exc:  # noqa: BLE001
                 self.problem(f"step timings file unreadable: {exc}")
+        if raw_payload is None and self.env.get("GITHUB_RUN_ID"):
+            raw_payload, source = self._step_timings_from_api()
+        if raw_payload is not None:
+            steps = raw_payload.get("steps", raw_payload if isinstance(raw_payload, list) else [])
+            for step in steps:
+                rows.append([
+                    step.get("number"), step.get("name"), step.get("status"),
+                    step.get("conclusion"), step.get("started_at"),
+                    step.get("completed_at"), step.get("duration_sec"),
+                ])
+            write_json(self.path("run", "step_timings.json"), raw_payload)
         write_csv(
             self.path("run", "step_timings.csv"), rows,
-            ["step", "status", "conclusion", "started_at", "completed_at", "duration_sec"],
+            ["number", "step", "status", "conclusion", "started_at", "completed_at", "duration_sec"],
             preamble=(
                 f"source: {source}\n"
-                "Empty outside CI, and empty in CI unless the workflow writes a\n"
-                "step-timing JSON and points PYTHIA_STEP_TIMINGS_JSON at it. The\n"
-                "workflow's own step list is in config/workflows/resolver_update.yml."
+                "Read from the GitHub jobs API for this run (or from the file named\n"
+                "by PYTHIA_STEP_TIMINGS_JSON when set). The bundle step is in_progress\n"
+                "while this is read and the steps after it are pending; nothing here\n"
+                "is a duration for them. Empty outside CI, or when GITHUB_TOKEN is\n"
+                "absent from the bundle step's environment."
             ),
         )
+
+    def _step_timings_from_api(self) -> tuple[dict[str, Any] | None, str]:
+        """This run's job and its steps from the GitHub jobs API. Never raises."""
+
+        env = self.env
+        token = env.get("GITHUB_TOKEN") or env.get("GH_TOKEN") or ""
+        repo = env.get("GITHUB_REPOSITORY", "")
+        run_id = env.get("GITHUB_RUN_ID", "")
+        attempt = env.get("GITHUB_RUN_ATTEMPT", "") or "1"
+        if not (token and repo and run_id):
+            self.problem(
+                "step timings: GITHUB_TOKEN, GITHUB_REPOSITORY or GITHUB_RUN_ID is "
+                "unset in the bundle step's environment, so the jobs API was not read"
+            )
+            return None, "unavailable (no GITHUB_TOKEN in the bundle step's environment)"
+        api = env.get("GITHUB_API_URL") or "https://api.github.com"
+        url = f"{api}/repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+        try:
+            import urllib.request
+
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "pythia-resolver-debug-bundle",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            self.problem(f"step timings: jobs API read failed: {type(exc).__name__}: {exc}")
+            return None, f"unavailable (jobs API: {type(exc).__name__})"
+        job = _pick_this_job(payload.get("jobs") or [], env)
+        if job is None:
+            self.problem("step timings: no job in the jobs API response matched this runner")
+            return None, "unavailable (no matching job in the jobs API response)"
+        return _step_timings_payload(job, url), f"github jobs api: {url}"
 
     # -- logs/ --------------------------------------------------------------
 
@@ -962,7 +1154,8 @@ class BundleBuilder:
             "acled_monthly_fatalities_coverage",
             ("acled_monthly_fatalities",),
             """
-            SELECT MIN(ym) AS first_ym, MAX(ym) AS last_ym,
+            SELECT strftime(MIN(month), '%Y-%m') AS first_ym,
+                   strftime(MAX(month), '%Y-%m') AS last_ym,
                    COUNT(*) AS rows, COUNT(DISTINCT iso3) AS countries
             FROM acled_monthly_fatalities
             """,
@@ -1477,6 +1670,11 @@ class BundleBuilder:
             self._check_no_future_publication_date,
             self._check_declared_active_tables_hold_rows,
             self._check_emdat_read_when_enabled,
+            self._check_bundle_records_the_checked_out_commit,
+            self._check_every_db_query_names_real_columns,
+            self._check_no_extraction_lost_to_truncation,
+            self._check_backcast_deferral_is_recorded,
+            self._check_crisiswatch_entries_accounted_for,
         ):
             try:
                 check()
@@ -1497,6 +1695,220 @@ class BundleBuilder:
             "name": name, "verdict": verdict,
             "left": str(left), "right": str(right), "detail": detail,
         })
+
+    def _check_bundle_records_the_checked_out_commit(self) -> None:
+        """In CI, git.json must name the commit the workflow ran at, clean."""
+
+        name = "bundle_records_the_commit_the_runner_checked_out"
+        info = self.git_info or {}
+        if not self.env.get("GITHUB_RUN_ID"):
+            return self._check(name, "SKIP", "", "", "not a CI run")
+        head, sha = info.get("commit"), info.get("github_sha")
+        if not head or not sha:
+            return self._check(
+                name, "FAIL", head or "(no HEAD)", sha or "(no GITHUB_SHA)",
+                "git.json could not establish both HEAD and GITHUB_SHA",
+            )
+        if head != sha:
+            return self._check(
+                name, "FAIL", head, sha,
+                "HEAD is not the commit the workflow was dispatched at",
+            )
+        if info.get("dirty"):
+            return self._check(
+                name, "FAIL", head, f"{info.get('n_tracked_changes')} tracked change(s)",
+                "a tracked source file was modified on the runner: "
+                + "; ".join(info.get("tracked_changes") or [])[:300],
+            )
+        return self._check(
+            name, "PASS", head, sha,
+            f"HEAD == GITHUB_SHA, no tracked changes, "
+            f"{info.get('n_untracked_files')} untracked output file(s)",
+        )
+
+    def _check_every_db_query_names_real_columns(self) -> None:
+        """Every DB_QUERIES entry whose tables exist must run.
+
+        The September 2026 bundle ran ``SELECT MIN(ym)`` against a table
+        whose column is ``month``; the failure landed in problems.md as one
+        line among many and the coverage file was silently absent.
+        """
+
+        name = "every_bundle_query_runs_against_this_database"
+        if self.query("SELECT 1") is None:
+            return self._check(name, "SKIP", "", "", "no database")
+        failed: list[str] = []
+        ran = 0
+        for qname, needs, sql in self.DB_QUERIES:
+            if any(t not in self.tables() for t in needs):
+                continue
+            ran += 1
+            try:
+                self.con.execute(sql).fetchall()  # type: ignore[union-attr]
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"{qname}: {type(exc).__name__}: {str(exc).splitlines()[0][:160]}")
+        if failed:
+            return self._check(name, "FAIL", ran, len(failed), "; ".join(failed))
+        return self._check(name, "PASS", ran, 0, "every query whose tables exist ran")
+
+    def _check_no_extraction_lost_to_truncation(self) -> None:
+        """No document read this run was lost to an output-ceiling cut-off.
+
+        A first answer cut at ``max_tokens`` is re-read once at twice the
+        budget; the ledger row then reads ``ok`` or carries
+        ``truncated_after_retry``. An error row that names ``max_tokens``
+        WITHOUT that marker is a document read and lost — the two Chile
+        flood extractions of 2026-09-01.
+        """
+
+        name = "no_extraction_this_run_was_lost_to_output_truncation"
+        if "haz_doc_extractions" not in self.tables():
+            return self._check(name, "SKIP", "", "", "haz_doc_extractions is absent")
+        started = self._run_started_at()
+        if started is None:
+            return self._check(name, "SKIP", "", "", "PYTHIA_RUN_STARTED_AT unset")
+        result = self.query(
+            """
+            SELECT iso3, hazard, year, month, doc_id, error
+            FROM haz_doc_extractions
+            WHERE status = 'error' AND created_at >= ?
+              AND (lower(error) LIKE '%max_tokens%' OR lower(error) LIKE '%truncat%')
+            ORDER BY created_at
+            """,
+            [started],
+        )
+        if result is None:
+            return self._check(name, "SKIP", "", "", "query failed (see problems)")
+        rows = result[1]
+        lost = [r for r in rows if "truncated_after_retry" not in str(r[5] or "")]
+        too_long = len(rows) - len(lost)
+        if lost:
+            sample = "; ".join(f"{r[0]}/{r[1]}/{r[2]}-{r[3]:02d} doc {r[4]}" for r in lost[:5])
+            return self._check(
+                name, "FAIL", len(lost), 0,
+                f"error rows cut at the output ceiling with no retry recorded: {sample}",
+            )
+        return self._check(
+            name, "PASS", 0, 0,
+            f"{too_long} document(s) too long even at the doubled budget, recorded as such"
+            if too_long else "no truncation this run",
+        )
+
+    def _check_backcast_deferral_is_recorded(self) -> None:
+        """A budget-bound backcast cell is deferred in the ledger, never NO_DATA.
+
+        Two facts must agree: a trigger row stamped ``extraction_budget_deferred``
+        has no resolution row, and the month it sits in is ``deferred`` in
+        ``haz_backcast_progress`` with that cell listed. A cell stamped
+        deferred that also carries a row, or a deferred month recorded ``ok``,
+        is the resume ledger lying about what it owes.
+        """
+
+        name = "budget_deferred_backcast_cells_are_owed_by_the_resume_ledger"
+        needed = {"haz_triggers", "haz_resolutions", "haz_backcast_progress"}
+        if not needed <= self.tables():
+            return self._check(name, "SKIP", "", "", "a haz_* table is absent")
+        columns = {c for c, _t in self.columns_of("haz_backcast_progress")}
+        if "deferred_cells" not in columns:
+            return self._check(name, "SKIP", "", "", "ledger predates deferred_cells")
+        result = self.query(
+            """
+            SELECT t.hazard, t.iso3, t.year, t.month,
+                   (r.iso3 IS NOT NULL) AS has_row,
+                   p.status, p.deferred_cells
+            FROM haz_triggers t
+            LEFT JOIN haz_resolutions r
+              ON r.iso3 = t.iso3 AND r.hazard = t.hazard
+             AND r.year = t.year AND r.month = t.month
+            LEFT JOIN haz_backcast_progress p
+              ON p.hazard = t.hazard
+             AND p.ym = printf('%04d-%02d', t.year, t.month)
+            WHERE json_extract_string(t.trigger_detail_json, '$.no_row_reason')
+                  = 'extraction_budget_deferred'
+            """
+        )
+        if result is None:
+            return self._check(name, "SKIP", "", "", "query failed (see problems)")
+        rows = result[1]
+        if not rows:
+            return self._check(name, "PASS", 0, 0, "no cell is deferred for budget")
+        bad: list[str] = []
+        for hazard, iso3, year, month, has_row, status, cells in rows:
+            cell = f"{iso3}/{hazard}/{year}-{int(month):02d}"
+            if has_row:
+                bad.append(f"{cell}: stamped deferred but carries a resolution row")
+                continue
+            if status != "deferred":
+                bad.append(f"{cell}: ledger status is {status!r}, not deferred")
+                continue
+            try:
+                owed = json.loads(cells or "[]")
+            except ValueError:
+                owed = []
+            if iso3 not in owed:
+                bad.append(f"{cell}: not in the ledger's deferred_cells")
+        if bad:
+            return self._check(name, "FAIL", len(rows), len(bad), "; ".join(bad[:6]))
+        return self._check(
+            name, "PASS", len(rows), 0,
+            f"{len(rows)} deferred cell(s), each owed by a 'deferred' ledger month",
+        )
+
+    def _check_crisiswatch_entries_accounted_for(self) -> None:
+        """Parsed minus stored equals the sum of the per-entry reasons.
+
+        The September 2026 run parsed 85 entries and stored 78 with no line
+        for the other seven. The store now records its accounting in the
+        ``crisiswatch_store`` run-log stream; the table must hold exactly
+        the rows the accounting says it does for that edition.
+        """
+
+        name = "crisiswatch_entries_parsed_are_all_accounted_for"
+        stream = self._stream_file("crisiswatch_store")
+        if stream is None:
+            return self._check(name, "SKIP", "", "", "no crisiswatch_store stream this run")
+        records = list(run_log.read_stream(stream))
+        if not records:
+            return self._check(name, "SKIP", "", "", "crisiswatch_store stream is empty")
+        rec = records[-1]
+        parsed = int(rec.get("parsed") or 0)
+        reasons = rec.get("load_reasons") or {}
+        accounted = sum(int(v or 0) for v in reasons.values())
+        problems: list[str] = []
+        if parsed != accounted:
+            problems.append(f"parsed {parsed} but reasons account for {accounted}")
+        loaded = int(rec.get("loaded") or 0)
+        written = (
+            int(rec.get("inserted") or 0) + int(rec.get("updated") or 0)
+            + int(rec.get("unchanged") or 0) + int(rec.get("skipped_no_month") or 0)
+        )
+        if loaded != written:
+            problems.append(f"loaded {loaded} but the store accounts for {written}")
+        if rec.get("error"):
+            problems.append(f"store error: {rec['error']}")
+        if "crisiswatch_entries" in self.tables():
+            edition = str(rec.get("edition") or "")
+            year = _year_of_edition(edition)
+            month = _month_of_edition(edition)
+            if year and month:
+                result = self.query(
+                    "SELECT COUNT(*) FROM crisiswatch_entries WHERE year = ? AND month = ?",
+                    [year, month],
+                )
+                held = int(result[1][0][0]) if result and result[1] else None
+                claimed = int(rec.get("rows_for_edition") or 0)
+                if held is not None and held != claimed:
+                    problems.append(
+                        f"table holds {held} rows for {edition}, store claimed {claimed}"
+                    )
+        if problems:
+            return self._check(name, "FAIL", parsed, loaded, "; ".join(problems))
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items()))
+        return self._check(
+            name, "PASS", parsed, loaded,
+            f"{detail}; store inserted={rec.get('inserted')} updated={rec.get('updated')} "
+            f"unchanged={rec.get('unchanged')}",
+        )
 
     def _check_enso_vs_tc_narrative(self) -> None:
         name = "enso_phase_matches_the_tc_context_narrative"

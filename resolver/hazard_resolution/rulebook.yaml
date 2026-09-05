@@ -762,7 +762,15 @@ extraction:
   # parser additionally requires the figure's value to appear in its quote.
   prompt_version: v2
   temperature: 0.0
-  max_output_tokens: 2000
+  # The ANSWER budget for one document: a JSON list of figures, each with a
+  # verbatim quote. 2,000 was enough for most situation reports and not for
+  # a long one — two Chile flood extractions on 2026-09-01 were cut off at
+  # max_tokens and filed as errors. Raised to 8,000 (Sept 2026), and a
+  # truncated answer is re-read once at twice this figure before the
+  # ledger records it as too long. The extraction model is Haiku-class
+  # with no thinking requested, so the whole budget is answer; this is NOT
+  # the SPD path's PYTHIA_ANTHROPIC_SPD_MAX_TOKENS, which governs Opus.
+  max_output_tokens: 8000
   request_timeout_sec: 120
   # Hard cost guard. Counted over haz_doc_extractions rows created in the
   # current CALENDAR month, across every run — so a re-run costs nothing

@@ -230,6 +230,15 @@ def check_backcastable(hazard_name: str, rulebook: Rulebook) -> BackcastableChec
 # ---------------------------------------------------------------------------
 
 
+def _binding_limit_from_note(note: str) -> str | None:
+    """Pull "backcast share (2000)" out of the note the ladder stamped."""
+
+    import re as _re
+
+    match = _re.search(r"bound at its (.+?); ", note or "")
+    return match.group(1).strip() if match else None
+
+
 def completed_months(con, hazard: str) -> set[str]:
     """Months this hazard's backcast has already finished successfully."""
 
@@ -252,11 +261,22 @@ def record_month(
     counts: dict[str, Any] | None = None,
     duration_sec: float | None = None,
     error: str | None = None,
+    deferred_cells: Sequence[str] | None = None,
 ) -> None:
-    """Upsert one month's outcome into the resume ledger."""
+    """Upsert one month's outcome into the resume ledger.
+
+    ``status`` is ``ok`` (done, never re-walked), ``failed`` (re-walked whole
+    next run) or ``deferred`` (the extraction budget was bound; only the
+    ISO3s in ``deferred_cells`` are re-walked next run).
+    """
 
     ensure_haz_schema(con)
     counts = counts or {}
+    if status not in ("ok", "failed", "deferred"):
+        raise ValueError(f"backcast ledger status must be ok/failed/deferred, got {status!r}")
+    import json as _json
+
+    deferred_json = _json.dumps(sorted(set(deferred_cells))) if deferred_cells else None
     try:
         con.execute("BEGIN TRANSACTION")
         con.execute(
@@ -268,8 +288,8 @@ def record_month(
             INSERT INTO haz_backcast_progress
                 (hazard, ym, status, cells, resolved_value, resolved_zero,
                  no_data, frozen_skipped, extraction_calls, extraction_cost_usd,
-                 duration_sec, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 duration_sec, error, deferred_cells)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 hazard,
@@ -284,12 +304,38 @@ def record_month(
                 float(counts.get("extraction_cost_usd") or 0.0),
                 duration_sec,
                 error,
+                deferred_json,
             ],
         )
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")
         raise
+
+
+def deferred_months(con, hazard: str) -> dict[str, list[str]]:
+    """``{ym: [iso3, ...]}`` for months the ledger holds as ``deferred``.
+
+    The resume walks exactly these cells: the rest of the month is already
+    answered, and re-deciding a frozen cell writes a ``haz_revisions`` row
+    that buries the genuine post-freeze revisions the table exists for.
+    """
+
+    import json as _json
+
+    ensure_haz_schema(con)
+    out: dict[str, list[str]] = {}
+    for ym, raw in con.execute(
+        "SELECT ym, deferred_cells FROM haz_backcast_progress "
+        "WHERE hazard = ? AND status = 'deferred'",
+        [hazard],
+    ).fetchall():
+        try:
+            cells = _json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            cells = []
+        out[str(ym)] = [str(c).upper() for c in cells if c]
+    return out
 
 
 def month_counts(con, hazard: str, ym: str) -> dict[str, Any]:
@@ -339,6 +385,26 @@ def month_counts(con, hazard: str, ym: str) -> dict[str, Any]:
             [hazard, year, month],
         ).fetchone()[0]
     )
+    # A cell the budget cut short carries its reason on the trigger row and
+    # has NO resolution row (impact._defer_for_budget) — so it is counted
+    # from the trigger rows, which are the record whether or not the
+    # run-log ledger was switched on.
+    deferred_rows = con.execute(
+        """
+        SELECT t.iso3,
+               json_extract_string(t.trigger_detail_json, '$.no_row_note')
+        FROM haz_triggers t
+        LEFT JOIN haz_resolutions r
+          ON r.iso3 = t.iso3 AND r.hazard = t.hazard
+         AND r.year = t.year AND r.month = t.month
+        WHERE t.hazard = ? AND t.year = ? AND t.month = ?
+          AND r.iso3 IS NULL
+          AND json_extract_string(t.trigger_detail_json, '$.no_row_reason')
+              = 'extraction_budget_deferred'
+        ORDER BY t.iso3
+        """,
+        [hazard, year, month],
+    ).fetchall()
     return {
         "cells": cells,
         "resolved_value": by_status.get("RESOLVED_VALUE", 0),
@@ -347,7 +413,25 @@ def month_counts(con, hazard: str, ym: str) -> dict[str, Any]:
         "frozen_skipped": frozen_skipped,
         "extraction_calls": int(extraction[0] or 0),
         "extraction_cost_usd": float(extraction[1] or 0.0),
+        "cells_deferred_for_budget": len(deferred_rows),
+        "deferred_cells": [str(row[0]) for row in deferred_rows],
+        "deferred_note": str(deferred_rows[0][1] or "") if deferred_rows else "",
     }
+
+
+def month_is_deferred(counts: Mapping[str, Any]) -> tuple[bool, str]:
+    """Did the extraction budget cut this month short?
+
+    A deferred month is neither complete (cells still owe an answer) nor
+    failed (the spend guard did its job). It is recorded ``deferred`` with
+    the cells it owes, and the next run walks exactly those.
+    """
+
+    deferred = int(counts.get("cells_deferred_for_budget") or 0)
+    if deferred:
+        note = str(counts.get("deferred_note") or "extraction budget bound")
+        return True, f"{deferred} cell(s) deferred: {note}"
+    return False, ""
 
 
 def month_is_complete(counts: Mapping[str, Any]) -> tuple[bool, str]:
@@ -372,7 +456,10 @@ def month_is_complete(counts: Mapping[str, Any]) -> tuple[bool, str]:
         + int(counts.get("no_data") or 0)
         + int(counts.get("frozen_skipped") or 0)
     )
-    if cells and not written:
+    # A cell the budget deferred is accounted for — owed, not lost — so a
+    # month made entirely of deferred cells is deferred, not a source outage.
+    deferred = int(counts.get("cells_deferred_for_budget") or 0)
+    if cells and not written and not deferred:
         return False, (
             f"{cells} cell(s) assessed and no row written — a source was "
             "unreadable, so the month is left incomplete and will be retried"
@@ -398,11 +485,23 @@ class BackcastRun:
     #: Months left unrun because the time budget was spent — not failures:
     #: the resume ledger picks them up on the next run.
     months_deferred: int = 0
+    #: Months recorded ``deferred`` because the extraction budget was bound
+    #: with cells still owing an answer; those cells resume next run.
+    months_budget_deferred: int = 0
+    cells_deferred_for_budget: int = 0
+    #: True once any month this run was cut short by the extraction budget.
+    extraction_budget_bound: bool = False
+    #: The limit that bound, in the budget's own words ("backcast share (2000)").
+    extraction_binding_limit: str | None = None
     resolved_value: int = 0
     resolved_zero: int = 0
     no_data: int = 0
     failures: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+    #: What the machine does when the extraction budget binds. Stated in the
+    #: summary so a reader never has to infer it from the counts.
+    budget_policy: str = "checkpoint_and_resume"
 
     @property
     def resolved(self) -> int:
@@ -512,6 +611,7 @@ def run_backcast(
         return run
 
     already = completed_months(con, hazard) if resume else set()
+    owed = deferred_months(con, hazard) if resume else {}
     todo = [ym for ym in months if ym not in already]
     run.months_skipped_done = len(months) - len(todo)
     if run.months_skipped_done:
@@ -557,18 +657,28 @@ def run_backcast(
             )
             break
         started = time.monotonic()
+        month_common = common
+        if ym in owed and owed[ym] and not countries_filter:
+            # A deferred month owes only the cells the budget cut short:
+            # walk those and leave the answered cells (and their frozen
+            # rows) alone.
+            month_common = {**common, "countries_filter": list(owed[ym])}
+            LOG.info(
+                "[backcast] %s %s: resuming %d deferred cell(s): %s",
+                hazard_name, ym, len(owed[ym]), ",".join(owed[ym][:20]),
+            )
         LOG.info("[backcast] %s %s (%d/%d)", hazard_name, ym, index, len(todo))
         try:
             if runner is not None:
-                rc = runner(ym=ym, **common)
+                rc = runner(ym=ym, **month_common)
             elif hazard_name == "cyclone":
                 rc = cli_mod.run_cyclone_month(
-                    ym=ym, scope="ALL", skip_detector_fetch=skip_detector_fetch, **common
+                    ym=ym, scope="ALL", skip_detector_fetch=skip_detector_fetch, **month_common
                 )
             elif hazard_name == "drought":
-                rc = cli_mod.run_drought_month(ym=ym, **common)
+                rc = cli_mod.run_drought_month(ym=ym, **month_common)
             else:
-                rc = cli_mod.run_flood_month(ym=ym, **common)
+                rc = cli_mod.run_flood_month(ym=ym, **month_common)
             error = None if rc == 0 else f"month runner exited {rc}"
         except Exception as exc:  # noqa: BLE001 - one bad month must not end the run
             rc, error = 1, f"{type(exc).__name__}: {exc}"
@@ -599,22 +709,53 @@ def run_backcast(
                 run.months_failed += 1
                 run.failures.append(f"{ym}: {error}")
                 LOG.error("[backcast] %s %s: %s", hazard_name, ym, error)
+            status = "ok" if rc == 0 else "failed"
+            deferred_cells: list[str] = []
+            if rc == 0:
+                deferred, deferred_reason = month_is_deferred(counts)
+                if deferred:
+                    # Neither done nor failed: the spend guard bound with
+                    # cells still owing an answer. Recorded as such, with
+                    # the cells, so the next run resumes exactly there.
+                    status = "deferred"
+                    deferred_cells = list(counts.get("deferred_cells") or [])
+                    error = deferred_reason
+                    run.months_budget_deferred += 1
+                    run.cells_deferred_for_budget += len(deferred_cells)
+                    run.extraction_budget_bound = True
+                    run.extraction_binding_limit = _binding_limit_from_note(
+                        str(counts.get("deferred_note") or "")
+                    ) or run.extraction_binding_limit
+                    LOG.warning(
+                        "[backcast] %s %s: %s — recorded deferred, resumes next run",
+                        hazard_name, ym, deferred_reason,
+                    )
             record_month(
                 con,
                 hazard=hazard,
                 ym=ym,
-                status="ok" if rc == 0 else "failed",
+                status=status,
                 counts=counts,
                 duration_sec=duration,
                 error=error,
+                deferred_cells=deferred_cells,
             )
 
     LOG.info(
         "[backcast] %s finished: %d months run, %d already done, %d failed, "
-        "%d deferred | %d values, %d zeros, %d no-data",
+        "%d deferred (time) | %d values, %d zeros, %d no-data",
         hazard_name, run.months_run, run.months_skipped_done, run.months_failed,
         run.months_deferred, run.resolved_value, run.resolved_zero, run.no_data,
     )
+    if run.extraction_budget_bound:
+        run.warnings.append(
+            f"extraction budget bound at its {run.extraction_binding_limit or 'limit'}: "
+            f"{run.months_budget_deferred} month(s) recorded deferred with "
+            f"{run.cells_deferred_for_budget} cell(s) owing an answer; policy is "
+            f"{run.budget_policy} — no cap was raised, the cells resume once the "
+            "calendar month's allowance resets"
+        )
+        LOG.warning("[backcast] %s", run.warnings[-1])
     if run.failures:
         LOG.error(
             "[backcast] %d month(s) failed and were NOT marked complete — re-run "
@@ -714,6 +855,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"[backcast] wrote {run.resolved_value} values, {run.resolved_zero} zeros, "
         f"{run.no_data} no-data"
     )
+    if run.extraction_budget_bound:
+        print(
+            f"[backcast] extraction budget BOUND at its {run.extraction_binding_limit}: "
+            f"{run.months_budget_deferred} month(s) / {run.cells_deferred_for_budget} "
+            f"cell(s) deferred; policy={run.budget_policy}"
+        )
     for warning in run.warnings:
         print(f"[backcast] WARNING: {warning}")
 
@@ -733,6 +880,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "months_already_complete": run.months_skipped_done,
                 "months_failed": run.months_failed,
                 "months_deferred": run.months_deferred,
+                "months_budget_deferred": run.months_budget_deferred,
+                "cells_deferred_for_budget": run.cells_deferred_for_budget,
+                "extraction_budget_bound": run.extraction_budget_bound,
+                "extraction_binding_limit": run.extraction_binding_limit,
+                "budget_policy": run.budget_policy,
                 "resolved_value": run.resolved_value,
                 "resolved_zero": run.resolved_zero,
                 "no_data": run.no_data,

@@ -252,6 +252,28 @@ jobs:
               FAILED=1
             fi
             echo "::endgroup::"
+            # The extraction budget binding is neither a failure nor silence:
+            # the run summary says which cells were checkpointed and that the
+            # policy is checkpoint-and-resume, and the step summary repeats it
+            # so nobody has to open the artifact to learn the month is owed.
+            python - "diagnostics/haz_backcast_${HZ}.json" "${HZ}" <<'PY' || true
+          import json, os, sys
+          path, hz = sys.argv[1], sys.argv[2]
+          try:
+              s = json.load(open(path))
+          except Exception:
+              sys.exit(0)
+          if s.get("extraction_budget_bound"):
+              line = (
+                  f"backcast {hz}: extraction budget BOUND at its {s.get('extraction_binding_limit')} — "
+                  f"{s.get('months_budget_deferred')} month(s) / {s.get('cells_deferred_for_budget')} "
+                  f"cell(s) deferred; policy={s.get('budget_policy')} (no cap raised; the cells "
+                  "resume once the calendar month's allowance resets)"
+              )
+              print(f"::notice::{line}")
+              with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a") as fh:
+                  fh.write(f"- {line}\n")
+          PY
           done
           echo "BACKCAST_FAILED=${FAILED}" >> "$GITHUB_ENV"
 

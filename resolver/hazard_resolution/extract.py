@@ -349,6 +349,10 @@ class CellExtraction:
     calls_made: int = 0
     cost_usd: float = 0.0
     budget_capped: bool = False
+    #: Documents whose first answer was cut off at the output ceiling and
+    #: were re-read at a doubled budget; and those cut off even then.
+    docs_truncated_retried: int = 0
+    docs_truncated_after_retry: int = 0
     figures: list[ExtractedFigure] = field(default_factory=list)
     rejected: list[dict[str, Any]] = field(default_factory=list)
 
@@ -362,6 +366,8 @@ class CellExtraction:
             "calls_made": self.calls_made,
             "cost_usd": round(self.cost_usd, 4),
             "budget_capped": self.budget_capped,
+            "docs_truncated_retried": self.docs_truncated_retried,
+            "docs_truncated_after_retry": self.docs_truncated_after_retry,
             "figures_extracted": len(self.figures),
             "figures_rejected": self.rejected,
         }
@@ -392,8 +398,17 @@ def resolve_extraction_model(rulebook: Rulebook) -> str:
     return ref
 
 
-def _default_call(model_ref: str, prompt: str, rulebook: Rulebook) -> tuple[str, dict, str]:
+def _default_call(
+    model_ref: str,
+    prompt: str,
+    rulebook: Rulebook,
+    max_output_tokens: int | None = None,
+) -> tuple[str, dict, str]:
     """Call the extraction model once. Never raises.
+
+    ``max_output_tokens`` overrides the rulebook's budget for ONE call — the
+    truncation retry in :func:`extract_for_cell` asks for twice the budget
+    when the first answer was cut off at ``max_tokens``.
 
     Goes through ``forecaster.providers.call_chat_ms`` — the repo's single
     provider path, so retries, circuit breakers and cost accounting are the
@@ -428,12 +443,52 @@ def _default_call(model_ref: str, prompt: str, rulebook: Rulebook) -> tuple[str,
                 # timeout at both the async layer and the Anthropic
                 # transport, the token ceiling in the request body.
                 timeout_sec=float(rulebook.get("extraction.request_timeout_sec")),
-                max_output_tokens=int(rulebook.get("extraction.max_output_tokens")),
+                max_output_tokens=int(
+                    max_output_tokens or rulebook.get("extraction.max_output_tokens")
+                ),
             )
         )
     except Exception as exc:  # pragma: no cover - network/runtime failures
         LOG.warning("[extract] model call failed: %s", exc)
         return "", {}, str(exc)
+
+
+#: The provider's own word for an answer cut off at the output ceiling.
+#: ``forecaster.providers._anthropic_stop_reason_error`` reports it as
+#: "truncated at max_tokens"; OpenAI-style errors say "length". Either way
+#: the document was READ and the answer LOST, which is not a model failure
+#: and not a document with nothing to say.
+_TRUNCATION_MARKERS = ("max_tokens", "finish_reason=length", "truncated")
+
+#: The largest answer budget the retry may ask for. The rulebook validator
+#: bounds ``extraction.max_output_tokens`` at 32,000 and this must not
+#: exceed what a Haiku-class model accepts.
+_MAX_RETRY_OUTPUT_TOKENS = 32_000
+
+
+def is_truncation_error(error: str | None) -> bool:
+    """Was this call's failure the answer hitting its output ceiling?"""
+
+    text = str(error or "").lower()
+    return any(marker in text for marker in _TRUNCATION_MARKERS)
+
+
+def _call_accepts_budget(call: "CallFn") -> bool:
+    """Whether an injected seam takes the ``max_output_tokens`` keyword.
+
+    The test seams are three-argument functions; the real seam and any seam
+    that wants to exercise the retry take the keyword. Never raises.
+    """
+
+    import inspect
+
+    try:
+        params = inspect.signature(call).parameters
+    except (TypeError, ValueError):
+        return False
+    if "max_output_tokens" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def _log_llm_call(
@@ -999,6 +1054,34 @@ def _figures_from_cache(cached: dict[str, Any], model: str) -> list[ExtractedFig
 # ---------------------------------------------------------------------------
 
 
+def _account_call(
+    budget: ExtractionBudget,
+    result: CellExtraction,
+    model_ref: str,
+    usage: dict[str, Any] | None,
+    error: str | None,
+) -> tuple[float, bool]:
+    """Charge one call to the budget and the cell. Returns (cost, attempted).
+
+    A call that never reached the provider — missing API key, circuit
+    breaker cooldown, a local exception — billed nothing and must not
+    consume the monthly allowance. Anything that billed tokens, or
+    succeeded, counts.
+    """
+
+    billed_tokens = int((usage or {}).get("prompt_tokens") or 0) + int(
+        (usage or {}).get("completion_tokens") or 0
+    )
+    attempted = bool(billed_tokens) or not error
+    if attempted:
+        budget.calls_this_run += 1
+        result.calls_made += 1
+    cost = _cost_usd(model_ref, usage or {})
+    budget.cost_this_run_usd += cost
+    result.cost_usd += cost
+    return cost, attempted
+
+
 def extract_for_cell(
     con: "duckdb.DuckDBPyConnection",
     *,
@@ -1089,21 +1172,45 @@ def extract_for_cell(
                 model_ref=model_ref, prompt=prompt, response=text,
                 usage=usage, error=error, iso3=iso3, hazard=hazard, ym=ym,
             )
-        # A call that never reached the provider — missing API key, circuit
-        # breaker cooldown, a local exception — billed nothing and must not
-        # consume the monthly allowance. Anything that billed tokens, or
-        # succeeded, counts.
-        billed_tokens = int((usage or {}).get("prompt_tokens") or 0) + int(
-            (usage or {}).get("completion_tokens") or 0
-        )
-        attempted = bool(billed_tokens) or not error
-        if attempted:
-            budget.calls_this_run += 1
-            result.calls_made += 1
+        cost, attempted = _account_call(budget, result, model_ref, usage, error)
 
-        cost = _cost_usd(model_ref, usage)
-        budget.cost_this_run_usd += cost
-        result.cost_usd += cost
+        # An answer cut off at the output ceiling is a document that was
+        # READ and LOST: the figures were being transcribed when the budget
+        # ran out. Two Chile flood extractions failed this way on
+        # 2026-09-01 and were filed as errors, which is what a dead API key
+        # looks like. Re-read ONCE at twice the budget (the second call is
+        # paid for and counted like any other); a document that overruns
+        # even that is recorded as such, so the ledger says "too long", not
+        # "failed".
+        truncated_after_retry = False
+        if error and is_truncation_error(error) and not budget.exhausted:
+            base_budget = int(rulebook.get("extraction.max_output_tokens"))
+            retry_budget = min(base_budget * 2, _MAX_RETRY_OUTPUT_TOKENS)
+            result.docs_truncated_retried += 1
+            LOG.warning(
+                "[extract] %s %s %s doc %s: answer truncated at %d output tokens; "
+                "re-reading once at %d",
+                iso3, hazard, ym, doc_id, base_budget, retry_budget,
+            )
+            if _call_accepts_budget(call):
+                text, usage, error = call(
+                    model_ref, prompt, rulebook, max_output_tokens=retry_budget
+                )
+            else:
+                text, usage, error = call(model_ref, prompt, rulebook)
+            if using_default_call:
+                _log_llm_call(
+                    model_ref=model_ref, prompt=prompt, response=text,
+                    usage=usage, error=error, iso3=iso3, hazard=hazard, ym=ym,
+                )
+            retry_cost, _retry_attempted = _account_call(
+                budget, result, model_ref, usage, error
+            )
+            cost += retry_cost
+            if error and is_truncation_error(error):
+                truncated_after_retry = True
+                result.docs_truncated_after_retry += 1
+                error = f"truncated_after_retry_at_{retry_budget}_output_tokens: {error}"
 
         if error or not str(text).strip():
             result.docs_failed += 1

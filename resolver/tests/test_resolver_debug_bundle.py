@@ -1070,3 +1070,54 @@ def test_the_six_requested_contradiction_checks_are_all_registered(tmp_path, ful
         "connectors_claiming_rows_touched_their_source_rows",       # G1 + G2
     ):
         assert name in checks, name
+
+
+def test_the_crisiswatch_accounting_check_reads_the_store_stream(tmp_path):
+    """Group H: parsed minus stored equals the sum of the per-entry reasons."""
+
+    db = tmp_path / "pythia.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute(
+        "CREATE TABLE crisiswatch_entries (iso3 TEXT, month INTEGER, year INTEGER, "
+        "arrow TEXT, alert_type TEXT, summary TEXT, country_name TEXT, "
+        "fetched_at TIMESTAMP, content_hash TEXT)"
+    )
+    con.execute(
+        "INSERT INTO crisiswatch_entries VALUES "
+        "('ETH', 8, 2026, 'deteriorated', '', 'x', 'Ethiopia', now(), 'h1'), "
+        "('SOM', 8, 2026, 'unchanged', '', 'y', 'Somalia', now(), 'h2')"
+    )
+    con.close()
+    log_dir = tmp_path / "run_log"
+    log_dir.mkdir()
+    record = {
+        "edition": "August 2026", "parsed": 5, "loaded": 2,
+        "load_reasons": {"stored": 2, "merged_into_ETH": 1, "merged_into_SOM": 1,
+                         "unresolved_iso3": 1},
+        "not_stored": [], "inserted": 0, "updated": 1, "unchanged": 1,
+        "skipped_no_month": 0, "rows_for_edition": 2, "error": "",
+    }
+    (log_dir / "crisiswatch_store.jsonl").write_text(
+        json.dumps(record) + "\n", encoding="utf-8"
+    )
+    builder = bundle.BundleBuilder(
+        out_path=tmp_path / "b.zip", db_path=db, diagnostics_dir=tmp_path / "diag",
+        run_log_dir=log_dir, staging=tmp_path / "staging",
+        max_bytes=bundle.DEFAULT_MAX_BYTES, environ={},
+    )
+    builder._check_crisiswatch_entries_accounted_for()
+    assert builder.checks[-1]["verdict"] == "PASS", builder.checks[-1]
+
+    # Seven entries nobody accounted for: the September fault.
+    record["parsed"] = 12
+    (log_dir / "crisiswatch_store.jsonl").write_text(
+        json.dumps(record) + "\n", encoding="utf-8"
+    )
+    builder = bundle.BundleBuilder(
+        out_path=tmp_path / "b2.zip", db_path=db, diagnostics_dir=tmp_path / "diag",
+        run_log_dir=log_dir, staging=tmp_path / "staging2",
+        max_bytes=bundle.DEFAULT_MAX_BYTES, environ={},
+    )
+    builder._check_crisiswatch_entries_accounted_for()
+    check = builder.checks[-1]
+    assert check["verdict"] == "FAIL" and "parsed 12" in check["detail"]

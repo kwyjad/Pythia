@@ -33,6 +33,7 @@ Usage::
 from __future__ import annotations
 
 import calendar
+import hashlib
 import json
 import logging
 import os
@@ -575,6 +576,77 @@ def _merge_country_rows(
     }
 
 
+#: Per-entry reason codes for the gap between "entries parsed" and "rows
+#: stored". The September 2026 run parsed 85 and stored 78 with no line
+#: saying where the seven went; every parsed entry now carries one of these.
+REASON_STORED = "stored"
+REASON_UNRESOLVED_ISO3 = "unresolved_iso3"
+REASON_MERGED_PREFIX = "merged_into_"
+REASON_NO_EDITION_MONTH = "no_edition_month"
+
+#: The accounting of the most recent ``_load_from_json`` call, read by
+#: ``bulk_store_crisiswatch`` so the store's own line can say how many were
+#: parsed, how many loaded, and why the difference.
+_LAST_LOAD_ACCOUNTING: Dict[str, Any] = {}
+
+
+def _new_accounting(parsed: int, month: str) -> Dict[str, Any]:
+    return {
+        "edition": month,
+        "parsed": parsed,
+        "loaded": 0,
+        "reasons": {},
+        "not_stored": [],
+    }
+
+
+def _account(
+    accounting: Dict[str, Any], entry: Dict[str, Any], reason: str, *, iso3: str = ""
+) -> None:
+    reasons = accounting["reasons"]
+    reasons[reason] = reasons.get(reason, 0) + 1
+    if reason != REASON_STORED:
+        accounting["not_stored"].append({
+            "country": (entry.get("country") or "").strip(),
+            "iso3": iso3 or (entry.get("iso3") or "").strip().upper(),
+            "regional_source": (entry.get("regional_source") or "").strip(),
+            "reason": reason,
+        })
+
+
+def _log_accounting(accounting: Dict[str, Any]) -> None:
+    """One line per entry that did not become its own row, and the totals."""
+
+    for item in accounting.get("not_stored", []):
+        log.info(
+            "CrisisWatch entry accounting: %r (%s) -> %s",
+            item["country"], item.get("iso3") or "no iso3", item["reason"],
+        )
+    reasons = ", ".join(
+        f"{k}={v}" for k, v in sorted(accounting.get("reasons", {}).items())
+    )
+    log.info(
+        "CrisisWatch: %d entries parsed, %d loaded as ISO3 rows (%s)",
+        accounting.get("parsed", 0), accounting.get("loaded", 0), reasons,
+    )
+
+
+def load_accounting() -> Dict[str, Any]:
+    """The most recent JSON load's per-entry accounting (a copy)."""
+
+    return dict(_LAST_LOAD_ACCOUNTING)
+
+
+def entry_content_hash(entry: Dict[str, Any]) -> str:
+    """sha256 over the fields a stored row carries — what "changed" means."""
+
+    payload = "\x1f".join(
+        str(entry.get(key) or "").strip()
+        for key in ("arrow", "alert_type", "summary", "country")
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _load_from_json() -> Dict[str, Any] | None:
     """Load CrisisWatch data from the scraped JSON file (primary source).
 
@@ -619,6 +691,7 @@ def _load_from_json() -> Dict[str, Any] | None:
         # heading that resolves by name (China-U.S. -> CHN), or a territory
         # (Somaliland -> SOM).  They are merged, never overwritten.
         grouped: Dict[str, List[Dict[str, Any]]] = {}
+        accounting = _new_accounting(len(entries), data.get("month", ""))
         for entry in entries:
             iso3 = (entry.get("iso3") or "").strip().upper()
             if not iso3:
@@ -626,6 +699,8 @@ def _load_from_json() -> Dict[str, Any] | None:
                 iso3 = _resolve_iso3(country) or ""
             if iso3:
                 grouped.setdefault(iso3, []).append(entry)
+            else:
+                _account(accounting, entry, REASON_UNRESOLVED_ISO3)
 
         result: Dict[str, Any] = {}
         for iso3, rows in grouped.items():
@@ -633,6 +708,9 @@ def _load_from_json() -> Dict[str, Any] | None:
             merged["month"] = data.get("month", "")
             merged["year"] = data.get("year", 0)
             result[iso3] = merged
+            _account(accounting, rows[0], REASON_STORED, iso3=iso3)
+            for extra in rows[1:]:
+                _account(accounting, extra, f"{REASON_MERGED_PREFIX}{iso3}", iso3=iso3)
 
         n_collisions = sum(1 for rows in grouped.values() if len(rows) > 1)
         if n_collisions:
@@ -641,6 +719,10 @@ def _load_from_json() -> Dict[str, Any] | None:
                 "scraped row (regional, bilateral or territory entries).",
                 n_collisions,
             )
+        accounting["loaded"] = len(result)
+        _log_accounting(accounting)
+        global _LAST_LOAD_ACCOUNTING
+        _LAST_LOAD_ACCOUNTING = accounting
 
         if not result:
             return None
@@ -682,24 +764,45 @@ _load_fallback_json = _load_from_json
 # ---------------------------------------------------------------------------
 
 
-def store_crisiswatch_entries(entries: Dict[str, Any]) -> None:
-    """Write CrisisWatch entries to the crisiswatch_entries DuckDB table."""
+def store_crisiswatch_entries(entries: Dict[str, Any]) -> Dict[str, Any]:
+    """Write CrisisWatch entries to ``crisiswatch_entries``, change-aware.
+
+    This is the ONE writer of the table, and it is the guard: a row is
+    inserted when its key is new, rewritten (and ``fetched_at`` moved) only
+    when its content hash differs from the stored one, and left untouched
+    otherwise. Until Sept 2026 it was ``INSERT OR REPLACE`` for every entry
+    on every run — so the refresh script's "not newer than existing —
+    skipping write" guard was honoured for the JSON file while 78 rows
+    landed in the table with a fresh ``fetched_at`` regardless, and the
+    table could not say whether an edition had been revised.
+
+    Returns the accounting: ``inserted``, ``updated``, ``unchanged``,
+    ``skipped_no_month``, ``rows_for_edition`` and ``error`` (empty when
+    the store succeeded). Never raises.
+    """
+
+    counts: Dict[str, Any] = {
+        "inserted": 0, "updated": 0, "unchanged": 0, "skipped_no_month": 0,
+        "rows_for_edition": 0, "error": "",
+    }
     if not entries:
-        return
+        return counts
     try:
         from pythia.db.schema import connect, ensure_schema
     except ImportError:
         log.debug("Pythia DB helpers unavailable — skipping CrisisWatch store.")
-        return
+        counts["error"] = "pythia.db.schema unavailable"
+        return counts
 
     try:
         con = connect(read_only=False)
     except Exception as exc:
         log.warning("Could not connect to DuckDB for CrisisWatch store: %s", exc)
-        return
+        counts["error"] = f"connect failed: {exc}"
+        return counts
 
     now = datetime.now(timezone.utc).isoformat()
-    stored = 0
+    editions: set = set()
     try:
         ensure_schema(con)
         for iso3, entry in entries.items():
@@ -707,35 +810,77 @@ def store_crisiswatch_entries(entries: Dict[str, Any]) -> None:
             year = entry.get("year", 0)
             # Parse month number from month name string like "March 2026"
             month_num = _month_num_from_str(month_str)
-            if not month_num and not year:
+            if not month_num or not year:
+                counts["skipped_no_month"] += 1
+                log.warning(
+                    "CrisisWatch entry accounting: %s -> %s (month=%r year=%r)",
+                    iso3, REASON_NO_EDITION_MONTH, month_str, year,
+                )
                 continue
-            con.execute(
-                """
-                INSERT OR REPLACE INTO crisiswatch_entries
-                    (iso3, month, year, arrow, alert_type, summary,
-                     country_name, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    iso3.upper(),
-                    month_num or 0,
-                    year or 0,
-                    entry.get("arrow", ""),
-                    entry.get("alert_type", ""),
-                    entry.get("summary", ""),
-                    entry.get("country", ""),
-                    now,
-                ],
+            key = [iso3.upper(), int(year), int(month_num)]
+            editions.add((int(year), int(month_num)))
+            new_hash = entry_content_hash(entry)
+            existing = con.execute(
+                "SELECT content_hash FROM crisiswatch_entries "
+                "WHERE iso3 = ? AND year = ? AND month = ?",
+                key,
+            ).fetchone()
+            if existing is not None and existing[0] == new_hash:
+                counts["unchanged"] += 1
+                continue
+            values = [
+                entry.get("arrow", ""),
+                entry.get("alert_type", ""),
+                entry.get("summary", ""),
+                entry.get("country", ""),
+                now,
+                new_hash,
+            ]
+            if existing is not None:
+                con.execute(
+                    """
+                    UPDATE crisiswatch_entries
+                    SET arrow = ?, alert_type = ?, summary = ?, country_name = ?,
+                        fetched_at = ?, content_hash = ?
+                    WHERE iso3 = ? AND year = ? AND month = ?
+                    """,
+                    values + key,
+                )
+                counts["updated"] += 1
+            else:
+                con.execute(
+                    """
+                    INSERT INTO crisiswatch_entries
+                        (iso3, year, month, arrow, alert_type, summary,
+                         country_name, fetched_at, content_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    key + values,
+                )
+                counts["inserted"] += 1
+        for year, month_num in editions:
+            counts["rows_for_edition"] += int(
+                con.execute(
+                    "SELECT COUNT(*) FROM crisiswatch_entries WHERE year = ? AND month = ?",
+                    [year, month_num],
+                ).fetchone()[0]
             )
-            stored += 1
-        log.info("CrisisWatch: stored %d entries in DuckDB", stored)
+        log.info(
+            "CrisisWatch: DuckDB store — %d inserted, %d updated (content changed), "
+            "%d unchanged (row and fetched_at left alone), %d skipped (no edition "
+            "month); %d rows now held for this edition",
+            counts["inserted"], counts["updated"], counts["unchanged"],
+            counts["skipped_no_month"], counts["rows_for_edition"],
+        )
     except Exception as exc:
         log.warning("CrisisWatch DuckDB store failed: %s", exc)
+        counts["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         try:
             con.close()
         except Exception:
             pass
+    return counts
 
 
 def bulk_store_crisiswatch() -> int:
@@ -752,12 +897,49 @@ def bulk_store_crisiswatch() -> int:
         if not data:
             log.warning("bulk_store_crisiswatch: no data loaded from JSON file.")
             return 0
-        store_crisiswatch_entries(data)
-        log.info("bulk_store_crisiswatch: stored %d entries.", len(data))
-        return len(data)
+        counts = store_crisiswatch_entries(data)
+        accounting = load_accounting()
+        record = {
+            "edition": accounting.get("edition"),
+            "parsed": accounting.get("parsed"),
+            "loaded": accounting.get("loaded"),
+            "load_reasons": accounting.get("reasons", {}),
+            "not_stored": accounting.get("not_stored", []),
+            **counts,
+        }
+        _record_store_accounting(record)
+        log.info(
+            "bulk_store_crisiswatch: %s parsed -> %s loaded -> %d inserted, %d updated, "
+            "%d unchanged, %d skipped; %d rows held for the edition%s",
+            record["parsed"], record["loaded"], counts["inserted"], counts["updated"],
+            counts["unchanged"], counts["skipped_no_month"], counts["rows_for_edition"],
+            f" (store error: {counts['error']})" if counts["error"] else "",
+        )
+        if counts["error"]:
+            return 0
+        return int(counts["rows_for_edition"])
     except Exception as exc:
         log.warning("bulk_store_crisiswatch failed: %s", exc)
         return 0
+
+
+def _record_store_accounting(record: Dict[str, Any]) -> None:
+    """Append the store's accounting to the run-log stream the bundle reads.
+
+    Off unless ``PYTHIA_RUN_LOG_DIR`` is set (the resolver diagnostics
+    contract); never raises.
+    """
+
+    try:
+        from resolver.diagnostics import run_log
+
+        run_log.record(STORE_ACCOUNTING_STREAM, record)
+    except Exception:  # noqa: BLE001 - diagnostics never break a store
+        pass
+
+
+#: Run-log stream carrying one record per ``bulk_store_crisiswatch`` call.
+STORE_ACCOUNTING_STREAM = "crisiswatch_store"
 
 
 def load_crisiswatch_for_country(iso3: str) -> Dict[str, Any] | None:

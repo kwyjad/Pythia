@@ -279,7 +279,7 @@ _CORE_TABLE_DDL: dict[str, str] = {
     CREATE TABLE IF NOT EXISTS haz_backcast_progress (
         hazard TEXT NOT NULL {_HAZARD_CHECK},
         ym TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('ok','failed')),
+        status TEXT NOT NULL CHECK (status IN ('ok','failed','deferred')),
         cells INTEGER NOT NULL DEFAULT 0,
         resolved_value INTEGER NOT NULL DEFAULT 0,
         resolved_zero INTEGER NOT NULL DEFAULT 0,
@@ -289,6 +289,7 @@ _CORE_TABLE_DDL: dict[str, str] = {
         extraction_cost_usd DOUBLE NOT NULL DEFAULT 0.0,
         duration_sec DOUBLE,
         error TEXT,
+        deferred_cells TEXT,
         ran_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (hazard, ym)
     )
@@ -353,7 +354,59 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str, str | None], ...] = (
     # budget query counts NULL toward the BACKCAST share — every pre-split
     # row was backcast-created (the live path first runs 2026-08-28).
     ("haz_doc_extractions", "run_type", "TEXT", None),
+    # JSON list of the ISO3s a 'deferred' backcast month still owes: the
+    # resume walks exactly those cells. NULL means the month owes nothing.
+    ("haz_backcast_progress", "deferred_cells", "TEXT", None),
 )
+
+
+def _widen_backcast_status_check(conn: "duckdb.DuckDBPyConnection") -> None:
+    """Admit ``'deferred'`` into an already-created resume ledger.
+
+    A budget-bound backcast month is neither ``ok`` (the resume ledger would
+    never return to it) nor ``failed`` (the nightly gate would go red for a
+    spend guard doing its job). DuckDB cannot alter a CHECK in place, so a
+    ledger created under the two-value constraint is rebuilt once, in one
+    transaction, with the live name never unbound — the same swap
+    ``retention.py`` uses. Idempotent: a ledger that already admits the
+    value is left alone.
+    """
+
+    try:
+        row = conn.execute(
+            """
+            SELECT constraint_text FROM duckdb_constraints()
+            WHERE table_name = 'haz_backcast_progress'
+              AND constraint_type = 'CHECK'
+              AND constraint_text LIKE '%status%'
+            """
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - an older DuckDB without the function
+        return
+    if row is None or "deferred" in str(row[0]):
+        return
+    LOG.info("[schema] rebuilding haz_backcast_progress to admit status 'deferred'")
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        conn.execute("ALTER TABLE haz_backcast_progress RENAME TO haz_backcast_progress__old")
+        conn.execute(_CORE_TABLE_DDL["haz_backcast_progress"])
+        conn.execute(
+            """
+            INSERT INTO haz_backcast_progress
+                (hazard, ym, status, cells, resolved_value, resolved_zero, no_data,
+                 frozen_skipped, extraction_calls, extraction_cost_usd, duration_sec,
+                 error, ran_at)
+            SELECT hazard, ym, status, cells, resolved_value, resolved_zero, no_data,
+                   frozen_skipped, extraction_calls, extraction_cost_usd, duration_sec,
+                   error, ran_at
+            FROM haz_backcast_progress__old
+            """
+        )
+        conn.execute("DROP TABLE haz_backcast_progress__old")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
 _INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_haz_triggers_lookup ON haz_triggers (iso3, hazard, year, month)",
@@ -476,6 +529,7 @@ def ensure_haz_schema(
     for ddl in _CORE_TABLE_DDL.values():
         conn.execute(ddl)
 
+    _widen_backcast_status_check(conn)
     _apply_column_migrations(conn)
 
     for ddl in _INDEX_DDL:

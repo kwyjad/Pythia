@@ -478,3 +478,77 @@ def test_download_and_validation_failures_are_distinguishable(monkeypatch):
 
     monkeypatch.setattr(rc, "_MIN_ENTRY_COUNT", 2)
     assert rc._accept_snapshot_html("<html>Just a moment...</html>", "ts") is None
+
+
+# ---------------------------------------------------------------------------
+# 8: same-edition republication (Group H, run 33841370196)
+# ---------------------------------------------------------------------------
+
+
+def _seed_edition(output_path: Path, month: str, year: int, entries: list) -> None:
+    output_path.write_text(
+        json.dumps({
+            "month": month, "year": year, "entries": entries,
+            "content_hash": rc.entries_content_hash(entries),
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_same_edition_with_identical_content_is_skipped(
+    tmp_path, fixture_html, monkeypatch,
+):
+    out = tmp_path / "cw.json"
+    first = _run_wayback(out, fixture_html, monkeypatch, only_if_newer=False)
+    assert first["month"] == "April 2026"
+    assert first["content_hash"] == rc.entries_content_hash(first["entries"])
+    before = out.read_text(encoding="utf-8")
+
+    again = _run_wayback(out, fixture_html, monkeypatch, only_if_newer=True)
+    assert again == {}
+    assert out.read_text(encoding="utf-8") == before
+
+
+def test_same_edition_with_revised_content_is_written(
+    tmp_path, fixture_html, monkeypatch,
+):
+    """ICG revises entries after publication; a changed edition must land."""
+
+    out = tmp_path / "cw.json"
+    stale_entries = [{"country": "Somalia", "iso3": "SOM", "arrow": "unchanged",
+                      "alert_type": "", "summary": "old wording", "regional_source": ""}]
+    _seed_edition(out, "April 2026", 2026, stale_entries)
+
+    result = _run_wayback(out, fixture_html, monkeypatch, only_if_newer=True)
+    assert result["month"] == "April 2026"
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert len(written["entries"]) == 3
+    assert written["content_hash"] != rc.entries_content_hash(stale_entries)
+
+
+def test_a_legacy_file_without_a_hash_is_compared_by_its_entries(
+    tmp_path, fixture_html, monkeypatch,
+):
+    out = tmp_path / "cw.json"
+    first = _run_wayback(out, fixture_html, monkeypatch, only_if_newer=False)
+    data = json.loads(out.read_text(encoding="utf-8"))
+    del data["content_hash"]
+    out.write_text(json.dumps(data), encoding="utf-8")
+
+    again = _run_wayback(out, fixture_html, monkeypatch, only_if_newer=True)
+    assert again == {}, "identical entries under a hash-less file are not a revision"
+    assert first["content_hash"] == rc._load_existing_content_hash(out)
+
+
+def test_an_older_edition_never_overwrites(tmp_path, fixture_html, monkeypatch):
+    out = tmp_path / "cw.json"
+    _seed(out, "May 2026", 2026)
+    assert _run_wayback(out, fixture_html, monkeypatch, only_if_newer=True) == {}
+
+
+def test_parsed_entries_carry_an_iso3_reason(fixture_html):
+    soup = BeautifulSoup(fixture_html, "html.parser")
+    entries, _month, _year = rc._parse_country_entries(soup)
+    assert entries
+    assert all(e.get("iso3_reason") in ("resolved", "unresolved_country_name")
+               for e in entries if not e.get("regional_source"))
