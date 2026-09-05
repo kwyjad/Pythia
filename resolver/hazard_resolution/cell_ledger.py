@@ -66,6 +66,12 @@ REASON_EXCEPTION = "cell_raised"
 #: The sweep found reports, so the cell became triggered and the ladder owns
 #: it — this row is the sweep's half of the story, not a missing answer.
 REASON_FLIPPED = "flipped_to_triggered_by_sweep"
+#: A BACKCAST cell whose rung-2 documents were fetched and not read because
+#: the extraction budget was bound. Nothing is written: the cell is
+#: checkpointed on the trigger row and the resume ledger walks it again
+#: once the calendar month's allowance resets. A live run never defers —
+#: it writes what it has, with ``budget_capped`` in the provenance.
+REASON_BUDGET_DEFERRED = "extraction_budget_deferred"
 
 #: Every reason a cell may carry no row, so a reader (the debug bundle, a
 #: contradiction check) can tell a known silence from an unexplained one.
@@ -73,6 +79,7 @@ NO_ROW_REASONS = frozenset({
     REASON_PENDING, REASON_SWEEP_INCONCLUSIVE, REASON_COVERAGE_GATE,
     REASON_INCONCLUSIVE, REASON_NO_COVERAGE, REASON_TOO_FEW_FEEDS,
     REASON_MONTH_IN_PROGRESS, REASON_FROZEN, REASON_EXCEPTION, REASON_FLIPPED,
+    REASON_BUDGET_DEFERRED,
 })
 
 #: Stage names, so a reader can tell which half of the machine spoke.

@@ -42,7 +42,7 @@ from resolver.hazard_resolution import reconcile as reconcile_mod
 from resolver.hazard_resolution import reliefweb_docs as docs_mod
 from resolver.hazard_resolution import resolutions as res_mod
 from resolver.hazard_resolution.rulebook import Rulebook
-from resolver.hazard_resolution.schema import RUN_TYPE_LIVE, ensure_haz_schema
+from resolver.hazard_resolution.schema import RUN_TYPE_BACKCAST, RUN_TYPE_LIVE, ensure_haz_schema
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import duckdb
@@ -75,6 +75,12 @@ class LadderRun:
     extraction_calls: int = 0
     extraction_cost_usd: float = 0.0
     extraction_budget_capped: bool = False
+    #: The limit that bound when the budget ran out (``ExtractionBudget.binding_limit``).
+    extraction_binding_limit: str | None = None
+    #: BACKCAST cells checkpointed rather than resolved because the budget
+    #: was bound while they still had unread documents (see
+    #: :func:`_defer_for_budget`). Empty on a live run by construction.
+    deferred_cells: list[str] = field(default_factory=list)
     #: Cells reconciled with ceiling basis "none": no positive GDACS
     #: exposure and no population denominator, so no sanity bound at all.
     no_ceiling: int = 0
@@ -84,6 +90,74 @@ class LadderRun:
         return sorted(
             name for name, meta in self.fetches.items() if not meta.get("ok", False)
         )
+
+
+def _defer_for_budget(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    iso3: str,
+    ym: str,
+    hazard: str,
+    year: int,
+    budget: "extract_mod.ExtractionBudget",
+    run: LadderRun,
+    unavailable: list[str],
+    extraction: dict[str, Any],
+) -> bool:
+    """Checkpoint a backcast cell the budget cut short. Returns True if deferred.
+
+    The nightly backcast spent its entire 2,000-call share on 2026-09-01
+    and every later cell that month was written NO_DATA with
+    ``budget_capped`` in its provenance — a frozen row, never rewritten,
+    recording "ReliefWeb was silent" about documents that were fetched and
+    never read. The decision (Sept 2026) is CHECKPOINT AND RESUME, not a
+    higher cap: the cap is the owner's spend guard and raising it moves the
+    wall without removing it, while a deferred cell costs nothing to hold.
+    So in a backcast a budget-capped cell gets NO resolution row, its
+    trigger row says why (``extraction_budget_deferred``), the month is
+    recorded ``deferred`` in the resume ledger, and the next run walks
+    exactly the deferred cells once the calendar month's allowance resets.
+
+    A cell that already carries a resolution row is never deferred: a
+    backcast fills gaps and never rewrites, so deferring it would hold the
+    month open for a row the freeze guard will not let change.
+    """
+
+    year_i, month_i = (int(part) for part in ym.split("-"))
+    existing = con.execute(
+        """
+        SELECT 1 FROM haz_resolutions
+        WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ?
+        """,
+        [iso3, year_i, month_i, hazard],
+    ).fetchone()
+    if existing is not None:
+        return False
+    note = (
+        f"extraction budget bound at its {budget.binding_limit}; the cell's "
+        "documents are fetched and unread, and the resume ledger walks it "
+        "again once the calendar month's allowance resets"
+    )
+    detect_mod.record_no_row_reason(
+        con, hazard=hazard, iso3=iso3, ym=ym,
+        reason=cell_ledger.REASON_BUDGET_DEFERRED, note=note,
+    )
+    run.deferred_cells.append(iso3)
+    cell_ledger.record_cell(
+        stage=cell_ledger.STAGE_LADDER,
+        iso3=iso3, hazard=hazard, ym=ym, triggered=True,
+        write_outcome="deferred",
+        reason_code=cell_ledger.REASON_BUDGET_DEFERRED,
+        rungs_unavailable=unavailable,
+        detail={"binding_limit": budget.binding_limit, "extraction": extraction},
+        run_type=RUN_TYPE_BACKCAST,
+    )
+    LOG.warning(
+        "[impact] %s %s %s: deferred — extraction budget bound at its %s; no row "
+        "written, the cell resumes next run",
+        iso3, hazard, ym, budget.binding_limit,
+    )
+    return True
 
 
 def _load_country_names() -> dict[str, str]:
@@ -377,6 +451,14 @@ def resolve_triggered_cells(
                 run.extraction_calls += int(stats.get("calls_made") or 0)
                 run.extraction_cost_usd += float(stats.get("cost_usd") or 0.0)
                 run.extraction_budget_capped |= bool(stats.get("budget_capped"))
+                if stats.get("budget_capped") and budget is not None:
+                    run.extraction_binding_limit = budget.binding_limit
+                    if run_type == RUN_TYPE_BACKCAST and _defer_for_budget(
+                        con, iso3=iso3, ym=ym, hazard=hazard, year=year,
+                        budget=budget, run=run, unavailable=unavailable,
+                        extraction=extraction_provenance,
+                    ):
+                        continue
 
             found = cand_mod.build_candidates(
                 con, iso3, ym, hazard, rulebook, extracted=extracted

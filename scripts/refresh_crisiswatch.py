@@ -869,6 +869,37 @@ def _load_existing_edition(output_path: Path) -> tuple[int, int] | None:
         return None
 
 
+def entries_content_hash(entries: list[dict[str, Any]]) -> str:
+    """sha256 over the entries' content, order-independent.
+
+    Only the fields a consumer reads take part (country, iso3, arrow,
+    alert_type, summary, regional_source) — ``fetched_at`` and the source
+    snapshot id do not, or every capture would look like a revision.
+    """
+    import hashlib
+
+    keys = ("country", "iso3", "arrow", "alert_type", "summary", "regional_source")
+    canonical = sorted(
+        json.dumps({k: str(e.get(k) or "") for k in keys}, sort_keys=True)
+        for e in entries
+    )
+    return hashlib.sha256("\n".join(canonical).encode("utf-8")).hexdigest()
+
+
+def _load_existing_content_hash(output_path: Path) -> str | None:
+    """The on-disk edition's content hash, computed from its entries when the
+    file predates the field. ``None`` if absent/corrupt."""
+    try:
+        data = json.loads(output_path.read_text(encoding="utf-8"))
+        stored = str(data.get("content_hash") or "")
+        if stored:
+            return stored
+        return entries_content_hash(list(data.get("entries") or []))
+    except Exception as exc:
+        log.debug("No existing content hash at %s: %s", output_path, exc)
+        return None
+
+
 def _check_staleness(
     edition: tuple[int, int] | None,
     max_age_days: int,
@@ -1189,6 +1220,11 @@ def _parse_country_entries(
                 "alert_type": alert_type,
                 "summary": summary,
                 "regional_source": "",
+                # Why this entry will or will not become its own row: the
+                # consumer (horizon_scanner.crisiswatch._load_from_json)
+                # accounts for merges; the scraper can only say whether
+                # the name resolved.
+                "iso3_reason": "resolved" if iso3 else "unresolved_country_name",
             })
 
     return entries, detected_month, detected_year
@@ -1298,15 +1334,37 @@ def run(
                 month_str,
             )
             sys.exit(1)
-        if existing is not None and candidate <= existing:
+        if existing is not None and candidate < existing:
             log.info(
-                "Candidate edition %04d-%02d is not newer than existing "
-                "%04d-%02d — skipping write.",
+                "Candidate edition %04d-%02d is older than existing "
+                "%04d-%02d — skipping write (never regress an edition).",
                 candidate[0], candidate[1], existing[0], existing[1],
             )
             _check_staleness(existing, max_age_days)
             _check_edition_currency(existing, expect_edition_by_day)
             return {}
+        if existing is not None and candidate == existing:
+            # ICG revises entries after publication, so the same edition
+            # month can carry different content. A republication with a
+            # different content hash is written; an identical one is not.
+            candidate_hash = entries_content_hash(entries)
+            existing_hash = _load_existing_content_hash(output_path)
+            if candidate_hash == existing_hash:
+                log.info(
+                    "Candidate edition %04d-%02d matches existing %04d-%02d with "
+                    "identical content (hash %s) — skipping write.",
+                    candidate[0], candidate[1], existing[0], existing[1],
+                    candidate_hash[:12],
+                )
+                _check_staleness(existing, max_age_days)
+                _check_edition_currency(existing, expect_edition_by_day)
+                return {}
+            log.info(
+                "Candidate edition %04d-%02d matches existing %04d-%02d but its "
+                "content differs (hash %s vs %s) — writing the revised edition.",
+                candidate[0], candidate[1], existing[0], existing[1],
+                candidate_hash[:12], (existing_hash or "none")[:12],
+            )
 
     # Build output dict (compatible with _load_fallback_json).
     now = datetime.now(timezone.utc).isoformat()
@@ -1315,6 +1373,15 @@ def run(
         "year": year,
         "fetched_at": now,
         "source": provenance,
+        "content_hash": entries_content_hash(entries),
+        "parse_accounting": {
+            "entries": len(entries),
+            "resolved_iso3": n_resolved,
+            "unresolved_iso3": n_unresolved,
+            "unresolved_names": sorted(
+                {str(e.get("country") or "") for e in entries if not e.get("iso3")}
+            ),
+        },
         "outlook_month": overview.get("outlook_month", ""),
         "conflict_risk_alerts": overview.get("conflict_risk_alerts", []),
         "resolution_opportunities": overview.get("resolution_opportunities", []),

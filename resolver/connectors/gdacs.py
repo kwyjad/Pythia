@@ -358,6 +358,46 @@ def parse_gdacs_population(
 # ---------------------------------------------------------------------------
 
 
+def _geometry_resolver():
+    """The PA machine's boundary loader, or None when it cannot be imported.
+
+    ``resolver.hazard_resolution.gdacs`` borrows THIS module's helpers, so the
+    import is made lazily at the one call site rather than at module scope,
+    and its absence costs the fallback, never the connector.
+    """
+
+    try:
+        from resolver.hazard_resolution.gdacs import _CountryGeometries
+
+        return _CountryGeometries()
+    except Exception as exc:  # noqa: BLE001 - the boundaries are optional here
+        LOG.warning("[gdacs] geometry fallback unavailable: %s", exc)
+        return None
+
+
+def _iso3s_by_geometry(event: dict[str, Any], geometries) -> list[str]:
+    """Countries near the event's own point, nearest first; [] when unplaceable.
+
+    Delegates to :func:`resolver.hazard_resolution.gdacs._iso3s_near_event`
+    so the connector and the machine attribute a country-less event by ONE
+    rule and one distance (500 km). Never raises.
+    """
+
+    if geometries is None:
+        return []
+    try:
+        from resolver.hazard_resolution.gdacs import _iso3s_near_event
+
+        hazard = _HAZARD_MAP.get(str(event.get("eventtype") or ""), str(event.get("eventtype")))
+        return list(_iso3s_near_event(event, hazard, geometries))
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning(
+            "[gdacs] geometry fallback failed for %s/%s: %s",
+            event.get("eventtype"), event.get("eventid"), exc,
+        )
+        return []
+
+
 def _feature_point(feature: dict[str, Any], props: dict[str, Any]) -> tuple[float | None, float | None]:
     """(lat, lon) for a GDACS GeoJSON feature, or (None, None).
 
@@ -898,12 +938,34 @@ class GdacsConnector:
     ) -> list[dict[str, Any]]:
         """Expand events to per-country per-month rows."""
         rows: list[dict[str, Any]] = []
+        geometries = None
+        self.events_resolved_by_geometry: list[str] = []
+        self.events_without_country: list[str] = []
         for ev in events:
             iso3_list = self._resolve_countries(ev, name_to_iso3)
             if not iso3_list:
+                # GDACS names no country for an event still over open ocean
+                # (routine for a tropical cyclone), and the row it produces
+                # was read by no cell. The PA machine already resolves such
+                # an event from its own position against the vendored
+                # boundaries; the connector path now does the same, so a
+                # storm sitting 200 km off a coast lands on that coast's
+                # country-month in facts_resolved as it does in haz_raw_gdacs.
+                if geometries is None:
+                    geometries = _geometry_resolver()
+                iso3_list = _iso3s_by_geometry(ev, geometries)
+                if iso3_list:
+                    ev["iso3_from_geometry"] = True
+                    self.events_resolved_by_geometry.append(
+                        f"{ev['eventtype']}-{ev['eventid']}:{','.join(iso3_list[:3])}"
+                    )
+            if not iso3_list:
+                self.events_without_country.append(f"{ev['eventtype']}-{ev['eventid']}")
                 LOG.warning(
-                    "[gdacs] cannot resolve country for event %s/%s (country=%r)",
+                    "[gdacs] cannot resolve country for event %s/%s (country=%r, "
+                    "lat=%r, lon=%r) — dropped",
                     ev["eventtype"], ev["eventid"], ev.get("country"),
+                    ev.get("lat"), ev.get("lon"),
                 )
                 continue
 
@@ -921,6 +983,20 @@ class GdacsConnector:
                         "alertlevel": ev["alertlevel"],
                         "todate": ev["todate"],
                     })
+        if self.events_resolved_by_geometry:
+            LOG.info(
+                "[gdacs] %d event(s) named no country and were placed from their "
+                "position: %s",
+                len(self.events_resolved_by_geometry),
+                "; ".join(self.events_resolved_by_geometry[:20]),
+            )
+        if self.events_without_country:
+            LOG.warning(
+                "[gdacs] %d event(s) resolved to no country even by position and "
+                "produced no row: %s",
+                len(self.events_without_country),
+                ",".join(self.events_without_country[:30]),
+            )
         return rows
 
     def _resolve_countries(
