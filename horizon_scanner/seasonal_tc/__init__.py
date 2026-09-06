@@ -379,6 +379,16 @@ def store_seasonal_tc_outlooks(outlooks: list[dict]) -> int:
     date — the older row for that product is superseded and deleted, and
     the log says so: a corrected reading replaces a misread one rather than
     sitting beside it.
+
+    The same rule runs the other way round. One DOCUMENT has one category,
+    so a row sharing this row's basin, source, season and issue date under a
+    DIFFERENT category is the same document classified two ways by two
+    versions of the classifier, and is superseded too. NWP/TSR/2026 issued
+    2026-05-11 sat in the table twice — extended_range from July, pre_season
+    from September, both quoting 27 named storms.
+
+    A supersede is always scoped to the season being written, so a store can
+    never take a row belonging to another season.
     """
     if not outlooks:
         return 0
@@ -429,6 +439,38 @@ def store_seasonal_tc_outlooks(outlooks: list[dict]) -> int:
                     updated += 1
                 else:
                     inserted += 1
+                # One DOCUMENT per basin, source, season and issue date. A
+                # row sharing all four but carrying a different category is
+                # the same document classified two ways by two versions of
+                # the classifier — NWP/TSR/2026 @ 2026-05-11 sat in the
+                # table twice, once extended_range (fetched July) and once
+                # pre_season (fetched September), both quoting 27 named
+                # storms. The newer parse wins.
+                if row["issue_date"]:
+                    miscategorised = con.execute(
+                        "SELECT category FROM seasonal_tc_outlooks WHERE basin = ? "
+                        "AND source = ? AND forecast_season = ? AND issue_date_key = ? "
+                        "AND category <> ?",
+                        [row["basin"], row["source"], row["forecast_season"],
+                         row["issue_date_key"], row["category"]],
+                    ).fetchall()
+                    if miscategorised:
+                        con.execute(
+                            "DELETE FROM seasonal_tc_outlooks WHERE basin = ? "
+                            "AND source = ? AND forecast_season = ? "
+                            "AND issue_date_key = ? AND category <> ?",
+                            [row["basin"], row["source"], row["forecast_season"],
+                             row["issue_date_key"], row["category"]],
+                        )
+                        superseded += len(miscategorised)
+                        log.warning(
+                            "store_seasonal_tc_outlooks: %s/%s %s issued %s re-parsed "
+                            "as %s; superseded %d earlier row(s) categorised %s — one "
+                            "document has one category",
+                            row["basin"], row["source"], row["forecast_season"],
+                            row["issue_date"], row["category"], len(miscategorised),
+                            ", ".join(str(r[0]) for r in miscategorised),
+                        )
                 # One product per basin, source, season and category. A row
                 # for the same product under another issue date is the
                 # earlier misread of this document.
@@ -457,6 +499,22 @@ def store_seasonal_tc_outlooks(outlooks: list[dict]) -> int:
                         )
             except Exception as row_exc:
                 log.warning("store_seasonal_tc_outlooks row error: %s", row_exc)
+        # What the table holds per season, after the store. A season that
+        # loses every row would otherwise be invisible until somebody
+        # counted rows two cycles later; the migration to the outlook key
+        # took the table from 56 rows to 16, and only a per-season count
+        # could say whether that was deduplication or loss.
+        try:
+            seasons = con.execute(
+                "SELECT forecast_season, COUNT(*) FROM seasonal_tc_outlooks "
+                "GROUP BY forecast_season ORDER BY forecast_season"
+            ).fetchall()
+            log.info(
+                "store_seasonal_tc_outlooks: table now holds %s",
+                ", ".join(f"{season}: {count}" for season, count in seasons) or "nothing",
+            )
+        except Exception as season_exc:  # noqa: BLE001 - a count must not fail a store
+            log.debug("store_seasonal_tc_outlooks: season count failed: %s", season_exc)
         log.info(
             "store_seasonal_tc_outlooks: stored %d / %d outlooks (%d new, %d updated in "
             "place, %d superseded misreads deleted)",

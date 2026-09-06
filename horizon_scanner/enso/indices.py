@@ -68,9 +68,15 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import hashlib
 import io
 import logging
+import os
+import pathlib
 import re
+import tempfile
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Sequence
 
@@ -177,8 +183,12 @@ class IndexReading:
     error: str | None = None
     observations: list[Observation] = field(default_factory=list)
     #: True when the source already publishes a three-month mean (the ONI
-    #: table), false when this module has to compute one from weekly values.
+    #: table), false when this module has to compute one from the series.
     seasonal: bool = False
+    #: True when the series IS weekly, so its newest value may be published
+    #: as ``nino34_weekly``. A monthly series (NOAA PSL) computes an ONI the
+    #: same way and is emphatically not a weekly reading.
+    weekly: bool = True
     #: What this rank would have answered, recorded whether or not it was
     #: the rank used. The two-sources-alive check reads these.
     newest_observation: dt.date | None = None
@@ -526,20 +536,191 @@ def oni_from_observations(
 # The ladder
 # ---------------------------------------------------------------------------
 
+#: NOAA PSL publishes the Niño 3.4 monthly anomaly series in the classic
+#: "correlation data" layout: a first line of "startyear endyear", one line
+#: per year of twelve monthly values, then a missing-value sentinel line.
+#: It is a fourth INDEPENDENT rank, added because the ladder was down to two
+#: after ERDDAP blacklisted the runner — the bare minimum the corroboration
+#: check demands, with no margin at all.
+PSL_NINO34_URL = "https://psl.noaa.gov/data/correlation/nina34.anom.data"
+
+#: Anomalies outside this band are a parse failure, never a reading. The
+#: same bound the other parsers use.
+_PSL_MISSING = (-99.99, -9.99, -999.0, 99.9)
+
+
+def parse_psl_monthly(body: str) -> list[Observation]:
+    """Monthly Niño 3.4 anomalies from NOAA PSL's correlation-data file.
+
+    The layout is fixed-width-ish whitespace: ``YEAR v1 v2 ... v12``. A
+    trailing metadata block (the missing-value line and the citation) is
+    ignored because no line of it parses as a year plus twelve numbers.
+
+    Dated to the FIRST of each month, which is what a monthly mean is
+    about. The value is a monthly mean, not a weekly reading, so the caller
+    must not print it under a weekly label — ``weekly=False`` on the rank
+    spec is what keeps ``nino34_weekly`` empty.
+    """
+
+    out: list[Observation] = []
+    for line in body.splitlines():
+        parts = line.split()
+        if len(parts) != 13:
+            continue
+        try:
+            year = int(parts[0])
+        except ValueError:
+            continue
+        if not 1800 <= year <= 2200:
+            continue
+        for month_index, raw in enumerate(parts[1:], start=1):
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if any(abs(value - sentinel) < 1e-6 for sentinel in _PSL_MISSING):
+                continue
+            if not NINO34_MIN <= value <= NINO34_MAX:
+                continue
+            out.append(Observation(date=dt.date(year, month_index, 1), anomaly=value))
+    out.sort(key=lambda o: o.date)
+    return out
+
+
+#: Where a fetched body is cached between processes, so the several
+#: processes of one run ask an upstream ONCE. Deliberately outside the
+#: checkout, exactly like the ACLED token cache, so no artifact upload
+#: sweeps it up. An empty value disables the cache.
+def _cache_dir() -> pathlib.Path | None:
+    raw = os.environ.get("PYTHIA_ENSO_CACHE_DIR")
+    if raw is not None and not raw.strip():
+        return None
+    base = raw.strip() if raw else os.path.join(tempfile.gettempdir(), "pythia_enso_cache")
+    try:
+        path = pathlib.Path(base)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except Exception:  # noqa: BLE001 - an unusable cache is simply no cache
+        return None
+
+
+def _cache_path(url: str) -> "pathlib.Path | None":
+    directory = _cache_dir()
+    if directory is None:
+        return None
+    return directory / (hashlib.sha256(url.encode("utf-8")).hexdigest()[:32] + ".txt")
+
+
+def _cache_ttl_sec() -> float:
+    try:
+        return max(0.0, float(os.environ.get("PYTHIA_ENSO_CACHE_TTL_SEC", "") or 21600))
+    except ValueError:
+        return 21600.0
+
+
+def read_cached_body(url: str) -> tuple[str, float] | None:
+    """``(body, age_seconds)`` for a cached response, or None."""
+
+    path = _cache_path(url)
+    if path is None or not path.is_file():
+        return None
+    try:
+        age = max(0.0, time.time() - path.stat().st_mtime)
+        return path.read_text(encoding="utf-8"), age
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def write_cached_body(url: str, body: str) -> None:
+    path = _cache_path(url)
+    if path is None:
+        return
+    try:
+        path.write_text(body, encoding="utf-8")
+    except Exception:  # noqa: BLE001 - a cache we cannot write is no cache
+        pass
+
+
+#: Minimum seconds between two requests to the SAME host from this process.
+#: ERDDAP's refusal names the cause outright — "Did you often submit more
+#: than one request at a time? Did you often submit identical requests?" —
+#: and the ladder is read by several processes in a run.
+_HOST_MIN_INTERVAL_SEC = 2.0
+_LAST_REQUEST_AT: dict[str, float] = {}
+_THROTTLE_LOCK = threading.Lock()
+
+
+def _throttle(url: str) -> None:
+    from urllib.parse import urlsplit
+
+    host = urlsplit(url).netloc.lower()
+    if not host:
+        return
+    with _THROTTLE_LOCK:
+        previous = _LAST_REQUEST_AT.get(host)
+        now = time.monotonic()
+        if previous is not None and now - previous < _HOST_MIN_INTERVAL_SEC:
+            time.sleep(_HOST_MIN_INTERVAL_SEC - (now - previous))
+        _LAST_REQUEST_AT[host] = time.monotonic()
+
+
 def _default_get(url: str, timeout: float) -> str:
+    """Fetch a ladder source, cached between processes and paced per host.
+
+    A run reads the ladder from several processes (the ENSO store, the ONI
+    backfill, the seasonal TC cross-check), so the same URL was fetched
+    several times a run — and NOAA ERDDAP eventually answered
+
+        HTTP 403 ... Your IP address is on this ERDDAP's request blacklist.
+        Did you often submit more than one request at a time? Did you often
+        submit identical requests?
+
+    which is the cause named by the source itself. A body under
+    ``PYTHIA_ENSO_CACHE_TTL_SEC`` (6h) old is served from the cache without
+    a request; anything else is fetched once, paced per host, and cached.
+
+    On a failed fetch a cached body is served as a STALE reading rather than
+    leaving the rank unread — a stale rank still answers, and `read_rank`'s
+    own age bound decides whether that answer is usable. An unread rank
+    answers nothing at all, and the ladder was one rank from having no
+    corroboration left.
+    """
+
     import requests
 
-    resp = requests.get(
-        url,
-        timeout=timeout,
-        headers={"User-Agent": "PythiaBot/1.0 (humanitarian forecasting research)"},
-    )
-    if resp.status_code >= 400:
-        # ERDDAP puts the reason in the body ("Unrecognized variable=...");
-        # a bare status code sent the September 2026 diagnosis nowhere.
-        snippet = re.sub(r"\s+", " ", (resp.text or ""))[:200]
-        raise RuntimeError(f"HTTP {resp.status_code} from {url}: {snippet}")
+    cached = read_cached_body(url)
+    if cached is not None and cached[1] <= _cache_ttl_sec():
+        LOG.info(
+            "[enso] served %s from the response cache (%.0f min old)",
+            url.split("?")[0], cached[1] / 60.0,
+        )
+        return cached[0]
+
+    _throttle(url)
+    try:
+        resp = requests.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": "PythiaBot/1.0 (humanitarian forecasting research)"},
+        )
+        if resp.status_code >= 400:
+            # ERDDAP puts the reason in the body ("Unrecognized variable=...",
+            # and the blacklist notice); a bare status code sent the
+            # September 2026 diagnosis nowhere.
+            snippet = re.sub(r"\s+", " ", (resp.text or ""))[:200]
+            raise RuntimeError(f"HTTP {resp.status_code} from {url}: {snippet}")
+    except Exception as exc:
+        if cached is not None:
+            LOG.warning(
+                "[enso] %s failed (%s) — serving the cached body, %.1f h old; "
+                "its own age bound decides whether that reading is usable",
+                url.split("?")[0], exc, cached[1] / 3600.0,
+            )
+            return cached[0]
+        raise
+    write_cached_body(url, resp.text)
     return resp.text
+
 
 
 def _erddap_url(today: dt.date, lookback_days: int) -> str:
@@ -574,6 +755,22 @@ def source_ladder(today: dt.date, *, lookback_days: int = 400) -> list[dict]:
             "parse": parse_cpc_oni,
             "seasonal": True,
         },
+        # A FOURTH independent rank, on a different host from ranks 2 and 3.
+        # After ERDDAP blacklisted the runner the ladder was down to two
+        # live ranks, which is the bare minimum the corroboration check
+        # demands and no margin at all. PSL publishes the monthly Niño 3.4
+        # anomaly as plain text and does not blacklist.
+        {
+            "name": "noaa_psl_nina34_monthly",
+            "rank": 4,
+            "url": PSL_NINO34_URL,
+            "parse": parse_psl_monthly,
+            "seasonal": False,
+            # Monthly means, not weekly readings: the ONI is computed from
+            # them exactly as from a weekly series, but nino34_weekly must
+            # stay empty or a monthly value is printed under a weekly label.
+            "weekly": False,
+        },
     ]
 
 
@@ -593,11 +790,13 @@ def read_rank(
     stale, never read as current.
     """
 
+    seasonal = bool(spec["seasonal"])
     reading = IndexReading(
         name=str(spec["name"]),
         rank=int(spec["rank"]),
         url=str(spec["url"]),
-        seasonal=bool(spec["seasonal"]),
+        seasonal=seasonal,
+        weekly=bool(spec.get("weekly", not seasonal)),
     )
     try:
         body = getter(reading.url, timeout)
@@ -677,7 +876,7 @@ def resolve_indices(
 
     chosen = usable[0]
     resolution.nino34 = chosen.nino34
-    resolution.nino34_weekly = None if chosen.seasonal else chosen.nino34
+    resolution.nino34_weekly = chosen.nino34 if chosen.weekly else None
     resolution.oni = chosen.oni
     resolution.oni_basis = chosen.oni_basis
     resolution.observation_date = chosen.newest_observation
@@ -752,7 +951,7 @@ def corroborate(
             continue
         other = IndexResolution(
             nino34=reading.nino34,
-            nino34_weekly=None if reading.seasonal else reading.nino34,
+            nino34_weekly=reading.nino34 if reading.weekly else None,
             oni=reading.oni,
             oni_basis=reading.oni_basis,
             observation_date=reading.newest_observation,

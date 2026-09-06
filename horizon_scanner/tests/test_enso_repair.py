@@ -308,7 +308,10 @@ def test_every_rank_is_read_and_recorded_even_when_rank_one_answers():
         today=TODAY,
     )
     assert resolution.source_rank_used == 1
-    assert [r.ok for r in resolution.readings] == [True, True, True]
+    # Rank 4 (NOAA PSL) is not in this fixture's getter, so it is read and
+    # recorded as failed — which is the point: EVERY rank is read.
+    assert [r.ok for r in resolution.readings][:3] == [True, True, True]
+    assert len(resolution.readings) == len(idx.source_ladder(TODAY))
     evidence = resolution.as_evidence()
     assert evidence["ranks_ok"] == [1, 2, 3]
     assert evidence["readings"][2]["newest_observation"] == "2026-08-01"
