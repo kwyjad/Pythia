@@ -480,7 +480,7 @@ def compute_all(
     # Phase 2.5) route through here, so one call site covers both.
     from resolver.hazard_resolution.resolutions import finalize_frozen_provisionals
 
-    finalize_frozen_provisionals(con, today=today)
+    finalize_frozen_provisionals(con, today=today, rulebook=rulebook)
 
     return {
         "occurrence": compute_occurrence(con, rulebook, hazards=hazards, today=today),

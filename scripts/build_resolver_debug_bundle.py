@@ -954,6 +954,24 @@ class BundleBuilder:
         "seasonal_forecasts": 60,
     }
 
+    #: Columns whose future values are the column doing its job rather than a
+    #: defect. A period END has not arrived yet for an open window, and
+    #: ``haz_resolutions.frozen_at`` holds the freeze DEADLINE — 953 rows of
+    #: it read as future-dated in run 33946954189 and none of them was wrong.
+    _EXPECTED_FUTURE_COLUMNS: frozenset[str] = frozenset({
+        "as_of", "as_of_date", "target_month", "window_end", "valid_to",
+        "period_end", "forecast_season",
+    })
+    _EXPECTED_FUTURE_PAIRS: frozenset[tuple[str, str]] = frozenset({
+        ("haz_resolutions", "frozen_at"),
+    })
+
+    def _future_is_expected(self, table: str, column: str) -> bool:
+        return (
+            column.lower() in self._EXPECTED_FUTURE_COLUMNS
+            or (table.lower(), column.lower()) in self._EXPECTED_FUTURE_PAIRS
+        )
+
     def _freshness(self, dest: Path) -> None:
         rows = []
         for table in sorted(self.tables()):
@@ -1007,21 +1025,24 @@ class BundleBuilder:
                 rows.append([
                     table, column, newest, age, threshold, n_rows, verdict,
                     n_future, newest_any if n_future else "",
+                    "yes" if self._future_is_expected(table, column) else "",
                 ])
         write_csv(
             dest / "freshness.csv", rows,
             ["table", "date_column", "max_value", "age_days",
              "staleness_threshold_days", "rows", "verdict",
-             "n_future", "max_value_in_future"],
+             "n_future", "max_value_in_future", "future_expected"],
             preamble=(
                 "Every date-typed or date-named column in every table, with its\n"
                 "newest value AT OR BEFORE the bundle time and that value's age.\n"
                 "`no_threshold` means nothing is configured for that table, not\n"
                 "that the value is fine. `n_future` counts values after the bundle\n"
-                "time: a period end that has not arrived (an IPC projection window,\n"
-                "the current month) is expected; a publication_date there is a\n"
-                "defect, and `no_fact_carries_a_publication_date_after_the_run_date`\n"
-                "fails on it."
+                "time, and `future_expected` says whether that is the column doing\n"
+                "its job: a period end that has not arrived (an IPC projection\n"
+                "window, the current month) and haz_resolutions.frozen_at (which\n"
+                "holds the freeze DEADLINE, not the moment of freezing) are\n"
+                "expected. A publication_date there is a defect, and\n"
+                "`no_fact_carries_a_publication_date_after_the_run_date` fails on it."
             ),
         )
 
@@ -1690,6 +1711,7 @@ class BundleBuilder:
             self._check_acled_html_responses,
             self._check_no_past_target_month_served,
             self._check_figures_inside_their_document_window,
+            self._check_no_revision_against_an_unfrozen_cell,
             self._check_no_unexplained_no_row,
             self._check_drought_severity_base_rates,
             self._check_nmme_read_when_table_covers_month,
@@ -2616,6 +2638,43 @@ class BundleBuilder:
                 f"{'' if delta is None else delta} | {agrees} |"
             )
         write_text(path, "\n".join(lines) + "\n" + counts_meaning)
+
+    def _check_no_revision_against_an_unfrozen_cell(self) -> None:
+        """A skip logged as "frozen" must rest on a deadline that has passed.
+
+        ``haz_resolutions.frozen_at`` holds the freeze DEADLINE, not the
+        moment of freezing, so an open month legitimately carries a future
+        date — and the freeze guard compares ``today > deadline``, so such a
+        cell is correctly NOT treated as frozen. This asserts that: a
+        ``haz_revisions`` row is written only where the guard refused to
+        rewrite, so one against a cell whose deadline has not passed would
+        mean a cell was skipped on a date that has not happened, and the
+        answer it carries is recoverable.
+        """
+
+        name = "no_revision_was_logged_against_a_cell_whose_deadline_has_not_passed"
+        needed = {"haz_revisions", "haz_resolutions"}
+        if not needed.issubset(self.tables()):
+            return self._check(name, "SKIP", "", "", "need haz_revisions and haz_resolutions")
+        result = self.query(
+            "SELECT COUNT(*) FROM haz_revisions v JOIN haz_resolutions r "
+            "ON r.iso3 = v.iso3 AND r.year = v.year AND r.month = v.month "
+            "AND r.hazard = v.hazard "
+            "WHERE r.frozen_at IS NOT NULL "
+            "AND CAST(r.frozen_at AS DATE) >= CURRENT_DATE"
+        )
+        if result is None:
+            return
+        offenders = int(result[1][0][0] or 0)
+        self._check(
+            name, "FAIL" if offenders else "PASS",
+            f"{offenders} revisions", "0",
+            "A revision row means the freeze guard refused to rewrite a cell. "
+            "The guard compares today against the stored deadline, so a "
+            "revision against a cell whose deadline is still ahead would mean "
+            "an answer was withheld on a date that has not happened, and that "
+            "cell could be resolved after all.",
+        )
 
     def _check_no_unexplained_no_row(self) -> None:
         """Every assessed cell with no resolution row names its reason (D1).
