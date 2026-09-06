@@ -20,10 +20,15 @@ deterministic, and neither of them consulting any source of its own:
     ladder rung, per year.
 
 **Why the denominators are what they are.** Occurrence counts YEARS
-ASSESSED, not years in the calendar: a country-month with no trigger row
-was never looked at, and counting it as a quiet month would manufacture a
-low base rate out of an ingestion gap — the same mistake the coverage gate
-exists to prevent one cell at a time. ``n_years`` travels with every row so
+OBSERVED, not years in the calendar and not merely years assessed. A
+country-month with no trigger row was never looked at, and counting it as a
+quiet month would manufacture a low base rate out of an ingestion gap — the
+same mistake the coverage gate exists to prevent one cell at a time. A
+trigger row is not enough either: a `triggered = false` row with no
+resolution beside it is a cell the machine looked at and then declined to
+decide (the zero was suppressed by the coverage gate, the sweep was unread,
+the drought gate was inconclusive), so a year counts only where it TRIGGERED
+or where a RESOLVED_ZERO was actually written. ``n_years`` travels with every row so
 a thin denominator is visible rather than implied, and
 ``base_rates.occurrence.min_years`` refuses to publish a rate below a floor
 (one observed November is not a base rate, and a p_occurrence of 1.0 from a
@@ -157,6 +162,10 @@ class BaseRateRun:
     #: (iso3, calendar month) cells whose every trigger row was UNASSESSED
     #: (an inconclusive drought verdict) and so had no denominator at all.
     cells_unassessed: int = 0
+    #: (iso3, calendar month) cells whose years were assessed but never
+    #: OBSERVED — no year triggered and no year wrote a zero, so the machine
+    #: recorded no outcome to draw a rate from.
+    cells_unobserved: int = 0
     hazards: dict[str, int] = field(default_factory=dict)
     windows: dict[str, str] = field(default_factory=dict)
 
@@ -198,12 +207,26 @@ def compute_occurrence(
         # the indicators never covered — which is exactly what the 2017-2025
         # drought backcast did before Sept 2026. Such rows carry
         # trigger_detail_json.assessed = false and are left out here.
+        # A NON-TRIGGERED year is an observed quiet year only where the
+        # machine actually WROTE the zero. A trigger row on its own proves a
+        # cell was looked at, never that a verdict survived: the zero-safety
+        # coverage gate, an unread sweep and an inconclusive drought gate all
+        # leave a `triggered = false` row behind with no resolution beside
+        # it. Counting those as quiet years is what published 3,024 confident
+        # DR occurrence rows over 2017-2026 from a hazard path that resolved
+        # not one cell in the window — a rate with no observation behind it,
+        # rendered into every drought PA prompt as though it were evidence.
+        # A TRIGGERED year counts whatever the ladder later managed, because
+        # occurrence is a statement about detection.
         rows = con.execute(
             """
-            SELECT iso3, month,
-                   COUNT(DISTINCT year) AS n_years,
-                   COUNT(DISTINCT CASE WHEN triggered THEN year END) AS n_triggered,
-                   COUNT(DISTINCT CASE WHEN NOT assessed THEN year END) AS n_unassessed
+            SELECT t.iso3, t.month,
+                   COUNT(DISTINCT t.year) AS n_years,
+                   COUNT(DISTINCT CASE WHEN t.triggered THEN t.year END) AS n_triggered,
+                   COUNT(DISTINCT CASE WHEN NOT t.assessed THEN t.year END) AS n_unassessed,
+                   COUNT(DISTINCT CASE
+                       WHEN t.triggered OR r.status = 'RESOLVED_ZERO' THEN t.year
+                   END) AS n_observed
             FROM (
                 SELECT iso3, month, year, triggered,
                        COALESCE(
@@ -214,27 +237,42 @@ def compute_occurrence(
                 WHERE hazard = ?
                   AND year >= ?
                   AND (year < ? OR (year = ? AND month <= ?))
-            )
-            GROUP BY iso3, month
-            ORDER BY iso3, month
+            ) AS t
+            LEFT JOIN haz_resolutions AS r
+              ON r.iso3 = t.iso3 AND r.year = t.year AND r.month = t.month
+             AND r.hazard = ?
+            GROUP BY t.iso3, t.month
+            ORDER BY t.iso3, t.month
             """,
-            [hazard, first_year, last_year, last_year, last_month],
+            [hazard, first_year, last_year, last_year, last_month, hazard],
         ).fetchall()
         rows = [
-            (iso3, month, int(n_years) - int(n_unassessed), n_triggered)
-            for iso3, month, n_years, n_triggered, n_unassessed in rows
+            (
+                iso3,
+                month,
+                int(n_years) - int(n_unassessed),
+                n_triggered,
+                int(n_observed),
+            )
+            for iso3, month, n_years, n_triggered, n_unassessed, n_observed in rows
         ]
         run.cells_unassessed += sum(
-            1 for _iso3, _month, n_years, _n in rows if int(n_years) <= 0
+            1 for _iso3, _month, n_years, _n, _obs in rows if int(n_years) <= 0
         )
 
         written = 0
         skipped_before = run.rows_skipped_thin
+        unobserved_before = run.cells_unobserved
         payload: list[list[Any]] = []
-        for iso3, month, n_years, n_triggered in rows:
+        for iso3, month, n_years, n_triggered, n_observed in rows:
             if int(n_years) <= 0 or int(n_years) < min_years:
                 run.rows_skipped_thin += 1
                 continue
+            # The denominator is OBSERVED years, never merely assessed ones.
+            if int(n_observed) < min_years:
+                run.cells_unobserved += 1
+                continue
+            n_years = int(n_observed)
             payload.append(
                 [
                     str(iso3),
@@ -268,8 +306,11 @@ def compute_occurrence(
         run.rows_written += written
         LOG.info(
             "[base_rates] occurrence %s: %d rows over %s (%d cells below "
-            "min_years=%d were not published)",
-            hazard, written, window, run.rows_skipped_thin - skipped_before, min_years,
+            "min_years=%d, %d cells with fewer than %d OBSERVED years — "
+            "assessed but never triggered and never zeroed — were not "
+            "published)",
+            hazard, written, window, run.rows_skipped_thin - skipped_before,
+            min_years, run.cells_unobserved - unobserved_before, min_years,
         )
 
     return run

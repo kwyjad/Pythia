@@ -607,10 +607,28 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
+          # ROWS is counted from the TABLE, not from what the writer printed.
+          # In run 33946954189 the writer said 2,808 and hdx_signals gained
+          # nothing and kept the previous day's fetched_at, and the guard
+          # reported OK because it believed the number.
           python -c "
+          import os
           from horizon_scanner.hdx_signals import bulk_fetch_and_store_hdx_signals
-          n = bulk_fetch_and_store_hdx_signals()
-          print(f'ROWS={n}')
+          from pythia.db.schema import connect
+          bulk_fetch_and_store_hdx_signals()
+          started = os.environ.get('PYTHIA_RUN_STARTED_AT') or ''
+          con = connect(read_only=True)
+          try:
+              if started:
+                  n = con.execute(
+                      'SELECT COUNT(*) FROM hdx_signals WHERE fetched_at >= ?',
+                      [started],
+                  ).fetchone()[0]
+              else:
+                  n = con.execute('SELECT COUNT(*) FROM hdx_signals').fetchone()[0]
+          finally:
+              con.close()
+          print(f'ROWS={int(n)}')
           " 2>&1 | tee diagnostics/phase4_hdx_signals.log || true
           # A sentinel line is grepped rather than the last merged line: one
           # log line emitted after the print would otherwise read as failure.

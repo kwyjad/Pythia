@@ -584,8 +584,18 @@ class TestOccurrenceIgnoresUndecidedCells:
         ~0% March drought rate for every country from cells nobody decided."""
 
         for year in range(2018, 2024):
-            seed_trigger(con, iso3="SOM", ym=f"{year}-03", hazard="DR",
-                         triggered=year == 2022)
+            if year == 2022:
+                seed_trigger(con, iso3="SOM", ym=f"{year}-03", hazard="DR",
+                             triggered=True)
+            elif year in (2021, 2023):
+                # Decided quiet: the gate read its feeds and found no
+                # deterioration, so the zero was actually written.
+                seed_resolution(
+                    con, iso3="SOM", ym=f"{year}-03", hazard="DR",
+                    status="RESOLVED_ZERO", value=0.0, source="ipc",
+                )
+            else:
+                seed_trigger(con, iso3="SOM", ym=f"{year}-03", hazard="DR")
         for year in (2018, 2019, 2020):
             con.execute(
                 "UPDATE haz_triggers SET trigger_detail_json = ? "

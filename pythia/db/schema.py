@@ -952,26 +952,60 @@ def _ensure_crisiswatch_entries_table(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
-def _ensure_hdx_signals_table(con: duckdb.DuckDBPyConnection) -> None:
-    """Ensure the hdx_signals table exists."""
-
-    _ensure_table_and_columns(
-        con,
-        "hdx_signals",
-        """
+HDX_SIGNALS_DDL = """
         CREATE TABLE IF NOT EXISTS hdx_signals (
             iso3              VARCHAR NOT NULL,
-            hazard_code       VARCHAR,
+            hazard_code       VARCHAR NOT NULL,
             indicator         VARCHAR NOT NULL,
             concern_level     VARCHAR,
             indicator_value   DOUBLE,
             description       VARCHAR,
             source_url        VARCHAR,
-            signal_date       VARCHAR,
+            signal_date       VARCHAR NOT NULL,
             fetched_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (iso3, indicator, signal_date)
+            PRIMARY KEY (iso3, indicator, signal_date, hazard_code)
         );
-        """,
+        """
+
+
+def _primary_key_columns(con: duckdb.DuckDBPyConnection, table: str) -> list[str]:
+    """The PK column names of a table, lowercased; empty when it has none."""
+
+    try:
+        rows = con.execute(
+            "SELECT constraint_column_names FROM duckdb_constraints() "
+            "WHERE lower(table_name) = ? AND constraint_type = 'PRIMARY KEY'",
+            [table.lower()],
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - introspection must never fail a startup
+        return []
+    for (cols,) in rows:
+        return [str(c).lower() for c in (cols or [])]
+    return []
+
+
+def _ensure_hdx_signals_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Ensure the hdx_signals table exists, keyed on the hazard too.
+
+    Until Sept 2026 the key was ``(iso3, indicator, signal_date)`` while the
+    writer emits ONE ROW PER HAZARD an indicator maps to — so an indicator
+    mapped to {ACE, DR} collided with itself and only the last hazard
+    survived. ``load_hdx_signals_from_db`` filters on ``hazard_code``, so the
+    losing hazard's prompt lost the signal outright: 2,808 rows written,
+    1,423 stored, and the missing 1,385 were hazard attributions, not
+    duplicates. The key now carries the hazard; an indicator that maps to no
+    hazard stores ``''`` rather than NULL, because a PK column cannot be
+    null and an absent mapping is a fact worth keeping.
+    """
+
+    existing = _existing_columns(con, "hdx_signals")
+    if existing and "hazard_code" not in _primary_key_columns(con, "hdx_signals"):
+        _migrate_hdx_signals(con)
+        return
+    _ensure_table_and_columns(
+        con,
+        "hdx_signals",
+        HDX_SIGNALS_DDL,
         {
             "iso3": "VARCHAR",
             "hazard_code": "VARCHAR",
@@ -984,6 +1018,52 @@ def _ensure_hdx_signals_table(con: duckdb.DuckDBPyConnection) -> None:
             "fetched_at": "TIMESTAMP",
         },
     )
+
+
+def _migrate_hdx_signals(con: duckdb.DuckDBPyConnection) -> dict:
+    """Rebuild hdx_signals on the hazard-bearing key. Returns counts.
+
+    The old table is renamed aside and dropped only once the new one holds
+    its rows — a kill between a DROP and a RENAME is how a live table
+    becomes an empty one. NULL hazard codes become ``''``. The rebuild
+    cannot recover the hazard rows the old key discarded; the next fetch
+    writes them.
+    """
+
+    counts = {"rows_before": 0, "rows_after": 0}
+    try:
+        counts["rows_before"] = int(
+            con.execute("SELECT COUNT(*) FROM hdx_signals").fetchone()[0]
+        )
+    except Exception:  # noqa: BLE001
+        return counts
+    con.execute("BEGIN TRANSACTION")
+    try:
+        con.execute("DROP TABLE IF EXISTS hdx_signals__old")
+        con.execute("ALTER TABLE hdx_signals RENAME TO hdx_signals__old")
+        con.execute(HDX_SIGNALS_DDL)
+        con.execute(
+            """
+            INSERT OR REPLACE INTO hdx_signals
+                (iso3, hazard_code, indicator, concern_level, indicator_value,
+                 description, source_url, signal_date, fetched_at)
+            SELECT iso3, COALESCE(hazard_code, ''), indicator, concern_level,
+                   indicator_value, description, source_url, signal_date,
+                   fetched_at
+            FROM hdx_signals__old
+            WHERE iso3 IS NOT NULL AND indicator IS NOT NULL
+              AND signal_date IS NOT NULL
+            """
+        )
+        con.execute("DROP TABLE hdx_signals__old")
+        con.execute("COMMIT")
+    except Exception:  # noqa: BLE001
+        con.execute("ROLLBACK")
+        raise
+    counts["rows_after"] = int(
+        con.execute("SELECT COUNT(*) FROM hdx_signals").fetchone()[0]
+    )
+    return counts
 
 
 def _ensure_gdelt_conflict_indicators_table(con: duckdb.DuckDBPyConnection) -> None:

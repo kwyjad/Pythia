@@ -30,7 +30,7 @@ import csv
 import io
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -370,14 +370,26 @@ def store_hdx_signals(signals: list[dict]) -> int:
                     indicator_value, description, source_url, signal_date,
                 ))
         else:
-            # Store with NULL hazard_code so the data is not lost.
+            # An indicator that maps to no hazard is still evidence. It is
+            # stored under the empty hazard, not NULL: hazard_code is part of
+            # the key now, and a key column cannot be null.
             rows.append((
-                iso3, None, indicator, concern_level,
+                iso3, "", indicator, concern_level,
                 indicator_value, description, source_url, signal_date,
             ))
 
     if not rows:
         return 0
+
+    # The write stamp is set HERE, at write time. Until Sept 2026 fetched_at
+    # was left to its column default and DuckDB's INSERT OR REPLACE keeps
+    # every column the statement does not name — so a row that already
+    # existed kept the timestamp of the run that first wrote it, and
+    # `hdx_signals` reported a fetched_at from the previous cycle after a
+    # successful write of 2,808 rows. A reconciliation that asks "which rows
+    # did THIS run touch" then correctly answered: none.
+    written_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    rows = [row + (written_at,) for row in rows]
 
     try:
         con = connect(read_only=False)
@@ -386,14 +398,29 @@ def store_hdx_signals(signals: list[dict]) -> int:
             """
             INSERT OR REPLACE INTO hdx_signals
                 (iso3, hazard_code, indicator, concern_level,
-                 indicator_value, description, source_url, signal_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 indicator_value, description, source_url, signal_date,
+                 fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
+        stored = int(
+            con.execute(
+                "SELECT COUNT(*) FROM hdx_signals WHERE fetched_at >= ?",
+                [written_at],
+            ).fetchone()[0]
+        )
         con.close()
-        log.info("HDX Signals: stored %d rows to DB", len(rows))
-        return len(rows)
+        # The count is the rows the table HOLDS carrying this run's stamp,
+        # never the length of the list handed to the writer: several rows can
+        # collide on one key, and reporting the pre-collapse figure is how
+        # "stored 2,808" sat beside a table that had gained nothing.
+        log.info(
+            "HDX Signals: wrote %d row(s), %d carry this run's stamp",
+            len(rows),
+            stored,
+        )
+        return stored
     except Exception as exc:
         log.warning("HDX Signals: DB write failed — %s", exc)
         return 0

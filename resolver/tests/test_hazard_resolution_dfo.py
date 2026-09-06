@@ -34,7 +34,11 @@ from resolver.hazard_resolution import base_rates as br
 from resolver.hazard_resolution import dfo as dfo_mod
 from resolver.hazard_resolution.rulebook import RulebookError, validate_rulebook
 from resolver.hazard_resolution.schema import ensure_haz_schema
-from resolver.tests.hazard_resolution_utils import make_rulebook, seed_trigger
+from resolver.tests.hazard_resolution_utils import (
+    make_rulebook,
+    seed_resolution,
+    seed_trigger,
+)
 
 TODAY = dt.date(2026, 8, 5)
 
@@ -304,11 +308,24 @@ def test_load_events_honours_the_pre_backcast_cutoff(con, rulebook):
 
 
 def _seed_machine_flood_rate(con, rulebook, iso3: str, month: int, triggered_years: set[int]):
+    """Ten Augusts the machine DECIDED: triggered, or zeroed by the sweep.
+
+    The quiet years carry their RESOLVED_ZERO because that is what the
+    machine writes for a month it looked at and found silent — and since
+    Sept 2026 the occurrence denominator counts observed years, not merely
+    years with a trigger row.
+    """
+
     for year in range(2011, 2021):
-        seed_trigger(
-            con, iso3=iso3, ym=f"{year}-{month:02d}", hazard="FL",
-            triggered=year in triggered_years,
-        )
+        if year in triggered_years:
+            seed_trigger(
+                con, iso3=iso3, ym=f"{year}-{month:02d}", hazard="FL", triggered=True
+            )
+        else:
+            seed_resolution(
+                con, iso3=iso3, ym=f"{year}-{month:02d}", hazard="FL",
+                status="RESOLVED_ZERO", value=0.0, source="reliefweb_sweep",
+            )
     br.compute_occurrence(con, rulebook, hazards=["FL"], today=TODAY)
 
 

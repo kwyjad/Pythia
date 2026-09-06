@@ -532,6 +532,22 @@ def resolve_triggered_cells(
         except Exception as exc:  # noqa: BLE001 - one bad cell must not end the month
             run.failed_cells.append(f"{iso3}: {type(exc).__name__}: {exc}")
             LOG.exception("[impact] %s %s %s: ladder walk raised", iso3, hazard, ym)
+            # The reason belongs on the trigger row too, not only in the run
+            # stream: the nightly backcast never enables the stream, so a
+            # cell that raised would otherwise read as unexplained in every
+            # bundle built from the database alone.
+            if not dry_run:
+                try:
+                    detect_mod.record_no_row_reason(
+                        con, hazard=hazard, iso3=iso3, ym=ym,
+                        reason=cell_ledger.REASON_EXCEPTION,
+                        note=f"{type(exc).__name__}: {exc}",
+                    )
+                except Exception:  # noqa: BLE001 - stamping must not raise here
+                    LOG.warning(
+                        "[impact] %s %s %s: could not stamp the cell_raised reason",
+                        iso3, hazard, ym,
+                    )
             cell_ledger.record_cell(
                 stage=cell_ledger.STAGE_LADDER,
                 iso3=iso3, hazard=hazard, ym=ym, triggered=True,
