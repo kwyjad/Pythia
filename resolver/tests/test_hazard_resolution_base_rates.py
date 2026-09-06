@@ -104,13 +104,19 @@ def test_quantile_of_nothing_is_none():
 # ---------------------------------------------------------------------------
 
 
-def test_occurrence_is_the_share_of_assessed_years_that_triggered(con, rulebook):
-    # Six Septembers assessed, two of them triggered -> 2/6.
+def test_occurrence_is_the_share_of_observed_years_that_triggered(con, rulebook):
+    # Six Septembers observed, two of them triggered -> 2/6. The four quiet
+    # years carry the RESOLVED_ZERO the sweep writes: a quiet year counts
+    # because the machine DECIDED it was quiet, not merely because a trigger
+    # row exists for it.
     for year in range(2018, 2024):
-        seed_trigger(
-            con, iso3="PHL", ym=f"{year}-09", hazard="FL",
-            triggered=year in (2020, 2022),
-        )
+        if year in (2020, 2022):
+            seed_trigger(con, iso3="PHL", ym=f"{year}-09", hazard="FL", triggered=True)
+        else:
+            seed_resolution(
+                con, iso3="PHL", ym=f"{year}-09", hazard="FL",
+                status="RESOLVED_ZERO", value=0.0, source="reliefweb_sweep",
+            )
 
     br.compute_occurrence(con, rulebook, hazards=["FL"], today=TODAY)
 
@@ -136,7 +142,13 @@ def test_occurrence_denominator_excludes_years_never_assessed(con, rulebook):
 
     # Ten calendar years in the window, but only four were assessed.
     for year in (2019, 2020, 2021, 2022):
-        seed_trigger(con, iso3="MOZ", ym=f"{year}-01", hazard="FL", triggered=year == 2020)
+        if year == 2020:
+            seed_trigger(con, iso3="MOZ", ym=f"{year}-01", hazard="FL", triggered=True)
+        else:
+            seed_resolution(
+                con, iso3="MOZ", ym=f"{year}-01", hazard="FL",
+                status="RESOLVED_ZERO", value=0.0, source="reliefweb_sweep",
+            )
 
     br.compute_occurrence(con, rulebook, hazards=["FL"], today=TODAY)
 
@@ -148,6 +160,76 @@ def test_occurrence_denominator_excludes_years_never_assessed(con, rulebook):
     ).fetchone()
     assert n_years == 4
     assert p == pytest.approx(0.25)
+
+
+
+def test_a_year_assessed_but_never_decided_is_not_a_quiet_year(con, rulebook):
+    """The DR fault of run 33946954189, pinned.
+
+    Sixteen Julys carry trigger rows saying ``triggered = false`` and not one
+    of them produced a resolution — the drought gate could read no indicator,
+    so the machine never decided anything. Counting those as quiet years
+    published 3,024 confident DR occurrence rows from a hazard path that
+    resolved nothing at all, and rendered them into every drought PA prompt.
+    """
+
+    for year in range(2010, 2026):
+        seed_trigger(con, iso3="ETH", ym=f"{year}-07", hazard="DR", triggered=False)
+
+    run = br.compute_occurrence(con, rulebook, hazards=["DR"], today=TODAY)
+
+    assert run.rows_written == 0
+    assert run.cells_unobserved == 1
+    assert con.execute(
+        "SELECT COUNT(*) FROM haz_base_rates_occurrence WHERE hazard = 'DR'"
+    ).fetchone()[0] == 0
+
+
+def test_a_suppressed_zero_does_not_enter_the_denominator(con, rulebook):
+    """A zero the coverage gate withheld is an undecided year, not a quiet one."""
+
+    # Three Junes the sweep actually zeroed, three it looked at and withheld.
+    for year in (2015, 2016, 2017):
+        seed_resolution(
+            con, iso3="MOZ", ym=f"{year}-06", hazard="FL",
+            status="RESOLVED_ZERO", value=0.0, source="reliefweb_sweep",
+        )
+    for year in (2018, 2019, 2020):
+        seed_trigger(con, iso3="MOZ", ym=f"{year}-06", hazard="FL", triggered=False)
+
+    br.compute_occurrence(con, rulebook, hazards=["FL"], today=TODAY)
+
+    p, n_years = con.execute(
+        """
+        SELECT p_occurrence, n_years FROM haz_base_rates_occurrence
+        WHERE iso3 = 'MOZ' AND hazard = 'FL' AND calendar_month = 6
+        """
+    ).fetchone()
+    assert n_years == 3
+    assert p == 0.0
+
+
+def test_a_triggered_year_counts_even_where_the_ladder_resolved_nothing(con, rulebook):
+    """Occurrence is a statement about DETECTION.
+
+    A cyclone that struck and whose impact figure never landed is still a
+    cyclone that struck; requiring a resolved value here would read an
+    EM-DAT outage as a decade of quiet weather.
+    """
+
+    for year in (2020, 2021, 2022):
+        seed_trigger(con, iso3="FJI", ym=f"{year}-02", hazard="TC", triggered=True)
+
+    br.compute_occurrence(con, rulebook, hazards=["TC"], today=TODAY)
+
+    p, n_years = con.execute(
+        """
+        SELECT p_occurrence, n_years FROM haz_base_rates_occurrence
+        WHERE iso3 = 'FJI' AND hazard = 'TC' AND calendar_month = 2
+        """
+    ).fetchone()
+    assert n_years == 3
+    assert p == 1.0
 
 
 def test_occurrence_refuses_to_publish_a_rate_from_too_few_years(con, rulebook):
@@ -178,7 +260,10 @@ def test_occurrence_ignores_months_outside_the_backcast_window(con, rulebook):
     for year in (2007, 2008, 2009):
         seed_trigger(con, iso3="BGD", ym=f"{year}-06", hazard="FL", triggered=True)
     for year in (2011, 2012, 2013):
-        seed_trigger(con, iso3="BGD", ym=f"{year}-06", hazard="FL", triggered=False)
+        seed_resolution(
+            con, iso3="BGD", ym=f"{year}-06", hazard="FL",
+            status="RESOLVED_ZERO", value=0.0, source="reliefweb_sweep",
+        )
 
     br.compute_occurrence(con, rulebook, hazards=["FL"], today=TODAY)
 

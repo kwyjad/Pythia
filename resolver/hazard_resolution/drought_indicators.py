@@ -365,6 +365,42 @@ def _unzip_first_table(blob: bytes) -> tuple[str, str]:
         return text, ("application/json" if member.lower().endswith(".json") else "text/csv")
 
 
+#: Delimiters a published table feed is plausibly written with. JRC ships
+#: ``hotspots_ts.zip`` semicolon-delimited; reading it as comma-delimited
+#: yields ONE column whose name is the whole header, so every record fails
+#: to resolve to a country and the indicator reports "the feed's shape has
+#: probably changed" for a feed that had not changed at all.
+_CSV_DELIMITERS = (",", ";", "\t", "|")
+
+
+def _sniff_delimiter(body: str) -> str:
+    """The delimiter a CSV body is actually written with.
+
+    The sniffer decides where it can, checked against the header (it will
+    happily nominate a character that appears only inside the data). Where
+    it cannot, the header row does: the candidate that splits it into the
+    most fields wins, and a tie keeps the comma. A body whose header holds
+    no candidate at all is a single-column file, which reads the same either
+    way.
+    """
+
+    sample = body[:8192]
+    header = sample.splitlines()[0] if sample else ""
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters="".join(_CSV_DELIMITERS))
+        delimiter = getattr(dialect, "delimiter", ",")
+        if delimiter in _CSV_DELIMITERS and delimiter in header:
+            return delimiter
+    except Exception:  # noqa: BLE001 - an inconclusive sniff is not an error
+        pass
+    best, best_count = ",", header.count(",")
+    for candidate in _CSV_DELIMITERS:
+        count = header.count(candidate)
+        if count > best_count:
+            best, best_count = candidate, count
+    return best
+
+
 def _rows_from_text(text: str | bytes, content_type: str) -> list[dict[str, Any]]:
     """Parse a feed body into a list of records (JSON, CSV, or a zipped CSV)."""
 
@@ -398,7 +434,11 @@ def _rows_from_text(text: str | bytes, content_type: str) -> list[dict[str, Any]
                 if isinstance(key, str) and len(key) == 3
             ]
         return []
-    return [dict(row) for row in csv.DictReader(io.StringIO(body))]
+    delimiter = _sniff_delimiter(body)
+    return [
+        dict(row)
+        for row in csv.DictReader(io.StringIO(body), delimiter=delimiter)
+    ]
 
 
 def _signed_number(value: Any) -> float | None:
@@ -550,6 +590,36 @@ def _parse_feed(
     that want one answer: the live month reads the latest assessment)."""
 
     return _parse_feed_series(entry, text, content_type, fallback_ym)[-1]
+
+
+def _table_date_span(
+    con: "duckdb.DuckDBPyConnection", entry: Mapping[str, Any]
+) -> tuple[str, str] | None:
+    """The ``YYYY-MM`` span a pythia_table entry's rows cover, or None.
+
+    Used to tell "this month is before the table starts" — a structural
+    absence a backcast will meet in every early month — from "the table
+    covers this month and the filter matched nothing", which is a fault.
+    Never raises.
+    """
+
+    table = str(entry.get("table") or "")
+    date_column = str(entry.get("date_column") or "")
+    if not table or not date_column:
+        return None
+    where = str(entry.get("where") or "").strip()
+    clause = f" WHERE ({where})" if where else ""
+    try:
+        lo, hi = con.execute(
+            f"SELECT MIN(substr(CAST({date_column} AS VARCHAR), 1, 7)), "
+            f"MAX(substr(CAST({date_column} AS VARCHAR), 1, 7)) "
+            f"FROM {table}{clause}"
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - a span we cannot read decides nothing
+        return None
+    if not lo or not hi:
+        return None
+    return str(lo), str(hi)
 
 
 def describe_pythia_table(
@@ -768,13 +838,34 @@ def fetch_indicators(
                 detail["entries"][name] = {"ok": False, "error": str(exc)}
                 continue
             if not snapshot["values"]:
+                # A month that predates everything the table holds is not a
+                # fault: nothing was ingested that far back and nothing ever
+                # will be. It is still no coverage — the entry stays
+                # unavailable, which is what keeps a backcast month from
+                # resolving a zero on absence — but it is recorded at INFO
+                # under its own reason, so a backcast does not print a
+                # warning per month for a table that simply starts later.
+                span = _table_date_span(con, entry)
+                predates = bool(span and span[0] and ym < span[0])
                 error = (
                     f"{entry.get('table')} holds no usable rows for {ym} — the "
                     "indicator is unavailable, which is not the same as no drought. "
                     f"Table: {describe_pythia_table(con, entry)}"
                 )
-                LOG.warning("[drought_indicators] %s: %s", name, error)
-                detail["entries"][name] = {"ok": False, "error": error}
+                if predates:
+                    error = (
+                        f"{entry.get('table')} starts at {span[0]}, after {ym} — "
+                        "no coverage for this month, which is not the same as "
+                        "no drought."
+                    )
+                    LOG.info("[drought_indicators] %s: %s", name, error)
+                else:
+                    LOG.warning("[drought_indicators] %s: %s", name, error)
+                detail["entries"][name] = {
+                    "ok": False,
+                    "error": error,
+                    "reason": "predates_table_coverage" if predates else "no_usable_rows",
+                }
                 continue
             attempts: list[dict[str, Any]] = []
             snapshots = [snapshot]

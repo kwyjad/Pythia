@@ -372,13 +372,30 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
 
         rows.append({"iso3": iso3.upper(), "anomaly_value": round(mean_val, 4)})
 
+    # --- Countries the mask never named at all ---
+    # regionmask gives a grid cell to the country containing the cell CENTRE.
+    # A country smaller than a cell of a ~1-degree seasonal model contains no
+    # centre and is therefore absent from `unique_regions` entirely: not
+    # skipped, never seen, and invisible in the skip counters. In run
+    # 33946954189 that was 76 of the 252 countries in the run — the island
+    # and small states a cyclone or drought question most needs an outlook
+    # for. They are sampled from the nearest grid cell instead, which is the
+    # value the model actually carries over that piece of ocean or coast.
+    produced = {r["iso3"] for r in rows}
+    sampled_rows, n_sampled, n_unsampled = _sample_regions_absent_from_mask(
+        da, countries, unique_regions, produced
+    )
+    rows.extend(sampled_rows)
+
     # --- Diagnostic: aggregation summary ---
     total_skipped = skipped_keyerror + skipped_length + skipped_weight
     log.info(
-        "NMME aggregation: %d countries produced, %d skipped "
-        "(KeyError=%d, length_filter=%d, zero_weight=%d)",
-        len(rows), total_skipped,
-        skipped_keyerror, skipped_length, skipped_weight,
+        "NMME aggregation: %d countries produced (%d from the mask, %d from "
+        "the nearest grid cell), %d skipped "
+        "(KeyError=%d, length_filter=%d, zero_weight=%d), "
+        "%d region(s) neither masked nor sampled",
+        len(rows), len(rows) - n_sampled, n_sampled, total_skipped,
+        skipped_keyerror, skipped_length, skipped_weight, n_unsampled,
     )
     if skipped_length > 0:
         failed_details: dict[str, str] = {}
@@ -402,6 +419,91 @@ def _aggregate_2d_field_to_countries(da, countries, mask) -> pd.DataFrame:
         log.debug("NMME resolved %d countries: %s", len(iso3s), iso3s[:30])
 
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["iso3", "anomaly_value"])
+
+
+def _region_point(region_obj) -> tuple[float, float] | None:
+    """A representative (lon, lat) for a region: its centroid, else the
+    midpoint of its bounds. Never raises — a region we cannot place is one
+    we simply do not sample."""
+
+    try:
+        centroid = getattr(region_obj, "centroid", None)
+        if centroid is not None:
+            lon, lat = float(centroid[0]), float(centroid[1])
+            if lon == lon and lat == lat:  # not NaN
+                return lon, lat
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        lon_min, lat_min, lon_max, lat_max = (float(b) for b in region_obj.bounds)
+        return (lon_min + lon_max) / 2.0, (lat_min + lat_max) / 2.0
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _sample_regions_absent_from_mask(
+    da, countries, unique_regions, produced: set[str]
+) -> tuple[list[dict], int, int]:
+    """Sample the nearest grid cell for every country the mask never named.
+
+    Returns ``(rows, n_sampled, n_unsampled)``. Longitude is already
+    normalised to [-180, 180] by :func:`_prepare_data_array`, so the region
+    centroid and the grid share one convention.
+    """
+
+    masked = {int(n) for n in unique_regions}
+    try:
+        numbers = [int(n) for n in countries.numbers]
+    except Exception:  # noqa: BLE001 - a regions object without numbers
+        return [], 0, 0
+
+    sampled: list[dict] = []
+    unsampled: list[str] = []
+    for number in numbers:
+        if number in masked:
+            continue
+        try:
+            region_obj = countries[number]
+        except (KeyError, IndexError):
+            continue
+        iso3 = _resolve_iso3(
+            (region_obj.abbrev or "").strip(), getattr(region_obj, "name", "")
+        )
+        if not iso3 or len(iso3) != 3:
+            continue
+        iso3 = iso3.upper()
+        if iso3 in produced:
+            continue
+        point = _region_point(region_obj)
+        if point is None:
+            unsampled.append(iso3)
+            continue
+        lon, lat = point
+        try:
+            value = float(da.sel(lat=lat, lon=lon, method="nearest").values)
+        except Exception:  # noqa: BLE001 - an unsamplable point is not fatal
+            unsampled.append(iso3)
+            continue
+        if value != value:  # NaN: the nearest cell carries no value
+            unsampled.append(iso3)
+            continue
+        produced.add(iso3)
+        sampled.append({"iso3": iso3, "anomaly_value": round(value, 4)})
+
+    if sampled:
+        log.info(
+            "NMME nearest-cell sampling: %d countries the mask never named "
+            "gained a value: %s",
+            len(sampled),
+            sorted(r["iso3"] for r in sampled)[:40],
+        )
+    if unsampled:
+        log.info(
+            "NMME: %d countries could be neither masked nor sampled: %s",
+            len(unsampled),
+            sorted(set(unsampled))[:40],
+        )
+    return sampled, len(sampled), len(set(unsampled))
 
 
 def _prepare_data_array(ds):
