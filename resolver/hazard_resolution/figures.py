@@ -90,6 +90,53 @@ def household_multiplier(iso3: str, rulebook: Rulebook) -> tuple[float, str]:
     return float(rulebook.get("reliefweb.household_conversion.default_multiplier")), "default"
 
 
+#: What a figure is attributed to when the document names nobody in the
+#: text. Ordered by how much it says.
+_ATTRIBUTION_FROM_TEXT = "text"
+_ATTRIBUTION_FROM_DOCUMENT = "document"
+_ATTRIBUTION_NONE = "none"
+UNATTRIBUTED = "(unattributed)"
+
+
+def _attribute(figure: "ExtractedFigure") -> tuple[str, str]:
+    """``(stated_by, where it came from)`` for one extracted figure.
+
+    The model's verbatim ``stated_by`` first; the document's own publisher
+    where the text names nobody; ``(unattributed)`` where neither says
+    anything. The second case is an inference and is labelled as one — a
+    reader must be able to tell "the report said UNHCR" from "the report is
+    an OCHA report and said nothing".
+    """
+
+    stated = str(getattr(figure, "stated_by", "") or "").strip()
+    if stated:
+        return stated, _ATTRIBUTION_FROM_TEXT
+    publisher = str(getattr(figure, "doc_publisher", "") or "").strip()
+    if publisher:
+        return publisher, _ATTRIBUTION_FROM_DOCUMENT
+    return UNATTRIBUTED, _ATTRIBUTION_NONE
+
+
+def conversion_for_unit(
+    unit: str | None, iso3: str, rulebook: Rulebook
+) -> tuple[float, str]:
+    """``(factor, origin)`` joining a stated unit to whole persons.
+
+    Every ledger row carries this, accepted or rejected. Before Sept 2026
+    only the accepted household rows did, so 74 household rows and 229
+    person rows went out with an empty factor — and a household count with
+    no factor beside it is either being multiplied by an unrecorded number
+    or read as persons, which is a factor of five either way.
+    """
+
+    if str(unit or "").strip().lower() == UNIT_HOUSEHOLDS:
+        multiplier, origin = household_multiplier(iso3, rulebook)
+        return float(multiplier), origin
+    # A person figure is one person per person. Stated outright so a blank
+    # in this column means "unresolved" and never "trivially one".
+    return 1.0, "identity"
+
+
 def convert_units(
     figure: ExtractedFigure, iso3: str, rulebook: Rulebook
 ) -> tuple[float, dict[str, Any] | None]:
@@ -425,7 +472,18 @@ def build_candidates(
 
     candidates: list[Candidate] = []
     for rank, (figure, value) in enumerate(pairs):
-        tier_rank, tier = authority_tier(figure.stated_by, rulebook)
+        # A figure the model found no in-text attribution for is still
+        # attributable: the DOCUMENT is the attribution. A figure in an OCHA
+        # situation report that names nobody is OCHA's, and treating it as
+        # unattributed put 558 of 950 accepted figures — 59% — outside
+        # `preference_rank`, which exists precisely to rank a named
+        # authority above an unnamed one.
+        #
+        # It is an INFERENCE, not a transcription, so it is labelled: the
+        # detail says whether the attribution came from the text or from the
+        # document, and only the first is what the source stated.
+        stated_by, attribution_source = _attribute(figure)
+        tier_rank, tier = authority_tier(stated_by, rulebook)
         conversion = conversions.get(id(figure))
         candidates.append(
             Candidate(
@@ -436,7 +494,7 @@ def build_candidates(
                 value_type=VALUE_AFFECTED,
                 source=SOURCE,
                 source_ref=_source_ref(figure),
-                stated_by=figure.stated_by or "(unattributed)",
+                stated_by=stated_by,
                 doc_url=figure.doc_url or None,
                 extraction_model=figure.model,
                 preference_rank=rank,
@@ -448,6 +506,7 @@ def build_candidates(
                     "figure_date": figure.date,
                     "cumulative_or_new": figure.cumulative_or_new,
                     "authority_tier": tier,
+                    "stated_by_source": attribution_source,
                     "authority_rank": tier_rank,
                     "doc_id": figure.doc_id,
                     "doc_title": figure.doc_title,
@@ -505,7 +564,18 @@ def _record_figures(
             stated_value=detail.get("stated_value"),
             stated_unit=str(detail.get("unit_as_stated") or ""),
             value_persons=int(round(float(candidate.value))),
-            conversion_factor=conversion.get("multiplier") if conversion else 1.0,
+            conversion_factor=(
+                float(conversion["multiplier"]) if conversion
+                else conversion_for_unit(
+                    detail.get("unit_as_stated"), iso3, rulebook
+                )[0]
+            ),
+            conversion_factor_origin=(
+                str(conversion.get("multiplier_origin") or "") if conversion
+                else conversion_for_unit(
+                    detail.get("unit_as_stated"), iso3, rulebook
+                )[1]
+            ),
             figure_date=str(detail.get("figure_date") or ""),
             doc_date=str(detail.get("doc_date") or ""),
             doc_date_original=str(detail.get("doc_date_original") or ""),
@@ -537,13 +607,31 @@ def _record_figures(
             },
         )
     for entry in rejected:
+        # A rejected figure gets the same unit accounting as an accepted
+        # one. It is still evidence — "306 houses were affected, impacting
+        # 1,917 people" rejected against a ceiling of 20 is a reading a
+        # human has to be able to check — and a blank unit column made 74
+        # household rejections unreadable.
+        factor, factor_origin = conversion_for_unit(
+            entry.get("unit"), iso3, rulebook
+        )
+        stated = entry.get("stated_value", entry.get("value"))
+        persons: int | None = None
+        try:
+            if stated is not None:
+                persons = int(round(float(stated) * factor))
+        except (TypeError, ValueError):
+            persons = None
         cell_ledger.record_figure(
             iso3=iso3, hazard=hazard, ym=ym, outcome="rejected",
             doc_id=str(entry.get("doc_id") or ""),
             value=entry.get("value"),
             unit=str(entry.get("unit") or ""),
-            stated_value=entry.get("stated_value", entry.get("value")),
+            stated_value=stated,
             stated_unit=str(entry.get("unit") or ""),
+            value_persons=persons,
+            conversion_factor=factor,
+            conversion_factor_origin=factor_origin,
             figure_date=str(entry.get("figure_about") or entry.get("figure_date") or ""),
             doc_primary_country=str(entry.get("doc_primary_country") or ""),
             quote=str(entry.get("quote") or ""),

@@ -256,6 +256,24 @@ def parse_archive(
     return events, report
 
 
+def _archive_urls(rulebook: Rulebook) -> list[str]:
+    """Every candidate archive url, in order. ``urls`` first, then ``url``."""
+
+    out: list[str] = []
+    try:
+        listed = rulebook.get("dfo.urls") or []
+    except Exception:  # noqa: BLE001 - an absent optional key is not an error
+        listed = []
+    for candidate in listed:
+        text = str(candidate).strip()
+        if text and text not in out:
+            out.append(text)
+    single = str(rulebook.get("dfo.url") or "").strip()
+    if single and single not in out:
+        out.append(single)
+    return out
+
+
 def fetch_dfo(
     con: "duckdb.DuckDBPyConnection",
     rulebook: Rulebook,
@@ -275,16 +293,33 @@ def fetch_dfo(
             source=SOURCE, ok=False, error="dfo.enabled is false — cross-check not consulted"
         )
 
-    url = str(rulebook.get("dfo.url"))
+    candidates = _archive_urls(rulebook)
     fmt = str(rulebook.get("dfo.format"))
     timeout = float(rulebook.get("dfo.request_timeout_sec"))
     getter = get or _http_get
 
-    try:
-        blob = getter(url, timeout)
-    except Exception as exc:  # noqa: BLE001 - a source outage is data, not a crash
-        LOG.warning("[dfo] archive fetch failed (%s): %s", url, exc)
-        return FetchOutcome(source=SOURCE, ok=False, source_urls=[url], error=str(exc))
+    # A source address is a candidate LIST, not a string: a portal that
+    # moves its download route has not lost its data, and `haz_raw_dfo` has
+    # held 0 rows since the module shipped. The first candidate that fetches
+    # wins; when every one fails the error names each attempt, because "the
+    # archive is unreachable" and "the route moved" want different repairs.
+    blob = None
+    url = candidates[0] if candidates else ""
+    attempts: list[str] = []
+    for candidate in candidates:
+        try:
+            blob = getter(candidate, timeout)
+            url = candidate
+            break
+        except Exception as exc:  # noqa: BLE001 - a source outage is data, not a crash
+            attempts.append(f"{candidate}: {type(exc).__name__}: {exc}")
+            LOG.warning("[dfo] archive fetch failed (%s): %s", candidate, exc)
+    if blob is None:
+        error = "; ".join(attempts) or "no dfo url configured"
+        return FetchOutcome(
+            source=SOURCE, ok=False, source_urls=list(candidates), error=error,
+            detail={"attempts": attempts},
+        )
 
     try:
         events, report = parse_archive(blob, fmt)
@@ -585,7 +620,15 @@ def main(argv: list[str] | None = None) -> int:
             f"({outcome.inserted} new)"
         )
     else:
-        print(f"::warning::DFO archive not fetched: {outcome.error}", file=sys.stderr)
+        # Name the URLs. `haz_raw_dfo` has held 0 rows since the module
+        # shipped and the acceptance report has said the cross-check "may be
+        # unreachable" ever since — without the addresses tried, that
+        # sentence sends a reader nowhere.
+        print(
+            "::warning::DFO archive not fetched: "
+            f"{outcome.error} (tried: {', '.join(outcome.source_urls) or 'nothing'})",
+            file=sys.stderr,
+        )
     return 0
 
 

@@ -187,6 +187,40 @@ class ConflictForecastOrgConnector:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _drop_rows_from_the_wrong_period(df, period_col, iso3_col, issue_date):
+        """Drop a kept row whose period is not the file's own newest period.
+
+        The connector is about to stamp every surviving row with one issue
+        date, so a row from an older period would be stored as the current
+        forecast. Rows are dropped, never rewritten: their period is a fact
+        and the issue date is a fact, and where they disagree the row is not
+        this vintage's.
+
+        The comparison is against the FILE's maximum period rather than
+        against the issue date itself, because the two are in different
+        units (a YYYYMM integer and a file-listing timestamp) and inferring
+        one from the other is exactly the guess this guards against.
+        """
+
+        periods = df[period_col].dropna()
+        if periods.empty:
+            return df
+        newest = periods.max()
+        stale = df[df[period_col] != newest]
+        if not stale.empty:
+            LOG.warning(
+                "[conflictforecast_org] dropping %d row(s) whose %s is not the "
+                "file's newest (%s) while the connector is about to stamp them "
+                "all with issue date %s: %s",
+                len(stale), period_col, newest, issue_date,
+                ", ".join(
+                    f"{row[iso3_col]}@{row[period_col]}"
+                    for _, row in stale.head(8).iterrows()
+                ),
+            )
+        return df[df[period_col] == newest]
+
+    @staticmethod
     def _transform_csv(
         df: pd.DataFrame,
         metric: str,
@@ -311,12 +345,43 @@ class ConflictForecastOrgConnector:
                 value_col, median_val, metric,
             )
 
+        # Keep the LATEST period per country, and say so. Until Sept 2026
+        # this was a bare drop_duplicates(keep="last") with no sort: it kept
+        # 182 of 36,200 rows and worked only because the CSV happens to
+        # arrive in ascending period order per country. The file spans
+        # periods from 201001, so a provider that ever reorders it would
+        # silently store 2010 values as the current forecast and nothing in
+        # the run would notice.
+        period_col = None
+        for col in df.columns:
+            if str(col).strip().lower() in ("period", "ym", "month_id", "time"):
+                period_col = col
+                break
+
         original_len = len(df)
-        df = df.drop_duplicates(subset=[iso3_col], keep="last")
-        LOG.info(
-            "[conflictforecast_org] deduped CSV: kept %d of %d rows (by %s)",
-            len(df), original_len, iso3_col,
-        )
+        if period_col is not None:
+            df = df.sort_values([iso3_col, period_col], kind="mergesort")
+            df = df.drop_duplicates(subset=[iso3_col], keep="last")
+            kept_periods = sorted({str(p) for p in df[period_col].dropna().tolist()})
+            LOG.info(
+                "[conflictforecast_org] deduped CSV: kept %d of %d rows "
+                "(latest %s per %s; kept periods: %s)",
+                len(df), original_len, period_col, iso3_col,
+                ", ".join(kept_periods[:6]) + ("…" if len(kept_periods) > 6 else ""),
+            )
+            # Named on the class, not on self: _transform_csv is a
+            # staticmethod, so `self` does not exist in this scope.
+            df = ConflictForecastOrgConnector._drop_rows_from_the_wrong_period(
+                df, period_col, iso3_col, issue_date
+            )
+        else:
+            df = df.drop_duplicates(subset=[iso3_col], keep="last")
+            LOG.warning(
+                "[conflictforecast_org] no period column in the CSV (columns: %s) "
+                "— deduped %d of %d rows by arrival order, which is a property "
+                "of the file rather than of the data",
+                list(df.columns)[:12], len(df), original_len,
+            )
 
         # Compute target month
         target_year = issue_date.year + (issue_date.month + lead_months - 1) // 12
