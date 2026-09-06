@@ -415,6 +415,7 @@ def finalize_frozen_provisionals(
     con: "duckdb.DuckDBPyConnection",
     *,
     today: dt.date | None = None,
+    rulebook: Rulebook | None = None,
 ) -> int:
     """Flip ``provisional`` to FALSE on rows whose freeze deadline has passed.
 
@@ -429,31 +430,50 @@ def finalize_frozen_provisionals(
 
     This is NOT a revision: values, statuses and provenance are untouched
     (the freeze guard still owns those), only the revisability label moves
-    to match the calendar. Rows with a NULL ``frozen_at`` (pre-migration)
-    are left alone — the freeze guard computes their deadline per-cell.
+    to match the calendar.
+
+    A row with a NULL ``frozen_at`` (pre-migration) used to be left alone,
+    on the reasoning that the freeze guard computes its deadline per-cell —
+    but nothing else ever flips its label, so it stayed provisional forever
+    and never entered a severity quantile. Its deadline is computed here
+    from the same arithmetic the guard uses: month end plus ``freeze_days``.
+
+    Note ``frozen_at`` holds the freeze DEADLINE, not the moment of
+    freezing, so a row for an open month legitimately carries a date in the
+    future. That is what the comparison below is for.
 
     Returns the number of rows finalized.
     """
 
     today = today or _today()
+    if rulebook is None:
+        from resolver.hazard_resolution.rulebook import load_rulebook
+
+        rulebook = load_rulebook()
+    freeze_days = int(rulebook.get("freeze_days"))
+    # COALESCE onto the computed deadline so a pre-migration row is judged
+    # by the same calendar as every other.
+    deadline_sql = (
+        "CAST(COALESCE(frozen_at, "
+        "  last_day(make_date(year, month, 1)) + CAST(? AS INTEGER) * INTERVAL 1 DAY"
+        ") AS DATE)"
+    )
     before = con.execute(
-        """
+        f"""
         SELECT COUNT(*) FROM haz_resolutions
         WHERE COALESCE(provisional, FALSE)
-          AND frozen_at IS NOT NULL
-          AND CAST(frozen_at AS DATE) < ?
+          AND {deadline_sql} < ?
         """,
-        [today],
+        [freeze_days, today],
     ).fetchone()[0]
     if before:
         con.execute(
-            """
+            f"""
             UPDATE haz_resolutions SET provisional = FALSE
             WHERE COALESCE(provisional, FALSE)
-              AND frozen_at IS NOT NULL
-              AND CAST(frozen_at AS DATE) < ?
+              AND {deadline_sql} < ?
             """,
-            [today],
+            [freeze_days, today],
         )
         LOG.info(
             "[resolutions] finalized %d provisional row(s) past their freeze deadline",

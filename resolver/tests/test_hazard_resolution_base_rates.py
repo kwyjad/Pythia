@@ -489,25 +489,64 @@ def test_finalize_flips_provisional_rows_past_their_deadline(con):
     assert row[2] == "RESOLVED_VALUE", "finalization must never touch the status"
 
 
-def test_finalize_leaves_pre_deadline_and_unstamped_rows_alone(con):
+def test_finalize_leaves_a_row_still_inside_its_window_alone(con):
     from resolver.hazard_resolution.resolutions import finalize_frozen_provisionals
 
-    # Still inside its revision window — stays provisional.
+    # frozen_at holds the freeze DEADLINE, not the moment of freezing, so an
+    # open month legitimately carries a date in the future.
     seed_resolution(
         con, iso3="BGD", ym="2026-07", status="RESOLVED_VALUE",
         value=1_000.0, provisional=True, frozen_at="2026-09-29 00:00:00",
     )
-    # Pre-migration row with no stored deadline — left for the per-cell guard.
+
+    n = finalize_frozen_provisionals(con, today=dt.date(2026, 8, 30))
+
+    assert n == 0
+    assert con.execute(
+        "SELECT provisional FROM haz_resolutions WHERE iso3 = 'BGD'"
+    ).fetchone()[0] is True
+
+
+def test_finalize_computes_the_deadline_for_a_row_with_no_stamp(con):
+    """A pre-migration row was left provisional FOREVER.
+
+    ``frozen_at IS NOT NULL`` excluded it, and nothing else ever moves the
+    label — so a 2020 row whose deadline passed six years ago never entered
+    a severity quantile. Its deadline is computed from the same arithmetic
+    the freeze guard uses.
+    """
+
+    from resolver.hazard_resolution.resolutions import finalize_frozen_provisionals
+
     seed_resolution(
         con, iso3="VNM", ym="2020-01", status="RESOLVED_VALUE",
         value=2_000.0, provisional=True, frozen_at=None,
     )
+
     n = finalize_frozen_provisionals(con, today=dt.date(2026, 8, 30))
-    assert n == 0
-    rows = dict(
-        con.execute("SELECT iso3, provisional FROM haz_resolutions").fetchall()
+
+    assert n == 1
+    row = con.execute(
+        "SELECT provisional, value, status FROM haz_resolutions WHERE iso3 = 'VNM'"
+    ).fetchone()
+    assert row[0] is False
+    assert row[1] == 2_000.0, "finalization must never touch the value"
+    assert row[2] == "RESOLVED_VALUE", "finalization must never touch the status"
+
+
+def test_finalize_leaves_an_unstamped_row_inside_its_window_alone(con):
+    from resolver.hazard_resolution.resolutions import finalize_frozen_provisionals
+
+    seed_resolution(
+        con, iso3="PHL", ym="2026-07", status="RESOLVED_VALUE",
+        value=3_000.0, provisional=True, frozen_at=None,
     )
-    assert rows == {"BGD": True, "VNM": True}
+
+    # 2026-07 ends on the 31st; +60 days is 2026-09-29, still ahead.
+    assert finalize_frozen_provisionals(con, today=dt.date(2026, 8, 30)) == 0
+    assert con.execute(
+        "SELECT provisional FROM haz_resolutions WHERE iso3 = 'PHL'"
+    ).fetchone()[0] is True
 
 
 def test_compute_all_finalizes_before_the_severity_quantiles(con, rulebook):

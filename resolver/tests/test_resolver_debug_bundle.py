@@ -920,7 +920,8 @@ def test_freshness_measures_from_the_newest_value_that_has_happened(tmp_path, fu
     # max_value is the newest value at or before now; the 2027 period end is
     # counted under n_future and named, never allowed to set the verdict.
     assert "2027" not in fields[2]
-    assert fields[-2] == "1" and fields[-1].startswith("2027-03-01")
+    # Trailing columns: n_future, max_value_in_future, future_expected.
+    assert fields[-3] == "1" and fields[-2].startswith("2027-03-01")
 
 
 def test_a_table_this_workflow_writes_may_not_be_empty_after_the_run(tmp_path, full_run):
