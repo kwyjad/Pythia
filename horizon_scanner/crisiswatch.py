@@ -977,6 +977,13 @@ def missing_editions(months_back: int = 12) -> List[str]:
     except Exception as exc:  # noqa: BLE001 - a missing table is not a fault here
         log.info("crisiswatch_entries not readable (%s) — no backfill list.", exc)
         return []
+    finally:
+        # Same lifecycle as store_crisiswatch_entries: this module opens and
+        # closes its own handle.
+        try:
+            con.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     present = {(int(r[0]), int(r[1])) for r in rows if r[0] and r[1]}
     missing = [f"{y:04d}-{m:02d}" for (y, m) in sorted(months) if (y, m) not in present]
