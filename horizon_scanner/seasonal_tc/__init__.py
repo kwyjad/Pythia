@@ -364,6 +364,23 @@ def canonical_outlook_row(f: dict) -> dict:
     }
 
 
+def _storm_count(value: object) -> float | None:
+    """The named-storm figure as a number, or None when it says nothing.
+
+    Two outlooks on one date are the same document only if they carry the
+    same figure; a row with no figure can never establish that, so it never
+    supersedes anything.
+    """
+
+    text = str(value if value is not None else "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def store_seasonal_tc_outlooks(outlooks: list[dict]) -> int:
     """Persist seasonal TC outlooks by upsert on the outlook key.
 
@@ -380,12 +397,17 @@ def store_seasonal_tc_outlooks(outlooks: list[dict]) -> int:
     the log says so: a corrected reading replaces a misread one rather than
     sitting beside it.
 
-    The same rule runs the other way round. One DOCUMENT has one category,
-    so a row sharing this row's basin, source, season and issue date under a
-    DIFFERENT category is the same document classified two ways by two
-    versions of the classifier, and is superseded too. NWP/TSR/2026 issued
-    2026-05-11 sat in the table twice — extended_range from July, pre_season
-    from September, both quoting 27 named storms.
+    Two rows sharing basin, source, season and issue date under different
+    categories are one of two things, and the FIGURES say which. Same
+    figures: one document classified two ways by two versions of the
+    classifier — NWP/TSR/2026 issued 2026-05-11 sat in the table as
+    extended_range from July and pre_season from September, both quoting 27
+    named storms — and the newer parse supersedes the older. Different
+    figures: two genuinely different documents, one wearing a misread date
+    (the August Atlantic update stored under the May date beside the real
+    May forecast). Both of those stand, and the contradiction is logged: it
+    is not the store's to settle, and collapsing them would delete a
+    correct row.
 
     A supersede is always scoped to the season being written, so a store can
     never take a row belonging to another season.
@@ -439,37 +461,66 @@ def store_seasonal_tc_outlooks(outlooks: list[dict]) -> int:
                     updated += 1
                 else:
                     inserted += 1
-                # One DOCUMENT per basin, source, season and issue date. A
-                # row sharing all four but carrying a different category is
-                # the same document classified two ways by two versions of
-                # the classifier — NWP/TSR/2026 @ 2026-05-11 sat in the
-                # table twice, once extended_range (fetched July) and once
-                # pre_season (fetched September), both quoting 27 named
-                # storms. The newer parse wins.
+                # Two rows sharing basin, source, season and issue date under
+                # DIFFERENT categories are one of two things, and the FIGURES
+                # say which.
+                #
+                # Same figures: one document classified two ways by two
+                # versions of the classifier. NWP/TSR/2026 @ 2026-05-11 sat in
+                # the table as extended_range (fetched July) and pre_season
+                # (fetched September), both quoting 27 named storms. The
+                # newer parse wins and the older row goes.
+                #
+                # Different figures: two genuinely different documents, one
+                # of them wearing a misread date — the August Atlantic update
+                # stored under the May date beside the real May forecast.
+                # Collapsing those would delete a correct row, so both stand
+                # and the contradiction is logged. It is not ours to settle
+                # from the store.
                 if row["issue_date"]:
-                    miscategorised = con.execute(
-                        "SELECT category FROM seasonal_tc_outlooks WHERE basin = ? "
-                        "AND source = ? AND forecast_season = ? AND issue_date_key = ? "
-                        "AND category <> ?",
+                    same_date = con.execute(
+                        "SELECT category, named_storms_forecast FROM seasonal_tc_outlooks "
+                        "WHERE basin = ? AND source = ? AND forecast_season = ? "
+                        "AND issue_date_key = ? AND category <> ?",
                         [row["basin"], row["source"], row["forecast_season"],
                          row["issue_date_key"], row["category"]],
                     ).fetchall()
-                    if miscategorised:
+                    mine = _storm_count(row["named_storms_forecast"])
+                    duplicates = [
+                        category for category, storms in same_date
+                        if mine is not None and _storm_count(storms) == mine
+                    ]
+                    contradictions = [
+                        category for category, storms in same_date
+                        if category not in duplicates
+                    ]
+                    for category in duplicates:
                         con.execute(
                             "DELETE FROM seasonal_tc_outlooks WHERE basin = ? "
                             "AND source = ? AND forecast_season = ? "
-                            "AND issue_date_key = ? AND category <> ?",
+                            "AND issue_date_key = ? AND category = ?",
                             [row["basin"], row["source"], row["forecast_season"],
-                             row["issue_date_key"], row["category"]],
+                             row["issue_date_key"], category],
                         )
-                        superseded += len(miscategorised)
+                    if duplicates:
+                        superseded += len(duplicates)
                         log.warning(
                             "store_seasonal_tc_outlooks: %s/%s %s issued %s re-parsed "
-                            "as %s; superseded %d earlier row(s) categorised %s — one "
-                            "document has one category",
+                            "as %s; superseded %d earlier row(s) categorised %s — same "
+                            "figures on one date is one document read twice",
                             row["basin"], row["source"], row["forecast_season"],
-                            row["issue_date"], row["category"], len(miscategorised),
-                            ", ".join(str(r[0]) for r in miscategorised),
+                            row["issue_date"], row["category"], len(duplicates),
+                            ", ".join(str(c) for c in duplicates),
+                        )
+                    if contradictions:
+                        log.warning(
+                            "store_seasonal_tc_outlooks: %s/%s %s has %d other "
+                            "outlook(s) on %s with DIFFERENT figures (%s) — two "
+                            "documents, one of them misdated; both kept, because "
+                            "collapsing them would delete a correct row",
+                            row["basin"], row["source"], row["forecast_season"],
+                            len(contradictions), row["issue_date"],
+                            ", ".join(str(c) for c in contradictions),
                         )
                 # One product per basin, source, season and category. A row
                 # for the same product under another issue date is the

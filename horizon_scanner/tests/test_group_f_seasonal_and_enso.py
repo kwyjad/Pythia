@@ -76,6 +76,8 @@ def _rows():
 
 class TestOneDocumentOneRow:
     def test_a_re_categorised_document_supersedes_its_earlier_row(self, db):
+        """Same date, same figures: one document read twice."""
+
         from horizon_scanner.seasonal_tc import store_seasonal_tc_outlooks
 
         store_seasonal_tc_outlooks([_outlook(forecast_type="extended_range")])
@@ -83,10 +85,43 @@ class TestOneDocumentOneRow:
 
         rows = _rows()
         assert len(rows) == 1, (
-            "one basin, one source, one season and one issue date is ONE "
-            "document, and a document has one category"
+            "one basin, one source, one season, one issue date and one storm "
+            "count is ONE document, and a document has one category"
         )
         assert rows[0][3] == "pre_season"
+
+    def test_two_documents_misdated_onto_one_day_both_stand(self, db):
+        """Same date, DIFFERENT figures: two documents, one misdated.
+
+        This is the shape PR #892 was about — the August Atlantic update
+        stored under the May date beside the real May forecast. Collapsing
+        them would delete a correct row, so both stand and the store logs
+        the contradiction.
+        """
+
+        from horizon_scanner.seasonal_tc import store_seasonal_tc_outlooks
+
+        store_seasonal_tc_outlooks([
+            _outlook(basin="ATL", forecast_type="august_update",
+                     issue_date="2026-05-28", named_storms=10),
+            _outlook(basin="ATL", forecast_type="pre_season",
+                     issue_date="2026-05-28", named_storms=11),
+        ])
+
+        assert len(_rows()) == 2
+
+    def test_a_row_with_no_figure_supersedes_nothing(self, db):
+        from horizon_scanner.seasonal_tc import store_seasonal_tc_outlooks
+
+        store_seasonal_tc_outlooks([_outlook(forecast_type="extended_range")])
+        store_seasonal_tc_outlooks([
+            _outlook(forecast_type="pre_season", named_storms=None),
+        ])
+
+        assert len(_rows()) == 2, (
+            "a row carrying no figure cannot establish that it is the same "
+            "document, so it never deletes one"
+        )
 
     def test_two_documents_on_different_dates_both_stand(self, db):
         from horizon_scanner.seasonal_tc import store_seasonal_tc_outlooks
