@@ -58,6 +58,17 @@ concurrency:
         required: false
         default: false
         type: boolean
+      order:
+        description: >-
+          Which end of each hazard's window a time-budgeted night reaches
+          first. "newest" (the default) fills the months the acceptance
+          report, the base rates and the SPD prompt block read; "oldest" is
+          the pre-Sept-2026 walk, which left cyclone's acceptance window
+          holding a single month.
+        required: false
+        default: "newest"
+        type: choice
+        options: ["newest", "oldest"]
       no_resume_hazards:
         description: >-
           Hazards to re-walk from the start of their window, ignoring the
@@ -221,6 +232,7 @@ jobs:
           NO_EXTRACT: ${{ github.event_name == 'workflow_dispatch' && (inputs.no_extract == true || inputs.no_extract == 'true') && 'true' || 'false' }}
           TIME_BUDGET_MIN: ${{ inputs.time_budget_min || '240' }}
           NO_RESUME_HAZARDS: ${{ inputs.no_resume_hazards || '' }}
+          WALK_ORDER: ${{ inputs.order || 'newest' }}
         run: |
           set -uo pipefail
           # Re-assigning from the env (with the same default the env mapping
@@ -231,7 +243,7 @@ jobs:
           echo "Backcasting: ${HAZARDS} | ${PER_HAZARD} min each of ${TIME_BUDGET_MIN} total"
           FAILED=0
           for HZ in ${HAZARDS}; do
-            CMD="python -m resolver.hazard_resolution.backcast --hazard ${HZ} --time-budget-min ${PER_HAZARD} --summary-out diagnostics/haz_backcast_${HZ}.json"
+            CMD="python -m resolver.hazard_resolution.backcast --hazard ${HZ} --order ${WALK_ORDER} --time-budget-min ${PER_HAZARD} --summary-out diagnostics/haz_backcast_${HZ}.json"
             if [ -n "${FROM_YM}" ]; then
               CMD="${CMD} --from ${FROM_YM}"
             fi

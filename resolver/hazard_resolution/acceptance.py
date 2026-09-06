@@ -75,6 +75,10 @@ class HazardRates:
 
     hazard: str
     cells_assessed: int = 0
+    #: Distinct months of the window this hazard has trigger rows for. A
+    #: rate over one month printed under a twelve-month heading is not a
+    #: twelve-month rate, and nothing in the report used to say which.
+    months_present: int = 0
     resolved_value: int = 0
     resolved_zero: int = 0
     no_data: int = 0
@@ -137,6 +141,8 @@ class AcceptanceResult:
             total.flagged += rates.flagged
             total.lower_bound += rates.lower_bound
             total.ifrc_go_only_cells += rates.ifrc_go_only_cells
+            # The roll-up covers a month as soon as ANY hazard does.
+            total.months_present = max(total.months_present, rates.months_present)
         return total
 
 
@@ -206,6 +212,13 @@ def compute_rates(
         rates.cells_assessed = int(
             con.execute(
                 f"SELECT COUNT(*) FROM haz_triggers WHERE hazard = ? AND {_WINDOW_SQL}",
+                [hazard, *bounds],
+            ).fetchone()[0]
+        )
+        rates.months_present = int(
+            con.execute(
+                f"SELECT COUNT(DISTINCT year * 100 + month) FROM haz_triggers "
+                f"WHERE hazard = ? AND {_WINDOW_SQL}",
                 [hazard, *bounds],
             ).fetchone()[0]
         )
@@ -512,23 +525,42 @@ def _render_rates(result: AcceptanceResult) -> list[str]:
         "assessed* — every country-month-hazard with a detection verdict — so "
         "a cell that produced no row at all counts against the rate.",
         "",
-        "| hazard | cells assessed | resolved | rate | value | zero | no-data | no row | IFRC-GO-only baseline |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| hazard | months in window | cells assessed | resolved | rate | value | zero | no-data | no row | IFRC-GO-only baseline |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
+    short: list[str] = []
     for hazard, rates in sorted(result.rates.items()):
+        months_cell = f"{rates.months_present} of {result.months}"
+        if rates.months_present < result.months:
+            months_cell = f"**{months_cell}**"
+            short.append(
+                f"{hazard} ({rates.months_present} of {result.months})"
+            )
         lines.append(
-            f"| {hazard} | {rates.cells_assessed:,} | {rates.resolved:,} | "
+            f"| {hazard} | {months_cell} | {rates.cells_assessed:,} | "
+            f"{rates.resolved:,} | "
             f"**{_pct(rates.rate_pct)}** | {rates.resolved_value:,} | "
             f"{rates.resolved_zero:,} | {rates.no_data:,} | {rates.no_row:,} | "
             f"{_pct(rates.baseline_pct)} |"
         )
     total = result.overall
     lines.append(
-        f"| **all** | {total.cells_assessed:,} | {total.resolved:,} | "
+        f"| **all** | {total.months_present} of {result.months} | "
+        f"{total.cells_assessed:,} | {total.resolved:,} | "
         f"**{_pct(total.rate_pct)}** | {total.resolved_value:,} | "
         f"{total.resolved_zero:,} | {total.no_data:,} | {total.no_row:,} | "
         f"{_pct(total.baseline_pct)} |"
     )
+    if short:
+        lines += [
+            "",
+            "> **These rates do not cover the window they are printed under.** "
+            + ", ".join(short)
+            + " have trigger rows for fewer months than the window holds, so "
+            "the rate beside them is computed over the months present, not "
+            "over the window. The backcast has not reached the rest. The "
+            "number is not adjusted to hide the gap; the gap is named.",
+        ]
     lines += [
         "",
         f"The *IFRC-GO-only baseline* column is recomputed from this database: "
