@@ -1845,10 +1845,20 @@ class BundleBuilder:
                 "a tracked source file was modified on the runner: "
                 + "; ".join(info.get("tracked_changes") or [])[:300],
             )
+        # The exclusion is stated, never silent: a reader must be able to see
+        # which tracked files the run rewrote on purpose.
+        n_expected = int(info.get("n_expected_tracked_changes") or 0)
+        expected_note = (
+            f", {n_expected} expected refresh(es): "
+            + ", ".join(info.get("expected_tracked_changes") or [])
+            if n_expected
+            else ""
+        )
         return self._check(
             name, "PASS", head, sha,
-            f"HEAD == GITHUB_SHA, no tracked changes, "
-            f"{info.get('n_untracked_files')} untracked output file(s)",
+            f"HEAD == GITHUB_SHA, no unexpected tracked changes, "
+            f"{info.get('n_untracked_files')} untracked output file(s)"
+            + expected_note,
         )
 
     def _check_every_db_query_names_real_columns(self) -> None:
