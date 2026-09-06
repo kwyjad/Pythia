@@ -354,6 +354,7 @@ def apply_ceiling(
                 "ceiling_source": basis.get("source"),
                 "ceiling_source_ref": basis.get("source_ref"),
                 "ceiling_field": basis.get("field"),
+                "ceiling_basis": basis.get("basis"),
                 "ceiling_events_seen": basis.get("n_events"),
                 "ceiling_events_with_exposure": basis.get("n_events_with_exposure"),
             }
@@ -512,15 +513,27 @@ def _record_figures(
             stated_by=candidate.stated_by,
             quote=str(detail.get("quote") or ""),
             ceiling=exposure_ceiling,
-            ceiling_multiplier=multiplier,
+            ceiling_multiplier=multiplier if exposure_ceiling is not None else None,
             ceiling_source=ceiling_basis.get("source"),
             ceiling_source_ref=ceiling_basis.get("source_ref"),
             ceiling_field=ceiling_basis.get("field"),
+            ceiling_basis=ceiling_basis.get("basis"),
             preference_rank=candidate.preference_rank,
             detail={
                 "authority_tier": detail.get("authority_tier"),
                 "household_conversion": detail.get("household_conversion"),
                 "figure_date": detail.get("figure_date"),
+                # Why a blank ceiling is blank. Without these a reader
+                # cannot tell "GDACS listed no event" from "GDACS listed
+                # events and described none of them", and only the second
+                # is an enrichment failure to chase.
+                "ceiling_events_seen": ceiling_basis.get("n_events"),
+                "ceiling_events_with_exposure": ceiling_basis.get(
+                    "n_events_with_exposure"
+                ),
+                "ceiling_events_below_plausible_floor": ceiling_basis.get(
+                    "n_events_below_plausible_floor"
+                ),
             },
         )
     for entry in rejected:
@@ -542,6 +555,7 @@ def _record_figures(
                 "ceiling_source_ref", ceiling_basis.get("source_ref")
             ),
             ceiling_field=entry.get("ceiling_field", ceiling_basis.get("field")),
+            ceiling_basis=entry.get("ceiling_basis", ceiling_basis.get("basis")),
             detail={
                 k: v
                 for k, v in entry.items()
@@ -550,6 +564,7 @@ def _record_figures(
                     "doc_id", "value", "unit", "quote", "reason",
                     "exposed_population", "ceiling_multiplier",
                     "ceiling_source", "ceiling_source_ref", "ceiling_field",
+                    "ceiling_basis",
                 }
             },
         )

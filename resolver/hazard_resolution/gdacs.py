@@ -277,6 +277,59 @@ def _iso3s_near_event(
     return resolved
 
 
+def _carry_forward_exposure(
+    con: "duckdb.DuckDBPyConnection", records: list[RawRecord]
+) -> int:
+    """Fill a record's missing exposure from the newest stored revision.
+
+    Returns how many records were filled. A record whose exposure this run
+    could not read (the per-event RSS was refused, 404ed, or carried no
+    figure) keeps whatever the cache already knows, labelled
+    ``exposed_population_source = "cache"`` with the retrieval timestamp of
+    the revision it came from — a STALE figure is worth more than none, and
+    only worth anything if it says it is stale.
+
+    Never raises: an unreadable cache leaves the records exactly as they are.
+    """
+
+    missing = [r for r in records if not float(r.payload.get("exposed_population") or 0.0) > 0]
+    if not missing:
+        return 0
+    try:
+        cached = {
+            str(row.get("_record_id")): row
+            for row in load_raw_records(con, SOURCE)
+        }
+    except Exception as exc:  # noqa: BLE001 - a cache we cannot read decides nothing
+        LOG.warning("[gdacs] could not read the exposure cache: %s", exc)
+        return 0
+
+    filled = 0
+    for record in missing:
+        previous = cached.get(record.record_id)
+        if previous is None:
+            continue
+        try:
+            value = float(previous.get("exposed_population") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0:
+            continue
+        record.payload["exposed_population"] = value
+        for key in (
+            "exposed_population_unit", "exposed_population_text",
+            "exposed_population_raw", "exposed_population_parse",
+        ):
+            if previous.get(key):
+                record.payload[key] = previous[key]
+        record.payload["exposed_population_source"] = "cache"
+        record.payload["exposed_population_cached_at"] = str(
+            previous.get("_retrieved_at") or ""
+        )
+        filled += 1
+    return filled
+
+
 def fetch_gdacs_events(
     con: "duckdb.DuckDBPyConnection",
     ym: str,
@@ -340,16 +393,31 @@ def fetch_gdacs_events(
             continue
         if record is not None:
             records.append(record)
+    # A run GDACS refused to enrich must not overwrite a stored exposure
+    # with a zero. The raw cache keeps every revision and readers take the
+    # newest, so a throttled run appending a figure-less revision of an
+    # event we already have a figure for is data loss dressed as a refresh.
+    carried = _carry_forward_exposure(con, records)
+
     stored = store_raw_records(con, SOURCE, records)
     outcome.ok = True
     outcome.records = stored["records"]
     outcome.inserted = stored["inserted"]
+    refused = sum(1 for e in events if e.get("population_refused"))
     outcome.detail = {
         "window": {"from": start.isoformat(), "to": end.isoformat()},
         "events_discovered": len(events),
         "events_skipped_malformed": skipped_malformed,
+        "events_enrichment_refused": refused,
+        "events_exposure_carried_from_cache": carried,
         "hazard": hazard,
     }
+    if refused or carried:
+        LOG.warning(
+            "[gdacs] %s %s: %d event(s) refused enrichment; %d kept an "
+            "exposure figure from the cache rather than losing it",
+            hazard, ym, refused, carried,
+        )
     LOG.info(
         "[gdacs] %s %s: %d events in %s..%s (%d stored, %d new)",
         hazard, ym, len(events), start, end, stored["records"], stored["inserted"],
