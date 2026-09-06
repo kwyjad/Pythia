@@ -14,6 +14,11 @@ on:
       - "scripts/ci/snapshot_prompt_artifact.py"
       - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
       - "resolver/tests/test_hs_hazard_tail_packs_schema_and_writer.py"
+      # horizon_scanner/tests/test_group_h_context_sources.py loads the
+      # CrisisWatch refresh script by path and exercises pythia/acaps.py
+      # helpers, so a change to either must re-run this suite.
+      - "scripts/refresh_crisiswatch.py"
+      - "pythia/acaps.py"
       # More resolver/tests files that guard horizon_scanner/. resolver-ci-fast
       # runs them but triggers only on resolver/**, so a horizon_scanner-only PR
       # re-ran none of them. test_ci_shell_sanity.py enforces this wiring.
@@ -34,6 +39,11 @@ on:
       - "scripts/ci/snapshot_prompt_artifact.py"
       - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
       - "resolver/tests/test_hs_hazard_tail_packs_schema_and_writer.py"
+      # horizon_scanner/tests/test_group_h_context_sources.py loads the
+      # CrisisWatch refresh script by path and exercises pythia/acaps.py
+      # helpers, so a change to either must re-run this suite.
+      - "scripts/refresh_crisiswatch.py"
+      - "pythia/acaps.py"
       # More resolver/tests files that guard horizon_scanner/. resolver-ci-fast
       # runs them but triggers only on resolver/**, so a horizon_scanner-only PR
       # re-ran none of them. test_ci_shell_sanity.py enforces this wiring.

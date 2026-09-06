@@ -939,6 +939,39 @@ jobs:
             --expect-edition-by-day 7 \
             --verbose 2>&1 | tee diagnostics/phase4_crisiswatch_refresh.log
 
+      # A month whose refresh never ran is a permanent hole: the monthly
+      # path only ever takes the NEWEST Wayback snapshot, so nothing in the
+      # pipeline ever goes back for March. The 2026 run had four such holes
+      # (2026-03, -04, -05, -07). This asks the table which editions in the
+      # last year it has no row for, recovers those from the archive, and
+      # stores each one. Nothing writes crisiswatch_latest.json, so the
+      # latest-edition guard is untouched; a hole the archive cannot fill is
+      # named and the step still passes.
+      - name: "Phase 4: Backfill missing CrisisWatch editions"
+        timeout-minutes: 25
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'crisiswatch') }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          MISSING=$(python -c "
+          from horizon_scanner.crisiswatch import missing_editions
+          print(','.join(missing_editions(12)))
+          " 2>/dev/null | tail -1 || true)
+          MISSING="${MISSING:-}"
+          if [ -z "$MISSING" ]; then
+            echo "[crisiswatch] no missing editions in the last 12 months"
+            exit 0
+          fi
+          echo "[crisiswatch] backfilling editions: ${MISSING}"
+          python -m scripts.refresh_crisiswatch \
+            --backfill-editions "$MISSING" \
+            --verbose 2>&1 | tee diagnostics/phase4_crisiswatch_backfill.log || true
+          python -c "
+          from horizon_scanner.crisiswatch import store_backfilled_editions
+          out = store_backfilled_editions()
+          print(f'BACKFILL_ROWS={out[\"rows\"]} FILES={out[\"files\"]}')
+          " 2>&1 | tee -a diagnostics/phase4_crisiswatch_backfill.log || true
+
       - name: "Phase 4: Store CrisisWatch"
         timeout-minutes: 15
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'crisiswatch') }}

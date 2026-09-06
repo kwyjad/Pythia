@@ -62,6 +62,7 @@ unresolved rather than becoming false zeros.
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import logging
 import os
@@ -546,6 +547,13 @@ def run_cyclone_month(
     # step hid 756 unresolved cells.
     reason = wrote_nothing_because_a_source_was_unreadable(ladder)
     if reason and not dry_run:
+        if not month_has_ended(ym):
+            LOG.info(
+                "[cli] %s %s wrote nothing yet: %s. The month is still in "
+                "progress, so every cell is legitimately PENDING — exit 0.",
+                result.hazard, ym, reason,
+            )
+            return 0
         LOG.error("[cli] %s %s resolved nothing: %s", result.hazard, ym, reason)
         return 1
     return 0
@@ -667,9 +675,36 @@ def run_flood_month(
     # unresolved cells.
     reason = wrote_nothing_because_a_source_was_unreadable(ladder)
     if reason and not dry_run:
+        if not month_has_ended(ym):
+            LOG.info(
+                "[cli] %s %s wrote nothing yet: %s. The month is still in "
+                "progress, so every cell is legitimately PENDING — exit 0.",
+                hazard, ym, reason,
+            )
+            return 0
         LOG.error("[cli] %s %s resolved nothing: %s", hazard, ym, reason)
         return 1
     return 0
+
+
+def month_has_ended(ym: str, today: date | None = None) -> bool:
+    """True when every day of *ym* is in the past.
+
+    A month still running has no unresolved cells to complain about: every
+    one of them is legitimately PENDING and no re-run can change that until
+    the calendar does. Treating it as a failure turned the cyclone job red
+    on the first of the month, every month, for a run that had done exactly
+    what it should.
+    """
+
+    try:
+        year, month = (int(part) for part in str(ym).split("-", 1))
+        last_day = calendar.monthrange(year, month)[1]
+        end = date(year, month, last_day)
+    except (TypeError, ValueError):
+        # An unparseable label is not evidence the month is still running.
+        return True
+    return (today or date.today()) > end
 
 
 def wrote_nothing_because_a_source_was_unreadable(run) -> str:
@@ -854,6 +889,13 @@ def run_drought_month(
     # month of drought disappear behind a green step.
     reason = wrote_nothing_because_a_source_was_unreadable(run)
     if reason and not dry_run:
+        if not month_has_ended(ym):
+            LOG.info(
+                "[cli] drought %s wrote nothing yet: %s. The month is still "
+                "in progress, so every cell is legitimately PENDING — exit 0.",
+                ym, reason,
+            )
+            return 0
         LOG.error("[cli] drought %s resolved nothing: %s", ym, reason)
         return 1
     return 0

@@ -2273,67 +2273,12 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
             },
         )
 
-        _ensure_table_and_columns(
-            con,
-            "gtmc1_runs",
-            """
-            CREATE TABLE IF NOT EXISTS gtmc1_runs (
-                gtmc1_run_id TEXT,
-                run_id TEXT,
-                question_id TEXT,
-                active BOOLEAN,
-                gtmc1_prob DOUBLE,
-                coalition_rate DOUBLE,
-                dispersion DOUBLE,
-                median_of_final_medians DOUBLE,
-                exceedance_ge_50 DOUBLE,
-                num_runs INTEGER,
-                median_rounds INTEGER,
-                raw_reason TEXT,
-                runs_ref TEXT,
-                meta_json TEXT
-            );
-            """,
-            {
-                "gtmc1_run_id": "TEXT",
-                "run_id": "TEXT",
-                "question_id": "TEXT",
-                "active": "BOOLEAN",
-                "gtmc1_prob": "DOUBLE",
-                "coalition_rate": "DOUBLE",
-                "dispersion": "DOUBLE",
-                "median_of_final_medians": "DOUBLE",
-                "exceedance_ge_50": "DOUBLE",
-                "num_runs": "INTEGER",
-                "median_rounds": "INTEGER",
-                "raw_reason": "TEXT",
-                "runs_ref": "TEXT",
-                "meta_json": "TEXT",
-            },
-        )
-
-        _ensure_table_and_columns(
-            con,
-            "gtmc1_actors",
-            """
-            CREATE TABLE IF NOT EXISTS gtmc1_actors (
-                gtmc1_run_id TEXT,
-                actor_name TEXT,
-                position DOUBLE,
-                capability DOUBLE,
-                salience DOUBLE,
-                risk_threshold DOUBLE
-            );
-            """,
-            {
-                "gtmc1_run_id": "TEXT",
-                "actor_name": "TEXT",
-                "position": "DOUBLE",
-                "capability": "DOUBLE",
-                "salience": "DOUBLE",
-                "risk_threshold": "DOUBLE",
-            },
-        )
+        # ``gtmc1_runs`` and ``gtmc1_actors`` used to be declared here. Nothing
+        # has ever written either, so every connection created them and
+        # ``drop_dead_tables`` dropped them again a moment later — churn that
+        # cost a little time on every open and taught the empty-table check to
+        # be ignored. They stay in ``DEAD_TABLES`` so an old database still
+        # loses them; they are simply no longer created.
 
         _ensure_table_and_columns(
             con,
