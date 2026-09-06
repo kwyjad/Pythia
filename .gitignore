@@ -188,3 +188,14 @@ data/resolver.duckdb.local.dev
 tools/make_zip_from_list.py
 tools/make_zip_from_list.py
 /.claude/worktrees
+
+# Runner output that used to be tracked (H5): a debug dump and a connector
+# diagnostic, both written by every run and read by nobody. Tracking them
+# made every CI checkout report a dirty tree, which is how a REAL tracked
+# change goes unnoticed.
+horizon_scanner/data/crisiswatch_debug.html
+resolver/diagnostics/ingestion/acled/http_diag.json
+
+# Editions recovered by refresh_crisiswatch.py --backfill-editions. They are
+# stored into DuckDB by the same run; the file is the transport, not a record.
+horizon_scanner/data/crisiswatch_editions/

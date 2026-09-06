@@ -647,11 +647,13 @@ def entry_content_hash(entry: Dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _load_from_json() -> Dict[str, Any] | None:
-    """Load CrisisWatch data from the scraped JSON file (primary source).
+def _load_from_json(path: Path | None = None) -> Dict[str, Any] | None:
+    """Load CrisisWatch data from a scraped JSON file (primary source).
 
-    Reads ``horizon_scanner/data/crisiswatch_latest.json`` produced by the
-    Playwright scraper (``scripts/refresh_crisiswatch.py``).  If the file's
+    Reads ``horizon_scanner/data/crisiswatch_latest.json`` by default, or
+    *path* — which is how a backfilled edition recovered by
+    ``scripts/refresh_crisiswatch.py --backfill-editions`` reaches the
+    table without disturbing the latest-edition file.  If the file's
     ``fetched_at`` timestamp is older than ``_STALENESS_DAYS``, a warning is
     logged but the data is still returned (stale data is better than none).
 
@@ -659,11 +661,12 @@ def _load_from_json() -> Dict[str, Any] | None:
     ``get_horizon_countries()`` and ``format_crisiswatch_for_prompt()``, or
     ``None`` if the file is missing / unparseable / empty.
     """
-    if not _FALLBACK_PATH.exists():
-        log.debug("CrisisWatch JSON file not found at %s", _FALLBACK_PATH)
+    source_path = Path(path) if path is not None else _FALLBACK_PATH
+    if not source_path.exists():
+        log.debug("CrisisWatch JSON file not found at %s", source_path)
         return None
     try:
-        data = json.loads(_FALLBACK_PATH.read_text(encoding="utf-8"))
+        data = json.loads(source_path.read_text(encoding="utf-8"))
         entries = data.get("entries", [])
         if not entries:
             log.debug("CrisisWatch JSON file has no entries.")
@@ -883,8 +886,8 @@ def store_crisiswatch_entries(entries: Dict[str, Any]) -> Dict[str, Any]:
     return counts
 
 
-def bulk_store_crisiswatch() -> int:
-    """Load CrisisWatch from JSON file and persist to DuckDB.
+def bulk_store_crisiswatch(path: Path | str | None = None) -> int:
+    """Load CrisisWatch from a JSON file and persist to DuckDB.
 
     Convenience function for the backfill workflow::
 
@@ -893,9 +896,12 @@ def bulk_store_crisiswatch() -> int:
     Returns the number of entries stored (0 on failure).
     """
     try:
-        data = _load_from_json()
+        data = _load_from_json(Path(path) if path is not None else None)
         if not data:
-            log.warning("bulk_store_crisiswatch: no data loaded from JSON file.")
+            log.warning(
+                "bulk_store_crisiswatch: no data loaded from %s.",
+                path or _FALLBACK_PATH,
+            )
             return 0
         counts = store_crisiswatch_entries(data)
         accounting = load_accounting()
@@ -921,6 +927,95 @@ def bulk_store_crisiswatch() -> int:
     except Exception as exc:
         log.warning("bulk_store_crisiswatch failed: %s", exc)
         return 0
+
+
+#: Where ``scripts/refresh_crisiswatch.py --backfill-editions`` leaves a
+#: recovered edition. Kept beside the reader so the two halves of the
+#: backfill cannot drift apart.
+BACKFILL_DIR = _DATA_DIR / "crisiswatch_editions"
+
+
+def missing_editions(months_back: int = 12) -> List[str]:
+    """Return ``YYYY-MM`` months in the window that ``crisiswatch_entries`` has no row for.
+
+    The window ends at the PREVIOUS complete month: ICG publishes an
+    edition in the first days of the month after the one it describes, so
+    the current month is legitimately absent and naming it would send the
+    backfill after something that does not exist yet.
+
+    Returns ``[]`` when the table cannot be read — a backfill that cannot
+    tell what is missing must ask for nothing, not for everything.
+    """
+
+    try:
+        from pythia.db.schema import connect
+    except ImportError:
+        log.debug("Pythia DB helpers unavailable — cannot list missing editions.")
+        return []
+
+    today = datetime.now(timezone.utc).date()
+    # Walk back from the previous complete month.
+    year, month = today.year, today.month
+    months: List[tuple] = []
+    for _ in range(max(0, int(months_back))):
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+        months.append((year, month))
+    if not months:
+        return []
+
+    try:
+        con = connect(read_only=False)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not connect to DuckDB to list missing editions: %s", exc)
+        return []
+    try:
+        rows = con.execute(
+            "SELECT DISTINCT year, month FROM crisiswatch_entries"
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - a missing table is not a fault here
+        log.info("crisiswatch_entries not readable (%s) — no backfill list.", exc)
+        return []
+
+    present = {(int(r[0]), int(r[1])) for r in rows if r[0] and r[1]}
+    missing = [f"{y:04d}-{m:02d}" for (y, m) in sorted(months) if (y, m) not in present]
+    log.info(
+        "CrisisWatch editions in the last %d months: %d present, %d missing%s",
+        len(months), len(months) - len(missing), len(missing),
+        (" (" + ", ".join(missing) + ")") if missing else "",
+    )
+    return missing
+
+
+def store_backfilled_editions(directory: Path | str | None = None) -> Dict[str, Any]:
+    """Store every recovered edition JSON in *directory* into the table.
+
+    One file per edition, each stored through the same change-aware writer
+    the monthly refresh uses, so a re-run is a no-op. Never raises; returns
+    ``{"files": n, "rows": n, "per_file": {...}}``.
+    """
+
+    target = Path(directory) if directory is not None else BACKFILL_DIR
+    outcome: Dict[str, Any] = {"files": 0, "rows": 0, "per_file": {}}
+    if not target.exists():
+        log.info("No backfilled CrisisWatch editions at %s", target)
+        return outcome
+    for path in sorted(target.glob("crisiswatch_*.json")):
+        outcome["files"] += 1
+        try:
+            rows = bulk_store_crisiswatch(path)
+        except Exception as exc:  # noqa: BLE001 - one bad file is not the set
+            log.warning("Could not store backfilled edition %s: %s", path, exc)
+            outcome["per_file"][path.name] = f"error: {exc}"
+            continue
+        outcome["per_file"][path.name] = rows
+        outcome["rows"] += int(rows or 0)
+    log.info(
+        "Stored %d backfilled CrisisWatch edition(s), %d rows held in total",
+        outcome["files"], outcome["rows"],
+    )
+    return outcome
 
 
 def _record_store_accounting(record: Dict[str, Any]) -> None:

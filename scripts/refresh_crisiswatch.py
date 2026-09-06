@@ -1125,11 +1125,17 @@ def _parse_country_entries(
         if not country_name:
             continue
 
-        iso3 = _resolve_iso3(country_name)
-        if not iso3:
+        # A regional heading is not a country and is never meant to resolve:
+        # _REGIONAL_ENTRY_MAP expands it into its member states a few lines
+        # below. Warning here made "Nile Waters" and "Korean Peninsula" look
+        # like parse failures in every single run, which is how a real
+        # unmatched country goes unread.
+        is_regional = country_name in _REGIONAL_ENTRY_MAP
+        iso3 = "" if is_regional else (_resolve_iso3(country_name) or "")
+        if not iso3 and not is_regional:
             # Try cleaning up: "Israel/Palestine", "India (Jammu and Kashmir)"
             clean_name = re.sub(r"\s*\(.*?\)\s*", "", country_name).strip()
-            iso3 = _resolve_iso3(clean_name)
+            iso3 = _resolve_iso3(clean_name) or ""
             if not iso3:
                 log.warning(
                     "Unmatched country: '%s' (slug=%s)",
@@ -1198,7 +1204,7 @@ def _parse_country_entries(
         # Each expanded row is stamped with the heading it came from, so the
         # consumer can tell a country's own entry from a regional one and
         # merge rather than overwrite (see crisiswatch._merge_country_rows).
-        if country_name in _REGIONAL_ENTRY_MAP:
+        if is_regional:
             for sub_country, sub_iso3 in _REGIONAL_ENTRY_MAP[country_name]:
                 entries.append({
                     "country": sub_country,
@@ -1207,6 +1213,7 @@ def _parse_country_entries(
                     "alert_type": alert_type,
                     "summary": summary,
                     "regional_source": country_name,
+                    "iso3_reason": "regional_expansion",
                 })
             log.info(
                 "Expanded regional entry '%s' into %d countries",
@@ -1233,6 +1240,206 @@ def _parse_country_entries(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+
+#: Where ``--backfill-editions`` puts a recovered edition. Deliberately NOT
+#: ``crisiswatch_latest.json``: that file is the LATEST edition and a
+#: recovered March must never overwrite it.
+_DEFAULT_BACKFILL_DIR = Path("horizon_scanner/data/crisiswatch_editions")
+
+
+def _wanted_editions(spec: str) -> list[tuple[int, int]]:
+    """Parse ``"2026-03,2026-04"`` into ``[(2026, 3), (2026, 4)]``."""
+
+    wanted: list[tuple[int, int]] = []
+    for chunk in str(spec or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        m = re.fullmatch(r"(\d{4})-(\d{1,2})", chunk)
+        if not m:
+            raise ValueError(f"not a YYYY-MM edition: {chunk!r}")
+        year, month = int(m.group(1)), int(m.group(2))
+        if not 1 <= month <= 12:
+            raise ValueError(f"month out of range: {chunk!r}")
+        wanted.append((year, month))
+    return wanted
+
+
+def backfill_editions(
+    spec: str,
+    *,
+    backfill_dir: Path = _DEFAULT_BACKFILL_DIR,
+    lookback_days: int = 730,
+    timeout_sec: int = 120,
+) -> dict[str, Any]:
+    """Recover named editions from the Wayback archive, one JSON each.
+
+    The monthly refresh only ever takes the newest snapshot, so a month
+    whose refresh never ran is a permanent hole: nothing in the pipeline
+    goes back for it. This walks the archive OLDEST-first over a long
+    window and keeps the first snapshot whose parsed edition month is one
+    of the wanted ones — oldest-first because the earliest capture of an
+    edition is the one least likely to have been superseded on the page by
+    the next month.
+
+    Writes ``crisiswatch_YYYY-MM.json`` per recovered edition and never
+    touches ``crisiswatch_latest.json``. Returns the accounting; never
+    raises on a single snapshot's failure.
+    """
+
+    wanted = set(_wanted_editions(spec))
+    result: dict[str, Any] = {
+        "wanted": sorted(f"{y:04d}-{m:02d}" for y, m in wanted),
+        "recovered": [],
+        "written": {},
+        "snapshots_tried": 0,
+        "still_missing": [],
+    }
+    if not wanted:
+        log.warning("--backfill-editions given no editions; nothing to do")
+        return result
+
+    snapshots = _list_wayback_snapshots(
+        lookback_days=lookback_days, timeout_sec=timeout_sec,
+    )
+    if not snapshots:
+        log.error(
+            "No Wayback snapshots in the last %d days — cannot backfill %s",
+            lookback_days, ", ".join(result["wanted"]),
+        )
+        result["still_missing"] = list(result["wanted"])
+        return result
+
+    backfill_dir.mkdir(parents=True, exist_ok=True)
+    outstanding = set(wanted)
+    # Oldest first: 14-digit timestamps sort chronologically as strings.
+    for timestamp in sorted(snapshots):
+        if not outstanding:
+            break
+        result["snapshots_tried"] += 1
+        try:
+            html = _fetch_snapshot_html(timestamp, timeout_sec=timeout_sec)
+        except Exception as exc:  # noqa: BLE001 - one bad capture is not fatal
+            log.warning("Snapshot %s could not be fetched: %s", timestamp, exc)
+            continue
+        if html is None:
+            continue
+        try:
+            data = parse_edition(html, provenance=f"wayback:{timestamp}")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Snapshot %s could not be parsed: %s", timestamp, exc)
+            continue
+        key = _edition_key(data.get("month", ""), int(data.get("year") or 0))
+        if key is None:
+            log.info("Snapshot %s carries no parseable edition month", timestamp)
+            continue
+        if key not in outstanding:
+            log.debug(
+                "Snapshot %s carries edition %04d-%02d — not wanted",
+                timestamp, key[0], key[1],
+            )
+            continue
+        entries = data.get("entries") or []
+        resolved = int(data.get("parse_accounting", {}).get("resolved_iso3", 0))
+        if not entries or resolved == 0:
+            log.warning(
+                "Snapshot %s parsed edition %04d-%02d with %d entries and %d "
+                "resolved ISO3s — refusing to write an empty edition",
+                timestamp, key[0], key[1], len(entries), resolved,
+            )
+            continue
+        dest = backfill_dir / f"crisiswatch_{key[0]:04d}-{key[1]:02d}.json"
+        dest.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n",
+            encoding="utf-8",
+        )
+        outstanding.discard(key)
+        label = f"{key[0]:04d}-{key[1]:02d}"
+        result["recovered"].append(label)
+        result["written"][label] = str(dest)
+        log.info(
+            "Recovered edition %s from snapshot %s: %d entries (%d resolved) -> %s",
+            label, timestamp, len(entries), resolved, dest,
+        )
+
+    result["still_missing"] = sorted(f"{y:04d}-{m:02d}" for y, m in outstanding)
+    if result["still_missing"]:
+        log.warning(
+            "Backfill recovered %d of %d editions; no snapshot in the last "
+            "%d days carried %s",
+            len(result["recovered"]), len(wanted), lookback_days,
+            ", ".join(result["still_missing"]),
+        )
+    else:
+        log.info("Backfill recovered every wanted edition: %s",
+                 ", ".join(result["recovered"]))
+    return result
+
+
+def parse_edition(html: str, *, provenance: str) -> dict[str, Any]:
+    """Parse one CrisisWatch page into the JSON payload. No gates, no write.
+
+    Shared by the monthly refresh and by ``--backfill-editions``, so a
+    recovered edition is parsed by exactly the same code as a live one.
+    """
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Parse overview section.
+    overview = _parse_overview_section(soup)
+    log.info(
+        "Overview: outlook=%s, report=%s, "
+        "conflict_risk_alerts=%d, resolution_opportunities=%d, "
+        "deteriorated=%d, improved=%d",
+        overview.get("outlook_month"),
+        overview.get("report_month"),
+        len(overview.get("conflict_risk_alerts", [])),
+        len(overview.get("resolution_opportunities", [])),
+        len(overview.get("deteriorated", [])),
+        len(overview.get("improved", [])),
+    )
+
+    # Parse country entries.
+    entries, month_str, year = _parse_country_entries(soup)
+    log.info("Parsed %d country entries (month=%s, year=%d)", len(entries), month_str, year)
+
+    # Use overview report_month as the canonical month if available.
+    if overview.get("report_month"):
+        month_str = overview["report_month"]
+        m = re.match(r"(\w+)\s+(\d{4})", month_str)
+        if m:
+            try:
+                year = int(m.group(2))
+            except ValueError:
+                pass
+
+    # Count entries with valid ISO3.
+    n_resolved = sum(1 for e in entries if e.get("iso3"))
+    n_unresolved = len(entries) - n_resolved
+
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "month": month_str,
+        "year": year,
+        "fetched_at": now,
+        "source": provenance,
+        "content_hash": entries_content_hash(entries),
+        "parse_accounting": {
+            "entries": len(entries),
+            "resolved_iso3": n_resolved,
+            "unresolved_iso3": n_unresolved,
+            "unresolved_names": sorted(
+                {str(e.get("country") or "") for e in entries if not e.get("iso3")}
+            ),
+        },
+        "outlook_month": overview.get("outlook_month", ""),
+        "conflict_risk_alerts": overview.get("conflict_risk_alerts", []),
+        "resolution_opportunities": overview.get("resolution_opportunities", []),
+        "deteriorated": overview.get("deteriorated", []),
+        "improved": overview.get("improved", []),
+        "entries": entries,
+    }
 
 
 def run(
@@ -1269,35 +1476,10 @@ def run(
         debug_html_path.write_text(html, encoding="utf-8")
         log.info("Raw HTML saved to %s (%d bytes)", debug_html_path, len(html))
 
-    soup = BeautifulSoup(html, "html.parser")
-
-    # Parse overview section.
-    overview = _parse_overview_section(soup)
-    log.info(
-        "Overview: outlook=%s, report=%s, "
-        "conflict_risk_alerts=%d, resolution_opportunities=%d, "
-        "deteriorated=%d, improved=%d",
-        overview.get("outlook_month"),
-        overview.get("report_month"),
-        len(overview.get("conflict_risk_alerts", [])),
-        len(overview.get("resolution_opportunities", [])),
-        len(overview.get("deteriorated", [])),
-        len(overview.get("improved", [])),
-    )
-
-    # Parse country entries.
-    entries, month_str, year = _parse_country_entries(soup)
-    log.info("Parsed %d country entries (month=%s, year=%d)", len(entries), month_str, year)
-
-    # Use overview report_month as the canonical month if available.
-    if overview.get("report_month"):
-        month_str = overview["report_month"]
-        m = re.match(r"(\w+)\s+(\d{4})", month_str)
-        if m:
-            try:
-                year = int(m.group(2))
-            except ValueError:
-                pass
+    data = parse_edition(html, provenance=provenance)
+    entries = data["entries"]
+    month_str = data["month"]
+    year = data["year"]
 
     if not entries:
         log.error(
@@ -1306,9 +1488,8 @@ def run(
         )
         sys.exit(1)
 
-    # Count entries with valid ISO3.
-    n_resolved = sum(1 for e in entries if e.get("iso3"))
-    n_unresolved = len(entries) - n_resolved
+    n_resolved = int(data["parse_accounting"]["resolved_iso3"])
+    n_unresolved = int(data["parse_accounting"]["unresolved_iso3"])
     if n_unresolved:
         log.warning("%d entries have unresolved ISO3 codes", n_unresolved)
     if n_resolved == 0:
@@ -1365,30 +1546,6 @@ def run(
                 candidate[0], candidate[1], existing[0], existing[1],
                 candidate_hash[:12], (existing_hash or "none")[:12],
             )
-
-    # Build output dict (compatible with _load_fallback_json).
-    now = datetime.now(timezone.utc).isoformat()
-    data: dict[str, Any] = {
-        "month": month_str,
-        "year": year,
-        "fetched_at": now,
-        "source": provenance,
-        "content_hash": entries_content_hash(entries),
-        "parse_accounting": {
-            "entries": len(entries),
-            "resolved_iso3": n_resolved,
-            "unresolved_iso3": n_unresolved,
-            "unresolved_names": sorted(
-                {str(e.get("country") or "") for e in entries if not e.get("iso3")}
-            ),
-        },
-        "outlook_month": overview.get("outlook_month", ""),
-        "conflict_risk_alerts": overview.get("conflict_risk_alerts", []),
-        "resolution_opportunities": overview.get("resolution_opportunities", []),
-        "deteriorated": overview.get("deteriorated", []),
-        "improved": overview.get("improved", []),
-        "entries": entries,
-    }
 
     # Write JSON.
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1490,6 +1647,22 @@ def main() -> None:
              "than this many days (0 = disabled)",
     )
     parser.add_argument(
+        "--backfill-editions", type=str, default="",
+        help="Comma-separated YYYY-MM editions to recover from the Wayback "
+             "archive into --backfill-dir. Writes one JSON per edition and "
+             "never touches the latest-edition file; skips the live fetch",
+    )
+    parser.add_argument(
+        "--backfill-dir", type=str, default=str(_DEFAULT_BACKFILL_DIR),
+        help="Where --backfill-editions writes recovered editions "
+             "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--backfill-lookback-days", type=int, default=730,
+        help="How far back --backfill-editions walks the CDX index "
+             "(default: %(default)s)",
+    )
+    parser.add_argument(
         "--expect-edition-by-day", type=int, default=0,
         help="Exit non-zero when the previous month's edition is still "
              "missing after this day of the month. Catches a single missed "
@@ -1502,6 +1675,20 @@ def main() -> None:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    if args.backfill_editions:
+        outcome = backfill_editions(
+            args.backfill_editions,
+            backfill_dir=Path(args.backfill_dir),
+            lookback_days=args.backfill_lookback_days,
+            timeout_sec=args.timeout,
+        )
+        # A hole nobody could fill is a fact about the archive, not a
+        # failure of this run: the editions we DID recover are written and
+        # the missing ones are named. Exiting non-zero here would take a
+        # best-effort recovery step down with it.
+        print(json.dumps(outcome, indent=2, sort_keys=True))
+        return
 
     run(
         output_path=Path(args.output),

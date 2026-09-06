@@ -149,21 +149,59 @@ def fetch_and_cache() -> Path | None:
     return CACHE_FILE
 
 
+def _newest_signal_date(rows: list[dict[str, str]]) -> datetime | None:
+    """The newest ``date`` any cached row carries, or ``None``."""
+
+    newest: datetime | None = None
+    for row in rows:
+        raw = str(row.get("date") or "").strip()
+        if not raw:
+            continue
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                parsed = datetime.strptime(raw[: len(fmt) + 4], fmt)
+            except ValueError:
+                continue
+            if newest is None or parsed > newest:
+                newest = parsed
+            break
+    return newest
+
+
 def ensure_cache_fresh(max_age_hours: int = 168) -> bool:
-    """Refresh the cache if it is older than *max_age_hours* (default 7 days).
+    """Refresh the cache if its CONTENT is older than *max_age_hours*.
+
+    Age is measured from the newest ``date`` the cached rows carry, never
+    from the file's mtime. ``data/hdx_signals/hdx_signals.csv`` is checked
+    into the repository, so on a CI runner git stamps it with the checkout
+    time and an mtime test called it fresh on every run — the Horizon
+    Scanner has been reading a committed August 2026 snapshot ever since,
+    and no amount of waiting would have refreshed it.
 
     Returns True if the cache is fresh after the operation.
     """
     log.info("HDX Signals: checking cache freshness...")
     if CACHE_FILE.exists():
-        age = datetime.now() - datetime.fromtimestamp(CACHE_FILE.stat().st_mtime)
-        if age.total_seconds() < max_age_hours * 3600:
-            rows = _load_csv()
-            log.info("HDX Signals: cache is fresh, %d rows", len(rows))
-            return True
+        rows = _load_csv()
+        newest = _newest_signal_date(rows)
+        if newest is not None:
+            age = datetime.now() - newest
+            if age.total_seconds() < max_age_hours * 3600:
+                log.info(
+                    "HDX Signals: cache is fresh, %d rows, newest signal %s",
+                    len(rows), newest.date(),
+                )
+                return True
+            log.info(
+                "HDX Signals: cache newest signal is %s (%.1f days old) — refreshing",
+                newest.date(), age.total_seconds() / 86400.0,
+            )
+        else:
+            log.info("HDX Signals: cache carries no parseable date — refreshing")
 
     result = fetch_and_cache()
     if result is not None:
+        # fetch_and_cache already dropped the in-memory copy.
         rows = _load_csv()
         log.info("HDX Signals: cache refreshed, %d rows", len(rows))
     return result is not None

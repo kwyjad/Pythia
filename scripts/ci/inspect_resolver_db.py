@@ -1733,7 +1733,9 @@ def build_report(
                     L("```")
             L()
         else:
-            L("_Table does not exist._")
+            L("_Retired: nothing ever wrote this table, so the schema no longer "
+              "creates it and `drop_dead_tables` removes it from an older "
+              "database. Its absence is the expected state, not a gap._")
         L()
 
     # =====================================================================

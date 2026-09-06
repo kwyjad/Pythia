@@ -47,6 +47,7 @@ on:
       - "resolver/tests/test_acled_html_response.py"
       - "resolver/tests/test_group_e_repairs.py"
       - "resolver/tests/test_group_a_drought_recovery.py"
+      - "resolver/tests/test_group_h_housekeeping.py"
       - "pythia/tools/score_views.py"
       - "pythia/db/schema.py"
       - "pythia/tests/test_ingest_rows_written.py"
@@ -341,6 +342,7 @@ jobs:
             resolver/tests/test_acled_html_response.py \
             resolver/tests/test_group_e_repairs.py \
             resolver/tests/test_group_a_drought_recovery.py \
+            resolver/tests/test_group_h_housekeeping.py \
             pythia/tests/test_ingest_rows_written.py \
             resolver/tests/test_eiv_scoring.py \
             resolver/tests/test_risk_index_prefers_bayesmc.py

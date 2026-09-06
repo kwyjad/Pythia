@@ -245,16 +245,24 @@ def _current_month_label() -> str:
     return date.today().strftime("%b%Y")
 
 
-def _month_labels_back(n: int) -> list[str]:
-    """Return a list of ``MmmYYYY`` labels going back *n* months.
+def _month_labels_back(n: int, today: date | None = None) -> list[str]:
+    """Return ``MmmYYYY`` labels going back *n* months, most recent first.
 
-    The list is ordered most-recent-first (index 0 = current month).
+    Counted in calendar months, not in thirty-day steps. The old
+    ``- timedelta(days=i * 30)`` skipped a month and repeated another
+    whenever it crossed a 31-day one: asked on 15 March it returned
+    ``Mar, Jan, Dec`` — February never requested, December requested
+    twice — so a country whose only recent snapshot was February looked to
+    this connector like a country with no INFORM data at all.
     """
-    today = date.today()
+    anchor = (today or date.today()).replace(day=1)
     labels: list[str] = []
-    for i in range(n):
-        d = today.replace(day=1) - timedelta(days=i * 30)
-        labels.append(d.strftime("%b%Y"))
+    year, month = anchor.year, anchor.month
+    for _ in range(max(0, int(n))):
+        labels.append(date(year, month, 1).strftime("%b%Y"))
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
     return labels
 
 
@@ -281,6 +289,107 @@ def _access_category(score: float) -> str:
 # ============================================================
 # INFORM Severity Index
 # ============================================================
+
+
+#: Field names the INFORM country-log has used for the observation date
+#: and the severity value. Resolved in order; the first present wins.
+_TREND_DATE_KEYS = ("date", "log_date", "month", "reporting_period", "period")
+_TREND_VALUE_KEYS = (
+    "value", "score", "severity_index_score", "severity_score", "severity",
+)
+
+
+def _first_present(entry: dict, keys: tuple[str, ...]) -> object | None:
+    for key in keys:
+        if key in entry and entry[key] not in (None, ""):
+            return entry[key]
+    return None
+
+
+def _trend_from_country_log(iso3: str, token: str) -> list[dict]:
+    """Severity trend from the country-log endpoint. Never raises.
+
+    Returns ``[{"date": ..., "score": ...}]``. A response whose rows all
+    fail to parse is reported WITH the keys it carried — "0 of 143 rows
+    parsed, keys seen: log_date, severity_index_score" names the repair,
+    where a silent empty list names nothing.
+    """
+
+    entries: list[dict] = []
+    try:
+        results = _fetch_paginated(
+            "/api/v1/inform-severity-index/country-log/",
+            params={"iso3": iso3},
+            max_pages=5,
+            token=token,
+        )
+    except Exception as exc:  # noqa: BLE001 - one rung is not the connector
+        log.warning("ACAPS INFORM country-log failed for %s: %s", iso3, exc)
+        return entries
+
+    keys_seen: set[str] = set()
+    for entry in results:
+        if isinstance(entry, dict):
+            keys_seen.update(entry.keys())
+        entry_date = _first_present(entry, _TREND_DATE_KEYS)
+        entry_score = _safe_float(_first_present(entry, _TREND_VALUE_KEYS))
+        if entry_date and entry_score is not None:
+            entries.append({"date": str(entry_date), "score": entry_score})
+
+    if results and not entries:
+        log.warning(
+            "ACAPS INFORM country-log for %s: 0 of %d rows parsed. Keys seen: "
+            "%s. Expected a date in %s and a value in %s — the endpoint's "
+            "shape has changed.",
+            iso3, len(results), ", ".join(sorted(keys_seen)) or "(none)",
+            "/".join(_TREND_DATE_KEYS), "/".join(_TREND_VALUE_KEYS),
+        )
+    return entries
+
+
+def _trend_from_monthly_snapshots(
+    iso3: str,
+    token: str,
+    *,
+    months_back: int = 6,
+    skip_label: str | None = None,
+) -> list[dict]:
+    """Severity trend assembled from the monthly INFORM snapshots.
+
+    The fallback when the country-log has nothing to say. One request per
+    month label; a month with no snapshot is simply absent, never a zero.
+    """
+
+    entries: list[dict] = []
+    for label in _month_labels_back(max(2, int(months_back)) + 1):
+        if skip_label and label == skip_label:
+            continue
+        try:
+            results = _fetch_paginated(
+                f"/api/v1/inform-severity-index/{label}/",
+                params={"iso3": iso3},
+                max_pages=1,
+                token=token,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("ACAPS INFORM snapshot %s failed for %s: %s", label, iso3, exc)
+            continue
+        if not results:
+            continue
+        record = _pick_country_crisis(results)
+        score = _safe_float(
+            record.get("severity_index_score")
+            or record.get("severity_score")
+            or record.get("score")
+        )
+        if score is None:
+            continue
+        try:
+            stamp = datetime.strptime(label, "%b%Y").date().isoformat()
+        except ValueError:
+            stamp = label
+        entries.append({"date": stamp, "score": score})
+    return entries
 
 
 def fetch_inform_severity(
@@ -350,18 +459,30 @@ def fetch_inform_severity(
     crisis_name = snapshot.get("crisis", "") or snapshot.get("crisis_name", "")
 
     # --- Fetch country-log for trend data ---
-    trend_entries: list[dict] = []
-    log_results = _fetch_paginated(
-        "/api/v1/inform-severity-index/country-log/",
-        params={"iso3": iso3},
-        max_pages=5,
-        token=token,
-    )
-    for entry in log_results:
-        entry_date = entry.get("date", "")
-        entry_score = _safe_float(entry.get("value"))
-        if entry_date and entry_score is not None:
-            trend_entries.append({"date": entry_date, "score": entry_score})
+    #
+    # Two ways this rung goes quiet, and neither used to say anything: the
+    # endpoint stops serving new rows (acaps_inform_severity_trend was
+    # frozen at 2024-01-29 with 143 rows for over two years), or it renames
+    # the fields and every row silently fails to parse. So the keys are
+    # resolved tolerantly, a total parse failure names the keys it actually
+    # saw, and when the log cannot furnish a series the MONTHLY SNAPSHOTS
+    # do — the same endpoint that just answered for the current month,
+    # asked once per month back. A trend built from snapshots is the same
+    # quantity from the same publisher, and it is rows where there were
+    # none.
+    trend_entries = _trend_from_country_log(iso3, token)
+    if len(trend_entries) < 2:
+        snapshot_trend = _trend_from_monthly_snapshots(
+            iso3, token, months_back=months_back,
+            skip_label=snapshot_date,
+        )
+        if len(snapshot_trend) > len(trend_entries):
+            log.info(
+                "ACAPS INFORM trend for %s: country-log gave %d usable "
+                "entries, monthly snapshots gave %d — using the snapshots",
+                iso3, len(trend_entries), len(snapshot_trend),
+            )
+            trend_entries = snapshot_trend
 
     # Sort by date ascending
     trend_entries.sort(key=lambda e: e["date"])

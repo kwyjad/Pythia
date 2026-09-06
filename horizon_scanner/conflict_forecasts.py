@@ -132,6 +132,14 @@ def load_conflict_forecasts(
         result.update(cf_data)
     if cast_data:
         result.update(cast_data)
+    else:
+        # An absent forecast is a fact the prompt states, not a gap it hides.
+        try:
+            result["cast_unavailable_reason"] = cast_unavailable_reason(con, iso3)
+        except Exception:  # noqa: BLE001
+            result["cast_unavailable_reason"] = (
+                "no ACLED CAST forecast is available for this country"
+            )
 
     return result
 
@@ -231,6 +239,41 @@ def _load_conflictforecast_org(con, iso3: str) -> Optional[dict[str, Any]]:
         "cf_issue_date": str(latest_date),
         "cf_stale": stale,
     }
+
+
+def cast_unavailable_reason(con, iso3: str) -> str:
+    """Why this country's prompt carries no ACLED CAST block, in words.
+
+    CAST has served the 2025-12-10 vintage since January 2026, so every
+    target month it carries is now in the past and the served-target filter
+    correctly withholds it. The block used to be omitted in silence while
+    the closing paragraph went on describing CAST to the model as one of
+    the three forecasts it had been given — so the model was told about
+    evidence it never received. Saying it plainly is the fix.
+    """
+
+    try:
+        row = con.execute(
+            """
+            SELECT COUNT(*), MAX(forecast_issue_date), MAX(target_month)
+            FROM conflict_forecasts
+            WHERE source = 'ACLED_CAST' AND iso3 = ?
+            """,
+            [iso3.upper()],
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - a missing column is not worth a crash
+        return "no ACLED CAST forecast is available for this country"
+    n = int((row or [0])[0] or 0)
+    if not n:
+        return "ACLED CAST has never published a forecast for this country"
+    issued = (row or [None, None, None])[1]
+    newest_target = (row or [None, None, None])[2]
+    return (
+        "ACLED CAST is UNAVAILABLE: the newest vintage this system holds was "
+        f"issued {issued} and the last month it forecasts is {newest_target}, "
+        "which is now in the past. Treat the event-count dimension as absent, "
+        "not as a forecast of no events."
+    )
 
 
 def _load_acled_cast(con, iso3: str) -> Optional[dict[str, Any]]:
@@ -446,20 +489,40 @@ def format_conflict_forecasts_for_prompt(
             )
             parts.append(f"{line}\n  {vals}")
 
+    cast_absent_reason = "" if has_cast else str(
+        forecasts.get("cast_unavailable_reason") or ""
+    )
+    if cast_absent_reason:
+        parts.append("\n### ACLED CAST (Conflict Alert System Tool) — NO DATA")
+        parts.append(cast_absent_reason)
+
     if len(parts) <= 1:
         return ""
 
-    parts.append(
+    closing = [
         "\nThe conflict forecast data above comes from independent sources. "
         "VIEWS provides ML-based fatality predictions (treat as a statistical "
         "baseline — good at trends, weak at sudden onset). conflictforecast.org "
         "provides news-driven risk scores (better at detecting shifts and "
-        "escalation signals). ACLED CAST provides event count predictions by "
-        "type (battles, ERV, VAC) based on historical patterns. "
-        "These are inputs to your assessment, not "
+        "escalation signals)."
+    ]
+    if has_cast:
+        closing.append(
+            " ACLED CAST provides event count predictions by type (battles, "
+            "ERV, VAC) based on historical patterns."
+        )
+    else:
+        # Do not describe a source the model was not given.
+        closing.append(
+            " No ACLED CAST event-count forecast was available for this "
+            "country, so nothing above rests on one."
+        )
+    closing.append(
+        " These are inputs to your assessment, not "
         "substitutes for it. Where they disagree, note the disagreement and "
         "reason about why."
     )
+    parts.append("".join(closing))
 
     return "\n".join(parts)
 

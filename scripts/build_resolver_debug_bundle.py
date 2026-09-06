@@ -274,6 +274,63 @@ def _normalise_log_line(line: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+#: Log levels, most severe first. ``WARN`` is an alias the standard library
+#: never emits but several third-party libraries do.
+_LOG_LEVEL_ALIASES = {"WARN": "WARNING"}
+
+#: A level counts only where it stands as its OWN word. The bundle used to
+#: ask ``if level in line.upper()``, which counted every line carrying a
+#: counter named ``KeyError=0`` as an ERROR — fourteen of them in one NMME
+#: log, all of them INFO lines reporting that nothing had gone wrong. A
+#: reader who opens a log because the index says fourteen errors and finds
+#: none stops trusting the index.
+_LOG_LEVEL_RE = re.compile(
+    r"(?<![0-9A-Z_])(CRITICAL|FATAL|ERROR|WARNING|WARN|INFO|DEBUG)(?![0-9A-Z_])"
+)
+
+
+def log_level_of(line: str) -> str | None:
+    """Return the level this log line announces, or ``None``.
+
+    The LEFTMOST level token wins, because every format this repo emits
+    puts the level near the front — so an INFO line whose message mentions
+    a warning is still an INFO line.
+    """
+
+    match = _LOG_LEVEL_RE.search(line.upper())
+    if match is None:
+        return None
+    level = match.group(1)
+    if level == "FATAL":
+        return "CRITICAL"
+    return _LOG_LEVEL_ALIASES.get(level, level)
+
+
+#: Tracked files a run is EXPECTED to rewrite. Each is a committed
+#: fallback a reader consults (the checked-in CrisisWatch edition, the
+#: FEWS NET country list, the HDX Signals cache) that the same run also
+#: refreshes on the runner so the DB gets the current data — the refresh is
+#: what lands rows, so these are not moving. Naming them keeps ``dirty``
+#: meaningful: an UNEXPECTED tracked change is the one worth reading.
+EXPECTED_TRACKED_CHANGES: frozenset[str] = frozenset(
+    {
+        "horizon_scanner/data/crisiswatch_latest.json",
+        "resolver/data/fewsnet_countries.json",
+        "data/hdx_signals/hdx_signals.csv",
+    }
+)
+
+
+def _porcelain_path(line: str) -> str:
+    """The path a ``git status --porcelain`` line refers to."""
+
+    path = line[3:].strip()
+    # A rename reads "R  old -> new"; the new path is the one on disk.
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path.strip('"')
+
+
 # ---------------------------------------------------------------------------
 # The builder
 # ---------------------------------------------------------------------------
@@ -599,7 +656,17 @@ class BundleBuilder:
         porcelain = [
             line for line in _run_git(["status", "--porcelain"]).splitlines() if line
         ]
-        tracked = [line for line in porcelain if not line.startswith("??")]
+        all_tracked = [line for line in porcelain if not line.startswith("??")]
+        expected = [
+            line
+            for line in all_tracked
+            if _porcelain_path(line) in EXPECTED_TRACKED_CHANGES
+        ]
+        tracked = [
+            line
+            for line in all_tracked
+            if _porcelain_path(line) not in EXPECTED_TRACKED_CHANGES
+        ]
         untracked = [line[3:] for line in porcelain if line.startswith("??")]
         recent = [
             line
@@ -622,6 +689,8 @@ class BundleBuilder:
             "dirty": bool(tracked),
             "tracked_changes": tracked[:50],
             "n_tracked_changes": len(tracked),
+            "expected_tracked_changes": [_porcelain_path(line) for line in expected],
+            "n_expected_tracked_changes": len(expected),
             "n_untracked_files": len(untracked),
             "untracked_sample": untracked[:20],
             "recent_commits": recent,
@@ -630,7 +699,9 @@ class BundleBuilder:
             ),
             "note": (
                 "recent_commits starts at HEAD with no path filter; dirty counts "
-                "tracked changes only, untracked files are the run's own outputs"
+                "UNEXPECTED tracked changes only. The committed fallbacks a run "
+                "refreshes on the runner (EXPECTED_TRACKED_CHANGES) are listed "
+                "separately, and untracked files are the run's own outputs."
             ),
         }
 
@@ -769,13 +840,12 @@ class BundleBuilder:
             levels: Counter[str] = Counter()
             shapes: Counter[str] = Counter()
             for line in text.splitlines():
-                upper = line.upper()
-                for level in ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"):
-                    if level in upper:
-                        levels[level] += 1
-                        if level in ("CRITICAL", "ERROR", "WARNING"):
-                            shapes[f"{level}: {_normalise_log_line(line)[:200]}"] += 1
-                        break
+                level = log_level_of(line)
+                if level is None:
+                    continue
+                levels[level] += 1
+                if level in ("CRITICAL", "ERROR", "WARNING"):
+                    shapes[f"{level}: {_normalise_log_line(line)[:200]}"] += 1
             lines.append(f"## {name}")
             lines.append("")
             lines.append(f"- lines: {n_lines}")
