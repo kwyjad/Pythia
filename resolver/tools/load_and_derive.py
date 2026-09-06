@@ -19,7 +19,7 @@ from typing import Iterable, Sequence
 import pandas as pd
 
 from resolver.db.conn_shared import get_shared_duckdb_conn
-from resolver.db.duckdb_io import init_schema
+from resolver.db.duckdb_io import _ensure_updated_at_column, init_schema
 from resolver.transform.resolve_sources import resolve_sources
 
 LOGGER = logging.getLogger(__name__)
@@ -190,11 +190,48 @@ def _ensure_facts_raw_table(conn) -> None:
     )
 
 
+#: Columns that record WHEN a row was written, as opposed to what it is
+#: about. They are stamped here, at write time, on every row this loader
+#: inserts. Left to their column defaults they were not stamped at all:
+#: ``updated_at`` was added to the facts tables by an ALTER, so it carries
+#: no default and an INSERT that does not name it writes NULL — and the
+#: reconciliation reads ``updated_at`` first. That is why ACLED, IFRC and
+#: IDMC each reported hundreds of rows written in run 33946954189 and none
+#: of them could be found in facts_resolved carrying this run's stamp.
+#:
+#: The SOURCE's own dates are a different thing entirely and are untouched:
+#: ``as_of_date`` is what the figure is about and ``publication_date`` is
+#: when the source published it.
+_WRITE_STAMP_COLUMNS: tuple[str, ...] = ("updated_at", "created_at")
+
+
+def _table_columns(conn, table: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
+    except Exception:  # noqa: BLE001 - a table we cannot describe is stamped as-is
+        return set()
+
+
+def _stamp_write_time(conn, table: str, frame: pd.DataFrame) -> pd.DataFrame:
+    """Return ``frame`` with this run's write stamp on every write-time column."""
+
+    present = _table_columns(conn, table)
+    targets = [c for c in _WRITE_STAMP_COLUMNS if c in present]
+    if not targets:
+        return frame
+    stamped = frame.copy()
+    now = pd.Timestamp(dt.datetime.now(dt.timezone.utc).replace(tzinfo=None))
+    for column in targets:
+        stamped[column] = now
+    return stamped
+
+
 def _insert_dataframe(conn, table: str, frame: pd.DataFrame) -> int:
     if frame.empty:
         return 0
+    frame = _stamp_write_time(conn, table, frame)
     cols = list(frame.columns)
-    placeholder = ", ".join(cols)
+    placeholder = ", ".join(f'"{c}"' for c in cols)
     temp_name = f"tmp_{table}_load"
     conn.register(temp_name, frame)
     try:
@@ -214,6 +251,13 @@ def _load_into_db(
 ) -> dict[str, int]:
     init_schema(conn)
     _ensure_facts_raw_table(conn)
+    # A table that predates the write stamp gains the column here, so the
+    # stamp below has somewhere to land on an older canonical DB.
+    for table in ("facts_resolved", "facts_deltas"):
+        try:
+            _ensure_updated_at_column(conn, table)
+        except Exception as exc:  # noqa: BLE001 - the stamp is not worth a failed load
+            LOGGER.warning("could not ensure %s.updated_at: %s", table, exc)
 
     # Determine which sources are being loaded so we only delete *their* rows.
     if loaded_sources is None:
