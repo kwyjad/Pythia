@@ -310,7 +310,13 @@ def exposure_ceiling_basis(
         "value": float(binding.value) if binding is not None else None,
         "source": SOURCE_GDACS if binding is not None else None,
         "source_ref": binding.source_ref if binding is not None else None,
-        "field": CEILING_FIELD,
+        # The field is named only where it produced a number. A constant
+        # here made every ledger row claim a ceiling had been read from
+        # `gdacs.population` while the ceiling column beside it was blank —
+        # which is not a broken ceiling, it is no ceiling, and the two want
+        # different repairs.
+        "field": CEILING_FIELD if binding is not None else None,
+        "basis": "gdacs_exposed" if binding is not None else "no_usable_gdacs_exposure",
         "n_events": len(events),
         "n_events_with_exposure": len(positive),
         "n_events_below_plausible_floor": len(implausible),

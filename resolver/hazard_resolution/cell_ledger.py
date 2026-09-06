@@ -160,6 +160,7 @@ def record_figure(
     ceiling_source: str | None = None,
     ceiling_source_ref: str | None = None,
     ceiling_field: str | None = None,
+    ceiling_basis: str | None = None,
     preference_rank: int | None = None,
     detail: dict[str, Any] | None = None,
     stated_value: float | None = None,
@@ -181,11 +182,16 @@ def record_figure(
     facts wearing one label. The document's dates and primary country ride
     along so the attribution check can be run over the ledger alone.
 
-    ``ceiling_source``/``ceiling_field`` matter as much as the ceiling: the
-    August 2026 run rejected 199 figures against ceilings of 0, 2, 5 and 20
-    and nothing in the artifact said which GDACS field produced them — so
-    "the ceiling is broken" and "the figure is wrong" could not be told
-    apart without reading the source.
+    ``ceiling_source``/``ceiling_field``/``ceiling_basis`` matter as much as
+    the ceiling: the August 2026 run rejected 199 figures against ceilings of
+    0, 2, 5 and 20 and nothing in the artifact said which GDACS field
+    produced them — so "the ceiling is broken" and "the figure is wrong"
+    could not be told apart without reading the source. A run later, all
+    1,324 rows carried an EMPTY ceiling beside a constant ceiling_field,
+    which is worse: it reads as a ceiling that was evaluated and came out
+    blank. ``ceiling_basis`` is the field that says which case a row is
+    (``gdacs_exposed`` or ``no_usable_gdacs_exposure``), and the other
+    ceiling fields are populated only when there is a ceiling to describe.
     """
 
     run_log.record(
@@ -207,6 +213,7 @@ def record_figure(
             "ceiling_source": ceiling_source,
             "ceiling_source_ref": ceiling_source_ref,
             "ceiling_field": ceiling_field,
+            "ceiling_basis": ceiling_basis,
             "preference_rank": preference_rank,
             "stated_value": stated_value,
             "stated_unit": stated_unit,

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -103,6 +104,10 @@ _CONFIDENCE_MAP: dict[str, str] = {
 _NS: dict[str, str] = {
     "gdacs": "http://www.gdacs.org",
     "geo": "http://www.w3.org/2003/01/geo/wgs84_pos#",
+    # GeoRSS is the second place a GDACS item states its position, as a
+    # single "lat lon" string. Without it registered, an item carrying only
+    # georss:point parsed to no coordinates at all.
+    "georss": "http://www.georss.org/georss",
 }
 
 # Countries CSV path
@@ -202,6 +207,56 @@ def _load_countries() -> tuple[dict[str, str], dict[str, str]]:
     except Exception as exc:
         LOG.warning("[gdacs] failed to load countries.csv: %s", exc)
     return name_to_iso3, iso3_to_name
+
+
+#: Statuses the per-event RSS fetch retries. 403 is here because GDACS
+#: answers a rate-limited caller with one, and urllib3's retry list does not
+#: carry it — so 532 of 1,050 refusals in run 33946954189 were never retried.
+_RETRYABLE_ENRICH_STATUS = frozenset({403, 429, 500, 502, 503, 504})
+
+#: Seconds between one worker's own per-event requests. Six workers with no
+#: delay is what drew the refusals; two with a quarter of a second is roughly
+#: 2.5 requests a second, which the flood pass has ample budget for.
+_DEFAULT_ENRICH_WORKERS = 2
+_DEFAULT_ENRICH_DELAY = 0.25
+_DEFAULT_ENRICH_ATTEMPTS = 4
+
+
+def _enrich_attempts() -> int:
+    try:
+        return max(1, int(os.getenv("GDACS_ENRICH_ATTEMPTS", "") or _DEFAULT_ENRICH_ATTEMPTS))
+    except ValueError:
+        return _DEFAULT_ENRICH_ATTEMPTS
+
+
+def _enrich_delay(caller_delay: float | None) -> float:
+    """Seconds a worker waits between its own per-event requests.
+
+    ``GDACS_ENRICH_DELAY`` wins where it is set, so an operator can slow the
+    enrichment without touching the discovery delay the caller passes — the
+    two used to be one number, so tuning discovery moved the enrichment rate
+    with it. Otherwise the caller's own value stands, zero included: a test
+    that asks for no delay must get none.
+    """
+
+    raw = os.getenv("GDACS_ENRICH_DELAY", "")
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return max(0.0, float(caller_delay or 0.0))
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential backoff with jitter, capped.
+
+    The jitter is the point: a pool of workers that all sleep the same
+    interval and wake together reproduces the burst that drew the refusal.
+    """
+
+    base = min(_DEFAULT_ENRICH_DELAY * (2 ** attempt), 30.0)
+    return base * (0.5 + random.random())
 
 
 def _build_session() -> requests.Session:
@@ -396,6 +451,34 @@ def _iso3s_by_geometry(event: dict[str, Any], geometries) -> list[str]:
             event.get("eventtype"), event.get("eventid"), exc,
         )
         return []
+
+
+def _item_point(item: ET.Element) -> tuple[float | None, float | None]:
+    """(lat, lon) for a GDACS RSS item, or (None, None).
+
+    Two spellings, both standard and both used by GDACS: ``geo:lat`` /
+    ``geo:long`` as separate elements, and ``georss:point`` as one
+    space-separated "lat lon" string. The pair is returned in the same
+    (lat, lon) order and under the same keys the JSON path already uses,
+    so the geometry resolver needs no second code path.
+    """
+
+    lat_text = _text(item, "geo:lat")
+    lon_text = _text(item, "geo:long") or _text(item, "geo:lon")
+    if lat_text and lon_text:
+        try:
+            return float(lat_text), float(lon_text)
+        except (TypeError, ValueError):
+            pass
+    point = _text(item, "georss:point")
+    if point:
+        parts = point.replace(",", " ").split()
+        if len(parts) >= 2:
+            try:
+                return float(parts[0]), float(parts[1])
+            except (TypeError, ValueError):
+                pass
+    return None, None
 
 
 def _feature_point(feature: dict[str, Any], props: dict[str, Any]) -> tuple[float | None, float | None]:
@@ -634,6 +717,14 @@ class GdacsConnector:
         alertlevel = _text(item, "gdacs:alertlevel") or "Green"
         alertscore = _text(item, "gdacs:alertscore")
 
+        # Position. The JSON discovery path sets lat/lon from the feature
+        # geometry; the RSS path did not read them at all, so an event GDACS
+        # names no country for — a cyclone still over open ocean, which is
+        # most of them at discovery — had nothing for the geometry resolver
+        # to work with and was dropped outright. Seventeen TC events went
+        # that way in run 33946954189.
+        lat, lon = _item_point(item)
+
         # Publication date (use pubDate if available)
         pub_date_text = None
         pub_el = item.find("pubDate")
@@ -651,6 +742,8 @@ class GdacsConnector:
             "population_parse": population_detail["outcome"],
             "iso3": iso3,
             "country": country,
+            "lat": lat,
+            "lon": lon,
             "fromdate": fromdate,
             "todate": todate,
             "alertlevel": alertlevel,
@@ -822,34 +915,87 @@ class GdacsConnector:
         """Fetch one event's per-event RSS and merge population data in place.
 
         Errors (404, network, parse) are tolerated — the event is returned
-        unenriched with ``population`` left at its discovery-time value.
+        unenriched with ``population`` left at its discovery-time value, and
+        marked ``population_enriched = False`` so a caller can tell an event
+        GDACS declined to describe from one it described as zero.
+
+        **A refusal is retried.** In run 33946954189, 532 of 1,050 per-event
+        fetches came back HTTP 403 — the refusals starting after about
+        thirteen successes and continuing for most of the run, which is rate
+        limiting rather than a permission problem. urllib3's retry list does
+        not carry 403, so every one of those events lost its exposure figure
+        and the cells that depended on it reconciled with no upper bound at
+        all. The backoff is exponential with jitter, because a fleet of
+        workers retrying in lockstep is the same burst again.
         """
         etype = ev["eventtype"]
         eid = ev["eventid"]
         url = _EVENT_RSS_PATTERN.format(type=etype, eventid=eid)
+        ev.setdefault("population_enriched", False)
+        attempts = _enrich_attempts()
 
-        try:
-            resp = session.get(url, timeout=30)
-            if resp.status_code == 404:
-                LOG.debug("[gdacs] per-event RSS 404 for %s/%s", etype, eid)
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = session.get(url, timeout=30)
+                if resp.status_code == 404:
+                    LOG.debug("[gdacs] per-event RSS 404 for %s/%s", etype, eid)
+                    return ev
+                if resp.status_code in _RETRYABLE_ENRICH_STATUS and attempt < attempts:
+                    pause = _backoff_seconds(attempt)
+                    LOG.debug(
+                        "[gdacs] per-event RSS %d for %s/%s — attempt %d of %d, "
+                        "sleeping %.2fs",
+                        resp.status_code, etype, eid, attempt, attempts, pause,
+                    )
+                    time.sleep(pause)
+                    continue
+                if resp.status_code in _RETRYABLE_ENRICH_STATUS:
+                    ev["population_refused"] = int(resp.status_code)
+                    LOG.debug(
+                        "[gdacs] per-event RSS %d for %s/%s after %d attempts — "
+                        "the event keeps its discovery-time population",
+                        resp.status_code, etype, eid, attempts,
+                    )
+                    return ev
+                resp.raise_for_status()
+
+                # Parse the per-event RSS to get population
+                rss_events = self._parse_rss(resp.content, name_to_iso3)
+                if rss_events:
+                    # Take the latest episode (highest todate)
+                    best = max(
+                        rss_events,
+                        key=lambda e: (e["todate"], e.get("pub_date") or e["todate"]),
+                    )
+                    ev["population"] = best["population"]
+                    for key in (
+                        "population_unit", "population_text",
+                        "population_raw", "population_parse",
+                    ):
+                        ev[key] = best.get(key, ev.get(key, ""))
+                    # Also update iso3/country if the RSS has better data
+                    if best.get("iso3") and not ev.get("iso3"):
+                        ev["iso3"] = best["iso3"]
+                    if best.get("country") and not ev.get("country"):
+                        ev["country"] = best["country"]
+                    if best.get("lat") is not None and ev.get("lat") is None:
+                        ev["lat"] = best.get("lat")
+                    if best.get("lon") is not None and ev.get("lon") is None:
+                        ev["lon"] = best.get("lon")
+                    ev["population_enriched"] = True
                 return ev
-            resp.raise_for_status()
-
-            # Parse the per-event RSS to get population
-            rss_events = self._parse_rss(resp.content, name_to_iso3)
-            if rss_events:
-                # Take the latest episode (highest todate)
-                best = max(rss_events, key=lambda e: (e["todate"], e.get("pub_date") or e["todate"]))
-                ev["population"] = best["population"]
-                for key in ("population_unit", "population_text", "population_raw", "population_parse"):
-                    ev[key] = best.get(key, ev.get(key, ""))
-                # Also update iso3/country if the RSS has better data
-                if best.get("iso3") and not ev.get("iso3"):
-                    ev["iso3"] = best["iso3"]
-                if best.get("country") and not ev.get("country"):
-                    ev["country"] = best["country"]
-        except Exception as exc:
-            LOG.debug("[gdacs] error fetching RSS for %s/%s: %s", etype, eid, exc)
+            except Exception as exc:
+                if attempt < attempts:
+                    pause = _backoff_seconds(attempt)
+                    LOG.debug(
+                        "[gdacs] error fetching RSS for %s/%s (attempt %d of %d): "
+                        "%s — sleeping %.2fs",
+                        etype, eid, attempt, attempts, exc, pause,
+                    )
+                    time.sleep(pause)
+                    continue
+                LOG.debug("[gdacs] error fetching RSS for %s/%s: %s", etype, eid, exc)
+                return ev
 
         return ev
 
@@ -872,7 +1018,17 @@ class GdacsConnector:
         ``GDACS_ENRICH_WORKERS=1`` preserves the exact sequential behavior.
         """
         total = len(events)
-        workers = max(1, int(os.getenv("GDACS_ENRICH_WORKERS", "6") or "6"))
+        workers = max(
+            1,
+            int(
+                os.getenv("GDACS_ENRICH_WORKERS", "")
+                or _DEFAULT_ENRICH_WORKERS
+            ),
+        )
+        # The enrichment delay has its OWN knob now (GDACS_ENRICH_DELAY), so
+        # an operator can slow the per-event fetches without touching
+        # discovery. Unset, the caller's value stands.
+        delay = _enrich_delay(delay)
 
         if workers == 1 or total <= 1:
             enriched: list[dict[str, Any]] = []
@@ -882,6 +1038,7 @@ class GdacsConnector:
                     LOG.info("[gdacs] enriched %d/%d events", i + 1, total)
                 if delay > 0:
                     time.sleep(delay)
+            self._log_enrichment_outcome(enriched)
             return enriched
 
         LOG.info("[gdacs] enriching %d events with %d workers", total, workers)
@@ -905,7 +1062,34 @@ class GdacsConnector:
                 if (done + 1) % 50 == 0:
                     LOG.info("[gdacs] enriched %d/%d events", done + 1, total)
 
+        self._log_enrichment_outcome(enriched)
         return enriched
+
+    @staticmethod
+    def _log_enrichment_outcome(events: list[dict[str, Any]]) -> None:
+        """Say how many events GDACS actually described.
+
+        A refusal rate is the only way to tell "no exposure figure exists"
+        from "we were throttled": the run that prompted this counted 532
+        refusals in 1,050 requests and reported nothing but a per-event
+        DEBUG line nobody reads at INFO.
+        """
+
+        refused = [e for e in events if e.get("population_refused")]
+        enriched = sum(1 for e in events if e.get("population_enriched"))
+        if refused:
+            statuses = sorted({int(e["population_refused"]) for e in refused})
+            LOG.warning(
+                "[gdacs] %d of %d per-event fetches were refused after retries "
+                "(status %s) — those events keep no exposure figure, so the "
+                "cells that need one reconcile with no upper bound",
+                len(refused), len(events),
+                ",".join(str(s) for s in statuses),
+            )
+        LOG.info(
+            "[gdacs] enrichment: %d of %d events carry an exposure figure",
+            enriched, len(events),
+        )
 
     # -----------------------------------------------------------------------
     # Deduplication

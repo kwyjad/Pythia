@@ -1389,7 +1389,7 @@ class BundleBuilder:
             "figure_date", "doc_date", "doc_date_original", "doc_primary_country",
             "stated_by", "reason", "ceiling", "ceiling_multiplier",
             "ceiling_source", "ceiling_source_ref", "ceiling_field",
-            "preference_rank", "quote", "doc_url",
+            "ceiling_basis", "preference_rank", "quote", "doc_url",
         ]
         rows = [
             [redact_text(str(r.get(col) or ""), self.secrets) if col in ("quote", "doc_url")
@@ -1406,6 +1406,11 @@ class BundleBuilder:
                 "ceiling_field names the upstream field the ceiling came from: a\n"
                 "ceiling of 2 against a reported 40,000 is a GDACS enrichment\n"
                 "failure, not a mis-transcription, and only that column says which.\n"
+                "ceiling_basis says whether a ceiling existed at all:\n"
+                "gdacs_exposed means one was read and applied,\n"
+                "no_usable_gdacs_exposure means GDACS described no event of this\n"
+                "cell well enough to bound it, so no figure was rejected on a\n"
+                "ceiling and the ceiling column is empty for a reason.\n"
                 "Empty unless PYTHIA_RUN_LOG_DIR was set while the machine ran."
             ),
         )
