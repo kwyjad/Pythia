@@ -167,6 +167,7 @@ def record_figure(
     stated_unit: str | None = None,
     value_persons: int | None = None,
     conversion_factor: float | None = None,
+    conversion_factor_origin: str | None = None,
     figure_date: str | None = None,
     doc_date: str | None = None,
     doc_date_original: str | None = None,
@@ -179,7 +180,15 @@ def record_figure(
     ``stated_unit`` — beside ``value_persons`` (a whole number) and the
     ``conversion_factor`` that joins them, because "187 families affected"
     was being written as value 935 under unit "households", which is two
-    facts wearing one label. The document's dates and primary country ride
+    facts wearing one label.
+
+    ``conversion_factor`` is required on EVERY row and is never blank: a
+    household count with no factor beside it is either being multiplied by
+    an unrecorded number or read as persons, and a factor of five is the
+    difference between 2,000 people and 10,000. A person figure carries an
+    explicit 1.0, so blank means "unresolved" and never "trivially one";
+    ``conversion_factor_origin`` says where the number came from (the
+    country's own entry, the rulebook default, or the identity). The document's dates and primary country ride
     along so the attribution check can be run over the ledger alone.
 
     ``ceiling_source``/``ceiling_field``/``ceiling_basis`` matter as much as
@@ -219,6 +228,7 @@ def record_figure(
             "stated_unit": stated_unit,
             "value_persons": value_persons,
             "conversion_factor": conversion_factor,
+            "conversion_factor_origin": conversion_factor_origin,
             "figure_date": figure_date,
             "doc_date": doc_date,
             "doc_date_original": doc_date_original,

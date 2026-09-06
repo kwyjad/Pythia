@@ -1430,6 +1430,7 @@ class BundleBuilder:
         header = [
             "iso3", "hazard", "ym", "outcome", "doc_id", "value", "unit",
             "stated_value", "stated_unit", "value_persons", "conversion_factor",
+            "conversion_factor_origin",
             "figure_date", "doc_date", "doc_date_original", "doc_primary_country",
             "stated_by", "reason", "ceiling", "ceiling_multiplier",
             "ceiling_source", "ceiling_source_ref", "ceiling_field",
@@ -1446,7 +1447,11 @@ class BundleBuilder:
                 "Every LLM-extracted figure and what became of it.\n"
                 "stated_value/stated_unit are what the SOURCE said; value_persons is\n"
                 "the whole-person count the ladder uses and conversion_factor joins\n"
-                "them. value keeps the legacy meaning (people, as used).\n"
+                "them, on EVERY row — a person figure carries an explicit 1.0, so a\n"
+                "blank here means unresolved and never trivially one, and\n"
+                "conversion_factor_origin says whether the number came from the\n"
+                "country's own entry or the rulebook default.\n"
+                "value keeps the legacy meaning (people, as used).\n"
                 "ceiling_field names the upstream field the ceiling came from: a\n"
                 "ceiling of 2 against a reported 40,000 is a GDACS enrichment\n"
                 "failure, not a mis-transcription, and only that column says which.\n"

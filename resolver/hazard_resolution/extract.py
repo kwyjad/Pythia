@@ -57,6 +57,7 @@ import datetime as dt
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -180,6 +181,13 @@ class ExtractedFigure:
     #: for a cached document written before Sept 2026.
     doc_primary_country: str = ""
     doc_country_iso3s: tuple[str, ...] = ()
+    #: Who PUBLISHED the document (ReliefWeb's ``source`` list, joined).
+    #: A figure the text attributes to nobody is still attributable to the
+    #: document it appears in — an unnamed figure in an OCHA situation
+    #: report is OCHA's — and 558 of 950 accepted figures in run
+    #: 33946954189 carried "(unattributed)" for want of this. Empty for a
+    #: cached document written before Sept 2026.
+    doc_publisher: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -198,6 +206,7 @@ class ExtractedFigure:
             "doc_primary_country": self.doc_primary_country,
             "doc_country_iso3s": list(self.doc_country_iso3s),
             "doc_source_rank": self.doc_source_rank,
+            "doc_publisher": self.doc_publisher,
             "model": self.model,
         }
 
@@ -638,21 +647,59 @@ def build_prompt(
     )
 
 
+#: Characters that carry no text and exist only for layout: zero-width
+#: space/non-joiner/joiner, the word joiner, a BOM landing mid-document, and
+#: the SOFT HYPHEN a PDF extractor leaves where a word was broken across a
+#: line. Removing them can never remove a word.
+_INVISIBLE_CHARS = "\u200b\u200c\u200d\u2060\ufeff\u00ad"
+
+#: A word broken across a line by a typesetter: a hyphen, then the line
+#: break. Joining it is what makes "affec-\nted" and "affected" the same
+#: word. Applied to BOTH sides, so a quote reproducing the break and one
+#: that does not land on the same string.
+_LINE_BREAK_HYPHEN_RE = re.compile(r"-[ \t]*\r?\n[ \t]*")
+
+
+def strict_normalise(text: str) -> str:
+    """Whitespace and case only — the pre-Sept-2026 comparison."""
+
+    return re.sub(r"\s+", " ", str(text)).strip().lower()
+
+
 def _normalise_for_match(text: str) -> str:
     """Collapse whitespace and case so a quote can be found in a body.
 
-    Deliberately conservative: it normalises only whitespace, case and the
+    Deliberately conservative: it normalises only whitespace, case, the
     typographic characters that differ between a JSON string and the HTML
-    a document was rendered from. It never removes words, so a quote that
-    does not appear in the document still fails to match.
+    or PDF a document was rendered from, and the artefacts a PDF text
+    extractor leaves behind. It never removes a word, so a quote that does
+    not appear in the document still fails to match.
+
+    Three things beyond the original whitespace-and-quotes pass, all of them
+    ordinary in ReliefWeb's PDF-derived text and all of them reasons a real
+    quote could fail to verify (71 of 1,324 figures in run 33946954189,
+    5.4%):
+
+    * NFKC folding, which turns a ligature into its letters and a narrow or
+      full-width space into an ordinary one;
+    * the invisible layout characters above, the soft hyphen among them; and
+    * a word broken across a line by a hyphen, rejoined.
+
+    This is emphatically NOT a fuzzy match. An unverifiable quote stays
+    rejected: nothing here removes, reorders or approximates a word.
     """
 
-    text = str(text)
+    text = unicodedata.normalize("NFKC", str(text))
+    text = _LINE_BREAK_HYPHEN_RE.sub("", text)
     for fancy, plain in (
-        ("‘", "'"), ("’", "'"), ("“", '"'), ("”", '"'),
-        ("–", "-"), ("—", "-"), (" ", " "),
+        ("\u2018", "'"), ("\u2019", "'"), ("\u201c", '"'), ("\u201d", '"'),
+        ("\u02bc", "'"), ("\u2032", "'"),
+        ("\u2013", "-"), ("\u2014", "-"), ("\u2011", "-"), ("\u2212", "-"),
+        ("\u00a0", " "),
     ):
         text = text.replace(fancy, plain)
+    for invisible in _INVISIBLE_CHARS:
+        text = text.replace(invisible, "")
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
@@ -759,6 +806,12 @@ def parse_response(
         return figures, rejected
 
     body = _normalise_for_match(document.get("body") or "")
+    # The pre-Sept-2026 comparison, kept alongside so a run can SAY how many
+    # quotes the wider normalisation recovered. 71 of 1,324 figures were
+    # rejected as unverifiable; how many of those were PDF artefacts rather
+    # than fabrications is a number, and a number is what this produces.
+    strict_body = strict_normalise(document.get("body") or "")
+    recovered_by_normalisation = 0
 
     for index, raw in enumerate(payload["figures"]):
         where = {"index": index, "raw": raw}
@@ -786,6 +839,8 @@ def parse_response(
         if _normalise_for_match(quote) not in body:
             rejected.append({**where, "reason": "quote_not_found_in_document"})
             continue
+        if strict_normalise(quote) not in strict_body:
+            recovered_by_normalisation += 1
         if not _value_stated_in_quote(float(value), quote):
             rejected.append({**where, "reason": "value_not_found_in_quote"})
             continue
@@ -814,7 +869,23 @@ def parse_response(
                 doc_country_iso3s=tuple(
                     str(c).upper() for c in (document.get("country_iso3s") or [])
                 ),
+                doc_publisher=", ".join(
+                    str(source).strip()
+                    for source in (document.get("sources") or [])
+                    if str(source).strip()
+                ),
             )
+        )
+
+    if recovered_by_normalisation:
+        # Not a warning: these are quotes the document really does
+        # contain, recovered from a ligature, a soft hyphen or a word
+        # broken across a line. The count is what says how much of the
+        # 5.4% rejection rate was PDF artefacts rather than fabrication.
+        LOG.info(
+            "[extract] %s: %d quote(s) verified only after normalisation "
+            "(ligatures, soft hyphens, hyphenated line breaks)",
+            document.get("doc_id"), recovered_by_normalisation,
         )
 
     return figures, rejected

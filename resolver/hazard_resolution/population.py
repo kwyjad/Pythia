@@ -132,6 +132,20 @@ def load_population_records(csv_path: str | Path | None = None) -> pd.DataFrame:
         len(records),
         dropped_aggregates,
     )
+    # WHICH countries have no denominator, not just how many rows were
+    # dropped. A cell with no GDACS exposure falls back to a share of the
+    # national population, and a country with neither reconciles with NO
+    # UPPER BOUND at all — so the list matters more than the count, and the
+    # run used to print only the count.
+    if known is not None:
+        missing = sorted(known - set(records["iso3"]))
+        if missing:
+            LOG.warning(
+                "population: %d of %d countries have no denominator — a cell "
+                "with no GDACS exposure in one of these reconciles with no "
+                "upper bound at all: %s",
+                len(missing), len(known), ",".join(missing),
+            )
     return records
 
 

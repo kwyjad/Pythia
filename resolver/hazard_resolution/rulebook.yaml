@@ -592,6 +592,15 @@ dfo:
   # report says so, and nothing else in the machine is affected, because
   # nothing else reads this source.
   url: "https://floodobservatory.colorado.edu/temp/FloodArchive.xlsx"
+  # Candidate routes, tried in order; the first that fetches wins. A source
+  # address is a LIST, not a string — haz_raw_dfo has held 0 rows since the
+  # module shipped, and a portal that moves its download route should cost a
+  # YAML edit rather than an outage. When every candidate fails the error
+  # names each attempt with its own reason.
+  urls:
+    - "https://floodobservatory.colorado.edu/temp/FloodArchive.xlsx"
+    - "https://floodobservatory.colorado.edu/Archives/FloodArchive.xlsx"
+    - "https://floodobservatory.colorado.edu/temp/FloodArchive.csv"
   # How to parse what the URL returns: xlsx or csv.
   format: xlsx
   request_timeout_sec: 300
