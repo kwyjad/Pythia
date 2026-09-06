@@ -234,5 +234,5 @@ def test_every_source_failing_resolves_nothing():
     assert not resolution.resolved
     assert resolution.nino34 is None
     assert resolution.oni is None
-    assert len(resolution.readings) == 3
+    assert len(resolution.readings) == len(idx.source_ladder(TODAY))
     assert all(not r.ok for r in resolution.readings)

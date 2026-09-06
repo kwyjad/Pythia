@@ -853,7 +853,11 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          python -m horizon_scanner.enso.enso_module --backfill-oni \
+          # The PACKAGE, not the module inside it: running the module
+          # directly imports it once for the package's re-exports and
+          # again under __main__, which runpy warns about and which
+          # leaves its module-level state existing twice.
+          python -m horizon_scanner.enso --backfill-oni \
             2>&1 | tee diagnostics/phase4_enso_backfill.log \
             || echo "WARNING: ENSO ONI backfill failed (non-fatal)"
 
