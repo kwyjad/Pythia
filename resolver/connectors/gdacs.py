@@ -229,14 +229,23 @@ def _enrich_attempts() -> int:
         return _DEFAULT_ENRICH_ATTEMPTS
 
 
-def _enrich_delay(default: float | None = None) -> float:
+def _enrich_delay(caller_delay: float | None) -> float:
+    """Seconds a worker waits between its own per-event requests.
+
+    ``GDACS_ENRICH_DELAY`` wins where it is set, so an operator can slow the
+    enrichment without touching the discovery delay the caller passes — the
+    two used to be one number, so tuning discovery moved the enrichment rate
+    with it. Otherwise the caller's own value stands, zero included: a test
+    that asks for no delay must get none.
+    """
+
     raw = os.getenv("GDACS_ENRICH_DELAY", "")
     if raw:
         try:
             return max(0.0, float(raw))
         except ValueError:
             pass
-    return _DEFAULT_ENRICH_DELAY if default is None else default
+    return max(0.0, float(caller_delay or 0.0))
 
 
 def _backoff_seconds(attempt: int) -> float:
@@ -1016,11 +1025,10 @@ class GdacsConnector:
                 or _DEFAULT_ENRICH_WORKERS
             ),
         )
-        # The enrichment delay is its OWN knob. It used to be the discovery
-        # delay, so tuning discovery moved the enrichment rate with it, and
-        # six workers sharing a one-second delay was fast enough to be
-        # refused for most of a run.
-        delay = _enrich_delay(delay if delay else None)
+        # The enrichment delay has its OWN knob now (GDACS_ENRICH_DELAY), so
+        # an operator can slow the per-event fetches without touching
+        # discovery. Unset, the caller's value stands.
+        delay = _enrich_delay(delay)
 
         if workers == 1 or total <= 1:
             enriched: list[dict[str, Any]] = []

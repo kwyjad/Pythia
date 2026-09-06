@@ -164,12 +164,24 @@ class TestEnrichmentRetry:
     def test_403_is_in_the_retryable_set_and_the_urllib3_list_alone_is_not_enough(self):
         assert 403 in connector_mod._RETRYABLE_ENRICH_STATUS
 
-    def test_the_pool_is_small_and_paced_by_default(self, monkeypatch):
+    def test_the_pool_is_small_by_default(self, monkeypatch):
         monkeypatch.delenv("GDACS_ENRICH_WORKERS", raising=False)
-        monkeypatch.delenv("GDACS_ENRICH_DELAY", raising=False)
 
-        assert connector_mod._DEFAULT_ENRICH_WORKERS == 2
-        assert connector_mod._enrich_delay() == pytest.approx(0.25)
+        assert connector_mod._DEFAULT_ENRICH_WORKERS == 2, (
+            "six workers with no delay of their own is what drew the refusals"
+        )
+
+    def test_the_enrichment_delay_has_its_own_knob(self, monkeypatch):
+        monkeypatch.delenv("GDACS_ENRICH_DELAY", raising=False)
+        # Unset, the caller's value stands — a caller asking for none gets none.
+        assert connector_mod._enrich_delay(0.0) == pytest.approx(0.0)
+        assert connector_mod._enrich_delay(1.0) == pytest.approx(1.0)
+
+        monkeypatch.setenv("GDACS_ENRICH_DELAY", "0.25")
+        assert connector_mod._enrich_delay(1.0) == pytest.approx(0.25), (
+            "an operator must be able to slow enrichment without touching "
+            "the discovery delay the caller passes"
+        )
 
     def test_backoff_is_jittered(self, monkeypatch):
         seen = {connector_mod._backoff_seconds(2) for _ in range(20)}
