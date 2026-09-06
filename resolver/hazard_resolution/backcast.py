@@ -240,16 +240,51 @@ def _binding_limit_from_note(note: str) -> str | None:
 
 
 def completed_months(con, hazard: str) -> set[str]:
-    """Months this hazard's backcast has already finished successfully."""
+    """Months this hazard's backcast has already finished successfully.
+
+    The ledger is checked against the DATABASE, and the database wins. A
+    month recorded ``ok`` with cells assessed, whose ``haz_triggers`` holds
+    nothing for it, is a ledger that disagrees with what is on disk — the
+    rows were lost to a restore from an older artifact, a failed upload, or
+    a swap — and skipping it forever on the ledger's word is how a hole
+    becomes permanent. Such a month is re-walked.
+
+    A month recorded ``ok`` with ZERO cells assessed is complete: there was
+    nothing to do (a cyclone month with no country in an active basin
+    season), and re-walking it every night would be noise.
+    """
 
     ensure_haz_schema(con)
-    return {
+    rows = con.execute(
+        "SELECT ym, COALESCE(cells, 0) FROM haz_backcast_progress "
+        "WHERE hazard = ? AND status = 'ok'",
+        [hazard],
+    ).fetchall()
+    if not rows:
+        return set()
+    with_triggers = {
         str(row[0])
         for row in con.execute(
-            "SELECT ym FROM haz_backcast_progress WHERE hazard = ? AND status = 'ok'",
+            "SELECT DISTINCT printf('%04d-%02d', year, month) FROM haz_triggers "
+            "WHERE hazard = ?",
             [hazard],
         ).fetchall()
     }
+    done: set[str] = set()
+    disowned: list[str] = []
+    for ym, cells in rows:
+        ym = str(ym)
+        if int(cells or 0) <= 0 or ym in with_triggers:
+            done.add(ym)
+        else:
+            disowned.append(ym)
+    if disowned:
+        LOG.warning(
+            "[backcast] %s: %d month(s) the ledger calls complete hold no "
+            "trigger rows in this database — re-walking them: %s",
+            hazard, len(disowned), ",".join(sorted(disowned)[:24]),
+        )
+    return done
 
 
 def record_month(
@@ -567,6 +602,7 @@ def run_backcast(
     no_ladder: bool = False,
     dry_run: bool = False,
     resume: bool = True,
+    order: str = "newest",
     time_budget_min: float | None = None,
     today: dt.date | None = None,
     rulebook: Rulebook | None = None,
@@ -580,6 +616,15 @@ def run_backcast(
     are deferred, not failed — the resume ledger continues exactly where
     this run stopped. This is what lets a scheduled job chew through a
     multi-decade backcast one bounded chunk at a time and converge.
+
+    ``order`` decides which end of the window a bounded run reaches first.
+    It defaults to ``newest`` because that is the end every consumer reads:
+    the acceptance window is the last twelve frozen months, the severity
+    quantiles lean on recent resolutions, and the SPD prompt block is about
+    the coming six months. Under the old oldest-first walk, cyclone (which
+    starts in 2000) had reached 2025-06 by September 2026, so the acceptance
+    report covered its twelve-month window with a single month of TC.
+    ``oldest`` restores the original order.
     """
 
     from resolver.db.duckdb_io import get_db
@@ -613,6 +658,17 @@ def run_backcast(
     already = completed_months(con, hazard) if resume else set()
     owed = deferred_months(con, hazard) if resume else {}
     todo = [ym for ym in months if ym not in already]
+    # NEWEST FIRST. The nightly run has a time budget, so the order decides
+    # which months exist when the acceptance report, the base rates and the
+    # SPD prompts read them — and oldest-first left the recent months last.
+    # Cyclone starts in 2000, so on 4 September 2026 its ledger had reached
+    # 2025-06 and the acceptance window (the last twelve frozen months) held
+    # exactly ONE month of TC: the report printed 237 assessed cells as
+    # though they were a year's worth, and computed a 57.4% rate on them.
+    # The resume ledger makes the walk convergent in either order; this one
+    # makes the months a reader actually needs arrive first.
+    if str(order).lower() == "newest":
+        todo = list(reversed(todo))
     run.months_skipped_done = len(months) - len(todo)
     if run.months_skipped_done:
         LOG.info(
@@ -809,6 +865,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--order", choices=("newest", "oldest"), default="newest",
+        help=(
+            "Which end of the window a time-budgeted run reaches first. "
+            "newest (default) fills the months the acceptance report, the "
+            "base rates and the SPD prompts actually read; oldest is the "
+            "pre-Sept-2026 walk"
+        ),
+    )
+    parser.add_argument(
         "--time-budget-min", type=float, default=None, metavar="MIN",
         help=(
             "Stop cleanly between months once this many minutes have elapsed; "
@@ -843,6 +908,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         no_ladder=args.no_ladder,
         dry_run=args.dry_run,
         resume=not args.no_resume,
+        order=args.order,
         time_budget_min=args.time_budget_min,
     )
 

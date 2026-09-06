@@ -172,7 +172,7 @@ def test_backcast_stamps_every_row_it_writes(con, rulebook):
         from_ym="2015-01", to_ym="2015-03", runner=runner,
     )
 
-    assert calls == ["2015-01", "2015-02", "2015-03"]
+    assert sorted(calls) == ["2015-01", "2015-02", "2015-03"]
     assert run.months_run == 3
     assert run.resolved_zero == 3
 
@@ -275,7 +275,7 @@ def test_no_resume_rewalks_completed_months(con, rulebook):
     calls.clear()
     bc.run_backcast(resume=False, **kwargs)
 
-    assert calls == ["2015-01", "2015-02"]
+    assert sorted(calls) == ["2015-01", "2015-02"]
 
 
 def test_a_failed_month_is_not_marked_complete_and_is_retried(con, rulebook):
@@ -317,7 +317,7 @@ def test_a_raising_month_does_not_end_the_run(con, rulebook):
         from_ym="2015-01", to_ym="2015-03", runner=runner,
     )
 
-    assert seen == ["2015-01", "2015-02", "2015-03"]
+    assert sorted(seen) == ["2015-01", "2015-02", "2015-03"]
     assert run.months_failed == 1
     assert run.months_run == 2
     assert "RuntimeError" in run.failures[0]
@@ -332,7 +332,7 @@ def test_dry_run_writes_nothing_and_claims_no_month_complete(con, rulebook):
         from_ym="2015-01", to_ym="2015-02", runner=runner, dry_run=True,
     )
 
-    assert calls == ["2015-01", "2015-02"]
+    assert sorted(calls) == ["2015-01", "2015-02"]
     assert con.execute("SELECT COUNT(*) FROM haz_resolutions").fetchone()[0] == 0
     assert con.execute("SELECT COUNT(*) FROM haz_backcast_progress").fetchone()[0] == 0
 
