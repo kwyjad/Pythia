@@ -467,6 +467,11 @@ jobs:
           RESOLVER_END_ISO: ${{ steps.window.outputs.end_iso }}
           BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
           BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
+          # IDMC is the HELIX path in the step above; the legacy `idmc`
+          # connector here is skipped so the same source is not pulled
+          # twice. The run log carries both ids, and the reconciliation
+          # collapses the skipped one as superseded rather than reporting a
+          # source that both ran and did not.
           RESOLVER_SKIP_IDMC: "1"
           # Reset runs use a ~12-month window (vs 3 months scheduled) — the
           # 2026-07-08 reset run hit the 1500s deadline at page 77 and wrote
@@ -541,19 +546,27 @@ jobs:
 
           CANONICAL_DIR="resolver/staging/${PERIOD_LABEL}/canonical"
           mkdir -p "${CANONICAL_DIR}"
+          # Both invocations are teed, like every other phase. This step was
+          # the only substantive one in the workflow with no log, so when
+          # ACLED, IFRC and IDMC each wrote a staging CSV and none of their
+          # rows could be found in facts_resolved carrying this run's write
+          # stamp, there was no way to tell from the artifact whether the
+          # step had written nothing or written without a stamp.
           python -m resolver.transform.normalize \
             --in resolver/staging \
             --out "${CANONICAL_DIR}" \
             --sources ifrc_go,acled,idmc \
             --period "${PERIOD_LABEL}" \
-            --log-level "${LOG_LEVEL:-INFO}"
+            --log-level "${LOG_LEVEL:-INFO}" \
+            2>&1 | tee diagnostics/phase1_normalize.log
 
           python -m resolver.tools.load_and_derive \
             --period "${PERIOD_LABEL}" \
             --staging-root resolver/staging \
             --snapshots-root data/snapshots \
             --db "${BACKFILL_DB_PATH}" \
-            --allow-negatives 1
+            --allow-negatives 1 \
+            2>&1 | tee diagnostics/phase1_load_and_derive.log
           echo "::endgroup::"
 
       # === PHASE 2: RESOLUTION SOURCES (non-fatal) ===

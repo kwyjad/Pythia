@@ -279,6 +279,29 @@ def _normalise_log_line(line: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Connector ids that are two entries for ONE source, newest-wins. The
+#: legacy connector is skipped deliberately (RESOLVER_SKIP_IDMC=1 on the
+#: connectors step) because the other ran in its own step; the run log
+#: carries both, and reporting them side by side reads as a source that
+#: both ran and did not.
+_SUPERSEDES: dict[str, str] = {"idmc_helix": "idmc"}
+
+
+def _superseded_connectors(records: list[dict]) -> dict[str, str]:
+    """``{legacy_id: live_id}`` for pairs where the live one actually ran."""
+
+    ran = {
+        str(r.get("connector_id") or r.get("connector") or "")
+        for r in records
+        if str(r.get("status") or "").lower() not in ("", "skipped")
+    }
+    return {
+        legacy: live
+        for live, legacy in _SUPERSEDES.items()
+        if live in ran
+    }
+
+
 class BundleBuilder:
     """Assembles the bundle. Every section is best-effort and records problems."""
 
@@ -2556,8 +2579,21 @@ class BundleBuilder:
             write_text(path, "\n".join(lines) + "\n" + counts_meaning)
             return
 
-        for record in run_log.read_stream(report):
+        records = list(run_log.read_stream(report))
+        superseded = _superseded_connectors(records)
+        for record in records:
             cid = str(record.get("connector_id") or record.get("connector") or "?")
+            if cid in superseded:
+                # One source, two entries telling opposite stories: the
+                # legacy `idmc` connector is skipped on purpose
+                # (RESOLVER_SKIP_IDMC=1 on the connectors step) BECAUSE
+                # `idmc_helix` ran in its own step. Reporting both without
+                # saying so reads as a source that both ran and did not.
+                lines.append(
+                    f"| {cid} | superseded by {superseded[cid]} | | | | | | | | | "
+                    "n/a — deliberately skipped |"
+                )
+                continue
             table, where = targets.get(cid, (None, None))
             table = table or ""
             delta = deltas.get(table)
