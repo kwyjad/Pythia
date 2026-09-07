@@ -651,12 +651,18 @@ is a different quantity from a resolved figure, and a source admitted "just
 for calibration" is one refactor away from being admitted as an answer.
 That is exactly how GDACS exposure once got into a people-affected series.
 
-> **Verify on first run.** `dfo.url` could not be reached from the
-> environment this was built in. A wrong URL or a changed sheet shape fails
-> loud and safe — the fetch reports unavailable, the report's cross-check
-> section says so, and no resolved row is affected, because nothing else
-> reads this source. The fix is a URL in YAML and at worst a column name in
-> `_COLUMN_ALIASES`.
+> **What the first live run found.** On 2026-09-07 every candidate route
+> was refused: 403 on both `/temp/` files and 410 on the retired
+> `/Archives/` one. A 403 is a live route refusing the caller, and the
+> request went out as bare `python-requests` with no `Accept` header, which
+> is the shape a bot filter is freest to refuse; BoM and NOAA refused this
+> repo for the same reason. The fetch now names itself (`DFO_USER_AGENT`
+> overrides the User-Agent), and the 410 route is recorded in the YAML
+> rather than asked for again. A wrong URL or a changed sheet shape still
+> fails loud and safe — the fetch reports unavailable, every candidate is
+> named with its own status, the report's cross-check section says so, and
+> no resolved row is affected, because nothing else reads this source. The
+> fix is a URL in YAML and at worst a column name in `_COLUMN_ALIASES`.
 
 ### The acceptance report
 

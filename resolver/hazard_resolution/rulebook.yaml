@@ -609,20 +609,27 @@ base_rates:
 # ---------------------------------------------------------------------------
 dfo:
   enabled: true
-  # NOTE: this endpoint could not be reached from the environment the
-  # module was built in. A wrong URL or a changed shape fails LOUD and
-  # SAFE — the fetch reports unavailable, the cross-check section of the
-  # report says so, and nothing else in the machine is affected, because
-  # nothing else reads this source.
+  # A wrong URL or a changed shape fails LOUD and SAFE — the fetch reports
+  # unavailable, every candidate is named with its own status, the
+  # cross-check section of the report says so, and nothing else in the
+  # machine is affected, because nothing else reads this source.
   url: "https://floodobservatory.colorado.edu/temp/FloodArchive.xlsx"
   # Candidate routes, tried in order; the first that fetches wins. A source
   # address is a LIST, not a string — haz_raw_dfo has held 0 rows since the
   # module shipped, and a portal that moves its download route should cost a
-  # YAML edit rather than an outage. When every candidate fails the error
-  # names each attempt with its own reason.
+  # YAML edit rather than an outage.
+  #
+  # What the first live run (2026-09-07) actually found, and why this list
+  # is now two entries rather than three: both /temp/ routes answered 403,
+  # which is a live route refusing the caller rather than a dead one — the
+  # request went out as bare python-requests with no Accept header, so the
+  # repair was to name the caller (see dfo.py::_request_headers).
+  # /Archives/FloodArchive.xlsx answered 410 Gone. That is the server
+  # stating the route is retired on purpose, so asking again every run
+  # spends a request to learn what it already told us. It is recorded here
+  # and no longer requested.
   urls:
     - "https://floodobservatory.colorado.edu/temp/FloodArchive.xlsx"
-    - "https://floodobservatory.colorado.edu/Archives/FloodArchive.xlsx"
     - "https://floodobservatory.colorado.edu/temp/FloodArchive.csv"
   # How to parse what the URL returns: xlsx or csv.
   format: xlsx

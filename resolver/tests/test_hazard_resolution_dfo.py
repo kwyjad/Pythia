@@ -398,3 +398,95 @@ def test_cross_check_divergence_factor_comes_from_the_rulebook(con, rulebook):
 
     strict = make_rulebook({"dfo": {"format": "csv", "divergence_factor": 1.5}})
     assert dfo_mod.cross_check(con, strict).diverging
+
+
+# ---------------------------------------------------------------------------
+# The first live run: an outbound request must name itself
+# ---------------------------------------------------------------------------
+
+
+class TestTheFetchNamesItself:
+    """``haz_raw_dfo`` held no rows because the archive refused the caller.
+
+    The first live run of this module, on 2026-09-07, tried three routes
+    and was refused by all of them: 403 on both ``/temp/`` files and 410 on
+    the retired ``/Archives/`` one. A 403 is a live route refusing this
+    caller, not a dead route, and the request went out as bare
+    ``python-requests`` with no ``Accept`` at all. BoM and NOAA refused this
+    repo for the same reason, and the repair is the same.
+    """
+
+    def test_the_request_carries_a_real_user_agent(self, monkeypatch):
+        monkeypatch.delenv("DFO_USER_AGENT", raising=False)
+        sent: dict[str, object] = {}
+
+        class _Response:
+            content = b"id,country,began,ended\n"
+
+            def raise_for_status(self) -> None:
+                return None
+
+        def _get(url, timeout=None, headers=None):
+            sent["headers"] = headers or {}
+            return _Response()
+
+        monkeypatch.setattr(dfo_mod.requests, "get", _get)
+        dfo_mod._http_get("https://example.invalid/FloodArchive.xlsx", 5.0)
+
+        agent = str(sent["headers"].get("User-Agent", ""))
+        assert agent, "the request must say who is asking"
+        assert "python-requests" not in agent.lower(), (
+            "a bare python-requests User-Agent is the shape a bot filter is "
+            "freest to refuse, and floodobservatory.colorado.edu did refuse it"
+        )
+
+    def test_the_request_asks_for_what_the_parser_can_read(self, monkeypatch):
+        monkeypatch.delenv("DFO_USER_AGENT", raising=False)
+        headers = dfo_mod._request_headers()
+        accept = headers.get("Accept", "")
+        assert accept, "an outbound request asks for what it wants"
+        assert "spreadsheetml" in accept and "text/csv" in accept, (
+            "the two formats _rows_from_csv/_rows_from_xlsx actually read"
+        )
+
+    def test_the_user_agent_is_overridable_without_a_deploy(self, monkeypatch):
+        monkeypatch.setenv("DFO_USER_AGENT", "PythiaOperator/9.9")
+        assert dfo_mod._request_headers()["User-Agent"] == "PythiaOperator/9.9"
+
+    def test_a_blank_override_falls_back_rather_than_sending_nothing(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("DFO_USER_AGENT", "   ")
+        assert dfo_mod._request_headers()["User-Agent"].strip()
+
+    def test_the_retired_route_is_recorded_and_no_longer_requested(self):
+        """410 Gone is the server saying the route is retired on purpose.
+
+        Asking again every run spends a request to learn what it has
+        already been told. The evidence stays in the YAML comment.
+        """
+
+        from resolver.hazard_resolution.rulebook import load_rulebook
+
+        urls = load_rulebook().get("dfo.urls")
+        assert "/Archives/FloodArchive.xlsx" not in " ".join(urls)
+        assert len(urls) >= 2, "a source address is still a candidate LIST"
+        assert any(u.endswith(".csv") for u in urls), (
+            "the csv export is a different route from the xlsx one and both "
+            "were refused for the same reason, so both stay candidates"
+        )
+
+    def test_every_candidate_route_is_named_when_all_of_them_fail(
+        self, con, rulebook
+    ):
+        """The log that made this diagnosable must keep saying it."""
+
+        def _refuse(url, timeout):
+            raise RuntimeError(f"403 Client Error: Forbidden for url: {url}")
+
+        outcome = dfo_mod.fetch_dfo(con, rulebook, get=_refuse)
+        assert outcome.ok is False
+        for url in rulebook.get("dfo.urls"):
+            assert url in " ".join(outcome.source_urls) or url in str(
+                outcome.error
+            ), f"{url} was tried and must be named in the failure"

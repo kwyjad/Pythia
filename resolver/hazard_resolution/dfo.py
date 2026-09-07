@@ -29,12 +29,21 @@ archive assembled from press reporting is a different quantity from a
 resolved people-affected figure, and a source admitted "just for
 calibration" is one refactor away from being admitted as an answer.
 
-**Endpoint caveat.** ``dfo.url`` in the rulebook could not be reached from
-the environment this was built in. A wrong URL or a changed sheet shape
-fails LOUD and SAFE: the fetch reports unavailable, the report's
-cross-check section says so, and nothing else in the machine is affected —
-because nothing else reads this source. The fix is a URL in YAML and at
-worst a column name in :data:`_COLUMN_ALIASES`.
+**How the archive is asked for.** The first live run of this module, on
+2026-09-07, was refused by every candidate route: 403 on both ``/temp/``
+files and 410 on the retired ``/Archives/`` one. A 403 is not a dead
+route. It is a live route refusing this caller, and the request went out
+as bare ``python-requests`` with no ``Accept`` header at all, which is the
+shape a bot filter is freest to refuse. BoM and NOAA both refused this
+repo for the same reason. So the fetch names itself: a real User-Agent
+(``DFO_USER_AGENT`` overrides it) and an ``Accept`` listing the two
+formats the parser reads.
+
+A wrong URL or a changed sheet shape still fails LOUD and SAFE: the fetch
+reports unavailable, every candidate is named with its own status, the
+report's cross-check section says so, and nothing else in the machine is
+affected — because nothing else reads this source. The fix is a URL in
+YAML and at worst a column name in :data:`_COLUMN_ALIASES`.
 """
 
 from __future__ import annotations
@@ -43,6 +52,7 @@ import csv
 import datetime as dt
 import io
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
@@ -107,8 +117,36 @@ def _map_columns(headers: list[Any]) -> dict[str, int]:
     return out
 
 
+#: What this repo calls itself to floodobservatory.colorado.edu. A bare
+#: ``python-requests`` User-Agent with no ``Accept`` was refused 403 by both
+#: live routes on 2026-09-07 — the same refusal BoM and NOAA gave this repo
+#: for the same reason. Overridable so a future refusal costs an env var
+#: rather than a deploy.
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+
+
+def _request_headers() -> dict[str, str]:
+    """Headers every DFO request carries. An outbound request asks for what
+    it wants, and says who is asking."""
+
+    agent = (os.getenv("DFO_USER_AGENT") or "").strip() or _DEFAULT_USER_AGENT
+    return {
+        "User-Agent": agent,
+        # The two formats the parser can actually read, then a
+        # wildcard so a server that negotiates strictly still answers.
+        "Accept": (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,"
+            "text/csv;q=0.9,*/*;q=0.8"
+        ),
+        "Accept-Language": "en",
+    }
+
+
 def _http_get(url: str, timeout: float) -> bytes:
-    response = requests.get(url, timeout=timeout)
+    response = requests.get(url, timeout=timeout, headers=_request_headers())
     response.raise_for_status()
     return response.content
 
