@@ -183,3 +183,10 @@ def test_the_gdacs_ingest_step_bounds_its_own_enrichment_pass():
         f"the budget must sit inside the reset step's 60 minutes, got "
         f"{max(budgets)}s"
     )
+    # The step is 20 minutes off reset and 60 on it, so the two budgets are
+    # not interchangeable: the larger one on a normal run would outlive the
+    # step it is supposed to fit inside.
+    assert min(budgets) <= 18 * 60, (
+        f"the non-reset budget must sit inside the 20-minute step, got "
+        f"{min(budgets)}s"
+    )
