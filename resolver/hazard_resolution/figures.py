@@ -645,14 +645,29 @@ def _record_figures(
             ceiling_field=entry.get("ceiling_field", ceiling_basis.get("field")),
             ceiling_basis=entry.get("ceiling_basis", ceiling_basis.get("basis")),
             detail={
-                k: v
-                for k, v in entry.items()
-                if k
-                not in {
-                    "doc_id", "value", "unit", "quote", "reason",
-                    "exposed_population", "ceiling_multiplier",
-                    "ceiling_source", "ceiling_source_ref", "ceiling_field",
-                    "ceiling_basis",
-                }
+                # Why a blank ceiling is blank, on a rejected row too. Only
+                # apply_ceiling's own rejections carried these; every other
+                # reason (a duplicate quote, a document about another
+                # country) rendered the counts as blank, so a reader
+                # comparing rejections could not see that the cell had no
+                # bound at all.
+                "ceiling_events_seen": ceiling_basis.get("n_events"),
+                "ceiling_events_with_exposure": ceiling_basis.get(
+                    "n_events_with_exposure"
+                ),
+                "ceiling_events_below_plausible_floor": ceiling_basis.get(
+                    "n_events_below_plausible_floor"
+                ),
+                **{
+                    k: v
+                    for k, v in entry.items()
+                    if k
+                    not in {
+                        "doc_id", "value", "unit", "quote", "reason",
+                        "exposed_population", "ceiling_multiplier",
+                        "ceiling_source", "ceiling_source_ref", "ceiling_field",
+                        "ceiling_basis",
+                    }
+                },
             },
         )

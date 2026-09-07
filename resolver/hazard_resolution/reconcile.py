@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from resolver.hazard_resolution.candidates import (
+    CEILING_FIELD,
     Candidate,
     ceiling_candidates,
     ladder_candidates,
@@ -129,11 +130,26 @@ def _best_on_rung(candidates: list[Candidate], rung: str) -> Candidate | None:
     return max(on_rung, key=lambda c: (c.value, str(c.source_ref)))
 
 
-def _ceiling(candidates: list[Candidate], rulebook: Rulebook | None = None) -> float | None:
-    """The GDACS exposure ceiling for this cell, or None if unknown.
+def gdacs_ceiling_detail(
+    candidates: list[Candidate], rulebook: Rulebook | None = None
+) -> dict[str, Any]:
+    """The GDACS exposure ceiling AND the event that supplied it.
 
     Several overlapping events each bound the month; the largest exposure
     is the binding one, since any of them could account for the figure.
+
+    The number alone is not auditable. A flag raised against a ceiling of
+    two is a GDACS enrichment failure and a flag raised against a ceiling
+    of two million is a figure worth doubting, and only the event id and
+    the response field say which. The extraction path has carried that
+    since Sept 2026 (:func:`candidates.exposure_ceiling_basis`); the ladder
+    recorded a rulebook constant, so 2,089 flagged resolutions in run
+    34124705852 said a bound had been exceeded and named neither the bound
+    nor its origin.
+
+    The counts matter as much: without them a reader cannot tell "GDACS
+    listed no event for this cell" from "GDACS listed six and described
+    none of them", and only the second is an enrichment failure to chase.
     """
 
     # A zero or negative exposure is GDACS declining to say, not GDACS
@@ -141,16 +157,39 @@ def _ceiling(candidates: list[Candidate], rulebook: Rulebook | None = None) -> f
     # plausibility floor (rules.usable_exposure). Filtering those out here
     # means an event with no usable exposure contributes no ceiling, rather
     # than contributing a ceiling of zero — or of five.
-    ceilings = []
-    for candidate in ceiling_candidates(candidates):
-        usable = (
+    seen = ceiling_candidates(candidates)
+    usable: list[tuple[float, Candidate]] = []
+    for candidate in seen:
+        value = (
             usable_exposure(candidate.value, rulebook)
             if rulebook is not None
             else (float(candidate.value) if candidate.value > 0 else None)
         )
-        if usable is not None:
-            ceilings.append(usable)
-    return max(ceilings) if ceilings else None
+        if value is not None:
+            usable.append((value, candidate))
+    below_floor = sum(
+        1 for c in seen if c.value > 0 and all(c is not u for _, u in usable)
+    )
+    binding = max(usable, key=lambda pair: pair[0]) if usable else None
+    return {
+        "value": binding[0] if binding is not None else None,
+        # Named only where a number was produced. A constant beside a blank
+        # ceiling reads as a ceiling that was evaluated and came out empty,
+        # which is a different fault from having no ceiling at all.
+        "source": binding[1].source if binding is not None else None,
+        "source_ref": binding[1].source_ref if binding is not None else None,
+        "field": CEILING_FIELD if binding is not None else None,
+        "n_events": len(seen),
+        "n_events_with_exposure": len(usable),
+        "n_events_below_plausible_floor": below_floor,
+        "all_exposures": sorted((float(c.value) for c in seen), reverse=True)[:10],
+    }
+
+
+def _ceiling(candidates: list[Candidate], rulebook: Rulebook | None = None) -> float | None:
+    """The GDACS exposure ceiling for this cell, or None if unknown."""
+
+    return gdacs_ceiling_detail(candidates, rulebook)["value"]
 
 
 def effective_ceiling(
@@ -160,27 +199,80 @@ def effective_ceiling(
 ) -> tuple[float | None, str]:
     """The ceiling actually in force, and where it came from.
 
-    GDACS exposure when there is one. When there is not — its discovery
-    response carries no population figure and the per-event RSS fetch that
-    fills it in tolerates 404s — a share of the national population stands
-    in, so a silent GDACS leaves a bound rather than none at all.
-
     Returns (ceiling, basis) where basis is one of ``gdacs_exposed``,
-    ``population_share`` or ``none``. The basis travels into provenance:
-    a reader must be able to see WHICH bound a flag was raised against.
+    ``population_share`` or ``none``. Kept for callers that want only the
+    number and the word; :func:`effective_ceiling_detail` is the record.
     """
 
-    gdacs = _ceiling(candidates, rulebook)
-    if gdacs is not None:
-        return gdacs, "gdacs_exposed"
+    detail = effective_ceiling_detail(candidates, rulebook, national_population)
+    return detail["value"], detail["basis"]
+
+
+def effective_ceiling_detail(
+    candidates: list[Candidate],
+    rulebook: Rulebook,
+    national_population: float | None,
+) -> dict[str, Any]:
+    """The ceiling in force, where it came from, and why it is not GDACS.
+
+    GDACS exposure when there is one. When there is not — its discovery
+    response carries no population figure and the per-event RSS fetch that
+    fills it in tolerates 404s, and in run 34124705852 was refused 552
+    times — a share of the national population stands in, so a silent
+    GDACS leaves a bound rather than none at all.
+
+    Whichever bound is in force, the GDACS counts ride along. They are the
+    difference between "GDACS listed no event for this cell" and "GDACS
+    listed events and could describe none of them", and the second is an
+    enrichment failure with a repair. A `population_share` basis with
+    ``n_events`` at six is a different report from one with ``n_events`` at
+    zero, and until now both rendered as the same blank column.
+    """
+
+    gdacs = gdacs_ceiling_detail(candidates, rulebook)
+    counts = {
+        key: gdacs[key]
+        for key in (
+            "n_events",
+            "n_events_with_exposure",
+            "n_events_below_plausible_floor",
+            "all_exposures",
+        )
+    }
+    if gdacs["value"] is not None:
+        return {
+            "value": gdacs["value"],
+            "basis": "gdacs_exposed",
+            "source": gdacs["source"],
+            "source_ref": gdacs["source_ref"],
+            "field": gdacs["field"],
+            "population_share": None,
+            **counts,
+        }
 
     try:
         share = float(rulebook.get("sanity.population_fallback_share"))
     except Exception:  # noqa: BLE001 - older rulebooks have no such key
         share = 0.0
     if share > 0 and national_population and national_population > 0:
-        return float(national_population) * share, "population_share"
-    return None, "none"
+        return {
+            "value": float(national_population) * share,
+            "basis": "population_share",
+            "source": "haz_raw_population",
+            "source_ref": None,
+            "field": "population.value x sanity.population_fallback_share",
+            "population_share": share,
+            **counts,
+        }
+    return {
+        "value": None,
+        "basis": "none",
+        "source": None,
+        "source_ref": None,
+        "field": None,
+        "population_share": share if share > 0 else None,
+        **counts,
+    }
 
 
 def reconcile(
@@ -192,17 +284,30 @@ def reconcile(
     rulebook: Rulebook,
     national_population: float | None = None,
     today: dt.date | None = None,
+    sources_unavailable: list[str] | None = None,
 ) -> Reconciliation:
-    """Resolve one country-month-hazard from its candidates. Pure function."""
+    """Resolve one country-month-hazard from its candidates. Pure function.
+
+    ``sources_unavailable`` names the rungs this run could not READ. It is
+    provenance, not policy: nothing here behaves differently for an
+    unreadable rung. It is recorded because an empty rung and an unread one
+    are different facts and only one of them can justify a NO_DATA — and
+    because the run stream that used to carry the distinction is off in the
+    nightly backcast, so 59,967 NO_DATA rows in run 34124705852 could not
+    say that EM-DAT had rejected the key on every call.
+    """
 
     year, month = (int(p) for p in ym.split("-"))
     provisional = is_provisional(year, month, rulebook, today=today)
     ladder = [str(rung) for rung in rulebook.get("ladder")]
 
     usable = ladder_candidates(candidates)
-    exposure_ceiling, ceiling_basis = effective_ceiling(
+    ceiling_detail = effective_ceiling_detail(
         candidates, rulebook, national_population
     )
+    exposure_ceiling = ceiling_detail["value"]
+    ceiling_basis = ceiling_detail["basis"]
+    unavailable = sorted({str(rung) for rung in (sources_unavailable or [])})
 
     # Which rungs actually have something, in ladder order.
     populated: list[tuple[str, Candidate]] = []
@@ -211,21 +316,45 @@ def reconcile(
         if best is not None:
             populated.append((rung, best))
 
+    empty_rungs = [rung for rung in ladder if rung not in {r for r, _ in populated}]
     consulted = {
         "ladder": ladder,
         "rungs_populated": [rung for rung, _ in populated],
-        "rungs_empty": [rung for rung in ladder if rung not in {r for r, _ in populated}],
+        "rungs_empty": empty_rungs,
+        # An empty rung and an unread one are different facts, and only the
+        # first can justify a NO_DATA. Splitting them here puts the
+        # distinction on the STORED row, where a bundle built from the
+        # database alone can read it.
+        "rungs_unavailable": unavailable,
+        "rungs_empty_and_readable": [r for r in empty_rungs if r not in unavailable],
         "candidates": [c.provenance() for c in candidates],
         "ceiling": {
-            "source": rulebook.get("sanity.ceiling_source"),
+            # The rule that says a ceiling applies at all, kept under its own
+            # name. It used to occupy the `source` key, where it read as the
+            # thing that supplied the number.
+            "rule_source": rulebook.get("sanity.ceiling_source"),
             # WHICH bound is in force. A flag raised against a population
             # share is a different statement from one raised against a GDACS
             # footprint, and a reader must be able to tell them apart.
             "basis": ceiling_basis,
+            # WHERE the number came from: the event, and the response field.
+            # A ceiling of two against a reported forty thousand is an
+            # enrichment failure, and only these say so.
+            "source": ceiling_detail["source"],
+            "source_ref": ceiling_detail["source_ref"],
+            "field": ceiling_detail["field"],
             "multiplier": rulebook.get("sanity.ceiling_multiplier"),
             "exposed_population": exposure_ceiling,
             "national_population": national_population,
+            "population_share": ceiling_detail["population_share"],
             "population_cap_enabled": bool(rulebook.get("sanity.population_cap")),
+            # Why a blank ceiling is blank.
+            "n_events": ceiling_detail["n_events"],
+            "n_events_with_exposure": ceiling_detail["n_events_with_exposure"],
+            "n_events_below_plausible_floor": ceiling_detail[
+                "n_events_below_plausible_floor"
+            ],
+            "all_exposures": ceiling_detail["all_exposures"],
         },
         "conflict_rule": rulebook.get("conflict_rule"),
         "event_attribution": rulebook.get("event_attribution"),
