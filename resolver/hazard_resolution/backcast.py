@@ -239,7 +239,41 @@ def _binding_limit_from_note(note: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def completed_months(con, hazard: str) -> set[str]:
+def walking_commit() -> str | None:
+    """The commit of the code doing the walking, for the ledger's record.
+
+    ``GITHUB_SHA`` in CI; otherwise ``git rev-parse HEAD``. Recorded and
+    never compared — a bare commit change must not invalidate the ledger,
+    or every merge would trigger a full re-walk of every hazard.
+    """
+
+    sha = (os.getenv("GITHUB_SHA") or "").strip()
+    if sha:
+        return sha[:40]
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if out.returncode == 0:
+            return (out.stdout or "").strip()[:40] or None
+    except Exception:  # noqa: BLE001 - provenance is best effort
+        pass
+    return None
+
+
+def hazard_rulebook_hash(rb, hazard: str) -> str | None:
+    """This hazard's rulebook fingerprint, or None when it cannot be taken."""
+
+    try:
+        return rb.hazard_fingerprint(hazard)
+    except Exception:  # noqa: BLE001 - an older rulebook object
+        return None
+
+
+def completed_months(con, hazard: str, rulebook_hash: str | None = None) -> set[str]:
     """Months this hazard's backcast has already finished successfully.
 
     The ledger is checked against the DATABASE, and the database wins. A
@@ -252,11 +286,22 @@ def completed_months(con, hazard: str) -> set[str]:
     A month recorded ``ok`` with ZERO cells assessed is complete: there was
     nothing to do (a cyclone month with no country in an active basin
     season), and re-walking it every night would be noise.
+
+    A month decided under DIFFERENT RULES is also re-walked. When
+    ``rulebook_hash`` is given, a row whose stored hash differs from it was
+    resolved by a rulebook since changed, and its ``ok`` describes a
+    question no longer being asked. This is what makes a fix reach the
+    historical record without an operator remembering to pass
+    ``--no-resume``: the ASAP delimiter fix left 114 drought months marked
+    complete and unreachable, and only a hand-passed flag could free them.
+
+    A row with NO stored hash predates the columns. It is re-walked once,
+    which is the honest reading — nothing recorded what decided it.
     """
 
     ensure_haz_schema(con)
     rows = con.execute(
-        "SELECT ym, COALESCE(cells, 0) FROM haz_backcast_progress "
+        "SELECT ym, COALESCE(cells, 0), rulebook_hash FROM haz_backcast_progress "
         "WHERE hazard = ? AND status = 'ok'",
         [hazard],
     ).fetchall()
@@ -272,8 +317,12 @@ def completed_months(con, hazard: str) -> set[str]:
     }
     done: set[str] = set()
     disowned: list[str] = []
-    for ym, cells in rows:
+    restaled: list[str] = []
+    for ym, cells, stored_hash in rows:
         ym = str(ym)
+        if rulebook_hash and str(stored_hash or "") != rulebook_hash:
+            restaled.append(ym)
+            continue
         if int(cells or 0) <= 0 or ym in with_triggers:
             done.add(ym)
         else:
@@ -283,6 +332,14 @@ def completed_months(con, hazard: str) -> set[str]:
             "[backcast] %s: %d month(s) the ledger calls complete hold no "
             "trigger rows in this database — re-walking them: %s",
             hazard, len(disowned), ",".join(sorted(disowned)[:24]),
+        )
+    if restaled:
+        LOG.warning(
+            "[backcast] %s: %d month(s) were decided under a different "
+            "rulebook (now %s) — re-walking them so the change reaches the "
+            "historical record: %s",
+            hazard, len(restaled), rulebook_hash,
+            ",".join(sorted(restaled)[:24]),
         )
     return done
 
@@ -297,6 +354,8 @@ def record_month(
     duration_sec: float | None = None,
     error: str | None = None,
     deferred_cells: Sequence[str] | None = None,
+    walked_by_commit: str | None = None,
+    rulebook_hash: str | None = None,
 ) -> None:
     """Upsert one month's outcome into the resume ledger.
 
@@ -323,8 +382,9 @@ def record_month(
             INSERT INTO haz_backcast_progress
                 (hazard, ym, status, cells, resolved_value, resolved_zero,
                  no_data, frozen_skipped, extraction_calls, extraction_cost_usd,
-                 duration_sec, error, deferred_cells)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 duration_sec, error, deferred_cells, walked_by_commit,
+                 rulebook_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 hazard,
@@ -340,6 +400,8 @@ def record_month(
                 duration_sec,
                 error,
                 deferred_json,
+                walked_by_commit,
+                rulebook_hash,
             ],
         )
         con.execute("COMMIT")
@@ -655,7 +717,12 @@ def run_backcast(
         )
         return run
 
-    already = completed_months(con, hazard) if resume else set()
+    # The rulebook fingerprint is taken ONCE per hazard run: it decides
+    # which ledger months still describe the rules in force, and it is
+    # stamped on every month this run records.
+    rb_hash = hazard_rulebook_hash(rulebook, hazard_name)
+    commit = walking_commit()
+    already = completed_months(con, hazard, rb_hash) if resume else set()
     owed = deferred_months(con, hazard) if resume else {}
     todo = [ym for ym in months if ym not in already]
     # NEWEST FIRST. The nightly run has a time budget, so the order decides
@@ -795,6 +862,8 @@ def run_backcast(
                 duration_sec=duration,
                 error=error,
                 deferred_cells=deferred_cells,
+                walked_by_commit=commit,
+                rulebook_hash=rb_hash,
             )
 
     LOG.info(

@@ -133,6 +133,45 @@ class Rulebook:
     def __contains__(self, dotted_key: str) -> bool:
         return self.get(dotted_key, None) is not None
 
+    #: Sections that govern EVERY hazard's answer, whichever hazard is
+    #: being walked. A change to the ladder or the sanity ceiling changes
+    #: what a flood month resolves as surely as a change under ``flood:``.
+    _SHARED_SECTIONS = (
+        "ladder", "sanity", "conflict_detection", "event_attribution",
+        "freeze_days", "reliefweb", "extraction", "raw_cache",
+    )
+
+    def hazard_fingerprint(self, hazard: str) -> str:
+        """A stable digest of every rulebook value that decides ``hazard``.
+
+        The resume ledger uses this to tell a month decided by the CURRENT
+        rules from one decided by rules since changed. It is why a
+        one-character delimiter bug could freeze ten years of drought
+        behind a wall of ``status='ok'``: nothing recorded which rules had
+        produced that ``ok``, so nothing could notice they had moved.
+
+        Deliberately NOT the whole file. A digest over everything would
+        change when an unrelated hazard's threshold moved and trigger a
+        full re-walk of all three, which is expensive and teaches an
+        operator to distrust the mechanism. It covers the hazard's own
+        section plus the shared sections that reach every hazard.
+
+        Sorted, separator-tight JSON, so key order in the YAML cannot move
+        the digest on its own.
+        """
+
+        import hashlib
+        import json as _json
+
+        payload = {
+            "hazard": {hazard: self.get(hazard, None)},
+            "shared": {
+                key: self.get(key, None) for key in self._SHARED_SECTIONS
+            },
+        }
+        blob = _json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"Rulebook(path={str(self.path)!r}, keys={sorted(self._data)})"
 

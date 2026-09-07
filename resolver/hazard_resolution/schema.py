@@ -290,6 +290,16 @@ _CORE_TABLE_DDL: dict[str, str] = {
         duration_sec DOUBLE,
         error TEXT,
         deferred_cells TEXT,
+        -- What DECIDED this month. Without them the ledger cannot tell a
+        -- month resolved correctly from one resolved by code since fixed,
+        -- which is how a one-character delimiter bug froze ten years of
+        -- drought behind a wall of status='ok'. rulebook_hash is the
+        -- hazard's own fingerprint (rulebook.hazard_fingerprint) and a
+        -- change to it re-walks the month on its own; walked_by_commit is
+        -- recorded for the reader and deliberately does NOT invalidate,
+        -- or every merge would trigger a full re-walk.
+        walked_by_commit TEXT,
+        rulebook_hash TEXT,
         ran_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (hazard, ym)
     )
@@ -357,6 +367,12 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str, str | None], ...] = (
     # JSON list of the ISO3s a 'deferred' backcast month still owes: the
     # resume walks exactly those cells. NULL means the month owes nothing.
     ("haz_backcast_progress", "deferred_cells", "TEXT", None),
+    # What decided a ledger month. NULL on every row written before these
+    # columns existed, and NULL is meaningful: it says the month was walked
+    # by code that did not record its rules, so the resume treats it as
+    # unwalked the first time a fingerprint is available to compare.
+    ("haz_backcast_progress", "walked_by_commit", "TEXT", None),
+    ("haz_backcast_progress", "rulebook_hash", "TEXT", None),
 )
 
 
@@ -400,6 +416,10 @@ def _widen_backcast_status_check(conn: "duckdb.DuckDBPyConnection") -> None:
                    frozen_skipped, extraction_calls, extraction_cost_usd, duration_sec,
                    error, ran_at
             FROM haz_backcast_progress__old
+            -- walked_by_commit/rulebook_hash are deliberately not copied:
+            -- a ledger old enough to need this rebuild predates them, so
+            -- the columns are NULL either way and _apply_column_migrations
+            -- adds them straight after.
             """
         )
         conn.execute("DROP TABLE haz_backcast_progress__old")

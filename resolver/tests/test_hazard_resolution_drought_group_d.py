@@ -499,12 +499,46 @@ class TestNmmeLookup:
         assert entry["ok"] is False
 
     def test_a_miss_describes_the_table(self, con, rulebook):
-        _seed_nmme(con, [("SOM", -1.4, 1, "2024-03-08")])
+        """A miss INSIDE the table's coverage still describes the table.
+
+        The fixture carries a vintage that speaks for the asked month
+        (issued February at lead 1) whose value is NULL, so the lookup
+        misses while the month is squarely within coverage. Before
+        run 34124705852 the span was taken over ISSUE dates, so a table
+        whose only vintage was issued in the asked month looked as though
+        it covered it, and every month before the ingest began was
+        reported as this fault rather than as the structural absence it
+        is. That case is now
+        ``test_a_month_before_coverage_is_structural_not_a_fault``.
+        """
+
+        _seed_nmme(con, [
+            ("SOM", None, 1, "2024-02-08"),   # about 2024-03, no value
+            ("SOM", -1.4, 1, "2024-03-08"),   # about 2024-04
+        ])
         outcome = _refresh(con, rulebook)
         error = outcome.detail["entries"]["nmme_precip_anomaly"]["error"]
-        assert "seasonal_forecasts: 1 rows" in error
-        assert "forecast_issue_date spans 2024-03-08..2024-03-08" in error
+        assert outcome.detail["entries"]["nmme_precip_anomaly"].get("reason") == (
+            "no_usable_rows"
+        )
+        assert "seasonal_forecasts: 2 rows" in error
         assert "lead_months in {1}" in error
+
+    def test_a_month_before_coverage_is_structural_not_a_fault(self, con, rulebook):
+        """The 2026-07 case: the earliest vintage speaks for a later month.
+
+        NMME's earliest vintage in run 34124705852 was issued 2026-07-08 at
+        lead 1, so it is about August. July had no possible vintage, and
+        was reported as a fault once per month for every backcast month
+        before the ingest began.
+        """
+
+        _seed_nmme(con, [("SOM", -1.4, 1, "2024-03-08")])  # about April
+        outcome = _refresh(con, rulebook)
+        entry = outcome.detail["entries"]["nmme_precip_anomaly"]
+        assert entry["ok"] is False
+        assert entry.get("reason") == "predates_table_coverage"
+        assert "starts at 2024-04" in entry["error"]
 
     def test_the_shipped_where_no_longer_pins_a_lead(self, rulebook):
         entry = next(
