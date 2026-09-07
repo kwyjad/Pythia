@@ -332,6 +332,23 @@ def _pick_country_crisis(results: list[dict]) -> dict:
     return max(results, key=_score)
 
 
+#: Where an INFORM record carries its severity score. Read in order; the
+#: first present wins. Kept as a NAMED list so a record that matches none of
+#: them can be reported against it — the monthly-snapshot fallback of run
+#: 34099296877 fetched five months of records successfully and produced a
+#: trend for zero countries, and a bare "0 countries" says nothing about why.
+_SEVERITY_SCORE_KEYS = (
+    "severity_index_score",
+    "severity_score",
+    "score",
+    "inform_severity_index",
+    "severity_index",
+    "severity",
+    "figure",
+    "value",
+)
+
+
 #: How many months of INFORM severity a trend covers, and how far back the
 #: snapshot fallback reaches when the country-log has gone quiet.
 _TREND_MONTHS = 6
@@ -341,6 +358,7 @@ _TREND_MONTHS = 6
 # duplicate-helper trap is what left this module's month arithmetic and its
 # trend handling behind when the other copy was fixed.
 from pythia.acaps import (  # noqa: E402
+    _first_present,
     _newest_trend_date,
     _trend_is_better,
     _trend_is_stale,
@@ -426,6 +444,7 @@ def _bulk_fetch_inform_severity(
             "the trend from the monthly snapshots instead",
             log_newest or "absent",
         )
+        keys_seen: set[str] = set()
         for label in _month_labels_back(_TREND_MONTHS):
             month_data = (
                 snapshot_data
@@ -452,23 +471,34 @@ def _bulk_fetch_inform_severity(
                     month_by_country[iso3].append(rec)
             for iso3, records in month_by_country.items():
                 record = _pick_country_crisis(records)
-                score = _safe_float(
-                    record.get("severity_index_score")
-                    or record.get("severity_score")
-                    or record.get("score")
-                )
+                score = _safe_float(_first_present(record, _SEVERITY_SCORE_KEYS))
                 if score is not None:
                     snapshot_trend_by_country[iso3].append(
                         {"date": stamp, "score": score}
                     )
-        LOG.info(
-            "INFORM Severity: monthly snapshots produced a trend for %d "
-            "countries (newest %s)",
-            len(snapshot_trend_by_country),
-            _newest_trend_date(
-                [e for v in snapshot_trend_by_country.values() for e in v]
-            ) or "none",
-        )
+                else:
+                    keys_seen.update(k for k in record if isinstance(k, str))
+        if snapshot_trend_by_country:
+            LOG.info(
+                "INFORM Severity: monthly snapshots produced a trend for %d "
+                "countries (newest %s)",
+                len(snapshot_trend_by_country),
+                _newest_trend_date(
+                    [e for v in snapshot_trend_by_country.values() for e in v]
+                ) or "none",
+            )
+        else:
+            # Naming the keys is what turns "it produced nothing" into a
+            # repair. The country-log parser has said this about its own
+            # rows since Group H; the snapshot path was reading three key
+            # names on faith and reporting a bare zero when none matched.
+            LOG.warning(
+                "INFORM Severity: the monthly snapshots produced NO trend at "
+                "all. Looked for a score in %s; the records carried %s. The "
+                "trend stays on the country-log, stale as it is.",
+                "/".join(_SEVERITY_SCORE_KEYS),
+                ", ".join(sorted(keys_seen)) or "(no records reached this point)",
+            )
 
     # 3. Fetch global dimension data for top indicators
     top_indicators_by_country: dict[str, list[dict]] = defaultdict(list)
