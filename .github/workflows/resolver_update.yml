@@ -608,6 +608,13 @@ jobs:
         timeout-minutes: ${{ inputs.reset_db && 60 || 20 }}
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'gdacs') }}
         continue-on-error: true
+        env:
+          # The per-event pace is one request every two seconds, which is
+          # slow enough to outrun this step: a reset's 3,272 events would
+          # take 109 minutes against 60. So the pass is bounded and says
+          # how many events it left — they keep the cache's figure and the
+          # next run asks for them. Comfortably inside each step budget.
+          GDACS_ENRICH_MAX_SECONDS: ${{ inputs.reset_db && '2700' || '900' }}
         run: |
           echo "::group::GDACS"
           python -m pythia.tools.ingest_structured_data --sources gdacs 2>&1 | tee diagnostics/phase2_gdacs.log || echo "WARNING: GDACS ingest failed (non-fatal)"

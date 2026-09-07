@@ -426,7 +426,10 @@ def test_no_budget_means_no_ceiling():
 
 
 def test_the_rulebook_budget_fits_inside_the_step():
-    """The flood and cyclone machine steps are 90 minutes each."""
+    """Each hazard walks 3 months in a 90-minute step, so the enrichment
+    may take at most a third of it and leave the ladder, the extraction
+    and the sweeps the rest."""
 
     rb = make_rulebook()
-    assert 0 < rb.get("flood.gdacs.enrich_max_seconds") <= 85 * 60
+    budget = rb.get("flood.gdacs.enrich_max_seconds")
+    assert 0 < budget * 3 <= 30 * 60

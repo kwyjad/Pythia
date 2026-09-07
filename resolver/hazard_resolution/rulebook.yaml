@@ -88,8 +88,10 @@ flood:
     # enough to keep is slow enough to outrun a step budget, and the answer
     # to that is to stop asking and say so, never to speed up: the events
     # not reached keep whatever the cache holds and the next run asks for
-    # them. Well inside the 90-minute flood and cyclone steps.
-    enrich_max_seconds: 900
+    # them. Each hazard walks 3 months in a 90-minute step, so at 600 the
+    # enrichment can take at most 30 of those minutes and the ladder,
+    # extraction and sweeps keep the rest.
+    enrich_max_seconds: 600
     # How many months of GDACS events to pull around the target month.
     # Events are discovered over [month_start - lookback, month_end +
     # lookahead] so a long-running flood that began earlier still lands
