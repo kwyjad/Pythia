@@ -167,25 +167,102 @@ def _get_acaps_token(force_refresh: bool = False) -> str | None:
         return None
 
 
+#: Runaway guard on the page walk. A DRF page is 100 records, so this is
+#: 50,000 records from one endpoint. It exists to stop a server that keeps
+#: handing back a ``next`` link forever, never to bound a legitimate
+#: archive: an endpoint that genuinely holds more says so through ``count``
+#: and the shortfall is reported.
+_PAGE_HARD_CEILING = 500
+
+#: Wall-clock budget for ALL ACAPS paging in one process, not for one walk.
+#: INFORM alone makes over a dozen walks — three snapshot probes, the
+#: country log, a trend month each, three dimensions — so a per-walk budget
+#: multiplies by the walk count and outruns the 30-minute step it is meant
+#: to fit inside. A polite pace is slow enough to outrun a step budget, and
+#: the answer is to stop asking and say how many records were left.
+_PAGE_BUDGET_SECONDS = float(os.environ.get("ACAPS_PAGE_BUDGET_SECONDS", "1200"))
+
+#: Set on the first walk of the process. ``None`` means not yet started.
+_PAGING_DEADLINE: float | None = None
+
+
+def reset_paging_budget() -> None:
+    """Start the ACAPS paging allowance again. Called by tests."""
+
+    global _PAGING_DEADLINE
+    _PAGING_DEADLINE = None
+
+
+def _report_pagination_shortfall(
+    endpoint: str, fetched: int, count: int | None, reason: str
+) -> None:
+    """Say what was left behind, and against what the server said it holds.
+
+    A page walk that stops early with a ``next`` link still in hand has
+    silently truncated the source. The ACAPS INFORM country log was capped
+    at 30 pages, so it stopped at 3,000 records and the trend it fed was
+    built on our own boundary rather than on ACAPS' data.
+    """
+
+    held = f"{count} record(s) held upstream" if count is not None else "an unknown total"
+    LOG.warning(
+        "ACAPS %s: stopped after %d record(s) of %s (%s) — the walk was "
+        "truncated and every record past this point is missing",
+        endpoint, fetched, held, reason,
+    )
+    print(
+        f"::warning title=ACAPS {endpoint} truncated::"
+        f"paging stopped after {fetched} record(s) of {held} ({reason}). "
+        "Raise ACAPS_PAGE_BUDGET_SECONDS, or narrow the query."
+    )
+
+
 def _fetch_paginated_global(
     endpoint: str,
     params: dict | None = None,
-    max_pages: int = 50,
+    max_pages: int = _PAGE_HARD_CEILING,
     token: str | None = None,
+    max_seconds: float | None = None,
 ) -> list[dict]:
-    """Fetch ALL pages from an ACAPS endpoint without iso3 filter."""
+    """Fetch every page from an ACAPS endpoint, with no iso3 filter.
+
+    The walk follows the server's own ``next`` link to exhaustion. It stops
+    early only on a runaway page count or a wall-clock budget, and either
+    stop is announced against the ``count`` the envelope states, because a
+    cap that binds in silence reads exactly like an upstream that has run
+    out of data.
+    """
+
     if token is None:
         token = _get_acaps_token()
     if not token:
         return []
 
+    global _PAGING_DEADLINE
+    budget = _PAGE_BUDGET_SECONDS if max_seconds is None else float(max_seconds)
+    if budget > 0:
+        if _PAGING_DEADLINE is None:
+            _PAGING_DEADLINE = time.monotonic() + budget
+        deadline = _PAGING_DEADLINE
+    else:
+        deadline = None
+
     headers = {"Authorization": f"Token {token}"}
     url: str | None = f"{ACAPS_API_BASE}{endpoint}"
     all_results: list[dict] = []
     retried_auth = False
+    reported_count: int | None = None
+    page_num = 0
+    stopped_early: str | None = None
 
     for page_num in range(1, max_pages + 1):
         if url is None:
+            break
+        if deadline is not None and time.monotonic() > deadline:
+            stopped_early = (
+                f"the {budget:.0f}s wall-clock budget for ACAPS paging in "
+                "this process was already spent"
+            )
             break
         try:
             resp = requests.get(
@@ -226,18 +303,39 @@ def _fetch_paginated_global(
             LOG.warning("ACAPS non-JSON response for %s", endpoint)
             return all_results
 
+        # The envelope's own total. This is what makes a truncated walk
+        # nameable rather than a guess about whether more existed.
+        if reported_count is None:
+            raw_count = body.get("count")
+            if isinstance(raw_count, int):
+                reported_count = raw_count
+
         results = body.get("results") or []
         if isinstance(results, list):
             all_results.extend(results)
 
         url = body.get("next")
-        if url and page_num < max_pages:
-            time.sleep(0.5)  # lighter sleep for bulk fetch
+        if url:
+            if page_num == max_pages:
+                stopped_early = f"{max_pages}-page ceiling"
+            else:
+                time.sleep(0.5)  # lighter sleep for bulk fetch
 
-    LOG.info(
-        "ACAPS %s: fetched %d records across %d page(s)",
-        endpoint, len(all_results), min(page_num, max_pages),
-    )
+    if stopped_early is not None or (url and page_num >= max_pages):
+        _report_pagination_shortfall(
+            endpoint,
+            len(all_results),
+            reported_count,
+            stopped_early or f"{max_pages}-page ceiling",
+        )
+    else:
+        LOG.info(
+            "ACAPS %s: fetched %d record(s) across %d page(s)%s",
+            endpoint,
+            len(all_results),
+            page_num,
+            f" of {reported_count} held upstream" if reported_count is not None else "",
+        )
     return all_results
 
 
@@ -409,7 +507,6 @@ def _bulk_fetch_inform_severity(
     for label in _month_labels_back(3):
         data = _fetch_paginated_global(
             f"/api/v1/inform-severity-index/{label}/",
-            max_pages=20,
             token=token,
         )
         if data:
@@ -435,7 +532,6 @@ def _bulk_fetch_inform_severity(
     # 2. Fetch global country-log (trend data)
     log_data = _fetch_paginated_global(
         "/api/v1/inform-severity-index/country-log/",
-        max_pages=30,
         token=token,
     )
     trend_by_country: dict[str, list[dict]] = defaultdict(list)
@@ -475,7 +571,6 @@ def _bulk_fetch_inform_severity(
                 if label == snapshot_date
                 else _fetch_paginated_global(
                     f"/api/v1/inform-severity-index/{label}/",
-                    max_pages=20,
                     token=token,
                 )
             )
@@ -533,7 +628,6 @@ def _bulk_fetch_inform_severity(
     ]:
         dim_data = _fetch_paginated_global(
             f"/api/v1/inform-severity-index/{dim_path}/{snapshot_date}/",
-            max_pages=20,
             token=token,
         )
         for ind in dim_data:
@@ -622,7 +716,6 @@ def _bulk_fetch_risk_radar(
     all_risks = _fetch_paginated_global(
         "/api/v1/risk-radar/risk-radar/",
         params={"status": "Active"},
-        max_pages=20,
         token=token,
     )
 
@@ -632,7 +725,6 @@ def _bulk_fetch_risk_radar(
         all_risks = _fetch_paginated_global(
             "/api/v1/risk-list/",
             params={"status": "Active"},
-            max_pages=20,
             token=token,
         )
         used_fallback = bool(all_risks)
@@ -676,7 +768,6 @@ def _bulk_fetch_risk_radar(
     if risk_ids_to_fetch and not used_fallback:
         all_triggers = _fetch_paginated_global(
             "/api/v1/risk-radar/trigger-list/",
-            max_pages=30,
             token=token,
         )
         # Index triggers by risk_id
@@ -744,7 +835,6 @@ def _bulk_fetch_daily_monitoring(
             "_internal_filter_date_gte": start_date.isoformat(),
             "_internal_filter_date_lte": end_date.isoformat(),
         },
-        max_pages=30,
         token=token,
     )
 
@@ -817,7 +907,6 @@ def _bulk_fetch_humanitarian_access(
 
         data = _fetch_paginated_global(
             f"/api/v1/humanitarian-access/{label}/",
-            max_pages=10,
             token=token,
         )
 

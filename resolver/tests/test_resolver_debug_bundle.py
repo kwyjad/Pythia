@@ -1122,3 +1122,68 @@ def test_the_crisiswatch_accounting_check_reads_the_store_stream(tmp_path):
     builder._check_crisiswatch_entries_accounted_for()
     check = builder.checks[-1]
     assert check["verdict"] == "FAIL" and "parsed 12" in check["detail"]
+
+
+def test_a_probe_web_page_does_not_fail_the_acled_check(tmp_path, full_run):
+    """Run 34124705852's actual shape: one probe 405, three healthy connectors."""
+
+    from resolver.diagnostics import run_log
+
+    streams = full_run["streams"]
+    with open(streams / f"{run_log.STREAM_HTTP}.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "connector": "unknown", "probe": "diagnose_acled_auth:GET",
+            "method": "GET", "url": "https://acleddata.com/oauth/token",
+            "status": 405, "content_type": "text/html; charset=utf-8",
+            "elapsed_ms": 30.0, "response_bytes": 1200, "redirects": 0,
+        }) + "\n")
+    report = full_run["diagnostics"] / "ingestion" / "connectors_report.jsonl"
+    with open(report, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"connector_id": "acled_client", "status": "ok",
+                                 "counts": {"written": 424}}) + "\n")
+
+    _out, manifest = _build(tmp_path, db_path=full_run["db"],
+                            diagnostics_dir=full_run["diagnostics"],
+                            run_log_dir=streams)
+    checks = {c["name"]: c for c in manifest["checks"]}
+    check = checks["acled_html_responses_are_recorded_as_connector_failures"]
+    assert check["verdict"] == "PASS", (
+        "a diagnostic probe is not a connector being refused"
+    )
+    assert "diagnose_acled_auth" in check["detail"], (
+        "the excluded probe must still be named, or the exclusion is invisible"
+    )
+
+
+def test_an_unlabelled_web_page_still_fails_the_acled_check(tmp_path, full_run):
+    """The exclusion must not blind the check to the thing it exists for."""
+
+    from resolver.diagnostics import run_log
+
+    streams = full_run["streams"]
+    with open(streams / f"{run_log.STREAM_HTTP}.jsonl", "a", encoding="utf-8") as handle:
+        # A probe 405 AND a genuine Unauthorized page in one run.
+        handle.write(json.dumps({
+            "connector": "unknown", "probe": "diagnose_acled_auth:GET",
+            "method": "GET", "url": "https://acleddata.com/oauth/token",
+            "status": 405, "content_type": "text/html; charset=utf-8",
+            "elapsed_ms": 30.0, "response_bytes": 1200, "redirects": 0,
+        }) + "\n")
+        handle.write(json.dumps({
+            "connector": "acled_client", "probe": None, "method": "GET",
+            "url": "https://acleddata.com/api/acled/read?page=1",
+            "status": 200, "content_type": "text/html; charset=UTF-8",
+            "elapsed_ms": 12.0, "response_bytes": 5120, "redirects": 0,
+        }) + "\n")
+    report = full_run["diagnostics"] / "ingestion" / "connectors_report.jsonl"
+    with open(report, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"connector_id": "acled_client", "status": "ok",
+                                 "counts": {"written": 0}}) + "\n")
+
+    _out, manifest = _build(tmp_path, db_path=full_run["db"],
+                            diagnostics_dir=full_run["diagnostics"],
+                            run_log_dir=streams)
+    checks = {c["name"]: c for c in manifest["checks"]}
+    check = checks["acled_html_responses_are_recorded_as_connector_failures"]
+    assert check["verdict"] == "FAIL"
+    assert "acled_client" in check["left"]
