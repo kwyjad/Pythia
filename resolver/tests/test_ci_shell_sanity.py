@@ -154,3 +154,39 @@ def test_debug_bundle_is_dumped_from_exactly_one_workflow():
         "scripts.dump_pythia_debug_bundle must be invoked from exactly one workflow "
         f"({_DEBUG_BUNDLE_INVOKER}); found: {sorted(str(p) for p in invokers)}"
     )
+
+
+def test_the_gdacs_ingest_step_bounds_its_own_enrichment_pass():
+    """A polite pace outruns a step budget, and the step must say so.
+
+    The per-event GDACS pace is one request every two seconds, which is
+    slow enough to matter: a reset run's 3,272 events would take 109
+    minutes against a 60-minute step, and a killed step throws away every
+    exposure the run had already fetched. The connector path takes its
+    ceiling from the environment, so the workflow that owns the step
+    budget is the thing that must set it.
+    """
+
+    body = pathlib.Path(".github/workflows/resolver_update.yml").read_text(
+        encoding="utf-8"
+    )
+    marker = '- name: "Phase 2: Ingest GDACS'
+    assert marker in body, "the GDACS ingest step was renamed; update this check"
+    step = body.split(marker, 1)[1].split("- name:", 1)[0]
+    assert "GDACS_ENRICH_MAX_SECONDS" in step, (
+        "the GDACS ingest step must bound its enrichment pass — without a "
+        "ceiling the pass outruns the step and the run loses the work"
+    )
+    budgets = [int(m) for m in re.findall(r"'(\d+)'", step)]
+    assert budgets, "GDACS_ENRICH_MAX_SECONDS must be given a value"
+    assert max(budgets) <= 55 * 60, (
+        f"the budget must sit inside the reset step's 60 minutes, got "
+        f"{max(budgets)}s"
+    )
+    # The step is 20 minutes off reset and 60 on it, so the two budgets are
+    # not interchangeable: the larger one on a normal run would outlive the
+    # step it is supposed to fit inside.
+    assert min(budgets) <= 18 * 60, (
+        f"the non-reset budget must sit inside the 20-minute step, got "
+        f"{min(budgets)}s"
+    )

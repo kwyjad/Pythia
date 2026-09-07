@@ -746,7 +746,12 @@ def test_gdacs_fetch_survives_one_malformed_event(con, rulebook, monkeypatch):
         def _search_events(self, *a, **kw):
             return [good, bad]
 
-        def _enrich_with_population(self, session, events, delay, name_to_iso3):
+        def _enrich_with_population(
+            self, session, events, delay, name_to_iso3, **_kwargs
+        ):
+            # **_kwargs so a stub does not have to track the real
+            # signature's pacing arguments to keep testing the
+            # malformed-event guard it exists for.
             return events
 
     from resolver.connectors import gdacs as core

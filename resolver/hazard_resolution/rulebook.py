@@ -141,6 +141,17 @@ class Rulebook:
         "freeze_days", "reliefweb", "extraction", "raw_cache",
     )
 
+    #: Sections a hazard reads that do not carry its name. The GDACS block
+    #: lives under ``flood`` and configures the GDACS fetch for EVERY
+    #: hazard, so cyclone ceilings move when it moves. Without this entry a
+    #: GDACS pacing change re-walked flood and left cyclone's ledger
+    #: claiming its months were decided under rules that had changed.
+    #: Drought is deliberately absent: it has no ladder and no ceiling, so
+    #: nothing in the GDACS block reaches it.
+    _EXTRA_SECTIONS_BY_HAZARD: dict[str, tuple[str, ...]] = {
+        "cyclone": ("flood.gdacs",),
+    }
+
     def hazard_fingerprint(self, hazard: str) -> str:
         """A stable digest of every rulebook value that decides ``hazard``.
 
@@ -163,12 +174,18 @@ class Rulebook:
         import hashlib
         import json as _json
 
-        payload = {
+        extra = self._EXTRA_SECTIONS_BY_HAZARD.get(hazard, ())
+        payload: dict[str, Any] = {
             "hazard": {hazard: self.get(hazard, None)},
             "shared": {
                 key: self.get(key, None) for key in self._SHARED_SECTIONS
             },
         }
+        # Only when there is something borrowed. An empty key would move
+        # the digest of every hazard that borrows nothing, which would
+        # re-walk drought's 114 months for a change that cannot reach them.
+        if extra:
+            payload["borrowed"] = {key: self.get(key, None) for key in extra}
         blob = _json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -308,6 +325,9 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     # comment; what is configured here is window, pacing and zero safety.
     _require_non_negative_number("flood.gdacs.request_delay_sec")
     _require_int_in("flood.gdacs.enrich_workers", 1, 32)
+    _require_non_negative_number("flood.gdacs.enrich_min_interval_sec")
+    _require_int_in("flood.gdacs.exposure_refresh_days", 0, 3650)
+    _require_non_negative_number("flood.gdacs.enrich_max_seconds")
     _require_fetch_window("flood.gdacs")
     _require_int_in("flood.gdacs.coverage_grace_days", 0, 60)
 

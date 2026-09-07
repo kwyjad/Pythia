@@ -157,6 +157,11 @@ def _event_record(
         "exposed_population_text": str(event.get("population_text") or "")[:200],
         "exposed_population_raw": str(event.get("population_raw") or ""),
         "exposed_population_parse": str(event.get("population_parse") or ""),
+        # Whether this run READ the figure or was served it from the cache.
+        # A stale figure is worth more than none and only worth anything if
+        # the row says it is stale.
+        "exposed_population_source": str(event.get("population_source") or ""),
+        "exposed_population_cached_at": str(event.get("population_cached_at") or ""),
         "start_date": start.isoformat(),
         "end_date": (end or start).isoformat(),
         # Always present; None unless the reversed-dates clamp above fired.
@@ -277,6 +282,117 @@ def _iso3s_near_event(
     return resolved
 
 
+def _rb_int(rulebook: Rulebook | None, dotted: str, default: int) -> int:
+    """A rulebook integer, or the default when an older rulebook lacks it."""
+
+    if rulebook is None:
+        return default
+    try:
+        return int(rulebook.get(dotted))
+    except Exception:  # noqa: BLE001 - a missing key is not a failure here
+        return default
+
+
+def _rb_float(rulebook: Rulebook | None, dotted: str, default: float) -> float:
+    if rulebook is None:
+        return default
+    try:
+        return float(rulebook.get(dotted))
+    except Exception:  # noqa: BLE001
+        return default
+
+
+#: How recently an event must have ENDED for its exposure to be worth
+#: asking about again. GDACS revises a figure while an event is live and
+#: leaves it alone once it is over, so an event that finished last year has
+#: a settled exposure and re-asking for it buys nothing but a request. The
+#: backcast walks 2000..2026, which is where nearly every request went.
+_DEFAULT_EXPOSURE_REFRESH_DAYS = 21
+
+
+def _exposure_refresh_days(rulebook: Rulebook | None) -> int:
+    return max(
+        0,
+        _rb_int(
+            rulebook,
+            "flood.gdacs.exposure_refresh_days",
+            _DEFAULT_EXPOSURE_REFRESH_DAYS,
+        ),
+    )
+
+
+def seed_exposure_memo(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    refresh_days: int,
+    today: dt.date | None = None,
+) -> dict[str, int]:
+    """Tell the connector what the database already knows, before it asks.
+
+    The cache was already read, and read too late: ``_carry_forward_exposure``
+    ran AFTER every request had been made, so it repaired a refusal and
+    never prevented one. Run 34124705852 asked GDACS for 291 events and was
+    refused on 138 of them while the cache held figures for events it was
+    about to ask for again.
+
+    Seeding the connector's own per-run memo is deliberately the same
+    mechanism, not a second one: a hit returns through ``_apply_exposure``
+    exactly as a fetched answer does, so a cache-served figure and a live
+    one cannot diverge in how they reach the record. The figure is labelled
+    ``cache`` with the time it was read, because a stale figure is worth
+    more than none and only worth anything if it says it is stale.
+
+    An event that ended within ``refresh_days`` is NOT seeded: while an
+    event is live its exposure is still being revised, and serving last
+    week's figure as this week's would be the fallback-that-serves-old-data
+    failure in another costume.
+
+    Never raises: a cache that cannot be read seeds nothing and the run
+    behaves exactly as it did before.
+    """
+
+    counts = {"seeded": 0, "still_live": 0, "no_usable_figure": 0}
+    today = today or dt.date.today()
+    cutoff = today - dt.timedelta(days=max(0, int(refresh_days)))
+    core = _connector_api()
+    try:
+        rows = load_raw_records(con, SOURCE)
+    except Exception as exc:  # noqa: BLE001 - a cache we cannot read decides nothing
+        LOG.warning("[gdacs] could not read the exposure cache to seed it: %s", exc)
+        return counts
+
+    for row in rows:
+        try:
+            value = float(row.get("exposed_population") or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value <= 0:
+            counts["no_usable_figure"] += 1
+            continue
+        ended = parse_date(row.get("end_date"))
+        if ended is None or ended > cutoff:
+            # Still live, or undated and therefore not provably settled.
+            counts["still_live"] += 1
+            continue
+        record_id = str(row.get("_record_id") or "")
+        etype, _, event_id = record_id.partition("-")
+        if not etype or not event_id:
+            continue
+        episode = {
+            "population": value,
+            "population_unit": row.get("exposed_population_unit") or "",
+            "population_text": row.get("exposed_population_text") or "",
+            "population_raw": row.get("exposed_population_raw") or "",
+            "population_parse": row.get("exposed_population_parse") or "",
+            "population_source": "cache",
+            "population_cached_at": str(row.get("_retrieved_at") or ""),
+        }
+        with core._EXPOSURE_MEMO_LOCK:
+            core._EXPOSURE_MEMO[(etype, event_id)] = (episode, None)
+        counts["seeded"] += 1
+    return counts
+
+
 def _carry_forward_exposure(
     con: "duckdb.DuckDBPyConnection", records: list[RawRecord]
 ) -> int:
@@ -352,15 +468,28 @@ def fetch_gdacs_events(
     outcome = FetchOutcome(source=SOURCE, ok=False, source_urls=[core._SEARCH_API])
     try:
         session = session or core._build_session()
+        core.reset_search_property_keys()
         connector = core.GdacsConnector()
         name_to_iso3, _ = core._load_countries()
 
         events = connector._search_events(
             session, start, end, delay, event_types=[hazard]
         )
-        # Discovery carries no exposure figure; the per-event RSS does.
+        # Discovery carries no exposure figure; the per-event RSS does. But
+        # ask only for the ones we do not already have. An event that ended
+        # more than `exposure_refresh_days` ago has a settled figure, so the
+        # cache answers for it and no request is spent.
+        seeded = seed_exposure_memo(
+            con, refresh_days=_exposure_refresh_days(rulebook)
+        )
         events = connector._enrich_with_population(
-            session, events, delay, name_to_iso3
+            session, events, delay, name_to_iso3,
+            # The rulebook owns the pacing it claims to own.
+            workers=_rb_int(rulebook, "flood.gdacs.enrich_workers", 1),
+            min_interval=_rb_float(
+                rulebook, "flood.gdacs.enrich_min_interval_sec", 2.0
+            ),
+            max_seconds=_rb_float(rulebook, "flood.gdacs.enrich_max_seconds", 900.0),
         )
     except Exception as exc:
         LOG.error(
@@ -404,14 +533,49 @@ def fetch_gdacs_events(
     outcome.records = stored["records"]
     outcome.inserted = stored["inserted"]
     refused = sum(1 for e in events if e.get("population_refused"))
+    from_cache = sum(
+        1 for e in events if str(e.get("population_source") or "") == "cache"
+    )
+    from_search = sum(
+        1 for e in events if str(e.get("population_source") or "") == "search"
+    )
     outcome.detail = {
         "window": {"from": start.isoformat(), "to": end.isoformat()},
         "events_discovered": len(events),
         "events_skipped_malformed": skipped_malformed,
         "events_enrichment_refused": refused,
+        # Answered from the cache without a request. The number that says
+        # whether the cache-first read is doing its job.
+        "events_exposure_from_cache": from_cache,
+        "exposure_cache_seeded": seeded,
+        # Answered by the SEARCH response, with no per-event request at all.
+        "events_exposure_from_search": from_search,
+        # What that response actually carried, so "is there a bulk route"
+        # is settled by evidence rather than by the assumption the code
+        # was written on.
+        "search_property_keys": core.observed_search_property_keys(),
         "events_exposure_carried_from_cache": carried,
         "hazard": hazard,
     }
+    LOG.info(
+        "[gdacs] %s %s: %d event(s) discovered, %d answered from the cache "
+        "and %d by the search response with no per-event request (%d settled "
+        "figures seeded, %d still live, %d with no usable figure), %d refused",
+        hazard, ym, len(events), from_cache, from_search, seeded["seeded"],
+        seeded["still_live"], seeded["no_usable_figure"], refused,
+    )
+    if from_search:
+        LOG.info(
+            "[gdacs] the search response stated an exposure for %d of %d "
+            "events — the per-event route may be unnecessary for those",
+            from_search, len(events),
+        )
+    else:
+        LOG.info(
+            "[gdacs] the search response stated no exposure; its property "
+            "keys were %s",
+            ",".join(core.observed_search_property_keys()) or "(none seen)",
+        )
     if refused or carried:
         LOG.warning(
             "[gdacs] %s %s: %d event(s) refused enrichment; %d kept an "
