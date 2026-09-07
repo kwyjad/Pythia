@@ -593,3 +593,169 @@ class TestUnexplainedNoRowScope:
         detail = builder.checks[0][0][4]
         assert "2007-03..2026-06" in detail
         assert "28728" in detail or "DR" in detail
+
+
+# ---------------------------------------------------------------------------
+# Follow-ups from the scoped re-run 34093339513
+# ---------------------------------------------------------------------------
+
+
+class TestScopedRunDoesNotCryWolf:
+    """A scoped ``only_connector`` run never reaches the PA machine. Two
+    checks failed anyway, one of them contradicting itself in the same
+    sentence: "29,035 unexplained (0 cell(s) assessed this run; 0 historical)".
+    """
+
+    def test_no_cells_assessed_means_the_backlog_owns_them_all(self):
+        bundle = _load("bundle_scoped", "scripts/build_resolver_debug_bundle.py")
+        builder = bundle.BundleBuilder.__new__(bundle.BundleBuilder)
+        builder.cell_ledger_summary = {
+            "rows": 156213,
+            "no_row": 30813,
+            "unexplained_no_row": 0,
+            "unexplained_no_row_backlog": 29035,
+            "backlog_by_hazard": {"DR": 28728},
+            "backlog_month_range": "2007-03..2026-06",
+            "cells_assessed_this_run": 0,
+            "cell_stream_recorded": True,
+            "machine_ran_this_job": False,
+        }
+        builder.checks = []
+        builder._check = lambda *a, **k: builder.checks.append((a, k))
+        builder._check_no_unexplained_no_row()
+        verdict = builder.checks[0][0]
+        assert verdict[1] == "PASS", verdict
+        assert "did not run in this job" in verdict[4]
+
+    def test_a_machine_run_with_no_stream_must_still_be_explained(self):
+        """Group A's contract: the nightly backcast records no run stream, so
+        the DATABASE alone has to carry the reason. Excusing that case would
+        undo the fix, so the discriminator is whether the machine ran in this
+        job, never whether a stream happened to be written.
+        """
+
+        bundle = _load("bundle_scoped2", "scripts/build_resolver_debug_bundle.py")
+        builder = bundle.BundleBuilder.__new__(bundle.BundleBuilder)
+        builder.cell_ledger_summary = {
+            "rows": 10, "no_row": 4, "unexplained_no_row": 4,
+            "unexplained_no_row_backlog": 0,
+            "backlog_by_hazard": {}, "backlog_month_range": "",
+            "cells_assessed_this_run": 0,
+            "cell_stream_recorded": False,
+            "machine_ran_this_job": True,
+        }
+        builder.checks = []
+        builder._check = lambda *a, **k: builder.checks.append((a, k))
+        builder._check_no_unexplained_no_row()
+        verdict = builder.checks[0][0]
+        assert verdict[1] == "FAIL", verdict
+        assert "database alone must explain" in verdict[4]
+
+    def test_the_emdat_skip_guard_is_not_a_truthy_generator(self, tmp_path):
+        """``any(path.glob(...) for hz in ...)`` is True for any non-empty
+        tuple, because each glob is a generator object. The guard never fired.
+        """
+
+        bundle = _load("bundle_emdat", "scripts/build_resolver_debug_bundle.py")
+        builder = bundle.BundleBuilder.__new__(bundle.BundleBuilder)
+        builder.env = {"EMDAT_API_KEY": "set"}
+        builder.diagnostics_dir = tmp_path  # no haz_run_*.json: no ladder ran
+        builder._stream_file = lambda _name: None
+        builder.checks = []
+        builder._check = lambda *a, **k: builder.checks.append((a, k))
+        builder._check_emdat_read_when_enabled()
+        verdict = builder.checks[0][0]
+        assert verdict[1] == "SKIP", verdict
+        assert "no flood or cyclone pass ran" in verdict[4]
+
+    def test_a_ladder_run_is_still_checked(self, tmp_path):
+        bundle = _load("bundle_emdat2", "scripts/build_resolver_debug_bundle.py")
+        (tmp_path / "haz_run_flood.json").write_text("{}", encoding="utf-8")
+        builder = bundle.BundleBuilder.__new__(bundle.BundleBuilder)
+        builder.env = {"EMDAT_API_KEY": "set"}
+        builder.diagnostics_dir = tmp_path
+        builder._stream_file = lambda _name: None
+        builder.tables = lambda: set()
+        builder.checks = []
+        builder._check = lambda *a, **k: builder.checks.append((a, k))
+        builder._check_emdat_read_when_enabled()
+        verdict = builder.checks[0][0]
+        assert verdict[1] == "FAIL", verdict
+
+
+# ---------------------------------------------------------------------------
+# 7b — the ACAPS trend fix must land in the path production actually runs
+# ---------------------------------------------------------------------------
+
+
+class TestAcapsBulkTrendIsTheProductionPath:
+    """The workflow runs ``_bulk_fetch_inform_severity``, which carries its
+    OWN country-log parsing and never calls ``pythia.acaps.fetch_inform_severity``.
+    Group H4's fallback and its successor both went into the function
+    production does not use, which is why acaps_inform_severity_trend was
+    still frozen at 2024-01-29 after both.
+    """
+
+    def test_the_bulk_path_month_labels_step_in_calendar_months(self):
+        from pythia.tools.ingest_structured_data import _month_labels_back
+
+        labels = _month_labels_back(6, today=date(2026, 3, 15))
+        assert labels == [
+            "Mar2026", "Feb2026", "Jan2026", "Dec2025", "Nov2025", "Oct2025",
+        ], "February was skipped and December requested twice"
+
+    def test_a_stale_country_log_is_replaced_by_the_monthly_snapshots(
+        self, monkeypatch
+    ):
+        from pythia.tools import ingest_structured_data as ingest
+
+        monkeypatch.setattr(ingest, "_get_acaps_token", lambda: "token")
+
+        def _global(endpoint, max_pages=10, token=None):
+            if "country-log" in endpoint:
+                # Plenty of rows, all of them two years old — the shape that
+                # satisfied "fewer than two entries" and froze the table.
+                return [
+                    {"iso3": "ETH", "date": "2024-01-29", "value": 4.1},
+                    {"iso3": "ETH", "date": "2024-01-15", "value": 4.0},
+                ]
+            if "impact-of-crisis" in endpoint or "conditions" in endpoint or "complexity" in endpoint:
+                return []
+            # A monthly snapshot: the current month and the ones behind it.
+            return [{"iso3": "ETH", "severity_index_score": 4.6, "country_level": True}]
+
+        monkeypatch.setattr(ingest, "_fetch_paginated_global", _global)
+        out = ingest._bulk_fetch_inform_severity({"ETH"})
+
+        trend = out["ETH"]["trend_6m"]
+        assert trend, "no trend was built at all"
+        newest = max(e["date"] for e in trend)
+        assert newest > "2024-01-29", (
+            f"the trend is still the stale country-log (newest {newest})"
+        )
+
+    def test_a_current_country_log_is_left_alone(self, monkeypatch):
+        """The fallback must not fire, or cost requests, when the log is fine."""
+
+        from pythia.tools import ingest_structured_data as ingest
+
+        monkeypatch.setattr(ingest, "_get_acaps_token", lambda: "token")
+        this_month = date.today().replace(day=1).isoformat()
+        calls: list[str] = []
+
+        def _global(endpoint, max_pages=10, token=None):
+            calls.append(endpoint)
+            if "country-log" in endpoint:
+                return [
+                    {"iso3": "ETH", "date": this_month, "value": 4.4},
+                    {"iso3": "ETH", "date": "2026-07-01", "value": 4.3},
+                ]
+            if any(k in endpoint for k in ("impact-of-crisis", "conditions", "complexity")):
+                return []
+            return [{"iso3": "ETH", "severity_index_score": 9.9, "country_level": True}]
+
+        monkeypatch.setattr(ingest, "_fetch_paginated_global", _global)
+        out = ingest._bulk_fetch_inform_severity({"ETH"})
+
+        scores = {e["score"] for e in out["ETH"]["trend_6m"]}
+        assert 9.9 not in scores, "the snapshot fallback overrode a healthy log"
