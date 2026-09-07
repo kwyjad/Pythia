@@ -853,6 +853,12 @@ def _ensure_enso_state_table(con: duckdb.DuckDBPyConnection) -> None:
             -- "The state as of today" reads live/repaired rows only.
             row_kind VARCHAR,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            -- When this ROW was last written. created_at is first-seen and
+            -- never moves for a row an INSERT OR REPLACE matched, so it
+            -- cannot answer "did this run touch anything": two runs on one
+            -- day share a fetch_date, and the second kept the first's
+            -- created_at. Every writer sets this explicitly.
+            updated_at TIMESTAMP,
             PRIMARY KEY (fetch_date)
         );
         """,
@@ -878,6 +884,7 @@ def _ensure_enso_state_table(con: duckdb.DuckDBPyConnection) -> None:
             "nino34_weekly": "DOUBLE",
             "row_kind": "VARCHAR",
             "created_at": "TIMESTAMP",
+            "updated_at": "TIMESTAMP",
         },
     )
 
