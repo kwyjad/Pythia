@@ -423,6 +423,7 @@ def _store_day(
     if not indicators_by_country:
         return 0
 
+    written_at = datetime.now(timezone.utc)
     rows = []
     for iso3, ind in indicators_by_country.items():
         rows.append(
@@ -439,16 +440,24 @@ def _store_day(
                 ind.get("avg_tone_conflict"),
                 ind.get("top_codes_json"),
                 is_test,
+                written_at,
             )
         )
 
+    # fetched_at is named EXPLICITLY. DuckDB's INSERT OR REPLACE keeps every
+    # column the statement does not name, so a stamp left to its column
+    # DEFAULT never moves for a row that already existed: run 34081262443
+    # rewrote 16,588 rows and stamped none of them, and the reconciliation
+    # correctly answered that this run had touched nothing. Same fault the
+    # hdx_signals writer carried, same remedy.
     con.executemany(
         """
         INSERT OR REPLACE INTO gdelt_conflict_indicators (
             iso3, event_date, total_events, material_conflict_events,
             verbal_conflict_events, tier1_events, tier2_events, tier3_events,
-            avg_goldstein, avg_tone_conflict, top_codes_json, is_test
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            avg_goldstein, avg_tone_conflict, top_codes_json, is_test,
+            fetched_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """,
         rows,
     )

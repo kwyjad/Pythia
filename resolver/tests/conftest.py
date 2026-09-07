@@ -271,3 +271,24 @@ if os.environ.get("RUN_EXPORTS_TESTS") == "1":
             yield exports_dir
         finally:
             monkeypatch.undo()
+
+
+@pytest.fixture(autouse=True)
+def _reset_gdacs_exposure_memo():
+    """Forget remembered GDACS exposures between tests.
+
+    ``resolver.connectors.gdacs`` remembers one event's exposure for the life
+    of the process, so the PA machine does not ask GDACS the same question
+    once per hazard-month pass. A module-level store that outlives a test
+    would serve the first test's events to every later one — the same trap
+    the vendored-boundary loader documents — and it did: two enrichment tests
+    passed alone and failed together.
+    """
+
+    from resolver.connectors import gdacs as _gdacs
+
+    _gdacs.reset_exposure_memo()
+    try:
+        yield
+    finally:
+        _gdacs.reset_exposure_memo()
