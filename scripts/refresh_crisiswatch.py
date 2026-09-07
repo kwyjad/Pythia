@@ -145,6 +145,25 @@ _FRESH_CAPTURE_BACKOFF_SEC = 20
 # cost is ~100s of backoff. The snapshot is ~1.6 MB; 45s is ample.
 _FRESH_CAPTURE_TIMEOUT_SEC = 45
 
+# --- Edition backfill budget --------------------------------------------
+#
+# CrisisWatch publishes edition M in the first days of month M+1, so the
+# captures that can carry edition M are the ones taken in month M+1 (and,
+# when ICG publishes late or the archive missed the window, month M+2).
+# The first backfill run to walk the archive at scale (2026-09-07) ignored
+# that: it downloaded and fully parsed ~95 captures oldest-first, most of
+# them carrying an edition it already had, was refused by archive.org part
+# way through, and hit the step's 25-minute ceiling having recovered two of
+# nine wanted editions. Probing the month AFTER each edition turns a walk
+# over the whole archive into a handful of downloads per edition.
+_BACKFILL_PROBES_PER_EDITION = 6
+_BACKFILL_MAX_DOWNLOADS = 40
+_BACKFILL_DEADLINE_SEC = 1200
+# archive.org starts refusing connections when a walk leans on it. Three
+# downloads in a row that fetch nothing is the source saying stop; grinding
+# on spends the remaining budget to learn the same thing.
+_BACKFILL_MAX_CONSECUTIVE_FAILURES = 3
+
 # SVG xlink:href value → (arrow, alert_type) mapping.
 # The CrisisWatch page encodes status via SVG <use xlink:href="#...">
 # icons inside the <h3> heading of each country entry.
@@ -597,32 +616,9 @@ def _list_wayback_snapshots(
     from_date = (
         datetime.now(timezone.utc) - timedelta(days=lookback_days)
     ).strftime("%Y%m%d")
-    resp = _get_with_retries(
-        _WAYBACK_CDX_URL,
-        params={
-            "url": "crisisgroup.org/crisiswatch",
-            "output": "json",
-            "from": from_date,
-            "fl": "timestamp,statuscode,mimetype",
-            "filter": "mimetype:text/html",
-            "limit": "-100",
-        },
-        timeout_sec=timeout_sec,
+    timestamps = _cdx_timestamps(
+        from_date=from_date, to_date=None, limit="-100", timeout_sec=timeout_sec,
     )
-    if resp is None:
-        log.warning("CDX snapshot listing failed")
-        return []
-    try:
-        rows = resp.json()
-    except ValueError as exc:
-        log.warning("CDX response is not JSON: %s", exc)
-        return []
-    # Row 0 of output=json is the header row (["timestamp", ...]).
-    timestamps = [
-        row[0]
-        for row in rows[1:]
-        if len(row) >= 2 and row[1] == "200"
-    ]
     # 14-digit timestamps sort chronologically as strings.
     timestamps.sort(reverse=True)
     log.info(
@@ -631,6 +627,86 @@ def _list_wayback_snapshots(
         timestamps[0] if timestamps else "none",
     )
     return timestamps
+
+
+def _cdx_timestamps(
+    *,
+    from_date: str,
+    to_date: str | None,
+    limit: str,
+    timeout_sec: int = 30,
+) -> list[str]:
+    """Timestamps of successful HTML captures in a date window, unsorted.
+
+    One place that talks to CDX, so the whole-window listing and the
+    per-month probe of ``backfill_editions`` cannot drift apart.
+    """
+    params = {
+        "url": "crisisgroup.org/crisiswatch",
+        "output": "json",
+        "from": from_date,
+        "fl": "timestamp,statuscode,mimetype",
+        "filter": "mimetype:text/html",
+        "limit": limit,
+    }
+    if to_date:
+        params["to"] = to_date
+    resp = _get_with_retries(
+        _WAYBACK_CDX_URL, params=params, timeout_sec=timeout_sec,
+    )
+    if resp is None:
+        log.warning("CDX snapshot listing failed (%s..%s)", from_date, to_date or "now")
+        return []
+    try:
+        rows = resp.json()
+    except ValueError as exc:
+        log.warning("CDX response is not JSON: %s", exc)
+        return []
+    # Row 0 of output=json is the header row (["timestamp", ...]).
+    return [row[0] for row in rows[1:] if len(row) >= 2 and row[1] == "200"]
+
+
+def _add_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    """``(2026, 12) + 1 -> (2027, 1)``."""
+    index = (year * 12 + (month - 1)) + delta
+    return index // 12, index % 12 + 1
+
+
+def _month_window(year: int, month: int) -> tuple[str, str]:
+    """CDX ``from``/``to`` bounds covering one calendar month."""
+    last_day = calendar.monthrange(year, month)[1]
+    return f"{year:04d}{month:02d}01", f"{year:04d}{month:02d}{last_day:02d}"
+
+
+def _candidate_snapshots_for_edition(
+    year: int,
+    month: int,
+    *,
+    timeout_sec: int = 30,
+) -> list[str]:
+    """Captures that could carry edition ``year-month``, oldest first.
+
+    CrisisWatch publishes an edition in the first days of the FOLLOWING
+    month, so month+1 is where its captures live; month+2 is the fallback
+    for a late publication or a month the archive barely crawled. A capture
+    from the first days of month+1 may still be showing month-1's edition,
+    which costs a probe and is usually not wasted — the missing editions
+    are typically contiguous, so that capture answers a neighbour.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for delta in (1, 2):
+        y, m = _add_months(year, month, delta)
+        start, end = _month_window(y, m)
+        for timestamp in sorted(
+            _cdx_timestamps(
+                from_date=start, to_date=end, limit="200", timeout_sec=timeout_sec,
+            )
+        ):
+            if timestamp not in seen:
+                seen.add(timestamp)
+                ordered.append(timestamp)
+    return ordered
 
 
 def _download_snapshot_html(
@@ -1272,16 +1348,30 @@ def backfill_editions(
     backfill_dir: Path = _DEFAULT_BACKFILL_DIR,
     lookback_days: int = 730,
     timeout_sec: int = 120,
+    max_downloads: int = _BACKFILL_MAX_DOWNLOADS,
+    probes_per_edition: int = _BACKFILL_PROBES_PER_EDITION,
+    deadline_sec: int = _BACKFILL_DEADLINE_SEC,
 ) -> dict[str, Any]:
     """Recover named editions from the Wayback archive, one JSON each.
 
     The monthly refresh only ever takes the newest snapshot, so a month
     whose refresh never ran is a permanent hole: nothing in the pipeline
-    goes back for it. This walks the archive OLDEST-first over a long
-    window and keeps the first snapshot whose parsed edition month is one
-    of the wanted ones — oldest-first because the earliest capture of an
-    edition is the one least likely to have been superseded on the page by
-    the next month.
+    goes back for it.
+
+    The walk is TARGETED, not exhaustive. An edition is published in the
+    first days of the following month, so for each wanted edition only the
+    captures from month+1 and month+2 are probed, oldest-first — oldest
+    because the earliest capture of an edition is the one least likely to
+    have been superseded on the page by the next month. A capture that
+    turns out to carry a DIFFERENT wanted edition is written for that one
+    instead of thrown away, and no capture is downloaded twice however many
+    editions ask for it.
+
+    Three budgets bound the run, because the first at-scale walk spent 25
+    minutes and was refused by archive.org before it finished: probes per
+    edition, total downloads, and a wall clock. Hitting one stops the walk
+    cleanly and reports what is still missing rather than being killed by
+    the step timeout with nothing written.
 
     Writes ``crisiswatch_YYYY-MM.json`` per recovered edition and never
     touches ``crisiswatch_latest.json``. Returns the accounting; never
@@ -1294,52 +1384,70 @@ def backfill_editions(
         "recovered": [],
         "written": {},
         "snapshots_tried": 0,
+        "snapshots_downloaded": 0,
         "still_missing": [],
+        "stopped_early": "",
     }
     if not wanted:
         log.warning("--backfill-editions given no editions; nothing to do")
         return result
 
-    snapshots = _list_wayback_snapshots(
-        lookback_days=lookback_days, timeout_sec=timeout_sec,
-    )
-    if not snapshots:
-        log.error(
-            "No Wayback snapshots in the last %d days — cannot backfill %s",
-            lookback_days, ", ".join(result["wanted"]),
-        )
-        result["still_missing"] = list(result["wanted"])
-        return result
-
     backfill_dir.mkdir(parents=True, exist_ok=True)
     outstanding = set(wanted)
-    # Oldest first: 14-digit timestamps sort chronologically as strings.
-    for timestamp in sorted(snapshots):
+    started = time.monotonic()
+    # timestamp -> edition key it carried (None when it parsed to nothing).
+    probed: dict[str, tuple[int, int] | None] = {}
+    consecutive_failures = 0
+
+    def budget_spent() -> str:
+        """The budget that has run out, or ``""`` while there is room."""
         if not outstanding:
-            break
+            return ""
+        if result["snapshots_downloaded"] >= max_downloads:
+            return f"download budget of {max_downloads} spent"
+        if time.monotonic() - started >= deadline_sec:
+            return f"deadline of {deadline_sec}s reached"
+        if consecutive_failures >= _BACKFILL_MAX_CONSECUTIVE_FAILURES:
+            return (
+                f"{consecutive_failures} downloads in a row fetched nothing "
+                "— archive.org is refusing us"
+            )
+        return ""
+
+    def probe(timestamp: str) -> tuple[int, int] | None:
+        """Download, parse and bank one capture. Returns its edition key."""
+        nonlocal consecutive_failures
+        if timestamp in probed:
+            return probed[timestamp]
         result["snapshots_tried"] += 1
+        result["snapshots_downloaded"] += 1
         try:
             html = _fetch_snapshot_html(timestamp, timeout_sec=timeout_sec)
         except Exception as exc:  # noqa: BLE001 - one bad capture is not fatal
             log.warning("Snapshot %s could not be fetched: %s", timestamp, exc)
-            continue
+            html = None
         if html is None:
-            continue
+            consecutive_failures += 1
+            probed[timestamp] = None
+            return None
+        consecutive_failures = 0
         try:
             data = parse_edition(html, provenance=f"wayback:{timestamp}")
         except Exception as exc:  # noqa: BLE001
             log.warning("Snapshot %s could not be parsed: %s", timestamp, exc)
-            continue
+            probed[timestamp] = None
+            return None
         key = _edition_key(data.get("month", ""), int(data.get("year") or 0))
+        probed[timestamp] = key
         if key is None:
             log.info("Snapshot %s carries no parseable edition month", timestamp)
-            continue
+            return None
         if key not in outstanding:
             log.debug(
                 "Snapshot %s carries edition %04d-%02d — not wanted",
                 timestamp, key[0], key[1],
             )
-            continue
+            return key
         entries = data.get("entries") or []
         resolved = int(data.get("parse_accounting", {}).get("resolved_iso3", 0))
         if not entries or resolved == 0:
@@ -1348,7 +1456,7 @@ def backfill_editions(
                 "resolved ISO3s — refusing to write an empty edition",
                 timestamp, key[0], key[1], len(entries), resolved,
             )
-            continue
+            return key
         dest = backfill_dir / f"crisiswatch_{key[0]:04d}-{key[1]:02d}.json"
         dest.write_text(
             json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n",
@@ -1362,18 +1470,97 @@ def backfill_editions(
             "Recovered edition %s from snapshot %s: %d entries (%d resolved) -> %s",
             label, timestamp, len(entries), resolved, dest,
         )
+        return key
+
+    # Pass 1: for each wanted edition, probe the months that can carry it.
+    for year, month in sorted(wanted):
+        if (year, month) not in outstanding:
+            continue  # a neighbour's probe already banked it
+        stop = budget_spent()
+        if stop:
+            result["stopped_early"] = stop
+            break
+        candidates = _candidate_snapshots_for_edition(
+            year, month, timeout_sec=min(timeout_sec, 30),
+        )
+        if not candidates:
+            log.warning(
+                "No archive captures in %04d-%02d or the month after it — "
+                "edition %04d-%02d cannot be recovered",
+                *_add_months(year, month, 1), year, month,
+            )
+            continue
+        log.info(
+            "Edition %04d-%02d: %d candidate capture(s) in the following "
+            "two months", year, month, len(candidates),
+        )
+        probes = 0
+        for timestamp in candidates:
+            if (year, month) not in outstanding:
+                break
+            if timestamp in probed:
+                continue
+            if probes >= probes_per_edition:
+                log.warning(
+                    "Edition %04d-%02d: gave up after %d probes",
+                    year, month, probes,
+                )
+                break
+            stop = budget_spent()
+            if stop:
+                result["stopped_early"] = stop
+                break
+            probes += 1
+            probe(timestamp)
+        if result["stopped_early"]:
+            break
+
+    # Pass 2: whatever the targeted probe could not place, look for in the
+    # general listing — bounded by the same budgets, and skipping every
+    # capture pass 1 already downloaded.
+    if outstanding and not result["stopped_early"]:
+        snapshots = _list_wayback_snapshots(
+            lookback_days=lookback_days, timeout_sec=min(timeout_sec, 30),
+        )
+        if not snapshots:
+            log.error(
+                "No Wayback snapshots in the last %d days — cannot backfill %s",
+                lookback_days, ", ".join(sorted(
+                    f"{y:04d}-{m:02d}" for y, m in outstanding
+                )),
+            )
+        # Oldest first: 14-digit timestamps sort chronologically as strings.
+        for timestamp in sorted(snapshots):
+            if not outstanding:
+                break
+            if timestamp in probed:
+                continue
+            stop = budget_spent()
+            if stop:
+                result["stopped_early"] = stop
+                break
+            probe(timestamp)
 
     result["still_missing"] = sorted(f"{y:04d}-{m:02d}" for y, m in outstanding)
-    if result["still_missing"]:
+    if result["stopped_early"]:
         log.warning(
-            "Backfill recovered %d of %d editions; no snapshot in the last "
-            "%d days carried %s",
-            len(result["recovered"]), len(wanted), lookback_days,
-            ", ".join(result["still_missing"]),
+            "Backfill stopped early (%s) with %d of %d editions recovered; "
+            "the next run resumes on what is still missing: %s",
+            result["stopped_early"], len(result["recovered"]), len(wanted),
+            ", ".join(result["still_missing"]) or "nothing",
+        )
+    elif result["still_missing"]:
+        log.warning(
+            "Backfill recovered %d of %d editions in %d download(s); no "
+            "capture carried %s",
+            len(result["recovered"]), len(wanted),
+            result["snapshots_downloaded"], ", ".join(result["still_missing"]),
         )
     else:
-        log.info("Backfill recovered every wanted edition: %s",
-                 ", ".join(result["recovered"]))
+        log.info(
+            "Backfill recovered every wanted edition in %d download(s): %s",
+            result["snapshots_downloaded"], ", ".join(result["recovered"]),
+        )
     return result
 
 
@@ -1663,6 +1850,18 @@ def main() -> None:
              "(default: %(default)s)",
     )
     parser.add_argument(
+        "--backfill-max-downloads", type=int, default=_BACKFILL_MAX_DOWNLOADS,
+        help="Stop --backfill-editions after this many snapshot downloads. "
+             "The next run resumes on whatever is still missing "
+             "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--backfill-deadline-sec", type=int, default=_BACKFILL_DEADLINE_SEC,
+        help="Wall-clock ceiling for --backfill-editions, kept under the "
+             "workflow step's own timeout so the walk stops cleanly and "
+             "reports rather than being killed (default: %(default)s)",
+    )
+    parser.add_argument(
         "--expect-edition-by-day", type=int, default=0,
         help="Exit non-zero when the previous month's edition is still "
              "missing after this day of the month. Catches a single missed "
@@ -1682,6 +1881,8 @@ def main() -> None:
             backfill_dir=Path(args.backfill_dir),
             lookback_days=args.backfill_lookback_days,
             timeout_sec=args.timeout,
+            max_downloads=args.backfill_max_downloads,
+            deadline_sec=args.backfill_deadline_sec,
         )
         # A hole nobody could fill is a fact about the archive, not a
         # failure of this run: the editions we DID recover are written and

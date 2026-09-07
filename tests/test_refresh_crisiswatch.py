@@ -552,3 +552,221 @@ def test_parsed_entries_carry_an_iso3_reason(fixture_html):
     assert entries
     assert all(e.get("iso3_reason") in ("resolved", "unresolved_country_name")
                for e in entries if not e.get("regional_source"))
+
+
+# ---------------------------------------------------------------------------
+# Edition backfill: the walk is targeted, budgeted, and resumable
+#
+# The first at-scale backfill (Resolver Update 34107462853, 2026-09-07) wanted
+# nine editions, downloaded and fully parsed ~95 archive captures oldest-first,
+# was refused by archive.org part way through, and hit the step's 25-minute
+# ceiling having recovered two. An edition is published in the first days of
+# the following month, so the captures that can carry it are known in advance.
+# ---------------------------------------------------------------------------
+
+_BACKFILL_PAGE = """
+<html><body>
+  <div class="c-crisiswatch-entry" data-entry-country="somalia" id="a">
+    <h3>Somalia</h3>
+    <time>{month}</time>
+    <div class="o-crisis-states__detail"><p><strong>Offensive.</strong></p></div>
+  </div>
+  <div class="c-crisiswatch-entry" data-entry-country="sudan" id="b">
+    <h3>Sudan</h3>
+    <time>{month}</time>
+    <div class="o-crisis-states__detail"><p><strong>Shelling.</strong></p></div>
+  </div>
+</body></html>
+"""
+
+
+def _page_for(month: str) -> str:
+    return _BACKFILL_PAGE.format(month=month)
+
+
+class _Archive:
+    """A pretend Wayback holding one capture per day, per edition."""
+
+    def __init__(self, captures: dict[str, str]):
+        #: timestamp -> the edition month string that capture displays
+        self.captures = captures
+        self.downloaded: list[str] = []
+        self.cdx_calls: list[tuple[str, str | None]] = []
+
+    def cdx(self, *, from_date, to_date=None, limit="", timeout_sec=30):
+        self.cdx_calls.append((from_date, to_date))
+        lo, hi = from_date, (to_date or "99999999")
+        return [ts for ts in self.captures if lo <= ts[:8] <= hi]
+
+    def listing(self, **_kwargs):
+        return sorted(self.captures, reverse=True)
+
+    def fetch(self, timestamp, **_kwargs):
+        self.downloaded.append(timestamp)
+        return _page_for(self.captures[timestamp])
+
+
+def _install(archive: _Archive, monkeypatch) -> None:
+    monkeypatch.setattr(rc, "_cdx_timestamps", archive.cdx)
+    monkeypatch.setattr(rc, "_list_wayback_snapshots", archive.listing)
+    monkeypatch.setattr(rc, "_fetch_snapshot_html", archive.fetch)
+
+
+def test_month_arithmetic_rolls_the_year():
+    assert rc._add_months(2026, 12, 1) == (2027, 1)
+    assert rc._add_months(2026, 1, -1) == (2025, 12)
+    assert rc._month_window(2026, 2) == ("20260201", "20260228")
+    assert rc._month_window(2024, 2) == ("20240201", "20240229")
+
+
+def test_an_edition_is_looked_for_in_the_month_after_it(tmp_path, monkeypatch):
+    archive = _Archive({"20260405000000": "March 2026"})
+    _install(archive, monkeypatch)
+    out = rc.backfill_editions("2026-03", backfill_dir=tmp_path)
+    assert out["recovered"] == ["2026-03"]
+    assert archive.cdx_calls[0] == ("20260401", "20260430"), (
+        "March's edition is published in April, so April is where the walk looks"
+    )
+
+
+def test_captures_carrying_editions_we_already_have_are_never_downloaded(
+    tmp_path, monkeypatch,
+):
+    # Twenty February captures all showing January's edition — the shape that
+    # spent the real run's budget — plus the one April capture that answers.
+    captures = {f"202602{day:02d}000000": "January 2026" for day in range(1, 21)}
+    captures["20260405000000"] = "March 2026"
+    archive = _Archive(captures)
+    _install(archive, monkeypatch)
+
+    out = rc.backfill_editions("2026-03", backfill_dir=tmp_path)
+
+    assert out["recovered"] == ["2026-03"]
+    assert archive.downloaded == ["20260405000000"], (
+        "the February captures cannot carry March's edition and must not be "
+        f"fetched; downloaded {archive.downloaded}"
+    )
+    assert out["snapshots_downloaded"] == 1
+
+
+def test_one_capture_answers_every_edition_it_carries(tmp_path, monkeypatch):
+    archive = _Archive({
+        "20260405000000": "March 2026",
+        "20260505000000": "April 2026",
+    })
+    _install(archive, monkeypatch)
+
+    out = rc.backfill_editions("2026-03,2026-04", backfill_dir=tmp_path)
+
+    assert out["recovered"] == ["2026-03", "2026-04"]
+    assert len(archive.downloaded) == 2
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "crisiswatch_2026-03.json", "crisiswatch_2026-04.json",
+    ]
+
+
+def test_a_capture_is_downloaded_once_however_many_editions_ask_for_it(
+    tmp_path, monkeypatch,
+):
+    # A May capture falls in the window of BOTH March (month+2) and April
+    # (month+1). It must be fetched once.
+    archive = _Archive({"20260503000000": "April 2026"})
+    _install(archive, monkeypatch)
+
+    out = rc.backfill_editions("2026-03,2026-04", backfill_dir=tmp_path)
+
+    assert archive.downloaded == ["20260503000000"]
+    assert out["recovered"] == ["2026-04"]
+    assert out["still_missing"] == ["2026-03"]
+
+
+def test_a_late_published_edition_is_found_in_the_second_month(
+    tmp_path, monkeypatch,
+):
+    archive = _Archive({"20260519000000": "March 2026"})
+    _install(archive, monkeypatch)
+    out = rc.backfill_editions("2026-03", backfill_dir=tmp_path)
+    assert out["recovered"] == ["2026-03"]
+    assert [c for c in archive.cdx_calls] == [
+        ("20260401", "20260430"), ("20260501", "20260531"),
+    ]
+
+
+def test_the_download_budget_stops_the_walk_and_says_so(tmp_path, monkeypatch):
+    captures = {f"202604{day:02d}000000": "February 2026" for day in range(1, 15)}
+    archive = _Archive(captures)
+    _install(archive, monkeypatch)
+
+    out = rc.backfill_editions(
+        "2026-03", backfill_dir=tmp_path, max_downloads=3, probes_per_edition=99,
+    )
+
+    assert len(archive.downloaded) == 3
+    assert out["still_missing"] == ["2026-03"]
+    assert "download budget" in out["stopped_early"]
+
+
+def test_the_probe_cap_moves_the_walk_on_to_the_next_edition(
+    tmp_path, monkeypatch,
+):
+    captures = {f"202604{day:02d}000000": "February 2026" for day in range(1, 15)}
+    captures["20260605000000"] = "May 2026"
+    archive = _Archive(captures)
+    _install(archive, monkeypatch)
+
+    out = rc.backfill_editions(
+        "2026-03,2026-05", backfill_dir=tmp_path, probes_per_edition=2,
+    )
+
+    assert out["recovered"] == ["2026-05"], (
+        "a fruitless edition must not consume the budget the next one needs"
+    )
+    assert out["still_missing"] == ["2026-03"]
+
+
+def test_archive_refusals_stop_the_walk_rather_than_grinding(
+    tmp_path, monkeypatch,
+):
+    captures = {f"202604{day:02d}000000": "March 2026" for day in range(1, 15)}
+    archive = _Archive(captures)
+    _install(archive, monkeypatch)
+    monkeypatch.setattr(
+        rc, "_fetch_snapshot_html",
+        lambda ts, **k: archive.downloaded.append(ts) or None,
+    )
+
+    out = rc.backfill_editions(
+        "2026-03", backfill_dir=tmp_path, probes_per_edition=99,
+    )
+
+    assert len(archive.downloaded) == rc._BACKFILL_MAX_CONSECUTIVE_FAILURES
+    assert "refusing us" in out["stopped_early"]
+
+
+def test_a_deadline_stops_the_walk_before_the_step_timeout_kills_it(
+    tmp_path, monkeypatch,
+):
+    captures = {f"202604{day:02d}000000": "February 2026" for day in range(1, 15)}
+    archive = _Archive(captures)
+    _install(archive, monkeypatch)
+
+    out = rc.backfill_editions(
+        "2026-03", backfill_dir=tmp_path, deadline_sec=0, probes_per_edition=99,
+    )
+
+    assert archive.downloaded == []
+    assert "deadline" in out["stopped_early"]
+    assert out["still_missing"] == ["2026-03"], (
+        "what the deadline cut short is named so the next run resumes on it"
+    )
+
+
+def test_an_edition_with_no_captures_at_all_is_named_not_probed(
+    tmp_path, monkeypatch,
+):
+    archive = _Archive({"20260405000000": "March 2026"})
+    _install(archive, monkeypatch)
+    out = rc.backfill_editions("2026-03,2026-09", backfill_dir=tmp_path)
+    assert out["recovered"] == ["2026-03"]
+    assert out["still_missing"] == ["2026-09"]
+    assert not out["stopped_early"]
