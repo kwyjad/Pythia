@@ -392,6 +392,53 @@ def _trend_from_monthly_snapshots(
     return entries
 
 
+def _newest_trend_date(entries: list[dict]) -> str | None:
+    """The newest ISO date among trend entries, or None."""
+
+    dates = [str(e.get("date") or "") for e in entries if e.get("date")]
+    return max(dates) if dates else None
+
+
+def _trend_is_stale(
+    entries: list[dict], months_back: int, today: date | None = None
+) -> bool:
+    """True when the newest entry predates the window the trend describes.
+
+    A six-month trend whose newest point is from 2024 describes 2024. The
+    bound is generous — the window plus one month — because INFORM
+    publishes monthly and a cycle's lag is normal, not staleness.
+    """
+
+    newest = _newest_trend_date(entries)
+    if not newest:
+        return True
+    anchor = (today or date.today()).replace(day=1)
+    year, month = anchor.year, anchor.month
+    for _ in range(max(1, int(months_back)) + 1):
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+    return newest < date(year, month, 1).isoformat()
+
+
+def _trend_is_better(candidate: list[dict], current: list[dict]) -> bool:
+    """True when *candidate* is a better trend than *current*.
+
+    Newer wins over longer: a two-point series from this quarter says more
+    about now than a six-point one from two years ago.
+    """
+
+    if not candidate:
+        return False
+    newest_new = _newest_trend_date(candidate)
+    newest_old = _newest_trend_date(current)
+    if newest_old is None:
+        return True
+    if newest_new is not None and newest_new != newest_old:
+        return newest_new > newest_old
+    return len(candidate) > len(current)
+
+
 def fetch_inform_severity(
     iso3: str,
     months_back: int = 6,
@@ -471,16 +518,26 @@ def fetch_inform_severity(
     # quantity from the same publisher, and it is rows where there were
     # none.
     trend_entries = _trend_from_country_log(iso3, token)
-    if len(trend_entries) < 2:
+    # The fallback fires on STALENESS as well as on count. Gating it on
+    # "fewer than two entries" alone assumed the log's failure mode was
+    # returning nothing; the actual one is returning plenty of OLD rows.
+    # ACAPS served 3,000 country-log records in run 34081262443 and
+    # acaps_inform_severity_trend stayed frozen at 2024-01-29 — 952 days —
+    # because two-or-more stale entries satisfied the old condition and the
+    # snapshots were never asked. A trend whose newest point predates the
+    # window it claims to describe is not a trend.
+    if len(trend_entries) < 2 or _trend_is_stale(trend_entries, months_back):
         snapshot_trend = _trend_from_monthly_snapshots(
             iso3, token, months_back=months_back,
             skip_label=snapshot_date,
         )
-        if len(snapshot_trend) > len(trend_entries):
+        if _trend_is_better(snapshot_trend, trend_entries):
             log.info(
-                "ACAPS INFORM trend for %s: country-log gave %d usable "
-                "entries, monthly snapshots gave %d — using the snapshots",
-                iso3, len(trend_entries), len(snapshot_trend),
+                "ACAPS INFORM trend for %s: country-log gave %d entries "
+                "(newest %s), monthly snapshots gave %d (newest %s) — "
+                "using the snapshots",
+                iso3, len(trend_entries), _newest_trend_date(trend_entries) or "none",
+                len(snapshot_trend), _newest_trend_date(snapshot_trend) or "none",
             )
             trend_entries = snapshot_trend
 

@@ -157,11 +157,24 @@ def write_text(path: Path, text: str) -> None:
 
 
 def _run_git(args: list[str]) -> str:
+    """``git <args>`` stdout with the trailing newline removed, or "".
+
+    Only the TRAILING newline: ``git status --porcelain`` writes each line
+    as ``XY<space>PATH`` and the unstaged-modification code is a LEADING
+    space, so stripping the whole output silently ate the first line's
+    status column. ``_porcelain_path`` then read from character 3 of a
+    line that had lost a character and returned
+    ``ata/hdx_signals/hdx_signals.csv``, which matches nothing — so
+    whichever tracked change sorted first was always reported as
+    unexpected, and the check named a file that IS declared expected.
+    Callers wanting a scalar strip it themselves.
+    """
+
     try:
         out = subprocess.run(
             ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, timeout=30
         )
-        return out.stdout.strip() if out.returncode == 0 else ""
+        return out.stdout.rstrip("\n") if out.returncode == 0 else ""
     except Exception:
         return ""
 
@@ -651,7 +664,7 @@ class BundleBuilder:
         cannot quietly disagree with the Actions page.
         """
 
-        head = _run_git(["rev-parse", "HEAD"]) or None
+        head = _run_git(["rev-parse", "HEAD"]).strip() or None
         github_sha = env.get("GITHUB_SHA") or None
         porcelain = [
             line for line in _run_git(["status", "--porcelain"]).splitlines() if line
@@ -681,7 +694,7 @@ class BundleBuilder:
             "head_matches_github_sha": (
                 None if not (head and github_sha) else head == github_sha
             ),
-            "branch": _run_git(["rev-parse", "--abbrev-ref", "HEAD"]) or None,
+            "branch": _run_git(["rev-parse", "--abbrev-ref", "HEAD"]).strip() or None,
             "github_ref": env.get("GITHUB_REF") or None,
             "shallow_clone": (None if shallow not in ("true", "false") else shallow == "true"),
             # Only a modified or staged TRACKED file makes a checkout dirty.
@@ -1422,9 +1435,13 @@ class BundleBuilder:
 
         stream = self._stream_file(run_log.STREAM_CELLS)
         n_stream = 0
+        #: The cells THIS run assessed. A cell outside this set was decided by
+        #: an earlier run and its stored row is all there is to read.
+        assessed_this_run: set[tuple[str, str, str]] = set()
         for record in run_log.read_stream(stream) if stream else []:
             n_stream += 1
             key = (str(record.get("iso3")), str(record.get("hazard")), str(record.get("ym")))
+            assessed_this_run.add(key)
             entry = merged.setdefault(
                 key,
                 {
@@ -1457,14 +1474,40 @@ class BundleBuilder:
 
         # A cell assessed with no row and no recorded reason is itself a
         # finding: it means some path writes nothing and says nothing.
+        #
+        # But only for a cell THIS run decided. haz_triggers holds every cell
+        # the machine has ever assessed, and the reason has only been stamped
+        # on the trigger row since Sept 2026 — so 29,035 backcast cells from
+        # 2007-03..2026-06 carry none and no re-run can put one there, because
+        # nothing records why a 2013 cell wrote nothing. Counting them made
+        # the check permanently red with no path to green, which is the way a
+        # reader learns to skip it. The backlog is reported as its own number,
+        # named and dated, and clears as the backcast re-walks those months.
         unexplained = 0
-        for entry in merged.values():
-            if entry["status"] is None and not entry["reason_code"]:
-                entry["reason_code"] = "unexplained_no_row"
+        backlog = 0
+        backlog_hazards: dict[str, int] = {}
+        backlog_months: list[str] = []
+        for key, entry in merged.items():
+            if entry["status"] is not None or entry["reason_code"]:
+                continue
+            entry["reason_code"] = "unexplained_no_row"
+            if key in assessed_this_run or not assessed_this_run:
                 unexplained += 1
+            else:
+                backlog += 1
+                hazard = str(entry.get("hazard") or "?")
+                backlog_hazards[hazard] = backlog_hazards.get(hazard, 0) + 1
+                if entry.get("ym"):
+                    backlog_months.append(str(entry["ym"]))
         self.cell_ledger_summary = {
             "rows": len(merged),
             "unexplained_no_row": unexplained,
+            "unexplained_no_row_backlog": backlog,
+            "backlog_by_hazard": dict(sorted(backlog_hazards.items())),
+            "backlog_month_range": (
+                f"{min(backlog_months)}..{max(backlog_months)}" if backlog_months else ""
+            ),
+            "cells_assessed_this_run": len(assessed_this_run),
             "no_row": sum(1 for e in merged.values() if e["status"] is None),
         }
 
@@ -1693,7 +1736,7 @@ class BundleBuilder:
                 rel.as_posix(),
                 hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16],
                 len(text.splitlines()),
-                _run_git(["log", "-1", "--date=short", "--pretty=%ad", "--", str(rel)]),
+                _run_git(["log", "-1", "--date=short", "--pretty=%ad", "--", str(rel)]).strip(),
                 "",
             ])
         write_csv(
@@ -2238,6 +2281,7 @@ class BundleBuilder:
         targets = self._connector_targets()
         offenders: list[str] = []
         unattributable: list[str] = []
+        unchanged: list[str] = []
         checked = 0
         for record in run_log.read_stream(report):
             cid = str(record.get("connector_id") or record.get("connector") or "")
@@ -2253,12 +2297,26 @@ class BundleBuilder:
                 unattributable.append(f"{cid} ({table} has no write stamp)")
                 continue
             if touched == 0:
+                declined = self._writer_declined_to_change(cid)
+                if declined:
+                    # A content-hash guarded writer that finds every row
+                    # identical has not failed to write; it has correctly
+                    # declined to, and moving the stamp anyway is the very
+                    # thing that guard exists to stop. store_crisiswatch_entries
+                    # reported inserted=0 updated=0 unchanged=78 on run
+                    # 34081262443 and the check called it a fault.
+                    unchanged.append(f"{cid} ({declined})")
+                    continue
                 offenders.append(
                     f"{cid} claimed {claimed} rows; 0 rows of {table}"
                     + (f" where {where}" if where else "")
                     + f" carry a write stamp since {started_at}"
                 )
         detail = "; ".join(offenders)
+        if unchanged:
+            detail += ("; " if detail else "") + (
+                "left unchanged on purpose: " + ", ".join(unchanged)
+            )
         if unattributable:
             detail += ("; " if detail else "") + "unattributable: " + ", ".join(unattributable)
         self._check(
@@ -2269,6 +2327,44 @@ class BundleBuilder:
             "this run's write stamp. Counted per source filter, never per table, "
             "and by stamp, never by table delta: an idempotent upsert moves no "
             "count, and three sources on one table share one delta.",
+        )
+
+    #: Connectors whose writer is content-hash guarded, and the run-log
+    #: stream carrying its own accounting. Such a writer leaves an identical
+    #: row — and its write stamp — alone by design, so "no row stamped this
+    #: run" is the guard working, not the writer failing.
+    _CONTENT_GUARDED_WRITERS: dict[str, str] = {"crisiswatch": "crisiswatch_store"}
+
+    def _writer_declined_to_change(self, connector_id: str) -> str:
+        """Why a content-guarded writer stamped nothing, or "" if it should have.
+
+        Returns a human-readable reason when the connector's own accounting
+        says every row it considered was identical to the stored one. An
+        empty string means either the connector has no such guard or its
+        accounting shows rows it should have written and did not.
+        """
+
+        stream_name = self._CONTENT_GUARDED_WRITERS.get(connector_id)
+        if not stream_name:
+            return ""
+        stream = self._stream_file(stream_name)
+        if stream is None:
+            return ""
+        records = list(run_log.read_stream(stream))
+        if not records:
+            return ""
+        rec = records[-1]
+        try:
+            inserted = int(rec.get("inserted") or 0)
+            updated = int(rec.get("updated") or 0)
+            unchanged = int(rec.get("unchanged") or 0)
+        except (TypeError, ValueError):
+            return ""
+        if inserted or updated or not unchanged:
+            return ""
+        return (
+            f"content-hash guarded writer reported inserted=0 updated=0 "
+            f"unchanged={unchanged}"
         )
 
     def _table_delta_map(self) -> dict[str, int | None]:
@@ -2712,7 +2808,12 @@ class BundleBuilder:
                 touched = self._touched_since(table, where, started_at)
             agrees = "—"
             if claimed and touched is not None:
-                agrees = "yes" if touched > 0 else "**NO**"
+                if touched > 0:
+                    agrees = "yes"
+                elif self._writer_declined_to_change(cid):
+                    agrees = "unchanged on purpose"
+                else:
+                    agrees = "**NO**"
             elif claimed and touched is None and delta is not None:
                 agrees = "delta only: " + ("yes" if delta > 0 else "unproven")
             lines.append(
@@ -2776,13 +2877,33 @@ class BundleBuilder:
         if not summary or not summary.get("rows"):
             return self._check(name, "SKIP", "", "", "no cell ledger built")
         unexplained = int(summary.get("unexplained_no_row") or 0)
-        self._check(
-            name, "FAIL" if unexplained else "PASS",
-            f"{unexplained} of {summary.get('no_row')} no-row cells unexplained",
-            "0",
+        backlog = int(summary.get("unexplained_no_row_backlog") or 0)
+        assessed = int(summary.get("cells_assessed_this_run") or 0)
+        detail = (
             "A trigger row with no resolution row must carry "
             "trigger_detail_json.no_row_reason (or the run stream must name it). "
-            "unexplained_no_row is a bug in whichever path wrote nothing silently.",
+            "unexplained_no_row is a bug in whichever path wrote nothing silently."
+        )
+        if backlog:
+            detail += (
+                f" Not counted here: {backlog} cell(s) decided by EARLIER runs "
+                f"({summary.get('backlog_month_range') or 'unknown range'}, "
+                f"{summary.get('backlog_by_hazard') or {}}) carry no reason because "
+                "the stamp postdates them. No re-run can put one there — nothing "
+                "records why those cells wrote nothing — and the count clears as "
+                "the backcast re-walks those months."
+            )
+        if not assessed:
+            detail += (
+                " The run stream recorded no cells, so live and historical cells "
+                "could not be told apart and every one is counted."
+            )
+        self._check(
+            name, "FAIL" if unexplained else "PASS",
+            f"{unexplained} of {summary.get('no_row')} no-row cells unexplained "
+            f"({assessed} cell(s) assessed this run; {backlog} historical)",
+            "0",
+            detail,
         )
 
     def _check_drought_severity_base_rates(self) -> None:
@@ -2927,11 +3048,22 @@ class BundleBuilder:
                 provenance = json.loads(provenance_json or "{}")
             except (TypeError, ValueError):
                 provenance = {}
+            # An absence zero is written by resolutions.write_zero_resolution,
+            # whose provenance carries no "decision" key at all: the readings
+            # sit under evidence_of_absence. Reading only "decision" scored
+            # every one of these rows at zero answering feeds, so the check
+            # named 203 innocent country-months and could never pass — which
+            # is how a validator teaches its reader to skip it.
             decision = provenance.get("decision") or {}
-            if decision.get("delta") is not None:
+            absence = provenance.get("evidence_of_absence") or {}
+            if decision.get("delta") is not None or (
+                (absence.get("ipc") or {}).get("delta") is not None
+            ):
                 # Both IPC analyses were read: the zero rests on IPC too.
                 continue
-            indicators = decision.get("indicators") or {}
+            indicators = (
+                decision.get("indicators") or absence.get("indicators") or {}
+            )
             answered = indicators.get("answered_count")
             if answered is None:
                 answered = sum(

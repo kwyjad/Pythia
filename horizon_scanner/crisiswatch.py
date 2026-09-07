@@ -152,6 +152,11 @@ _ICG_COUNTRY_ISO3: dict[str, str] = {
     "Nagorno-Karabakh": "AZE",
     "Namibia": "NAM",
     "Nepal": "NPL",
+    # ICG heads this entry with the administering state in brackets. It was
+    # unmatched in 16 of the editions the Sept 2026 backfill walked, so New
+    # Caledonia's arrow reached no prompt and no row.
+    "New Caledonia": "NCL",
+    "New Caledonia (France)": "NCL",
     "Nicaragua": "NIC",
     "Niger": "NER",
     "Nigeria": "NGA",

@@ -859,21 +859,8 @@ def parse_response(
                 date=str(raw.get("date") or "").strip(),
                 cumulative_or_new=cumulative,
                 doc_id=str(document.get("doc_id") or ""),
-                doc_url=str(document.get("url") or ""),
-                doc_title=str(document.get("title") or ""),
-                doc_date=str(document.get("date_created") or ""),
-                doc_source_rank=int(document.get("source_rank") or 0),
                 model=model,
-                doc_date_original=str(document.get("date_original") or ""),
-                doc_primary_country=str(document.get("primary_country_iso3") or "").upper(),
-                doc_country_iso3s=tuple(
-                    str(c).upper() for c in (document.get("country_iso3s") or [])
-                ),
-                doc_publisher=", ".join(
-                    str(source).strip()
-                    for source in (document.get("sources") or [])
-                    if str(source).strip()
-                ),
+                **_document_fields(document),
             )
         )
 
@@ -1108,11 +1095,83 @@ def write_extraction(
     )
 
 
-def _figures_from_cache(cached: dict[str, Any], model: str) -> list[ExtractedFigure]:
+#: Fields of an ExtractedFigure that describe the DOCUMENT rather than the
+#: model's answer. They are re-derived from the document on every replay, so
+#: a cache row written before one of them existed does not carry its absence
+#: forward forever. In run 34081262443, 555 of 955 accepted figures read
+#: "(unattributed)" because their cached payloads predated ``doc_publisher``
+#: by one day — and an unattributed figure loses the authority ranking that
+#: puts a government figure above an unnamed one.
+_DOCUMENT_DERIVED_FIELDS = (
+    "doc_url",
+    "doc_title",
+    "doc_date",
+    "doc_date_original",
+    "doc_primary_country",
+    "doc_country_iso3s",
+    "doc_source_rank",
+    "doc_publisher",
+)
+
+
+def _document_fields(document: dict[str, Any]) -> dict[str, Any]:
+    """The document-derived half of an ExtractedFigure, from the document.
+
+    One definition, used by the fresh path and the cache replay alike, so
+    the two cannot describe the same document differently.
+    """
+
+    return {
+        "doc_url": str(document.get("url") or ""),
+        "doc_title": str(document.get("title") or ""),
+        "doc_date": str(document.get("date_created") or ""),
+        "doc_date_original": str(document.get("date_original") or ""),
+        "doc_primary_country": str(document.get("primary_country_iso3") or "").upper(),
+        "doc_country_iso3s": tuple(
+            str(c).upper() for c in (document.get("country_iso3s") or [])
+        ),
+        "doc_source_rank": int(document.get("source_rank") or 0),
+        "doc_publisher": ", ".join(
+            str(source).strip()
+            for source in (document.get("sources") or [])
+            if str(source).strip()
+        ),
+    }
+
+
+def _figures_from_cache(
+    cached: dict[str, Any],
+    model: str,
+    document: dict[str, Any] | None = None,
+) -> list[ExtractedFigure]:
+    """Rebuild an extraction's figures from its cached payload.
+
+    ``document`` is the document the cache row is about. Its own fields are
+    re-derived rather than trusted from the payload: they describe the
+    DOCUMENT, not the model's answer, so taking them from the document that
+    is in hand is not inventing anything — it is reading the same source the
+    fresh path reads. Without it a cache row written before a field existed
+    replays that field empty forever, because the key is (doc, model,
+    prompt_version, cell) and nothing short of a prompt-version bump ever
+    rewrites it.
+    """
+
+    derived = _document_fields(document) if document else {}
     out: list[ExtractedFigure] = []
     for entry in cached["payload"].get("figures") or []:
         fields = {k: v for k, v in entry.items() if k in ExtractedFigure.__annotations__}
         fields.setdefault("model", model)
+        for key, value in derived.items():
+            # A key the payload never carried is filled outright — that is
+            # the whole point, and it also completes a payload written before
+            # the field existed. A key it does carry is overwritten only when
+            # the document actually says something, so a document with no
+            # publisher cannot blank a figure that names one, and rank 0
+            # (the most preferred rank there is) is not mistaken for absence.
+            if key not in fields:
+                fields[key] = value
+            elif value not in ("", (), None):
+                fields[key] = value
         try:
             out.append(ExtractedFigure(**fields))
         except TypeError:  # pragma: no cover - a cache row from an older shape
@@ -1216,7 +1275,7 @@ def extract_for_cell(
         )
         if cached is not None:
             result.docs_cached += 1
-            result.figures.extend(_figures_from_cache(cached, model_ref))
+            result.figures.extend(_figures_from_cache(cached, model_ref, document))
             budget.cached_hits += 1
             continue
 

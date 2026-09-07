@@ -259,8 +259,40 @@ def _backoff_seconds(attempt: int) -> float:
     return base * (0.5 + random.random())
 
 
+#: What this connector calls itself to GDACS. An outbound request asks for
+#: what it wants: until Sept 2026 this session sent no User-Agent and no
+#: Accept at all, so every call went out as ``python-requests/2.x``, which is
+#: the shape a bot filter is freest to refuse. This repo has been refused for
+#: exactly that twice already — bom.gov.au 403s a generic agent, and noaa.gov
+#: refused ``PythiaBot/1.0``.
+_USER_AGENT = os.getenv("GDACS_USER_AGENT", "").strip() or (
+    "Mozilla/5.0 (compatible; Pythia/1.0; +https://fredforecaster.org)"
+)
+
+
+#: One event's exposure, remembered for the life of THIS PROCESS.
+#:
+#: Keyed ``(eventtype, eventid)`` -> ``(best RSS episode | None, refusal
+#: status | None)``. Deliberately NOT a cache of upstream state: it exists
+#: because the PA machine walks the same events once per hazard-month pass
+#: and an event's exposure cannot change between two passes of one run. It
+#: is process-scoped, so the next run asks GDACS again, and
+#: ``reset_exposure_memo()`` clears it — a module-level store that outlives
+#: a test would serve the first test's events to every later one, which is
+#: the trap the vendored-boundary loader documents.
+_EXPOSURE_MEMO: dict[tuple[str, str], tuple[dict[str, Any] | None, int | None]] = {}
+_EXPOSURE_MEMO_LOCK = threading.Lock()
+
+
+def reset_exposure_memo() -> None:
+    """Forget every remembered per-event exposure. For tests and long runs."""
+
+    with _EXPOSURE_MEMO_LOCK:
+        _EXPOSURE_MEMO.clear()
+
+
 def _build_session() -> requests.Session:
-    """Build a requests session with retry logic."""
+    """Build a requests session with retry logic and honest headers."""
     session = requests.Session()
     retries = Retry(
         total=3,
@@ -270,6 +302,13 @@ def _build_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retries)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
+    session.headers.update(
+        {
+            "User-Agent": _USER_AGENT,
+            "Accept": "application/rss+xml, application/xml, text/xml, application/json;q=0.9, */*;q=0.8",
+            "Accept-Language": "en",
+        }
+    )
     return session
 
 
@@ -930,8 +969,73 @@ class GdacsConnector:
         """
         etype = ev["eventtype"]
         eid = ev["eventid"]
-        url = _EVENT_RSS_PATTERN.format(type=etype, eventid=eid)
         ev.setdefault("population_enriched", False)
+
+        # An event's exposure does not change during a run, but the machine
+        # asks for it once per hazard-month pass: run 34081262443 made 2,678
+        # per-event requests for 294 distinct events — up to 24 for one event
+        # across six passes at four attempts each — and 2,132 of them were
+        # refused. Answering the second and later passes from memory is not a
+        # cache of upstream state; it is not asking the same question six
+        # times in one process. A refusal is remembered too: re-running the
+        # whole retry ladder against a host that has just refused it four
+        # times spends four more requests to learn the same thing, and the
+        # raw cache's carry-forward is what supplies the figure meanwhile.
+        memo_key = (str(etype), str(eid))
+        remembered = _EXPOSURE_MEMO.get(memo_key)
+        if remembered is not None:
+            return self._apply_exposure(ev, remembered)
+
+        best, refused = self._fetch_event_exposure(session, etype, eid, name_to_iso3)
+        with _EXPOSURE_MEMO_LOCK:
+            _EXPOSURE_MEMO[memo_key] = (best, refused)
+        return self._apply_exposure(ev, (best, refused))
+
+    @staticmethod
+    def _apply_exposure(
+        ev: dict[str, Any],
+        outcome: tuple[dict[str, Any] | None, int | None],
+    ) -> dict[str, Any]:
+        """Merge one event's fetched exposure onto ``ev``.
+
+        Split out of the fetch so a remembered outcome and a fresh one reach
+        the event by exactly the same path.
+        """
+
+        best, refused = outcome
+        if refused is not None:
+            ev["population_refused"] = int(refused)
+            return ev
+        if not best:
+            return ev
+        ev["population"] = best["population"]
+        for key in (
+            "population_unit", "population_text",
+            "population_raw", "population_parse",
+        ):
+            ev[key] = best.get(key, ev.get(key, ""))
+        # Also update iso3/country if the RSS has better data
+        if best.get("iso3") and not ev.get("iso3"):
+            ev["iso3"] = best["iso3"]
+        if best.get("country") and not ev.get("country"):
+            ev["country"] = best["country"]
+        if best.get("lat") is not None and ev.get("lat") is None:
+            ev["lat"] = best.get("lat")
+        if best.get("lon") is not None and ev.get("lon") is None:
+            ev["lon"] = best.get("lon")
+        ev["population_enriched"] = True
+        return ev
+
+    def _fetch_event_exposure(
+        self,
+        session: requests.Session,
+        etype: str,
+        eid: Any,
+        name_to_iso3: dict[str, str],
+    ) -> tuple[dict[str, Any] | None, int | None]:
+        """``(best RSS episode or None, refusal status or None)`` for one event."""
+
+        url = _EVENT_RSS_PATTERN.format(type=etype, eventid=eid)
         attempts = _enrich_attempts()
 
         for attempt in range(1, attempts + 1):
@@ -939,7 +1043,7 @@ class GdacsConnector:
                 resp = session.get(url, timeout=30)
                 if resp.status_code == 404:
                     LOG.debug("[gdacs] per-event RSS 404 for %s/%s", etype, eid)
-                    return ev
+                    return None, None
                 if resp.status_code in _RETRYABLE_ENRICH_STATUS and attempt < attempts:
                     pause = _backoff_seconds(attempt)
                     LOG.debug(
@@ -950,40 +1054,24 @@ class GdacsConnector:
                     time.sleep(pause)
                     continue
                 if resp.status_code in _RETRYABLE_ENRICH_STATUS:
-                    ev["population_refused"] = int(resp.status_code)
                     LOG.debug(
                         "[gdacs] per-event RSS %d for %s/%s after %d attempts — "
                         "the event keeps its discovery-time population",
                         resp.status_code, etype, eid, attempts,
                     )
-                    return ev
+                    return None, int(resp.status_code)
                 resp.raise_for_status()
 
                 # Parse the per-event RSS to get population
                 rss_events = self._parse_rss(resp.content, name_to_iso3)
-                if rss_events:
-                    # Take the latest episode (highest todate)
-                    best = max(
-                        rss_events,
-                        key=lambda e: (e["todate"], e.get("pub_date") or e["todate"]),
-                    )
-                    ev["population"] = best["population"]
-                    for key in (
-                        "population_unit", "population_text",
-                        "population_raw", "population_parse",
-                    ):
-                        ev[key] = best.get(key, ev.get(key, ""))
-                    # Also update iso3/country if the RSS has better data
-                    if best.get("iso3") and not ev.get("iso3"):
-                        ev["iso3"] = best["iso3"]
-                    if best.get("country") and not ev.get("country"):
-                        ev["country"] = best["country"]
-                    if best.get("lat") is not None and ev.get("lat") is None:
-                        ev["lat"] = best.get("lat")
-                    if best.get("lon") is not None and ev.get("lon") is None:
-                        ev["lon"] = best.get("lon")
-                    ev["population_enriched"] = True
-                return ev
+                if not rss_events:
+                    return None, None
+                # Take the latest episode (highest todate)
+                best = max(
+                    rss_events,
+                    key=lambda e: (e["todate"], e.get("pub_date") or e["todate"]),
+                )
+                return best, None
             except Exception as exc:
                 if attempt < attempts:
                     pause = _backoff_seconds(attempt)
@@ -995,9 +1083,9 @@ class GdacsConnector:
                     time.sleep(pause)
                     continue
                 LOG.debug("[gdacs] error fetching RSS for %s/%s: %s", etype, eid, exc)
-                return ev
+                return None, None
 
-        return ev
+        return None, None
 
     def _enrich_with_population(
         self,

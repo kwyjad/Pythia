@@ -30,6 +30,7 @@ on:
       - "resolver/tests/test_hs_triage_resilience_and_rerun_lists.py"
       - "resolver/tests/test_conflict_forecasts_served.py"
       - "resolver/tests/test_group_a_drought_recovery.py"
+      - "resolver/tests/test_run_34081262443_fixes.py"
       - "pythia/db/schema.py"
       - "pythia/buckets.py"
       - ".github/workflows/horizon-scanner-ci.yml"
@@ -55,6 +56,7 @@ on:
       - "resolver/tests/test_hs_triage_resilience_and_rerun_lists.py"
       - "resolver/tests/test_conflict_forecasts_served.py"
       - "resolver/tests/test_group_a_drought_recovery.py"
+      - "resolver/tests/test_run_34081262443_fixes.py"
       - "pythia/db/schema.py"
       - "pythia/buckets.py"
       - ".github/workflows/horizon-scanner-ci.yml"
@@ -105,4 +107,5 @@ jobs:
             resolver/tests/test_hs_triage_resilience_and_rerun_lists.py \
             resolver/tests/test_conflict_forecasts_served.py \
             resolver/tests/test_group_a_drought_recovery.py \
+            resolver/tests/test_run_34081262443_fixes.py \
             -m "not allow_network and not network"
