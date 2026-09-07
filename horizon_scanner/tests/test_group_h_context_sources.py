@@ -94,6 +94,17 @@ class TestEditionBackfill:
     def refresh(self):
         return _load_refresh()
 
+    @pytest.fixture(autouse=True)
+    def _no_cdx(self, refresh, monkeypatch):
+        """Keep the targeted per-edition probe off the network.
+
+        Since the walk became targeted, pass 1 asks CDX for the captures in
+        the month after each wanted edition. These tests hand the walk a
+        snapshot list directly, so the windowed query must answer nothing
+        and let pass 2 — the general listing they DO patch — do the work.
+        """
+        monkeypatch.setattr(refresh, "_cdx_timestamps", lambda **k: [])
+
     def test_wanted_editions_parse(self, refresh):
         assert refresh._wanted_editions("2026-03, 2026-4") == [(2026, 3), (2026, 4)]
         assert refresh._wanted_editions("") == []
