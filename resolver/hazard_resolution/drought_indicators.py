@@ -595,26 +595,46 @@ def _parse_feed(
 def _table_date_span(
     con: "duckdb.DuckDBPyConnection", entry: Mapping[str, Any]
 ) -> tuple[str, str] | None:
-    """The ``YYYY-MM`` span a pythia_table entry's rows cover, or None.
+    """The ``YYYY-MM`` span of months this entry's rows SPEAK FOR, or None.
 
     Used to tell "this month is before the table starts" — a structural
     absence a backcast will meet in every early month — from "the table
     covers this month and the filter matched nothing", which is a fault.
     Never raises.
+
+    The span is taken in the same terms the lookup matches on. Where the
+    row's date is an ISSUE date and ``date_offset_column`` carries a lead,
+    the month a row is ABOUT is issue + lead, and the span must say so:
+    NMME's earliest vintage was issued 2026-07-08 at lead 1, so the table
+    speaks for 2026-08 onwards and says nothing about July. Comparing
+    against the raw issue date made 2026-07 look covered, so a month with
+    no possible vintage was reported as a fault, once per month, for every
+    backcast month before the ingest began.
     """
 
     table = str(entry.get("table") or "")
     date_column = str(entry.get("date_column") or "")
     if not table or not date_column:
         return None
+    offset_column = str(entry.get("date_offset_column") or "")
     where = str(entry.get("where") or "").strip()
     clause = f" WHERE ({where})" if where else ""
+    month_expr = f"substr(CAST({date_column} AS VARCHAR), 1, 7)"
     try:
-        lo, hi = con.execute(
-            f"SELECT MIN(substr(CAST({date_column} AS VARCHAR), 1, 7)), "
-            f"MAX(substr(CAST({date_column} AS VARCHAR), 1, 7)) "
-            f"FROM {table}{clause}"
-        ).fetchone()
+        if offset_column:
+            # Shift each row's issue month by its own lead, in SQL, so the
+            # extremes are the extremes of what the table is ABOUT.
+            shifted = (
+                f"strftime(CAST({month_expr} || '-01' AS DATE) "
+                f"+ TO_MONTHS(CAST(COALESCE({offset_column}, 0) AS INTEGER)), '%Y-%m')"
+            )
+            lo, hi = con.execute(
+                f"SELECT MIN({shifted}), MAX({shifted}) FROM {table}{clause}"
+            ).fetchone()
+        else:
+            lo, hi = con.execute(
+                f"SELECT MIN({month_expr}), MAX({month_expr}) FROM {table}{clause}"
+            ).fetchone()
     except Exception:  # noqa: BLE001 - a span we cannot read decides nothing
         return None
     if not lo or not hi:

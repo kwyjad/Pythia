@@ -70,6 +70,22 @@ def main(argv: list[str] | None = None) -> dict | None:
         action="store_true",
         help="Fetch and process but do not write to DuckDB.",
     )
+    parser.add_argument(
+        "--backfill-months",
+        type=int,
+        default=0,
+        help=(
+            "Also ingest the N issue months BEFORE the one fetched, oldest "
+            "first. A vintage the FTP no longer keeps is skipped and named, "
+            "never fatal: the CPC directory is 'realtime_anom', so how far "
+            "back it reaches is a property of the archive rather than of "
+            "this code, and the run reports what it found. Each recovered "
+            "vintage is a month the drought gate's NMME indicator can speak "
+            "for — the gate read 2 of 3 feeds in 2026-07 because the "
+            "earliest vintage held was issued that July at lead 1, so it is "
+            "about August and says nothing about July."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -132,14 +148,107 @@ def main(argv: list[str] | None = None) -> dict | None:
             result.rows_before,
             result.rows_after,
         )
-        return {
+        summary = {
             "rows_written": int(result.rows_written),
             "rows_before": int(result.rows_before),
             "rows_after": int(result.rows_after),
         }
+        if args.backfill_months > 0:
+            summary["backfill"] = _backfill_earlier_issues(
+                con,
+                months=args.backfill_months,
+                newest_issue=str(df["forecast_issue_date"].iloc[0]),
+                max_leads=args.max_leads,
+            )
+        return summary
     finally:
         from resolver.db.duckdb_io import close_db
         close_db(con)
+
+
+def _earlier_issue_months(newest_issue: str, months: int) -> list[str]:
+    """The ``YYYYMM`` issue months before ``newest_issue``, oldest first."""
+
+    from datetime import date as _date
+
+    text = str(newest_issue)[:7]
+    year, month = int(text[:4]), int(text[5:7])
+    out: list[str] = []
+    for back in range(months, 0, -1):
+        index = (year * 12 + month - 1) - back
+        out.append(f"{index // 12:04d}{index % 12 + 1:02d}")
+    _ = _date  # imported for the reader; arithmetic is done on the index
+    return out
+
+
+def _backfill_earlier_issues(
+    con, *, months: int, newest_issue: str, max_leads: int
+) -> dict:
+    """Ingest earlier NMME vintages, reporting what the archive actually held.
+
+    CPC publishes under ``realtime_anom``, which is usually a rolling
+    window rather than an archive, so a month that is simply not there is
+    an ordinary outcome and is named rather than raised — the same rule the
+    NOAA candidate-URL walk follows. A vintage that IS there is a month the
+    drought gate's NMME indicator can speak for, which is the point.
+    """
+
+    from resolver.db.duckdb_io import upsert_dataframe
+    from resolver.ingestion.nmme import fetch_and_process
+
+    wanted = _earlier_issue_months(newest_issue, months)
+    recovered: list[str] = []
+    absent: list[str] = []
+    failed: dict[str, str] = {}
+    rows_written = 0
+
+    LOG.info(
+        "[nmme] backfill: asking CPC for %d earlier issue month(s): %s",
+        len(wanted), ", ".join(wanted),
+    )
+    for year_month in wanted:
+        try:
+            frame = fetch_and_process(year_month=year_month, max_leads=max_leads)
+        except FileNotFoundError as exc:
+            absent.append(year_month)
+            LOG.info("[nmme] backfill %s: not held by the archive (%s)", year_month, exc)
+            continue
+        except Exception as exc:  # noqa: BLE001 - one bad vintage is not the run
+            failed[year_month] = str(exc)[:200]
+            LOG.warning("[nmme] backfill %s failed: %s", year_month, exc)
+            continue
+        if frame is None or frame.empty:
+            absent.append(year_month)
+            LOG.info("[nmme] backfill %s: no rows produced", year_month)
+            continue
+        from datetime import datetime, timezone
+
+        frame["fetched_at"] = datetime.now(timezone.utc)
+        result = upsert_dataframe(
+            con,
+            "seasonal_forecasts",
+            frame,
+            keys=["iso3", "variable", "lead_months", "forecast_issue_date"],
+        )
+        rows_written += int(result.rows_written)
+        recovered.append(year_month)
+        LOG.info(
+            "[nmme] backfill %s: %d rows written", year_month, result.rows_written
+        )
+
+    LOG.info(
+        "[nmme] backfill complete: %d of %d vintage(s) recovered (%d rows); "
+        "not held by the archive: %s",
+        len(recovered), len(wanted), rows_written,
+        ", ".join(absent) or "none",
+    )
+    return {
+        "wanted": wanted,
+        "recovered": recovered,
+        "absent": absent,
+        "failed": failed,
+        "rows_written": rows_written,
+    }
 
 
 if __name__ == "__main__":

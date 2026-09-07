@@ -630,6 +630,29 @@ jobs:
           python -m pythia.tools.ingest_structured_data --sources nmme 2>&1 | tee diagnostics/phase3_nmme.log || echo "WARNING: NMME ingest failed (non-fatal)"
           echo "::endgroup::"
 
+      # The drought gate read 2 of 3 feeds for 2026-07 because the earliest
+      # NMME vintage the table held was issued that July at lead 1, so it is
+      # ABOUT August and says nothing about July. CPC publishes under
+      # "realtime_anom", which is usually a rolling window rather than an
+      # archive, so how far back this reaches is a property of the source:
+      # a vintage that is not there is named and skipped, never fatal, and
+      # the log says which months were recovered. Each one is a month the
+      # NMME indicator can speak for in the drought backcast.
+      - name: "Phase 2.4: Backfill earlier NMME vintages (drought gate coverage)"
+        timeout-minutes: 25
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'nmme') }}
+        continue-on-error: true
+        env:
+          NMME_BACKFILL_MONTHS: "12"
+        run: |
+          set -o pipefail
+          echo "::group::NMME backfill"
+          python -m resolver.tools.ingest_nmme \
+            --backfill-months "${NMME_BACKFILL_MONTHS}" \
+            2>&1 | tee diagnostics/phase24_nmme_backfill.log \
+            || echo "::warning::NMME vintage backfill failed (non-fatal)"
+          echo "::endgroup::"
+
       - name: "Phase 2.4: Store HDX Signals (read by the drought gate)"
         timeout-minutes: 15
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'hdx_signals') }}
