@@ -212,14 +212,86 @@ def _load_countries() -> tuple[dict[str, str], dict[str, str]]:
 #: Statuses the per-event RSS fetch retries. 403 is here because GDACS
 #: answers a rate-limited caller with one, and urllib3's retry list does not
 #: carry it — so 532 of 1,050 refusals in run 33946954189 were never retried.
-_RETRYABLE_ENRICH_STATUS = frozenset({403, 429, 500, 502, 503, 504})
+#: Statuses worth asking again about. **403 is deliberately absent.** It was
+#: added on the reading that GDACS answers a throttled caller 403 and that
+#: the ladder would ride it out. Two runs disproved that. Run 33946954189
+#: refused 532 of 1,050 requests; run 34124705852 cut volume by 73% and the
+#: refusal rate barely moved, 79.6% to 76% — a rate limit eases when the
+#: rate falls and this did not. And of 291 distinct events, 153 were served
+#: on the FIRST request and 138 were refused on all four attempts: whatever
+#: decides a refusal decides it per event and does not change its mind.
+#: Retrying a 403 four times spends four requests to learn what one already
+#: said, and the answer to a refusing source is fewer requests and a cache,
+#: not a harder retry. 429 stays — that is the code a source uses when it
+#: means "slow down", and it is worth obeying.
+_RETRYABLE_ENRICH_STATUS = frozenset({429, 500, 502, 503, 504})
 
-#: Seconds between one worker's own per-event requests. Six workers with no
-#: delay is what drew the refusals; two with a quarter of a second is roughly
-#: 2.5 requests a second, which the flood pass has ample budget for.
-_DEFAULT_ENRICH_WORKERS = 2
+#: Refused, recorded, and asked once. The event keeps whatever the
+#: cache already holds for it.
+_REFUSAL_STATUS = frozenset({401, 403, 451})
+
+#: One worker, paced. Six with no delay drew the refusals; two with a
+#: quarter of a second did not fix them, because volume was never the whole
+#: story. The pace is now held by a process-wide bucket rather than by the
+#: per-worker sleep, so it survives an operator raising the worker count.
+_DEFAULT_ENRICH_WORKERS = 1
 _DEFAULT_ENRICH_DELAY = 0.25
 _DEFAULT_ENRICH_ATTEMPTS = 4
+#: Minimum seconds between ANY two per-event requests from this process.
+_DEFAULT_ENRICH_MIN_INTERVAL = 2.0
+#: A wall-clock ceiling on one enrichment pass, or 0 for none. A pace slow
+#: enough to be polite is slow enough to outrun a step budget: 3,272 events
+#: at one request every two seconds is 109 minutes against a 60-minute
+#: reset step. Rather than choose between a rude pace and a killed step,
+#: the pass stops asking and says how many it left — the events it did not
+#: reach keep whatever the cache holds, and the next run asks for those.
+_DEFAULT_ENRICH_MAX_SECONDS = 0.0
+
+
+class _RateLimiter:
+    """A process-wide floor on the interval between requests.
+
+    The per-worker sleep paces one worker and multiplies by however many
+    there are; this does not. It is deliberately the crudest possible
+    limiter — one lock, one timestamp — because the thing it must never do
+    is fail open under contention.
+    """
+
+    def __init__(self, min_interval: float) -> None:
+        self._min_interval = max(0.0, float(min_interval))
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def acquire(self) -> None:
+        if self._min_interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            wait = self._next_allowed - now
+            self._next_allowed = max(now, self._next_allowed) + self._min_interval
+        if wait > 0:
+            time.sleep(wait)
+
+
+def _enrich_max_seconds() -> float:
+    try:
+        raw = os.getenv("GDACS_ENRICH_MAX_SECONDS", "")
+        return max(0.0, float(raw)) if raw else _DEFAULT_ENRICH_MAX_SECONDS
+    except ValueError:
+        return _DEFAULT_ENRICH_MAX_SECONDS
+
+
+def _enrich_min_interval() -> float:
+    try:
+        raw = os.getenv("GDACS_ENRICH_MIN_INTERVAL_SEC", "")
+        return max(0.0, float(raw)) if raw else _DEFAULT_ENRICH_MIN_INTERVAL
+    except ValueError:
+        return _DEFAULT_ENRICH_MIN_INTERVAL
+
+
+#: Rebuilt per fetch by :func:`reset_exposure_memo`, so a test that changes
+#: the interval is not held to the first test's pace.
+_ENRICH_LIMITER = _RateLimiter(_enrich_min_interval())
 
 
 def _enrich_attempts() -> int:
@@ -287,8 +359,79 @@ _EXPOSURE_MEMO_LOCK = threading.Lock()
 def reset_exposure_memo() -> None:
     """Forget every remembered per-event exposure. For tests and long runs."""
 
+    global _ENRICH_LIMITER
     with _EXPOSURE_MEMO_LOCK:
         _EXPOSURE_MEMO.clear()
+    _ENRICH_LIMITER = _RateLimiter(_enrich_min_interval())
+
+
+#: Property names a GDACS search feature might state an exposure under.
+#: Checked in order; the first that parses to a positive number wins. This
+#: is a probe, not a promise — if none of them is ever present the run says
+#: so and the per-event fetch carries on as before.
+_BULK_POPULATION_KEYS = (
+    "population",
+    "populationexposed",
+    "exposedpopulation",
+    "affectedpopulation",
+    "poptotal",
+)
+
+#: Property keys seen on search features this run, so the next run's log
+#: answers "is there a bulk route" from evidence. Reset per fetch.
+_SEARCH_PROPERTY_KEYS: set[str] = set()
+_SEARCH_PROPERTY_LOCK = threading.Lock()
+
+
+def reset_search_property_keys() -> None:
+    with _SEARCH_PROPERTY_LOCK:
+        _SEARCH_PROPERTY_KEYS.clear()
+
+
+def observed_search_property_keys() -> list[str]:
+    with _SEARCH_PROPERTY_LOCK:
+        return sorted(_SEARCH_PROPERTY_KEYS)
+
+
+def _note_search_properties(props: dict[str, Any]) -> None:
+    if not isinstance(props, dict):
+        return
+    with _SEARCH_PROPERTY_LOCK:
+        _SEARCH_PROPERTY_KEYS.update(str(k) for k in props)
+
+
+def _population_from_properties(props: dict[str, Any]) -> tuple[float, str]:
+    """``(exposure, field name)`` from a search feature, or ``(0.0, "")``.
+
+    GDACS nests some numbers under ``severitydata``, so that is searched
+    too. A non-positive figure is GDACS declining to say and is treated as
+    absent, exactly as it is everywhere else in this connector.
+    """
+
+    if not isinstance(props, dict):
+        return 0.0, ""
+    candidates: list[tuple[str, Any]] = []
+    for key in _BULK_POPULATION_KEYS:
+        if key in props:
+            candidates.append((key, props[key]))
+    severity = props.get("severitydata")
+    if isinstance(severity, dict):
+        for key in _BULK_POPULATION_KEYS:
+            if key in severity:
+                candidates.append((f"severitydata.{key}", severity[key]))
+    for name, raw in candidates:
+        # A JSON field carries no separate unit attribute, so the RSS unit
+        # parser has nothing to work with here. A value that is not plainly
+        # a number is left alone rather than guessed at: an unrecognised
+        # figure is UNKNOWN everywhere else in this connector and must be
+        # here too, or the bulk route becomes a way to smuggle one in.
+        try:
+            value = float(str(raw).replace(",", "").strip())
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value, f"search:{name}"
+    return 0.0, ""
 
 
 def _build_session() -> requests.Session:
@@ -927,6 +1070,17 @@ class GdacsConnector:
             # against the boundaries the PA machine already ships.
             lat, lon = _feature_point(feat, props)
 
+            # WHAT THE BULK ROUTE ACTUALLY CARRIES. The per-event RSS costs
+            # one request per event and is where every refusal came from; if
+            # the search response already states an exposure, the whole
+            # enrichment pass is unnecessary. The code assumed it does not
+            # and recorded nothing, so the assumption could never be checked
+            # — a connector's response envelope is evidence the connector
+            # itself discards. The property keys are noted once per run, and
+            # a population-shaped field is USED when one is present.
+            _note_search_properties(props)
+            bulk_population, bulk_field = _population_from_properties(props)
+
             events.append({
                 "eventtype": eventtype,
                 "eventid": props.get("eventid"),
@@ -939,7 +1093,12 @@ class GdacsConnector:
                 "todate": todate,
                 "alertlevel": props.get("alertlevel", "Green"),
                 "alertscore": props.get("alertscore"),
-                "population": 0.0,  # Will be enriched from per-event RSS
+                # 0.0 unless the search response stated one, in which case
+                # the per-event fetch is not needed at all.
+                "population": bulk_population,
+                "population_enriched": bulk_population > 0,
+                "population_source": "search" if bulk_population > 0 else "",
+                "population_parse": bulk_field,
                 "pub_date": _parse_date(props.get("datemodified")) or todate,
             })
 
@@ -1012,8 +1171,15 @@ class GdacsConnector:
         for key in (
             "population_unit", "population_text",
             "population_raw", "population_parse",
+            # A figure served from the cache must say so, and say when it
+            # was read. A stale figure is worth more than none, and only
+            # worth anything if it is labelled.
+            "population_source", "population_cached_at",
         ):
             ev[key] = best.get(key, ev.get(key, ""))
+        ev.setdefault("population_source", "live")
+        if not ev.get("population_source"):
+            ev["population_source"] = "live"
         # Also update iso3/country if the RSS has better data
         if best.get("iso3") and not ev.get("iso3"):
             ev["iso3"] = best["iso3"]
@@ -1040,6 +1206,9 @@ class GdacsConnector:
 
         for attempt in range(1, attempts + 1):
             try:
+                # Every per-event request in this process passes here, so
+                # the pace holds whatever the worker count is.
+                _ENRICH_LIMITER.acquire()
                 resp = session.get(url, timeout=30)
                 if resp.status_code == 404:
                     LOG.debug("[gdacs] per-event RSS 404 for %s/%s", etype, eid)
@@ -1058,6 +1227,14 @@ class GdacsConnector:
                         "[gdacs] per-event RSS %d for %s/%s after %d attempts — "
                         "the event keeps its discovery-time population",
                         resp.status_code, etype, eid, attempts,
+                    )
+                    return None, int(resp.status_code)
+                if resp.status_code in _REFUSAL_STATUS:
+                    # Recorded exactly as a retried refusal is, and asked
+                    # once. The event keeps whatever the cache knows.
+                    LOG.debug(
+                        "[gdacs] per-event RSS %d for %s/%s — not retried",
+                        resp.status_code, etype, eid,
                     )
                     return None, int(resp.status_code)
                 resp.raise_for_status()
@@ -1093,6 +1270,10 @@ class GdacsConnector:
         events: list[dict[str, Any]],
         delay: float,
         name_to_iso3: dict[str, str],
+        *,
+        workers: int | None = None,
+        min_interval: float | None = None,
+        max_seconds: float | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch per-event RSS to get population data for each event.
 
@@ -1105,14 +1286,22 @@ class GdacsConnector:
         the pool brings that to ~10 min without hammering GDACS.
         ``GDACS_ENRICH_WORKERS=1`` preserves the exact sequential behavior.
         """
+        global _ENRICH_LIMITER
         total = len(events)
-        workers = max(
-            1,
-            int(
-                os.getenv("GDACS_ENRICH_WORKERS", "")
-                or _DEFAULT_ENRICH_WORKERS
-            ),
-        )
+        # An explicit argument wins (the PA machine passes the rulebook's
+        # values, which is what makes `flood.gdacs.enrich_workers` mean
+        # something — it was validated and read by nothing until Sept 2026,
+        # so lowering it did nothing at all). Then the env, then the default.
+        if workers is None:
+            workers = int(
+                os.getenv("GDACS_ENRICH_WORKERS", "") or _DEFAULT_ENRICH_WORKERS
+            )
+        workers = max(1, int(workers))
+        if min_interval is not None:
+            _ENRICH_LIMITER = _RateLimiter(float(min_interval))
+        budget = _enrich_max_seconds() if max_seconds is None else float(max_seconds)
+        deadline = (time.monotonic() + budget) if budget > 0 else None
+        unasked = 0
         # The enrichment delay has its OWN knob now (GDACS_ENRICH_DELAY), so
         # an operator can slow the per-event fetches without touching
         # discovery. Unset, the caller's value stands.
@@ -1121,18 +1310,30 @@ class GdacsConnector:
         if workers == 1 or total <= 1:
             enriched: list[dict[str, Any]] = []
             for i, ev in enumerate(events):
+                if deadline is not None and time.monotonic() >= deadline:
+                    # Stop asking, keep the events. A memo hit costs no
+                    # request, so this only ever cuts short the genuinely
+                    # unknown ones — which the next run asks for.
+                    unasked = total - i
+                    enriched.extend(events[i:])
+                    break
                 enriched.append(self._enrich_one_event(session, ev, name_to_iso3))
                 if (i + 1) % 50 == 0:
                     LOG.info("[gdacs] enriched %d/%d events", i + 1, total)
                 if delay > 0:
                     time.sleep(delay)
-            self._log_enrichment_outcome(enriched)
+            self._log_enrichment_outcome(enriched, unasked=unasked)
             return enriched
 
         LOG.info("[gdacs] enriching %d events with %d workers", total, workers)
         thread_local = threading.local()
 
+        overrun = threading.Event()
+
         def _worker(ev: dict[str, Any]) -> dict[str, Any]:
+            if deadline is not None and time.monotonic() >= deadline:
+                overrun.set()
+                return ev
             worker_session = getattr(thread_local, "session", None)
             if worker_session is None:
                 worker_session = _build_session()
@@ -1150,11 +1351,18 @@ class GdacsConnector:
                 if (done + 1) % 50 == 0:
                     LOG.info("[gdacs] enriched %d/%d events", done + 1, total)
 
-        self._log_enrichment_outcome(enriched)
+        if overrun.is_set():
+            unasked = sum(
+                1 for e in enriched
+                if not e.get("population_enriched") and not e.get("population_refused")
+            )
+        self._log_enrichment_outcome(enriched, unasked=unasked)
         return enriched
 
     @staticmethod
-    def _log_enrichment_outcome(events: list[dict[str, Any]]) -> None:
+    def _log_enrichment_outcome(
+        events: list[dict[str, Any]], *, unasked: int = 0
+    ) -> None:
         """Say how many events GDACS actually described.
 
         A refusal rate is the only way to tell "no exposure figure exists"
@@ -1165,6 +1373,14 @@ class GdacsConnector:
 
         refused = [e for e in events if e.get("population_refused")]
         enriched = sum(1 for e in events if e.get("population_enriched"))
+        if unasked:
+            LOG.warning(
+                "[gdacs] the enrichment pass ran out of time with %d event(s) "
+                "unasked — they keep whatever the cache holds and the next "
+                "run asks for them; raise GDACS_ENRICH_MAX_SECONDS or lower "
+                "GDACS_ENRICH_MIN_INTERVAL_SEC if this persists",
+                unasked,
+            )
         if refused:
             statuses = sorted({int(e["population_refused"]) for e in refused})
             LOG.warning(

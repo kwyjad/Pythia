@@ -68,7 +68,28 @@ flood:
     # address. What the rulebook owns is how the machine USES that
     # connector — window, pacing, and the zero-safety coverage gate.
     request_delay_sec: 1.0
-    enrich_workers: 6
+    # One worker, paced by enrich_min_interval_sec. Six with no delay drew
+    # the refusals; two with a quarter of a second did not fix them, because
+    # volume was never the whole story — of 291 distinct events in run
+    # 34124705852, 153 were served on the first request and 138 were refused
+    # on all four attempts. This value was validated and read by nothing
+    # until Sept 2026, so lowering it did nothing at all.
+    enrich_workers: 1
+    # A floor on the interval between ANY two per-event requests from one
+    # process, held whatever the worker count is.
+    enrich_min_interval_sec: 2.0
+    # How recently an event must have ENDED for its exposure to be worth
+    # asking about again. GDACS revises a figure while an event is live and
+    # leaves it alone once it is over, so an event that finished last year
+    # is answered from the cache and costs no request. The backcast walks
+    # 2000..2026, which is where nearly every request went.
+    exposure_refresh_days: 21
+    # A wall-clock ceiling on one month's enrichment pass. A pace polite
+    # enough to keep is slow enough to outrun a step budget, and the answer
+    # to that is to stop asking and say so, never to speed up: the events
+    # not reached keep whatever the cache holds and the next run asks for
+    # them. Well inside the 90-minute flood and cyclone steps.
+    enrich_max_seconds: 900
     # How many months of GDACS events to pull around the target month.
     # Events are discovered over [month_start - lookback, month_end +
     # lookahead] so a long-running flood that began earlier still lands
