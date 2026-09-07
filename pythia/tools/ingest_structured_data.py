@@ -323,11 +323,11 @@ def _pick_country_crisis(results: list[dict]) -> dict:
             return r
 
     def _score(r: dict) -> float:
-        return _safe_float(
-            r.get("severity_index_score")
-            or r.get("severity_score")
-            or r.get("score")
-        ) or 0.0
+        # Same key list as everywhere else. Reading three snake_case names
+        # the endpoint does not use scored every crisis 0.0, so "the most
+        # severe crisis for this country" was whichever the API happened to
+        # list last.
+        return _safe_float(_first_present(r, _SEVERITY_SCORE_KEYS)) or 0.0
 
     return max(results, key=_score)
 
@@ -338,6 +338,13 @@ def _pick_country_crisis(results: list[dict]) -> dict:
 #: 34099296877 fetched five months of records successfully and produced a
 #: trend for zero countries, and a bare "0 countries" says nothing about why.
 _SEVERITY_SCORE_KEYS = (
+    # What the endpoint ACTUALLY returns, established by the diagnostic in
+    # run 34103799256: display labels with spaces and capitals, not
+    # snake_case fields. Every snake_case name below had been read on faith
+    # since this connector was written and matched nothing, so the severity
+    # score, its category and all three dimension scores have been NULL for
+    # every row this path ever wrote.
+    "INFORM Severity Index",
     "severity_index_score",
     "severity_score",
     "score",
@@ -347,6 +354,23 @@ _SEVERITY_SCORE_KEYS = (
     "figure",
     "value",
 )
+
+#: The severity CATEGORY, same endpoint, same display-label shape.
+_SEVERITY_CATEGORY_KEYS = (
+    "INFORM Severity category",
+    "severity_index_category",
+    "severity_category",
+    "category",
+)
+
+#: The three dimension scores, in the order each is looked for.
+_IMPACT_SCORE_KEYS = ("Impact of the crisis", "impact_score", "impact_of_the_crisis")
+_CONDITIONS_SCORE_KEYS = (
+    "Conditions of affected people",
+    "conditions_score",
+    "conditions_of_people_affected",
+)
+_COMPLEXITY_SCORE_KEYS = ("Complexity", "complexity_score", "complexity")
 
 
 #: How many months of INFORM severity a trend covers, and how far back the
@@ -530,27 +554,16 @@ def _bulk_fetch_inform_severity(
     for iso3, records in by_country.items():
         snapshot = _pick_country_crisis(records)
 
-        severity_score = _safe_float(
-            snapshot.get("severity_index_score")
-            or snapshot.get("severity_score")
-            or snapshot.get("score")
-        )
+        severity_score = _safe_float(_first_present(snapshot, _SEVERITY_SCORE_KEYS))
         severity_category = (
-            snapshot.get("severity_index_category")
-            or snapshot.get("severity_category")
-            or snapshot.get("category")
-            or ""
+            _first_present(snapshot, _SEVERITY_CATEGORY_KEYS) or ""
         )
-        impact_score = _safe_float(
-            snapshot.get("impact_score")
-            or snapshot.get("impact_of_the_crisis")
-        )
+        impact_score = _safe_float(_first_present(snapshot, _IMPACT_SCORE_KEYS))
         conditions_score = _safe_float(
-            snapshot.get("conditions_score")
-            or snapshot.get("conditions_of_people_affected")
+            _first_present(snapshot, _CONDITIONS_SCORE_KEYS)
         )
         complexity_score = _safe_float(
-            snapshot.get("complexity_score") or snapshot.get("complexity")
+            _first_present(snapshot, _COMPLEXITY_SCORE_KEYS)
         )
 
         # Trend: newer beats longer, so a two-point series from this quarter

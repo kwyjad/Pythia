@@ -816,3 +816,86 @@ class TestSnapshotFallbackNamesWhatItSaw:
         monkeypatch.setattr(ingest, "_fetch_paginated_global", _global)
         out = ingest._bulk_fetch_inform_severity({"ETH"})
         assert any(e["score"] == 4.6 for e in out["ETH"]["trend_6m"])
+
+
+# ---------------------------------------------------------------------------
+# 7d — the real INFORM key names, established by the diagnostic
+# ---------------------------------------------------------------------------
+
+
+class TestInformSeverityRealKeyNames:
+    """Run 34103799256's diagnostic named them: the endpoint returns DISPLAY
+    labels — "INFORM Severity Index", "Impact of the crisis" — not snake_case
+    fields. Every snake_case name the connector read had matched nothing
+    since it was written, so the severity score, its category and all three
+    dimension scores were NULL for every row this path wrote.
+    """
+
+    #: Exactly what the records carried, from the run's own warning.
+    RECORD = {
+        "iso3": "ETH",
+        "country_level": True,
+        "crisis_id": "c1",
+        "crisis_name": "Ethiopia",
+        "INFORM Severity Index": 4.6,
+        "INFORM Severity category": "High",
+        "Impact of the crisis": 4.2,
+        "Conditions of affected people": 4.8,
+        "Complexity": 3.9,
+        "People in need": 21000000,
+    }
+
+    def test_the_score_is_read(self):
+        from pythia.tools.ingest_structured_data import (
+            _SEVERITY_SCORE_KEYS, _first_present, _safe_float,
+        )
+
+        assert _safe_float(_first_present(self.RECORD, _SEVERITY_SCORE_KEYS)) == 4.6
+
+    def test_the_category_and_dimensions_are_read(self):
+        from pythia.tools.ingest_structured_data import (
+            _COMPLEXITY_SCORE_KEYS,
+            _CONDITIONS_SCORE_KEYS,
+            _IMPACT_SCORE_KEYS,
+            _SEVERITY_CATEGORY_KEYS,
+            _first_present,
+        )
+
+        assert _first_present(self.RECORD, _SEVERITY_CATEGORY_KEYS) == "High"
+        assert _first_present(self.RECORD, _IMPACT_SCORE_KEYS) == 4.2
+        assert _first_present(self.RECORD, _CONDITIONS_SCORE_KEYS) == 4.8
+        assert _first_present(self.RECORD, _COMPLEXITY_SCORE_KEYS) == 3.9
+
+    def test_the_worst_crisis_wins_not_the_last_one(self):
+        """_pick_country_crisis scored every crisis 0.0 on the old keys, so
+        the pick was whichever the API listed last."""
+
+        from pythia.tools.ingest_structured_data import _pick_country_crisis
+
+        worst = dict(self.RECORD, crisis_id="worst")
+        worst["INFORM Severity Index"] = 4.9
+        mild = dict(self.RECORD, crisis_id="mild")
+        mild["INFORM Severity Index"] = 2.0
+        mild["country_level"] = False
+        picked = _pick_country_crisis([worst, mild])
+        assert picked["crisis_id"] == "worst"
+
+    def test_the_snapshot_trend_now_builds(self, monkeypatch):
+        from pythia.tools import ingest_structured_data as ingest
+
+        monkeypatch.setattr(ingest, "_get_acaps_token", lambda: "token")
+
+        def _global(endpoint, max_pages=10, token=None):
+            if "country-log" in endpoint:
+                return [{"iso3": "ETH", "date": "2024-01-29", "value": 4.1}]
+            if any(k in endpoint for k in ("impact-of-crisis", "conditions", "complexity")):
+                return []
+            return [dict(self.RECORD)]
+
+        monkeypatch.setattr(ingest, "_fetch_paginated_global", _global)
+        out = ingest._bulk_fetch_inform_severity({"ETH"})
+
+        assert out["ETH"]["severity_score"] == 4.6
+        assert out["ETH"]["severity_category"] == "High"
+        trend = out["ETH"]["trend_6m"]
+        assert trend and max(e["date"] for e in trend) > "2024-01-29"
