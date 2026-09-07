@@ -149,24 +149,78 @@ def _iso_numeric(iso3: str) -> Optional[str]:
 # ``ev.get("iso3")`` read attributes nothing and every event is discarded.
 # Mirror the robust extraction the fatalities connector uses
 # (resolver/ingestion/acled_client.py).
-_ISO3_EXTRA_KEYS = ("iso3", "country_iso3", "#country+code")
+_ISO3_EXTRA_KEYS = (
+    "iso3",
+    "country_iso3",
+    "countryiso3",
+    "iso_3",
+    "#country+code",
+    "#country+code+iso3",
+)
+
+#: The NUMERIC country code. The request already sends it as the server-side
+#: filter (`iso=`), so the API returns it, and it resolves to an ISO3
+#: unambiguously through pycountry. It is the one identifier that survives a
+#: country whose NAME does not match our alias table — the fault that cost
+#: GIN, COG, BIH, KOR and TLS every one of their events until the ACLED name
+#: forms were added by hand.
+_ISO_NUMERIC_KEYS = ("iso", "country_iso", "#country+code+num")
+
+
+def _iso3_from_numeric(raw: Any) -> str:
+    """ISO3 for a numeric country code, or "" when it is not one."""
+
+    text = str(raw or "").strip()
+    if not text.isdigit():
+        return ""
+    try:
+        import pycountry
+
+        country = pycountry.countries.get(numeric=text.zfill(3))
+    except Exception:  # noqa: BLE001 - pycountry is optional at import time
+        return ""
+    return (getattr(country, "alpha_3", "") or "").upper()
+
+
+def _lookup(ev: dict, keys: tuple[str, ...]) -> Any:
+    """First non-empty value under any of ``keys``, matched case-insensitively.
+
+    ACLED has served the same field as ``iso3``, ``ISO3`` and the HXL tag
+    ``#country+code`` at different times, and a key read that is exact-match
+    only answers "absent" for a field that is right there. That is the
+    display-label fault the INFORM severity connector carried for a year.
+    """
+
+    lowered = {str(k).strip().lower(): v for k, v in ev.items()}
+    for key in keys:
+        raw = lowered.get(key.lower())
+        if raw not in (None, "", []):
+            return raw
+    return None
 
 
 def _event_iso3(ev: dict) -> str:
     """Best-effort ISO3 for one raw ACLED event.
 
-    Tries the explicit ISO3 response keys, then falls back to resolving from
-    the ``country`` name (which the request already asks for in ``fields``).
+    Explicit ISO3 keys first, then the numeric code, then the country NAME.
+    The order is deliberate: a code is what the source stated about identity,
+    while a name has to survive our alias table to mean anything.
     Returns "" when nothing resolves.
     """
     from resolver.ingestion.utils.iso_normalize import resolve_iso3, to_iso3
 
-    for key in _ISO3_EXTRA_KEYS:
-        raw = ev.get(key)
-        if raw:
-            code = to_iso3(str(raw))
-            if code:
-                return code
+    raw = _lookup(ev, _ISO3_EXTRA_KEYS)
+    if raw:
+        code = to_iso3(str(raw))
+        if code:
+            return code
+
+    numeric = _lookup(ev, _ISO_NUMERIC_KEYS)
+    if numeric:
+        code = _iso3_from_numeric(numeric)
+        if code:
+            return code
+
     # resolve_iso3 also covers ISO3/CountryISO3 and the country-name fallback.
     resolved, _reason = resolve_iso3(ev, name_keys=("country",))
     return (resolved or "").strip().upper()
@@ -188,10 +242,17 @@ def _filter_events_to_country(events: list[dict], iso3: str) -> list[dict]:
         if _event_iso3(ev) == iso3_up
     ]
     if events and not matched:
+        # Name the keys the response actually carried. "0 of 50 resolve" is
+        # true of a changed field name, a country missing from the alias
+        # table and a filter the gateway ignored, and those are three
+        # different repairs. Reading the first event's keys is what ended
+        # the identical fault in the INFORM severity connector.
+        seen = ", ".join(sorted(str(k) for k in (events[0] or {}))[:24])
         log.warning(
             "ACLED political: 0/%d returned events resolve to iso3=%s — "
-            "storing nothing rather than misattributed events.",
-            len(events), iso3_up,
+            "storing nothing rather than misattributed events. First event's "
+            "keys: %s",
+            len(events), iso3_up, seen or "(none)",
         )
         with _ATTRIBUTION_DROPS_LOCK:
             _ATTRIBUTION_DROPS[iso3_up] = len(events)

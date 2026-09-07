@@ -1479,9 +1479,15 @@ class GdacsConnector:
                 "; ".join(self.events_resolved_by_geometry[:20]),
             )
         if self.events_without_country:
-            LOG.warning(
-                "[gdacs] %d event(s) resolved to no country even by position and "
-                "produced no row: %s",
+            # INFO, not WARNING. A tropical cyclone over open ocean names no
+            # country and sits too far from any coast to be placed, which is
+            # the feed describing a storm at sea rather than a fault. It is
+            # counted and named so a rise is still visible, but a warning
+            # every run for the ordinary case is how a reader learns to skip
+            # the warnings that matter.
+            LOG.info(
+                "[gdacs] %d event(s) were over open ocean or otherwise too far "
+                "from land to place, and produced no row: %s",
                 len(self.events_without_country),
                 ",".join(self.events_without_country[:30]),
             )

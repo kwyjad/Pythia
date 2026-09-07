@@ -957,8 +957,9 @@ def store_enso_state(forecast: ENSOForecast) -> bool:
                      oni, enso_strength, oni_basis, observation_date,
                      source_rank_used, nino34_source, status, age_days,
                      scraped_phase, index_evidence_json, warnings_json,
-                     nino34_weekly, row_kind)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     nino34_weekly, row_kind, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        CURRENT_TIMESTAMP)
                 """,
                 [
                     fetch_date_str,
@@ -1291,7 +1292,8 @@ def _fetch_and_store_this_run(*, get=None, today=None, fetch_page: bool = True) 
 
 _ROW_KIND_MIGRATION_SQL = """
     UPDATE enso_state
-       SET row_kind = CASE
+       SET updated_at = CURRENT_TIMESTAMP,
+           row_kind = CASE
              WHEN oni_basis = 'oni_table'
               AND nino34_source = 'cpc_oni_ascii'
               AND observation_date IS NOT NULL
@@ -1336,7 +1338,8 @@ def classify_row_kinds(con=None) -> dict:
             "WHERE row_kind = 'historical' AND COALESCE(status, '') <> 'historical'"
         ).fetchone()[0]
         con.execute(
-            "UPDATE enso_state SET status = ? WHERE row_kind = 'historical'",
+            "UPDATE enso_state SET status = ?, updated_at = CURRENT_TIMESTAMP "
+            "WHERE row_kind = 'historical' AND COALESCE(status, '') <> 'historical'",
             [STATUS_HISTORICAL],
         )
         counts = dict(con.execute(
@@ -1472,7 +1475,8 @@ def repair_unbacked_rows(con=None, *, today=None) -> dict:
                        observation_date = ?, oni_basis = ?,
                        nino34_source = 'cpc_oni_ascii', source_rank_used = 3,
                        age_days = ?, status = ?, scraped_phase = ?,
-                       warnings_json = ?, row_kind = ?, raw_context = ?
+                       warnings_json = ?, row_kind = ?, raw_context = ?,
+                       updated_at = CURRENT_TIMESTAMP
                  WHERE fetch_date = ?
                 """,
                 [
@@ -1550,8 +1554,9 @@ def backfill_oni_history(*, get=None) -> int:
                         (fetch_date, enso_phase, nino34_anomaly, oni,
                          enso_strength, oni_basis, observation_date,
                          source_rank_used, nino34_source, status, age_days,
-                         raw_context, row_kind, nino34_weekly)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                         raw_context, row_kind, nino34_weekly, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,
+                            CURRENT_TIMESTAMP)
                     """,
                     [
                         stamp,

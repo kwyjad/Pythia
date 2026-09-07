@@ -117,12 +117,32 @@ def _auto_scope(ym: str, rulebook) -> str:
     return "ALL"
 
 
+#: Territories with no resident population, excluded from the assessed
+#: universe. Every one of them is absent from ``resolver/data/population.csv``
+#: deliberately (inventing a denominator is worse than the hole), so a cell
+#: for them has no population cap and, with GDACS silent, no upper bound at
+#: all. They can never carry humanitarian impact, and counting them as
+#: assessed puts noise in the denominator of every occurrence base rate and
+#: every acceptance rate. ANT is the dissolved Netherlands Antilles.
+UNPOPULATED_TERRITORIES: frozenset[str] = frozenset(
+    {"ANT", "ATA", "ATF", "BVT", "HMD", "SGS", "UMI"}
+)
+
+
 def _load_universe() -> list[str]:
-    """ISO3 universe from the resolver country registry."""
+    """ISO3 universe from the resolver country registry, minus the empty ones."""
     import pandas as pd
 
     df = pd.read_csv(COUNTRIES_CSV_PATH, usecols=["iso3"], encoding="utf-8-sig")
-    return sorted({str(c).strip().upper() for c in df["iso3"] if str(c).strip()})
+    codes = {str(c).strip().upper() for c in df["iso3"] if str(c).strip()}
+    dropped = sorted(codes & UNPOPULATED_TERRITORIES)
+    if dropped:
+        LOG.info(
+            "[cli] %d territory/territories with no resident population are "
+            "not assessed: %s",
+            len(dropped), ",".join(dropped),
+        )
+    return sorted(codes - UNPOPULATED_TERRITORIES)
 
 
 @dataclass

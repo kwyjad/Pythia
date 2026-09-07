@@ -145,6 +145,13 @@ _FRESH_CAPTURE_BACKOFF_SEC = 20
 # cost is ~100s of backoff. The snapshot is ~1.6 MB; 45s is ample.
 _FRESH_CAPTURE_TIMEOUT_SEC = 45
 
+#: Ceiling on a CDX index query. It was 30s, which is tight against an
+#: archive that answers slowly under load: a CDX timeout costs the whole
+#: edition the query was for, and the walk then reports that no capture
+#: exists when the truth is that we never waited long enough to hear.
+#: 60s still sits well inside the walk's own deadline.
+_CDX_TIMEOUT_SEC = 60
+
 # --- Edition backfill budget --------------------------------------------
 #
 # CrisisWatch publishes edition M in the first days of month M+1, so the
@@ -1481,7 +1488,7 @@ def backfill_editions(
             result["stopped_early"] = stop
             break
         candidates = _candidate_snapshots_for_edition(
-            year, month, timeout_sec=min(timeout_sec, 30),
+            year, month, timeout_sec=min(timeout_sec, _CDX_TIMEOUT_SEC),
         )
         if not candidates:
             log.warning(
@@ -1520,7 +1527,7 @@ def backfill_editions(
     # capture pass 1 already downloaded.
     if outstanding and not result["stopped_early"]:
         snapshots = _list_wayback_snapshots(
-            lookback_days=lookback_days, timeout_sec=min(timeout_sec, 30),
+            lookback_days=lookback_days, timeout_sec=min(timeout_sec, _CDX_TIMEOUT_SEC),
         )
         if not snapshots:
             log.error(

@@ -2292,16 +2292,20 @@ class BundleBuilder:
         )
 
     #: Write-stamp columns, in order of preference. ``updated_at`` moves on
-    #: every MERGE (facts tables since Sept 2026); ``fetched_at`` is set by
-    #: the Pythia stores on every INSERT OR REPLACE; ``created_at`` only on a
-    #: genuine insert; ``fetch_date`` is enso_state's.
+    #: every MERGE (facts tables since Sept 2026) and is what enso_state's
+    #: writers set; ``fetched_at`` is set by the Pythia stores on every
+    #: INSERT OR REPLACE; ``created_at`` only on a genuine insert, so it
+    #: cannot answer for a row an upsert matched. ``fetch_date`` is the last
+    #: resort and is a DATE, which ``_touched_since`` compares as one.
     _WRITE_STAMPS = ("updated_at", "fetched_at", "created_at", "fetch_date")
 
-    def _write_stamp_column(self, table: str) -> str | None:
-        columns = {c for c, _t in self.columns_of(table)}
+    def _write_stamp_column(self, table: str) -> tuple[str, str] | None:
+        """(column, declared type) of the best write stamp this table has."""
+
+        types = {c: t for c, t in self.columns_of(table)}
         for candidate in self._WRITE_STAMPS:
-            if candidate in columns:
-                return candidate
+            if candidate in types:
+                return candidate, types[candidate]
         return None
 
     def _run_started_at(self) -> str | None:
@@ -2314,13 +2318,20 @@ class BundleBuilder:
         None when the table has no write stamp to ask.
         """
 
-        stamp = self._write_stamp_column(table)
-        if stamp is None:
+        found = self._write_stamp_column(table)
+        if found is None:
             return None
+        stamp, stamp_type = found
         clause = f" AND ({where})" if where else ""
+        # A DATE-typed stamp casts to midnight, so a same-day run start is
+        # always LATER than it and the table reads as untouched however many
+        # rows it just wrote. Compare such a column at its own granularity.
+        if "DATE" in stamp_type.upper() and "TIME" not in stamp_type.upper():
+            predicate = f'TRY_CAST("{stamp}" AS DATE) >= TRY_CAST(? AS DATE)'
+        else:
+            predicate = f'TRY_CAST("{stamp}" AS TIMESTAMP) >= TRY_CAST(? AS TIMESTAMP)'
         result = self.query(
-            f'SELECT COUNT(*) FROM "{table}" WHERE TRY_CAST("{stamp}" AS TIMESTAMP) '
-            f">= TRY_CAST(? AS TIMESTAMP){clause}",
+            f'SELECT COUNT(*) FROM "{table}" WHERE {predicate}{clause}',
             [started_at],
         )
         if not result or not result[1]:
