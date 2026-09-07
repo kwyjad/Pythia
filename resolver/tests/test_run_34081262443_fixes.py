@@ -759,3 +759,60 @@ class TestAcapsBulkTrendIsTheProductionPath:
 
         scores = {e["score"] for e in out["ETH"]["trend_6m"]}
         assert 9.9 not in scores, "the snapshot fallback overrode a healthy log"
+
+
+# ---------------------------------------------------------------------------
+# 7c — an empty snapshot fallback must name the keys it looked for
+# ---------------------------------------------------------------------------
+
+
+class TestSnapshotFallbackNamesWhatItSaw:
+    """Run 34099296877 fetched five months of snapshots successfully and
+    produced a trend for ZERO countries. "0 countries" is not a diagnosis: a
+    reader cannot tell an empty response from a renamed field. The failure
+    now names the keys it looked for and the keys the records carried.
+    """
+
+    def test_a_record_with_an_unexpected_score_key_is_reported(
+        self, monkeypatch, caplog
+    ):
+        from pythia.tools import ingest_structured_data as ingest
+
+        monkeypatch.setattr(ingest, "_get_acaps_token", lambda: "token")
+
+        def _global(endpoint, max_pages=10, token=None):
+            if "country-log" in endpoint:
+                return [
+                    {"iso3": "ETH", "date": "2024-01-29", "value": 4.1},
+                    {"iso3": "ETH", "date": "2024-01-15", "value": 4.0},
+                ]
+            if any(k in endpoint for k in ("impact-of-crisis", "conditions", "complexity")):
+                return []
+            # A snapshot whose score lives under a name nobody looked for.
+            return [{"iso3": "ETH", "country_level": True, "gravity_rating": 4.6}]
+
+        monkeypatch.setattr(ingest, "_fetch_paginated_global", _global)
+        with caplog.at_level("WARNING"):
+            ingest._bulk_fetch_inform_severity({"ETH"})
+
+        text = caplog.text
+        assert "produced NO trend" in text
+        assert "gravity_rating" in text, "the keys the records carried are not named"
+
+    def test_a_known_alternate_key_is_simply_read(self, monkeypatch):
+        """The lookup is a named list, so widening it is a one-line change."""
+
+        from pythia.tools import ingest_structured_data as ingest
+
+        monkeypatch.setattr(ingest, "_get_acaps_token", lambda: "token")
+
+        def _global(endpoint, max_pages=10, token=None):
+            if "country-log" in endpoint:
+                return [{"iso3": "ETH", "date": "2024-01-29", "value": 4.1}]
+            if any(k in endpoint for k in ("impact-of-crisis", "conditions", "complexity")):
+                return []
+            return [{"iso3": "ETH", "country_level": True, "severity": 4.6}]
+
+        monkeypatch.setattr(ingest, "_fetch_paginated_global", _global)
+        out = ingest._bulk_fetch_inform_severity({"ETH"})
+        assert any(e["score"] == 4.6 for e in out["ETH"]["trend_6m"])
