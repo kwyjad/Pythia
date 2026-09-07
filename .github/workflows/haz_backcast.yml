@@ -69,6 +69,20 @@ concurrency:
         default: "newest"
         type: choice
         options: ["newest", "oldest"]
+      backcast_extraction_share:
+        description: >-
+          Raise the backcast's share of this calendar month's extraction
+          allowance, for THIS DISPATCH ONLY (leave blank for the rulebook
+          default). Use it to clear a named backlog: the cyclone months the
+          share cut short are owed cells, not lost ones, and the ledger
+          resumes on exactly those. The rulebook default is deliberately
+          untouched — a share raised in YAML is raised every night after,
+          and the backcast spends whatever it is given. The value is clamped
+          to the monthly total less the live pass's reserve, which the
+          backcast may never take.
+        required: false
+        default: ""
+        type: string
       no_resume_hazards:
         description: >-
           Hazards to re-walk from the start of their window, ignoring the
@@ -233,6 +247,7 @@ jobs:
           TIME_BUDGET_MIN: ${{ inputs.time_budget_min || '240' }}
           NO_RESUME_HAZARDS: ${{ inputs.no_resume_hazards || '' }}
           WALK_ORDER: ${{ inputs.order || 'newest' }}
+          PYTHIA_HAZ_BACKCAST_EXTRACTION_SHARE: ${{ inputs.backcast_extraction_share || '' }}
         run: |
           set -uo pipefail
           # Re-assigning from the env (with the same default the env mapping
@@ -277,10 +292,10 @@ jobs:
               sys.exit(0)
           if s.get("extraction_budget_bound"):
               line = (
-                  f"backcast {hz}: extraction budget BOUND at its {s.get('extraction_binding_limit')} — "
+                  f"backcast {hz}: extraction budget BOUND at its {s.get('extraction_binding_limit')} - "
                   f"{s.get('months_budget_deferred')} month(s) / {s.get('cells_deferred_for_budget')} "
-                  f"cell(s) deferred; policy={s.get('budget_policy')} (no cap raised; the cells "
-                  "resume once the calendar month's allowance resets)"
+                  f"cell(s) deferred; policy={s.get('budget_policy')} (the cells resume once the "
+                  f"calendar month's allowance resets). {s.get('deferred_cost_note') or ''}"
               )
               print(f"::notice::{line}")
               with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a") as fh:

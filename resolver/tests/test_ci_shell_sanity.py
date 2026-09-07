@@ -190,3 +190,24 @@ def test_the_gdacs_ingest_step_bounds_its_own_enrichment_pass():
         f"the non-reset budget must sit inside the 20-minute step, got "
         f"{min(budgets)}s"
     )
+
+
+def test_the_backcast_share_override_reaches_the_run_step():
+    """A one-dispatch lever nobody can pull is not a lever.
+
+    The input exists so a named backlog can be cleared without raising the
+    rulebook's standing share, which governs every night after. It reaches
+    the machine only as the env var ``load_budget`` reads, so both halves
+    are asserted here — in the file ci-lint runs on every PR, because
+    resolver-ci-fast has no ``.github/workflows/**`` trigger and a
+    workflow-only edit would otherwise run nothing.
+    """
+
+    text = (WF_DIR / "haz_backcast.yml").read_text()
+    assert "backcast_extraction_share:" in text, (
+        "haz_backcast.yml needs the dispatch input"
+    )
+    assert re.search(
+        r"PYTHIA_HAZ_BACKCAST_EXTRACTION_SHARE:\s*\$\{\{\s*inputs\.backcast_extraction_share",
+        text,
+    ), "the input must reach the run step as the env var load_budget reads"
