@@ -97,10 +97,27 @@ _CREDENTIAL_WORDS = (
 RequestFn = Callable[..., Any]
 
 
+try:  # the recorder is optional; a local run without it must still probe
+    from resolver.diagnostics.http_recorder import probing as _probing
+except Exception:  # pragma: no cover - import guard
+    import contextlib
+
+    @contextlib.contextmanager
+    def _probing(label: str):  # type: ignore[misc]
+        yield
+
+
+
 def _default_request(method: str, url: str, **kwargs: Any) -> Any:
     import requests
 
-    return requests.request(method, url, timeout=TIMEOUT, **kwargs)
+    # Every call this script makes is a PROBE: a GET against a POST-only
+    # token route, a grant sent in a deliberately wrong request shape. The
+    # answers are the diagnostic working. Labelling them keeps the bundle's
+    # ACLED check from reading a probe's 405 web page as a connector that
+    # was handed the website.
+    with _probing(f"diagnose_acled_auth:{method.upper()}"):
+        return requests.request(method, url, timeout=TIMEOUT, **kwargs)
 
 
 def _summarise(resp: Any) -> Dict[str, Any]:

@@ -2613,6 +2613,14 @@ class BundleBuilder:
         to a request that asked for JSON, so a 401, a WAF interstitial and
         a session expiry are indistinguishable by status code. A run must
         not report ok=N fail=0 while receiving web pages.
+
+        A DIAGNOSTIC's calls are excluded. ``diagnose_acled_auth`` sends a
+        GET to a POST-only token route to see what the route says, and
+        repeats a grant in a deliberately wrong request shape to isolate
+        content negotiation; a 405 web page is that probe answering, not a
+        connector being refused. Run 34124705852 failed this check on
+        exactly that, with every production grant returning 200 JSON — a
+        check that fails on a healthy run teaches the reader to skip it.
         """
 
         name = "acled_html_responses_are_recorded_as_connector_failures"
@@ -2620,19 +2628,29 @@ class BundleBuilder:
         if stream is None:
             return self._check(name, "SKIP", "", "", "no HTTP stream recorded")
         html_calls: list[str] = []
+        probe_calls: list[str] = []
         for record in run_log.read_stream(stream):
             url = str(record.get("url") or "")
             if "acleddata.com" not in url:
                 continue
             content_type = str(record.get("content_type") or "").lower()
-            if "html" in content_type:
-                html_calls.append(
-                    f"{record.get('connector')} {record.get('status')} {url[:80]}"
-                )
+            if "html" not in content_type:
+                continue
+            described = f"{record.get('connector')} {record.get('status')} {url[:80]}"
+            probe = record.get("probe")
+            if probe:
+                probe_calls.append(f"{probe} {record.get('status')}")
+            else:
+                html_calls.append(described)
+        probe_note = (
+            f" {len(probe_calls)} diagnostic probe(s) excluded: "
+            + "; ".join(sorted(set(probe_calls))[:5])
+            if probe_calls else ""
+        )
         if not html_calls:
             return self._check(
                 name, "PASS", "0 HTML responses from acleddata.com", "0",
-                "No ACLED call was answered with a web page.",
+                "No ACLED call was answered with a web page." + probe_note,
             )
         report = self.diagnostics_dir / "ingestion" / "connectors_report.jsonl"
         ok_connectors: list[str] = []
@@ -2649,7 +2667,7 @@ class BundleBuilder:
             "every ACLED connector that received a web page reports a failure",
             "HTML from acleddata.com is the shape of an unauthenticated call, a WAF "
             "challenge and a session expiry alike; it is never zero records. "
-            "Calls: " + "; ".join(html_calls[:10]),
+            "Calls: " + "; ".join(html_calls[:10]) + probe_note,
         )
 
     def _check_no_past_target_month_served(self) -> None:

@@ -36,10 +36,13 @@ written, with no edit here and none there.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import logging
 import os
+import threading
 import time
+from collections.abc import Iterator
 from typing import Any
 
 from resolver.diagnostics import run_log
@@ -73,6 +76,38 @@ _SKIP_MODULES = (
     "resolver.diagnostics.http_recorder",
     "resolver.diagnostics.run_log",
 )
+
+
+#: Set while a deliberate PROBE is in flight (see :func:`probing`).
+_PROBE = threading.local()
+
+
+@contextlib.contextmanager
+def probing(label: str) -> Iterator[None]:
+    """Mark every request made inside this block as a deliberate probe.
+
+    A diagnostic asks questions a connector never would: it sends a GET to
+    a POST-only token route to see what the route says, and repeats a grant
+    in a deliberately wrong request shape to isolate content negotiation.
+    Those answers are the diagnostic working, not the transport failing —
+    but on the wire they are indistinguishable from a connector being
+    refused, and the bundle's ACLED check read a probe's 405 web page as a
+    connector that had been handed the website.
+
+    The label rides on the record so a reader can see WHY a probe call is
+    there, and so the checks can leave it out of their verdicts.
+    """
+
+    previous = getattr(_PROBE, "label", None)
+    _PROBE.label = label
+    try:
+        yield
+    finally:
+        _PROBE.label = previous
+
+
+def _probe_label() -> str | None:
+    return getattr(_PROBE, "label", None)
 
 
 def _caller() -> str:
@@ -258,6 +293,9 @@ def _record(
         run_log.STREAM_HTTP,
         {
             "connector": connector,
+            # Non-null when a diagnostic deliberately made this call. A probe
+            # is not connector traffic and must not be read as one.
+            "probe": _probe_label(),
             "method": str(method).upper(),
             "url": safe_url,
             "request_body": _body_shape(body),
