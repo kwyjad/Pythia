@@ -20,6 +20,7 @@ import pandas as pd
 
 from resolver.db import duckdb_io
 from resolver.db.schema_keys import ACLED_MONTHLY_FATALITIES_KEY_COLUMNS
+from resolver.ingestion import acled_auth
 from resolver.ingestion.acled_client import ACLEDClient
 from resolver.ingestion.utils.iso_normalize import to_iso3
 from scripts.ci import append_error_to_summary
@@ -342,7 +343,23 @@ def run(argv: Sequence[str] | None = None) -> int:
             LOGGER.info("acled_to_duckdb.events_source | api | %s", events_reason)
             print(f"[acled_to_duckdb] staged events unavailable ({events_reason}); falling back to API fetch")
 
-    client = ACLEDClient()
+    # Constructing the client fetches an OAuth token, so an unreachable
+    # ACLED dies HERE — outside the try below, which is why the 2026-09-06
+    # run ended on a bare traceback rather than a described failure. The
+    # cause is named and the exit code is the connector's own contract:
+    # non-zero because the source could not be READ.
+    try:
+        client = ACLEDClient()
+    except acled_auth.AcledResponseError as exc:
+        print(
+            "::error title=ACLED could not be read::"
+            f"ACLED monthly fatalities could not authenticate: {exc}. "
+            "No ACLED rows will reach acled_monthly_fatalities this run; this "
+            "is not an empty month."
+        )
+        LOGGER.error("acled_to_duckdb.auth_failed | %s", exc)
+        return 1
+
     try:
         # Pass events_frame only when staged data was actually loaded, so
         # test stubs (and older client implementations) without the kwarg

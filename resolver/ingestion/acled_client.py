@@ -1161,6 +1161,17 @@ def collect_rows() -> List[Dict[str, Any]]:
 
     try:
         records, source_url, diagnostics_meta = fetch_events(config)
+    except acled_auth.AcledResponseError:
+        # An unreadable source is never an empty window. AcledResponseError
+        # IS a RuntimeError, so the handler below used to collapse a WAF
+        # block, a dead credential and a quiet month into one empty list —
+        # and `main` then took its "no data collected" branch, left
+        # _UNREAD_REASON unset, and `cli_main` exited 0. On 2026-09-06 that
+        # put "wrote acled.csv rows=0 (no data collected)" and a green
+        # Phase 1 against ACLED answering
+        # "Access denied by Imunify360 bot-protection" to every request.
+        # Re-raise: `main` records the reason and the shim exits non-zero.
+        raise
     except RuntimeError as exc:
         LOG.warning("ACLED fetch_events failed: %s", exc)
         if ingestion_mode == "real":

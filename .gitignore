@@ -195,6 +195,10 @@ tools/make_zip_from_list.py
 # change goes unnoticed.
 horizon_scanner/data/crisiswatch_debug.html
 resolver/diagnostics/ingestion/acled/http_diag.json
+# The per-connector run summary _write_run_summary drops on every run.
+# Nothing tracks it; the negation above re-includes the whole ingestion
+# subtree, so without this it shows up untracked after every run.
+resolver/diagnostics/ingestion/acled_client/
 
 # Editions recovered by refresh_crisiswatch.py --backfill-editions. They are
 # stored into DuckDB by the same run; the file is the transport, not a record.

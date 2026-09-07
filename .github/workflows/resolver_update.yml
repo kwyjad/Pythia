@@ -489,6 +489,18 @@ jobs:
         # ACLED_MAX_RUNTIME_SEC=3900 returning partial rows early and the
         # observed ~35-min reset pulls.
         timeout-minutes: ${{ inputs.reset_db && 90 || 70 }}
+        # Non-fatal, with the outcome recorded and re-raised by the terminal
+        # gate at the very end of the job. ACLED being unreachable is not a
+        # reason for FEWS NET, IPC, GDACS, NMME, HDX, the PA machine, the
+        # conflict forecasts, ACAPS, ReliefWeb, GDELT, ENSO, seasonal TC and
+        # CrisisWatch to lose their ingest: on 2026-09-06 one 403 from
+        # ACLED's bot-protection took every one of them down with it and no
+        # canonical DB was uploaded at all. The run still goes red — after
+        # the upload, the pattern haz_backcast.yml already uses, and the
+        # reason `include-failed-runs-from: Resolver Update` is set on the
+        # discovery action above.
+        continue-on-error: true
+        id: phase1_connectors
         run: |
           set -euo pipefail
           echo "::group::Connectors (ACLED, IFRC)"
@@ -499,6 +511,10 @@ jobs:
 
       - name: "Phase 1: ACLED monthly fatalities → DuckDB"
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_client') }}
+        # Same reasoning as the connectors step above: recorded here, raised
+        # by the terminal gate, so the rest of the ingest still happens.
+        continue-on-error: true
+        id: phase1_acled_fatalities
         timeout-minutes: ${{ inputs.reset_db && 60 || 30 }}
         env:
           BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
@@ -1136,3 +1152,45 @@ jobs:
             diagnostics/
           retention-days: 30
           if-no-files-found: warn
+
+      # The terminal gate. Everything above has run and the canonical DB and
+      # both diagnostics artifacts are uploaded, so a red run here is a
+      # COMPLETE ingest minus whatever ACLED would have added — discoverable,
+      # because `include-failed-runs-from: Resolver Update` is set on the
+      # download action. It stays red on purpose: a tier-0 connector that
+      # could not READ its source is not an empty month, the freshness
+      # watchdog measures from the last SUCCESS, and the resolutions chain
+      # guards on `conclusion == success`. Skipped steps (a scoped
+      # `only_connector` run) never fire it — `outcome` is then `skipped`.
+      - name: "Phase 1 gate: ACLED must have been readable"
+        if: always()
+        run: |
+          set -euo pipefail
+          CONNECTORS='${{ steps.phase1_connectors.outcome }}'
+          FATALITIES='${{ steps.phase1_acled_fatalities.outcome }}'
+          echo "phase1 connectors outcome: ${CONNECTORS}"
+          echo "phase1 acled fatalities outcome: ${FATALITIES}"
+          FAILED=0
+          if [ "${CONNECTORS}" = "failure" ]; then FAILED=1; fi
+          if [ "${FATALITIES}" = "failure" ]; then FAILED=1; fi
+          if [ "${FAILED}" -eq 0 ]; then
+            echo "Phase 1 tier-0 connectors were readable."
+            exit 0
+          fi
+          {
+            echo "### Phase 1 failed: ACLED could not be read"
+            echo
+            echo "Every other phase still ran and the canonical DB was uploaded,"
+            echo "so this run is a complete ingest minus ACLED. The run is red"
+            echo "because a source we could not read is not an empty month."
+            echo
+            echo "- connectors step: \`${CONNECTORS}\`"
+            echo "- monthly fatalities step: \`${FATALITIES}\`"
+            echo
+            echo "Check \`diagnostics/ingestion/logs/acled_client.log\` for the"
+            echo "response ACLED actually sent. A 403 naming Imunify360"
+            echo "bot-protection is an IP block on the runner and no code change"
+            echo "fixes it: ACLED must whitelist the caller."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=ACLED could not be read::Phase 1 could not read ACLED (connectors=${CONNECTORS}, fatalities=${FATALITIES}). The rest of the ingest completed and the canonical DB was uploaded; this run is red because a tier-0 source was unreadable, not because the month was empty."
+          exit 1
