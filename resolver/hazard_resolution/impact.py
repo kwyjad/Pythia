@@ -474,10 +474,16 @@ def resolve_triggered_cells(
                 rulebook=rulebook,
                 national_population=national_population(con, iso3, year),
                 today=today,
+                # A rung that could not be READ is not a rung that was empty.
+                # Passed IN rather than stamped on afterwards, so the decision
+                # record can subtract it from the empty rungs: `rungs_empty`
+                # minus the unreadable ones is the set that was consulted and
+                # had nothing, which is the only set a NO_DATA rests on.
+                sources_unavailable=unavailable,
             )
-            # A rung that could not be READ is not a rung that was empty. Record
-            # the difference on the row itself so a NO_DATA can be re-litigated.
             if unavailable:
+                # Kept under its original name for readers that predate the
+                # parameter (a stored row, a test) — one value, two keys.
                 verdict.provenance.setdefault("decision", {})[
                     "sources_unavailable"
                 ] = unavailable

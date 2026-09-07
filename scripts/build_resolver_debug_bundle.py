@@ -1396,7 +1396,8 @@ class BundleBuilder:
                    t.evidence_of_absence_json IS NOT NULL AS has_absence_evidence,
                    r.status, r.value, r.rule_fired, r.flagged, r.provisional,
                    r.frozen_at IS NOT NULL AS frozen,
-                   c.n_candidates, c.sources, t.trigger_detail_json
+                   c.n_candidates, c.sources, t.trigger_detail_json,
+                   r.provenance_json
             FROM haz_triggers t
             LEFT JOIN haz_resolutions r
               ON r.iso3 = t.iso3 AND r.year = t.year
@@ -1420,6 +1421,15 @@ class BundleBuilder:
                 # the ladder stamp it when they write nothing) and whether
                 # the cell counts as assessed at all.
                 db_reason, assessed = _no_row_reason_from_detail(row[15])
+                # The stored row's own provenance. It carries the ceiling, the
+                # flags, the answering rung and the rungs this run could not
+                # read — and until now the bundle selected the columns beside
+                # it and none of this. Run 34124705852 rendered 2,089 flagged
+                # resolutions as `flagged=True` with no ceiling, no flag name
+                # and no origin, and 59,967 NO_DATA rows with a blank
+                # rungs_unavailable column while EM-DAT had rejected the key
+                # on every call of the run.
+                prov = _provenance_columns(row[16])
                 merged[key] = {
                     "iso3": row[0], "hazard": row[1], "ym": row[2],
                     "triggered": row[3], "trigger_source": row[4], "run_type": row[5],
@@ -1429,8 +1439,12 @@ class BundleBuilder:
                     "candidate_sources": row[14] or "",
                     "stage": "", "write_outcome": "",
                     "reason_code": db_reason if row[7] is None else "",
-                    "answering_rung": "", "rungs_readable": "", "rungs_unavailable": "",
+                    "answering_rung": prov["answering_rung"],
+                    "rungs_readable": "",
+                    "rungs_unavailable": prov["rungs_unavailable"],
                     "extraction": "", "detail": "", "assessed": assessed,
+                    **{k: v for k, v in prov.items()
+                       if k not in {"answering_rung", "rungs_unavailable"}},
                 }
 
         stream = self._stream_file(run_log.STREAM_CELLS)
@@ -1453,8 +1467,9 @@ class BundleBuilder:
                     "rule_fired": None, "flagged": None, "provisional": None,
                     "frozen": None, "n_candidates": 0, "candidate_sources": "",
                     "stage": "", "write_outcome": "", "reason_code": "",
-                    "answering_rung": "", "rungs_readable": "", "rungs_unavailable": "",
+                    "rungs_readable": "",
                     "extraction": "", "detail": "", "assessed": None,
+                    **dict(PROVENANCE_COLUMNS),
                 },
             )
             entry["stage"] = record.get("stage") or entry["stage"]
@@ -1463,6 +1478,29 @@ class BundleBuilder:
             entry["answering_rung"] = record.get("answering_rung") or entry["answering_rung"]
             entry["rungs_readable"] = "|".join(record.get("rungs_readable") or []) or entry["rungs_readable"]
             entry["rungs_unavailable"] = "|".join(record.get("rungs_unavailable") or []) or entry["rungs_unavailable"]
+            # The stream carries the same ceiling and flags in its detail
+            # payload. Reading them into the columns means a live run and a
+            # backcast month render alike, rather than one of them hiding
+            # its evidence inside a JSON blob nobody greps.
+            stream_detail = record.get("detail")
+            if isinstance(stream_detail, dict):
+                ceiling = stream_detail.get("ceiling")
+                ceiling = ceiling if isinstance(ceiling, dict) else {}
+                for column, value in (
+                    ("flags", "|".join(stream_detail.get("flags") or [])),
+                    ("rungs_empty", "|".join(stream_detail.get("rungs_empty") or [])),
+                    ("ceiling", ceiling.get("exposed_population")),
+                    ("ceiling_basis", stream_detail.get("ceiling_basis")
+                     or ceiling.get("basis")),
+                    ("ceiling_source", ceiling.get("source")),
+                    ("ceiling_source_ref", ceiling.get("source_ref")),
+                    ("national_population", ceiling.get("national_population")),
+                    ("ceiling_events_seen", ceiling.get("n_events")),
+                    ("ceiling_events_with_exposure",
+                     ceiling.get("n_events_with_exposure")),
+                ):
+                    if value not in (None, "", []):
+                        entry[column] = value
             if entry["status"] is None:
                 entry["status"] = record.get("status")
                 entry["value"] = record.get("value")
@@ -1534,8 +1572,19 @@ class BundleBuilder:
         header = [
             "iso3", "hazard", "ym", "stage", "triggered", "trigger_source",
             "has_absence_evidence", "status", "value", "rule_fired", "flagged",
+            # WHICH flag. `flagged` alone collapses a ceiling breach, a
+            # population-cap breach and an order-of-magnitude disagreement
+            # between rungs into one word, and they want three repairs.
+            "flags",
             "provisional", "frozen", "write_outcome", "reason_code",
-            "answering_rung", "rungs_readable", "rungs_unavailable",
+            "answering_rung", "rungs_readable", "rungs_unavailable", "rungs_empty",
+            # The bound the flag was raised against, and where it came from.
+            "ceiling", "ceiling_basis", "ceiling_source", "ceiling_source_ref",
+            "national_population",
+            # Why a blank ceiling is blank: GDACS listed no event, or listed
+            # events and described none of them. Only the second is an
+            # enrichment failure with a repair.
+            "ceiling_events_seen", "ceiling_events_with_exposure",
             "n_candidates", "candidate_sources", "extraction", "detail", "run_type",
             "assessed",
         ]
@@ -1567,13 +1616,29 @@ class BundleBuilder:
             "figure_date", "doc_date", "doc_date_original", "doc_primary_country",
             "stated_by", "reason", "ceiling", "ceiling_multiplier",
             "ceiling_source", "ceiling_source_ref", "ceiling_field",
-            "ceiling_basis", "preference_rank", "quote", "doc_url",
+            "ceiling_basis",
+            # Why a blank ceiling is blank. Both were already recorded, in
+            # the detail payload, where nothing renders them: run
+            # 34124705852 showed 1,280 rows reading no_usable_gdacs_exposure
+            # and no reader could tell whether GDACS had listed no event for
+            # the cell or had listed several and described none. Only the
+            # second is an enrichment failure with a repair, and the whole
+            # measurement of one is the difference between these two numbers.
+            "ceiling_events_seen", "ceiling_events_with_exposure",
+            "preference_rank", "quote", "doc_url",
         ]
-        rows = [
-            [redact_text(str(r.get(col) or ""), self.secrets) if col in ("quote", "doc_url")
-             else r.get(col) for col in header]
-            for r in records
-        ]
+        #: Columns promoted out of the free-form detail payload.
+        from_detail = {"ceiling_events_seen", "ceiling_events_with_exposure"}
+
+        def _cell(record: dict[str, Any], col: str) -> Any:
+            if col in from_detail:
+                detail = record.get("detail")
+                return detail.get(col) if isinstance(detail, dict) else None
+            if col in ("quote", "doc_url"):
+                return redact_text(str(record.get(col) or ""), self.secrets)
+            return record.get(col)
+
+        rows = [[_cell(r, col) for col in header] for r in records]
         write_csv(
             dest / "figures_ledger.csv", rows, header,
             preamble=(
@@ -1846,6 +1911,7 @@ class BundleBuilder:
             self._check_tc_outlook_issue_dates_parse,
             self._check_forecast_vintages,
             self._check_resolution_above_rejection_ceiling,
+            self._check_flagged_resolutions_name_their_flag,
             self._check_acled_html_responses,
             self._check_no_past_target_month_served,
             self._check_figures_inside_their_document_window,
@@ -2732,6 +2798,64 @@ class BundleBuilder:
             "disagree about the same cell and one of them is wrong.",
         )
 
+    def _check_flagged_resolutions_name_their_flag(self) -> None:
+        """A flag is the machine doubting an answer. It must say why.
+
+        ``flagged`` is one boolean over four findings — a figure above the
+        GDACS exposure ceiling, one above the national population, an
+        order-of-magnitude disagreement between adjacent rungs, and no
+        candidate past the freeze deadline — and each wants a different
+        repair. In run 34124705852, 2,089 of 4,999 resolved values were
+        flagged and every one of them rendered as the word True.
+
+        A ``ceiling_exceeded`` flag with no ceiling value beside it is
+        worse than useless: it says a bound was breached and declines to
+        say what the bound was, so a reader cannot tell a mis-transcribed
+        figure from a GDACS enrichment failure.
+        """
+
+        name = "every_flagged_resolution_names_the_flag_it_raised"
+        if "haz_resolutions" not in self.tables():
+            return self._check(name, "SKIP", "", "", "haz_resolutions is absent")
+        result = self.query(
+            "SELECT iso3, hazard, printf('%04d-%02d', year, month), "
+            "provenance_json FROM haz_resolutions WHERE flagged"
+        )
+        if result is None:
+            return
+        if not result[1]:
+            return self._check(
+                name, "PASS", "0 flagged rows", "0",
+                "No resolution is flagged, so none owes an explanation.",
+            )
+        nameless: list[str] = []
+        ceiling_without_a_number: list[str] = []
+        for row in result[1]:
+            cell = f"{row[0]}/{row[1]}/{row[2]}"
+            columns = _provenance_columns(row[3])
+            flags = str(columns["flags"] or "")
+            if not flags:
+                nameless.append(cell)
+                continue
+            if "ceiling_exceeded" in flags and columns["ceiling"] in (None, ""):
+                ceiling_without_a_number.append(cell)
+        offenders = nameless + ceiling_without_a_number
+        detail = "; ".join(
+            [f"{c} flagged, names no flag" for c in nameless[:5]]
+            + [
+                f"{c} ceiling_exceeded with no ceiling recorded"
+                for c in ceiling_without_a_number[:5]
+            ]
+        )
+        self._check(
+            name, "FAIL" if offenders else "PASS",
+            f"{len(offenders)} of {len(result[1])} flagged rows",
+            "0",
+            detail
+            or f"All {len(result[1])} flagged resolutions name the flag they "
+            "raised, and every ceiling breach names the bound it exceeded.",
+        )
+
     def _write_contradictions(self, path: Path) -> None:
         lines = [
             "# Contradictions",
@@ -3538,6 +3662,80 @@ def _no_row_reason_from_detail(detail_json: Any) -> tuple[str, Any]:
     reason = str(detail.get("no_row_reason") or "")
     assessed = detail.get("assessed")
     return reason, (assessed if isinstance(assessed, bool) else None)
+
+
+#: The columns a resolution's own provenance can fill, and their blanks.
+#: Named here so a row the query returns with no provenance and a row the
+#: query never returned agree on shape.
+PROVENANCE_COLUMNS: dict[str, Any] = {
+    "answering_rung": "",
+    "flags": "",
+    "ceiling": "",
+    "ceiling_basis": "",
+    "ceiling_source": "",
+    "ceiling_source_ref": "",
+    "national_population": "",
+    "rungs_empty": "",
+    "rungs_unavailable": "",
+    "ceiling_events_seen": "",
+    "ceiling_events_with_exposure": "",
+}
+
+
+def _provenance_columns(provenance_json: Any) -> dict[str, Any]:
+    """Flatten a resolution's provenance into the ledger's own columns.
+
+    Everything here was already stored on the row and none of it was read.
+    A flag is the machine saying it doubts an answer; ``flagged=True`` with
+    no flag name, no ceiling and no origin is that doubt with the reason
+    removed, and it is what 2,089 rows of run 34124705852 rendered as.
+
+    ``rungs_unavailable`` matters for the opposite reason: a NO_DATA rests
+    on rungs that were consulted and empty, and a rung that could not be
+    read is neither. The nightly backcast writes no run stream, so the
+    stored row is the only account there is.
+    """
+
+    columns = dict(PROVENANCE_COLUMNS)
+    if not provenance_json:
+        return columns
+    try:
+        prov = json.loads(provenance_json)
+    except (TypeError, ValueError):
+        return columns
+    if not isinstance(prov, dict):
+        return columns
+    decision = prov.get("decision")
+    decision = decision if isinstance(decision, dict) else {}
+    ceiling = decision.get("ceiling")
+    ceiling = ceiling if isinstance(ceiling, dict) else {}
+
+    def _join(value: Any) -> str:
+        if isinstance(value, list):
+            return "|".join(str(v) for v in value if v not in (None, ""))
+        return "" if value in (None, "") else str(value)
+
+    columns["answering_rung"] = _join(prov.get("winning_rung"))
+    columns["flags"] = _join(decision.get("flags"))
+    columns["ceiling"] = ceiling.get("exposed_population")
+    columns["ceiling_basis"] = _join(ceiling.get("basis"))
+    columns["ceiling_source"] = _join(ceiling.get("source"))
+    columns["ceiling_source_ref"] = _join(ceiling.get("source_ref"))
+    columns["national_population"] = ceiling.get("national_population")
+    columns["ceiling_events_seen"] = ceiling.get("n_events")
+    columns["ceiling_events_with_exposure"] = ceiling.get("n_events_with_exposure")
+    columns["rungs_empty"] = _join(decision.get("rungs_empty"))
+    # Written under two keys: the parameter's own, and the name it was
+    # stamped under before the parameter existed. A stored row may carry
+    # either.
+    columns["rungs_unavailable"] = _join(
+        decision.get("rungs_unavailable") or decision.get("sources_unavailable")
+    )
+    # One blank, not two. A missing key and a key holding null are the same
+    # statement here — the row did not record it — and rendering them as ""
+    # and as the word None in the same column is how a reader concludes the
+    # column is unreliable.
+    return {k: ("" if v is None else v) for k, v in columns.items()}
 
 
 def _deep_int(payload: Any, key: str) -> int | None:
