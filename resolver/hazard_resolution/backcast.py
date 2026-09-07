@@ -62,6 +62,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 from resolver.hazard_resolution.base_rates import backcast_window, last_frozen_month
+from resolver.hazard_resolution.extract import SHARE_OVERRIDE_ENV as _SHARE_OVERRIDE_ENV
 from resolver.hazard_resolution.rulebook import (
     HAZARD_CODE_BY_RULEBOOK_NAME,
     Rulebook,
@@ -466,9 +467,14 @@ def month_counts(con, hazard: str, ym: str) -> dict[str, Any]:
             [hazard, year, month],
         ).fetchone()[0]
     )
+    # COUNT(DISTINCT iso3) is what turns a spend into a RATE: cost per call
+    # says what one document costs, and calls per cell says how many
+    # documents a cell takes. A deferral message needs both to state what
+    # the owed cells would cost, and both are measured here rather than
+    # assumed from the rulebook's per-cell document cap.
     extraction = con.execute(
         """
-        SELECT COUNT(*), COALESCE(SUM(cost_usd), 0.0)
+        SELECT COUNT(*), COALESCE(SUM(cost_usd), 0.0), COUNT(DISTINCT iso3)
         FROM haz_doc_extractions
         WHERE hazard = ? AND year = ? AND month = ?
           AND (status = 'ok'
@@ -510,6 +516,7 @@ def month_counts(con, hazard: str, ym: str) -> dict[str, Any]:
         "frozen_skipped": frozen_skipped,
         "extraction_calls": int(extraction[0] or 0),
         "extraction_cost_usd": float(extraction[1] or 0.0),
+        "extraction_cells": int(extraction[2] or 0),
         "cells_deferred_for_budget": len(deferred_rows),
         "deferred_cells": [str(row[0]) for row in deferred_rows],
         "deferred_note": str(deferred_rows[0][1] or "") if deferred_rows else "",
@@ -600,9 +607,73 @@ class BackcastRun:
     #: summary so a reader never has to infer it from the counts.
     budget_policy: str = "checkpoint_and_resume"
 
+    #: Extraction spend this run ACTUALLY made, summed over the months it
+    #: walked. These are what turn "510 cells are owed" into a price.
+    extraction_calls: int = 0
+    extraction_cost_usd: float = 0.0
+    extraction_cells: int = 0
+
+    @property
+    def cost_per_call_usd(self) -> float | None:
+        """Observed, never assumed. None when this run billed nothing."""
+
+        if self.extraction_calls <= 0:
+            return None
+        return self.extraction_cost_usd / self.extraction_calls
+
+    @property
+    def calls_per_cell(self) -> float | None:
+        """How many documents a cell actually took, this run."""
+
+        if self.extraction_cells <= 0:
+            return None
+        return self.extraction_calls / self.extraction_cells
+
+    @property
+    def deferred_cost_estimate_usd(self) -> float | None:
+        """What the owed cells would cost at THIS run's observed rates.
+
+        A message that says a month is owed without saying what clearing it
+        costs leaves the operator to guess, and the guess available to them
+        is the rulebook's per-cell document cap, which is an upper bound
+        rather than a rate. Both factors here are measured.
+        """
+
+        per_call = self.cost_per_call_usd
+        per_cell = self.calls_per_cell
+        if per_call is None or per_cell is None:
+            return None
+        return self.cells_deferred_for_budget * per_cell * per_call
+
     @property
     def resolved(self) -> int:
         return self.resolved_value + self.resolved_zero
+
+
+def describe_deferred_cost(run: "BackcastRun") -> str:
+    """One sentence pricing the deferred cells at this run's own rates.
+
+    Never a rulebook number: the rulebook states a per-cell DOCUMENT CAP and
+    a documented per-call price, and neither is what a run actually spends.
+    A run that billed nothing says so rather than printing a zero, because
+    a zero here would read as "clearing the backlog is free".
+    """
+
+    per_call = run.cost_per_call_usd
+    per_cell = run.calls_per_cell
+    if per_call is None or per_cell is None:
+        return (
+            "this run billed no extraction calls, so it has no observed rate "
+            "to price the owed cells with"
+        )
+    estimate = run.deferred_cost_estimate_usd or 0.0
+    calls_owed = run.cells_deferred_for_budget * per_cell
+    return (
+        f"observed this run: ${per_call:.4f} per call over {run.extraction_calls} "
+        f"call(s), {per_cell:.1f} call(s) per cell over {run.extraction_cells} "
+        f"cell(s); at those rates the {run.cells_deferred_for_budget} owed cell(s) "
+        f"need about {calls_owed:.0f} more call(s), costing about ${estimate:.2f}"
+    )
 
 
 def _prefetch_ibtracs(con, rulebook: Rulebook) -> bool:
@@ -832,6 +903,9 @@ def run_backcast(
                 run.months_failed += 1
                 run.failures.append(f"{ym}: {error}")
                 LOG.error("[backcast] %s %s: %s", hazard_name, ym, error)
+            run.extraction_calls += int(counts.get("extraction_calls") or 0)
+            run.extraction_cost_usd += float(counts.get("extraction_cost_usd") or 0.0)
+            run.extraction_cells += int(counts.get("extraction_cells") or 0)
             status = "ok" if rc == 0 else "failed"
             deferred_cells: list[str] = []
             if rc == 0:
@@ -878,7 +952,7 @@ def run_backcast(
             f"{run.months_budget_deferred} month(s) recorded deferred with "
             f"{run.cells_deferred_for_budget} cell(s) owing an answer; policy is "
             f"{run.budget_policy} — no cap was raised, the cells resume once the "
-            "calendar month's allowance resets"
+            f"calendar month's allowance resets. {describe_deferred_cost(run)}"
         )
         LOG.warning("[backcast] %s", run.warnings[-1])
     if run.failures:
@@ -1020,6 +1094,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "extraction_budget_bound": run.extraction_budget_bound,
                 "extraction_binding_limit": run.extraction_binding_limit,
                 "budget_policy": run.budget_policy,
+                # Observed, so the step summary can price the backlog
+                # without anyone opening the ledger.
+                "extraction_calls": run.extraction_calls,
+                "extraction_cost_usd": round(run.extraction_cost_usd, 4),
+                "extraction_cells": run.extraction_cells,
+                "extraction_cost_per_call_usd": (
+                    round(run.cost_per_call_usd, 6)
+                    if run.cost_per_call_usd is not None else None
+                ),
+                "extraction_calls_per_cell": (
+                    round(run.calls_per_cell, 2)
+                    if run.calls_per_cell is not None else None
+                ),
+                "deferred_cost_estimate_usd": (
+                    round(run.deferred_cost_estimate_usd, 2)
+                    if run.deferred_cost_estimate_usd is not None else None
+                ),
+                "deferred_cost_note": describe_deferred_cost(run),
+                "backcast_share_override": (
+                    os.getenv(_SHARE_OVERRIDE_ENV) or ""
+                ).strip() or None,
                 "resolved_value": run.resolved_value,
                 "resolved_zero": run.resolved_zero,
                 "no_data": run.no_data,

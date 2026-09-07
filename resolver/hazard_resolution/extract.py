@@ -56,6 +56,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -927,6 +928,70 @@ def calls_this_calendar_month(
     return int(row[0] or 0)
 
 
+#: One-dispatch override of the backcast's share of the monthly extraction
+#: allowance. The rulebook DEFAULT is never touched: a share raised in YAML
+#: is raised for every night thereafter, and the backcast spends whatever it
+#: is given. This env var exists so a single dispatch can clear a specific
+#: backlog and the next night is back to the standing policy.
+SHARE_OVERRIDE_ENV = "PYTHIA_HAZ_BACKCAST_EXTRACTION_SHARE"
+
+
+def _reserve_from(rulebook: Rulebook) -> int:
+    try:
+        return int(rulebook.get("extraction.live_reserve_calls"))
+    except Exception:  # noqa: BLE001 - older rulebooks have no such key
+        return 0
+
+
+def _share_override(
+    configured: int | None, *, monthly_total: int, reserve: int
+) -> int | None:
+    """The backcast share for THIS run, honouring a one-dispatch override.
+
+    The override is clamped to ``monthly_total - reserve``. The live pass's
+    reserve is calls the backcast may never take whatever its share says, so
+    an override large enough to swallow it would remove the reserve by the
+    back door — which is the implicit-reserve fault the reserve was made
+    explicit to end. A clamped value says so in the log.
+
+    An override BELOW the configured share is honoured as written: lowering
+    the backcast's spend for one night needs no guard.
+    """
+
+    raw = (os.getenv(SHARE_OVERRIDE_ENV) or "").strip()
+    if not raw:
+        return configured
+    try:
+        wanted = int(raw)
+    except ValueError:
+        LOG.warning(
+            "[extract] %s=%r is not an integer; keeping the rulebook share %s",
+            SHARE_OVERRIDE_ENV, raw, configured,
+        )
+        return configured
+    if wanted <= 0:
+        LOG.warning(
+            "[extract] %s=%d is not a usable share; keeping the rulebook share %s",
+            SHARE_OVERRIDE_ENV, wanted, configured,
+        )
+        return configured
+    ceiling = max(0, monthly_total - reserve)
+    granted = min(wanted, ceiling)
+    if granted < wanted:
+        LOG.warning(
+            "[extract] %s=%d exceeds the monthly total (%d) less the live "
+            "reserve (%d); granting %d — the reserve is calls the backcast "
+            "may never take, whatever its share says",
+            SHARE_OVERRIDE_ENV, wanted, monthly_total, reserve, granted,
+        )
+    LOG.warning(
+        "[extract] backcast share raised for THIS RUN ONLY: %s -> %d "
+        "(rulebook default unchanged)",
+        configured, granted,
+    )
+    return granted
+
+
 def load_budget(
     con: "duckdb.DuckDBPyConnection",
     rulebook: Rulebook,
@@ -941,14 +1006,16 @@ def load_budget(
     if run_type == "backcast":
         raw_cap = rulebook.get("extraction.backcast_max_calls_per_month", None)
         backcast_cap = int(raw_cap) if raw_cap is not None else None
+        backcast_cap = _share_override(
+            backcast_cap,
+            monthly_total=int(rulebook.get("extraction.max_calls_per_month")),
+            reserve=_reserve_from(rulebook),
+        )
         if backcast_cap is not None:
             backcast_used = calls_this_calendar_month(
                 con, today=today, backcast_only=True
             )
-    try:
-        reserve = int(rulebook.get("extraction.live_reserve_calls"))
-    except Exception:  # noqa: BLE001 - older rulebooks have no such key
-        reserve = 0
+    reserve = _reserve_from(rulebook)
     raw_run_cap = rulebook.get("extraction.max_calls_per_run", None)
     run_cap = int(raw_run_cap) if raw_run_cap is not None else None
     budget = ExtractionBudget(
