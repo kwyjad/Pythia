@@ -1483,6 +1483,22 @@ class BundleBuilder:
         # the check permanently red with no path to green, which is the way a
         # reader learns to skip it. The backlog is reported as its own number,
         # named and dated, and clears as the backcast re-walks those months.
+        # A cell this run did not assess is one an EARLIER run decided, and its
+        # stored row is all there is to read.
+        #
+        # With no cell stream, the discriminator is whether the MACHINE ran in
+        # this job at all. It did (a summary exists) -> the database alone must
+        # explain its cells, which is the whole of Group A: the nightly
+        # backcast never sets PYTHIA_RUN_LOG_DIR, so the reason has to be on
+        # the trigger row. It did not -> a scoped `only_connector` run never
+        # reaches the machine, so no unexplained cell is attributable to it and
+        # counting 29,035 of them as live said "0 cell(s) assessed this run; 0
+        # historical" in the same breath.
+        machine_ran = any(
+            any(self.diagnostics_dir.glob(f"haz_run_{hz}.json"))
+            for hz in ("flood", "cyclone", "drought")
+        )
+        attribute_all_to_this_run = bool(assessed_this_run) or machine_ran
         unexplained = 0
         backlog = 0
         backlog_hazards: dict[str, int] = {}
@@ -1491,7 +1507,9 @@ class BundleBuilder:
             if entry["status"] is not None or entry["reason_code"]:
                 continue
             entry["reason_code"] = "unexplained_no_row"
-            if key in assessed_this_run or not assessed_this_run:
+            if key in assessed_this_run or (
+                attribute_all_to_this_run and not assessed_this_run
+            ):
                 unexplained += 1
             else:
                 backlog += 1
@@ -1508,6 +1526,8 @@ class BundleBuilder:
                 f"{min(backlog_months)}..{max(backlog_months)}" if backlog_months else ""
             ),
             "cells_assessed_this_run": len(assessed_this_run),
+            "cell_stream_recorded": stream is not None,
+            "machine_ran_this_job": machine_ran,
             "no_row": sum(1 for e in merged.values() if e["status"] is None),
         }
 
@@ -2895,8 +2915,15 @@ class BundleBuilder:
             )
         if not assessed:
             detail += (
-                " The run stream recorded no cells, so live and historical cells "
-                "could not be told apart and every one is counted."
+                " This run assessed no cells and the machine "
+                + (
+                    "DID run in this job, so the database alone must explain "
+                    "them — the nightly backcast records no run stream."
+                    if summary.get("machine_ran_this_job")
+                    else "did not run in this job (a scoped only_connector run "
+                    "never reaches it), so every unexplained cell was decided "
+                    "by an earlier run."
+                )
             )
         self._check(
             name, "FAIL" if unexplained else "PASS",
@@ -3321,8 +3348,14 @@ class BundleBuilder:
             r for r in (run_log.read_stream(stream) if stream else [])
             if str(r.get("source") or "") == "emdat"
         ]
+        # `any(path.glob(...) for hz in ...)` iterates over GENERATOR OBJECTS,
+        # every one of which is truthy, so this guard was unconditionally True
+        # and the check failed on any run that never went near the ladder — a
+        # scoped `only_connector` run reported "0 live fetch(es) ok, 0
+        # rejected, 0 cached rows" as though EM-DAT had let us down.
         ran_ladder = bool(fetches) or any(
-            self.diagnostics_dir.glob(f"haz_run_{hz}.json") for hz in ("flood", "cyclone")
+            any(self.diagnostics_dir.glob(f"haz_run_{hz}.json"))
+            for hz in ("flood", "cyclone")
         )
         if not key_present:
             return self._check(
