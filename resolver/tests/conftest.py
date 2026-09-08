@@ -292,3 +292,27 @@ def _reset_gdacs_exposure_memo():
         yield
     finally:
         _gdacs.reset_exposure_memo()
+
+
+@pytest.fixture(autouse=True)
+def _reset_drought_series_cache():
+    """Forget parsed time-series indicator feeds between tests.
+
+    ``drought_indicators`` parses a ``time_series`` feed once per process,
+    because the backcast asks for one archive once a month for a decade and
+    parsing the same zip 120 times is 120 downloads of the same bytes. The
+    cache is keyed by url alone, which is right in production — one address
+    is one body — and wrong across tests, where each case serves its own
+    fixture body from the same address. ``reset_for_tests`` existed and
+    nothing called it, so the store outlived every test: a good parse cached
+    by one case made a later case's deliberately broken feed read as a feed
+    that answered.
+    """
+
+    from resolver.hazard_resolution import drought_indicators as _ind
+
+    _ind.reset_for_tests()
+    try:
+        yield
+    finally:
+        _ind.reset_for_tests()
