@@ -359,17 +359,54 @@ def test_the_worker_count_is_taken_from_the_argument_not_the_env(monkeypatch):
 
 def test_cyclone_borrows_the_gdacs_block_for_its_fingerprint():
     """The GDACS block lives under `flood` and configures the fetch for
-    EVERY hazard, so a pacing change moves cyclone's answers too. Without
-    this, cyclone's ledger claims months decided under rules that moved."""
+    EVERY hazard, so a change to what it DECIDES moves cyclone's answers
+    too. Without this, cyclone's ledger claims months decided under rules
+    that moved.
+
+    This case was written in September 2026 against a PACING key, and that
+    half is inverted below rather than deleted. The property it was
+    guarding is right and is guarded here with a key that can actually
+    move an answer: ``exposure_refresh_days`` decides whether a settled
+    exposure is served from the cache or asked for again, and a
+    cache-served figure is a ceiling a refused fetch would not have
+    produced.
+    """
 
     rb = make_rulebook()
-    moved = make_rulebook({"flood": {"gdacs": {"enrich_min_interval_sec": 9.0}}})
+    moved = make_rulebook({"flood": {"gdacs": {"exposure_refresh_days": 90}}})
     assert rb.hazard_fingerprint("cyclone") != moved.hazard_fingerprint("cyclone")
     assert rb.hazard_fingerprint("flood") != moved.hazard_fingerprint("flood")
     assert rb.hazard_fingerprint("drought") == moved.hazard_fingerprint("drought"), (
         "drought has no ladder and no ceiling, so nothing in the GDACS "
         "block reaches it — re-walking its 114 months would be waste"
     )
+
+
+def test_a_gdacs_pacing_change_no_longer_re_walks_the_borrowers():
+    """The refuted half of the case above, kept because it is the useful half.
+
+    Borrowing the block made a pacing edit re-derive history: the September
+    2026 GDACS work put 307 cyclone months back on the queue, roughly six
+    months of nightly runs and about $30 to reproduce answers a request
+    rate cannot move. The borrowing is still right. What was wrong was
+    letting keys that decide nothing into the digest at all.
+
+    The next person to change a worker count will want to know whether it
+    costs a re-walk. This is where the answer lives.
+    """
+
+    rb = make_rulebook()
+    for key, value in (
+        ("enrich_min_interval_sec", 9.0),
+        ("enrich_workers", 6),
+        ("request_delay_sec", 5.0),
+        ("enrich_max_seconds", 2700),
+    ):
+        paced = make_rulebook({"flood": {"gdacs": {key: value}}})
+        for hazard in ("cyclone", "flood", "drought"):
+            assert rb.hazard_fingerprint(hazard) == paced.hazard_fingerprint(
+                hazard
+            ), f"changing {key} re-walked {hazard}, and it decides nothing"
 
 
 # ---------------------------------------------------------------------------

@@ -586,6 +586,23 @@ revision row per already-answered cell, burying the genuine post-freeze
 revisions the audit table exists for. `--no-resume` re-walks anyway, for
 when that is what you want.
 
+**A month is also re-walked when the rules that decided it have moved.**
+Each ledger row carries a digest of the rulebook values that govern its
+hazard, so a fix reaches the historical record without anyone remembering
+a flag — the ASAP delimiter bug left 114 drought months marked complete
+and only a hand-passed `--no-resume` could free them.
+
+The digest covers what can move an ANSWER, and nothing else. A request
+rate, a timeout, a wall clock and a budget decide how the machine asks and
+how much one run does; they cannot change what a cell resolves to, and
+including them cost 307 cyclone months on one pacing edit, because cyclone
+borrows `flood.gdacs`. `Rulebook._NON_DECIDING_KEYS` lists them. The bar
+for entry is high and the asymmetry is why: excluding a key that does
+decide freezes history under stale rules, silently, while including one
+that does not costs an expensive but harmless re-walk. It is a list of
+keys, never a prefix or a section, so a key added beside a pacing knob is
+deciding until somebody assesses it.
+
 **Two costs to know before starting one.** ReliefWeb silence sweeps run once
 per non-triggered country-month, so a 25-year cyclone backcast over ~200
 countries is on the order of half a million paced requests — the driver
