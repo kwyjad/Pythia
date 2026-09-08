@@ -68,6 +68,7 @@ _BORROWED = (
     "_load_countries",
     "_SEARCH_API",
     "_EVENT_RSS_PATTERN",
+    "_STATIC_RSS",
 )
 
 
@@ -393,6 +394,104 @@ def seed_exposure_memo(
     return counts
 
 
+#: How far back the 3-month static feeds reach. A window ending before this
+#: cannot be covered by them, so the request is not made at all.
+STATIC_FEED_DAYS = 92
+
+
+def seed_exposure_memo_from_static_feed(
+    hazard: str,
+    *,
+    window_end: dt.date,
+    session: Any = None,
+    today: dt.date | None = None,
+) -> dict[str, int]:
+    """Read the 3-month feed once, so the per-event route is a fallback.
+
+    ``fetch_gdacs_events`` discovers events through the JSON search API,
+    which carries no exposure figure, and then asks the per-event datareport
+    RSS for each one — a route that answers 403 for any event GDACS never
+    published a report for. Meanwhile the static feeds carry
+    ``gdacs:population`` for every event they list, in ONE request, and this
+    module already fetches them successfully elsewhere.
+
+    So for a window the feeds can cover, the figures are taken from there
+    first. Seeding the connector's per-run memo is deliberately the same
+    mechanism the cache seed uses rather than a second one: a hit returns
+    through ``_apply_exposure`` exactly as a fetched answer does, so a
+    feed-served figure and a per-event one cannot diverge in how they reach
+    the record. Events the feed does not list keep no memo entry and fall
+    through to enrichment, which is the whole point.
+
+    It runs AFTER the cache seed and overwrites it where both answer: the
+    cache holds a figure read on some earlier day and the feed is the
+    current one, and taking the older of two available figures would be the
+    serve-stale-data fault in another costume.
+
+    Only the last ``STATIC_FEED_DAYS`` are reachable, and only FL and TC
+    have a feed (GDACS's drought feed has 404'd since 2026-03). Outside
+    either condition this is a no-op that costs no request. Never raises.
+    """
+
+    counts = {"listed": 0, "seeded": 0, "no_usable_figure": 0}
+    core = _connector_api()
+    if hazard not in core._STATIC_RSS:
+        return counts
+    today = today or dt.date.today()
+    if window_end < today - dt.timedelta(days=STATIC_FEED_DAYS):
+        # The window closed before the feed's own coverage begins. Asking
+        # would spend a request to be told nothing.
+        return counts
+
+    try:
+        session = session or core._build_session()
+        name_to_iso3, _ = core._load_countries()
+        events = core.GdacsConnector().fetch_static_rss_for_type(
+            session, hazard, name_to_iso3
+        )
+    except Exception as exc:  # noqa: BLE001 - a feed we cannot read decides nothing
+        LOG.warning(
+            "[gdacs] could not read the %s static feed to seed exposures: %s",
+            hazard, exc,
+        )
+        return counts
+
+    for event in events:
+        event_id = str(event.get("eventid") or "").strip()
+        etype = str(event.get("eventtype") or hazard).strip()
+        if not event_id:
+            continue
+        counts["listed"] += 1
+        try:
+            value = float(event.get("population") or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value <= 0:
+            # A listed event with no readable figure is UNKNOWN, not zero,
+            # and must still be asked about individually.
+            counts["no_usable_figure"] += 1
+            continue
+        episode = {
+            "population": value,
+            "population_unit": event.get("population_unit") or "",
+            "population_text": event.get("population_text") or "",
+            "population_raw": event.get("population_raw") or "",
+            "population_parse": event.get("population_parse") or "",
+            "population_source": "static_feed",
+            "population_cached_at": "",
+        }
+        with core._EXPOSURE_MEMO_LOCK:
+            core._EXPOSURE_MEMO[(etype, event_id)] = (episode, None)
+        counts["seeded"] += 1
+
+    LOG.info(
+        "[gdacs] static %s feed: %d event(s) listed, %d exposure(s) seeded, "
+        "%d with no usable figure",
+        hazard, counts["listed"], counts["seeded"], counts["no_usable_figure"],
+    )
+    return counts
+
+
 def _carry_forward_exposure(
     con: "duckdb.DuckDBPyConnection", records: list[RawRecord]
 ) -> int:
@@ -482,6 +581,13 @@ def fetch_gdacs_events(
         seeded = seed_exposure_memo(
             con, refresh_days=_exposure_refresh_days(rulebook)
         )
+        # Then the 3-month feed, which states an exposure for every event it
+        # lists in one request. It runs second so its live figure wins over
+        # the cache's stored one where both answer; a window it cannot cover
+        # costs no request at all.
+        from_feed = seed_exposure_memo_from_static_feed(
+            hazard, window_end=end, session=session
+        )
         events = connector._enrich_with_population(
             session, events, delay, name_to_iso3,
             # The rulebook owns the pacing it claims to own.
@@ -539,6 +645,12 @@ def fetch_gdacs_events(
     from_search = sum(
         1 for e in events if str(e.get("population_source") or "") == "search"
     )
+    from_static_feed = sum(
+        1 for e in events if str(e.get("population_source") or "") == "static_feed"
+    )
+    from_event_data = sum(
+        1 for e in events if str(e.get("population_source") or "") == "geteventdata"
+    )
     outcome.detail = {
         "window": {"from": start.isoformat(), "to": end.isoformat()},
         "events_discovered": len(events),
@@ -548,12 +660,20 @@ def fetch_gdacs_events(
         # whether the cache-first read is doing its job.
         "events_exposure_from_cache": from_cache,
         "exposure_cache_seeded": seeded,
+        # Answered by the 3-month static feed, which carries an exposure for
+        # every event it lists and costs one request for all of them.
+        "events_exposure_from_static_feed": from_static_feed,
+        "exposure_static_feed_seeded": from_feed,
         # Answered by the SEARCH response, with no per-event request at all.
         "events_exposure_from_search": from_search,
         # What that response actually carried, so "is there a bulk route"
         # is settled by evidence rather than by the assumption the code
         # was written on.
         "search_property_keys": core.observed_search_property_keys(),
+        # Answered by the API's own per-event route after the datareport
+        # tree refused. A rise here is the refusal rate being recovered
+        # rather than absorbed.
+        "events_exposure_from_geteventdata": from_event_data,
         "events_exposure_carried_from_cache": carried,
         "hazard": hazard,
     }

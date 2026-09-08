@@ -109,9 +109,11 @@ class _Session:
         self.status = status
         self.body = body
         self.calls = 0
+        self.urls: list[str] = []
 
     def get(self, url, timeout=None):  # noqa: ARG002
         self.calls += 1
+        self.urls.append(url)
         if self.calls <= self.refusals:
             return _Response(self.status)
         return _Response(200, self.body)
@@ -156,7 +158,14 @@ class TestEnrichmentRetry:
         connector_mod.reset_exposure_memo()
 
     def test_a_403_is_not_retried(self, monkeypatch):
-        """Four requests to learn what the first one already said."""
+        """Four requests to learn what the first one already said.
+
+        Counted per ROUTE since the geteventdata fallback landed. The rule
+        this pins is that the REFUSING route is asked once — no retry
+        ladder. Asking a different endpoint a different question is not a
+        retry, and it is the only thing standing between a refused event
+        and no exposure ceiling at all.
+        """
 
         monkeypatch.setattr(connector_mod.time, "sleep", lambda _s: None)
         session = _Session(refusals=2, body=_ENRICH_RSS)
@@ -164,7 +173,7 @@ class TestEnrichmentRetry:
 
         out = self.connector._enrich_one_event(session, event, {})
 
-        assert session.calls == 1
+        assert sum("datareport" in u for u in session.urls) == 1
         assert out["population_refused"] == 403
 
     def test_a_refused_figure_still_lands_from_the_cache(self, tmp_path, monkeypatch):
@@ -219,7 +228,11 @@ class TestEnrichmentRetry:
 
         out = self.connector._enrich_one_event(session, event, {})
 
-        assert session.calls == 1
+        # One ask of the refusing route, and one of the fallback. When both
+        # refuse, the original refusal is what lands on the row: an event
+        # GDACS will not describe by either route is refused, not silent.
+        assert sum("datareport" in u for u in session.urls) == 1
+        assert sum("geteventdata" in u for u in session.urls) == 1
         assert out["population_refused"] == 403
         assert out["population_enriched"] is False
 
