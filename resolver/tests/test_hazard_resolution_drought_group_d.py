@@ -457,7 +457,17 @@ class TestAsapHotspotSeries:
         get, seen = self._serve(_hotspots_zip(self.ROWS))
         _refresh(con, rulebook, get=get, ym="2024-02")
         _refresh(con, rulebook, get=get, ym="2024-03")
-        assert len(seen) == 1
+        # Counted PER ADDRESS, not in total: the rulebook carries more than
+        # one time-series feed now, and the cache's promise is that each is
+        # read once per process — not that only one feed exists.
+        hotspots = [u for u in seen if "hotspots_ts" in u]
+        assert hotspots == [ind_mod._expand_url(
+            "https://agricultural-production-hotspots.ec.europa.eu/files/hotspots_ts.zip",
+            "2024-02",
+        )]
+        assert len(seen) == len(set(seen)), (
+            f"a time-series feed was fetched twice: {seen}"
+        )
 
     def test_the_backcast_preflight_counts_the_series_as_dated(self, rulebook):
         check = bc.check_backcastable("drought", rulebook)

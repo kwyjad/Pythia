@@ -423,6 +423,13 @@ drought:
         url: "resolver/data/spei3_country_means.csv"
         required: false
         request_timeout_sec: 60
+        # Every row carries its own ym, so this is a TIME SERIES: parsed into
+        # one snapshot per month and read month by month, which is the only
+        # way a backcast month gets the assessment made FOR it. Without the
+        # flag the pre-flight would file it as a latest-only snapshot that
+        # "cannot speak for a backcast month" — the exact opposite of why it
+        # exists — and the file would be re-read once per month of the walk.
+        time_series: true
         match: threshold
         absence_means_no_drought: false
         threshold: -1.0
