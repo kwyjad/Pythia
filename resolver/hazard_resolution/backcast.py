@@ -274,6 +274,66 @@ def hazard_rulebook_hash(rb, hazard: str) -> str | None:
         return None
 
 
+def legacy_rulebook_hash(rb, hazard: str) -> str | None:
+    """The pre-narrowing digest of the rulebook in force, or None."""
+
+    try:
+        return rb.legacy_hazard_fingerprint(hazard)
+    except Exception:  # noqa: BLE001 - an older rulebook object
+        return None
+
+
+def restamp_equivalent_fingerprints(
+    con, hazard: str, *, current: str | None, legacy: str | None
+) -> int:
+    """Re-stamp ledger rows decided under today's rules but an older digest.
+
+    Narrowing the fingerprint changes it, and a changed fingerprint is the
+    signal to re-walk. Left alone, the change that exists to STOP needless
+    re-walks would cost one: every month already decided under the rulebook
+    in force would be walked again on the next run, for a digest that moved
+    because it stopped covering a worker count.
+
+    So a row carrying the LEGACY digest of the CURRENT rulebook is
+    re-stamped rather than re-walked. That is provable, not a guess: same
+    rulebook, same deciding values, and the only difference between the two
+    digests is the keys :data:`Rulebook._NON_DECIDING_KEYS` now leaves out.
+    It blesses nothing else. A row from an older rulebook matches neither
+    digest and is walked again, which is the whole point of the mechanism.
+
+    Idempotent, and a no-op once the ledger has converged. Returns the
+    number of rows re-stamped.
+    """
+
+    if not current or not legacy or current == legacy:
+        return 0
+    ensure_haz_schema(con)
+    try:
+        rows = con.execute(
+            "SELECT COUNT(*) FROM haz_backcast_progress "
+            "WHERE hazard = ? AND rulebook_hash = ?",
+            [hazard, legacy],
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - a ledger predating the column
+        return 0
+    n = int((rows or [0])[0] or 0)
+    if not n:
+        return 0
+    con.execute(
+        "UPDATE haz_backcast_progress SET rulebook_hash = ? "
+        "WHERE hazard = ? AND rulebook_hash = ?",
+        [current, hazard, legacy],
+    )
+    LOG.info(
+        "[backcast] %s: %d ledger month(s) were decided under this same "
+        "rulebook and an older digest — re-stamped %s -> %s rather than "
+        "re-walked, because the digests differ only in keys that decide "
+        "nothing (pacing, timeouts, budgets)",
+        hazard, n, legacy, current,
+    )
+    return n
+
+
 def completed_months(con, hazard: str, rulebook_hash: str | None = None) -> set[str]:
     """Months this hazard's backcast has already finished successfully.
 
@@ -792,6 +852,14 @@ def run_backcast(
     # which ledger months still describe the rules in force, and it is
     # stamped on every month this run records.
     rb_hash = hazard_rulebook_hash(rulebook, hazard_name)
+    # Before the ledger is read: bless the months this same rulebook
+    # decided under the pre-narrowing digest, so pruning pacing keys does
+    # not itself trigger the re-walk it exists to prevent.
+    restamp_equivalent_fingerprints(
+        con, hazard,
+        current=rb_hash,
+        legacy=legacy_rulebook_hash(rulebook, hazard_name),
+    )
     commit = walking_commit()
     already = completed_months(con, hazard, rb_hash) if resume else set()
     owed = deferred_months(con, hazard) if resume else {}

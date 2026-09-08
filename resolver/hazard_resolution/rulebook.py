@@ -152,6 +152,70 @@ class Rulebook:
         "cyclone": ("flood.gdacs",),
     }
 
+    #: Keys that govern how the machine ASKS, never what it answers.
+    #:
+    #: Every key in a fingerprinted section used to enter the digest, so
+    #: lowering a worker count or trimming a timeout re-derived history.
+    #: Cyclone borrows ``flood.gdacs``, so a pacing change there put 307
+    #: cyclone months back on the queue: roughly six months of nightly runs
+    #: and about $30 to reproduce answers that could not have moved,
+    #: because a request rate decides nothing about a flood.
+    #:
+    #: The bar for entry here is high, and the asymmetry is why. Excluding
+    #: a key that DOES decide freezes history under stale rules, silently,
+    #: which is the exact fault the fingerprint was built to end. Including
+    #: one that does not costs an expensive but harmless re-walk. So a key
+    #: is listed only where no answer can move, and the four families below
+    #: are the only ones that qualify.
+    #:
+    #: What is deliberately NOT here, and why:
+    #:   ``flood.gdacs.exposure_refresh_days`` decides whether a settled
+    #:     exposure is served from the cache or asked for again, and a
+    #:     cache-served figure is a ceiling a refused fetch would not have
+    #:     produced. It is also the key the September 2026 GDACS work
+    #:     ADDED, which is why the re-walk that change triggered was
+    #:     legitimate and this narrowing would not have prevented it.
+    #:   ``flood.gdacs.lookback_months`` / ``lookahead_months`` /
+    #:     ``coverage_grace_days`` decide which events a month sees and
+    #:     whether a zero may be written at all.
+    #:   ``reliefweb.api_base_url`` is an address, and a different address
+    #:     can serve different documents.
+    #:   ``reliefweb.documents.candidate_pool_size`` decides which
+    #:     documents are ranked before the top ones are taken.
+    #:   ``extraction.max_output_tokens`` decides whether an answer is
+    #:     truncated, and a truncated answer is a figure lost.
+    #:   ``raw_cache.keep_revisions_per_record`` decides what history a
+    #:     re-walk can still read.
+    _NON_DECIDING_KEYS: frozenset[str] = frozenset({
+        # Request rate and concurrency. These change how fast the machine
+        # asks a source, and nothing about what the source says.
+        "flood.gdacs.request_delay_sec",
+        "flood.gdacs.enrich_workers",
+        "flood.gdacs.enrich_min_interval_sec",
+        "reliefweb.documents.request_delay_sec",
+        # Timeouts and wall clocks. A request that times out and a pass
+        # that runs out of clock are both RESUMED: the events not reached
+        # keep what the cache holds and the next run asks for them, and a
+        # failed extraction is never a cache hit. Neither is recorded as an
+        # answer, so neither can freeze a wrong one. A wall clock is not
+        # reproducible in any case — two runs at the same value already
+        # differ by how fast the runner is, so a digest over it promises
+        # something it cannot deliver.
+        "flood.gdacs.enrich_max_seconds",
+        "reliefweb.documents.request_timeout_sec",
+        "extraction.request_timeout_sec",
+        # Budgets. These decide how much work ONE run does, never what a
+        # cell resolves to: a budget-capped backcast cell is DEFERRED and
+        # writes no row, so raising a budget adds answers rather than
+        # changing them. Listing them is also what lets the one-dispatch
+        # share override exist without re-deriving history behind it.
+        "extraction.max_calls_per_month",
+        "extraction.live_reserve_calls",
+        "extraction.backcast_max_calls_per_month",
+        # Housekeeping. Storage size, not content.
+        "raw_cache.compaction",
+    })
+
     def hazard_fingerprint(self, hazard: str) -> str:
         """A stable digest of every rulebook value that decides ``hazard``.
 
@@ -168,24 +232,57 @@ class Rulebook:
         section plus the shared sections that reach every hazard.
 
         Sorted, separator-tight JSON, so key order in the YAML cannot move
-        the digest on its own.
+        the digest on its own. Keys that decide nothing are pruned first —
+        see :data:`_NON_DECIDING_KEYS`.
         """
 
+        return self._fingerprint(hazard, prune=True)
+
+    def legacy_hazard_fingerprint(self, hazard: str) -> str:
+        """The digest as it stood before the non-deciding keys were pruned.
+
+        Kept for exactly one purpose. A ledger row stamped with this, taken
+        from the rulebook in force RIGHT NOW, was decided under today's
+        deciding values and differs only in keys that decide nothing. The
+        backcast re-stamps such a row once instead of walking it again, so
+        narrowing the digest does not itself cost the re-walk it exists to
+        prevent. It blesses nothing else: a row from an older rulebook
+        fails both comparisons and is walked again, as it should be.
+        """
+
+        return self._fingerprint(hazard, prune=False)
+
+    def _prune_non_deciding(self, node: Any, path: str) -> Any:
+        """Drop the keys that decide nothing, wherever in the tree they sit."""
+
+        if not isinstance(node, Mapping):
+            return node
+        out: dict[Any, Any] = {}
+        for key, value in node.items():
+            dotted = f"{path}.{key}" if path else str(key)
+            if dotted in self._NON_DECIDING_KEYS:
+                continue
+            out[key] = self._prune_non_deciding(value, dotted)
+        return out
+
+    def _fingerprint(self, hazard: str, *, prune: bool) -> str:
         import hashlib
         import json as _json
 
+        def _section(key: str) -> Any:
+            value = self.get(key, None)
+            return self._prune_non_deciding(value, key) if prune else value
+
         extra = self._EXTRA_SECTIONS_BY_HAZARD.get(hazard, ())
         payload: dict[str, Any] = {
-            "hazard": {hazard: self.get(hazard, None)},
-            "shared": {
-                key: self.get(key, None) for key in self._SHARED_SECTIONS
-            },
+            "hazard": {hazard: _section(hazard)},
+            "shared": {key: _section(key) for key in self._SHARED_SECTIONS},
         }
         # Only when there is something borrowed. An empty key would move
         # the digest of every hazard that borrows nothing, which would
         # re-walk drought's 114 months for a change that cannot reach them.
         if extra:
-            payload["borrowed"] = {key: self.get(key, None) for key in extra}
+            payload["borrowed"] = {key: _section(key) for key in extra}
         blob = _json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
