@@ -121,9 +121,14 @@ def test_a_refused_event_costs_exactly_one_request():
     connector = core.GdacsConnector()
     best, refused = connector._fetch_event_exposure(_Session(), "FL", "1104004", {})
     assert (best, refused) == (None, 403)
-    assert len(calls) == 1, (
-        f"a refusal must be asked once, not {len(calls)} times — the answer "
-        "to a refusing source is fewer requests, not a harder retry"
+    # Counted per ROUTE since the geteventdata fallback landed: the rule is
+    # that the REFUSING route is asked once, not that an event costs one
+    # request. A different endpoint is a different question, and it is what
+    # recovers an exposure the report tree will never serve.
+    datareport = [u for u in calls if "datareport" in u]
+    assert len(datareport) == 1, (
+        f"a refusal must be asked once, not {len(datareport)} times — the "
+        "answer to a refusing source is fewer requests, not a harder retry"
     )
 
 
