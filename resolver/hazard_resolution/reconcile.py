@@ -400,7 +400,14 @@ def reconcile(
                 "source_urls": [],
                 "retrieved_at": None,
                 "rule_fired": RULE_NO_CANDIDATE,
-                "decision": consulted,
+                # The flag is the machine doubting an answer and must say
+                # WHY on the row: `flagged` alone is one boolean over four
+                # findings that want four different repairs.
+                "decision": {
+                    **consulted,
+                    "conflicts": [],
+                    "flags": [FLAG_NO_CANDIDATE],
+                },
                 "note": (
                     "hazard detected but no rung stated a people-affected figure "
                     "by the freeze deadline; flagged for human review"
