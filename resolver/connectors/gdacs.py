@@ -71,6 +71,25 @@ _EVENT_RSS_PATTERN = (
     "https://www.gdacs.org/datareport/resources/{type}/{eventid}/rss_{eventid}.xml"
 )
 
+# Per-event JSON, the API's own route. The datareport tree above is a
+# published-report artefact and answers 403 for an event GDACS never wrote a
+# report for, which is a statement about the REPORT and not about the event —
+# the API still describes it. Asked once, only after a refusal.
+_EVENT_DATA_PATTERN = (
+    "https://www.gdacs.org/gdacsapi/api/events/geteventdata"
+    "?eventtype={type}&eventid={eventid}"
+)
+
+#: Population-shaped fields in a ``geteventdata`` impacts entry, lowercased.
+#: GDACS names its measures as the field: ``pop39`` and ``pop74`` are the
+#: populations inside the 39 kt and 74 kt wind envelopes of a cyclone, and
+#: ``popaffected`` is the general affected count. They are handed to
+#: :func:`parse_gdacs_population` as the UNIT for that reason — the same
+#: rule that reads ``Pop74`` off the RSS reads them here.
+_EVENT_DATA_POPULATION_FIELDS: frozenset[str] = frozenset(
+    {"pop39", "pop74", "popaffected"}
+)
+
 # GDACS event types we care about
 _WANTED_TYPES = {"DR", "FL", "TC"}
 
@@ -590,6 +609,99 @@ def parse_gdacs_population(
     return None, detail
 
 
+def _population_candidates(node: Any, out: dict[str, Any]) -> None:
+    """Collect every population-shaped field anywhere under ``node``.
+
+    A recursive walk rather than a fixed path, deliberately. The impacts
+    array is where these fields live, but the exact nesting is the vendor's
+    to change and a fixed path answers "absent" for a field that is right
+    there — which is the shape of every silent connector failure in this
+    repository. The walk finds the field wherever GDACS puts it, and the
+    keys actually seen are recorded where it finds nothing, so a changed
+    shape is settled by evidence rather than by re-reading this function.
+    """
+
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if str(key).strip().lower() in _EVENT_DATA_POPULATION_FIELDS:
+                out.setdefault(str(key).strip().lower(), value)
+            else:
+                _population_candidates(value, out)
+    elif isinstance(node, list):
+        for item in node:
+            _population_candidates(item, out)
+
+
+def parse_geteventdata_population(
+    payload: Any,
+) -> tuple[float | None, dict[str, Any]]:
+    """The exposed population from a ``geteventdata`` body, or None.
+
+    Returns ``(people, detail)``. ``detail`` names the field that answered,
+    every population-shaped field seen with its raw value, and — when none
+    answered — the top-level keys the body carried, so a body that changed
+    shape says so in the next run's bundle instead of reading as an event
+    with no exposure.
+
+    Where several fields answer, the LARGEST wins. The figure is used as an
+    upper bound on plausible impact, and a bound set too low rejects correct
+    figures: that is the fault the ceiling multiplier was raised to 3.0 to
+    end, and picking the 74 kt envelope over the 39 kt one would reintroduce
+    it. Every candidate is recorded, so the choice is auditable.
+    """
+
+    detail: dict[str, Any] = {
+        "outcome": "",
+        "field": "",
+        "candidates": {},
+        "keys_seen": [],
+    }
+    impacts = None
+    if isinstance(payload, dict):
+        impacts = payload.get("impacts")
+        if impacts is None and isinstance(payload.get("properties"), dict):
+            impacts = payload["properties"].get("impacts")
+    # Prefer the impacts array the API documents; fall back to the whole
+    # body, because a field moved one level up is still the field.
+    found: dict[str, Any] = {}
+    if impacts is not None:
+        _population_candidates(impacts, found)
+    if not found:
+        _population_candidates(payload, found)
+
+    detail["candidates"] = {k: str(v)[:40] for k, v in found.items()}
+    best_value: float | None = None
+    best_field = ""
+    for field_name, raw in found.items():
+        # The field name IS the unit: `pop74` is in the people set and the
+        # rest start with "pop", which parse_gdacs_population reads as
+        # people. A value it cannot read is UNKNOWN, never the bare number.
+        people, _ = parse_gdacs_population(
+            None if raw is None else str(raw), field_name
+        )
+        if people is None or people <= 0:
+            continue
+        if best_value is None or people > best_value:
+            best_value, best_field = people, field_name
+
+    if best_value is None:
+        detail["outcome"] = "no_population_field"
+        if isinstance(payload, dict):
+            detail["keys_seen"] = sorted(str(k) for k in payload)[:40]
+        LOG.warning(
+            "[gdacs] geteventdata carried no readable population field "
+            "(looked for %s; saw %s) — the exposure is UNKNOWN for this "
+            "event, not zero",
+            ",".join(sorted(_EVENT_DATA_POPULATION_FIELDS)),
+            ",".join(detail["keys_seen"]) or "nothing",
+        )
+        return None, detail
+
+    detail["outcome"] = "ok"
+    detail["field"] = best_field
+    return best_value, detail
+
+
 # ---------------------------------------------------------------------------
 # GdacsConnector
 # ---------------------------------------------------------------------------
@@ -817,19 +929,42 @@ class GdacsConnector:
     ) -> list[dict[str, Any]]:
         """Fetch from static RSS feeds (FL 3m, TC 3m)."""
         all_events: list[dict[str, Any]] = []
-        for etype, url in _STATIC_RSS.items():
-            try:
-                resp = session.get(url, timeout=30)
-                if resp.status_code == 404:
-                    LOG.warning("[gdacs] static RSS 404 for %s: %s", etype, url)
-                    continue
-                resp.raise_for_status()
-                events = self._parse_rss(resp.content, name_to_iso3)
-                LOG.info("[gdacs] static RSS %s: %d events", etype, len(events))
-                all_events.extend(events)
-            except Exception as exc:
-                LOG.warning("[gdacs] error fetching static RSS %s: %s", etype, exc)
+        for etype in _STATIC_RSS:
+            all_events.extend(
+                self.fetch_static_rss_for_type(session, etype, name_to_iso3)
+            )
         return all_events
+
+    def fetch_static_rss_for_type(
+        self,
+        session: requests.Session,
+        etype: str,
+        name_to_iso3: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """One static feed's events, or [] when it cannot be read.
+
+        Split out so the PA machine can borrow it: the 3-month feeds carry
+        ``gdacs:population`` for every event they list, in ONE request, and
+        the machine was paying a per-event request for figures already on
+        the table. Never raises — a feed that cannot be read costs the
+        events it would have covered and nothing else.
+        """
+
+        url = _STATIC_RSS.get(etype)
+        if not url:
+            return []
+        try:
+            resp = session.get(url, timeout=30)
+            if resp.status_code == 404:
+                LOG.warning("[gdacs] static RSS 404 for %s: %s", etype, url)
+                return []
+            resp.raise_for_status()
+            events = self._parse_rss(resp.content, name_to_iso3)
+            LOG.info("[gdacs] static RSS %s: %d events", etype, len(events))
+            return events
+        except Exception as exc:  # noqa: BLE001 - a feed decides nothing on its own
+            LOG.warning("[gdacs] error fetching static RSS %s: %s", etype, exc)
+            return []
 
     def _parse_rss(
         self,
@@ -1230,12 +1365,20 @@ class GdacsConnector:
                     )
                     return None, int(resp.status_code)
                 if resp.status_code in _REFUSAL_STATUS:
-                    # Recorded exactly as a retried refusal is, and asked
-                    # once. The event keeps whatever the cache knows.
+                    # The datareport tree is refusing, and asked once — the
+                    # answer to a refusing source is fewer requests, not a
+                    # harder retry. But a 403 there is a statement about a
+                    # published REPORT that does not exist, not about the
+                    # event, and the API describes the event regardless. So
+                    # one request to the API's own route before giving up.
                     LOG.debug(
-                        "[gdacs] per-event RSS %d for %s/%s — not retried",
+                        "[gdacs] per-event RSS %d for %s/%s — not retried, "
+                        "asking geteventdata once",
                         resp.status_code, etype, eid,
                     )
+                    episode = self._fetch_event_data_exposure(session, etype, eid)
+                    if episode is not None:
+                        return episode, None
                     return None, int(resp.status_code)
                 resp.raise_for_status()
 
@@ -1263,6 +1406,63 @@ class GdacsConnector:
                 return None, None
 
         return None, None
+
+    def _fetch_event_data_exposure(
+        self,
+        session: requests.Session,
+        etype: str,
+        eid: Any,
+    ) -> dict[str, Any] | None:
+        """One request to ``geteventdata``, or None. Never raises.
+
+        The datareport RSS is a published-report artefact: GDACS answers 403
+        for an event it never wrote a report for, which says nothing about
+        whether the event happened or how many people it exposed. The API's
+        own per-event route still describes it, and it is a different host
+        path with a different refusal, so a refusal there is not evidence
+        that this one will refuse.
+
+        Asked exactly once, under the same process-wide pace as every other
+        per-event request. A failure returns None and the caller records the
+        original refusal, so an event GDACS genuinely will not describe is
+        still counted as refused rather than silently carrying no figure.
+        """
+
+        url = _EVENT_DATA_PATTERN.format(type=etype, eventid=eid)
+        try:
+            _ENRICH_LIMITER.acquire()
+            resp = session.get(url, timeout=30)
+            if resp.status_code != 200:
+                LOG.debug(
+                    "[gdacs] geteventdata %d for %s/%s", resp.status_code, etype, eid
+                )
+                return None
+            payload = resp.json()
+        except Exception as exc:  # noqa: BLE001 - a fallback never costs the run
+            LOG.debug("[gdacs] geteventdata failed for %s/%s: %s", etype, eid, exc)
+            return None
+
+        people, detail = parse_geteventdata_population(payload)
+        if people is None or people <= 0:
+            return None
+        LOG.debug(
+            "[gdacs] geteventdata answered for %s/%s: %s = %s",
+            etype, eid, detail["field"], people,
+        )
+        return {
+            "population": people,
+            # The field name is the unit, and is kept verbatim: a ceiling
+            # of 2 against a reported 40,000 is an enrichment failure, and
+            # only the source column says which field produced it.
+            "population_unit": detail["field"],
+            "population_text": "",
+            "population_raw": str(detail["candidates"].get(detail["field"], "")),
+            "population_parse": detail["outcome"],
+            # Which endpoint answered. Without it a figure the datareport
+            # route refused and the API supplied is indistinguishable from
+            # one the datareport route served.
+            "population_source": "geteventdata",
+        }
 
     def _enrich_with_population(
         self,
