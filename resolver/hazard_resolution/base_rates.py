@@ -478,9 +478,19 @@ def compute_all(
     # non-provisional filter excluded it from the quantiles for good. Both
     # callers of the base rates (the nightly backcast and resolver_update
     # Phase 2.5) route through here, so one call site covers both.
-    from resolver.hazard_resolution.resolutions import finalize_frozen_provisionals
+    from resolver.hazard_resolution.resolutions import (
+        backfill_no_candidate_flags,
+        finalize_frozen_provisionals,
+    )
 
     finalize_frozen_provisionals(con, today=today, rulebook=rulebook)
+
+    # Then name the flag on rows the no-candidate branch flagged without
+    # naming — provenance only, no status, value or freeze stamp moves. It
+    # rides here for the same reason: both callers route through this
+    # function, so one call site repairs the live months and the backcast
+    # alike, and it is a no-op once converged.
+    backfill_no_candidate_flags(con)
 
     return {
         "occurrence": compute_occurrence(con, rulebook, hazards=hazards, today=today),
