@@ -77,9 +77,37 @@ _KNOWN_INDICATOR_MATCHES = ("classes", "threshold")
 
 
 def _is_feed_address(value: str) -> bool:
-    """An indicator feed address: an https URL, or an HDX CKAN dataset."""
+    """An indicator feed address.
 
-    return value.startswith("https://") or value.startswith("hdx-ckan://")
+    Three forms: an https URL, an HDX CKAN dataset, or a repository-relative
+    path to a feed this repository GENERATES and commits — the SPEI-3
+    country means are computed once by hand out of a raster and read back
+    like any other feed, because zonal statistics do not belong in a
+    resolution run.
+
+    A committed path is deliberately narrow. It must be relative (so it
+    means one file in every job), must not climb out of the checkout, and
+    must carry a table extension — an accidental bare word in this field
+    is a typo, and reading it as a path would turn the loud validation
+    failure it deserves into a quiet FileNotFoundError at fetch time.
+    """
+
+    if value.startswith("https://") or value.startswith("hdx-ckan://"):
+        return True
+    return _is_committed_feed_path(value)
+
+
+def _is_committed_feed_path(value: str) -> bool:
+    """A repo-relative path to a committed feed file."""
+
+    candidate = value.strip()
+    if not candidate or "://" in candidate or candidate.startswith("/"):
+        return False
+    if ".." in Path(candidate).parts:
+        return False
+    return Path(candidate).suffix.lower() in (".csv", ".json")
+
+
 _KNOWN_INDICATOR_COMBINE = ("any", "all")
 _KNOWN_INDICATOR_DIRECTIONS = ("below", "above")
 _KNOWN_CEILING_SOURCES = ("gdacs_exposed",)

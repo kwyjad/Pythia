@@ -400,11 +400,31 @@ drought:
         request_timeout_sec: 60
         threshold: -1.0
         direction: below
+      # SPEI-3, the three-month water-balance anomaly, as country means
+      # computed ONCE by hand from the Copernicus ERA5 drought grid and
+      # committed: scripts/build_spei3_country_means.py writes this file
+      # and nothing in a Resolver Update calls it. Zonal statistics need a
+      # scientific stack the pipeline does not install and credentials it
+      # does not hold, so the file is the product and the run just reads
+      # it through the tabular provider, exactly as it would a remote feed.
+      #
+      # This is the only drought indicator that reaches back to 2016. HDX
+      # Signals and NMME begin when their ingests began, which is why the
+      # backcast resolves INCONCLUSIVE for most of its window: a cell no
+      # feed NAMED is "not looked at", and one under
+      # min_answered_for_zero cannot rest a zero on absence.
+      #
+      # absence_means_no_drought stays FALSE. This is an anomaly feed, not
+      # an alerting one: a country absent from it is a country nobody
+      # measured, and reading that as "no drought" is how an ingestion gap
+      # becomes a quiet month.
       - name: spei3
         provider: tabular
-        url: ""
+        url: "resolver/data/spei3_country_means.csv"
         required: false
         request_timeout_sec: 60
+        match: threshold
+        absence_means_no_drought: false
         threshold: -1.0
         direction: below
 
