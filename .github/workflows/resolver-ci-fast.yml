@@ -57,6 +57,12 @@ on:
       # and a lint that guards a directory must run when that directory
       # changes.
       - "scripts/build_resolver_debug_bundle.py"
+      # Same reason: guards resolver/tests/test_spei3_country_means.py. The
+      # SPEI-3 country-mean builder is a one-off that runs nowhere near a
+      # resolution run, but the feed it writes IS one of the drought gate's
+      # indicators, and a test file that runs in no workflow is a test file
+      # that runs nowhere.
+      - "scripts/build_spei3_country_means.py"
       - "scripts/ci/make_ai_summary.py"
       - "scripts/ci/run_and_capture.sh"
       - "scripts/ci/validate_python_syntax.py"
@@ -109,6 +115,9 @@ on:
       # and a lint that guards a directory must run when that directory
       # changes.
       - "scripts/build_resolver_debug_bundle.py"
+      # Same reason, on the PR trigger: a test file that runs in no
+      # workflow runs nowhere.
+      - "scripts/build_spei3_country_means.py"
       - "scripts/ci/make_ai_summary.py"
       - "scripts/ci/run_and_capture.sh"
       - "scripts/ci/validate_python_syntax.py"
