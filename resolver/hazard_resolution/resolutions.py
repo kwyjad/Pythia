@@ -27,6 +27,10 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from resolver.hazard_resolution.reconcile import (
+    FLAG_NO_CANDIDATE,
+    RULE_NO_CANDIDATE,
+)
 from resolver.hazard_resolution.rulebook import Rulebook
 from resolver.hazard_resolution.rules import freeze_deadline, is_provisional
 from resolver.hazard_resolution.schema import (
@@ -479,4 +483,74 @@ def finalize_frozen_provisionals(
             "[resolutions] finalized %d provisional row(s) past their freeze deadline",
             before,
         )
+    return int(before)
+
+
+def backfill_no_candidate_flags(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    dry_run: bool = False,
+) -> int:
+    """Name the flag on rows the no-candidate branch flagged without naming.
+
+    ``reconcile``'s no-candidate branch has always returned
+    ``flags=[FLAG_NO_CANDIDATE]`` on the Reconciliation, and the writer has
+    always stamped ``flagged = TRUE`` on the row — but the provenance it
+    wrote set ``"decision": consulted`` bare, with no ``flags`` key at all,
+    while the resolved-value branch and ``drought`` both write
+    ``{**consulted, "conflicts": [...], "flags": [...]}``. So the flag name
+    reached nothing durable: a reader with the row in hand could see that
+    the machine doubted the answer and not which of the four findings it
+    doubted it for, and the four want four different repairs.
+
+    The writer is fixed. This repairs what it already wrote, in place and
+    idempotently: every row that is flagged, fired ``RULE_NO_CANDIDATE``,
+    and carries no ``decision.flags`` gets the flag name and the empty
+    conflicts list the other branches carry.
+
+    This is NOT a revision and is deliberately not gated on the freeze
+    deadline. Nothing about the machine's ANSWER moves — status, value,
+    ``rule_fired``, ``flagged``, ``provisional`` and ``frozen_at`` are all
+    untouched. Only the record of a decision already taken is completed, so
+    a frozen row is as entitled to it as an open one; withholding it would
+    leave the whole backcast permanently unable to say why it was flagged.
+
+    Returns the number of rows repaired (or, on a dry run, the number that
+    would be).
+    """
+
+    ensure_haz_schema(con)
+    patch = json.dumps({"decision": {"conflicts": [], "flags": [FLAG_NO_CANDIDATE]}})
+    # `json_extract` answers NULL for an absent key, which is the whole
+    # filter: a row that already names its flag is left alone, so a second
+    # run is a no-op.
+    where = """
+        WHERE COALESCE(flagged, FALSE)
+          AND rule_fired = ?
+          AND json_extract(provenance_json, '$.decision.flags') IS NULL
+    """
+    before = con.execute(
+        f"SELECT COUNT(*) FROM haz_resolutions {where}", [RULE_NO_CANDIDATE]
+    ).fetchone()[0]
+    if not before:
+        return 0
+    if dry_run:
+        LOG.info(
+            "[resolutions] %d flagged no-candidate row(s) name no flag (dry run)",
+            before,
+        )
+        return int(before)
+    con.execute(
+        f"""
+        UPDATE haz_resolutions
+           SET provenance_json = json_merge_patch(provenance_json, ?)
+        {where}
+        """,
+        [patch, RULE_NO_CANDIDATE],
+    )
+    LOG.info(
+        "[resolutions] named %s on %d flagged no-candidate row(s)",
+        FLAG_NO_CANDIDATE,
+        before,
+    )
     return int(before)
