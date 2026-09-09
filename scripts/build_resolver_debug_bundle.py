@@ -1050,7 +1050,7 @@ class BundleBuilder:
             if rate < self._REFUSAL_RATE_ALARM:
                 continue
             self.extra_issues.append(issue_sources.issue_from_measurement(
-                f"refused_requests_{issue_sources._slug(connector)}",
+                f"refused_requests_{issue_sources.slug(connector)}",
                 f"{connector} was refused {rate:.0%} of its requests "
                 f"({n_4xx} of {requests_made} answered 4xx).",
                 severity=issues_mod.DEGRADED,

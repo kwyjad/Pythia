@@ -46,7 +46,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping
 
 try:  # pragma: no cover - PyYAML is a base dependency; the fallback is belt
     import yaml
@@ -450,7 +450,7 @@ def render_markdown(register: IssueRegister, *, run_label: str = "") -> str:
             f"{issue.cost_text()} | {issue.owner} | "
             f"{'yes' if issue.recovers_on_rerun else 'no'} | {issue.age_text()} |"
         )
-    lines += ["", f"_Counts: " + ", ".join(
+    lines += ["", "_Counts: " + ", ".join(
         f"{counts[name]} {name}" for name in SEVERITY_ORDER) + "._", ""]
 
     for issue in register.issues:

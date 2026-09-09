@@ -66,7 +66,7 @@ class TestTheRefusalRateIsReported:
             for i in range(n_200):
                 fh.write(json.dumps({
                     "connector": "resolver.connectors.gdacs",
-                    "url": f"https://www.gdacs.org/xml/rss_fl_3m.xml",
+                    "url": "https://www.gdacs.org/xml/rss_fl_3m.xml",
                     "status": 200, "elapsed_ms": 300.0, "response_bytes": 90000,
                 }) + "\n")
         return streams

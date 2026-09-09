@@ -44,7 +44,7 @@ def _register_file(tmp_path: Path, *ids: str) -> Path:
             "    first_seen: 2026-08-05",
             "    review_by: 2099-01-01",
             "    recovers_on_rerun: false",
-            f"    note: >-",
+            "    note: >-",
             f"      {issue_id} is upstream and already escalated.",
         ]
     path = tmp_path / "known_issues.yml"

@@ -19,7 +19,7 @@ bundle can pass what it holds in memory and a test can pass a fixture.
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping
 
 from resolver.diagnostics.issues import (
     DEGRADED,
@@ -58,9 +58,20 @@ VINTAGE_ISSUE_IDS: dict[str, str] = {
 }
 
 
-def _slug(text: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "_", str(text).strip().lower()).strip("_")
-    return slug or "unnamed"
+def slug(text: str) -> str:
+    """A stable issue-id fragment from a connector, source or log name.
+
+    Public because an issue id has to be the same string wherever it is
+    minted: a collector here and a caller in the bundle disagreeing by one
+    character is a known-issues entry that suppresses nothing.
+    """
+
+    out = re.sub(r"[^a-z0-9]+", "_", str(text).strip().lower()).strip("_")
+    return out or "unnamed"
+
+
+#: Kept as the internal name this module already used.
+_slug = slug
 
 
 def issues_from_checks(checks: Iterable[Mapping[str, Any]]) -> list[Issue]:
@@ -293,14 +304,8 @@ def issue_from_measurement(
     )
 
 
-#: Re-exported so the bundle can stamp an owner on a check-declared issue
-#: without importing two modules to do it.
-OWNER_EXTERNAL = OWNER_EXTERNAL
-OWNER_PYTHIA = OWNER_PYTHIA
-
-
 __all__ = [
-    "OWNER_EXTERNAL", "OWNER_PYTHIA",
+    "OWNER_EXTERNAL", "OWNER_PYTHIA", "slug",
     "CHECK_ISSUE_IDS", "SOURCE_ISSUE_IDS", "VINTAGE_ISSUE_IDS",
     "issues_from_checks", "issues_from_source_fetches",
     "issues_from_reconciliation", "issues_from_log_histogram",
