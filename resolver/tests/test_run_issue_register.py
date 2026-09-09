@@ -529,3 +529,39 @@ class TestTheShippedRegister:
             _unread_source_records("emdat")
         ))
         assert register.issues[0].severity == mod.DEGRADED
+
+
+class TestTheAnnotationSaysWhenAnEntryIsOverdue:
+    """The Actions annotations are where a reader looks first.
+
+    An overdue entry is the one that most needs looking at — it is a
+    suppression nobody has re-read — and a quiet `::notice::` that says
+    nothing about it reads as settled.
+    """
+
+    def _register(self, tmp_path: Path, review_by: str):
+        path = tmp_path / "known.yml"
+        path.write_text(
+            "issues:\n"
+            "  - id: some_fault\n"
+            "    owner: external\n"
+            "    note: somebody is chasing it\n"
+            f"    review_by: {review_by}\n",
+            encoding="utf-8",
+        )
+        register = mod.IssueRegister(known=mod.KnownIssues.load(path))
+        register.add(mod.Issue(id="some_fault", severity=mod.DEGRADED,
+                               title="a fault", evidence="e"))
+        return register
+
+    def test_an_overdue_entry_says_so_in_the_annotation(self, tmp_path):
+        register = self._register(tmp_path, "2020-01-01")
+        line = mod.render_annotations(register)[0]
+        assert "::notice" in line
+        assert "overdue" in line.lower()
+        assert "2020-01-01" in line
+
+    def test_an_entry_within_its_review_window_stays_quiet(self, tmp_path):
+        register = self._register(tmp_path, "2099-01-01")
+        line = mod.render_annotations(register)[0]
+        assert "overdue" not in line.lower()

@@ -523,6 +523,16 @@ def render_annotations(register: IssueRegister) -> list[str]:
             body += f" (cost: {issue.cost_text()})"
         if issue.severity == KNOWN and issue.note:
             body += f" — known: {issue.note}"
+        if issue.overdue and issue.severity == KNOWN:
+            # The annotations are where a reader looks first, and an
+            # overdue entry is the one that most needs looking at: it is a
+            # suppression nobody has re-read. Saying it in the stdout block
+            # and not here leaves the quiet notice looking settled.
+            title = f"{issue.severity} (overdue): {issue.id}"
+            body += (
+                f" — REGISTER ENTRY OVERDUE: due {issue.review_by}, "
+                "chase it or move the date."
+            )
         out.append(f"::{level} title={_command(title)}::{_command(body)}")
     return out
 
