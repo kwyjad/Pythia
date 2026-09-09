@@ -22,6 +22,7 @@ import datetime as dt
 import json
 from pathlib import Path
 
+import duckdb
 import pytest
 
 from resolver.diagnostics import issue_sources, issues as mod
@@ -565,3 +566,104 @@ class TestTheAnnotationSaysWhenAnEntryIsOverdue:
         register = self._register(tmp_path, "2099-01-01")
         line = mod.render_annotations(register)[0]
         assert "overdue" not in line.lower()
+
+
+class TestTheHistorySurvivesBetweenRuns:
+    """`first_seen` and `runs_seen` need state carried between runs.
+
+    There is only one store that travels: the canonical database, because
+    nothing in CI may push to `main`. So the claim these fields rest on is
+    that a row written before the canonical upload is IN the uploaded file
+    — and the upload copies `data/resolver.duckdb` alone, so a write left
+    in the WAL is uploaded as if it never happened.
+
+    These drive real files rather than `:memory:`, because an in-memory
+    database cannot fail the way a WAL can.
+    """
+
+    def _issue(self, issue_id="some_fault", severity=None):
+        return mod.Issue(
+            id=issue_id, severity=severity or mod.DEGRADED,
+            title="a fault", evidence="e",
+        )
+
+    def _run(self, path, issue_id="some_fault", today=None):
+        con = duckdb.connect(str(path))
+        try:
+            register = mod.IssueRegister()
+            register.apply_history(mod.load_history(con))
+            register.add(self._issue(issue_id))
+            # apply_history runs before add in the real path too; re-apply so
+            # the freshly added issue picks the prior run up.
+            register.apply_history(mod.load_history(con))
+            mod.save_history(con, register, today=today)
+            con.execute("CHECKPOINT")
+            return register
+        finally:
+            con.close()
+
+    def test_a_second_run_counts_the_first(self, tmp_path):
+        db = tmp_path / "resolver.duckdb"
+        first = self._run(db, today=dt.date(2026, 9, 1))
+        assert first.issues[0].runs_seen == 1, (
+            "the first run has seen the fault once — itself"
+        )
+        second = self._run(db, today=dt.date(2026, 9, 9))
+        assert second.issues[0].runs_seen == 2
+
+    def test_first_seen_is_the_first_run_and_never_moves(self, tmp_path):
+        db = tmp_path / "resolver.duckdb"
+        self._run(db, today=dt.date(2026, 8, 1))
+        third = None
+        for day in (dt.date(2026, 8, 15), dt.date(2026, 9, 9)):
+            third = self._run(db, today=day)
+        assert third.issues[0].first_seen == "2026-08-01"
+        assert third.issues[0].runs_seen == 3
+
+    def test_the_history_is_in_the_file_the_upload_copies(self, tmp_path):
+        """The sharp one. The canonical upload copies the .duckdb file and
+        NOT its .wal, so an uncheckpointed write is uploaded as if it had
+        never happened — and the counter silently resets to 1 forever."""
+
+        db = tmp_path / "resolver.duckdb"
+        self._run(db, today=dt.date(2026, 9, 1))
+        uploaded = tmp_path / "uploaded.duckdb"
+        uploaded.write_bytes(db.read_bytes())  # the file alone, no .wal
+
+        con = duckdb.connect(str(uploaded), read_only=True)
+        try:
+            rows = con.execute(
+                f"SELECT issue_id, runs_seen FROM {mod.HISTORY_TABLE}"
+            ).fetchall()
+        finally:
+            con.close()
+        assert rows == [("some_fault", 1)]
+
+    def test_a_run_that_finds_nothing_else_still_records_the_table(self, tmp_path):
+        """A run writing no new rows must not lose the count.
+
+        The table's own CREATE is a write too, which is why the checkpoint
+        runs whether or not a row was written.
+        """
+
+        db = tmp_path / "resolver.duckdb"
+        con = duckdb.connect(str(db))
+        try:
+            mod.save_history(con, mod.IssueRegister())  # no issues at all
+            con.execute("CHECKPOINT")
+        finally:
+            con.close()
+        con = duckdb.connect(str(db), read_only=True)
+        try:
+            tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+        finally:
+            con.close()
+        assert mod.HISTORY_TABLE in tables
+
+    def test_a_history_write_that_fails_costs_the_counter_and_nothing_else(self):
+        class Broken:
+            def execute(self, *a, **k):
+                raise RuntimeError("disk full")
+
+        assert mod.save_history(Broken(), mod.IssueRegister()) == 0
+        assert mod.load_history(Broken()) == {}
