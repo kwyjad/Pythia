@@ -579,6 +579,12 @@ def test_the_register_records_its_history_in_the_travelling_database(
     seen = {i.id: i.runs_seen for i in again.issues}
     assert seen["emdat_auth_rejected"] == 2
 
+    # And the write is CHECKPOINTED, not left in a WAL beside the file. The
+    # canonical upload copies the .duckdb alone, so a write still in the WAL
+    # would be uploaded as if it had never happened and `runs_seen` would
+    # read 1 forever.
+    assert not full_run["db"].with_suffix(".duckdb.wal").exists()
+
 
 def test_redaction_rejects_a_bundle_containing_a_known_secret(tmp_path, full_run, monkeypatch):
     """A bundle meant for a chat window cannot leak. The build must fail."""

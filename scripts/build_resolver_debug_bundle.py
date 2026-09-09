@@ -4520,20 +4520,24 @@ def build_register(
             register.notes.append(problem)
         if write_history:
             try:
-                written = issues_mod.save_history(builder.con, register)
-                # CHECKPOINT then close. This step runs BEFORE the canonical
-                # upload and the upload copies the .duckdb file alone, so a
-                # write still sitting in the WAL would be uploaded as if it
-                # had never happened — the history would reset every run and
-                # `runs_seen` would read 1 forever.
-                if written and builder.con is not None:
+                issues_mod.save_history(builder.con, register)
+            except Exception as exc:  # noqa: BLE001
+                register.notes.append(f"issue history not recorded: {exc}")
+            # CHECKPOINT then close, whether or not a row was written: the
+            # table's own CREATE is a write too. This step runs BEFORE the
+            # canonical upload and the upload copies the .duckdb file alone,
+            # so anything still sitting in the WAL is uploaded as if it had
+            # never happened — the history would reset every run and
+            # `runs_seen` would read 1 forever.
+            if builder.con is not None:
+                try:
                     builder.con.execute("CHECKPOINT")
                     from resolver.db import duckdb_io
 
                     duckdb_io.close_db(builder.con)
                     builder._con = None
-            except Exception as exc:  # noqa: BLE001
-                register.notes.append(f"issue history not recorded: {exc}")
+                except Exception as exc:  # noqa: BLE001
+                    register.notes.append(f"issue history not checkpointed: {exc}")
         return register
     finally:
         if temp_dir:
