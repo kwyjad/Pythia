@@ -15,11 +15,15 @@ HTTP stream, at the cost of no request at all.
 from __future__ import annotations
 
 import datetime as dt
+import json
+from pathlib import Path
 
 import duckdb
 import pytest
 
-from resolver.diagnostics import refusals
+from resolver.diagnostics import refusals, run_log
+
+from scripts import build_resolver_debug_bundle as bundle
 
 
 def _record(url: str, status: int, connector: str = "resolver.connectors.gdacs",
@@ -299,13 +303,6 @@ class TestStateThatTravels:
 # The whole path, rendered
 # ---------------------------------------------------------------------------
 
-from pathlib import Path  # noqa: E402
-
-from resolver.diagnostics import run_log  # noqa: E402
-
-from scripts import build_resolver_debug_bundle as bundle  # noqa: E402
-
-
 def _db(path: Path) -> Path:
     con = duckdb.connect(str(path))
     con.execute("CREATE TABLE facts_resolved (iso3 TEXT, ym TEXT, value DOUBLE)")
@@ -341,9 +338,6 @@ def _run(tmp_path: Path, name: str, run_id: str, db: Path, refused, served):
         staging=root / "reg", environ={"GITHUB_RUN_ID": run_id},
         write_history=False,
     )
-
-
-import json  # noqa: E402
 
 
 class TestTheWholePathRendersIt:
