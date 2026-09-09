@@ -285,12 +285,33 @@ class IssueRegister:
             return issue
         if issue.rank < existing.rank:
             existing.severity = issue.severity
-        if issue.cost is not None:
-            existing.cost = (existing.cost or 0) + issue.cost
-            existing.cost_unit = existing.cost_unit or issue.cost_unit
+        self._merge_cost(existing, issue)
         if issue.evidence and issue.evidence not in existing.evidence:
             existing.evidence = f"{existing.evidence}; {issue.evidence}".strip("; ")
         return existing
+
+    @staticmethod
+    def _merge_cost(existing: Issue, incoming: Issue) -> None:
+        """Add costs ONLY where the two are counting the same thing.
+
+        One fault can be found by two collectors — EM-DAT's lockout shows up
+        as six failed fetches AND as a failed contradiction check counting
+        rows. Adding those gives 29,041 "failed fetches", which is a number
+        in a unit belonging to a different measurement. The second cost is
+        carried into the evidence instead, where it says what it is.
+        """
+
+        if incoming.cost is None:
+            return
+        if existing.cost is None:
+            existing.cost, existing.cost_unit = incoming.cost, incoming.cost_unit
+            return
+        if (existing.cost_unit or "") == (incoming.cost_unit or ""):
+            existing.cost += incoming.cost
+            return
+        note = f"also {incoming.cost_text()}"
+        if note not in existing.evidence:
+            existing.evidence = f"{existing.evidence}; {note}".strip("; ")
 
     def extend(self, issues: Iterable[Issue]) -> None:
         for issue in issues:

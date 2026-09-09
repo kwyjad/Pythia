@@ -318,6 +318,48 @@ class TestCollectors:
         assert issues[0].cost == 3
 
 
+class TestMergingOneFaultFoundTwice:
+    """One fault, two collectors, and a cost that must not lie.
+
+    EM-DAT's lockout arrives twice in a real run: as failed fetches from the
+    source stream, and as a failed contradiction check counting rows. Adding
+    them gave "29,041 failed fetches" — a number wearing the unit of a
+    different measurement, which is the one thing a cost column may never
+    do.
+    """
+
+    def test_costs_in_the_same_unit_are_added(self):
+        register = mod.IssueRegister(known=mod.KnownIssues(entries={}))
+        register.add(mod.Issue(id="x", severity=mod.DEGRADED, title="t",
+                               cost=3, cost_unit="failed fetches"))
+        register.add(mod.Issue(id="x", severity=mod.DEGRADED, title="t",
+                               cost=4, cost_unit="failed fetches"))
+        assert register.issues[0].cost_text() == "7 failed fetches"
+
+    def test_costs_in_different_units_are_never_added(self):
+        register = mod.IssueRegister(known=mod.KnownIssues(entries={}))
+        register.add(mod.Issue(id="x", severity=mod.DEGRADED, title="t",
+                               cost=6, cost_unit="failed fetches"))
+        register.add(mod.Issue(id="x", severity=mod.DEGRADED, title="t",
+                               cost=29035, cost_unit="rows"))
+        issue = register.issues[0]
+        assert issue.cost_text() == "6 failed fetches"
+        assert "also 29,035 rows" in issue.evidence
+
+    def test_a_measured_cost_fills_an_unmeasured_one(self):
+        register = mod.IssueRegister(known=mod.KnownIssues(entries={}))
+        register.add(mod.Issue(id="x", severity=mod.DEGRADED, title="t"))
+        register.add(mod.Issue(id="x", severity=mod.DEGRADED, title="t",
+                               cost=12, cost_unit="rows"))
+        assert register.issues[0].cost_text() == "12 rows"
+
+    def test_the_worse_severity_wins(self):
+        register = mod.IssueRegister(known=mod.KnownIssues(entries={}))
+        register.add(mod.Issue(id="x", severity=mod.INFO, title="t"))
+        register.add(mod.Issue(id="x", severity=mod.DEGRADED, title="t"))
+        assert register.issues[0].severity == mod.DEGRADED
+
+
 class TestRendering:
     def test_an_unmeasured_cost_says_so_rather_than_printing_zero(self):
         """Zero is a claim that the fault cost nothing. Silence is not."""
