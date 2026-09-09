@@ -462,6 +462,122 @@ def test_do_any_two_sources_in_the_run_contradict_each_other(tmp_path, full_run)
 # --------------------------------------------------------------------------
 
 
+def _add_unread_emdat_fetch(streams: Path, n: int = 2) -> None:
+    """The shape EM-DAT produced on every fetch of run 34222175003."""
+
+    with open(streams / "source_fetches.jsonl", "a", encoding="utf-8") as handle:
+        for _ in range(n):
+            handle.write(json.dumps({
+                "source": "emdat", "hazard": "TC", "ym": "2026-08", "ok": False,
+                "records": 0, "inserted": 0, "served_from_cache": False,
+                "failure_class": "auth_rejected",
+                "error": "Invalid key passed or insufficient user access",
+            }) + "\n")
+
+
+def test_the_bundle_leads_with_the_issue_register(tmp_path, full_run):
+    """Q0, and the one a reader hits first: what went wrong and what it cost.
+
+    Run 34222175003 finished green with a failed check, an unread EM-DAT
+    rung and a broken flood ceiling in it. Every one was recorded; none
+    reached anyone. `checks/issues.md` is the answer, and it is only an
+    answer if it is the first thing the README sends the reader to.
+    """
+
+    _add_unread_emdat_fetch(full_run["streams"])
+    out, _ = _build(tmp_path, db_path=full_run["db"],
+                    diagnostics_dir=full_run["diagnostics"],
+                    run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        names = set(zf.namelist())
+        register = json.loads(zf.read("checks/issues.json").decode())
+        markdown = zf.read("checks/issues.md").decode()
+        readme = zf.read("README.md").decode()
+
+    assert {"checks/issues.md", "checks/issues.json"} <= names
+    assert "Run issue register" in markdown
+    # EM-DAT refused every fetch in the fixture stream, and it is a
+    # registered known issue: reported, owned, and not shouted about.
+    by_id = {i["id"]: i for i in register["issues"]}
+    assert by_id["emdat_auth_rejected"]["severity"] == "known"
+    assert by_id["emdat_auth_rejected"]["owner"] == "external"
+
+    first = readme.split("## Where to look first", 1)[1].splitlines()
+    lead = next(line for line in first if line.strip().startswith("1."))
+    assert "checks/issues.md" in lead
+
+
+def test_the_register_the_run_printed_is_the_register_the_bundle_carries(
+    tmp_path, full_run
+):
+    """Two accounts of one run disagreeing is worse than either alone.
+
+    The register is computed and printed BEFORE the canonical upload (the
+    history has to land in the artifact); the bundle is built after. So the
+    bundle copies that file rather than recomputing it.
+    """
+
+    precomputed = {
+        "counts": {"blocking": 0, "degraded": 1, "known": 0, "info": 0},
+        "notes": [],
+        "issues": [{
+            "id": "a_fault_only_the_earlier_step_saw", "severity": "degraded",
+            "title": "computed before the canonical upload", "cost": 3,
+            "cost_unit": "rows", "owner": "pythia", "recovers_on_rerun": True,
+        }],
+    }
+    (full_run["diagnostics"] / "issues.json").write_text(
+        json.dumps(precomputed), encoding="utf-8"
+    )
+    out, manifest = _build(tmp_path, db_path=full_run["db"],
+                           diagnostics_dir=full_run["diagnostics"],
+                           run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        carried = json.loads(zf.read("checks/issues.json").decode())
+
+    assert [i["id"] for i in carried["issues"]] == ["a_fault_only_the_earlier_step_saw"]
+    assert manifest["sections"]["issues"]["detail"]["reused_precomputed"] is True
+
+
+def test_the_register_records_its_history_in_the_travelling_database(
+    tmp_path, full_run
+):
+    """`runs_seen` needs somewhere that survives the runner.
+
+    The canonical DB is the only such place — nothing in CI may push to
+    `main` — which is why the register runs before the canonical upload
+    rather than after it.
+    """
+
+    _add_unread_emdat_fetch(full_run["streams"])
+    register = bundle.build_register(
+        db_path=full_run["db"],
+        diagnostics_dir=full_run["diagnostics"],
+        run_log_dir=full_run["streams"],
+        staging=tmp_path / "register-staging",
+        environ={},
+    )
+    assert any(i.id == "emdat_auth_rejected" for i in register.issues)
+
+    con = duckdb.connect(str(full_run["db"]))
+    rows = dict(con.execute(
+        "SELECT issue_id, runs_seen FROM diagnostic_issue_history"
+    ).fetchall())
+    con.close()
+    assert rows.get("emdat_auth_rejected") == 1
+
+    # A second run of the same fault reads as older, not as new.
+    again = bundle.build_register(
+        db_path=full_run["db"],
+        diagnostics_dir=full_run["diagnostics"],
+        run_log_dir=full_run["streams"],
+        staging=tmp_path / "register-staging-2",
+        environ={},
+    )
+    seen = {i.id: i.runs_seen for i in again.issues}
+    assert seen["emdat_auth_rejected"] == 2
+
+
 def test_redaction_rejects_a_bundle_containing_a_known_secret(tmp_path, full_run, monkeypatch):
     """A bundle meant for a chat window cannot leak. The build must fail."""
 

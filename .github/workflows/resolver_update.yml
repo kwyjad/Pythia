@@ -1115,6 +1115,31 @@ jobs:
           echo "SIGNATURE_OK=true" >> "$GITHUB_ENV"
           echo "signature_ok=true" >> "$GITHUB_OUTPUT"
 
+      # The run issue register. Deliberately BEFORE the canonical upload:
+      # `first_seen` / `runs_seen` live in a table inside the canonical DB
+      # (the only store that travels between runs — nothing in CI may push
+      # to `main`), so the history write has to land in the artifact that
+      # gets uploaded. It runs the contradiction suite itself and writes
+      # diagnostics/issues.json; the debug bundle later COPIES that file
+      # rather than rebuilding it, so the register a person reads here and
+      # the one in the zip cannot disagree.
+      #
+      # continue-on-error and the script's own exit 0: two failed checks
+      # must never throw away a complete ingest. Only a run that could not
+      # write its output belongs anywhere near an exit code.
+      - name: Run issue register
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          python -m scripts.ci.report_run_issues \
+            --db "${BACKFILL_DB_PATH}" \
+            --diagnostics-dir diagnostics \
+            --run-log-dir diagnostics/run_log \
+            2>&1 | tee diagnostics/issue_register.log \
+            || echo "::warning::issue register failed (non-fatal)"
+
       - name: Upload canonical resolver DB
         if: success()
         uses: actions/upload-artifact@v4

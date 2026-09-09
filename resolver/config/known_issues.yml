@@ -1,0 +1,64 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+#
+# Faults already diagnosed, already owned, and not worth re-litigating on
+# every run. An id here is reported at severity `known`: one line in the
+# stdout block, a `::notice::` rather than a `::error::`, and no repetition
+# per occurrence.
+#
+# Registering an issue does NOT hide it. Every entry still appears in the
+# register, still carries its cost, and still names who is chasing it. What
+# it stops is the shouting — and a report that shouts about three faults
+# nobody in this repository can fix is a report the reader learns to skip.
+#
+# `review_by` is the expiry. Past that date the issue still reports at
+# `known` and the report adds one line saying the entry is overdue, because
+# a suppression that never expires is how a known issue becomes an invisible
+# one. An entry with NO review date is treated as overdue from the first run.
+#
+# Fields:
+#   id                 must match the id the collector emits
+#   owner              `external` (someone else must fix it) or `pythia`
+#   note               who is chasing it and what would resolve it
+#   review_by          ISO date; after it, the entry reports as overdue
+#   first_seen         ISO date the fault was first observed
+#   recovers_on_rerun  optional; overrides the collector's judgement
+
+issues:
+  - id: emdat_auth_rejected
+    owner: external
+    first_seen: 2026-08-05
+    review_by: 2026-11-30
+    recovers_on_rerun: false
+    note: >-
+      EM-DAT rejects the configured EMDAT_API_KEY (HTTP 500, "Invalid key
+      passed or insufficient user access"). The connector, the query shape
+      and the transport are all fine; the account or its tier has to change,
+      which is Kevin's to do with EM-DAT. Until then ladder rung 1 is unread
+      and the cache answers where it covers the window. No code change helps.
+
+  - id: acled_cast_stale_vintage
+    owner: external
+    first_seen: 2026-01-15
+    review_by: 2026-11-30
+    recovers_on_rerun: false
+    note: >-
+      ACLED CAST has served the 2025-12-01 vintage since the 2026-01 cycle —
+      281 days against a 45-day threshold as of run 34222175003. Auth
+      succeeds and roughly 9,879 records return, so this is not an outage:
+      ACLED is not publishing current CAST through the API. Escalated to
+      ACLED (access@acleddata.com). The prompt readers already filter on
+      target month, so no past-dated forecast is served.
+
+  - id: views_stale_vintage
+    owner: external
+    first_seen: 2026-07-01
+    review_by: 2026-11-30
+    recovers_on_rerun: false
+    note: >-
+      VIEWS has served the 2026-07-01 vintage since July — 69 days against a
+      45-day threshold as of run 34222175003. Same shape as ACLED CAST: the
+      connector reads the API successfully and the API's newest run is old.
+      Upstream to VIEWS.

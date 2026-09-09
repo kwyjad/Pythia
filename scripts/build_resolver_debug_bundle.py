@@ -66,7 +66,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import convenience
     sys.path.insert(0, str(REPO_ROOT))
 
-from resolver.diagnostics import run_log  # noqa: E402
+from resolver.diagnostics import issue_sources, issues as issues_mod, run_log  # noqa: E402
 from resolver.diagnostics.redaction import (  # noqa: E402
     find_secrets,
     is_secret_name,
@@ -399,6 +399,16 @@ class BundleBuilder:
         self.sections: dict[str, dict[str, Any]] = {}
         self.checks: list[dict[str, Any]] = []
         self.git_info: dict[str, Any] = {}
+        #: (log name, normalised level+line, count) — what the log index
+        #: collapsed, kept so the issue register reads it rather than
+        #: recomputing it and drifting from what the index printed.
+        self.log_shapes: list[tuple[str, str, int]] = []
+        #: One dict per reconciliation row, so the register can read the
+        #: `agrees` verdict without re-deriving it.
+        self.reconciliation_rows: list[dict[str, Any]] = []
+        #: Measurements collected by other sections for the register.
+        self.extra_issues: list[Any] = []
+        self.issue_counts: dict[str, int] = {}
         self._con = None
         self._db_reported = False
         self._tables: set[str] | None = None
@@ -859,6 +869,8 @@ class BundleBuilder:
                 levels[level] += 1
                 if level in ("CRITICAL", "ERROR", "WARNING"):
                     shapes[f"{level}: {_normalise_log_line(line)[:200]}"] += 1
+            for shape, count in shapes.items():
+                self.log_shapes.append((name, shape, count))
             lines.append(f"## {name}")
             lines.append("")
             lines.append(f"- lines: {n_lines}")
@@ -1944,11 +1956,79 @@ class BundleBuilder:
         failed = sum(1 for c in self.checks if c["verdict"] == "FAIL")
         return {"checks": len(self.checks), "failed": failed}
 
-    def _check(self, name: str, verdict: str, left: Any, right: Any, detail: str) -> None:
-        self.checks.append({
+    # -- checks/issues.{md,json} -------------------------------------------
+
+    def build_issues(self) -> dict[str, Any]:
+        """The run issue register: what went wrong, what it cost, who owns it.
+
+        Built from evidence this bundle already holds — contradiction
+        verdicts, the source-fetch stream, the reconciliation verdicts and
+        the collapsed error histogram — never from a second detection path.
+
+        Where the register was already computed and printed before the
+        canonical upload (``--checks-only``), that file is COPIED rather
+        than rebuilt. The register a human read in the Actions log and the
+        one in this zip disagreeing would be worse than either alone.
+        """
+
+        dest = self.path("checks")
+        dest.mkdir(parents=True, exist_ok=True)
+        precomputed = issues_mod.read_register(self.diagnostics_dir / "issues.json")
+        if precomputed is not None:
+            register = precomputed
+            reused = True
+        else:
+            register = self.collect_issues()
+            reused = False
+        issues_mod.write_outputs(
+            register,
+            json_path=dest / "issues.json",
+            markdown_path=dest / "issues.md",
+            run={"github_run_id": self.env.get("GITHUB_RUN_ID", ""),
+                 "commit": (self.git_info or {}).get("commit", "")},
+            run_label=self.env.get("GITHUB_RUN_ID", ""),
+        )
+        counts = register.counts()
+        self.issue_counts = counts
+        return {"reused_precomputed": reused, **counts}
+
+    def collect_issues(self) -> "issues_mod.IssueRegister":
+        """Assemble the register from what this builder has gathered."""
+
+        register = issues_mod.IssueRegister()
+        register.extend(issue_sources.issues_from_checks(self.checks))
+        stream = self._stream_file(self.SOURCE_FETCH_STREAM)
+        if stream is not None:
+            register.extend(issue_sources.issues_from_source_fetches(
+                run_log.read_stream(stream)
+            ))
+        register.extend(issue_sources.issues_from_reconciliation(
+            self.reconciliation_rows
+        ))
+        register.extend(issue_sources.issues_from_log_histogram(self.log_shapes))
+        register.extend(self.extra_issues)
+        register.apply_history(issues_mod.load_history(self.con))
+        return register
+
+    def _check(
+        self, name: str, verdict: str, left: Any, right: Any, detail: str,
+        issues: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Record one check. ``issues`` lets a check name the faults it found.
+
+        Most checks are one fault and their own name says which. A few know
+        more than their name can: the vintage check finds two stale sources
+        and the register wants them apart, because one live source standing
+        for two dead ones is the fault it exists to expose.
+        """
+
+        record: dict[str, Any] = {
             "name": name, "verdict": verdict,
             "left": str(left), "right": str(right), "detail": detail,
-        })
+        }
+        if issues:
+            record["issues"] = issues
+        self.checks.append(record)
 
     def _check_bundle_records_the_checked_out_commit(self) -> None:
         """In CI, git.json must name the commit the workflow ran at, clean."""
@@ -2989,6 +3069,15 @@ class BundleBuilder:
                     agrees = "**NO**"
             elif claimed and touched is None and delta is not None:
                 agrees = "delta only: " + ("yes" if delta > 0 else "unproven")
+            self.reconciliation_rows.append({
+                "connector": cid,
+                "status": record.get("status", "?"),
+                "claimed": claimed,
+                "touched": touched,
+                "table": table,
+                "agrees": agrees,
+                "reason": record.get("reason") or record.get("error") or "",
+            })
             lines.append(
                 f"| {cid} | {record.get('status', '?')} | "
                 f"{counts.get('fetched', '')} | {counts.get('normalized', counts.get('normalised', ''))} | "
@@ -3592,14 +3681,18 @@ class BundleBuilder:
             "",
             "## Where to look first",
             "",
-            "1. `checks/contradictions.md` — two things in this run that disagree.",
-            "2. `logs/log_index.md` — every ERROR and WARNING, collapsed so one",
+            "1. `checks/issues.md` — every distinct fault this run found, worst",
+            "   first, each with what it cost and who owns it. A `known` row is",
+            "   already registered in `resolver/config/known_issues.yml` with an",
+            "   owner and a review date; it is stated once and shouts at nobody.",
+            "2. `checks/contradictions.md` — two things in this run that disagree.",
+            "3. `logs/log_index.md` — every ERROR and WARNING, collapsed so one",
             "   fault repeated 252 times reads as one row with a count.",
-            "3. `checks/reconciliation.md` — what each connector claimed against",
+            "4. `checks/reconciliation.md` — what each connector claimed against",
             "   what its table actually gained.",
-            "4. `hazard/cell_ledger.csv` — for any unresolved hazard cell, the",
+            "5. `hazard/cell_ledger.csv` — for any unresolved hazard cell, the",
             "   reason code saying why it produced no row.",
-            "5. `http/requests.jsonl` and `http/envelopes/` — the URL each",
+            "6. `http/requests.jsonl` and `http/envelopes/` — the URL each",
             "   connector called and what came back, including the response",
             "   fields the connectors themselves discard.",
             "",
@@ -3614,7 +3707,7 @@ class BundleBuilder:
             "| `hazard/` | per-cell and per-figure ledgers, extraction spend, backcast state |",
             "| `config/` | the rulebook, connector configs and workflows, verbatim |",
             "| `code/` | the source files that participated, verbatim |",
-            "| `checks/` | contradictions and connector reconciliation |",
+            "| `checks/` | the issue register, contradictions and reconciliation |",
             "",
             "## Reading the ledgers",
             "",
@@ -3850,6 +3943,73 @@ def _truncate_largest(staging: Path, skip: set[str], keep_lines: int = 2000) -> 
     return f"{target.relative_to(staging).as_posix()}: {original} bytes -> head+tail {half * 2} lines"
 
 
+def build_register(
+    *,
+    db_path: Path | None,
+    diagnostics_dir: Path,
+    run_log_dir: Path | None,
+    staging: Path | None = None,
+    environ: dict[str, str] | None = None,
+    write_history: bool = True,
+) -> "issues_mod.IssueRegister":
+    """The run issue register, without building the zip.
+
+    This exists because of an ordering constraint that cannot be wished
+    away. ``first_seen`` and ``runs_seen`` have to live in the canonical DB
+    — it is the only store that travels between runs, and nothing in CI may
+    push to ``main`` — so the history write has to happen BEFORE the
+    canonical artifact is uploaded. The bundle is built after that upload on
+    purpose, so that a diagnostics failure can never orphan a good ingest.
+    Both constraints are right, and this is what reconciles them: the checks
+    and the register run early and cheaply, the bundle copies the result.
+
+    Sections are limited to the ones the checks actually read — ``http``,
+    ``config`` and ``code`` are the expensive ones and no check touches
+    them. Nothing here raises: a register that fails to build costs the
+    register.
+    """
+
+    temp_dir = None
+    if staging is None:
+        temp_dir = tempfile.mkdtemp(prefix="resolver-issue-register-")
+        staging = Path(temp_dir) / "register"
+    staging.mkdir(parents=True, exist_ok=True)
+    builder = BundleBuilder(
+        out_path=staging / "unused.zip", db_path=db_path,
+        diagnostics_dir=diagnostics_dir, run_log_dir=run_log_dir,
+        staging=staging, environ=environ,
+    )
+    try:
+        builder.section("run", builder.build_run)
+        builder.section("logs", builder.build_logs)
+        builder.section("db", builder.build_db)
+        builder.section("hazard", builder.build_hazard)
+        builder.section("checks", builder.build_checks)
+        register = builder.collect_issues()
+        for problem in builder.problems:
+            register.notes.append(problem)
+        if write_history:
+            try:
+                written = issues_mod.save_history(builder.con, register)
+                # CHECKPOINT then close. This step runs BEFORE the canonical
+                # upload and the upload copies the .duckdb file alone, so a
+                # write still sitting in the WAL would be uploaded as if it
+                # had never happened — the history would reset every run and
+                # `runs_seen` would read 1 forever.
+                if written and builder.con is not None:
+                    builder.con.execute("CHECKPOINT")
+                    from resolver.db import duckdb_io
+
+                    duckdb_io.close_db(builder.con)
+                    builder._con = None
+            except Exception as exc:  # noqa: BLE001
+                register.notes.append(f"issue history not recorded: {exc}")
+        return register
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def build_bundle(
     *,
     out_path: Path,
@@ -3884,6 +4044,8 @@ def build_bundle(
         builder.section("config", builder.build_config)
         builder.section("code", builder.build_code)
         builder.section("checks", builder.build_checks)
+        # After checks: the register reads their verdicts.
+        builder.section("issues", builder.build_issues)
 
         manifest: dict[str, Any] = {
             "bundle_version": BUNDLE_VERSION,
