@@ -53,6 +53,7 @@ through the repo's model registry — the rulebook owns the policy,
 
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 import json
 import logging
@@ -253,6 +254,11 @@ class ExtractionBudget:
     #: timeout, is then what stops it, and a budget stop is recorded per cell
     #: while a timeout records nothing.
     max_calls_per_run: int | None = None
+    #: The backcast's ceiling for TODAY, derived (never configured) from the
+    #: share it has left and the days left in the month. See
+    #: :func:`daily_backcast_ceiling` for why it exists.
+    backcast_max_calls_per_day: int | None = None
+    backcast_used_today: int = 0
 
     def _limits(self) -> list[tuple[str, int]]:
         """Every limit in force, named, so the binding one can be reported."""
@@ -272,6 +278,16 @@ class ExtractionBudget:
                     0,
                     self.backcast_max_calls_per_month
                     - self.backcast_used_this_month
+                    - self.calls_this_run,
+                ),
+            ))
+        if self.backcast_max_calls_per_day is not None:
+            limits.append((
+                "backcast daily share",
+                max(
+                    0,
+                    self.backcast_max_calls_per_day
+                    - self.backcast_used_today
                     - self.calls_this_run,
                 ),
             ))
@@ -309,6 +325,7 @@ class ExtractionBudget:
             "monthly total": self.max_calls_per_month,
             "per-run cap": self.max_calls_per_run,
             "backcast share": self.backcast_max_calls_per_month,
+            "backcast daily share": self.backcast_max_calls_per_day,
             "live reserve": (
                 self.max_calls_per_month - self.live_reserve_calls
                 if self.live_reserve_calls else None
@@ -341,6 +358,43 @@ class ExtractionBudget:
         if self.run_type == "backcast" and self.backcast_max_calls_per_month is not None:
             out["backcast_max_calls_per_month"] = self.backcast_max_calls_per_month
             out["backcast_used_this_month_before_run"] = self.backcast_used_this_month
+        if self.run_type == "backcast" and self.backcast_max_calls_per_day is not None:
+            out["backcast_max_calls_per_day"] = self.backcast_max_calls_per_day
+            out["backcast_used_today_before_run"] = self.backcast_used_today
+        return out
+
+    def headroom(self) -> dict[str, Any]:
+        """What is left, per limit, for the run issue register to report.
+
+        The register carries this at `info` every run and at `degraded` when
+        the backcast's monthly share is spent before the 25th — because a
+        share raced away in one night leaves three weeks of nights with no
+        extraction at all, and `reliefweb_extracted` is the second rung of
+        the impact ladder.
+        """
+
+        out: dict[str, Any] = {
+            "run_type": self.run_type,
+            "monthly_total": self.max_calls_per_month,
+            "monthly_used": self.used_this_month,
+            "monthly_headroom": max(
+                0, self.max_calls_per_month - self.used_this_month
+            ),
+            "binding_limit": self.binding_limit,
+            "remaining": self.remaining,
+        }
+        if self.backcast_max_calls_per_month is not None:
+            out["backcast_share"] = self.backcast_max_calls_per_month
+            out["backcast_used_this_month"] = self.backcast_used_this_month
+            out["backcast_share_headroom"] = max(
+                0, self.backcast_max_calls_per_month - self.backcast_used_this_month
+            )
+        if self.backcast_max_calls_per_day is not None:
+            out["backcast_daily_ceiling"] = self.backcast_max_calls_per_day
+            out["backcast_used_today"] = self.backcast_used_today
+            out["backcast_daily_headroom"] = max(
+                0, self.backcast_max_calls_per_day - self.backcast_used_today
+            )
         return out
 
 
@@ -928,6 +982,71 @@ def calls_this_calendar_month(
     return int(row[0] or 0)
 
 
+def daily_backcast_ceiling(
+    share: int | None, used_this_month: int, today: dt.date | None = None
+) -> int | None:
+    """The backcast's ceiling for TODAY: what is left, spread over what is left.
+
+    A monthly cap alone lets one night take the whole month. On 1 September
+    2026 a single backcast run made 1,998 of a 2,000-call share; by the 8th,
+    2,526 of the monthly 4,000 were spent, leaving 1,474 — below the 1,500
+    live reserve — so the backcast made no extraction calls at all in run
+    34222175003 and 443 cells sat deferred with three weeks of the month
+    still to run. Nothing was misconfigured. The share was raced rather than
+    spread, and ``reliefweb_extracted`` is the second rung of the impact
+    ladder.
+
+    Derived, never configured: the remaining share divided by the days
+    remaining in the calendar month, inclusive of today. A quiet night
+    therefore raises tomorrow's ceiling rather than forfeiting its calls,
+    and an exhausted share gives zero, which is the honest answer. It is a
+    ceiling alongside the monthly cap and never above it — the monthly cap
+    stays the hard bound.
+
+    None where there is no share to spread; the live pass has no daily
+    ceiling because the reserve exists for its benefit.
+    """
+
+    if share is None:
+        return None
+    reference = today or dt.date.today()
+    days_in_month = calendar.monthrange(reference.year, reference.month)[1]
+    days_remaining = max(1, days_in_month - reference.day + 1)
+    remaining_share = max(0, int(share) - int(used_this_month))
+    return remaining_share // days_remaining
+
+
+def calls_today(
+    con: "duckdb.DuckDBPyConnection",
+    today: dt.date | None = None,
+    *,
+    backcast_only: bool = False,
+) -> int:
+    """Extraction calls made TODAY, on the same billing rule as the month.
+
+    Same shape as :func:`calls_this_calendar_month` and for the same
+    reason: only a call that billed tokens consumed anything, and a call
+    that never reached the provider must cost nothing.
+    """
+
+    ensure_haz_schema(con)
+    reference = today or dt.date.today()
+    run_type_clause = (
+        "AND (run_type = 'backcast' OR run_type IS NULL)" if backcast_only else ""
+    )
+    row = con.execute(
+        f"""
+        SELECT COUNT(*) FROM haz_doc_extractions
+        WHERE CAST(created_at AS DATE) = CAST(? AS DATE)
+          AND (status = 'ok'
+               OR COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) > 0)
+          {run_type_clause}
+        """,
+        [reference.isoformat()],
+    ).fetchone()
+    return int(row[0] or 0)
+
+
 #: One-dispatch override of the backcast's share of the monthly extraction
 #: allowance. The rulebook DEFAULT is never touched: a share raised in YAML
 #: is raised for every night thereafter, and the backcast spends whatever it
@@ -1003,6 +1122,8 @@ def load_budget(
 
     backcast_cap: int | None = None
     backcast_used = 0
+    daily_cap: int | None = None
+    used_today = 0
     if run_type == "backcast":
         raw_cap = rulebook.get("extraction.backcast_max_calls_per_month", None)
         backcast_cap = int(raw_cap) if raw_cap is not None else None
@@ -1015,6 +1136,21 @@ def load_budget(
             backcast_used = calls_this_calendar_month(
                 con, today=today, backcast_only=True
             )
+            # The one-dispatch share override deliberately bypasses the
+            # daily ceiling. The ceiling exists to stop the STANDING nightly
+            # job racing its month away; the override exists so an operator
+            # can clear one named backlog in one dispatch, and a ceiling
+            # that bound it would leave the override doing nothing.
+            if (os.getenv(SHARE_OVERRIDE_ENV) or "").strip():
+                daily_cap = None
+                LOG.warning(
+                    "[extract] %s is set, so the derived daily ceiling does not "
+                    "apply to this dispatch — the monthly share is still the bound",
+                    SHARE_OVERRIDE_ENV,
+                )
+            else:
+                daily_cap = daily_backcast_ceiling(backcast_cap, backcast_used, today)
+            used_today = calls_today(con, today=today, backcast_only=True)
     reserve = _reserve_from(rulebook)
     raw_run_cap = rulebook.get("extraction.max_calls_per_run", None)
     run_cap = int(raw_run_cap) if raw_run_cap is not None else None
@@ -1026,6 +1162,8 @@ def load_budget(
         backcast_used_this_month=backcast_used,
         live_reserve_calls=reserve,
         max_calls_per_run=run_cap,
+        backcast_max_calls_per_day=daily_cap,
+        backcast_used_today=used_today,
     )
     LOG.info(
         "[extract] budget: %d of %d extraction calls already made this calendar "
@@ -1035,7 +1173,7 @@ def load_budget(
         budget.remaining,
         (
             f" (backcast share: {backcast_used} of {backcast_cap}; "
-            f"live reserve: {reserve})"
+            f"today: {used_today} of {daily_cap}; live reserve: {reserve})"
             if backcast_cap is not None
             else ""
         ),

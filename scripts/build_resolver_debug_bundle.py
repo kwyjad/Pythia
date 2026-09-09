@@ -46,6 +46,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import calendar
 import csv
 import datetime as dt
 import io
@@ -1873,6 +1874,75 @@ class BundleBuilder:
                       preamble=preamble)
             return
         write_csv(dest / "extraction_budget.csv", result[1], result[0], preamble=preamble)
+        self._report_extraction_headroom(caps)
+
+    #: The day of the month after which a spent backcast share is ordinary
+    #: rather than alarming. Before it, an exhausted share means the rest of
+    #: the month has no document extraction at all, and rung 2 of the impact
+    #: ladder is where the machine reads what people reported.
+    _SHARE_EXHAUSTION_ALARM_DAY = 25
+
+    def _report_extraction_headroom(self, caps: dict[str, Any]) -> None:
+        """Carry the budget into the register: `info`, or `degraded` when raced."""
+
+        total = caps.get("extraction.max_calls_per_month")
+        share = caps.get("extraction.backcast_max_calls_per_month")
+        if total is None:
+            return
+        try:
+            from resolver.hazard_resolution.extract import (
+                calls_this_calendar_month, calls_today, daily_backcast_ceiling,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self.problem(f"extraction headroom unavailable: {exc}")
+        con = self.con
+        if con is None:
+            return
+        try:
+            used = calls_this_calendar_month(con)
+            share_used = calls_this_calendar_month(con, backcast_only=True)
+            today_used = calls_today(con, backcast_only=True)
+        except Exception as exc:  # noqa: BLE001
+            return self.problem(f"extraction headroom unavailable: {exc}")
+
+        today = dt.date.today()
+        daily = daily_backcast_ceiling(share, share_used, today) if share else None
+        monthly_headroom = max(0, int(total) - used)
+        share_headroom = max(0, int(share) - share_used) if share else None
+
+        evidence = (
+            f"{used} of {total} calls used this calendar month "
+            f"({monthly_headroom} left)"
+        )
+        if share is not None:
+            evidence += (
+                f"; backcast share {share_used} of {share} ({share_headroom} left)"
+                f"; today {today_used} of a derived ceiling of {daily}"
+            )
+        self.extra_issues.append(issue_sources.issue_from_measurement(
+            "extraction_budget_headroom",
+            "Extraction budget headroom, monthly and daily.",
+            severity=issues_mod.INFO,
+            evidence=evidence,
+            cost=float(monthly_headroom),
+            cost_unit="calls left this month",
+            source="hazard/extraction_budget.csv",
+        ))
+
+        if share is not None and share_headroom == 0 and today.day < self._SHARE_EXHAUSTION_ALARM_DAY:
+            self.extra_issues.append(issue_sources.issue_from_measurement(
+                "backcast_extraction_share_raced",
+                f"The backcast's monthly extraction share was spent by day "
+                f"{today.day}, so the rest of the month has no document "
+                f"extraction — rung 2 of the impact ladder.",
+                severity=issues_mod.DEGRADED,
+                evidence=evidence,
+                cost=float(
+                    calendar.monthrange(today.year, today.month)[1] - today.day
+                ),
+                cost_unit="days of the month with no extraction",
+                source="hazard/extraction_budget.csv",
+            ))
 
     def _backcast_progress(self, dest: Path) -> None:
         if "haz_backcast_progress" not in self.tables():
@@ -4253,6 +4323,20 @@ def _truncate_largest(staging: Path, skip: set[str], keep_lines: int = 2000) -> 
     )
     target.write_text("\n".join(body) + "\n", encoding="utf-8")
     return f"{target.relative_to(staging).as_posix()}: {original} bytes -> head+tail {half * 2} lines"
+
+
+def read_register_from(staging: Path) -> "issues_mod.IssueRegister":
+    """The register a completed build left in its staging tree.
+
+    A test seam, and the honest one: it reads what the bundle actually
+    wrote rather than re-deriving it, so a register that renders wrongly
+    fails here instead of passing on a second computation of the same data.
+    """
+
+    register = issues_mod.read_register(Path(staging) / "checks" / "issues.json")
+    if register is None:  # pragma: no cover - a built bundle always has one
+        raise FileNotFoundError(f"no checks/issues.json under {staging}")
+    return register
 
 
 def build_register(
