@@ -161,7 +161,10 @@ def gdacs_ceiling_detail(
     usable: list[tuple[float, Candidate]] = []
     for candidate in seen:
         value = (
-            usable_exposure(candidate.value, rulebook)
+            # Judged by the candidate's OWN hazard: whether a GDACS figure
+            # is a population exposure is a property of the feed that
+            # produced it, not of the cell that is reading it.
+            usable_exposure(candidate.value, rulebook, candidate.hazard)
             if rulebook is not None
             else (float(candidate.value) if candidate.value > 0 else None)
         )

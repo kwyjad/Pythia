@@ -520,14 +520,38 @@ sanity:
   # and the Philippines' 6.5 million in November 2025 among them, correct
   # figures wearing a doubt the machine had no basis to raise.
   #
-  # min_plausible_exposure already discards nearly all of it: 68 is a parse
-  # failure, not a bound, so almost every flood cell reports
+  # min_plausible_exposure discarded nearly all of it and left the top of
+  # the range standing, and THAT is the half that turned out to be wrong.
+  # Across the whole of run 34222175003's cell ledger, on rows where GDACS
+  # supplied the ceiling, only TEN flood ceilings ever reached 1,000. Five
+  # of them bound a figure, and all five were wrong by three orders of
+  # magnitude: Libya 2023-09 rejected 1,600,000 (Derna) against 5,300;
+  # Pakistan 2022-06 rejected 7,245,490 against 1,061 and 2022-08 rejected
+  # 3,007,858 against the same; India 2019-06 and 2019-08 rejected 744,499
+  # and 1,563,482 against 1,377. A floor at 1,000 asserts that 1,061 is a
+  # plausible national monthly flood exposure while 68 is not, and nothing
+  # supports that — they are the same field, read the same way, by the same
+  # parser, on the same route. There is no evidence of a second field or a
+  # second route behind the larger values; the ledger records them all with
+  # `ceiling_source: gdacs_exposed`.
+  #
+  # The contrast with cyclone is the whole argument. On flagged rows the
+  # median cyclone figure is 2x its ceiling — a plausibility check catching
+  # a report that modestly exceeds a modelled envelope, which is what a
+  # ceiling is for. The median flood figure is 541x its ceiling, and the
+  # largest 4,235,400x. That is not a ceiling being exceeded; it is two
+  # different quantities being compared.
+  #
+  # So flood takes NO GDACS ceiling at any size, until somebody establishes
+  # what that field carries: `rules.NO_POPULATION_EXPOSURE_HAZARDS`, a code
+  # constant for the reason above — a value here would move the digest of
+  # flood and cyclone alike and re-walk frozen history that the freeze
+  # guard will not let a re-walk change. Every flood cell reports
   # `ceiling_basis: no_usable_gdacs_exposure` and is bounded by the
-  # population share instead. That IS the right answer — an honest absence
-  # beats a bound of 68 — and it is reached by a rule that was written for
-  # a different reason, so the two contradiction checks
+  # population share, which already bounded every flood cell in that run
+  # and is deliberately untouched. Two contradiction checks —
   # `no_positive_resolution_was_measured_against_a_ceiling_of_zero` and
-  # `every_hazard_ceiling_is_the_same_scale_as_the_values_it_bounds` now
+  # `every_hazard_ceiling_is_the_same_scale_as_the_values_it_bounds` —
   # hold it there and say so through the run issue register.
   #
   # Routes considered and rejected as a flood exposure source:

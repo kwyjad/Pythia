@@ -162,10 +162,33 @@ class TestPlausibilityFloor:
             {"exposed_population": 250_000.0, "event_id": "2", "exposed_population_unit": "people"},
         ]
         monkeypatch.setattr(cand_mod.gdacs_mod, "events_for_country_month", lambda *a, **k: events)
-        basis = cand_mod.exposure_ceiling_basis(None, "AFG", "2026-07", "FL", rulebook)
+        # On cyclone, where the GDACS figure IS a national population
+        # exposure. Flood takes no ceiling at any size since Sept 2026
+        # (rules.NO_POPULATION_EXPOSURE_HAZARDS) — the case below.
+        basis = cand_mod.exposure_ceiling_basis(None, "AFG", "2026-07", "TC", rulebook)
         assert basis["value"] == 250_000.0
         assert basis["n_events_below_plausible_floor"] == 1
         assert basis["exposure_units_seen"] == ["people"]
+
+    def test_a_flood_exposure_bounds_nothing_however_large(self, rulebook, monkeypatch):
+        """The floor left the ten largest flood ceilings standing, and all
+        five that ever bound a figure were wrong by three orders of
+        magnitude. Same field, same read: the answer is not a better line."""
+
+        from resolver.hazard_resolution import candidates as cand_mod
+
+        events = [
+            {"exposed_population": 250_000.0, "event_id": "2",
+             "exposed_population_unit": "people"},
+        ]
+        monkeypatch.setattr(cand_mod.gdacs_mod, "events_for_country_month", lambda *a, **k: events)
+        basis = cand_mod.exposure_ceiling_basis(None, "AFG", "2026-07", "FL", rulebook)
+        assert basis["value"] is None
+        assert basis["basis"] == "no_usable_gdacs_exposure"
+        # And the record says which absence this is: GDACS described an
+        # event, and its figure bounds nothing. A blank column said neither.
+        assert basis["n_events"] == 1
+        assert basis["n_events_not_a_population_exposure"] == 1
 
 
 # ---------------------------------------------------------------------------

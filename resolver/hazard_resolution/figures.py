@@ -380,6 +380,12 @@ def apply_ceiling(
     only so existing callers keep working: without it a rejection records
     the number and not its origin, and a ceiling of 2 against a reported
     40,000 cannot be told apart from a genuine mis-transcription.
+
+    It takes no hazard on purpose. A hazard whose GDACS figure is not a
+    population exposure arrives here with no ceiling at all, because
+    :func:`candidates.exposure_ceiling_basis` declines to supply one — and
+    the ceiling that DOES arrive may be the population share, which is a
+    real bound whatever the hazard.
     """
 
     basis = ceiling_basis or {}

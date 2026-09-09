@@ -42,7 +42,10 @@ from resolver.hazard_resolution import emdat as emdat_mod
 from resolver.hazard_resolution import gdacs as gdacs_mod
 from resolver.hazard_resolution import idmc_idu as idu_mod
 from resolver.hazard_resolution import ifrc_go as go_mod
-from resolver.hazard_resolution.rules import usable_exposure
+from resolver.hazard_resolution.rules import (
+    NO_POPULATION_EXPOSURE_HAZARDS,
+    usable_exposure,
+)
 from resolver.hazard_resolution.rulebook import Rulebook
 from resolver.hazard_resolution.schema import ensure_haz_schema
 
@@ -297,7 +300,10 @@ def exposure_ceiling_basis(
     # failure, not a bound (rules.usable_exposure); without a rulebook the
     # historical "> 0" test applies.
     if rulebook is not None:
-        positive = [c for c in events if usable_exposure(c.value, rulebook) is not None]
+        positive = [
+            c for c in events
+            if usable_exposure(c.value, rulebook, c.hazard) is not None
+        ]
     else:
         positive = [c for c in events if c.value > 0]
     implausible = [c for c in events if c.value > 0 and c not in positive]
@@ -320,6 +326,16 @@ def exposure_ceiling_basis(
         "n_events": len(events),
         "n_events_with_exposure": len(positive),
         "n_events_below_plausible_floor": len(implausible),
+        # Set when the hazard's GDACS figure is not a population exposure at
+        # any size (rules.NO_POPULATION_EXPOSURE_HAZARDS). Without it a
+        # reader cannot tell "GDACS described no event" from "GDACS
+        # described six and none of them bounds anything", and the second is
+        # not an enrichment failure to chase.
+        "n_events_not_a_population_exposure": (
+            len(events)
+            if str(hazard).upper() in NO_POPULATION_EXPOSURE_HAZARDS
+            else 0
+        ),
         "exposure_units_seen": units,
         "all_exposures": sorted((float(c.value) for c in events), reverse=True)[:10],
     }

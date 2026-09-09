@@ -37,6 +37,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+from dataclasses import replace as dc_replace
 
 import duckdb
 import pytest
@@ -54,10 +55,18 @@ def rulebook():
     return make_rulebook()
 
 
-def _reconcile(candidates, rulebook, **kwargs):
+#: These cases pin how a GDACS ceiling is RECORDED, which needs a hazard
+#: whose GDACS figure really is a population exposure. Flood's is not — see
+#: rules.NO_POPULATION_EXPOSURE_HAZARDS — and that is a fact about the feed,
+#: not about the provenance machinery under test here.
+CEILING_HAZARD = "TC"
+
+
+def _reconcile(candidates, rulebook, hazard="FL", **kwargs):
     kwargs.setdefault("today", AFTER_FREEZE)
+    candidates = [dc_replace(c, hazard=hazard) for c in candidates]
     return reconcile_mod.reconcile(
-        iso3="PHL", ym=YM, hazard="FL", candidates=candidates,
+        iso3="PHL", ym=YM, hazard=hazard, candidates=candidates,
         rulebook=rulebook, **kwargs,
     )
 
@@ -79,7 +88,7 @@ def test_the_ceiling_names_the_event_that_supplied_it(rulebook):
             make_candidate("emdat", 40_000),
             make_candidate("gdacs", 900_000, source_ref="gdacs-event-1104004"),
         ],
-        rulebook,
+        rulebook, hazard=CEILING_HAZARD,
     )
     ceiling = _ceiling(verdict)
     assert ceiling["basis"] == "gdacs_exposed"
@@ -104,7 +113,7 @@ def test_the_largest_usable_exposure_binds_and_is_the_one_named(rulebook):
             make_candidate("gdacs", 50_000, source_ref="small"),
             make_candidate("gdacs", 800_000, source_ref="large"),
         ],
-        rulebook,
+        rulebook, hazard=CEILING_HAZARD,
     )
     ceiling = _ceiling(verdict)
     assert ceiling["exposed_population"] == 800_000
@@ -181,7 +190,7 @@ def test_effective_ceiling_keeps_its_two_value_contract(rulebook):
     """Existing callers want the number and the word, and still get them."""
 
     value, basis = reconcile_mod.effective_ceiling(
-        [make_candidate("gdacs", 700_000)], rulebook, None
+        [make_candidate("gdacs", 700_000, hazard=CEILING_HAZARD)], rulebook, None
     )
     assert (value, basis) == (700_000, "gdacs_exposed")
 

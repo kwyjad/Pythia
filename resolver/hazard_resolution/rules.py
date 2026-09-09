@@ -116,7 +116,50 @@ def is_provisional(
     return not is_frozen(year, month, rulebook, today=today)
 
 
-def usable_exposure(exposed_population: float | None, rulebook: Rulebook) -> float | None:
+#: Hazards whose GDACS `gdacs:population` figure is NOT a national
+#: population exposure, and therefore cannot bound how many people the
+#: hazard affected. A code constant rather than a rulebook key on purpose:
+#: this is a statement about what a feed carries, of the same kind as the
+#: connector's `_POPULATION_PEOPLE_UNITS`, and not a threshold anybody
+#: should tune. Putting it in `rulebook.yaml` would also move the digest of
+#: flood AND cyclone and re-walk years of frozen history that the freeze
+#: guard will not let a re-walk change — cost with nothing on the other
+#: side of it.
+#:
+#: The evidence, from run 34222175003's cell ledger, on rows where GDACS
+#: itself supplied the ceiling:
+#:
+#:                                   flood            cyclone
+#:   rows                            30,276           34,446
+#:   median ceiling                       0        3,747,249
+#:   largest ceiling ever             5,300      725,467,896
+#:   ceilings at or above 1,000          10            5,025
+#:   median overshoot when flagged      541x               2x
+#:
+#: Same connector, same parser, same column, same table. A cyclone ceiling
+#: flags a figure twice its size, which is a plausibility check working. A
+#: flood ceiling flags one 541 times its size, which is two different
+#: quantities being compared.
+#:
+#: `sanity.min_plausible_exposure` discarded the small ones and left the
+#: ten largest standing, and all five of those that ever bound a figure
+#: were wrong by three orders of magnitude: Libya 2023-09 rejected
+#: 1,600,000 (Derna) against 5,300; Pakistan 2022-06 rejected 7,245,490
+#: against 1,061; Pakistan 2022-08 rejected 3,007,858 against the same;
+#: India 2019-06 and 2019-08 rejected 744,499 and 1,563,482 against 1,377.
+#: A floor at 1,000 asserts that 1,061 is a plausible national monthly
+#: flood exposure while 68 is not, and nothing supports that: they are the
+#: same field read the same way. So flood takes no GDACS ceiling at all
+#: until somebody establishes what that field carries, and the population
+#: share — which already bounds every flood cell in that run — stands.
+NO_POPULATION_EXPOSURE_HAZARDS = frozenset({"FL"})
+
+
+def usable_exposure(
+    exposed_population: float | None,
+    rulebook: Rulebook,
+    hazard: str | None = None,
+) -> float | None:
     """The GDACS exposure as a ceiling basis, or None when it means UNKNOWN.
 
     **An exposure of zero is not a ceiling of zero.** GDACS discovery carries
@@ -139,8 +182,17 @@ def usable_exposure(exposed_population: float | None, rulebook: Rulebook) -> flo
     ``sanity.min_plausible_exposure`` draws the line, and below it the
     exposure means UNKNOWN exactly as a zero does: no ceiling from GDACS,
     and the population-share fallback and national cap take over.
+
+    **And for some hazards the figure is not a population exposure at any
+    size.** See :data:`NO_POPULATION_EXPOSURE_HAZARDS`: for those, GDACS
+    supplies no ceiling however large the number, because a threshold
+    inside a series of wrong numbers yields fewer wrong numbers and a false
+    confidence that the route works at the top end. ``hazard`` defaults to
+    None — an unknown hazard is judged on the number alone, as before.
     """
 
+    if hazard and str(hazard).upper() in NO_POPULATION_EXPOSURE_HAZARDS:
+        return None
     if exposed_population is None:
         return None
     basis = float(exposed_population)
@@ -166,6 +218,14 @@ def within_sanity_ceiling(
     check owned by reconciliation). A non-positive exposure, or one below
     ``sanity.min_plausible_exposure``, is UNKNOWN and applies no ceiling —
     see :func:`usable_exposure` for both halves of that argument.
+
+    It deliberately takes NO hazard. By the time a number reaches here it
+    may be a GDACS exposure or the national population share standing in
+    for a silent GDACS, and the two are different quantities: applying
+    :data:`NO_POPULATION_EXPOSURE_HAZARDS` here removed the population
+    share as well, which is a perfectly good bound and the only one flood
+    cells have left. The rule belongs where a GDACS figure BECOMES a
+    ceiling, which is :func:`usable_exposure`.
     """
 
     ceiling_basis = usable_exposure(exposed_population, rulebook)
