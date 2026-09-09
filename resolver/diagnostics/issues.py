@@ -384,7 +384,7 @@ def render_text(register: IssueRegister, *, run_label: str = "") -> str:
         if not group:
             continue
         header = f"  -- {severity.upper()} ({len(group)}) "
-        lines.append(header + "-" * max(4, len(_BAR) - len(header) + 2))
+        lines.append(header + "-" * max(4, len(_BAR) - len(header)))
         for issue in group:
             lines.append(f"  [{issue.id}] {_one_line(issue.title, 150)}")
             if severity == KNOWN:

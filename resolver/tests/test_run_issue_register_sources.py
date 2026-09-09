@@ -116,9 +116,25 @@ class TestTheBackfillRecoveryRate:
     def _backfill_stream(self, tmp_path: Path, payload: dict) -> Path:
         streams = tmp_path / "runlog"
         streams.mkdir(exist_ok=True)
-        with open(streams / "crisiswatch_backfill.jsonl", "w", encoding="utf-8") as fh:
+        name = bundle.BundleBuilder.CRISISWATCH_BACKFILL_STREAM
+        with open(streams / f"{name}.jsonl", "w", encoding="utf-8") as fh:
             fh.write(json.dumps(payload) + "\n")
         return streams
+
+    def test_the_writer_and_the_reader_name_the_same_stream(self):
+        """Two literals for one contract is a stream nobody reads.
+
+        The scraper runs as its own process and the bundle cannot import it
+        (bs4 is not in the bundle's dependency set), so the name is written
+        twice on purpose. Twice written means once checked.
+        """
+
+        from scripts import refresh_crisiswatch
+
+        assert (
+            refresh_crisiswatch.BACKFILL_STREAM
+            == bundle.BundleBuilder.CRISISWATCH_BACKFILL_STREAM
+        )
 
     def test_a_budget_spent_for_nothing_is_reported_as_such(self, tmp_path):
         """915 seconds, 40 downloads, 0 of 1 editions. The run's own numbers."""
