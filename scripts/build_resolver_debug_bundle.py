@@ -4490,10 +4490,12 @@ def build_register(
     Both constraints are right, and this is what reconciles them: the checks
     and the register run early and cheaply, the bundle copies the result.
 
-    Sections are limited to the ones the checks actually read — ``http``,
-    ``config`` and ``code`` are the expensive ones and no check touches
-    them. Nothing here raises: a register that fails to build costs the
-    register.
+    Sections are limited to the ones the register actually reads. ``config``
+    and ``code`` are the expensive ones and nothing here touches them;
+    ``http`` IS run, because the refusal rate is one of the things the
+    register reports and it is computed there — leaving it out made the
+    GDACS refusals reach the zip and not the person reading the log, which
+    is the fault this whole thing exists to end.
     """
 
     temp_dir = None
@@ -4509,6 +4511,7 @@ def build_register(
     try:
         builder.section("run", builder.build_run)
         builder.section("logs", builder.build_logs)
+        builder.section("http", builder.build_http)
         builder.section("db", builder.build_db)
         builder.section("hazard", builder.build_hazard)
         builder.section("checks", builder.build_checks)

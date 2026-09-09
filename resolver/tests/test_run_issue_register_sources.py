@@ -33,6 +33,24 @@ def _minimal_db(path: Path) -> Path:
     return path
 
 
+def _register_before_the_upload(tmp_path: Path, streams: Path | None = None):
+    """The register as the pre-upload step builds it, which is what prints.
+
+    Separate from the bundle path on purpose. Any collector the early path
+    does not run reaches the zip and never reaches the person reading the
+    Actions log, which is the fault this whole thing exists to end — and it
+    happened once already, to the GDACS refusal rate.
+    """
+
+    diagnostics = tmp_path / "diagnostics"
+    diagnostics.mkdir(exist_ok=True)
+    return bundle.build_register(
+        db_path=_minimal_db(tmp_path / "resolver.duckdb"),
+        diagnostics_dir=diagnostics, run_log_dir=streams,
+        staging=tmp_path / "reg", environ={}, write_history=False,
+    )
+
+
 def _register(tmp_path: Path, streams: Path | None = None):
     diagnostics = tmp_path / "diagnostics"
     diagnostics.mkdir(exist_ok=True)
@@ -249,3 +267,56 @@ class TestTheDfoTableNamesItsWriter:
             / ".github" / "workflows" / "haz_backcast.yml"
         ).read_text(encoding="utf-8")
         assert "resolver.hazard_resolution.dfo" in workflow
+
+
+class TestBothPathsSeeTheSameIssues:
+    """The printed register and the bundled one are one register.
+
+    They are built by two entry points -- one before the canonical upload,
+    where the history has to land, and one after, where the zip is
+    assembled. A collector wired into only the second is a fault that
+    reaches the artifact and never reaches the reader.
+    """
+
+    def _streams(self, tmp_path: Path) -> Path:
+        streams = tmp_path / "runlog"
+        streams.mkdir(exist_ok=True)
+        with open(streams / f"{run_log.STREAM_HTTP}.jsonl", "w", encoding="utf-8") as fh:
+            for i in range(30):
+                fh.write(json.dumps({
+                    "connector": "resolver.connectors.gdacs",
+                    "url": f"https://www.gdacs.org/datareport/resources/FL/{i}/rss_{i}.xml",
+                    "status": 403, "elapsed_ms": 100.0,
+                }) + "\n")
+        with open(streams / "source_fetches.jsonl", "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "source": "emdat", "ok": False, "failure_class": "auth_rejected",
+                "error": "Invalid key",
+            }) + "\n")
+        name = bundle.BundleBuilder.CRISISWATCH_BACKFILL_STREAM
+        with open(streams / f"{name}.jsonl", "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "wanted": ["2026-05"], "recovered": [], "still_missing": ["2026-05"],
+                "snapshots_tried": 40, "snapshots_downloaded": 40,
+                "stopped_early": "download budget (40)",
+            }) + "\n")
+        return streams
+
+    def test_the_early_path_carries_every_issue_the_bundle_path_does(self, tmp_path):
+        streams = self._streams(tmp_path)
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        early = _register_before_the_upload(tmp_path / "a", streams)
+        late = _register(tmp_path / "b", streams)
+
+        early_ids = {i.id for i in early.issues}
+        late_ids = {i.id for i in late.issues}
+        assert late_ids - early_ids == set(), (
+            "these issues reach the zip and never reach the reader: "
+            f"{sorted(late_ids - early_ids)}"
+        )
+        # And the three sources are all present, so the assertion above is
+        # comparing something rather than two empty sets.
+        assert "emdat_auth_rejected" in early_ids
+        assert "crisiswatch_backfill_spends_its_budget_for_nothing" in early_ids
+        assert any(i.startswith("refused_requests_") for i in early_ids)
