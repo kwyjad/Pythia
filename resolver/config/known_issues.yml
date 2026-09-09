@@ -18,6 +18,14 @@
 # a suppression that never expires is how a known issue becomes an invisible
 # one. An entry with NO review date is treated as overdue from the first run.
 #
+# A review date is CHOSEN, per fault, from how long its remedy should
+# reasonably take — not a uniform quarter out, which is a placeholder
+# wearing a date's clothes and never fires while anybody is still looking.
+# Each entry below says which interval it picked and why. When one comes
+# due the answer is to chase it, move the date and say what changed, or
+# delete the entry because it is fixed; leaving it is how a known issue
+# becomes an invisible one.
+#
 # Fields:
 #   id                 must match the id the collector emits
 #   owner              `external` (someone else must fix it) or `pythia`
@@ -30,7 +38,12 @@ issues:
   - id: emdat_auth_rejected
     owner: external
     first_seen: 2026-08-05
-    review_by: 2026-11-30
+    # One month. The remedy is entirely within the owner's reach — renew the
+    # key or raise the account tier with EM-DAT — and needs nobody else's
+    # release cycle, so a month is already generous. Past it as of
+    # 2026-09-09 and reported as overdue, which is the honest reading: the
+    # top ladder rung has been unread for over a month.
+    review_by: 2026-09-05
     recovers_on_rerun: false
     note: >-
       EM-DAT rejects the configured EMDAT_API_KEY (HTTP 500, "Invalid key
@@ -42,7 +55,11 @@ issues:
   - id: acled_cast_stale_vintage
     owner: external
     first_seen: 2026-01-15
-    review_by: 2026-11-30
+    # Six weeks from the September escalation. The remedy is somebody at
+    # ACLED answering a support request, which is a cycle we do not control
+    # and cannot honestly demand inside a fortnight; longer than six weeks
+    # and nobody is chasing it.
+    review_by: 2026-10-15
     recovers_on_rerun: false
     note: >-
       ACLED CAST has served the 2025-12-01 vintage since the 2026-01 cycle —
@@ -55,7 +72,11 @@ issues:
   - id: views_stale_vintage
     owner: external
     first_seen: 2026-07-01
-    review_by: 2026-11-30
+    # Three weeks. Nothing has been escalated yet, and the review is not
+    # "has VIEWS fixed it" but "have we asked" — which is a week's work
+    # nobody has done. A date far enough out to be fair and near enough to
+    # sting.
+    review_by: 2026-10-01
     recovers_on_rerun: false
     note: >-
       VIEWS has served the 2026-07-01 vintage since July — 69 days against a

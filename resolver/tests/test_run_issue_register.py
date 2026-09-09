@@ -18,6 +18,7 @@ blindfold.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -432,6 +433,79 @@ class TestTheShippedRegister:
             assert entry.get("owner") in ("external", "pythia"), issue_id
             assert entry.get("note"), issue_id
             assert entry.get("review_by"), issue_id
+
+    def test_the_review_dates_are_chosen_per_fault_not_stamped_uniformly(self):
+        """One date on every entry is a placeholder wearing a date's clothes.
+
+        Three faults with different remedies — a credential the owner
+        renews, a vendor support request, an escalation nobody has sent —
+        cannot honestly share one review interval. When they do, the date
+        was not chosen; a quarter was picked so nothing would fire.
+        """
+
+        known = mod.KnownIssues.load()
+        dates = {str(e.get("review_by")) for e in known.entries.values()}
+        assert len(dates) == len(known.entries), (
+            f"every entry carries the same review date: {dates}"
+        )
+
+    def test_no_review_date_is_parked_where_it_never_fires(self):
+        """A date years out is a suppression with no expiry, in disguise.
+
+        Anchoring the horizon to `first_seen` would be wrong: a fault can be
+        legitimately old and only recently escalated, which is exactly the
+        ACLED CAST case. What cannot be right is one entry parked far beyond
+        the others, so the test is the SPREAD — it stays meaningful when
+        somebody renews a date, and still catches a 2099 left in the file.
+        """
+
+        known = mod.KnownIssues.load()
+        due = sorted(
+            dt.date.fromisoformat(str(e["review_by"]))
+            for e in known.entries.values()
+        )
+        for issue_id, entry in known.entries.items():
+            first = dt.date.fromisoformat(str(entry["first_seen"]))
+            assert dt.date.fromisoformat(str(entry["review_by"])) > first, issue_id
+        assert (due[-1] - due[0]).days <= 180, (
+            f"review dates span {(due[-1] - due[0]).days} days: "
+            f"{due[0]} to {due[-1]}"
+        )
+
+    def test_every_review_date_says_why_that_interval(self):
+        """A date with no reasoning beside it is a date nobody can revise.
+
+        The next person to reach one of these has to decide whether to chase
+        it or move it, and cannot without knowing what the interval was for.
+        """
+
+        text = mod.KNOWN_ISSUES_PATH.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if not line.strip().startswith("review_by:"):
+                continue
+            preceding = lines[i - 1].strip() if i else ""
+            assert preceding.startswith("#"), (
+                f"line {i + 1} sets a review date with no reason beside it"
+            )
+
+    def test_the_overdue_line_fires_on_the_shipped_register(self):
+        """Held to a pinned date, so it is a property and not the calendar.
+
+        On 2026-09-09 the EM-DAT entry is a month past its review date and
+        the other two are not. That is what a live run prints, and it is the
+        difference between a register that expires and one that does not.
+        """
+
+        known = mod.KnownIssues.load()
+        today = dt.date(2026, 9, 9)
+        overdue = set()
+        for issue_id in known.entries:
+            issue = mod.Issue(id=issue_id, severity=mod.DEGRADED,
+                              title="t", evidence="e")
+            if known.apply(issue, today=today).overdue:
+                overdue.add(issue_id)
+        assert overdue == {"emdat_auth_rejected"}, overdue
 
     def test_the_seeded_ids_match_the_ids_the_collectors_emit(self):
         """A register keyed on an id nothing emits suppresses nothing."""
