@@ -42,6 +42,13 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 from resolver.diagnostics.issues import INFO, OWNER_EXTERNAL, Issue
 from resolver.diagnostics.redaction import redact_text
 
+#: Two runs on one day are ordinary — a scoped verification run beside a
+#: full one — and `recorded_at` is a DATE, so it cannot separate them. A
+#: GitHub run id is a rising integer, so ordering on it numerically settles
+#: the tie; the string fallback keeps a non-numeric id (a test's, a local
+#: run's) ordering sensibly rather than sorting NULL to the front.
+_RUN_ORDER = "TRY_CAST(run_id AS BIGINT) DESC NULLS LAST, run_id DESC"
+
 #: Where the per-run sets live. The canonical DB is the only store that
 #: travels between runs, for the same reason the issue history lives there.
 REFUSAL_TABLE = "diagnostic_refused_resources"
@@ -346,7 +353,7 @@ def previous_run(con: Any, connector: str, current_run_id: str) -> tuple[str, se
         SELECT run_id FROM {REFUSAL_TABLE}
         WHERE connector = ? AND run_id <> ?
         GROUP BY run_id
-        ORDER BY MAX(recorded_at) DESC, run_id DESC
+        ORDER BY MAX(recorded_at) DESC, {_RUN_ORDER}
         LIMIT 1
         """,
         [connector, str(current_run_id)],
@@ -375,7 +382,7 @@ def prune(con: Any, *, keep_runs: int = KEEP_RUNS) -> int:
                 SELECT connector, run_id,
                        ROW_NUMBER() OVER (
                            PARTITION BY connector
-                           ORDER BY MAX(recorded_at) DESC, run_id DESC
+                           ORDER BY MAX(recorded_at) DESC, {_RUN_ORDER}
                        ) AS rn
                 FROM {REFUSAL_TABLE}
                 GROUP BY connector, run_id

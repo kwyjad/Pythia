@@ -243,6 +243,30 @@ class TestStateThatTravels:
         prev_id, _, _ = refusals.previous_run(con, "gdacs", "run2")
         assert prev_id == "run1"
 
+    def test_two_runs_on_one_day_are_ordered_by_run_id(self, con):
+        """Ordinary: a scoped verification run beside a full one.
+
+        recorded_at is a DATE and cannot separate them, so the previous run
+        would otherwise be whichever the table happened to yield.
+        """
+
+        day = dt.date(2026, 9, 9)
+        refusals.save_run(con, "34222175003", self._entry({"a"}, {"a"}), today=day)
+        refusals.save_run(con, "34374766009", self._entry({"b"}, {"b"}), today=day)
+        prev_id, asked, _ = refusals.previous_run(con, "gdacs", "34400000000")
+        assert prev_id == "34374766009"
+        assert asked == {"b"}
+
+    def test_a_non_numeric_run_id_still_orders(self, con):
+        """A local run or a test has no GitHub id, and must not sort to the
+        front of every listing by being unparseable."""
+
+        day = dt.date(2026, 9, 9)
+        refusals.save_run(con, "local-a", self._entry({"a"}, {"a"}), today=day)
+        refusals.save_run(con, "34374766009", self._entry({"b"}, {"b"}), today=day)
+        prev_id, _, _ = refusals.previous_run(con, "gdacs", "later")
+        assert prev_id == "34374766009"
+
     def test_one_connectors_history_is_not_anothers(self, con):
         refusals.save_run(con, "run1", self._entry({"a"}, {"a"}))
         other = refusals.ConnectorRefusals(connector="acled")
