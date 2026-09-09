@@ -46,6 +46,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import calendar
 import csv
 import datetime as dt
 import io
@@ -66,7 +67,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import convenience
     sys.path.insert(0, str(REPO_ROOT))
 
-from resolver.diagnostics import run_log  # noqa: E402
+from resolver.diagnostics import issue_sources, issues as issues_mod, run_log  # noqa: E402
 from resolver.diagnostics.redaction import (  # noqa: E402
     find_secrets,
     is_secret_name,
@@ -357,6 +358,65 @@ def _porcelain_path(line: str) -> str:
 _SUPERSEDES: dict[str, str] = {"idmc_helix": "idmc"}
 
 
+def _ceiling_value_from_provenance(raw: Any) -> float | None:
+    """The ceiling a resolution was measured against, or None if it recorded none.
+
+    The ladder writes the number it actually applied under
+    ``decision.ceiling.exposed_population`` (the key predates the
+    population-share fallback that can now supply it, so the name is wider
+    than it reads); ``value`` is accepted first in case a writer ever states
+    it plainly. A row that names no ceiling is a row with no bound, which is
+    a different thing from a row bounded by zero — telling those two apart
+    is the whole point of asking.
+    """
+
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(payload, dict):
+        return None
+    decision = payload.get("decision")
+    if not isinstance(decision, dict):
+        return None
+    ceiling = decision.get("ceiling")
+    if isinstance(ceiling, dict):
+        ceiling = (
+            ceiling["value"] if ceiling.get("value") is not None
+            else ceiling.get("exposed_population")
+        )
+    if ceiling is None:
+        return None
+    try:
+        return float(ceiling)
+    except (TypeError, ValueError):
+        return None
+
+
+def _looks_like_current_code(raw: Any) -> bool:
+    """True when this provenance was written by code that carries the fix.
+
+    A fault count scoped to what the CURRENT code could have stamped is the
+    only one a reader can act on; history the code can never reach is
+    reported beside it as its own number. The marker is
+    ``decision.ceiling.basis``, added when the ceiling started naming its
+    own origin — the same change that made a non-positive exposure mean
+    UNKNOWN.
+    """
+
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:  # noqa: BLE001
+        return False
+    decision = payload.get("decision") if isinstance(payload, dict) else None
+    ceiling = decision.get("ceiling") if isinstance(decision, dict) else None
+    return isinstance(ceiling, dict) and "basis" in ceiling
+
+
 def _superseded_connectors(records: list[dict]) -> dict[str, str]:
     """``{legacy_id: live_id}`` for pairs where the live one actually ran."""
 
@@ -399,6 +459,16 @@ class BundleBuilder:
         self.sections: dict[str, dict[str, Any]] = {}
         self.checks: list[dict[str, Any]] = []
         self.git_info: dict[str, Any] = {}
+        #: (log name, normalised level+line, count) — what the log index
+        #: collapsed, kept so the issue register reads it rather than
+        #: recomputing it and drifting from what the index printed.
+        self.log_shapes: list[tuple[str, str, int]] = []
+        #: One dict per reconciliation row, so the register can read the
+        #: `agrees` verdict without re-deriving it.
+        self.reconciliation_rows: list[dict[str, Any]] = []
+        #: Measurements collected by other sections for the register.
+        self.extra_issues: list[Any] = []
+        self.issue_counts: dict[str, int] = {}
         self._con = None
         self._db_reported = False
         self._tables: set[str] | None = None
@@ -859,6 +929,8 @@ class BundleBuilder:
                 levels[level] += 1
                 if level in ("CRITICAL", "ERROR", "WARNING"):
                     shapes[f"{level}: {_normalise_log_line(line)[:200]}"] += 1
+            for shape, count in shapes.items():
+                self.log_shapes.append((name, shape, count))
             lines.append(f"## {name}")
             lines.append("")
             lines.append(f"- lines: {n_lines}")
@@ -933,6 +1005,7 @@ class BundleBuilder:
              "n_transport_error", "response_bytes", "median_ms", "max_ms"],
             preamble="Derived from http/requests.jsonl.",
         )
+        self._report_refusal_rates(rows)
 
         envelopes_path = self._stream_file(run_log.STREAM_ENVELOPE)
         envelopes = list(run_log.read_stream(envelopes_path)) if envelopes_path else []
@@ -946,6 +1019,49 @@ class BundleBuilder:
             write_json(env_dir / f"{safe}.json", redact_obj(entries, self.secrets))
         return {"requests": len(records), "envelopes": len(envelopes),
                 "connectors": len(by_connector)}
+
+    #: Above this share of 4xx a connector is being refused rather than
+    #: occasionally missing a record. GDACS answered 403 to 108 of 243
+    #: datareport fetches in run 34222175003 — 44%, scattered through the
+    #: hour — and nothing said so anywhere a person would look.
+    _REFUSAL_RATE_ALARM = 0.20
+
+    #: Below this many requests a rate is arithmetic on noise.
+    _REFUSAL_RATE_MIN_REQUESTS = 20
+
+    def _report_refusal_rates(self, rows: list[list[Any]]) -> None:
+        """Carry a connector's refusal rate into the register.
+
+        Reported, not retried. This repository measured the retry question
+        twice and settled it: cutting GDACS volume by 73% moved the refusal
+        rate 79.6% to 76%, and 153 of 291 events were served on the FIRST
+        request while 138 were refused on all four attempts. A rate limit
+        eases when the rate falls; that one did not. So a 403 is asked once
+        on the refusing route and once on the other, the pace is already a
+        process-wide bucket, and what was missing was anybody being told.
+        """
+
+        for row in rows:
+            connector, requests_made = str(row[0]), int(row[1] or 0)
+            n_4xx = int(row[4] or 0)
+            if requests_made < self._REFUSAL_RATE_MIN_REQUESTS:
+                continue
+            rate = n_4xx / requests_made
+            if rate < self._REFUSAL_RATE_ALARM:
+                continue
+            self.extra_issues.append(issue_sources.issue_from_measurement(
+                f"refused_requests_{issue_sources.slug(connector)}",
+                f"{connector} was refused {rate:.0%} of its requests "
+                f"({n_4xx} of {requests_made} answered 4xx).",
+                severity=issues_mod.DEGRADED,
+                evidence="Reported, not retried: this repository measured the "
+                         "retry question twice and a rate limit that does not "
+                         "ease when the rate falls is not a rate limit. The "
+                         "cache serves what the refusals cost.",
+                cost=float(n_4xx),
+                cost_unit="refused requests",
+                source="http/requests_by_connector.csv",
+            ))
 
     def _stream_file(self, stream: str) -> Path | None:
         if self.run_log_dir is None:
@@ -1055,6 +1171,91 @@ class BundleBuilder:
             or (table.lower(), column.lower()) in self._EXPECTED_FUTURE_PAIRS
         )
 
+    #: Columns that name WHO wrote a row. A table carrying one is several
+    #: feeds sharing a table, and a table-level MAX over it is the newest
+    #: feed answering for all of them: `conflict_forecasts` read FRESH at 7
+    #: days in run 34222175003 while ACLED CAST inside it was 281 days
+    #: stale and VIEWS 69. Freshness is per source where a source exists.
+    _SOURCE_COLUMNS = ("source", "publisher", "source_id")
+
+    #: Above this many distinct sources the split is noise rather than
+    #: signal, and the table-level row still carries the verdict.
+    _MAX_SOURCES_PER_TABLE = 25
+
+    def _source_column_of(self, table: str) -> str | None:
+        names = {name.lower(): name for name, _ in self.columns_of(table)}
+        for candidate in self._SOURCE_COLUMNS:
+            if candidate in names:
+                return names[candidate]
+        return None
+
+    def _sources_in(self, table: str, column: str) -> list[str]:
+        result = self.query(
+            f'SELECT DISTINCT CAST("{column}" AS VARCHAR) FROM "{table}" '
+            f'WHERE "{column}" IS NOT NULL ORDER BY 1'
+        )
+        if result is None:
+            return []
+        values = [str(row[0]) for row in result[1]]
+        return values if len(values) <= self._MAX_SOURCES_PER_TABLE else []
+
+    def _freshness_row(
+        self, table: str, column: str, threshold: int | None,
+        source_column: str | None, source: str | None,
+    ) -> list[Any] | None:
+        """One freshness row, over the whole table or over one source of it.
+
+        The newest value AT OR BEFORE now is what freshness is measured
+        from. A value after now is a period end (an IPC projection window,
+        the current month) or a defect (a publication date in the future);
+        either way its age is negative and "fresh" is the wrong word for
+        it, so it is counted separately rather than allowed to set the
+        verdict.
+        """
+
+        where, params = "", []
+        if source_column and source is not None:
+            where = f' WHERE CAST("{source_column}" AS VARCHAR) = ?'
+            params = [source]
+        result = self.query(
+            f'SELECT MAX(CASE WHEN TRY_CAST("{column}" AS TIMESTAMP) <= CURRENT_TIMESTAMP '
+            f'THEN TRY_CAST("{column}" AS TIMESTAMP) END), '
+            f'COUNT(*), '
+            f'SUM(CASE WHEN TRY_CAST("{column}" AS TIMESTAMP) > CURRENT_TIMESTAMP THEN 1 ELSE 0 END), '
+            f'MAX(TRY_CAST("{column}" AS TIMESTAMP)) '
+            f'FROM "{table}"{where}',
+            params or None,
+        )
+        if result is None or not result[1]:
+            return None
+        newest, n_rows, n_future, newest_any = result[1][0]
+        n_future = int(n_future or 0)
+        age = None
+        if newest is not None:
+            age_result = self.query(
+                "SELECT date_diff('day', CAST(? AS TIMESTAMP), CURRENT_TIMESTAMP)",
+                [newest],
+            )
+            if age_result and age_result[1]:
+                age = age_result[1][0][0]
+        if not n_rows:
+            verdict = "absent"
+        elif newest is None and n_future:
+            verdict = "future_only"
+        elif newest is None:
+            verdict = "no_dates"
+        elif threshold is None or age is None:
+            verdict = "no_threshold"
+        else:
+            verdict = "stale" if age > threshold else "fresh"
+        return [
+            table, column, newest, age, threshold, n_rows, verdict,
+            n_future, newest_any if n_future else "",
+            "yes" if self._future_is_expected(table, column) else "",
+            "table" if source is None else "source",
+            "" if source is None else source,
+        ]
+
     def _freshness(self, dest: Path) -> None:
         rows = []
         for table in sorted(self.tables()):
@@ -1068,53 +1269,38 @@ class BundleBuilder:
             if not date_columns:
                 continue
             threshold = self._STALENESS_DAYS.get(table)
+            source_column = self._source_column_of(table)
+            sources = self._sources_in(table, source_column) if source_column else []
             for column in date_columns:
-                # The newest value AT OR BEFORE now is what freshness is
-                # measured from. A value after now is a period end (an IPC
-                # projection window, the current month) or a defect (a
-                # publication date in the future); either way its age is
-                # negative and "fresh" is the wrong word for it, so it is
-                # counted separately rather than allowed to set the verdict.
-                result = self.query(
-                    f'SELECT MAX(CASE WHEN TRY_CAST("{column}" AS TIMESTAMP) <= CURRENT_TIMESTAMP '
-                    f'THEN TRY_CAST("{column}" AS TIMESTAMP) END), '
-                    f'COUNT(*), '
-                    f'SUM(CASE WHEN TRY_CAST("{column}" AS TIMESTAMP) > CURRENT_TIMESTAMP THEN 1 ELSE 0 END), '
-                    f'MAX(TRY_CAST("{column}" AS TIMESTAMP)) '
-                    f'FROM "{table}"'
-                )
-                if result is None or not result[1]:
+                per_source = [
+                    self._freshness_row(table, column, threshold, source_column, source)
+                    for source in sources
+                ]
+                per_source = [row for row in per_source if row is not None]
+                table_row = self._freshness_row(table, column, threshold, None, None)
+                if table_row is None:
                     continue
-                newest, n_rows, n_future, newest_any = result[1][0]
-                n_future = int(n_future or 0)
-                age = None
-                if newest is not None:
-                    age_result = self.query(
-                        "SELECT date_diff('day', CAST(? AS TIMESTAMP), CURRENT_TIMESTAMP)",
-                        [newest],
+                if per_source:
+                    # The WORST source decides the table's verdict. A MAX
+                    # over the whole table is the newest source answering
+                    # for every source that shares it, which is how one live
+                    # feed came to stand for two dead ones.
+                    worst = max(
+                        per_source,
+                        key=lambda r: (r[3] if r[3] is not None else -1),
                     )
-                    if age_result and age_result[1]:
-                        age = age_result[1][0][0]
-                if n_rows == 0:
-                    verdict = "absent"
-                elif newest is None and n_future:
-                    verdict = "future_only"
-                elif newest is None:
-                    verdict = "no_dates"
-                elif threshold is None or age is None:
-                    verdict = "no_threshold"
-                else:
-                    verdict = "stale" if age > threshold else "fresh"
-                rows.append([
-                    table, column, newest, age, threshold, n_rows, verdict,
-                    n_future, newest_any if n_future else "",
-                    "yes" if self._future_is_expected(table, column) else "",
-                ])
+                    table_row[6] = worst[6]
+                    table_row[11] = (
+                        f"worst of {len(per_source)}: {worst[11]}"
+                    )
+                rows.append(table_row)
+                rows.extend(per_source)
         write_csv(
             dest / "freshness.csv", rows,
             ["table", "date_column", "max_value", "age_days",
              "staleness_threshold_days", "rows", "verdict",
-             "n_future", "max_value_in_future", "future_expected"],
+             "n_future", "max_value_in_future", "future_expected",
+             "scope", "source"],
             preamble=(
                 "Every date-typed or date-named column in every table, with its\n"
                 "newest value AT OR BEFORE the bundle time and that value's age.\n"
@@ -1125,7 +1311,14 @@ class BundleBuilder:
                 "window, the current month) and haz_resolutions.frozen_at (which\n"
                 "holds the freeze DEADLINE, not the moment of freezing) are\n"
                 "expected. A publication_date there is a defect, and\n"
-                "`no_fact_carries_a_publication_date_after_the_run_date` fails on it."
+                "`no_fact_carries_a_publication_date_after_the_run_date` fails on it.\n"
+                "\n"
+                "Where a table carries a source column, freshness is measured PER\n"
+                "SOURCE (`scope=source`) and the table row (`scope=table`) takes the\n"
+                "WORST source's verdict. A table-level MAX is the newest feed\n"
+                "answering for every feed that shares the table: conflict_forecasts\n"
+                "read fresh at 7 days in run 34222175003 while ACLED CAST inside it\n"
+                "was 281 days stale and VIEWS 69."
             ),
         )
 
@@ -1339,7 +1532,88 @@ class BundleBuilder:
         self._extraction_budget(dest)
         self._backcast_progress(dest)
         fetches = self._source_fetches(dest)
+        self._crisiswatch_backfill(dest)
         return {"cells": cells, "figures": figures, "source_fetches": fetches}
+
+    #: The stream `scripts/refresh_crisiswatch.py` writes its accounting to.
+    CRISISWATCH_BACKFILL_STREAM = "crisiswatch_backfill"
+
+    def _crisiswatch_backfill(self, dest: Path) -> None:
+        """The edition backfill's recovery rate, per run.
+
+        Run 34222175003 spent 915 seconds and its entire 40-download budget
+        and recovered 0 of 1 editions. That is a real answer rather than a
+        failure — the archive's captures in that window carry a different
+        edition, so no amount of downloading finds it — but it lived only as
+        28 warnings in a log, so the next run spends the same 15 minutes
+        learning the same thing. The budget is deliberately NOT raised:
+        raising it would spend longer confirming an absence.
+        """
+
+        stream = self._stream_file(self.CRISISWATCH_BACKFILL_STREAM)
+        records = list(run_log.read_stream(stream)) if stream else []
+        if not records:
+            return
+        rows = [[
+            ", ".join(r.get("wanted") or []),
+            ", ".join(r.get("recovered") or []),
+            ", ".join(r.get("still_missing") or []),
+            r.get("snapshots_tried"), r.get("snapshots_downloaded"),
+            r.get("stopped_early") or "",
+        ] for r in records]
+        write_csv(
+            dest / "crisiswatch_backfill.csv", rows,
+            ["wanted", "recovered", "still_missing", "snapshots_tried",
+             "snapshots_downloaded", "stopped_early"],
+            preamble=(
+                "One row per edition-backfill pass. `stopped_early` names the\n"
+                "budget that bound (probes per edition, total downloads, or the\n"
+                "wall clock). A pass that spends its whole download budget and\n"
+                "recovers nothing is the archive saying the edition is not in it,\n"
+                "not a budget too small: every capture in the window carries a\n"
+                "different edition."
+            ),
+        )
+        last = records[-1]
+        wanted = len(last.get("wanted") or [])
+        recovered = len(last.get("recovered") or [])
+        downloads = int(last.get("snapshots_downloaded") or 0)
+        if not wanted:
+            return
+        rate = recovered / wanted
+        evidence = (
+            f"{recovered} of {wanted} edition(s) recovered from "
+            f"{downloads} download(s)"
+            + (f"; stopped early: {last.get('stopped_early')}"
+               if last.get("stopped_early") else "")
+            + (f"; still missing: {', '.join(last.get('still_missing') or [])}"
+               if last.get("still_missing") else "")
+        )
+        if recovered == 0 and last.get("stopped_early"):
+            self.extra_issues.append(issue_sources.issue_from_measurement(
+                "crisiswatch_backfill_spends_its_budget_for_nothing",
+                "The CrisisWatch edition backfill spent its whole budget and "
+                "recovered no edition. The archive's captures in the window "
+                "carry a different edition, so a larger budget would spend "
+                "longer confirming the same absence.",
+                severity=issues_mod.DEGRADED,
+                evidence=evidence,
+                cost=float(downloads),
+                cost_unit="downloads spent for no edition",
+                recovers_on_rerun=False,
+                source="hazard/crisiswatch_backfill.csv",
+            ))
+            return
+        self.extra_issues.append(issue_sources.issue_from_measurement(
+            "crisiswatch_backfill_recovery_rate",
+            f"The CrisisWatch edition backfill recovered {rate:.0%} of the "
+            f"editions it went looking for.",
+            severity=issues_mod.INFO if recovered else issues_mod.DEGRADED,
+            evidence=evidence,
+            cost=float(wanted - recovered),
+            cost_unit="editions still missing",
+            source="hazard/crisiswatch_backfill.csv",
+        ))
 
     #: The run-log stream the EM-DAT connector (and any source that adopts
     #: the same record) writes one line per (source, hazard, month) fetch to.
@@ -1725,6 +1999,94 @@ class BundleBuilder:
                       preamble=preamble)
             return
         write_csv(dest / "extraction_budget.csv", result[1], result[0], preamble=preamble)
+        self._report_extraction_headroom(caps)
+
+    #: The day of the month after which a spent backcast share is ordinary
+    #: rather than alarming. Before it, an exhausted share means the rest of
+    #: the month has no document extraction at all, and rung 2 of the impact
+    #: ladder is where the machine reads what people reported.
+    _SHARE_EXHAUSTION_ALARM_DAY = 25
+
+    def _report_extraction_headroom(self, caps: dict[str, Any]) -> None:
+        """Carry the budget into the register: `info`, or `degraded` when raced."""
+
+        total = caps.get("extraction.max_calls_per_month")
+        share = caps.get("extraction.backcast_max_calls_per_month")
+        if total is None:
+            return
+        try:
+            from resolver.hazard_resolution.extract import (
+                ExtractionBudget, calls_this_calendar_month, calls_today,
+                daily_backcast_ceiling,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self.problem(f"extraction headroom unavailable: {exc}")
+        con = self.con
+        if con is None:
+            return
+        try:
+            used = calls_this_calendar_month(con)
+            share_used = calls_this_calendar_month(con, backcast_only=True)
+            today_used = calls_today(con, backcast_only=True)
+        except Exception as exc:  # noqa: BLE001
+            return self.problem(f"extraction headroom unavailable: {exc}")
+
+        today = dt.date.today()
+        # Built through the budget itself rather than re-derived here: what
+        # "headroom" means has one definition, and a second one in the
+        # reporter would eventually disagree with the one that decides.
+        budget = ExtractionBudget(
+            max_calls_per_month=int(total),
+            used_this_month=used,
+            run_type="backcast" if share is not None else "live",
+            backcast_max_calls_per_month=int(share) if share is not None else None,
+            backcast_used_this_month=share_used,
+            live_reserve_calls=int(caps.get("extraction.live_reserve_calls") or 0),
+            backcast_max_calls_per_day=(
+                daily_backcast_ceiling(int(share), share_used, today)
+                if share is not None else None
+            ),
+            backcast_used_today=today_used,
+        )
+        headroom = budget.headroom()
+        monthly_headroom = headroom["monthly_headroom"]
+        share_headroom = headroom.get("backcast_share_headroom")
+
+        evidence = (
+            f"{used} of {total} calls used this calendar month "
+            f"({monthly_headroom} left)"
+        )
+        if share is not None:
+            evidence += (
+                f"; backcast share {share_used} of {share} ({share_headroom} left)"
+                f"; today {today_used} of a derived ceiling of "
+                f"{headroom.get('backcast_daily_ceiling')}"
+                f"; binding limit {headroom['binding_limit']}"
+            )
+        self.extra_issues.append(issue_sources.issue_from_measurement(
+            "extraction_budget_headroom",
+            "Extraction budget headroom, monthly and daily.",
+            severity=issues_mod.INFO,
+            evidence=evidence,
+            cost=float(monthly_headroom),
+            cost_unit="calls left this month",
+            source="hazard/extraction_budget.csv",
+        ))
+
+        if share is not None and share_headroom == 0 and today.day < self._SHARE_EXHAUSTION_ALARM_DAY:
+            self.extra_issues.append(issue_sources.issue_from_measurement(
+                "backcast_extraction_share_raced",
+                f"The backcast's monthly extraction share was spent by day "
+                f"{today.day}, so the rest of the month has no document "
+                f"extraction — rung 2 of the impact ladder.",
+                severity=issues_mod.DEGRADED,
+                evidence=evidence,
+                cost=float(
+                    calendar.monthrange(today.year, today.month)[1] - today.day
+                ),
+                cost_unit="days of the month with no extraction",
+                source="hazard/extraction_budget.csv",
+            ))
 
     def _backcast_progress(self, dest: Path) -> None:
         if "haz_backcast_progress" not in self.tables():
@@ -1911,6 +2273,8 @@ class BundleBuilder:
             self._check_tc_outlook_issue_dates_parse,
             self._check_forecast_vintages,
             self._check_resolution_above_rejection_ceiling,
+            self._check_no_positive_value_measured_against_a_zero_ceiling,
+            self._check_ceiling_is_the_same_scale_as_the_values_it_bounds,
             self._check_flagged_resolutions_name_their_flag,
             self._check_acled_html_responses,
             self._check_no_past_target_month_served,
@@ -1944,11 +2308,79 @@ class BundleBuilder:
         failed = sum(1 for c in self.checks if c["verdict"] == "FAIL")
         return {"checks": len(self.checks), "failed": failed}
 
-    def _check(self, name: str, verdict: str, left: Any, right: Any, detail: str) -> None:
-        self.checks.append({
+    # -- checks/issues.{md,json} -------------------------------------------
+
+    def build_issues(self) -> dict[str, Any]:
+        """The run issue register: what went wrong, what it cost, who owns it.
+
+        Built from evidence this bundle already holds — contradiction
+        verdicts, the source-fetch stream, the reconciliation verdicts and
+        the collapsed error histogram — never from a second detection path.
+
+        Where the register was already computed and printed before the
+        canonical upload (``--checks-only``), that file is COPIED rather
+        than rebuilt. The register a human read in the Actions log and the
+        one in this zip disagreeing would be worse than either alone.
+        """
+
+        dest = self.path("checks")
+        dest.mkdir(parents=True, exist_ok=True)
+        precomputed = issues_mod.read_register(self.diagnostics_dir / "issues.json")
+        if precomputed is not None:
+            register = precomputed
+            reused = True
+        else:
+            register = self.collect_issues()
+            reused = False
+        issues_mod.write_outputs(
+            register,
+            json_path=dest / "issues.json",
+            markdown_path=dest / "issues.md",
+            run={"github_run_id": self.env.get("GITHUB_RUN_ID", ""),
+                 "commit": (self.git_info or {}).get("commit", "")},
+            run_label=self.env.get("GITHUB_RUN_ID", ""),
+        )
+        counts = register.counts()
+        self.issue_counts = counts
+        return {"reused_precomputed": reused, **counts}
+
+    def collect_issues(self) -> "issues_mod.IssueRegister":
+        """Assemble the register from what this builder has gathered."""
+
+        register = issues_mod.IssueRegister()
+        register.extend(issue_sources.issues_from_checks(self.checks))
+        stream = self._stream_file(self.SOURCE_FETCH_STREAM)
+        if stream is not None:
+            register.extend(issue_sources.issues_from_source_fetches(
+                run_log.read_stream(stream)
+            ))
+        register.extend(issue_sources.issues_from_reconciliation(
+            self.reconciliation_rows
+        ))
+        register.extend(issue_sources.issues_from_log_histogram(self.log_shapes))
+        register.extend(self.extra_issues)
+        register.apply_history(issues_mod.load_history(self.con))
+        return register
+
+    def _check(
+        self, name: str, verdict: str, left: Any, right: Any, detail: str,
+        issues: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Record one check. ``issues`` lets a check name the faults it found.
+
+        Most checks are one fault and their own name says which. A few know
+        more than their name can: the vintage check finds two stale sources
+        and the register wants them apart, because one live source standing
+        for two dead ones is the fault it exists to expose.
+        """
+
+        record: dict[str, Any] = {
             "name": name, "verdict": verdict,
             "left": str(left), "right": str(right), "detail": detail,
-        })
+        }
+        if issues:
+            record["issues"] = issues
+        self.checks.append(record)
 
     def _check_bundle_records_the_checked_out_commit(self) -> None:
         """In CI, git.json must name the commit the workflow ran at, clean."""
@@ -2605,11 +3037,30 @@ class BundleBuilder:
             return
         threshold = self._STALENESS_DAYS["conflict_forecasts"]
         stale = [r for r in result[1] if r[2] is not None and r[2] > threshold]
+        # One issue PER SOURCE. The check's own name can only ever say
+        # "something is stale", and this table's whole failure mode is one
+        # live source standing for the dead ones beside it — the register
+        # has to be able to carry them apart, and to suppress the two that
+        # are already owned without suppressing a third that is not.
+        issues = [{
+            "id": issue_sources.VINTAGE_ISSUE_IDS.get(
+                str(row[0]).strip().lower(),
+                f"stale_vintage_{str(row[0]).strip().lower()}",
+            ),
+            "title": f"{row[0]} has served the {row[1]} vintage for {row[2]} days "
+                     f"(threshold {threshold}).",
+            "evidence": f"latest forecast_issue_date {row[1]}",
+            "cost": float(row[2]),
+            "cost_unit": "days stale",
+            "owner": issue_sources.OWNER_EXTERNAL,
+            "recovers_on_rerun": False,
+        } for row in stale]
         self._check(
             name, "FAIL" if stale else "PASS",
             f"{len(stale)} of {len(result[1])} sources", f"at most {threshold} days",
             "; ".join(f"{r[0]} latest={r[1]} ({r[2]}d)" for r in stale)
             or "Every conflict-forecast source is inside its staleness threshold.",
+            issues=issues,
         )
 
     #: The connectors whose calls go to acleddata.com, by the ids the
@@ -2827,6 +3278,161 @@ class BundleBuilder:
             "disagree about the same cell and one of them is wrong.",
         )
 
+    def _check_no_positive_value_measured_against_a_zero_ceiling(self) -> None:
+        """A ceiling of zero is not a bound. It is a source declining to say.
+
+        In run 34222175003, 1,962 resolved rows carried the
+        ``ceiling_exceeded`` flag — 1,841 of them floods — and the MEDIAN
+        ceiling on those rows was 0.0. Bangladesh's 7.2 million in June
+        2022 was flagged against a bound of nothing, and so were the
+        Philippines' 6.5 million and the DRC's 3.45 million. Those are
+        correct figures wearing a doubt the machine had no basis to raise.
+
+        The current code cannot produce such a row: ``rules.usable_exposure``
+        turns a non-positive exposure, and one below the plausibility floor,
+        into "no ceiling". This check exists so it stays that way, and so
+        the history that predates the fix is counted rather than assumed.
+        """
+
+        name = "no_positive_resolution_was_measured_against_a_ceiling_of_zero"
+        if "haz_resolutions" not in self.tables():
+            return self._check(name, "SKIP", "", "", "haz_resolutions is absent")
+        result = self.query(
+            "SELECT iso3, hazard, printf('%04d-%02d', year, month), value, "
+            "provenance_json, flagged, frozen_at "
+            "FROM haz_resolutions WHERE value IS NOT NULL AND value > 0"
+        )
+        if result is None:
+            return
+        offenders: list[str] = []
+        historical = 0
+        n_with_ceiling = 0
+        for iso3, hazard, ym, value, provenance, flagged, _frozen in result[1]:
+            ceiling = _ceiling_value_from_provenance(provenance)
+            if ceiling is None:
+                continue
+            n_with_ceiling += 1
+            if ceiling > 0:
+                continue
+            line = f"{iso3}/{hazard}/{ym}: {float(value):,.0f} against a ceiling of {ceiling:g}"
+            if flagged:
+                line += " (flagged)"
+            # A row this code could have written is a defect NOW; a row from
+            # before the fix is history, counted and dated, never mixed in
+            # with it. A fault count scoped to what the current code could
+            # have stamped is the only one a reader can act on.
+            if _looks_like_current_code(provenance):
+                offenders.append(line)
+            else:
+                historical += 1
+        if not n_with_ceiling:
+            return self._check(
+                name, "SKIP", "", "",
+                "no resolution records a ceiling in its provenance",
+            )
+        detail = (
+            "; ".join(offenders[:10])
+            or "No positive resolved value is bounded by a ceiling of zero."
+        )
+        if historical:
+            detail += (
+                f" {historical} row(s) predate the usable-exposure rule and carry "
+                "one; they are history this run cannot rewrite (the freeze guard "
+                "owns them) and are reported here rather than counted as a fault."
+            )
+        self._check(
+            name, "FAIL" if offenders else "PASS",
+            f"{len(offenders)} of {n_with_ceiling} rows with a recorded ceiling",
+            "0", detail,
+            issues=[{
+                "id": "resolution_bounded_by_a_zero_ceiling",
+                "title": f"{len(offenders)} resolved value(s) are measured against a "
+                         "ceiling of zero, which is a source declining to say rather "
+                         "than a bound.",
+                "cost": float(len(offenders)),
+                "cost_unit": "resolved rows",
+            }] if offenders else None,
+        )
+
+    #: How far a hazard's ceiling may sit below the values it bounds before
+    #: the ceiling is the thing in doubt. Two orders of magnitude: a
+    #: modelled footprint legitimately differs from reported impact by a
+    #: factor of a few, which is why sanity.ceiling_multiplier is 3.0, but
+    #: not by a hundred.
+    _CEILING_SCALE_TOLERANCE = 100.0
+
+    def _check_ceiling_is_the_same_scale_as_the_values_it_bounds(self) -> None:
+        """A bound a hundred times smaller than the thing it bounds is broken.
+
+        The flood exposure figures GDACS supplies are not a national
+        population exposure. Over 200 months and 5,415 candidate rows the
+        largest FL ``exposed_ceiling`` ever recorded is 5,300 people and the
+        median monthly maximum is 68, while TC — the same machinery, the
+        same parser, the same table — reports 92 million and 968,338. Three
+        to four orders of magnitude apart is not a difference in hazard.
+
+        This does not say what the flood field IS. It says the ceiling and
+        the values it bounds are not the same quantity, which is the
+        statement a reader can act on.
+        """
+
+        name = "every_hazard_ceiling_is_the_same_scale_as_the_values_it_bounds"
+        if "haz_impact_candidates" not in self.tables():
+            return self._check(name, "SKIP", "", "", "haz_impact_candidates is absent")
+        result = self.query(
+            """
+            SELECT hazard,
+                   MEDIAN(CASE WHEN value_type = 'exposed_ceiling' THEN value END),
+                   MEDIAN(CASE WHEN value_type <> 'exposed_ceiling' THEN value END),
+                   COUNT(CASE WHEN value_type = 'exposed_ceiling' THEN 1 END),
+                   COUNT(CASE WHEN value_type <> 'exposed_ceiling' THEN 1 END),
+                   MAX(CASE WHEN value_type = 'exposed_ceiling' THEN value END)
+            FROM haz_impact_candidates
+            GROUP BY hazard ORDER BY hazard
+            """
+        )
+        if result is None or not result[1]:
+            return self._check(name, "SKIP", "", "", "no impact candidates")
+        offenders: list[str] = []
+        rows_seen: list[str] = []
+        for hazard, med_ceiling, med_value, n_ceiling, n_value, max_ceiling in result[1]:
+            if not n_ceiling or not n_value or med_ceiling is None or med_value is None:
+                continue
+            if med_ceiling <= 0:
+                continue
+            ratio = float(med_value) / float(med_ceiling)
+            rows_seen.append(
+                f"{hazard}: median ceiling {float(med_ceiling):,.0f} "
+                f"(max {float(max_ceiling or 0):,.0f}, n={n_ceiling}) vs median "
+                f"reported {float(med_value):,.0f} (n={n_value}) — {ratio:,.0f}x"
+            )
+            if ratio > self._CEILING_SCALE_TOLERANCE:
+                offenders.append(rows_seen[-1])
+        if not rows_seen:
+            return self._check(
+                name, "SKIP", "", "", "no hazard has both a ceiling and a reported value"
+            )
+        self._check(
+            name, "FAIL" if offenders else "PASS",
+            f"{len(offenders)} of {len(rows_seen)} hazards",
+            f"within {self._CEILING_SCALE_TOLERANCE:g}x",
+            " | ".join(rows_seen)
+            + (
+                " — a ceiling that far below the values it bounds is not a bound on "
+                "them; it is a different quantity being read as one."
+                if offenders else ""
+            ),
+            issues=[{
+                "id": "gdacs_ceiling_is_not_the_quantity_it_bounds",
+                "title": "A hazard's GDACS exposure ceiling sits more than two orders "
+                         "of magnitude below the impact figures it is supposed to "
+                         "bound.",
+                "evidence": " | ".join(offenders),
+                "cost": float(len(offenders)),
+                "cost_unit": "hazards",
+            }] if offenders else None,
+        )
+
     def _check_flagged_resolutions_name_their_flag(self) -> None:
         """A flag is the machine doubting an answer. It must say why.
 
@@ -2989,6 +3595,15 @@ class BundleBuilder:
                     agrees = "**NO**"
             elif claimed and touched is None and delta is not None:
                 agrees = "delta only: " + ("yes" if delta > 0 else "unproven")
+            self.reconciliation_rows.append({
+                "connector": cid,
+                "status": record.get("status", "?"),
+                "claimed": claimed,
+                "touched": touched,
+                "table": table,
+                "agrees": agrees,
+                "reason": record.get("reason") or record.get("error") or "",
+            })
             lines.append(
                 f"| {cid} | {record.get('status', '?')} | "
                 f"{counts.get('fetched', '')} | {counts.get('normalized', counts.get('normalised', ''))} | "
@@ -3383,6 +3998,12 @@ class BundleBuilder:
         "hs_triage": "horizon scanner",
         "interpretations": "interpreter (run_sibyl)",
         "forecast_deviation": "compute_deviation (run_sibyl)",
+        # The nightly backcast's, not this workflow's. haz_raw_dfo sat empty
+        # in every Resolver Update bundle and was in neither registry, so
+        # the check said nothing at all about it — and an empty table is a
+        # claim about a writer that the check reading it has to know.
+        "haz_raw_dfo": "resolver.hazard_resolution.dfo (nightly haz_backcast.yml)",
+        "haz_backcast_progress": "haz-backcast (nightly haz_backcast.yml)",
     }
 
     def _check_declared_active_tables_hold_rows(self) -> None:
@@ -3592,14 +4213,18 @@ class BundleBuilder:
             "",
             "## Where to look first",
             "",
-            "1. `checks/contradictions.md` — two things in this run that disagree.",
-            "2. `logs/log_index.md` — every ERROR and WARNING, collapsed so one",
+            "1. `checks/issues.md` — every distinct fault this run found, worst",
+            "   first, each with what it cost and who owns it. A `known` row is",
+            "   already registered in `resolver/config/known_issues.yml` with an",
+            "   owner and a review date; it is stated once and shouts at nobody.",
+            "2. `checks/contradictions.md` — two things in this run that disagree.",
+            "3. `logs/log_index.md` — every ERROR and WARNING, collapsed so one",
             "   fault repeated 252 times reads as one row with a count.",
-            "3. `checks/reconciliation.md` — what each connector claimed against",
+            "4. `checks/reconciliation.md` — what each connector claimed against",
             "   what its table actually gained.",
-            "4. `hazard/cell_ledger.csv` — for any unresolved hazard cell, the",
+            "5. `hazard/cell_ledger.csv` — for any unresolved hazard cell, the",
             "   reason code saying why it produced no row.",
-            "5. `http/requests.jsonl` and `http/envelopes/` — the URL each",
+            "6. `http/requests.jsonl` and `http/envelopes/` — the URL each",
             "   connector called and what came back, including the response",
             "   fields the connectors themselves discard.",
             "",
@@ -3614,7 +4239,7 @@ class BundleBuilder:
             "| `hazard/` | per-cell and per-figure ledgers, extraction spend, backcast state |",
             "| `config/` | the rulebook, connector configs and workflows, verbatim |",
             "| `code/` | the source files that participated, verbatim |",
-            "| `checks/` | contradictions and connector reconciliation |",
+            "| `checks/` | the issue register, contradictions and reconciliation |",
             "",
             "## Reading the ledgers",
             "",
@@ -3850,6 +4475,94 @@ def _truncate_largest(staging: Path, skip: set[str], keep_lines: int = 2000) -> 
     return f"{target.relative_to(staging).as_posix()}: {original} bytes -> head+tail {half * 2} lines"
 
 
+def read_register_from(staging: Path) -> "issues_mod.IssueRegister":
+    """The register a completed build left in its staging tree.
+
+    A test seam, and the honest one: it reads what the bundle actually
+    wrote rather than re-deriving it, so a register that renders wrongly
+    fails here instead of passing on a second computation of the same data.
+    """
+
+    register = issues_mod.read_register(Path(staging) / "checks" / "issues.json")
+    if register is None:  # pragma: no cover - a built bundle always has one
+        raise FileNotFoundError(f"no checks/issues.json under {staging}")
+    return register
+
+
+def build_register(
+    *,
+    db_path: Path | None,
+    diagnostics_dir: Path,
+    run_log_dir: Path | None,
+    staging: Path | None = None,
+    environ: dict[str, str] | None = None,
+    write_history: bool = True,
+) -> "issues_mod.IssueRegister":
+    """The run issue register, without building the zip.
+
+    This exists because of an ordering constraint that cannot be wished
+    away. ``first_seen`` and ``runs_seen`` have to live in the canonical DB
+    — it is the only store that travels between runs, and nothing in CI may
+    push to ``main`` — so the history write has to happen BEFORE the
+    canonical artifact is uploaded. The bundle is built after that upload on
+    purpose, so that a diagnostics failure can never orphan a good ingest.
+    Both constraints are right, and this is what reconciles them: the checks
+    and the register run early and cheaply, the bundle copies the result.
+
+    Sections are limited to the ones the register actually reads. ``config``
+    and ``code`` are the expensive ones and nothing here touches them;
+    ``http`` IS run, because the refusal rate is one of the things the
+    register reports and it is computed there — leaving it out made the
+    GDACS refusals reach the zip and not the person reading the log, which
+    is the fault this whole thing exists to end.
+    """
+
+    temp_dir = None
+    if staging is None:
+        temp_dir = tempfile.mkdtemp(prefix="resolver-issue-register-")
+        staging = Path(temp_dir) / "register"
+    staging.mkdir(parents=True, exist_ok=True)
+    builder = BundleBuilder(
+        out_path=staging / "unused.zip", db_path=db_path,
+        diagnostics_dir=diagnostics_dir, run_log_dir=run_log_dir,
+        staging=staging, environ=environ,
+    )
+    try:
+        builder.section("run", builder.build_run)
+        builder.section("logs", builder.build_logs)
+        builder.section("http", builder.build_http)
+        builder.section("db", builder.build_db)
+        builder.section("hazard", builder.build_hazard)
+        builder.section("checks", builder.build_checks)
+        register = builder.collect_issues()
+        for problem in builder.problems:
+            register.notes.append(problem)
+        if write_history:
+            try:
+                issues_mod.save_history(builder.con, register)
+            except Exception as exc:  # noqa: BLE001
+                register.notes.append(f"issue history not recorded: {exc}")
+            # CHECKPOINT then close, whether or not a row was written: the
+            # table's own CREATE is a write too. This step runs BEFORE the
+            # canonical upload and the upload copies the .duckdb file alone,
+            # so anything still sitting in the WAL is uploaded as if it had
+            # never happened — the history would reset every run and
+            # `runs_seen` would read 1 forever.
+            if builder.con is not None:
+                try:
+                    builder.con.execute("CHECKPOINT")
+                    from resolver.db import duckdb_io
+
+                    duckdb_io.close_db(builder.con)
+                    builder._con = None
+                except Exception as exc:  # noqa: BLE001
+                    register.notes.append(f"issue history not checkpointed: {exc}")
+        return register
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def build_bundle(
     *,
     out_path: Path,
@@ -3884,6 +4597,8 @@ def build_bundle(
         builder.section("config", builder.build_config)
         builder.section("code", builder.build_code)
         builder.section("checks", builder.build_checks)
+        # After checks: the register reads their verdicts.
+        builder.section("issues", builder.build_issues)
 
         manifest: dict[str, Any] = {
             "bundle_version": BUNDLE_VERSION,

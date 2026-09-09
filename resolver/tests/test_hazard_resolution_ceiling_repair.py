@@ -38,11 +38,48 @@ def rulebook():
 
 class TestPopulationUnit:
     def test_people_units_pass_the_value_through(self):
-        for unit in ("people", "Pop74", "Population in 100km", ""):
+        for unit in ("people", "Pop74", "Population in 100km"):
             value, detail = parse_gdacs_population("1300", unit, "1300 people in the flooded area")
             assert value == 1300.0, unit
             assert detail["raw_unit"] == unit
             assert detail["text"].startswith("1300 people")
+
+    def test_an_absent_unit_is_unknown_not_a_count_of_people(self, caplog):
+        """The empty string used to be in the people set. It is the fault.
+
+        A value GDACS had not labelled was read as a count of people, so an
+        absent measurement became a measurement — and a 0 with no unit
+        became a measurement of zero, which then served as an upper bound on
+        how many people a flood could have affected. This assertion is the
+        one that would have caught it in 2010, and it was written the wrong
+        way round.
+        """
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            value, detail = parse_gdacs_population(
+                "1300", "", "1300 people in the flooded area"
+            )
+        assert value is None
+        assert detail["outcome"] == "no_unit"
+        assert any("no unit" in r.message for r in caplog.records)
+
+    def test_a_zero_with_no_unit_is_unknown_rather_than_a_ceiling_of_zero(self):
+        value, detail = parse_gdacs_population("0", None, "")
+        assert value is None
+        assert detail["outcome"] == "no_unit"
+
+    def test_an_absent_unit_and_an_unrecognised_one_are_told_apart(self):
+        """Both are UNKNOWN and they want different repairs.
+
+        No label at all says the feed publishes none; a label this parser
+        does not know says the feed publishes one we have not read. A ledger
+        that collapses the two sends the reader to the wrong place.
+        """
+
+        assert parse_gdacs_population("5", "")[1]["outcome"] == "no_unit"
+        assert parse_gdacs_population("5", "furlongs")[1]["outcome"] == "unrecognised_unit"
 
     def test_a_multiplicative_unit_is_scaled_never_taken_bare(self):
         assert parse_gdacs_population("1.67", "Million")[0] == pytest.approx(1_670_000.0)

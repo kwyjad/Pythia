@@ -63,6 +63,10 @@ on:
       # indicators, and a test file that runs in no workflow is a test file
       # that runs nowhere.
       - "scripts/build_spei3_country_means.py"
+      # The run issue register: the report a human reads at the end of a
+      # run, and the register of already-owned faults it suppresses on.
+      # Guards resolver/tests/test_run_issue_register.py.
+      - "scripts/ci/report_run_issues.py"
       - "scripts/ci/make_ai_summary.py"
       - "scripts/ci/run_and_capture.sh"
       - "scripts/ci/validate_python_syntax.py"
@@ -118,6 +122,10 @@ on:
       # Same reason, on the PR trigger: a test file that runs in no
       # workflow runs nowhere.
       - "scripts/build_spei3_country_means.py"
+      # The run issue register: the report a human reads at the end of a
+      # run, and the register of already-owned faults it suppresses on.
+      # Guards resolver/tests/test_run_issue_register.py.
+      - "scripts/ci/report_run_issues.py"
       - "scripts/ci/make_ai_summary.py"
       - "scripts/ci/run_and_capture.sh"
       - "scripts/ci/validate_python_syntax.py"

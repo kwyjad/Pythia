@@ -15,6 +15,8 @@ drops code before evidence and says so.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import zipfile
 from pathlib import Path
@@ -460,6 +462,128 @@ def test_do_any_two_sources_in_the_run_contradict_each_other(tmp_path, full_run)
 # --------------------------------------------------------------------------
 # Properties that decide whether the bundle is usable at all
 # --------------------------------------------------------------------------
+
+
+def _add_unread_emdat_fetch(streams: Path, n: int = 2) -> None:
+    """The shape EM-DAT produced on every fetch of run 34222175003."""
+
+    with open(streams / "source_fetches.jsonl", "a", encoding="utf-8") as handle:
+        for _ in range(n):
+            handle.write(json.dumps({
+                "source": "emdat", "hazard": "TC", "ym": "2026-08", "ok": False,
+                "records": 0, "inserted": 0, "served_from_cache": False,
+                "failure_class": "auth_rejected",
+                "error": "Invalid key passed or insufficient user access",
+            }) + "\n")
+
+
+def test_the_bundle_leads_with_the_issue_register(tmp_path, full_run):
+    """Q0, and the one a reader hits first: what went wrong and what it cost.
+
+    Run 34222175003 finished green with a failed check, an unread EM-DAT
+    rung and a broken flood ceiling in it. Every one was recorded; none
+    reached anyone. `checks/issues.md` is the answer, and it is only an
+    answer if it is the first thing the README sends the reader to.
+    """
+
+    _add_unread_emdat_fetch(full_run["streams"])
+    out, _ = _build(tmp_path, db_path=full_run["db"],
+                    diagnostics_dir=full_run["diagnostics"],
+                    run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        names = set(zf.namelist())
+        register = json.loads(zf.read("checks/issues.json").decode())
+        markdown = zf.read("checks/issues.md").decode()
+        readme = zf.read("README.md").decode()
+
+    assert {"checks/issues.md", "checks/issues.json"} <= names
+    assert "Run issue register" in markdown
+    # EM-DAT refused every fetch in the fixture stream, and it is a
+    # registered known issue: reported, owned, and not shouted about.
+    by_id = {i["id"]: i for i in register["issues"]}
+    assert by_id["emdat_auth_rejected"]["severity"] == "known"
+    assert by_id["emdat_auth_rejected"]["owner"] == "external"
+
+    first = readme.split("## Where to look first", 1)[1].splitlines()
+    lead = next(line for line in first if line.strip().startswith("1."))
+    assert "checks/issues.md" in lead
+
+
+def test_the_register_the_run_printed_is_the_register_the_bundle_carries(
+    tmp_path, full_run
+):
+    """Two accounts of one run disagreeing is worse than either alone.
+
+    The register is computed and printed BEFORE the canonical upload (the
+    history has to land in the artifact); the bundle is built after. So the
+    bundle copies that file rather than recomputing it.
+    """
+
+    precomputed = {
+        "counts": {"blocking": 0, "degraded": 1, "known": 0, "info": 0},
+        "notes": [],
+        "issues": [{
+            "id": "a_fault_only_the_earlier_step_saw", "severity": "degraded",
+            "title": "computed before the canonical upload", "cost": 3,
+            "cost_unit": "rows", "owner": "pythia", "recovers_on_rerun": True,
+        }],
+    }
+    (full_run["diagnostics"] / "issues.json").write_text(
+        json.dumps(precomputed), encoding="utf-8"
+    )
+    out, manifest = _build(tmp_path, db_path=full_run["db"],
+                           diagnostics_dir=full_run["diagnostics"],
+                           run_log_dir=full_run["streams"])
+    with zipfile.ZipFile(out) as zf:
+        carried = json.loads(zf.read("checks/issues.json").decode())
+
+    assert [i["id"] for i in carried["issues"]] == ["a_fault_only_the_earlier_step_saw"]
+    assert manifest["sections"]["issues"]["detail"]["reused_precomputed"] is True
+
+
+def test_the_register_records_its_history_in_the_travelling_database(
+    tmp_path, full_run
+):
+    """`runs_seen` needs somewhere that survives the runner.
+
+    The canonical DB is the only such place — nothing in CI may push to
+    `main` — which is why the register runs before the canonical upload
+    rather than after it.
+    """
+
+    _add_unread_emdat_fetch(full_run["streams"])
+    register = bundle.build_register(
+        db_path=full_run["db"],
+        diagnostics_dir=full_run["diagnostics"],
+        run_log_dir=full_run["streams"],
+        staging=tmp_path / "register-staging",
+        environ={},
+    )
+    assert any(i.id == "emdat_auth_rejected" for i in register.issues)
+
+    con = duckdb.connect(str(full_run["db"]))
+    rows = dict(con.execute(
+        "SELECT issue_id, runs_seen FROM diagnostic_issue_history"
+    ).fetchall())
+    con.close()
+    assert rows.get("emdat_auth_rejected") == 1
+
+    # A second run of the same fault reads as older, not as new.
+    again = bundle.build_register(
+        db_path=full_run["db"],
+        diagnostics_dir=full_run["diagnostics"],
+        run_log_dir=full_run["streams"],
+        staging=tmp_path / "register-staging-2",
+        environ={},
+    )
+    seen = {i.id: i.runs_seen for i in again.issues}
+    assert seen["emdat_auth_rejected"] == 2
+
+    # And the write is CHECKPOINTED, not left in a WAL beside the file. The
+    # canonical upload copies the .duckdb alone, so a write still in the WAL
+    # would be uploaded as if it had never happened and `runs_seen` would
+    # read 1 forever.
+    assert not full_run["db"].with_suffix(".duckdb.wal").exists()
 
 
 def test_redaction_rejects_a_bundle_containing_a_known_secret(tmp_path, full_run, monkeypatch):
@@ -912,16 +1036,72 @@ def test_freshness_measures_from_the_newest_value_that_has_happened(tmp_path, fu
     out, _manifest = _build(tmp_path / "e2", db_path=db, diagnostics_dir=full_run["diagnostics"])
     with zipfile.ZipFile(out) as zf:
         text = zf.read("db/freshness.csv").decode("utf-8")
-    row = next(
-        line for line in text.splitlines()
-        if line.startswith("facts_resolved,as_of_date")
-    )
-    fields = row.split(",")
+    body = "".join(line for line in text.splitlines(keepends=True)
+                   if not line.startswith("#"))
+    rows = [
+        r for r in csv.DictReader(io.StringIO(body))
+        if r["table"] == "facts_resolved" and r["date_column"] == "as_of_date"
+        and r["scope"] == "table"
+    ]
+    assert len(rows) == 1
+    row = rows[0]
     # max_value is the newest value at or before now; the 2027 period end is
     # counted under n_future and named, never allowed to set the verdict.
-    assert "2027" not in fields[2]
-    # Trailing columns: n_future, max_value_in_future, future_expected.
-    assert fields[-3] == "1" and fields[-2].startswith("2027-03-01")
+    assert "2027" not in row["max_value"]
+    assert row["n_future"] == "1"
+    assert row["max_value_in_future"].startswith("2027-03-01")
+
+
+def test_freshness_is_measured_per_source_not_per_table(tmp_path, full_run):
+    """One live source must not stand for the dead ones beside it.
+
+    `db/freshness.csv` marked conflict_forecasts FRESH at 7 days in run
+    34222175003. That was true of the table maximum and false of two of its
+    three sources: ACLED CAST was 281 days stale and VIEWS 69. The table
+    row now takes the WORST source's verdict and every source gets a row of
+    its own.
+    """
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO conflict_forecasts VALUES "
+        "('conflictforecast','SOM','ACE','risk',1, CURRENT_DATE - 7, 1.0),"
+        "('views','SOM','ACE','fat',1, CURRENT_DATE - 69, 1.0),"
+        "('acled_cast','SOM','ACE','events',1, CURRENT_DATE - 281, 1.0)"
+    )
+    con.close()
+
+    out, manifest = _build(tmp_path / "fr", db_path=db,
+                           diagnostics_dir=full_run["diagnostics"])
+    with zipfile.ZipFile(out) as zf:
+        text = zf.read("db/freshness.csv").decode("utf-8")
+    body = "".join(line for line in text.splitlines(keepends=True)
+                   if not line.startswith("#"))
+    rows = [
+        r for r in csv.DictReader(io.StringIO(body))
+        if r["table"] == "conflict_forecasts" and r["date_column"] == "forecast_issue_date"
+    ]
+    by_scope = {(r["scope"], r["source"]): r for r in rows}
+
+    # The live source is fresh and says so, on its own row.
+    assert by_scope[("source", "conflictforecast")]["verdict"] == "fresh"
+    assert by_scope[("source", "views")]["verdict"] == "stale"
+    assert by_scope[("source", "acled_cast")]["verdict"] == "stale"
+
+    # The table row no longer hides them.
+    table_row = next(r for r in rows if r["scope"] == "table")
+    assert table_row["verdict"] == "stale"
+    assert "acled_cast" in table_row["source"]
+
+    # And both stale sources reach the register under their own ids, so the
+    # two that are registered as known can be quietened without quietening
+    # a third that is not.
+    checks = {c["name"]: c for c in manifest["checks"]}
+    declared = {
+        i["id"] for i in checks["no_stored_forecast_vintage_past_its_threshold"]["issues"]
+    }
+    assert declared == {"acled_cast_stale_vintage", "views_stale_vintage"}
 
 
 def test_a_table_this_workflow_writes_may_not_be_empty_after_the_run(tmp_path, full_run):
