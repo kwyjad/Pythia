@@ -352,7 +352,8 @@ class TestFloodTakesNoGdacsCeilingAtAnySize:
     Run 34222175003's cell ledger, on rows where GDACS supplied the ceiling:
     flood's median ceiling is 0 and its largest ever 5,300, against
     cyclone's 3,747,249 and 725,467,896 — same connector, same parser, same
-    column. `min_plausible_exposure` discarded the small ones and left ten
+    column, and a flagged flood figure is a median 539x its ceiling where a
+    flagged cyclone figure is 2x. `min_plausible_exposure` discarded the small ones and left ten
     standing, and all five of those that ever bound a figure were wrong by
     three orders of magnitude: Libya 2023-09 rejected 1,600,000 against
     5,300, Pakistan 2022-06 rejected 7,245,490 against 1,061.

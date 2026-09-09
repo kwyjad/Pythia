@@ -126,15 +126,17 @@ def is_provisional(
 #: guard will not let a re-walk change — cost with nothing on the other
 #: side of it.
 #:
-#: The evidence, from run 34222175003's cell ledger, on rows where GDACS
-#: itself supplied the ceiling:
+#: The evidence, from run 34222175003's canonical database, on rows where
+#: GDACS itself supplied the ceiling (the row counts and the ten-at-or-above
+#: -1,000 figure come from the same run's cell ledger, which is a merge and
+#: runs 25 rows light on flood):
 #:
 #:                                   flood            cyclone
 #:   rows                            30,276           34,446
 #:   median ceiling                       0        3,747,249
 #:   largest ceiling ever             5,300      725,467,896
 #:   ceilings at or above 1,000          10            5,025
-#:   median overshoot when flagged      541x               2x
+#:   median overshoot when flagged      539x               2x
 #:
 #: Same connector, same parser, same column, same table. A cyclone ceiling
 #: flags a figure twice its size, which is a plausibility check working. A

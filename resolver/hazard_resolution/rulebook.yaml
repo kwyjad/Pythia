@@ -538,7 +538,7 @@ sanity:
   # The contrast with cyclone is the whole argument. On flagged rows the
   # median cyclone figure is 2x its ceiling — a plausibility check catching
   # a report that modestly exceeds a modelled envelope, which is what a
-  # ceiling is for. The median flood figure is 541x its ceiling, and the
+  # ceiling is for. The median flood figure is 539x its ceiling, and the
   # largest 4,235,400x. That is not a ceiling being exceeded; it is two
   # different quantities being compared.
   #
