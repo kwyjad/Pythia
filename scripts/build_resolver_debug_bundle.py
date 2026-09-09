@@ -2016,7 +2016,8 @@ class BundleBuilder:
             return
         try:
             from resolver.hazard_resolution.extract import (
-                calls_this_calendar_month, calls_today, daily_backcast_ceiling,
+                ExtractionBudget, calls_this_calendar_month, calls_today,
+                daily_backcast_ceiling,
             )
         except Exception as exc:  # noqa: BLE001
             return self.problem(f"extraction headroom unavailable: {exc}")
@@ -2031,9 +2032,25 @@ class BundleBuilder:
             return self.problem(f"extraction headroom unavailable: {exc}")
 
         today = dt.date.today()
-        daily = daily_backcast_ceiling(share, share_used, today) if share else None
-        monthly_headroom = max(0, int(total) - used)
-        share_headroom = max(0, int(share) - share_used) if share else None
+        # Built through the budget itself rather than re-derived here: what
+        # "headroom" means has one definition, and a second one in the
+        # reporter would eventually disagree with the one that decides.
+        budget = ExtractionBudget(
+            max_calls_per_month=int(total),
+            used_this_month=used,
+            run_type="backcast" if share is not None else "live",
+            backcast_max_calls_per_month=int(share) if share is not None else None,
+            backcast_used_this_month=share_used,
+            live_reserve_calls=int(caps.get("extraction.live_reserve_calls") or 0),
+            backcast_max_calls_per_day=(
+                daily_backcast_ceiling(int(share), share_used, today)
+                if share is not None else None
+            ),
+            backcast_used_today=today_used,
+        )
+        headroom = budget.headroom()
+        monthly_headroom = headroom["monthly_headroom"]
+        share_headroom = headroom.get("backcast_share_headroom")
 
         evidence = (
             f"{used} of {total} calls used this calendar month "
@@ -2042,7 +2059,9 @@ class BundleBuilder:
         if share is not None:
             evidence += (
                 f"; backcast share {share_used} of {share} ({share_headroom} left)"
-                f"; today {today_used} of a derived ceiling of {daily}"
+                f"; today {today_used} of a derived ceiling of "
+                f"{headroom.get('backcast_daily_ceiling')}"
+                f"; binding limit {headroom['binding_limit']}"
             )
         self.extra_issues.append(issue_sources.issue_from_measurement(
             "extraction_budget_headroom",

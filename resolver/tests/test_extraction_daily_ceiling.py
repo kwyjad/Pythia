@@ -106,13 +106,22 @@ class TestTheBudgetHonoursIt:
         assert self._budget(backcast_used_today=60).remaining == 6
         assert self._budget(backcast_used_today=66).exhausted is True
 
-    def test_a_live_run_has_no_daily_ceiling(self):
+    def test_a_live_run_ignores_a_daily_ceiling_even_when_one_is_set(self):
+        """The reserve exists for the live pass's benefit, so it is not bound.
+
+        Set deliberately: a budget with the field populated proves the
+        run_type gate, where a budget without it proves only that None is
+        falsy.
+        """
+
         budget = ExtractionBudget(
             max_calls_per_month=4000, used_this_month=0, run_type="live",
-            live_reserve_calls=1500,
+            live_reserve_calls=1500, backcast_max_calls_per_day=1,
+            backcast_used_today=1,
         )
         assert budget.remaining == 4000
         assert "daily" not in budget.binding_limit
+        assert budget.exhausted is False
 
     def test_the_provenance_names_it(self):
         """A capped cell must say which limit capped it."""
@@ -200,6 +209,9 @@ class TestItReachesTheRegister:
         issue = next(i for i in register.issues if i.id == "extraction_budget_headroom")
         assert issue.severity == "info"
         assert "backcast share 5 of 2000" in issue.evidence
+        # The reporter reads the budget's own definition of headroom rather
+        # than re-deriving one, so it can name the limit that would bind.
+        assert "binding limit" in issue.evidence
 
     def test_a_raced_share_is_carried_at_degraded(self, tmp_path, monkeypatch):
         """Exactly the September shape: the share gone, the month not."""
