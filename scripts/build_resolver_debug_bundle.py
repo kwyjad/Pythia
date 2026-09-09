@@ -1005,6 +1005,7 @@ class BundleBuilder:
              "n_transport_error", "response_bytes", "median_ms", "max_ms"],
             preamble="Derived from http/requests.jsonl.",
         )
+        self._report_refusal_rates(rows)
 
         envelopes_path = self._stream_file(run_log.STREAM_ENVELOPE)
         envelopes = list(run_log.read_stream(envelopes_path)) if envelopes_path else []
@@ -1018,6 +1019,49 @@ class BundleBuilder:
             write_json(env_dir / f"{safe}.json", redact_obj(entries, self.secrets))
         return {"requests": len(records), "envelopes": len(envelopes),
                 "connectors": len(by_connector)}
+
+    #: Above this share of 4xx a connector is being refused rather than
+    #: occasionally missing a record. GDACS answered 403 to 108 of 243
+    #: datareport fetches in run 34222175003 — 44%, scattered through the
+    #: hour — and nothing said so anywhere a person would look.
+    _REFUSAL_RATE_ALARM = 0.20
+
+    #: Below this many requests a rate is arithmetic on noise.
+    _REFUSAL_RATE_MIN_REQUESTS = 20
+
+    def _report_refusal_rates(self, rows: list[list[Any]]) -> None:
+        """Carry a connector's refusal rate into the register.
+
+        Reported, not retried. This repository measured the retry question
+        twice and settled it: cutting GDACS volume by 73% moved the refusal
+        rate 79.6% to 76%, and 153 of 291 events were served on the FIRST
+        request while 138 were refused on all four attempts. A rate limit
+        eases when the rate falls; that one did not. So a 403 is asked once
+        on the refusing route and once on the other, the pace is already a
+        process-wide bucket, and what was missing was anybody being told.
+        """
+
+        for row in rows:
+            connector, requests_made = str(row[0]), int(row[1] or 0)
+            n_4xx = int(row[4] or 0)
+            if requests_made < self._REFUSAL_RATE_MIN_REQUESTS:
+                continue
+            rate = n_4xx / requests_made
+            if rate < self._REFUSAL_RATE_ALARM:
+                continue
+            self.extra_issues.append(issue_sources.issue_from_measurement(
+                f"refused_requests_{issue_sources._slug(connector)}",
+                f"{connector} was refused {rate:.0%} of its requests "
+                f"({n_4xx} of {requests_made} answered 4xx).",
+                severity=issues_mod.DEGRADED,
+                evidence="Reported, not retried: this repository measured the "
+                         "retry question twice and a rate limit that does not "
+                         "ease when the rate falls is not a rate limit. The "
+                         "cache serves what the refusals cost.",
+                cost=float(n_4xx),
+                cost_unit="refused requests",
+                source="http/requests_by_connector.csv",
+            ))
 
     def _stream_file(self, stream: str) -> Path | None:
         if self.run_log_dir is None:
@@ -1488,7 +1532,88 @@ class BundleBuilder:
         self._extraction_budget(dest)
         self._backcast_progress(dest)
         fetches = self._source_fetches(dest)
+        self._crisiswatch_backfill(dest)
         return {"cells": cells, "figures": figures, "source_fetches": fetches}
+
+    #: The stream `scripts/refresh_crisiswatch.py` writes its accounting to.
+    CRISISWATCH_BACKFILL_STREAM = "crisiswatch_backfill"
+
+    def _crisiswatch_backfill(self, dest: Path) -> None:
+        """The edition backfill's recovery rate, per run.
+
+        Run 34222175003 spent 915 seconds and its entire 40-download budget
+        and recovered 0 of 1 editions. That is a real answer rather than a
+        failure — the archive's captures in that window carry a different
+        edition, so no amount of downloading finds it — but it lived only as
+        28 warnings in a log, so the next run spends the same 15 minutes
+        learning the same thing. The budget is deliberately NOT raised:
+        raising it would spend longer confirming an absence.
+        """
+
+        stream = self._stream_file(self.CRISISWATCH_BACKFILL_STREAM)
+        records = list(run_log.read_stream(stream)) if stream else []
+        if not records:
+            return
+        rows = [[
+            ", ".join(r.get("wanted") or []),
+            ", ".join(r.get("recovered") or []),
+            ", ".join(r.get("still_missing") or []),
+            r.get("snapshots_tried"), r.get("snapshots_downloaded"),
+            r.get("stopped_early") or "",
+        ] for r in records]
+        write_csv(
+            dest / "crisiswatch_backfill.csv", rows,
+            ["wanted", "recovered", "still_missing", "snapshots_tried",
+             "snapshots_downloaded", "stopped_early"],
+            preamble=(
+                "One row per edition-backfill pass. `stopped_early` names the\n"
+                "budget that bound (probes per edition, total downloads, or the\n"
+                "wall clock). A pass that spends its whole download budget and\n"
+                "recovers nothing is the archive saying the edition is not in it,\n"
+                "not a budget too small: every capture in the window carries a\n"
+                "different edition."
+            ),
+        )
+        last = records[-1]
+        wanted = len(last.get("wanted") or [])
+        recovered = len(last.get("recovered") or [])
+        downloads = int(last.get("snapshots_downloaded") or 0)
+        if not wanted:
+            return
+        rate = recovered / wanted
+        evidence = (
+            f"{recovered} of {wanted} edition(s) recovered from "
+            f"{downloads} download(s)"
+            + (f"; stopped early: {last.get('stopped_early')}"
+               if last.get("stopped_early") else "")
+            + (f"; still missing: {', '.join(last.get('still_missing') or [])}"
+               if last.get("still_missing") else "")
+        )
+        if recovered == 0 and last.get("stopped_early"):
+            self.extra_issues.append(issue_sources.issue_from_measurement(
+                "crisiswatch_backfill_spends_its_budget_for_nothing",
+                "The CrisisWatch edition backfill spent its whole budget and "
+                "recovered no edition. The archive's captures in the window "
+                "carry a different edition, so a larger budget would spend "
+                "longer confirming the same absence.",
+                severity=issues_mod.DEGRADED,
+                evidence=evidence,
+                cost=float(downloads),
+                cost_unit="downloads spent for no edition",
+                recovers_on_rerun=False,
+                source="hazard/crisiswatch_backfill.csv",
+            ))
+            return
+        self.extra_issues.append(issue_sources.issue_from_measurement(
+            "crisiswatch_backfill_recovery_rate",
+            f"The CrisisWatch edition backfill recovered {rate:.0%} of the "
+            f"editions it went looking for.",
+            severity=issues_mod.INFO if recovered else issues_mod.DEGRADED,
+            evidence=evidence,
+            cost=float(wanted - recovered),
+            cost_unit="editions still missing",
+            source="hazard/crisiswatch_backfill.csv",
+        ))
 
     #: The run-log stream the EM-DAT connector (and any source that adopts
     #: the same record) writes one line per (source, hazard, month) fetch to.
@@ -3854,6 +3979,12 @@ class BundleBuilder:
         "hs_triage": "horizon scanner",
         "interpretations": "interpreter (run_sibyl)",
         "forecast_deviation": "compute_deviation (run_sibyl)",
+        # The nightly backcast's, not this workflow's. haz_raw_dfo sat empty
+        # in every Resolver Update bundle and was in neither registry, so
+        # the check said nothing at all about it — and an empty table is a
+        # claim about a writer that the check reading it has to know.
+        "haz_raw_dfo": "resolver.hazard_resolution.dfo (nightly haz_backcast.yml)",
+        "haz_backcast_progress": "haz-backcast (nightly haz_backcast.yml)",
     }
 
     def _check_declared_active_tables_hold_rows(self) -> None:

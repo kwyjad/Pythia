@@ -770,3 +770,58 @@ def test_an_edition_with_no_captures_at_all_is_named_not_probed(
     assert out["recovered"] == ["2026-03"]
     assert out["still_missing"] == ["2026-09"]
     assert not out["stopped_early"]
+
+
+# ---------------------------------------------------------------------------
+# The backfill's accounting has to leave the process
+# ---------------------------------------------------------------------------
+
+
+def test_the_backfill_records_its_accounting_for_the_run_report(tmp_path, monkeypatch):
+    """915 seconds and 40 downloads for nothing, said once and then forgotten.
+
+    Run 34222175003's backfill spent its whole download budget and
+    recovered 0 of 1 editions. That is a real answer -- the archive's
+    captures in that window carry a different edition -- but it lived only
+    as 28 warnings in a log, so the next run spends the same 15 minutes
+    learning the same thing. The accounting now goes to the run-log stream
+    the debug bundle reads, which is where a recovery rate can be reported
+    per run.
+    """
+
+    from resolver.diagnostics import run_log
+
+    monkeypatch.setenv(run_log.ENV_DIR, str(tmp_path))
+    run_log.reset_for_tests()
+    try:
+        rc._record_backfill_accounting({
+            "wanted": ["2026-05"], "recovered": [], "still_missing": ["2026-05"],
+            "snapshots_tried": 40, "snapshots_downloaded": 40,
+            "stopped_early": "download budget (40)",
+        })
+        written = list(run_log.read_stream(
+            tmp_path / f"{rc.BACKFILL_STREAM}.jsonl"
+        ))
+    finally:
+        run_log.reset_for_tests()
+
+    assert len(written) == 1
+    assert written[0]["snapshots_downloaded"] == 40
+    assert written[0]["recovered"] == []
+    assert written[0]["stopped_early"] == "download budget (40)"
+
+
+def test_recording_the_accounting_never_costs_the_backfill(monkeypatch):
+    """A diagnostic that can fail a fetch is a diagnostic that gets removed."""
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _explode(name, *args, **kwargs):
+        if name.startswith("resolver"):
+            raise ImportError("no resolver package in this environment")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _explode)
+    rc._record_backfill_accounting({"wanted": ["2026-05"]})

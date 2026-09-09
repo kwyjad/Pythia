@@ -1349,6 +1349,36 @@ def _wanted_editions(spec: str) -> list[tuple[int, int]]:
     return wanted
 
 
+#: The run-log stream the backfill's accounting goes to, so the run issue
+#: register can report a recovery rate rather than leaving it in a log.
+BACKFILL_STREAM = "crisiswatch_backfill"
+
+
+def _record_backfill_accounting(result: dict[str, Any]) -> None:
+    """Put the accounting where the bundle can read it. Never raises.
+
+    Run 34222175003 spent 915 seconds and its entire 40-download budget and
+    recovered 0 of 1 editions. That is a real answer — the archive's
+    captures in that window carry a different edition, so no amount of
+    downloading finds it — but it existed only as 28 warnings in a log, so
+    the next run spent the same 15 minutes learning the same thing.
+    """
+
+    try:
+        from resolver.diagnostics import run_log
+
+        run_log.record(BACKFILL_STREAM, {
+            "wanted": result.get("wanted", []),
+            "recovered": result.get("recovered", []),
+            "still_missing": result.get("still_missing", []),
+            "snapshots_tried": result.get("snapshots_tried", 0),
+            "snapshots_downloaded": result.get("snapshots_downloaded", 0),
+            "stopped_early": result.get("stopped_early", ""),
+        })
+    except Exception:  # noqa: BLE001 - a diagnostic never costs the fetch
+        pass
+
+
 def backfill_editions(
     spec: str,
     *,
@@ -1549,6 +1579,7 @@ def backfill_editions(
             probe(timestamp)
 
     result["still_missing"] = sorted(f"{y:04d}-{m:02d}" for y, m in outstanding)
+    _record_backfill_accounting(result)
     if result["stopped_early"]:
         log.warning(
             "Backfill stopped early (%s) with %d of %d editions recovered; "
