@@ -293,7 +293,14 @@ def issue_from_measurement(
     )
 
 
+#: Re-exported so the bundle can stamp an owner on a check-declared issue
+#: without importing two modules to do it.
+OWNER_EXTERNAL = OWNER_EXTERNAL
+OWNER_PYTHIA = OWNER_PYTHIA
+
+
 __all__ = [
+    "OWNER_EXTERNAL", "OWNER_PYTHIA",
     "CHECK_ISSUE_IDS", "SOURCE_ISSUE_IDS", "VINTAGE_ISSUE_IDS",
     "issues_from_checks", "issues_from_source_fetches",
     "issues_from_reconciliation", "issues_from_log_histogram",

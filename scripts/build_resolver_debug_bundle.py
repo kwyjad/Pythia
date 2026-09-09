@@ -1067,6 +1067,91 @@ class BundleBuilder:
             or (table.lower(), column.lower()) in self._EXPECTED_FUTURE_PAIRS
         )
 
+    #: Columns that name WHO wrote a row. A table carrying one is several
+    #: feeds sharing a table, and a table-level MAX over it is the newest
+    #: feed answering for all of them: `conflict_forecasts` read FRESH at 7
+    #: days in run 34222175003 while ACLED CAST inside it was 281 days
+    #: stale and VIEWS 69. Freshness is per source where a source exists.
+    _SOURCE_COLUMNS = ("source", "publisher", "source_id")
+
+    #: Above this many distinct sources the split is noise rather than
+    #: signal, and the table-level row still carries the verdict.
+    _MAX_SOURCES_PER_TABLE = 25
+
+    def _source_column_of(self, table: str) -> str | None:
+        names = {name.lower(): name for name, _ in self.columns_of(table)}
+        for candidate in self._SOURCE_COLUMNS:
+            if candidate in names:
+                return names[candidate]
+        return None
+
+    def _sources_in(self, table: str, column: str) -> list[str]:
+        result = self.query(
+            f'SELECT DISTINCT CAST("{column}" AS VARCHAR) FROM "{table}" '
+            f'WHERE "{column}" IS NOT NULL ORDER BY 1'
+        )
+        if result is None:
+            return []
+        values = [str(row[0]) for row in result[1]]
+        return values if len(values) <= self._MAX_SOURCES_PER_TABLE else []
+
+    def _freshness_row(
+        self, table: str, column: str, threshold: int | None,
+        source_column: str | None, source: str | None,
+    ) -> list[Any] | None:
+        """One freshness row, over the whole table or over one source of it.
+
+        The newest value AT OR BEFORE now is what freshness is measured
+        from. A value after now is a period end (an IPC projection window,
+        the current month) or a defect (a publication date in the future);
+        either way its age is negative and "fresh" is the wrong word for
+        it, so it is counted separately rather than allowed to set the
+        verdict.
+        """
+
+        where, params = "", []
+        if source_column and source is not None:
+            where = f' WHERE CAST("{source_column}" AS VARCHAR) = ?'
+            params = [source]
+        result = self.query(
+            f'SELECT MAX(CASE WHEN TRY_CAST("{column}" AS TIMESTAMP) <= CURRENT_TIMESTAMP '
+            f'THEN TRY_CAST("{column}" AS TIMESTAMP) END), '
+            f'COUNT(*), '
+            f'SUM(CASE WHEN TRY_CAST("{column}" AS TIMESTAMP) > CURRENT_TIMESTAMP THEN 1 ELSE 0 END), '
+            f'MAX(TRY_CAST("{column}" AS TIMESTAMP)) '
+            f'FROM "{table}"{where}',
+            params or None,
+        )
+        if result is None or not result[1]:
+            return None
+        newest, n_rows, n_future, newest_any = result[1][0]
+        n_future = int(n_future or 0)
+        age = None
+        if newest is not None:
+            age_result = self.query(
+                "SELECT date_diff('day', CAST(? AS TIMESTAMP), CURRENT_TIMESTAMP)",
+                [newest],
+            )
+            if age_result and age_result[1]:
+                age = age_result[1][0][0]
+        if not n_rows:
+            verdict = "absent"
+        elif newest is None and n_future:
+            verdict = "future_only"
+        elif newest is None:
+            verdict = "no_dates"
+        elif threshold is None or age is None:
+            verdict = "no_threshold"
+        else:
+            verdict = "stale" if age > threshold else "fresh"
+        return [
+            table, column, newest, age, threshold, n_rows, verdict,
+            n_future, newest_any if n_future else "",
+            "yes" if self._future_is_expected(table, column) else "",
+            "table" if source is None else "source",
+            "" if source is None else source,
+        ]
+
     def _freshness(self, dest: Path) -> None:
         rows = []
         for table in sorted(self.tables()):
@@ -1080,53 +1165,38 @@ class BundleBuilder:
             if not date_columns:
                 continue
             threshold = self._STALENESS_DAYS.get(table)
+            source_column = self._source_column_of(table)
+            sources = self._sources_in(table, source_column) if source_column else []
             for column in date_columns:
-                # The newest value AT OR BEFORE now is what freshness is
-                # measured from. A value after now is a period end (an IPC
-                # projection window, the current month) or a defect (a
-                # publication date in the future); either way its age is
-                # negative and "fresh" is the wrong word for it, so it is
-                # counted separately rather than allowed to set the verdict.
-                result = self.query(
-                    f'SELECT MAX(CASE WHEN TRY_CAST("{column}" AS TIMESTAMP) <= CURRENT_TIMESTAMP '
-                    f'THEN TRY_CAST("{column}" AS TIMESTAMP) END), '
-                    f'COUNT(*), '
-                    f'SUM(CASE WHEN TRY_CAST("{column}" AS TIMESTAMP) > CURRENT_TIMESTAMP THEN 1 ELSE 0 END), '
-                    f'MAX(TRY_CAST("{column}" AS TIMESTAMP)) '
-                    f'FROM "{table}"'
-                )
-                if result is None or not result[1]:
+                per_source = [
+                    self._freshness_row(table, column, threshold, source_column, source)
+                    for source in sources
+                ]
+                per_source = [row for row in per_source if row is not None]
+                table_row = self._freshness_row(table, column, threshold, None, None)
+                if table_row is None:
                     continue
-                newest, n_rows, n_future, newest_any = result[1][0]
-                n_future = int(n_future or 0)
-                age = None
-                if newest is not None:
-                    age_result = self.query(
-                        "SELECT date_diff('day', CAST(? AS TIMESTAMP), CURRENT_TIMESTAMP)",
-                        [newest],
+                if per_source:
+                    # The WORST source decides the table's verdict. A MAX
+                    # over the whole table is the newest source answering
+                    # for every source that shares it, which is how one live
+                    # feed came to stand for two dead ones.
+                    worst = max(
+                        per_source,
+                        key=lambda r: (r[3] if r[3] is not None else -1),
                     )
-                    if age_result and age_result[1]:
-                        age = age_result[1][0][0]
-                if n_rows == 0:
-                    verdict = "absent"
-                elif newest is None and n_future:
-                    verdict = "future_only"
-                elif newest is None:
-                    verdict = "no_dates"
-                elif threshold is None or age is None:
-                    verdict = "no_threshold"
-                else:
-                    verdict = "stale" if age > threshold else "fresh"
-                rows.append([
-                    table, column, newest, age, threshold, n_rows, verdict,
-                    n_future, newest_any if n_future else "",
-                    "yes" if self._future_is_expected(table, column) else "",
-                ])
+                    table_row[6] = worst[6]
+                    table_row[11] = (
+                        f"worst of {len(per_source)}: {worst[11]}"
+                    )
+                rows.append(table_row)
+                rows.extend(per_source)
         write_csv(
             dest / "freshness.csv", rows,
             ["table", "date_column", "max_value", "age_days",
              "staleness_threshold_days", "rows", "verdict",
-             "n_future", "max_value_in_future", "future_expected"],
+             "n_future", "max_value_in_future", "future_expected",
+             "scope", "source"],
             preamble=(
                 "Every date-typed or date-named column in every table, with its\n"
                 "newest value AT OR BEFORE the bundle time and that value's age.\n"
@@ -1137,7 +1207,14 @@ class BundleBuilder:
                 "window, the current month) and haz_resolutions.frozen_at (which\n"
                 "holds the freeze DEADLINE, not the moment of freezing) are\n"
                 "expected. A publication_date there is a defect, and\n"
-                "`no_fact_carries_a_publication_date_after_the_run_date` fails on it."
+                "`no_fact_carries_a_publication_date_after_the_run_date` fails on it.\n"
+                "\n"
+                "Where a table carries a source column, freshness is measured PER\n"
+                "SOURCE (`scope=source`) and the table row (`scope=table`) takes the\n"
+                "WORST source's verdict. A table-level MAX is the newest feed\n"
+                "answering for every feed that shares the table: conflict_forecasts\n"
+                "read fresh at 7 days in run 34222175003 while ACLED CAST inside it\n"
+                "was 281 days stale and VIEWS 69."
             ),
         )
 
@@ -2685,11 +2762,30 @@ class BundleBuilder:
             return
         threshold = self._STALENESS_DAYS["conflict_forecasts"]
         stale = [r for r in result[1] if r[2] is not None and r[2] > threshold]
+        # One issue PER SOURCE. The check's own name can only ever say
+        # "something is stale", and this table's whole failure mode is one
+        # live source standing for the dead ones beside it — the register
+        # has to be able to carry them apart, and to suppress the two that
+        # are already owned without suppressing a third that is not.
+        issues = [{
+            "id": issue_sources.VINTAGE_ISSUE_IDS.get(
+                str(row[0]).strip().lower(),
+                f"stale_vintage_{str(row[0]).strip().lower()}",
+            ),
+            "title": f"{row[0]} has served the {row[1]} vintage for {row[2]} days "
+                     f"(threshold {threshold}).",
+            "evidence": f"latest forecast_issue_date {row[1]}",
+            "cost": float(row[2]),
+            "cost_unit": "days stale",
+            "owner": issue_sources.OWNER_EXTERNAL,
+            "recovers_on_rerun": False,
+        } for row in stale]
         self._check(
             name, "FAIL" if stale else "PASS",
             f"{len(stale)} of {len(result[1])} sources", f"at most {threshold} days",
             "; ".join(f"{r[0]} latest={r[1]} ({r[2]}d)" for r in stale)
             or "Every conflict-forecast source is inside its staleness threshold.",
+            issues=issues,
         )
 
     #: The connectors whose calls go to acleddata.com, by the ids the

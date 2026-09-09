@@ -15,6 +15,8 @@ drops code before evidence and says so.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import zipfile
 from pathlib import Path
@@ -1028,16 +1030,72 @@ def test_freshness_measures_from_the_newest_value_that_has_happened(tmp_path, fu
     out, _manifest = _build(tmp_path / "e2", db_path=db, diagnostics_dir=full_run["diagnostics"])
     with zipfile.ZipFile(out) as zf:
         text = zf.read("db/freshness.csv").decode("utf-8")
-    row = next(
-        line for line in text.splitlines()
-        if line.startswith("facts_resolved,as_of_date")
-    )
-    fields = row.split(",")
+    body = "".join(line for line in text.splitlines(keepends=True)
+                   if not line.startswith("#"))
+    rows = [
+        r for r in csv.DictReader(io.StringIO(body))
+        if r["table"] == "facts_resolved" and r["date_column"] == "as_of_date"
+        and r["scope"] == "table"
+    ]
+    assert len(rows) == 1
+    row = rows[0]
     # max_value is the newest value at or before now; the 2027 period end is
     # counted under n_future and named, never allowed to set the verdict.
-    assert "2027" not in fields[2]
-    # Trailing columns: n_future, max_value_in_future, future_expected.
-    assert fields[-3] == "1" and fields[-2].startswith("2027-03-01")
+    assert "2027" not in row["max_value"]
+    assert row["n_future"] == "1"
+    assert row["max_value_in_future"].startswith("2027-03-01")
+
+
+def test_freshness_is_measured_per_source_not_per_table(tmp_path, full_run):
+    """One live source must not stand for the dead ones beside it.
+
+    `db/freshness.csv` marked conflict_forecasts FRESH at 7 days in run
+    34222175003. That was true of the table maximum and false of two of its
+    three sources: ACLED CAST was 281 days stale and VIEWS 69. The table
+    row now takes the WORST source's verdict and every source gets a row of
+    its own.
+    """
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO conflict_forecasts VALUES "
+        "('conflictforecast','SOM','ACE','risk',1, CURRENT_DATE - 7, 1.0),"
+        "('views','SOM','ACE','fat',1, CURRENT_DATE - 69, 1.0),"
+        "('acled_cast','SOM','ACE','events',1, CURRENT_DATE - 281, 1.0)"
+    )
+    con.close()
+
+    out, manifest = _build(tmp_path / "fr", db_path=db,
+                           diagnostics_dir=full_run["diagnostics"])
+    with zipfile.ZipFile(out) as zf:
+        text = zf.read("db/freshness.csv").decode("utf-8")
+    body = "".join(line for line in text.splitlines(keepends=True)
+                   if not line.startswith("#"))
+    rows = [
+        r for r in csv.DictReader(io.StringIO(body))
+        if r["table"] == "conflict_forecasts" and r["date_column"] == "forecast_issue_date"
+    ]
+    by_scope = {(r["scope"], r["source"]): r for r in rows}
+
+    # The live source is fresh and says so, on its own row.
+    assert by_scope[("source", "conflictforecast")]["verdict"] == "fresh"
+    assert by_scope[("source", "views")]["verdict"] == "stale"
+    assert by_scope[("source", "acled_cast")]["verdict"] == "stale"
+
+    # The table row no longer hides them.
+    table_row = next(r for r in rows if r["scope"] == "table")
+    assert table_row["verdict"] == "stale"
+    assert "acled_cast" in table_row["source"]
+
+    # And both stale sources reach the register under their own ids, so the
+    # two that are registered as known can be quietened without quietening
+    # a third that is not.
+    checks = {c["name"]: c for c in manifest["checks"]}
+    declared = {
+        i["id"] for i in checks["no_stored_forecast_vintage_past_its_threshold"]["issues"]
+    }
+    assert declared == {"acled_cast_stale_vintage", "views_stale_vintage"}
 
 
 def test_a_table_this_workflow_writes_may_not_be_empty_after_the_run(tmp_path, full_run):
