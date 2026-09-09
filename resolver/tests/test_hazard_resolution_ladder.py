@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from dataclasses import replace as dc_replace
 
 import duckdb
 import pytest
@@ -59,12 +60,28 @@ def con():
     return con
 
 
-def _reconcile(candidates, rulebook, **kwargs):
+def _reconcile(candidates, rulebook, hazard="FL", **kwargs):
+    """Reconcile one cell, with the cell and its candidates on one hazard.
+
+    ``hazard`` re-stamps the candidates as well as the cell, because
+    whether a GDACS figure can bound anything is decided per candidate
+    (``rules.NO_POPULATION_EXPOSURE_HAZARDS``) and a cell whose hazard did
+    not match its candidates' would be testing a shape that cannot occur.
+    """
+
     kwargs.setdefault("today", AFTER_FREEZE)
+    candidates = [dc_replace(c, hazard=hazard) for c in candidates]
     return reconcile_mod.reconcile(
-        iso3="PHL", ym=YM, hazard="FL", candidates=candidates,
+        iso3="PHL", ym=YM, hazard=hazard, candidates=candidates,
         rulebook=rulebook, **kwargs,
     )
+
+
+#: A hazard whose GDACS `gdacs:population` really is a national population
+#: exposure, so the ceiling mechanics have something to bind on. Flood's is
+#: not (see rules.NO_POPULATION_EXPOSURE_HAZARDS), which is a fact about
+#: that feed rather than about the machinery these cases pin.
+CEILING_HAZARD = "TC"
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +211,7 @@ def test_figure_above_the_gdacs_ceiling_is_flagged_not_rewritten(rulebook):
     """conflict_rule = ladder_with_flag: keep the answer, raise the flag."""
     verdict = _reconcile(
         [make_candidate("emdat", 900_000), make_candidate("gdacs", 100_000)],
-        rulebook,
+        rulebook, hazard=CEILING_HAZARD,
     )
     assert verdict.value == 900_000  # NOT clamped to the ceiling
     assert verdict.flagged is True
@@ -237,13 +254,16 @@ def test_ceiling_multiplier_is_honoured_from_the_rulebook(rulebook):
     under = exposure * multiplier * 0.5
 
     breaching = [make_candidate("emdat", over), make_candidate("gdacs", exposure)]
-    assert reconcile_mod.FLAG_CEILING_EXCEEDED in _reconcile(breaching, rulebook).flags
+    assert reconcile_mod.FLAG_CEILING_EXCEEDED in _reconcile(
+        breaching, rulebook, hazard=CEILING_HAZARD).flags
 
     inside = [make_candidate("emdat", under), make_candidate("gdacs", exposure)]
-    assert reconcile_mod.FLAG_CEILING_EXCEEDED not in _reconcile(inside, rulebook).flags
+    assert reconcile_mod.FLAG_CEILING_EXCEEDED not in _reconcile(
+        inside, rulebook, hazard=CEILING_HAZARD).flags
 
     lenient = make_rulebook({"sanity": {"ceiling_multiplier": multiplier * 2}})
-    assert reconcile_mod.FLAG_CEILING_EXCEEDED not in _reconcile(breaching, lenient).flags
+    assert reconcile_mod.FLAG_CEILING_EXCEEDED not in _reconcile(
+        breaching, lenient, hazard=CEILING_HAZARD).flags
 
 
 def test_the_multiplier_leaves_room_between_a_model_and_a_report(rulebook):
@@ -297,7 +317,7 @@ def test_a_real_exposure_still_binds_alongside_a_zero_one(rulebook):
             make_candidate("gdacs", 0.0, source_ref="g0"),
             make_candidate("gdacs", 50_000, source_ref="g1"),
         ],
-        rulebook,
+        rulebook, hazard=CEILING_HAZARD,
     )
     assert reconcile_mod.FLAG_CEILING_EXCEEDED in verdict.flags
 
@@ -329,7 +349,8 @@ def test_the_ceiling_records_which_bound_it_used(rulebook):
     against a GDACS footprint, and a reader must be able to tell them apart."""
 
     with_gdacs = _reconcile(
-        [make_candidate("emdat", 10_000), make_candidate("gdacs", 100_000)], rulebook
+        [make_candidate("emdat", 10_000), make_candidate("gdacs", 100_000)],
+        rulebook, hazard=CEILING_HAZARD,
     )
     assert with_gdacs.provenance["decision"]["ceiling"]["basis"] == "gdacs_exposed"
 
@@ -549,7 +570,7 @@ def test_every_resolution_carries_full_provenance(con, rulebook):
             make_candidate("emdat", 4_000, source_ref="EMDAT-2024-0123"),
             make_candidate("gdacs", 500_000),
         ],
-        rulebook,
+        rulebook, hazard=CEILING_HAZARD,
     )
     res_mod.write_reconciliation(con, verdict, rulebook, today=AFTER_FREEZE)
     stored = json.loads(

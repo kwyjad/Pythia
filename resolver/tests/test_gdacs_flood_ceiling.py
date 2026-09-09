@@ -26,6 +26,7 @@ thing it is.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -33,6 +34,7 @@ import pytest
 
 from resolver.connectors.gdacs import parse_gdacs_population
 from resolver.hazard_resolution.rulebook import load_rulebook
+from resolver.tests.hazard_resolution_utils import make_candidate
 from resolver.hazard_resolution.rules import usable_exposure, within_sanity_ceiling
 
 duckdb = pytest.importorskip("duckdb")
@@ -331,3 +333,140 @@ class TestTheFindingIsRecordedWhereItCostsNothing:
         )
         for hazard in ("flood", "cyclone", "drought"):
             assert stripped.hazard_fingerprint(hazard) == loaded.hazard_fingerprint(hazard)
+
+
+# ---------------------------------------------------------------------------
+# The flood ceiling is closed rather than thresholded (Sept 2026)
+# ---------------------------------------------------------------------------
+
+from dataclasses import replace as dc_replace  # noqa: E402
+
+from resolver.hazard_resolution import candidates as cand_mod  # noqa: E402
+from resolver.hazard_resolution import reconcile as rc_mod  # noqa: E402
+from resolver.hazard_resolution import rules as rules_mod  # noqa: E402
+
+
+class TestFloodTakesNoGdacsCeilingAtAnySize:
+    """A threshold inside a series of wrong numbers is still wrong numbers.
+
+    Run 34222175003's cell ledger, on rows where GDACS supplied the ceiling:
+    flood's median ceiling is 0 and its largest ever 5,300, against
+    cyclone's 3,747,249 and 725,467,896 — same connector, same parser, same
+    column, and a flagged flood figure is a median 539x its ceiling where a
+    flagged cyclone figure is 2x. `min_plausible_exposure` discarded the small ones and left ten
+    standing, and all five of those that ever bound a figure were wrong by
+    three orders of magnitude: Libya 2023-09 rejected 1,600,000 against
+    5,300, Pakistan 2022-06 rejected 7,245,490 against 1,061.
+
+    So the question is not where to draw a line. It is whether that field
+    bounds anything at all for floods, and until somebody establishes what
+    it carries the answer is no.
+    """
+
+    def test_a_flood_exposure_far_above_the_floor_is_still_not_a_ceiling(self, rulebook):
+        floor = float(rulebook.get("sanity.min_plausible_exposure"))
+        assert rules_mod.usable_exposure(floor * 100, rulebook, "FL") is None
+
+    def test_the_five_ceilings_that_survived_the_floor_no_longer_bind(self, rulebook):
+        # The real ones, from the cell ledger of run 34222175003.
+        for ceiling in (5_300.0, 1_377.0, 1_061.0):
+            assert rules_mod.usable_exposure(ceiling, rulebook, "FL") is None
+
+    def test_cyclone_keeps_its_ceiling(self, rulebook):
+        # The same field on the same connector, and there it is a national
+        # population exposure: a cyclone ceiling flags a figure twice its
+        # size, which is a plausibility check working.
+        assert rules_mod.usable_exposure(3_747_249.0, rulebook, "TC") == 3_747_249.0
+
+    def test_an_unknown_hazard_is_judged_on_the_number_alone(self, rulebook):
+        floor = float(rulebook.get("sanity.min_plausible_exposure"))
+        assert rules_mod.usable_exposure(floor * 10, rulebook) == floor * 10
+        assert rules_mod.usable_exposure(floor / 10, rulebook) is None
+
+    def test_the_ladder_stops_flagging_derna_against_five_thousand(self, rulebook):
+        """Libya 2023-09: 1,600,000 people, rejected against a bound of 5,300."""
+
+        verdict = rc_mod.reconcile(
+            iso3="LBY", ym="2023-09", hazard="FL",
+            candidates=[
+                dc_replace(make_candidate("emdat", 1_600_000), iso3="LBY",
+                           ym="2023-09", hazard="FL"),
+                dc_replace(make_candidate("gdacs", 5_300), iso3="LBY",
+                           ym="2023-09", hazard="FL"),
+            ],
+            rulebook=rulebook, today=dt.date(2026, 9, 9),
+        )
+        assert verdict.value == 1_600_000
+        assert rc_mod.FLAG_CEILING_EXCEEDED not in verdict.flags
+        assert verdict.provenance["decision"]["ceiling"]["basis"] != "gdacs_exposed"
+
+    def test_the_population_share_still_bounds_a_flood(self, rulebook):
+        """The share bounds 771 resolved rows and is deliberately untouched.
+
+        Closing the GDACS ceiling must not close this one: the rule is
+        about what a GDACS figure carries, not about whether floods may be
+        bounded at all.
+        """
+
+        share = float(rulebook.get("sanity.population_fallback_share"))
+        multiplier = float(rulebook.get("sanity.ceiling_multiplier"))
+        population = 20_000_000
+        over = population * share * multiplier * 1.5
+        verdict = rc_mod.reconcile(
+            iso3="PHL", ym="2024-03", hazard="FL",
+            candidates=[make_candidate("emdat", over)],
+            rulebook=rulebook, national_population=population,
+            today=dt.date(2026, 9, 9),
+        )
+        assert rc_mod.FLAG_CEILING_EXCEEDED in verdict.flags
+        assert verdict.provenance["decision"]["ceiling"]["basis"] == "population_share"
+
+    def test_the_extraction_path_offers_no_flood_ceiling_either(self, rulebook):
+        """A figure rejected before it reaches the ladder is just as lost."""
+
+        events = [
+            dc_replace(make_candidate("gdacs", 5_300), hazard="FL"),
+        ]
+        keep = [
+            c for c in events
+            if rules_mod.usable_exposure(c.value, rulebook, c.hazard) is not None
+        ]
+        assert keep == []
+
+    def test_the_record_says_why_the_ceiling_is_absent(self):
+        """"GDACS described no event" and "its figure bounds nothing" want
+        different repairs, and a blank ceiling column says neither."""
+
+        assert "FL" in rules_mod.NO_POPULATION_EXPOSURE_HAZARDS
+        assert "TC" not in rules_mod.NO_POPULATION_EXPOSURE_HAZARDS
+        assert hasattr(cand_mod, "NO_POPULATION_EXPOSURE_HAZARDS")
+
+    def test_closing_the_flood_ceiling_costs_no_re_walk(self, rulebook):
+        """It must not be a rulebook value, or it re-walks frozen history.
+
+        The resume ledger stamps each month with a digest of the rulebook
+        that decided it, so a rulebook VALUE under `sanity` or `flood.gdacs`
+        moves the digest for flood and cyclone alike and puts years of
+        months back on the queue — to produce revision rows the freeze guard
+        will not let change an answer. Cost with nothing on the other side.
+
+        So the rule is a code constant, and this holds it there.
+        """
+
+        text = (
+            Path(__file__).resolve().parents[1]
+            / "hazard_resolution" / "rulebook.yaml"
+        ).read_text(encoding="utf-8")
+        keys = [
+            line.split(":", 1)[0].strip()
+            for line in text.splitlines()
+            if ":" in line and not line.lstrip().startswith("#")
+        ]
+        assert not any("population_exposure" in k.lower() for k in keys), (
+            "the flood-ceiling rule has moved into the rulebook and now "
+            "re-walks history"
+        )
+        for hazard in ("flood", "cyclone", "drought"):
+            # It has a fingerprint at all, i.e. the guard above is checking
+            # something rather than an absent mechanism.
+            assert rulebook.hazard_fingerprint(hazard)

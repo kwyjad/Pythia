@@ -18,9 +18,11 @@ blindfold.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 from pathlib import Path
 
+import duckdb
 import pytest
 
 from resolver.diagnostics import issue_sources, issues as mod
@@ -433,6 +435,79 @@ class TestTheShippedRegister:
             assert entry.get("note"), issue_id
             assert entry.get("review_by"), issue_id
 
+    def test_the_review_dates_are_chosen_per_fault_not_stamped_uniformly(self):
+        """One date on every entry is a placeholder wearing a date's clothes.
+
+        Three faults with different remedies — a credential the owner
+        renews, a vendor support request, an escalation nobody has sent —
+        cannot honestly share one review interval. When they do, the date
+        was not chosen; a quarter was picked so nothing would fire.
+        """
+
+        known = mod.KnownIssues.load()
+        dates = {str(e.get("review_by")) for e in known.entries.values()}
+        assert len(dates) == len(known.entries), (
+            f"every entry carries the same review date: {dates}"
+        )
+
+    def test_no_review_date_is_parked_where_it_never_fires(self):
+        """A date years out is a suppression with no expiry, in disguise.
+
+        Anchoring the horizon to `first_seen` would be wrong: a fault can be
+        legitimately old and only recently escalated, which is exactly the
+        ACLED CAST case. What cannot be right is one entry parked far beyond
+        the others, so the test is the SPREAD — it stays meaningful when
+        somebody renews a date, and still catches a 2099 left in the file.
+        """
+
+        known = mod.KnownIssues.load()
+        due = sorted(
+            dt.date.fromisoformat(str(e["review_by"]))
+            for e in known.entries.values()
+        )
+        for issue_id, entry in known.entries.items():
+            first = dt.date.fromisoformat(str(entry["first_seen"]))
+            assert dt.date.fromisoformat(str(entry["review_by"])) > first, issue_id
+        assert (due[-1] - due[0]).days <= 180, (
+            f"review dates span {(due[-1] - due[0]).days} days: "
+            f"{due[0]} to {due[-1]}"
+        )
+
+    def test_every_review_date_says_why_that_interval(self):
+        """A date with no reasoning beside it is a date nobody can revise.
+
+        The next person to reach one of these has to decide whether to chase
+        it or move it, and cannot without knowing what the interval was for.
+        """
+
+        text = mod.KNOWN_ISSUES_PATH.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if not line.strip().startswith("review_by:"):
+                continue
+            preceding = lines[i - 1].strip() if i else ""
+            assert preceding.startswith("#"), (
+                f"line {i + 1} sets a review date with no reason beside it"
+            )
+
+    def test_the_overdue_line_fires_on_the_shipped_register(self):
+        """Held to a pinned date, so it is a property and not the calendar.
+
+        On 2026-09-09 the EM-DAT entry is a month past its review date and
+        the other two are not. That is what a live run prints, and it is the
+        difference between a register that expires and one that does not.
+        """
+
+        known = mod.KnownIssues.load()
+        today = dt.date(2026, 9, 9)
+        overdue = set()
+        for issue_id in known.entries:
+            issue = mod.Issue(id=issue_id, severity=mod.DEGRADED,
+                              title="t", evidence="e")
+            if known.apply(issue, today=today).overdue:
+                overdue.add(issue_id)
+        assert overdue == {"emdat_auth_rejected"}, overdue
+
     def test_the_seeded_ids_match_the_ids_the_collectors_emit(self):
         """A register keyed on an id nothing emits suppresses nothing."""
 
@@ -455,3 +530,140 @@ class TestTheShippedRegister:
             _unread_source_records("emdat")
         ))
         assert register.issues[0].severity == mod.DEGRADED
+
+
+class TestTheAnnotationSaysWhenAnEntryIsOverdue:
+    """The Actions annotations are where a reader looks first.
+
+    An overdue entry is the one that most needs looking at — it is a
+    suppression nobody has re-read — and a quiet `::notice::` that says
+    nothing about it reads as settled.
+    """
+
+    def _register(self, tmp_path: Path, review_by: str):
+        path = tmp_path / "known.yml"
+        path.write_text(
+            "issues:\n"
+            "  - id: some_fault\n"
+            "    owner: external\n"
+            "    note: somebody is chasing it\n"
+            f"    review_by: {review_by}\n",
+            encoding="utf-8",
+        )
+        register = mod.IssueRegister(known=mod.KnownIssues.load(path))
+        register.add(mod.Issue(id="some_fault", severity=mod.DEGRADED,
+                               title="a fault", evidence="e"))
+        return register
+
+    def test_an_overdue_entry_says_so_in_the_annotation(self, tmp_path):
+        register = self._register(tmp_path, "2020-01-01")
+        line = mod.render_annotations(register)[0]
+        assert "::notice" in line
+        assert "overdue" in line.lower()
+        assert "2020-01-01" in line
+
+    def test_an_entry_within_its_review_window_stays_quiet(self, tmp_path):
+        register = self._register(tmp_path, "2099-01-01")
+        line = mod.render_annotations(register)[0]
+        assert "overdue" not in line.lower()
+
+
+class TestTheHistorySurvivesBetweenRuns:
+    """`first_seen` and `runs_seen` need state carried between runs.
+
+    There is only one store that travels: the canonical database, because
+    nothing in CI may push to `main`. So the claim these fields rest on is
+    that a row written before the canonical upload is IN the uploaded file
+    — and the upload copies `data/resolver.duckdb` alone, so a write left
+    in the WAL is uploaded as if it never happened.
+
+    These drive real files rather than `:memory:`, because an in-memory
+    database cannot fail the way a WAL can.
+    """
+
+    def _issue(self, issue_id="some_fault", severity=None):
+        return mod.Issue(
+            id=issue_id, severity=severity or mod.DEGRADED,
+            title="a fault", evidence="e",
+        )
+
+    def _run(self, path, issue_id="some_fault", today=None):
+        con = duckdb.connect(str(path))
+        try:
+            register = mod.IssueRegister()
+            register.apply_history(mod.load_history(con))
+            register.add(self._issue(issue_id))
+            # apply_history runs before add in the real path too; re-apply so
+            # the freshly added issue picks the prior run up.
+            register.apply_history(mod.load_history(con))
+            mod.save_history(con, register, today=today)
+            con.execute("CHECKPOINT")
+            return register
+        finally:
+            con.close()
+
+    def test_a_second_run_counts_the_first(self, tmp_path):
+        db = tmp_path / "resolver.duckdb"
+        first = self._run(db, today=dt.date(2026, 9, 1))
+        assert first.issues[0].runs_seen == 1, (
+            "the first run has seen the fault once — itself"
+        )
+        second = self._run(db, today=dt.date(2026, 9, 9))
+        assert second.issues[0].runs_seen == 2
+
+    def test_first_seen_is_the_first_run_and_never_moves(self, tmp_path):
+        db = tmp_path / "resolver.duckdb"
+        self._run(db, today=dt.date(2026, 8, 1))
+        third = None
+        for day in (dt.date(2026, 8, 15), dt.date(2026, 9, 9)):
+            third = self._run(db, today=day)
+        assert third.issues[0].first_seen == "2026-08-01"
+        assert third.issues[0].runs_seen == 3
+
+    def test_the_history_is_in_the_file_the_upload_copies(self, tmp_path):
+        """The sharp one. The canonical upload copies the .duckdb file and
+        NOT its .wal, so an uncheckpointed write is uploaded as if it had
+        never happened — and the counter silently resets to 1 forever."""
+
+        db = tmp_path / "resolver.duckdb"
+        self._run(db, today=dt.date(2026, 9, 1))
+        uploaded = tmp_path / "uploaded.duckdb"
+        uploaded.write_bytes(db.read_bytes())  # the file alone, no .wal
+
+        con = duckdb.connect(str(uploaded), read_only=True)
+        try:
+            rows = con.execute(
+                f"SELECT issue_id, runs_seen FROM {mod.HISTORY_TABLE}"
+            ).fetchall()
+        finally:
+            con.close()
+        assert rows == [("some_fault", 1)]
+
+    def test_a_run_that_finds_nothing_else_still_records_the_table(self, tmp_path):
+        """A run writing no new rows must not lose the count.
+
+        The table's own CREATE is a write too, which is why the checkpoint
+        runs whether or not a row was written.
+        """
+
+        db = tmp_path / "resolver.duckdb"
+        con = duckdb.connect(str(db))
+        try:
+            mod.save_history(con, mod.IssueRegister())  # no issues at all
+            con.execute("CHECKPOINT")
+        finally:
+            con.close()
+        con = duckdb.connect(str(db), read_only=True)
+        try:
+            tables = {r[0] for r in con.execute("SHOW TABLES").fetchall()}
+        finally:
+            con.close()
+        assert mod.HISTORY_TABLE in tables
+
+    def test_a_history_write_that_fails_costs_the_counter_and_nothing_else(self):
+        class Broken:
+            def execute(self, *a, **k):
+                raise RuntimeError("disk full")
+
+        assert mod.save_history(Broken(), mod.IssueRegister()) == 0
+        assert mod.load_history(Broken()) == {}
