@@ -357,6 +357,65 @@ def _porcelain_path(line: str) -> str:
 _SUPERSEDES: dict[str, str] = {"idmc_helix": "idmc"}
 
 
+def _ceiling_value_from_provenance(raw: Any) -> float | None:
+    """The ceiling a resolution was measured against, or None if it recorded none.
+
+    The ladder writes the number it actually applied under
+    ``decision.ceiling.exposed_population`` (the key predates the
+    population-share fallback that can now supply it, so the name is wider
+    than it reads); ``value`` is accepted first in case a writer ever states
+    it plainly. A row that names no ceiling is a row with no bound, which is
+    a different thing from a row bounded by zero — telling those two apart
+    is the whole point of asking.
+    """
+
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(payload, dict):
+        return None
+    decision = payload.get("decision")
+    if not isinstance(decision, dict):
+        return None
+    ceiling = decision.get("ceiling")
+    if isinstance(ceiling, dict):
+        ceiling = (
+            ceiling["value"] if ceiling.get("value") is not None
+            else ceiling.get("exposed_population")
+        )
+    if ceiling is None:
+        return None
+    try:
+        return float(ceiling)
+    except (TypeError, ValueError):
+        return None
+
+
+def _looks_like_current_code(raw: Any) -> bool:
+    """True when this provenance was written by code that carries the fix.
+
+    A fault count scoped to what the CURRENT code could have stamped is the
+    only one a reader can act on; history the code can never reach is
+    reported beside it as its own number. The marker is
+    ``decision.ceiling.basis``, added when the ceiling started naming its
+    own origin — the same change that made a non-positive exposure mean
+    UNKNOWN.
+    """
+
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:  # noqa: BLE001
+        return False
+    decision = payload.get("decision") if isinstance(payload, dict) else None
+    ceiling = decision.get("ceiling") if isinstance(decision, dict) else None
+    return isinstance(ceiling, dict) and "basis" in ceiling
+
+
 def _superseded_connectors(records: list[dict]) -> dict[str, str]:
     """``{legacy_id: live_id}`` for pairs where the live one actually ran."""
 
@@ -2000,6 +2059,8 @@ class BundleBuilder:
             self._check_tc_outlook_issue_dates_parse,
             self._check_forecast_vintages,
             self._check_resolution_above_rejection_ceiling,
+            self._check_no_positive_value_measured_against_a_zero_ceiling,
+            self._check_ceiling_is_the_same_scale_as_the_values_it_bounds,
             self._check_flagged_resolutions_name_their_flag,
             self._check_acled_html_responses,
             self._check_no_past_target_month_served,
@@ -3001,6 +3062,161 @@ class BundleBuilder:
             or "No cell published a figure larger than the ceiling it used to "
             "reject another figure. When one does, the ceiling and the ladder "
             "disagree about the same cell and one of them is wrong.",
+        )
+
+    def _check_no_positive_value_measured_against_a_zero_ceiling(self) -> None:
+        """A ceiling of zero is not a bound. It is a source declining to say.
+
+        In run 34222175003, 1,962 resolved rows carried the
+        ``ceiling_exceeded`` flag — 1,841 of them floods — and the MEDIAN
+        ceiling on those rows was 0.0. Bangladesh's 7.2 million in June
+        2022 was flagged against a bound of nothing, and so were the
+        Philippines' 6.5 million and the DRC's 3.45 million. Those are
+        correct figures wearing a doubt the machine had no basis to raise.
+
+        The current code cannot produce such a row: ``rules.usable_exposure``
+        turns a non-positive exposure, and one below the plausibility floor,
+        into "no ceiling". This check exists so it stays that way, and so
+        the history that predates the fix is counted rather than assumed.
+        """
+
+        name = "no_positive_resolution_was_measured_against_a_ceiling_of_zero"
+        if "haz_resolutions" not in self.tables():
+            return self._check(name, "SKIP", "", "", "haz_resolutions is absent")
+        result = self.query(
+            "SELECT iso3, hazard, printf('%04d-%02d', year, month), value, "
+            "provenance_json, flagged, frozen_at "
+            "FROM haz_resolutions WHERE value IS NOT NULL AND value > 0"
+        )
+        if result is None:
+            return
+        offenders: list[str] = []
+        historical = 0
+        n_with_ceiling = 0
+        for iso3, hazard, ym, value, provenance, flagged, _frozen in result[1]:
+            ceiling = _ceiling_value_from_provenance(provenance)
+            if ceiling is None:
+                continue
+            n_with_ceiling += 1
+            if ceiling > 0:
+                continue
+            line = f"{iso3}/{hazard}/{ym}: {float(value):,.0f} against a ceiling of {ceiling:g}"
+            if flagged:
+                line += " (flagged)"
+            # A row this code could have written is a defect NOW; a row from
+            # before the fix is history, counted and dated, never mixed in
+            # with it. A fault count scoped to what the current code could
+            # have stamped is the only one a reader can act on.
+            if _looks_like_current_code(provenance):
+                offenders.append(line)
+            else:
+                historical += 1
+        if not n_with_ceiling:
+            return self._check(
+                name, "SKIP", "", "",
+                "no resolution records a ceiling in its provenance",
+            )
+        detail = (
+            "; ".join(offenders[:10])
+            or "No positive resolved value is bounded by a ceiling of zero."
+        )
+        if historical:
+            detail += (
+                f" {historical} row(s) predate the usable-exposure rule and carry "
+                "one; they are history this run cannot rewrite (the freeze guard "
+                "owns them) and are reported here rather than counted as a fault."
+            )
+        self._check(
+            name, "FAIL" if offenders else "PASS",
+            f"{len(offenders)} of {n_with_ceiling} rows with a recorded ceiling",
+            "0", detail,
+            issues=[{
+                "id": "resolution_bounded_by_a_zero_ceiling",
+                "title": f"{len(offenders)} resolved value(s) are measured against a "
+                         "ceiling of zero, which is a source declining to say rather "
+                         "than a bound.",
+                "cost": float(len(offenders)),
+                "cost_unit": "resolved rows",
+            }] if offenders else None,
+        )
+
+    #: How far a hazard's ceiling may sit below the values it bounds before
+    #: the ceiling is the thing in doubt. Two orders of magnitude: a
+    #: modelled footprint legitimately differs from reported impact by a
+    #: factor of a few, which is why sanity.ceiling_multiplier is 3.0, but
+    #: not by a hundred.
+    _CEILING_SCALE_TOLERANCE = 100.0
+
+    def _check_ceiling_is_the_same_scale_as_the_values_it_bounds(self) -> None:
+        """A bound a hundred times smaller than the thing it bounds is broken.
+
+        The flood exposure figures GDACS supplies are not a national
+        population exposure. Over 200 months and 5,415 candidate rows the
+        largest FL ``exposed_ceiling`` ever recorded is 5,300 people and the
+        median monthly maximum is 68, while TC — the same machinery, the
+        same parser, the same table — reports 92 million and 968,338. Three
+        to four orders of magnitude apart is not a difference in hazard.
+
+        This does not say what the flood field IS. It says the ceiling and
+        the values it bounds are not the same quantity, which is the
+        statement a reader can act on.
+        """
+
+        name = "every_hazard_ceiling_is_the_same_scale_as_the_values_it_bounds"
+        if "haz_impact_candidates" not in self.tables():
+            return self._check(name, "SKIP", "", "", "haz_impact_candidates is absent")
+        result = self.query(
+            """
+            SELECT hazard,
+                   MEDIAN(CASE WHEN value_type = 'exposed_ceiling' THEN value END),
+                   MEDIAN(CASE WHEN value_type <> 'exposed_ceiling' THEN value END),
+                   COUNT(CASE WHEN value_type = 'exposed_ceiling' THEN 1 END),
+                   COUNT(CASE WHEN value_type <> 'exposed_ceiling' THEN 1 END),
+                   MAX(CASE WHEN value_type = 'exposed_ceiling' THEN value END)
+            FROM haz_impact_candidates
+            GROUP BY hazard ORDER BY hazard
+            """
+        )
+        if result is None or not result[1]:
+            return self._check(name, "SKIP", "", "", "no impact candidates")
+        offenders: list[str] = []
+        rows_seen: list[str] = []
+        for hazard, med_ceiling, med_value, n_ceiling, n_value, max_ceiling in result[1]:
+            if not n_ceiling or not n_value or med_ceiling is None or med_value is None:
+                continue
+            if med_ceiling <= 0:
+                continue
+            ratio = float(med_value) / float(med_ceiling)
+            rows_seen.append(
+                f"{hazard}: median ceiling {float(med_ceiling):,.0f} "
+                f"(max {float(max_ceiling or 0):,.0f}, n={n_ceiling}) vs median "
+                f"reported {float(med_value):,.0f} (n={n_value}) — {ratio:,.0f}x"
+            )
+            if ratio > self._CEILING_SCALE_TOLERANCE:
+                offenders.append(rows_seen[-1])
+        if not rows_seen:
+            return self._check(
+                name, "SKIP", "", "", "no hazard has both a ceiling and a reported value"
+            )
+        self._check(
+            name, "FAIL" if offenders else "PASS",
+            f"{len(offenders)} of {len(rows_seen)} hazards",
+            f"within {self._CEILING_SCALE_TOLERANCE:g}x",
+            " | ".join(rows_seen)
+            + (
+                " — a ceiling that far below the values it bounds is not a bound on "
+                "them; it is a different quantity being read as one."
+                if offenders else ""
+            ),
+            issues=[{
+                "id": "gdacs_ceiling_is_not_the_quantity_it_bounds",
+                "title": "A hazard's GDACS exposure ceiling sits more than two orders "
+                         "of magnitude below the impact figures it is supposed to "
+                         "bound.",
+                "evidence": " | ".join(offenders),
+                "cost": float(len(offenders)),
+                "cost_unit": "hazards",
+            }] if offenders else None,
         )
 
     def _check_flagged_resolutions_name_their_flag(self) -> None:

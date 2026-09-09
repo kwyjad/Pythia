@@ -539,10 +539,18 @@ def _attr(element: ET.Element | None, tag: str, attr: str,
 #: ``gdacs:population`` unit strings that mean the value is already a count of
 #: people. GDACS labels the MEASURE, not a multiplier: the public fixtures
 #: read ``unit="Pop74"`` (people under Category 1 winds or higher, TC),
-#: ``unit="Population in 100km"`` (EQ), ``unit=""`` (DR, value 0), and the
-#: flood feed ``unit="people"``. Compared case-insensitively after trimming.
+#: ``unit="Population in 100km"`` (EQ) and the flood feed ``unit="people"``.
+#: Compared case-insensitively after trimming.
+#:
+#: **The empty string is deliberately NOT in here.** It was, and that made an
+#: unlabelled value a count of people by default — so a measurement GDACS had
+#: not labelled became a measurement, and a value of 0 with no unit became a
+#: measurement of zero, which then served as an upper bound on how many
+#: people a flood could have affected. An absent unit is an absent unit. It
+#: means UNKNOWN, exactly as an unrecognised one does, and the figures
+#: ledger says so instead of quietly carrying the bare number.
 _POPULATION_PEOPLE_UNITS = frozenset({
-    "", "people", "persons", "population", "pop74", "pop_total", "population in 100km",
+    "people", "persons", "population", "pop74", "pop_total", "population in 100km",
 })
 #: Multiplicative unit words, in case a feed ever states exposure in
 #: thousands or millions: the bare number would then be 1,000x or
@@ -569,7 +577,8 @@ def parse_gdacs_population(
     * a multiplicative unit ("Million", "Thousand"): the value is scaled;
     * a unit that starts with "population" or "pop" (GDACS names measures
       that way): people, recorded as ``assumed_people``;
-    * anything else: UNKNOWN (None), logged, never the bare number.
+    * anything else, INCLUDING an absent unit: UNKNOWN (None), logged,
+      never the bare number.
     """
 
     raw_value = "" if value is None else str(value).strip()
@@ -590,6 +599,18 @@ def parse_gdacs_population(
         detail["outcome"] = "value_not_a_number"
         return None, detail
     key = raw_unit.lower()
+    if not key:
+        # An absent unit and an unrecognised one are both UNKNOWN, and they
+        # want different repairs: the first says GDACS published no label
+        # for this feed, the second says it published one this parser does
+        # not know. Only a named outcome can tell them apart in a ledger.
+        detail["outcome"] = "no_unit"
+        LOG.warning(
+            "[gdacs] gdacs:population carries no unit (value=%r, text=%r) — the "
+            "exposure is UNKNOWN for this event, not %s people",
+            raw_value, detail["text"][:80], raw_value,
+        )
+        return None, detail
     if key in _POPULATION_PEOPLE_UNITS:
         detail["outcome"] = "people"
         return number, detail

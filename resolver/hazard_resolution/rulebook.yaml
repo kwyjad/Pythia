@@ -502,6 +502,52 @@ sanity:
   # national cap are the bounds in force.
   min_plausible_exposure: 1000
 
+  # WHAT THE FLOOD FEED ACTUALLY SUPPLIES, and why the flood ceiling is
+  # mostly absent (Sept 2026, from run 34222175003 — a comment, deliberately
+  # not a key: a rulebook VALUE here moves the digest of all three hazards
+  # and re-walks history the freeze guard will not let a re-walk change).
+  #
+  # Over 200 months and 5,415 `exposed_ceiling` rows, the largest flood
+  # exposure GDACS has ever supplied this machine is 5,300 people, with a
+  # median monthly maximum of 68. Cyclone, through the same connector, the
+  # same parser and the same table, reports a maximum of 92,308,060 and a
+  # median monthly maximum of 968,338. Three to four orders of magnitude
+  # apart is not a difference between hazards: whatever the flood feed's
+  # `gdacs:population` carries, it is not a national population exposure.
+  #
+  # The consequence was 1,841 flood resolutions carrying `ceiling_exceeded`
+  # against a MEDIAN ceiling of 0.0 — Bangladesh's 7.2 million in June 2022
+  # and the Philippines' 6.5 million in November 2025 among them, correct
+  # figures wearing a doubt the machine had no basis to raise.
+  #
+  # min_plausible_exposure already discards nearly all of it: 68 is a parse
+  # failure, not a bound, so almost every flood cell reports
+  # `ceiling_basis: no_usable_gdacs_exposure` and is bounded by the
+  # population share instead. That IS the right answer — an honest absence
+  # beats a bound of 68 — and it is reached by a rule that was written for
+  # a different reason, so the two contradiction checks
+  # `no_positive_resolution_was_measured_against_a_ceiling_of_zero` and
+  # `every_hazard_ceiling_is_the_same_scale_as_the_values_it_bounds` now
+  # hold it there and say so through the run issue register.
+  #
+  # Routes considered and rejected as a flood exposure source:
+  #   * `geteventdata` `impacts` — empty for FL. `pop39`/`pop74` are cyclone
+  #     wind-radius fields; floods do not carry them. All 107 successful
+  #     calls in run 34222175003 returned `no_population_field`.
+  #   * the `sendai` array — REPORTED impact ("2,330 [people] Affected in
+  #     Nooken District"), sub-national and per-report. Summing across
+  #     regions double counts where reports overlap and understates where
+  #     regions are unreported, wrong in both directions at once; and
+  #     bounding the ladder's reported `affected` by another body's
+  #     reported `affected` is not a plausibility ceiling, it is GDACS
+  #     entering the ladder by the back door, which the machine forbids.
+  #   * the alert SCORE — a dimensionless index, not a count of people.
+  #   * the DFO-derived layers — DFO is calibration only and never writes to
+  #     a resolution table (`test_dfo_never_writes_to_any_resolution_table`).
+  # Unverified: gdacs.org is denied from the build sandbox, so the flood
+  # `<gdacs:population>` element's own unit attribute could not be read
+  # live. That is why an ABSENT unit is now UNKNOWN rather than people.
+
   population_cap: true
 
   # When GDACS says nothing about exposure — its discovery response carries
