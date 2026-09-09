@@ -67,7 +67,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:  # pragma: no cover - import convenience
     sys.path.insert(0, str(REPO_ROOT))
 
-from resolver.diagnostics import issue_sources, issues as issues_mod, run_log  # noqa: E402
+from resolver.diagnostics import (  # noqa: E402
+    issue_sources,
+    issues as issues_mod,
+    refusals as refusals_mod,
+    run_log,
+)
 from resolver.diagnostics.redaction import (  # noqa: E402
     find_secrets,
     is_secret_name,
@@ -1006,6 +1011,7 @@ class BundleBuilder:
             preamble="Derived from http/requests.jsonl.",
         )
         self._report_refusal_rates(rows)
+        self._report_refusal_patterns(records, rows, dest)
 
         envelopes_path = self._stream_file(run_log.STREAM_ENVELOPE)
         envelopes = list(run_log.read_stream(envelopes_path)) if envelopes_path else []
@@ -1062,6 +1068,84 @@ class BundleBuilder:
                 cost_unit="refused requests",
                 source="http/requests_by_connector.csv",
             ))
+
+    def _report_refusal_patterns(
+        self, records: list[dict[str, Any]], rows: list[list[Any]], dest: Path
+    ) -> None:
+        """Are the SAME resources refused each run, or different ones?
+
+        A refusal rate cannot tell those apart and they want opposite
+        responses: the same resources every run means the refusal belongs to
+        them and asking is waste, different ones each run means it belongs to
+        the asking and asking once is costing evidence. The URL of every
+        refusal is already in this run's own HTTP stream, so the direct test
+        costs no request.
+
+        Scoped to connectors the refusal-rate alarm already named. A
+        connector answering 2xx has nothing to compare, and storing every
+        URL of every connector would put an append-only cache back into a
+        database this repository has already had to compact once.
+        """
+
+        loud = [
+            str(row[0]) for row in rows
+            if int(row[1] or 0) >= self._REFUSAL_RATE_MIN_REQUESTS
+            and (int(row[4] or 0) / int(row[1] or 1)) >= self._REFUSAL_RATE_ALARM
+        ]
+        if not loud:
+            return
+        entries = refusals_mod.refusals_from_records(records, connectors=loud)
+        if not entries:
+            return
+
+        table: list[list[Any]] = []
+        for connector in sorted(entries):
+            entry = entries[connector]
+            for resource in sorted(entry.refused):
+                table.append([connector, resource])
+        write_csv(
+            dest / "refused_resources.csv", table, ["connector", "resource"],
+            preamble=(
+                "The resources a refusing connector was refused, derived from "
+                "http/requests.jsonl. Kept so the next run can ask whether "
+                "they are the same ones. Probe traffic is excluded."
+            ),
+        )
+
+        run_id = str(self.env.get("GITHUB_RUN_ID") or "")
+        if not run_id:
+            self.problem(
+                "refusal pattern: no GITHUB_RUN_ID, so this run's refused "
+                "resources were not recorded and no comparison is possible"
+            )
+            return
+        con = self.con
+        if con is None:
+            self.problem(
+                "refusal pattern: no readable database, so the refused "
+                "resources could not be carried to the next run"
+            )
+            return
+        for connector in sorted(entries):
+            entry = entries[connector]
+            try:
+                previous = refusals_mod.previous_run(con, connector, run_id)
+                if previous is not None:
+                    prev_id, prev_asked, prev_refused = previous
+                    comparison = refusals_mod.compare(
+                        connector, entry, prev_id, prev_asked, prev_refused
+                    )
+                    self.extra_issues.append(refusals_mod.issue_for(comparison))
+                refusals_mod.save_run(con, run_id, entry, secrets=self.secrets)
+                refusals_mod.prune(con)
+            except Exception as exc:  # noqa: BLE001
+                self.problem(f"refusal pattern for {connector}: {exc}")
+        if any(entries[c].truncated for c in entries):
+            self.problem(
+                "refusal pattern: at least one connector asked for more than "
+                f"{refusals_mod.MAX_RESOURCES_PER_RUN} distinct resources, so "
+                "the recorded set is a prefix and the overlap is a lower bound"
+            )
 
     def _stream_file(self, stream: str) -> Path | None:
         if self.run_log_dir is None:
