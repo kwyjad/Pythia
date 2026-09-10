@@ -32,6 +32,14 @@ figure of "roughly 50 MB a year" was arithmetic over a 0.25-degree grid and
 came out half the real volume, so the run reports the bytes it downloads
 and this paragraph is corrected from that rather than from a calculation.
 
+The reduction is the other half of the feasibility question and was measured
+rather than assumed: 17 seconds per month over 237 countries on a 0.25-degree
+grid, so about 36 minutes for a full 2016-to-present rebuild, holding roughly
+2.1 GB of grids at peak. That fits the workflow's 350-minute budget and a
+16 GB runner with room, which is why the reduce reads every owed month in one
+pass instead of streaming them; a wider window should re-measure rather than
+assume it scales for free.
+
 Five stages, each its own subcommand, deliberately separable so a run that
 is cut short by the CDS queue can be resumed by the next one rather than
 started again:

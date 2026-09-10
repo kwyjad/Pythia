@@ -15,3 +15,15 @@ xarray==2025.12.0
 netCDF4==1.7.4
 numpy==2.4.6
 shapely==2.1.2
+
+# The reduce stage borrows the vendored boundary layer from
+# resolver.hazard_resolution.geometry, so that it and the resolution path
+# agree on where a country is rather than each having its own answer. Reading
+# a module from that package executes the package's __init__, which imports
+# the rulebook, which imports yaml. So a transitive need of a deliberate
+# import, not a dependency of this producer's own code — and it is declared
+# here rather than left to chance, because the run that found it had already
+# spent nine minutes downloading a gigabyte and read 128 grids before the
+# import fired. Guarded by
+# test_the_requirements_declare_everything_the_geometry_import_pulls_in.
+PyYAML==6.0.3
