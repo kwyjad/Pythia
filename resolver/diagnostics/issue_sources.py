@@ -30,8 +30,12 @@ from resolver.diagnostics.issues import (
 )
 
 #: Failure classes a re-run cannot clear. A rejected credential answers the
-#: same way tomorrow; a timeout does not.
-_PERMANENT_FAILURE_CLASSES = frozenset({"auth_rejected", "no_key"})
+#: same way tomorrow; a timeout does not. ``marked_unavailable`` is a source
+#: the rulebook says we cannot read at all, which no re-run can change and
+#: which is nobody in this repository's to fix by writing code.
+_PERMANENT_FAILURE_CLASSES = frozenset({
+    "auth_rejected", "no_key", "marked_unavailable",
+})
 
 #: Check name -> issue id, where the fault has a name of its own that the
 #: known-issues register can carry. Without this a registered issue and the
@@ -45,6 +49,17 @@ CHECK_ISSUE_IDS: dict[str, str] = {
 SOURCE_ISSUE_IDS: dict[str, str] = {
     "emdat": "emdat_auth_rejected",
 }
+
+#: Ids raised by :func:`issue_from_measurement` rather than by one of the
+#: id maps above. A measurement's id is chosen at its call site, so without
+#: this list a register entry keyed on one could not be checked against
+#: anything and "the register suppresses an id nothing emits" would stop
+#: being testable for exactly the entries most likely to rot.
+MEASUREMENT_ISSUE_IDS: frozenset[str] = frozenset({
+    # scripts/build_resolver_debug_bundle.py
+    "spei3_commit_token_expiry",
+    "flood_ceiling_exceeded_rate",
+})
 
 #: Conflict-forecast source (as `conflict_forecasts.source` spells it,
 #: lowercased) -> issue id. The vintages are per source and the register is
@@ -201,6 +216,51 @@ def issues_from_source_fetches(records: Iterable[Mapping[str, Any]]) -> list[Iss
             cost=float(count),
             cost_unit="cache-served fetches",
             source="hazard/source_fetches.csv",
+        ))
+    return out
+
+
+def issues_from_source_state(
+    states: Mapping[str, str] | None,
+) -> list[Issue]:
+    """Sources the rulebook says we cannot read, reported from CONFIG.
+
+    ``issues_from_source_fetches`` needs a failed fetch to have happened.
+    That is the wrong dependency for a source deliberately stood down: if
+    the register only raises when a request fails, switching a connector off
+    makes its issue vanish, and a rung being down stops being visible at the
+    moment it becomes permanent. So the state itself is the evidence, and the
+    issue reports whether or not anything was attempted.
+
+    Ids come from :data:`SOURCE_ISSUE_IDS`, so a stood-down source and the
+    same source's failed fetches merge into ONE record rather than reporting
+    twice under two ids — which is the fault the register exists to prevent.
+
+    ``states`` maps source name to its unavailable reason. An empty mapping,
+    or None, yields nothing: a source with no declared state is available and
+    has nothing to say here.
+    """
+
+    out: list[Issue] = []
+    for source, reason in sorted((states or {}).items()):
+        if not reason:
+            continue
+        out.append(Issue(
+            id=SOURCE_ISSUE_IDS.get(source, f"source_unavailable_{_slug(source)}"),
+            severity=DEGRADED,
+            title=f"{source} is marked unavailable ({reason}), so every cell "
+                  f"that wanted it resolved without that rung.",
+            evidence=(
+                f"{source}.unavailable_reason = {reason} in the rulebook, so no "
+                f"request is made. Cells decided without it still record "
+                f"`rungs_unavailable: {source}`, which is what says which "
+                f"months to re-walk when the source is readable again — and a "
+                f"re-walk needs a targeted restale, because nothing in the "
+                f"hazard fingerprints moves when this switch does."
+            ),
+            owner=OWNER_EXTERNAL,
+            recovers_on_rerun=False,
+            source="config/rulebook.yaml",
         ))
     return out
 

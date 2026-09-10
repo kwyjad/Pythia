@@ -964,6 +964,32 @@ extraction:
 
 emdat:
   # EM-DAT public GraphQL API. Auth: Authorization: Bearer $EMDAT_API_KEY.
+  #
+  # STOOD DOWN, 2026-09-10. There is no working credential and there will not
+  # be one for some time: the key was issued to UNICEF for UNICEF work, and
+  # Pythia is a personal project, so chasing the old key is not the answer. A
+  # request you know will be refused is one you should not make — this rung
+  # was costing six rejected requests per ladder run.
+  #
+  # A REASON, not a boolean. The record has to say WHY the rung is down: a
+  # missing credential is somebody's to obtain, a retired upstream needs a
+  # replacement source, and a boolean would keep the first fact and lose the
+  # second. See rulebook.KNOWN_SOURCE_UNAVAILABLE_REASONS.
+  #
+  # This does NOT quieten the record. `fetch_emdat` returns the same failed
+  # outcome a refusal produced, so a NO_DATA cell still carries
+  # `rungs_unavailable: emdat` — the only thing that will ever say which
+  # cells were decided without their top rung, and therefore which to
+  # re-walk when a credential exists. Zero requests, identical ledger.
+  #
+  # RECOVERY, when a key arrives: removing this line is not enough. `emdat`
+  # is in no fingerprinted section (verified: neither _SHARED_SECTIONS nor a
+  # hazard name nor a borrowed section), so the hazard fingerprints do not
+  # move, `completed_months` returns every month already marked `ok`, and
+  # nothing re-walks. The cells stay as they are. It needs a targeted
+  # restale of the affected months, exactly as the SPEI-3 feed did — see
+  # `emdat_auth_rejected` in resolver/config/known_issues.yml.
+  unavailable_reason: no_credentials
   api_url: "https://api.emdat.be/v1"
   request_timeout_sec: 120
   page_limit: 1000

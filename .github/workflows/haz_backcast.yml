@@ -165,6 +165,12 @@ jobs:
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       # Ladder sources. Unset secrets degrade per rung (the rows record
       # UNAVAILABLE), they never fail the run.
+      # Still passed, deliberately, though EM-DAT is stood down in the
+      # rulebook (`emdat.unavailable_reason`). The SWITCH is what stops the
+      # request; making the stand-down depend on this secret also being
+      # withheld would need two places to agree, and an accidentally
+      # deleted secret would then look identical to a deliberate decision.
+      # The diagnose_emdat dispatch diagnostic needs it too.
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
       # The IDU rung takes IDMC_API_KEY, falling back to IDMC_HELIX_CLIENT_ID
       # — the same IDMC client id, sent as client_id to the same

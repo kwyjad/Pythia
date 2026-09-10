@@ -2454,9 +2454,33 @@ class BundleBuilder:
             self.reconciliation_rows
         ))
         register.extend(issue_sources.issues_from_log_histogram(self.log_shapes))
+        # From CONFIG, not from a failed fetch. A source deliberately stood
+        # down makes no request, so nothing appears in the fetch stream and
+        # the rung would stop being visible at the moment it became
+        # permanent. Same id as the fetch-derived issue, so the two merge
+        # into one record rather than reporting twice.
+        register.extend(issue_sources.issues_from_source_state(
+            self._declared_source_states()
+        ))
         register.extend(self.extra_issues)
         register.apply_history(issues_mod.load_history(self.con))
         return register
+
+    def _declared_source_states(self) -> dict[str, str]:
+        """Ladder rungs the rulebook marks unavailable, and why. Never raises."""
+
+        try:
+            from resolver.hazard_resolution import rulebook as rulebook_mod
+            rb = rulebook_mod.load_rulebook()
+        except Exception as exc:  # noqa: BLE001
+            self.problems.append(f"could not read the rulebook's source states: {exc}")
+            return {}
+        states: dict[str, str] = {}
+        for source in rulebook_mod.UNAVAILABLE_SWITCH_SOURCES:
+            reason = rulebook_mod.source_unavailable_reason(rb, source)
+            if reason:
+                states[source] = reason
+        return states
 
     def _check(
         self, name: str, verdict: str, left: Any, right: Any, detail: str,
@@ -4458,6 +4482,21 @@ class BundleBuilder:
             any(self.diagnostics_dir.glob(f"haz_run_{hz}.json"))
             for hz in ("flood", "cyclone")
         )
+        # A deliberate stand-down is not a contradiction. This check asks
+        # "a key is configured and the rung was still not read, why?" — and
+        # the answer "because we told it not to ask" is an answer, not a
+        # fault. Without this the bundle would stay red forever on a decision
+        # nobody is going to reverse, which is how a reader learns to skip
+        # the report. The register still carries it, at `known`, from config
+        # state: see `issues_from_source_state`.
+        stood_down = self._declared_source_states().get("emdat", "")
+        if stood_down:
+            return self._check(
+                name, "SKIP", "", "",
+                f"emdat is marked unavailable in the rulebook ({stood_down}), so "
+                "the rung is expected unread and no request was made. Reported "
+                "by the register from config state, not here.",
+            )
         if not key_present:
             return self._check(
                 name, "SKIP", "", "",
