@@ -173,10 +173,15 @@ def test_a_sampled_country_says_it_was_sampled():
 
 
 def test_the_nearest_cell_is_the_nearest_one():
-    grid = _grid(lats=[0.0], lons=[0.0, 10.0], values=[[-1.0, -9.0]])
+    # The marker is -3.5 rather than a round -9: since `SATURATION_ABS` a
+    # value that extreme is treated as the index saturating rather than
+    # measuring, so the nearest-cell path would skip it and this test would
+    # be asserting the opposite of what it means to. A distinctive number
+    # inside the valid range does the same job.
+    grid = _grid(lats=[0.0], lons=[0.0, 10.0], values=[[-1.0, -3.5]])
     out = spei.country_mean(grid, _box("MLT", 9.9, -0.05, 10.0, 0.05), contains=_contains)
 
-    assert out.value == pytest.approx(-9.0)
+    assert out.value == pytest.approx(-3.5)
 
 
 def test_sampling_can_be_switched_off():
