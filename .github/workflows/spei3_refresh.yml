@@ -1,0 +1,392 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+# The SPEI-3 drought feed, produced on a schedule instead of by hand.
+#
+# The drought gate has no observation reaching back before the HDX and NMME
+# ingests began, so most of the backcast's window resolves INCONCLUSIVE: a
+# cell no feed NAMED is "not looked at", and one under min_answered_for_zero
+# cannot rest a zero on absence. SPEI-3 is the observation those years are
+# missing. It is a global raster, and turning a raster into a country number
+# is zonal statistics, which the rulebook says does not belong in a
+# resolution run — so this workflow produces
+# resolver/data/spei3_country_means.csv and the rulebook's existing `tabular`
+# provider reads the committed file.
+#
+# Three properties this workflow has to keep.
+#
+# It cannot contend for the canonical DB. Its concurrency group is its own,
+# NOT pythia-resolver-db, so it can never cancel the nightly backcast or the
+# monthly ingest. That is also why it does not restale the resume ledger
+# itself: it commits the request into the status file and the backcast
+# applies it (resolver/hazard_resolution/backcast.py::apply_feed_restale).
+#
+# It fails closed. A candidate that misses any validation gate is uploaded as
+# an artifact and the committed CSV is left exactly as it was. A wrong feed
+# poisons every month it covers; a stale one only costs the months it does
+# not.
+#
+# It is resumable. A CDS request is an asynchronous job that can sit queued
+# for hours against a six-hour job cap, so the fetch carries a deadline and
+# reports the years it still owes rather than failing. `reduce` MERGES on
+# (iso3, ym), so a partial run is a smaller merge and never a truncation —
+# which is what makes resumption safe rather than merely possible.
+
+---
+name: SPEI-3 Feed Refresh
+
+# Its own group, deliberately. See the header.
+concurrency:
+  group: spei3-feed
+  cancel-in-progress: false
+
+"on":
+  workflow_dispatch:
+    inputs:
+      from_ym:
+        description: "First month to consider (YYYY-MM; the series starts 2016-01)"
+        required: false
+        default: ""
+        type: string
+      to_ym:
+        description: "Last month to consider (YYYY-MM; blank = the last complete month)"
+        required: false
+        default: ""
+        type: string
+      full_rebuild:
+        description: >-
+          Fetch and reduce EVERY month in the range rather than the trailing
+          revision window plus what the CSV is missing. Use it once, for the
+          initial 2016-to-present build. If one job cannot finish inside six
+          hours the deadline stops it cleanly and the next run resumes: run
+          it twice.
+        required: false
+        default: false
+        type: boolean
+      fetch_deadline_sec:
+        description: >-
+          Stop STARTING CDS jobs after this many seconds. The remainder is
+          reported owed, the run exits green with status `incomplete`, and the
+          next run asks for exactly those years.
+        required: false
+        default: "14400"
+        type: string
+  schedule:
+    # The 10th. ERA5T runs about five days behind and the product updates
+    # monthly, so the 10th is early enough to be current and late enough for
+    # the previous month to exist. Tune it once two cycles have been watched.
+    #
+    # NOT the 27th or 28th, for the reason haz_backcast.yml documents: crons
+    # in this repository are delivered hours late (the 28 Aug 2026 tick
+    # arrived 11h41m late) and those two days belong to the monthly ingest
+    # and the resolutions chain hanging off it. This workflow holds no DB
+    # lock, but a six-hour job competing for runners on the one night the
+    # month's scores depend on is a cost with nothing on the other side.
+    - cron: "40 5 10 * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  PYTHONUNBUFFERED: "1"
+  RAW_DIR: spei3_raw
+  WINDOW: diagnostics/spei3_window.json
+  FETCH_RESULT: diagnostics/spei3_fetch_result.json
+  REDUCE_REPORT: diagnostics/spei3_reduce_report.json
+  COVERAGE_REPORT: diagnostics/spei3_coverage_report.json
+  CANDIDATE: diagnostics/spei3_candidate.csv
+  FEED: resolver/data/spei3_country_means.csv
+  STATUS: resolver/data/spei3_status.json
+
+jobs:
+  refresh:
+    name: Fetch, reduce, gate, commit
+    runs-on: ubuntu-latest
+    # Under the six-hour job cap with room for the reduce, the gates and the
+    # commit after a fetch that spent its whole deadline.
+    timeout-minutes: 350
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Its own requirements file. Nothing here goes near the resolver's
+      # dependency set: the pipeline must not be able to import cdsapi.
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -r requirements-spei3.txt
+
+      - name: Prepare diagnostics directory
+        run: mkdir -p diagnostics "${RAW_DIR}"
+
+      # What this run owes: the trailing revision window (ERA5T values are
+      # revised to final ERA5 later, so the first version of a month is not
+      # its last) PLUS every month inside the range the committed CSV does
+      # not hold. The second half is what makes the producer self-healing —
+      # a month lost to a CDS job that timed out is picked up next cycle with
+      # nobody noticing it went missing.
+      - name: Plan the window
+        env:
+          FROM_YM: ${{ inputs.from_ym || '' }}
+          TO_YM: ${{ inputs.to_ym || '' }}
+          FULL_REBUILD: ${{ github.event_name == 'workflow_dispatch' && (inputs.full_rebuild == true || inputs.full_rebuild == 'true') && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          CMD="python -m scripts.build_spei3_country_means plan --out ${FEED} --window-out ${WINDOW}"
+          if [ -n "${FROM_YM}" ]; then
+            CMD="${CMD} --from ${FROM_YM}"
+          fi
+          if [ -n "${TO_YM}" ]; then
+            CMD="${CMD} --to ${TO_YM}"
+          fi
+          if [ "${FULL_REBUILD}" = "true" ]; then
+            CMD="${CMD} --full-rebuild"
+          fi
+          ${CMD} 2>&1 | tee diagnostics/spei3_plan.log
+          python - <<'PY'
+          import json, os
+          window = json.load(open(os.environ["WINDOW"]))
+          with open(os.environ["GITHUB_ENV"], "a") as fh:
+              fh.write(f"SPEI3_MONTHS_OWED={len(window['months'])}\n")
+              fh.write(f"SPEI3_YEARS={' '.join(window['years'])}\n")
+          PY
+
+      # A monthly cadence against a seven-day cache eviction means the cache
+      # essentially never hits between scheduled runs, and that is fine — the
+      # committed CSV is the durable artifact and the raw grids are
+      # disposable. What the cache IS for is the same-day resumption of a
+      # full rebuild whose fetch spent its deadline: without it, run two
+      # re-downloads everything run one already had.
+      - name: Restore cached raw grids
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.RAW_DIR }}
+          key: spei3-raw-v1-${{ github.run_id }}
+          restore-keys: |
+            spei3-raw-v1-
+
+      # cdsapi reads CDSAPI_URL and CDSAPI_KEY straight from the environment
+      # (verified against 0.7.7's get_url_key_verify), so no ~/.cdsapirc is
+      # written. That is the better arrangement: no credential on disk, no
+      # chmod to get wrong, and nothing for an artifact upload to sweep up.
+      #
+      # The dataset licence is accepted on the account that owns the token,
+      # which is an account-level fact and needs no step here.
+      - name: Fetch the grid from the CDS
+        env:
+          CDSAPI_URL: https://cds.climate.copernicus.eu/api
+          CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
+          DEADLINE: ${{ inputs.fetch_deadline_sec || '14400' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CDSAPI_KEY}" ]; then
+            echo "::error title=SPEI-3::CDSAPI_KEY is not configured; the producer cannot fetch anything"
+            exit 1
+          fi
+          python -m scripts.build_spei3_country_means fetch \
+            --window "${WINDOW}" \
+            --raw-dir "${RAW_DIR}" \
+            --deadline-sec "${DEADLINE}" \
+            --result-out "${FETCH_RESULT}" 2>&1 | tee diagnostics/spei3_fetch.log
+
+      # Reduce against the vendored Natural Earth layer the rest of the
+      # machine already uses, then MERGE into a candidate rather than over
+      # the feed — so the gates below decide whether it is publishable.
+      - name: Reduce to country means and merge
+        run: |
+          set -euo pipefail
+          python -m scripts.build_spei3_country_means reduce \
+            --raw-dir "${RAW_DIR}" \
+            --window "${WINDOW}" \
+            --out "${FEED}" \
+            --candidate-out "${CANDIDATE}" \
+            --report-out "${REDUCE_REPORT}" 2>&1 | tee diagnostics/spei3_reduce.log
+
+      # Fail closed. Every gate, and the reasons each exists, are in
+      # scripts/build_spei3_country_means.py::validate_candidate.
+      - name: Gate the candidate
+        id: gate
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m scripts.build_spei3_country_means validate \
+            --candidate "${CANDIDATE}" \
+            --against "${FEED}" \
+            --window "${WINDOW}" \
+            --reduce-report "${REDUCE_REPORT}" \
+            --fetch-result "${FETCH_RESULT}" \
+            --report-out "${COVERAGE_REPORT}" 2>&1 | tee diagnostics/spei3_validate.log
+
+      # Promote, or record the failure. Either way the status file is written:
+      # a feed that quietly stops extending is what an unattended system is
+      # worst at noticing, and the register's staleness check reads this file.
+      - name: Promote the candidate or record the failure
+        env:
+          GATE: ${{ steps.gate.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "${GATE}" = "success" ]; then
+            python -m scripts.build_spei3_country_means promote \
+              --candidate "${CANDIDATE}" \
+              --out "${FEED}" \
+              --status-out "${STATUS}" \
+              --window "${WINDOW}" \
+              --fetch-result "${FETCH_RESULT}" \
+              --run-id "${GITHUB_RUN_ID}" 2>&1 | tee diagnostics/spei3_promote.log
+          else
+            echo "::error title=SPEI-3::a validation gate failed; the committed feed is unchanged. See the spei3-candidate artifact."
+            python -m scripts.build_spei3_country_means promote \
+              --failed \
+              --failure-reason "a validation gate failed (see diagnostics/spei3_validate.log)" \
+              --out "${FEED}" \
+              --status-out "${STATUS}" \
+              --window "${WINDOW}" \
+              --fetch-result "${FETCH_RESULT}" \
+              --run-id "${GITHUB_RUN_ID}" 2>&1 | tee diagnostics/spei3_promote.log
+          fi
+
+      # The raw grids are disposable and the CSV is the durable artifact, so
+      # the cache keeps only what a resumption needs: everything while years
+      # are still owed, the trailing two years otherwise (the 10 GB
+      # repository cap defeats anything larger).
+      - name: Prune the raw grids before caching
+        run: |
+          set -euo pipefail
+          OWED=$(python -c "import json,os;print(len(json.load(open(os.environ['FETCH_RESULT'])).get('years_owed') or []))")
+          if [ "${OWED}" != "0" ]; then
+            echo "keeping every downloaded year: ${OWED} still owed, so the next run resumes on them"
+          else
+            KEEP_A=$(date -u +%Y)
+            KEEP_B=$(( KEEP_A - 1 ))
+            find "${RAW_DIR}" -name '*.nc' \
+              ! -name "spei3_${KEEP_A}.nc" ! -name "spei3_${KEEP_B}.nc" -delete
+            echo "kept ${KEEP_A} and ${KEEP_B} only"
+          fi
+          du -sh "${RAW_DIR}" || true
+
+      - name: Save cached raw grids
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ env.RAW_DIR }}
+          key: spei3-raw-v1-${{ github.run_id }}
+
+      # Commit whatever actually changed. On a failed gate that is the status
+      # file alone, which is the point: the failure is recorded even though
+      # the feed is not touched.
+      #
+      # KNOWN CONSTRAINT, and the reason for the fallback: branch protection
+      # on this repository rejects a CI push to main (GH006, observed from
+      # 2026-08-06 — it is what stopped refresh-crisiswatch.yml committing its
+      # scrape). A direct push is what makes this producer unattended, so it
+      # is tried first with SPEI3_COMMIT_TOKEN when one is configured; when
+      # the push is refused the change is raised as a pull request instead
+      # and the warning says which secret would remove the click.
+      - name: Commit the feed
+        id: commit
+        env:
+          GH_TOKEN: ${{ secrets.SPEI3_COMMIT_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git add -- "${FEED}" "${STATUS}"
+          if git diff --cached --quiet; then
+            echo "nothing changed: the feed already covers this window"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          NEWEST=$(python -c "import json,os;print(json.load(open(os.environ['STATUS'])).get('newest_month',''))")
+          git commit -m "SPEI-3 feed: covered through ${NEWEST} (run ${GITHUB_RUN_ID})"
+          if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+            echo "pushed=main" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::warning title=SPEI-3::the push to ${GITHUB_REF_NAME} was refused (branch protection, GH006). Raising a pull request instead. Configure a SPEI3_COMMIT_TOKEN that can bypass protection to make this unattended."
+          BRANCH="spei3-feed/${GITHUB_RUN_ID}"
+          git push --force origin "HEAD:refs/heads/${BRANCH}"
+          echo "pushed=${BRANCH}" >> "$GITHUB_OUTPUT"
+          gh pr create --base "${GITHUB_REF_NAME}" --head "${BRANCH}" \
+            --title "SPEI-3 feed: covered through ${NEWEST}" \
+            --body "Produced by \`spei3_refresh.yml\` run ${GITHUB_RUN_ID}. The nightly backcast restales the drought resume ledger for the months this extends once it is merged — until then those months stay INCONCLUSIVE." \
+            || echo "::warning title=SPEI-3::branch ${BRANCH} is pushed; opening the pull request failed, so open it by hand."
+
+      - name: Upload the candidate and the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spei3-candidate-${{ github.run_id }}
+          path: |
+            diagnostics/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Summarise
+        if: always()
+        env:
+          GATE: ${{ steps.gate.outcome }}
+          CHANGED: ${{ steps.commit.outputs.changed }}
+          PUSHED: ${{ steps.commit.outputs.pushed }}
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os, pathlib
+
+          def load(key):
+              path = pathlib.Path(os.environ.get(key, ""))
+              if not path.exists():
+                  return {}
+              try:
+                  return json.loads(path.read_text("utf-8"))
+              except ValueError:
+                  return {}
+
+          window, fetch = load("WINDOW"), load("FETCH_RESULT")
+          coverage, status = load("COVERAGE_REPORT"), load("STATUS")
+          gate = os.environ.get("GATE", "")
+          print("## SPEI-3 feed refresh\n")
+          print(f"- gate: **{gate}**; committed: {os.environ.get('CHANGED') or 'false'}"
+                f" ({os.environ.get('PUSHED') or 'nothing pushed'})")
+          print(f"- window: {len(window.get('months') or [])} month(s) across "
+                f"year(s) {', '.join(window.get('years') or []) or 'none'}")
+          print(f"- fetched: {len(fetch.get('written') or [])} year(s), "
+                f"{(fetch.get('bytes_downloaded') or 0) / 1e6:.1f} MB; "
+                f"owed: {', '.join(fetch.get('years_owed') or []) or 'none'}")
+          print(f"- feed now covers {status.get('oldest_month', '?')}.."
+                f"{status.get('newest_month', '?')} "
+                f"({status.get('months', 0)} month(s), {status.get('rows', 0)} row(s), "
+                f"{status.get('countries', 0)} country/countries); "
+                f"status **{status.get('status', 'unknown')}**")
+          restale = status.get("restale") or {}
+          if restale:
+              print(f"- restale requested for {len(restale.get('months') or [])} "
+                    f"DR month(s), token `{restale.get('token')}` — the nightly "
+                    "backcast applies it")
+          for failure in coverage.get("failures") or []:
+              print(f"- **gate failed**: {failure}")
+          for warning in coverage.get("warnings") or []:
+              print(f"- warning: {warning}")
+          PY
+
+      # Green when a CDS job is still queued: that is not a fault, and a red
+      # run there is indistinguishable from a broken request. Red when a gate
+      # failed, because a candidate the machine refused to publish is
+      # something a person has to look at.
+      - name: Fail if a gate failed
+        if: steps.gate.outcome != 'success'
+        run: |
+          set -euo pipefail
+          echo "::error::the SPEI-3 candidate failed its validation gates; the committed feed is unchanged"
+          exit 1

@@ -63,6 +63,15 @@ on:
       # indicators, and a test file that runs in no workflow is a test file
       # that runs nowhere.
       - "scripts/build_spei3_country_means.py"
+      # The SPEI-3 producer's workflow and its pins. Since Sept 2026 the
+      # builder is a SCHEDULED producer rather than a one-off, and
+      # resolver/tests/test_spei3_producer.py asserts things about the
+      # workflow itself: which stages it runs, that it is not in the
+      # canonical-DB concurrency group, and that its cron avoids the two
+      # days the monthly chain owns. A test that guards a file must run
+      # when that file changes.
+      - ".github/workflows/spei3_refresh.yml"
+      - "requirements-spei3.txt"
       # The run issue register: the report a human reads at the end of a
       # run, and the register of already-owned faults it suppresses on.
       # Guards resolver/tests/test_run_issue_register.py.
@@ -122,6 +131,10 @@ on:
       # Same reason, on the PR trigger: a test file that runs in no
       # workflow runs nowhere.
       - "scripts/build_spei3_country_means.py"
+      # Same reason: the producer's workflow and its pins are asserted by
+      # resolver/tests/test_spei3_producer.py.
+      - ".github/workflows/spei3_refresh.yml"
+      - "requirements-spei3.txt"
       # The run issue register: the report a human reads at the end of a
       # run, and the register of already-owned faults it suppresses on.
       # Guards resolver/tests/test_run_issue_register.py.

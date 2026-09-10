@@ -279,6 +279,11 @@ def issues_from_log_histogram(
             cost=float(count),
             cost_unit="log lines",
             source=f"logs/{log_name}",
+            # The id is minted from the log name and the shape, so it can
+            # never equal a registered fault's id. The register matches on
+            # THIS instead, and folds a listed shape into the record that
+            # owns it — see KnownIssues.match_signature.
+            signature=message,
         ))
     return out
 

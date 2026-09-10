@@ -372,6 +372,70 @@ def test_a_flagged_row_that_names_its_flag_and_bound_passes(tmp_path):
     assert _verdict(builder, CHECK)["verdict"] == "PASS"
 
 
+def test_the_scoped_note_says_the_count_is_almost_all_flood(tmp_path):
+    """A raw ceiling_exceeded count reads as the machine distrusting its own
+    record, and 94% of it is flood, where the ceiling was a different
+    quantity until the commit the note names.
+    """
+
+    ceiling = {"exposed_population": 900.0, "basis": "gdacs_exposed",
+               "source": "gdacs:population"}
+    builder = _bundle_over(
+        tmp_path,
+        [("PHL", "FL", 2024, 3, "RESOLVED_VALUE", 40_000.0, True,
+          json.dumps({"decision": {"flags": ["ceiling_exceeded"], "ceiling": ceiling}})),
+         ("BGD", "FL", 2024, 4, "RESOLVED_VALUE", 90_000.0, True,
+          json.dumps({"decision": {"flags": ["ceiling_exceeded"], "ceiling": ceiling}})),
+         ("VNM", "TC", 2024, 5, "RESOLVED_VALUE", 12_000.0, True,
+          json.dumps({"decision": {"flags": ["ceiling_exceeded"], "ceiling": ceiling}}))],
+    )
+    builder._check_flagged_resolutions_name_their_flag()
+    detail = _verdict(builder, CHECK)["detail"]
+
+    from resolver.hazard_resolution.rules import CEILING_EXCEEDED_FIX_COMMIT
+
+    assert "2 of 3 are flood" in detail
+    assert "1 cyclone" in detail
+    assert CEILING_EXCEEDED_FIX_COMMIT in detail
+    # And the ceiling each breach cited, because a breach against
+    # gdacs_exposed and one against a population share are different
+    # statements and only the source says which.
+    assert "gdacs:population 3" in detail
+
+
+def test_the_flood_rate_reaches_the_register_as_a_measurement(tmp_path):
+    """Reported rather than left to be re-derived from a table."""
+
+    builder = _bundle_over(
+        tmp_path,
+        [("PHL", "FL", 2024, 3, "RESOLVED_VALUE", 40_000.0, True,
+          json.dumps({"decision": {
+              "flags": ["ceiling_exceeded"],
+              "ceiling": {"exposed_population": 900.0, "source": "gdacs:population"},
+          }}))],
+    )
+    builder._check_flagged_resolutions_name_their_flag()
+    ids = [i.id for i in builder.extra_issues]
+    assert "ceiling_exceeded_is_almost_all_flood" in ids
+    issue = next(i for i in builder.extra_issues if i.id == ids[0])
+    assert issue.cost == 1.0
+    assert issue.cost_unit == "flagged flood rows"
+
+
+def test_a_flag_that_is_not_a_ceiling_breach_gets_no_ceiling_note(tmp_path):
+    """The note is scoped to the flag it is about."""
+
+    builder = _bundle_over(
+        tmp_path,
+        [("PHL", "FL", 2024, 3, "NO_DATA", None, True,
+          json.dumps({"decision": {"flags": ["no_candidate_past_freeze"]}}))],
+    )
+    builder._check_flagged_resolutions_name_their_flag()
+    detail = _verdict(builder, CHECK)["detail"]
+    assert "ceiling_exceeded` is scoped" not in detail
+    assert not builder.extra_issues
+
+
 def test_no_flagged_rows_is_a_pass_not_a_skip(tmp_path):
     builder = _bundle_over(tmp_path, [])
     builder._check_flagged_resolutions_name_their_flag()
