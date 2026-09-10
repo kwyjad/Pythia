@@ -28,6 +28,25 @@
 # poisons every month it covers; a stale one only costs the months it does
 # not.
 #
+# SETUP. Two secrets, and the producer does nothing durable without either.
+#
+#   CDSAPI_KEY           the Copernicus Climate Data Store API token, from an
+#                        account that has accepted this dataset's licence.
+#   SPEI3_COMMIT_TOKEN   a fine-grained personal access token with Contents:
+#                        read and write on this repository, and permission to
+#                        bypass branch protection on the default branch.
+#                        The default GITHUB_TOKEN cannot do this: branch
+#                        protection here refuses a CI push to main (GH006,
+#                        observed from 2026-08-06 — it is what stopped
+#                        refresh-crisiswatch.yml committing its scrape). A
+#                        pull request is not an alternative, for the reason
+#                        the commit step sets out at length.
+#
+# A fine-grained token expires, and when it does this producer stops
+# committing and the feed silently stops extending — which is registered as
+# `spei3_commit_token_expiry` in resolver/config/known_issues.yml so the run
+# issue register says so before the feed goes stale.
+#
 # It is resumable. A CDS request is an asynchronous job that can sit queued
 # for hours against a six-hour job cap, so the fetch carries a deadline and
 # reports the years it still owes rather than failing. `reduce` MERGES on
@@ -86,9 +105,10 @@ concurrency:
     # month's scores depend on is a cost with nothing on the other side.
     - cron: "40 5 10 * *"
 
+# contents: write covers the push. No pull-requests scope: there is no
+# pull-request route, for the reason the commit step documents.
 permissions:
   contents: write
-  pull-requests: write
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -109,8 +129,17 @@ jobs:
     # commit after a fetch that spent its whole deadline.
     timeout-minutes: 350
     steps:
+      # The token, not the default GITHUB_TOKEN. actions/checkout persists
+      # whatever credential it authenticated with, and every later `git push`
+      # uses that persisted credential — so checking out with the default and
+      # only setting GH_TOKEN in the commit step leaves the push authenticated
+      # as GITHUB_TOKEN, which branch protection refuses (GH006) with a message
+      # about the rule rather than about the credential. Checking out with the
+      # token is what actually makes the push work.
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SPEI3_COMMIT_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -287,23 +316,37 @@ jobs:
       # file alone, which is the point: the failure is recorded even though
       # the feed is not touched.
       #
-      # KNOWN CONSTRAINT, and the reason for the fallback: branch protection
-      # on this repository rejects a CI push to main (GH006, observed from
-      # 2026-08-06 — it is what stopped refresh-crisiswatch.yml committing its
-      # scrape). A direct push is what makes this producer unattended, so it
-      # is tried first with SPEI3_COMMIT_TOKEN when one is configured; when
-      # the push is refused the change is raised as a pull request instead
-      # and the warning says which secret would remove the click.
+      # Straight to main, with SPEI3_COMMIT_TOKEN. There is no pull-request
+      # fallback and there deliberately is not one: a pull request opened by
+      # GITHUB_TOKEN does not trigger workflows — GitHub suppresses that on
+      # purpose, to stop workflows spawning workflows — so with branch
+      # protection requiring CI and Lint, the checks on such a pull request
+      # never start and it can never merge. A click a month would become a
+      # stuck pull request a month, which is worse, because a stuck pull
+      # request looks like progress.
+      #
+      # No branch and no review step either. The gates fail closed and are
+      # stricter than a reviewer: they refuse a candidate whose values fall
+      # outside +/-6 sigma, whose requested months are absent without a
+      # stated reason, or which loses countries or rows against the feed it
+      # replaces. Run 34461670816 is the proof — it caught twelve saturating
+      # values and left the committed feed exactly as it was.
+      #
+      # When the secret is missing the run FAILS naming it. Falling back to
+      # anything else would put the producer back where it started while
+      # reporting success.
       - name: Commit the feed
         id: commit
         env:
-          GH_TOKEN: ${{ secrets.SPEI3_COMMIT_TOKEN || secrets.GITHUB_TOKEN }}
+          COMMIT_TOKEN: ${{ secrets.SPEI3_COMMIT_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -z "${COMMIT_TOKEN}" ]; then
+            echo "::error title=SPEI-3::SPEI3_COMMIT_TOKEN is not configured, so the feed cannot be committed and this run has produced nothing durable. It needs a fine-grained token with Contents: read and write on this repository, and the ability to bypass branch protection on the default branch. See the header of .github/workflows/spei3_refresh.yml."
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin \
-            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           # Add only what exists. On a failed gate `promote --failed`
           # deliberately writes the status file and leaves the feed alone, so
           # a bare `git add -- "${FEED}" "${STATUS}"` aborts with exit 128 on
@@ -321,20 +364,39 @@ jobs:
             exit 0
           fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
-          NEWEST=$(python -c "import json,os;print(json.load(open(os.environ['STATUS'])).get('newest_month',''))")
-          git commit -m "SPEI-3 feed: covered through ${NEWEST} (run ${GITHUB_RUN_ID})"
-          if git push origin "HEAD:${GITHUB_REF_NAME}"; then
-            echo "pushed=main" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "::warning title=SPEI-3::the push to ${GITHUB_REF_NAME} was refused (branch protection, GH006). Raising a pull request instead. Configure a SPEI3_COMMIT_TOKEN that can bypass protection to make this unattended."
-          BRANCH="spei3-feed/${GITHUB_RUN_ID}"
-          git push --force origin "HEAD:refs/heads/${BRANCH}"
-          echo "pushed=${BRANCH}" >> "$GITHUB_OUTPUT"
-          gh pr create --base "${GITHUB_REF_NAME}" --head "${BRANCH}" \
-            --title "SPEI-3 feed: covered through ${NEWEST}" \
-            --body "Produced by \`spei3_refresh.yml\` run ${GITHUB_RUN_ID}. The nightly backcast restales the drought resume ledger for the months this extends once it is merged — until then those months stay INCONCLUSIVE." \
-            || echo "::warning title=SPEI-3::branch ${BRANCH} is pushed; opening the pull request failed, so open it by hand. If the reason is 'GitHub Actions is not permitted to create or approve pull requests', that is a repository setting: either enable it, or configure a SPEI3_COMMIT_TOKEN that can bypass branch protection so the push above succeeds and no pull request is needed."
+          # The body carries what the commit actually did to the feed, so
+          # `git log -- resolver/data/` reads as a history of the series
+          # rather than a list of run ids: rows, the range covered, and the
+          # restale token the nightly backcast will consume.
+          python - <<'PY' > /tmp/spei3_commit_msg.txt
+          import json, os
+          status = json.load(open(os.environ["STATUS"]))
+          restale = status.get("restale") or {}
+          newest = status.get("newest_month") or "?"
+          print(f"SPEI-3 feed: covered through {newest}")
+          print()
+          print(f"rows:     {status.get('rows', 0):,}")
+          print(f"months:   {status.get('months', 0)} "
+                f"({status.get('oldest_month', '?')}..{newest})")
+          print(f"countries:{status.get('countries', 0):>4}")
+          print(f"state:    {status.get('status', 'unknown')}")
+          owed = status.get("months_owed") or []
+          if owed:
+              print(f"owed:     {len(owed)} month(s): {','.join(owed[:12])}")
+          if restale:
+              print(f"restale:  {restale.get('token')} "
+                    f"({len(restale.get('months') or [])} {restale.get('hazard', '?')} month(s))")
+          print()
+          print(f"Produced by spei3_refresh.yml run {os.environ['GITHUB_RUN_ID']}.")
+          PY
+          cat /tmp/spei3_commit_msg.txt
+          git commit -F /tmp/spei3_commit_msg.txt
+          # Rebase onto whatever landed while the fetch and reduce ran; a
+          # six-hour job is long enough for main to move under it, and the
+          # only files this commit touches are ones nothing else writes.
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "pushed=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Upload the candidate and the reports
         if: always()

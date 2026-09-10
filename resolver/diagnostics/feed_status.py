@@ -47,11 +47,46 @@ SPEI3_FEED = "spei3_country_means"
 SPEI3_STATUS_PATH = REPO_ROOT / "resolver" / "data" / "spei3_status.json"
 SPEI3_FEED_PATH = REPO_ROOT / "resolver" / "data" / "spei3_country_means.csv"
 
+#: How far behind real time the CONSOLIDATED ERA5-Drought product itself
+#: runs, measured in complete months behind the previous complete month.
+#:
+#: This is a property of the upstream, not of our producer, and it has to be
+#: stated separately or the staleness threshold below reads as pure
+#: tolerance. Copernicus documents the consolidated dataset as updated
+#: "2-3 months behind real time" (the intermediate release, ERA5T, is one
+#: month behind). Measured against the feed on 2026-09-10: the newest month
+#: served was 2026-05 against a previous complete month of 2026-08, so a
+#: healthy feed sat exactly 3 behind — the documented worst case, and the
+#: number to work from rather than the optimistic end of the range.
+#:
+#: The producer's own request asks for ``dataset_type: consolidated_dataset``
+#: (see ``scripts/build_spei3_country_means.py``), so this is the lag that
+#: applies. Change one and change the other.
+PRODUCT_LAG_MONTHS = 3
+
+#: Cycles of the monthly producer that may be missed before silence is a
+#: fault. ONE. A single missed cycle has honest explanations — a CDS job
+#: still queued at the deadline, a runner outage, a gate that failed closed
+#: on one bad month — and the next run resumes on exactly what it owes. Two
+#: consecutive silences is not an accident: the producer runs monthly and
+#: fails closed, so nobody is watching it.
+#:
+#: The comparison is ``lag > MAX_LAG_MONTHS``, so the alarm fires on the
+#: SECOND missed cycle and not the first.
+MISSED_CYCLE_TOLERANCE_MONTHS = 1
+
 #: How far behind the previous complete month the newest covered month may
-#: fall before the feed is reported stale. Three months, because the
-#: producer runs monthly and ERA5T is about five days behind: one missed
-#: cycle is not yet a fault, and three is not an accident.
-MAX_LAG_MONTHS = 3
+#: fall before the feed is reported stale.
+#:
+#: Expressed as the product's own lag PLUS the tolerance, because the two
+#: are different facts and a single literal hides that. The earlier value
+#: was 3 with a comment reasoning from ERA5T's five-day lag — which is the
+#: lag of a product this producer does not request. Against the consolidated
+#: product's real 3-month lag that left ZERO margin: the healthy feed sat at
+#: exactly 3 on 2026-09-10, one month from an alarm that would have fired on
+#: every run while nothing was wrong. A check that cannot pass is worse than
+#: an absent one, because it teaches the reader to skip the report.
+MAX_LAG_MONTHS = PRODUCT_LAG_MONTHS + MISSED_CYCLE_TOLERANCE_MONTHS
 
 STATE_OK = "ok"
 STATE_STALE = "stale"
@@ -293,7 +328,7 @@ def spei3_restale_request(path: Path | str | None = None) -> RestaleRequest | No
 
 
 __all__ = [
-    "MAX_LAG_MONTHS",
+    "MAX_LAG_MONTHS", "MISSED_CYCLE_TOLERANCE_MONTHS", "PRODUCT_LAG_MONTHS",
     "SPEI3_FEED", "SPEI3_FEED_PATH", "SPEI3_STATUS_PATH",
     "STATE_ABSENT", "STATE_FAILED", "STATE_INCOMPLETE", "STATE_OK",
     "STATE_STALE", "STATE_UNREADABLE",

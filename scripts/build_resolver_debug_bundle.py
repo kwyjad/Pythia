@@ -2662,12 +2662,20 @@ class BundleBuilder:
         the diagnostic is the whole of the protection, and it reports rather
         than changes any verdict.
 
-        Three months behind the last complete month is the threshold: the
-        producer runs monthly and ERA5T is about five days behind, so one
-        missed cycle is not yet a fault and three is not an accident.
+        The threshold is the CONSOLIDATED product's own lag plus room for a
+        missed cycle — see ``feed_status.MAX_LAG_MONTHS``, which states the
+        two halves separately. A single literal hides the difference between
+        "the upstream is slow" and "our producer has stopped", and the two
+        want different responses.
+
+        Also reported here, at ``info``: the producer commits with a
+        fine-grained token that expires. That is CONFIG state rather than
+        anything a run can observe, and it is reported anyway, because the
+        failure it causes is silent — the commit step fails, the feed stops
+        extending, and the staleness check above does not notice for months.
         """
 
-        name = "spei3_feed_covers_a_month_within_three_of_the_last_complete_one"
+        name = "spei3_feed_covers_a_month_within_the_products_lag_plus_a_cycle"
         try:
             from resolver.diagnostics import feed_status as feed_status_mod
         except Exception as exc:  # noqa: BLE001
@@ -2711,6 +2719,41 @@ class BundleBuilder:
                 "recovers_on_rerun": False,
             }],
         )
+        self._report_spei3_commit_token(status)
+
+    def _report_spei3_commit_token(self, status: Any) -> None:
+        """The producer's commit credential, reported from config state.
+
+        Nothing a Resolver Update does can observe a token's expiry, so this
+        never becomes visible by itself: the token lapses, spei3_refresh.yml
+        fails at its commit step, and the only downstream symptom is a feed
+        that stops extending — which the staleness check above will not call
+        a fault for another few months. So it is reported unconditionally
+        while the producer exists, and the register's own review-date
+        machinery does the nagging: the `spei3_commit_token_expiry` entry in
+        known_issues.yml deliberately carries NO review date, so it reports
+        as overdue every run until somebody records when the token actually
+        expires. An invented date would silence this and warn about nothing.
+        """
+
+        if status.state in ("absent", "unreadable"):
+            return
+        self.extra_issues.append(issue_sources.issue_from_measurement(
+            "spei3_commit_token_expiry",
+            "The SPEI-3 producer commits with a fine-grained SPEI3_COMMIT_TOKEN; "
+            "a fine-grained token expires and the producer then stops silently.",
+            severity=issues_mod.INFO,
+            evidence=(
+                "spei3_refresh.yml pushes resolver/data/spei3_country_means.csv "
+                "straight to main with SPEI3_COMMIT_TOKEN, because the default "
+                "GITHUB_TOKEN cannot push past branch protection (GH006) and a "
+                "pull request it opened would never run its own checks. The feed "
+                f"currently covers through {status.newest_month or 'nothing'}; "
+                "rotate the token before its expiry and record the date in the "
+                "register entry's review_by."
+            ),
+            source="config/spei3_status.json",
+        ))
 
     def _check_crisiswatch_entries_accounted_for(self) -> None:
         """Parsed minus stored equals the sum of the per-entry reasons.

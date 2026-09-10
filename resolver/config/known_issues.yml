@@ -81,6 +81,35 @@ issues:
       - "unavailable and the cache holds nothing"
       - "invalid key passed or insufficient user access"
 
+  - id: spei3_commit_token_expiry
+    owner: pythia
+    first_seen: 2026-09-10
+    # DELIBERATELY NO review_by, and the register therefore reports this
+    # entry as overdue on every run until somebody fills one in. That is not
+    # an oversight: the rule for this entry is `review_by` one month before
+    # the token expires, and the expiry date is a fact about a credential
+    # that only its holder can read off the GitHub settings page. Guessing it
+    # would be worse than leaving it blank — a date invented here would stop
+    # the nagging while giving no warning at all when the token actually
+    # lapses, which is precisely the failure this entry exists to prevent.
+    #
+    # To close it: read the expiry from
+    # https://github.com/settings/personal-access-tokens, set review_by to
+    # one month before that date, and note the expiry in the note below.
+    recovers_on_rerun: false
+    note: >-
+      SPEI-3 is produced by a scheduled workflow that commits
+      resolver/data/spei3_country_means.csv straight to main using a
+      fine-grained SPEI3_COMMIT_TOKEN, because the default GITHUB_TOKEN
+      cannot push past branch protection (GH006). Fine-grained tokens expire.
+      When this one does, spei3_refresh.yml fails at its commit step and the
+      feed stops extending — the drought gate then loses its only observation
+      before the HDX and NMME ingests began, one month at a time, and nothing
+      else complains because the rulebook entry is `required: false` with
+      `absence_means_no_drought: false`. The remedy is to rotate the token
+      before it lapses; the review date is what makes that happen, and it is
+      blank because the expiry has not been recorded here yet.
+
   - id: acled_cast_stale_vintage
     owner: external
     first_seen: 2026-01-15

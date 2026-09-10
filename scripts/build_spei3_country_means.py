@@ -146,6 +146,33 @@ CDS_DATASET = "derived-drought-historical-monthly"
 #: :func:`unpack_if_archive` sniffs the bytes regardless, because a file
 #: extension is a claim about a file and not evidence about it.
 #:
+#: ``consolidated_dataset``, and this is what sets the feed's leading edge.
+#: Copernicus publishes ERA5-Drought in two releases: the consolidated one,
+#: built on final ERA5 and updated **2-3 months behind real time**, and an
+#: intermediate one built on ERA5T and updated with **one month of delay**,
+#: which the documentation describes as experimental and subject to change
+#: before the official release. Measured on 2026-09-10 the consolidated
+#: product served through 2026-05 against a previous complete month of
+#: 2026-08 — exactly 3 behind, the documented worst case — and the fetch
+#: correctly recorded 2026-06/07/08 as absent WITH a reason rather than as a
+#: fault. So the feed stopping at 2026-05 is the product, not a defect here,
+#: and ``resolver/diagnostics/feed_status.PRODUCT_LAG_MONTHS`` carries that
+#: number so the staleness threshold is expressed against it.
+#:
+#: Switching to the intermediate release would buy roughly two months of
+#: leading edge, and the merge-on-``(iso3, ym)`` write plus the trailing
+#: revision window would handle the upgrade cleanly on its own: pull the
+#: intermediate value now, and when the consolidated version of that month
+#: appears the trailing window re-requests it and the merge replaces the
+#: row. It is NOT done here — that is a judgement about which product this
+#: repository should read, and this change was not the place to take it.
+#: The exact literal for the intermediate release could not be confirmed
+#: (the build environment's egress proxy denies cds.climate.copernicus.eu,
+#: so the download form's "Show API request code" could not be read);
+#: ``consolidated_dataset`` is proven by run 34456535827, its counterpart is
+#: not, and a guessed literal is refused with the same message a wrong
+#: variable name gets.
+#:
 #: **The rest of this shape came from the ECMWF forum thread announcing
 #: the release, and the first live run confirmed it**: eleven years were
 #: accepted and served, 45 to 90 seconds each. If a future run is refused
