@@ -3691,66 +3691,128 @@ class BundleBuilder:
             name, "FAIL" if offenders else "PASS",
             f"{len(offenders)} of {len(result[1])} flagged rows",
             "0",
-            (
+            # The scoped note LEADS. It is the line that changes what a
+            # reader concludes from the count beside it, and appended to the
+            # end of a passing check's detail it was the last thing anybody
+            # would read.
+            (self._ceiling_exceeded_note(result[1]).strip() + " " + (
                 detail
                 or f"All {len(result[1])} flagged resolutions name the flag they "
                 "raised, and every ceiling breach names the bound it exceeded."
-            )
-            + self._ceiling_exceeded_note(result[1]),
+            )).strip(),
         )
 
     def _ceiling_exceeded_note(self, flagged_rows: Sequence[Any]) -> str:
-        """The scoped note, plus the flood rate and the ceiling it cited.
+        """The scoped note, and the flood flag RATE with the bound behind it.
 
         A raw ``ceiling_exceeded`` count reads as "the machine distrusts most
         of its own record". Almost all of it is flood, where the ceiling was
         a different quantity until the fix the note names, and the rest is
-        cyclone, where the flag is a plausibility check working. Reported
-        here rather than only in the acceptance report because the bundle is
-        what a reader opens first, and it is measured per hazard AND per
-        ceiling source: a breach against `gdacs_exposed` and one against
-        `population_share` are different statements, and only the source
-        says which.
+        cyclone, where the flag is a plausibility check doing its job.
 
-        Also filed as an `info` measurement, so the register carries the rate
-        rather than leaving it to be re-derived from a table.
+        A count cannot show whether the fix worked, because a count also
+        falls when the machine resolves fewer flood cells. So this reports a
+        RATE against the flood values actually resolved, split by the bound
+        each breach was measured against, and names the post-fix residual
+        separately:
+
+        * breaches citing ``gdacs_exposed`` are pre-fix by construction —
+          flood takes no GDACS ceiling at any size from the fix commit — and
+          they are frozen, so that share can only fall as newer months
+          arrive and never by anything clearing the old ones;
+        * everything else is the LIVE residual, most likely
+          ``population_share``, and it is the number that should have
+          collapsed. A residual that survives means the fix addressed the
+          loudest cause rather than the only one; a residual drifting back
+          up months later is what a one-off check would miss.
+
+        Standing rather than one-off, and filed as an ``info`` measurement so
+        the register carries the rate rather than leaving it to be re-derived
+        from a table.
         """
 
         by_hazard: dict[str, int] = {}
-        by_source: dict[str, int] = {}
+        by_basis: dict[str, int] = {}
+        flood_pre_fix = 0
         for row in flagged_rows:
             columns = _provenance_columns(row[3])
             if "ceiling_exceeded" not in str(columns["flags"] or ""):
                 continue
             hazard = str(row[1])
             by_hazard[hazard] = by_hazard.get(hazard, 0) + 1
-            source = str(columns.get("ceiling_source") or "") or "(none recorded)"
-            by_source[source] = by_source.get(source, 0) + 1
+            # The BASIS, not the source ref: `basis` is the field that says
+            # which bound was in force (`gdacs_exposed` vs
+            # `population_share`), while `source` names the GDACS event the
+            # figure came from. Only the first answers "which fix does this
+            # row belong to".
+            basis = str(columns.get("ceiling_basis") or "") or "(none recorded)"
+            by_basis[basis] = by_basis.get(basis, 0) + 1
+            if hazard == "FL" and basis == "gdacs_exposed":
+                flood_pre_fix += 1
         if not by_hazard:
             return ""
 
         total = sum(by_hazard.values())
         flood = by_hazard.get("FL", 0)
-        sources = ", ".join(
-            f"{source} {count:,}" for source, count in sorted(
-                by_source.items(), key=lambda kv: (-kv[1], kv[0])
+        flood_residual = flood - flood_pre_fix
+        resolved = self._resolved_values_by_hazard()
+        flood_resolved = resolved.get("FL", 0)
+        bases = ", ".join(
+            f"{basis} {count:,}" for basis, count in sorted(
+                by_basis.items(), key=lambda kv: (-kv[1], kv[0])
             )
+        )
+
+        def _rate(numerator: int) -> str:
+            if not flood_resolved:
+                return "no denominator (no flood value resolved)"
+            return f"{numerator / flood_resolved:.1%}"
+
+        rate_line = (
+            f"Flood flag rate: {flood:,} of {flood_resolved:,} flood values "
+            f"resolved ({_rate(flood)}); of those {flood_pre_fix:,} were "
+            f"measured against `gdacs_exposed` and so predate the fix, "
+            f"leaving a live residual of {flood_residual:,} "
+            f"({_rate(flood_residual)})."
+            if flood_resolved else
+            f"Flood flag rate: {flood:,} flagged, but no flood value resolved "
+            f"in this database, so there is no denominator to divide by."
         )
         note = haz_rules.ceiling_exceeded_scope_note(
             flood_rows=flood, cyclone_rows=by_hazard.get("TC"),
         )
         self.extra_issues.append(issue_sources.issue_from_measurement(
-            "ceiling_exceeded_is_almost_all_flood",
-            f"{total:,} resolution(s) carry ceiling_exceeded; {flood:,} are flood, "
-            f"where the ceiling was a different quantity until commit "
-            f"{haz_rules.CEILING_EXCEEDED_FIX_COMMIT}.",
+            "flood_ceiling_exceeded_rate",
+            f"{flood:,} of {flood_resolved:,} resolved flood values carry "
+            f"ceiling_exceeded ({_rate(flood)}); the live residual, after the "
+            f"pre-fix `gdacs_exposed` breaches, is {flood_residual:,} "
+            f"({_rate(flood_residual)}).",
             severity=issues_mod.INFO,
-            evidence=f"by hazard: {by_hazard}. by ceiling source: {sources}. {note}",
-            cost=float(flood),
-            cost_unit="flagged flood rows",
+            evidence=(
+                f"by hazard: {by_hazard}. by ceiling basis: {bases}. "
+                f"resolved values by hazard: {resolved}. {note}"
+            ),
+            # The rate, not the count: a count also falls when fewer flood
+            # cells resolve, so it cannot say whether the fix worked. The
+            # residual is the half that can still move.
+            cost=(flood_residual / flood_resolved * 100.0) if flood_resolved else None,
+            cost_unit="% of resolved flood values (live residual)",
             source="checks/contradictions.md",
         ))
-        return f" {note} Ceilings cited: {sources}."
+        return f" {note} {rate_line} Ceilings cited: {bases}."
+
+    def _resolved_values_by_hazard(self) -> dict[str, int]:
+        """The denominator for any per-hazard flag rate. Never raises."""
+
+        if "haz_resolutions" not in self.tables():
+            return {}
+        result = self.query(
+            "SELECT hazard, COUNT(*) FROM haz_resolutions "
+            "WHERE status = 'RESOLVED_VALUE' GROUP BY hazard"
+        )
+        if result is None:
+            return {}
+        return {str(row[0]): int(row[1] or 0) for row in result[1]}
 
     def _write_contradictions(self, path: Path) -> None:
         lines = [

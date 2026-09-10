@@ -184,6 +184,22 @@ def ceiling_exceeded_scope_note(
     the rows are frozen. What it changes is what a reader concludes, and a
     scoped note fixes that without an UPDATE against frozen history.
 
+    **These rows do not age out, and this note is therefore the fix rather
+    than a stopgap.** Past the freeze deadline is not the same as re-walked,
+    and nothing re-walks them: ``resolutions.write_reconciliation`` and
+    ``write_zero_resolution`` both consult the freeze guard and, on a frozen
+    cell, write a ``haz_revisions`` row and leave the resolution
+    byte-identical; ``impact.reconsider_rejected_cells`` — the pass built
+    precisely so a corrected ceiling reaches rows already written — counts
+    frozen cells under ``frozen_logged`` and never reopens one; and the
+    backcast calls those same month runners, so a restale-freed month meets
+    the same guard. Only two writers UPDATE ``haz_resolutions`` at all,
+    ``finalize_frozen_provisionals`` (flips ``provisional``, values
+    untouched) and ``backfill_no_candidate_flag_names`` (adds a missing flag
+    NAME), and neither removes a flag. So a reader in 2030 will still be
+    shown this count, and the note is what has to keep telling them what it
+    means.
+
     The counts are passed in rather than measured here: this module is
     deterministic predicates over arguments and opens no connection.
     """
