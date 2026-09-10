@@ -32,8 +32,11 @@ and whether the CDS accepts the request is settled by the first real
 
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import json
+import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -204,6 +207,196 @@ def test_a_partial_file_from_a_failed_year_is_removed(tmp_path):
 
     spei.fetch_grids(tmp_path, ["2016-01"], client=_Client())
     assert not (tmp_path / "spei3_2016.nc").exists()
+
+
+# ---------------------------------------------------------------------------
+# The dependency the requirements file did not declare
+#
+# The second live run got past the container fix, unpacked 128 months and read
+# every one of them, and then died on `ModuleNotFoundError: No module named
+# 'yaml'` — nine minutes of download and 75 seconds of grid reading spent
+# before the import fired. `yaml` is nothing this producer imports: the reduce
+# borrows the vendored boundary layer from `resolver.hazard_resolution`, and
+# reading a module from that package runs the package's __init__, which
+# imports the rulebook, which imports yaml.
+# ---------------------------------------------------------------------------
+
+
+REQUIREMENTS = Path(__file__).resolve().parents[2] / "requirements-spei3.txt"
+
+#: Import name -> the distribution that provides it. Only the ones this
+#: chain can actually reach; a longer table would be a guess.
+_OURS = {"resolver", "scripts", "pythia", "forecaster", "horizon_scanner", "interpreter", "sibyl"}
+
+_DISTRIBUTION_FOR = {
+    "yaml": "PyYAML",
+    "shapely": "shapely",
+    "xarray": "xarray",
+    "netCDF4": "netCDF4",
+    "numpy": "numpy",
+    "cdsapi": "cdsapi",
+    "pandas": "pandas",
+    "duckdb": "duckdb",
+    "requests": "requests",
+}
+
+
+def _declared_distributions() -> set[str]:
+    names = set()
+    for line in REQUIREMENTS.read_text("utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            names.add(re.split(r"[<>=!\[]", line, 1)[0].strip().lower())
+    return names
+
+
+def _module_level_third_party_imports(path: Path) -> set[str]:
+    """Third-party modules imported when the file is merely IMPORTED.
+
+    Distinct from the walk below, which sees function-local imports too: this
+    producer quarantines its heavy imports inside the functions that need
+    them, so "what does importing it cost" and "what can running it need" are
+    different questions with different answers.
+    """
+
+    tree = ast.parse(path.read_text("utf-8"))
+    found: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            found.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            found.add(node.module.split(".")[0])
+    return {n for n in found if n not in sys.stdlib_module_names and n not in _OURS}
+
+
+def _third_party_imports(path: Path) -> set[str]:
+    """Every third-party module name a file imports, local imports included."""
+
+    tree = ast.parse(path.read_text("utf-8"))
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            found.add(node.module.split(".")[0])
+    return {
+        name for name in found
+        if name not in sys.stdlib_module_names and name not in _OURS
+    }
+
+
+#: The functions the workflow's five subcommands actually reach, each of
+#: which quarantines a heavy import behind it. `_cmd_coverage` is
+#: deliberately absent: it reads the canonical DuckDB, which this workflow
+#: never downloads and must not, so its `duckdb` import is a need of a
+#: command run elsewhere in the full environment.
+_WORKFLOW_IMPORT_SITES = (
+    "shapely_contains",
+    "load_grids_from_dir",
+    "fetch_grids",
+)
+
+
+def _local_third_party_imports(path: Path, functions: tuple[str, ...]) -> set[str]:
+    """Third-party imports inside the named functions of one file."""
+
+    tree = ast.parse(path.read_text("utf-8"))
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name not in functions:
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Import):
+                found.update(a.name.split(".")[0] for a in sub.names)
+            elif isinstance(sub, ast.ImportFrom) and sub.module and sub.level == 0:
+                found.add(sub.module.split(".")[0])
+    return {n for n in found if n not in sys.stdlib_module_names}
+
+
+def test_the_requirements_declare_everything_the_geometry_import_pulls_in():
+    """The producer enters `resolver.hazard_resolution`; its __init__ runs.
+
+    Walked statically rather than by importing, because the environment this
+    test runs in HAS yaml — which is exactly why the gap survived into
+    production, where the workflow installs `requirements-spei3.txt` and
+    nothing else. The chain is the package __init__ plus the intra-package
+    modules it reaches, one hop, which is as far as the __init__ goes.
+    """
+
+    package = Path(__file__).resolve().parents[1] / "hazard_resolution"
+    needed = _third_party_imports(package / "__init__.py")
+    tree = ast.parse((package / "__init__.py").read_text("utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+            "resolver.hazard_resolution."
+        ):
+            module = package / (node.module.split(".")[-1] + ".py")
+            if module.exists():
+                needed |= _third_party_imports(module)
+
+    producer = Path(__file__).resolve().parents[2] / "scripts" / "build_spei3_country_means.py"
+    needed |= _module_level_third_party_imports(producer)
+    needed |= _local_third_party_imports(producer, _WORKFLOW_IMPORT_SITES)
+
+    declared = _declared_distributions()
+    missing = sorted(
+        _DISTRIBUTION_FOR[name] for name in needed
+        if name in _DISTRIBUTION_FOR
+        and _DISTRIBUTION_FOR[name].lower() not in declared
+    )
+    assert not missing, (
+        f"requirements-spei3.txt does not declare {missing}, which the reduce "
+        "stage's import chain needs — the workflow installs only this file"
+    )
+    # And the one that actually bit, named so a future reader knows why a
+    # YAML parser sits in a file otherwise made of scientific pins.
+    assert "yaml" in needed
+    assert "pyyaml" in declared
+
+
+def test_the_geometry_borrow_is_the_only_thing_that_needs_yaml():
+    """Not a stylistic point: it is why the fix is one line in one file.
+
+    If the producer's own code needed yaml, or a second package did, the
+    requirements file would be tracking two chains instead of one.
+    """
+
+    producer = Path(__file__).resolve().parents[2] / "scripts" / "build_spei3_country_means.py"
+    assert "yaml" not in _module_level_third_party_imports(producer)
+    assert "yaml" not in _local_third_party_imports(
+        producer, _WORKFLOW_IMPORT_SITES + ("_cmd_coverage",)
+    )
+
+
+def test_the_producer_never_asks_the_pipeline_to_carry_its_stack():
+    """The contract this whole arrangement exists to keep.
+
+    `resolver/hazard_resolution/` reads a committed CSV through the rulebook's
+    `tabular` provider. If it gained an xarray, netCDF4 or cdsapi import, the
+    pipeline would have to install a scientific stack and a credentialled
+    client for one external service to produce a file it only ever reads.
+
+    **shapely is deliberately not in this set, and the brief that asked for
+    the set named it.** `resolver/hazard_resolution/geometry.py` has imported
+    shapely since August 2026 (commit fd54d89) — it is the cyclone detector's
+    own boundary code, and shapely is declared in pyproject's `ingestion`
+    extra and pinned in constraints-ci.txt. The resolution path cannot GAIN a
+    dependency it already has, and asserting otherwise would fail on
+    untouched code, which is how a guard gets switched off.
+    """
+
+    package = Path(__file__).resolve().parents[1] / "hazard_resolution"
+    forbidden = {"xarray", "netCDF4", "cdsapi"}
+    offenders = {}
+    for module in sorted(package.rglob("*.py")):
+        hit = _third_party_imports(module) & forbidden
+        if hit:
+            offenders[module.name] = sorted(hit)
+    assert not offenders, (
+        f"the resolution path must not import {sorted(forbidden)}: {offenders}"
+    )
 
 
 # ---------------------------------------------------------------------------
