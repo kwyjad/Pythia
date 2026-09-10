@@ -502,7 +502,11 @@ def test_the_bundle_leads_with_the_issue_register(tmp_path, full_run):
     # registered known issue: reported, owned, and not shouted about.
     by_id = {i["id"]: i for i in register["issues"]}
     assert by_id["emdat_auth_rejected"]["severity"] == "known"
-    assert by_id["emdat_auth_rejected"]["owner"] == "external"
+    # `pythia`, not `external`, since 2026-09-10: the remedy is no longer
+    # "EM-DAT must raise the account tier" but "obtain a personal EM-DAT
+    # account", which is ours to do. Nothing in this repository fixes it by
+    # writing code, which is what recovers_on_rerun says.
+    assert by_id["emdat_auth_rejected"]["owner"] == "pythia"
 
     first = readme.split("## Where to look first", 1)[1].splitlines()
     lead = next(line for line in first if line.strip().startswith("1."))
@@ -1140,10 +1144,58 @@ def test_an_empty_calibration_weights_is_explained_in_the_writers_terms(tmp_path
     assert "ACE/FATALITIES at 1" in check["detail"]
 
 
-def test_emdat_must_be_read_when_a_key_is_configured(tmp_path, full_run):
-    """E1: a configured key, a ladder run, and an empty cache is a contradiction."""
+def test_a_stood_down_emdat_skips_the_check_rather_than_failing_forever(
+    tmp_path, full_run
+):
+    """A deliberate stand-down is not a contradiction.
+
+    The check asks "a key is configured and the rung was still not read,
+    why?", and "because we told it not to ask" is an answer. Left as a FAIL
+    the bundle would stay red on a decision nobody is going to reverse, which
+    is how a reader learns to skip the report. The register still carries the
+    fault, at `known`, from config state.
+    """
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute("CREATE TABLE haz_raw_emdat (record_id TEXT, payload_json TEXT)")
+    con.close()
+    _out, manifest = _build(tmp_path / "e5b", db_path=db,
+                            diagnostics_dir=full_run["diagnostics"],
+                            run_log_dir=full_run["streams"],
+                            environ={"EMDAT_API_KEY": "dead-key"})
+    check = {c["name"]: c for c in manifest["checks"]}[
+        "emdat_is_read_when_a_key_is_configured"
+    ]
+    assert check["verdict"] == "SKIP"
+    assert "marked unavailable" in check["detail"]
+    assert "no_credentials" in check["detail"]
+
+    with zipfile.ZipFile(_out) as zf:
+        register = json.loads(zf.read("checks/issues.json").decode())
+    by_id = {i["id"]: i for i in register["issues"]}
+    # Reported from CONFIG state, so the rung being down stays visible even
+    # though nothing was attempted and no fetch failed.
+    assert "emdat_auth_rejected" in by_id
+    assert by_id["emdat_auth_rejected"]["severity"] == "known"
+
+
+def test_emdat_must_be_read_when_a_key_is_configured(
+    tmp_path, full_run, monkeypatch
+):
+    """E1: a configured key, a ladder run, and an empty cache is a contradiction.
+
+    EM-DAT is stood down in the SHIPPED rulebook, and the check correctly
+    stands down with it (see the test below). This one holds the
+    contradiction itself, for the day a credential arrives and the switch
+    comes off — deleting it would leave nothing watching that case.
+    """
 
     from resolver.diagnostics import run_log
+
+    monkeypatch.setattr(
+        bundle.BundleBuilder, "_declared_source_states", lambda self: {}
+    )
 
     db = full_run["db"]
     con = duckdb.connect(str(db))

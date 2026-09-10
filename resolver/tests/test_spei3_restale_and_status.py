@@ -204,20 +204,49 @@ def test_a_current_feed_is_ok(tmp_path):
     assert status.months_behind == 0
 
 
-def test_two_months_behind_is_not_yet_a_fault(tmp_path):
-    """The producer runs monthly and ERA5T is about five days behind, so one
-    missed cycle is not a fault."""
+def test_the_products_own_lag_is_not_a_fault(tmp_path):
+    """The state a HEALTHY feed is in, and the regression this pins.
 
-    path = _status_file(tmp_path, months=[], newest="2026-06")
-    assert fs.read_feed_status(path, today=dt.date(2026, 9, 10)).state == fs.STATE_OK
+    Copernicus updates the consolidated ERA5-Drought product 2-3 months
+    behind real time, and on 2026-09-10 the real feed sat at exactly 3
+    behind: newest 2026-05 against a previous complete month of 2026-08.
+    The threshold was 3 at the time, so `lag > 3` was False by precisely one
+    month — an alarm about to fire on every run while nothing was wrong.
+    """
+
+    path = _status_file(tmp_path, months=[], newest="2026-05")
+    status = fs.read_feed_status(path, today=dt.date(2026, 9, 10))
+    assert status.months_behind == fs.PRODUCT_LAG_MONTHS == 3
+    assert status.state == fs.STATE_OK
 
 
-def test_four_months_behind_is_stale(tmp_path):
+def test_one_missed_producer_cycle_is_not_yet_a_fault(tmp_path):
+    """The product's lag plus one month. A queued CDS job, a runner outage or
+    a gate that failed closed on one bad month all land here."""
+
     path = _status_file(tmp_path, months=[], newest="2026-04")
     status = fs.read_feed_status(path, today=dt.date(2026, 9, 10))
-    assert status.state == fs.STATE_STALE
     assert status.months_behind == 4
-    assert "4 month(s) behind" in status.detail
+    assert status.state == fs.STATE_OK
+
+
+def test_two_missed_producer_cycles_are_stale(tmp_path):
+    """Not an accident. The producer runs monthly and fails closed, so two
+    consecutive silent failures mean nobody is watching it."""
+
+    path = _status_file(tmp_path, months=[], newest="2026-03")
+    status = fs.read_feed_status(path, today=dt.date(2026, 9, 10))
+    assert status.months_behind == 5
+    assert status.state == fs.STATE_STALE
+    assert "5 month(s) behind" in status.detail
+
+
+def test_the_threshold_states_the_products_lag_and_the_tolerance_apart():
+    """One literal would hide the difference between "the upstream is slow"
+    and "our producer has stopped", and those want different responses."""
+
+    assert fs.MAX_LAG_MONTHS == fs.PRODUCT_LAG_MONTHS + fs.MISSED_CYCLE_TOLERANCE_MONTHS
+    assert fs.PRODUCT_LAG_MONTHS > 0 and fs.MISSED_CYCLE_TOLERANCE_MONTHS > 0
 
 
 def test_a_feed_that_has_never_been_produced_says_absent_not_stale(tmp_path):

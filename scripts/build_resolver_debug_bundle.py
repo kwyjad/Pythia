@@ -2454,9 +2454,33 @@ class BundleBuilder:
             self.reconciliation_rows
         ))
         register.extend(issue_sources.issues_from_log_histogram(self.log_shapes))
+        # From CONFIG, not from a failed fetch. A source deliberately stood
+        # down makes no request, so nothing appears in the fetch stream and
+        # the rung would stop being visible at the moment it became
+        # permanent. Same id as the fetch-derived issue, so the two merge
+        # into one record rather than reporting twice.
+        register.extend(issue_sources.issues_from_source_state(
+            self._declared_source_states()
+        ))
         register.extend(self.extra_issues)
         register.apply_history(issues_mod.load_history(self.con))
         return register
+
+    def _declared_source_states(self) -> dict[str, str]:
+        """Ladder rungs the rulebook marks unavailable, and why. Never raises."""
+
+        try:
+            from resolver.hazard_resolution import rulebook as rulebook_mod
+            rb = rulebook_mod.load_rulebook()
+        except Exception as exc:  # noqa: BLE001
+            self.problems.append(f"could not read the rulebook's source states: {exc}")
+            return {}
+        states: dict[str, str] = {}
+        for source in rulebook_mod.UNAVAILABLE_SWITCH_SOURCES:
+            reason = rulebook_mod.source_unavailable_reason(rb, source)
+            if reason:
+                states[source] = reason
+        return states
 
     def _check(
         self, name: str, verdict: str, left: Any, right: Any, detail: str,
@@ -2662,12 +2686,20 @@ class BundleBuilder:
         the diagnostic is the whole of the protection, and it reports rather
         than changes any verdict.
 
-        Three months behind the last complete month is the threshold: the
-        producer runs monthly and ERA5T is about five days behind, so one
-        missed cycle is not yet a fault and three is not an accident.
+        The threshold is the CONSOLIDATED product's own lag plus room for a
+        missed cycle — see ``feed_status.MAX_LAG_MONTHS``, which states the
+        two halves separately. A single literal hides the difference between
+        "the upstream is slow" and "our producer has stopped", and the two
+        want different responses.
+
+        Also reported here, at ``info``: the producer commits with a
+        fine-grained token that expires. That is CONFIG state rather than
+        anything a run can observe, and it is reported anyway, because the
+        failure it causes is silent — the commit step fails, the feed stops
+        extending, and the staleness check above does not notice for months.
         """
 
-        name = "spei3_feed_covers_a_month_within_three_of_the_last_complete_one"
+        name = "spei3_feed_covers_a_month_within_the_products_lag_plus_a_cycle"
         try:
             from resolver.diagnostics import feed_status as feed_status_mod
         except Exception as exc:  # noqa: BLE001
@@ -2711,6 +2743,41 @@ class BundleBuilder:
                 "recovers_on_rerun": False,
             }],
         )
+        self._report_spei3_commit_token(status)
+
+    def _report_spei3_commit_token(self, status: Any) -> None:
+        """The producer's commit credential, reported from config state.
+
+        Nothing a Resolver Update does can observe a token's expiry, so this
+        never becomes visible by itself: the token lapses, spei3_refresh.yml
+        fails at its commit step, and the only downstream symptom is a feed
+        that stops extending — which the staleness check above will not call
+        a fault for another few months. So it is reported unconditionally
+        while the producer exists, and the register's own review-date
+        machinery does the nagging: the `spei3_commit_token_expiry` entry in
+        known_issues.yml deliberately carries NO review date, so it reports
+        as overdue every run until somebody records when the token actually
+        expires. An invented date would silence this and warn about nothing.
+        """
+
+        if status.state in ("absent", "unreadable"):
+            return
+        self.extra_issues.append(issue_sources.issue_from_measurement(
+            "spei3_commit_token_expiry",
+            "The SPEI-3 producer commits with a fine-grained SPEI3_COMMIT_TOKEN; "
+            "a fine-grained token expires and the producer then stops silently.",
+            severity=issues_mod.INFO,
+            evidence=(
+                "spei3_refresh.yml pushes resolver/data/spei3_country_means.csv "
+                "straight to main with SPEI3_COMMIT_TOKEN, because the default "
+                "GITHUB_TOKEN cannot push past branch protection (GH006) and a "
+                "pull request it opened would never run its own checks. The feed "
+                f"currently covers through {status.newest_month or 'nothing'}; "
+                "rotate the token before its expiry and record the date in the "
+                "register entry's review_by."
+            ),
+            source="config/spei3_status.json",
+        ))
 
     def _check_crisiswatch_entries_accounted_for(self) -> None:
         """Parsed minus stored equals the sum of the per-entry reasons.
@@ -3648,66 +3715,128 @@ class BundleBuilder:
             name, "FAIL" if offenders else "PASS",
             f"{len(offenders)} of {len(result[1])} flagged rows",
             "0",
-            (
+            # The scoped note LEADS. It is the line that changes what a
+            # reader concludes from the count beside it, and appended to the
+            # end of a passing check's detail it was the last thing anybody
+            # would read.
+            (self._ceiling_exceeded_note(result[1]).strip() + " " + (
                 detail
                 or f"All {len(result[1])} flagged resolutions name the flag they "
                 "raised, and every ceiling breach names the bound it exceeded."
-            )
-            + self._ceiling_exceeded_note(result[1]),
+            )).strip(),
         )
 
     def _ceiling_exceeded_note(self, flagged_rows: Sequence[Any]) -> str:
-        """The scoped note, plus the flood rate and the ceiling it cited.
+        """The scoped note, and the flood flag RATE with the bound behind it.
 
         A raw ``ceiling_exceeded`` count reads as "the machine distrusts most
         of its own record". Almost all of it is flood, where the ceiling was
         a different quantity until the fix the note names, and the rest is
-        cyclone, where the flag is a plausibility check working. Reported
-        here rather than only in the acceptance report because the bundle is
-        what a reader opens first, and it is measured per hazard AND per
-        ceiling source: a breach against `gdacs_exposed` and one against
-        `population_share` are different statements, and only the source
-        says which.
+        cyclone, where the flag is a plausibility check doing its job.
 
-        Also filed as an `info` measurement, so the register carries the rate
-        rather than leaving it to be re-derived from a table.
+        A count cannot show whether the fix worked, because a count also
+        falls when the machine resolves fewer flood cells. So this reports a
+        RATE against the flood values actually resolved, split by the bound
+        each breach was measured against, and names the post-fix residual
+        separately:
+
+        * breaches citing ``gdacs_exposed`` are pre-fix by construction —
+          flood takes no GDACS ceiling at any size from the fix commit — and
+          they are frozen, so that share can only fall as newer months
+          arrive and never by anything clearing the old ones;
+        * everything else is the LIVE residual, most likely
+          ``population_share``, and it is the number that should have
+          collapsed. A residual that survives means the fix addressed the
+          loudest cause rather than the only one; a residual drifting back
+          up months later is what a one-off check would miss.
+
+        Standing rather than one-off, and filed as an ``info`` measurement so
+        the register carries the rate rather than leaving it to be re-derived
+        from a table.
         """
 
         by_hazard: dict[str, int] = {}
-        by_source: dict[str, int] = {}
+        by_basis: dict[str, int] = {}
+        flood_pre_fix = 0
         for row in flagged_rows:
             columns = _provenance_columns(row[3])
             if "ceiling_exceeded" not in str(columns["flags"] or ""):
                 continue
             hazard = str(row[1])
             by_hazard[hazard] = by_hazard.get(hazard, 0) + 1
-            source = str(columns.get("ceiling_source") or "") or "(none recorded)"
-            by_source[source] = by_source.get(source, 0) + 1
+            # The BASIS, not the source ref: `basis` is the field that says
+            # which bound was in force (`gdacs_exposed` vs
+            # `population_share`), while `source` names the GDACS event the
+            # figure came from. Only the first answers "which fix does this
+            # row belong to".
+            basis = str(columns.get("ceiling_basis") or "") or "(none recorded)"
+            by_basis[basis] = by_basis.get(basis, 0) + 1
+            if hazard == "FL" and basis == "gdacs_exposed":
+                flood_pre_fix += 1
         if not by_hazard:
             return ""
 
         total = sum(by_hazard.values())
         flood = by_hazard.get("FL", 0)
-        sources = ", ".join(
-            f"{source} {count:,}" for source, count in sorted(
-                by_source.items(), key=lambda kv: (-kv[1], kv[0])
+        flood_residual = flood - flood_pre_fix
+        resolved = self._resolved_values_by_hazard()
+        flood_resolved = resolved.get("FL", 0)
+        bases = ", ".join(
+            f"{basis} {count:,}" for basis, count in sorted(
+                by_basis.items(), key=lambda kv: (-kv[1], kv[0])
             )
+        )
+
+        def _rate(numerator: int) -> str:
+            if not flood_resolved:
+                return "no denominator (no flood value resolved)"
+            return f"{numerator / flood_resolved:.1%}"
+
+        rate_line = (
+            f"Flood flag rate: {flood:,} of {flood_resolved:,} flood values "
+            f"resolved ({_rate(flood)}); of those {flood_pre_fix:,} were "
+            f"measured against `gdacs_exposed` and so predate the fix, "
+            f"leaving a live residual of {flood_residual:,} "
+            f"({_rate(flood_residual)})."
+            if flood_resolved else
+            f"Flood flag rate: {flood:,} flagged, but no flood value resolved "
+            f"in this database, so there is no denominator to divide by."
         )
         note = haz_rules.ceiling_exceeded_scope_note(
             flood_rows=flood, cyclone_rows=by_hazard.get("TC"),
         )
         self.extra_issues.append(issue_sources.issue_from_measurement(
-            "ceiling_exceeded_is_almost_all_flood",
-            f"{total:,} resolution(s) carry ceiling_exceeded; {flood:,} are flood, "
-            f"where the ceiling was a different quantity until commit "
-            f"{haz_rules.CEILING_EXCEEDED_FIX_COMMIT}.",
+            "flood_ceiling_exceeded_rate",
+            f"{flood:,} of {flood_resolved:,} resolved flood values carry "
+            f"ceiling_exceeded ({_rate(flood)}); the live residual, after the "
+            f"pre-fix `gdacs_exposed` breaches, is {flood_residual:,} "
+            f"({_rate(flood_residual)}).",
             severity=issues_mod.INFO,
-            evidence=f"by hazard: {by_hazard}. by ceiling source: {sources}. {note}",
-            cost=float(flood),
-            cost_unit="flagged flood rows",
+            evidence=(
+                f"by hazard: {by_hazard}. by ceiling basis: {bases}. "
+                f"resolved values by hazard: {resolved}. {note}"
+            ),
+            # The rate, not the count: a count also falls when fewer flood
+            # cells resolve, so it cannot say whether the fix worked. The
+            # residual is the half that can still move.
+            cost=(flood_residual / flood_resolved * 100.0) if flood_resolved else None,
+            cost_unit="% of resolved flood values (live residual)",
             source="checks/contradictions.md",
         ))
-        return f" {note} Ceilings cited: {sources}."
+        return f" {note} {rate_line} Ceilings cited: {bases}."
+
+    def _resolved_values_by_hazard(self) -> dict[str, int]:
+        """The denominator for any per-hazard flag rate. Never raises."""
+
+        if "haz_resolutions" not in self.tables():
+            return {}
+        result = self.query(
+            "SELECT hazard, COUNT(*) FROM haz_resolutions "
+            "WHERE status = 'RESOLVED_VALUE' GROUP BY hazard"
+        )
+        if result is None:
+            return {}
+        return {str(row[0]): int(row[1] or 0) for row in result[1]}
 
     def _write_contradictions(self, path: Path) -> None:
         lines = [
@@ -4353,6 +4482,21 @@ class BundleBuilder:
             any(self.diagnostics_dir.glob(f"haz_run_{hz}.json"))
             for hz in ("flood", "cyclone")
         )
+        # A deliberate stand-down is not a contradiction. This check asks
+        # "a key is configured and the rung was still not read, why?" — and
+        # the answer "because we told it not to ask" is an answer, not a
+        # fault. Without this the bundle would stay red forever on a decision
+        # nobody is going to reverse, which is how a reader learns to skip
+        # the report. The register still carries it, at `known`, from config
+        # state: see `issues_from_source_state`.
+        stood_down = self._declared_source_states().get("emdat", "")
+        if stood_down:
+            return self._check(
+                name, "SKIP", "", "",
+                f"emdat is marked unavailable in the rulebook ({stood_down}), so "
+                "the rung is expected unread and no request was made. Reported "
+                "by the register from config state, not here.",
+            )
         if not key_present:
             return self._check(
                 name, "SKIP", "", "",

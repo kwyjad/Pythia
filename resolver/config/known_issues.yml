@@ -56,30 +56,90 @@
 
 issues:
   - id: emdat_auth_rejected
-    owner: external
+    owner: pythia
     first_seen: 2026-08-05
-    # One month. The remedy is entirely within the owner's reach — renew the
-    # key or raise the account tier with EM-DAT — and needs nobody else's
-    # release cycle, so a month is already generous. Past it as of
-    # 2026-09-09 and reported as overdue, which is the honest reading: the
-    # top ladder rung has been unread for over a month.
-    review_by: 2026-09-05
+    # Six months. The remedy moved: it used to be "renew the key or raise
+    # the tier with EM-DAT", which was a month's work at most, and the entry
+    # sat overdue while nobody could do it. It is now "obtain a personal
+    # EM-DAT account", because the old key was issued to UNICEF for UNICEF
+    # work and Pythia is a personal project — a real action, and not an
+    # urgent one. A date firing monthly against a problem nobody is going to
+    # act on this quarter teaches people to ignore the register, which costs
+    # more than the delay does.
+    review_by: 2027-03-10
     recovers_on_rerun: false
+    # Owner moved external -> pythia with the remedy. EM-DAT is not doing
+    # anything wrong: we have no account. Nothing in this repository fixes it
+    # by writing code, which is what `recovers_on_rerun: false` says, but the
+    # action is ours.
     note: >-
-      EM-DAT rejects the configured EMDAT_API_KEY (HTTP 500, "Invalid key
-      passed or insufficient user access"). The connector, the query shape
-      and the transport are all fine; the account or its tier has to change,
-      which is Kevin's to do with EM-DAT. Until then ladder rung 1 is unread
-      and the cache answers where it covers the window. No code change helps.
-    # Written out by hand from what emdat.py logs at ERROR. Substrings,
-    # matched case-insensitively against the NORMALISED line (ISO3 codes,
-    # dates and numbers already replaced by placeholders), so a hazard name
-    # or a month in the middle of the line does not defeat them.
+      EM-DAT is STOOD DOWN as of 2026-09-10:
+      `emdat.unavailable_reason: no_credentials` in the rulebook, so the
+      ladder makes no request at all rather than collecting six rejections a
+      run. Before that it answered every call with HTTP 500, "Invalid key
+      passed or insufficient user access" — the connector, the query shape
+      and the transport were all fine, and the key was issued to UNICEF for
+      UNICEF work, so chasing it is not the remedy. Ladder rung 1 is unread
+      and `haz_raw_emdat` holds nothing, so the cache cannot answer either.
+      WHAT IT COSTS is not the 61,413 NO_DATA cells naming this rung: 61,355
+      of them had NO readable rung at all, so EM-DAT is named there because
+      it was unavailable rather than because it was the missing answer, and
+      EM-DAT is sparse by design in any case (an event enters only at ten
+      deaths, a hundred affected, a declaration or an international appeal,
+      so most country-months hold nothing qualifying). The honest figure is
+      the count of cells where EM-DAT was the ONLY unavailable rung and every
+      other rung was readable and still produced no answer — at most 58, and
+      the genuinely recoverable share is unknown until a credential exists.
+      RECOVERY needs more than removing the switch. `emdat` is in no
+      fingerprinted section, so the hazard fingerprints do not move when the
+      switch does, `completed_months` returns every month already marked
+      `ok`, and nothing re-walks: the cells stay exactly as they are and the
+      recovery quietly does not happen. It needs a targeted restale of the
+      affected months, the same trap SPEI-3 sprang and the same shape of fix
+      (resolver/hazard_resolution/backcast.py::apply_feed_restale, keyed on a
+      one-shot token). The cells to re-walk are the ones whose provenance
+      names `rungs_unavailable: emdat`, which is why that marking is
+      preserved with zero requests rather than dropped along with the fetch.
+    # Kept, though nothing should match them while the source is stood down:
+    # no request is made, so no ERROR line is logged. They cover the
+    # historical rows still in the log index and the run after a credential
+    # arrives and the key is refused again. Substrings, matched
+    # case-insensitively against the NORMALISED line (ISO3 codes, dates and
+    # numbers already replaced by placeholders).
     log_connector: "[emdat]"
     log_signatures:
       - "[emdat] fetch failed for"
       - "unavailable and the cache holds nothing"
       - "invalid key passed or insufficient user access"
+
+  - id: spei3_commit_token_expiry
+    owner: pythia
+    first_seen: 2026-09-10
+    # DELIBERATELY NO review_by, and the register therefore reports this
+    # entry as overdue on every run until somebody fills one in. That is not
+    # an oversight: the rule for this entry is `review_by` one month before
+    # the token expires, and the expiry date is a fact about a credential
+    # that only its holder can read off the GitHub settings page. Guessing it
+    # would be worse than leaving it blank — a date invented here would stop
+    # the nagging while giving no warning at all when the token actually
+    # lapses, which is precisely the failure this entry exists to prevent.
+    #
+    # To close it: read the expiry from
+    # https://github.com/settings/personal-access-tokens, set review_by to
+    # one month before that date, and note the expiry in the note below.
+    recovers_on_rerun: false
+    note: >-
+      SPEI-3 is produced by a scheduled workflow that commits
+      resolver/data/spei3_country_means.csv straight to main using a
+      fine-grained SPEI3_COMMIT_TOKEN, because the default GITHUB_TOKEN
+      cannot push past branch protection (GH006). Fine-grained tokens expire.
+      When this one does, spei3_refresh.yml fails at its commit step and the
+      feed stops extending — the drought gate then loses its only observation
+      before the HDX and NMME ingests began, one month at a time, and nothing
+      else complains because the rulebook entry is `required: false` with
+      `absence_means_no_drought: false`. The remedy is to rotate the token
+      before it lapses; the review date is what makes that happen, and it is
+      blank because the expiry has not been recorded here yet.
 
   - id: acled_cast_stale_vintage
     owner: external

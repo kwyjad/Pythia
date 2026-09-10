@@ -660,6 +660,11 @@ class TestScopedRunDoesNotCryWolf:
         builder = bundle.BundleBuilder.__new__(bundle.BundleBuilder)
         builder.env = {"EMDAT_API_KEY": "set"}
         builder.diagnostics_dir = tmp_path  # no haz_run_*.json: no ladder ran
+        # EM-DAT is stood down in the shipped rulebook, and that guard runs
+        # first — correctly, since if we are not asking nothing else matters.
+        # This test is about the guard BELOW it, which has to keep working
+        # for the day the switch comes off.
+        builder._declared_source_states = lambda: {}
         builder._stream_file = lambda _name: None
         builder.checks = []
         builder._check = lambda *a, **k: builder.checks.append((a, k))
@@ -674,6 +679,7 @@ class TestScopedRunDoesNotCryWolf:
         builder = bundle.BundleBuilder.__new__(bundle.BundleBuilder)
         builder.env = {"EMDAT_API_KEY": "set"}
         builder.diagnostics_dir = tmp_path
+        builder._declared_source_states = lambda: {}  # see the test above
         builder._stream_file = lambda _name: None
         builder.tables = lambda: set()
         builder.checks = []

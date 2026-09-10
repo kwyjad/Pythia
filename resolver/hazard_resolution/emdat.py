@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import requests
 
 from resolver.diagnostics import run_log
+from resolver.hazard_resolution import rulebook as rulebook_mod
 from resolver.hazard_resolution.rulebook import Rulebook
 from resolver.hazard_resolution.rules import event_months
 from resolver.hazard_resolution.sources import (
@@ -102,6 +103,11 @@ _ERROR_BODY_CHARS = 500
 #: is ``EMDAT_API_KEY``; the account tier may need raising), and until it is
 #: the ladder has no top rung.
 FAILURE_AUTH = "auth_rejected"
+#: The source was not asked, because the rulebook says we cannot read it.
+#: A class of its own, so a stand-down and a refusal are distinguishable in
+#: the fetch stream — while producing the SAME ledger marking, which is the
+#: constraint that matters. See ``emdat.unavailable_reason`` in the rulebook.
+FAILURE_UNAVAILABLE = "marked_unavailable"
 FAILURE_SERVER = "server_error"
 FAILURE_NETWORK = "network"
 FAILURE_NO_KEY = "no_key"
@@ -357,6 +363,39 @@ def fetch_emdat(
     if not classif:
         outcome.error = f"no emdat.classif_keys entry for hazard {hazard}"
         LOG.warning("[emdat] %s", outcome.error)
+        return outcome
+
+    # Stood down before the key is even read, so no request is made and no
+    # credential is touched. The outcome is built and recorded exactly as a
+    # refusal's is — same `ok=False`, same cache fallback, same
+    # `source_fetches` record — because a cell decided without this rung must
+    # say so whether the rung refused us or we declined to ask. Skipped for
+    # want of credentials and attempted-then-refused produce the same ledger
+    # entry: zero requests, identical record.
+    #
+    # It routes through `_fall_back_to_cache` rather than short-circuiting to
+    # ok=False, so a populated cache still answers as a STALE rung. Making
+    # the two paths the same code is what makes the two records identical by
+    # construction rather than by coincidence.
+    unavailable = rulebook_mod.source_unavailable_reason(rulebook, SOURCE)
+    if unavailable:
+        outcome.error = (
+            f"{SOURCE} is marked unavailable in the rulebook ({unavailable}); "
+            "no request was made"
+        )
+        outcome.detail = {
+            **(outcome.detail or {}),
+            "failure_class": FAILURE_UNAVAILABLE,
+            "unavailable_reason": unavailable,
+        }
+        outcome = _fall_back_to_cache(con, ym, hazard, rulebook, outcome)
+        _record_fetch(
+            outcome, hazard=hazard, ym=ym, failure_class=FAILURE_UNAVAILABLE
+        )
+        LOG.info(
+            "[emdat] %s %s: not asked — marked unavailable (%s)",
+            hazard, ym, unavailable,
+        )
         return outcome
 
     key = _api_key()

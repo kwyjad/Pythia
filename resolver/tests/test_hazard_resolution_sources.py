@@ -57,6 +57,28 @@ def rulebook():
 
 
 @pytest.fixture()
+def emdat_rulebook():
+    """The rulebook with EM-DAT's stand-down cleared.
+
+    EM-DAT is stood down in the shipped rulebook (no working credential, see
+    ``emdat.unavailable_reason``), so a fetch against it makes no request at
+    all. Every test below still has to hold: they describe what the connector
+    must do when a credential exists, and pointing them at the shipped
+    rulebook instead would delete that coverage rather than adapt it.
+
+    That the shipped rulebook DOES stand it down is asserted separately, by
+    ``test_the_shipped_rulebook_stands_emdat_down`` here and by
+    ``resolver/tests/test_emdat_stand_down.py``.
+    """
+
+    rb = make_rulebook()
+    section = dict(rb.get("emdat"))
+    section.pop("unavailable_reason", None)
+    rb._data["emdat"] = section
+    return rb
+
+
+@pytest.fixture()
 def con():
     con = duckdb.connect(":memory:")
     ensure_haz_schema(con)
@@ -258,10 +280,10 @@ _EMDAT_ROW = {
 }
 
 
-def test_emdat_stores_and_reads_back_a_record(con, rulebook, monkeypatch):
+def test_emdat_stores_and_reads_back_a_record(con, emdat_rulebook, monkeypatch):
     monkeypatch.setenv("EMDAT_API_KEY", "test-key")
     outcome = emdat_mod.fetch_emdat(
-        con, "2024-03", "FL", rulebook,
+        con, "2024-03", "FL", emdat_rulebook,
         post=lambda *a: _emdat_response([_EMDAT_ROW]),
     )
     assert outcome.ok is True and outcome.records == 1
@@ -272,7 +294,7 @@ def test_emdat_stores_and_reads_back_a_record(con, rulebook, monkeypatch):
     assert records[0]["months_overlapped"] == ["2024-03"]
 
 
-def test_emdat_sends_the_key_from_the_environment_only(con, rulebook, monkeypatch):
+def test_emdat_sends_the_key_from_the_environment_only(con, emdat_rulebook, monkeypatch):
     """Hard rule: credentials come from env, never from the rulebook."""
     monkeypatch.setenv("EMDAT_API_KEY", "secret-token")
     seen = {}
@@ -281,31 +303,31 @@ def test_emdat_sends_the_key_from_the_environment_only(con, rulebook, monkeypatc
         seen.update(headers=headers, payload=payload)
         return _emdat_response([])
 
-    emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook, post=capture)
+    emdat_mod.fetch_emdat(con, "2024-03", "FL", emdat_rulebook, post=capture)
     assert seen["headers"]["Authorization"] == "Bearer secret-token"
-    assert "secret-token" not in str(rulebook.raw)
+    assert "secret-token" not in str(emdat_rulebook.raw)
 
 
-def test_emdat_without_a_key_reports_unavailable_not_empty(con, rulebook, monkeypatch):
+def test_emdat_without_a_key_reports_unavailable_not_empty(con, emdat_rulebook, monkeypatch):
     monkeypatch.delenv("EMDAT_API_KEY", raising=False)
-    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook)
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", emdat_rulebook)
     assert outcome.ok is False
     assert "EMDAT_API_KEY" in outcome.error
 
 
-def test_emdat_api_failure_reports_unavailable_not_empty(con, rulebook, monkeypatch):
+def test_emdat_api_failure_reports_unavailable_not_empty(con, emdat_rulebook, monkeypatch):
     monkeypatch.setenv("EMDAT_API_KEY", "test-key")
 
     def boom(*args):
         raise RuntimeError("503 Service Unavailable")
 
-    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook, post=boom)
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", emdat_rulebook, post=boom)
     assert outcome.ok is False
     assert "503" in outcome.error
     assert outcome.records == 0
 
 
-def test_emdat_serves_the_cache_when_the_live_call_fails(con, rulebook, monkeypatch):
+def test_emdat_serves_the_cache_when_the_live_call_fails(con, emdat_rulebook, monkeypatch):
     """A STALE rung and an UNREAD rung are different facts.
 
     api.emdat.be returned 500 on all six month-hazard passes of the 2026-08
@@ -316,13 +338,13 @@ def test_emdat_serves_the_cache_when_the_live_call_fails(con, rulebook, monkeypa
 
     monkeypatch.setenv("EMDAT_API_KEY", "test-key")
     emdat_mod.fetch_emdat(
-        con, "2024-03", "FL", rulebook, post=lambda *a: _emdat_response([_EMDAT_ROW])
+        con, "2024-03", "FL", emdat_rulebook, post=lambda *a: _emdat_response([_EMDAT_ROW])
     )
 
     def boom(*args):
         raise RuntimeError("500 Internal Server Error")
 
-    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook, post=boom)
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", emdat_rulebook, post=boom)
 
     # The rung answered, so it is not in the run's unavailable_sources and
     # the ladder still has a top rung to walk.
@@ -337,23 +359,23 @@ def test_emdat_serves_the_cache_when_the_live_call_fails(con, rulebook, monkeypa
     assert records and records[0]["total_affected"] == 45000
 
 
-def test_emdat_serves_the_cache_when_the_key_is_missing(con, rulebook, monkeypatch):
+def test_emdat_serves_the_cache_when_the_key_is_missing(con, emdat_rulebook, monkeypatch):
     """An expired key does not delete what was already fetched."""
 
     monkeypatch.setenv("EMDAT_API_KEY", "test-key")
     emdat_mod.fetch_emdat(
-        con, "2024-03", "FL", rulebook, post=lambda *a: _emdat_response([_EMDAT_ROW])
+        con, "2024-03", "FL", emdat_rulebook, post=lambda *a: _emdat_response([_EMDAT_ROW])
     )
 
     monkeypatch.delenv("EMDAT_API_KEY", raising=False)
-    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook)
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", emdat_rulebook)
 
     assert outcome.ok is True
     assert outcome.detail["served_from_cache"] is True
     assert "EMDAT_API_KEY" in outcome.detail["live_fetch_error"]
 
 
-def test_emdat_with_an_empty_cache_is_still_unread(con, rulebook, monkeypatch):
+def test_emdat_with_an_empty_cache_is_still_unread(con, emdat_rulebook, monkeypatch):
     """The error in the other direction.
 
     With nothing to serve, claiming the rung answered would manufacture a
@@ -365,13 +387,13 @@ def test_emdat_with_an_empty_cache_is_still_unread(con, rulebook, monkeypatch):
     def boom(*args):
         raise RuntimeError("500 Internal Server Error")
 
-    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook, post=boom)
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", emdat_rulebook, post=boom)
     assert outcome.ok is False
     assert "500" in outcome.error
 
 
 def test_emdat_cache_fallback_only_counts_records_in_the_window(
-    con, rulebook, monkeypatch
+    con, emdat_rulebook, monkeypatch
 ):
     """A cached record from another season does not make this month answered."""
 
@@ -382,13 +404,14 @@ def test_emdat_cache_fallback_only_counts_records_in_the_window(
         "start_year": 2019, "end_year": 2019,
     }
     emdat_mod.fetch_emdat(
-        con, "2019-03", "FL", rulebook, post=lambda *a: _emdat_response([old_row])
+        con, "2019-03", "FL", emdat_rulebook,
+        post=lambda *a: _emdat_response([old_row]),
     )
 
     def boom(*args):
         raise RuntimeError("500 Internal Server Error")
 
-    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", rulebook, post=boom)
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", emdat_rulebook, post=boom)
     assert outcome.ok is False
 
 
@@ -402,23 +425,23 @@ def test_emdat_falls_back_to_summing_its_own_components():
     assert emdat_mod.affected_from_record({"total_deaths": 3}) is None
 
 
-def test_emdat_record_without_a_month_is_dropped_not_parked_in_january(con, rulebook, monkeypatch):
+def test_emdat_record_without_a_month_is_dropped_not_parked_in_january(con, emdat_rulebook, monkeypatch):
     monkeypatch.setenv("EMDAT_API_KEY", "test-key")
     undated = {**_EMDAT_ROW, "start_month": None, "end_month": None}
     outcome = emdat_mod.fetch_emdat(
-        con, "2024-03", "FL", rulebook, post=lambda *a: _emdat_response([undated])
+        con, "2024-03", "FL", emdat_rulebook, post=lambda *a: _emdat_response([undated])
     )
     assert outcome.ok is True
     assert outcome.records == 0
 
 
-def test_emdat_records_outside_the_month_window_are_trimmed(con, rulebook, monkeypatch):
+def test_emdat_records_outside_the_month_window_are_trimmed(con, emdat_rulebook, monkeypatch):
     """EM-DAT filters by YEAR, so the month trim has to happen here."""
     monkeypatch.setenv("EMDAT_API_KEY", "test-key")
     far = {**_EMDAT_ROW, "disno": "2024-9999-PHL",
            "start_month": 9, "end_month": 9}  # Sept, outside Dec..Apr
     emdat_mod.fetch_emdat(
-        con, "2024-03", "FL", rulebook,
+        con, "2024-03", "FL", emdat_rulebook,
         post=lambda *a: _emdat_response([_EMDAT_ROW, far]),
     )
     stored = load_raw_records(con, "emdat")
@@ -426,6 +449,21 @@ def test_emdat_records_outside_the_month_window_are_trimmed(con, rulebook, monke
 
 
 # ---------------------------------------------------------------------------
+
+def test_the_shipped_rulebook_stands_emdat_down(con, monkeypatch):
+    """The counterpart to `emdat_rulebook`: the fixture clears a switch that
+    really is set, so a run in production makes no EM-DAT request at all."""
+
+    monkeypatch.setenv("EMDAT_API_KEY", "present-and-rejected")
+
+    def _explode(*_a, **_k):
+        raise AssertionError("a request was made for a source marked unavailable")
+
+    outcome = emdat_mod.fetch_emdat(con, "2024-03", "FL", make_rulebook(), post=_explode)
+    assert outcome.ok is False
+    assert outcome.detail["failure_class"] == emdat_mod.FAILURE_UNAVAILABLE
+
+
 # IFRC GO
 # ---------------------------------------------------------------------------
 

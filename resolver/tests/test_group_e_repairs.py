@@ -205,6 +205,24 @@ def haz_con():
     con.close()
 
 
+def _emdat_rulebook():
+    """The rulebook with EM-DAT's stand-down cleared.
+
+    EM-DAT is stood down in the shipped rulebook (``no_credentials``, no
+    working key), so a fetch against it makes no request at all. The two
+    tests below are about how a REFUSAL is classified and annotated, which
+    still has to work for the day a credential arrives and the switch comes
+    off — pointing them at the shipped rulebook would delete that coverage
+    rather than adapt it.
+    """
+
+    rb = load_rulebook()
+    section = dict(rb.get("emdat"))
+    section.pop("unavailable_reason", None)
+    rb._data["emdat"] = section
+    return rb
+
+
 def test_a_rejected_key_is_recorded_on_the_outcome_the_stream_and_the_job(
     haz_con, monkeypatch, tmp_path, capsys
 ):
@@ -216,7 +234,7 @@ def test_a_rejected_key_is_recorded_on_the_outcome_the_stream_and_the_job(
     def rejected(*args):
         return {"errors": [{"message": "Invalid key passed or insufficient user access"}]}
 
-    outcome = emdat_mod.fetch_emdat(haz_con, "2026-08", "TC", load_rulebook(), post=rejected)
+    outcome = emdat_mod.fetch_emdat(haz_con, "2026-08", "TC", _emdat_rulebook(), post=rejected)
     assert outcome.ok is False
     assert outcome.detail["failure_class"] == emdat_mod.FAILURE_AUTH
 
@@ -238,7 +256,7 @@ def test_a_server_error_does_not_raise_the_job_annotation(haz_con, monkeypatch, 
     def boom(*args):
         raise RuntimeError("HTTP 500 from https://api.emdat.be/v1: Internal Server Error")
 
-    outcome = emdat_mod.fetch_emdat(haz_con, "2026-08", "TC", load_rulebook(), post=boom)
+    outcome = emdat_mod.fetch_emdat(haz_con, "2026-08", "TC", _emdat_rulebook(), post=boom)
     assert outcome.detail["failure_class"] == emdat_mod.FAILURE_SERVER
     assert "::error::" not in capsys.readouterr().out
 

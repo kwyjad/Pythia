@@ -397,29 +397,93 @@ def test_the_scoped_note_says_the_count_is_almost_all_flood(tmp_path):
     assert "2 of 3 are flood" in detail
     assert "1 cyclone" in detail
     assert CEILING_EXCEEDED_FIX_COMMIT in detail
-    # And the ceiling each breach cited, because a breach against
-    # gdacs_exposed and one against a population share are different
-    # statements and only the source says which.
-    assert "gdacs:population 3" in detail
+    # And the BOUND each breach was measured against, because a breach
+    # against gdacs_exposed and one against a population share are different
+    # statements and only the basis says which.
+    assert "gdacs_exposed 3" in detail
+    # The note LEADS. Appended after a passing check's detail it was the last
+    # line anybody would read, and it is the one that changes what they
+    # conclude from the count.
+    assert detail.startswith("`ceiling_exceeded` is scoped")
 
 
 def test_the_flood_rate_reaches_the_register_as_a_measurement(tmp_path):
-    """Reported rather than left to be re-derived from a table."""
+    """A RATE, not a count. A count also falls when fewer flood cells
+    resolve, so it cannot say whether the fix worked."""
 
     builder = _bundle_over(
         tmp_path,
         [("PHL", "FL", 2024, 3, "RESOLVED_VALUE", 40_000.0, True,
           json.dumps({"decision": {
               "flags": ["ceiling_exceeded"],
-              "ceiling": {"exposed_population": 900.0, "source": "gdacs:population"},
+              "ceiling": {"exposed_population": 900.0, "basis": "population_share"},
+          }})),
+         ("BGD", "FL", 2024, 4, "RESOLVED_VALUE", 90_000.0, False, "{}"),
+         ("IDN", "FL", 2024, 5, "RESOLVED_VALUE", 1_000.0, False, "{}"),
+         ("VNM", "FL", 2024, 6, "RESOLVED_VALUE", 2_000.0, False, "{}")],
+    )
+    builder._check_flagged_resolutions_name_their_flag()
+    issue = next(
+        i for i in builder.extra_issues if i.id == "flood_ceiling_exceeded_rate"
+    )
+    # One flagged of four resolved flood values, none of them pre-fix, so
+    # the live residual is the whole 25%.
+    assert issue.cost == 25.0
+    assert "% of resolved flood values" in issue.cost_unit
+    assert "1 of 4" in issue.title and "25.0%" in issue.title
+
+
+def test_the_pre_fix_share_is_named_apart_from_the_live_residual(tmp_path):
+    """A breach citing gdacs_exposed is pre-fix by construction — flood takes
+    no GDACS ceiling at any size now — and it is frozen, so it can never
+    fall by anything clearing it. Only the residual can still move, and only
+    the residual answers "did the fix work"."""
+
+    def _flagged(iso3, month, basis):
+        return (iso3, "FL", 2024, month, "RESOLVED_VALUE", 40_000.0, True,
+                json.dumps({"decision": {
+                    "flags": ["ceiling_exceeded"],
+                    "ceiling": {"exposed_population": 900.0, "basis": basis},
+                }}))
+
+    builder = _bundle_over(
+        tmp_path,
+        [_flagged("PHL", 3, "gdacs_exposed"),
+         _flagged("BGD", 4, "gdacs_exposed"),
+         _flagged("IDN", 5, "gdacs_exposed"),
+         _flagged("VNM", 6, "population_share"),
+         ("THA", "FL", 2024, 7, "RESOLVED_VALUE", 1_000.0, False, "{}")],
+    )
+    builder._check_flagged_resolutions_name_their_flag()
+    detail = _verdict(builder, CHECK)["detail"]
+    assert "4 of 5 flood values resolved (80.0%)" in detail
+    assert "3 were" in detail and "predate the fix" in detail
+    assert "live residual of 1 (20.0%)" in detail
+    issue = next(
+        i for i in builder.extra_issues if i.id == "flood_ceiling_exceeded_rate"
+    )
+    assert issue.cost == 20.0
+
+
+def test_a_flood_rate_with_no_denominator_says_so_rather_than_dividing(tmp_path):
+    """Every flood row flagged and none resolved to a value is possible on a
+    scoped run. Printing a rate there would be inventing one."""
+
+    builder = _bundle_over(
+        tmp_path,
+        [("PHL", "FL", 2024, 3, "NO_DATA", None, True,
+          json.dumps({"decision": {
+              "flags": ["ceiling_exceeded"],
+              "ceiling": {"exposed_population": 900.0, "basis": "gdacs_exposed"},
           }}))],
     )
     builder._check_flagged_resolutions_name_their_flag()
-    ids = [i.id for i in builder.extra_issues]
-    assert "ceiling_exceeded_is_almost_all_flood" in ids
-    issue = next(i for i in builder.extra_issues if i.id == ids[0])
-    assert issue.cost == 1.0
-    assert issue.cost_unit == "flagged flood rows"
+    detail = _verdict(builder, CHECK)["detail"]
+    assert "no denominator" in detail or "no flood value resolved" in detail
+    issue = next(
+        i for i in builder.extra_issues if i.id == "flood_ceiling_exceeded_rate"
+    )
+    assert issue.cost is None
 
 
 def test_a_flag_that_is_not_a_ceiling_breach_gets_no_ceiling_note(tmp_path):

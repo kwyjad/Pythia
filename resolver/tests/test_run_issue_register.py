@@ -417,23 +417,47 @@ class TestRendering:
 
 
 class TestTheShippedRegister:
-    """The three seeded entries, held to what the run actually observed."""
+    """The seeded entries, held to what the runs actually observed."""
 
-    def test_the_three_confirmed_external_faults_are_registered(self):
+    def test_the_seeded_faults_are_registered(self):
         known = mod.KnownIssues.load()
         assert known.problems == []
         assert set(known.entries) == {
+            # Three confirmed external faults...
             "emdat_auth_rejected",
             "acled_cast_stale_vintage",
             "views_stale_vintage",
+            # ...and one of ours: a credential that will expire silently.
+            "spei3_commit_token_expiry",
         }
 
-    def test_every_entry_names_an_owner_a_note_and_a_review_date(self):
+    def test_every_entry_names_an_owner_and_a_note(self):
         known = mod.KnownIssues.load()
         for issue_id, entry in known.entries.items():
             assert entry.get("owner") in ("external", "pythia"), issue_id
             assert entry.get("note"), issue_id
-            assert entry.get("review_by"), issue_id
+
+    def test_a_dateless_entry_is_deliberate_and_therefore_always_overdue(self):
+        """One entry has NO review date on purpose, and the register's own
+        rule is what makes that safe: an entry with no date is overdue from
+        the first run, so it nags until somebody fills one in.
+
+        `spei3_commit_token_expiry` is that entry. Its rule is "review one
+        month before the token expires", and the expiry is a fact about a
+        credential only its holder can read off a settings page. A date
+        invented here would stop the nagging while warning about nothing —
+        which is precisely the failure the entry exists to prevent.
+        """
+
+        known = mod.KnownIssues.load()
+        dateless = {
+            issue_id for issue_id, entry in known.entries.items()
+            if not entry.get("review_by")
+        }
+        assert dateless == {"spei3_commit_token_expiry"}, dateless
+        issue = mod.Issue(id="spei3_commit_token_expiry", severity=mod.INFO,
+                          title="t", evidence="e")
+        assert known.apply(issue, today=dt.date(2026, 9, 10)).overdue is True
 
     def test_the_review_dates_are_chosen_per_fault_not_stamped_uniformly(self):
         """One date on every entry is a placeholder wearing a date's clothes.
@@ -461,11 +485,15 @@ class TestTheShippedRegister:
         """
 
         known = mod.KnownIssues.load()
+        # The deliberately dateless entry is covered by its own test above.
+        dated = {
+            issue_id: entry for issue_id, entry in known.entries.items()
+            if entry.get("review_by")
+        }
         due = sorted(
-            dt.date.fromisoformat(str(e["review_by"]))
-            for e in known.entries.values()
+            dt.date.fromisoformat(str(e["review_by"])) for e in dated.values()
         )
-        for issue_id, entry in known.entries.items():
+        for issue_id, entry in dated.items():
             first = dt.date.fromisoformat(str(entry["first_seen"]))
             assert dt.date.fromisoformat(str(entry["review_by"])) > first, issue_id
         assert (due[-1] - due[0]).days <= 180, (
@@ -493,20 +521,25 @@ class TestTheShippedRegister:
     def test_the_overdue_line_fires_on_the_shipped_register(self):
         """Held to a pinned date, so it is a property and not the calendar.
 
-        On 2026-09-09 the EM-DAT entry is a month past its review date and
-        the other two are not. That is what a live run prints, and it is the
-        difference between a register that expires and one that does not.
+        On 2026-09-09 the EM-DAT entry was a month past its review date and
+        the other two were not. It no longer is: the remedy changed on
+        2026-09-10 from "renew the key" to "obtain a personal EM-DAT
+        account", the source was stood down in the rulebook, and the date
+        moved out six months to match — a date firing monthly against a
+        problem nobody is going to act on this quarter teaches people to
+        ignore the register. What is overdue instead is the SPEI-3 commit
+        token entry, which carries no date by design.
         """
 
         known = mod.KnownIssues.load()
-        today = dt.date(2026, 9, 9)
+        today = dt.date(2026, 9, 10)
         overdue = set()
         for issue_id in known.entries:
             issue = mod.Issue(id=issue_id, severity=mod.DEGRADED,
                               title="t", evidence="e")
             if known.apply(issue, today=today).overdue:
                 overdue.add(issue_id)
-        assert overdue == {"emdat_auth_rejected"}, overdue
+        assert overdue == {"spei3_commit_token_expiry"}, overdue
 
     def test_the_seeded_ids_match_the_ids_the_collectors_emit(self):
         """A register keyed on an id nothing emits suppresses nothing."""
@@ -516,6 +549,7 @@ class TestTheShippedRegister:
             set(issue_sources.CHECK_ISSUE_IDS.values())
             | set(issue_sources.SOURCE_ISSUE_IDS.values())
             | set(issue_sources.VINTAGE_ISSUE_IDS.values())
+            | set(issue_sources.MEASUREMENT_ISSUE_IDS)
         )
         assert set(known.entries) <= emitted
 

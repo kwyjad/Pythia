@@ -192,6 +192,12 @@ jobs:
       ACAPS_PASSWORD: ${{ secrets.ACAPS_PASSWORD }}
       IPC_API_KEY: ${{ secrets.IPC_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # Still passed, deliberately, though EM-DAT is stood down in the
+      # rulebook (`emdat.unavailable_reason`). The SWITCH is what stops the
+      # request; making the stand-down depend on this secret also being
+      # withheld would need two places to agree, and an accidentally
+      # deleted secret would then look identical to a deliberate decision.
+      # The diagnose_emdat dispatch diagnostic needs it too.
       EMDAT_API_KEY: ${{ secrets.EMDAT_API_KEY }}
       # IFRC GO Admin API token. Optional in the client (it runs anonymously
       # without one), but anonymous GO is rate-limited and Phase 1 is fatal,

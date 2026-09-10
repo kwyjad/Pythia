@@ -44,6 +44,33 @@ KNOWN_IBTRACS_SCOPES = ("last3years", "ALL")
 #: File shapes the Dartmouth Flood Observatory archive reader can parse.
 KNOWN_DFO_FORMATS = ("xlsx", "csv")
 
+#: Why a source is marked unavailable, when one is. A REASON rather than a
+#: boolean, because "we cannot ask" has kinds and they want different
+#: responses: a credential is somebody's to obtain, a retired upstream needs
+#: a replacement source, a withdrawn licence is a legal question. A boolean
+#: would record that a rung is down and lose the only part a reader can act
+#: on.
+#:
+#: Absent or null means available, so a source with no entry behaves exactly
+#: as it did before this existed.
+#:
+#:   ``no_credentials``     we hold no working key and are not about to
+#:   ``upstream_retired``   the endpoint or product no longer exists
+#:   ``licence_withdrawn``  we may no longer use it
+#:   ``superseded``         another source now answers for it
+KNOWN_SOURCE_UNAVAILABLE_REASONS = (
+    "no_credentials",
+    "upstream_retired",
+    "licence_withdrawn",
+    "superseded",
+)
+
+#: Sources this switch may be declared on: the ladder rungs, which are what
+#: a fetch skip can be reasoned about. GDACS is deliberately excluded — it is
+#: the detector AND the ceiling, so standing it down would silently remove
+#: every flood trigger rather than one rung's figures.
+UNAVAILABLE_SWITCH_SOURCES = ("emdat", "ifrc_go", "idmc_idu")
+
 #: Rulebook hazard names -> repo hazard codes (resolver/data/shocks.csv).
 HAZARD_CODE_BY_RULEBOOK_NAME = {"cyclone": "TC", "flood": "FL", "drought": "DR"}
 
@@ -316,6 +343,27 @@ class Rulebook:
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"Rulebook(path={str(self.path)!r}, keys={sorted(self._data)})"
+
+
+def source_unavailable_reason(rulebook: "Rulebook", source: str) -> str:
+    """Why ``source`` is marked unavailable, or ``""`` if it is not.
+
+    A source we KNOW we cannot read should not be asked. EM-DAT rejected
+    six requests per ladder run for a month before this existed, and a
+    request you know will fail is one you should not make.
+
+    What this must NOT do is quieten the record. The ledger marking is the
+    only thing that will ever say which cells were decided without their top
+    rung, and therefore which to re-walk when a credential exists — so the
+    caller's job is to produce the SAME ``rungs_unavailable`` entry a refusal
+    would have produced, with zero requests. See
+    :func:`resolver.hazard_resolution.emdat.fetch_emdat`.
+    """
+
+    if source not in UNAVAILABLE_SWITCH_SOURCES:
+        return ""
+    reason = rulebook.get(f"{source}.unavailable_reason", None)
+    return "" if reason in (None, "") else str(reason)
 
 
 def _is_number(value: Any) -> bool:
@@ -961,6 +1009,19 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
     _require_int_in("emdat.max_pages", 1, 1000)
     _require_hazard_keyed_str_lists("emdat.classif_keys")
     _require_fetch_window("emdat")
+    # Optional, and validated only when present: an unknown reason must fail
+    # loudly rather than silently read as "available", which would leave a
+    # source we meant to stand down making requests we know will be refused.
+    for _source in UNAVAILABLE_SWITCH_SOURCES:
+        _reason = data.get(_source, {})
+        _reason = _reason.get("unavailable_reason") if isinstance(_reason, Mapping) else None
+        if _reason in (None, ""):
+            continue
+        if _reason not in KNOWN_SOURCE_UNAVAILABLE_REASONS:
+            problems.append(
+                f"{_source}.unavailable_reason must be one of "
+                f"{list(KNOWN_SOURCE_UNAVAILABLE_REASONS)}, got {_reason!r}"
+            )
 
     go_url = _require("ifrc_go.api_base_url")
     if go_url is not _MISSING and (
