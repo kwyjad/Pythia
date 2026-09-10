@@ -267,8 +267,11 @@ jobs:
           else
             KEEP_A=$(date -u +%Y)
             KEEP_B=$(( KEEP_A - 1 ))
+            # Prefix match: the CDS serves a zip and the unpacked members
+            # are named spei3_<year>__<member>.nc, so an exact-name test
+            # would delete every year it meant to keep.
             find "${RAW_DIR}" -name '*.nc' \
-              ! -name "spei3_${KEEP_A}.nc" ! -name "spei3_${KEEP_B}.nc" -delete
+              ! -name "spei3_${KEEP_A}*" ! -name "spei3_${KEEP_B}*" -delete
             echo "kept ${KEEP_A} and ${KEEP_B} only"
           fi
           du -sh "${RAW_DIR}" || true

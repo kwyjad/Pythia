@@ -77,10 +77,14 @@ def test_the_request_carries_every_key_the_cds_made_mandatory():
     assert request["dataset_type"] == "consolidated_dataset"
     assert request["version"] == "1_0"
 
-    # `format` became `data_format`, and the archive has to be unpacked.
+    # `format` became `data_format`.
     assert request["data_format"] == "netcdf"
     assert "format" not in request
-    assert request["download_format"] == "unarchived"
+    # `zip` because that is the only container this dataset serves: run
+    # 34456535827 asked for `unarchived` and was told "Download format not
+    # supported for this dataset. Defaulting to zip." Asking for what is
+    # served keeps that warning out of every run's log.
+    assert request["download_format"] == "zip"
 
 
 def test_months_are_zero_padded_because_the_cds_rejects_a_bare_one():
@@ -156,6 +160,24 @@ def test_a_year_already_downloaded_is_not_fetched_again(tmp_path):
     assert result.written == []
 
 
+def test_an_unpacked_year_is_not_fetched_again(tmp_path):
+    """The resume check reads the YEAR, not the name it was downloaded under.
+
+    An unpacked year is called ``spei3_2016__data.nc``, so a check on
+    ``spei3_2016.nc`` finds nothing and asks the CDS for 95 MB it already
+    holds — every run, forever.
+    """
+
+    (tmp_path / "spei3_2016__unpacked.nc").write_bytes(b"CDF\x01already here")
+
+    class _Client:
+        def retrieve(self, dataset, request, target):  # pragma: no cover
+            raise AssertionError("re-fetched a year already unpacked on disk")
+
+    result = spei.fetch_grids(tmp_path, ["2016-01"], client=_Client())
+    assert result.skipped_present == ["2016"]
+
+
 def test_a_failed_year_is_owed_not_fatal(tmp_path):
     """The other years may be fine, and the gates decide what is publishable."""
 
@@ -182,6 +204,144 @@ def test_a_partial_file_from_a_failed_year_is_removed(tmp_path):
 
     spei.fetch_grids(tmp_path, ["2016-01"], client=_Client())
     assert not (tmp_path / "spei3_2016.nc").exists()
+
+
+# ---------------------------------------------------------------------------
+# The container: sniffed, never assumed
+#
+# Run 34456535827 fetched all eleven years and then failed to read one of
+# them. The CDS said why in its own log — "Download format not supported for
+# this dataset. Defaulting to zip." — and wrote the archive to the `.nc`
+# filename the client had been handed, so xarray reported no matching IO
+# backend: a message about our installation, for a file that was never a
+# NetCDF.
+# ---------------------------------------------------------------------------
+
+
+def _zip_of(members: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, payload in members.items():
+            archive.writestr(name, payload)
+    return buffer.getvalue()
+
+
+def test_a_zip_named_nc_is_recognised_as_a_zip(tmp_path):
+    path = tmp_path / "spei3_2016.nc"
+    path.write_bytes(_zip_of({"data.nc": b"CDF\x01payload"}))
+    assert spei.sniff_container(path) == "zip"
+
+
+def test_a_real_netcdf_is_recognised_and_left_alone(tmp_path):
+    """The fixture is a genuine NetCDF, so the sniff must pass it through."""
+
+    fixture = FIXTURES / "spei3_2016.nc"
+    assert spei.sniff_container(fixture).startswith("netcdf")
+    assert spei.unpack_if_archive(fixture) == [fixture]
+    # Unchanged on disk: a passthrough must never delete its input.
+    assert fixture.exists()
+
+
+def test_a_file_that_is_neither_names_what_it_actually_is(tmp_path):
+    path = tmp_path / "spei3_2016.nc"
+    path.write_bytes(b"<html>Access denied")
+    assert spei.sniff_container(path).startswith("unknown:")
+
+
+def test_unpacking_replaces_the_archive_with_its_members(tmp_path):
+    path = tmp_path / "spei3_2016.nc"
+    path.write_bytes(_zip_of({"spei3_month.nc": b"CDF\x01one"}))
+
+    written = spei.unpack_if_archive(path)
+
+    assert [p.name for p in written] == ["spei3_2016__spei3_month.nc"]
+    assert written[0].read_bytes() == b"CDF\x01one"
+    # The archive goes: two copies of a 95 MB year doubles the cache entry
+    # for no gain, and leaving it would make the loader try to open it again.
+    assert not path.exists()
+
+
+def test_members_keep_the_year_so_two_years_cannot_collide(tmp_path):
+    """Both archives can legitimately carry a member called `data.nc`."""
+
+    for year in ("2016", "2017"):
+        target = tmp_path / f"spei3_{year}.nc"
+        target.write_bytes(_zip_of({"data.nc": f"CDF\x01{year}".encode()}))
+        spei.unpack_if_archive(target)
+
+    names = sorted(p.name for p in tmp_path.glob("*.nc"))
+    assert names == ["spei3_2016__data.nc", "spei3_2017__data.nc"]
+
+
+def test_a_zip_carrying_no_netcdf_member_says_what_it_carried(tmp_path):
+    path = tmp_path / "spei3_2016.nc"
+    path.write_bytes(_zip_of({"data.grib": b"GRIB"}))
+
+    with pytest.raises(ValueError) as excinfo:
+        spei.unpack_if_archive(path)
+
+    assert "data.grib" in str(excinfo.value)
+
+
+def test_the_loader_unpacks_a_cached_archive_rather_than_refusing_it(tmp_path):
+    """A cache from before this fix holds zips under `.nc` names.
+
+    Re-downloading a gigabyte to correct a container mismatch buys nothing,
+    so the read unpacks too — the fetch is not the only door in.
+    """
+
+    payload = (FIXTURES / "spei3_2016.nc").read_bytes()
+    (tmp_path / "spei3_2016.nc").write_bytes(_zip_of({"grid.nc": payload}))
+
+    grids = spei.load_grids_from_dir(tmp_path)
+
+    assert grids, "the archived fixture should have been unpacked and read"
+
+
+def test_the_loader_refuses_a_file_that_is_not_a_netcdf_and_says_so(tmp_path):
+    """xarray's own message points at the requirements file, not the download."""
+
+    (tmp_path / "spei3_2016.nc").write_bytes(b"<html>Access denied</html>")
+
+    with pytest.raises(ValueError) as excinfo:
+        spei.load_grids_from_dir(tmp_path)
+
+    message = str(excinfo.value)
+    assert "not a NetCDF" in message
+    assert "download_format" in message
+
+
+def test_a_downloaded_archive_is_unpacked_by_the_fetch_itself(tmp_path):
+    """So the reduce sees NetCDF whichever container the CDS chose."""
+
+    class _Client:
+        def retrieve(self, dataset, request, target):
+            Path(target).write_bytes(_zip_of({"data.nc": b"CDF\x01payload"}))
+
+    result = spei.fetch_grids(tmp_path, ["2016-01"], client=_Client())
+
+    assert result.written == ["2016"]
+    assert [p.name for p in tmp_path.glob("*.nc")] == ["spei3_2016__data.nc"]
+    # The reported volume is the ARCHIVE's size: that is what came down the
+    # wire, and it is the number the docstring's estimate is corrected from.
+    assert result.bytes_downloaded > 0
+
+
+def test_a_year_that_arrives_unreadable_is_owed_not_kept(tmp_path):
+    """Leaving it on disk would make every later run's resume check skip it."""
+
+    class _Client:
+        def retrieve(self, dataset, request, target):
+            Path(target).write_bytes(_zip_of({"data.grib": b"GRIB"}))
+
+    result = spei.fetch_grids(tmp_path, ["2016-01"], client=_Client())
+
+    assert result.written == []
+    assert "2016" in result.failed
+    assert list(tmp_path.glob("spei3_2016*")) == []
 
 
 # ---------------------------------------------------------------------------
