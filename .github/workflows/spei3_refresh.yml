@@ -304,7 +304,17 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git add -- "${FEED}" "${STATUS}"
+          # Add only what exists. On a failed gate `promote --failed`
+          # deliberately writes the status file and leaves the feed alone, so
+          # a bare `git add -- "${FEED}" "${STATUS}"` aborts with exit 128 on
+          # a pathspec matching nothing — which is how run 34461670816 went
+          # red at the commit rather than at the gate that actually failed,
+          # taking the gate's own error message with it.
+          for path in "${FEED}" "${STATUS}"; do
+            if [ -e "${path}" ]; then
+              git add -- "${path}"
+            fi
+          done
           if git diff --cached --quiet; then
             echo "nothing changed: the feed already covers this window"
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -387,8 +397,12 @@ jobs:
       # run there is indistinguishable from a broken request. Red when a gate
       # failed, because a candidate the machine refused to publish is
       # something a person has to look at.
+      # always(), not the default: without it a failure in any step above —
+      # the commit, say — skips this one and the run goes red carrying that
+      # step's message instead of the gate's. The gate is the thing a reader
+      # needs to be told about, so it says so whatever else went wrong.
       - name: Fail if a gate failed
-        if: steps.gate.outcome != 'success'
+        if: always() && steps.gate.outcome != 'success'
         run: |
           set -euo pipefail
           echo "::error::the SPEI-3 candidate failed its validation gates; the committed feed is unchanged"

@@ -210,6 +210,132 @@ def test_a_partial_file_from_a_failed_year_is_removed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Saturation: the index stopping rather than measuring
+#
+# The first full rebuild (run 34461670816) reduced 125 months into 29,625
+# rows and then failed its own value gate on twelve figures — at TWO
+# magnitudes, 8.2095 and -8.2221, repeated to four decimals across different
+# countries and different years. No area-weighted mean of real data does
+# that. SPEI is a fitted probability run through the inverse normal, and this
+# product is `SPEI3_genlogistic_...`: once the probability reaches the
+# floating-point neighbourhood of 0 or 1 the inverse normal returns ~±8.2
+# whatever the water balance was. It happened in Bahrain (almost no rainfall
+# variance to fit) and Palau (one nearest cell), which is where a fit
+# degenerates rather than anywhere at random.
+# ---------------------------------------------------------------------------
+
+
+#: The exact figures the run produced, kept as data so a future change to
+#: the threshold has to argue with the evidence rather than with a number.
+SATURATED_FROM_RUN_34461670816 = (8.2095, -8.2221)
+
+
+def _grid_of(values: list[list[float | None]]) -> "spei.Grid":
+    lats = [1.0 - i for i in range(len(values))]
+    lons = [float(j) for j in range(len(values[0]))]
+    return spei.Grid(lats=lats, lons=lons, values=values)
+
+
+class _Box:
+    """A country covering the whole test grid."""
+
+    iso3 = "TST"
+    bounds = (-99.0, -99.0, 99.0, 99.0)
+
+
+def test_the_values_the_run_saturated_on_are_recognised():
+    for value in SATURATED_FROM_RUN_34461670816:
+        assert spei._is_saturated(value), value
+        assert spei._is_missing(value), value
+
+
+def test_a_real_extreme_is_not_treated_as_saturated():
+    """A -4 sigma month is a drought, not an artefact. The gate's soft band
+    exists for exactly these, and dropping them would be the fix eating the
+    signal it was meant to protect."""
+
+    for value in (-4.0, 3.9, -5.9219, 5.4996):
+        assert not spei._is_saturated(value), value
+        assert not spei._is_missing(value), value
+
+
+def test_one_saturated_cell_does_not_poison_a_country_mean():
+    """The half of this that matters for a large country.
+
+    Bahrain is small; a country with two hundred good cells and one saturated
+    one would otherwise carry the artefact into its mean, where nothing
+    downstream could see it.
+    """
+
+    grid = _grid_of([[1.0, 8.2095], [1.0, 1.0]])
+    result = spei.country_mean(grid, _Box(), contains=lambda c, lon, lat: True)
+
+    assert result.coverage == spei.COVERAGE_CELLS
+    assert result.value == pytest.approx(1.0)
+    assert result.n_cells == 3
+    assert result.n_saturated == 1
+
+
+def test_a_country_whose_only_cell_saturated_gets_no_value():
+    """Palau's case: one nearest cell, and it saturated.
+
+    No value means no row, and the rulebook entry's
+    `absence_means_no_drought: false` reads that as unknown — which is the
+    truth. Writing -8.2 would have the drought gate read catastrophic drought
+    in Palau every March.
+    """
+
+    grid = _grid_of([[-8.2221]])
+    result = spei.country_mean(grid, _Box(), contains=lambda c, lon, lat: True)
+
+    assert result.value is None
+    assert result.coverage == spei.COVERAGE_NONE
+    assert result.n_saturated == 1
+
+
+def test_the_nearest_cell_fallback_will_not_serve_a_saturated_cell():
+    """Otherwise the drop above is undone one line later."""
+
+    grid = _grid_of([[8.2095, None], [None, 1.5]])
+    # Nothing is inside the territory, so the nearest-cell path runs.
+    result = spei.country_mean(grid, _Box(), contains=lambda c, lon, lat: False)
+
+    assert result.value == pytest.approx(1.5)
+    assert result.coverage == spei.COVERAGE_NEAREST
+
+
+def test_saturated_cells_are_counted_and_named_not_silently_dropped():
+    """A rise means the fit is degenerating somewhere new."""
+
+    grids = {"2016-01": _grid_of([[8.2095, 1.0]])}
+    countries = {"TST": _Box()}
+    rows, report = spei.reduce_grids(
+        grids, countries, iso3s=["TST"], contains=lambda c, lon, lat: True
+    )
+
+    assert report.saturated_cells == 1
+    assert report.saturated_country_months == ["TST/2016-01=1"]
+    assert report.as_dict()["saturated_cells"] == 1
+    # The month still produces a row: one bad cell out of two is not a lost
+    # country-month.
+    assert [r["value"] for r in rows] == [1.0]
+
+
+def test_the_hard_gate_stays_where_it_is():
+    """Saturation handling is not a reason to widen the fill-value catcher.
+
+    A 1e20 reaching the feed would make a whole month read as wet against a
+    rulebook that thresholds at -1.0 sigma, and that is what the hard limit
+    is for. It sits below the saturation figure on purpose: anything that
+    somehow arrives saturated still fails the gate rather than being
+    published.
+    """
+
+    assert spei.SANITY_HARD_LIMIT < spei.SATURATION_ABS
+    assert spei.SANITY_SOFT_LIMIT < spei.SANITY_HARD_LIMIT
+
+
+# ---------------------------------------------------------------------------
 # The dependency the requirements file did not declare
 #
 # The second live run got past the container fix, unpacked 128 months and read
@@ -987,6 +1113,64 @@ def test_the_workflow_runs_every_stage_of_the_producer():
     ).read_text("utf-8")
     for stage in ("plan", "fetch", "reduce", "validate", "promote"):
         assert f"build_spei3_country_means {stage}" in text, f"{stage} is never run"
+
+
+def _workflow_steps() -> list[dict]:
+    import yaml
+
+    workflow = yaml.safe_load(
+        (spei.REPO_ROOT / ".github" / "workflows" / "spei3_refresh.yml")
+        .read_text("utf-8")
+    )
+    return workflow["jobs"]["refresh"]["steps"]
+
+
+def _step(name: str) -> dict:
+    for step in _workflow_steps():
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"no step called {name!r}")
+
+
+def test_the_commit_step_survives_a_gate_failure():
+    """On a failed gate `promote --failed` writes the status file and leaves
+    the feed alone. That is the design; the commit step then has to add a
+    path that does not exist.
+
+    Run 34461670816 aborted there with `fatal: pathspec ... did not match any
+    files` and exit 128, so the run went red carrying the COMMIT's message
+    instead of the gate's, and the gate's own error step was skipped
+    entirely. Six weeks of work and a 56-minute reduce reported as a git
+    error.
+    """
+
+    # Comments stripped first: the step's own comment quotes the command it
+    # replaced, and a bare substring test would match the explanation rather
+    # than the code. (The concurrency-group test above learned this the same
+    # way.)
+    run = "\n".join(
+        line for line in _step("Commit the feed")["run"].splitlines()
+        if not line.strip().startswith("#")
+    )
+    assert 'git add -- "${FEED}" "${STATUS}"' not in run, (
+        "a bare add of both paths aborts when the gate withheld the feed"
+    )
+    assert '[ -e "${path}" ]' in run
+    assert "git add -- \"${path}\"" in run
+
+
+def test_a_gate_failure_cannot_be_masked_by_a_later_step():
+    """The gate is what a reader needs to be told about.
+
+    Without `always()` any failure above this step skips it, and the run
+    reports whatever failed last instead of the thing that decided nothing
+    would be published.
+    """
+
+    step = _step("Fail if a gate failed")
+    condition = str(step["if"])
+    assert "always()" in condition
+    assert "steps.gate.outcome" in condition
 
 
 def test_the_workflow_is_not_in_the_canonical_db_concurrency_group():

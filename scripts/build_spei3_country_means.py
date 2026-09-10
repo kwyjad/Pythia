@@ -32,13 +32,16 @@ figure of "roughly 50 MB a year" was arithmetic over a 0.25-degree grid and
 came out half the real volume, so the run reports the bytes it downloads
 and this paragraph is corrected from that rather than from a calculation.
 
-The reduction is the other half of the feasibility question and was measured
-rather than assumed: 17 seconds per month over 237 countries on a 0.25-degree
-grid, so about 36 minutes for a full 2016-to-present rebuild, holding roughly
-2.1 GB of grids at peak. That fits the workflow's 350-minute budget and a
-16 GB runner with room, which is why the reduce reads every owed month in one
-pass instead of streaming them; a wider window should re-measure rather than
-assume it scales for free.
+The reduction is the other half of the feasibility question. **Measured on
+run 34461670816: 125 months reduced into 29,625 rows in 56 minutes**, or
+about 27 seconds a month over 237 countries, holding roughly 2.1 GB of grids
+at peak. That fits the workflow's 350-minute budget and a 16 GB runner with
+room, which is why the reduce reads every owed month in one pass instead of
+streaming them; a wider window should re-measure rather than assume it scales
+for free. (A synthetic-grid estimate beforehand said 17 seconds and was
+optimistic by a third, because it scattered its missing cells at random while
+a real country's bounding box is nearly all land — so nearly every cell
+reaches the point-in-polygon test rather than one in three.)
 
 Five stages, each its own subcommand, deliberately separable so a run that
 is cut short by the CDS queue can be resumed by the next one rather than
@@ -229,15 +232,67 @@ class CountryValue:
     value: float | None
     coverage: str
     n_cells: int = 0
+    #: Cells of this country's own territory the index saturated on, which
+    #: are dropped like a NaN. Carried on the result rather than logged in
+    #: place so the caller can report the total and name the country-months.
+    n_saturated: int = 0
+
+
+#: Above this magnitude the index has saturated rather than measured.
+#:
+#: SPEI is a fitted probability run through the inverse normal, and this
+#: product is `SPEI3_genlogistic_...`: once the fitted probability reaches
+#: the floating-point neighbourhood of 0 or 1 the inverse normal returns a
+#: value near +/-8.2 whatever the water balance actually was. The first
+#: full rebuild (run 34461670816) found exactly that shape — twelve values
+#: at two magnitudes, `8.2095` and `-8.2221`, repeated to four decimals
+#: across different countries and years, which no area-weighted mean of
+#: real data produces.
+#:
+#: It happens where the fit degenerates rather than at random: Bahrain, a
+#: country with so little rainfall that the distribution has almost no
+#: variance to fit, and Palau, an island small enough to be sampled off one
+#: nearest cell. A real SPEI extreme lives inside +/-4; -8.2 for Palau in
+#: March is not a statement about Palau.
+#:
+#: So a saturated cell is treated as MISSING exactly as a NaN is, which is
+#: also what keeps one such cell out of the area-weighted mean of a country
+#: whose other cells are fine. The country-month then produces no row, and
+#: the rulebook entry's `absence_means_no_drought: false` reads that as
+#: unknown — which is the truth. :data:`SANITY_HARD_LIMIT` stays where it
+#: is as the fill-value and changed-unit catcher.
+SATURATION_ABS = 8.0
+
+
+def _is_saturated(value: float) -> bool:
+    """Has the index saturated rather than measured? See :data:`SATURATION_ABS`."""
+
+    return abs(value) >= SATURATION_ABS
+
+
+def _is_saturated_safely(value: Any) -> bool:
+    """`_is_saturated` for a value that may not be a number at all."""
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return not math.isnan(number) and _is_saturated(number)
 
 
 def _is_missing(value: Any) -> bool:
     if value is None:
         return True
     try:
-        return math.isnan(float(value))
+        number = float(value)
     except (TypeError, ValueError):
         return True
+    if math.isnan(number):
+        return True
+    # Saturated is not measured. Counted by the caller rather than silently
+    # folded in with the NaNs, because a rise in saturation means the fit is
+    # degenerating somewhere new and that is worth seeing.
+    return _is_saturated(number)
 
 
 def _cos_weight(lat: float) -> float:
@@ -289,6 +344,7 @@ def country_mean(
     total = 0.0
     weight_sum = 0.0
     n_cells = 0
+    n_saturated = 0
     for i, lat in enumerate(grid.lats):
         if lat < miny or lat > maxy:
             continue
@@ -298,6 +354,12 @@ def country_mean(
                 continue
             value = row[j]
             if _is_missing(value):
+                # Counted only where the cell is actually this country's,
+                # so the number means "cells this country lost" rather than
+                # "cells in its bounding box".
+                if value is not None and _is_saturated_safely(value):
+                    if contains(country, lon, lat):
+                        n_saturated += 1
                 continue
             if not contains(country, lon, lat):
                 continue
@@ -307,16 +369,21 @@ def country_mean(
             n_cells += 1
 
     if weight_sum > 0:
-        return CountryValue(country.iso3, total / weight_sum, COVERAGE_CELLS, n_cells)
+        return CountryValue(
+            country.iso3, total / weight_sum, COVERAGE_CELLS, n_cells, n_saturated
+        )
     if not nearest_when_uncovered:
-        return CountryValue(country.iso3, None, COVERAGE_NONE, 0)
+        return CountryValue(country.iso3, None, COVERAGE_NONE, 0, n_saturated)
 
     # No cell centre fell inside the territory. The country is smaller
-    # than a cell, not missing from the world.
+    # than a cell, not missing from the world. `_nearest_cell_value` skips a
+    # saturated cell for the same reason the loop above does, so a country
+    # whose only cell has saturated comes back with no value rather than
+    # with the saturation figure.
     sampled = _nearest_cell_value(grid, country)
     if sampled is None:
-        return CountryValue(country.iso3, None, COVERAGE_NONE, 0)
-    return CountryValue(country.iso3, sampled, COVERAGE_NEAREST, 0)
+        return CountryValue(country.iso3, None, COVERAGE_NONE, 0, n_saturated)
+    return CountryValue(country.iso3, sampled, COVERAGE_NEAREST, 0, n_saturated)
 
 
 def _nearest_cell_value(grid: Grid, country: Any) -> float | None:
@@ -388,6 +455,11 @@ class ReduceReport:
     countries_never_valued: list[str] = field(default_factory=list)
     countries_without_boundary: list[str] = field(default_factory=list)
     months_missing: list[str] = field(default_factory=list)
+    #: Cells the index saturated on rather than measured (:data:`SATURATION_ABS`),
+    #: and the country-months they cost a value. Reported rather than merely
+    #: dropped: a rise means the fit is degenerating somewhere new.
+    saturated_cells: int = 0
+    saturated_country_months: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -397,6 +469,8 @@ class ReduceReport:
             "countries_never_valued": self.countries_never_valued,
             "countries_without_boundary": self.countries_without_boundary,
             "months_missing": self.months_missing,
+            "saturated_cells": self.saturated_cells,
+            "saturated_country_months": self.saturated_country_months,
         }
 
 
@@ -433,6 +507,11 @@ def reduce_grids(
             report.by_coverage[result.coverage] = (
                 report.by_coverage.get(result.coverage, 0) + 1
             )
+            if result.n_saturated:
+                report.saturated_cells += result.n_saturated
+                report.saturated_country_months.append(
+                    f"{iso3}/{ym}={result.n_saturated}"
+                )
             if result.value is None:
                 continue
             valued.add(iso3)
@@ -1586,6 +1665,19 @@ def _cmd_reduce(args: argparse.Namespace) -> int:
         len(months_in(merged)), candidate,
     )
     LOG.info("[spei3] coverage: %s", report.by_coverage)
+    if report.saturated_cells:
+        # INFO, not a warning: the index saturating over a hyper-arid country
+        # or a one-cell island is the ordinary case for this product, and
+        # warning about it every run is how a reader learns to skip the
+        # warnings that matter. It is counted and named, so a RISE is still
+        # visible — a country appearing here that did not before means the
+        # fit has started degenerating somewhere new.
+        LOG.info(
+            "[spei3] the index saturated on %d cell(s) across %d country-month(s), "
+            "dropped as unmeasured (|value| >= %g): %s",
+            report.saturated_cells, len(report.saturated_country_months),
+            SATURATION_ABS, ",".join(report.saturated_country_months[:20]),
+        )
     if report.countries_never_valued:
         LOG.warning(
             "[spei3] %d country/countries got no value in any month: %s",
