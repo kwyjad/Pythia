@@ -120,6 +120,21 @@ class Issue:
     overdue: bool = False
     #: Where the issue came from, so a reader can go to the evidence.
     source: str = ""
+    #: The normalised log shape this issue was minted from, where it came
+    #: from the ERROR histogram. It is what a known-issues entry matches on:
+    #: the ID of such an issue is derived from the log NAME and the line, so
+    #: it can never equal a registered fault's id, which is how one EM-DAT
+    #: lockout reported five times — once as `known` and four more as
+    #: `degraded`, each raising an error annotation.
+    signature: str = ""
+    #: Log shapes absorbed under this issue, as evidence lines. Matching
+    #: decides severity and grouping; it never decides visibility, so an
+    #: absorbed shape is still printed here with its own count.
+    absorbed: list[str] = field(default_factory=list)
+    #: True while this record exists only to hold absorbed evidence — no
+    #: collector has claimed the id yet. The first that does replaces the
+    #: title and keeps the evidence.
+    placeholder: bool = False
 
     @property
     def rank(self) -> int:
@@ -155,6 +170,8 @@ class Issue:
             "review_by": self.review_by,
             "overdue": self.overdue,
             "source": self.source,
+            "signature": self.signature,
+            "absorbed": list(self.absorbed),
         }
 
     @classmethod
@@ -174,6 +191,8 @@ class Issue:
             review_by=str(payload.get("review_by") or ""),
             overdue=bool(payload.get("overdue", False)),
             source=str(payload.get("source") or ""),
+            signature=str(payload.get("signature") or ""),
+            absorbed=[str(a) for a in (payload.get("absorbed") or [])],
         )
 
 
@@ -249,6 +268,73 @@ class KnownIssues:
         issue.overdue = self._is_overdue(issue.review_by, today)
         return issue
 
+    # -- signature absorption -------------------------------------------
+    #
+    # An id from the ERROR histogram is minted from the log NAME and the
+    # normalised line, so it can never equal a registered fault's id — which
+    # is why one EM-DAT lockout reported five times in run 34081262443: once
+    # as `known` and four more as `degraded` with owner `pythia`, each
+    # raising an error annotation, and four of the seven degraded issues that
+    # run were that one fault.
+    #
+    # Matching decides SEVERITY and GROUPING. It never decides visibility: an
+    # absorbed shape is still printed, with its own count, as an evidence
+    # line under the record that owns it. And an entry absorbs only the
+    # signatures it lists EXPLICITLY — a shape from a registered connector
+    # the entry does not list still reports on its own at `degraded`, with a
+    # line saying the connector has a registered issue that does not cover
+    # it. Anything looser and registering a fault would silence the next,
+    # unrelated one from the same connector.
+
+    ABSORBED = "absorbed"
+    UNCOVERED = "uncovered"
+    UNMATCHED = "unmatched"
+
+    def match_signature(self, signature: str) -> tuple[str, str]:
+        """``(verdict, entry id)`` for a normalised log shape.
+
+        ``absorbed`` — the shape is one this entry lists, so it belongs under
+        that record. ``uncovered`` — the shape names a registered connector
+        but not a listed signature, so it is a DIFFERENT fault from the same
+        source and reports on its own. ``unmatched`` — nothing claims it.
+        """
+
+        text = str(signature or "").lower()
+        if not text:
+            return self.UNMATCHED, ""
+        connector_hit = ""
+        for key, entry in self.entries.items():
+            for listed in entry.get("log_signatures") or []:
+                if str(listed).strip().lower() in text:
+                    return self.ABSORBED, key
+            token = str(entry.get("log_connector") or "").strip().lower()
+            if token and token in text and not connector_hit:
+                connector_hit = key
+        if connector_hit:
+            return self.UNCOVERED, connector_hit
+        return self.UNMATCHED, ""
+
+    def placeholder_for(self, issue_id: str) -> Issue | None:
+        """A record to hang absorbed evidence on when no collector has one yet.
+
+        The histogram runs last, so in practice the owner already exists. This
+        is the case where it does not — a check that SKIPped, a fetch stream
+        that was not written — and the alternative is losing the evidence to
+        an ordering accident.
+        """
+
+        entry = self.entries.get(issue_id)
+        if entry is None:
+            return None
+        issue = Issue(
+            id=issue_id,
+            severity=DEGRADED,
+            title=f"Registered issue `{issue_id}`, found this run in the logs only.",
+            placeholder=True,
+            source="logs/",
+        )
+        return self.apply(issue)
+
     @staticmethod
     def _is_overdue(review_by: str, today: dt.date | None = None) -> bool:
         if not review_by:
@@ -276,7 +362,29 @@ class IssueRegister:
 
         An issue is one fault, however many rows show it. Appending a second
         record for the same id is how a register turns back into a log.
+
+        A log-histogram issue whose shape a registered entry LISTS is folded
+        into that record as an evidence line instead of standing on its own.
+        Matching decides severity and grouping, never visibility: the shape
+        is still printed, with its count, under the record that owns it. An
+        entry absorbs only what it lists, so a new fault from a registered
+        connector still reports at `degraded` — with a line saying the
+        connector has a registered issue that does not cover it, which is the
+        sentence that stops a reader assuming it is the known one again.
         """
+
+        if issue.signature:
+            verdict, owner_id = self.known.match_signature(issue.signature)
+            if verdict == KnownIssues.ABSORBED:
+                return self._absorb(issue, owner_id)
+            if verdict == KnownIssues.UNCOVERED:
+                note = (
+                    f"the connector this came from has a registered issue "
+                    f"(`{owner_id}`) that does not cover this signature, so this "
+                    f"is a different fault from the same source"
+                )
+                if note not in issue.evidence:
+                    issue.evidence = f"{issue.evidence}; {note}".strip("; ")
 
         issue = self.known.apply(issue)
         existing = self._issues.get(issue.id)
@@ -285,10 +393,33 @@ class IssueRegister:
             return issue
         if issue.rank < existing.rank:
             existing.severity = issue.severity
+        if existing.placeholder and not issue.placeholder:
+            # A real collector has claimed the id. Its title is the one a
+            # reader wants; the absorbed evidence stays.
+            existing.title = issue.title or existing.title
+            existing.source = issue.source or existing.source
+            existing.placeholder = False
         self._merge_cost(existing, issue)
         if issue.evidence and issue.evidence not in existing.evidence:
             existing.evidence = f"{existing.evidence}; {issue.evidence}".strip("; ")
         return existing
+
+    def _absorb(self, issue: Issue, owner_id: str) -> Issue:
+        """Fold a matched log shape into the record that owns it."""
+
+        owner = self._issues.get(owner_id)
+        if owner is None:
+            owner = self.known.placeholder_for(owner_id)
+            if owner is None:  # pragma: no cover - match_signature proved it exists
+                self._issues[issue.id] = self.known.apply(issue)
+                return self._issues[issue.id]
+            self._issues[owner_id] = owner
+        line = f"{issue.source or 'logs'}: {issue.signature}"
+        if issue.cost is not None:
+            line = f"{line} ({issue.cost_text()})"
+        if line not in owner.absorbed:
+            owner.absorbed.append(line)
+        return owner
 
     @staticmethod
     def _merge_cost(existing: Issue, incoming: Issue) -> None:
@@ -425,9 +556,11 @@ def render_text(register: IssueRegister, *, run_label: str = "") -> str:
                         "      OVERDUE FOR REVIEW — a suppression with no expiry "
                         "is an invisible fault."
                     )
+                lines += _absorbed_lines(issue)
                 continue
             if issue.evidence:
                 lines.append(f"      {_one_line(issue.evidence, 160)}")
+            lines += _absorbed_lines(issue)
             lines.append(
                 f"      cost {issue.cost_text()}; owner {issue.owner}; "
                 + ("a re-run may clear it" if issue.recovers_on_rerun
@@ -445,6 +578,23 @@ def render_text(register: IssueRegister, *, run_label: str = "") -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def _absorbed_lines(issue: Issue) -> list[str]:
+    """The log shapes folded under this record, each with its own count.
+
+    Matching decides severity and grouping; it never decides visibility. A
+    registered fault that swallowed four log shapes still has to say which
+    four, or the register has quietened the evidence along with the noise.
+    """
+
+    if not issue.absorbed:
+        return []
+    out = [f"      log shapes under this fault ({len(issue.absorbed)}):"]
+    out += [f"        - {_one_line(line, 150)}" for line in issue.absorbed[:8]]
+    if len(issue.absorbed) > 8:
+        out.append(f"        - ... and {len(issue.absorbed) - 8} more")
+    return out
 
 
 def render_markdown(register: IssueRegister, *, run_label: str = "") -> str:
@@ -498,6 +648,14 @@ def render_markdown(register: IssueRegister, *, run_label: str = "") -> str:
                 "- **this register entry is overdue for review.** A suppression "
                 "that never expires is how a known issue becomes an invisible one."
             )
+        if issue.absorbed:
+            # Grouped, not hidden. A registered fault that absorbed four log
+            # shapes still has to name them, with their counts, or the
+            # register has quietened the evidence along with the noise.
+            lines.append(
+                f"- log shapes folded under this fault ({len(issue.absorbed)}):"
+            )
+            lines += [f"  - `{_cell(line)}`" for line in issue.absorbed]
         lines.append("")
     if register.notes:
         lines.append("### notes on the register itself")

@@ -74,6 +74,13 @@ WATCHED: tuple[Watched, ...] = (
     Watched("Ingest Structured Data", 10, "weekly, Sunday"),
     Watched("Hazard Backcast", 3, "nightly"),
     Watched("Refresh CrisisWatch Data", 35, "monthly, days 3/5/7/10"),
+    # The SPEI-3 producer. Its silence costs the months the feed stops
+    # extending, and it fails CLOSED — a run whose candidate misses a gate
+    # goes red and leaves the committed CSV alone — so "the last SUCCESS"
+    # is exactly the right thing to age here. 40 days, not 35: crons in this
+    # repo are delivered hours and sometimes a day late, and this one is on
+    # the 10th rather than the 28th.
+    Watched("SPEI-3 Feed Refresh", 40, "monthly, 10th"),
 )
 
 UNKNOWN = "unknown"

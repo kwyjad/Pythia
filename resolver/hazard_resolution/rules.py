@@ -156,6 +156,59 @@ def is_provisional(
 #: share — which already bounds every flood cell in that run — stands.
 NO_POPULATION_EXPOSURE_HAZARDS = frozenset({"FL"})
 
+#: The commit that closed the flood ceiling. Named in the note below rather
+#: than left to a reader's memory: every report that surfaces a
+#: ``ceiling_exceeded`` count is showing a number most of which predates the
+#: fix, and "is this still happening" is the first question a reader has.
+CEILING_EXCEEDED_FIX_COMMIT = "61309ae"
+
+
+def ceiling_exceeded_scope_note(
+    *, flood_rows: int | None = None, cyclone_rows: int | None = None
+) -> str:
+    """One sentence every report that prints a ``ceiling_exceeded`` count owes.
+
+    The flag means "this figure is larger than the ceiling that bounded it",
+    and until commit :data:`CEILING_EXCEEDED_FIX_COMMIT` a flood figure was
+    bounded by GDACS ``population``, which for flood is not a national
+    monthly exposure at all — a flagged flood figure was a median 539x its
+    ceiling where a flagged cyclone figure was 2x. So the bulk of any
+    ``ceiling_exceeded`` count is flood rows carrying a doubt the machine had
+    no basis to raise, and a reader shown the raw count concludes the machine
+    distrusts most of its own flood record, which is false.
+
+    The flag itself is deliberately NOT retracted. Nothing consumes it: the
+    base rates carry no ``flagged`` predicate, ``compute_resolutions`` does
+    not read ``haz_resolutions``, and no API route or dashboard component
+    mentions a ``haz_`` table — so retracting it would change no forecast and
+    the rows are frozen. What it changes is what a reader concludes, and a
+    scoped note fixes that without an UPDATE against frozen history.
+
+    The counts are passed in rather than measured here: this module is
+    deterministic predicates over arguments and opens no connection.
+    """
+
+    scope = "flood only"
+    if flood_rows is not None and cyclone_rows is not None:
+        total = flood_rows + cyclone_rows
+        share = (flood_rows / total) if total else 0.0
+        scope = (
+            f"{flood_rows:,} of {total:,} are flood ({share:.0%}), "
+            f"{cyclone_rows:,} cyclone"
+        )
+    elif flood_rows is not None:
+        scope = f"{flood_rows:,} of them flood"
+    return (
+        f"`ceiling_exceeded` is scoped: {scope}. A flood figure was bounded "
+        f"by GDACS `population`, which for flood is not a national monthly "
+        f"exposure (a flagged flood figure was a median 539x its ceiling, a "
+        f"flagged cyclone figure 2x), so flood takes no GDACS ceiling from "
+        f"commit {CEILING_EXCEEDED_FIX_COMMIT}. Rows written before it carry "
+        f"a doubt the machine had no basis to raise, and are frozen; the flag "
+        f"is read by reports alone and by no forecast path, so it is left as "
+        f"it stands rather than rewritten."
+    )
+
 
 def usable_exposure(
     exposed_population: float | None,

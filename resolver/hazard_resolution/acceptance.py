@@ -41,6 +41,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Sequence
 
+from resolver.hazard_resolution import rules
 from resolver.hazard_resolution.base_rates import last_frozen_month, months_back_window
 from resolver.hazard_resolution.rulebook import (
     HAZARD_CODE_BY_RULEBOOK_NAME,
@@ -124,6 +125,10 @@ class AcceptanceResult:
     #: (gdacs_exposed / population_share / none). "none" is a value with no
     #: upper bound at all, and a reviewer should know how many there are.
     ceiling_basis_counts: dict[str, int] = field(default_factory=dict)
+    #: ``ceiling_exceeded`` rows per hazard. The flag is almost all flood,
+    #: where the ceiling was a different quantity, and a report that prints
+    #: the total without the split invites the wrong conclusion.
+    ceiling_exceeded_by_hazard: dict[str, int] = field(default_factory=dict)
     zero_samples: list[dict[str, Any]] = field(default_factory=list)
     value_samples: list[dict[str, Any]] = field(default_factory=list)
     cross_check: Any = None
@@ -324,6 +329,32 @@ def compute_flag_counts(
     return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
+def compute_ceiling_exceeded_by_hazard(
+    con: "duckdb.DuckDBPyConnection", *, first_ym: str, last_ym: str
+) -> dict[str, int]:
+    """``ceiling_exceeded`` rows per hazard, and the ceiling each cited.
+
+    The flag is not one fault: nearly all of it is flood, where the ceiling
+    was a different quantity, and the rest is cyclone, where it is a
+    plausibility check working. A count that does not say which is a count
+    that reads as "the machine distrusts most of its own record".
+    """
+
+    bounds = list(_ym_bounds(first_ym, last_ym))
+    counts: dict[str, int] = {}
+    rows = con.execute(
+        f"SELECT hazard, provenance_json FROM haz_resolutions "
+        f"WHERE COALESCE(flagged, FALSE) AND {_WINDOW_SQL}",
+        bounds,
+    ).fetchall()
+    for hazard, provenance in rows:
+        decision = (_loads(provenance).get("decision") or {})
+        if "ceiling_exceeded" in (decision.get("flags") or []):
+            key = str(hazard)
+            counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def compute_ceiling_basis_counts(
     con: "duckdb.DuckDBPyConnection", *, first_ym: str, last_ym: str
 ) -> dict[str, int]:
@@ -480,6 +511,9 @@ def build_result(
         con, first_ym=first_ym, last_ym=last_ym, hazards=targets
     )
     result.flag_counts = compute_flag_counts(con, first_ym=first_ym, last_ym=last_ym)
+    result.ceiling_exceeded_by_hazard = compute_ceiling_exceeded_by_hazard(
+        con, first_ym=first_ym, last_ym=last_ym
+    )
     result.ceiling_basis_counts = compute_ceiling_basis_counts(
         con, first_ym=first_ym, last_ym=last_ym
     )
@@ -677,6 +711,15 @@ def _render_flags(result: AcceptanceResult) -> list[str]:
         for flag, count in result.flag_counts.items():
             lines.append(f"| `{flag}` | {count:,} |")
         lines.append("")
+    if result.flag_counts.get("ceiling_exceeded"):
+        by_hazard = result.ceiling_exceeded_by_hazard
+        lines += [
+            rules.ceiling_exceeded_scope_note(
+                flood_rows=by_hazard.get("FL"),
+                cyclone_rows=by_hazard.get("TC"),
+            ),
+            "",
+        ]
     if result.ceiling_basis_counts:
         none_count = result.ceiling_basis_counts.get("none", 0)
         lines += [

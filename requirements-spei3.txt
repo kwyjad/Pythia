@@ -1,0 +1,17 @@
+# Pins for the SPEI-3 producer (.github/workflows/spei3_refresh.yml) and
+# NOTHING else. Deliberately its own file rather than an entry in
+# constraints-ci.txt or a pyproject extra: cdsapi is a credentialled client
+# for one external service, and the resolution path must never be able to
+# import it. The rulebook's contract is that a Resolver Update reads a
+# committed CSV; adding a scientific stack to the pipeline's dependency set
+# to produce that CSV would give up the only thing the arrangement buys.
+#
+# The four analysis pins MATCH constraints-ci.txt on purpose. The reduce
+# stage runs here and its tests run under the resolver suite, so a version
+# skew between the two would mean CI green on a reduction production never
+# performs. Bump them together.
+cdsapi==0.7.7
+xarray==2025.12.0
+netCDF4==1.7.4
+numpy==2.4.6
+shapely==2.1.2

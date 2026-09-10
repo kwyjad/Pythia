@@ -33,6 +33,26 @@
 #   review_by          ISO date; after it, the entry reports as overdue
 #   first_seen         ISO date the fault was first observed
 #   recovers_on_rerun  optional; overrides the collector's judgement
+#   log_connector      a token that, in a normalised ERROR line, says the
+#                      line is about THIS fault's connector
+#   log_signatures     the normalised shapes this entry absorbs, written out
+#                      BY HAND
+#
+# On log_signatures, and why matching is narrow. An id from the ERROR
+# histogram is minted from the log NAME and the normalised line, so it can
+# never equal a registered fault's id — which is why run 34081262443
+# reported the EM-DAT lockout FIVE times: once as `known` here and four more
+# as `degraded` with owner `pythia`, each raising an error annotation. Four
+# of that run's seven degraded issues were that one fault.
+#
+# Matching decides SEVERITY and GROUPING, never visibility: an absorbed shape
+# is still printed, with its own count, as an evidence line under the record
+# that owns it. And an entry absorbs only the signatures it LISTS — a shape
+# naming log_connector but no listed signature still reports on its own at
+# `degraded`, with a line saying the connector has a registered issue that
+# does not cover it. Anything looser and registering one fault would silence
+# the next, unrelated one from the same source, which is the failure the
+# register exists to prevent rather than to commit.
 
 issues:
   - id: emdat_auth_rejected
@@ -51,6 +71,15 @@ issues:
       and the transport are all fine; the account or its tier has to change,
       which is Kevin's to do with EM-DAT. Until then ladder rung 1 is unread
       and the cache answers where it covers the window. No code change helps.
+    # Written out by hand from what emdat.py logs at ERROR. Substrings,
+    # matched case-insensitively against the NORMALISED line (ISO3 codes,
+    # dates and numbers already replaced by placeholders), so a hazard name
+    # or a month in the middle of the line does not defeat them.
+    log_connector: "[emdat]"
+    log_signatures:
+      - "[emdat] fetch failed for"
+      - "unavailable and the cache holds nothing"
+      - "invalid key passed or insufficient user access"
 
   - id: acled_cast_stale_vintage
     owner: external
@@ -68,6 +97,12 @@ issues:
       ACLED is not publishing current CAST through the API. Escalated to
       ACLED (access@acleddata.com). The prompt readers already filter on
       target month, so no past-dated forecast is served.
+    # No log_signatures, deliberately: this fault is found by the vintage
+    # contradiction check, which declares the right id itself
+    # (issue_sources.VINTAGE_ISSUE_IDS), and a stale vintage is logged as a
+    # WARNING, which never enters the ERROR histogram. There is nothing to
+    # absorb, and inventing a signature would claim a match that cannot
+    # happen.
 
   - id: views_stale_vintage
     owner: external
@@ -83,3 +118,5 @@ issues:
       45-day threshold as of run 34222175003. Same shape as ACLED CAST: the
       connector reads the API successfully and the API's newest run is old.
       Upstream to VIEWS.
+    # Same as ACLED CAST: found by the vintage check, logged as a WARNING,
+    # so no log signature can match and none is claimed.

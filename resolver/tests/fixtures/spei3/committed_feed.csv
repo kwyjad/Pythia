@@ -1,0 +1,5 @@
+iso3,ym,value,coverage,n_cells
+AAA,2016-01,-1.25,cells,12
+BBB,2016-01,0.4,nearest_cell,0
+AAA,2016-02,-0.75,cells,12
+BBB,2016-02,0.9,nearest_cell,0

@@ -334,6 +334,103 @@ def restamp_equivalent_fingerprints(
     return n
 
 
+def apply_feed_restale(con, hazard: str, *, status_path=None) -> dict[str, object]:
+    """Free the ledger months a committed feed has just started covering.
+
+    This is the step that decides whether extending SPEI-3 reaches the
+    historical record at all, and it is the one most easily forgotten.
+    Committing a CSV changes no rulebook key, so the drought fingerprint
+    does not move, so :func:`completed_months` returns every month already
+    marked ``ok`` and the backcast skips them. The file lands, nothing
+    re-walks, and the 18,755 ``indicator_no_coverage`` cells the feed exists
+    to decide stay exactly as they are.
+
+    So the producer names the months that gained coverage in the committed
+    status file and this deletes their ledger rows — nothing else. Deliberately
+    NOT a content hash of the committed feeds folded into the drought
+    fingerprint: that is fewer lines and it re-walks ten years every month
+    for the sake of one appended row.
+
+    One-shot, by the request's own token: applied once, recorded in
+    ``haz_feed_restale``, never applied again. Without that the nightly run
+    would free the same months every night, re-walk them, and free them
+    again forever — the fix turned into a treadmill.
+
+    On the initial build every month gains coverage and all of drought's
+    history is freed, which is right. On a routine monthly append one month
+    is touched, which is also right.
+    """
+
+    from resolver.diagnostics import feed_status as feed_status_mod
+
+    outcome: dict[str, object] = {
+        "applied": False, "token": "", "months": [], "rows_deleted": 0, "reason": "",
+    }
+    try:
+        request = feed_status_mod.spei3_restale_request(status_path)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not take the run
+        outcome["reason"] = f"status unreadable: {type(exc).__name__}: {exc}"
+        return outcome
+    if request is None:
+        outcome["reason"] = "no pending restale request"
+        return outcome
+    if request.hazard != hazard:
+        outcome["reason"] = f"request is for {request.hazard}, not {hazard}"
+        return outcome
+
+    outcome["token"] = request.token
+    ensure_haz_schema(con)
+    try:
+        seen = con.execute(
+            "SELECT rows_deleted FROM haz_feed_restale "
+            "WHERE feed = ? AND hazard = ? AND token = ?",
+            [request.feed, hazard, request.token],
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001 - a ledger predating the table
+        outcome["reason"] = f"restale ledger unreadable: {type(exc).__name__}: {exc}"
+        return outcome
+    if seen is not None:
+        outcome["reason"] = (
+            f"already applied ({int(seen[0] or 0)} ledger row(s) freed then)"
+        )
+        return outcome
+
+    months = sorted(set(request.months))
+    placeholders = ", ".join("?" for _ in months)
+    held = con.execute(
+        f"SELECT ym FROM haz_backcast_progress WHERE hazard = ? "
+        f"AND ym IN ({placeholders})",
+        [hazard, *months],
+    ).fetchall()
+    freed = sorted({str(row[0]) for row in held})
+    if freed:
+        con.execute(
+            f"DELETE FROM haz_backcast_progress WHERE hazard = ? "
+            f"AND ym IN ({placeholders})",
+            [hazard, *months],
+        )
+    con.execute(
+        "INSERT INTO haz_feed_restale (feed, hazard, token, months, rows_deleted) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [request.feed, hazard, request.token, ",".join(months), len(freed)],
+    )
+    outcome.update({
+        "applied": True, "months": freed, "rows_deleted": len(freed),
+        "reason": "applied",
+    })
+    # Logged with counts on purpose: the next run's bundle should show the
+    # connection between a feed extending and a history being re-walked,
+    # rather than leaving a reader to infer it from a month count moving.
+    LOG.warning(
+        "[backcast] %s: the %s feed gained coverage of %d month(s) "
+        "(token %s) — freed %d resume-ledger row(s) so the walk decides them "
+        "again: %s",
+        hazard, request.feed, len(months), request.token, len(freed),
+        ",".join(freed[:24]) or "none were marked complete",
+    )
+    return outcome
+
+
 def completed_months(con, hazard: str, rulebook_hash: str | None = None) -> set[str]:
     """Months this hazard's backcast has already finished successfully.
 
@@ -663,6 +760,12 @@ class BackcastRun:
     failures: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
+    #: What the committed-feed restale did this run, if anything. Carried
+    #: into the summary so the next bundle shows the connection between a
+    #: feed extending and a history being re-walked, rather than leaving a
+    #: reader to infer it from a month count that moved.
+    feed_restale: dict[str, object] = field(default_factory=dict)
+
     #: What the machine does when the extraction budget binds. Stated in the
     #: summary so a reader never has to infer it from the counts.
     budget_policy: str = "checkpoint_and_resume"
@@ -860,6 +963,10 @@ def run_backcast(
         current=rb_hash,
         legacy=legacy_rulebook_hash(rulebook, hazard_name),
     )
+    # And before the ledger is read: free the months a committed feed has
+    # just started covering. A CSV landing moves no rulebook key, so without
+    # this the file arrives and nothing re-walks.
+    run.feed_restale = apply_feed_restale(con, hazard)
     commit = walking_commit()
     already = completed_months(con, hazard, rb_hash) if resume else set()
     owed = deferred_months(con, hazard) if resume else {}
@@ -1186,6 +1293,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "resolved_value": run.resolved_value,
                 "resolved_zero": run.resolved_zero,
                 "no_data": run.no_data,
+                # A feed extending and a history being re-walked belong in
+                # the same record, or the next bundle shows a month count
+                # that moved and nothing saying why.
+                "feed_restale": run.feed_restale,
                 "failures": run.failures,
                 "warnings": run.warnings,
             }

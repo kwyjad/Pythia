@@ -304,6 +304,28 @@ _CORE_TABLE_DDL: dict[str, str] = {
         UNIQUE (hazard, ym)
     )
     """,
+    # One row per extension of a COMMITTED feed that has already been
+    # applied to the resume ledger. Without it the nightly backcast would
+    # free the same drought months every night, re-walk them, and free them
+    # again — the restale is a one-shot request, and something has to
+    # remember that it has been honoured.
+    #
+    # The producer of a committed feed cannot write here. It runs outside
+    # the pythia-resolver-db concurrency group on purpose (it must never be
+    # able to cancel the nightly backcast or the monthly ingest), so the
+    # request travels in the committed status file and the backcast applies
+    # it. This table is the backcast's record of having done so.
+    "haz_feed_restale": f"""
+    CREATE TABLE IF NOT EXISTS haz_feed_restale (
+        feed TEXT NOT NULL,
+        hazard TEXT NOT NULL {_HAZARD_CHECK},
+        token TEXT NOT NULL,
+        months TEXT,
+        rows_deleted INTEGER NOT NULL DEFAULT 0,
+        applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (feed, hazard, token)
+    )
+    """,
     "haz_base_rates_occurrence": f"""
     CREATE TABLE IF NOT EXISTS haz_base_rates_occurrence (
         iso3 TEXT NOT NULL,

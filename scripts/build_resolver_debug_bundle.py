@@ -80,6 +80,10 @@ from resolver.diagnostics.redaction import (  # noqa: E402
     redact_text,
     secret_values,
 )
+# Deterministic predicates and the prose that goes with them, no connection
+# and no heavy dependency. The scoped ceiling_exceeded note lives beside the
+# rule that made it necessary, so a report and the rule cannot disagree.
+from resolver.hazard_resolution import rules as haz_rules  # noqa: E402
 
 #: Compressed ceiling. 80 MB uploads to a chat; 200 MB does not.
 DEFAULT_MAX_BYTES = 80 * 1024 * 1024
@@ -98,12 +102,19 @@ CONFIG_FILES = (
     "resolver/hazard_resolution/rulebook.yaml",
     "pythia/config.yaml",
     "resolver/tools/precedence_config.yml",
+    # The SPEI-3 feed is produced by a separate scheduled workflow, so its
+    # own account of what it covers is the only thing in a Resolver Update
+    # that can say whether that producer is still working. Cheap, and
+    # without it a reader has to infer a quiet producer from a drought
+    # coverage number that stopped improving.
+    "resolver/data/spei3_status.json",
 )
 CONFIG_DIRS = ("resolver/config", "resolver/ingestion/config")
 WORKFLOW_FILES = (
     ".github/workflows/resolver_update.yml",
     ".github/workflows/haz_backcast.yml",
     ".github/workflows/ingest-structured-data.yml",
+    ".github/workflows/spei3_refresh.yml",
 )
 
 #: A source file over this size is a data blob, not code a reader will read.
@@ -2377,6 +2388,7 @@ class BundleBuilder:
             self._check_no_extraction_lost_to_truncation,
             self._check_backcast_deferral_is_recorded,
             self._check_crisiswatch_entries_accounted_for,
+            self._check_spei3_feed_is_current,
         ):
             try:
                 check()
@@ -2632,6 +2644,72 @@ class BundleBuilder:
         return self._check(
             name, "PASS", len(rows), 0,
             f"{len(rows)} deferred cell(s), each owed by a 'deferred' ledger month",
+        )
+
+    def _check_spei3_feed_is_current(self) -> None:
+        """Has the SPEI-3 producer stopped working?
+
+        This is the one drought indicator no Resolver Update fetches. A
+        separate scheduled workflow writes the CSV and the rulebook's
+        ``tabular`` provider reads the committed file, which is the right
+        division of labour and has exactly one cost: the producer can stop
+        without any run noticing.
+
+        The rulebook entry stays ``required: false`` with
+        ``absence_means_no_drought: false``, and that is not up for
+        negotiation — a missing or stale SPEI file must never suppress a
+        zero. Which is precisely why nothing else here would complain. So
+        the diagnostic is the whole of the protection, and it reports rather
+        than changes any verdict.
+
+        Three months behind the last complete month is the threshold: the
+        producer runs monthly and ERA5T is about five days behind, so one
+        missed cycle is not yet a fault and three is not an accident.
+        """
+
+        name = "spei3_feed_covers_a_month_within_three_of_the_last_complete_one"
+        try:
+            from resolver.diagnostics import feed_status as feed_status_mod
+        except Exception as exc:  # noqa: BLE001
+            return self._check(name, "SKIP", "", "", f"reader unavailable: {exc}")
+
+        status = feed_status_mod.read_feed_status()
+        healthy = status.state in (
+            feed_status_mod.STATE_OK, feed_status_mod.STATE_INCOMPLETE
+        )
+        # The register is the channel that was asked for, so the issue is
+        # declared on the check rather than emitted by a second path: one
+        # fault, one id, one place a reader goes for it. A declared issue
+        # only reaches the register on a FAIL, which is why there is no
+        # cheerful `info` twin here — a line saying the feed is fine is
+        # noise, and the PASS row in contradictions.md already says it.
+        self._check(
+            name,
+            "PASS" if healthy else "FAIL",
+            f"{status.state} (newest {status.newest_month or 'none'})",
+            f"at most {feed_status_mod.MAX_LAG_MONTHS} month(s) behind "
+            f"{status.reference_month}",
+            status.detail,
+            issues=[{
+                "id": "spei3_feed_stale",
+                "severity": issues_mod.DEGRADED,
+                "owner": issue_sources.OWNER_PYTHIA,
+                "title": (
+                    "The SPEI-3 drought feed has gone quiet, so the drought "
+                    "backcast has no observation for the months it does not "
+                    "cover."
+                ),
+                "evidence": (
+                    f"state {status.state}; {status.detail}. Produced by "
+                    "spei3_refresh.yml; the feed is resolver/data/"
+                    "spei3_country_means.csv and its own account of itself is "
+                    "resolver/data/spei3_status.json (copied into config/)."
+                ),
+                "cost": float(status.months_behind)
+                if status.months_behind is not None else None,
+                "cost_unit": "months behind",
+                "recovers_on_rerun": False,
+            }],
         )
 
     def _check_crisiswatch_entries_accounted_for(self) -> None:
@@ -3570,10 +3648,66 @@ class BundleBuilder:
             name, "FAIL" if offenders else "PASS",
             f"{len(offenders)} of {len(result[1])} flagged rows",
             "0",
-            detail
-            or f"All {len(result[1])} flagged resolutions name the flag they "
-            "raised, and every ceiling breach names the bound it exceeded.",
+            (
+                detail
+                or f"All {len(result[1])} flagged resolutions name the flag they "
+                "raised, and every ceiling breach names the bound it exceeded."
+            )
+            + self._ceiling_exceeded_note(result[1]),
         )
+
+    def _ceiling_exceeded_note(self, flagged_rows: Sequence[Any]) -> str:
+        """The scoped note, plus the flood rate and the ceiling it cited.
+
+        A raw ``ceiling_exceeded`` count reads as "the machine distrusts most
+        of its own record". Almost all of it is flood, where the ceiling was
+        a different quantity until the fix the note names, and the rest is
+        cyclone, where the flag is a plausibility check working. Reported
+        here rather than only in the acceptance report because the bundle is
+        what a reader opens first, and it is measured per hazard AND per
+        ceiling source: a breach against `gdacs_exposed` and one against
+        `population_share` are different statements, and only the source
+        says which.
+
+        Also filed as an `info` measurement, so the register carries the rate
+        rather than leaving it to be re-derived from a table.
+        """
+
+        by_hazard: dict[str, int] = {}
+        by_source: dict[str, int] = {}
+        for row in flagged_rows:
+            columns = _provenance_columns(row[3])
+            if "ceiling_exceeded" not in str(columns["flags"] or ""):
+                continue
+            hazard = str(row[1])
+            by_hazard[hazard] = by_hazard.get(hazard, 0) + 1
+            source = str(columns.get("ceiling_source") or "") or "(none recorded)"
+            by_source[source] = by_source.get(source, 0) + 1
+        if not by_hazard:
+            return ""
+
+        total = sum(by_hazard.values())
+        flood = by_hazard.get("FL", 0)
+        sources = ", ".join(
+            f"{source} {count:,}" for source, count in sorted(
+                by_source.items(), key=lambda kv: (-kv[1], kv[0])
+            )
+        )
+        note = haz_rules.ceiling_exceeded_scope_note(
+            flood_rows=flood, cyclone_rows=by_hazard.get("TC"),
+        )
+        self.extra_issues.append(issue_sources.issue_from_measurement(
+            "ceiling_exceeded_is_almost_all_flood",
+            f"{total:,} resolution(s) carry ceiling_exceeded; {flood:,} are flood, "
+            f"where the ceiling was a different quantity until commit "
+            f"{haz_rules.CEILING_EXCEEDED_FIX_COMMIT}.",
+            severity=issues_mod.INFO,
+            evidence=f"by hazard: {by_hazard}. by ceiling source: {sources}. {note}",
+            cost=float(flood),
+            cost_unit="flagged flood rows",
+            source="checks/contradictions.md",
+        ))
+        return f" {note} Ceilings cited: {sources}."
 
     def _write_contradictions(self, path: Path) -> None:
         lines = [
@@ -4088,6 +4222,10 @@ class BundleBuilder:
         # claim about a writer that the check reading it has to know.
         "haz_raw_dfo": "resolver.hazard_resolution.dfo (nightly haz_backcast.yml)",
         "haz_backcast_progress": "haz-backcast (nightly haz_backcast.yml)",
+        # Written the first time the nightly backcast honours a committed
+        # feed's restale request. Empty until then, which is a statement
+        # about the SPEI-3 producer rather than about this run.
+        "haz_feed_restale": "haz-backcast, applying a committed feed's restale request",
     }
 
     def _check_declared_active_tables_hold_rows(self) -> None:
