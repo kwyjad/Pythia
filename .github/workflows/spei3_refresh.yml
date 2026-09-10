@@ -334,7 +334,7 @@ jobs:
           gh pr create --base "${GITHUB_REF_NAME}" --head "${BRANCH}" \
             --title "SPEI-3 feed: covered through ${NEWEST}" \
             --body "Produced by \`spei3_refresh.yml\` run ${GITHUB_RUN_ID}. The nightly backcast restales the drought resume ledger for the months this extends once it is merged — until then those months stay INCONCLUSIVE." \
-            || echo "::warning title=SPEI-3::branch ${BRANCH} is pushed; opening the pull request failed, so open it by hand."
+            || echo "::warning title=SPEI-3::branch ${BRANCH} is pushed; opening the pull request failed, so open it by hand. If the reason is 'GitHub Actions is not permitted to create or approve pull requests', that is a repository setting: either enable it, or configure a SPEI3_COMMIT_TOKEN that can bypass branch protection so the push above succeeds and no pull request is needed."
 
       - name: Upload the candidate and the reports
         if: always()
