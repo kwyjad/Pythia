@@ -24,13 +24,13 @@ the committed file exactly as it would a remote feed. Nothing in a
 Resolver Update, a forecast run or a backcast imports this module.
 
 It used to say the download was "tens of gigabytes", which is what made
-running it by hand sound like the only option. At 0.25 degrees the grid is
-1440 x 721 cells; one variable, one accumulation period, twelve months of
-float32 is roughly 50 MB a year, so 2016 to present is on the order of a
-gigabyte. **That figure is arithmetic, not an observation** — the CDS was
-unreachable from the environment this was written in — so the first real
-run reports the bytes it actually downloaded and this paragraph is to be
-corrected from it.
+running it by hand sound like the only option. **Measured on the first live
+run (34456535827): 95 MB zipped per year, eleven years in nine and a half
+minutes, 1.05 GB in total.** That is a scheduled job rather than an
+afternoon, and it is what the estimate here was replaced by — the earlier
+figure of "roughly 50 MB a year" was arithmetic over a 0.25-degree grid and
+came out half the real volume, so the run reports the bytes it downloads
+and this paragraph is corrected from that rather than from a calculation.
 
 Five stages, each its own subcommand, deliberately separable so a run that
 is cut short by the CDS queue can be resumed by the next one rather than
@@ -92,6 +92,7 @@ import datetime as dt
 import json
 import logging
 import math
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -124,23 +125,28 @@ CDS_DATASET = "derived-drought-historical-monthly"
 #: ten realisations and multiplies the download by ten for a country mean
 #: that would come out the same.
 #:
-#: ``unarchived``, because :func:`load_grids_from_dir` globs for ``*.nc``
-#: and hands the path to xarray — a zip named ``.nc`` fails in a way that
-#: takes an afternoon to read.
+#: ``zip``, because that is the only container this dataset serves. The
+#: first live run (34456535827) asked for ``unarchived`` and the CDS
+#: answered ``Download format not supported for this dataset. Defaulting
+#: to zip.`` — then handed back an archive under the ``.nc`` name the
+#: client had been told to write, which is exactly the failure the
+#: ``unarchived`` request was chosen to avoid. Asking for what the dataset
+#: actually serves keeps that warning out of every run's log, and
+#: :func:`unpack_if_archive` sniffs the bytes regardless, because a file
+#: extension is a claim about a file and not evidence about it.
 #:
-#: **This shape comes from the ECMWF forum thread announcing the release,
-#: not from a call anybody here has made.** The authoritative version is
-#: the "Show API request code" button on the dataset's own download form,
-#: and if the first real run is refused the error body names the offending
-#: key — which is why :func:`fetch_grids` logs the request it is about to
-#: send.
+#: **The rest of this shape came from the ECMWF forum thread announcing
+#: the release, and the first live run confirmed it**: eleven years were
+#: accepted and served, 45 to 90 seconds each. If a future run is refused
+#: the error body names the offending key — which is why
+#: :func:`fetch_grids` logs the request it is about to send.
 CDS_VARIABLE = "standardised_precipitation_evapotranspiration_index"
 CDS_ACCUMULATION_PERIOD = "3"
 CDS_PRODUCT_TYPE = "reanalysis"
 CDS_DATASET_TYPE = "consolidated_dataset"
 CDS_VERSION = "1_0"
 CDS_DATA_FORMAT = "netcdf"
-CDS_DOWNLOAD_FORMAT = "unarchived"
+CDS_DOWNLOAD_FORMAT = "zip"
 
 #: The first month the series is built for. Before 2016 the drought path
 #: has no indicator at all; this is the hole it exists to fill.
@@ -466,6 +472,102 @@ def write_csv(rows: Sequence[dict[str, Any]], out: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+#: What the first bytes of a file say it is. A ``.nc`` extension is a claim
+#: about a file; these are evidence about it.
+_MAGIC = {
+    b"PK\x03\x04": "zip",
+    b"CDF\x01": "netcdf3",
+    b"CDF\x02": "netcdf3",
+    b"\x89HDF": "netcdf4",
+}
+
+
+def sniff_container(path: Path) -> str:
+    """``zip`` / ``netcdf3`` / ``netcdf4`` / ``unknown:<hex>`` from the bytes.
+
+    The CDS writes to whatever filename the client hands it, so the
+    extension records what we ASKED for and not what arrived. On the first
+    live run every file was named ``spei3_YYYY.nc`` and every one of them
+    was a zip, and the only symptom was xarray reporting no matching IO
+    backend — a message about our installation, for a file that was never
+    a NetCDF.
+    """
+
+    with path.open("rb") as handle:
+        head = handle.read(8)
+    for magic, name in _MAGIC.items():
+        if head.startswith(magic):
+            return name
+    return "unknown:" + head.hex()
+
+
+def unpack_if_archive(path: Path) -> list[Path]:
+    """The NetCDF files behind ``path``, unpacking a zip in place.
+
+    This dataset serves a zip whatever ``download_format`` asks for, so
+    unpacking is the ordinary case rather than a fallback. Called from the
+    fetch (so a downloaded year is normalised at once) AND from the read
+    (so a raw directory left behind by an older run still reduces), because
+    a cached grid is expensive and a re-download for a container mismatch
+    buys nothing.
+
+    Members keep the year in their name, since the year is what the fetch's
+    resume check and the cache prune both read. The archive is removed once
+    its members are on disk: two copies of a 95 MB year is a cache entry
+    twice the size for no gain.
+    """
+
+    import zipfile
+
+    kind = sniff_container(path)
+    if kind != "zip":
+        return [path]
+
+    stem = path.stem
+    written: list[Path] = []
+    with zipfile.ZipFile(path) as archive:
+        members = [m for m in archive.namelist() if not m.endswith("/")]
+        wanted = [m for m in members if m.lower().endswith(".nc")]
+        ignored = sorted(set(members) - set(wanted))
+        if ignored:
+            # Named rather than counted: a member we cannot read is either a
+            # second product we do not want or the whole payload in a format
+            # we did not ask for, and only its name says which.
+            LOG.warning(
+                "[spei3] %s carries %d member(s) this reads and %d it does not: %s",
+                path.name, len(wanted), len(ignored), ", ".join(ignored[:6]),
+            )
+        if not wanted:
+            raise ValueError(
+                f"{path.name} is a zip carrying no .nc member "
+                f"(members: {', '.join(members[:6]) or 'none'})"
+            )
+        for member in sorted(wanted):
+            # `stem` already carries the year, so a member named `data.nc`
+            # in two years' archives cannot collide.
+            target = path.parent / f"{stem}__{Path(member).name}"
+            with archive.open(member) as src, target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            written.append(target)
+            LOG.info(
+                "[spei3] unpacked %s -> %s (%.1f MB)",
+                path.name, target.name, target.stat().st_size / 1e6,
+            )
+    path.unlink()
+    return written
+
+
+def year_files(raw_dir: Path, year: str) -> list[Path]:
+    """Everything on disk for one year, archived or unpacked.
+
+    The fetch's resume check reads this rather than one filename, because a
+    year that has been unpacked no longer has the name it was downloaded
+    under and re-downloading it costs 95 MB to learn nothing.
+    """
+
+    return sorted(p for p in raw_dir.glob(f"spei3_{year}*") if p.is_file())
+
+
 def load_grids_from_dir(raw_dir: Path) -> dict[str, Grid]:
     """Every ``*.nc`` under ``raw_dir`` as ``{ym: Grid}``.
 
@@ -477,8 +579,24 @@ def load_grids_from_dir(raw_dir: Path) -> dict[str, Grid]:
     import numpy as np
     import xarray as xr
 
+    # Unpack before globbing: a cache restored from a run that predates
+    # `unpack_if_archive` holds zips under `.nc` names, and re-downloading a
+    # gigabyte to correct a container mismatch buys nothing.
+    for candidate in sorted(raw_dir.glob("*.nc")):
+        unpack_if_archive(candidate)
+
     grids: dict[str, Grid] = {}
     for path in sorted(raw_dir.glob("*.nc")):
+        kind = sniff_container(path)
+        if not kind.startswith("netcdf"):
+            # Named, not swallowed: xarray's own complaint is about the IO
+            # backends installed here, which sends the reader to the
+            # requirements file for a problem in the download.
+            raise ValueError(
+                f"{path.name} is not a NetCDF file (first bytes say {kind!r}); "
+                "the CDS writes to whatever filename it is given, so check "
+                "`download_format` and the fetch log"
+            )
         with xr.open_dataset(path) as ds:
             name = _spei_variable_name(ds)
             da = ds[name]
@@ -1186,10 +1304,17 @@ def fetch_grids(
 
     for year in sorted(by_year):
         target = raw_dir / f"spei3_{year}.nc"
-        if target.exists():
-            LOG.info("[spei3] %s already downloaded — skipping", target.name)
+        # By year, not by that one filename: an unpacked year no longer has
+        # the name it was downloaded under, and re-asking for it costs 95 MB
+        # to learn nothing.
+        held = year_files(raw_dir, year)
+        if held:
+            LOG.info(
+                "[spei3] %s already downloaded — skipping (%s)",
+                year, ", ".join(p.name for p in held),
+            )
             result.skipped_present.append(year)
-            result.bytes_downloaded += target.stat().st_size
+            result.bytes_downloaded += sum(p.stat().st_size for p in held)
             continue
         if deadline_sec is not None and (clock() - started) >= deadline_sec:
             result.deadline_hit = True
@@ -1219,10 +1344,25 @@ def fetch_grids(
             result.failed[year] = "the client reported success and wrote no file"
             LOG.error("[spei3] %s: %s", year, result.failed[year])
             continue
+        # The archive's own size is the download volume, so it is read
+        # before unpacking replaces the file.
         size = target.stat().st_size
         result.bytes_downloaded += size
         result.written.append(year)
         LOG.info("[spei3] %s -> %s (%.1f MB)", year, target.name, size / 1e6)
+        try:
+            unpack_if_archive(target)
+        except Exception as exc:  # noqa: BLE001 - the reason is the payload
+            # A year that arrived and cannot be opened is owed, exactly as a
+            # year that never arrived is: the difference matters to nobody
+            # downstream, and leaving an unreadable file on disk would make
+            # the next run's resume check skip it forever.
+            result.failed[year] = f"{type(exc).__name__}: {exc}"[:400]
+            LOG.error("[spei3] %s downloaded and could not be unpacked: %s",
+                      year, result.failed[year])
+            for stale in year_files(raw_dir, year):
+                stale.unlink()
+            result.written.remove(year)
 
     if result.years_owed:
         LOG.warning(
