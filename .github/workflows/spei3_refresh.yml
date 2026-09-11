@@ -91,13 +91,13 @@ concurrency:
         type: boolean
       probe:
         description: >-
-          Ask the CDS what `dataset_type` accepts, and do nothing else. It
-          submits ONE request carrying a deliberately invalid value and prints
-          the refusal, because the CDS names the accepted values when it
-          rejects an out-of-range key. Fetches nothing, reduces nothing,
-          commits nothing. This is how the intermediate release's literal gets
-          settled without guessing it — a wrong enum is refused exactly as a
-          misspelt variable name is.
+          Ask the CDS what `dataset_type` accepts, and do nothing else. Two
+          questions in one run: the service's own `/constraints` endpoint and
+          process description, which is the route that answers; and one
+          deliberately invalid value, which proves the request shape is right.
+          Fetches nothing, reduces nothing, commits nothing. This is how the
+          intermediate release's literal gets settled without guessing it — a
+          wrong enum is refused exactly as a misspelt variable name is.
         required: false
         default: false
         type: boolean
@@ -174,7 +174,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install "$(grep -i '^cdsapi' requirements-spei3.txt)"
 
+      # The route that can actually answer: the CDS's own constraints endpoint
+      # and process description. Asked FIRST, because the refusal probe below
+      # already came back empty on this dataset (run 34587745561) and the
+      # question is what the accepted values ARE.
+      - name: Ask the CDS for the accepted values
+        env:
+          CDSAPI_URL: https://cds.climate.copernicus.eu/api
+          CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CDSAPI_KEY}" ]; then
+            echo "::error title=SPEI-3::CDSAPI_KEY is not configured, so the CDS cannot be asked anything"
+            exit 1
+          fi
+          mkdir -p diagnostics
+          python -m scripts.build_spei3_country_means describe \
+            --key dataset_type \
+            --report-out diagnostics/spei3_describe.json 2>&1 \
+            | tee diagnostics/spei3_describe.log
+
       - name: Probe dataset_type
+        if: always()
         env:
           CDSAPI_URL: https://cds.climate.copernicus.eu/api
           CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
@@ -196,12 +217,52 @@ jobs:
           set -euo pipefail
           python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json, pathlib
-          path = pathlib.Path("diagnostics/spei3_probe.json")
+
           print("## SPEI-3: what the CDS accepts for `dataset_type`\n")
-          if not path.exists():
-              print("The probe wrote no report. Read the step log above.")
+
+          described = pathlib.Path("diagnostics/spei3_describe.json")
+          print("### Asked the CDS's own schema\n")
+          if not described.exists():
+              print("The describe step wrote no report. Read its step log above.\n")
+          else:
+              report = json.loads(described.read_text("utf-8"))
+              print(f"- settled: **{report.get('settled')}**")
+              values = report.get("values") or []
+              if values:
+                  print(f"- accepted values, via `{report.get('source_route')}`:\n")
+                  for value in values:
+                      print(f"  - `{value}`")
+                  extra = report.get("only_unconstrained") or []
+                  if extra:
+                      print("\n- valid in general but NOT with the rest of our "
+                            "request, so a switch to one of these needs another "
+                            "key to move too:\n")
+                      for value in extra:
+                          print(f"  - `{value}`")
+                  print("\nTake the intermediate release's literal from that "
+                        "list and only then make the switch.\n")
+              else:
+                  print("- no route named the accepted values. Do not guess "
+                        "one.\n")
+              print("| route | read | values |")
+              print("| --- | --- | --- |")
+              for route in report.get("routes") or []:
+                  said = ", ".join(f"`{v}`" for v in route.get("values") or [])
+                  print(f"| {route.get('route')} | {route.get('ok')} | "
+                        f"{said or (route.get('error') or 'named none')} |")
+              for route in report.get("routes") or []:
+                  excerpt = route.get("excerpt")
+                  if excerpt:
+                      print(f"\n<details><summary>{route.get('route')}"
+                            f"</summary>\n\n```json\n{excerpt}\n```\n"
+                            "</details>")
+
+          probed = pathlib.Path("diagnostics/spei3_probe.json")
+          print("\n### Sent one deliberately invalid value\n")
+          if not probed.exists():
+              print("The probe wrote no report. Read its step log above.")
               raise SystemExit(0)
-          report = json.loads(path.read_text("utf-8"))
+          report = json.loads(probed.read_text("utf-8"))
           print(f"- sent `dataset_type={report.get('sent', {}).get('dataset_type')}`")
           print(f"- refused: **{report.get('refused')}**; settled: "
                 f"**{report.get('settled')}**")
@@ -210,11 +271,11 @@ jobs:
               print("- accepted values, in the order the CDS listed them:\n")
               for value in values:
                   print(f"  - `{value}`")
-              print("\nTake the intermediate release's literal from that list "
-                    "and only then make the switch.")
           else:
-              print("- the refusal named NO accepted values, so this probe "
-                    "cannot settle the literal. Do not guess one.")
+              print("- the refusal named NO accepted values. Expected on this "
+                    "dataset, whose validator complains about the whole "
+                    "combination rather than one key; what it does prove is "
+                    "that every other key in the request was accepted.")
           print(f"\n- what the CDS said:\n\n```\n{report.get('body') or '(nothing)'}\n```")
           PY
 

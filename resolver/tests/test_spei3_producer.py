@@ -416,10 +416,18 @@ def _third_party_imports(path: Path) -> set[str]:
 #: deliberately absent: it reads the canonical DuckDB, which this workflow
 #: never downloads and must not, so its `duckdb` import is a need of a
 #: command run elsewhere in the full environment.
+#:
+#: The two probe functions are here because the probe JOB runs in this
+#: workflow too, off the same requirements file. Their `cdsapi` import is
+#: already declared, so listing them changes nothing today — which is the
+#: point of doing it now rather than after a probe run dies on a module the
+#: producer's own path happens not to need.
 _WORKFLOW_IMPORT_SITES = (
     "shapely_contains",
     "load_grids_from_dir",
     "fetch_grids",
+    "probe_enum_values",
+    "describe_enum_values",
 )
 
 
@@ -1368,3 +1376,316 @@ def test_the_workflow_runs_the_probe_in_a_job_that_cannot_produce_a_feed():
     # `probe` without inverting it would read fine and run the producer on
     # every probe dispatch.
     assert "!(" in refresh_if, refresh_if
+
+
+# ---------------------------------------------------------------------------
+# describe mode: ask the CDS's own schema, because the refusal named nothing
+# ---------------------------------------------------------------------------
+#
+# Probe mode ran on 2026-09-11 (run 34587745561) and came back empty: the CDS
+# answered "Request has not produced a valid combination of values, please
+# check your selection." with an echo of the request and no list of accepted
+# values. This dataset's validator complains about the whole COMBINATION
+# rather than about one key, so a deliberately wrong enum names no enum.
+#
+# So ask the service for its own schema. Two routes, both reads: the
+# `/constraints` endpoint the web form itself calls, and the process
+# description's input schemas. Both reached through the client this producer
+# already builds, so there is no hand-rolled `PRIVATE-TOKEN` header to get
+# wrong.
+
+
+#: The body the live refusal probe actually returned, kept verbatim so the
+#: test that says "this is why describe mode exists" rests on evidence.
+_REAL_COMBINATION_REFUSAL = (
+    "400 Client Error: Bad Request for url: "
+    "https://cds.climate.copernicus.eu/api/retrieve/v1/processes/"
+    "derived-drought-historical-monthly/execution\n"
+    "invalid request\n"
+    "Request has not produced a valid combination of values, please check "
+    "your selection.\n"
+    "{'accumulation_period': ['3'], 'data_format': 'netcdf', "
+    "'dataset_type': 'pythia_probe_not_a_real_dataset_type', 'month': ['01'], "
+    "'product_type': ['reanalysis'], 'variable': "
+    "['standardised_precipitation_evapotranspiration_index'], "
+    "'version': '1_0', 'year': ['2016']}"
+)
+
+
+class _DescribingClient:
+    """A CDS client that answers the two read routes, and records the asking.
+
+    Shaped like the real one: `cdsapi.Client()` returns ecmwf-datastores'
+    LegacyClient, which keeps the datastores client on `.client`.
+    """
+
+    def __init__(self, constraints=None, process=None, constraints_error=None,
+                 process_error=None):
+        self._constraints = constraints if constraints is not None else {}
+        self._process = process if process is not None else {}
+        self._constraints_error = constraints_error
+        self._process_error = process_error
+        self.constraint_calls = []
+        self.process_calls = []
+        self.retrieved = []
+        self.client = self
+
+    def apply_constraints(self, dataset, request):
+        self.constraint_calls.append((dataset, dict(request)))
+        if self._constraints_error is not None:
+            raise self._constraints_error
+        if isinstance(self._constraints, list):
+            return self._constraints[len(self.constraint_calls) - 1]
+        return self._constraints
+
+    def get_process(self, dataset):
+        self.process_calls.append(dataset)
+        if self._process_error is not None:
+            raise self._process_error
+        payload = self._process
+        return type("_P", (), {"json": payload})()
+
+    def retrieve(self, dataset, request, target):  # pragma: no cover
+        self.retrieved.append((dataset, dict(request), target))
+        raise AssertionError("describe mode must never retrieve anything")
+
+
+def test_the_refusal_the_live_probe_got_names_nothing():
+    """The finding that made this route necessary, pinned as evidence.
+
+    If a future CDS release starts naming its values in that body, this test
+    fails and the cheaper route is available again.
+    """
+
+    assert spei.parse_probe_refusal(_REAL_COMBINATION_REFUSAL) == []
+
+
+def test_the_constraints_route_answers_the_question():
+    """The documented shape: a flat mapping of key to the values still valid."""
+
+    client = _DescribingClient(constraints={
+        "dataset_type": ["consolidated_dataset", "intermediate_dataset"],
+        "product_type": ["reanalysis", "ensemble_members"],
+    })
+    result = spei.describe_enum_values(client=client)
+    assert result.settled is True
+    assert result.values == ["consolidated_dataset", "intermediate_dataset"]
+    assert "constraints" in result.source_route
+
+
+def test_the_constraints_route_is_asked_with_our_request_and_with_nothing():
+    """The pair is the point: one answers "what may this key be in the request
+    we send", the other "what may it be at all"."""
+
+    client = _DescribingClient(constraints=[
+        {"dataset_type": ["consolidated_dataset"]},
+        {"dataset_type": ["consolidated_dataset", "intermediate_dataset"]},
+    ])
+    result = spei.describe_enum_values(client=client)
+    assert len(client.constraint_calls) == 2
+    _dataset, ours = client.constraint_calls[0]
+    assert "dataset_type" not in ours, (
+        "the key being asked about must not be pinned, or the answer is just "
+        "the value we sent"
+    )
+    live = spei.cds_request("2016", ["01"])
+    for key, value in live.items():
+        if key == "dataset_type":
+            continue
+        assert ours[key] == value, key
+    _dataset, unconstrained = client.constraint_calls[1]
+    assert unconstrained == {}
+
+
+def test_a_value_valid_only_unconstrained_is_reported_as_its_own_finding():
+    """"The release exists but not with the rest of our request" and "the
+    release does not exist" want different repairs, so they are not one
+    answer."""
+
+    client = _DescribingClient(constraints=[
+        {"dataset_type": ["consolidated_dataset"]},
+        {"dataset_type": ["consolidated_dataset", "intermediate_dataset"]},
+    ])
+    result = spei.describe_enum_values(client=client)
+    assert result.values == ["consolidated_dataset"]
+    assert result.unconstrained == [
+        "consolidated_dataset", "intermediate_dataset",
+    ]
+    assert result.only_unconstrained == ["intermediate_dataset"]
+    assert "NOT alongside" in result.detail
+
+
+def test_the_process_description_answers_when_constraints_does_not():
+    """A failed route is a finding, not the end of the asking."""
+
+    client = _DescribingClient(
+        constraints_error=RuntimeError("404 Client Error"),
+        process={"inputs": {"dataset_type": {"schema_": {
+            "enum": ["consolidated_dataset", "intermediate_dataset"],
+        }}}},
+    )
+    result = spei.describe_enum_values(client=client)
+    assert result.settled is True
+    assert result.values == ["consolidated_dataset", "intermediate_dataset"]
+    assert result.source_route == "process description"
+    failed = [r for r in result.routes if r.error]
+    assert len(failed) == 2, "both constraints attempts should record failure"
+    assert "404" in failed[0].error
+
+
+@pytest.mark.parametrize("payload", [
+    {"inputs": {"dataset_type": {"schema_": {"enum": ["a_one", "b_two"]}}}},
+    {"inputs": {"dataset_type": {"schema": {"enum": ["a_one", "b_two"]}}}},
+    {"inputs": {"dataset_type": {"enum": ["a_one", "b_two"]}}},
+    {"inputs": {"dataset_type": {"schema_": {"oneOf": [
+        {"const": "a_one"}, {"const": "b_two"},
+    ]}}}},
+    {"inputs": {"dataset_type": {"schema_": {"type": "array", "items": {
+        "enum": ["a_one", "b_two"],
+    }}}}},
+])
+def test_the_process_description_reader_walks_for_the_key_not_a_path(payload):
+    """The CDS spells the schema key `schema_` in places and `schema` in
+    others, and wraps an array's values under `items`. Pinning one path would
+    answer "absent" for a value sitting right there, which is the
+    `PRAGMA table_info` mistake in another costume."""
+
+    assert spei.parse_process_description(payload, "dataset_type") == [
+        "a_one", "b_two",
+    ]
+
+
+def test_the_readers_report_nothing_rather_than_inventing_something():
+    """An empty answer is the outcome that stops the switch. It has to be
+    returnable."""
+
+    assert spei.parse_constraints_payload({"product_type": ["x"]}, "dataset_type") == []
+    assert spei.parse_process_description({"inputs": {}}, "dataset_type") == []
+    assert spei.parse_constraints_payload(None, "dataset_type") == []
+    assert spei.parse_process_description("not json", "dataset_type") == []
+
+
+def test_no_route_naming_values_is_reported_and_never_guessed():
+    """The whole discipline of this work order in one assertion."""
+
+    client = _DescribingClient(constraints={}, process={})
+    result = spei.describe_enum_values(client=client)
+    assert result.settled is False
+    assert result.values == []
+    assert "Do not guess" in result.detail
+    assert "no route named the accepted values" in result.detail
+
+
+def test_every_route_is_recorded_including_the_ones_that_failed():
+    """"Which way of asking failed" is most of the diagnosis when the answer
+    does not arrive."""
+
+    client = _DescribingClient(
+        constraints_error=RuntimeError("403 Forbidden"),
+        process_error=RuntimeError("500 Server Error"),
+    )
+    result = spei.describe_enum_values(client=client)
+    assert [r.route for r in result.routes] == [
+        "constraints(our request minus dataset_type)",
+        "constraints(nothing fixed)",
+        "process description",
+    ]
+    assert all(r.error for r in result.routes)
+    assert "403" in result.detail and "500" in result.detail
+
+
+def test_describe_mode_never_retrieves_anything():
+    """A read is a read. The one method that downloads is the one it must not
+    call — on this dataset a retrieve is tens of megabytes."""
+
+    client = _DescribingClient(constraints={"dataset_type": ["consolidated_dataset"]})
+    spei.describe_enum_values(client=client)
+    assert client.retrieved == []
+
+
+def test_a_renamed_borrow_says_so_rather_than_failing_obscurely():
+    """`cdsapi.Client()` hands back a wrapper and the real client sits on
+    `.client`. Borrowed on purpose — hand-rolling the request means
+    hand-rolling the PRIVATE-TOKEN header — so a borrow that disappears has to
+    name itself, exactly as the GDACS connector's helpers do."""
+
+    class _Stranger:
+        pass
+
+    result = spei.describe_enum_values(client=_Stranger())
+    assert result.settled is False
+    assert "apply_constraints" in result.detail
+    assert "re-pointing" in result.detail
+    assert result.routes and result.routes[0].route == "client"
+
+
+def test_describe_mode_writes_no_feed_and_no_status(tmp_path, monkeypatch):
+    """It asks a question. A question that rewrote the feed would be a
+    producer."""
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        spei, "describe_enum_values",
+        lambda key="dataset_type", **kw: spei.DescribeResult(key=key),
+    )
+    report = tmp_path / "describe.json"
+    rc = spei.main(["describe", "--report-out", str(report)])
+    assert rc == 0
+    written = {p.name for p in tmp_path.rglob("*") if p.is_file()}
+    assert written == {"describe.json"}, written
+
+
+def test_describe_mode_always_exits_zero_because_a_question_is_not_a_fault(
+    tmp_path, monkeypatch,
+):
+    """A probe that goes red is a probe somebody stops running."""
+
+    monkeypatch.setattr(
+        spei, "describe_enum_values",
+        lambda key="dataset_type", **kw: spei.DescribeResult(
+            key=key, detail="no route named the accepted values",
+        ),
+    )
+    assert spei.main(["describe", "--report-out", str(tmp_path / "r.json")]) == 0
+
+
+def test_the_workflow_asks_both_questions_in_the_probe_job_only():
+    """One checkbox, two questions, and neither of them touching the feed.
+
+    The describe route is what can answer; the refusal probe is what proves
+    the request shape is right. Both belong to the dispatch-only job.
+    """
+
+    import yaml
+
+    doc = yaml.safe_load(
+        (spei.REPO_ROOT / ".github" / "workflows" / "spei3_refresh.yml")
+        .read_text("utf-8")
+    )
+    probe_steps = yaml.dump(doc["jobs"]["probe"]["steps"])
+    assert "build_spei3_country_means describe" in probe_steps
+    assert "build_spei3_country_means probe" in probe_steps
+    refresh_steps = yaml.dump(doc["jobs"]["refresh"]["steps"])
+    for asking in ("means describe", "means probe"):
+        assert asking not in refresh_steps, (
+            f"the producer job runs `{asking}`; asking a question and building "
+            "a feed are different jobs for a reason"
+        )
+
+
+def test_the_probe_job_reports_even_when_a_route_fails():
+    """Both asking steps write their own report and the summary renders
+    whichever arrived. Without `always()` a failed first question would take
+    the second one and the summary with it — and a probe whose output depends
+    on nothing going wrong is not a diagnostic."""
+
+    import yaml
+
+    doc = yaml.safe_load(
+        (spei.REPO_ROOT / ".github" / "workflows" / "spei3_refresh.yml")
+        .read_text("utf-8")
+    )
+    steps = {s.get("name"): s for s in doc["jobs"]["probe"]["steps"] if s.get("name")}
+    assert "always()" in str(steps["Probe dataset_type"].get("if"))
+    assert "always()" in str(steps["Report what the CDS said"].get("if"))
+    assert "always()" in str(steps["Upload the probe report"].get("if"))
