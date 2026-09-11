@@ -1721,8 +1721,12 @@ def test_a_value_valid_only_unconstrained_is_narrowed_to_the_key_that_blocks_it(
     """Run 34591513359 put `intermediate_dataset` in exactly this position:
     allowed in general, refused alongside the rest of our request. "Something
     excludes it" is not a repair; the key's name is, and it is the difference
-    between a switch that is one constant and a switch that has to vary per
-    month. So the probe asks, one read per key, rather than reasoning about it.
+    between a switch that is one constant and one that has to vary per year.
+    So the probe asks, one read per key, rather than reasoning about it.
+
+    The fixture is shaped on what run 34591818890 actually found: `year` is
+    the key, which says the intermediate release covers only the recent end of
+    the record.
     """
 
     class _Selective:

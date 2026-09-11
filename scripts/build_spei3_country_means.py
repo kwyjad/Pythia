@@ -1873,9 +1873,9 @@ def narrow_exclusion(
     Asked rather than reasoned about, one read per key. A value the service
     allows in general and refuses alongside our request is excluded by
     something, and "something" is not a repair — the key's name is. Run
-    34591513359 found `intermediate_dataset` in exactly that position, which
-    is the difference between a switch that is one constant and a switch that
-    has to vary per month.
+    34591513359 found `intermediate_dataset` in exactly that position and run
+    34591818890 named the key as ``year``, which is the difference between a
+    switch that is one constant and one that has to vary per year.
 
     Returns the keys whose removal admits the value, in request order. An
     empty list means no single key explains it, which is itself worth saying:
@@ -1887,7 +1887,11 @@ def narrow_exclusion(
         probe = {k: v for k, v in ours.items() if k != dropped}
         try:
             payload = api.apply_constraints(CDS_DATASET, probe)
-        except Exception:  # noqa: BLE001 - a failed narrowing is not a finding
+        except Exception:  # noqa: BLE001
+            # A call that failed cannot ADMIT the value, so leaving the key out
+            # of the list is the honest reading. It can only ever cost a
+            # blocker, never invent one, and the no-single-key branch then says
+            # the exclusion is unexplained rather than claiming it is settled.
             continue
         if value in parse_constraints_payload(payload, key):
             admitted.append(dropped)
