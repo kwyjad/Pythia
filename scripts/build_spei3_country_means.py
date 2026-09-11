@@ -187,16 +187,51 @@ CDS_DATASET = "derived-drought-historical-monthly"
 #: with the better one. That behaviour is already built and tested, and this
 #: is the case it was built for.
 #:
-#: It is NOT done here, for one reason only: the literal is unknown.
-#: ``intermediate_dataset`` is likely by symmetry and a guessed enum is
-#: refused with the same message a misspelt variable name gets, so shipping it
-#: on a guess would turn the gain into an outage that reads like one. Neither
-#: this sandbox nor a browser settles it — the egress proxy denies
-#: cds.climate.copernicus.eu, and the Download tab's "Show API request code"
-#: button only emits whatever the form currently has selected. So the workflow
-#: asks: ``probe`` mode sends one deliberately invalid ``dataset_type`` and
-#: prints the accepted values the CDS names when it refuses one. Take the
-#: literal from that output and only then make the switch.
+#: **The literal is ``intermediate_dataset``, and it is now evidence rather
+#: than a guess.** Run 34591286383 asked the CDS and two independent routes
+#: agreed: the ``/constraints`` endpoint and the process description both name
+#: exactly ``consolidated_dataset`` and ``intermediate_dataset``.
+#:
+#: **And the switch is NOT one constant, which the same probe established.**
+#: Run 34591513359 asked the constraints endpoint with the rest of our request
+#: fixed and got ``consolidated_dataset`` ALONE: ``intermediate_dataset`` is
+#: allowed by the dataset and refused alongside what we ask for. Run
+#: 34591818890 then named the key — **``year``**. Dropping it admits the value,
+#: and nothing else does.
+#:
+#: So the intermediate release covers only the recent end of the record, which
+#: is exactly what a one-month-lagged product would do and is the reason a
+#: probe asking about 2016 could never accept it. The producer therefore has to
+#: choose ``dataset_type`` PER YEAR rather than carry one constant:
+#: intermediate for the months the consolidated release does not yet hold,
+#: consolidated for everything behind them. `cds_request` already takes the
+#: year as an argument, and `fetch_grids` already asks one year at a time, so
+#: this is a decision inside a function that has the year in hand rather than a
+#: redesign — and the trailing revision window is what then replaces an
+#: intermediate value with its consolidated version when that appears, which is
+#: the arrangement it was built for.
+#:
+#: It was NOT settled by reading around the problem, and the record of how it
+#: was settled is worth keeping. Neither this sandbox nor a browser could do
+#: it: the egress proxy denies cds.climate.copernicus.eu, and the Download
+#: tab's "Show API request code" button only emits whatever the form currently
+#: has selected. So the workflow asks, and there are two ways of asking.
+#:
+#: ``probe`` mode sends one deliberately invalid ``dataset_type`` and reads
+#: the refusal. **It was run on 2026-09-11 (run 34587745561) and came back
+#: empty**: the CDS answered "Request has not produced a valid combination of
+#: values, please check your selection." with an echo of the request and no
+#: list of accepted values. That settles something narrow — every mandatory
+#: key was accepted, and the same body with ``consolidated_dataset`` fetched
+#: eleven years in run 34472338247, so the refusal is about that one value —
+#: but this dataset's validator complains about the whole COMBINATION rather
+#: than about one key, so a wrong enum names no enum here.
+#:
+#: ``describe`` mode asks the service for its own schema instead of inferring
+#: it from a complaint: the ``/constraints`` endpoint the web form itself
+#: calls, and the process description's input schemas. See
+#: :func:`describe_enum_values`. Take the literal from that output and only
+#: then make the switch.
 #:
 #: Two things the switch must not disturb, recorded here while the reasoning
 #: is fresh. ``REVISION_WINDOW_MONTHS`` has to be long enough to re-request a
@@ -1407,14 +1442,24 @@ def cds_request(year: str, months: Sequence[str]) -> dict[str, Any]:
 #
 # The workflow can reach the CDS, so it asks. Probe mode submits ONE request
 # with a deliberately invalid ``dataset_type``, catches the refusal, and prints
-# the body — because the CDS names the accepted values when it rejects an
-# out-of-range key. A few seconds of a dispatch-only run settles what no
-# amount of reading around the problem will.
+# the body, on the expectation that the CDS names the accepted values when it
+# rejects an out-of-range key.
 #
-# It is kept afterwards. The same trick answers the next enum question with no
-# round trip through a browser, and enum questions recur: this dataset already
-# moved ``format`` to ``data_format`` and pushed the accumulation period out of
-# the variable name into a key of its own.
+# **On this dataset it does not.** Run 34587745561 asked and got "Request has
+# not produced a valid combination of values, please check your selection."
+# with an echo of the request and no list at all: the validator here complains
+# about the whole combination rather than about one key, so a deliberately
+# wrong enum names no enum. The route that does answer is
+# :func:`describe_enum_values`, which asks the service for its own schema.
+#
+# This one is kept regardless, and not out of sentiment. It is the only route
+# that proves the request SHAPE is right — every mandatory key accepted, the
+# refusal isolated to the one value changed — which is worth knowing on its
+# own and is what rules out a missing key when a switch goes wrong. And other
+# CDS datasets do name their values, so the trick still answers the next enum
+# question elsewhere; enum questions recur, as this dataset showed when it
+# moved ``format`` to ``data_format`` and pushed the accumulation period out
+# of the variable name into a key of its own.
 
 #: The value probe mode sends. Deliberately not a plausible guess — a probe
 #: that happened to hit a REAL value would be a silent download rather than the
@@ -1563,6 +1608,419 @@ def probe_enum_values(
             target.unlink()
         except OSError:
             pass
+    return result
+
+
+# --------------------------------------------------------------------------
+# Asking the CDS for the accepted values, rather than reading a refusal
+# --------------------------------------------------------------------------
+#
+# The refusal probe above was the first way to ask and it came back empty.
+# Run 34587745561 sent ``dataset_type=pythia_probe_not_a_real_dataset_type``
+# in the live request shape and the CDS answered:
+#
+#     Request has not produced a valid combination of values, please check
+#     your selection.
+#
+# followed by an echo of the request. It named no accepted values. That
+# settles something narrow and useful — every mandatory key was accepted, and
+# the same body with ``consolidated_dataset`` fetched eleven years in run
+# 34472338247, so the refusal IS about that one value — but it does not settle
+# what a valid value looks like. This dataset's validator complains about the
+# whole COMBINATION rather than about one key, so a deliberately wrong enum
+# buys nothing here.
+#
+# So ask the service for its own schema instead of inferring it from a
+# complaint. Two routes, both read-only, taken in order:
+#
+#   1. ``POST {process}/constraints`` — the endpoint the web form calls on
+#      every click. Given a partial request it returns the values still valid
+#      for every key, which is exactly the question. A POST that queues no
+#      job, downloads nothing and writes nothing: it is a read wearing a
+#      verb.
+#   2. ``GET {process}`` — the process description, whose input schemas carry
+#      each key's full enum irrespective of the other selections.
+#
+# Both reached through the client this producer already builds, so there is no
+# hand-rolled auth header to get wrong: ``cdsapi.Client()`` returns
+# ecmwf-datastores' ``LegacyClient``, which holds a ``datastores.Client`` on
+# ``.client`` carrying ``apply_constraints`` and ``get_process``. Borrowed
+# under the same contract this repository uses for the GDACS connector's
+# helpers: if the attribute is renamed upstream, say so plainly rather than
+# failing obscurely.
+#
+# The constraints route is asked TWICE, and the pair is the point. Once with
+# the rest of our request fixed, which answers "what may this key be in the
+# request we actually send", and once with nothing fixed, which answers "what
+# may this key be at all". A value present in the second list and absent from
+# the first is a real and different finding: the release exists, but not in
+# combination with something else we ask for.
+#
+# Finding nothing is still a reported outcome, for the same reason as in the
+# refusal probe: "the service did not name the values" is the answer that
+# stops the switch, and dressing it up as a parse failure would invite
+# somebody to guess anyway.
+
+
+#: Where a JSON Schema keeps its accepted values. The CDS spells the schema
+#: key ``schema_`` in places (``schema`` collides with pydantic's own), so the
+#: reader walks for the key by NAME rather than pinning one path — a changed
+#: nesting then costs nothing.
+_ENUM_CONTAINER_KEYS = ("enum", "oneOf", "anyOf")
+
+
+def _enum_from_schema(node: Any) -> list[str]:
+    """The accepted string values a JSON Schema fragment names, in order.
+
+    Handles the plain ``enum`` list and the ``oneOf``/``anyOf`` form where
+    each branch carries a ``const``. Anything else yields nothing, which the
+    caller reports rather than papers over.
+    """
+
+    if not isinstance(node, dict):
+        return []
+    found: list[str] = []
+    raw = node.get("enum")
+    if isinstance(raw, list):
+        found.extend(str(v) for v in raw if isinstance(v, (str, int)))
+    for branch_key in ("oneOf", "anyOf"):
+        branches = node.get(branch_key)
+        if isinstance(branches, list):
+            for branch in branches:
+                if isinstance(branch, dict) and "const" in branch:
+                    found.append(str(branch["const"]))
+    # A schema may wrap the real thing (an array's ``items``, say).
+    for nested in ("items", "schema", "schema_"):
+        child = node.get(nested)
+        if isinstance(child, dict) and not found:
+            found.extend(_enum_from_schema(child))
+    return _dedupe_preserving_order(found)
+
+
+def _dedupe_preserving_order(values: Sequence[Any]) -> list[str]:
+    """Order kept, duplicates dropped. The service's own order is worth having."""
+
+    seen: dict[str, None] = {}
+    for value in values:
+        text = str(value)
+        if text:
+            seen.setdefault(text, None)
+    return list(seen)
+
+
+def parse_process_description(payload: Any, key: str) -> list[str]:
+    """The accepted values a process description names for one key.
+
+    Pure, so it is tested against recorded payload shapes rather than against
+    the live service. Walks for a mapping ENTRY whose name is ``key`` and
+    whose value carries a schema, because the CDS nests the schema under
+    ``inputs[key]["schema_"]`` in some versions and ``["schema"]`` in others,
+    and pinning one of them would answer "absent" for a value sitting right
+    there — the ``PRAGMA table_info`` mistake in another costume.
+    """
+
+    hits: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for name, child in node.items():
+                if name == key:
+                    hits.extend(_enum_from_schema(child))
+                walk(child)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return _dedupe_preserving_order(hits)
+
+
+def parse_constraints_payload(payload: Any, key: str) -> list[str]:
+    """The values a ``/constraints`` response says one key may still take.
+
+    The documented shape is a flat mapping of key to a list of valid values.
+    ``inputs`` nesting and a mapping-of-mappings are both tolerated, because
+    the shape is the service's to change and the answer is worth more than the
+    assumption.
+    """
+
+    if isinstance(payload, dict):
+        for container in (payload, payload.get("inputs")):
+            if not isinstance(container, dict):
+                continue
+            raw = container.get(key)
+            if isinstance(raw, list):
+                return _dedupe_preserving_order(raw)
+            if isinstance(raw, dict):
+                # Some surfaces return {value: something} rather than a list.
+                return _dedupe_preserving_order(list(raw))
+    return []
+
+
+@dataclass
+class DescribeRoute:
+    """One attempt to ask the CDS, and what it said."""
+
+    route: str = ""
+    ok: bool = False
+    values: list[str] = field(default_factory=list)
+    error: str = ""
+    excerpt: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "route": self.route,
+            "ok": self.ok,
+            "values": list(self.values),
+            "error": self.error,
+            "excerpt": self.excerpt,
+        }
+
+
+@dataclass
+class DescribeResult:
+    """What the CDS's own schema says one enum accepts."""
+
+    key: str = "dataset_type"
+    routes: list[DescribeRoute] = field(default_factory=list)
+    values: list[str] = field(default_factory=list)
+    source_route: str = ""
+    unconstrained: list[str] = field(default_factory=list)
+    #: For a value valid only unconstrained: which of our own keys, dropped,
+    #: admits it. Empty when nothing needed narrowing, or when no single key
+    #: explains the exclusion.
+    blocked_by: dict[str, list[str]] = field(default_factory=dict)
+    detail: str = ""
+
+    @property
+    def settled(self) -> bool:
+        """Did any route actually name the accepted values?
+
+        Unsettled means the switch does not proceed. Same rule as the refusal
+        probe, and for the same reason.
+        """
+
+        return bool(self.values)
+
+    @property
+    def only_unconstrained(self) -> list[str]:
+        """Values valid in general but NOT alongside the rest of our request.
+
+        A finding in its own right: it means the release exists and something
+        else we ask for excludes it, which is a different repair from the
+        release not existing.
+        """
+
+        return [v for v in self.unconstrained if v not in self.values]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "settled": self.settled,
+            "values": list(self.values),
+            "source_route": self.source_route,
+            "unconstrained": list(self.unconstrained),
+            "only_unconstrained": list(self.only_unconstrained),
+            "blocked_by": {k: list(v) for k, v in self.blocked_by.items()},
+            "routes": [route.as_dict() for route in self.routes],
+            "detail": self.detail,
+        }
+
+
+#: Keys the ``/constraints`` endpoint refuses. They describe how a result is
+#: DELIVERED rather than what is selected, so the form knows nothing about
+#: them and says so with a 422 rather than ignoring them.
+_CONSTRAINTS_NON_FORM_KEYS = ("data_format", "download_format")
+
+#: How much of a payload to keep in the report. Enough for a human to read
+#: the shape when the parser found nothing, bounded so a large process
+#: description does not become the artifact.
+_DESCRIBE_EXCERPT_CHARS = 4000
+
+
+def _describe_api(client: Any) -> Any:
+    """The datastores client underneath cdsapi's legacy wrapper.
+
+    ``cdsapi.Client()`` returns ecmwf-datastores' ``LegacyClient``, which
+    keeps the real client on ``.client``. Borrowed deliberately rather than
+    rebuilt: hand-rolling the request means hand-rolling the ``PRIVATE-TOKEN``
+    header, and a borrowed helper that disappears should say so.
+    """
+
+    api = getattr(client, "client", client)
+    missing = [
+        name for name in ("apply_constraints", "get_process")
+        if not hasattr(api, name)
+    ]
+    if missing:
+        raise AttributeError(
+            "the CDS client exposes no "
+            + " or ".join(missing)
+            + f" (got {type(api).__name__}); ecmwf-datastores has moved the "
+            "constraints API and this borrow needs re-pointing"
+        )
+    return api
+
+
+def narrow_exclusion(
+    api: Any,
+    key: str,
+    value: str,
+    ours: Mapping[str, Any],
+) -> list[str]:
+    """Which of OUR keys, dropped, admits ``value`` for ``key``.
+
+    Asked rather than reasoned about, one read per key. A value the service
+    allows in general and refuses alongside our request is excluded by
+    something, and "something" is not a repair — the key's name is. Run
+    34591513359 found `intermediate_dataset` in exactly that position and run
+    34591818890 named the key as ``year``, which is the difference between a
+    switch that is one constant and one that has to vary per year.
+
+    Returns the keys whose removal admits the value, in request order. An
+    empty list means no single key explains it, which is itself worth saying:
+    a combination of two is a different repair again.
+    """
+
+    admitted: list[str] = []
+    for dropped in list(ours):
+        probe = {k: v for k, v in ours.items() if k != dropped}
+        try:
+            payload = api.apply_constraints(CDS_DATASET, probe)
+        except Exception:  # noqa: BLE001
+            # A call that failed cannot ADMIT the value, so leaving the key out
+            # of the list is the honest reading. It can only ever cost a
+            # blocker, never invent one, and the no-single-key branch then says
+            # the exclusion is unexplained rather than claiming it is settled.
+            continue
+        if value in parse_constraints_payload(payload, key):
+            admitted.append(dropped)
+    return admitted
+
+
+def describe_enum_values(
+    key: str = "dataset_type",
+    *,
+    client: Any = None,
+) -> DescribeResult:
+    """Ask the CDS what one request key accepts, and report what it said.
+
+    Reads only. Queues no job, downloads nothing, writes nothing to the
+    repository. Every route's outcome is recorded, including its failure,
+    because "which way of asking failed" is most of the diagnosis when the
+    answer does not arrive.
+    """
+
+    result = DescribeResult(key=key)
+
+    if client is None:  # pragma: no cover - needs CDS credentials
+        import cdsapi
+
+        client = cdsapi.Client(wait_until_complete=True, delete=False, quiet=False)
+
+    try:
+        api = _describe_api(client)
+    except AttributeError as exc:
+        result.routes.append(DescribeRoute(route="client", error=str(exc)))
+        result.detail = str(exc)
+        return result
+
+    # Route 1a: the constraints endpoint, with the rest of our request fixed.
+    # The DELIVERY keys are dropped, not the selection ones. `/constraints`
+    # answers about the form's own fields and rejects the rest outright: run
+    # 34591286383 sent the whole request and got
+    # "422 ... invalid parameter / invalid param 'data_format'", so that half
+    # of the pair never answered and `only_unconstrained` came back empty for
+    # want of an answer rather than because there was nothing to report.
+    ours = {
+        k: v for k, v in cds_request("2016", ["01"]).items()
+        if k != key and k not in _CONSTRAINTS_NON_FORM_KEYS
+    }
+    for route_name, request in (
+        (f"constraints(our request minus {key})", ours),
+        ("constraints(nothing fixed)", {}),
+    ):
+        route = DescribeRoute(route=route_name)
+        try:
+            payload = api.apply_constraints(CDS_DATASET, request)
+        except Exception as exc:  # noqa: BLE001 - a failed route is a finding
+            route.error = f"{type(exc).__name__}: {exc}"
+        else:
+            route.ok = True
+            route.values = parse_constraints_payload(payload, key)
+            route.excerpt = json.dumps(payload, indent=2, sort_keys=True)[
+                :_DESCRIBE_EXCERPT_CHARS
+            ]
+        result.routes.append(route)
+
+    # Route 2: the process description's own input schema.
+    route = DescribeRoute(route="process description")
+    try:
+        payload = api.get_process(CDS_DATASET).json
+    except Exception as exc:  # noqa: BLE001 - a failed route is a finding
+        route.error = f"{type(exc).__name__}: {exc}"
+    else:
+        route.ok = True
+        route.values = parse_process_description(payload, key)
+        route.excerpt = json.dumps(payload, indent=2, sort_keys=True)[
+            :_DESCRIBE_EXCERPT_CHARS
+        ]
+    result.routes.append(route)
+
+    # The answer is the first route that named anything, in the order asked:
+    # the constrained list is the one that governs the request we send.
+    for route in result.routes:
+        if route.values and not result.values:
+            result.values = list(route.values)
+            result.source_route = route.route
+
+    for route in result.routes:
+        if route.route == "constraints(nothing fixed)":
+            result.unconstrained = list(route.values)
+
+    if result.values:
+        result.detail = (
+            f"the CDS named {len(result.values)} accepted value(s) for {key} "
+            f"via {result.source_route}"
+        )
+        for value in result.only_unconstrained:
+            blockers = narrow_exclusion(api, key, value, ours)
+            if blockers:
+                result.blocked_by[value] = blockers
+        if result.only_unconstrained:
+            result.detail += (
+                "; and "
+                + ", ".join(repr(v) for v in result.only_unconstrained)
+                + " is valid in general but NOT alongside the rest of our "
+                "request"
+            )
+            for value, blockers in result.blocked_by.items():
+                result.detail += (
+                    f". Dropping {' or '.join(blockers)} admits {value!r}, so a "
+                    "switch has to vary that rather than replace one constant"
+                )
+            unexplained = [
+                v for v in result.only_unconstrained
+                if v not in result.blocked_by
+            ]
+            if unexplained:
+                result.detail += (
+                    ". No single key of ours explains the exclusion of "
+                    + ", ".join(repr(v) for v in unexplained)
+                    + ", so it is a combination and wants reading before a "
+                    "switch"
+                )
+    else:
+        asked = ", ".join(
+            f"{route.route} ({'read' if route.ok else route.error})"
+            for route in result.routes
+        )
+        result.detail = (
+            f"no route named the accepted values for {key}. Asked: {asked}. Do "
+            "not guess one: a wrong enum is refused exactly as a wrong "
+            "variable name is, and shipping it would turn a two-month gain "
+            "into an outage that reads like one."
+        )
     return result
 
 
@@ -2119,6 +2577,28 @@ def _cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_describe(args: argparse.Namespace) -> int:
+    """Ask the CDS's own schema what an enum accepts. Read-only, always exit 0.
+
+    A question that goes red is a question somebody stops asking. The verdict
+    is in the report and the step summary; the exit code says only that the
+    question was put.
+    """
+
+    result = describe_enum_values(args.key)
+    LOG.info("describe %s: %s", args.key, result.detail)
+    for route in result.routes:
+        LOG.info(
+            "  route %-38s %s",
+            route.route,
+            ", ".join(route.values) if route.values
+            else (route.error or "named no values"),
+        )
+    if args.report_out:
+        write_json(result.as_dict(), args.report_out)
+    return 0
+
+
 def _cmd_coverage(args: argparse.Namespace) -> int:
     import duckdb
 
@@ -2240,6 +2720,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     probe.add_argument("--report-out", type=Path, default=None)
 
+    describe = sub.add_parser(
+        "describe",
+        help="ask the CDS's own constraints and process description what an "
+             "enum accepts (read-only)",
+    )
+    describe.add_argument(
+        "--key", default="dataset_type",
+        help="the request key to ask about",
+    )
+    describe.add_argument("--report-out", type=Path, default=None)
+
     coverage = sub.add_parser(
         "coverage",
         help="count DR cells the drought gate declined to decide (read-only)",
@@ -2258,6 +2749,7 @@ def main(argv: list[str] | None = None) -> int:
         "validate": _cmd_validate,
         "promote": _cmd_promote,
         "probe": _cmd_probe,
+        "describe": _cmd_describe,
         "coverage": _cmd_coverage,
     }
     return handlers[args.command](args)
