@@ -195,15 +195,21 @@ CDS_DATASET = "derived-drought-historical-monthly"
 #: **And the switch is NOT one constant, which the same probe established.**
 #: Run 34591513359 asked the constraints endpoint with the rest of our request
 #: fixed and got ``consolidated_dataset`` ALONE: ``intermediate_dataset`` is
-#: allowed by the dataset and refused alongside what we ask for. The narrowing
-#: names the key. Whichever it is, the shape of the repair follows from it —
-#: if it is ``year`` or ``month`` then the intermediate release covers only
-#: the recent end, which is exactly what a one-month-lagged product would do,
-#: and the producer has to choose the ``dataset_type`` PER MONTH rather than
-#: carry one constant: intermediate for the months the consolidated release
-#: does not yet hold, consolidated for everything behind it. That is also the
-#: arrangement the trailing revision window already assumes, so it costs a
-#: per-month decision in ``cds_request`` rather than a redesign.
+#: allowed by the dataset and refused alongside what we ask for. Run
+#: 34591818890 then named the key — **``year``**. Dropping it admits the value,
+#: and nothing else does.
+#:
+#: So the intermediate release covers only the recent end of the record, which
+#: is exactly what a one-month-lagged product would do and is the reason a
+#: probe asking about 2016 could never accept it. The producer therefore has to
+#: choose ``dataset_type`` PER YEAR rather than carry one constant:
+#: intermediate for the months the consolidated release does not yet hold,
+#: consolidated for everything behind them. `cds_request` already takes the
+#: year as an argument, and `fetch_grids` already asks one year at a time, so
+#: this is a decision inside a function that has the year in hand rather than a
+#: redesign — and the trailing revision window is what then replaces an
+#: intermediate value with its consolidated version when that appears, which is
+#: the arrangement it was built for.
 #:
 #: It was NOT settled by reading around the problem, and the record of how it
 #: was settled is worth keeping. Neither this sandbox nor a browser could do
