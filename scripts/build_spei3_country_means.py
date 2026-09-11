@@ -103,8 +103,10 @@ import datetime as dt
 import json
 import logging
 import math
+import re
 import shutil
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -159,19 +161,51 @@ CDS_DATASET = "derived-drought-historical-monthly"
 #: and ``resolver/diagnostics/feed_status.PRODUCT_LAG_MONTHS`` carries that
 #: number so the staleness threshold is expressed against it.
 #:
+#: **A naming trap, and it is worth stating because the two axes are named
+#: the opposite way round in the prose and in the API.** C3S presentation
+#: material calls the LAG axis "product type" and the REALISATION axis
+#: "dataset type". The API uses both terms in the other sense, and the API is
+#: what is written here: ``product_type: reanalysis`` selects the realisation
+#: (as against ``ensemble_members``), and ``dataset_type`` selects the lag
+#: (consolidated as against intermediate). Write the request from the API's
+#: vocabulary; the documentation's prose is for reading, not for copying.
+#:
+#: Also ignore any figure of five days for the lag. A C3S slide gives that
+#: number and it disagrees with the dataset page, which states the lags
+#: directly in both its overview text and its Data description table. The
+#: dataset page is the source to trust, read on 2026-09-11: consolidated
+#: 2-3 months, intermediate one month, and the dataset's own update date that
+#: day was 2026-09-10, so it is actively maintained.
+#:
 #: Switching to the intermediate release would buy roughly two months of
-#: leading edge, and the merge-on-``(iso3, ym)`` write plus the trailing
-#: revision window would handle the upgrade cleanly on its own: pull the
+#: leading edge — a feed reaching about 2026-08 rather than 2026-05, which
+#: covers 2026-06, the newest month the backcast needs and the one the
+#: consolidated product cannot supply. The merge-on-``(iso3, ym)`` write plus
+#: the trailing revision window handle the upgrade with no migration: pull the
 #: intermediate value now, and when the consolidated version of that month
-#: appears the trailing window re-requests it and the merge replaces the
-#: row. It is NOT done here — that is a judgement about which product this
-#: repository should read, and this change was not the place to take it.
-#: The exact literal for the intermediate release could not be confirmed
-#: (the build environment's egress proxy denies cds.climate.copernicus.eu,
-#: so the download form's "Show API request code" could not be read);
-#: ``consolidated_dataset`` is proven by run 34456535827, its counterpart is
-#: not, and a guessed literal is refused with the same message a wrong
-#: variable name gets.
+#: appears the trailing window re-requests it and the merge replaces the row
+#: with the better one. That behaviour is already built and tested, and this
+#: is the case it was built for.
+#:
+#: It is NOT done here, for one reason only: the literal is unknown.
+#: ``intermediate_dataset`` is likely by symmetry and a guessed enum is
+#: refused with the same message a misspelt variable name gets, so shipping it
+#: on a guess would turn the gain into an outage that reads like one. Neither
+#: this sandbox nor a browser settles it — the egress proxy denies
+#: cds.climate.copernicus.eu, and the Download tab's "Show API request code"
+#: button only emits whatever the form currently has selected. So the workflow
+#: asks: ``probe`` mode sends one deliberately invalid ``dataset_type`` and
+#: prints the accepted values the CDS names when it refuses one. Take the
+#: literal from that output and only then make the switch.
+#:
+#: Two things the switch must not disturb, recorded here while the reasoning
+#: is fresh. ``REVISION_WINDOW_MONTHS`` has to be long enough to re-request a
+#: month AFTER its consolidated version appears, which is roughly three months
+#: later than the intermediate one — otherwise intermediate values become
+#: permanent. And ``feed_status.PRODUCT_LAG_MONTHS`` describes whichever
+#: product is requested, so it changes with this literal; keep it stated apart
+#: from the missed-cycle tolerance, which is the mistake the version before it
+#: made by reasoning from a lag the producer does not ask for.
 #:
 #: **The rest of this shape came from the ECMWF forum thread announcing
 #: the release, and the first live run confirmed it**: eleven years were
@@ -860,10 +894,27 @@ def months_gaining_coverage(
 # ---------------------------------------------------------------------------
 
 #: How many trailing months are re-fetched every run whatever the CSV says.
-#: ERA5T runs about five days behind and its values are revised to final
-#: ERA5 later, so the first version of a month is not its last. Four months
-#: is a guess at how long a revision takes to settle and is the one number
-#: here worth tuning once two cycles have been watched.
+#:
+#: Under the CONSOLIDATED product this producer currently requests, the values
+#: are built on final ERA5 and are not revised afterwards, so this window is
+#: belt-and-braces: `plan` already re-asks for any month the CSV is missing,
+#: and four months simply means a republished month is picked up too.
+#:
+#: It becomes LOAD-BEARING the moment the request moves to the intermediate
+#: release. Those values are built on ERA5T, which is documented as
+#: experimental and subject to change, and they are superseded by the
+#: consolidated version of the same month roughly three months later — so the
+#: window has to be long enough to re-request a month AFTER its consolidated
+#: version appears, or the intermediate value becomes permanent. Four is not
+#: enough of a margin for that on its own: the gap between the two releases is
+#: about two months (one behind against three behind), so a window of four
+#: leaves two months of slack for a missed cycle, and a missed cycle costs the
+#: upgrade rather than the coverage. Widen it with the switch, and say what the
+#: new number is reasoned from. See CDS_DATASET_TYPE for the whole argument.
+#:
+#: The comment this replaces reasoned from "ERA5T runs about five days
+#: behind", which is a figure from a C3S slide that disagrees with the dataset
+#: page AND describes a release this producer does not request.
 REVISION_WINDOW_MONTHS = 4
 
 
@@ -1339,6 +1390,180 @@ def cds_request(year: str, months: Sequence[str]) -> dict[str, Any]:
         "data_format": CDS_DATA_FORMAT,
         "download_format": CDS_DOWNLOAD_FORMAT,
     }
+
+
+# ---------------------------------------------------------------------------
+# probe: ask the CDS what an enum accepts, instead of guessing
+# ---------------------------------------------------------------------------
+#
+# The intermediate release's ``dataset_type`` literal is unknown.
+# ``intermediate_dataset`` is likely by symmetry with ``consolidated_dataset``,
+# and a guessed key is refused with the same message a misspelt variable name
+# gets — so shipping it on a guess would turn a two-month gain into an outage
+# that reads like one. Neither the sandbox this code was written in nor a
+# browser is a good way to settle it: the proxy denies the CDS entirely, and
+# the Download tab's "Show API request code" button only emits whatever the
+# form currently has selected, which is a fiddly way to read one enum.
+#
+# The workflow can reach the CDS, so it asks. Probe mode submits ONE request
+# with a deliberately invalid ``dataset_type``, catches the refusal, and prints
+# the body — because the CDS names the accepted values when it rejects an
+# out-of-range key. A few seconds of a dispatch-only run settles what no
+# amount of reading around the problem will.
+#
+# It is kept afterwards. The same trick answers the next enum question with no
+# round trip through a browser, and enum questions recur: this dataset already
+# moved ``format`` to ``data_format`` and pushed the accumulation period out of
+# the variable name into a key of its own.
+
+#: The value probe mode sends. Deliberately not a plausible guess — a probe
+#: that happened to hit a REAL value would be a silent download rather than the
+#: refusal it is here to read, and on this dataset a successful retrieve is
+#: tens of megabytes.
+PROBE_INVALID_VALUE = "pythia_probe_not_a_real_dataset_type"
+
+#: Accepted-value lists are quoted in a few shapes across the CDS's error
+#: bodies, so the reader tries several rather than pinning one. Finding none is
+#: a REPORTED outcome: "the refusal does not list valid values" is the answer
+#: that stops the switch, and dressing it up as a parse failure would invite
+#: somebody to guess anyway.
+_PROBE_VALUE_PATTERNS: tuple[str, ...] = (
+    r"(?:allowed|accepted|permitted|valid|expected)\s+values?[^:\[]*[:\[]\s*(.+)",
+    r"not\s+(?:a\s+)?valid[^.]*?\bone\s+of\s*[:\[]?\s*(.+)",
+    r"must\s+be\s+one\s+of\s*[:\[]?\s*(.+)",
+)
+
+#: Anything shaped like a CDS enum literal: lowercase words joined by
+#: underscores. Used only to pull the candidates out of whatever fragment the
+#: patterns above isolated, so a changed sentence costs the sentence and not
+#: the reading.
+_PROBE_LITERAL = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+")
+
+
+@dataclass
+class ProbeResult:
+    """What one deliberately-invalid request taught us about an enum."""
+
+    key: str = "dataset_type"
+    sent: dict[str, Any] = field(default_factory=dict)
+    refused: bool = False
+    error_type: str = ""
+    body: str = ""
+    values: list[str] = field(default_factory=list)
+    detail: str = ""
+
+    @property
+    def settled(self) -> bool:
+        """Did the refusal actually name the accepted values?
+
+        The whole point of the probe. Unsettled means the switch does not
+        proceed — see the note in ``probe_enum_values``.
+        """
+
+        return self.refused and bool(self.values)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "sent": self.sent,
+            "refused": self.refused,
+            "settled": self.settled,
+            "error_type": self.error_type,
+            "values": list(self.values),
+            "body": self.body,
+            "detail": self.detail,
+        }
+
+
+def parse_probe_refusal(body: str) -> list[str]:
+    """The accepted values a CDS refusal names, in the order it names them.
+
+    Pure, so the reading is tested against recorded error bodies rather than
+    against the live service. An empty list is a legitimate answer and means
+    the body named nothing — which is a finding, not a failure.
+    """
+
+    text = str(body or "")
+    if not text.strip():
+        return []
+    for pattern in _PROBE_VALUE_PATTERNS:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        found = [
+            value for value in _PROBE_LITERAL.findall(match.group(1))
+            if value != PROBE_INVALID_VALUE
+        ]
+        if found:
+            # Order preserved, duplicates dropped: the CDS lists these in its
+            # own order and that order is worth keeping.
+            seen: dict[str, None] = {}
+            for value in found:
+                seen.setdefault(value, None)
+            return list(seen)
+    return []
+
+
+def probe_enum_values(
+    key: str = "dataset_type",
+    *,
+    client: Any = None,
+    invalid: str = PROBE_INVALID_VALUE,
+) -> ProbeResult:
+    """Send one invalid request and read the refusal.
+
+    Fetches nothing, writes nothing, commits nothing: the request is built to
+    be REFUSED, so there is no download to make. A request the CDS accepts is
+    reported as unsettled rather than treated as success — an accepted probe
+    means the invalid value was not invalid, and nothing has been learnt.
+    """
+
+    request = cds_request("2016", ["01"])
+    request[key] = invalid
+    result = ProbeResult(key=key, sent=dict(request))
+
+    if client is None:  # pragma: no cover - needs CDS credentials
+        import cdsapi
+
+        client = cdsapi.Client(wait_until_complete=True, delete=False, quiet=False)
+
+    target = Path(tempfile.gettempdir()) / "spei3_probe_should_never_be_written.nc"
+    try:
+        client.retrieve(CDS_DATASET, request, str(target))
+    except Exception as exc:  # noqa: BLE001 - the refusal IS the result
+        result.refused = True
+        result.error_type = type(exc).__name__
+        result.body = str(exc)
+        result.values = parse_probe_refusal(result.body)
+        if result.values:
+            result.detail = (
+                f"the CDS refused {key}={invalid!r} and named "
+                f"{len(result.values)} accepted value(s)"
+            )
+        else:
+            result.detail = (
+                f"the CDS refused {key}={invalid!r} but did NOT list the accepted "
+                "values, so this probe cannot settle the literal. Do not guess "
+                "one: a wrong enum is refused exactly as a wrong variable name "
+                "is, and shipping it would turn a two-month gain into an outage "
+                "that reads like one."
+            )
+        return result
+
+    # An accepted probe is not good news: it means the deliberately invalid
+    # value was accepted, so either the key is ignored or the value is real.
+    # Either way nothing was learnt, and a download may have happened.
+    result.detail = (
+        f"the CDS ACCEPTED {key}={invalid!r}, which it should not have. Either "
+        f"{key} is being ignored for this dataset or the probe value collides "
+        "with a real one; nothing was learnt about the accepted values."
+    )
+    if target.exists():
+        try:
+            target.unlink()
+        except OSError:
+            pass
+    return result
 
 
 @dataclass
@@ -1875,6 +2100,25 @@ def _owed_from(args: argparse.Namespace) -> list[str]:
     return [ym for ym in window.months if ym.split("-")[0] in owed_years]
 
 
+def _cmd_probe(args: argparse.Namespace) -> int:
+    """Ask the CDS what an enum accepts. Read-only, and always exit 0.
+
+    A probe is a question, and a question that goes red is one somebody stops
+    asking. The verdict is in the report and the step summary; the exit code
+    says only that the question was put.
+    """
+
+    result = probe_enum_values(args.key, invalid=args.invalid)
+    LOG.info("probe %s: %s", args.key, result.detail)
+    if result.values:
+        LOG.info("accepted values for %s: %s", args.key, ", ".join(result.values))
+    if result.body:
+        LOG.info("the CDS said: %s", result.body)
+    if args.report_out:
+        write_json(result.as_dict(), args.report_out)
+    return 0
+
+
 def _cmd_coverage(args: argparse.Namespace) -> int:
     import duckdb
 
@@ -1979,6 +2223,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     promote.add_argument("--failure-reason", default="")
 
+    probe = sub.add_parser(
+        "probe",
+        help="ask the CDS what an enum accepts, by sending one invalid value",
+    )
+    probe.add_argument(
+        "--key", default="dataset_type",
+        help="the request key to probe; the CDS names the accepted values when "
+             "it rejects an out-of-range one",
+    )
+    probe.add_argument(
+        "--invalid", default=PROBE_INVALID_VALUE,
+        help="the deliberately invalid value to send. Not a plausible guess: a "
+             "probe that hits a REAL value downloads tens of megabytes instead "
+             "of returning the refusal it exists to read",
+    )
+    probe.add_argument("--report-out", type=Path, default=None)
+
     coverage = sub.add_parser(
         "coverage",
         help="count DR cells the drought gate declined to decide (read-only)",
@@ -1996,6 +2257,7 @@ def main(argv: list[str] | None = None) -> int:
         "reduce": _cmd_reduce,
         "validate": _cmd_validate,
         "promote": _cmd_promote,
+        "probe": _cmd_probe,
         "coverage": _cmd_coverage,
     }
     return handlers[args.command](args)

@@ -2389,6 +2389,7 @@ class BundleBuilder:
             self._check_backcast_deferral_is_recorded,
             self._check_crisiswatch_entries_accounted_for,
             self._check_spei3_feed_is_current,
+            self._check_spei3_producer_can_commit,
         ):
             try:
                 check()
@@ -2748,36 +2749,125 @@ class BundleBuilder:
     def _report_spei3_commit_token(self, status: Any) -> None:
         """The producer's commit credential, reported from config state.
 
-        Nothing a Resolver Update does can observe a token's expiry, so this
-        never becomes visible by itself: the token lapses, spei3_refresh.yml
-        fails at its commit step, and the only downstream symptom is a feed
-        that stops extending — which the staleness check above will not call
-        a fault for another few months. So it is reported unconditionally
-        while the producer exists, and the register's own review-date
-        machinery does the nagging: the `spei3_commit_token_expiry` entry in
-        known_issues.yml deliberately carries NO review date, so it reports
-        as overdue every run until somebody records when the token actually
-        expires. An invented date would silence this and warn about nothing.
+        Not an expiry warning any more, and the change matters. The token was
+        issued with NO expiration, so the previous version of this — an `info`
+        note saying "a fine-grained token expires", hung off a register entry
+        deliberately left undated — reported OVERDUE on every run, warning
+        about a date that does not exist, in the first line of the issue
+        report. A check that cannot pass teaches the reader to skip the
+        report, and this one could not pass by construction.
+
+        What it says now is the design: the credential cannot lapse on a
+        schedule, so the guard is the refusal check below rather than a date.
+        One line, at `info`, from config state — because the arrangement is
+        worth stating where a reader will find it, and the `review_by: never`
+        on the `spei3_commit_credential` entry carries the argument.
         """
 
         if status.state in ("absent", "unreadable"):
             return
         self.extra_issues.append(issue_sources.issue_from_measurement(
-            "spei3_commit_token_expiry",
-            "The SPEI-3 producer commits with a fine-grained SPEI3_COMMIT_TOKEN; "
-            "a fine-grained token expires and the producer then stops silently.",
+            "spei3_commit_credential",
+            "The SPEI-3 producer commits with a fine-grained SPEI3_COMMIT_TOKEN "
+            "that carries no expiry, so the guard on it is refusal-based rather "
+            "than date-based.",
             severity=issues_mod.INFO,
             evidence=(
                 "spei3_refresh.yml pushes resolver/data/spei3_country_means.csv "
                 "straight to main with SPEI3_COMMIT_TOKEN, because the default "
                 "GITHUB_TOKEN cannot push past branch protection (GH006) and a "
-                "pull request it opened would never run its own checks. The feed "
-                f"currently covers through {status.newest_month or 'nothing'}; "
-                "rotate the token before its expiry and record the date in the "
-                "register entry's review_by."
+                "pull request it opened would never run its own checks. The token "
+                "has no expiration, so nothing about the calendar can warn about "
+                "it; a revocation or a narrowed permission is caught instead by "
+                "`spei3_producer_is_still_able_to_commit`, which reads the "
+                "producer's last run. The feed currently covers through "
+                f"{status.newest_month or 'nothing'}."
             ),
             source="config/spei3_status.json",
         ))
+
+    def _check_spei3_producer_can_commit(self) -> None:
+        """Was the producer's last push refused for want of a credential?
+
+        The SPEI-3 producer is the only feed in this repository whose channel
+        to the pipeline is a git commit, and a refused push cannot commit the
+        record of its own refusal. So the producer's own run is the only
+        durable account there is, and this reads it: the newest run of
+        `SPEI-3 Feed Refresh`, and — when that run failed — the names of the
+        steps that failed in it. Those names are a contract
+        (`producer_commit.STEP_BY_CLASS`), which is what lets one API call say
+        WHICH of four ways the commit went wrong.
+
+        Only a credential refusal is reported, and at `degraded`. The other
+        three are deliberately quiet here: a transport failure is a re-run
+        rather than a rotation and crying wolf over one would teach the reader
+        to skip the register, an absent secret is already a red run with its
+        own named error, and an unrecognised failure names itself in the run
+        it happened in. All four are still SAID in the check's detail, because
+        a reader who opens the report should not have to guess which case the
+        PASS covers.
+
+        SKIP rather than FAIL when the Actions API cannot be read. A guard
+        that goes red because it saw nothing is a guard somebody switches off,
+        and `actions: read` is a property of the workflow rather than of this
+        run's data.
+        """
+
+        name = "spei3_producer_is_still_able_to_commit"
+        try:
+            from resolver.diagnostics import producer_commit as producer_mod
+        except Exception as exc:  # noqa: BLE001
+            return self._check(name, "SKIP", "", "", f"reader unavailable: {exc}")
+
+        try:
+            state = producer_mod.read_producer_state()
+        except Exception as exc:  # noqa: BLE001
+            # A collector in the bundle must never fail the phase.
+            return self._check(name, "SKIP", "", "", f"reader raised: {exc}")
+
+        if state.state == "unavailable":
+            return self._check(
+                name, "SKIP", state.state, "a readable last run", state.detail
+            )
+        if not state.is_refused:
+            return self._check(
+                name,
+                "PASS",
+                state.state,
+                "not refused_auth",
+                f"{state.detail}. A transport failure, an absent secret and an "
+                "unrecognised failure are all red runs with their own messages "
+                "and are deliberately not reported here.",
+            )
+        return self._check(
+            name,
+            "FAIL",
+            state.state,
+            "not refused_auth",
+            state.detail,
+            issues=[{
+                "id": "spei3_commit_refused",
+                "severity": issues_mod.DEGRADED,
+                "owner": issue_sources.OWNER_PYTHIA,
+                "title": (
+                    "SPEI3_COMMIT_TOKEN was refused, so the SPEI-3 producer has "
+                    "stopped committing and the drought feed has stopped "
+                    "extending."
+                ),
+                "evidence": (
+                    f"{state.detail} ({state.run_url or 'no run url'}). The token "
+                    "has been revoked, had its permissions narrowed, or lost "
+                    "access to this repository; it needs Contents: read and write "
+                    "plus the ability to bypass branch protection on the default "
+                    "branch. Until it is rotated the drought gate loses its only "
+                    "observation of the months before the HDX and NMME ingests "
+                    "began, one month per cycle. The credential itself carries no "
+                    "expiry, which is why this is the guard rather than a review "
+                    "date — see the `spei3_commit_credential` register entry."
+                ),
+                "recovers_on_rerun": False,
+            }],
+        )
 
     def _check_crisiswatch_entries_accounted_for(self) -> None:
         """Parsed minus stored equals the sum of the per-entry reasons.

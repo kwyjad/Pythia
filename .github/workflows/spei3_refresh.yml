@@ -42,10 +42,15 @@
 #                        pull request is not an alternative, for the reason
 #                        the commit step sets out at length.
 #
-# A fine-grained token expires, and when it does this producer stops
-# committing and the feed silently stops extending — which is registered as
-# `spei3_commit_token_expiry` in resolver/config/known_issues.yml so the run
-# issue register says so before the feed goes stale.
+# The token in use was issued with NO expiry, so it cannot lapse on a
+# schedule and there is no date to warn about. It can still be revoked, have
+# its permissions narrowed, or lose access when the owning account changes —
+# and then this producer stops committing and the feed silently stops
+# extending. So the guard is refusal-based: the commit step classifies a
+# failed push and fails through a step whose NAME carries the class, and the
+# run issue register reads that name and reports `spei3_commit_refused` at
+# `degraded`. The argument for that design lives in the
+# `spei3_commit_credential` entry of resolver/config/known_issues.yml.
 #
 # It is resumable. A CDS request is an asynchronous job that can sit queued
 # for hours against a six-hour job cap, so the fetch carries a deadline and
@@ -84,6 +89,18 @@ concurrency:
         required: false
         default: false
         type: boolean
+      probe:
+        description: >-
+          Ask the CDS what `dataset_type` accepts, and do nothing else. It
+          submits ONE request carrying a deliberately invalid value and prints
+          the refusal, because the CDS names the accepted values when it
+          rejects an out-of-range key. Fetches nothing, reduces nothing,
+          commits nothing. This is how the intermediate release's literal gets
+          settled without guessing it — a wrong enum is refused exactly as a
+          misspelt variable name is.
+        required: false
+        default: false
+        type: boolean
       fetch_deadline_sec:
         description: >-
           Stop STARTING CDS jobs after this many seconds. The remainder is
@@ -93,9 +110,13 @@ concurrency:
         default: "14400"
         type: string
   schedule:
-    # The 10th. ERA5T runs about five days behind and the product updates
-    # monthly, so the 10th is early enough to be current and late enough for
-    # the previous month to exist. Tune it once two cycles have been watched.
+    # The 10th. The consolidated product this producer requests runs 2-3
+    # months behind real time and updates monthly, so no day of the month is
+    # "too early" for it — what the 10th buys is a fixed slot clear of the
+    # ingest chain. (An earlier version of this comment reasoned from ERA5T's
+    # five-day lag, which is the lag of a release this producer does not ask
+    # for; the figure also disagrees with the dataset page, which is the
+    # source to trust.)
     #
     # NOT the 27th or 28th, for the reason haz_backcast.yml documents: crons
     # in this repository are delivered hours late (the 28 Aug 2026 tick
@@ -122,7 +143,94 @@ env:
   STATUS: resolver/data/spei3_status.json
 
 jobs:
+  # Dispatch only, and deliberately a separate job rather than a branch inside
+  # the one below: a probe that shares a job with the producer shares its
+  # checkout token, its cache and its commit step, and the whole point is that
+  # it can touch none of them. It asks one question and exits.
+  probe:
+    name: Ask the CDS what an enum accepts
+    # One line and an explicit ${{ }}: the shell-sanity lint reads line by
+    # line, so a folded `if:` loses the marker that says this is a GitHub
+    # expression and not the `A && B || C` shell idiom it exists to reject.
+    # Both forms of the boolean are compared, because a dispatch input can
+    # arrive as the STRING "false" and every non-empty string is truthy.
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.probe == true || inputs.probe == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # cdsapi alone. The probe needs no scientific stack: it sends a request
+      # that will be refused, so there is nothing to open.
+      - name: Install the CDS client
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install "$(grep -i '^cdsapi' requirements-spei3.txt)"
+
+      - name: Probe dataset_type
+        env:
+          CDSAPI_URL: https://cds.climate.copernicus.eu/api
+          CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CDSAPI_KEY}" ]; then
+            echo "::error title=SPEI-3::CDSAPI_KEY is not configured, so the CDS cannot be asked anything"
+            exit 1
+          fi
+          mkdir -p diagnostics
+          python -m scripts.build_spei3_country_means probe \
+            --key dataset_type \
+            --report-out diagnostics/spei3_probe.json 2>&1 \
+            | tee diagnostics/spei3_probe.log
+
+      - name: Report what the CDS said
+        if: always()
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          path = pathlib.Path("diagnostics/spei3_probe.json")
+          print("## SPEI-3: what the CDS accepts for `dataset_type`\n")
+          if not path.exists():
+              print("The probe wrote no report. Read the step log above.")
+              raise SystemExit(0)
+          report = json.loads(path.read_text("utf-8"))
+          print(f"- sent `dataset_type={report.get('sent', {}).get('dataset_type')}`")
+          print(f"- refused: **{report.get('refused')}**; settled: "
+                f"**{report.get('settled')}**")
+          values = report.get("values") or []
+          if values:
+              print("- accepted values, in the order the CDS listed them:\n")
+              for value in values:
+                  print(f"  - `{value}`")
+              print("\nTake the intermediate release's literal from that list "
+                    "and only then make the switch.")
+          else:
+              print("- the refusal named NO accepted values, so this probe "
+                    "cannot settle the literal. Do not guess one.")
+          print(f"\n- what the CDS said:\n\n```\n{report.get('body') or '(nothing)'}\n```")
+          PY
+
+      - name: Upload the probe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spei3-probe-${{ github.run_id }}
+          path: diagnostics/
+          retention-days: 30
+          if-no-files-found: warn
+
   refresh:
+    # Probe mode asks a question and must not also produce a feed. On a
+    # schedule the inner test is false, so this is true and the producer runs.
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.probe == true || inputs.probe == 'true')) }}
     name: Fetch, reduce, gate, commit
     runs-on: ubuntu-latest
     # Under the six-hour job cap with room for the reduce, the gates and the
@@ -335,16 +443,32 @@ jobs:
       # When the secret is missing the run FAILS naming it. Falling back to
       # anything else would put the producer back where it started while
       # reporting success.
+      # When the secret is missing, or the push is refused, the run FAILS —
+      # but it fails through one of the named steps BELOW rather than here,
+      # and that is the whole point. A refused push cannot commit the record
+      # of its own refusal, so the only durable account of it is this run,
+      # and the register reads the failing STEP NAME off the Actions API.
+      # The names are a contract with
+      # resolver/diagnostics/producer_commit.py::STEP_BY_CLASS; a test holds
+      # this file to them, because renaming one here would silently blind the
+      # guard rather than break it.
+      #
+      # So this step classifies and exits 0. A transport failure earns up to
+      # four attempts with exponential backoff (this repository's own rule); a
+      # refused credential earns exactly one, because retrying a refusal
+      # spends three more requests to be told the same thing.
       - name: Commit the feed
         id: commit
         env:
           COMMIT_TOKEN: ${{ secrets.SPEI3_COMMIT_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           if [ -z "${COMMIT_TOKEN}" ]; then
-            echo "::error title=SPEI-3::SPEI3_COMMIT_TOKEN is not configured, so the feed cannot be committed and this run has produced nothing durable. It needs a fine-grained token with Contents: read and write on this repository, and the ability to bypass branch protection on the default branch. See the header of .github/workflows/spei3_refresh.yml."
-            exit 1
+            echo "class=no_secret" >> "$GITHUB_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Add only what exists. On a failed gate `promote --failed`
@@ -360,6 +484,7 @@ jobs:
           done
           if git diff --cached --quiet; then
             echo "nothing changed: the feed already covers this window"
+            echo "class=ok" >> "$GITHUB_OUTPUT"
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -391,12 +516,40 @@ jobs:
           PY
           cat /tmp/spei3_commit_msg.txt
           git commit -F /tmp/spei3_commit_msg.txt
+          set +e
           # Rebase onto whatever landed while the fetch and reduce ran; a
           # six-hour job is long enough for main to move under it, and the
           # only files this commit touches are ones nothing else writes.
-          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
-          echo "pushed=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          CLASS=""
+          for attempt in 1 2 3 4; do
+            OUT=$( { git pull --rebase --autostash origin "${GITHUB_REF_NAME}" \
+                       && git push origin "HEAD:${GITHUB_REF_NAME}"; } 2>&1 )
+            RC=$?
+            echo "${OUT}"
+            if [ "${RC}" = "0" ]; then
+              CLASS="ok"
+              break
+            fi
+            CLASS=$(printf '%s' "${OUT}" \
+              | python -m resolver.diagnostics.producer_commit --classify)
+            # A classifier that itself fell over must never read as success:
+            # an empty class fires no step below, so the run would go green
+            # having pushed nothing, which is the one outcome this whole
+            # arrangement exists to make impossible.
+            if [ -z "${CLASS}" ]; then
+              CLASS="refused_other"
+            fi
+            echo "attempt ${attempt}: push failed, classified as ${CLASS}"
+            if [ "${CLASS}" != "refused_network" ]; then
+              break
+            fi
+            sleep $(( 2 ** attempt ))
+          done
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          if [ "${CLASS}" = "ok" ]; then
+            echo "pushed=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
 
       - name: Upload the candidate and the reports
         if: always()
@@ -454,6 +607,42 @@ jobs:
           for warning in coverage.get("warnings") or []:
               print(f"- warning: {warning}")
           PY
+
+      # The class of a failed commit, carried out of this run by the NAME of
+      # the step that fails. A refused push cannot commit the record of its
+      # own refusal, so the run itself is the only durable account and the
+      # register reads these names off the Actions API
+      # (resolver/diagnostics/producer_commit.py::STEP_BY_CLASS, which a test
+      # holds this file to). They sit below the artifact upload and the
+      # summary on purpose, so a refusal still leaves its evidence behind.
+      #
+      # Only the credential class reaches the register, and only at
+      # `degraded`. A transport failure is a retry rather than a rotation and
+      # must not cry wolf; an absent secret is a red run with its own named
+      # error, which is where it belongs.
+      - name: "Fail: SPEI3_COMMIT_TOKEN is not configured"
+        if: always() && steps.commit.outputs.class == 'no_secret'
+        run: |
+          echo "::error title=SPEI-3::SPEI3_COMMIT_TOKEN is not configured, so the feed cannot be committed and this run has produced nothing durable. It needs a fine-grained token with Contents: read and write on this repository, and the ability to bypass branch protection on the default branch. See the header of .github/workflows/spei3_refresh.yml."
+          exit 1
+
+      - name: "Fail: SPEI3_COMMIT_TOKEN was refused"
+        if: always() && steps.commit.outputs.class == 'refused_auth'
+        run: |
+          echo "::error title=SPEI-3::the push was REFUSED for an authentication or permission reason, so the SPEI-3 feed has stopped extending. SPEI3_COMMIT_TOKEN has been revoked, had its permissions narrowed, or lost access to this repository. It needs Contents: read and write plus the ability to bypass branch protection on the default branch. Until it is rotated the drought gate loses its only observation of the months before the HDX and NMME ingests began, one month per cycle."
+          exit 1
+
+      - name: "Fail: the push could not reach GitHub"
+        if: always() && steps.commit.outputs.class == 'refused_network'
+        run: |
+          echo "::error title=SPEI-3::the push could not reach GitHub after four attempts. This is a transport failure rather than a credential problem, so the remedy is to re-run this workflow: nothing was lost, and the next run re-plans exactly the window it still owes."
+          exit 1
+
+      - name: "Fail: the commit failed for an unread reason"
+        if: always() && steps.commit.outputs.class == 'refused_other'
+        run: |
+          echo "::error title=SPEI-3::the commit failed and the failure matched neither a credential refusal nor a transport error. Read the Commit the feed step's log: this is a class resolver/diagnostics/producer_commit.py does not yet recognise, and guessing which of the two it is would either retry a bug or send somebody to rotate a working credential."
+          exit 1
 
       # Green when a CDS job is still queued: that is not a fault, and a red
       # run there is indistinguishable from a broken request. Red when a gate

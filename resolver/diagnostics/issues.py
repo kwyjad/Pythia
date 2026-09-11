@@ -36,7 +36,20 @@ decides. Four severities:
 
 A suppression that never expires is how a known issue becomes an invisible
 one, so an entry past its ``review_by`` still reports at ``known`` and adds
-one line saying the entry is overdue.
+one line saying the entry is overdue. An entry with NO review date is overdue
+from its first run, because a blank date is the commonest way to write "never"
+without admitting it.
+
+There is exactly one exception, and it has to say why. ``review_by: never``
+declares that the fault behind an entry has no scheduled arrival — nothing
+about the calendar will make it due — and such an entry must also carry
+``no_review_reason``, which the register prints in place of the overdue line.
+Without the reason the entry is treated as undated, i.e. overdue. The case it
+exists for: ``SPEI3_COMMIT_TOKEN`` was issued with no expiry, so an entry
+warning about its expiry was warning about a date that does not exist, and it
+reported overdue on every run forever. The guard for that credential is
+refusal-based instead (``resolver/diagnostics/producer_commit.py``); the entry
+remains as the place the argument lives.
 """
 
 from __future__ import annotations
@@ -62,6 +75,10 @@ BLOCKING = "blocking"
 DEGRADED = "degraded"
 KNOWN = "known"
 INFO = "info"
+
+#: ``review_by: never`` — the one deliberate no-expiry entry. It counts only
+#: alongside ``no_review_reason``; see ``KnownIssues._is_overdue``.
+NO_REVIEW = "never"
 
 #: Worst first. The report is ordered by this and nothing else, so a
 #: `blocking` issue can never sort below a chatty `info` one.
@@ -118,6 +135,11 @@ class Issue:
     note: str = ""
     review_by: str = ""
     overdue: bool = False
+    #: Why this entry has no review date, when that is deliberate. Set only
+    #: from a ``review_by: never`` entry that supplies it; printed in place of
+    #: the overdue line, so a no-expiry entry still has to argue its case.
+    no_review_reason: str = ""
+
     #: Where the issue came from, so a reader can go to the evidence.
     source: str = ""
     #: The normalised log shape this issue was minted from, where it came
@@ -169,6 +191,7 @@ class Issue:
             "note": self.note,
             "review_by": self.review_by,
             "overdue": self.overdue,
+            "no_review_reason": self.no_review_reason,
             "source": self.source,
             "signature": self.signature,
             "absorbed": list(self.absorbed),
@@ -190,6 +213,7 @@ class Issue:
             note=str(payload.get("note") or ""),
             review_by=str(payload.get("review_by") or ""),
             overdue=bool(payload.get("overdue", False)),
+            no_review_reason=str(payload.get("no_review_reason") or ""),
             source=str(payload.get("source") or ""),
             signature=str(payload.get("signature") or ""),
             absorbed=[str(a) for a in (payload.get("absorbed") or [])],
@@ -261,11 +285,14 @@ class KnownIssues:
         issue.owner = str(entry.get("owner") or issue.owner)
         issue.note = str(entry.get("note") or "")
         issue.review_by = str(entry.get("review_by") or "")
+        issue.no_review_reason = str(entry.get("no_review_reason") or "")
         if entry.get("first_seen"):
             issue.first_seen = str(entry["first_seen"])
         if entry.get("recovers_on_rerun") is not None:
             issue.recovers_on_rerun = bool(entry["recovers_on_rerun"])
-        issue.overdue = self._is_overdue(issue.review_by, today)
+        issue.overdue = self._is_overdue(
+            issue.review_by, today, no_review_reason=issue.no_review_reason
+        )
         return issue
 
     # -- signature absorption -------------------------------------------
@@ -336,8 +363,20 @@ class KnownIssues:
         return self.apply(issue)
 
     @staticmethod
-    def _is_overdue(review_by: str, today: dt.date | None = None) -> bool:
-        if not review_by:
+    def _is_overdue(
+        review_by: str,
+        today: dt.date | None = None,
+        no_review_reason: str = "",
+    ) -> bool:
+        raw = str(review_by or "").strip().lower()
+        if raw == NO_REVIEW:
+            # The one deliberate no-expiry entry, and it has to argue its
+            # case: `never` counts only when the entry also says WHY nothing
+            # about the calendar will make it due. An unexplained `never` is
+            # the same sentence as a blank date, so it is treated as one —
+            # otherwise the field becomes a way to switch the nagging off.
+            return not str(no_review_reason or "").strip()
+        if not raw:
             # An entry with no review date is overdue by construction: a
             # suppression with no expiry is how a known issue becomes an
             # invisible one.
@@ -556,6 +595,13 @@ def render_text(register: IssueRegister, *, run_label: str = "") -> str:
                         "      OVERDUE FOR REVIEW — a suppression with no expiry "
                         "is an invisible fault."
                     )
+                elif issue.no_review_reason:
+                    # Not silence: an entry that never comes due still has to
+                    # say why, every run, where the overdue line would have been.
+                    lines.append(
+                        f"      no review date, deliberately: "
+                        f"{_one_line(issue.no_review_reason, 130)}"
+                    )
                 lines += _absorbed_lines(issue)
                 continue
             if issue.evidence:
@@ -647,6 +693,10 @@ def render_markdown(register: IssueRegister, *, run_label: str = "") -> str:
             lines.append(
                 "- **this register entry is overdue for review.** A suppression "
                 "that never expires is how a known issue becomes an invisible one."
+            )
+        elif issue.no_review_reason and issue.severity == KNOWN:
+            lines.append(
+                f"- no review date, deliberately: {_cell(issue.no_review_reason)}"
             )
         if issue.absorbed:
             # Grouped, not hidden. A registered fault that absorbed four log

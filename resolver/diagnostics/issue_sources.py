@@ -57,7 +57,7 @@ SOURCE_ISSUE_IDS: dict[str, str] = {
 #: being testable for exactly the entries most likely to rot.
 MEASUREMENT_ISSUE_IDS: frozenset[str] = frozenset({
     # scripts/build_resolver_debug_bundle.py
-    "spei3_commit_token_expiry",
+    "spei3_commit_credential",
     "flood_ceiling_exceeded_rate",
 })
 
