@@ -1490,11 +1490,34 @@ def test_the_constraints_route_is_asked_with_our_request_and_with_nothing():
     )
     live = spei.cds_request("2016", ["01"])
     for key, value in live.items():
-        if key == "dataset_type":
+        if key == "dataset_type" or key in spei._CONSTRAINTS_NON_FORM_KEYS:
             continue
         assert ours[key] == value, key
     _dataset, unconstrained = client.constraint_calls[1]
     assert unconstrained == {}
+
+
+def test_the_constrained_call_drops_the_delivery_keys_and_nothing_else():
+    """`/constraints` answers about the form's fields and refuses the rest.
+
+    Run 34591286383 sent the whole request and got "422 ... invalid parameter
+    / invalid param 'data_format'", so that half of the pair never answered —
+    and `only_unconstrained` then came back empty for want of an answer rather
+    than because there was nothing to report, which is the worse failure of
+    the two. The SELECTION keys must all survive, or the question stops being
+    "is this value valid alongside what we ask for".
+    """
+
+    client = _DescribingClient(constraints={"dataset_type": ["consolidated_dataset"]})
+    spei.describe_enum_values(client=client)
+    _dataset, ours = client.constraint_calls[0]
+    for delivery in spei._CONSTRAINTS_NON_FORM_KEYS:
+        assert delivery not in ours, delivery
+    for selection in (
+        "variable", "accumulation_period", "product_type", "version",
+        "year", "month",
+    ):
+        assert selection in ours, selection
 
 
 def test_a_value_valid_only_unconstrained_is_reported_as_its_own_finding():

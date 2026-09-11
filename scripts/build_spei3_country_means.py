@@ -187,14 +187,18 @@ CDS_DATASET = "derived-drought-historical-monthly"
 #: with the better one. That behaviour is already built and tested, and this
 #: is the case it was built for.
 #:
-#: It is NOT done here, for one reason only: the literal is unknown.
-#: ``intermediate_dataset`` is likely by symmetry and a guessed enum is
-#: refused with the same message a misspelt variable name gets, so shipping it
-#: on a guess would turn the gain into an outage that reads like one. Neither
-#: this sandbox nor a browser settles it — the egress proxy denies
-#: cds.climate.copernicus.eu, and the Download tab's "Show API request code"
-#: button only emits whatever the form currently has selected. So the workflow
-#: asks, and there are two ways of asking.
+#: **The literal is ``intermediate_dataset``, and it is now evidence rather
+#: than a guess.** Run 34591286383 asked the CDS and two independent routes
+#: agreed: the ``/constraints`` endpoint and the process description both name
+#: exactly ``consolidated_dataset`` and ``intermediate_dataset``. The switch
+#: still has to be made deliberately — see the two things below it must not
+#: disturb — but there is no longer an unknown in it.
+#:
+#: It was NOT settled by reading around the problem, and the record of how it
+#: was settled is worth keeping. Neither this sandbox nor a browser could do
+#: it: the egress proxy denies cds.climate.copernicus.eu, and the Download
+#: tab's "Show API request code" button only emits whatever the form currently
+#: has selected. So the workflow asks, and there are two ways of asking.
 #:
 #: ``probe`` mode sends one deliberately invalid ``dataset_type`` and reads
 #: the refusal. **It was run on 2026-09-11 (run 34587745561) and came back
@@ -1801,6 +1805,11 @@ class DescribeResult:
         }
 
 
+#: Keys the ``/constraints`` endpoint refuses. They describe how a result is
+#: DELIVERED rather than what is selected, so the form knows nothing about
+#: them and says so with a 422 rather than ignoring them.
+_CONSTRAINTS_NON_FORM_KEYS = ("data_format", "download_format")
+
 #: How much of a payload to keep in the report. Enough for a human to read
 #: the shape when the parser found nothing, bounded so a large process
 #: description does not become the artifact.
@@ -1859,7 +1868,16 @@ def describe_enum_values(
         return result
 
     # Route 1a: the constraints endpoint, with the rest of our request fixed.
-    ours = {k: v for k, v in cds_request("2016", ["01"]).items() if k != key}
+    # The DELIVERY keys are dropped, not the selection ones. `/constraints`
+    # answers about the form's own fields and rejects the rest outright: run
+    # 34591286383 sent the whole request and got
+    # "422 ... invalid parameter / invalid param 'data_format'", so that half
+    # of the pair never answered and `only_unconstrained` came back empty for
+    # want of an answer rather than because there was nothing to report.
+    ours = {
+        k: v for k, v in cds_request("2016", ["01"]).items()
+        if k != key and k not in _CONSTRAINTS_NON_FORM_KEYS
+    }
     for route_name, request in (
         (f"constraints(our request minus {key})", ours),
         ("constraints(nothing fixed)", {}),
