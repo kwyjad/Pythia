@@ -427,8 +427,8 @@ class TestTheShippedRegister:
             "emdat_auth_rejected",
             "acled_cast_stale_vintage",
             "views_stale_vintage",
-            # ...and one of ours: a credential that will expire silently.
-            "spei3_commit_token_expiry",
+            # ...and one of ours: the producer's commit credential.
+            "spei3_commit_credential",
         }
 
     def test_every_entry_names_an_owner_and_a_note(self):
@@ -437,16 +437,16 @@ class TestTheShippedRegister:
             assert entry.get("owner") in ("external", "pythia"), issue_id
             assert entry.get("note"), issue_id
 
-    def test_a_dateless_entry_is_deliberate_and_therefore_always_overdue(self):
-        """One entry has NO review date on purpose, and the register's own
-        rule is what makes that safe: an entry with no date is overdue from
-        the first run, so it nags until somebody fills one in.
+    def test_no_entry_is_dateless_and_the_one_no_expiry_entry_argues_its_case(self):
+        """A blank date is how somebody writes "never" without admitting it.
 
-        `spei3_commit_token_expiry` is that entry. Its rule is "review one
-        month before the token expires", and the expiry is a fact about a
-        credential only its holder can read off a settings page. A date
-        invented here would stop the nagging while warning about nothing —
-        which is precisely the failure the entry exists to prevent.
+        So a blank date stays overdue from the first run, and the ONE entry
+        that genuinely has no expiry says `review_by: never` and supplies a
+        `no_review_reason`, which the register prints where the overdue line
+        would have gone. `spei3_commit_credential` is that entry:
+        SPEI3_COMMIT_TOKEN was issued with no expiration, so the version of
+        this entry that warned about its expiry and carried no date reported
+        overdue on every run, warning about a date that does not exist.
         """
 
         known = mod.KnownIssues.load()
@@ -454,10 +454,30 @@ class TestTheShippedRegister:
             issue_id for issue_id, entry in known.entries.items()
             if not entry.get("review_by")
         }
-        assert dateless == {"spei3_commit_token_expiry"}, dateless
-        issue = mod.Issue(id="spei3_commit_token_expiry", severity=mod.INFO,
+        assert dateless == set(), dateless
+        never = {
+            issue_id for issue_id, entry in known.entries.items()
+            if str(entry.get("review_by") or "").strip().lower() == mod.NO_REVIEW
+        }
+        assert never == {"spei3_commit_credential"}, never
+        for issue_id in never:
+            assert known.entries[issue_id].get("no_review_reason"), issue_id
+        issue = mod.Issue(id="spei3_commit_credential", severity=mod.INFO,
                           title="t", evidence="e")
-        assert known.apply(issue, today=dt.date(2026, 9, 10)).overdue is True
+        applied = known.apply(issue, today=dt.date(2026, 9, 11))
+        assert applied.overdue is False
+        assert "no expiration" in applied.no_review_reason
+
+    def test_an_unexplained_never_is_treated_as_no_date_at_all(self):
+        """Otherwise `never` becomes a way to switch the nagging off.
+
+        The exception is narrow on purpose: it is for a fault whose arrival
+        the calendar cannot predict, not for one whose date nobody looked up.
+        """
+
+        known = mod.KnownIssues(entries={"x": {"id": "x", "review_by": "never"}})
+        issue = mod.Issue(id="x", severity=mod.DEGRADED, title="t", evidence="e")
+        assert known.apply(issue, today=dt.date(2026, 9, 11)).overdue is True
 
     def test_the_review_dates_are_chosen_per_fault_not_stamped_uniformly(self):
         """One date on every entry is a placeholder wearing a date's clothes.
@@ -485,10 +505,12 @@ class TestTheShippedRegister:
         """
 
         known = mod.KnownIssues.load()
-        # The deliberately dateless entry is covered by its own test above.
+        # The one `review_by: never` entry is covered by its own test
+        # above; it is not a date and cannot join a spread.
         dated = {
             issue_id: entry for issue_id, entry in known.entries.items()
             if entry.get("review_by")
+            and str(entry["review_by"]).strip().lower() != mod.NO_REVIEW
         }
         due = sorted(
             dt.date.fromisoformat(str(e["review_by"])) for e in dated.values()
@@ -527,8 +549,9 @@ class TestTheShippedRegister:
         account", the source was stood down in the rulebook, and the date
         moved out six months to match — a date firing monthly against a
         problem nobody is going to act on this quarter teaches people to
-        ignore the register. What is overdue instead is the SPEI-3 commit
-        token entry, which carries no date by design.
+        ignore the register. Nothing is overdue now: the only entry without a
+        review date says `review_by: never` and argues why, because the token
+        it speaks about carries no expiry for a date to arrive at.
         """
 
         known = mod.KnownIssues.load()
@@ -539,7 +562,7 @@ class TestTheShippedRegister:
                               title="t", evidence="e")
             if known.apply(issue, today=today).overdue:
                 overdue.add(issue_id)
-        assert overdue == {"spei3_commit_token_expiry"}, overdue
+        assert overdue == set(), overdue
 
     def test_the_seeded_ids_match_the_ids_the_collectors_emit(self):
         """A register keyed on an id nothing emits suppresses nothing."""

@@ -18,6 +18,13 @@
 # a suppression that never expires is how a known issue becomes an invisible
 # one. An entry with NO review date is treated as overdue from the first run.
 #
+# `review_by: never` is the one exception, and it costs an argument: such an
+# entry must also carry `no_review_reason`, which the register prints where
+# the overdue line would have gone. It is for a fault whose arrival the
+# calendar cannot predict at all — not for one whose date nobody has looked
+# up. An unexplained `never` is the same sentence as a blank date and is
+# treated as one. Exactly one entry below uses it, and it says why at length.
+#
 # A review date is CHOSEN, per fault, from how long its remedy should
 # reasonably take — not a uniform quarter out, which is a placeholder
 # wearing a date's clothes and never fires while anybody is still looking.
@@ -30,7 +37,13 @@
 #   id                 must match the id the collector emits
 #   owner              `external` (someone else must fix it) or `pythia`
 #   note               who is chasing it and what would resolve it
-#   review_by          ISO date; after it, the entry reports as overdue
+#   review_by          ISO date; after it, the entry reports as overdue. The
+#                      literal `never` is the ONE deliberate no-expiry form
+#                      and is honoured only alongside no_review_reason;
+#                      an unexplained `never` counts as no date at all.
+#   no_review_reason   why nothing about the calendar makes this entry due.
+#                      Printed in place of the overdue line, every run, so a
+#                      no-expiry entry still has to argue its case.
 #   first_seen         ISO date the fault was first observed
 #   recovers_on_rerun  optional; overrides the collector's judgement
 #   log_connector      a token that, in a normalised ERROR line, says the
@@ -112,34 +125,48 @@ issues:
       - "unavailable and the cache holds nothing"
       - "invalid key passed or insufficient user access"
 
-  - id: spei3_commit_token_expiry
+  - id: spei3_commit_credential
     owner: pythia
     first_seen: 2026-09-10
-    # DELIBERATELY NO review_by, and the register therefore reports this
-    # entry as overdue on every run until somebody fills one in. That is not
-    # an oversight: the rule for this entry is `review_by` one month before
-    # the token expires, and the expiry date is a fact about a credential
-    # that only its holder can read off the GitHub settings page. Guessing it
-    # would be worse than leaving it blank — a date invented here would stop
-    # the nagging while giving no warning at all when the token actually
-    # lapses, which is precisely the failure this entry exists to prevent.
-    #
-    # To close it: read the expiry from
-    # https://github.com/settings/personal-access-tokens, set review_by to
-    # one month before that date, and note the expiry in the note below.
+    # `never`, and the register only honours that alongthe reason below. This
+    # is the one entry in this file with no review date, and it is not an
+    # oversight: the entry used to be `spei3_commit_token_expiry` with NO
+    # date, which made it report overdue on every run — nagging about an
+    # expiry that does not exist, in the first line of every issue report.
+    review_by: never
+    no_review_reason: >-
+      SPEI3_COMMIT_TOKEN was issued with no expiration, so there is no date
+      for a review to arrive at. A token with no expiry cannot lapse on a
+      schedule, which is why the guard for it is refusal-based rather than
+      date-based: `spei3_commit_refused` reports at `degraded` the moment the
+      producer's push is actually refused. Nothing about the calendar makes
+      this entry due.
     recovers_on_rerun: false
     note: >-
-      SPEI-3 is produced by a scheduled workflow that commits
-      resolver/data/spei3_country_means.csv straight to main using a
-      fine-grained SPEI3_COMMIT_TOKEN, because the default GITHUB_TOKEN
-      cannot push past branch protection (GH006). Fine-grained tokens expire.
-      When this one does, spei3_refresh.yml fails at its commit step and the
-      feed stops extending — the drought gate then loses its only observation
-      before the HDX and NMME ingests began, one month at a time, and nothing
-      else complains because the rulebook entry is `required: false` with
-      `absence_means_no_drought: false`. The remedy is to rotate the token
-      before it lapses; the review date is what makes that happen, and it is
-      blank because the expiry has not been recorded here yet.
+      The SPEI-3 producer pushes resolver/data/spei3_country_means.csv
+      straight to main with a fine-grained SPEI3_COMMIT_TOKEN, because the
+      default GITHUB_TOKEN cannot push past branch protection (GH006) and a
+      pull request it opened would never run its own checks and so could
+      never merge.
+      WHY THERE IS NO REVIEW DATE. The token carries no expiry. The previous
+      version of this entry warned that "a fine-grained token expires" and
+      carried no date, so the register reported it overdue every run: a
+      warning about a date that does not exist, printed first, which is
+      exactly how a reader learns to skip the report. No expiry means no
+      scheduled death and therefore no scheduled warning worth writing.
+      WHAT REPLACES IT. A token with no expiry can still be revoked, have its
+      permissions narrowed, or lose access when the account that owns it
+      changes — and then the producer is refused, the feed stops extending,
+      and the drought gate quietly loses its only observation of the years
+      before the HDX and NMME ingests began. So the guard fires on the
+      REFUSAL. The producer classifies a failed push from git's own words
+      (resolver/diagnostics/producer_commit.py::classify_git_failure) and
+      fails through a step whose NAME carries the class; the register reads
+      that step off the Actions API, because a refused push cannot commit the
+      record of its own refusal. Only the credential class reports, at
+      `degraded`: a transport failure is a retry rather than a rotation, and
+      an absent secret is already a red run with its own named error.
+      This entry stays as the place that argument lives.
 
   - id: acled_cast_stale_vintage
     owner: external

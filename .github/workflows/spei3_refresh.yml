@@ -42,10 +42,15 @@
 #                        pull request is not an alternative, for the reason
 #                        the commit step sets out at length.
 #
-# A fine-grained token expires, and when it does this producer stops
-# committing and the feed silently stops extending — which is registered as
-# `spei3_commit_token_expiry` in resolver/config/known_issues.yml so the run
-# issue register says so before the feed goes stale.
+# The token in use was issued with NO expiry, so it cannot lapse on a
+# schedule and there is no date to warn about. It can still be revoked, have
+# its permissions narrowed, or lose access when the owning account changes —
+# and then this producer stops committing and the feed silently stops
+# extending. So the guard is refusal-based: the commit step classifies a
+# failed push and fails through a step whose NAME carries the class, and the
+# run issue register reads that name and reports `spei3_commit_refused` at
+# `degraded`. The argument for that design lives in the
+# `spei3_commit_credential` entry of resolver/config/known_issues.yml.
 #
 # It is resumable. A CDS request is an asynchronous job that can sit queued
 # for hours against a six-hour job cap, so the fetch carries a deadline and
@@ -335,16 +340,32 @@ jobs:
       # When the secret is missing the run FAILS naming it. Falling back to
       # anything else would put the producer back where it started while
       # reporting success.
+      # When the secret is missing, or the push is refused, the run FAILS —
+      # but it fails through one of the named steps BELOW rather than here,
+      # and that is the whole point. A refused push cannot commit the record
+      # of its own refusal, so the only durable account of it is this run,
+      # and the register reads the failing STEP NAME off the Actions API.
+      # The names are a contract with
+      # resolver/diagnostics/producer_commit.py::STEP_BY_CLASS; a test holds
+      # this file to them, because renaming one here would silently blind the
+      # guard rather than break it.
+      #
+      # So this step classifies and exits 0. A transport failure earns up to
+      # four attempts with exponential backoff (this repository's own rule); a
+      # refused credential earns exactly one, because retrying a refusal
+      # spends three more requests to be told the same thing.
       - name: Commit the feed
         id: commit
         env:
           COMMIT_TOKEN: ${{ secrets.SPEI3_COMMIT_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           if [ -z "${COMMIT_TOKEN}" ]; then
-            echo "::error title=SPEI-3::SPEI3_COMMIT_TOKEN is not configured, so the feed cannot be committed and this run has produced nothing durable. It needs a fine-grained token with Contents: read and write on this repository, and the ability to bypass branch protection on the default branch. See the header of .github/workflows/spei3_refresh.yml."
-            exit 1
+            echo "class=no_secret" >> "$GITHUB_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Add only what exists. On a failed gate `promote --failed`
@@ -360,6 +381,7 @@ jobs:
           done
           if git diff --cached --quiet; then
             echo "nothing changed: the feed already covers this window"
+            echo "class=ok" >> "$GITHUB_OUTPUT"
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -391,12 +413,40 @@ jobs:
           PY
           cat /tmp/spei3_commit_msg.txt
           git commit -F /tmp/spei3_commit_msg.txt
+          set +e
           # Rebase onto whatever landed while the fetch and reduce ran; a
           # six-hour job is long enough for main to move under it, and the
           # only files this commit touches are ones nothing else writes.
-          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
-          echo "pushed=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          CLASS=""
+          for attempt in 1 2 3 4; do
+            OUT=$( { git pull --rebase --autostash origin "${GITHUB_REF_NAME}" \
+                       && git push origin "HEAD:${GITHUB_REF_NAME}"; } 2>&1 )
+            RC=$?
+            echo "${OUT}"
+            if [ "${RC}" = "0" ]; then
+              CLASS="ok"
+              break
+            fi
+            CLASS=$(printf '%s' "${OUT}" \
+              | python -m resolver.diagnostics.producer_commit --classify)
+            # A classifier that itself fell over must never read as success:
+            # an empty class fires no step below, so the run would go green
+            # having pushed nothing, which is the one outcome this whole
+            # arrangement exists to make impossible.
+            if [ -z "${CLASS}" ]; then
+              CLASS="refused_other"
+            fi
+            echo "attempt ${attempt}: push failed, classified as ${CLASS}"
+            if [ "${CLASS}" != "refused_network" ]; then
+              break
+            fi
+            sleep $(( 2 ** attempt ))
+          done
+          echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
+          if [ "${CLASS}" = "ok" ]; then
+            echo "pushed=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
 
       - name: Upload the candidate and the reports
         if: always()
@@ -454,6 +504,42 @@ jobs:
           for warning in coverage.get("warnings") or []:
               print(f"- warning: {warning}")
           PY
+
+      # The class of a failed commit, carried out of this run by the NAME of
+      # the step that fails. A refused push cannot commit the record of its
+      # own refusal, so the run itself is the only durable account and the
+      # register reads these names off the Actions API
+      # (resolver/diagnostics/producer_commit.py::STEP_BY_CLASS, which a test
+      # holds this file to). They sit below the artifact upload and the
+      # summary on purpose, so a refusal still leaves its evidence behind.
+      #
+      # Only the credential class reaches the register, and only at
+      # `degraded`. A transport failure is a retry rather than a rotation and
+      # must not cry wolf; an absent secret is a red run with its own named
+      # error, which is where it belongs.
+      - name: "Fail: SPEI3_COMMIT_TOKEN is not configured"
+        if: always() && steps.commit.outputs.class == 'no_secret'
+        run: |
+          echo "::error title=SPEI-3::SPEI3_COMMIT_TOKEN is not configured, so the feed cannot be committed and this run has produced nothing durable. It needs a fine-grained token with Contents: read and write on this repository, and the ability to bypass branch protection on the default branch. See the header of .github/workflows/spei3_refresh.yml."
+          exit 1
+
+      - name: "Fail: SPEI3_COMMIT_TOKEN was refused"
+        if: always() && steps.commit.outputs.class == 'refused_auth'
+        run: |
+          echo "::error title=SPEI-3::the push was REFUSED for an authentication or permission reason, so the SPEI-3 feed has stopped extending. SPEI3_COMMIT_TOKEN has been revoked, had its permissions narrowed, or lost access to this repository. It needs Contents: read and write plus the ability to bypass branch protection on the default branch. Until it is rotated the drought gate loses its only observation of the months before the HDX and NMME ingests began, one month per cycle."
+          exit 1
+
+      - name: "Fail: the push could not reach GitHub"
+        if: always() && steps.commit.outputs.class == 'refused_network'
+        run: |
+          echo "::error title=SPEI-3::the push could not reach GitHub after four attempts. This is a transport failure rather than a credential problem, so the remedy is to re-run this workflow: nothing was lost, and the next run re-plans exactly the window it still owes."
+          exit 1
+
+      - name: "Fail: the commit failed for an unread reason"
+        if: always() && steps.commit.outputs.class == 'refused_other'
+        run: |
+          echo "::error title=SPEI-3::the commit failed and the failure matched neither a credential refusal nor a transport error. Read the Commit the feed step's log: this is a class resolver/diagnostics/producer_commit.py does not yet recognise, and guessing which of the two it is would either retry a bug or send somebody to rotate a working credential."
+          exit 1
 
       # Green when a CDS job is still queued: that is not a fault, and a red
       # run there is indistinguishable from a broken request. Red when a gate
