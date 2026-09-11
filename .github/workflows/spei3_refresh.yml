@@ -235,10 +235,19 @@ jobs:
                   extra = report.get("only_unconstrained") or []
                   if extra:
                       print("\n- valid in general but NOT with the rest of our "
-                            "request, so a switch to one of these needs another "
-                            "key to move too:\n")
+                            "request:\n")
+                      blocked = report.get("blocked_by") or {}
                       for value in extra:
-                          print(f"  - `{value}`")
+                          keys = blocked.get(value) or []
+                          if keys:
+                              print(f"  - `{value}` — admitted once "
+                                    + " or ".join(f"`{k}`" for k in keys)
+                                    + " is dropped, so a switch has to vary "
+                                      "that rather than replace one constant")
+                          else:
+                              print(f"  - `{value}` — no single key of ours "
+                                    "explains the exclusion, so it is a "
+                                    "combination and wants reading first")
                   print("\nTake the intermediate release's literal from that "
                         "list and only then make the switch.\n")
               else:

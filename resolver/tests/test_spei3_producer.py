@@ -1482,7 +1482,10 @@ def test_the_constraints_route_is_asked_with_our_request_and_with_nothing():
         {"dataset_type": ["consolidated_dataset", "intermediate_dataset"]},
     ])
     result = spei.describe_enum_values(client=client)
-    assert len(client.constraint_calls) == 2
+    # The FIRST TWO calls are the pair. Later ones are the narrowing that
+    # fires because this fixture puts a value in the only-unconstrained
+    # position, which is its own test below.
+    assert len(client.constraint_calls) >= 2
     _dataset, ours = client.constraint_calls[0]
     assert "dataset_type" not in ours, (
         "the key being asked about must not be pinned, or the answer is just "
@@ -1712,3 +1715,112 @@ def test_the_probe_job_reports_even_when_a_route_fails():
     assert "always()" in str(steps["Probe dataset_type"].get("if"))
     assert "always()" in str(steps["Report what the CDS said"].get("if"))
     assert "always()" in str(steps["Upload the probe report"].get("if"))
+
+
+def test_a_value_valid_only_unconstrained_is_narrowed_to_the_key_that_blocks_it():
+    """Run 34591513359 put `intermediate_dataset` in exactly this position:
+    allowed in general, refused alongside the rest of our request. "Something
+    excludes it" is not a repair; the key's name is, and it is the difference
+    between a switch that is one constant and a switch that has to vary per
+    month. So the probe asks, one read per key, rather than reasoning about it.
+    """
+
+    class _Selective:
+        """Admits the value only when `year` is absent."""
+
+        def __init__(self):
+            self.client = self
+            self.calls = []
+
+        def apply_constraints(self, dataset, request):
+            self.calls.append(dict(request))
+            if not request:
+                return {"dataset_type": ["consolidated_dataset", "intermediate_dataset"]}
+            if "year" in request:
+                return {"dataset_type": ["consolidated_dataset"]}
+            return {"dataset_type": ["consolidated_dataset", "intermediate_dataset"]}
+
+        def get_process(self, dataset):
+            return type("_P", (), {"json": {}})()
+
+    client = _Selective()
+    result = spei.describe_enum_values(client=client)
+    assert result.only_unconstrained == ["intermediate_dataset"]
+    assert result.blocked_by == {"intermediate_dataset": ["year"]}
+    assert "Dropping year admits 'intermediate_dataset'" in result.detail
+    assert "vary that rather than replace one constant" in result.detail
+
+
+def test_an_exclusion_no_single_key_explains_says_so():
+    """A combination of two keys is a different repair from one, and naming
+    the wrong one is worse than naming none."""
+
+    class _Stubborn:
+        def __init__(self):
+            self.client = self
+
+        def apply_constraints(self, dataset, request):
+            if not request:
+                return {"dataset_type": ["consolidated_dataset", "intermediate_dataset"]}
+            return {"dataset_type": ["consolidated_dataset"]}
+
+        def get_process(self, dataset):
+            return type("_P", (), {"json": {}})()
+
+    result = spei.describe_enum_values(client=_Stubborn())
+    assert result.only_unconstrained == ["intermediate_dataset"]
+    assert result.blocked_by == {}
+    assert "No single key of ours explains" in result.detail
+    assert "combination" in result.detail
+
+
+def test_narrowing_costs_one_read_per_key_and_never_retrieves():
+    """It is a read, and a bounded one: one call per key of ours, no more."""
+
+    class _Counting:
+        def __init__(self):
+            self.client = self
+            self.n = 0
+
+        def apply_constraints(self, dataset, request):
+            self.n += 1
+            if not request:
+                return {"dataset_type": ["consolidated_dataset", "intermediate_dataset"]}
+            return {"dataset_type": ["consolidated_dataset"]}
+
+        def get_process(self, dataset):
+            return type("_P", (), {"json": {}})()
+
+        def retrieve(self, *a, **k):  # pragma: no cover
+            raise AssertionError("narrowing must never retrieve")
+
+    client = _Counting()
+    spei.describe_enum_values(client=client)
+    ours = {
+        k for k in spei.cds_request("2016", ["01"])
+        if k != "dataset_type" and k not in spei._CONSTRAINTS_NON_FORM_KEYS
+    }
+    # Two pair calls, plus one per key of ours.
+    assert client.n == 2 + len(ours)
+
+
+def test_narrowing_is_skipped_when_nothing_needs_it():
+    """The ordinary case must cost nothing extra."""
+
+    class _Agreeing:
+        def __init__(self):
+            self.client = self
+            self.n = 0
+
+        def apply_constraints(self, dataset, request):
+            self.n += 1
+            return {"dataset_type": ["consolidated_dataset", "intermediate_dataset"]}
+
+        def get_process(self, dataset):
+            return type("_P", (), {"json": {}})()
+
+    client = _Agreeing()
+    result = spei.describe_enum_values(client=client)
+    assert result.only_unconstrained == []
+    assert result.blocked_by == {}
+    assert client.n == 2

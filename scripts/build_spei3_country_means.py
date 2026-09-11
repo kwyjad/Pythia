@@ -190,9 +190,20 @@ CDS_DATASET = "derived-drought-historical-monthly"
 #: **The literal is ``intermediate_dataset``, and it is now evidence rather
 #: than a guess.** Run 34591286383 asked the CDS and two independent routes
 #: agreed: the ``/constraints`` endpoint and the process description both name
-#: exactly ``consolidated_dataset`` and ``intermediate_dataset``. The switch
-#: still has to be made deliberately — see the two things below it must not
-#: disturb — but there is no longer an unknown in it.
+#: exactly ``consolidated_dataset`` and ``intermediate_dataset``.
+#:
+#: **And the switch is NOT one constant, which the same probe established.**
+#: Run 34591513359 asked the constraints endpoint with the rest of our request
+#: fixed and got ``consolidated_dataset`` ALONE: ``intermediate_dataset`` is
+#: allowed by the dataset and refused alongside what we ask for. The narrowing
+#: names the key. Whichever it is, the shape of the repair follows from it —
+#: if it is ``year`` or ``month`` then the intermediate release covers only
+#: the recent end, which is exactly what a one-month-lagged product would do,
+#: and the producer has to choose the ``dataset_type`` PER MONTH rather than
+#: carry one constant: intermediate for the months the consolidated release
+#: does not yet hold, consolidated for everything behind it. That is also the
+#: arrangement the trailing revision window already assumes, so it costs a
+#: per-month decision in ``cds_request`` rather than a redesign.
 #:
 #: It was NOT settled by reading around the problem, and the record of how it
 #: was settled is worth keeping. Neither this sandbox nor a browser could do
@@ -1769,6 +1780,10 @@ class DescribeResult:
     values: list[str] = field(default_factory=list)
     source_route: str = ""
     unconstrained: list[str] = field(default_factory=list)
+    #: For a value valid only unconstrained: which of our own keys, dropped,
+    #: admits it. Empty when nothing needed narrowing, or when no single key
+    #: explains the exclusion.
+    blocked_by: dict[str, list[str]] = field(default_factory=dict)
     detail: str = ""
 
     @property
@@ -1800,6 +1815,7 @@ class DescribeResult:
             "source_route": self.source_route,
             "unconstrained": list(self.unconstrained),
             "only_unconstrained": list(self.only_unconstrained),
+            "blocked_by": {k: list(v) for k, v in self.blocked_by.items()},
             "routes": [route.as_dict() for route in self.routes],
             "detail": self.detail,
         }
@@ -1838,6 +1854,38 @@ def _describe_api(client: Any) -> Any:
             "constraints API and this borrow needs re-pointing"
         )
     return api
+
+
+def narrow_exclusion(
+    api: Any,
+    key: str,
+    value: str,
+    ours: Mapping[str, Any],
+) -> list[str]:
+    """Which of OUR keys, dropped, admits ``value`` for ``key``.
+
+    Asked rather than reasoned about, one read per key. A value the service
+    allows in general and refuses alongside our request is excluded by
+    something, and "something" is not a repair — the key's name is. Run
+    34591513359 found `intermediate_dataset` in exactly that position, which
+    is the difference between a switch that is one constant and a switch that
+    has to vary per month.
+
+    Returns the keys whose removal admits the value, in request order. An
+    empty list means no single key explains it, which is itself worth saying:
+    a combination of two is a different repair again.
+    """
+
+    admitted: list[str] = []
+    for dropped in list(ours):
+        probe = {k: v for k, v in ours.items() if k != dropped}
+        try:
+            payload = api.apply_constraints(CDS_DATASET, probe)
+        except Exception:  # noqa: BLE001 - a failed narrowing is not a finding
+            continue
+        if value in parse_constraints_payload(payload, key):
+            admitted.append(dropped)
+    return admitted
 
 
 def describe_enum_values(
@@ -1925,13 +1973,33 @@ def describe_enum_values(
             f"the CDS named {len(result.values)} accepted value(s) for {key} "
             f"via {result.source_route}"
         )
+        for value in result.only_unconstrained:
+            blockers = narrow_exclusion(api, key, value, ours)
+            if blockers:
+                result.blocked_by[value] = blockers
         if result.only_unconstrained:
             result.detail += (
                 "; and "
                 + ", ".join(repr(v) for v in result.only_unconstrained)
                 + " is valid in general but NOT alongside the rest of our "
-                "request, so switching to it needs another key to move too"
+                "request"
             )
+            for value, blockers in result.blocked_by.items():
+                result.detail += (
+                    f". Dropping {' or '.join(blockers)} admits {value!r}, so a "
+                    "switch has to vary that rather than replace one constant"
+                )
+            unexplained = [
+                v for v in result.only_unconstrained
+                if v not in result.blocked_by
+            ]
+            if unexplained:
+                result.detail += (
+                    ". No single key of ours explains the exclusion of "
+                    + ", ".join(repr(v) for v in unexplained)
+                    + ", so it is a combination and wants reading before a "
+                    "switch"
+                )
     else:
         asked = ", ".join(
             f"{route.route} ({'read' if route.ok else route.error})"
