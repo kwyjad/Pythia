@@ -89,6 +89,18 @@ concurrency:
         required: false
         default: false
         type: boolean
+      probe:
+        description: >-
+          Ask the CDS what `dataset_type` accepts, and do nothing else. It
+          submits ONE request carrying a deliberately invalid value and prints
+          the refusal, because the CDS names the accepted values when it
+          rejects an out-of-range key. Fetches nothing, reduces nothing,
+          commits nothing. This is how the intermediate release's literal gets
+          settled without guessing it — a wrong enum is refused exactly as a
+          misspelt variable name is.
+        required: false
+        default: false
+        type: boolean
       fetch_deadline_sec:
         description: >-
           Stop STARTING CDS jobs after this many seconds. The remainder is
@@ -98,9 +110,13 @@ concurrency:
         default: "14400"
         type: string
   schedule:
-    # The 10th. ERA5T runs about five days behind and the product updates
-    # monthly, so the 10th is early enough to be current and late enough for
-    # the previous month to exist. Tune it once two cycles have been watched.
+    # The 10th. The consolidated product this producer requests runs 2-3
+    # months behind real time and updates monthly, so no day of the month is
+    # "too early" for it — what the 10th buys is a fixed slot clear of the
+    # ingest chain. (An earlier version of this comment reasoned from ERA5T's
+    # five-day lag, which is the lag of a release this producer does not ask
+    # for; the figure also disagrees with the dataset page, which is the
+    # source to trust.)
     #
     # NOT the 27th or 28th, for the reason haz_backcast.yml documents: crons
     # in this repository are delivered hours late (the 28 Aug 2026 tick
@@ -127,7 +143,94 @@ env:
   STATUS: resolver/data/spei3_status.json
 
 jobs:
+  # Dispatch only, and deliberately a separate job rather than a branch inside
+  # the one below: a probe that shares a job with the producer shares its
+  # checkout token, its cache and its commit step, and the whole point is that
+  # it can touch none of them. It asks one question and exits.
+  probe:
+    name: Ask the CDS what an enum accepts
+    # One line and an explicit ${{ }}: the shell-sanity lint reads line by
+    # line, so a folded `if:` loses the marker that says this is a GitHub
+    # expression and not the `A && B || C` shell idiom it exists to reject.
+    # Both forms of the boolean are compared, because a dispatch input can
+    # arrive as the STRING "false" and every non-empty string is truthy.
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.probe == true || inputs.probe == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # cdsapi alone. The probe needs no scientific stack: it sends a request
+      # that will be refused, so there is nothing to open.
+      - name: Install the CDS client
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install "$(grep -i '^cdsapi' requirements-spei3.txt)"
+
+      - name: Probe dataset_type
+        env:
+          CDSAPI_URL: https://cds.climate.copernicus.eu/api
+          CDSAPI_KEY: ${{ secrets.CDSAPI_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CDSAPI_KEY}" ]; then
+            echo "::error title=SPEI-3::CDSAPI_KEY is not configured, so the CDS cannot be asked anything"
+            exit 1
+          fi
+          mkdir -p diagnostics
+          python -m scripts.build_spei3_country_means probe \
+            --key dataset_type \
+            --report-out diagnostics/spei3_probe.json 2>&1 \
+            | tee diagnostics/spei3_probe.log
+
+      - name: Report what the CDS said
+        if: always()
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          path = pathlib.Path("diagnostics/spei3_probe.json")
+          print("## SPEI-3: what the CDS accepts for `dataset_type`\n")
+          if not path.exists():
+              print("The probe wrote no report. Read the step log above.")
+              raise SystemExit(0)
+          report = json.loads(path.read_text("utf-8"))
+          print(f"- sent `dataset_type={report.get('sent', {}).get('dataset_type')}`")
+          print(f"- refused: **{report.get('refused')}**; settled: "
+                f"**{report.get('settled')}**")
+          values = report.get("values") or []
+          if values:
+              print("- accepted values, in the order the CDS listed them:\n")
+              for value in values:
+                  print(f"  - `{value}`")
+              print("\nTake the intermediate release's literal from that list "
+                    "and only then make the switch.")
+          else:
+              print("- the refusal named NO accepted values, so this probe "
+                    "cannot settle the literal. Do not guess one.")
+          print(f"\n- what the CDS said:\n\n```\n{report.get('body') or '(nothing)'}\n```")
+          PY
+
+      - name: Upload the probe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spei3-probe-${{ github.run_id }}
+          path: diagnostics/
+          retention-days: 30
+          if-no-files-found: warn
+
   refresh:
+    # Probe mode asks a question and must not also produce a feed. On a
+    # schedule the inner test is false, so this is true and the producer runs.
+    if: ${{ !(github.event_name == 'workflow_dispatch' && (inputs.probe == true || inputs.probe == 'true')) }}
     name: Fetch, reduce, gate, commit
     runs-on: ubuntu-latest
     # Under the six-hour job cap with room for the reduce, the gates and the

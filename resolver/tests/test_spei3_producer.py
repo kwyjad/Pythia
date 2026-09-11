@@ -1202,3 +1202,169 @@ def test_the_workflow_avoids_the_days_the_monthly_chain_owns():
         assert day_of_month not in ("27", "28")
         assert "27" not in day_of_month.split(",")
         assert "28" not in day_of_month.split(",")
+
+
+# ---------------------------------------------------------------------------
+# probe mode: ask the CDS what an enum accepts rather than guessing
+# ---------------------------------------------------------------------------
+#
+# The intermediate release's `dataset_type` literal is unknown.
+# `intermediate_dataset` is likely by symmetry, and a guessed enum is refused
+# with the same message a misspelt variable name gets — so shipping the switch
+# on a guess would turn a two-month gain in the feed's leading edge into an
+# outage that reads like one. The CDS names accepted values when it rejects an
+# out-of-range key, so the workflow asks it.
+
+
+class _RefusingClient:
+    """A CDS client that refuses, and records that it was asked exactly once."""
+
+    def __init__(self, message):
+        self.message = message
+        self.calls = []
+
+    def retrieve(self, dataset, request, target):
+        self.calls.append((dataset, dict(request), target))
+        raise RuntimeError(self.message)
+
+
+@pytest.mark.parametrize("body", [
+    "Invalid value for 'dataset_type'. Allowed values: "
+    "['consolidated_dataset', 'intermediate_dataset']",
+    "400 Client Error: dataset_type must be one of: consolidated_dataset, "
+    "intermediate_dataset",
+    "invalid request: 'dataset_type' is not a valid value, expected one of "
+    "[consolidated_dataset, intermediate_dataset]",
+])
+def test_the_probe_reads_the_accepted_values_out_of_a_refusal(body):
+    """Several shapes, because the wording is not ours to fix.
+
+    A changed sentence should cost the sentence, not the reading, which is why
+    the literals are pulled out of whatever fragment a pattern isolated rather
+    than captured group by group.
+    """
+
+    assert spei.parse_probe_refusal(body) == [
+        "consolidated_dataset", "intermediate_dataset",
+    ]
+
+
+def test_the_probe_value_itself_is_never_reported_as_an_accepted_one():
+    """It appears in the body the CDS echoes back, and offering it as an
+    answer would be the probe teaching itself its own invented literal."""
+
+    body = (
+        f"Invalid value {spei.PROBE_INVALID_VALUE!r} for 'dataset_type'. "
+        "Allowed values: ['consolidated_dataset', 'intermediate_dataset']"
+    )
+    assert spei.PROBE_INVALID_VALUE not in spei.parse_probe_refusal(body)
+
+
+def test_a_refusal_that_names_nothing_is_reported_and_never_guessed():
+    """The one outcome that stops the switch. Saying so is the answer; a
+    plausible-looking guess here is how a feed goes dark for a cycle."""
+
+    client = _RefusingClient("Internal Server Error")
+    result = spei.probe_enum_values(client=client)
+    assert result.refused is True
+    assert result.values == []
+    assert result.settled is False
+    assert "cannot settle" in result.detail
+    assert "Do not guess" in result.detail
+
+
+def test_the_probe_sends_one_request_and_asks_for_one_month():
+    """It exists to be refused, so there is nothing to download — and a probe
+    that quietly pulled tens of megabytes would not be a probe."""
+
+    client = _RefusingClient("Allowed values: ['consolidated_dataset']")
+    spei.probe_enum_values(client=client)
+    assert len(client.calls) == 1
+    _dataset, request, _target = client.calls[0]
+    assert request["dataset_type"] == spei.PROBE_INVALID_VALUE
+    assert request["year"] == ["2016"]
+    assert request["month"] == ["01"]
+
+
+def test_the_probe_borrows_the_real_request_shape():
+    """Otherwise it would answer a question about a request nobody sends.
+
+    Every mandatory key the live request carries has to be present and right,
+    or the refusal names the missing key instead of the enum being probed.
+    """
+
+    client = _RefusingClient("Allowed values: ['consolidated_dataset']")
+    spei.probe_enum_values(client=client)
+    _dataset, request, _target = client.calls[0]
+    live = spei.cds_request("2016", ["01"])
+    for key, value in live.items():
+        if key == "dataset_type":
+            continue
+        assert request[key] == value, key
+
+
+def test_an_accepted_probe_is_unsettled_rather_than_a_success():
+    """If the CDS accepts a value built to be invalid, either the key is being
+    ignored or the value collides with a real one. Nothing was learnt, and
+    reporting it as settled would be reporting a guess as a measurement."""
+
+    class _Accepting:
+        def retrieve(self, dataset, request, target):
+            return None
+
+    result = spei.probe_enum_values(client=_Accepting())
+    assert result.refused is False
+    assert result.settled is False
+    assert "ACCEPTED" in result.detail
+
+
+def test_probe_mode_writes_no_feed_and_no_status(tmp_path, monkeypatch):
+    """Fetches nothing, writes nothing, commits nothing — the contract the
+    workflow's separate job exists to keep."""
+
+    client = _RefusingClient("Allowed values: ['consolidated_dataset']")
+    real = spei.probe_enum_values
+    monkeypatch.setattr(spei, "probe_enum_values",
+                        lambda *a, **k: real(*a, client=client, **k))
+    report = tmp_path / "probe.json"
+    rc = spei.main(["probe", "--report-out", str(report)])
+    assert rc == 0
+    written = {p.name for p in tmp_path.iterdir()}
+    assert written == {"probe.json"}, written
+    assert json.loads(report.read_text("utf-8"))["values"] == ["consolidated_dataset"]
+
+
+def test_the_probe_always_exits_zero_because_a_question_is_not_a_fault(tmp_path, monkeypatch):
+    client = _RefusingClient("Internal Server Error")
+    real = spei.probe_enum_values
+    monkeypatch.setattr(spei, "probe_enum_values",
+                        lambda *a, **k: real(*a, client=client, **k))
+    assert spei.main(["probe", "--report-out", str(tmp_path / "p.json")]) == 0
+
+
+def test_the_workflow_runs_the_probe_in_a_job_that_cannot_produce_a_feed():
+    """A probe sharing the producer's job shares its checkout token, its cache
+    and its commit step, and the whole point is that it touches none of them.
+    """
+
+    yaml = pytest.importorskip("yaml")
+    workflow = (
+        Path(__file__).resolve().parents[2]
+        / ".github" / "workflows" / "spei3_refresh.yml"
+    )
+    doc = yaml.safe_load(workflow.read_text("utf-8"))
+    assert "probe" in doc["jobs"], "probe mode has no job of its own"
+    probe_job = doc["jobs"]["probe"]
+    # Dispatch only.
+    assert "workflow_dispatch" in str(probe_job["if"])
+    names = [str(step.get("name") or step.get("uses") or "") for step in probe_job["steps"]]
+    for forbidden in ("Commit", "Promote", "Reduce", "Fetch the grid", "cache"):
+        assert not any(forbidden.lower() in n.lower() for n in names), forbidden
+    # And the producer stands aside while a probe runs, or one dispatch would
+    # both ask the question and rebuild the feed.
+    refresh_if = str(doc["jobs"]["refresh"]["if"])
+    assert "inputs.probe" in refresh_if
+    # NEGATED, not merely mentioning the input: a condition that referenced
+    # `probe` without inverting it would read fine and run the producer on
+    # every probe dispatch.
+    assert "!(" in refresh_if, refresh_if
