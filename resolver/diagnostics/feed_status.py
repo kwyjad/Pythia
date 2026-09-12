@@ -47,22 +47,48 @@ SPEI3_FEED = "spei3_country_means"
 SPEI3_STATUS_PATH = REPO_ROOT / "resolver" / "data" / "spei3_status.json"
 SPEI3_FEED_PATH = REPO_ROOT / "resolver" / "data" / "spei3_country_means.csv"
 
-#: How far behind real time the CONSOLIDATED ERA5-Drought product itself
-#: runs, measured in complete months behind the previous complete month.
+#: How far behind real time each ERA5-Drought release runs, measured in
+#: complete months behind the previous complete month.
 #:
-#: This is a property of the upstream, not of our producer, and it has to be
-#: stated separately or the staleness threshold below reads as pure
-#: tolerance. Copernicus documents the consolidated dataset as updated
-#: "2-3 months behind real time" (the intermediate release, ERA5T, is one
-#: month behind). Measured against the feed on 2026-09-10: the newest month
-#: served was 2026-05 against a previous complete month of 2026-08, so a
-#: healthy feed sat exactly 3 behind — the documented worst case, and the
-#: number to work from rather than the optimistic end of the range.
+#: A property of the upstream, not of our producer, and it has to be stated
+#: apart from the tolerance below or the staleness threshold reads as pure
+#: slack. Copernicus documents the consolidated release as updated "2-3
+#: months behind real time" and the intermediate one as a single month
+#: behind; the worst case of the range is taken, because this decides when
+#: an alarm fires. Measured against the feed on 2026-09-10, before the
+#: switch: newest month served 2026-05 against a previous complete month of
+#: 2026-08, so a healthy consolidated-only feed sat at exactly 3.
 #:
-#: The producer's own request asks for ``dataset_type: consolidated_dataset``
-#: (see ``scripts/build_spei3_country_means.py``), so this is the lag that
-#: applies. Change one and change the other.
-PRODUCT_LAG_MONTHS = 3
+#: Ignore the figure of five days that a C3S presentation slide gives. It
+#: disagrees with the dataset page and describes ERA5T rather than either of
+#: these releases. It is what the version before this one reasoned from, and
+#: it left the healthy feed one month from an alarm on every run.
+PRODUCT_LAG_BY_DATASET_TYPE = {
+    "consolidated_dataset": 3,
+    "intermediate_dataset": 1,
+}
+
+#: The lag to assume when the status file does not say which release its
+#: newest month came from — a file written before the producer requested
+#: more than one, when every month it covered was consolidated.
+PRODUCT_LAG_MONTHS = PRODUCT_LAG_BY_DATASET_TYPE["consolidated_dataset"]
+
+
+def product_lag_months(dataset_type: str | None) -> int:
+    """The lag of the release the feed's newest month actually came from.
+
+    Read from the feed rather than fixed, because it is the producer's
+    request that decides it and the two move together. Fixing it as a
+    literal is how the version before this one came to describe a release
+    the producer does not ask for; and during a switch between releases a
+    literal is wrong for a month in the other direction too — the threshold
+    would tighten before the feed it measures had caught up, and report a
+    fault nobody could act on any faster.
+    """
+
+    return PRODUCT_LAG_BY_DATASET_TYPE.get(
+        str(dataset_type or "").strip(), PRODUCT_LAG_MONTHS
+    )
 
 #: Cycles of the monthly producer that may be missed before silence is a
 #: fault. ONE. A single missed cycle has honest explanations — a CDS job
@@ -78,15 +104,27 @@ MISSED_CYCLE_TOLERANCE_MONTHS = 1
 #: How far behind the previous complete month the newest covered month may
 #: fall before the feed is reported stale.
 #:
-#: Expressed as the product's own lag PLUS the tolerance, because the two
-#: are different facts and a single literal hides that. The earlier value
-#: was 3 with a comment reasoning from ERA5T's five-day lag — which is the
-#: lag of a product this producer does not request. Against the consolidated
-#: product's real 3-month lag that left ZERO margin: the healthy feed sat at
-#: exactly 3 on 2026-09-10, one month from an alarm that would have fired on
-#: every run while nothing was wrong. A check that cannot pass is worse than
-#: an absent one, because it teaches the reader to skip the report.
+#: Always the lag of the release that month came from PLUS the tolerance,
+#: because the two are different facts and a single literal hides that. The
+#: value here is the fallback and the widest of the two: the check itself
+#: computes the bound per run from the feed's own newest release (see
+#: `max_lag_for` and `read_feed_status`), so the threshold tightens as the
+#: producer moves to the intermediate release and not a month before.
+#:
+#: The value before this one was 3 with a comment reasoning from ERA5T's
+#: five-day lag — the lag of a product the producer does not request — which
+#: against the consolidated release's real 3-month lag left ZERO margin: the
+#: healthy feed sat at exactly 3 on 2026-09-10, one month from an alarm that
+#: would have fired on every run while nothing was wrong. A check that
+#: cannot pass is worse than an absent one, because it teaches the reader to
+#: skip the report.
 MAX_LAG_MONTHS = PRODUCT_LAG_MONTHS + MISSED_CYCLE_TOLERANCE_MONTHS
+
+
+def max_lag_for(dataset_type: str | None) -> int:
+    """The staleness bound for a feed whose newest month came from ``dataset_type``."""
+
+    return product_lag_months(dataset_type) + MISSED_CYCLE_TOLERANCE_MONTHS
 
 STATE_OK = "ok"
 STATE_STALE = "stale"
@@ -175,6 +213,12 @@ class FeedStatus:
     countries: int = 0
     months_behind: int | None = None
     reference_month: str = ""
+    #: Which CDS release the newest covered month came from, and the bound
+    #: derived from it. Reported rather than only used, because "3 months
+    #: behind" is a fault under one release and healthy under the other, and
+    #: a reader cannot tell which without being told.
+    newest_month_dataset_type: str = ""
+    max_lag_months: int | None = None
     coverage: dict[str, int] = field(default_factory=dict)
     months_owed: list[str] = field(default_factory=list)
     last_success_run_id: str = ""
@@ -198,6 +242,8 @@ class FeedStatus:
             "countries": self.countries,
             "months_behind": self.months_behind,
             "reference_month": self.reference_month,
+            "newest_month_dataset_type": self.newest_month_dataset_type,
+            "max_lag_months": self.max_lag_months,
             "coverage": dict(self.coverage),
             "months_owed": list(self.months_owed),
             "last_success_run_id": self.last_success_run_id,
@@ -226,7 +272,7 @@ def read_feed_status(
     path: Path | str | None = None,
     *,
     today: dt.date | None = None,
-    max_lag_months: int = MAX_LAG_MONTHS,
+    max_lag_months: int | None = None,
     feed: str = SPEI3_FEED,
 ) -> FeedStatus:
     """The feed's state, ready for the register and for the backcast.
@@ -235,6 +281,10 @@ def read_feed_status(
     ``stale``: a feed whose producer has never succeeded and one whose
     producer stopped succeeding are different faults with different repairs,
     and reporting both as "stale" sends the reader to the wrong one.
+
+    ``max_lag_months`` defaults to the bound derived from the release the
+    feed's own newest month came from, so the threshold describes the
+    product actually being requested. Pass one to override it.
     """
 
     target = Path(path) if path is not None else SPEI3_STATUS_PATH
@@ -245,9 +295,15 @@ def read_feed_status(
         return FeedStatus(
             feed=feed, state=state, path=str(target),
             reference_month=reference, detail=problem,
+            max_lag_months=max_lag_months
+            if max_lag_months is not None else MAX_LAG_MONTHS,
         )
 
     newest = str(payload.get("newest_month") or "")
+    newest_release = str(payload.get("newest_month_dataset_type") or "")
+    bound = (
+        max_lag_months if max_lag_months is not None else max_lag_for(newest_release)
+    )
     lag = months_behind(newest, reference) if newest else None
     status = FeedStatus(
         feed=str(payload.get("feed") or feed),
@@ -260,6 +316,8 @@ def read_feed_status(
         countries=int(payload.get("countries") or 0),
         months_behind=lag,
         reference_month=reference,
+        newest_month_dataset_type=newest_release,
+        max_lag_months=bound,
         coverage={str(k): int(v) for k, v in (payload.get("coverage") or {}).items()},
         months_owed=[str(m) for m in (payload.get("months_owed") or [])],
         last_success_run_id=str(payload.get("last_success_run_id") or ""),
@@ -272,11 +330,18 @@ def read_feed_status(
     if not newest:
         status.state = STATE_ABSENT
         status.detail = "the status file names no covered month"
-    elif lag is not None and lag > max_lag_months:
+    elif lag is not None and lag > bound:
         status.state = STATE_STALE
         status.detail = (
             f"the newest month covered is {newest}, {lag} month(s) behind "
-            f"{reference} (limit {max_lag_months})"
+            f"{reference} (limit {bound}"
+            + (
+                f", the {newest_release} release running "
+                f"{product_lag_months(newest_release)} month(s) behind plus "
+                f"{MISSED_CYCLE_TOLERANCE_MONTHS} for a missed cycle)"
+                if newest_release
+                else ")"
+            )
         )
     elif reported == STATE_FAILED:
         status.state = STATE_FAILED
@@ -329,6 +394,7 @@ def spei3_restale_request(path: Path | str | None = None) -> RestaleRequest | No
 
 __all__ = [
     "MAX_LAG_MONTHS", "MISSED_CYCLE_TOLERANCE_MONTHS", "PRODUCT_LAG_MONTHS",
+    "PRODUCT_LAG_BY_DATASET_TYPE", "product_lag_months", "max_lag_for",
     "SPEI3_FEED", "SPEI3_FEED_PATH", "SPEI3_STATUS_PATH",
     "STATE_ABSENT", "STATE_FAILED", "STATE_INCOMPLETE", "STATE_OK",
     "STATE_STALE", "STATE_UNREADABLE",

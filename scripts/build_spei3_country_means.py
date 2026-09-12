@@ -177,15 +177,21 @@ CDS_DATASET = "derived-drought-historical-monthly"
 #: 2-3 months, intermediate one month, and the dataset's own update date that
 #: day was 2026-09-10, so it is actively maintained.
 #:
-#: Switching to the intermediate release would buy roughly two months of
-#: leading edge — a feed reaching about 2026-08 rather than 2026-05, which
-#: covers 2026-06, the newest month the backcast needs and the one the
-#: consolidated product cannot supply. The merge-on-``(iso3, ym)`` write plus
-#: the trailing revision window handle the upgrade with no migration: pull the
-#: intermediate value now, and when the consolidated version of that month
-#: appears the trailing window re-requests it and the merge replaces the row
-#: with the better one. That behaviour is already built and tested, and this
-#: is the case it was built for.
+#: **The producer requests BOTH releases, one per month**, which buys roughly
+#: two months of leading edge — a feed reaching about 2026-07 rather than
+#: 2026-05, which covers 2026-06, the newest month the backcast needs and the
+#: one the consolidated release cannot supply. :func:`dataset_type_for` makes
+#: the choice; :func:`cds_request` takes it as an argument; `fetch_grids`
+#: asks per (year, release) and names the files so one cannot answer for the
+#: other.
+#:
+#: The upgrade back to the settled value needs no migration. Every row
+#: carries the release it came from, `plan_window` re-requests any month
+#: still holding an intermediate value whose consolidated version should now
+#: exist, and the merge-on-``(iso3, ym)`` write replaces the row. That is a
+#: fact about the file checked every run, rather than a bet on how long the
+#: upstream takes — which matters, because the upstream states its own lag as
+#: a range.
 #:
 #: **The literal is ``intermediate_dataset``, and it is now evidence rather
 #: than a guess.** Run 34591286383 asked the CDS and two independent routes
@@ -201,15 +207,11 @@ CDS_DATASET = "derived-drought-historical-monthly"
 #:
 #: So the intermediate release covers only the recent end of the record, which
 #: is exactly what a one-month-lagged product would do and is the reason a
-#: probe asking about 2016 could never accept it. The producer therefore has to
-#: choose ``dataset_type`` PER YEAR rather than carry one constant:
-#: intermediate for the months the consolidated release does not yet hold,
-#: consolidated for everything behind them. `cds_request` already takes the
-#: year as an argument, and `fetch_grids` already asks one year at a time, so
-#: this is a decision inside a function that has the year in hand rather than a
-#: redesign — and the trailing revision window is what then replaces an
-#: intermediate value with its consolidated version when that appears, which is
-#: the arrangement it was built for.
+#: probe asking about 2016 could never accept it. The producer therefore
+#: chooses ``dataset_type`` PER MONTH rather than carrying one constant, and
+#: `fetch_grids` groups the choice into one request per (year, release) — a
+#: year at the boundary needs both, which is why the resume check and the raw
+#: filenames key on the pair and not on the year alone.
 #:
 #: It was NOT settled by reading around the problem, and the record of how it
 #: was settled is worth keeping. Neither this sandbox nor a browser could do
@@ -230,17 +232,20 @@ CDS_DATASET = "derived-drought-historical-monthly"
 #: ``describe`` mode asks the service for its own schema instead of inferring
 #: it from a complaint: the ``/constraints`` endpoint the web form itself
 #: calls, and the process description's input schemas. See
-#: :func:`describe_enum_values`. Take the literal from that output and only
-#: then make the switch.
+#: :func:`describe_enum_values`. That is where the literal above came from,
+#: and the probe is kept beside it because it is the only route that proves
+#: every OTHER key in the request is accepted.
 #:
-#: Two things the switch must not disturb, recorded here while the reasoning
-#: is fresh. ``REVISION_WINDOW_MONTHS`` has to be long enough to re-request a
-#: month AFTER its consolidated version appears, which is roughly three months
-#: later than the intermediate one — otherwise intermediate values become
-#: permanent. And ``feed_status.PRODUCT_LAG_MONTHS`` describes whichever
-#: product is requested, so it changes with this literal; keep it stated apart
-#: from the missed-cycle tolerance, which is the mistake the version before it
-#: made by reasoning from a lag the producer does not ask for.
+#: Three things the switch moved with it, and they move again together if the
+#: request ever changes release. ``REVISION_WINDOW_MONTHS`` widened to six,
+#: with its derivation stated where it is defined — though the upgrade no
+#: longer depends on it, because the ``dataset_type`` column does that job.
+#: The committed CSV gained that column. And
+#: ``feed_status.PRODUCT_LAG_BY_DATASET_TYPE`` holds a lag per release, with
+#: the status file naming the release its newest month came from, so the
+#: staleness threshold describes the product actually requested rather than a
+#: literal somebody has to remember — which is the mistake the version before
+#: it made, by reasoning from a lag the producer does not ask for.
 #:
 #: **The rest of this shape came from the ECMWF forum thread announcing
 #: the release, and the first live run confirmed it**: eleven years were
@@ -250,10 +255,74 @@ CDS_DATASET = "derived-drought-historical-monthly"
 CDS_VARIABLE = "standardised_precipitation_evapotranspiration_index"
 CDS_ACCUMULATION_PERIOD = "3"
 CDS_PRODUCT_TYPE = "reanalysis"
-CDS_DATASET_TYPE = "consolidated_dataset"
 CDS_VERSION = "1_0"
 CDS_DATA_FORMAT = "netcdf"
 CDS_DOWNLOAD_FORMAT = "zip"
+
+#: The two releases, and how many complete months behind real time each one
+#: runs. Both figures come from the dataset page, read on 2026-09-11, which
+#: states them in its overview text and again in its Data description table.
+#:
+#: Ignore the figure of five days that a C3S presentation slide gives. It
+#: disagrees with the dataset page and it describes ERA5T rather than either
+#: of these releases; it is what the version before this one reasoned the
+#: revision window and the staleness threshold from, and both numbers were
+#: wrong as a result.
+#:
+#: The consolidated lag is the DOCUMENTED WORST CASE of the 2-3 months the
+#: page states, and it is taken rather than the optimistic end on purpose:
+#: it decides which product a month is asked from, and the two mistakes are
+#: not symmetric. Asking consolidated for a month it does not hold loses the
+#: month until the next cycle. Asking intermediate for a month consolidated
+#: already holds stores a slightly earlier version of a correct value, which
+#: `plan_window` re-requests as soon as it can be upgraded. Measured against
+#: the live feed on 2026-09-10: newest month served 2026-05 against a
+#: previous complete month of 2026-08, so exactly 3.
+CDS_DATASET_TYPE_CONSOLIDATED = "consolidated_dataset"
+CDS_DATASET_TYPE_INTERMEDIATE = "intermediate_dataset"
+CONSOLIDATED_LAG_MONTHS = 3
+INTERMEDIATE_LAG_MONTHS = 1
+
+#: The default for the routes that need A request rather than a request for a
+#: particular month: `probe` and `describe` both build one to borrow its shape,
+#: and every other key in it is what they are asking about.
+CDS_DATASET_TYPE = CDS_DATASET_TYPE_CONSOLIDATED
+
+#: How the raw file for one (year, product) is named. The product is in the
+#: name because two products can serve the same year and the fetch's resume
+#: check reads the disk: without it, the consolidated file for 2026 would
+#: answer for the intermediate request that covers the rest of that year, and
+#: the newest months would never be asked for again. The YEAR stays first so
+#: the workflow's cache prune, which keeps `spei3_<year>*`, still keeps both.
+_DATASET_TYPE_TAGS = {
+    CDS_DATASET_TYPE_CONSOLIDATED: "consolidated",
+    CDS_DATASET_TYPE_INTERMEDIATE: "intermediate",
+}
+
+
+def dataset_type_for(ym: str, *, today: dt.date | None = None) -> str:
+    """Which release can be expected to hold ``ym``.
+
+    The consolidated release runs 2-3 months behind and the intermediate one
+    a single month, so the recent end of the record exists only in the second
+    — which is why a probe asking about 2016 could never accept it, and why
+    this is a decision per month rather than one constant.
+
+    Older months take the consolidated release deliberately, even though the
+    intermediate one may still carry some of them: consolidated values are
+    built on final ERA5 and are not revised again, and a settled value is
+    what a decade of base rates should rest on.
+    """
+
+    newest_consolidated = shift_months(
+        previous_complete_month(today), -CONSOLIDATED_LAG_MONTHS
+    )
+    return (
+        CDS_DATASET_TYPE_INTERMEDIATE
+        if str(ym) > newest_consolidated
+        else CDS_DATASET_TYPE_CONSOLIDATED
+    )
+
 
 #: The first month the series is built for. Before 2016 the drought path
 #: has no indicator at all; this is the hole it exists to fill.
@@ -268,6 +337,20 @@ COVERAGE_NONE = "no_value"
 # ---------------------------------------------------------------------------
 # Month arithmetic (calendar months, never 30-day jumps)
 # ---------------------------------------------------------------------------
+
+
+def shift_months(ym: str, delta: int) -> str:
+    """``ym`` moved ``delta`` calendar months. Never a 30-day jump.
+
+    The same rule `month_range` steps by, as one step: a lag expressed in
+    months has to be subtracted in months, or a producer asking "what did
+    the upstream publish three months ago" skips February every leap year
+    and December every other one.
+    """
+
+    year, month = (int(part) for part in str(ym).split("-"))
+    index = year * 12 + (month - 1) + int(delta)
+    return f"{index // 12:04d}-{index % 12 + 1:02d}"
 
 
 def month_range(start_ym: str, end_ym: str) -> list[str]:
@@ -320,6 +403,12 @@ class Grid:
     lats: Sequence[float]
     lons: Sequence[float]
     values: Sequence[Sequence[float | None]]
+    #: Which CDS release this month was downloaded from. Carried through to
+    #: the committed CSV so a reader (and the next run's planner) can tell a
+    #: settled consolidated value from an intermediate one that is still to
+    #: be superseded. Defaulted so every existing construction of a Grid,
+    #: in tests and in code, keeps working unchanged.
+    dataset_type: str = ""
 
 
 @dataclass
@@ -580,7 +669,8 @@ def reduce_grids(
     """Country means for every month in ``grids``.
 
     Returns ``(rows, report)`` where a row is
-    ``{"iso3", "ym", "value", "coverage", "n_cells"}``. A country with no
+    ``{"iso3", "ym", "value", "coverage", "n_cells", "dataset_type"}``. A
+    country with no
     value in a month writes NO row: an absent reading is unknown, and the
     rulebook entry is ``absence_means_no_drought: false`` precisely so
     that absence cannot be read as a quiet month.
@@ -618,6 +708,7 @@ def reduce_grids(
                     "value": round(float(result.value), 4),
                     "coverage": result.coverage,
                     "n_cells": result.n_cells,
+                    "dataset_type": grid.dataset_type,
                 }
             )
 
@@ -629,15 +720,22 @@ def reduce_grids(
 def write_csv(rows: Sequence[dict[str, Any]], out: Path) -> None:
     """Write the feed the ``tabular`` provider reads.
 
-    ``iso3,ym,value`` are the columns that provider looks for; ``coverage``
-    and ``n_cells`` ride along so a reader can tell a country whose value
-    is a mean of two hundred cells from one sampled off the nearest.
+    ``iso3,ym,value`` are the columns that provider looks for; ``coverage``,
+    ``n_cells`` and ``dataset_type`` ride along so a reader can tell a
+    country whose value is a mean of two hundred cells from one sampled off
+    the nearest, and a settled value from one still to be superseded. The
+    reader picks its value by column NAME, so the extra columns cost it
+    nothing.
     """
 
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(
             fh, fieldnames=list(CSV_FIELDS),
+            # A row from before a column existed writes a blank rather than
+            # raising: the merge carries decade-old rows forward untouched,
+            # and adding a column must never be able to fail the write.
+            restval="",
             # LF, not the csv module's default CRLF. This file is committed
             # and read in diffs, and every other CSV under resolver/data uses
             # LF; a lone CRLF file makes every review of it noisier for no
@@ -740,15 +838,91 @@ def unpack_if_archive(path: Path) -> list[Path]:
     return written
 
 
-def year_files(raw_dir: Path, year: str) -> list[Path]:
-    """Everything on disk for one year, archived or unpacked.
+def unit_files(raw_dir: Path, year: str, dataset_type: str) -> list[Path]:
+    """Everything on disk for one (year, release), archived or unpacked.
 
     The fetch's resume check reads this rather than one filename, because a
-    year that has been unpacked no longer has the name it was downloaded
+    unit that has been unpacked no longer has the name it was downloaded
     under and re-downloading it costs 95 MB to learn nothing.
+
+    It keys on the PAIR, not on the year. A year can legitimately need both
+    releases — consolidated for the months behind its lag, intermediate for
+    the recent end — and a check on the year alone would let the first file
+    that landed answer for the second request, so the newest months would
+    never be asked for again. That is the `spei3_2016.nc` versus
+    `spei3_2016__data.nc` trap wearing a different hat, and it is permanent
+    rather than merely wasteful.
     """
 
-    return sorted(p for p in raw_dir.glob(f"spei3_{year}*") if p.is_file())
+    tag = _DATASET_TYPE_TAGS.get(dataset_type, dataset_type)
+    # ``.nc`` only: the unit also writes a small ``.months.json`` manifest
+    # beside its grid (see :func:`unit_covers`), and counting that as data
+    # would let a manifest left behind by a pruned year answer for a grid
+    # that is no longer there.
+    return sorted(
+        p for p in raw_dir.glob(f"spei3_{year}_{tag}*.nc") if p.is_file()
+    )
+
+
+def _unit_manifest(raw_dir: Path, year: str, dataset_type: str) -> Path:
+    tag = _DATASET_TYPE_TAGS.get(dataset_type, dataset_type)
+    return raw_dir / f"spei3_{year}_{tag}.months.json"
+
+
+def record_unit_months(
+    raw_dir: Path, year: str, dataset_type: str, months: Sequence[str]
+) -> None:
+    """Write down which months a downloaded unit actually holds."""
+
+    _unit_manifest(raw_dir, year, dataset_type).write_text(
+        json.dumps(sorted(f"{int(m):02d}" for m in months)), encoding="utf-8"
+    )
+
+
+def unit_covers(
+    raw_dir: Path, year: str, dataset_type: str, months: Sequence[str]
+) -> bool:
+    """May the file on disk answer for ``months``, or must it be re-asked?
+
+    The resume check's other half, and it closes a hole the switch made
+    reachable. A unit's month-set is not fixed: a year at the boundary now
+    splits between the releases, and an operator re-dispatching with
+    different ``from_ym``/``to_ym`` changes it too. Skipping on the presence
+    of a file alone would then leave a month silently never fetched, recorded
+    absent with a reason, on a green run — and the next run would skip it
+    again for the same reason.
+
+    A file written before this manifest existed answers for whatever is
+    asked of it, which is the old behaviour: a cached unit from a run that
+    predates this is far likelier to be complete than to be worth
+    re-downloading 95 MB on suspicion.
+    """
+
+    manifest = _unit_manifest(raw_dir, year, dataset_type)
+    if not manifest.exists():
+        return True
+    try:
+        held = {str(m) for m in json.loads(manifest.read_text("utf-8"))}
+    except (OSError, ValueError):
+        return True
+    return {f"{int(m):02d}" for m in months}.issubset(held)
+
+
+def dataset_type_of_file(path: Path) -> str:
+    """Which release a downloaded grid came from, read off its own name.
+
+    A file written before the producer requested more than one release
+    carries no tag, and it is read as consolidated: that is the only release
+    this producer had ever asked for, so the claim is about history rather
+    than a guess. Such a file is replaced by a tagged one the first time its
+    year is fetched again.
+    """
+
+    stem = Path(path).name
+    for dataset_type, tag in _DATASET_TYPE_TAGS.items():
+        if f"_{tag}" in stem:
+            return dataset_type
+    return CDS_DATASET_TYPE_CONSOLIDATED
 
 
 def load_grids_from_dir(raw_dir: Path) -> dict[str, Grid]:
@@ -770,6 +944,7 @@ def load_grids_from_dir(raw_dir: Path) -> dict[str, Grid]:
 
     grids: dict[str, Grid] = {}
     for path in sorted(raw_dir.glob("*.nc")):
+        dataset_type = dataset_type_of_file(path)
         kind = sniff_container(path)
         if not kind.startswith("netcdf"):
             # Named, not swallowed: xarray's own complaint is about the IO
@@ -796,8 +971,46 @@ def load_grids_from_dir(raw_dir: Path) -> dict[str, Grid]:
                     [None if np.isnan(v) else float(v) for v in row]
                     for row in np.asarray(slab.values, dtype="float64")
                 ]
-                grids[ym] = Grid(lats=lats, lons=lons, values=values)
+                held = grids.get(ym)
+                if held is not None and not _supersedes(dataset_type, held.dataset_type):
+                    # Both releases are on disk for this month, which the
+                    # cache makes routine: a month asked for as intermediate
+                    # in September is asked for as consolidated in December,
+                    # and the trailing years are kept between runs. The
+                    # settled value wins, said out loud rather than left to
+                    # whichever filename happened to sort later.
+                    LOG.info(
+                        "[spei3] %s: keeping the %s grid over the %s one in %s",
+                        ym, held.dataset_type, dataset_type, path.name,
+                    )
+                    continue
+                if held is not None:
+                    LOG.info(
+                        "[spei3] %s: the %s grid in %s supersedes the %s one",
+                        ym, dataset_type, path.name, held.dataset_type,
+                    )
+                grids[ym] = Grid(
+                    lats=lats, lons=lons, values=values, dataset_type=dataset_type
+                )
     return grids
+
+
+def _supersedes(incoming: str, held: str) -> bool:
+    """May a grid from ``incoming`` replace one already read from ``held``?
+
+    Only the consolidated release supersedes, and only the intermediate one
+    is superseded. Consolidated values are built on final ERA5 and are not
+    revised again; an intermediate value is explicitly experimental and
+    subject to change, so replacing one with the other in that direction
+    would be a downgrade wearing a refresh's clothes.
+    """
+
+    if held == incoming:
+        return True
+    return (
+        incoming == CDS_DATASET_TYPE_CONSOLIDATED
+        and held == CDS_DATASET_TYPE_INTERMEDIATE
+    )
 
 
 def _spei_variable_name(ds: Any) -> str:
@@ -836,7 +1049,38 @@ def _coord_name(da: Any, candidates: Sequence[str]) -> str:
 # The committed CSV: read, merge, write
 # ---------------------------------------------------------------------------
 
-CSV_FIELDS = ("iso3", "ym", "value", "coverage", "n_cells")
+#: The committed feed's columns.
+#:
+#: ``dataset_type`` was added with the move to the intermediate release, and
+#: it is not decoration: it is what lets the next run tell a settled
+#: consolidated value from an intermediate one still waiting to be
+#: superseded, which is what makes the upgrade self-healing rather than a
+#: bet on the length of the revision window. See `plan_window`.
+#:
+#: Adding a column to a committed CSV rewrites every line whichever way it
+#: is done, so the 29,625 rows already in the file were migrated in the
+#: commit that introduced the column — deliberately, on its own, rather than
+#: leaving it to happen inside the first producer run's diff where the real
+#: change would be a handful of months. They were all stamped
+#: ``consolidated_dataset``, which is a true statement rather than a guess:
+#: it is the only release this producer had ever requested.
+#:
+#: `row_dataset_type` still reads a blank as consolidated, for a row a hand
+#: edit or an older tool leaves without one.
+CSV_FIELDS = ("iso3", "ym", "value", "coverage", "n_cells", "dataset_type")
+
+
+def row_dataset_type(row: Mapping[str, Any]) -> str:
+    """Which release a committed row came from.
+
+    A blank means the row predates the column, and every such row came from
+    the consolidated release: it is the only one the producer requested
+    before this. That is a statement about this repository's history rather
+    than a guess about the file, which is why it can be made here and not
+    written into the file.
+    """
+
+    return str(row.get("dataset_type") or "").strip() or CDS_DATASET_TYPE_CONSOLIDATED
 
 
 def read_csv_rows(path: Path) -> list[dict[str, Any]]:
@@ -864,6 +1108,7 @@ def read_csv_rows(path: Path) -> list[dict[str, Any]]:
                 "value": str(row.get("value") or "").strip(),
                 "coverage": str(row.get("coverage") or "").strip(),
                 "n_cells": str(row.get("n_cells") or "").strip(),
+                "dataset_type": str(row.get("dataset_type") or "").strip(),
             })
     return out
 
@@ -930,27 +1175,30 @@ def months_gaining_coverage(
 
 #: How many trailing months are re-fetched every run whatever the CSV says.
 #:
-#: Under the CONSOLIDATED product this producer currently requests, the values
-#: are built on final ERA5 and are not revised afterwards, so this window is
-#: belt-and-braces: `plan` already re-asks for any month the CSV is missing,
-#: and four months simply means a republished month is picked up too.
+#: Six, reasoned as: the gap between the two releases is two months (the
+#: intermediate one runs a month behind real time, the consolidated one
+#: three), plus a cycle for the run that does the upgrade to happen at all,
+#: plus three more for missed cycles. A missed cycle here costs the upgrade
+#: rather than the coverage, so the margin is cheap and the shortfall is
+#: quiet, which is exactly the combination that wants slack.
 #:
-#: It becomes LOAD-BEARING the moment the request moves to the intermediate
-#: release. Those values are built on ERA5T, which is documented as
-#: experimental and subject to change, and they are superseded by the
-#: consolidated version of the same month roughly three months later — so the
-#: window has to be long enough to re-request a month AFTER its consolidated
-#: version appears, or the intermediate value becomes permanent. Four is not
-#: enough of a margin for that on its own: the gap between the two releases is
-#: about two months (one behind against three behind), so a window of four
-#: leaves two months of slack for a missed cycle, and a missed cycle costs the
-#: upgrade rather than the coverage. Widen it with the switch, and say what the
-#: new number is reasoned from. See CDS_DATASET_TYPE for the whole argument.
+#: It is NOT what makes the upgrade happen, and that is the important half.
+#: A window is a bet on how long the upstream takes, and this upstream
+#: documents its own lag as a RANGE. So `plan_window` re-requests a month
+#: because the CSV says it is still holding an intermediate value and the
+#: consolidated release should now hold it — a fact about the file, checked
+#: every run, true however long the gap turns out to be. The window is back
+#: to being belt-and-braces: it catches a month republished for some reason
+#: nobody predicted.
+#:
+#: Cost of widening: the trailing months fall inside one or two calendar
+#: years, and a request is per (year, release), so six months is the same
+#: one or two CDS jobs four months was.
 #:
 #: The comment this replaces reasoned from "ERA5T runs about five days
 #: behind", which is a figure from a C3S slide that disagrees with the dataset
 #: page AND describes a release this producer does not request.
-REVISION_WINDOW_MONTHS = 4
+REVISION_WINDOW_MONTHS = 6
 
 
 @dataclass
@@ -960,6 +1208,12 @@ class Window:
     months: list[str] = field(default_factory=list)
     revision_months: list[str] = field(default_factory=list)
     missing_months: list[str] = field(default_factory=list)
+    #: Months the CSV holds from the intermediate release whose consolidated
+    #: version should now exist. Reported apart from the other two because
+    #: they mean something different to a reader: the feed already covers
+    #: these months, and this run is replacing a provisional value with a
+    #: settled one.
+    upgradeable_months: list[str] = field(default_factory=list)
     start_ym: str = ""
     end_ym: str = ""
     full_rebuild: bool = False
@@ -973,6 +1227,7 @@ class Window:
             "months": self.months,
             "revision_months": self.revision_months,
             "missing_months": self.missing_months,
+            "upgradeable_months": self.upgradeable_months,
             "years": self.years,
             "start_ym": self.start_ym,
             "end_ym": self.end_ym,
@@ -985,10 +1240,29 @@ class Window:
             months=[str(m) for m in payload.get("months") or []],
             revision_months=[str(m) for m in payload.get("revision_months") or []],
             missing_months=[str(m) for m in payload.get("missing_months") or []],
+            upgradeable_months=[
+                str(m) for m in payload.get("upgradeable_months") or []
+            ],
             start_ym=str(payload.get("start_ym") or ""),
             end_ym=str(payload.get("end_ym") or ""),
             full_rebuild=bool(payload.get("full_rebuild")),
         )
+
+
+def months_held_from(
+    rows: Sequence[Mapping[str, Any]], dataset_type: str
+) -> set[str]:
+    """Months the committed feed holds at least one ``dataset_type`` row for.
+
+    At least one, not all: a month is reduced from one grid, so its rows
+    share a release — but a merge only replaces the countries the new reduce
+    produced, so a month CAN end up mixed, and a month still carrying one
+    intermediate row is still a month worth upgrading.
+    """
+
+    return {
+        str(row["ym"]) for row in rows if row_dataset_type(row) == dataset_type
+    }
 
 
 def plan_window(
@@ -998,22 +1272,31 @@ def plan_window(
     end_ym: str | None = None,
     revision_months: int = REVISION_WINDOW_MONTHS,
     full_rebuild: bool = False,
+    intermediate_months: Iterable[str] = (),
+    today: dt.date | None = None,
 ) -> Window:
     """The months this run owes. Never a hardcoded range.
 
-    Two halves, and the second is what makes the producer self-healing:
+    Three halves, and the last two are what make the producer self-healing:
 
-    * a trailing revision window, because ERA5T is revised later and the
-      first version of a month is not its last;
+    * a trailing revision window, for a month republished for a reason
+      nobody predicted;
     * every month inside the configured range that the committed CSV does
       not hold — so a month lost to a CDS job that timed out is picked up
-      on the next cycle with nobody noticing it went missing.
+      on the next cycle with nobody noticing it went missing;
+    * every month the CSV holds from the INTERMEDIATE release whose
+      consolidated version should now exist. Intermediate values are
+      documented as experimental and subject to change, so leaving one in
+      place once the settled version is available would make a provisional
+      number permanent. Asking the file which months are provisional beats
+      betting on the length of the revision window: the upstream states its
+      own lag as a range, and this is a fact rather than an estimate.
 
     A closed year the CSV already covers is never re-fetched: the CSV is
     the durable artifact and the raw grids are disposable.
     """
 
-    end = end_ym or previous_complete_month()
+    end = end_ym or previous_complete_month(today)
     every = month_range(start_ym, end)
     if full_rebuild:
         return Window(
@@ -1023,11 +1306,18 @@ def plan_window(
     held = {str(m) for m in existing_months}
     revision = every[-revision_months:] if revision_months > 0 else []
     missing = [ym for ym in every if ym not in held]
-    months = sorted(set(revision) | set(missing))
+    upgradeable = [
+        ym
+        for ym in every
+        if ym in {str(m) for m in intermediate_months}
+        and dataset_type_for(ym, today=today) == CDS_DATASET_TYPE_CONSOLIDATED
+    ]
+    months = sorted(set(revision) | set(missing) | set(upgradeable))
     return Window(
         months=months,
         revision_months=sorted(set(revision)),
         missing_months=missing,
+        upgradeable_months=upgradeable,
         start_ym=start_ym,
         end_ym=end,
         full_rebuild=False,
@@ -1047,6 +1337,35 @@ SANITY_SOFT_LIMIT = 5.0
 #: (NetCDF's usual fill) reaching the feed would make the whole month read
 #: as wet, and the rulebook thresholds at -1.0 sigma.
 SANITY_HARD_LIMIT = 6.0
+
+#: How far the mean of the intermediate rows may sit from the mean of the
+#: consolidated ones before the candidate is refused, in sigma.
+#:
+#: The check exists because the switch to the intermediate release is the one
+#: change that could quietly substitute a different quantity: same request,
+#: same parser, same gates, one enum. SPEI is standardised, so a correct
+#: reduction of either release lands near 0 with a spread near 1 — measured
+#: on the 29,625-row consolidated backfill of 2026-09-10, mean -0.086 and
+#: sd 0.969.
+#:
+#: The reference is the candidate's OWN consolidated rows rather than those
+#: two literals: a decade of them is a better comparison than a frozen pair,
+#: and a frozen pair rots. The literals stay here as the evidence for the
+#: band.
+#:
+#: A whole sigma of global mean shift is not weather — the intermediate
+#: sample is a month or three, so it is legitimately noisy, but a genuinely
+#: dry global month moves the mean by a few tenths and not by one. The sd
+#: ratio catches the other shape of the same fault: a changed unit or a
+#: different variable rescales the spread rather than sliding it.
+INTERMEDIATE_MEAN_SHIFT_LIMIT = 1.0
+INTERMEDIATE_SD_RATIO_LIMITS = (0.5, 2.0)
+
+#: Below this many rows on either side the comparison says nothing, so it is
+#: SKIPPED with a stated reason rather than passed. A gate that cannot run
+#: must say so: a silent pass is indistinguishable from a real one, and this
+#: is the gate guarding the change it ships with.
+INTERMEDIATE_MIN_ROWS = 100
 
 #: How far the sampled share may move between runs before the candidate is
 #: refused. The share of countries resolved off the NEAREST cell rather
@@ -1071,6 +1390,11 @@ class Validation:
     nearest_share: float | None = None
     previous_nearest_share: float | None = None
     changed_months: list[str] = field(default_factory=list)
+    #: The intermediate-versus-consolidated comparison, reported whether or
+    #: not it decided anything. The numbers are the point: they are how a
+    #: reader sees the switch landed, and a gate that only speaks when it
+    #: fails leaves them to be re-derived by hand.
+    release_comparison: dict[str, Any] = field(default_factory=dict)
 
     def fail(self, message: str) -> None:
         self.ok = False
@@ -1088,6 +1412,7 @@ class Validation:
             "nearest_share": self.nearest_share,
             "previous_nearest_share": self.previous_nearest_share,
             "changed_months": self.changed_months,
+            "release_comparison": self.release_comparison,
         }
 
 
@@ -1097,6 +1422,105 @@ def _float_or_none(text: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return None if math.isnan(value) else value
+
+
+def _mean_and_sd(values: Sequence[float]) -> tuple[float, float] | None:
+    """Sample mean and standard deviation, or None below two values.
+
+    Written out rather than delegated, for the same reason the quantile in
+    `base_rates.py` is: this repository's tests pin the definition, and the
+    sd here is the sample one (n-1), which is what a comparison of two
+    samples wants.
+    """
+
+    if len(values) < 2:
+        return None
+    mean = sum(values) / len(values)
+    variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    return mean, math.sqrt(variance)
+
+
+def compare_releases(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Do the intermediate rows look like the consolidated ones?
+
+    The only quality check the switch to the intermediate release actually
+    needs. Everything else about the request is unchanged — same variable,
+    same accumulation period, same parser, same reduction — so the failure
+    this is guarding against is the narrow one: that enum naming a different
+    quantity, which would show up as a shifted mean or a rescaled spread
+    rather than as an error.
+
+    Returns the numbers on both sides whatever the verdict, and says why
+    when it declines to reach one.
+    """
+
+    by_release: dict[str, list[float]] = {}
+    for row in rows:
+        value = _float_or_none(row.get("value"))
+        if value is None:
+            continue
+        by_release.setdefault(row_dataset_type(row), []).append(value)
+
+    consolidated = by_release.get(CDS_DATASET_TYPE_CONSOLIDATED, [])
+    intermediate = by_release.get(CDS_DATASET_TYPE_INTERMEDIATE, [])
+    report: dict[str, Any] = {
+        "consolidated_rows": len(consolidated),
+        "intermediate_rows": len(intermediate),
+        "verdict": "",
+        "reason": "",
+    }
+    for label, values in (
+        ("consolidated", consolidated), ("intermediate", intermediate),
+    ):
+        stats = _mean_and_sd(values)
+        if stats is not None:
+            report[f"{label}_mean"] = round(stats[0], 4)
+            report[f"{label}_sd"] = round(stats[1], 4)
+
+    if not intermediate:
+        report["verdict"] = "skipped"
+        report["reason"] = "the feed holds no rows from the intermediate release"
+        return report
+    if len(intermediate) < INTERMEDIATE_MIN_ROWS or len(consolidated) < INTERMEDIATE_MIN_ROWS:
+        report["verdict"] = "skipped"
+        report["reason"] = (
+            f"one side is below {INTERMEDIATE_MIN_ROWS} rows "
+            f"({len(consolidated)} consolidated, {len(intermediate)} intermediate), "
+            "so a comparison of their spreads says nothing"
+        )
+        return report
+
+    shift = abs(report["intermediate_mean"] - report["consolidated_mean"])
+    ratio = (
+        report["intermediate_sd"] / report["consolidated_sd"]
+        if report["consolidated_sd"]
+        else None
+    )
+    report["mean_shift"] = round(shift, 4)
+    report["sd_ratio"] = round(ratio, 4) if ratio is not None else None
+    low, high = INTERMEDIATE_SD_RATIO_LIMITS
+    problems: list[str] = []
+    if shift > INTERMEDIATE_MEAN_SHIFT_LIMIT:
+        problems.append(
+            f"the intermediate mean sits {shift:.3f} sigma from the consolidated "
+            f"one ({report['intermediate_mean']:.3f} against "
+            f"{report['consolidated_mean']:.3f}, limit "
+            f"{INTERMEDIATE_MEAN_SHIFT_LIMIT:g})"
+        )
+    if ratio is None or not (low <= ratio <= high):
+        problems.append(
+            f"the intermediate spread is {report['intermediate_sd']:.3f} against "
+            f"{report['consolidated_sd']:.3f} "
+            f"(ratio {ratio if ratio is None else round(ratio, 3)}, "
+            f"limits {low:g}-{high:g})"
+        )
+    report["verdict"] = "fail" if problems else "ok"
+    report["reason"] = (
+        "; ".join(problems)
+        if problems
+        else "the two releases agree on mean and spread"
+    )
+    return report
 
 
 def _nearest_share(rows: Sequence[Mapping[str, Any]]) -> float | None:
@@ -1167,6 +1591,13 @@ def validate_candidate(
     ``row count``
         a month already present that came back with fewer rows. Merging
         cannot do this; only a reduction that silently lost cells can.
+    ``release agreement``
+        the intermediate release quietly serving a different quantity from
+        the consolidated one. One enum separates them and everything else
+        about the request is identical, so a wrong literal that the CDS
+        happened to accept would arrive looking exactly like data. Skipped
+        with a stated reason when either side is too small to compare, and
+        its numbers are reported either way.
     """
 
     result = Validation()
@@ -1267,6 +1698,14 @@ def validate_candidate(
                 "committed rows hold"
             )
 
+    # -- the two releases agreeing ----------------------------------------
+    result.release_comparison = compare_releases(candidate)
+    if result.release_comparison.get("verdict") == "fail":
+        result.fail(
+            "the intermediate release does not look like the consolidated one: "
+            + str(result.release_comparison.get("reason") or "")
+        )
+
     result.changed_months = months_gaining_coverage(previous, candidate)
     return result
 
@@ -1334,14 +1773,39 @@ def build_status(
     for row in rows:
         key = str(row.get("coverage") or COVERAGE_NONE)
         counts[key] = counts.get(key, 0) + 1
+    newest = months[-1] if months else ""
+    # Which release the newest covered month came from, so the staleness
+    # threshold can be the lag of the product actually being requested
+    # rather than a literal somebody has to remember to move. During the
+    # switch itself the two disagree — the feed's newest month is still
+    # consolidated until the first run under the new rule lands — and this
+    # is what stops that transition reporting a fault nobody can act on.
+    newest_release = ""
+    if newest:
+        releases = {
+            row_dataset_type(row) for row in rows if str(row.get("ym")) == newest
+        }
+        # A mixed month is possible (a merge only replaces the countries the
+        # reduce produced), and the honest label for it is the less settled
+        # of the two: the month is not fully upgraded.
+        newest_release = (
+            CDS_DATASET_TYPE_INTERMEDIATE
+            if CDS_DATASET_TYPE_INTERMEDIATE in releases
+            else (sorted(releases)[0] if releases else "")
+        )
     payload: dict[str, Any] = {
         "feed": "spei3_country_means",
         "generated_at": generated_at
         or dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "status": status,
-        "newest_month": months[-1] if months else "",
+        "newest_month": newest,
+        "newest_month_dataset_type": newest_release,
         "oldest_month": months[0] if months else "",
         "months": len(months),
+        "rows_by_dataset_type": {
+            release: sum(1 for r in rows if row_dataset_type(r) == release)
+            for release in sorted({row_dataset_type(r) for r in rows})
+        },
         "rows": len(rows),
         "countries": len({str(r["iso3"]) for r in rows}),
         "coverage": dict(sorted(counts.items())),
@@ -1403,21 +1867,32 @@ def write_json(payload: Any, path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def cds_request(year: str, months: Sequence[str]) -> dict[str, Any]:
-    """The request body for one year. A pure function, so a test can pin it.
+def cds_request(
+    year: str,
+    months: Sequence[str],
+    *,
+    dataset_type: str = CDS_DATASET_TYPE,
+) -> dict[str, Any]:
+    """The request body for one year of one release. Pure, so a test pins it.
 
     Pinned by a test rather than only exercised in production, because the
     keys are the whole of what makes this work: the pre-October-2025 shape
     is not merely suboptimal, it is REFUSED, and a refused request looks
     from the outside like an outage. See :data:`CDS_VARIABLE` for what
     changed and where the shape came from.
+
+    ``dataset_type`` is an argument rather than a constant because the two
+    releases cover different ends of the record — see
+    :func:`dataset_type_for`. It defaults to the consolidated release so the
+    routes that want A request to borrow the shape of (`probe`, `describe`)
+    ask about the release every other key was verified against.
     """
 
     return {
         "variable": [CDS_VARIABLE],
         "accumulation_period": [CDS_ACCUMULATION_PERIOD],
         "product_type": [CDS_PRODUCT_TYPE],
-        "dataset_type": CDS_DATASET_TYPE,
+        "dataset_type": dataset_type,
         "version": CDS_VERSION,
         "year": [str(year)],
         # Leading zeros: the CDS rejects a bare "1".
@@ -2058,12 +2533,19 @@ def fetch_grids(
     deadline_sec: float | None = None,
     client: Any = None,
     now: Any = None,
+    today: dt.date | None = None,
 ) -> FetchResult:
-    """Download one NetCDF per year from the CDS. Needs CDS credentials.
+    """Download one NetCDF per (year, release) from the CDS. Needs credentials.
 
     Requested a year at a time: a request per month is thousands of jobs in
     the CDS queue for the same data, and the whole series in one request is
     a job large enough to be refused.
+
+    A year at the recent end of the record needs TWO requests, because the
+    consolidated release has not reached its newest months and the
+    intermediate one has (:func:`dataset_type_for`). Each unit gets its own
+    file, its own resume check and its own entry in the log; a failure of
+    one is owed on its own and costs the other nothing.
 
     **A CDS request is an asynchronous job and can sit queued for hours**,
     against a six-hour cap on an Actions job. So the pass carries a
@@ -2084,13 +2566,13 @@ def fetch_grids(
     started = clock()
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    by_year: dict[str, list[str]] = {}
+    by_unit: dict[tuple[str, str], list[str]] = {}
     for ym in months:
         year, month = str(ym).split("-")
-        by_year.setdefault(year, []).append(month)
+        by_unit.setdefault((year, dataset_type_for(ym, today=today)), []).append(month)
 
     result = FetchResult()
-    if not by_year:
+    if not by_unit:
         LOG.info("[spei3] nothing to fetch — the committed feed already covers the window")
         return result
 
@@ -2099,67 +2581,96 @@ def fetch_grids(
 
         client = cdsapi.Client()
 
-    for year in sorted(by_year):
-        target = raw_dir / f"spei3_{year}.nc"
-        # By year, not by that one filename: an unpacked year no longer has
-        # the name it was downloaded under, and re-asking for it costs 95 MB
-        # to learn nothing.
-        held = year_files(raw_dir, year)
+    def owe(year: str) -> None:
+        if year not in result.years_owed:
+            result.years_owed.append(year)
+
+    def record_failure(year: str, dataset_type: str, message: str) -> None:
+        # Keyed by YEAR because that is what `_absent_reasons` and the
+        # workflow's cache prune read, and a year is incomplete whichever of
+        # its units failed. Two failing units of one year are both named
+        # rather than the second overwriting the first.
+        text = f"{dataset_type}: {message}"
+        prior = result.failed.get(year)
+        result.failed[year] = f"{prior}; {text}" if prior else text
+
+    for year, dataset_type in sorted(by_unit):
+        tag = _DATASET_TYPE_TAGS.get(dataset_type, dataset_type)
+        label = f"{year} ({tag})"
+        target = raw_dir / f"spei3_{year}_{tag}.nc"
+        # By (year, release), not by that one filename: an unpacked unit no
+        # longer has the name it was downloaded under, and re-asking for it
+        # costs 95 MB to learn nothing — while a check on the year alone
+        # would let one release answer for the other.
+        wanted = by_unit[(year, dataset_type)]
+        held = unit_files(raw_dir, year, dataset_type)
+        if held and not unit_covers(raw_dir, year, dataset_type, wanted):
+            # The cached unit does not hold every month this run wants, so
+            # it cannot answer for them. Re-asked rather than half-trusted.
+            LOG.info(
+                "[spei3] %s is on disk but does not cover %s — re-requesting",
+                label, ",".join(sorted(wanted)),
+            )
+            for stale in held:
+                stale.unlink()
+            held = []
         if held:
             LOG.info(
                 "[spei3] %s already downloaded — skipping (%s)",
-                year, ", ".join(p.name for p in held),
+                label, ", ".join(p.name for p in held),
             )
-            result.skipped_present.append(year)
+            result.skipped_present.append(label)
             result.bytes_downloaded += sum(p.stat().st_size for p in held)
             continue
         if deadline_sec is not None and (clock() - started) >= deadline_sec:
             result.deadline_hit = True
-            result.years_owed.append(year)
+            owe(year)
             continue
-        request = cds_request(year, by_year[year])
+        request = cds_request(year, wanted, dataset_type=dataset_type)
         # Logged in full, on purpose: when the CDS refuses a request it
         # names the offending key, and the error and the request being in
         # the same log is the difference between a one-line fix and an
         # afternoon.
         LOG.info(
             "[spei3] requesting %s (%d month(s)) from %s: %s",
-            year, len(by_year[year]), CDS_DATASET, json.dumps(request, sort_keys=True),
+            label, len(wanted), CDS_DATASET, json.dumps(request, sort_keys=True),
         )
         try:
             client.retrieve(CDS_DATASET, request, str(target))
         except Exception as exc:  # noqa: BLE001 - the reason is the payload
-            # A failed year is owed, not fatal. The other years may well be
+            # A failed unit is owed, not fatal. The other units may well be
             # fine, and the run's own gates decide whether what it did get
             # is publishable.
-            result.failed[year] = f"{type(exc).__name__}: {exc}"[:400]
-            LOG.error("[spei3] %s failed: %s", year, result.failed[year])
+            record_failure(year, dataset_type, f"{type(exc).__name__}: {exc}"[:400])
+            LOG.error("[spei3] %s failed: %s", label, result.failed[year])
             if target.exists():
                 target.unlink()
             continue
         if not target.exists():
-            result.failed[year] = "the client reported success and wrote no file"
-            LOG.error("[spei3] %s: %s", year, result.failed[year])
+            record_failure(year, dataset_type, "the client reported success and wrote no file")
+            LOG.error("[spei3] %s: %s", label, result.failed[year])
             continue
         # The archive's own size is the download volume, so it is read
         # before unpacking replaces the file.
         size = target.stat().st_size
         result.bytes_downloaded += size
-        result.written.append(year)
-        LOG.info("[spei3] %s -> %s (%.1f MB)", year, target.name, size / 1e6)
+        result.written.append(label)
+        record_unit_months(raw_dir, year, dataset_type, wanted)
+        LOG.info("[spei3] %s -> %s (%.1f MB)", label, target.name, size / 1e6)
         try:
             unpack_if_archive(target)
         except Exception as exc:  # noqa: BLE001 - the reason is the payload
-            # A year that arrived and cannot be opened is owed, exactly as a
-            # year that never arrived is: the difference matters to nobody
+            # A unit that arrived and cannot be opened is owed, exactly as
+            # one that never arrived is: the difference matters to nobody
             # downstream, and leaving an unreadable file on disk would make
             # the next run's resume check skip it forever.
-            result.failed[year] = f"{type(exc).__name__}: {exc}"[:400]
+            record_failure(year, dataset_type, f"{type(exc).__name__}: {exc}"[:400])
             LOG.error("[spei3] %s downloaded and could not be unpacked: %s",
-                      year, result.failed[year])
-            for stale in year_files(raw_dir, year):
+                      label, result.failed[year])
+            for stale in unit_files(raw_dir, year, dataset_type):
                 stale.unlink()
-            result.written.remove(year)
+            _unit_manifest(raw_dir, year, dataset_type).unlink(missing_ok=True)
+            result.written.remove(label)
 
     if result.years_owed:
         LOG.warning(
@@ -2296,19 +2807,22 @@ def _resolve_end(end: str | None) -> str:
 
 def _cmd_plan(args: argparse.Namespace) -> int:
     existing = read_csv_rows(args.out)
+    intermediate = months_held_from(existing, CDS_DATASET_TYPE_INTERMEDIATE)
     window = plan_window(
         months_in(existing),
         start_ym=args.start,
         end_ym=_resolve_end(args.end),
         revision_months=args.revision_months,
         full_rebuild=bool(args.full_rebuild),
+        intermediate_months=intermediate,
     )
     LOG.info(
-        "[spei3] the committed feed holds %d month(s); this run owes %d "
-        "(%d revision, %d missing) across year(s) %s",
-        len(months_in(existing)), len(window.months),
+        "[spei3] the committed feed holds %d month(s), %d of them still on "
+        "the intermediate release; this run owes %d (%d revision, %d missing, "
+        "%d upgradeable) across year(s) %s",
+        len(months_in(existing)), len(intermediate), len(window.months),
         len(window.revision_months), len(window.missing_months),
-        ",".join(window.years) or "none",
+        len(window.upgradeable_months), ",".join(window.years) or "none",
     )
     if window.missing_months:
         # Named, not counted: a month missing for the third cycle running is
@@ -2316,6 +2830,22 @@ def _cmd_plan(args: argparse.Namespace) -> int:
         LOG.info(
             "[spei3] months the committed feed does not hold: %s",
             ",".join(window.missing_months[:36]),
+        )
+    if window.upgradeable_months:
+        LOG.info(
+            "[spei3] months holding an intermediate value whose consolidated "
+            "version should now exist: %s",
+            ",".join(window.upgradeable_months[:36]),
+        )
+    still_provisional = sorted(intermediate - set(window.upgradeable_months))
+    if still_provisional:
+        # Not a fault and worth saying: these are the recent months the
+        # consolidated release has not reached yet, which is the whole
+        # reason the producer asks the intermediate one for them.
+        LOG.info(
+            "[spei3] %d month(s) stay on the intermediate release this cycle "
+            "(the consolidated one does not hold them yet): %s",
+            len(still_provisional), ",".join(still_provisional[:12]),
         )
     if args.window_out:
         write_json(window.as_dict(), args.window_out)
@@ -2465,6 +2995,22 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     )
     for warning in result.warnings:
         LOG.warning("[spei3] %s", warning)
+    # Printed on every run, passing or not. This is the measurement the move
+    # to the intermediate release is judged by, and a number a reader has to
+    # go and re-derive is a number nobody checks.
+    comparison = result.release_comparison or {}
+    LOG.info(
+        "[spei3] release comparison (%s): consolidated %d row(s) mean %s sd %s; "
+        "intermediate %d row(s) mean %s sd %s — %s",
+        comparison.get("verdict") or "unreported",
+        comparison.get("consolidated_rows", 0),
+        comparison.get("consolidated_mean", "n/a"),
+        comparison.get("consolidated_sd", "n/a"),
+        comparison.get("intermediate_rows", 0),
+        comparison.get("intermediate_mean", "n/a"),
+        comparison.get("intermediate_sd", "n/a"),
+        comparison.get("reason") or "",
+    )
     for failure in result.failures:
         LOG.error("[spei3] GATE FAILED: %s", failure)
     if args.report_out:

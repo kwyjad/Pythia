@@ -335,12 +335,16 @@ jobs:
       - name: Prepare diagnostics directory
         run: mkdir -p diagnostics "${RAW_DIR}"
 
-      # What this run owes: the trailing revision window (ERA5T values are
-      # revised to final ERA5 later, so the first version of a month is not
-      # its last) PLUS every month inside the range the committed CSV does
-      # not hold. The second half is what makes the producer self-healing —
-      # a month lost to a CDS job that timed out is picked up next cycle with
-      # nobody noticing it went missing.
+      # What this run owes, in three parts. The trailing revision window,
+      # for a month republished for a reason nobody predicted. Every month
+      # inside the range the committed CSV does not hold — which is what
+      # makes the producer self-healing, since a month lost to a CDS job
+      # that timed out is picked up next cycle with nobody noticing it went
+      # missing. And every month the CSV still holds from the INTERMEDIATE
+      # release whose consolidated version should now exist: an intermediate
+      # value is experimental and subject to change, and leaving one in
+      # place once the settled version is available makes a provisional
+      # number permanent.
       - name: Plan the window
         env:
           FROM_YM: ${{ inputs.from_ym || '' }}
@@ -474,9 +478,13 @@ jobs:
           else
             KEEP_A=$(date -u +%Y)
             KEEP_B=$(( KEEP_A - 1 ))
-            # Prefix match: the CDS serves a zip and the unpacked members
-            # are named spei3_<year>__<member>.nc, so an exact-name test
-            # would delete every year it meant to keep.
+            # Prefix match on the YEAR: the CDS serves a zip and the
+            # unpacked members are named
+            # spei3_<year>_<release>__<member>.nc, so an exact-name test
+            # would delete every year it meant to keep — and a year at the
+            # boundary legitimately holds BOTH releases, which this keeps
+            # together. Keeping one of a pair would make the next run
+            # re-download the other for nothing.
             find "${RAW_DIR}" -name '*.nc' \
               ! -name "spei3_${KEEP_A}*" ! -name "spei3_${KEEP_B}*" -delete
             echo "kept ${KEEP_A} and ${KEEP_B} only"
@@ -659,6 +667,11 @@ jobs:
                 f" ({os.environ.get('PUSHED') or 'nothing pushed'})")
           print(f"- window: {len(window.get('months') or [])} month(s) across "
                 f"year(s) {', '.join(window.get('years') or []) or 'none'}")
+          upgradeable = window.get("upgradeable_months") or []
+          if upgradeable:
+              print(f"- upgrading {len(upgradeable)} month(s) from the "
+                    "intermediate release to the consolidated one: "
+                    + ", ".join(upgradeable[:12]))
           print(f"- fetched: {len(fetch.get('written') or [])} year(s), "
                 f"{(fetch.get('bytes_downloaded') or 0) / 1e6:.1f} MB; "
                 f"owed: {', '.join(fetch.get('years_owed') or []) or 'none'}")
@@ -667,6 +680,25 @@ jobs:
                 f"({status.get('months', 0)} month(s), {status.get('rows', 0)} row(s), "
                 f"{status.get('countries', 0)} country/countries); "
                 f"status **{status.get('status', 'unknown')}**")
+          by_release = status.get("rows_by_dataset_type") or {}
+          if by_release:
+              print("- rows by release: "
+                    + ", ".join(f"{k} {v}" for k, v in sorted(by_release.items()))
+                    + f"; newest month from "
+                      f"{status.get('newest_month_dataset_type') or 'an unnamed release'}")
+          # The measurement the move to the intermediate release is judged
+          # by. Printed whatever the verdict, because a number a reader has
+          # to go and re-derive is a number nobody checks.
+          release = coverage.get("release_comparison") or {}
+          if release:
+              print(f"- release comparison (**{release.get('verdict', 'unreported')}**): "
+                    f"consolidated {release.get('consolidated_rows', 0)} row(s) "
+                    f"mean {release.get('consolidated_mean', 'n/a')} "
+                    f"sd {release.get('consolidated_sd', 'n/a')}; "
+                    f"intermediate {release.get('intermediate_rows', 0)} row(s) "
+                    f"mean {release.get('intermediate_mean', 'n/a')} "
+                    f"sd {release.get('intermediate_sd', 'n/a')} — "
+                    f"{release.get('reason', '')}")
           restale = status.get("restale") or {}
           if restale:
               print(f"- restale requested for {len(restale.get('months') or [])} "

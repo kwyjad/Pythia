@@ -45,6 +45,14 @@ from scripts import build_spei3_country_means as spei
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "spei3"
 
+#: A fixed "today" for the tests that exercise the fetch. Which release a
+#: month is asked from is a function of the calendar, so a test that lets
+#: the real date decide is a test whose meaning changes in December.
+#: 2026-09-12 is the day the switch was made: previous complete month
+#: 2026-08, so the consolidated release reaches 2026-05 and everything after
+#: it is intermediate.
+TODAY = dt.date(2026, 9, 12)
+
 
 def _rows(*triples):
     return [
@@ -114,10 +122,46 @@ def test_a_year_is_one_request_not_twelve(tmp_path):
 
     client = _Client()
     spei.fetch_grids(
-        tmp_path, [f"2026-{m:02d}" for m in range(1, 13)], client=client,
+        tmp_path, [f"2026-{m:02d}" for m in range(1, 13)],
+        client=client, today=TODAY,
+    )
+    # Two, because 2026 straddles the two releases — never twelve, which is
+    # the fault this guards against. The months are split at the boundary
+    # and nothing is asked for twice.
+    assert len(client.requests) == 2
+    by_type = {
+        req["dataset_type"]: req["month"] for _, req in client.requests
+    }
+    assert by_type[spei.CDS_DATASET_TYPE_CONSOLIDATED] == [
+        f"{m:02d}" for m in range(1, 6)
+    ]
+    assert by_type[spei.CDS_DATASET_TYPE_INTERMEDIATE] == [
+        f"{m:02d}" for m in range(6, 13)
+    ]
+
+
+def test_a_closed_year_is_still_one_request(tmp_path):
+    """Splitting a year is the boundary case, not the rule.
+
+    Every year behind the consolidated lag is one request exactly as it was
+    before the switch, which is nearly the whole record.
+    """
+
+    class _Client:
+        def __init__(self):
+            self.requests = []
+
+        def retrieve(self, dataset, request, target):
+            self.requests.append(request)
+            Path(target).write_bytes(b"nc")
+
+    client = _Client()
+    spei.fetch_grids(
+        tmp_path, [f"2019-{m:02d}" for m in range(1, 13)],
+        client=client, today=TODAY,
     )
     assert len(client.requests) == 1
-    assert client.requests[0][1]["month"] == [f"{m:02d}" for m in range(1, 13)]
+    assert client.requests[0]["dataset_type"] == spei.CDS_DATASET_TYPE_CONSOLIDATED
 
 
 # ---------------------------------------------------------------------------
@@ -152,33 +196,65 @@ def test_the_deadline_stops_starting_jobs_and_reports_the_rest_owed(tmp_path):
 def test_a_year_already_downloaded_is_not_fetched_again(tmp_path):
     """The CSV is the durable artifact; a closed year never needs re-asking."""
 
-    (tmp_path / "spei3_2016.nc").write_bytes(b"already here")
+    (tmp_path / "spei3_2016_consolidated.nc").write_bytes(b"already here")
 
     class _Client:
         def retrieve(self, dataset, request, target):  # pragma: no cover
             raise AssertionError("re-fetched a year already on disk")
 
-    result = spei.fetch_grids(tmp_path, ["2016-01"], client=_Client())
-    assert result.skipped_present == ["2016"]
+    result = spei.fetch_grids(
+        tmp_path, ["2016-01"], client=_Client(), today=TODAY,
+    )
+    assert result.skipped_present == ["2016 (consolidated)"]
     assert result.written == []
 
 
 def test_an_unpacked_year_is_not_fetched_again(tmp_path):
-    """The resume check reads the YEAR, not the name it was downloaded under.
+    """The resume check reads the UNIT, not the name it was downloaded under.
 
-    An unpacked year is called ``spei3_2016__data.nc``, so a check on
-    ``spei3_2016.nc`` finds nothing and asks the CDS for 95 MB it already
-    holds — every run, forever.
+    An unpacked unit is called ``spei3_2016_consolidated__data.nc``, so a
+    check on the downloaded filename finds nothing and asks the CDS for
+    95 MB it already holds — every run, forever.
     """
 
-    (tmp_path / "spei3_2016__unpacked.nc").write_bytes(b"CDF\x01already here")
+    (tmp_path / "spei3_2016_consolidated__unpacked.nc").write_bytes(
+        b"CDF\x01already here"
+    )
 
     class _Client:
         def retrieve(self, dataset, request, target):  # pragma: no cover
             raise AssertionError("re-fetched a year already unpacked on disk")
 
-    result = spei.fetch_grids(tmp_path, ["2016-01"], client=_Client())
-    assert result.skipped_present == ["2016"]
+    result = spei.fetch_grids(
+        tmp_path, ["2016-01"], client=_Client(), today=TODAY,
+    )
+    assert result.skipped_present == ["2016 (consolidated)"]
+
+
+def test_one_release_never_answers_for_the_other(tmp_path):
+    """The trap the tagged filenames exist to close.
+
+    A year at the boundary needs both releases. With the resume check on the
+    year alone, the consolidated file that landed first would answer for the
+    intermediate request too, and the newest months — the whole point of the
+    switch — would never be asked for again. That failure is permanent
+    rather than merely wasteful.
+    """
+
+    (tmp_path / "spei3_2026_consolidated__data.nc").write_bytes(b"CDF\x01held")
+    asked = []
+
+    class _Client:
+        def retrieve(self, dataset, request, target):
+            asked.append(request["dataset_type"])
+            Path(target).write_bytes(b"nc")
+
+    result = spei.fetch_grids(
+        tmp_path, ["2026-03", "2026-07"], client=_Client(), today=TODAY,
+    )
+    assert asked == [spei.CDS_DATASET_TYPE_INTERMEDIATE]
+    assert result.skipped_present == ["2026 (consolidated)"]
+    assert result.written == ["2026 (intermediate)"]
 
 
 def test_a_failed_year_is_owed_not_fatal(tmp_path):
@@ -190,10 +266,17 @@ def test_a_failed_year_is_owed_not_fatal(tmp_path):
                 raise RuntimeError("invalid request / no valid combination")
             Path(target).write_bytes(b"nc")
 
-    result = spei.fetch_grids(tmp_path, ["2016-01", "2017-01"], client=_Client())
-    assert result.written == ["2016"]
+    result = spei.fetch_grids(
+        tmp_path, ["2016-01", "2017-01"], client=_Client(), today=TODAY,
+    )
+    assert result.written == ["2016 (consolidated)"]
     assert "2017" in result.failed
     assert "no valid combination" in result.failed["2017"]
+    # Keyed by YEAR, because that is what the absent-reason reader and the
+    # workflow's cache prune read, and a year is incomplete whichever of its
+    # units failed — but the message names the release, so two failures of
+    # one year are both readable.
+    assert result.failed["2017"].startswith(spei.CDS_DATASET_TYPE_CONSOLIDATED)
     assert result.complete is False
 
 
@@ -205,8 +288,8 @@ def test_a_partial_file_from_a_failed_year_is_removed(tmp_path):
             Path(target).write_bytes(b"half a file")
             raise RuntimeError("connection reset")
 
-    spei.fetch_grids(tmp_path, ["2016-01"], client=_Client())
-    assert not (tmp_path / "spei3_2016.nc").exists()
+    spei.fetch_grids(tmp_path, ["2016-01"], client=_Client(), today=TODAY)
+    assert not (tmp_path / "spei3_2016_consolidated.nc").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -648,10 +731,12 @@ def test_a_downloaded_archive_is_unpacked_by_the_fetch_itself(tmp_path):
         def retrieve(self, dataset, request, target):
             Path(target).write_bytes(_zip_of({"data.nc": b"CDF\x01payload"}))
 
-    result = spei.fetch_grids(tmp_path, ["2016-01"], client=_Client())
+    result = spei.fetch_grids(tmp_path, ["2016-01"], client=_Client(), today=TODAY)
 
-    assert result.written == ["2016"]
-    assert [p.name for p in tmp_path.glob("*.nc")] == ["spei3_2016__data.nc"]
+    assert result.written == ["2016 (consolidated)"]
+    assert [p.name for p in tmp_path.glob("*.nc")] == [
+        "spei3_2016_consolidated__data.nc"
+    ]
     # The reported volume is the ARCHIVE's size: that is what came down the
     # wire, and it is the number the docstring's estimate is corrected from.
     assert result.bytes_downloaded > 0
@@ -1828,3 +1913,409 @@ def test_narrowing_is_skipped_when_nothing_needs_it():
     assert result.only_unconstrained == []
     assert result.blocked_by == {}
     assert client.n == 2
+
+
+# ---------------------------------------------------------------------------
+# The switch: which release a month is asked from, and what that costs
+#
+# `describe` mode settled the literal (`intermediate_dataset`, named by the
+# constraints endpoint AND the process description in run 34591286383) and
+# then settled the shape of the switch: with the rest of our request fixed
+# the endpoint names `consolidated_dataset` ALONE, and run 34591818890
+# narrowed the exclusion to `year`. So the intermediate release covers only
+# the recent end of the record, and `dataset_type` is a decision per month
+# rather than one constant.
+# ---------------------------------------------------------------------------
+
+
+def test_the_consolidated_release_is_asked_for_the_settled_end_of_the_record():
+    """And the intermediate one only for what it cannot yet hold.
+
+    The boundary is the consolidated release's documented worst-case lag,
+    measured against the live feed on 2026-09-10: newest month served
+    2026-05 against a previous complete month of 2026-08.
+    """
+
+    assert spei.dataset_type_for("2016-01", today=TODAY) == spei.CDS_DATASET_TYPE_CONSOLIDATED
+    assert spei.dataset_type_for("2026-05", today=TODAY) == spei.CDS_DATASET_TYPE_CONSOLIDATED
+    assert spei.dataset_type_for("2026-06", today=TODAY) == spei.CDS_DATASET_TYPE_INTERMEDIATE
+    assert spei.dataset_type_for("2026-07", today=TODAY) == spei.CDS_DATASET_TYPE_INTERMEDIATE
+
+
+def test_the_boundary_is_derived_from_the_lag_and_not_a_literal_month():
+    """A hardcoded cutover is a switch that silently stops switching."""
+
+    for today, boundary in (
+        (dt.date(2026, 9, 12), "2026-05"),
+        (dt.date(2027, 1, 3), "2026-09"),
+        (dt.date(2027, 3, 31), "2026-11"),
+    ):
+        assert spei.dataset_type_for(boundary, today=today) == spei.CDS_DATASET_TYPE_CONSOLIDATED
+        after = spei.shift_months(boundary, 1)
+        assert spei.dataset_type_for(after, today=today) == spei.CDS_DATASET_TYPE_INTERMEDIATE
+
+
+def test_the_request_names_the_release_it_was_asked_for():
+    """Everything else about the two requests is identical, and must be.
+
+    One enum separates them, which is exactly why the release-agreement gate
+    exists: a wrong literal the CDS happened to accept would arrive looking
+    like data rather than like an error.
+    """
+
+    consolidated = spei.cds_request(
+        "2019", ["01"], dataset_type=spei.CDS_DATASET_TYPE_CONSOLIDATED
+    )
+    intermediate = spei.cds_request(
+        "2026", ["07"], dataset_type=spei.CDS_DATASET_TYPE_INTERMEDIATE
+    )
+    assert consolidated["dataset_type"] == "consolidated_dataset"
+    assert intermediate["dataset_type"] == "intermediate_dataset"
+    assert {
+        k: v for k, v in consolidated.items() if k not in ("dataset_type", "year", "month")
+    } == {
+        k: v for k, v in intermediate.items() if k not in ("dataset_type", "year", "month")
+    }
+
+
+def test_a_month_is_asked_from_one_release_and_never_both(tmp_path):
+    """Two requests for one month is two CDS jobs for the same numbers."""
+
+    asked: dict[str, list[str]] = {}
+
+    class _Client:
+        def retrieve(self, dataset, request, target):
+            for month in request["month"]:
+                asked.setdefault(f"{request['year'][0]}-{month}", []).append(
+                    request["dataset_type"]
+                )
+            Path(target).write_bytes(b"nc")
+
+    months = [f"2026-{m:02d}" for m in range(1, 9)]
+    spei.fetch_grids(tmp_path, months, client=_Client(), today=TODAY)
+    assert sorted(asked) == months
+    assert all(len(v) == 1 for v in asked.values())
+
+
+# ---------------------------------------------------------------------------
+# Provenance, and the upgrade it makes self-healing
+# ---------------------------------------------------------------------------
+
+
+def _inside(country, lon, lat) -> bool:
+    minx, miny, maxx, maxy = country.bounds
+    return minx <= lon <= maxx and miny <= lat <= maxy
+
+
+def test_every_reduced_row_carries_the_release_it_came_from():
+    rows, _ = spei.reduce_grids(
+        {
+            "2026-03": spei.Grid(
+                lats=[0.0], lons=[0.0], values=[[0.5]],
+                dataset_type=spei.CDS_DATASET_TYPE_CONSOLIDATED,
+            ),
+            "2026-07": spei.Grid(
+                lats=[0.0], lons=[0.0], values=[[0.5]],
+                dataset_type=spei.CDS_DATASET_TYPE_INTERMEDIATE,
+            ),
+        },
+        {"AAA": _Box()},
+        iso3s=["AAA"],
+        contains=_inside,
+    )
+    assert {r["ym"]: r["dataset_type"] for r in rows} == {
+        "2026-03": spei.CDS_DATASET_TYPE_CONSOLIDATED,
+        "2026-07": spei.CDS_DATASET_TYPE_INTERMEDIATE,
+    }
+
+
+def test_a_row_written_before_the_column_existed_reads_as_consolidated():
+    """A true statement about this repository's history, not a guess.
+
+    The producer had requested exactly one release before the switch, so a
+    blank can only have come from it. The committed rows were migrated in
+    the same commit; this covers a hand edit or an older tool.
+    """
+
+    assert spei.row_dataset_type({"dataset_type": ""}) == spei.CDS_DATASET_TYPE_CONSOLIDATED
+    assert spei.row_dataset_type({}) == spei.CDS_DATASET_TYPE_CONSOLIDATED
+    assert (
+        spei.row_dataset_type({"dataset_type": "intermediate_dataset"})
+        == spei.CDS_DATASET_TYPE_INTERMEDIATE
+    )
+
+
+def test_a_month_still_on_the_intermediate_release_is_asked_for_again():
+    """The upgrade, and it is a fact about the file rather than a bet.
+
+    An intermediate value is documented as experimental and subject to
+    change. Leaving one in place once the consolidated version exists makes
+    a provisional number permanent, and the trailing revision window is the
+    wrong instrument for catching that: the upstream states its own lag as a
+    RANGE, so a window is a guess about how long it will take.
+    """
+
+    held = [f"2026-{m:02d}" for m in range(1, 8)]
+    window = spei.plan_window(
+        held,
+        start_ym="2026-01",
+        end_ym="2026-07",
+        revision_months=0,
+        intermediate_months=["2026-04", "2026-06", "2026-07"],
+        today=TODAY,
+    )
+    # 2026-04 can be upgraded; 2026-06 and 2026-07 are newer than the
+    # consolidated release reaches, so they stay provisional this cycle.
+    assert window.upgradeable_months == ["2026-04"]
+    assert window.months == ["2026-04"]
+
+
+def test_the_upgrade_does_not_depend_on_the_revision_window():
+    """Which is the whole reason the column is on the row.
+
+    A month that fell out of the window while still provisional is still
+    upgraded, however long ago it was written.
+    """
+
+    window = spei.plan_window(
+        [f"2025-{m:02d}" for m in range(1, 13)],
+        start_ym="2025-01",
+        end_ym="2025-12",
+        revision_months=0,
+        intermediate_months=["2025-02"],
+        today=TODAY,
+    )
+    assert window.upgradeable_months == ["2025-02"]
+
+
+def test_the_revision_window_outlives_the_gap_between_the_releases():
+    """Six months, against a two-month gap plus room for missed cycles."""
+
+    gap = spei.CONSOLIDATED_LAG_MONTHS - spei.INTERMEDIATE_LAG_MONTHS
+    assert gap == 2
+    assert spei.REVISION_WINDOW_MONTHS > gap + 1
+
+
+def test_the_consolidated_grid_wins_where_both_releases_hold_a_month():
+    """Which the cache makes routine rather than hypothetical.
+
+    A month asked for as intermediate in September is asked for as
+    consolidated in December, and the trailing years are kept between runs.
+    """
+
+    assert spei._supersedes(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED, spei.CDS_DATASET_TYPE_INTERMEDIATE
+    )
+    assert not spei._supersedes(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE, spei.CDS_DATASET_TYPE_CONSOLIDATED
+    )
+
+
+def test_the_release_is_read_off_the_filename():
+    assert spei.dataset_type_of_file(
+        Path("spei3_2026_intermediate__data.nc")
+    ) == spei.CDS_DATASET_TYPE_INTERMEDIATE
+    assert spei.dataset_type_of_file(
+        Path("spei3_2026_consolidated.nc")
+    ) == spei.CDS_DATASET_TYPE_CONSOLIDATED
+    # Untagged: written before the producer asked for more than one release.
+    assert spei.dataset_type_of_file(
+        Path("spei3_2016__data.nc")
+    ) == spei.CDS_DATASET_TYPE_CONSOLIDATED
+
+
+# ---------------------------------------------------------------------------
+# The gate the switch ships with
+#
+# Everything else about the two requests is identical, so the failure worth
+# guarding against is narrow: the enum naming a different quantity. It would
+# show up as a shifted mean or a rescaled spread, not as an error.
+# ---------------------------------------------------------------------------
+
+
+#: What the 29,625-row consolidated backfill of 2026-09-10 measured. Kept as
+#: data so a future change to the band has to argue with the evidence.
+BACKFILL_MEAN_AND_SD = (-0.086, 0.969)
+
+
+def _release_rows(release: str, values):
+    return [
+        {
+            "iso3": f"C{i:02d}", "ym": "2026-07", "value": f"{v:.4f}",
+            "coverage": "cells", "n_cells": "10", "dataset_type": release,
+        }
+        for i, v in enumerate(values)
+    ]
+
+
+def test_the_committed_feed_matches_the_backfill_it_was_measured_from():
+    """The reference the gate compares against, checked against the record."""
+
+    rows = spei.read_csv_rows(
+        Path(__file__).resolve().parents[2] / "resolver" / "data"
+        / "spei3_country_means.csv"
+    )
+    assert len(rows) == 29625
+    mean, sd = spei._mean_and_sd([float(r["value"]) for r in rows])
+    expected_mean, expected_sd = BACKFILL_MEAN_AND_SD
+    assert abs(mean - expected_mean) < 0.01
+    assert abs(sd - expected_sd) < 0.01
+
+
+def test_two_releases_that_agree_pass_the_gate():
+    import random
+
+    rng = random.Random(11)
+    rows = _release_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED,
+        [rng.gauss(-0.086, 0.969) for _ in range(400)],
+    ) + _release_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE,
+        [rng.gauss(-0.086, 0.969) for _ in range(200)],
+    )
+    report = spei.compare_releases(rows)
+    assert report["verdict"] == "ok"
+    assert report["intermediate_rows"] == 200
+
+
+def test_a_release_serving_a_different_quantity_fails_the_gate():
+    """A shifted mean and a rescaled spread are the two shapes of that fault."""
+
+    import random
+
+    rng = random.Random(11)
+    consolidated = _release_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED,
+        [rng.gauss(-0.086, 0.969) for _ in range(400)],
+    )
+    shifted = consolidated + _release_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE,
+        [rng.gauss(2.5, 0.969) for _ in range(200)],
+    )
+    rescaled = consolidated + _release_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE,
+        [rng.gauss(-0.086, 0.05) for _ in range(200)],
+    )
+    assert spei.compare_releases(shifted)["verdict"] == "fail"
+    assert spei.compare_releases(rescaled)["verdict"] == "fail"
+
+    result = spei.validate_candidate(shifted, [])
+    assert result.ok is False
+    assert any("intermediate release" in f for f in result.failures)
+
+
+def test_a_dry_month_does_not_trip_the_gate():
+    """The band has to survive weather, or it is a gate nobody keeps on.
+
+    A genuinely dry global month moves the mean by a few tenths. A whole
+    sigma is not weather.
+    """
+
+    import random
+
+    rng = random.Random(3)
+    rows = _release_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED,
+        [rng.gauss(-0.086, 0.969) for _ in range(400)],
+    ) + _release_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE,
+        [rng.gauss(-0.55, 1.05) for _ in range(200)],
+    )
+    assert spei.compare_releases(rows)["verdict"] == "ok"
+
+
+def test_a_comparison_that_cannot_run_is_skipped_with_a_reason():
+    """Never passed silently. This is the gate guarding its own change."""
+
+    only_consolidated = _release_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED, [0.1] * 400
+    )
+    report = spei.compare_releases(only_consolidated)
+    assert report["verdict"] == "skipped"
+    assert "no rows from the intermediate release" in report["reason"]
+
+    thin = only_consolidated + _release_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE, [0.1] * 5
+    )
+    report = spei.compare_releases(thin)
+    assert report["verdict"] == "skipped"
+    assert "below" in report["reason"]
+    # And a skip never fails the candidate.
+    assert spei.validate_candidate(thin, []).ok is True
+
+
+def test_the_comparison_is_reported_whether_or_not_it_decided_anything():
+    """The numbers are how a reader sees the switch landed."""
+
+    rows = _release_rows(spei.CDS_DATASET_TYPE_CONSOLIDATED, [0.1, 0.2, 0.3])
+    result = spei.validate_candidate(rows, [])
+    assert result.release_comparison["consolidated_rows"] == 3
+    assert "consolidated_mean" in result.release_comparison
+    assert "release_comparison" in result.as_dict()
+
+
+def test_a_cached_unit_that_does_not_cover_the_window_is_re_asked(tmp_path):
+    """The hole the switch made reachable, closed.
+
+    A unit's month-set is not fixed. A year at the boundary splits between
+    the releases, and an operator re-dispatching with different ``from_ym``
+    / ``to_ym`` changes it too. Skipping on the presence of a file alone
+    would leave a month silently never fetched, recorded absent with a
+    stated reason, on a green run — and the next run would skip it again for
+    exactly the same reason.
+    """
+
+    asked = []
+
+    class _Client:
+        def retrieve(self, dataset, request, target):
+            asked.append(sorted(request["month"]))
+            Path(target).write_bytes(b"CDF\x01nc")
+
+    first = spei.fetch_grids(
+        tmp_path, ["2026-06", "2026-07"], client=_Client(), today=TODAY,
+    )
+    assert first.written == ["2026 (intermediate)"]
+    assert asked == [["06", "07"]]
+
+    # A later run wants a month the cached unit does not hold.
+    second = spei.fetch_grids(
+        tmp_path, ["2026-06", "2026-07", "2026-08"], client=_Client(), today=TODAY,
+    )
+    assert asked[-1] == ["06", "07", "08"]
+    assert second.written == ["2026 (intermediate)"]
+    assert second.skipped_present == []
+
+
+def test_a_cached_unit_that_covers_the_window_is_not_re_asked(tmp_path):
+    """Which is the whole point of the cache, and the case it is for."""
+
+    class _Writing:
+        def retrieve(self, dataset, request, target):
+            Path(target).write_bytes(b"CDF\x01nc")
+
+    spei.fetch_grids(tmp_path, ["2026-06", "2026-07"], client=_Writing(), today=TODAY)
+
+    class _Refusing:
+        def retrieve(self, dataset, request, target):  # pragma: no cover
+            raise AssertionError("re-fetched a unit that already covers the window")
+
+    result = spei.fetch_grids(
+        tmp_path, ["2026-07"], client=_Refusing(), today=TODAY,
+    )
+    assert result.skipped_present == ["2026 (intermediate)"]
+
+
+def test_a_cached_unit_from_before_the_manifest_answers_as_it_used_to(tmp_path):
+    """A cache is far likelier to be complete than worth 95 MB on suspicion."""
+
+    (tmp_path / "spei3_2016_consolidated__data.nc").write_bytes(b"CDF\x01held")
+
+    class _Refusing:
+        def retrieve(self, dataset, request, target):  # pragma: no cover
+            raise AssertionError("re-fetched a unit cached before the manifest")
+
+    result = spei.fetch_grids(
+        tmp_path, ["2016-01", "2016-02"], client=_Refusing(), today=TODAY,
+    )
+    assert result.skipped_present == ["2016 (consolidated)"]

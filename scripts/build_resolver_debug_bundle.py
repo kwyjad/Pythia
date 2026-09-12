@@ -2687,11 +2687,15 @@ class BundleBuilder:
         the diagnostic is the whole of the protection, and it reports rather
         than changes any verdict.
 
-        The threshold is the CONSOLIDATED product's own lag plus room for a
-        missed cycle — see ``feed_status.MAX_LAG_MONTHS``, which states the
-        two halves separately. A single literal hides the difference between
-        "the upstream is slow" and "our producer has stopped", and the two
-        want different responses.
+        The threshold is the lag of the release the feed's OWN newest month
+        came from, plus room for a missed cycle — see
+        ``feed_status.max_lag_for``, which states the two halves separately.
+        A single literal hides the difference between "the upstream is slow"
+        and "our producer has stopped", and the two want different
+        responses; and since the producer asks the consolidated release for
+        the settled end of the record and the intermediate one for the
+        recent end, a fixed bound would also be wrong for a month either
+        side of a switch between them.
 
         Also reported here, at ``info``: the producer commits with a
         fine-grained token that expires. That is CONFIG state rather than
@@ -2720,8 +2724,12 @@ class BundleBuilder:
             name,
             "PASS" if healthy else "FAIL",
             f"{status.state} (newest {status.newest_month or 'none'})",
-            f"at most {feed_status_mod.MAX_LAG_MONTHS} month(s) behind "
-            f"{status.reference_month}",
+            f"at most {status.max_lag_months} month(s) behind "
+            f"{status.reference_month}"
+            + (
+                f" (the {status.newest_month_dataset_type} release)"
+                if status.newest_month_dataset_type else ""
+            ),
             status.detail,
             issues=[{
                 "id": "spei3_feed_stale",
