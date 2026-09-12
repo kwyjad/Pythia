@@ -401,12 +401,19 @@ drought:
         threshold: -1.0
         direction: below
       # SPEI-3, the three-month water-balance anomaly, as country means
-      # computed ONCE by hand from the Copernicus ERA5 drought grid and
-      # committed: scripts/build_spei3_country_means.py writes this file
-      # and nothing in a Resolver Update calls it. Zonal statistics need a
-      # scientific stack the pipeline does not install and credentials it
-      # does not hold, so the file is the product and the run just reads
-      # it through the tabular provider, exactly as it would a remote feed.
+      # computed from the Copernicus ERA5-Drought grid and committed:
+      # scripts/build_spei3_country_means.py writes this file on its own
+      # monthly schedule (.github/workflows/spei3_refresh.yml) and nothing
+      # in a Resolver Update calls it. Zonal statistics need a scientific
+      # stack the pipeline does not install and credentials it does not
+      # hold, so the file is the product and the run just reads it through
+      # the tabular provider, exactly as it would a remote feed.
+      #
+      # Its rows carry a `dataset_type` column naming which ERA5-Drought
+      # release each value came from. The reader picks its value by column
+      # NAME, so the extra column costs it nothing; it is there for the
+      # producer, which re-asks for a month still holding an intermediate
+      # value once the settled one exists.
       #
       # This is the only drought indicator that reaches back to 2016. HDX
       # Signals and NMME begin when their ingests began, which is why the

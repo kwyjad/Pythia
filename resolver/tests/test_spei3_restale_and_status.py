@@ -55,9 +55,12 @@ def _ledger(con, hazard: str, *months: str) -> None:
         )
 
 
-def _status_file(tmp_path, *, months, token="3m-abc", hazard="DR", newest="2026-08"):
+def _status_file(
+    tmp_path, *, months, token="3m-abc", hazard="DR", newest="2026-08",
+    dataset_type=None,
+):
     path = tmp_path / "spei3_status.json"
-    path.write_text(json.dumps({
+    payload = {
         "feed": "spei3_country_means",
         "status": "ok",
         "newest_month": newest,
@@ -70,7 +73,10 @@ def _status_file(tmp_path, *, months, token="3m-abc", hazard="DR", newest="2026-
             "hazard": hazard, "token": token, "months": list(months),
             "requested_at": "2026-09-10T00:00:00+00:00",
         },
-    }), encoding="utf-8")
+    }
+    if dataset_type is not None:
+        payload["newest_month_dataset_type"] = dataset_type
+    path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
 
@@ -247,6 +253,69 @@ def test_the_threshold_states_the_products_lag_and_the_tolerance_apart():
 
     assert fs.MAX_LAG_MONTHS == fs.PRODUCT_LAG_MONTHS + fs.MISSED_CYCLE_TOLERANCE_MONTHS
     assert fs.PRODUCT_LAG_MONTHS > 0 and fs.MISSED_CYCLE_TOLERANCE_MONTHS > 0
+    for release in ("consolidated_dataset", "intermediate_dataset"):
+        assert fs.max_lag_for(release) == (
+            fs.PRODUCT_LAG_BY_DATASET_TYPE[release] + fs.MISSED_CYCLE_TOLERANCE_MONTHS
+        )
+
+
+def test_the_threshold_follows_the_release_the_newest_month_came_from(tmp_path):
+    """The lag is a property of the product the producer actually requests.
+
+    The intermediate release runs a single month behind, so a feed serving
+    it and sitting three months back is NOT healthy — while the identical
+    lag on the consolidated release is exactly what a healthy feed looks
+    like. A fixed literal cannot say both, and this producer asks for both.
+    """
+
+    today = dt.date(2026, 9, 10)
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    consolidated = fs.read_feed_status(
+        _status_file(tmp_path / "a", months=[], newest="2026-05",
+                     dataset_type="consolidated_dataset"),
+        today=today,
+    )
+    intermediate = fs.read_feed_status(
+        _status_file(tmp_path / "b", months=[], newest="2026-05",
+                     dataset_type="intermediate_dataset"),
+        today=today,
+    )
+    assert consolidated.months_behind == intermediate.months_behind == 3
+    assert consolidated.state == fs.STATE_OK
+    assert intermediate.state == fs.STATE_STALE
+    assert "intermediate_dataset release" in intermediate.detail
+
+
+def test_a_healthy_intermediate_feed_is_not_reported_stale(tmp_path):
+    """One month behind is the intermediate release doing its job."""
+
+    status = fs.read_feed_status(
+        _status_file(tmp_path, months=[], newest="2026-07",
+                     dataset_type="intermediate_dataset"),
+        today=dt.date(2026, 9, 10),
+    )
+    assert status.months_behind == 1
+    assert status.state == fs.STATE_OK
+    assert status.max_lag_months == 2
+
+
+def test_a_status_file_that_names_no_release_keeps_the_wider_bound(tmp_path):
+    """Written before the producer asked for more than one release.
+
+    Every month such a file covers came from the consolidated one, so the
+    consolidated bound is the right one — and it is the WIDER of the two,
+    which is what stops the switch itself reporting a fault nobody could act
+    on any faster than the next producer run.
+    """
+
+    status = fs.read_feed_status(
+        _status_file(tmp_path, months=[], newest="2026-05"),
+        today=dt.date(2026, 9, 10),
+    )
+    assert status.newest_month_dataset_type == ""
+    assert status.max_lag_months == fs.MAX_LAG_MONTHS == 4
+    assert status.state == fs.STATE_OK
 
 
 def test_a_feed_that_has_never_been_produced_says_absent_not_stale(tmp_path):
