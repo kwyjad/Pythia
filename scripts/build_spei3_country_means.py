@@ -1358,6 +1358,22 @@ SANITY_HARD_LIMIT = 6.0
 #: dry global month moves the mean by a few tenths and not by one. The sd
 #: ratio catches the other shape of the same fault: a changed unit or a
 #: different variable rescales the spread rather than sliding it.
+#:
+#: The mean is tested against a SEASONALLY MATCHED reference, not against
+#: the whole record: the intermediate side is the newest month or three, and
+#: comparing a northern summer against a decade of every season measures the
+#: season as much as the release. Run 34835609446 is the evidence. It
+#: reported the intermediate rows 0.589 sigma below the whole 29,625-row
+#: consolidated record and passed, but against the same calendar months the
+#: gap was 0.536 — so season explained almost none of it, which the whole-
+#: record form could not have said either way.
+#:
+#: Sharpening the reference does NOT license a tighter band, and the same run
+#: is why. That 0.536 is real weather: the decade's JJA mean drifts from
+#: +0.079 in 2016 to -0.321 in 2025, and 2026 continues to -0.676. A limit
+#: set to catch a half-sigma would have refused a correct candidate. What the
+#: matched reference buys is a number that means something, not a narrower
+#: one.
 INTERMEDIATE_MEAN_SHIFT_LIMIT = 1.0
 INTERMEDIATE_SD_RATIO_LIMITS = (0.5, 2.0)
 
@@ -1365,6 +1381,10 @@ INTERMEDIATE_SD_RATIO_LIMITS = (0.5, 2.0)
 #: SKIPPED with a stated reason rather than passed. A gate that cannot run
 #: must say so: a silent pass is indistinguishable from a real one, and this
 #: is the gate guarding the change it ships with.
+#:
+#: It applies to the MATCHED reference rather than to the whole consolidated
+#: record, which is the side that can actually be small: a feed holding one
+#: August has ten Augusts to compare against, not ten years of everything.
 INTERMEDIATE_MIN_ROWS = 100
 
 #: How far the sampled share may move between runs before the candidate is
@@ -1440,6 +1460,17 @@ def _mean_and_sd(values: Sequence[float]) -> tuple[float, float] | None:
     return mean, math.sqrt(variance)
 
 
+def _calendar_month(ym: Any) -> str:
+    """The MM of a YYYY-MM, or "" when the value is not one.
+
+    The seasonal match is keyed on this, so a malformed ym must drop out of
+    the comparison rather than form a bucket of its own.
+    """
+
+    text = str(ym or "")
+    return text[5:7] if len(text) >= 7 and text[4] == "-" else ""
+
+
 def compare_releases(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Do the intermediate rows look like the consolidated ones?
 
@@ -1450,19 +1481,49 @@ def compare_releases(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     quantity, which would show up as a shifted mean or a rescaled spread
     rather than as an error.
 
-    Returns the numbers on both sides whatever the verdict, and says why
-    when it declines to reach one.
+    The mean is compared against a seasonally MATCHED reference: the
+    consolidated rows for the same calendar months the intermediate side
+    covers, weighted to the intermediate side's own month mix. Without the
+    match the comparison measures the season as much as the release, because
+    the intermediate side is always the newest month or three; with it, a
+    feed holding one August is compared against every other August rather
+    than against a decade of every season. The weighting matters when the
+    intermediate months are unevenly spread — three Augusts and one June
+    should not be answered by a reference that treats June and August alike.
+
+    The SPREAD is compared against those matched rows POOLED, unweighted. The
+    sd test asks whether the unit or the variable changed, which rescales the
+    spread whatever the season, and a month-mix-weighted sd would be a
+    quantity nobody could re-derive from the numbers printed beside it.
+
+    The whole-record consolidated mean and sd are reported too, and are worth
+    reporting: SPEI is standardised, so a correct reduction of the whole feed
+    lands near 0 with a spread near 1 whatever the release. They no longer
+    decide the verdict.
+
+    Returns the numbers on every side whatever the verdict, and says why when
+    it declines to reach one.
     """
 
-    by_release: dict[str, list[float]] = {}
+    consolidated: list[float] = []
+    intermediate: list[float] = []
+    consolidated_by_month: dict[str, list[float]] = {}
+    intermediate_by_month: dict[str, list[float]] = {}
     for row in rows:
         value = _float_or_none(row.get("value"))
         if value is None:
             continue
-        by_release.setdefault(row_dataset_type(row), []).append(value)
+        release = row_dataset_type(row)
+        month = _calendar_month(row.get("ym"))
+        if release == CDS_DATASET_TYPE_INTERMEDIATE:
+            intermediate.append(value)
+            if month:
+                intermediate_by_month.setdefault(month, []).append(value)
+        elif release == CDS_DATASET_TYPE_CONSOLIDATED:
+            consolidated.append(value)
+            if month:
+                consolidated_by_month.setdefault(month, []).append(value)
 
-    consolidated = by_release.get(CDS_DATASET_TYPE_CONSOLIDATED, [])
-    intermediate = by_release.get(CDS_DATASET_TYPE_INTERMEDIATE, [])
     report: dict[str, Any] = {
         "consolidated_rows": len(consolidated),
         "intermediate_rows": len(intermediate),
@@ -1481,20 +1542,78 @@ def compare_releases(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         report["verdict"] = "skipped"
         report["reason"] = "the feed holds no rows from the intermediate release"
         return report
-    if len(intermediate) < INTERMEDIATE_MIN_ROWS or len(consolidated) < INTERMEDIATE_MIN_ROWS:
+
+    # The matched reference. Only calendar months BOTH sides carry can take
+    # part: a consolidated month the intermediate side does not cover says
+    # nothing about it, and an intermediate month with no consolidated
+    # counterpart has nothing to be compared against.
+    shared = sorted(set(intermediate_by_month) & set(consolidated_by_month))
+    report["reference_months"] = shared
+    report["intermediate_months_unmatched"] = sorted(
+        set(intermediate_by_month) - set(consolidated_by_month)
+    )
+    reference_pool = [v for m in shared for v in consolidated_by_month[m]]
+    report["reference_rows"] = len(reference_pool)
+
+    if not shared:
+        report["verdict"] = "skipped"
+        report["reason"] = (
+            "the feed holds no consolidated rows for the calendar month(s) the "
+            "intermediate release covers, so there is nothing to compare them "
+            "against"
+        )
+        return report
+    if len(intermediate) < INTERMEDIATE_MIN_ROWS or len(reference_pool) < INTERMEDIATE_MIN_ROWS:
         report["verdict"] = "skipped"
         report["reason"] = (
             f"one side is below {INTERMEDIATE_MIN_ROWS} rows "
-            f"({len(consolidated)} consolidated, {len(intermediate)} intermediate), "
+            f"({len(reference_pool)} consolidated for month(s) "
+            f"{', '.join(shared)}, {len(intermediate)} intermediate), "
             "so a comparison of their spreads says nothing"
         )
         return report
 
-    shift = abs(report["intermediate_mean"] - report["consolidated_mean"])
+    # Weighted to the intermediate side's month mix, so an uneven spread of
+    # intermediate months cannot reintroduce the seasonal confound.
+    weights = {m: len(intermediate_by_month[m]) for m in shared}
+    total_weight = sum(weights.values())
+    reference_mean = sum(
+        weights[m] * (sum(consolidated_by_month[m]) / len(consolidated_by_month[m]))
+        for m in shared
+    ) / total_weight
+    matched_intermediate = [v for m in shared for v in intermediate_by_month[m]]
+    intermediate_stats = _mean_and_sd(matched_intermediate)
+    reference_stats = _mean_and_sd(reference_pool)
+    if intermediate_stats is None or reference_stats is None:
+        report["verdict"] = "skipped"
+        report["reason"] = (
+            "a mean and spread need two values on each side, and one side has "
+            "fewer"
+        )
+        return report
+
+    report["reference_mean"] = round(reference_mean, 4)
+    report["reference_sd"] = round(reference_stats[1], 4)
+    report["intermediate_matched_rows"] = len(matched_intermediate)
+    report["intermediate_matched_mean"] = round(intermediate_stats[0], 4)
+    report["intermediate_matched_sd"] = round(intermediate_stats[1], 4)
+    report["by_calendar_month"] = {
+        m: {
+            "consolidated_rows": len(consolidated_by_month[m]),
+            "consolidated_mean": round(
+                sum(consolidated_by_month[m]) / len(consolidated_by_month[m]), 4
+            ),
+            "intermediate_rows": len(intermediate_by_month[m]),
+            "intermediate_mean": round(
+                sum(intermediate_by_month[m]) / len(intermediate_by_month[m]), 4
+            ),
+        }
+        for m in shared
+    }
+
+    shift = abs(intermediate_stats[0] - reference_mean)
     ratio = (
-        report["intermediate_sd"] / report["consolidated_sd"]
-        if report["consolidated_sd"]
-        else None
+        intermediate_stats[1] / reference_stats[1] if reference_stats[1] else None
     )
     report["mean_shift"] = round(shift, 4)
     report["sd_ratio"] = round(ratio, 4) if ratio is not None else None
@@ -1503,14 +1622,15 @@ def compare_releases(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     if shift > INTERMEDIATE_MEAN_SHIFT_LIMIT:
         problems.append(
             f"the intermediate mean sits {shift:.3f} sigma from the consolidated "
-            f"one ({report['intermediate_mean']:.3f} against "
-            f"{report['consolidated_mean']:.3f}, limit "
+            f"mean for the same calendar month(s) "
+            f"({intermediate_stats[0]:.3f} against {reference_mean:.3f} for "
+            f"month(s) {', '.join(shared)}, limit "
             f"{INTERMEDIATE_MEAN_SHIFT_LIMIT:g})"
         )
     if ratio is None or not (low <= ratio <= high):
         problems.append(
-            f"the intermediate spread is {report['intermediate_sd']:.3f} against "
-            f"{report['consolidated_sd']:.3f} "
+            f"the intermediate spread is {intermediate_stats[1]:.3f} against "
+            f"{reference_stats[1]:.3f} for the same calendar month(s) "
             f"(ratio {ratio if ratio is None else round(ratio, 3)}, "
             f"limits {low:g}-{high:g})"
         )
@@ -1518,7 +1638,10 @@ def compare_releases(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     report["reason"] = (
         "; ".join(problems)
         if problems
-        else "the two releases agree on mean and spread"
+        else (
+            "the two releases agree on mean and spread for the same calendar "
+            f"month(s) ({', '.join(shared)})"
+        )
     )
     return report
 
@@ -3000,17 +3123,42 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     # go and re-derive is a number nobody checks.
     comparison = result.release_comparison or {}
     LOG.info(
-        "[spei3] release comparison (%s): consolidated %d row(s) mean %s sd %s; "
-        "intermediate %d row(s) mean %s sd %s — %s",
+        "[spei3] release comparison (%s): for calendar month(s) %s, "
+        "consolidated %s row(s) mean %s sd %s against intermediate %s row(s) "
+        "mean %s sd %s — %s",
         comparison.get("verdict") or "unreported",
+        ", ".join(comparison.get("reference_months") or []) or "none",
+        comparison.get("reference_rows", 0),
+        comparison.get("reference_mean", "n/a"),
+        comparison.get("reference_sd", "n/a"),
+        comparison.get("intermediate_matched_rows", 0),
+        comparison.get("intermediate_matched_mean", "n/a"),
+        comparison.get("intermediate_matched_sd", "n/a"),
+        comparison.get("reason") or "",
+    )
+    # The whole-feed figures are a different statement and are kept apart from
+    # the verdict: SPEI is standardised, so a correct reduction of either
+    # release lands near 0 with a spread near 1 whatever the season.
+    LOG.info(
+        "[spei3] whole feed: consolidated %d row(s) mean %s sd %s; "
+        "intermediate %d row(s) mean %s sd %s",
         comparison.get("consolidated_rows", 0),
         comparison.get("consolidated_mean", "n/a"),
         comparison.get("consolidated_sd", "n/a"),
         comparison.get("intermediate_rows", 0),
         comparison.get("intermediate_mean", "n/a"),
         comparison.get("intermediate_sd", "n/a"),
-        comparison.get("reason") or "",
     )
+    for month, stats in sorted((comparison.get("by_calendar_month") or {}).items()):
+        LOG.info(
+            "[spei3]   month %s: consolidated mean %s over %d row(s); "
+            "intermediate mean %s over %d row(s)",
+            month,
+            stats.get("consolidated_mean", "n/a"),
+            stats.get("consolidated_rows", 0),
+            stats.get("intermediate_mean", "n/a"),
+            stats.get("intermediate_rows", 0),
+        )
     for failure in result.failures:
         LOG.error("[spei3] GATE FAILED: %s", failure)
     if args.report_out:

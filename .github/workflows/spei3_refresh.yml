@@ -691,14 +691,35 @@ jobs:
           # to go and re-derive is a number nobody checks.
           release = coverage.get("release_comparison") or {}
           if release:
-              print(f"- release comparison (**{release.get('verdict', 'unreported')}**): "
-                    f"consolidated {release.get('consolidated_rows', 0)} row(s) "
-                    f"mean {release.get('consolidated_mean', 'n/a')} "
-                    f"sd {release.get('consolidated_sd', 'n/a')}; "
-                    f"intermediate {release.get('intermediate_rows', 0)} row(s) "
-                    f"mean {release.get('intermediate_mean', 'n/a')} "
-                    f"sd {release.get('intermediate_sd', 'n/a')} — "
+              months = ", ".join(release.get("reference_months") or []) or "none"
+              print(f"- release comparison (**{release.get('verdict', 'unreported')}**), "
+                    f"calendar month(s) {months}: "
+                    f"consolidated {release.get('reference_rows', 0)} row(s) "
+                    f"mean {release.get('reference_mean', 'n/a')} "
+                    f"sd {release.get('reference_sd', 'n/a')} against "
+                    f"intermediate {release.get('intermediate_matched_rows', 0)} row(s) "
+                    f"mean {release.get('intermediate_matched_mean', 'n/a')} "
+                    f"sd {release.get('intermediate_matched_sd', 'n/a')} — "
                     f"{release.get('reason', '')}")
+              # Kept apart from the verdict. SPEI is standardised, so these two
+              # landing near 0 and 1 is a statement about the reduction rather
+              # than about either release, and folding them into the comparison
+              # is what made the seasonal confound invisible.
+              print(f"  - whole feed: consolidated "
+                    f"mean {release.get('consolidated_mean', 'n/a')} "
+                    f"sd {release.get('consolidated_sd', 'n/a')}; intermediate "
+                    f"mean {release.get('intermediate_mean', 'n/a')} "
+                    f"sd {release.get('intermediate_sd', 'n/a')}")
+              for month, stats in sorted((release.get("by_calendar_month") or {}).items()):
+                  print(f"  - month {month}: consolidated "
+                        f"{stats.get('consolidated_mean', 'n/a')} over "
+                        f"{stats.get('consolidated_rows', 0)} row(s); intermediate "
+                        f"{stats.get('intermediate_mean', 'n/a')} over "
+                        f"{stats.get('intermediate_rows', 0)} row(s)")
+              unmatched = release.get("intermediate_months_unmatched") or []
+              if unmatched:
+                  print(f"  - no consolidated counterpart for month(s) "
+                        f"{', '.join(unmatched)}, so they are outside the comparison")
           restale = status.get("restale") or {}
           if restale:
               print(f"- restale requested for {len(restale.get('months') or [])} "
