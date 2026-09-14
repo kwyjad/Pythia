@@ -2138,10 +2138,10 @@ def test_the_release_is_read_off_the_filename():
 BACKFILL_MEAN_AND_SD = (-0.086, 0.969)
 
 
-def _release_rows(release: str, values):
+def _release_rows(release: str, values, ym: str = "2026-07"):
     return [
         {
-            "iso3": f"C{i:02d}", "ym": "2026-07", "value": f"{v:.4f}",
+            "iso3": f"C{i:02d}", "ym": ym, "value": f"{v:.4f}",
             "coverage": "cells", "n_cells": "10", "dataset_type": release,
         }
         for i, v in enumerate(values)
@@ -2149,14 +2149,26 @@ def _release_rows(release: str, values):
 
 
 def test_the_committed_feed_matches_the_backfill_it_was_measured_from():
-    """The reference the gate compares against, checked against the record."""
+    """The reference the gate compares against, checked against the record.
+
+    Pinned on the CONSOLIDATED rows rather than on the whole file. Those
+    29,625 rows ARE the 2026-09-10 backfill the two figures were measured
+    from, and the file's total moves on every successful producer run — a
+    test asserting it would fail on success, which is the one thing a test
+    must never do.
+    """
 
     rows = spei.read_csv_rows(
         Path(__file__).resolve().parents[2] / "resolver" / "data"
         / "spei3_country_means.csv"
     )
-    assert len(rows) == 29625
-    mean, sd = spei._mean_and_sd([float(r["value"]) for r in rows])
+    consolidated = [
+        r for r in rows
+        if spei.row_dataset_type(r) == spei.CDS_DATASET_TYPE_CONSOLIDATED
+    ]
+    assert len(consolidated) >= 29625
+    assert len(rows) >= len(consolidated)
+    mean, sd = spei._mean_and_sd([float(r["value"]) for r in consolidated])
     expected_mean, expected_sd = BACKFILL_MEAN_AND_SD
     assert abs(mean - expected_mean) < 0.01
     assert abs(sd - expected_sd) < 0.01
@@ -2319,3 +2331,263 @@ def test_a_cached_unit_from_before_the_manifest_answers_as_it_used_to(tmp_path):
         tmp_path, ["2016-01", "2016-02"], client=_Refusing(), today=TODAY,
     )
     assert result.skipped_present == ["2016 (consolidated)"]
+
+
+# --------------------------------------------------------------------------
+# The seasonally matched release comparison.
+#
+# The gate used to compare the intermediate rows against the WHOLE
+# consolidated record. The intermediate side is always the newest month or
+# three, so that measured the season as much as the release: run 34835609446
+# reported a 0.589 sigma gap and could not say how much of it was July and
+# August. The reference is now the consolidated rows for the same calendar
+# months, weighted to the intermediate side's own month mix.
+# --------------------------------------------------------------------------
+
+
+def _seasonal_rows(release, by_month):
+    """Rows for one release across several calendar months of 2026/other years."""
+
+    rows = []
+    for ym, values in by_month.items():
+        rows.extend(_release_rows(release, values, ym=ym))
+    return rows
+
+
+def _spread(mean: float, n: int, d: float = 0.9):
+    """n values with EXACTLY this mean and a spread of about d.
+
+    Alternating rather than random so the assertions can be exact. A block of
+    identical values would have zero spread, which the sd half of the gate
+    refuses outright — correctly: a reference in which every country reads
+    the same is a broken feed, not a tight one.
+    """
+
+    assert n % 2 == 0
+    return [mean + d if i % 2 else mean - d for i in range(n)]
+
+
+def test_the_reference_is_the_same_calendar_months_not_the_whole_record():
+    """The property the sharpening exists for, stated on its own."""
+
+    import random
+
+    rng = random.Random(5)
+    # A record whose winters are wet and whose summers are dry.
+    consolidated = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED,
+        {
+            "2024-01": [rng.gauss(0.8, 0.9) for _ in range(200)],
+            "2025-01": [rng.gauss(0.8, 0.9) for _ in range(200)],
+            "2024-07": [rng.gauss(-0.4, 0.9) for _ in range(200)],
+            "2025-07": [rng.gauss(-0.4, 0.9) for _ in range(200)],
+        },
+    )
+    intermediate = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE,
+        {"2026-07": [rng.gauss(-0.4, 0.9) for _ in range(200)]},
+    )
+    report = spei.compare_releases(consolidated + intermediate)
+
+    # July only, never the Januaries.
+    assert report["reference_months"] == ["07"]
+    assert report["reference_rows"] == 400
+    assert abs(report["reference_mean"] - (-0.4)) < 0.2
+    # The whole-record mean is pulled up by the wet winters, and is reported
+    # but does not decide anything.
+    assert report["consolidated_mean"] > report["reference_mean"]
+    # An intermediate release that agrees with its own season passes, where
+    # against the whole record it would have looked a sigma low.
+    assert report["verdict"] == "ok"
+    assert report["mean_shift"] < 0.3
+
+
+def test_a_release_shift_hidden_by_the_season_is_caught():
+    """The case the whole-record form passed and this one refuses.
+
+    Constructed so the two verdicts genuinely differ: the record's winters
+    are wet enough that a badly shifted summer still lands near the overall
+    mean, which is exactly how a real substitution could have slipped
+    through.
+    """
+
+    import random
+
+    rng = random.Random(7)
+    consolidated = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED,
+        {
+            "2024-01": [rng.gauss(1.2, 0.9) for _ in range(300)],
+            "2025-01": [rng.gauss(1.2, 0.9) for _ in range(300)],
+            "2024-07": [rng.gauss(-1.2, 0.9) for _ in range(300)],
+            "2025-07": [rng.gauss(-1.2, 0.9) for _ in range(300)],
+        },
+    )
+    # Sits within a sigma of the whole-record mean (~0.0) and more than a
+    # sigma from July's (~-1.2).
+    intermediate = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE,
+        {"2026-07": [rng.gauss(0.15, 0.9) for _ in range(200)]},
+    )
+    report = spei.compare_releases(consolidated + intermediate)
+
+    # The whole-record comparison the gate used to make would have passed.
+    whole_record_shift = abs(
+        report["intermediate_mean"] - report["consolidated_mean"]
+    )
+    assert whole_record_shift < spei.INTERMEDIATE_MEAN_SHIFT_LIMIT
+    # The matched one does not.
+    assert report["verdict"] == "fail"
+    assert report["mean_shift"] > spei.INTERMEDIATE_MEAN_SHIFT_LIMIT
+    assert "same calendar month(s)" in report["reason"]
+
+
+def test_the_reference_is_weighted_to_the_intermediate_month_mix():
+    """Three Augusts and one June must not be answered by an even reference."""
+
+    consolidated = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED,
+        {
+            "2024-06": _spread(0.0, 150),
+            "2025-06": _spread(0.0, 150),
+            "2024-08": _spread(-1.0, 150),
+            "2025-08": _spread(-1.0, 150),
+        },
+    )
+    # Mostly Augusts, so the reference should sit near August's -1.0 rather
+    # than near the unweighted -0.5 of the pooled months.
+    intermediate = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE,
+        {"2026-06": _spread(-1.0, 40), "2026-08": _spread(-1.0, 360)},
+    )
+    report = spei.compare_releases(consolidated + intermediate)
+
+    assert report["reference_months"] == ["06", "08"]
+    # 40 Junes at 0.0 and 360 Augusts at -1.0 -> -0.9.
+    assert abs(report["reference_mean"] - (-0.9)) < 1e-6
+    # The pooled, unweighted figure would have been -0.5, and would have
+    # made a correct candidate look half a sigma out.
+    assert report["verdict"] == "ok"
+    assert report["mean_shift"] < 0.15
+
+
+def test_an_intermediate_month_with_no_counterpart_is_named_not_silently_dropped():
+    consolidated = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED,
+        {"2024-07": _spread(0.0, 200), "2025-07": _spread(0.0, 200)},
+    )
+    intermediate = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE,
+        {"2026-07": _spread(0.0, 150), "2026-12": _spread(0.0, 150)},
+    )
+    report = spei.compare_releases(consolidated + intermediate)
+
+    assert report["reference_months"] == ["07"]
+    assert report["intermediate_months_unmatched"] == ["12"]
+    assert report["verdict"] == "ok"
+
+
+def test_no_shared_calendar_month_is_skipped_rather_than_passed():
+    """A gate that cannot run says so. It is guarding its own change."""
+
+    rows = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED, {"2025-01": [0.0] * 400}
+    ) + _seasonal_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE, {"2026-07": [0.0] * 200}
+    )
+    report = spei.compare_releases(rows)
+
+    assert report["verdict"] == "skipped"
+    assert "nothing to compare" in report["reason"]
+    # And a skip never fails the candidate.
+    assert spei.validate_candidate(rows, []).ok is True
+
+
+def test_a_thin_matched_reference_is_skipped_even_when_the_record_is_large():
+    """The new small side. The whole record can be huge and the match tiny."""
+
+    rows = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED,
+        {"2025-01": [0.0] * 5000, "2025-07": [0.0] * 10},
+    ) + _seasonal_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE, {"2026-07": [0.0] * 200}
+    )
+    report = spei.compare_releases(rows)
+
+    assert report["consolidated_rows"] == 5010
+    assert report["reference_rows"] == 10
+    assert report["verdict"] == "skipped"
+    assert "below" in report["reason"] and "07" in report["reason"]
+
+
+def test_the_per_month_breakdown_reports_both_sides():
+    """How a reader sees which month moved, rather than one pooled number."""
+
+    rows = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED,
+        {"2024-07": [-0.2] * 200, "2024-08": [-0.3] * 200},
+    ) + _seasonal_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE,
+        {"2026-07": [-0.4] * 100, "2026-08": [-0.9] * 100},
+    )
+    report = spei.compare_releases(rows)
+
+    breakdown = report["by_calendar_month"]
+    assert set(breakdown) == {"07", "08"}
+    assert abs(breakdown["07"]["consolidated_mean"] - (-0.2)) < 1e-6
+    assert abs(breakdown["07"]["intermediate_mean"] - (-0.4)) < 1e-6
+    assert abs(breakdown["08"]["intermediate_mean"] - (-0.9)) < 1e-6
+    assert breakdown["08"]["consolidated_rows"] == 200
+    assert breakdown["08"]["intermediate_rows"] == 100
+
+
+def test_a_malformed_month_drops_out_of_the_comparison():
+    """A bad ym must not become a bucket of its own."""
+
+    rows = _seasonal_rows(
+        spei.CDS_DATASET_TYPE_CONSOLIDATED, {"2025-07": _spread(0.0, 300)}
+    ) + _seasonal_rows(
+        spei.CDS_DATASET_TYPE_INTERMEDIATE, {"2026-07": _spread(0.0, 150)}
+    ) + _release_rows(spei.CDS_DATASET_TYPE_INTERMEDIATE, [9.0] * 5, ym="nonsense")
+    report = spei.compare_releases(rows)
+
+    assert report["reference_months"] == ["07"]
+    assert report["intermediate_matched_rows"] == 150
+    # The malformed rows are still counted in the whole-feed total, which is
+    # what makes their absence from the match visible rather than silent.
+    assert report["intermediate_rows"] == 155
+    assert report["verdict"] == "ok"
+
+
+def test_the_live_feed_passes_the_matched_gate_with_the_numbers_on_record():
+    """Run 34835609446's own data, which is why the gate was sharpened.
+
+    Pinned loosely, because the feed grows: what is being asserted is that
+    the matched reference is JJA rather than the whole record, that the gap
+    is the 0.536 the matched form measures and not the 0.589 the whole-record
+    form did, and that a real drying summer still passes.
+    """
+
+    rows = spei.read_csv_rows(
+        Path(__file__).resolve().parents[2] / "resolver" / "data"
+        / "spei3_country_means.csv"
+    )
+    if not any(
+        spei.row_dataset_type(r) == spei.CDS_DATASET_TYPE_INTERMEDIATE
+        for r in rows
+    ):
+        pytest.skip("the committed feed holds no intermediate rows yet")
+
+    report = spei.compare_releases(rows)
+    assert report["verdict"] == "ok"
+    # Summer months, and the reference is every other year's summer.
+    assert report["reference_months"] == ["06", "07", "08"]
+    assert report["reference_rows"] > report["intermediate_matched_rows"]
+    # Season explains almost none of the gap: matched and whole-record agree
+    # to within a tenth of a sigma, which is the finding that motivated this.
+    whole_record_shift = abs(
+        report["intermediate_mean"] - report["consolidated_mean"]
+    )
+    assert abs(report["mean_shift"] - whole_record_shift) < 0.1
+    # And it is inside the band, which is why the band was not tightened.
+    assert report["mean_shift"] < spei.INTERMEDIATE_MEAN_SHIFT_LIMIT
