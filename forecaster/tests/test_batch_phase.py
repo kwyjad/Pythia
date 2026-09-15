@@ -239,3 +239,69 @@ def test_collect_replay_restores_submitted_prompt(batch_env, monkeypatch):
     (text, usage, error, ms), sync_calls = _call(monkeypatch, "collect")
     assert not sync_calls
     assert usage["sent_prompt_text"] == submitted_prompt
+
+
+def test_collect_ingest_rebatches_before_replay(batch_env, monkeypatch):
+    """A row expired under a batch the provider rejected at validation is
+    re-batched by the collect preamble and then REPLAYED — no sync call."""
+
+    cid = llm_batch.enqueue_request(
+        batch_env,
+        family="spd_v2",
+        provider="anthropic",
+        model_id="claude-opus-5",
+        request_body={"model": "claude-opus-5"},
+        prompt_text="the spd prompt",
+        question_id="SOM_ACE_FATALITIES_2026-08",
+        model_key=cli._batch_model_key(_MS),
+        iso3="SOM",
+        hazard_code="ACE",
+        metric="FATALITIES",
+        pipeline_id="pl_test",
+    )
+    # The state the 2026-09-01 collect stage found: a failed batch whose
+    # error_text names the file-access rejection, and rows flipped to expired.
+    batch_env.execute(
+        """
+        INSERT INTO llm_batches (batch_id, provider, provider_batch_id, family, run_id,
+            pipeline_id, stage, model_id, status, n_requests, n_succeeded, n_expired,
+            submitted_at, error_text)
+        VALUES ('b_old', 'anthropic', 'prov_old', 'spd_v2', 'fc_submit_run', 'pl_test',
+            'fc_submit', 'claude-opus-5', 'failed', 1, 0, 1, now(), ?)
+        """,
+        [json.dumps({"provider_state": "failed", "detail": json.dumps({"errors": {"data": [
+            {"code": "invalid_request", "param": "file_id",
+             "message": "Cannot find file file-x, or organization org-y does not have access to it."}]}})})],
+    )
+    batch_env.execute(
+        "UPDATE llm_batch_requests SET status='expired', batch_id='b_old' WHERE custom_id = ?", [cid]
+    )
+
+    class _Adapter:
+        submitted: list = []
+
+        def submit(self, rows, **kwargs):
+            type(self).submitted.append(list(rows))
+            return {"provider_batch_id": "prov_new", "input_file_id": None}
+
+        def poll(self, provider_batch_id):
+            return llm_batch.BatchStatus(provider_batch_id, "ended", {})
+
+        def fetch(self, provider_batch_id):
+            yield (cid, True, '{"spds": {"2026-08": {"probs": [1,0,0,0,0,0,0]}}}',
+                   {"prompt_tokens": 7, "completion_tokens": 2}, "")
+
+        def cancel(self, provider_batch_id):
+            raise AssertionError("nothing should be canceled")
+
+    monkeypatch.setattr(llm_batch, "_ADAPTERS", {"anthropic": _Adapter, "openai": _Adapter, "google": _Adapter})
+    monkeypatch.setattr(llm_batch, "_sleep", lambda _s: None)
+
+    run_id = cli._collect_phase_ingest(batch_env, pipeline_id="pl_test", run_id="fc_fresh", hs_run_id=None)
+    assert run_id == "fc_submit_run"
+    assert len(_Adapter.submitted) == 1
+    (text, usage, error, ms), sync_calls = _call(monkeypatch, "collect")
+    assert not sync_calls
+    assert error is None
+    assert usage["service_tier"] == "batch"
+    assert json.loads(text)["spds"]

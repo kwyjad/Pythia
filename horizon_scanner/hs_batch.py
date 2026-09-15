@@ -556,27 +556,61 @@ def submit_family(family: str, *, run_id: str, stage_name: str) -> list[str]:
     from pythia import llm_batch
 
     pid = _PIPELINE_ID or run_id
-    return llm_batch.submit_pending(
+    report = llm_batch.submit_pending_report(
         batch_con(),
         family=family,
         pipeline_id=pid,
         stage=stage_name,
         hs_run_id=run_id,
     )
+    if report.n_groups:
+        logger.info(report.summary_line())
+        print(report.summary_line(), flush=True)
+    if report.failed:
+        llm_batch.gh_annotation(
+            "warning",
+            "Batch submit incomplete",
+            f"HS {family}: {len(report.failed)} of {report.n_groups} provider batch(es) "
+            f"could not be submitted ({report.n_created} created); their rows stay pending "
+            "and the next collect stage re-batches them before any sync fallback",
+        )
+    return report.created
 
 
-def collect_pending_batches(pipe_id: Optional[str] = None) -> None:
+# The family each collect stage replays; the same family is what it may
+# re-batch before falling back to sync.
+_COLLECT_FAMILIES = {"hs_rc_collect": ("hs_rc",), "hs_finalize": ("hs_triage",)}
+
+
+def collect_pending_batches(pipe_id: Optional[str] = None, *, hs_run_id: Optional[str] = None) -> None:
     """Ingest finished provider batches for this pipeline (collect stages).
 
     Mirrors the forecaster collect phase: poll each pending batch, collect
     terminal ones, cancel-and-expire ones past PYTHIA_BATCH_MAX_WAIT_H so
-    their items take the sync fallback path.
+    their items take the sync fallback path — and then re-batch whatever
+    never got a batch result (bounded wait) before that fallback runs.
     """
 
     from pythia import llm_batch
 
     con = batch_con()
-    for binfo in llm_batch.pending_batches(con, pipe_id or _PIPELINE_ID):
+    _drain_pending_batches(con, pipe_id or _PIPELINE_ID)
+    families = _COLLECT_FAMILIES.get(_STAGE, ())
+    if families and (pipe_id or _PIPELINE_ID):
+        rb = llm_batch.resubmit_unserved(
+            con,
+            pipeline_id=pipe_id or _PIPELINE_ID,
+            families=families,
+            stage=f"{_STAGE}_resubmit",
+            hs_run_id=hs_run_id,
+        )
+        logger.info("hs_batch: collect re-batch: %s", rb)
+
+
+def _drain_pending_batches(con, pipe_id: Optional[str]) -> None:
+    from pythia import llm_batch
+
+    for binfo in llm_batch.pending_batches(con, pipe_id):
         status = llm_batch.poll_batch(con, binfo["batch_id"])
         state = status.state if status else "unknown"
         if state == "ended" or (status and status.terminal):

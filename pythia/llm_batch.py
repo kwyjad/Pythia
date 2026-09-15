@@ -36,6 +36,13 @@ Env flags:
   providers may batch; others stay on the sync path.
 - ``PYTHIA_BATCH_MAX_WAIT_H`` (default 24): poller gives up past this age
   and the collect stage falls back to sync for unfinished items.
+- ``PYTHIA_OPENAI_BATCH_SUBMIT_BUDGET_MIN`` (default 20): how long the OpenAI
+  submit guard keeps retrying a validation-rejected input file, shared across
+  the process (see ``_OpenAIBatch.submit``).
+- ``PYTHIA_BATCH_RESUBMIT_AT_COLLECT`` (default 1) / ``PYTHIA_BATCH_RESUBMIT_WAIT_MIN``
+  (default 90): a collect stage re-batches every request that never got a
+  batch result and waits, bounded, before the sync fallback (see
+  ``resubmit_unserved``). The sync path is the fallback of last resort.
 """
 
 from __future__ import annotations
@@ -45,11 +52,12 @@ import json
 import logging
 import os
 import re
+import signal
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import requests
 
@@ -100,6 +108,30 @@ def max_wait_hours() -> float:
         return float(os.getenv("PYTHIA_BATCH_MAX_WAIT_H", "24") or 24)
     except ValueError:
         return 24.0
+
+
+def resubmit_at_collect_enabled() -> bool:
+    """``PYTHIA_BATCH_RESUBMIT_AT_COLLECT`` (default on): re-batch before the sync fallback."""
+
+    return os.getenv("PYTHIA_BATCH_RESUBMIT_AT_COLLECT", "1").strip().lower() in ("1", "true", "yes")
+
+
+def resubmit_wait_minutes() -> float:
+    """``PYTHIA_BATCH_RESUBMIT_WAIT_MIN`` (default 90): how long a collect stage waits on re-batches."""
+
+    try:
+        return max(0.0, float(os.getenv("PYTHIA_BATCH_RESUBMIT_WAIT_MIN", "90") or 90))
+    except ValueError:
+        return 90.0
+
+
+def resubmit_poll_sec() -> float:
+    """``PYTHIA_BATCH_RESUBMIT_POLL_SEC`` (default 60): poll interval while waiting on re-batches."""
+
+    try:
+        return max(1.0, float(os.getenv("PYTHIA_BATCH_RESUBMIT_POLL_SEC", "60") or 60))
+    except ValueError:
+        return 60.0
 
 
 def _now() -> datetime:
@@ -266,14 +298,21 @@ class BatchStatus:
 # ---------------------------------------------------------------------------
 
 
-# OpenAI submit-time guards (see _OpenAIBatch.submit). All read per call so
+# OpenAI submit-time guards (see _OpenAIBatch.submit). Read per call so
 # tests and operators can tune them without an import-order trap; `_sleep`
-# is a module attribute so tests can stub the waits.
+# and `_clock` are module attributes so tests can stub the waits and drive a
+# fake clock.
 _sleep = time.sleep
+_clock = time.monotonic
 _OPENAI_FILE_POLL_SEC = 2.0
 _OPENAI_VALIDATE_POLL_SEC = 3.0
-_OPENAI_SUBMIT_RETRY_BACKOFF_SEC = 5.0
+# Backoff between validation retries; the last rung repeats. Seconds.
+_OPENAI_SUBMIT_BACKOFF_LADDER_SEC: Tuple[float, ...] = (30.0, 60.0, 120.0, 300.0)
 _OPENAI_FILE_ACCESS_MARKERS = ("cannot find file", "does not have access")
+# Process-shared retry budget, armed at the FIRST rejection anywhere in the
+# process: however many OpenAI groups a submit stage carries, the extra wall
+# time the guard can add is bounded once.
+_openai_submit_budget_deadline: Optional[float] = None
 
 
 def _openai_file_ready_wait_sec() -> float:
@@ -284,15 +323,56 @@ def _openai_validate_wait_sec() -> float:
     return float(os.getenv("PYTHIA_OPENAI_BATCH_VALIDATE_WAIT_SEC", "120") or 120)
 
 
-def _openai_submit_attempts() -> int:
-    return max(1, int(os.getenv("PYTHIA_OPENAI_BATCH_SUBMIT_ATTEMPTS", "3") or 3))
+def _openai_submit_budget_sec() -> float:
+    """``PYTHIA_OPENAI_BATCH_SUBMIT_BUDGET_MIN`` (default 20) in seconds."""
+
+    try:
+        return max(0.0, float(os.getenv("PYTHIA_OPENAI_BATCH_SUBMIT_BUDGET_MIN", "20") or 20)) * 60.0
+    except ValueError:
+        return 20.0 * 60.0
+
+
+def _openai_submit_backoff_sec(retry_idx: int) -> float:
+    """Rung ``retry_idx`` (1-based) of the backoff ladder; past the end, the last rung."""
+
+    ladder = _OPENAI_SUBMIT_BACKOFF_LADDER_SEC
+    idx = max(1, int(retry_idx)) - 1
+    return float(ladder[min(idx, len(ladder) - 1)])
+
+
+def _openai_submit_budget_remaining() -> float:
+    """Seconds left in the process-wide retry budget; arms it on first call."""
+
+    global _openai_submit_budget_deadline
+    if _openai_submit_budget_deadline is None:
+        _openai_submit_budget_deadline = _clock() + _openai_submit_budget_sec()
+    return max(0.0, _openai_submit_budget_deadline - _clock())
+
+
+def _reset_openai_submit_budget() -> None:
+    """Disarm the shared budget (tests, and the canary between providers)."""
+
+    global _openai_submit_budget_deadline
+    _openai_submit_budget_deadline = None
+
+
+def gh_annotation(level: str, title: str, message: str) -> None:
+    """Print a GitHub Actions annotation (one line; a person reads these first).
+
+    ``level`` is ``warning`` or ``error``. An ``::error::`` annotation does NOT
+    fail the job by itself — it is a statement about what happened, and the
+    stage's exit code stays a statement about whether it wrote its output.
+    """
+
+    flat = " ".join(str(message).split())
+    print(f"::{level} title={title}::{flat}", flush=True)
 
 
 def _openai_errors_are_file_access(errors: Any) -> bool:
-    """True when OpenAI's validation errors are the input-file access race.
+    """True when OpenAI's validation errors are the input-file access rejection.
 
     ``errors`` is the batch object's ``errors.data`` list (or the whole
-    ``errors`` dict). Only that failure is worth a re-upload; every other
+    ``errors`` dict). Only that failure is worth retrying; every other
     validation failure is deterministic.
     """
 
@@ -310,6 +390,37 @@ def _openai_errors_are_file_access(errors: Any) -> bool:
     return True
 
 
+class OpenAIBatchValidationError(RuntimeError):
+    """OpenAI's asynchronous validator rejected a batch we had just created.
+
+    ``file_access`` says which of the two kinds this is: the provider-side
+    file-access rejection (worth retrying, and the collect stage re-batches
+    it) or a deterministic failure such as ``mismatched_model`` (never
+    retried). ``same_file_retry_failed`` records whether re-creating the batch
+    against the SAME file was refused too — the difference between "the file
+    was not visible yet" and "the organisation is being refused".
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_batch_id: str = "",
+        input_file_id: str = "",
+        errors: Any = None,
+        file_access: bool = False,
+        attempts: int = 1,
+        same_file_retry_failed: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.provider_batch_id = provider_batch_id
+        self.input_file_id = input_file_id
+        self.errors = errors
+        self.file_access = file_access
+        self.attempts = attempts
+        self.same_file_retry_failed = same_file_retry_failed
+
+
 class _OpenAIBatch:
     provider = "openai"
 
@@ -324,19 +435,29 @@ class _OpenAIBatch:
         """rows: [(custom_id, request_body)] -> {provider_batch_id, input_file_id}.
 
         Upload the JSONL, wait for the file to be readable, create the batch,
-        and then WATCH ITS VALIDATION: on 2026-09-01 every one of the four
+        and then WATCH ITS VALIDATION. On 2026-09-01 every one of the four
         OpenAI batches was accepted at creation and rejected seconds later by
         OpenAI's asynchronous validator with ``invalid_request: Cannot find
         file file-..., or organization ... does not have access to it`` — the
-        file we had just uploaded, under the same key. Nothing in this
-        adapter saw that: the batch object was persisted as ``submitted``,
-        the poller found it ``failed`` with zero counts, and all 210 requests
-        expired into synchronous full-price calls (~$10.80, a fifth of the
-        run). The same upload+create sequence had worked on 2026-08-01, so
-        this is eventual consistency on the provider side, and the only
-        defence is to notice at submit time, where a re-upload costs seconds
-        rather than a batch discount. See ``_wait_for_file`` and
-        ``_confirm_validation``.
+        file we had just uploaded, under the same key, already reporting
+        ``status=processed``. Nothing in this adapter saw that: the batch was
+        persisted as ``submitted``, the poller found it ``failed`` with zero
+        counts two minutes later, and all 210 requests expired into
+        synchronous full-price calls (~$10.80, a fifth of the run).
+
+        This is NOT eventual consistency that a re-upload cures in seconds.
+        It is a provider-side incident that hit many organisations from
+        19 August 2026 and spiked on 1 September: batches.create fails
+        validation for HOURS at a time while files.retrieve says processed,
+        on /v1/chat/completions as well as /v1/responses, and OpenAI applies
+        a per-organisation mitigation on request. So the guard is patient
+        rather than quick: a shared time budget (``PYTHIA_OPENAI_BATCH_SUBMIT_
+        BUDGET_MIN``, default 20) and a backoff ladder, with the FIRST retry
+        re-creating the batch against the SAME file (which tells "not visible
+        yet" from "refused") and later retries re-uploading. Every rejection
+        is a ``::warning`` annotation and giving up is a ``::error``; the rows
+        then stay pending, which the collect stage re-batches before it falls
+        back to sync (see ``resubmit_unserved``).
         """
 
         jsonl = "\n".join(
@@ -351,56 +472,102 @@ class _OpenAIBatch:
             )
             for cid, body in rows
         )
-        last_errors: Any = None
-        attempts = _openai_submit_attempts()
-        for attempt in range(1, attempts + 1):
-            up = requests.post(
-                f"{self.base}/files",
-                headers=self._headers(),
-                files={"file": ("batch.jsonl", jsonl.encode("utf-8"), "application/jsonl")},
-                data={"purpose": "batch"},
-                timeout=_HTTP_TIMEOUT,
-            )
-            up.raise_for_status()
-            input_file_id = up.json()["id"]
-            self._wait_for_file(input_file_id)
-            created = requests.post(
-                f"{self.base}/batches",
-                headers={**self._headers(), "Content-Type": "application/json"},
-                json={
-                    "input_file_id": input_file_id,
-                    "endpoint": "/v1/chat/completions",
-                    "completion_window": "24h",
-                },
-                timeout=_HTTP_TIMEOUT,
-            )
-            created.raise_for_status()
-            payload = created.json()
-            provider_batch_id = payload["id"]
+        input_file_id = self._upload_jsonl(jsonl)
+        attempt = 0
+        same_file_retry_failed = False
+        budget_min = _openai_submit_budget_sec() / 60.0
+        while True:
+            attempt += 1
+            provider_batch_id = self._create_batch(input_file_id)
             verdict, errors = self._confirm_validation(provider_batch_id)
             if verdict != "failed":
                 return {"provider_batch_id": provider_batch_id, "input_file_id": input_file_id}
-            last_errors = errors
             if not _openai_errors_are_file_access(errors):
-                # A validation failure that is NOT the file-access race
+                # A validation failure that is NOT the file-access rejection
                 # (mismatched_model, a malformed line, ...) will fail the same
-                # way on every re-upload: surface it instead of retrying.
-                raise RuntimeError(
+                # way on every retry: surface it instead of retrying.
+                raise OpenAIBatchValidationError(
                     f"OpenAI batch {provider_batch_id} failed validation: "
-                    f"{json.dumps(errors)[:600]}"
+                    f"{json.dumps(errors)[:600]}",
+                    provider_batch_id=provider_batch_id,
+                    input_file_id=input_file_id,
+                    errors=errors,
+                    file_access=False,
+                    attempts=attempt,
                 )
+            if attempt == 2:
+                same_file_retry_failed = True
+            wait = _openai_submit_backoff_sec(attempt)
+            remaining = _openai_submit_budget_remaining()
+            how = "first upload" if attempt == 1 else ("same file" if attempt == 2 else "fresh upload")
             LOGGER.warning(
-                "llm_batch: OpenAI batch %s rejected its own input file %s at "
-                "validation (attempt %d/%d) — re-uploading: %s",
-                provider_batch_id, input_file_id, attempt, attempts,
-                json.dumps(errors)[:400],
+                "llm_batch: OpenAI batch %s rejected input file %s at validation "
+                "(attempt %d, %s): %s",
+                provider_batch_id, input_file_id, attempt, how, json.dumps(errors)[:400],
             )
-            if attempt < attempts:
-                _sleep(_OPENAI_SUBMIT_RETRY_BACKOFF_SEC * attempt)
-        raise RuntimeError(
-            f"OpenAI batch validation kept rejecting the uploaded input file after "
-            f"{attempts} attempt(s): {json.dumps(last_errors)[:600]}"
+            gh_annotation(
+                "warning",
+                "OpenAI batch validation rejected input file",
+                f"{provider_batch_id} rejected {input_file_id} (attempt {attempt}, {how}); "
+                f"{remaining / 60.0:.1f} of {budget_min:.0f} min submit budget left; "
+                f"retry in {wait:.0f}s: {json.dumps(errors)[:300]}",
+            )
+            if remaining < wait:
+                why = (
+                    "same-file retry also failed (org-level rejection, not a file race)"
+                    if same_file_retry_failed
+                    else "same-file retry not reached"
+                )
+                gh_annotation(
+                    "error",
+                    "OpenAI batch submit gave up",
+                    f"validation kept rejecting the input file after {attempt} attempt(s) "
+                    f"over the {budget_min:.0f} min budget; {why}; rows stay pending — the "
+                    f"collect stage re-batches them, then falls back to sync at full price. "
+                    f"Last: {json.dumps(errors)[:300]}",
+                )
+                raise OpenAIBatchValidationError(
+                    f"OpenAI batch validation kept rejecting the uploaded input file after "
+                    f"{attempt} attempt(s): {json.dumps(errors)[:600]}",
+                    provider_batch_id=provider_batch_id,
+                    input_file_id=input_file_id,
+                    errors=errors,
+                    file_access=True,
+                    attempts=attempt,
+                    same_file_retry_failed=same_file_retry_failed,
+                )
+            _sleep(wait)
+            if attempt >= 2:
+                input_file_id = self._upload_jsonl(jsonl)
+
+    def _upload_jsonl(self, jsonl: str) -> str:
+        """POST the JSONL to /files (purpose=batch) and wait until it is readable."""
+
+        up = requests.post(
+            f"{self.base}/files",
+            headers=self._headers(),
+            files={"file": ("batch.jsonl", jsonl.encode("utf-8"), "application/jsonl")},
+            data={"purpose": "batch"},
+            timeout=_HTTP_TIMEOUT,
         )
+        up.raise_for_status()
+        input_file_id = str(up.json()["id"])
+        self._wait_for_file(input_file_id)
+        return input_file_id
+
+    def _create_batch(self, input_file_id: str) -> str:
+        created = requests.post(
+            f"{self.base}/batches",
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json={
+                "input_file_id": input_file_id,
+                "endpoint": "/v1/chat/completions",
+                "completion_window": "24h",
+            },
+            timeout=_HTTP_TIMEOUT,
+        )
+        created.raise_for_status()
+        return str(created.json()["id"])
 
     def _wait_for_file(self, file_id: str) -> None:
         """Block until the uploaded file reports ``status=processed`` (bounded).
@@ -891,7 +1058,42 @@ def expire_and_purge_stale(
     return counts
 
 
-def submit_pending(
+@dataclass
+class SubmitReport:
+    """What one ``submit_pending`` call did, group by group.
+
+    ``n_groups`` is the number of provider batches the pending rows WANTED
+    (one per (provider, model_id) group, times chunks); ``created`` names the
+    ones that exist. A stage that prints only the second number reads
+    "submitted 3 provider batch(es)" as success when it wanted 5.
+    """
+
+    family: str
+    created: List[str] = field(default_factory=list)
+    n_groups: int = 0
+    failed: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def n_created(self) -> int:
+        return len(self.created)
+
+    def summary_line(self) -> str:
+        line = f"[batch] {self.family}: {self.n_created} of {self.n_groups} provider batch(es) submitted"
+        if self.failed:
+            names = ", ".join(
+                f"{f['provider']}/{f.get('model_id') or '?'} ({f.get('error_class')})" for f in self.failed
+            )
+            line += f"; {len(self.failed)} FAILED — {names} — rows stay pending -> sync fallback"
+        return line
+
+
+def _submit_error_class(exc: BaseException) -> str:
+    if isinstance(exc, OpenAIBatchValidationError):
+        return "validation:file_access" if exc.file_access else "validation:other"
+    return type(exc).__name__
+
+
+def submit_pending_report(
     con,
     *,
     family: str,
@@ -899,20 +1101,25 @@ def submit_pending(
     stage: str,
     run_id: Optional[str] = None,
     hs_run_id: Optional[str] = None,
-) -> List[str]:
+) -> SubmitReport:
     """Submit all pending rows of *family* for THIS pipeline as provider batches.
 
-    Returns the list of created ``llm_batches.batch_id``. Providers outside
-    ``PYTHIA_BATCH_PROVIDERS`` keep their rows pending — the collect stage's
-    get_result miss then routes those calls down the sync path.
+    Returns a :class:`SubmitReport`. Providers outside ``PYTHIA_BATCH_PROVIDERS``
+    keep their rows pending — the collect stage's get_result miss then routes
+    those calls down the sync path.
 
     Only rows enqueued under *pipeline_id* are submitted: the DB artifact
     carries llm_batch_requests forward between pipelines, and sweeping a
     stale pipeline's leftover pending rows into a fresh batch would bill
     last month's prompts again.
+
+    A group whose submit raises is recorded in ``report.failed``, announced
+    with a ``::warning`` annotation, and its rows stay ``pending``: the stage
+    never depends on batch-submission success (the collect stage re-batches
+    what is still pending, then falls back to sync).
     """
 
-    created: List[str] = []
+    report = SubmitReport(family=family)
     expire_and_purge_stale(con, current_pipeline_id=pipeline_id)
     providers_rows = con.execute(
         """
@@ -924,7 +1131,7 @@ def submit_pending(
         [family, pipeline_id],
     ).fetchall()
     if not providers_rows:
-        return created
+        return report
 
     grouped: Dict[Tuple[str, Optional[str]], List[Tuple[str, str]]] = {}
     for provider, model_id, custom_id, body_json in providers_rows:
@@ -946,8 +1153,15 @@ def submit_pending(
         grouped.setdefault(group_key, []).append((custom_id, body_json))
 
     for (provider, group_model), rows in grouped.items():
-        adapter = _adapter(provider)
-        for chunk_idx, chunk in enumerate(_chunk_rows(rows)):
+        chunks = list(_chunk_rows(rows))
+        report.n_groups += len(chunks)
+        try:
+            adapter = _adapter(provider)
+        except Exception as exc:  # noqa: BLE001 - an unknown provider is not a reason to abort the family
+            for chunk_idx, chunk in enumerate(chunks):
+                _record_submit_failure(report, provider, group_model, chunk_idx, chunk, exc)
+            continue
+        for chunk_idx, chunk in enumerate(chunks):
             batch_id = f"b_{pipeline_id}_{_FAMILY_SLUGS[family]}_{provider}" + (
                 f"_{_sanitize_token(group_model, 20)}" if group_model else ""
             ) + f"_{chunk_idx}_{uuid.uuid4().hex[:6]}"
@@ -957,11 +1171,8 @@ def submit_pending(
                 else:
                     submit_info = adapter.submit(chunk)
             except Exception as exc:  # noqa: BLE001
-                LOGGER.error(
-                    "llm_batch: submit failed family=%s provider=%s chunk=%d: %s",
-                    family, provider, chunk_idx, exc,
-                )
-                # Rows stay 'pending' → collect stage falls back to sync.
+                # Rows stay 'pending' → collect stage re-batches, then falls back to sync.
+                _record_submit_failure(report, provider, group_model, chunk_idx, chunk, exc)
                 continue
             con.execute(
                 """
@@ -997,12 +1208,65 @@ def submit_pending(
                 """,
                 [batch_id, *custom_ids],
             )
-            created.append(batch_id)
+            report.created.append(batch_id)
             LOGGER.info(
                 "llm_batch: submitted %s (%s, %d requests) as %s",
                 batch_id, provider, len(chunk), submit_info["provider_batch_id"],
             )
-    return created
+    return report
+
+
+def _record_submit_failure(
+    report: SubmitReport,
+    provider: str,
+    group_model: Optional[str],
+    chunk_idx: int,
+    chunk: Sequence[Tuple[str, Any]],
+    exc: BaseException,
+) -> None:
+    error_class = _submit_error_class(exc)
+    LOGGER.error(
+        "llm_batch: submit failed family=%s provider=%s model=%s chunk=%d (%s): %s",
+        report.family, provider, group_model, chunk_idx, error_class, exc,
+    )
+    report.failed.append(
+        {
+            "provider": provider,
+            "model_id": group_model,
+            "chunk_idx": chunk_idx,
+            "n_requests": len(chunk),
+            "error": str(exc)[:600],
+            "error_class": error_class,
+        }
+    )
+    gh_annotation(
+        "warning",
+        "Batch submit failed",
+        f"{report.family} {provider}/{group_model or '?'} chunk {chunk_idx} "
+        f"({len(chunk)} requests) [{error_class}]: {str(exc)[:300]} — rows stay pending; "
+        "the collect stage re-batches them, then falls back to sync at full price",
+    )
+
+
+def submit_pending(
+    con,
+    *,
+    family: str,
+    pipeline_id: str,
+    stage: str,
+    run_id: Optional[str] = None,
+    hs_run_id: Optional[str] = None,
+) -> List[str]:
+    """Compatibility wrapper over :func:`submit_pending_report`: the created batch ids."""
+
+    return submit_pending_report(
+        con,
+        family=family,
+        pipeline_id=pipeline_id,
+        stage=stage,
+        run_id=run_id,
+        hs_run_id=hs_run_id,
+    ).created
 
 
 def poll_batch(con, batch_id: str) -> Optional[BatchStatus]:
@@ -1256,6 +1520,411 @@ def cancel_batch(con, batch_id: str) -> None:
         "UPDATE llm_batches SET status = 'canceled', ended_at = COALESCE(ended_at, ?) WHERE batch_id = ?",
         [_now(), batch_id],
     )
+
+
+# ---------------------------------------------------------------------------
+# Collect-stage re-batch (before the per-item sync fallback)
+# ---------------------------------------------------------------------------
+
+# Failure classes a collect stage is allowed to re-batch. A `validation_other`
+# failure (mismatched_model, a malformed line) is deterministic and would fail
+# again; it is left to the sync path.
+_RESUBMIT_CLASSES = ("file_access", "failed_empty")
+
+
+def _batch_failure_class(error_text: Optional[str]) -> Optional[str]:
+    """Classify the JSON ``_record_empty_batch`` writes into ``llm_batches.error_text``.
+
+    Returns ``file_access`` (OpenAI's input-file rejection), ``validation_other``
+    (any other stated validation error), ``failed_empty`` (the provider says
+    failed and names no error), or None when the text does not describe a
+    failed batch at all.
+    """
+
+    if not error_text:
+        return None
+    try:
+        info = json.loads(error_text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(info, dict):
+        return None
+    if str(info.get("provider_state") or "") != "failed":
+        return None
+    detail_raw = info.get("detail")
+    detail: Any = detail_raw
+    if isinstance(detail_raw, str):
+        try:
+            detail = json.loads(detail_raw)
+        except (TypeError, ValueError):
+            detail = {}
+    errors = detail.get("errors") if isinstance(detail, dict) else None
+    if isinstance(errors, dict):
+        errors = errors.get("data")
+    if not errors:
+        return "failed_empty"
+    if _openai_errors_are_file_access(errors):
+        return "file_access"
+    return "validation_other"
+
+
+def unserved_requests(
+    con, *, pipeline_id: str, families: Sequence[str]
+) -> List[Dict[str, Any]]:
+    """Rows of THIS pipeline that never got a batch result and can be re-batched.
+
+    Two kinds: rows still ``pending`` (their submit failed at the submit
+    stage, or the provider was excluded then and is included now) and rows
+    ``expired`` under a batch that yielded nothing and whose recorded
+    provider state (``error_text``, written by ``_record_empty_batch``) is a
+    validation failure of a re-batchable class. The recorded state decides,
+    not ``llm_batches.status``: whether the poller or the collect stage was
+    the first to see the failure changes the latter and not the fact. Rows whose provider is outside ``PYTHIA_BATCH_PROVIDERS`` and rows
+    whose request body has already been cleared are never candidates.
+    """
+
+    if not families:
+        return []
+    placeholders = ", ".join(["?"] * len(families))
+    rows = con.execute(
+        f"""
+        SELECT r.custom_id, r.provider, r.model_id, r.family, r.status, r.batch_id,
+               r.created_at, b.status, b.error_text, b.submitted_at, b.n_succeeded
+        FROM llm_batch_requests r
+        LEFT JOIN llm_batches b ON r.batch_id = b.batch_id
+        WHERE r.pipeline_id = ?
+          AND r.family IN ({placeholders})
+          AND r.request_body_json IS NOT NULL
+          AND (
+                r.status = 'pending'
+             OR (r.status = 'expired' AND COALESCE(b.n_succeeded, 0) = 0 AND b.error_text IS NOT NULL)
+          )
+        ORDER BY r.provider, r.model_id, r.custom_id
+        """,
+        [pipeline_id, *families],
+    ).fetchall()
+    allowed = batch_providers()
+    out: List[Dict[str, Any]] = []
+    for (cid, provider, model_id, family, status, batch_id, created_at,
+         b_status, b_error, b_submitted, _n_ok) in rows:
+        provider = (provider or "").lower()
+        if provider not in allowed:
+            continue
+        if status == "pending":
+            reason = "never_submitted"
+        else:
+            klass = _batch_failure_class(b_error)
+            if klass not in _RESUBMIT_CLASSES:
+                continue
+            reason = f"batch_failed:{klass}"
+        out.append(
+            {
+                "custom_id": cid,
+                "provider": provider,
+                "model_id": model_id,
+                "family": family,
+                "status": status,
+                "batch_id": batch_id,
+                "reason": reason,
+                "original_at": b_submitted or created_at,
+            }
+        )
+    return out
+
+
+def reset_for_resubmit(con, custom_ids: Sequence[str]) -> int:
+    """Return pending/expired rows to ``pending`` with no batch, keeping their bodies."""
+
+    n = 0
+    ids = list(custom_ids)
+    for i in range(0, len(ids), 500):
+        chunk = ids[i : i + 500]
+        placeholders = ", ".join(["?"] * len(chunk))
+        cur = con.execute(
+            f"""
+            UPDATE llm_batch_requests
+            SET status = 'pending', batch_id = NULL, completed_at = NULL, error_text = NULL
+            WHERE custom_id IN ({placeholders})
+              AND status IN ('pending', 'expired')
+              AND request_body_json IS NOT NULL
+            """,
+            chunk,
+        )
+        try:
+            n += int(cur.fetchall()[0][0]) if cur else 0
+        except Exception:  # noqa: BLE001
+            pass
+    return n
+
+
+def _annotate_resubmitted(con, old_batch_id: str, new_batch_ids: Sequence[str]) -> None:
+    """Stamp ``resubmitted_as`` into the old failed batch's error_text JSON (no schema change)."""
+
+    if not old_batch_id or not new_batch_ids:
+        return
+    try:
+        row = con.execute(
+            "SELECT error_text FROM llm_batches WHERE batch_id = ?", [old_batch_id]
+        ).fetchone()
+        info: Dict[str, Any] = {}
+        if row and row[0]:
+            try:
+                parsed = json.loads(row[0])
+                if isinstance(parsed, dict):
+                    info = parsed
+            except (TypeError, ValueError):
+                info = {"raw_error_text": str(row[0])[:2000]}
+        existing = info.get("resubmitted_as")
+        merged = sorted(set((existing if isinstance(existing, list) else []) + list(new_batch_ids)))
+        info["resubmitted_as"] = merged
+        con.execute(
+            "UPDATE llm_batches SET error_text = ? WHERE batch_id = ?",
+            [json.dumps(info, default=str)[:4000], old_batch_id],
+        )
+    except Exception as exc:  # noqa: BLE001 - bookkeeping only
+        LOGGER.warning("llm_batch: could not annotate %s as resubmitted: %s", old_batch_id, exc)
+
+
+def wait_for_batches(
+    con, batch_ids: Sequence[str], *, deadline: float, poll_sec: float
+) -> Dict[str, str]:
+    """Poll each batch until every one is terminal or ``_clock()`` reaches ``deadline``.
+
+    Returns ``{batch_id: last state}``; a failed poll reads ``poll_error`` and
+    counts as non-terminal.
+    """
+
+    states: Dict[str, str] = {bid: "submitted" for bid in batch_ids}
+    while True:
+        for bid in batch_ids:
+            if states[bid] in ("ended", "failed", "expired", "canceled"):
+                continue
+            status = poll_batch(con, bid)
+            states[bid] = status.state if status else "poll_error"
+        if all(s in ("ended", "failed", "expired", "canceled") for s in states.values()):
+            return states
+        if _clock() >= deadline:
+            return states
+        _sleep(max(1.0, min(poll_sec, deadline - _clock())))
+
+
+def resubmit_unserved(
+    con,
+    *,
+    pipeline_id: str,
+    families: Sequence[str],
+    stage: str,
+    run_id: Optional[str] = None,
+    hs_run_id: Optional[str] = None,
+    wait_min: Optional[float] = None,
+    poll_sec: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Re-batch what never got a batch result, and wait for it, before the sync fallback.
+
+    On 2026-09-01 the collect stage found four OpenAI batches rejected at
+    validation and had exactly one move for their 210 requests: the
+    synchronous call at full price, ~$10.80 of discount gone. The request
+    bodies were still in the table and the wait ceiling had 23 hours left.
+    This is the other move: reset the unserved rows to pending, submit them
+    again (through the patient guard), wait in-process up to
+    ``PYTHIA_BATCH_RESUBMIT_WAIT_MIN`` — never past ``PYTHIA_BATCH_MAX_WAIT_H``
+    from the ORIGINAL submit — collect what finished, and cancel-and-salvage
+    the rest so the sync path below never pays twice for one item.
+
+    NEVER raises: every failure path is annotated and returned, because the
+    caller is the collect stage and losing a forecast is worse than losing a
+    discount. A SIGTERM/SIGINT while waiting cancels the batches this call
+    created — a re-dispatched collect stage starts from the ORIGINAL staged
+    DB and would otherwise re-batch on top of paid-for, forgotten work.
+    """
+
+    report: Dict[str, Any] = {
+        "enabled": resubmit_at_collect_enabled(),
+        "stage": stage,
+        "n_candidates": 0,
+        "n_reset": 0,
+        "created": [],
+        "states": {},
+        "counts": {},
+    }
+    if not report["enabled"]:
+        return report
+    created: List[str] = []
+    try:
+        candidates = unserved_requests(con, pipeline_id=pipeline_id, families=families)
+        report["n_candidates"] = len(candidates)
+        if not candidates:
+            return report
+        reasons: Dict[str, int] = {}
+        for c in candidates:
+            reasons[c["reason"]] = reasons.get(c["reason"], 0) + 1
+        report["reasons"] = reasons
+
+        wait_sec = (resubmit_wait_minutes() if wait_min is None else float(wait_min)) * 60.0
+        originals = [c["original_at"] for c in candidates if c.get("original_at")]
+        if originals:
+            oldest = min(originals)
+            try:
+                age_sec = (_now() - oldest).total_seconds()
+            except Exception:  # noqa: BLE001
+                age_sec = 0.0
+            wait_sec = min(wait_sec, max_wait_hours() * 3600.0 - age_sec)
+        if wait_sec <= 0:
+            gh_annotation(
+                "warning",
+                "Collect re-batch skipped",
+                f"{len(candidates)} unserved request(s) in {pipeline_id} are past "
+                f"PYTHIA_BATCH_MAX_WAIT_H ({max_wait_hours():g}h) from their original submit; "
+                "they take the sync fallback",
+            )
+            report["skipped"] = "past_max_wait"
+            return report
+
+        old_batches: Dict[str, List[str]] = {}
+        for c in candidates:
+            if c.get("batch_id"):
+                old_batches.setdefault(c["batch_id"], []).append(c["custom_id"])
+        report["n_reset"] = reset_for_resubmit(con, [c["custom_id"] for c in candidates])
+
+        for family in families:
+            sub = submit_pending_report(
+                con,
+                family=family,
+                pipeline_id=pipeline_id,
+                stage=stage,
+                run_id=run_id,
+                hs_run_id=hs_run_id,
+            )
+            if sub.n_groups:
+                print(sub.summary_line(), flush=True)
+            created.extend(sub.created)
+        report["created"] = list(created)
+
+        if old_batches:
+            for old_id, cids in old_batches.items():
+                placeholders = ", ".join(["?"] * len(cids))
+                new_ids = [
+                    r[0]
+                    for r in con.execute(
+                        f"SELECT DISTINCT batch_id FROM llm_batch_requests "
+                        f"WHERE custom_id IN ({placeholders}) AND batch_id IS NOT NULL",
+                        cids,
+                    ).fetchall()
+                ]
+                _annotate_resubmitted(con, old_id, new_ids)
+
+        if not created:
+            gh_annotation(
+                "warning",
+                "Collect re-batch created nothing",
+                f"{len(candidates)} unserved request(s) in {pipeline_id} could not be "
+                "re-batched; they take the sync fallback at full price",
+            )
+            return report
+
+        deadline = _clock() + wait_sec
+        print(
+            f"[batch] collect re-batch: {report['n_reset']} request(s) re-submitted as "
+            f"{len(created)} batch(es); waiting up to {wait_sec / 60.0:.0f} min",
+            flush=True,
+        )
+        with _cancel_on_signal(con, created):
+            states = wait_for_batches(
+                con, created, deadline=deadline,
+                poll_sec=resubmit_poll_sec() if poll_sec is None else float(poll_sec),
+            )
+        report["states"] = dict(states)
+        totals = {"succeeded": 0, "errored": 0, "expired": 0}
+        for bid in created:
+            if states.get(bid) not in ("ended", "failed", "expired", "canceled"):
+                gh_annotation(
+                    "warning",
+                    "Re-batched batch still running at deadline",
+                    f"{bid} is {states.get(bid)} after {wait_sec / 60.0:.0f} min; "
+                    "canceling and salvaging completed items; the rest take the sync fallback",
+                )
+                cancel_batch(con, bid)
+            counts = collect_batch(con, bid) or {}
+            for k in totals:
+                totals[k] += int(counts.get(k, 0) or 0)
+        report["counts"] = totals
+        print(
+            f"[batch] collect re-batch: succeeded={totals['succeeded']} "
+            f"errored={totals['errored']} expired={totals['expired']} (expired -> sync fallback)",
+            flush=True,
+        )
+        return report
+    except Exception as exc:  # noqa: BLE001 - the collect stage must go on
+        LOGGER.exception("llm_batch: collect re-batch failed: %s", exc)
+        gh_annotation(
+            "warning",
+            "Collect re-batch failed",
+            f"{type(exc).__name__}: {str(exc)[:300]} — unserved requests take the sync fallback",
+        )
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        _cancel_and_collect_quietly(con, created)
+        return report
+
+
+def _cancel_and_collect_quietly(con, batch_ids: Sequence[str]) -> None:
+    for bid in batch_ids:
+        try:
+            status = poll_batch(con, bid)
+            if not (status and status.terminal):
+                cancel_batch(con, bid)
+            collect_batch(con, bid)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("llm_batch: cleanup of re-batched %s failed: %s", bid, exc)
+
+
+class _cancel_on_signal:
+    """Context manager: on SIGTERM/SIGINT cancel the given batches, then re-raise.
+
+    Installed only in the main thread (signal handlers cannot be set
+    elsewhere); anywhere else it is a no-op.
+    """
+
+    def __init__(self, con, batch_ids: Sequence[str]) -> None:
+        self._con = con
+        self._ids = list(batch_ids)
+        self._previous: Dict[int, Any] = {}
+
+    def _handler(self, signum, frame):  # noqa: ANN001
+        gh_annotation(
+            "warning",
+            "Collect re-batch interrupted",
+            f"signal {signum} while waiting on {len(self._ids)} re-batched batch(es); canceling them",
+        )
+        for bid in self._ids:
+            try:
+                cancel_batch(self._con, bid)
+            except Exception:  # noqa: BLE001
+                pass
+        previous = self._previous.get(signum)
+        if callable(previous) and previous not in (signal.SIG_IGN, signal.SIG_DFL):
+            previous(signum, frame)
+        else:
+            raise KeyboardInterrupt(f"signal {signum}")
+
+    def __enter__(self):
+        try:
+            import threading  # noqa: PLC0415
+
+            if threading.current_thread() is not threading.main_thread():
+                return self
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                self._previous[sig] = signal.signal(sig, self._handler)
+        except Exception:  # noqa: BLE001 - never let the guard break the wait
+            self._previous = {}
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        for sig, prev in self._previous.items():
+            try:
+                signal.signal(sig, prev)
+            except Exception:  # noqa: BLE001
+                pass
+        return False
 
 
 def get_result(

@@ -168,6 +168,76 @@ def _batch_model_key(ms: "ModelSpec") -> str:
     return _sanitize_token(getattr(ms, "model_id", "") or "primary", 24)
 
 
+def _collect_phase_ingest(con_b, *, pipeline_id: str, run_id: str, hs_run_id: Optional[str]) -> str:
+    """Collect-phase preamble: reuse the submit run id, drain the poller's
+    leftovers, then re-batch what never got a batch result BEFORE the
+    per-question replay falls back to full-price sync calls.
+
+    Returns the run_id to use (the submit phase's, when one exists).
+    """
+
+    from pythia import llm_batch  # noqa: PLC0415
+
+    prior = con_b.execute(
+        """
+        SELECT run_id FROM llm_batches
+        WHERE pipeline_id = ? AND run_id IS NOT NULL
+        ORDER BY submitted_at DESC LIMIT 1
+        """,
+        [pipeline_id],
+    ).fetchone()
+    if prior and prior[0]:
+        # Reuse the forecaster run identity minted by the submit phase so
+        # batch results, llm_calls and forecasts share one run_id.
+        run_id = str(prior[0])
+        print(f"[batch] collect reusing run_id={run_id}")
+    # Ingest any batches the poller hasn't collected yet: poll each,
+    # collect terminal ones, cancel-and-expire ones past the wait cap
+    # (their items then take the sync fallback path below).
+    for binfo in llm_batch.pending_batches(con_b, pipeline_id):
+        status = llm_batch.poll_batch(con_b, binfo["batch_id"])
+        state = status.state if status else "unknown"
+        if state == "ended" or (status and status.terminal):
+            counts = llm_batch.collect_batch(con_b, binfo["batch_id"])
+            print(f"[batch] collected {binfo['batch_id']}: {counts}")
+        else:
+            age_h = 0.0
+            try:
+                age_h = (
+                    datetime.now(timezone.utc).replace(tzinfo=None)
+                    - binfo["submitted_at"]
+                ).total_seconds() / 3600.0
+            except Exception:  # noqa: BLE001
+                pass
+            if age_h >= llm_batch.max_wait_hours():
+                print(
+                    f"[batch][warn] {binfo['batch_id']} still {state} after "
+                    f"{age_h:.1f}h — canceling; items fall back to sync"
+                )
+                llm_batch.cancel_batch(con_b, binfo["batch_id"])
+                llm_batch.collect_batch(con_b, binfo["batch_id"])
+            else:
+                print(
+                    f"[batch][warn] {binfo['batch_id']} not finished ({state}); "
+                    "its items fall back to sync this collect"
+                )
+    # Re-batch what never got a batch result (a submit that failed at the
+    # submit stage, or a batch the provider rejected at validation) and wait
+    # for it, bounded, before the per-question sync fallback. 2026-09-01:
+    # 210 OpenAI requests went straight to full price with 23 hours of wait
+    # budget unused (~$10.80 of discount).
+    rb = llm_batch.resubmit_unserved(
+        con_b,
+        pipeline_id=pipeline_id,
+        families=("spd_v2", "binary_v2", "track2_spd"),
+        stage="fc_collect_resubmit",
+        run_id=run_id,
+        hs_run_id=hs_run_id,
+    )
+    print(f"[batch] collect re-batch: {rb}")
+    return run_id
+
+
 def _try_batch_phase(
     ms: "ModelSpec",
     prompt: str,
@@ -6109,52 +6179,12 @@ def main() -> None:
 
         run_id = f"fc_{int(time.time())}"
         if _batch_collect_active() and _BATCH_PIPELINE_ID:
-            # Reuse the forecaster run identity minted by the submit phase so
-            # batch results, llm_calls and forecasts share one run_id.
-            from pythia import llm_batch  # noqa: PLC0415
-
-            con_b = _batch_con()
-            prior = con_b.execute(
-                """
-                SELECT run_id FROM llm_batches
-                WHERE pipeline_id = ? AND run_id IS NOT NULL
-                ORDER BY submitted_at DESC LIMIT 1
-                """,
-                [_BATCH_PIPELINE_ID],
-            ).fetchone()
-            if prior and prior[0]:
-                run_id = str(prior[0])
-                print(f"[batch] collect reusing run_id={run_id}")
-            # Ingest any batches the poller hasn't collected yet: poll each,
-            # collect terminal ones, cancel-and-expire ones past the wait cap
-            # (their items then take the sync fallback path below).
-            for binfo in llm_batch.pending_batches(con_b, _BATCH_PIPELINE_ID):
-                status = llm_batch.poll_batch(con_b, binfo["batch_id"])
-                state = status.state if status else "unknown"
-                if state == "ended" or (status and status.terminal):
-                    counts = llm_batch.collect_batch(con_b, binfo["batch_id"])
-                    print(f"[batch] collected {binfo['batch_id']}: {counts}")
-                else:
-                    age_h = 0.0
-                    try:
-                        age_h = (
-                            datetime.now(timezone.utc).replace(tzinfo=None)
-                            - binfo["submitted_at"]
-                        ).total_seconds() / 3600.0
-                    except Exception:  # noqa: BLE001
-                        pass
-                    if age_h >= llm_batch.max_wait_hours():
-                        print(
-                            f"[batch][warn] {binfo['batch_id']} still {state} after "
-                            f"{age_h:.1f}h — canceling; items fall back to sync"
-                        )
-                        llm_batch.cancel_batch(con_b, binfo["batch_id"])
-                        llm_batch.collect_batch(con_b, binfo["batch_id"])
-                    else:
-                        print(
-                            f"[batch][warn] {binfo['batch_id']} not finished ({state}); "
-                            "its items fall back to sync this collect"
-                        )
+            run_id = _collect_phase_ingest(
+                _batch_con(),
+                pipeline_id=_BATCH_PIPELINE_ID,
+                run_id=run_id,
+                hs_run_id=hs_run_id,
+            )
         os.environ["PYTHIA_FORECASTER_RUN_ID"] = run_id
         reset_provider_failures_for_run(run_id)
         n_track1 = sum(1 for q in questions if q.get("track") == 1)
@@ -6344,8 +6374,10 @@ def main() -> None:
 
             con_b = _batch_con()
             created: list[str] = []
+            n_groups = 0
+            n_failed = 0
             for family in ("spd_v2", "binary_v2", "track2_spd"):
-                created += llm_batch.submit_pending(
+                report = llm_batch.submit_pending_report(
                     con_b,
                     family=family,
                     pipeline_id=_BATCH_PIPELINE_ID or run_id,
@@ -6353,7 +6385,24 @@ def main() -> None:
                     run_id=run_id,
                     hs_run_id=hs_run_id,
                 )
-            print(f"[batch] submitted {len(created)} provider batch(es): {created}")
+                created += report.created
+                n_groups += report.n_groups
+                n_failed += len(report.failed)
+                if report.n_groups:
+                    print(report.summary_line())
+            print(f"[batch] submitted {len(created)} of {n_groups} provider batch(es): {created}")
+            if n_failed:
+                # A submit that created fewer batches than it wanted must say
+                # so where a person looks: the rows stay pending, the collect
+                # stage re-batches them, and the fallback after that is full
+                # price. The stage itself stays green (the DB is its output).
+                llm_batch.gh_annotation(
+                    "warning",
+                    "Batch submit incomplete",
+                    f"{n_failed} of {n_groups} provider batch(es) could not be submitted "
+                    f"({len(created)} created); their rows stay pending and the collect "
+                    "stage re-batches them before any sync fallback",
+                )
             # Machine-readable markers for the workflow step.
             print(f"BATCH_PIPELINE_ID={_BATCH_PIPELINE_ID or run_id}")
             print(f"FC_RUN_ID={run_id}")
