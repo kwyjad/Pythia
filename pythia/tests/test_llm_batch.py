@@ -122,30 +122,46 @@ class _FakeAdapter:
     provider = "fake"
     submitted: list = []
     poll_state = "ended"
+    poll_detail = ""
     fetch_results: list = []
+    fail_models: set = set()      # submit raises for chunks whose first body names one of these
+    fail_exc: Exception | None = None
+    canceled: list = []
 
     def __init__(self):
         pass
 
     def submit(self, rows, **kwargs):
-        type(self).submitted.append((list(rows), kwargs))
+        rows = list(rows)
+        first_model = rows[0][1].get("model") if rows and isinstance(rows[0][1], dict) else None
+        if first_model in type(self).fail_models:
+            raise type(self).fail_exc or RuntimeError(f"submit refused for {first_model}")
+        type(self).submitted.append((rows, kwargs))
         return {"provider_batch_id": f"prov_{len(type(self).submitted)}", "input_file_id": None}
 
     def poll(self, provider_batch_id):
-        return llm_batch.BatchStatus(provider_batch_id, type(self).poll_state, {})
+        return llm_batch.BatchStatus(
+            provider_batch_id, type(self).poll_state, {}, type(self).poll_detail
+        )
 
     def fetch(self, provider_batch_id):
         yield from type(self).fetch_results
 
     def cancel(self, provider_batch_id):
-        pass
+        type(self).canceled.append(provider_batch_id)
 
 
 @pytest.fixture()
 def fake_adapters(monkeypatch: pytest.MonkeyPatch):
     _FakeAdapter.submitted = []
     _FakeAdapter.poll_state = "ended"
+    _FakeAdapter.poll_detail = ""
     _FakeAdapter.fetch_results = []
+    _FakeAdapter.fail_models = set()
+    _FakeAdapter.fail_exc = None
+    _FakeAdapter.canceled = []
+    monkeypatch.setattr(llm_batch, "_sleep", lambda _s: None)
+    monkeypatch.setattr(llm_batch, "_openai_submit_budget_deadline", None)
     monkeypatch.setattr(
         llm_batch, "_ADAPTERS",
         {"openai": _FakeAdapter, "anthropic": _FakeAdapter, "google": _FakeAdapter},
@@ -436,16 +452,24 @@ _FILE_ACCESS_ERROR = {
 }
 
 
+def _ladder(state):
+    """The backoff sleeps only — the 3s validation-poll sleeps are noise."""
+    return [s for s in state["sleeps"] if s >= 30.0]
+
+
 class TestOpenAISubmitValidationGuard:
     """The 2026-09-01 failure: OpenAI accepted every batch at creation and its
     asynchronous validator then rejected the input file we had just uploaded.
-    The adapter must see that at submit time and re-upload, not persist a
-    doomed batch that expires 210 requests into full-price sync calls."""
+    This is a provider-side incident that lasts hours, not a race a re-upload
+    cures in seconds, so the guard is PATIENT (a shared time budget and a
+    backoff ladder), re-creates against the SAME file first, and says what it
+    did where a person looks. Giving up leaves the rows pending; the stage
+    never fails on batch submission."""
 
     def _wire(self, monkeypatch, validation_outcomes):
         """validation_outcomes: per created batch, the status sequence the
         batch GET returns (list of payload dicts)."""
-        state = {"uploads": 0, "batches": 0, "batch_polls": {}}
+        state = {"uploads": 0, "batches": 0, "batch_polls": {}, "t": 0.0, "sleeps": []}
 
         def _fake_post(url, **kwargs):
             if url.endswith("/files"):
@@ -466,24 +490,82 @@ class TestOpenAISubmitValidationGuard:
             state["batch_polls"][bid] = n + 1
             return _FakeGet(seq[min(n, len(seq) - 1)])
 
+        def _fake_sleep(s):
+            state["sleeps"].append(s)
+            state["t"] += s
+
         monkeypatch.setenv("OPENAI_API_KEY", "k")
         monkeypatch.setattr(llm_batch.requests, "post", _fake_post)
         monkeypatch.setattr(llm_batch.requests, "get", _fake_get)
-        monkeypatch.setattr(llm_batch, "_sleep", lambda _s: None)
+        monkeypatch.setattr(llm_batch, "_sleep", _fake_sleep)
+        monkeypatch.setattr(llm_batch, "_clock", lambda: state["t"])
+        monkeypatch.setattr(llm_batch, "_openai_submit_budget_deadline", None)
         return state
 
-    def test_file_access_rejection_reuploads_and_returns_the_good_batch(self, monkeypatch):
-        state = self._wire(monkeypatch, [
-            [{"status": "validating"}, {"status": "failed", "errors": _FILE_ACCESS_ERROR}],
-            [{"status": "validating"}, {"status": "in_progress"}],
-        ])
-        info = llm_batch._OpenAIBatch().submit([("cid-1", {"model": "gpt-5.6-sol", "messages": []})])
+    _ROW = [("cid-1", {"model": "gpt-5.6-sol", "messages": []})]
+    _REJECT = [{"status": "validating"}, {"status": "failed", "errors": _FILE_ACCESS_ERROR}]
+    _ACCEPT = [{"status": "validating"}, {"status": "in_progress"}]
+
+    def test_first_retry_reuses_the_same_file(self, monkeypatch):
+        state = self._wire(monkeypatch, [self._REJECT, self._ACCEPT])
+        info = llm_batch._OpenAIBatch().submit(self._ROW)
         assert info["provider_batch_id"] == "batch-2"
+        assert info["input_file_id"] == "file-1"
+        # One upload: the first retry re-creates against the SAME file, which
+        # is what tells "not visible yet" from "the organisation is refused".
+        assert state["uploads"] == 1
+        assert state["batch-2_file"] == "file-1"
+        assert _ladder(state) == [30.0]
+
+    def test_second_retry_reuploads(self, monkeypatch):
+        state = self._wire(monkeypatch, [self._REJECT, self._REJECT, self._ACCEPT])
+        info = llm_batch._OpenAIBatch().submit(self._ROW)
+        assert info["provider_batch_id"] == "batch-3"
         assert info["input_file_id"] == "file-2"
         assert state["uploads"] == 2
-        # The retry uploads a FRESH file rather than re-pointing at the one
-        # the validator could not see.
-        assert state["batch-2_file"] == "file-2"
+        assert state["batch-3_file"] == "file-2"
+        assert _ladder(state) == [30.0, 60.0]
+
+    def test_every_rejection_is_annotated(self, monkeypatch, capsys):
+        self._wire(monkeypatch, [self._REJECT, self._ACCEPT])
+        llm_batch._OpenAIBatch().submit(self._ROW)
+        out = capsys.readouterr().out
+        assert out.count("::warning title=OpenAI batch validation rejected input file::") == 1
+        assert "::error" not in out
+
+    def test_budget_exhaustion_gives_up_with_error_annotation(self, monkeypatch, capsys):
+        monkeypatch.setenv("PYTHIA_OPENAI_BATCH_SUBMIT_BUDGET_MIN", "5")
+        state = self._wire(monkeypatch, [self._REJECT] * 10)
+        with pytest.raises(llm_batch.OpenAIBatchValidationError) as exc_info:
+            llm_batch._OpenAIBatch().submit(self._ROW)
+        exc = exc_info.value
+        assert exc.file_access is True
+        assert exc.same_file_retry_failed is True
+        # 5 minutes: sleeps 30 + 60 + 120 = 210s, then the 300s rung does not
+        # fit — four attempts, and the fourth is the one that gives up.
+        assert _ladder(state) == [30.0, 60.0, 120.0]
+        assert exc.attempts == 4
+        out = capsys.readouterr().out
+        assert out.count("::warning title=OpenAI batch validation rejected input file::") == 4
+        assert out.count("::error title=OpenAI batch submit gave up::") == 1
+        assert "org-level rejection" in out
+
+    def test_budget_is_shared_across_groups(self, monkeypatch):
+        monkeypatch.setenv("PYTHIA_OPENAI_BATCH_SUBMIT_BUDGET_MIN", "5")
+        state = self._wire(monkeypatch, [self._REJECT] * 10)
+        with pytest.raises(llm_batch.OpenAIBatchValidationError):
+            llm_batch._OpenAIBatch().submit(self._ROW)
+        n_sleeps = len(_ladder(state))
+        # A second group arriving after the budget is spent gets one create +
+        # probe and gives up at once: the extra wall time is bounded ONCE per
+        # process, not once per OpenAI model.
+        with pytest.raises(llm_batch.OpenAIBatchValidationError) as exc_info:
+            llm_batch._OpenAIBatch().submit(self._ROW)
+        # Whatever the budget had left (78s here) is all it may spend: one
+        # more rung at most, and never the ladder from the top again.
+        assert exc_info.value.attempts <= 2
+        assert sum(_ladder(state)) <= 5 * 60
+        assert len(_ladder(state)) <= n_sleeps + 1
 
     def test_other_validation_failures_are_not_retried(self, monkeypatch):
         mismatched = {"object": "list", "data": [{"code": "mismatched_model",
@@ -492,24 +574,16 @@ class TestOpenAISubmitValidationGuard:
         state = self._wire(monkeypatch, [
             [{"status": "failed", "errors": mismatched}],
         ])
-        with pytest.raises(RuntimeError, match="mismatched_model"):
-            llm_batch._OpenAIBatch().submit([("cid-1", {"model": "gpt-5.6-sol", "messages": []})])
+        with pytest.raises(llm_batch.OpenAIBatchValidationError, match="mismatched_model") as exc_info:
+            llm_batch._OpenAIBatch().submit(self._ROW)
+        assert exc_info.value.file_access is False
         assert state["uploads"] == 1
-
-    def test_gives_up_after_the_attempt_cap(self, monkeypatch):
-        monkeypatch.setenv("PYTHIA_OPENAI_BATCH_SUBMIT_ATTEMPTS", "2")
-        state = self._wire(monkeypatch, [
-            [{"status": "failed", "errors": _FILE_ACCESS_ERROR}],
-            [{"status": "failed", "errors": _FILE_ACCESS_ERROR}],
-        ])
-        with pytest.raises(RuntimeError, match="kept rejecting"):
-            llm_batch._OpenAIBatch().submit([("cid-1", {"model": "gpt-5.6-sol", "messages": []})])
-        assert state["uploads"] == 2
+        assert _ladder(state) == []
 
     def test_still_validating_at_the_deadline_is_accepted(self, monkeypatch):
         monkeypatch.setenv("PYTHIA_OPENAI_BATCH_VALIDATE_WAIT_SEC", "0")
         state = self._wire(monkeypatch, [[{"status": "validating"}]])
-        info = llm_batch._OpenAIBatch().submit([("cid-1", {"model": "gpt-5.6-sol", "messages": []})])
+        info = llm_batch._OpenAIBatch().submit(self._ROW)
         assert info["provider_batch_id"] == "batch-1"
         assert state["uploads"] == 1
 
@@ -521,6 +595,52 @@ class TestOpenAISubmitValidationGuard:
         assert not llm_batch._openai_errors_are_file_access(
             [{"code": "mismatched_model", "message": "single model", "param": None}]
         )
+
+    def test_backoff_ladder_repeats_its_last_rung(self):
+        assert [llm_batch._openai_submit_backoff_sec(i) for i in (1, 2, 3, 4, 5, 9)] == [
+            30.0, 60.0, 120.0, 300.0, 300.0, 300.0
+        ]
+
+
+class TestSubmitReport:
+    """A submit that creates fewer batches than it wanted must say so."""
+
+    def test_report_counts_groups_and_annotates_failures(
+        self, con, fake_adapters, batch_enabled, capsys
+    ):
+        _enqueue_spd(con, question_id="Q1", model_key="sol", provider="openai", model_id="gpt-5.6-sol")
+        _enqueue_spd(con, question_id="Q1", model_key="luna", provider="openai", model_id="gpt-5.6-luna")
+        fake_adapters.fail_models = {"gpt-5.6-sol"}
+        report = llm_batch.submit_pending_report(
+            con, family="spd_v2", pipeline_id="pl_1", stage="fc_submit"
+        )
+        assert report.n_groups == 2
+        assert report.n_created == 1
+        assert len(report.failed) == 1
+        assert report.failed[0]["model_id"] == "gpt-5.6-sol"
+        assert report.failed[0]["error_class"] == "RuntimeError"
+        assert "1 of 2 provider batch(es) submitted" in report.summary_line()
+        statuses = dict(con.execute(
+            "SELECT model_id, status FROM llm_batch_requests WHERE pipeline_id = 'pl_1'"
+        ).fetchall())
+        assert statuses == {"gpt-5.6-sol": "pending", "gpt-5.6-luna": "submitted"}
+        assert "::warning title=Batch submit failed::" in capsys.readouterr().out
+
+    def test_validation_error_class_is_named(self, con, fake_adapters, batch_enabled):
+        _enqueue_spd(con, question_id="Q1", model_key="sol", provider="openai", model_id="gpt-5.6-sol")
+        fake_adapters.fail_models = {"gpt-5.6-sol"}
+        fake_adapters.fail_exc = llm_batch.OpenAIBatchValidationError(
+            "kept rejecting", file_access=True, attempts=4
+        )
+        report = llm_batch.submit_pending_report(
+            con, family="spd_v2", pipeline_id="pl_1", stage="fc_submit"
+        )
+        assert report.failed[0]["error_class"] == "validation:file_access"
+
+    def test_compat_wrapper_returns_created_ids(self, con, fake_adapters, batch_enabled):
+        _enqueue_spd(con, question_id="Q1", model_key="m1")
+        ids = llm_batch.submit_pending(con, family="spd_v2", pipeline_id="pl_1", stage="fc_submit")
+        assert len(ids) == 1 and ids[0].startswith("b_pl_1_spd_anthropic")
 
 
 class TestPipelineScoping:
@@ -779,3 +899,197 @@ class TestEmptyBatchDiagnosis:
             "SELECT error_text FROM llm_batches WHERE batch_id = ?", [batch_id]
         ).fetchone()[0]
         assert "poll_error" in err
+
+
+class TestResubmitAtCollect:
+    """The collect stage re-batches what never got a batch result before it
+    falls back to sync. On 2026-09-01 it had 210 unserved OpenAI requests,
+    their bodies, and 23 hours of wait budget — and one move: full price."""
+
+    def _failed_openai_batch(self, con, fake_adapters, errors, *, n=2):
+        cids = [
+            _enqueue_spd(con, question_id=f"Q{i}", model_key=f"m{i}",
+                         provider="openai", model_id="gpt-5.6-sol")
+            for i in range(n)
+        ]
+        ids = llm_batch.submit_pending(con, family="spd_v2", pipeline_id="pl_1", stage="fc_submit")
+        assert len(ids) == 1
+        fake_adapters.poll_state = "failed"
+        fake_adapters.poll_detail = json.dumps({"errors": errors}) if errors is not None else "{}"
+        fake_adapters.fetch_results = []
+        assert llm_batch.poll_batch(con, ids[0]).state == "failed"   # the poller's tick
+        counts = llm_batch.collect_batch(con, ids[0])
+        assert counts["expired"] == n
+        fake_adapters.poll_state = "ended"
+        fake_adapters.poll_detail = ""
+        return ids[0], cids
+
+    def test_batch_failure_class(self):
+        def _text(state, errors=None, detail=True):
+            d = {"provider_state": state}
+            if detail:
+                d["detail"] = json.dumps({"errors": errors} if errors is not None else {})
+            return json.dumps(d)
+
+        assert llm_batch._batch_failure_class(_text("failed", _FILE_ACCESS_ERROR)) == "file_access"
+        assert llm_batch._batch_failure_class(_text("failed", {"object": "list", "data": [
+            {"code": "mismatched_model", "message": "single model", "param": None}]})) == "validation_other"
+        assert llm_batch._batch_failure_class(_text("failed")) == "failed_empty"
+        assert llm_batch._batch_failure_class(_text("failed", detail=False)) == "failed_empty"
+        assert llm_batch._batch_failure_class(_text("ended", _FILE_ACCESS_ERROR)) is None
+        assert llm_batch._batch_failure_class("not json") is None
+        assert llm_batch._batch_failure_class(None) is None
+
+    def test_unserved_selects_pending_and_rejected_batches_only(
+        self, con, fake_adapters, batch_enabled, monkeypatch
+    ):
+        # B: expired under a batch rejected for the file-access reason.
+        _, (b,) = self._failed_openai_batch(con, fake_adapters, _FILE_ACCESS_ERROR, n=1)
+        # C: expired under a deterministic validation failure — never re-batched.
+        c = _enqueue_spd(con, question_id="C", model_key="c", provider="openai", model_id="gpt-5.6-sol")
+        ids = llm_batch.submit_pending(con, family="spd_v2", pipeline_id="pl_1", stage="fc_submit")
+        fake_adapters.poll_state = "failed"
+        fake_adapters.poll_detail = json.dumps({"errors": {"data": [
+            {"code": "mismatched_model", "message": "single model", "param": None}]}})
+        llm_batch.collect_batch(con, ids[-1])
+        fake_adapters.poll_state = "ended"
+        fake_adapters.poll_detail = ""
+        # D: expired under a canceled batch (the wait cap) — not a failure to re-batch.
+        d = _enqueue_spd(con, question_id="D", model_key="d", provider="openai", model_id="gpt-5.6-sol")
+        ids = llm_batch.submit_pending(con, family="spd_v2", pipeline_id="pl_1", stage="fc_submit")
+        llm_batch.cancel_batch(con, ids[-1])
+        llm_batch.collect_batch(con, ids[-1])
+        # A: never submitted (its submit failed) — still pending.
+        a = _enqueue_spd(con, question_id="A", model_key="a", provider="openai", model_id="gpt-5.6-luna")
+        # E: pending but its provider is excluded from batching.
+        e = _enqueue_spd(con, question_id="E", model_key="e", provider="anthropic", model_id="claude-opus-5")
+        monkeypatch.setenv("PYTHIA_BATCH_PROVIDERS", "openai")
+        # F: a row from another pipeline.
+        _enqueue_spd(con, question_id="F", model_key="f", provider="openai", model_id="gpt-5.6-sol", pipeline_id="pl_2")
+
+        rows = llm_batch.unserved_requests(con, pipeline_id="pl_1", families=("spd_v2",))
+        got = {r["custom_id"]: r["reason"] for r in rows}
+        assert got == {a: "never_submitted", b: "batch_failed:file_access"}
+        assert c not in got and d not in got and e not in got
+
+    def test_reset_for_resubmit_keeps_bodies(self, con, fake_adapters, batch_enabled):
+        _, cids = self._failed_openai_batch(con, fake_adapters, _FILE_ACCESS_ERROR)
+        assert llm_batch.reset_for_resubmit(con, cids) == 2
+        rows = con.execute(
+            "SELECT status, batch_id, request_body_json IS NOT NULL FROM llm_batch_requests "
+            "WHERE custom_id IN (?, ?)", cids
+        ).fetchall()
+        assert all(r == ("pending", None, True) for r in rows)
+
+    def test_resubmit_end_to_end_replays_from_new_batch(
+        self, con, fake_adapters, batch_enabled, capsys
+    ):
+        old_id, cids = self._failed_openai_batch(con, fake_adapters, _FILE_ACCESS_ERROR)
+        fake_adapters.fetch_results = [
+            (cid, True, '{"spds": 1}', {"prompt_tokens": 3, "completion_tokens": 2}, "")
+            for cid in cids
+        ]
+        capsys.readouterr()   # drop the setup's "returned no results" warning
+        report = llm_batch.resubmit_unserved(
+            con, pipeline_id="pl_1", families=("spd_v2",), stage="fc_collect_resubmit",
+            run_id="fc_1", wait_min=5, poll_sec=1,
+        )
+        assert report["n_candidates"] == 2 and report["n_reset"] == 2
+        assert len(report["created"]) == 1
+        assert report["counts"] == {"succeeded": 2, "errored": 0, "expired": 0}
+        new_id = report["created"][0]
+        rows = con.execute(
+            "SELECT status, batch_id FROM llm_batch_requests WHERE custom_id IN (?, ?)", cids
+        ).fetchall()
+        assert all(r == ("succeeded", new_id) for r in rows)
+        stage, status = con.execute(
+            "SELECT stage, status FROM llm_batches WHERE batch_id = ?", [new_id]
+        ).fetchone()
+        assert (stage, status) == ("fc_collect_resubmit", "collected")
+        old_status, old_err = con.execute(
+            "SELECT status, error_text FROM llm_batches WHERE batch_id = ?", [old_id]
+        ).fetchone()
+        assert old_status == "failed"
+        assert json.loads(old_err)["resubmitted_as"] == [new_id]
+        hit = llm_batch.get_result(con, "spd_v2", question_id="Q0", model_key="m0", pipeline_id="pl_1")
+        assert hit and hit["status"] == "succeeded"
+        assert hit["usage"]["service_tier"] == "batch"
+        assert "::warning" not in capsys.readouterr().out
+
+    def test_resubmit_picks_up_never_submitted_rows(self, con, fake_adapters, batch_enabled):
+        cid = _enqueue_spd(con, question_id="A", model_key="a", provider="openai", model_id="gpt-5.6-luna")
+        fake_adapters.fetch_results = [(cid, True, "ok", {"prompt_tokens": 1}, "")]
+        report = llm_batch.resubmit_unserved(
+            con, pipeline_id="pl_1", families=("spd_v2",), stage="fc_collect_resubmit",
+            wait_min=5, poll_sec=1,
+        )
+        assert report["reasons"] == {"never_submitted": 1}
+        assert report["counts"]["succeeded"] == 1
+
+    def test_resubmit_deadline_cancels_and_salvages(
+        self, con, fake_adapters, batch_enabled, monkeypatch, capsys
+    ):
+        _, cids = self._failed_openai_batch(con, fake_adapters, _FILE_ACCESS_ERROR)
+        state = {"t": 0.0}
+        monkeypatch.setattr(llm_batch, "_clock", lambda: state["t"])
+        monkeypatch.setattr(llm_batch, "_sleep", lambda s: state.__setitem__("t", state["t"] + s))
+        fake_adapters.poll_state = "in_progress"
+        fake_adapters.fetch_results = []          # nothing completed before the cancel
+        report = llm_batch.resubmit_unserved(
+            con, pipeline_id="pl_1", families=("spd_v2",), stage="fc_collect_resubmit",
+            wait_min=1, poll_sec=10,
+        )
+        assert fake_adapters.canceled == ["prov_2"]
+        assert report["counts"]["expired"] == 2
+        rows = con.execute(
+            "SELECT status FROM llm_batch_requests WHERE custom_id IN (?, ?)", cids
+        ).fetchall()
+        assert {r[0] for r in rows} == {"expired"}
+        assert llm_batch.get_result(con, "spd_v2", question_id="Q0", model_key="m0", pipeline_id="pl_1") is None
+        assert "::warning title=Re-batched batch still running at deadline::" in capsys.readouterr().out
+
+    def test_resubmit_disabled_by_flag(self, con, fake_adapters, batch_enabled, monkeypatch):
+        self._failed_openai_batch(con, fake_adapters, _FILE_ACCESS_ERROR)
+        monkeypatch.setenv("PYTHIA_BATCH_RESUBMIT_AT_COLLECT", "0")
+        n_before = len(fake_adapters.submitted)
+        report = llm_batch.resubmit_unserved(
+            con, pipeline_id="pl_1", families=("spd_v2",), stage="fc_collect_resubmit"
+        )
+        assert report["enabled"] is False
+        assert len(fake_adapters.submitted) == n_before
+
+    def test_resubmit_bounded_by_max_wait_from_original_submit(
+        self, con, fake_adapters, batch_enabled, capsys
+    ):
+        old_id, _ = self._failed_openai_batch(con, fake_adapters, _FILE_ACCESS_ERROR)
+        con.execute(
+            "UPDATE llm_batches SET submitted_at = submitted_at - INTERVAL 25 HOUR WHERE batch_id = ?",
+            [old_id],
+        )
+        n_before = len(fake_adapters.submitted)
+        report = llm_batch.resubmit_unserved(
+            con, pipeline_id="pl_1", families=("spd_v2",), stage="fc_collect_resubmit"
+        )
+        assert report.get("skipped") == "past_max_wait"
+        assert len(fake_adapters.submitted) == n_before
+        assert "::warning title=Collect re-batch skipped::" in capsys.readouterr().out
+
+    def test_resubmit_never_raises(self, con, fake_adapters, batch_enabled, monkeypatch, capsys):
+        self._failed_openai_batch(con, fake_adapters, _FILE_ACCESS_ERROR)
+
+        def _boom(*a, **k):
+            raise RuntimeError("provider unreachable")
+
+        monkeypatch.setattr(llm_batch, "submit_pending_report", _boom)
+        report = llm_batch.resubmit_unserved(
+            con, pipeline_id="pl_1", families=("spd_v2",), stage="fc_collect_resubmit"
+        )
+        assert "provider unreachable" in report["error"]
+        assert "::warning title=Collect re-batch failed::" in capsys.readouterr().out
+
+    def test_resubmit_no_candidates_is_quiet(self, con, fake_adapters, batch_enabled, capsys):
+        report = llm_batch.resubmit_unserved(
+            con, pipeline_id="pl_1", families=("spd_v2",), stage="fc_collect_resubmit"
+        )
+        assert report["n_candidates"] == 0 and report["created"] == []
+        assert capsys.readouterr().out == ""

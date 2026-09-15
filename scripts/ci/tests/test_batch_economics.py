@@ -462,3 +462,29 @@ def test_batchable_spend_that_missed_a_batch_is_still_counted_as_lost(tmp_path):
     cost = _run_scoped(path, tmp_path)["cost"]
     assert cost["lost_discount_cost_usd"] == pytest.approx(1.50)
     assert cost["lost_discount_pct_of_batchable"] == pytest.approx(100.0)
+
+
+def test_rebatched_batch_is_described_not_counted_as_empty(tmp_path, capsys):
+    """A failed batch whose requests a collect stage re-batched is not a batch
+    that cost its requests the discount — the new batch decides that."""
+    path = _db(tmp_path)
+    con = duckdb.connect(path)
+    err = json.dumps({"provider_state": "failed", "resubmitted_as": ["b_new"]})
+    con.execute(
+        "INSERT INTO llm_batches VALUES (?, 'openai', 'spd_v2', 'fc_submit', 'gpt-5.6-sol', "
+        "'failed', ?, 2, 0, 0, 2, 0, now(), ?)",
+        ["b_old", PIPE, err],
+    )
+    con.execute(
+        "INSERT INTO llm_batches VALUES (?, 'openai', 'spd_v2', 'fc_collect_resubmit', 'gpt-5.6-sol', "
+        "'collected', ?, 2, 2, 0, 0, 0, now(), '')",
+        ["b_new", PIPE],
+    )
+    con.close()
+    rc = batch_economics.main(["--db", path, "--pipeline-id", PIPE, "--stage", "fc_collect_finalize",
+                               "--out", str(tmp_path / "o.json")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Batches re-batched at collect" in out
+    assert "`b_old`" in out and "`b_new`" in out
+    assert "::warning title=Batch returned no results::" not in out

@@ -45,6 +45,11 @@ on:
         required: false
         default: ""
         type: string
+      canary:
+        description: "Diagnostic: submit one trivial request per provider and ensemble model through the real Batch APIs and report whether each provider accepts our batches right now. Skips polling. Run this BEFORE dispatching the pipeline."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -57,7 +62,9 @@ concurrency:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The canary follows each batch for up to 10 minutes and needs the full
+    # dependency install; the poller itself stays inside 15.
+    timeout-minutes: ${{ (inputs.canary == true || inputs.canary == 'true') && 30 || 15 }}
     steps:
       # Checked out before the gate so the gate itself can be the shared,
       # unit-tested decision core rather than a second inline copy of it.
@@ -135,9 +142,48 @@ jobs:
           fi
           python -m scripts.ci.inspect_openai_batch "${args[@]}" --input-head 2
 
+      # Pre-run canary. On 2026-09-01 OpenAI's validator rejected every batch
+      # the pipeline submitted (a provider-side incident lasting hours) and
+      # nothing could have said so beforehand, because nothing asked. This
+      # asks: one trivial request per provider and ensemble model through
+      # the real adapters, no DB, cents of spend, a verdict table in the
+      # step summary. Red when a provider cannot be batched right now.
+      # The forecaster body builders import the full stack, hence the full
+      # requirements install rather than the poller's bare `requests`.
+      - name: Install full dependencies (canary)
+        if: ${{ inputs.canary == true || inputs.canary == 'true' }}
+        run: |
+          pip install -c constraints-ci.txt -r python_library_requirements.txt
+
+      - name: Batch canary (diagnostic)
+        if: ${{ inputs.canary == true || inputs.canary == 'true' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PYTHIA_LLM_PROFILE: prod
+          PYTHIA_BATCH_API_ENABLED: "1"
+          PYTHIA_BATCH_PROVIDERS: "openai,anthropic,google"
+          PYTHIA_PROMPT_V3_ORDER: "1"
+          PYTHIA_PROMPT_CACHE_ENABLED: "1"
+          PYTHIA_BATCH_PROMPT_CACHE: "1"
+        run: |
+          set -e
+          mkdir -p diagnostics
+          python -m scripts.ci.batch_canary --wait-min 10 --out diagnostics/batch_canary.json
+
+      - name: Upload canary verdict
+        if: ${{ always() && (inputs.canary == true || inputs.canary == 'true') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-batch-canary
+          path: diagnostics/batch_canary.json
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Poll batches and dispatch ready stages
         id: poll
-        if: ${{ steps.gate.outputs.active == 'true' && inputs.inspect_batches == '' && inputs.inspect_recent == '' }}
+        if: ${{ steps.gate.outputs.active == 'true' && inputs.inspect_batches == '' && inputs.inspect_recent == '' && inputs.canary != true && inputs.canary != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           POLLER_CHAIN_DEPTH: ${{ inputs.chain_depth || '0' }}

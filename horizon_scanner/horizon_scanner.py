@@ -1405,7 +1405,7 @@ def main(
         # Ingest any provider batches the poller hasn't collected yet
         # (idempotent; stragglers past the wait cap are canceled so their
         # items take the per-item sync fallback).
-        hs_batch.collect_pending_batches(hs_batch.pipeline_id())
+        hs_batch.collect_pending_batches(hs_batch.pipeline_id(), hs_run_id=run_id)
     else:
         run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
         if hs_batch.staged() and not hs_batch.pipeline_id():

@@ -95,9 +95,29 @@ def _collect_batches(con, pipeline_id: str) -> List[Dict[str, Any]]:
             "n_expired": int(r[9]),
             "n_fallback_sync": int(r[10]),
             "error_text": r[11],
+            "resubmitted_as": _resubmitted_as(r[11]),
         }
         for r in rows
     ]
+
+
+def _resubmitted_as(error_text: str) -> List[str]:
+    """Batch ids a collect stage re-batched this batch's requests into.
+
+    Written by ``llm_batch.resubmit_unserved`` into the failed batch's
+    ``error_text`` JSON. A batch that carries them did not cost its requests
+    the discount — the new batch decides that — so it is described rather
+    than counted as a batch that returned nothing.
+    """
+
+    if not error_text:
+        return []
+    try:
+        info = json.loads(error_text)
+    except (TypeError, ValueError):
+        return []
+    ids = info.get("resubmitted_as") if isinstance(info, dict) else None
+    return [str(x) for x in ids] if isinstance(ids, list) else []
 
 
 def _collect_request_states(con, pipeline_id: str) -> Dict[str, Dict[str, int]]:
@@ -418,7 +438,20 @@ def _markdown(report: Dict[str, Any]) -> str:
 
     # A batch that yielded nothing is why a fallback rate is high. Naming it
     # here turns an unexplained percentage into an actionable cause.
-    empty = [b for b in report["batches"] if b["n_requests"] and not b["n_succeeded"]]
+    rebatched = [b for b in report["batches"] if b.get("resubmitted_as")]
+    if rebatched:
+        lines.append("**Batches re-batched at collect** (their requests were re-submitted; the new batch decides their price):")
+        lines.append("")
+        for b in rebatched:
+            lines.append(
+                f"- `{b['batch_id']}` ({b['provider']}/{b['family']}) -> "
+                + ", ".join(f"`{x}`" for x in b["resubmitted_as"])
+            )
+        lines.append("")
+    empty = [
+        b for b in report["batches"]
+        if b["n_requests"] and not b["n_succeeded"] and not b.get("resubmitted_as")
+    ]
     if empty:
         lines.append("**Batches that returned no results** (their requests paid full price):")
         lines.append("")
@@ -580,7 +613,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _emit_step_summary(md)
 
     for b in report["batches"]:
-        if b["n_requests"] and not b["n_succeeded"]:
+        if b["n_requests"] and not b["n_succeeded"] and not b.get("resubmitted_as"):
             print(
                 f"::warning title=Batch returned no results::{b['provider']} batch "
                 f"{b['batch_id']} ({b['family']}) yielded 0 of {b['n_requests']} results — "
