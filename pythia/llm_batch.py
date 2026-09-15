@@ -1685,6 +1685,12 @@ def _annotate_resubmitted(con, old_batch_id: str, new_batch_ids: Sequence[str]) 
         LOGGER.warning("llm_batch: could not annotate %s as resubmitted: %s", old_batch_id, exc)
 
 
+# poll_batch echoes llm_batches.status for a batch already past polling, so
+# "collected" is terminal here too — without it a re-collected batch would be
+# waited on until the deadline.
+_WAIT_TERMINAL = ("ended", "failed", "expired", "canceled", "collected")
+
+
 def wait_for_batches(
     con, batch_ids: Sequence[str], *, deadline: float, poll_sec: float
 ) -> Dict[str, str]:
@@ -1697,11 +1703,11 @@ def wait_for_batches(
     states: Dict[str, str] = {bid: "submitted" for bid in batch_ids}
     while True:
         for bid in batch_ids:
-            if states[bid] in ("ended", "failed", "expired", "canceled"):
+            if states[bid] in _WAIT_TERMINAL:
                 continue
             status = poll_batch(con, bid)
             states[bid] = status.state if status else "poll_error"
-        if all(s in ("ended", "failed", "expired", "canceled") for s in states.values()):
+        if all(s in _WAIT_TERMINAL for s in states.values()):
             return states
         if _clock() >= deadline:
             return states
@@ -1836,7 +1842,7 @@ def resubmit_unserved(
         report["states"] = dict(states)
         totals = {"succeeded": 0, "errored": 0, "expired": 0}
         for bid in created:
-            if states.get(bid) not in ("ended", "failed", "expired", "canceled"):
+            if states.get(bid) not in _WAIT_TERMINAL:
                 gh_annotation(
                     "warning",
                     "Re-batched batch still running at deadline",
