@@ -167,3 +167,15 @@ def test_main_exits_zero_when_every_provider_batches(adapter, tmp_path, capsys, 
     assert payload["summary"]["n_failed"] == 0
     assert set(payload["summary"]["by_provider"]) == {"openai", "anthropic"}
     assert "::error" not in capsys.readouterr().out
+
+
+def test_follow_bounds_the_whole_set_by_one_deadline(adapter, monkeypatch):
+    """Five slow models must not cost five waits: one deadline for the set."""
+    adapter.poll_states = ["in_progress"]
+    results = [batch_canary.submit_one("openai", f"m{i}", _BODY) for i in range(5)]
+    assert all("_pending" in r for r in results)
+    t_before = batch_canary._clock()
+    batch_canary.follow(results, wait_sec=60, poll_sec=10)
+    assert batch_canary._clock() - t_before <= 60 + 10
+    assert [r["verdict"] for r in results] == [batch_canary.VERDICT_SLOW] * 5
+    assert len(adapter.canceled) == 5

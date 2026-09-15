@@ -147,17 +147,8 @@ def _classify_failed(detail: str) -> str:
     return VERDICT_OTHER
 
 
-def run_one(
-    provider: str,
-    model_id: str,
-    body: Dict[str, Any],
-    *,
-    wait_sec: float,
-    poll_sec: float,
-) -> Dict[str, Any]:
-    """Submit one request as a batch and follow it to a verdict. Never raises."""
-
-    result: Dict[str, Any] = {
+def _new_result(provider: str, model_id: str) -> Dict[str, Any]:
+    return {
         "provider": provider,
         "model_id": model_id,
         "verdict": None,
@@ -169,6 +160,15 @@ def run_one(
         "item_ok": None,
         "item_error": "",
     }
+
+
+def submit_one(provider: str, model_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Submit one request as a batch. Returns a result dict; ``verdict`` is set
+    only when the submit itself settled the question (no key, refused,
+    rejected at validation) — otherwise ``_pending`` carries what to follow.
+    Never raises."""
+
+    result = _new_result(provider, model_id)
     if not _has_key(provider):
         result["verdict"] = VERDICT_NO_KEY
         return result
@@ -204,25 +204,18 @@ def run_one(
         result["verdict"] = VERDICT_SUBMIT_ERROR
         result["detail"] = "adapter returned no provider batch id"
         return result
+    result["_pending"] = {"adapter": adapter, "pbid": pbid, "t0": t0}
+    return result
 
-    deadline = _clock() + wait_sec
-    state = "submitted"
-    detail = ""
-    while True:
-        try:
-            status = adapter.poll(pbid)
-            state, detail = status.state, status.detail
-        except Exception as exc:  # noqa: BLE001
-            state, detail = "poll_error", f"{type(exc).__name__}: {str(exc)[:300]}"
-        if state in ("ended", "failed", "expired", "canceled"):
-            break
-        if _clock() >= deadline:
-            break
-        _sleep(max(1.0, min(poll_sec, deadline - _clock())))
+
+def _settle(result: Dict[str, Any], state: str, detail: str) -> None:
+    """Turn a terminal (or deadline) poll state into a verdict."""
+
+    pending = result.pop("_pending")
+    adapter, pbid, t0 = pending["adapter"], pending["pbid"], pending["t0"]
     result["elapsed_sec"] = round(_clock() - t0, 1)
     result["detail"] = detail[:1000] if detail else ""
-
-    if state == "ended":
+    if state in ("ended", "collected"):
         try:
             items = list(adapter.fetch(pbid))
         except Exception as exc:  # noqa: BLE001
@@ -234,19 +227,63 @@ def run_one(
             result["item_error"] = error or ""
             result["detail"] = (text or "")[:120] if ok else (error or "")[:300]
         result["verdict"] = VERDICT_OK
-        return result
+        return
     if state == "failed":
         result["verdict"] = _classify_failed(detail)
-        return result
+        return
     if state in ("expired", "canceled"):
         result["verdict"] = VERDICT_OTHER
-        return result
+        return
     # Still validating / in progress at the deadline: accepted, just slow.
     try:
         adapter.cancel(pbid)
     except Exception:  # noqa: BLE001
         pass
     result["verdict"] = VERDICT_SLOW
+
+
+def follow(results: List[Dict[str, Any]], *, wait_sec: float, poll_sec: float) -> None:
+    """Poll every submitted batch together until each is terminal or ONE shared
+    deadline passes — the deadline is for the whole set, so the job's wall
+    time is bounded whatever the number of models."""
+
+    deadline = _clock() + wait_sec
+    while True:
+        open_ = [r for r in results if "_pending" in r]
+        if not open_:
+            return
+        for r in open_:
+            pending = r["_pending"]
+            try:
+                status = pending["adapter"].poll(pending["pbid"])
+                state, detail = status.state, status.detail
+            except Exception as exc:  # noqa: BLE001
+                state, detail = "poll_error", f"{type(exc).__name__}: {str(exc)[:300]}"
+            if state in ("ended", "collected", "failed", "expired", "canceled"):
+                _settle(r, state, detail)
+        open_ = [r for r in results if "_pending" in r]
+        if not open_:
+            return
+        if _clock() >= deadline:
+            for r in open_:
+                _settle(r, "deadline", "")
+            return
+        _sleep(max(1.0, min(poll_sec, deadline - _clock())))
+
+
+def run_one(
+    provider: str,
+    model_id: str,
+    body: Dict[str, Any],
+    *,
+    wait_sec: float,
+    poll_sec: float,
+) -> Dict[str, Any]:
+    """Submit one request as a batch and follow it to a verdict. Never raises."""
+
+    result = submit_one(provider, model_id, body)
+    if "_pending" in result:
+        follow([result], wait_sec=wait_sec, poll_sec=poll_sec)
     return result
 
 
@@ -296,7 +333,7 @@ def _emit_step_summary(md: str) -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--wait-min", type=float, default=10.0,
-                   help="How long to follow each batch after submit before cancelling it (default 10)")
+                   help="How long to follow the submitted batches, all together, before cancelling the rest (default 10)")
     p.add_argument("--poll-sec", type=float, default=15.0)
     p.add_argument("--submit-budget-min", type=float, default=3.0,
                    help="PYTHIA_OPENAI_BATCH_SUBMIT_BUDGET_MIN for the canary's own guard (default 3)")
@@ -317,24 +354,31 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("::error title=Batch canary::no ensemble members for the requested providers")
         return 1
 
+    # Submit everything first, then follow the whole set against one deadline:
+    # a sequential submit-and-wait per model multiplies the wait by the model
+    # count and outran the job's timeout on the canary's own first run.
+    llm_batch._reset_openai_submit_budget()
     results: List[Dict[str, Any]] = []
     for entry in entries:
-        llm_batch._reset_openai_submit_budget()
         provider, model_id = entry["provider"], entry["model_id"]
-        print(f"[canary] {provider}/{model_id}: building request ...", flush=True)
+        print(f"[canary] {provider}/{model_id}: submitting ...", flush=True)
         try:
             body = build_body(entry)
         except Exception as exc:  # noqa: BLE001
-            results.append({
-                "provider": provider, "model_id": model_id, "verdict": VERDICT_SUBMIT_ERROR,
-                "provider_batch_id": None, "input_file_id": None, "submit_sec": None,
-                "elapsed_sec": None, "detail": f"body build failed: {type(exc).__name__}: {exc}",
-                "item_ok": None, "item_error": "",
-            })
+            r = _new_result(provider, model_id)
+            r["verdict"] = VERDICT_SUBMIT_ERROR
+            r["detail"] = f"body build failed: {type(exc).__name__}: {exc}"
+            results.append(r)
             continue
-        r = run_one(provider, model_id, body, wait_sec=args.wait_min * 60.0, poll_sec=args.poll_sec)
-        print(f"[canary] {provider}/{model_id}: {r['verdict']} ({r['detail'][:200]})", flush=True)
+        r = submit_one(provider, model_id, body)
+        if "_pending" in r:
+            print(f"[canary] {provider}/{model_id}: submitted {r['provider_batch_id']} in {r['submit_sec']}s", flush=True)
+        else:
+            print(f"[canary] {provider}/{model_id}: {r['verdict']} ({r['detail'][:200]})", flush=True)
         results.append(r)
+    follow(results, wait_sec=args.wait_min * 60.0, poll_sec=args.poll_sec)
+    for r in results:
+        print(f"[canary] {r['provider']}/{r['model_id']}: {r['verdict']} ({(r['detail'] or '')[:200]})", flush=True)
 
     summary = summarize(results)
     md = "### Batch canary\n\n" + _table(results) + "\n"
