@@ -420,7 +420,10 @@ jobs:
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
       - name: Fail stage on DB signature regression
-        if: always() && steps.signature_after.outputs.signature_ok != 'true'
+        # Only when the compare step actually RAN and said so: an earlier step
+        # failure leaves the output empty, and `!= 'true'` then blamed a
+        # signature regression for every red stage.
+        if: always() && steps.signature_after.outcome == 'success' && steps.signature_after.outputs.signature_ok == 'false'
         run: |
           echo "::error::DB signature regressed after this stage; the staged DB and batch state were withheld (see diagnostics/db_signature_after.json)."
           exit 1
@@ -433,7 +436,8 @@ jobs:
   hs-rc-collect:
     if: inputs.stage == 'hs_rc_collect'
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    # A collect stage now waits in-process for a re-batch (PYTHIA_BATCH_RESUBMIT_WAIT_MIN) before the per-item sync fallback; 360 is GitHub's cap and the fallback must still fit inside it.
+    timeout-minutes: 360
     steps:
       - name: Validate inputs
         run: |
@@ -629,7 +633,10 @@ jobs:
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
       - name: Fail stage on DB signature regression
-        if: always() && steps.signature_after.outputs.signature_ok != 'true'
+        # Only when the compare step actually RAN and said so: an earlier step
+        # failure leaves the output empty, and `!= 'true'` then blamed a
+        # signature regression for every red stage.
+        if: always() && steps.signature_after.outcome == 'success' && steps.signature_after.outputs.signature_ok == 'false'
         run: |
           echo "::error::DB signature regressed after this stage; the staged DB and batch state were withheld (see diagnostics/db_signature_after.json)."
           exit 1
@@ -642,7 +649,8 @@ jobs:
   hs-finalize-fc-submit:
     if: inputs.stage == 'hs_finalize_fc_submit'
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    # A collect stage now waits in-process for a re-batch (PYTHIA_BATCH_RESUBMIT_WAIT_MIN) before the per-item sync fallback; 360 is GitHub's cap and the fallback must still fit inside it.
+    timeout-minutes: 360
     steps:
       - name: Validate inputs
         run: |
@@ -879,7 +887,10 @@ jobs:
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
       - name: Fail stage on DB signature regression
-        if: always() && steps.signature_after.outputs.signature_ok != 'true'
+        # Only when the compare step actually RAN and said so: an earlier step
+        # failure leaves the output empty, and `!= 'true'` then blamed a
+        # signature regression for every red stage.
+        if: always() && steps.signature_after.outcome == 'success' && steps.signature_after.outputs.signature_ok == 'false'
         run: |
           echo "::error::DB signature regressed after this stage; the staged DB and batch state were withheld (see diagnostics/db_signature_after.json)."
           exit 1
@@ -1136,7 +1147,10 @@ jobs:
       # Without this step a signature regression leaves the job green with
       # no uploads — the pipeline stalls silently behind a success mark.
       - name: Fail stage on DB signature regression
-        if: always() && steps.signature_after.outputs.signature_ok != 'true'
+        # Only when the compare step actually RAN and said so: an earlier step
+        # failure leaves the output empty, and `!= 'true'` then blamed a
+        # signature regression for every red stage.
+        if: always() && steps.signature_after.outcome == 'success' && steps.signature_after.outputs.signature_ok == 'false'
         run: |
           echo "::error::DB signature regressed after this stage; the staged DB and batch state were withheld (see diagnostics/db_signature_after.json)."
           exit 1
@@ -1149,7 +1163,8 @@ jobs:
   fc-collect-finalize:
     if: inputs.stage == 'fc_collect_finalize'
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    # A collect stage now waits in-process for a re-batch (PYTHIA_BATCH_RESUBMIT_WAIT_MIN) before the per-item sync fallback; 360 is GitHub's cap and the fallback must still fit inside it.
+    timeout-minutes: 360
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -1221,6 +1236,29 @@ jobs:
               ).fetchone()
               hs_run_id = (row[1] if row else None) or ""
               fc_run_id = (row[0] if row else None) or ""
+              if not hs_run_id:
+                  # A submit stage where every provider group failed is a
+                  # legitimate GREEN outcome with no llm_batches row at all;
+                  # the durable pipeline -> hs_run_id mapping hs_submit wrote
+                  # to hs_stage_state (hs_batch.save_pipeline_run_id) is this
+                  # pipeline's epoch. "Newest hs_runs" is only the last resort:
+                  # a manual HS run landing between submit and collect would
+                  # pin the wrong epoch and forecast another run's questions.
+                  try:
+                      import json as _json
+                      r1 = con.execute(
+                          """
+                          SELECT payload_json FROM hs_stage_state
+                          WHERE run_id = ? AND iso3 = '__RUN__' AND stage_key = 'pipeline_run_id'
+                          ORDER BY created_at DESC LIMIT 1
+                          """,
+                          [pid],
+                      ).fetchone()
+                      if r1 and r1[0]:
+                          parsed = _json.loads(r1[0])
+                          hs_run_id = str((parsed or {}).get("hs_run_id") or "")
+                  except Exception as exc:  # noqa: BLE001
+                      print(f"hs_stage_state lookup failed: {exc}")
               if not hs_run_id:
                   r2 = con.execute(
                       "SELECT hs_run_id FROM hs_runs ORDER BY generated_at DESC LIMIT 1"
@@ -1472,7 +1510,10 @@ jobs:
       # when the gate fires, the whole month's pipeline output goes
       # unpublished — that must be a RED run, not a quiet green one.
       - name: Fail if canonical DB was not published
-        if: always() && steps.signature_after.outputs.signature_ok != 'true'
+        # Only when the compare step actually RAN and said so: an earlier step
+        # failure leaves the output empty, and `!= 'true'` then blamed a
+        # signature regression for every red stage.
+        if: always() && steps.signature_after.outcome == 'success' && steps.signature_after.outputs.signature_ok == 'false'
         run: |
           echo "::error::fc_collect_finalize finished WITHOUT uploading the canonical pythia-resolver-db (DB signature regression) — the pipeline's output is unpublished and Sibyl was not dispatched. Inspect diagnostics/db_signature_after.json, then re-run this stage or publish manually."
           exit 1

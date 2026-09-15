@@ -131,6 +131,9 @@ def test_the_whole_forecast_and_scoring_chain_is_watched():
         "Pythia — Compute Calibration Weights & Advice",
         "Pythia Pipeline Stage",
         "Publish Latest Data (Release)",
+        # The forecast chain's SOLE publish trigger; Publish alone stays green
+        # all month on the calibration chain's release when Sibyl fails on the 1st.
+        "Sibyl Deep Research",
     ):
         assert required in watched, f"{required} is not watched"
 

@@ -301,3 +301,48 @@ class TestWriteHsTriageBraveGate:
         if ace_rows:
             # need_full_spd should remain True because grounding exists
             assert ace_rows[0][5] is True, "need_full_spd should be True for grounded hazard"
+
+
+class TestHazardHasGroundingIsPerCountry:
+    """The gate's SQL computed iso3_up and never bound it, so it asked whether
+    ANY country got grounding for the hazard in this run — always yes once one
+    had — and the blocked-no-grounding gate never fired for the countries the
+    breaker actually cost."""
+
+    def _con(self):
+        import duckdb
+
+        from pythia.db.schema import ensure_schema
+
+        con = duckdb.connect(":memory:")
+        ensure_schema(con)
+        con.execute(
+            "INSERT INTO llm_calls (call_id, hs_run_id, iso3, hazard_code, status) "
+            "VALUES ('c1', 'hs_1', 'SOM', 'GROUNDING_FL', 'ok'), "
+            "('c2', 'hs_1', 'ETH', 'GROUNDING_TC', 'error')"
+        )
+
+        class _NoClose:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, *a, **k):
+                return self._inner.execute(*a, **k)
+
+            def close(self):
+                pass
+
+        return _NoClose(con)
+
+    def test_grounding_for_one_country_does_not_answer_for_another(self):
+        from horizon_scanner.horizon_scanner import _hazard_has_grounding
+
+        con = self._con()
+        with patch("horizon_scanner.horizon_scanner.pythia_connect", return_value=con):
+            assert _hazard_has_grounding("hs_1", "SOM", "FL") is True
+            assert _hazard_has_grounding("hs_1", "som", "fl") is True
+            assert _hazard_has_grounding("hs_1", "ETH", "FL") is False
+            assert _hazard_has_grounding("hs_1", "SOM", "TC") is False
+            assert _hazard_has_grounding("hs_2", "SOM", "FL") is False
+            # A grounding call that errored is not grounding.
+            assert _hazard_has_grounding("hs_1", "ETH", "TC") is False

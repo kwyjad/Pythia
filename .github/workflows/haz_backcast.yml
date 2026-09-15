@@ -21,9 +21,11 @@
 ---
 name: Hazard Backcast
 
-concurrency:
-  group: pythia-resolver-db
-  cancel-in-progress: false
+# The DB concurrency group is declared on the WRITING job, not the workflow:
+# at workflow level the gate job (which usually decides to SKIP) took the
+# group's single pending slot before deciding anything, and a newer queued run
+# cancels whatever is pending — including a poller-dispatched pipeline stage
+# or the 1st-of-month hs_submit cron itself.
 
 "on":
   workflow_dispatch:
@@ -155,6 +157,9 @@ jobs:
     needs: gate
     if: needs.gate.outputs.proceed == 'true'
     runs-on: ubuntu-latest
+    concurrency:
+      group: pythia-resolver-db
+      cancel-in-progress: false
     # Budget (default 240 min) + download/upload/setup headroom, and a hard
     # stop that frees the pythia-resolver-db group before the 28th 03:00 UTC
     # resolver-update cron even on the slowest night (a killed night loses

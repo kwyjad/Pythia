@@ -218,4 +218,14 @@ jobs:
           set -e
           echo "Pipeline still in flight — chaining next poll (depth ${NEXT_DEPTH})."
           sleep 300
-          gh workflow run poll_llm_batches.yml --ref main -f "chain_depth=${NEXT_DEPTH}"
+          # One transient API error here ended the whole chain, and recovery
+          # was the throttled cron (gaps of one to three hours observed).
+          for attempt in 1 2 3 4; do
+            if gh workflow run poll_llm_batches.yml --ref main -f "chain_depth=${NEXT_DEPTH}"; then
+              exit 0
+            fi
+            echo "::warning title=Poller re-arm dispatch failed::attempt ${attempt} of 4; retrying"
+            sleep $((15 * attempt))
+          done
+          echo "::error title=Poller chain broken::could not dispatch the next poll after 4 attempts; the hourly cron is the backstop"
+          exit 1

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import json
+
 import pytest
 
 duckdb = pytest.importorskip("duckdb")
@@ -141,3 +143,27 @@ def test_no_run_ids_returns_unavailable(tmp_path):
     con = _db(tmp_path)
     _reference_run(con)
     assert _load_batch_health(con, None, None, PRED, PARAMS) == {"available": False}
+
+
+def test_a_rebatched_batch_is_described_not_counted_as_empty(tmp_path):
+    """A batch the collect stage re-batched (`resubmitted_as` written by
+    llm_batch.resubmit_unserved) did not cost its requests the discount; the
+    bundle a human reads first said FAIL while batch_economics said recovered."""
+    con = _db(tmp_path)
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('b_openai_spd','openai','spd_v2','failed',NULL,?,12,0,?)",
+        [FC_RUN, json.dumps({"provider_state": "failed", "resubmitted_as": ["b_openai_spd_re"]})],
+    )
+    con.execute(
+        "INSERT INTO llm_batches VALUES "
+        "('b_openai_spd_re','openai','spd_v2','collected',NULL,?,12,12,'')",
+        [FC_RUN],
+    )
+    for i in range(12):
+        con.execute("INSERT INTO llm_batch_requests VALUES (?, 'b_openai_spd_re', 'succeeded')", [f"r{i}"])
+    con.execute("INSERT INTO llm_calls VALUES (NULL, ?, 1.0, '{\"service_tier\": \"batch\"}')", [FC_RUN])
+    bh = _load_batch_health(con, HS_RUN, FC_RUN, PRED, PARAMS)
+    assert bh["empty_batches"] == []
+    assert [e["batch_id"] for e in bh["rebatched_batches"]] == ["b_openai_spd"]
+    assert bh["rebatched_batches"][0]["resubmitted_as"] == ["b_openai_spd_re"]

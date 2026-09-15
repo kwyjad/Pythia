@@ -1502,6 +1502,10 @@ def cancel_batch(con, batch_id: str) -> None:
     sync fallback runs avoids paying for both the late batch results AND the
     fallback calls. collect_batch afterwards flips the outstanding items to
     'expired' so consumers take the sync path.
+
+    Prefer :func:`cancel_and_salvage`: a cancel is asynchronous at every
+    provider, and the completed items are only readable once the batch has
+    actually reached its terminal state (see that function's docstring).
     """
 
     row = con.execute(
@@ -1522,6 +1526,195 @@ def cancel_batch(con, batch_id: str) -> None:
     )
 
 
+# How long a cancel is given to SETTLE before the salvage fetch. OpenAI
+# documents `cancelling` as lasting "up to 10 minutes" before `cancelled`,
+# and only the cancelled batch carries an output file; Anthropic's
+# `results_url` is null until processing_status reaches `ended`. Seconds.
+_CANCEL_SETTLE_POLL_SEC = 15.0
+
+
+def cancel_settle_sec() -> float:
+    """``PYTHIA_BATCH_CANCEL_SETTLE_SEC`` (default 720): how long to wait for a cancel to settle."""
+
+    try:
+        return max(0.0, float(os.getenv("PYTHIA_BATCH_CANCEL_SETTLE_SEC", "720") or 720))
+    except ValueError:
+        return 720.0
+
+
+def cancel_and_salvage(con, batch_id: str, *, settle_sec: Optional[float] = None) -> Dict[str, int]:
+    """Cancel a provider batch, wait for the cancel to SETTLE, then collect.
+
+    ``cancel_batch`` followed at once by ``collect_batch`` salvages nothing:
+    OpenAI parks a cancelled batch in ``cancelling`` for up to ten minutes
+    and exposes ``output_file_id`` only once it reads ``cancelled``, and
+    Anthropic's ``results_url`` is null until ``processing_status`` is
+    ``ended``. So an immediate fetch yields no lines, every row flips to
+    ``expired``, and the sync fallback re-runs items the provider had
+    already completed and will bill at batch price — paid twice, and for
+    a straggler re-batch, dearer than never re-batching at all.
+
+    This asks the PROVIDER (not ``poll_batch``, which short-circuits on the
+    local ``canceled`` status) until the batch is terminal or the settle
+    budget is spent — bounded by attempts as well as the clock, so a
+    stubbed sleep cannot spin — and only then collects. Never raises.
+    """
+
+    row = con.execute(
+        "SELECT provider, provider_batch_id FROM llm_batches WHERE batch_id = ?",
+        [batch_id],
+    ).fetchone()
+    if not row:
+        return {}
+    provider, provider_batch_id = row
+    cancel_batch(con, batch_id)
+    if provider_batch_id:
+        budget = cancel_settle_sec() if settle_sec is None else max(0.0, float(settle_sec))
+        deadline = _clock() + budget
+        max_polls = int(budget // _CANCEL_SETTLE_POLL_SEC) + 1
+        settled = False
+        for _ in range(max_polls):
+            try:
+                status = _adapter(provider).poll(provider_batch_id)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("llm_batch: settle poll failed for %s: %s", batch_id, exc)
+                status = None
+            if status is not None and status.terminal:
+                settled = True
+                break
+            remaining = deadline - _clock()
+            if remaining <= 0:
+                break
+            _sleep(min(_CANCEL_SETTLE_POLL_SEC, remaining))
+        if not settled:
+            LOGGER.warning(
+                "llm_batch: %s did not reach a terminal state within %.0fs of cancel; "
+                "salvaging whatever the provider exposes now",
+                batch_id, budget,
+            )
+    try:
+        return collect_batch(con, batch_id) or {}
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.error("llm_batch: salvage collect failed for %s: %s", batch_id, exc)
+        return {}
+
+
+def _poll_with_retry(con, batch_id: str, attempts: int = 3) -> Optional[BatchStatus]:
+    """``poll_batch`` with a short retry: one transient 5xx must not send a batch to sync."""
+
+    status = None
+    for i in range(max(1, attempts)):
+        status = poll_batch(con, batch_id)
+        if status is not None:
+            return status
+        if i + 1 < attempts:
+            _sleep(min(30.0, 5.0 * (2 ** i)))
+    return status
+
+
+def drain_pending(
+    con,
+    pipeline_id: Optional[str],
+    *,
+    wait_min: Optional[float] = None,
+    poll_sec: Optional[float] = None,
+    log: Any = None,
+) -> Dict[str, Any]:
+    """Ingest this pipeline's pending batches at the start of a collect stage.
+
+    The one drain both collect paths (forecaster and HS) run. For each batch
+    the poller has not collected: poll (retrying a transient failure —
+    before this, one Gemini 5xx on the stage's single GET sent a whole
+    family to sync at full price, and the paid batch results were then
+    skipped as terminal when a later stage collected them); collect it when
+    terminal; cancel-and-salvage it when past ``PYTHIA_BATCH_MAX_WAIT_H``;
+    and when it is still IN FLIGHT under the cap — an early or manual
+    dispatch — wait for it in-process, bounded by ``wait_min`` (default
+    ``PYTHIA_BATCH_RESUBMIT_WAIT_MIN``), then cancel-and-salvage what is
+    left. Leaving an in-flight batch running while the sync fallback pays
+    for the same items is the double charge every other branch here exists
+    to avoid.
+
+    Returns ``{"collected": [...], "canceled": [...], "waited_sec": float,
+    "poll_failed": [...]}`` so the caller can spend the remainder of its
+    wait budget on the re-batch that follows. Never raises.
+    """
+
+    emit = log or (lambda msg: print(msg, flush=True))
+    report: Dict[str, Any] = {"collected": [], "canceled": [], "waited_sec": 0.0, "poll_failed": []}
+    in_flight: List[str] = []
+    try:
+        for binfo in pending_batches(con, pipeline_id):
+            bid = binfo["batch_id"]
+            status = _poll_with_retry(con, bid)
+            state = status.state if status else "unknown"
+            if status is None:
+                report["poll_failed"].append(bid)
+                gh_annotation(
+                    "warning",
+                    "Batch poll failed at collect",
+                    f"{bid} ({binfo.get('provider')}) could not be polled after retries; "
+                    "waiting on it in-process before any sync fallback",
+                )
+            if status is not None and (state == "ended" or status.terminal):
+                counts = collect_batch(con, bid)
+                report["collected"].append(bid)
+                emit(f"[batch] collected {bid}: {counts}")
+                continue
+            age_h = 0.0
+            try:
+                age_h = (_now() - binfo["submitted_at"]).total_seconds() / 3600.0
+            except Exception:  # noqa: BLE001
+                pass
+            if age_h >= max_wait_hours():
+                emit(
+                    f"[batch][warn] {bid} still {state} after {age_h:.1f}h — "
+                    "canceling and salvaging; unserved items fall back to sync"
+                )
+                counts = cancel_and_salvage(con, bid)
+                report["canceled"].append(bid)
+                emit(f"[batch] salvaged {bid}: {counts}")
+                continue
+            in_flight.append(bid)
+
+        if in_flight:
+            wait_sec = (resubmit_wait_minutes() if wait_min is None else max(0.0, float(wait_min))) * 60.0
+            emit(
+                f"[batch] {len(in_flight)} batch(es) still in flight at collect; "
+                f"waiting up to {wait_sec / 60.0:.0f} min before any sync fallback: "
+                + ", ".join(in_flight[:5])
+            )
+            started = _clock()
+            states = wait_for_batches(
+                con, in_flight, deadline=started + wait_sec,
+                poll_sec=resubmit_poll_sec() if poll_sec is None else float(poll_sec),
+            )
+            report["waited_sec"] = max(0.0, _clock() - started)
+            for bid in in_flight:
+                if states.get(bid) in _WAIT_TERMINAL:
+                    counts = collect_batch(con, bid)
+                    report["collected"].append(bid)
+                    emit(f"[batch] collected {bid}: {counts}")
+                else:
+                    gh_annotation(
+                        "warning",
+                        "Batch still running at collect",
+                        f"{bid} is {states.get(bid)} after {wait_sec / 60.0:.0f} min in-process wait; "
+                        "canceling and salvaging completed items; the rest take the sync fallback",
+                    )
+                    counts = cancel_and_salvage(con, bid)
+                    report["canceled"].append(bid)
+                    emit(f"[batch] salvaged {bid}: {counts}")
+    except Exception as exc:  # noqa: BLE001 - the collect stage must go on
+        LOGGER.exception("llm_batch: drain failed: %s", exc)
+        gh_annotation(
+            "warning", "Batch drain failed",
+            f"{type(exc).__name__}: {str(exc)[:300]} — unserved items take the sync fallback",
+        )
+        report["error"] = f"{type(exc).__name__}: {exc}"
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Collect-stage re-batch (before the per-item sync fallback)
 # ---------------------------------------------------------------------------
@@ -1530,6 +1723,9 @@ def cancel_batch(con, batch_id: str) -> None:
 # failure (mismatched_model, a malformed line) is deterministic and would fail
 # again; it is left to the sync path.
 _RESUBMIT_CLASSES = ("file_access", "failed_empty")
+# Pause between re-batch submit rounds while the provider keeps refusing the
+# input file (the multi-hour incident shape). Seconds.
+_RESUBMIT_RETRY_PAUSE_SEC = 300.0
 
 
 def _batch_failure_class(error_text: Optional[str]) -> Optional[str]:
@@ -1792,18 +1988,52 @@ def resubmit_unserved(
                 old_batches.setdefault(c["batch_id"], []).append(c["custom_id"])
         report["n_reset"] = reset_for_resubmit(con, [c["custom_id"] for c in candidates])
 
-        for family in families:
-            sub = submit_pending_report(
-                con,
-                family=family,
-                pipeline_id=pipeline_id,
-                stage=stage,
-                run_id=run_id,
-                hs_run_id=hs_run_id,
+        # The whole re-batch — asking AND waiting — is bounded by wait_sec.
+        deadline = _clock() + wait_sec
+        rounds = 0
+        while True:
+            rounds += 1
+            failed: List[Dict[str, Any]] = []
+            for family in families:
+                sub = submit_pending_report(
+                    con,
+                    family=family,
+                    pipeline_id=pipeline_id,
+                    stage=stage,
+                    run_id=run_id,
+                    hs_run_id=hs_run_id,
+                )
+                if sub.n_groups:
+                    print(sub.summary_line(), flush=True)
+                created.extend(sub.created)
+                failed.extend(sub.failed)
+            # A file-access rejection is the provider-side INCIDENT, measured
+            # in hours. The submit guard spends its own budget (10 min on a
+            # collect stage) and gives up; returning here would spend the
+            # other ~80 minutes of this window on nothing and send the rows
+            # to sync at full price. So keep re-asking, on a ladder, until
+            # the window closes — that window is exactly what the incident
+            # needs. Any OTHER failure class is deterministic: stop at once.
+            only_file_access = bool(failed) and all(
+                f.get("error_class") == "validation:file_access" for f in failed
             )
-            if sub.n_groups:
-                print(sub.summary_line(), flush=True)
-            created.extend(sub.created)
+            remaining = deadline - _clock()
+            if created or not only_file_access or remaining <= 0:
+                break
+            pause = min(_RESUBMIT_RETRY_PAUSE_SEC, remaining)
+            gh_annotation(
+                "warning",
+                "Collect re-batch: provider still rejecting the input file",
+                f"round {rounds}: {len(failed)} group(s) refused at validation (file access); "
+                f"asking again in {pause / 60.0:.0f} min, {remaining / 60.0:.0f} min of the "
+                "re-batch window left",
+            )
+            report["submit_rounds"] = rounds
+            _sleep(pause)
+            _reset_openai_submit_budget()
+            if _clock() >= deadline:
+                break
+        report["submit_rounds"] = rounds
         report["created"] = list(created)
 
         if old_batches:
@@ -1828,10 +2058,10 @@ def resubmit_unserved(
             )
             return report
 
-        deadline = _clock() + wait_sec
+        wait_left = max(0.0, deadline - _clock())
         print(
             f"[batch] collect re-batch: {report['n_reset']} request(s) re-submitted as "
-            f"{len(created)} batch(es); waiting up to {wait_sec / 60.0:.0f} min",
+            f"{len(created)} batch(es); waiting up to {wait_left / 60.0:.0f} min",
             flush=True,
         )
         with _cancel_on_signal(con, created):
@@ -1849,8 +2079,9 @@ def resubmit_unserved(
                     f"{bid} is {states.get(bid)} after {wait_sec / 60.0:.0f} min; "
                     "canceling and salvaging completed items; the rest take the sync fallback",
                 )
-                cancel_batch(con, bid)
-            counts = collect_batch(con, bid) or {}
+                counts = cancel_and_salvage(con, bid) or {}
+            else:
+                counts = collect_batch(con, bid) or {}
             for k in totals:
                 totals[k] += int(counts.get(k, 0) or 0)
         report["counts"] = totals
@@ -1876,9 +2107,10 @@ def _cancel_and_collect_quietly(con, batch_ids: Sequence[str]) -> None:
     for bid in batch_ids:
         try:
             status = poll_batch(con, bid)
-            if not (status and status.terminal):
-                cancel_batch(con, bid)
-            collect_batch(con, bid)
+            if status and status.terminal:
+                collect_batch(con, bid)
+            else:
+                cancel_and_salvage(con, bid)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("llm_batch: cleanup of re-batched %s failed: %s", bid, exc)
 
@@ -1910,7 +2142,11 @@ class _cancel_on_signal:
         if callable(previous) and previous not in (signal.SIG_IGN, signal.SIG_DFL):
             previous(signum, frame)
         else:
-            raise KeyboardInterrupt(f"signal {signum}")
+            # The default action for SIGTERM is to die with 128+signum. A
+            # KeyboardInterrupt here was caught by the forecaster's main()
+            # ("Interrupted by user.") and turned into exit 0 — a stage
+            # killed mid-wait read green with no forecasts written.
+            raise SystemExit(128 + int(signum))
 
     def __enter__(self):
         try:

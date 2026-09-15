@@ -203,3 +203,114 @@ def test_resolver_update_is_gated_on_the_staged_pipeline() -> None:
     assert "gate" in jobs
     assert jobs["backfill"].get("needs") == "gate"
     assert "proceed" in str(jobs["backfill"].get("if", ""))
+
+
+# ---------------------------------------------------------------------------
+# Forecast-pipeline audit pins (2026-09-15)
+# ---------------------------------------------------------------------------
+
+WF_SIBYL = pathlib.Path(".github/workflows/run_sibyl.yml")
+WF_PUBLISH = pathlib.Path(".github/workflows/publish_latest_data.yml")
+WF_STAGE = pathlib.Path(".github/workflows/pythia_pipeline_stage.yml")
+WF_POLLER = pathlib.Path(".github/workflows/poll_llm_batches.yml")
+WF_INGEST = pathlib.Path(".github/workflows/ingest-structured-data.yml")
+WF_BACKCAST = pathlib.Path(".github/workflows/haz_backcast.yml")
+
+
+def _steps(path: pathlib.Path, job: str) -> list[dict]:
+    data = _load_yaml(path)
+    assert isinstance(data, dict)
+    return list(data["jobs"][job]["steps"])
+
+
+def _step(path: pathlib.Path, job: str, name: str) -> dict:
+    for step in _steps(path, job):
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"{path}: job {job} has no step named {name!r}")
+
+
+def test_sibyl_publish_dispatch_is_the_chain_not_a_human_pick() -> None:
+    """publish's regression guard hard-fails an explicit run_id with no chain
+    flag — the mode reserved for a person's deliberate run pick. Sibyl is the
+    forecast chain's SOLE publish trigger and must take the soft-skip branch,
+    as the calibration chain has since 2026-08-26."""
+    step = _step(WF_SIBYL, "sibyl", "Publish post-Sibyl DB to release")
+    assert "-f dispatched_by_chain=true" in step["run"]
+    assert "-f run_id=${{ github.run_id }}" in step["run"]
+
+
+def test_sibyl_failure_cannot_withhold_the_forecast_release() -> None:
+    """The gate and the Sibyl run sit between the DB download and the
+    canonical upload; a red there left the month's forecasts unpublished."""
+    for name in ("Gate on eligible questions with volatility scores", "Run Sibyl"):
+        step = _step(WF_SIBYL, "sibyl", name)
+        assert step.get("continue-on-error") is True, f"{name} must be non-fatal"
+    run_sibyl = _step(WF_SIBYL, "sibyl", "Run Sibyl")
+    # A gate that could not decide leaves the output empty: Sibyl is skipped, not run blind.
+    assert "steps.gate.outputs.eligible != ''" in str(run_sibyl.get("if"))
+    data = _load_yaml(WF_SIBYL)
+    assert int(data["jobs"]["sibyl"]["timeout-minutes"]) >= 330
+
+
+def test_publish_diagnostics_after_the_release_upload_are_non_fatal() -> None:
+    """A crash in the inspection after `gh release upload` turned a completed
+    publish red, skipped the API sync poke, and aged Publish in the watchdog."""
+    data = _load_yaml(WF_PUBLISH)
+    job = next(iter(data["jobs"].values()))
+    names = [s.get("name") for s in job["steps"]]
+    upload_idx = next(i for i, n in enumerate(names) if n and n.startswith("Upload resolver.duckdb"))
+    for step in job["steps"][upload_idx + 1:]:
+        if step.get("name") in ("Inspect published DB", "Upload resolver inspection artifact"):
+            assert step.get("continue-on-error") is True, step.get("name")
+
+
+def test_db_concurrency_group_is_on_the_writing_job_not_the_gate() -> None:
+    """At workflow level the gate job (which usually SKIPS) took the group's
+    single pending slot before deciding anything, and a newer queued run
+    cancels whatever is pending — a poller-dispatched stage or the
+    1st-of-month hs_submit cron itself."""
+    for path, job in ((WF_INGEST, "ingest"), (WF_BACKCAST, "backcast")):
+        data = _load_yaml(path)
+        assert "concurrency" not in data, f"{path}: concurrency must not be workflow-level"
+        assert data["jobs"][job]["concurrency"]["group"] == "pythia-resolver-db", path
+        assert "concurrency" not in data["jobs"]["gate"], f"{path}: the gate must stay outside the group"
+
+
+def test_collect_stages_have_room_for_the_in_process_wait_and_the_sync_fallback() -> None:
+    data = _load_yaml(WF_STAGE)
+    for job in ("hs-rc-collect", "hs-finalize-fc-submit", "fc-collect-finalize"):
+        assert int(data["jobs"][job]["timeout-minutes"]) == 360, job
+    # The re-batch wait must leave the sync fallback most of the stage.
+    env = data["env"]
+    assert float(env["PYTHIA_BATCH_RESUBMIT_WAIT_MIN"]) <= 120
+
+
+def test_signature_regression_gate_only_fires_when_the_compare_ran() -> None:
+    """With `!= 'true'` an earlier step failure (empty output) made every red
+    stage end on a false 'DB signature regressed' annotation."""
+    data = _load_yaml(WF_STAGE)
+    seen = 0
+    for job in data["jobs"].values():
+        for step in job.get("steps", []):
+            if str(step.get("name", "")).startswith(("Fail stage on DB signature regression", "Fail if canonical DB was not published")):
+                seen += 1
+                cond = str(step.get("if"))
+                assert "steps.signature_after.outcome == 'success'" in cond
+                assert "signature_ok == 'false'" in cond
+    assert seen == 5
+
+
+def test_fc_collect_resolves_the_epoch_from_stage_state_before_newest_hs_run() -> None:
+    """A submit stage where every provider group failed is GREEN with no
+    llm_batches row; the durable hs_stage_state mapping is this pipeline's
+    epoch, and "newest hs_runs" would pin a manual run's question set."""
+    step = _step(WF_STAGE, "fc-collect-finalize", "Read pipeline context from DB")
+    run = step["run"]
+    assert "hs_stage_state" in run and "pipeline_run_id" in run
+    assert run.index("hs_stage_state") < run.index("FROM hs_runs ORDER BY generated_at DESC")
+
+
+def test_poller_rearm_dispatch_retries_before_breaking_the_chain() -> None:
+    step = _step(WF_POLLER, "poll", "Reschedule next poll")
+    assert "for attempt in" in step["run"] and "gh workflow run poll_llm_batches.yml" in step["run"]

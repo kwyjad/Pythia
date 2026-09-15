@@ -217,17 +217,6 @@ def replay_hazard_call(
             pass_idx=pass_idx,
             pipeline_id=_PIPELINE_ID,
         )
-    if hit is not None and hit.get("status", "succeeded") != "succeeded":
-        # Errored batch item: fall back to sync. The burned tokens are
-        # visible here but not rich-logged (HS logging is label-keyed per
-        # pass); surface them in the log at least.
-        usage = hit.get("usage") or {}
-        logger.warning(
-            "hs_batch: %s %s/%s p%d errored in batch (%s tokens in / %s out) — sync fallback",
-            family, iso3, hazard_code, pass_idx,
-            usage.get("prompt_tokens"), usage.get("completion_tokens"),
-        )
-        hit = None
     if hit is None:
         return None
 
@@ -246,7 +235,56 @@ def replay_hazard_call(
     )
     usage.setdefault("model_selected", f"{spec.provider}:{spec.model_id}")
     usage.setdefault("fallback_used", False)
+
+    if hit.get("status", "succeeded") != "succeeded":
+        # Errored batch item: the provider billed its tokens (a Gemini item
+        # refused mid-batch still consumed its prompt). Cost it as its own
+        # rich row before the sync fallback re-runs the call — otherwise HS
+        # batch errors are invisible to every cost view. The row carries
+        # call_type='batch_item_errored', so the label-keyed
+        # llm_call_already_logged check for the pass itself is unaffected.
+        logger.warning(
+            "hs_batch: %s %s/%s p%d errored in batch (%s tokens in / %s out) — sync fallback",
+            family, iso3, hazard_code, pass_idx,
+            usage.get("prompt_tokens"), usage.get("completion_tokens"),
+        )
+        _log_errored_replay(family, iso3=iso3, hazard_code=hazard_code, pass_idx=pass_idx,
+                            spec=spec, usage=usage, error=str(hit.get("error") or ""))
+        return None
+
+    sent_prompt = hit.get("sent_prompt") or ""
+    if sent_prompt:
+        # The prompt the provider ACTUALLY received. Collect-stage prompts are
+        # rebuilt (a later "today", a refreshed inject) and the forecaster's
+        # log sites already prefer the sent prompt; HS logged the rebuilt one.
+        usage["sent_prompt_text"] = sent_prompt
     return hit.get("text") or "", usage, (hit.get("error") or ""), spec
+
+
+def _log_errored_replay(
+    family: str, *, iso3: str, hazard_code: str, pass_idx: int, spec, usage: dict, error: str
+) -> None:
+    """Rich-log an errored HS batch item's usage so its cost reaches llm_calls. Never raises."""
+
+    try:
+        from horizon_scanner.llm_logging import log_hs_llm_call
+        from pythia.test_mode import is_test_mode
+
+        kind = "rc" if family == "hs_rc" else "triage"
+        log_hs_llm_call(
+            hs_run_id=os.getenv("PYTHIA_HS_RUN_ID", "") or "",
+            iso3=iso3,
+            hazard_code=f"{kind}_{hazard_code}_pass_{pass_idx}_batch_error",
+            model_spec=spec,
+            prompt_text="",
+            response_text="",
+            usage=dict(usage),
+            error_text=f"batch item errored: {error or 'unknown'}",
+            is_test=is_test_mode(),
+            call_type="batch_item_errored",
+        )
+    except Exception:  # noqa: BLE001 - telemetry only
+        logger.debug("hs_batch: could not log errored batch item for %s/%s", iso3, hazard_code, exc_info=True)
 
 
 def mark_fallback(family: str, *, iso3: str, hazard_code: str, pass_idx: int) -> None:
@@ -594,7 +632,11 @@ def collect_pending_batches(pipe_id: Optional[str] = None, *, hs_run_id: Optiona
     from pythia import llm_batch
 
     con = batch_con()
-    _drain_pending_batches(con, pipe_id or _PIPELINE_ID)
+    # The drain's in-process wait and the re-batch below share ONE budget
+    # (PYTHIA_BATCH_RESUBMIT_WAIT_MIN); the stage timeout is sized for it.
+    budget_min = llm_batch.resubmit_wait_minutes()
+    drained = _drain_pending_batches(con, pipe_id or _PIPELINE_ID, wait_min=budget_min)
+    wait_left_min = max(0.0, budget_min - float(drained.get("waited_sec") or 0.0) / 60.0)
     families = _COLLECT_FAMILIES.get(_STAGE, ())
     if families and (pipe_id or _PIPELINE_ID):
         rb = llm_batch.resubmit_unserved(
@@ -603,39 +645,24 @@ def collect_pending_batches(pipe_id: Optional[str] = None, *, hs_run_id: Optiona
             families=families,
             stage=f"{_STAGE}_resubmit",
             hs_run_id=hs_run_id,
+            wait_min=wait_left_min,
         )
         logger.info("hs_batch: collect re-batch: %s", rb)
+        print(f"[batch] collect re-batch: {rb}", flush=True)
 
 
-def _drain_pending_batches(con, pipe_id: Optional[str]) -> None:
+def _drain_pending_batches(con, pipe_id: Optional[str], *, wait_min: Optional[float] = None) -> dict:
+    """The shared drain (see ``llm_batch.drain_pending``), logged through this module."""
+
     from pythia import llm_batch
 
-    for binfo in llm_batch.pending_batches(con, pipe_id):
-        status = llm_batch.poll_batch(con, binfo["batch_id"])
-        state = status.state if status else "unknown"
-        if state == "ended" or (status and status.terminal):
-            counts = llm_batch.collect_batch(con, binfo["batch_id"])
-            logger.info("hs_batch: collected %s: %s", binfo["batch_id"], counts)
-            continue
-        age_h = 0.0
-        try:
-            age_h = (
-                datetime.now(timezone.utc).replace(tzinfo=None) - binfo["submitted_at"]
-            ).total_seconds() / 3600.0
-        except Exception:  # noqa: BLE001
-            pass
-        if age_h >= llm_batch.max_wait_hours():
-            logger.warning(
-                "hs_batch: %s still %s after %.1fh — canceling; items fall back to sync",
-                binfo["batch_id"], state, age_h,
-            )
-            llm_batch.cancel_batch(con, binfo["batch_id"])
-            llm_batch.collect_batch(con, binfo["batch_id"])
-        else:
-            logger.warning(
-                "hs_batch: %s not finished (%s); its items fall back to sync this stage",
-                binfo["batch_id"], state,
-            )
+    def _log(msg: str) -> None:
+        logger.info("hs_batch: %s", msg)
+        print(msg, flush=True)
+
+    report = llm_batch.drain_pending(con, pipe_id, wait_min=wait_min, log=_log)
+    logger.info("hs_batch: collect drain: %s", report)
+    return report
 
 
 def batch_flags_summary() -> str:

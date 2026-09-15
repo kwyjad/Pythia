@@ -831,18 +831,29 @@ def _hazard_has_grounding(run_id: str, iso3: str, hazard_code: str) -> bool:
             """
             SELECT 1 FROM llm_calls
             WHERE hs_run_id = ?
+              AND UPPER(COALESCE(iso3, '')) = ?
               AND (
                 LOWER(hazard_code) = LOWER(?)
                 OR LOWER(hazard_code) = LOWER(?)
               )
-              AND success = true
+              AND COALESCE(status, '') = 'ok'
             LIMIT 1
             """,
-            [run_id, f"grounding_{hazard_up}", f"TRIAGE_GROUNDING_{hazard_up}"],
+            # Two faults hid here. iso3 was computed and never bound, so the
+            # gate asked "did ANY country get grounding for this hazard in
+            # this run". And the row filter read `success = true` against a
+            # table that has no such column (llm_calls carries `status`, set
+            # by derive_status): DuckDB raised, the bare except returned
+            # False, and with the breaker tripped EVERY hazard of EVERY
+            # country was blocked as ungrounded — no test hit the SQL, since
+            # the breaker tests patch this function.
+            [run_id, iso3_up, f"grounding_{hazard_up}", f"TRIAGE_GROUNDING_{hazard_up}"],
         ).fetchone()
         return row is not None
-    except Exception:
-        # If table doesn't exist or query fails, assume no grounding
+    except Exception as exc:  # noqa: BLE001
+        # A query that cannot run must not read as "no grounding" quietly:
+        # that answer blocks the hazard from forecasting.
+        logger.warning("_hazard_has_grounding query failed for %s/%s: %s", iso3_up, hazard_up, exc)
         return False
     finally:
         con.close()
@@ -1403,9 +1414,20 @@ def main(
             )
         run_id = resolved
         # Ingest any provider batches the poller hasn't collected yet
-        # (idempotent; stragglers past the wait cap are canceled so their
-        # items take the per-item sync fallback).
-        hs_batch.collect_pending_batches(hs_batch.pipeline_id(), hs_run_id=run_id)
+        # (idempotent; stragglers past the wait cap are canceled and
+        # salvaged, and the unserved remainder is re-batched, bounded,
+        # before any item takes the sync fallback). This sits OUTSIDE
+        # main()'s try/finally, so an exception here used to escape as a
+        # bare traceback with the connection left open and no HS_RUN_ID
+        # line — the workflow then reported "HS_RUN_ID not found" in place
+        # of the real cause. Name it and exit 1 instead.
+        try:
+            hs_batch.collect_pending_batches(hs_batch.pipeline_id(), hs_run_id=run_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("collect-stage batch ingest failed for %s: %s", run_id, exc)
+            print(f"::error title=Collect-stage batch ingest failed::{type(exc).__name__}: {exc}")
+            hs_batch.close_con()
+            raise SystemExit(1) from exc
     else:
         run_id = f"hs_{start_time.strftime('%Y%m%dT%H%M%S')}"
         if hs_batch.staged() and not hs_batch.pipeline_id():

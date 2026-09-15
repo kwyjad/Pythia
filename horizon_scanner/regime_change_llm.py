@@ -734,8 +734,11 @@ def _run_rc_for_single_hazard(
                 hs_batch.mark_fallback(
                     "hs_rc", iso3=iso3, hazard_code=hazard_code, pass_idx=pass_idx
                 )
+        sent_prompt: str | None = None
         if replayed is not None:
             text, usage, error, model_spec = replayed
+            # The prompt the batch item was SENT (collect-stage prompts are rebuilt).
+            sent_prompt = (usage or {}).pop("sent_prompt_text", None) or None
         else:
             text, usage, error, model_spec = asyncio.run(
                 _call_rc_model(prompt, run_id=run_id, fallback_specs=fallback_specs, pass_idx=pass_idx)
@@ -819,7 +822,7 @@ def _run_rc_for_single_hazard(
                 iso3=iso3,
                 hazard_code=_rc_label,
                 model_spec=model_spec,
-                prompt_text=prompt,
+                prompt_text=sent_prompt or prompt,
                 response_text=text or "",
                 usage=usage_for_log,
                 error_text=log_error_text,

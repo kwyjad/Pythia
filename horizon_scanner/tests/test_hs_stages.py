@@ -509,3 +509,67 @@ def test_rc_and_triage_grounding_packs_coexist(staged_env):
     tr_loaded = hs_batch.load_grounding_pack("hs_pack_test", "TST", "FL", "triage_grounding")
     assert rc_loaded["markdown"] == "RC EVIDENCE"
     assert tr_loaded["markdown"] == "TRIAGE EVIDENCE"
+
+
+def test_rc_collect_logs_the_prompt_the_batch_item_was_sent(staged_env, monkeypatch) -> None:
+    """Collect-stage prompts are REBUILT (a later 'today', a refreshed inject);
+    the llm_calls row must carry the prompt the provider actually received,
+    as the forecaster's log sites already do."""
+    hs_batch.set_stage("hs_finalize", "pl_test")
+    spec = rc_llm._rc_model_spec(1)
+    cid = llm_batch.enqueue_request(
+        hs_batch.batch_con(),
+        family="hs_rc",
+        provider=spec.provider,
+        model_id=spec.model_id,
+        request_body={"model": spec.model_id,
+                      "contents": [{"parts": [{"text": "RC PROMPT AS SENT"}]}],
+                      "messages": [{"role": "user", "content": "RC PROMPT AS SENT"}]},
+        prompt_text="RC PROMPT AS SENT",
+        iso3="TST",
+        hazard_code="FL",
+        pass_idx=1,
+        pipeline_id="pl_test",
+    )
+    hs_batch.batch_con().execute(
+        "UPDATE llm_batch_requests SET status='succeeded', response_text=?, usage_json=? WHERE custom_id = ?",
+        [_RC_RESPONSE, json.dumps({"prompt_tokens": 9, "completion_tokens": 1, "total_tokens": 10}), cid],
+    )
+    _forbid_sync(monkeypatch, rc_llm, "_call_rc_model")
+    merged = _run_rc(monkeypatch)          # the rebuilt prompt is "RC PROMPT"
+    assert merged["status"] == "ok"
+    logged = hs_batch.batch_con().execute(
+        "SELECT prompt_text FROM llm_calls WHERE hs_run_id = ? AND UPPER(iso3) = 'TST' "
+        "AND UPPER(hazard_code) = 'RC_FL_PASS_1'",
+        ["hs_20260701T000000"],
+    ).fetchone()
+    assert logged and logged[0] == "RC PROMPT AS SENT"
+    assert "sent_prompt_text" not in json.dumps(merged, default=str)
+
+
+def test_rc_collect_costs_an_errored_batch_item_before_falling_back(staged_env, monkeypatch) -> None:
+    hs_batch.set_stage("hs_rc_collect", "pl_test")
+    monkeypatch.setenv("PYTHIA_HS_RUN_ID", "hs_20260701T000000")
+    spec = rc_llm._rc_model_spec(1)
+    cid = llm_batch.enqueue_request(
+        hs_batch.batch_con(), family="hs_rc", provider=spec.provider, model_id=spec.model_id,
+        request_body={"model": spec.model_id}, prompt_text="RC PROMPT",
+        iso3="TST", hazard_code="FL", pass_idx=1, pipeline_id="pl_test",
+    )
+    hs_batch.batch_con().execute(
+        "UPDATE llm_batch_requests SET status='errored', error_text='item refused', usage_json=? "
+        "WHERE custom_id = ?",
+        [json.dumps({"prompt_tokens": 900, "completion_tokens": 0, "total_tokens": 900}), cid],
+    )
+    sync_calls = _stub_sync(monkeypatch, rc_llm, "_call_rc_model", _RC_RESPONSE)
+    merged = _run_rc(monkeypatch)
+    assert sync_calls == [1] and merged["status"] == "ok"
+    rows = hs_batch.batch_con().execute(
+        "SELECT call_type, hazard_code, error_text FROM llm_calls WHERE hs_run_id = ? AND UPPER(iso3) = 'TST' "
+        "ORDER BY call_type",
+        ["hs_20260701T000000"],
+    ).fetchall()
+    kinds = {r[0] for r in rows}
+    assert "batch_item_errored" in kinds and "rc_pass_1" in kinds
+    errored = [r for r in rows if r[0] == "batch_item_errored"][0]
+    assert errored[1].upper() == "RC_FL_PASS_1_BATCH_ERROR" and "item refused" in errored[2]

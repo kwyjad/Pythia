@@ -191,36 +191,16 @@ def _collect_phase_ingest(con_b, *, pipeline_id: str, run_id: str, hs_run_id: Op
         # batch results, llm_calls and forecasts share one run_id.
         run_id = str(prior[0])
         print(f"[batch] collect reusing run_id={run_id}")
-    # Ingest any batches the poller hasn't collected yet: poll each,
-    # collect terminal ones, cancel-and-expire ones past the wait cap
-    # (their items then take the sync fallback path below).
-    for binfo in llm_batch.pending_batches(con_b, pipeline_id):
-        status = llm_batch.poll_batch(con_b, binfo["batch_id"])
-        state = status.state if status else "unknown"
-        if state == "ended" or (status and status.terminal):
-            counts = llm_batch.collect_batch(con_b, binfo["batch_id"])
-            print(f"[batch] collected {binfo['batch_id']}: {counts}")
-        else:
-            age_h = 0.0
-            try:
-                age_h = (
-                    datetime.now(timezone.utc).replace(tzinfo=None)
-                    - binfo["submitted_at"]
-                ).total_seconds() / 3600.0
-            except Exception:  # noqa: BLE001
-                pass
-            if age_h >= llm_batch.max_wait_hours():
-                print(
-                    f"[batch][warn] {binfo['batch_id']} still {state} after "
-                    f"{age_h:.1f}h — canceling; items fall back to sync"
-                )
-                llm_batch.cancel_batch(con_b, binfo["batch_id"])
-                llm_batch.collect_batch(con_b, binfo["batch_id"])
-            else:
-                print(
-                    f"[batch][warn] {binfo['batch_id']} not finished ({state}); "
-                    "its items fall back to sync this collect"
-                )
+    # Ingest any batches the poller hasn't collected yet (the shared drain:
+    # poll with retry, collect terminal ones, cancel-and-SALVAGE ones past
+    # the wait cap, and wait in-process — bounded — on any still in flight
+    # rather than leaving them running while the sync fallback pays for the
+    # same items). Both the drain's wait and the re-batch below spend ONE
+    # budget, PYTHIA_BATCH_RESUBMIT_WAIT_MIN.
+    budget_min = llm_batch.resubmit_wait_minutes()
+    drained = llm_batch.drain_pending(con_b, pipeline_id, wait_min=budget_min)
+    print(f"[batch] collect drain: {drained}")
+    wait_left_min = max(0.0, budget_min - float(drained.get("waited_sec") or 0.0) / 60.0)
     # Re-batch what never got a batch result (a submit that failed at the
     # submit stage, or a batch the provider rejected at validation) and wait
     # for it, bounded, before the per-question sync fallback. 2026-09-01:
@@ -233,6 +213,7 @@ def _collect_phase_ingest(con_b, *, pipeline_id: str, run_id: str, hs_run_id: Op
         stage="fc_collect_resubmit",
         run_id=run_id,
         hs_run_id=hs_run_id,
+        wait_min=wait_left_min,
     )
     print(f"[batch] collect re-batch: {rb}")
     return run_id
@@ -2955,6 +2936,12 @@ async def _call_spd_model_for_spec(
         )
         if batch_short is not None:
             return batch_short
+        if _batch_collect_active() and is_provider_disabled_for_run(ms.provider, run_id):
+            # A replay miss that would fall to sync against a provider in
+            # cooldown: the breaker applies HERE, to the sync call, never to
+            # the replay above (which is why the members list no longer
+            # pre-filters on it in the collect phase).
+            return "", {"skipped": "provider_disabled"}, "provider disabled (cooldown)", ms
 
     prompt_with_evidence = prompt
     if (
@@ -3313,9 +3300,18 @@ async def _call_spd_members_v2(
     """
 
     specs_active = [ms for ms in specs if ms.active]
-    skipped_providers = sorted(
-        {ms.provider for ms in specs_active if is_provider_disabled_for_run(ms.provider, run_id)}
-    )
+    # The provider breaker is a statement about SYNC calls. In the collect
+    # phase a member's answer is usually already in llm_batch_requests, paid
+    # for at batch price — skipping the provider here would orphan it and
+    # write a partial ensemble. So collect consults the replay first and
+    # applies the breaker only where a sync fallback would actually be made
+    # (see _call_spd_model_for_spec).
+    if _batch_collect_active():
+        skipped_providers: list[str] = []
+    else:
+        skipped_providers = sorted(
+            {ms.provider for ms in specs_active if is_provider_disabled_for_run(ms.provider, run_id)}
+        )
     specs_used = [ms for ms in specs_active if ms.provider not in skipped_providers]
     ensemble_meta = {
         "n_models_active": len(specs_active),
@@ -5623,6 +5619,20 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     hs_run_id=hs_run_id,
                 )
         else:
+            if _batch_submit_active():
+                # This single-model branch has no batch family, so its call
+                # would run synchronously at full price INSIDE the submit
+                # phase and then write a forecast the collect phase pays for
+                # again. Only reachable when PYTHIA_SPD_V2_WRITE_BOTH and
+                # PYTHIA_SPD_V2_USE_BAYESMC are both off, which the production
+                # workflow never does; guarded so a config change cannot
+                # double-charge the ensemble silently.
+                LOG.warning(
+                    "SPD submit phase: %s would take the un-batched single-model path; "
+                    "skipping it here (set PYTHIA_SPD_V2_WRITE_BOTH=1 to batch it)",
+                    qid,
+                )
+                return
             text, usage, error, ms = await _call_spd_model_compat(
                 prompt,
                 run_id=run_id,
