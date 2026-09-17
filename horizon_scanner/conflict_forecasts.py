@@ -611,4 +611,20 @@ def format_conflict_forecasts_for_research(
             v = f"{vac_by_lead[lead]:.0f}" if lead in vac_by_lead else "n/a"
             parts.append(f"| Month {lead}   | {t:>11} | {b:>7} | {e:>3} | {v:>3} |")
 
+    # A source the prompt did not receive is STATED, never omitted. The RC
+    # path has said so since the vintage work; this one did not, so across
+    # the 2026-09-15 cycle all 120 ACE regime-change prompts named CAST's
+    # absence and none of the 234 ACE SPD prompts mentioned it at all —
+    # while the closing paragraph went on describing three forecasts to a
+    # model that had been handed two.
+    cast_absent_reason = "" if has_cast else str(
+        forecasts.get("cast_unavailable_reason") or ""
+    )
+    if cast_absent_reason:
+        parts.append("\n### ACLED CAST — event count forecasts — NO DATA")
+        parts.append(cast_absent_reason)
+        parts.append(
+            "Nothing above rests on an ACLED CAST forecast."
+        )
+
     return "\n".join(parts) if len(parts) > 1 else ""

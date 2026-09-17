@@ -427,6 +427,98 @@ def _build_hazard_catalog() -> Dict[str, str]:
     return dict(sorted(catalog.items()))
 
 
+def _build_acled_summary_for_country(iso3: str) -> Optional[Dict[str, Any]]:
+    """Trailing ACLED fatalities and events, for the ACE prompt block.
+
+    ``build_rc_prompt_ace`` and ``build_triage_prompt_ace`` have taken an
+    ``acled_summary`` since they were written, and no live caller ever
+    passed one. So every ACE prompt in the 2026-09-15 cycle — all 120 of
+    them — opened its ACLED section with "ACLED summary unavailable ... do
+    not assume either", a few lines above RESOLVER FEATURES carrying the
+    ACLED numbers. The model was told a source was absent and then handed
+    it, which is worse than either.
+
+    Built from the rows the machine already ingests. Returns None when
+    there is genuinely nothing, so the formatter's honest "unavailable"
+    text still fires for a country ACLED does not cover.
+    """
+
+    from datetime import date, timedelta
+
+    con = pythia_connect(read_only=True)
+    summary: Dict[str, Any] = {}
+
+    # The current month is partial, and a partial month read as a complete
+    # one manufactures a de-escalating trend every time (the same fault
+    # _build_conflict_base_rate was fixed for).
+    today = date.today()
+    cutoff = date(today.year, today.month, 1)
+
+    try:
+        rows = con.execute(
+            """
+            SELECT month, fatalities
+            FROM acled_monthly_fatalities
+            WHERE iso3 = ? AND month < ?
+            ORDER BY month DESC
+            LIMIT 12
+            """,
+            [iso3.upper(), cutoff],
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - schema drift is not worth a crash
+        logger.warning("ACLED summary (fatalities) failed for %s: %s", iso3, exc)
+        rows = []
+
+    if rows:
+        values = [int(r[1] or 0) for r in rows]  # newest first
+        summary["fatalities_trailing_12m"] = sum(values)
+        summary["fatalities_trailing_3m"] = sum(values[:3])
+        last3 = sum(values[:3])
+        prior3 = sum(values[3:6])
+        if prior3 > 0:
+            pct = (last3 - prior3) / prior3 * 100.0
+            summary["trend_pct_change"] = pct
+            summary["trend_direction"] = (
+                "escalating" if pct > 10 else "de-escalating" if pct < -10 else "stable"
+            )
+        elif last3 > 0:
+            summary["trend_direction"] = "escalating"
+
+    try:
+        ev_rows = con.execute(
+            """
+            SELECT event_type, event_date
+            FROM acled_political_events
+            WHERE iso3 = ? AND event_date IS NOT NULL AND event_date <> ''
+            """,
+            [iso3.upper()],
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - the table is optional
+        ev_rows = []
+
+    if ev_rows:
+        from collections import Counter
+
+        horizon_12m = (cutoff - timedelta(days=365)).isoformat()
+        horizon_3m = (cutoff - timedelta(days=92)).isoformat()
+        cutoff_iso = cutoff.isoformat()
+        in_12m = [
+            (str(t or ""), str(d))
+            for t, d in ev_rows
+            if horizon_12m <= str(d) < cutoff_iso
+        ]
+        if in_12m:
+            summary["events_trailing_12m"] = len(in_12m)
+            summary["events_trailing_3m"] = sum(
+                1 for _t, d in in_12m if d >= horizon_3m
+            )
+            counts = Counter(t for t, _d in in_12m if t)
+            if counts:
+                summary["top_event_types"] = counts.most_common(4)
+
+    return summary or None
+
+
 def _build_resolver_features_for_country(iso3: str) -> Dict[str, Any]:
     """Summarize Resolver history per hazard to ground triage."""
 

@@ -271,18 +271,35 @@ def _record(con, hazard: str, ym: str, digest: str | None) -> None:
     )
 
 
-def test_the_legacy_digest_is_what_the_ledger_actually_holds():
-    """The cyclone ledger's stored value on 2026-09-07 was 29ccb0bbbe515dad.
+#: The cyclone ledger's stored value on 2026-09-07, when the narrowing
+#: landed. It was then the pre-narrowing digest of the rulebook in force,
+#: so those months had been decided under the deciding values of the day
+#: and were re-stamped rather than re-walked.
+#:
+#: It is NOT the legacy digest any more, and deliberately so: on 2026-09-17
+#: the ReliefWeb sweep's keyword scoping moved a deciding key under both
+#: `cyclone` and `flood`, which is exactly the signal to re-walk. A month
+#: stamped with the value below matches neither digest, so the re-stamp
+#: leaves it alone and the backcast walks it again. That is the mechanism
+#: working, not a fault to route around.
+SWEPT_AWAY_BY_THE_SWEEP_FIX = "29ccb0bbbe515dad"
 
-    That is the pre-narrowing digest of this same rulebook, so those months
-    were decided under today's deciding values and must not be walked
-    again. If this ever fails, a deciding key moved and the re-walk is
-    correct — do not reach for the re-stamp.
+#: Today's pre-narrowing digest. Pinned for the same reason the value above
+#: was: an accidental move should fail here, loudly, with a diff to read.
+CURRENT_LEGACY_CYCLONE_DIGEST = "77adeb967c90d4b3"
+
+
+def test_the_legacy_digest_is_pinned_so_an_accidental_move_is_loud():
+    """A deciding key moving is legitimate; moving one by accident is not.
+
+    If this fails, read the diff before reaching for the re-stamp: a
+    deliberate change to what decides a cyclone month SHOULD re-walk the
+    backcast, and the only thing to update is this constant.
     """
 
-    assert load_rulebook().legacy_hazard_fingerprint("cyclone") == (
-        "29ccb0bbbe515dad"
-    )
+    rb = load_rulebook()
+    assert rb.legacy_hazard_fingerprint("cyclone") == CURRENT_LEGACY_CYCLONE_DIGEST
+    assert rb.legacy_hazard_fingerprint("cyclone") != SWEPT_AWAY_BY_THE_SWEEP_FIX
 
 
 def test_months_decided_under_this_rulebook_are_re_stamped_not_re_walked(con):

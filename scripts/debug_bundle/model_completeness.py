@@ -26,8 +26,35 @@ from typing import Any
 FIELDNAMES = [
     "question_id", "iso3", "hazard_code", "metric", "track", "model_name",
     "month_index", "row_exists", "n_buckets", "n_buckets_expected",
-    "status", "verdict",
+    "family", "status", "verdict",
 ]
+
+#: Metrics with no per-member rows in ``forecasts_raw``. EVENT_OCCURRENCE is
+#: the only one: ``_write_binary_outputs`` writes the AGGREGATE rows alone
+#: (``ensemble_mean_v2`` or ``track2_flash``, plus ``ensemble_bayesmc_v2``
+#: on Track 1), because a binary question's members are pooled before
+#: anything is stored. Expecting a row per member per month therefore
+#: counts every binary cell as missing: on the 2026-09-15 run that put
+#: "1,602 of 4,398 forecasts missing or unusable" at the top of the
+#: executive summary when the real loss was 12 cells, and a check that
+#: cannot pass teaches the reader to skip the report.
+BINARY_METRICS = frozenset({"EVENT_OCCURRENCE"})
+
+#: The aggregate a binary question's forecast IS. This is the row
+#: ``compute_scores`` reads (``bucket_index = 1``), so its absence is a real
+#: loss and worth checking. ``ensemble_bayesmc_v2`` is deliberately NOT
+#: required: Track 1 writes it only where more than one member returned, so
+#: demanding it would turn a partial member failure into two alarms.
+AGGREGATE_MEAN = "ensemble_mean_v2"
+
+FAMILY_SPD = "spd"
+FAMILY_BINARY = "binary"
+
+
+def writes_member_rows(metric: str) -> bool:
+    """Does this metric store a forecast per ensemble member?"""
+
+    return str(metric or "").upper() not in BINARY_METRICS
 
 
 def _expected_buckets(metric: str) -> int | None:
@@ -74,6 +101,7 @@ def collect(
         "n_cells_missing": 0,
         "by_model": {},
         "short_question_months": [],
+        "binary": {"n_cells_expected": 0, "n_cells_missing": 0, "by_model": {}},
     }
     if not run_id or not questions:
         return [], rollup
@@ -118,13 +146,21 @@ def collect(
             track_int = int(track) if track is not None else None
         except Exception:
             track_int = None
-        expected = [track2_model] if track_int == 2 else list(expected_models)
-        # A model that wrote for this question but is not in the configured
-        # lineup (an aggregate row, a leftover from a swapped member) is
-        # still reported: it is evidence about what ran.
-        for extra in sorted(models_seen.get(qid, set()) - set(expected)):
-            if extra and not extra.startswith("ensemble_"):
-                expected.append(extra)
+        binary = not writes_member_rows(metric)
+        family = FAMILY_BINARY if binary else FAMILY_SPD
+        if binary:
+            # The pooled aggregate is the whole of a binary question's
+            # stored forecast — see BINARY_METRICS.
+            expected = [track2_model if track_int == 2 else AGGREGATE_MEAN]
+        else:
+            expected = [track2_model] if track_int == 2 else list(expected_models)
+            # A model that wrote for this question but is not in the
+            # configured lineup (an aggregate row, a leftover from a
+            # swapped member) is still reported: it is evidence about what
+            # ran.
+            for extra in sorted(models_seen.get(qid, set()) - set(expected)):
+                if extra and not extra.startswith("ensemble_"):
+                    expected.append(extra)
         n_expected = _expected_buckets(metric)
         for model in expected:
             for month in range(1, n_months + 1):
@@ -151,6 +187,7 @@ def collect(
                         "row_exists": bool(cell),
                         "n_buckets": n_buckets,
                         "n_buckets_expected": n_expected if n_expected is not None else "",
+                        "family": family,
                         "status": status,
                         "verdict": verdict,
                     }
@@ -161,13 +198,29 @@ def collect(
 
 
 def _rollup(rows: list[dict[str, Any]], n_months: int) -> dict[str, Any]:
-    """Which question-months were aggregated from fewer members than expected."""
+    """Which question-months were aggregated from fewer members than expected.
+
+    The top-level counts are the SPD family ALONE, so a FAIL built on them
+    means what it says. Binary questions have one stored forecast per month
+    rather than one per member (see :data:`BINARY_METRICS`); they are
+    counted under ``binary`` and never folded in, because adding a
+    one-per-month family to a five-per-month one produces a number nobody
+    can act on.
+    """
 
     per_qm: dict[tuple[str, int], dict[str, Any]] = {}
     by_model: dict[str, int] = {}
     n_expected_cells = 0
     n_missing_cells = 0
+    binary = {"n_cells_expected": 0, "n_cells_missing": 0, "by_model": {}}
     for r in rows:
+        if r.get("family") == FAMILY_BINARY:
+            binary["n_cells_expected"] += 1
+            if r["verdict"] != "ok":
+                binary["n_cells_missing"] += 1
+                name = str(r["model_name"])
+                binary["by_model"][name] = binary["by_model"].get(name, 0) + 1
+            continue
         n_expected_cells += 1
         key = (str(r["question_id"]), int(r["month_index"]))
         entry = per_qm.setdefault(
@@ -200,4 +253,5 @@ def _rollup(rows: list[dict[str, Any]], n_months: int) -> dict[str, Any]:
         "n_cells_missing": n_missing_cells,
         "by_model": by_model,
         "short_question_months": short,
+        "binary": binary,
     }

@@ -5,7 +5,7 @@
 
 """Regression tests for the LLM prompt-artifact generator.
 
-Guards the bug where ``_load_question_for_hazard`` ordered by a non-existent
+Guards the bug where the question loader ordered by a non-existent
 ``questions.created_at`` column: the resulting DuckDB BinderException was
 swallowed by a bare ``except`` and returned ``None`` for every hazard, so the
 SPD and Scenario sections of the ``pythia-llm-prompts`` artifact were blank
@@ -53,55 +53,86 @@ def _make_questions_db(db_path: Path) -> None:
                 ('SOM_ACE_FATALITIES_2026-08', 'SOM', 'ACE', 'FATALITIES',
                  DATE '2026-08-01', '2027-01', 'active', 2),
                 ('SOM_ACE_FATALITIES_2026-06', 'SOM', 'ACE', 'FATALITIES',
-                 DATE '2026-06-01', '2026-11', 'retired', 2)
+                 DATE '2026-06-01', '2026-11', 'retired', 2),
+                -- EVENT_OCCURRENCE sorts before PA on question_id, which is
+                -- how a single-question loader guaranteed the PA prompt was
+                -- never rendered.
+                ('SOM_TC_EVENT_OCCURRENCE_2026-08', 'SOM', 'TC',
+                 'EVENT_OCCURRENCE', DATE '2026-08-01', '2027-01', 'active', 1),
+                ('SOM_TC_PA_2026-08', 'SOM', 'TC', 'PA',
+                 DATE '2026-08-01', '2027-01', 'active', 1)
             """
         )
     finally:
         con.close()
 
 
-def test_load_question_for_hazard_returns_active_question(tmp_path: Path) -> None:
-    """The loader must return the active question, not None.
+def test_loader_returns_the_newest_active_epoch(tmp_path: Path) -> None:
+    """The loader must return the active question, not nothing.
 
     Reproduces the ``created_at`` regression: with the buggy ORDER BY this
-    raised BinderException → None; with the fix it returns the newest active
-    epoch.
+    raised BinderException → nothing; with the fix it returns the newest
+    active epoch.
     """
     import duckdb
 
-    from scripts.ci.snapshot_prompt_artifact import _load_question_for_hazard
+    from scripts.ci.snapshot_prompt_artifact import _load_questions_for_hazard
 
     db_path = tmp_path / "q.duckdb"
     _make_questions_db(db_path)
 
     con = duckdb.connect(str(db_path), read_only=True)
     try:
-        result = _load_question_for_hazard(con, "SOM", "ACE")
+        result = _load_questions_for_hazard(con, "SOM", "ACE")
     finally:
         con.close()
 
-    assert result is not None, "loader returned None — SPD/Scenario would be blank"
+    assert result, "loader returned nothing — SPD/Scenario would be blank"
     # Newest active epoch wins; the 'retired' row is excluded.
-    assert result["question_id"] == "SOM_ACE_FATALITIES_2026-08"
-    assert result["metric"] == "FATALITIES"
+    assert result[0]["question_id"] == "SOM_ACE_FATALITIES_2026-08"
+    assert result[0]["metric"] == "FATALITIES"
 
 
-def test_load_question_for_hazard_none_when_absent(tmp_path: Path) -> None:
-    """No active question for the pair → None (quiet/blocked hazards)."""
+def test_loader_returns_one_question_per_metric_with_pa_first(tmp_path: Path) -> None:
+    """The PA base-rate block appeared in no artifact until Sept 2026.
+
+    A single question ordered by question_id always chose
+    ``..._EVENT_OCCURRENCE_...``, which sorts before ``..._PA_...`` — so on
+    a run where 96 of 97 production prompts carried the PA base-rate block,
+    the diagnostic read for it showed none of them.
+    """
     import duckdb
 
-    from scripts.ci.snapshot_prompt_artifact import _load_question_for_hazard
+    from scripts.ci.snapshot_prompt_artifact import _load_questions_for_hazard
 
     db_path = tmp_path / "q.duckdb"
     _make_questions_db(db_path)
 
     con = duckdb.connect(str(db_path), read_only=True)
     try:
-        result = _load_question_for_hazard(con, "SOM", "FL")
+        result = _load_questions_for_hazard(con, "SOM", "TC")
     finally:
         con.close()
 
-    assert result is None
+    assert [q["metric"] for q in result] == ["PA", "EVENT_OCCURRENCE"]
+
+
+def test_loader_returns_nothing_when_absent(tmp_path: Path) -> None:
+    """No active question for the pair → empty (quiet/blocked hazards)."""
+    import duckdb
+
+    from scripts.ci.snapshot_prompt_artifact import _load_questions_for_hazard
+
+    db_path = tmp_path / "q.duckdb"
+    _make_questions_db(db_path)
+
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        result = _load_questions_for_hazard(con, "SOM", "FL")
+    finally:
+        con.close()
+
+    assert result == []
 
 
 def test_connect_reopens_after_shared_connection_closed(tmp_path: Path) -> None:

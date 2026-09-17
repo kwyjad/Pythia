@@ -683,6 +683,41 @@ def build_report(
             L("_No trigger rows._")
         L()
 
+        # --- What did the triggering: detector, or the silence sweep? ---
+        # Over the WHOLE record, not the last 12 months: the sweep's
+        # over-triggering was a property of the backcast, and a 12-month
+        # window is mostly live months. A trigger sourced from
+        # 'reliefweb_sweep' is a report found, never a hazard detected;
+        # Sept 2026 stopped the machine promoting on one, and this row is
+        # how a reader sees whether the history still carries them.
+        L("### Trigger source (haz_triggers, whole record)")
+        rows = safe_query(
+            con,
+            """
+            SELECT hazard,
+                   COALESCE(trigger_source, '(none)') AS src,
+                   COUNT(*) AS n,
+                   MIN(printf('%04d-%02d', year, month)) AS first_ym,
+                   MAX(printf('%04d-%02d', year, month)) AS last_ym
+            FROM haz_triggers
+            WHERE triggered
+            GROUP BY hazard, src ORDER BY hazard, n DESC
+            """,
+        )
+        if rows:
+            L()
+            L("| hazard | trigger source | triggered cells | window |")
+            L("|--------|----------------|----------------:|--------|")
+            for hz, src, n, first_ym, last_ym in rows:
+                note = " ⚠ not a detection" if src == "reliefweb_sweep" else ""
+                L(
+                    f"| {hz} | {src}{note} | {fmt_num(n)} | "
+                    f"{first_ym} → {last_ym} |"
+                )
+        else:
+            L("_No triggered cells._")
+        L()
+
         # --- Resolutions: status mix per hazard, last 12 months ---
         L("### Resolutions (haz_resolutions, last 12 months)")
         if table_exists(con, "haz_resolutions"):

@@ -279,35 +279,67 @@ def _load_calibration_advice(con, hazard_code: str, metric: str) -> str:
     return "(no calibration advice available)"
 
 
-def _load_question_for_hazard(con, iso3: str, hazard_code: str) -> Optional[Dict[str, Any]]:
-    """Load a sample question for SPD/scenario prompt rendering."""
+#: Metric order for the artifact. PA leads because the PA base-rate block
+#: the machine generates appears in no other metric's prompt, and this
+#: diagnostic exists to show what the model was actually sent.
+_METRIC_PRIORITY = ("PA", "FATALITIES", "PHASE3PLUS_IN_NEED", "EVENT_OCCURRENCE")
+
+
+def _metric_rank(metric: str) -> int:
+    try:
+        return _METRIC_PRIORITY.index(str(metric or "").upper())
+    except ValueError:
+        return len(_METRIC_PRIORITY)
+
+
+def _load_questions_for_hazard(
+    con, iso3: str, hazard_code: str
+) -> list[Dict[str, Any]]:
+    """One sample question per METRIC, newest epoch each, PA first.
+
+    Until Sept 2026 this loaded ONE question ordered by question_id, and
+    ``..._EVENT_OCCURRENCE_...`` sorts before ``..._PA_...`` — so the
+    artifact rendered a binary prompt for every hazard that had one and the
+    PA base-rate block appeared nowhere in the diagnostic, on a run where
+    it was in 96 of 97 production prompts. A diagnostic that cannot show
+    the thing it is read for is worse than none.
+    """
     try:
         # NOTE: the ``questions`` table has no ``created_at`` column — ordering
         # by it raises a DuckDB BinderException that a bare except would swallow,
         # blanking the SPD/Scenario sections for every hazard. Order by the epoch
         # (window_start_date) with question_id as a deterministic tiebreak.
-        row = con.execute(
+        rows = con.execute(
             """
             SELECT question_id, hs_run_id, iso3, hazard_code, metric,
                    target_month, window_start_date, window_end_date,
                    wording, track
-            FROM questions
-            WHERE iso3 = ? AND hazard_code = ? AND status = 'active'
-            ORDER BY window_start_date DESC, question_id
-            LIMIT 1
+            FROM (
+                SELECT q.*, ROW_NUMBER() OVER (
+                    PARTITION BY metric
+                    ORDER BY window_start_date DESC, question_id
+                ) AS rn
+                FROM questions AS q
+                WHERE iso3 = ? AND hazard_code = ? AND status = 'active'
+            )
+            WHERE rn = 1
             """,
             [iso3, hazard_code],
-        ).fetchone()
+        ).fetchall()
     except Exception as exc:
         LOG.warning(
-            "snapshot_prompt_artifact: failed to load sample question for "
-            "%s/%s — SPD/Scenario prompt will not render: %s",
+            "snapshot_prompt_artifact: failed to load sample questions for "
+            "%s/%s — SPD/Scenario prompts will not render: %s",
             iso3, hazard_code, exc,
         )
-        return None
+        return []
 
-    if not row:
-        return None
+    out = [_question_dict(r) for r in rows]
+    out.sort(key=lambda q: (_metric_rank(q.get("metric") or ""), q.get("metric") or ""))
+    return out
+
+
+def _question_dict(row) -> Dict[str, Any]:
 
     return {
         "question_id": row[0],
@@ -355,9 +387,46 @@ ACTIVE_HAZARDS = ["ACE", "DR", "FL", "TC"]
 # Prompt rendering
 # ---------------------------------------------------------------------------
 
+def _ace_conflict_kwargs(iso3: str) -> Dict[str, Any]:
+    """The ACE-only injects production passes to RC and triage.
+
+    The artifact rendered neither, so an ACE prompt here was missing its
+    conflict forecasts, its CrisisWatch note and its ACLED summary while
+    production sent all three — and the discrepancy is worse than an
+    unrendered section, because a reader compares the artifact against what
+    the model saw and concludes the wrong thing. Best effort per inject: a
+    dead loader costs that inject and nothing else.
+    """
+    kwargs: Dict[str, Any] = {}
+    try:
+        from horizon_scanner.horizon_scanner import _build_acled_summary_for_country
+        acled = _build_acled_summary_for_country(iso3)
+        if acled:
+            kwargs["acled_summary"] = acled
+    except Exception as exc:
+        LOG.warning("artifact: ACLED summary failed for %s: %s", iso3, exc)
+    try:
+        from horizon_scanner.conflict_forecasts import load_conflict_forecasts
+        forecasts = load_conflict_forecasts(iso3)
+        if forecasts:
+            kwargs["conflict_forecasts"] = forecasts
+    except Exception as exc:
+        LOG.warning("artifact: conflict forecasts failed for %s: %s", iso3, exc)
+    try:
+        from horizon_scanner.crisiswatch import format_crisiswatch_for_prompt
+        cw = format_crisiswatch_for_prompt(iso3)
+        if cw:
+            kwargs["crisiswatch_context"] = cw
+            kwargs["icg_on_the_horizon"] = cw
+    except Exception as exc:
+        LOG.warning("artifact: CrisisWatch failed for %s: %s", iso3, exc)
+    return kwargs
+
+
 def _render_rc_prompt(hazard_code: str, country_name: str, iso3: str,
                       resolver_features: Dict[str, Any],
-                      evidence_pack: Optional[Dict[str, Any]]) -> str:
+                      evidence_pack: Optional[Dict[str, Any]],
+                      extra_kwargs: Optional[Dict[str, Any]] = None) -> str:
     """Render the RC prompt for a hazard."""
     try:
         from horizon_scanner.rc_prompts import build_rc_prompt
@@ -367,6 +436,7 @@ def _render_rc_prompt(hazard_code: str, country_name: str, iso3: str,
             iso3=iso3,
             resolver_features=resolver_features,
             evidence_pack=evidence_pack,
+            **(extra_kwargs or {}),
         )
     except Exception as e:
         return f"(RC prompt rendering failed: {e})"
@@ -375,7 +445,8 @@ def _render_rc_prompt(hazard_code: str, country_name: str, iso3: str,
 def _render_triage_prompt(hazard_code: str, country_name: str, iso3: str,
                           resolver_features: Dict[str, Any],
                           evidence_pack: Optional[Dict[str, Any]],
-                          rc_result: Optional[Dict[str, Any]] = None) -> str:
+                          rc_result: Optional[Dict[str, Any]] = None,
+                          extra_kwargs: Optional[Dict[str, Any]] = None) -> str:
     """Render the triage prompt for a hazard."""
     try:
         from horizon_scanner.hs_triage_prompts import build_triage_prompt
@@ -386,6 +457,7 @@ def _render_triage_prompt(hazard_code: str, country_name: str, iso3: str,
             resolver_features=resolver_features,
             rc_result=rc_result,
             evidence_pack=evidence_pack,
+            **(extra_kwargs or {}),
         )
     except Exception as e:
         return f"(Triage prompt rendering failed: {e})"
@@ -527,8 +599,15 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
             lines.append(f"<summary>Full RC prompt for {hazard_code} — {country_name} ({iso3})</summary>")
             lines.append("")
             lines.append("```")
+            # ACE carries injects no other hazard does; the artifact must
+            # send what production sends or it describes a different prompt.
+            ace_kwargs = (
+                _ace_conflict_kwargs(iso3) if hazard_code == "ACE" else {}
+            )
+            con = _ensure_live(con, db_url)  # the loaders above may close it
             rc_prompt = _render_rc_prompt(hazard_code, country_name, iso3,
-                                         resolver_features, evidence_pack)
+                                         resolver_features, evidence_pack,
+                                         extra_kwargs=ace_kwargs)
             lines.append(rc_prompt)
             lines.append("```")
             lines.append("")
@@ -544,7 +623,8 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
             lines.append("```")
             triage_prompt = _render_triage_prompt(hazard_code, country_name, iso3,
                                                  resolver_features, evidence_pack,
-                                                 rc_result=rc_result)
+                                                 rc_result=rc_result,
+                                                 extra_kwargs=ace_kwargs)
             lines.append(triage_prompt)
             lines.append("```")
             lines.append("")
@@ -554,10 +634,13 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
             # ── 3. SPD Forecast prompt ──
             lines.append("## 3. SPD Forecast Prompt")
             lines.append("")
-            question = _load_question_for_hazard(con, iso3, hazard_code)
-            if question:
-                metric = question.get("metric", "PA")
-                cal_advice = _load_calibration_advice(con, hazard_code, metric)
+            # One question per METRIC, PA first. A single question ordered
+            # by question_id always chose EVENT_OCCURRENCE, so the PA
+            # base-rate block never appeared in this artifact.
+            questions = _load_questions_for_hazard(con, iso3, hazard_code)
+            question = questions[0] if questions else None
+            hs_triage_entry = dict(sample)
+            if questions:
                 history_summary = {
                     "source": "resolver",
                     "summary": resolver_features,
@@ -566,7 +649,6 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
                     "prediction_market_signals": None,
                     "nmme_seasonal_outlook": None,
                 }
-                hs_triage_entry = dict(sample)
 
                 # Load the full structured-data injects the pipeline feeds the
                 # SPD prompt (conflict forecasts, adversarial checks, HS
@@ -577,6 +659,7 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
                 # immediately afterwards — this MUST run after all con-based
                 # reads for this hazard (sample/features/evidence/question/
                 # calibration) and before the scenario block / next iteration.
+                # It does not vary by metric, so it is loaded once.
                 try:
                     rc_level_raw = sample.get("regime_change_level")
                     rc_level = int(rc_level_raw) if rc_level_raw is not None else None
@@ -587,18 +670,29 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
                 )
                 con = _ensure_live(con, db_url)  # loaders closed the shared con
 
-                lines.append("<details>")
-                lines.append(f"<summary>Full SPD Forecast prompt for {hazard_code}/{metric} — "
-                             f"{country_name} ({iso3})</summary>")
+                metrics_rendered = ", ".join(
+                    str(q.get("metric") or "?") for q in questions
+                )
+                lines.append(f"_Metrics rendered: {metrics_rendered}._")
                 lines.append("")
-                lines.append("```")
-                spd_prompt = _render_spd_prompt(question, history_summary,
-                                               hs_triage_entry, research_json,
-                                               structured_data=structured_data)
-                lines.append(spd_prompt)
-                lines.append("```")
-                lines.append("")
-                lines.append("</details>")
+                for q in questions:
+                    metric = q.get("metric", "PA")
+                    lines.append("<details>")
+                    lines.append(
+                        f"<summary>Full SPD Forecast prompt for "
+                        f"{hazard_code}/{metric} — {country_name} ({iso3})</summary>"
+                    )
+                    lines.append("")
+                    lines.append("```")
+                    spd_prompt = _render_spd_prompt(
+                        q, history_summary, hs_triage_entry, research_json,
+                        structured_data=structured_data,
+                    )
+                    lines.append(spd_prompt)
+                    lines.append("```")
+                    lines.append("")
+                    lines.append("</details>")
+                    lines.append("")
             else:
                 lines.append("_No active question found for this hazard-country pair; "
                              "SPD prompt not rendered._")
@@ -626,6 +720,11 @@ def build_artifact(db_url: str, run_id: str | None = None) -> str:
                     "bucket_alt": {"bucket_label": _pa_labels[3], "probability": 0.20},
                 }
 
+                lines.append(
+                    f"_Rendered for the {question.get('metric')} question; the "
+                    "scenario prompt does not vary by metric._"
+                )
+                lines.append("")
                 lines.append("<details>")
                 lines.append(f"<summary>Full Scenario prompt for {hazard_code} — "
                              f"{country_name} ({iso3})</summary>")

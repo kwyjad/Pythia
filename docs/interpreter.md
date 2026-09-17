@@ -35,7 +35,7 @@ Phase 2 (scripts/ai_bundle/):   build_current_run_bundle (attention index, delta
 Phase 3 (interpreter/):         pack -> Opus 5 (role: interpreter, effort=high)
                                 -> JSON (schema-validated) -> markdown -> interpretations
 Phase 6 (interpreter/pdf.py):   interpretations row -> HTML -> WeasyPrint
-                                -> report__{YYYY-MM}__v{n}.pdf + latest copy
+                                -> report__{YYYY-MM}__{run}__v{n}.pdf + latest copy
                                 -> pythia-interpreter-report artifact -> release
 ```
 
@@ -685,7 +685,7 @@ headings, lists, pipe tables, bold/italic/code; inline code protects the
 underscored question ids from emphasis parsing), and renders it with
 **WeasyPrint** (chosen over a headless browser: fewer moving parts; the
 import is lazy and the render seam `interpreter.pdf._render_pdf` is what
-tests mock). Outputs `report__{YYYY-MM}__v{n}.pdf` plus the constant-name
+tests mock). Outputs `report__{YYYY-MM}__{run}__v{n}.pdf` plus the constant-name
 copy `interpreter_report_latest.pdf`. A render failure keeps the HTML as
 evidence and still exits 0; a non-`ok` row renders behind a validation
 banner, unless `PYTHIA_INTERPRETER_STRICT_VALIDATION=1`, which suppresses

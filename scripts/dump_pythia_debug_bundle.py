@@ -1067,6 +1067,16 @@ def _compute_question_run_metrics(
         )
         for q in questions if q.get("question_id")
     }
+    # True where per-member SPD rows exist at all. A binary question's
+    # members are pooled before anything is stored, so recording an
+    # expectation of five would make every one of them read as five missing
+    # members forever — 265 of the 267 the September summary led with.
+    metric_by_qid: dict[str, bool] = {
+        str(q.get("question_id")): model_completeness.writes_member_rows(
+            str(q.get("metric") or "")
+        )
+        for q in questions if q.get("question_id")
+    }
     track2_model = os.getenv("PYTHIA_TRACK2_MODEL_ID", "gemini-3.5-flash")
     present_by_qid: dict[str, set[str]] = {}
     if expected_model_ids and "call_type" in llm_columns and "model_id" in llm_columns:
@@ -1148,7 +1158,7 @@ def _compute_question_run_metrics(
         if qid in cost_by_qid:
             row["cost_usd"] = cost_by_qid[qid]
 
-        if expected_model_ids:
+        if expected_model_ids and metric_by_qid.get(qid, True):
             present = present_by_qid.get(qid, set())
             q_track = track_by_qid.get(qid)
             if q_track == 2:
@@ -3455,6 +3465,12 @@ def _member_gap_summary(question_run_metrics: list[dict[str, Any]]) -> dict[str,
     n_expected = 0
     n_questions = 0
     for row in question_run_metrics or []:
+        # Binary questions store one pooled forecast per month rather than
+        # one per member, so a per-member expectation is not a thing they
+        # can satisfy. Rows written before Sept 2026 still carry one; skip
+        # them here rather than reporting 265 phantom misses.
+        if not model_completeness.writes_member_rows(str(row.get("metric") or "")):
+            continue
         expected = row.get("n_spd_models_expected")
         try:
             expected_n = int(expected or 0)
@@ -3828,7 +3844,7 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
                 f"{m}: {c}" for m, c in sorted(gaps["by_model"].items(), key=lambda kv: (-kv[1], kv[0]))
             )
             e_detail += (
-                f" · {gaps['n_cells_missing']} of {n_cells} Track-1 member SPDs missing "
+                f" · {gaps['n_cells_missing']} of {n_cells} Track-1 SPD member forecasts missing "
                 f"({per_model}) — {gaps['n_questions_affected']} question(s) aggregated from fewer members"
             )
             if e_status == "OK":
@@ -4255,11 +4271,23 @@ def emit_executive_summary(
         if roll.get("n_cells_expected"):
             lines.append("")
             lines.append(
-                f"- Member forecasts landed: "
+                f"- Member forecasts landed (SPD): "
                 f"{roll['n_cells_expected'] - roll.get('n_cells_missing', 0)} of "
                 f"{roll['n_cells_expected']} (question, model, month) cells; "
                 f"{roll.get('n_question_months_short', 0)} question-months were aggregated "
                 "from fewer members than expected. See model_completeness.csv."
+            )
+        # Binary questions store one pooled forecast per month rather than
+        # one per member, so they are counted apart — folded in, they made
+        # the summary report 1,602 missing forecasts against a real loss of
+        # 12 (2026-09-15).
+        binary = (roll.get("binary") or {}) if roll else {}
+        if binary.get("n_cells_expected"):
+            lines.append(
+                f"- Binary forecasts landed: "
+                f"{binary['n_cells_expected'] - binary.get('n_cells_missing', 0)} of "
+                f"{binary['n_cells_expected']} (question, month) pooled cells "
+                "(no per-member rows exist for EVENT_OCCURRENCE)."
             )
         lines.append("")
 

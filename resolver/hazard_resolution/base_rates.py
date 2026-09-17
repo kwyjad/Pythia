@@ -54,6 +54,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from resolver.hazard_resolution.detect import TRIGGER_SOURCE_RELIEFWEB
 from resolver.hazard_resolution.rulebook import (
     HAZARD_CODE_BY_RULEBOOK_NAME,
     Rulebook,
@@ -218,17 +219,34 @@ def compute_occurrence(
         # rendered into every drought PA prompt as though it were evidence.
         # A TRIGGERED year counts whatever the ladder later managed, because
         # occurrence is a statement about detection.
+        #
+        # And only a DETECTOR's trigger is one. A row stamped
+        # trigger_source = 'reliefweb_sweep' was promoted by the silence
+        # sweep finding reports, which disproves absence and asserts
+        # nothing about whether the hazard occurred. Sept 2026 stopped the
+        # promotion at the source (detect.record_sweep_hit), and this is
+        # the belt: a database walked before that fix still carries 62,304
+        # such rows — 95% of every trigger in the backcast — and without
+        # this clause the corrected rates would wait on a 30-hour re-walk.
+        # Such a cell is UNDECIDED, so it is excluded from n_triggered and
+        # from n_observed alike: out of the numerator and the denominator
+        # together, never out of one of them.
         rows = con.execute(
             """
             SELECT t.iso3, t.month,
                    COUNT(DISTINCT t.year) AS n_years,
-                   COUNT(DISTINCT CASE WHEN t.triggered THEN t.year END) AS n_triggered,
+                   COUNT(DISTINCT CASE
+                       WHEN t.detector_triggered THEN t.year
+                   END) AS n_triggered,
                    COUNT(DISTINCT CASE WHEN NOT t.assessed THEN t.year END) AS n_unassessed,
                    COUNT(DISTINCT CASE
-                       WHEN t.triggered OR r.status = 'RESOLVED_ZERO' THEN t.year
+                       WHEN t.detector_triggered OR r.status = 'RESOLVED_ZERO'
+                       THEN t.year
                    END) AS n_observed
             FROM (
                 SELECT iso3, month, year, triggered,
+                       (triggered AND COALESCE(trigger_source, '') <> ?)
+                           AS detector_triggered,
                        COALESCE(
                            NOT (trigger_detail_json LIKE '%"assessed": false%'),
                            TRUE
@@ -244,7 +262,10 @@ def compute_occurrence(
             GROUP BY t.iso3, t.month
             ORDER BY t.iso3, t.month
             """,
-            [hazard, first_year, last_year, last_year, last_month, hazard],
+            [
+                TRIGGER_SOURCE_RELIEFWEB,
+                hazard, first_year, last_year, last_year, last_month, hazard,
+            ],
         ).fetchall()
         rows = [
             (

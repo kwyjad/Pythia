@@ -608,6 +608,76 @@ def test_a_wrong_length_bucket_vector_counts_as_missing(tmp_path: Path):
     assert rollup["n_cells_missing"] == 6
 
 
+def test_a_binary_question_is_checked_on_its_pooled_row_not_on_members(tmp_path: Path):
+    """EVENT_OCCURRENCE has no per-member rows, and demanding them read as
+    total loss: 1,590 of the 1,602 "missing forecasts" the 2026-09-15
+    summary led with were binary cells with a blank expected bucket count.
+    """
+    con = _forecasts_db(tmp_path)
+    for month in range(1, 7):
+        for bucket in range(1, 6):
+            con.execute(
+                "INSERT INTO forecasts_raw VALUES "
+                "('fc_1','Q1','ensemble_mean_v2',?,?,'ok')",
+                [month, bucket],
+            )
+    rows, rollup = model_completeness.collect(
+        con,
+        run_id="fc_1",
+        questions=[{"question_id": "Q1", "metric": "EVENT_OCCURRENCE", "track": 1}],
+        expected_models=["model-a", "model-b", "model-c"],
+        track2_model="track2_flash",
+    )
+    # Six pooled cells, not thirty member cells.
+    assert len(rows) == 6
+    assert {r["family"] for r in rows} == {"binary"}
+    assert {r["verdict"] for r in rows} == {"ok"}
+    # And the SPD counts the summary's FAIL is built on stay clean.
+    assert rollup["n_cells_expected"] == 0
+    assert rollup["n_cells_missing"] == 0
+    assert rollup["binary"]["n_cells_expected"] == 6
+    assert rollup["binary"]["n_cells_missing"] == 0
+
+
+def test_a_binary_question_with_no_pooled_row_is_still_a_real_loss(tmp_path: Path):
+    # The check has to be able to fail, or it is decoration.
+    con = _forecasts_db(tmp_path)
+    rows, rollup = model_completeness.collect(
+        con,
+        run_id="fc_1",
+        questions=[{"question_id": "Q1", "metric": "EVENT_OCCURRENCE", "track": 1}],
+        expected_models=["model-a"],
+        track2_model="track2_flash",
+    )
+    assert rollup["binary"]["n_cells_missing"] == 6
+    assert rollup["n_cells_missing"] == 0
+
+
+def test_the_two_families_are_counted_apart(tmp_path: Path):
+    con = _forecasts_db(tmp_path)
+    for month in range(1, 7):
+        for bucket in range(1, 7):
+            con.execute(
+                "INSERT INTO forecasts_raw VALUES ('fc_1','Q1','model-a',?,?,'ok')",
+                [month, bucket],
+            )
+    rows, rollup = model_completeness.collect(
+        con,
+        run_id="fc_1",
+        questions=[
+            {"question_id": "Q1", "metric": "PA", "track": 1},
+            {"question_id": "Q2", "metric": "EVENT_OCCURRENCE", "track": 1},
+        ],
+        expected_models=["model-a"],
+        track2_model="track2_flash",
+    )
+    assert rollup["n_cells_expected"] == 6 and rollup["n_cells_missing"] == 0
+    assert rollup["binary"]["n_cells_expected"] == 6
+    assert rollup["binary"]["n_cells_missing"] == 6
+    families = {r["question_id"]: r["family"] for r in rows}
+    assert families == {"Q1": "spd", "Q2": "binary"}
+
+
 # ---------------------------------------------------------------------------
 # Prompt prefix deduplication
 # ---------------------------------------------------------------------------

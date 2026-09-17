@@ -15,7 +15,7 @@ every figure already substituted — and hands it to WeasyPrint.
         --out-dir interpreter_out
 
 Outputs (in --out-dir):
-- ``report__{YYYY-MM}__v{n}.pdf`` — the versioned report
+- ``report__{YYYY-MM}__{run}__v{n}.pdf`` — the versioned report
 - ``interpreter_report_latest.pdf`` — constant-name copy for the release
 
 WeasyPrint was chosen over a headless browser deliberately (fewer moving
@@ -455,8 +455,32 @@ def month_label(row: dict[str, Any]) -> str:
     return str(row.get("created_at") or "")[:7] or "unknown"
 
 
+def run_tag(row: dict[str, Any]) -> str:
+    """A slug for the run this report is about, so two runs cannot collide.
+
+    The month and the version together are not unique: the version resets
+    per run key, so two cycles in one calendar month both produce
+    ``report__2026-09__v1.pdf`` and the publish step's ``--clobber`` deletes
+    the first. The 1 September 2026 report was destroyed that way by the
+    15 September one. A scored row's ``scored_run_id`` IS the month label,
+    so it adds nothing; those fall back to the interpretation id.
+    """
+    candidate = str(row.get("hs_run_id") or "").strip()
+    if not candidate and str(row.get("kind") or "") == "scored":
+        candidate = str(row.get("interpretation_id") or "").strip()
+    if not candidate:
+        candidate = str(row.get("run_id") or "").strip()
+    if not candidate:
+        return ""
+    return re.sub(r"[^A-Za-z0-9._-]", "-", candidate)[:64]
+
+
 def pdf_filename(row: dict[str, Any]) -> str:
-    return f"report__{month_label(row)}__v{int(row.get('version') or 0)}.pdf"
+    version = int(row.get("version") or 0)
+    tag = run_tag(row)
+    if tag:
+        return f"report__{month_label(row)}__{tag}__v{version}.pdf"
+    return f"report__{month_label(row)}__v{version}.pdf"
 
 
 def generate_pdf(

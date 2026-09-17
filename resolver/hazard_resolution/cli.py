@@ -150,7 +150,11 @@ class SweepTally:
     """Counts from the silence-sweep / zero-resolution step."""
 
     zeros: int = 0
+    #: Retired Sept 2026 — the sweep no longer promotes a cell to triggered.
+    #: Kept at 0 so a caller reading it still reads a number.
     flipped: int = 0
+    #: Non-silent sweeps: absence disproven, no zero, cell left undecided.
+    sweep_hits: int = 0
     inconclusive: int = 0
     frozen: int = 0
 
@@ -169,9 +173,15 @@ def sweep_and_resolve_zeros(
 
     Shared by both hazards: the sweep, the fail-closed handling and the
     coverage gate are identical, and only the detector's own evidence
-    block differs. A non-silent sweep FLIPS the cell to triggered so the
-    impact ladder still sees it — a hazard nobody's physical detector
-    caught but everybody reported is a real hazard.
+    block differs.
+
+    A non-silent sweep disproves absence and therefore suppresses the
+    zero. It does not assert a detection: until Sept 2026 it promoted the
+    cell to ``triggered``, which made the sweep 95% of every trigger in
+    the backcast and published 100% occurrence rates into the forecaster's
+    prompts. Such a cell is left UNDECIDED — no row, the reason on the
+    trigger row — so it falls out of both sides of the occurrence rate.
+    See :func:`detect.record_sweep_hit`.
     """
     import time
 
@@ -182,6 +192,8 @@ def sweep_and_resolve_zeros(
 
     def ledger(row, *, outcome: str, reason: str | None, sweep: dict) -> None:
         """One assessed non-triggered cell, and why it did or did not get a row."""
+        # Retired Sept 2026: nothing sets REASON_FLIPPED any more, so this is
+        # always False. Kept so a ledger row written before then still reads.
         flipped = reason == cell_ledger.REASON_FLIPPED
         # The database is the record: a cell with no row says why on its own
         # trigger row, so a bundle built without the run stream (the nightly
@@ -211,6 +223,10 @@ def sweep_and_resolve_zeros(
             run_type=run_type,
             detail={
                 "sweep_hits": sweep.get("total_hits"),
+                # Apart, because the total cannot say whether the curated
+                # disaster-type tag or the keyword search defeated silence.
+                "sweep_taxonomy_hits": sweep.get("taxonomy_hits"),
+                "sweep_keyword_hits": sweep.get("keyword_hits"),
                 "sweep_silent": sweep.get("silent"),
                 "sweep_inconclusive": sweep.get("inconclusive"),
                 "sweep_error": sweep.get("error"),
@@ -245,20 +261,23 @@ def sweep_and_resolve_zeros(
             continue
 
         if not sweep["silent"]:
-            tally.flipped += 1
+            tally.sweep_hits += 1
             LOG.info(
-                "[cli] %s %s: ReliefWeb sweep found %d reports despite no "
-                "%s trigger — flipping to triggered (reliefweb_sweep)",
-                row.iso3, result.ym, sweep["total_hits"], hazard_key,
+                "[cli] %s %s: ReliefWeb sweep found %d reports (taxonomy=%s, "
+                "keywords=%s) despite no %s trigger — absence disproven, so "
+                "no zero; the cell stays undecided (sweep_hit_unconfirmed)",
+                row.iso3, result.ym, sweep["total_hits"],
+                sweep.get("taxonomy_hits"), sweep.get("keyword_hits"),
+                hazard_key,
             )
             if not dry_run:
-                detect_mod.flip_trigger_from_sweep(
+                detect_mod.record_sweep_hit(
                     con, hazard=result.hazard, iso3=row.iso3,
                     ym=result.ym, sweep_evidence=sweep,
                 )
             ledger(
-                row, outcome="flipped",
-                reason=cell_ledger.REASON_FLIPPED, sweep=sweep,
+                row, outcome="no_row",
+                reason=cell_ledger.REASON_SWEEP_HIT, sweep=sweep,
             )
             continue
 
@@ -380,7 +399,7 @@ def _log_summary(hazard: str, ym: str, result, tally: SweepTally, ladder, dry: s
     LOG.info("--- resolve-hazards summary (%s %s) ---", hazard, ym)
     LOG.info("  countries assessed:        %d", len(result.rows))
     LOG.info("  triggered (detector):      %d", n_triggered)
-    LOG.info("  flipped by sweep:          %d", tally.flipped)
+    LOG.info("  sweep hits (no zero):      %d", tally.sweep_hits)
     LOG.info("  resolved zero:             %d%s", tally.zeros, dry)
     LOG.info("  sweep inconclusive:        %d", tally.inconclusive)
     LOG.info("  frozen (skipped, logged):  %d", tally.frozen)

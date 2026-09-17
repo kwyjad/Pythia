@@ -63,8 +63,14 @@ REASON_MONTH_IN_PROGRESS = "month_in_progress"
 REASON_FROZEN = "frozen_row_unchanged"
 #: The walk raised. The cell is unresolved THIS run and a re-run retries it.
 REASON_EXCEPTION = "cell_raised"
-#: The sweep found reports, so the cell became triggered and the ladder owns
-#: it — this row is the sweep's half of the story, not a missing answer.
+#: The sweep found reports, so silence is disproven and no zero may be
+#: written — but reports are not a detection, so the cell is not triggered
+#: either. It is undecided, and drops out of both sides of the occurrence
+#: rate. Until Sept 2026 this cell was PROMOTED to triggered
+#: (``REASON_FLIPPED``), which made the sweep 95% of every trigger in the
+#: backcast and put 100% occurrence rates in front of the forecaster.
+REASON_SWEEP_HIT = "sweep_hit_unconfirmed"
+#: Retired Sept 2026, kept so a ledger written before then still reads.
 REASON_FLIPPED = "flipped_to_triggered_by_sweep"
 #: A BACKCAST cell whose rung-2 documents were fetched and not read because
 #: the extraction budget was bound. Nothing is written: the cell is
@@ -79,7 +85,7 @@ NO_ROW_REASONS = frozenset({
     REASON_PENDING, REASON_SWEEP_INCONCLUSIVE, REASON_COVERAGE_GATE,
     REASON_INCONCLUSIVE, REASON_NO_COVERAGE, REASON_TOO_FEW_FEEDS,
     REASON_MONTH_IN_PROGRESS, REASON_FROZEN, REASON_EXCEPTION, REASON_FLIPPED,
-    REASON_BUDGET_DEFERRED,
+    REASON_SWEEP_HIT, REASON_BUDGET_DEFERRED,
 })
 
 #: Stage names, so a reader can tell which half of the machine spoke.
