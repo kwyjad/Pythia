@@ -132,14 +132,21 @@ jobs:
       # workflow already exercises. Two controls: the repository variable
       # PYTHIA_SIBYL_DISABLED (Settings → Secrets and variables → Actions →
       # Variables) for a durable hold, and the skip_sibyl dispatch input for
-      # one run. stage_health already reports available: false when no
-      # Sibyl run persisted, so nothing downstream needs changing.
+      # one run. There is also an automatic hold on TEST runs: Sibyl
+      # chains off HS by workflow_run, which carries no inputs, so a
+      # test-mode smoke run had no way to say "not this one" and spent
+      # Opus money on questions nothing scores. Set the repository
+      # variable PYTHIA_SIBYL_ON_TEST_RUNS=true to run it on test runs
+      # anyway (for testing Sibyl itself).
+      # stage_health already reports available: false when no Sibyl run
+      # persisted, so nothing downstream needs changing.
       - name: Gate on eligible questions with volatility scores
         id: gate
         continue-on-error: true
         env:
           SIBYL_DISABLED: ${{ vars.PYTHIA_SIBYL_DISABLED }}
           SKIP_SIBYL: ${{ inputs.skip_sibyl }}
+          SIBYL_ON_TEST_RUNS: ${{ vars.PYTHIA_SIBYL_ON_TEST_RUNS }}
           SIBYL_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
         run: |
           set -euo pipefail
@@ -155,8 +162,15 @@ jobs:
           import json
           import os
           os.environ.setdefault("PYTHIA_DB_URL", os.environ["RESOLVER_DB_URL"])
-          from sibyl.select_questions import eligibility_breakdown, select_top_questions
+          from sibyl.select_questions import (
+              eligibility_breakdown,
+              hs_run_is_test,
+              latest_hs_run_id,
+              select_top_questions,
+          )
           hs_run_id = os.environ.get("SIBYL_HS_RUN_ID") or None
+          resolved = hs_run_id or latest_hs_run_id()
+          print(f"SIBYL_TEST_RUN={1 if hs_run_is_test(resolved) else 0}")
           # Per-pair diagnostics so a 0-eligible outcome is self-explanatory
           # (active questions per pair, pair eligibility, test-run status).
           print("SIBYL_ELIGIBILITY_BREAKDOWN=" + json.dumps(eligibility_breakdown(hs_run_id)))
@@ -164,6 +178,12 @@ jobs:
           print(f"SIBYL_ELIGIBLE_COUNT={len(qs)}")
           EOF
           COUNT=$(grep -oE 'SIBYL_ELIGIBLE_COUNT=[0-9]+' gate_out.txt | tail -1 | cut -d= -f2)
+          IS_TEST=$(grep -oE 'SIBYL_TEST_RUN=[01]' gate_out.txt | tail -1 | cut -d= -f2)
+          if [ "${IS_TEST:-0}" = "1" ] && [ "${SIBYL_ON_TEST_RUNS:-}" != "true" ]; then
+            echo "::notice title=Sibyl skipped::Test-mode run. The trial loop is held on test runs (set PYTHIA_SIBYL_ON_TEST_RUNS=true to override). Bundles, interpreter, prompt artifact, canonical upload and publish dispatch still run."
+            echo "eligible=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "eligible=${COUNT:-0}" >> "$GITHUB_OUTPUT"
           if [ "${COUNT:-0}" = "0" ]; then
             echo "No eligible questions with volatility scores — skipping Sibyl run."
