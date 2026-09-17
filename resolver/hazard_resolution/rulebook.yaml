@@ -46,13 +46,19 @@ cyclone:
     # silent) does a full-text keyword search.
     disaster_types: ["Tropical Cyclone"]
     keywords: ["cyclone", "hurricane", "typhoon", "tropical storm"]
-    # The keyword query is scoped where the taxonomy query is not (Sept
-    # 2026). Searching `body` over any `country.iso3` tag made a passing
-    # mention in a regional bulletin a cyclone report for every country the
-    # bulletin was tagged with, and one hit defeats silence — so the sweep
-    # became 95% of all triggers and Afghanistan "had" a cyclone in 305 of
-    # 321 months. A title match on a report whose PRIMARY country is this
-    # one is a signal; a body mention is not.
+    # BOTH queries are scoped to the report's PRIMARY country (Sept 2026),
+    # and the second scoping is the one that mattered. The sweep was 95% of
+    # all triggers — Afghanistan, landlocked, "had" a cyclone in 305 of 321
+    # months — and the first repair narrowed the keyword query alone, on the
+    # theory that a curated disaster-type tag is an editor's judgement about
+    # the report and any country tag on it is therefore fair. Run
+    # 35193605561 refuted that in its first hour: over nine re-walked months
+    # the keyword query decided NOTHING, and every one of the 1,325 hits came
+    # from the taxonomy query. A "Tropical Cyclone" tag IS a judgement about
+    # the report; the country list beside it is not a judgement that the
+    # report is about each of those countries, and a regional appeal naming
+    # forty of them defeats silence for all forty.
+    taxonomy_country_field: "primary_country.iso3"
     keyword_fields: ["title"]
     keyword_country_field: "primary_country.iso3"
     # Sweep window: month start .. month end + publication_pad_days
@@ -119,6 +125,8 @@ flood:
     # "landslide" left Sept 2026: it is a different hazard, and a landslide
     # report was defeating flood silence on its own.
     keywords: ["flood", "flooding", "flash flood", "inundation"]
+    # Both queries scoped to the primary country — see the cyclone block.
+    taxonomy_country_field: "primary_country.iso3"
     keyword_fields: ["title"]
     keyword_country_field: "primary_country.iso3"
     publication_pad_days: 14

@@ -284,9 +284,16 @@ def _record(con, hazard: str, ym: str, digest: str | None) -> None:
 #: working, not a fault to route around.
 SWEPT_AWAY_BY_THE_SWEEP_FIX = "29ccb0bbbe515dad"
 
-#: Today's pre-narrowing digest. Pinned for the same reason the value above
-#: was: an accidental move should fail here, loudly, with a diff to read.
-CURRENT_LEGACY_CYCLONE_DIGEST = "77adeb967c90d4b3"
+#: And swept away again the same day. The keyword narrowing above turned out
+#: to be scoped to the query that decides almost nothing: over the nine
+#: months run 35193605561 re-walked, every one of 1,325 sweep hits came from
+#: the TAXONOMY query, which runs first. Scoping that query to the report's
+#: primary country moved the deciding keys a second time.
+SWEPT_AWAY_BY_THE_TAXONOMY_SCOPING = "77adeb967c90d4b3"
+
+#: Today's pre-narrowing digest. Pinned for the same reason the values above
+#: were: an accidental move should fail here, loudly, with a diff to read.
+CURRENT_LEGACY_CYCLONE_DIGEST = "a1779b6326ffe0e5"
 
 
 def test_the_legacy_digest_is_pinned_so_an_accidental_move_is_loud():
@@ -300,6 +307,10 @@ def test_the_legacy_digest_is_pinned_so_an_accidental_move_is_loud():
     rb = load_rulebook()
     assert rb.legacy_hazard_fingerprint("cyclone") == CURRENT_LEGACY_CYCLONE_DIGEST
     assert rb.legacy_hazard_fingerprint("cyclone") != SWEPT_AWAY_BY_THE_SWEEP_FIX
+    assert (
+        rb.legacy_hazard_fingerprint("cyclone")
+        != SWEPT_AWAY_BY_THE_TAXONOMY_SCOPING
+    )
 
 
 def test_months_decided_under_this_rulebook_are_re_stamped_not_re_walked(con):

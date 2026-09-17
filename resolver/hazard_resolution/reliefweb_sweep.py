@@ -15,24 +15,31 @@ Two queries per country-month, both recorded verbatim in the evidence:
    ``<hazard>.reliefweb_sweep.keyword_fields`` (only run when the taxonomy
    sweep is silent).
 
-The taxonomy query filters on ``country.iso3`` (any country tag,
-deliberately broader than ``primary_country``): the curated disaster-type
-tag is an editor's judgement about the report, and a report tagged for a
-country is about that country.
+BOTH queries are scoped to the report's PRIMARY country
+(``taxonomy_country_field`` / ``keyword_country_field``), and the keyword
+query is additionally scoped to ``title``. Sept 2026 is why, in two
+instalments, and the second corrects the first.
 
-The KEYWORD query does not get the same latitude, and Sept 2026 is why.
-Searching ``body`` over any country tag made a passing mention inside a
-regional bulletin count as a hazard report for all twenty countries the
-bulletin was tagged with, and one hit defeats silence
-(``max_hits_for_silence: 0``). The sweep then became 95% of all triggers
-in the backcast — Afghanistan, landlocked, "had" a cyclone in 305 of 321
-months, and the occurrence base rates the forecaster is shown read 100%
-for 62% of month cells. The flip rate tracked ReliefWeb's publication
-volume rather than exposure, rising from 20% of cyclone cells in 2000 to
-64% in 2023. So the keyword query is scoped by
-``keyword_country_field`` (``primary_country.iso3``) and
-``keyword_fields`` (``title``): a report whose TITLE names the hazard and
-whose PRIMARY country is this one is a real signal.
+The sweep had become 95% of all triggers in the backcast. Afghanistan,
+landlocked, "had" a cyclone in 305 of 321 months; the occurrence base
+rates the forecaster is shown read 100% for 62% of month cells; and the
+flip rate tracked ReliefWeb's publication volume rather than exposure,
+rising from 20% of cyclone cells in 2000 to 64% in 2023. The first repair
+narrowed the keyword query alone — ``body`` over any country tag made a
+passing mention in a regional bulletin a hazard report for every country
+the bulletin carried, and one hit defeats silence
+(``max_hits_for_silence: 0``) — while leaving the taxonomy query wide, on
+the argument that a curated disaster-type tag is an editor's judgement
+about the report and any country tag on it is therefore fair.
+
+Run 35193605561 refuted that argument in its first hour. Over nine
+re-walked months the keyword query decided NOTHING: all 1,325 hits came
+from the taxonomy query, which only runs first. The tag is indeed a
+judgement about the report; the country LIST beside it is not a judgement
+that the report is about each of those countries, so a regional appeal
+naming forty defeats silence for all forty. Scoped to the primary
+country, a hit means an editor filed a hazard-tagged report under THIS
+country, which is the bar the sweep was always meant to clear.
 
 Fail-closed: an API failure makes the sweep INCONCLUSIVE, never silent —
 a zero is only ever written on positive evidence of silence.
@@ -166,6 +173,7 @@ def sweep_country_month(
     max_hits = int(rulebook.get(f"{cfg}.max_hits_for_silence"))
     sample_size = int(rulebook.get(f"{cfg}.sample_size"))
     keyword_fields = [str(f) for f in rulebook.get(f"{cfg}.keyword_fields")]
+    taxonomy_country_field = str(rulebook.get(f"{cfg}.taxonomy_country_field"))
     keyword_country_field = str(rulebook.get(f"{cfg}.keyword_country_field"))
     timeout = float(rulebook.get(f"{cfg}.request_timeout_sec"))
     api_url = str(rulebook.get("reliefweb.api_base_url")).rstrip("/") + "/reports"
@@ -186,6 +194,12 @@ def sweep_country_month(
         # and those are different claims about the cell.
         "taxonomy_hits": None,
         "keyword_hits": None,
+        # The bar each query had to clear, on the row. The scoping moved
+        # twice in one month (see the module docstring), so a stored sweep
+        # that does not say which rule decided it cannot be read back.
+        "taxonomy_country_field": taxonomy_country_field,
+        "keyword_country_field": keyword_country_field,
+        "keyword_fields": list(keyword_fields),
         "queries": [],
         "retrieved_at": _utcnow_iso(),
         "error": None,
@@ -224,7 +238,7 @@ def sweep_country_month(
         return total
 
     # Query 1: taxonomy sweep.
-    filt = _base_filter(iso3, ym, pad_days)
+    filt = _base_filter(iso3, ym, pad_days, country_field=taxonomy_country_field)
     taxonomy_payload = {
         "filter": {
             "operator": "AND",

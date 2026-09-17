@@ -53,7 +53,7 @@ def test_silent_sweep_runs_both_queries_and_confirms_silence():
     assert ev["retrieved_at"]
     # The window and country reached the API.
     conditions = post.calls[0]["payload"]["filter"]["conditions"]
-    assert {"field": "country.iso3", "value": "MDG"} in conditions
+    assert {"field": "primary_country.iso3", "value": "MDG"} in conditions
 
 
 def test_taxonomy_hits_short_circuit_and_are_not_silent():
@@ -136,13 +136,30 @@ def test_the_keyword_query_is_scoped_to_the_primary_country():
     assert _country_field(_keyword_payload(post)) == "primary_country.iso3"
 
 
-def test_the_taxonomy_query_keeps_the_wider_country_filter():
-    # A curated disaster-type tag is an editor's judgement about the report,
-    # and a report tagged for a country is about that country. Only the
-    # keyword query needed narrowing.
+def test_the_taxonomy_query_is_scoped_to_the_primary_country_too():
+    # This test replaces one asserting the opposite, and the run that
+    # refuted it is 35193605561. The first repair left the taxonomy query
+    # filtering on any `country.iso3` tag, arguing that a curated
+    # disaster-type tag is an editor's judgement about the report and so any
+    # country on it is fair. Over nine re-walked months the keyword query
+    # decided NOTHING and all 1,325 hits came from the taxonomy query: 154
+    # of 233 countries had a cyclone-tagged report naming them in July 2023,
+    # Afghanistan among them. The tag is a judgement about the report; the
+    # country list beside it is not a judgement that the report is about
+    # each of those countries.
     post = _FakePost(taxonomy_hits=0, keyword_hits=0)
     sweep_country_month("AFG", "2013-01", make_rulebook(), post=post)
-    assert _country_field(_taxonomy_payload(post)) == "country.iso3"
+    assert _country_field(_taxonomy_payload(post)) == "primary_country.iso3"
+
+
+def test_the_sweep_records_the_bar_each_query_had_to_clear():
+    # The scoping moved twice in one month. A stored sweep that does not say
+    # which rule decided it cannot be read back against either.
+    post = _FakePost(taxonomy_hits=0, keyword_hits=0)
+    ev = sweep_country_month("AFG", "2013-01", make_rulebook(), post=post)
+    assert ev["taxonomy_country_field"] == "primary_country.iso3"
+    assert ev["keyword_country_field"] == "primary_country.iso3"
+    assert ev["keyword_fields"] == ["title"]
 
 
 def test_landslide_no_longer_defeats_flood_silence():
@@ -183,6 +200,9 @@ def test_the_country_field_is_validated_not_freely_configurable():
 
     with open(DEFAULT_RULEBOOK_PATH, encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
-    data["cyclone"]["reliefweb_sweep"]["keyword_country_field"] = "iso3"
-    problems = validate_rulebook(data)
-    assert any("keyword_country_field" in p for p in problems), problems
+    for key in ("taxonomy_country_field", "keyword_country_field"):
+        with open(DEFAULT_RULEBOOK_PATH, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+        data["cyclone"]["reliefweb_sweep"][key] = "iso3"
+        problems = validate_rulebook(data)
+        assert any(key in p for p in problems), (key, problems)
