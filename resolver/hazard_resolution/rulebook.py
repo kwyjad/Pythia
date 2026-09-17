@@ -530,12 +530,13 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
         _require_str_list(f"{sweep}.disaster_types")
         _require_str_list(f"{sweep}.keywords")
         _require_str_list(f"{sweep}.keyword_fields")
-        keyword_country = _get(f"{sweep}.keyword_country_field")
-        if keyword_country not in KNOWN_SWEEP_COUNTRY_FIELDS:
-            problems.append(
-                f"{sweep}.keyword_country_field must be one of "
-                f"{sorted(KNOWN_SWEEP_COUNTRY_FIELDS)}, got {keyword_country!r}"
-            )
+        for key in ("taxonomy_country_field", "keyword_country_field"):
+            country_field = _get(f"{sweep}.{key}")
+            if country_field not in KNOWN_SWEEP_COUNTRY_FIELDS:
+                problems.append(
+                    f"{sweep}.{key} must be one of "
+                    f"{sorted(KNOWN_SWEEP_COUNTRY_FIELDS)}, got {country_field!r}"
+                )
         _require_int_in(f"{sweep}.publication_pad_days", 0, 90)
         _require_int_in(f"{sweep}.max_hits_for_silence", 0, 100)
         _require_int_in(f"{sweep}.sample_size", 1, 50)
