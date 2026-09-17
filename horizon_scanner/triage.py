@@ -735,6 +735,18 @@ def _run_triage_for_single_hazard(
     # Inject conflict forecasts and CrisisWatch for ACE hazard.
     conflict_kwargs: dict[str, Any] = {}
     if hazard_code == "ACE":
+        # See regime_change_llm for why this had to be passed explicitly:
+        # the parameter existed and no caller ever filled it.
+        try:
+            from horizon_scanner.horizon_scanner import (
+                _build_acled_summary_for_country,
+            )
+            acled = _build_acled_summary_for_country(iso3)
+            if acled:
+                conflict_kwargs["acled_summary"] = acled
+        except Exception as exc:
+            logger.debug("ACLED summary load failed for %s: %s", iso3, exc)
+
         try:
             from horizon_scanner.conflict_forecasts import load_conflict_forecasts
             forecasts = load_conflict_forecasts(iso3)

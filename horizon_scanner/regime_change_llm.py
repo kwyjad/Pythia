@@ -595,6 +595,20 @@ def _run_rc_for_single_hazard(
     # Inject conflict forecasts and ICG "On the Horizon" for ACE hazard.
     conflict_kwargs: dict[str, Any] = {}
     if hazard_code == "ACE":
+        # The ACE builder has taken an acled_summary since it was written
+        # and no caller ever passed one, so every ACE prompt opened its
+        # ACLED section with "unavailable ... do not assume either" a few
+        # lines above RESOLVER FEATURES carrying the ACLED numbers.
+        try:
+            from horizon_scanner.horizon_scanner import (
+                _build_acled_summary_for_country,
+            )
+            acled = _build_acled_summary_for_country(iso3)
+            if acled:
+                conflict_kwargs["acled_summary"] = acled
+        except Exception as exc:
+            logger.debug("ACLED summary load failed for %s: %s", iso3, exc)
+
         try:
             from horizon_scanner.conflict_forecasts import load_conflict_forecasts
             forecasts = load_conflict_forecasts(iso3)
