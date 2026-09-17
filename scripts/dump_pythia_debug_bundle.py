@@ -1929,11 +1929,34 @@ def _load_batch_health(
     out["n_batches"] = len(batches)
     # A batch that yielded nothing is WHY spend lost the discount; naming it
     # turns an unexplained percentage into a cause.
+    # A batch the collect stage RE-BATCHED (`resubmitted_as` in its error_text,
+    # written by llm_batch.resubmit_unserved) did not cost its requests the
+    # discount — the new batch decides that — so it is described under
+    # rebatched_batches rather than counted as one that returned nothing.
+    # Same rule batch_economics.py applies; the two reports must agree.
+    def _rebatched_into(error_text):
+        try:
+            info = json.loads(error_text) if error_text else None
+        except (TypeError, ValueError):
+            return []
+        ids = info.get("resubmitted_as") if isinstance(info, dict) else None
+        return [str(x) for x in ids] if isinstance(ids, list) else []
+
+    yielded_nothing = [
+        b for b in batches
+        if int(b["n_requests"] or 0) and not int(b["n_succeeded"] or 0)
+    ]
     out["empty_batches"] = [
         {"batch_id": b["batch_id"], "provider": b["provider"],
          "family": b["family"], "error_text": b["error_text"]}
-        for b in batches
-        if int(b["n_requests"] or 0) and not int(b["n_succeeded"] or 0)
+        for b in yielded_nothing
+        if not _rebatched_into(b["error_text"])
+    ]
+    out["rebatched_batches"] = [
+        {"batch_id": b["batch_id"], "provider": b["provider"],
+         "family": b["family"], "resubmitted_as": _rebatched_into(b["error_text"])}
+        for b in yielded_nothing
+        if _rebatched_into(b["error_text"])
     ]
 
     batch_ids = [b["batch_id"] for b in batches]
@@ -3765,6 +3788,15 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
             )
         elif bh.get("fallback_pct", 0.0) > 20.0:
             b_status = "WARN"
+        rebatched = bh.get("rebatched_batches") or []
+        if rebatched:
+            parts.append(
+                f"{len(rebatched)} batch(es) rejected by the provider and re-batched at collect: "
+                + "; ".join(
+                    f"{e['provider']}/{e['family']} -> {', '.join(e['resubmitted_as'])}"
+                    for e in rebatched
+                )
+            )
         else:
             b_status = "OK"
         checks.append(

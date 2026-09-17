@@ -71,6 +71,11 @@ WATCHED: tuple[Watched, ...] = (
     Watched("Pythia — Compute Calibration Weights & Advice", 35, "chained off Compute SPD Scores"),
     Watched("Pythia Pipeline Stage", 35, "monthly, 1st"),
     Watched("Publish Latest Data (Release)", 35, "after Sibyl / after Calibration"),
+    # The forecast chain's SOLE publish trigger. Publish alone cannot cover for
+    # it: the calibration chain also publishes on the 28th, so a Sibyl that
+    # failed on the 1st leaves Publish green all month with the forecasts
+    # never released.
+    Watched("Sibyl Deep Research", 35, "after HS Triage / after fc_collect_finalize"),
     Watched("Ingest Structured Data", 10, "weekly, Sunday"),
     Watched("Hazard Backcast", 3, "nightly"),
     Watched("Refresh CrisisWatch Data", 35, "monthly, days 3/5/7/10"),

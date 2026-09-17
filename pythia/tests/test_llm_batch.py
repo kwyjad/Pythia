@@ -1093,3 +1093,338 @@ class TestResubmitAtCollect:
         )
         assert report["n_candidates"] == 0 and report["created"] == []
         assert capsys.readouterr().out == ""
+
+
+class _SettlingAdapter(_FakeAdapter):
+    """A provider whose cancel is ASYNCHRONOUS, as every real one is.
+
+    After ``cancel`` the batch reads in-progress (OpenAI: ``cancelling``,
+    up to ten minutes) for ``settle_polls`` polls and only then reads
+    canceled — and the completed items are readable only from then on.
+    """
+
+    settle_polls = 3
+    _polls_since_cancel: dict = {}
+    settled: set = set()
+
+    def poll(self, provider_batch_id):
+        if provider_batch_id in type(self)._polls_since_cancel:
+            type(self)._polls_since_cancel[provider_batch_id] += 1
+            if type(self)._polls_since_cancel[provider_batch_id] >= type(self).settle_polls:
+                type(self).settled.add(provider_batch_id)
+                return llm_batch.BatchStatus(provider_batch_id, "canceled", {}, "")
+            return llm_batch.BatchStatus(provider_batch_id, "in_progress", {}, "")
+        return super().poll(provider_batch_id)
+
+    def fetch(self, provider_batch_id):
+        # The provider exposes partial results only once the cancel settled.
+        if provider_batch_id in type(self)._polls_since_cancel and provider_batch_id not in type(self).settled:
+            return
+        yield from type(self).fetch_results
+
+    def cancel(self, provider_batch_id):
+        type(self).canceled.append(provider_batch_id)
+        type(self)._polls_since_cancel[provider_batch_id] = 0
+
+
+@pytest.fixture()
+def settling_adapters(monkeypatch: pytest.MonkeyPatch, fake_adapters):
+    _SettlingAdapter._polls_since_cancel = {}
+    _SettlingAdapter.settled = set()
+    _SettlingAdapter.settle_polls = 3
+    monkeypatch.setattr(
+        llm_batch, "_ADAPTERS",
+        {"openai": _SettlingAdapter, "anthropic": _SettlingAdapter, "google": _SettlingAdapter},
+    )
+    return _SettlingAdapter
+
+
+class TestCancelAndSalvage:
+    """A cancel followed at once by a fetch salvages NOTHING: OpenAI parks the
+    batch in `cancelling` for up to ten minutes and exposes the output file
+    only once it reads `cancelled`; Anthropic's results_url is null until
+    `ended`. Every row then flips to expired and the sync fallback re-runs
+    items the provider already completed and will bill — paid twice."""
+
+    def _in_flight(self, con, adapters, n=2):
+        cids = [
+            _enqueue_spd(con, question_id=f"Q{i}", model_key=f"m{i}",
+                         provider="openai", model_id="gpt-5.6-sol")
+            for i in range(n)
+        ]
+        (bid,) = llm_batch.submit_pending(con, family="spd_v2", pipeline_id="pl_1", stage="fc_submit")
+        adapters.poll_state = "in_progress"
+        adapters.fetch_results = [
+            (cids[0], True, '{"spds": 1}', {"prompt_tokens": 3, "completion_tokens": 2}, "")
+        ]
+        return bid, cids
+
+    def test_cancel_then_immediate_collect_loses_the_completed_items(
+        self, con, settling_adapters, batch_enabled
+    ):
+        """The pre-fix shape, kept as the evidence for cancel_and_salvage."""
+        bid, cids = self._in_flight(con, settling_adapters)
+        llm_batch.cancel_batch(con, bid)
+        counts = llm_batch.collect_batch(con, bid)
+        assert counts["succeeded"] == 0 and counts["expired"] == 2
+
+    def test_cancel_and_salvage_waits_for_the_terminal_state_then_collects(
+        self, con, settling_adapters, batch_enabled, monkeypatch
+    ):
+        bid, cids = self._in_flight(con, settling_adapters)
+        state = {"t": 0.0}
+        monkeypatch.setattr(llm_batch, "_clock", lambda: state["t"])
+        monkeypatch.setattr(llm_batch, "_sleep", lambda s: state.__setitem__("t", state["t"] + s))
+        counts = llm_batch.cancel_and_salvage(con, bid)
+        assert settling_adapters.canceled == ["prov_1"]
+        assert counts["succeeded"] == 1 and counts["expired"] == 1
+        rows = dict(con.execute(
+            "SELECT custom_id, status FROM llm_batch_requests WHERE custom_id IN (?, ?)", cids
+        ).fetchall())
+        assert rows[cids[0]] == "succeeded" and rows[cids[1]] == "expired"
+        status = con.execute("SELECT status FROM llm_batches WHERE batch_id = ?", [bid]).fetchone()[0]
+        assert status == "canceled"
+        hit = llm_batch.get_result(con, "spd_v2", question_id="Q0", model_key="m0", pipeline_id="pl_1")
+        assert hit and hit["usage"]["service_tier"] == "batch"
+
+    def test_cancel_and_salvage_is_bounded_by_attempts_when_the_cancel_never_settles(
+        self, con, settling_adapters, batch_enabled, monkeypatch
+    ):
+        settling_adapters.settle_polls = 10_000
+        bid, cids = self._in_flight(con, settling_adapters)
+        monkeypatch.setenv("PYTHIA_BATCH_CANCEL_SETTLE_SEC", "60")
+        polls = {"n": 0}
+        real_poll = settling_adapters.poll
+
+        def _counting_poll(self_, provider_batch_id):
+            polls["n"] += 1
+            return real_poll(self_, provider_batch_id)
+
+        monkeypatch.setattr(settling_adapters, "poll", _counting_poll)
+        monkeypatch.setattr(llm_batch, "_sleep", lambda s: None)   # a stubbed sleep must not spin
+        counts = llm_batch.cancel_and_salvage(con, bid)
+        assert polls["n"] <= 60 // 15 + 2
+        assert counts["expired"] == 2
+
+    def test_resubmit_deadline_salvages_what_the_provider_completed(
+        self, con, settling_adapters, batch_enabled, monkeypatch, capsys
+    ):
+        """The #934 straggler path, with a provider whose cancel is asynchronous."""
+        cids = [
+            _enqueue_spd(con, question_id=f"Q{i}", model_key=f"m{i}",
+                         provider="openai", model_id="gpt-5.6-sol")
+            for i in range(2)
+        ]
+        state = {"t": 0.0}
+        monkeypatch.setattr(llm_batch, "_clock", lambda: state["t"])
+        monkeypatch.setattr(llm_batch, "_sleep", lambda s: state.__setitem__("t", state["t"] + s))
+        settling_adapters.poll_state = "in_progress"
+        settling_adapters.fetch_results = [
+            (cids[0], True, '{"spds": 1}', {"prompt_tokens": 3, "completion_tokens": 2}, "")
+        ]
+        report = llm_batch.resubmit_unserved(
+            con, pipeline_id="pl_1", families=("spd_v2",), stage="fc_collect_resubmit",
+            wait_min=1, poll_sec=10,
+        )
+        assert report["counts"] == {"succeeded": 1, "errored": 0, "expired": 1}
+        assert llm_batch.get_result(con, "spd_v2", question_id="Q0", model_key="m0", pipeline_id="pl_1")
+        assert llm_batch.get_result(con, "spd_v2", question_id="Q1", model_key="m1", pipeline_id="pl_1") is None
+
+
+class TestDrainPending:
+    """The one drain both collect stages run at their start."""
+
+    def _submitted(self, con, adapters, n=2, provider="google", model_id="gemini-3.5-flash"):
+        cids = [
+            _enqueue_spd(con, question_id=f"Q{i}", model_key=f"m{i}", provider=provider, model_id=model_id)
+            for i in range(n)
+        ]
+        (bid,) = llm_batch.submit_pending(con, family="spd_v2", pipeline_id="pl_1", stage="fc_submit")
+        adapters.fetch_results = [
+            (cid, True, '{"spds": 1}', {"prompt_tokens": 3, "completion_tokens": 2}, "") for cid in cids
+        ]
+        return bid, cids
+
+    def test_terminal_batch_is_collected(self, con, fake_adapters, batch_enabled):
+        bid, cids = self._submitted(con, fake_adapters)
+        fake_adapters.poll_state = "ended"
+        report = llm_batch.drain_pending(con, "pl_1", wait_min=1, poll_sec=1)
+        assert report["collected"] == [bid] and report["canceled"] == []
+        assert all(
+            llm_batch.get_result(con, "spd_v2", question_id=f"Q{i}", model_key=f"m{i}", pipeline_id="pl_1")
+            for i in range(2)
+        )
+
+    def test_one_transient_poll_failure_does_not_send_the_batch_to_sync(
+        self, con, fake_adapters, batch_enabled, monkeypatch
+    ):
+        """One Gemini 5xx on the stage's single GET used to send a whole family
+        to sync at full price, and the paid results were then skipped as
+        terminal when a later stage collected them."""
+        bid, cids = self._submitted(con, fake_adapters)
+        calls = {"n": 0}
+
+        def _flaky_poll(self_, provider_batch_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("HTTP 503")
+            return llm_batch.BatchStatus(provider_batch_id, "ended", {}, "")
+
+        monkeypatch.setattr(fake_adapters, "poll", _flaky_poll)
+        monkeypatch.setattr(llm_batch, "_sleep", lambda s: None)
+        report = llm_batch.drain_pending(con, "pl_1", wait_min=1, poll_sec=1)
+        assert report["collected"] == [bid] and report["poll_failed"] == []
+        assert calls["n"] == 2
+
+    def test_in_flight_batch_under_the_cap_is_waited_on_then_collected(
+        self, con, fake_adapters, batch_enabled, monkeypatch, capsys
+    ):
+        bid, cids = self._submitted(con, fake_adapters)
+        state = {"t": 0.0, "polls": 0}
+        monkeypatch.setattr(llm_batch, "_clock", lambda: state["t"])
+        monkeypatch.setattr(llm_batch, "_sleep", lambda s: state.__setitem__("t", state["t"] + s))
+
+        def _finishes_later(self_, provider_batch_id):
+            state["polls"] += 1
+            return llm_batch.BatchStatus(
+                provider_batch_id, "ended" if state["polls"] >= 3 else "in_progress", {}, ""
+            )
+
+        monkeypatch.setattr(fake_adapters, "poll", _finishes_later)
+        report = llm_batch.drain_pending(con, "pl_1", wait_min=10, poll_sec=30)
+        assert report["collected"] == [bid] and report["canceled"] == []
+        assert 0 < report["waited_sec"] <= 10 * 60
+        assert fake_adapters.canceled == []
+        assert "still in flight at collect" in capsys.readouterr().out
+
+    def test_in_flight_batch_past_the_wait_is_canceled_and_salvaged(
+        self, con, settling_adapters, batch_enabled, monkeypatch, capsys
+    ):
+        bid, cids = self._submitted(con, settling_adapters, provider="openai", model_id="gpt-5.6-sol")
+        settling_adapters.poll_state = "in_progress"
+        settling_adapters.fetch_results = settling_adapters.fetch_results[:1]   # one item done
+        state = {"t": 0.0}
+        monkeypatch.setattr(llm_batch, "_clock", lambda: state["t"])
+        monkeypatch.setattr(llm_batch, "_sleep", lambda s: state.__setitem__("t", state["t"] + s))
+        report = llm_batch.drain_pending(con, "pl_1", wait_min=1, poll_sec=10)
+        assert report["canceled"] == [bid]
+        assert settling_adapters.canceled == ["prov_1"]
+        statuses = {r[0] for r in con.execute(
+            "SELECT status FROM llm_batch_requests WHERE batch_id = ? OR custom_id IN (?, ?)", [bid, *cids]
+        ).fetchall()}
+        assert statuses == {"succeeded", "expired"}
+        assert "::warning title=Batch still running at collect::" in capsys.readouterr().out
+
+    def test_batch_past_max_wait_is_canceled_and_salvaged_without_waiting(
+        self, con, settling_adapters, batch_enabled, monkeypatch
+    ):
+        bid, cids = self._submitted(con, settling_adapters, provider="openai", model_id="gpt-5.6-sol")
+        con.execute(
+            "UPDATE llm_batches SET submitted_at = submitted_at - INTERVAL 25 HOUR WHERE batch_id = ?", [bid]
+        )
+        settling_adapters.poll_state = "in_progress"
+        monkeypatch.setattr(llm_batch, "_sleep", lambda s: None)
+        report = llm_batch.drain_pending(con, "pl_1", wait_min=1, poll_sec=10)
+        assert report["canceled"] == [bid] and report["waited_sec"] == 0.0
+        assert settling_adapters.canceled == ["prov_1"]
+
+    def test_drain_never_raises(self, con, fake_adapters, batch_enabled, monkeypatch, capsys):
+        def _boom(*a, **k):
+            raise RuntimeError("db gone")
+
+        monkeypatch.setattr(llm_batch, "pending_batches", _boom)
+        report = llm_batch.drain_pending(con, "pl_1")
+        assert "db gone" in report["error"]
+        assert "::warning title=Batch drain failed::" in capsys.readouterr().out
+
+
+class TestResubmitRounds:
+    """A file-access rejection is the multi-hour incident: the collect stage
+    keeps re-asking, on a ladder, until its re-batch window closes, rather
+    than spending ten minutes on the guard and eighty on nothing."""
+
+    def test_keeps_asking_while_the_provider_refuses_the_file_then_succeeds(
+        self, con, fake_adapters, batch_enabled, monkeypatch, capsys
+    ):
+        cid = _enqueue_spd(con, question_id="A", model_key="a", provider="openai", model_id="gpt-5.6-sol")
+        state = {"t": 0.0}
+        monkeypatch.setattr(llm_batch, "_clock", lambda: state["t"])
+        monkeypatch.setattr(llm_batch, "_sleep", lambda s: state.__setitem__("t", state["t"] + s))
+        rounds = {"n": 0}
+        real_submit = fake_adapters.submit
+
+        def _refuses_twice(self_, rows, **kw):
+            rounds["n"] += 1
+            if rounds["n"] <= 2:
+                raise llm_batch.OpenAIBatchValidationError(
+                    "rejected", errors=_FILE_ACCESS_ERROR["data"], file_access=True, attempts=3,
+                )
+            return real_submit(self_, rows, **kw)
+
+        monkeypatch.setattr(fake_adapters, "submit", _refuses_twice)
+        fake_adapters.fetch_results = [(cid, True, "ok", {"prompt_tokens": 1}, "")]
+        report = llm_batch.resubmit_unserved(
+            con, pipeline_id="pl_1", families=("spd_v2",), stage="fc_collect_resubmit",
+            wait_min=30, poll_sec=10,
+        )
+        assert rounds["n"] == 3 and report["submit_rounds"] == 3
+        assert report["counts"]["succeeded"] == 1
+        out = capsys.readouterr().out
+        assert out.count("::warning title=Collect re-batch: provider still rejecting the input file::") == 2
+
+    def test_gives_up_at_the_window_and_leaves_rows_pending_for_sync(
+        self, con, fake_adapters, batch_enabled, monkeypatch, capsys
+    ):
+        cid = _enqueue_spd(con, question_id="A", model_key="a", provider="openai", model_id="gpt-5.6-sol")
+        state = {"t": 0.0}
+        monkeypatch.setattr(llm_batch, "_clock", lambda: state["t"])
+        monkeypatch.setattr(llm_batch, "_sleep", lambda s: state.__setitem__("t", state["t"] + s))
+        rounds = {"n": 0}
+
+        def _always_refuses(self_, rows, **kw):
+            rounds["n"] += 1
+            raise llm_batch.OpenAIBatchValidationError(
+                "rejected", errors=_FILE_ACCESS_ERROR["data"], file_access=True, attempts=3,
+            )
+
+        monkeypatch.setattr(fake_adapters, "submit", _always_refuses)
+        report = llm_batch.resubmit_unserved(
+            con, pipeline_id="pl_1", families=("spd_v2",), stage="fc_collect_resubmit",
+            wait_min=12, poll_sec=10,
+        )
+        # 12 min window / 5 min ladder -> rounds at t=0, 5, 10, then the window is spent.
+        assert rounds["n"] == 3 and report["created"] == []
+        assert state["t"] <= 12 * 60
+        row = con.execute("SELECT status FROM llm_batch_requests WHERE custom_id = ?", [cid]).fetchone()
+        assert row[0] == "pending"
+        assert "::warning title=Collect re-batch created nothing::" in capsys.readouterr().out
+
+    def test_a_deterministic_rejection_is_not_re_asked(
+        self, con, fake_adapters, batch_enabled, monkeypatch
+    ):
+        _enqueue_spd(con, question_id="A", model_key="a", provider="openai", model_id="gpt-5.6-sol")
+        monkeypatch.setattr(llm_batch, "_sleep", lambda s: None)
+        rounds = {"n": 0}
+
+        def _mismatched(self_, rows, **kw):
+            rounds["n"] += 1
+            raise llm_batch.OpenAIBatchValidationError("mismatched_model", file_access=False)
+
+        monkeypatch.setattr(fake_adapters, "submit", _mismatched)
+        report = llm_batch.resubmit_unserved(
+            con, pipeline_id="pl_1", families=("spd_v2",), stage="fc_collect_resubmit", wait_min=30,
+        )
+        assert rounds["n"] == 1 and report["submit_rounds"] == 1
+
+
+class TestSignalExit:
+    def test_sigterm_during_the_wait_exits_non_zero(self, con, fake_adapters, batch_enabled, monkeypatch):
+        """KeyboardInterrupt was caught by the forecaster's main() and turned
+        into exit 0 — a stage killed mid-wait read green with no forecasts."""
+        import signal as _signal
+
+        guard = llm_batch._cancel_on_signal(con, [])
+        monkeypatch.setattr(guard, "_previous", {_signal.SIGTERM: _signal.SIG_DFL})
+        with pytest.raises(SystemExit) as exc:
+            guard._handler(_signal.SIGTERM, None)
+        assert exc.value.code == 128 + int(_signal.SIGTERM)

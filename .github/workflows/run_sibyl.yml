@@ -66,7 +66,10 @@ jobs:
   sibyl:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # Sibyl (40+ min at the $40 cap) + interpreter + PDF + two bundles all run
+    # BEFORE the canonical upload; a slow month at 180 was killed with the
+    # forecasts unpublished. 330 matches the pipeline stage jobs.
+    timeout-minutes: 330
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
       PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -108,8 +111,16 @@ jobs:
       - name: Record stage start
         run: echo "STAGE_STARTED_AT=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
 
+      # The gate and the Sibyl run are the only steps between the DB download
+      # and the canonical upload that could go red, and a red here withheld
+      # the whole month's forecasts from the release (Sibyl is the forecast
+      # chain's SOLE publish trigger). Both are non-fatal: a gate that cannot
+      # decide skips Sibyl, and Sibyl's own failure is visible in
+      # sibyl_stdout.txt and stage_health while the HS/forecaster rows still
+      # ship. Nothing Sibyl writes is a precondition for the upload.
       - name: Gate on eligible questions with volatility scores
         id: gate
+        continue-on-error: true
         run: |
           set -euo pipefail
           python - <<'EOF' | tee gate_out.txt
@@ -133,7 +144,8 @@ jobs:
           SIBYL_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
 
       - name: Run Sibyl
-        if: steps.gate.outputs.eligible != '0'
+        if: steps.gate.outputs.eligible != '0' && steps.gate.outputs.eligible != ''
+        continue-on-error: true
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
@@ -533,7 +545,8 @@ jobs:
           # reference DB, where that fallback resolved the wrong run.
           SIBYL_RUN_ID=$(grep -oE 'sibyl_run_id=[A-Za-z0-9_]+' sibyl_stdout.txt 2>/dev/null \
             | tail -n 1 | cut -d= -f2 || true)
-          HS_RUN_ID="${{ github.event.inputs.hs_run_id }}"
+          # Keep the value sibyl_bundle_context resolved on the workflow_run path.
+          HS_RUN_ID="${HS_RUN_ID:-${{ github.event.inputs.hs_run_id }}}"
           if [ -n "${SIBYL_RUN_ID}" ] && [ -z "${HS_RUN_ID}" ]; then
             HS_RUN_ID=$(python - "${SIBYL_RUN_ID}" <<'EOF'
           import os
@@ -595,7 +608,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # dispatched_by_chain puts publish's regression guard in its
+          # soft-skip mode: with an explicit run_id and no chain flag it hard
+          # fails, which is the mode reserved for a human's deliberate run
+          # pick (the calibration chain has passed this since 2026-08-26).
           gh workflow run publish_latest_data.yml \
             -R "${{ github.repository }}" \
             --ref main \
-            -f run_id=${{ github.run_id }}
+            -f run_id=${{ github.run_id }} \
+            -f dispatched_by_chain=true

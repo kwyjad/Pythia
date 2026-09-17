@@ -206,8 +206,13 @@ def collect(
             "results_url": b.get("results_url"),
             "provider_error_payload": _parse_error_payload(b.get("error_text")),
         }
+        payload = record["provider_error_payload"]
+        rebatched = payload.get("resubmitted_as") if isinstance(payload, dict) else None
+        record["rebatched_into"] = [str(x) for x in rebatched] if isinstance(rebatched, list) else []
+        # A batch the collect stage re-batched is described, not counted as
+        # one that returned nothing: the batches it points at decide the cost.
         record["yielded_nothing"] = bool(
-            record["n_requests"] and not record["n_succeeded"]
+            record["n_requests"] and not record["n_succeeded"] and not record["rebatched_into"]
         )
         records.append(record)
 

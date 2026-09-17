@@ -757,8 +757,13 @@ jobs:
       # entry point (scripts/ci/inspect_resolver_db.py, stdlib + duckdb only).
       # The DB is already on disk at data_out/resolver.duckdb and duckdb was
       # pip-installed by the regression-guard step earlier in this job.
+      # Everything after the release upload is diagnostics: a crash here
+      # (the July 2026 NoneType.__format__ class) turned a COMPLETED publish
+      # red, skipped the API sync poke, and made the watchdog age Publish
+      # from a success that had in fact happened.
       - name: Inspect published DB
         if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
+        continue-on-error: true
         run: |
           set -euo pipefail
           python -c "import duckdb" 2>/dev/null || pip install duckdb >/dev/null
@@ -769,6 +774,7 @@ jobs:
 
       - name: Upload resolver inspection artifact
         if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: resolver-inspect

@@ -305,3 +305,60 @@ def test_collect_ingest_rebatches_before_replay(batch_env, monkeypatch):
     assert error is None
     assert usage["service_tier"] == "batch"
     assert json.loads(text)["spds"]
+
+
+def test_collect_phase_serves_the_replay_even_when_the_provider_breaker_is_tripped(
+    batch_env, monkeypatch
+):
+    """The breaker is a statement about SYNC calls. In collect the member's
+    answer is already paid for at batch price; skipping the provider orphaned
+    it and wrote a partial ensemble."""
+    cid = llm_batch.enqueue_request(
+        batch_env,
+        family="spd_v2",
+        provider="anthropic",
+        model_id="claude-opus-5",
+        request_body={"model": "claude-opus-5"},
+        prompt_text="the spd prompt",
+        question_id="SOM_ACE_FATALITIES_2026-08",
+        model_key=cli._batch_model_key(_MS),
+        pipeline_id="pl_test",
+    )
+    batch_env.execute(
+        "UPDATE llm_batch_requests SET status='succeeded', response_text='{\"spds\": 1}', "
+        "usage_json='{\"prompt_tokens\": 1, \"service_tier\": \"batch\"}' WHERE custom_id = ?",
+        [cid],
+    )
+    monkeypatch.setattr(cli, "is_provider_disabled_for_run", lambda provider, run_id: True)
+    (text, usage, error, ms), sync_calls = _call(monkeypatch, "collect")
+    assert text == '{"spds": 1}' and not error and not sync_calls
+    assert usage["service_tier"] == "batch"
+
+
+def test_collect_phase_applies_the_breaker_to_the_sync_fallback_only(batch_env, monkeypatch):
+    monkeypatch.setattr(cli, "is_provider_disabled_for_run", lambda provider, run_id: True)
+    (text, usage, error, ms), sync_calls = _call(monkeypatch, "collect")   # a replay miss
+    assert error == "provider disabled (cooldown)" and not sync_calls
+
+
+def test_collect_phase_members_are_not_prefiltered_by_the_breaker(batch_env, monkeypatch):
+    monkeypatch.setattr(cli, "_FORECAST_PHASE", "collect")
+    monkeypatch.setattr(cli, "is_provider_disabled_for_run", lambda provider, run_id: True)
+    seen: list = []
+
+    async def _fake_for_spec(ms, prompt, **kwargs):
+        seen.append(ms.provider)
+        return "", {}, "provider disabled (cooldown)", ms
+
+    monkeypatch.setattr(cli, "_call_spd_model_for_spec", _fake_for_spec)
+    result = asyncio.run(
+        cli._call_spd_members_v2(
+            "the spd prompt", [_MS], run_id="fc_1", question_id="Q", iso3="SOM",
+            hazard_code="ACE", metric="FATALITIES", anchor_month="2026-08",
+            batch_family="spd_v2",
+        )
+    )
+    meta = result[-1]
+    assert seen == ["anthropic"]                 # the member was consulted (replay first)
+    assert meta["skipped_providers"] == []
+    assert meta["n_models_called"] == 1
