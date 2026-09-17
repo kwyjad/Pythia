@@ -82,6 +82,30 @@ def test_member_gap_summary_counts_track1_cells_only():
     assert gaps["by_model"] == {"claude-opus-5": 2, "gpt-5.6-luna": 1}
 
 
+def test_member_gap_summary_skips_binary_questions():
+    """A binary question has no per-member rows to be missing.
+
+    _write_binary_outputs stores the POOLED forecast alone, so a
+    per-member expectation is one no binary question can satisfy. Rows
+    written before Sept 2026 still carry one — 53 Track-1 binary questions
+    at five members apiece, which is 265 of the 267 "missing member SPDs"
+    the 2026-09-15 executive summary led with.
+    """
+    metrics = [
+        {"metric": "PA", "n_spd_models_expected": 5,
+         "missing_model_ids_json": json.dumps(["claude-opus-5"])},
+        {"metric": "EVENT_OCCURRENCE", "n_spd_models_expected": 5,
+         "missing_model_ids_json": json.dumps(
+             ["claude-opus-5", "gpt-5.6-sol", "gpt-5.6-luna",
+              "gemini-3.1-pro-preview", "gemini-3.5-flash"]
+         )},
+    ]
+    gaps = _member_gap_summary(metrics)
+    assert gaps["n_cells_missing"] == 1
+    assert gaps["n_cells_expected"] == 5
+    assert gaps["by_model"] == {"claude-opus-5": 1}
+
+
 def test_timing_stage_comes_from_call_type_not_phase():
     # Every HS row carries phase='hs_triage'; call_type must split them.
     assert _timing_stage_for_call("hs_triage", "rc_pass_1", "RC_ACE_PASS_1") == "rc"

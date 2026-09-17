@@ -477,7 +477,7 @@ def load_raw_events_for_month(
     ]
 
 
-def flip_trigger_from_sweep(
+def record_sweep_hit(
     con: "duckdb.DuckDBPyConnection",
     *,
     hazard: str,
@@ -485,12 +485,25 @@ def flip_trigger_from_sweep(
     ym: str,
     sweep_evidence: dict,
 ) -> None:
-    """Promote a non-triggered country-month after a non-silent sweep.
+    """Record a non-silent sweep on a cell the detector did not trigger.
 
-    The ReliefWeb sweep found cyclone reporting despite no qualifying
-    track (remnant systems, naming edge cases): set triggered=true with
-    trigger_source='reliefweb_sweep' and leave the month for the impact
-    ladder (Phase 2+).  The sweep record joins the trigger detail.
+    Until Sept 2026 this PROMOTED the cell: ``triggered = TRUE`` with
+    ``trigger_source = 'reliefweb_sweep'``, on the reasoning that a hazard
+    nobody's physical detector caught but everybody reported is a real
+    hazard. The reasoning survives; asserting it as a DETECTION did not.
+    The sweep became 95% of every trigger in the backcast (62,304 against
+    3,499 from IBTrACS and GDACS), and because ``compute_occurrence``
+    counts triggered years, the occurrence base rates the forecaster is
+    shown stopped being base rates: 62% of month cells read 100%, and
+    landlocked Afghanistan "had" a cyclone in 305 of 321 months.
+
+    So a sweep hit now says only what it can honestly say: reports exist,
+    therefore absence is DISPROVEN, therefore no zero. It does not say a
+    hazard occurred, so the cell stays non-triggered, gets no row, and
+    drops out of both the numerator and the denominator of the occurrence
+    rate — which is the truthful position for a cell the machine looked at
+    and could not decide. The evidence lands in ``trigger_detail_json``,
+    never in ``evidence_of_absence_json``: it is the opposite of that.
     """
     year, month = ym_to_year_month(ym)
     row = con.execute(
@@ -502,29 +515,28 @@ def flip_trigger_from_sweep(
     ).fetchone()
     detail = json.loads(row[0]) if row and row[0] else {}
     detail["reliefweb_sweep"] = sweep_evidence
-    con.execute(
-        """
-        UPDATE haz_triggers
-        SET triggered = TRUE,
-            trigger_source = ?,
-            trigger_detail_json = ?,
-            evidence_of_absence_json = NULL
-        WHERE hazard = ? AND iso3 = ? AND year = ? AND month = ?
-        """,
-        [TRIGGER_SOURCE_RELIEFWEB, json.dumps(detail), hazard, iso3, year, month],
-    )
     if row is None:
-        # No detection row (unexpected) — record the sweep verdict alone.
+        # No detection row (unexpected) — record the sweep verdict alone,
+        # still non-triggered.
         con.execute(
             """
             INSERT INTO haz_triggers
                 (iso3, year, month, hazard, triggered, trigger_source,
                  trigger_detail_json, evidence_of_absence_json, run_type)
-            VALUES (?, ?, ?, ?, TRUE, ?, ?, NULL, ?)
+            VALUES (?, ?, ?, ?, FALSE, ?, ?, NULL, ?)
             """,
-            [iso3, year, month, hazard, TRIGGER_SOURCE_RELIEFWEB, json.dumps(detail),
-             RUN_TYPE_LIVE],
+            [iso3, year, month, hazard, TRIGGER_SOURCE_RELIEFWEB,
+             json.dumps(detail), RUN_TYPE_LIVE],
         )
+        return
+    con.execute(
+        """
+        UPDATE haz_triggers
+        SET trigger_detail_json = ?
+        WHERE hazard = ? AND iso3 = ? AND year = ? AND month = ?
+        """,
+        [json.dumps(detail), hazard, iso3, year, month],
+    )
 
 
 def record_no_row_reason(

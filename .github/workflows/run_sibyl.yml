@@ -53,6 +53,11 @@ on:
         description: "Forecaster run id (fc_...) to bundle (default: resolved from the DB)"
         required: false
         default: ""
+      skip_sibyl:
+        description: "Skip the Sibyl trial loop for this run only (everything else still runs)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: pythia-resolver-db
@@ -118,11 +123,34 @@ jobs:
       # decide skips Sibyl, and Sibyl's own failure is visible in
       # sibyl_stdout.txt and stage_health while the HS/forecaster rows still
       # ship. Nothing Sibyl writes is a precondition for the upload.
+      # The kill switch (Sept 2026). Sibyl costs real money on Opus and is
+      # pure noise on a small test run, but this workflow is also the only
+      # producer of the prompt artifact, the debug bundle, the interpreter
+      # report and the canonical upload — so disabling the WORKFLOW would
+      # take the verification evidence down with it. The switch stops the
+      # trial loop and nothing else, by writing the eligible=0 outcome the
+      # workflow already exercises. Two controls: the repository variable
+      # PYTHIA_SIBYL_DISABLED (Settings → Secrets and variables → Actions →
+      # Variables) for a durable hold, and the skip_sibyl dispatch input for
+      # one run. stage_health already reports available: false when no
+      # Sibyl run persisted, so nothing downstream needs changing.
       - name: Gate on eligible questions with volatility scores
         id: gate
         continue-on-error: true
+        env:
+          SIBYL_DISABLED: ${{ vars.PYTHIA_SIBYL_DISABLED }}
+          SKIP_SIBYL: ${{ inputs.skip_sibyl }}
+          SIBYL_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
         run: |
           set -euo pipefail
+          # A boolean workflow_dispatch input arrives as the STRING "false"
+          # over the REST API, so compare against the literal rather than
+          # testing truthiness (the pythia_pipeline_stage.yml lesson).
+          if [ "${SIBYL_DISABLED:-}" = "true" ] || [ "${SKIP_SIBYL:-}" = "true" ]; then
+            echo "::notice title=Sibyl skipped::Trial loop disabled (PYTHIA_SIBYL_DISABLED or skip_sibyl). Bundles, interpreter, prompt artifact, canonical upload and publish dispatch still run."
+            echo "eligible=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           python - <<'EOF' | tee gate_out.txt
           import json
           import os
@@ -140,8 +168,6 @@ jobs:
           if [ "${COUNT:-0}" = "0" ]; then
             echo "No eligible questions with volatility scores — skipping Sibyl run."
           fi
-        env:
-          SIBYL_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
 
       - name: Run Sibyl
         if: steps.gate.outputs.eligible != '0' && steps.gate.outputs.eligible != ''

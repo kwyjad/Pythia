@@ -11,12 +11,28 @@ Two queries per country-month, both recorded verbatim in the evidence:
 
 1. taxonomy sweep — reports tagged with the hazard's ReliefWeb disaster
    types (``cyclone.reliefweb_sweep.disaster_types``);
-2. keyword sweep — full-text search over title/body for the hazard's
-   keyword list (only run when the taxonomy sweep is silent).
+2. keyword sweep — keyword search over the fields named by
+   ``<hazard>.reliefweb_sweep.keyword_fields`` (only run when the taxonomy
+   sweep is silent).
 
-Both queries filter on ``country.iso3`` (any country tag, deliberately
-broader than ``primary_country``) and a publication window of month
-start .. month end + ``publication_pad_days``.
+The taxonomy query filters on ``country.iso3`` (any country tag,
+deliberately broader than ``primary_country``): the curated disaster-type
+tag is an editor's judgement about the report, and a report tagged for a
+country is about that country.
+
+The KEYWORD query does not get the same latitude, and Sept 2026 is why.
+Searching ``body`` over any country tag made a passing mention inside a
+regional bulletin count as a hazard report for all twenty countries the
+bulletin was tagged with, and one hit defeats silence
+(``max_hits_for_silence: 0``). The sweep then became 95% of all triggers
+in the backcast — Afghanistan, landlocked, "had" a cyclone in 305 of 321
+months, and the occurrence base rates the forecaster is shown read 100%
+for 62% of month cells. The flip rate tracked ReliefWeb's publication
+volume rather than exposure, rising from 20% of cyclone cells in 2000 to
+64% in 2023. So the keyword query is scoped by
+``keyword_country_field`` (``primary_country.iso3``) and
+``keyword_fields`` (``title``): a report whose TITLE names the hazard and
+whose PRIMARY country is this one is a real signal.
 
 Fail-closed: an API failure makes the sweep INCONCLUSIVE, never silent —
 a zero is only ever written on positive evidence of silence.
@@ -102,13 +118,15 @@ def _quote_term(term: str) -> str:
     return f'"{term}"' if " " in term else term
 
 
-def _base_filter(iso3: str, ym: str, pad_days: int) -> dict:
+def _base_filter(
+    iso3: str, ym: str, pad_days: int, *, country_field: str = "country.iso3"
+) -> dict:
     start, end = month_bounds(ym)
     window_end = end + timedelta(days=pad_days)
     return {
         "operator": "AND",
         "conditions": [
-            {"field": "country.iso3", "value": iso3.upper()},
+            {"field": country_field, "value": iso3.upper()},
             {
                 "field": "date.created",
                 "value": {
@@ -147,6 +165,8 @@ def sweep_country_month(
     pad_days = int(rulebook.get(f"{cfg}.publication_pad_days"))
     max_hits = int(rulebook.get(f"{cfg}.max_hits_for_silence"))
     sample_size = int(rulebook.get(f"{cfg}.sample_size"))
+    keyword_fields = [str(f) for f in rulebook.get(f"{cfg}.keyword_fields")]
+    keyword_country_field = str(rulebook.get(f"{cfg}.keyword_country_field"))
     timeout = float(rulebook.get(f"{cfg}.request_timeout_sec"))
     api_url = str(rulebook.get("reliefweb.api_base_url")).rstrip("/") + "/reports"
 
@@ -161,6 +181,11 @@ def sweep_country_month(
         "silent": False,
         "inconclusive": False,
         "total_hits": 0,
+        # Per-query hits, stated apart. The total alone cannot say whether
+        # the curated taxonomy tag or the keyword search defeated silence,
+        # and those are different claims about the cell.
+        "taxonomy_hits": None,
+        "keyword_hits": None,
         "queries": [],
         "retrieved_at": _utcnow_iso(),
         "error": None,
@@ -214,14 +239,20 @@ def sweep_country_month(
     if taxonomy_hits is None:
         return evidence
     evidence["total_hits"] = taxonomy_hits
+    evidence["taxonomy_hits"] = taxonomy_hits
 
-    # Query 2: keyword sweep (only when taxonomy is silent).
+    # Query 2: keyword sweep (only when taxonomy is silent), scoped to the
+    # fields and the country field the rulebook names — see the module
+    # docstring for what the unscoped version cost.
     if taxonomy_hits <= max_hits:
+        keyword_filter = _base_filter(
+            iso3, ym, pad_days, country_field=keyword_country_field
+        )
         keyword_payload = {
-            "filter": filt,
+            "filter": keyword_filter,
             "query": {
                 "value": " OR ".join(_quote_term(k) for k in keywords),
-                "fields": ["title", "body"],
+                "fields": list(keyword_fields),
                 "operator": "OR",
             },
             "fields": fields,
@@ -231,7 +262,14 @@ def sweep_country_month(
         keyword_hits = _run("keywords", keyword_payload)
         if keyword_hits is None:
             return evidence
+        evidence["keyword_hits"] = keyword_hits
         evidence["total_hits"] += keyword_hits
 
     evidence["silent"] = evidence["total_hits"] <= max_hits
+    LOG.info(
+        "[reliefweb_sweep] %s %s %s: taxonomy=%s keywords=%s total=%d silent=%s",
+        iso3.upper(), ym, hazard_key,
+        evidence["taxonomy_hits"], evidence["keyword_hits"],
+        evidence["total_hits"], evidence["silent"],
+    )
     return evidence

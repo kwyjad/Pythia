@@ -41,6 +41,13 @@ KNOWN_WIND_SOURCES = ("usa_wind", "wmo_wind")
 #: IBTrACS CSV files the connector knows how to fetch.
 KNOWN_IBTRACS_SCOPES = ("last3years", "ALL")
 
+# The ReliefWeb country fields a sweep query may filter on. `country.iso3`
+# matches ANY country tag on a report; `primary_country.iso3` matches only
+# the country the report is about. The keyword query must name one of them
+# explicitly rather than inherit the taxonomy query's — see the Sept 2026
+# entry in reliefweb_sweep.py's docstring for what inheriting cost.
+KNOWN_SWEEP_COUNTRY_FIELDS = ("country.iso3", "primary_country.iso3")
+
 #: File shapes the Dartmouth Flood Observatory archive reader can parse.
 KNOWN_DFO_FORMATS = ("xlsx", "csv")
 
@@ -522,6 +529,13 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
         sweep = f"{hazard_key}.reliefweb_sweep"
         _require_str_list(f"{sweep}.disaster_types")
         _require_str_list(f"{sweep}.keywords")
+        _require_str_list(f"{sweep}.keyword_fields")
+        keyword_country = _get(f"{sweep}.keyword_country_field")
+        if keyword_country not in KNOWN_SWEEP_COUNTRY_FIELDS:
+            problems.append(
+                f"{sweep}.keyword_country_field must be one of "
+                f"{sorted(KNOWN_SWEEP_COUNTRY_FIELDS)}, got {keyword_country!r}"
+            )
         _require_int_in(f"{sweep}.publication_pad_days", 0, 90)
         _require_int_in(f"{sweep}.max_hits_for_silence", 0, 100)
         _require_int_in(f"{sweep}.sample_size", 1, 50)

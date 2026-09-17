@@ -123,17 +123,36 @@ class TestFilenames:
         # A July run interpreted in August must not be filed under August.
         row = {"kind": "combined", "version": 1, "hs_run_id": "hs_20260715T103033",
                "created_at": "2026-08-06 12:00:00", "scored_run_id": None}
-        assert pdf.pdf_filename(row) == "report__2026-07__v1.pdf"
+        assert pdf.pdf_filename(row) == "report__2026-07__hs_20260715T103033__v1.pdf"
 
     def test_malformed_run_id_falls_back_to_creation_month(self):
         row = {"kind": "combined", "version": 1, "hs_run_id": "not-a-run-id",
                "created_at": "2026-08-06 12:00:00", "scored_run_id": None}
-        assert pdf.pdf_filename(row) == "report__2026-08__v1.pdf"
+        assert pdf.pdf_filename(row) == "report__2026-08__not-a-run-id__v1.pdf"
 
     def test_scored_rows_use_the_round_key(self):
-        row = {"kind": "scored", "version": 1,
+        row = {"kind": "scored", "version": 1, "interpretation_id": "int_abc",
                "created_at": "2026-09-02 00:00:00", "scored_run_id": "2026-08"}
-        assert pdf.pdf_filename(row) == "report__2026-08__v1.pdf"
+        assert pdf.pdf_filename(row) == "report__2026-08__int_abc__v1.pdf"
+
+    def test_two_runs_in_one_calendar_month_do_not_share_a_filename(self):
+        # The clobber that destroyed the 1 September 2026 report: the version
+        # resets per run, so month + version alone collide and the publish
+        # step uploads --clobber.
+        first = {"kind": "combined", "version": 1,
+                 "hs_run_id": "hs_20260901T040916", "scored_run_id": None,
+                 "created_at": "2026-09-01 11:27:00"}
+        second = {"kind": "combined", "version": 1,
+                  "hs_run_id": "hs_20260915T130009", "scored_run_id": None,
+                  "created_at": "2026-09-16 17:55:00"}
+        assert pdf.month_label(first) == pdf.month_label(second) == "2026-09"
+        assert pdf.pdf_filename(first) != pdf.pdf_filename(second)
+
+    def test_run_tag_is_filesystem_safe(self):
+        row = {"kind": "combined", "version": 1, "scored_run_id": None,
+               "hs_run_id": "hs/2026 09:01", "created_at": "2026-09-01 00:00:00"}
+        name = pdf.pdf_filename(row)
+        assert "/" not in name and " " not in name and ":" not in name
 
 
 class TestGenerate:

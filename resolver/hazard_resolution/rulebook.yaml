@@ -46,6 +46,15 @@ cyclone:
     # silent) does a full-text keyword search.
     disaster_types: ["Tropical Cyclone"]
     keywords: ["cyclone", "hurricane", "typhoon", "tropical storm"]
+    # The keyword query is scoped where the taxonomy query is not (Sept
+    # 2026). Searching `body` over any `country.iso3` tag made a passing
+    # mention in a regional bulletin a cyclone report for every country the
+    # bulletin was tagged with, and one hit defeats silence — so the sweep
+    # became 95% of all triggers and Afghanistan "had" a cyclone in 305 of
+    # 321 months. A title match on a report whose PRIMARY country is this
+    # one is a signal; a body mention is not.
+    keyword_fields: ["title"]
+    keyword_country_field: "primary_country.iso3"
     # Sweep window: month start .. month end + publication_pad_days
     # (reports about a late-month landfall publish into the next month).
     publication_pad_days: 14
@@ -107,7 +116,11 @@ flood:
     # Silence check for non-triggered flood country-months. Same two-query
     # shape as the cyclone sweep — taxonomy filter, then keywords.
     disaster_types: ["Flood", "Flash Flood"]
-    keywords: ["flood", "flooding", "flash flood", "inundation", "landslide"]
+    # "landslide" left Sept 2026: it is a different hazard, and a landslide
+    # report was defeating flood silence on its own.
+    keywords: ["flood", "flooding", "flash flood", "inundation"]
+    keyword_fields: ["title"]
+    keyword_country_field: "primary_country.iso3"
     publication_pad_days: 14
     max_hits_for_silence: 0
     sample_size: 5

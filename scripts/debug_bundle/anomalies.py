@@ -223,9 +223,28 @@ def build(
                 FAIL if share > 0.10 else WARN,
                 "ensemble",
                 f"{roll['n_cells_missing']} of {roll.get('n_cells_expected')} "
-                f"(question, model, month) forecasts are missing or unusable ({by_model}); "
+                f"(question, model, month) SPD forecasts are missing or unusable "
+                f"({by_model}); "
                 f"{roll.get('n_question_months_short')} question-months were aggregated "
                 "from fewer members than expected",
+                f("model_completeness", "model_completeness.csv"),
+            )
+        )
+
+    # Binary questions are counted apart: they store one pooled forecast per
+    # month, not one per member, so a missing one is a whole forecast lost
+    # rather than a thinner ensemble.
+    binary = (roll.get("binary") or {}) if roll else {}
+    if int(binary.get("n_cells_missing") or 0):
+        b_share = 0.0
+        if binary.get("n_cells_expected"):
+            b_share = binary["n_cells_missing"] / binary["n_cells_expected"]
+        out.append(
+            _entry(
+                FAIL if b_share > 0.10 else WARN,
+                "ensemble",
+                f"{binary['n_cells_missing']} of {binary.get('n_cells_expected')} "
+                "(question, month) BINARY forecasts are missing or unusable",
                 f("model_completeness", "model_completeness.csv"),
             )
         )

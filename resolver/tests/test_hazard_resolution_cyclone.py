@@ -29,7 +29,7 @@ from resolver.hazard_resolution.detect import (
     TRIGGER_SOURCE_NONE,
     TRIGGER_SOURCE_RELIEFWEB,
     detect_cyclone_month,
-    flip_trigger_from_sweep,
+    record_sweep_hit,
     write_triggers,
 )
 from resolver.hazard_resolution.geometry import load_country_geometries
@@ -280,24 +280,33 @@ def test_freeze_is_immutable_and_logs_revisions(con):
 # ---------------------------------------------------------------------------
 
 
-def test_sweep_hits_flip_trigger_for_the_ladder(con, real_geoms):
+def test_sweep_hits_record_evidence_without_asserting_a_detection(con, real_geoms):
+    # Sept 2026: a sweep hit disproves absence and asserts nothing about
+    # whether a cyclone occurred, so the cell must NOT become triggered.
+    # Promotion is what made the sweep 95% of every trigger in the backcast.
     rb = make_rulebook()
     result = detect_cyclone_month(
         con, "2013-01", rb, real_geoms, iso3_filter=["PHL"]
     )
     write_triggers(con, result, rb)
+    con.execute(
+        "UPDATE haz_triggers SET triggered = FALSE, trigger_source = NULL "
+        "WHERE hazard='TC' AND iso3='PHL' AND year=2013 AND month=1"
+    )
     sweep = silent_sweep_evidence("PHL", "2013-01")
     sweep.update({"silent": False, "total_hits": 4})
-    flip_trigger_from_sweep(
+    record_sweep_hit(
         con, hazard="TC", iso3="PHL", ym="2013-01", sweep_evidence=sweep
     )
     row = con.execute(
-        "SELECT triggered, trigger_source, trigger_detail_json FROM haz_triggers "
+        "SELECT triggered, trigger_detail_json, evidence_of_absence_json "
+        "FROM haz_triggers "
         "WHERE hazard='TC' AND iso3='PHL' AND year=2013 AND month=1"
     ).fetchone()
-    assert row[0] is True
-    assert row[1] == TRIGGER_SOURCE_RELIEFWEB
-    assert json.loads(row[2])["reliefweb_sweep"]["total_hits"] == 4
+    assert row[0] is False
+    assert json.loads(row[1])["reliefweb_sweep"]["total_hits"] == 4
+    # Reports found is the opposite of evidence of absence.
+    assert row[2] is None
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +385,7 @@ def test_cli_landfall_and_quiet_month_end_to_end(tmp_path, monkeypatch):
     assert absence["silent"] is True
 
 
-def test_cli_sweep_hits_promote_to_ladder(tmp_path, monkeypatch):
+def test_cli_sweep_hits_leave_the_cell_undecided(tmp_path, monkeypatch):
     db_path, con = _seeded_file_db(tmp_path)
 
     def noisy_sweep(iso3, ym, rulebook, **kw):
@@ -401,11 +410,22 @@ def test_cli_sweep_hits_promote_to_ladder(tmp_path, monkeypatch):
         "SELECT triggered, trigger_source FROM haz_triggers "
         "WHERE hazard='TC' AND iso3='PHL' AND year=2013 AND month=1"
     ).fetchone()
-    assert row == (True, TRIGGER_SOURCE_RELIEFWEB)
-    # Promoted to the ladder — and never a zero. Since Phase 2 the ladder
-    # runs on the promoted cell; with no source seeded and the month long
-    # past its freeze deadline it reports NO_DATA. What must never happen
-    # is a RESOLVED_ZERO: reports exist, so absence is disproven.
+    # Sept 2026: reports found, so no zero — and no detection either. The
+    # cell is left undecided, which is what keeps it out of BOTH sides of
+    # the occurrence rate. Promotion put landlocked Afghanistan's cyclone
+    # rate at 305 of 321 months.
+    assert row[0] is False
+    assert row[1] != TRIGGER_SOURCE_RELIEFWEB
+    detail = json.loads(
+        con.execute(
+            "SELECT trigger_detail_json FROM haz_triggers "
+            "WHERE hazard='TC' AND iso3='PHL' AND year=2013 AND month=1"
+        ).fetchone()[0]
+    )
+    assert detail["reliefweb_sweep"]["total_hits"] == 7
+    assert detail["no_row_reason"] == "sweep_hit_unconfirmed"
+    # What must never happen is a RESOLVED_ZERO: reports exist, so absence
+    # is disproven. And with no detection there is no row at all.
     statuses = [
         r[0]
         for r in con.execute(
@@ -413,8 +433,7 @@ def test_cli_sweep_hits_promote_to_ladder(tmp_path, monkeypatch):
             "WHERE iso3='PHL' AND year=2013 AND month=1"
         ).fetchall()
     ]
-    assert "RESOLVED_ZERO" not in statuses
-    assert statuses == ["NO_DATA"]
+    assert statuses == []
 
 
 def test_cli_coverage_gate_suppresses_zeros(tmp_path, monkeypatch):

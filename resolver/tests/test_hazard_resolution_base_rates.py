@@ -133,6 +133,66 @@ def test_occurrence_is_the_share_of_observed_years_that_triggered(con, rulebook)
     assert row[2] == "2010-01..2026-05"
 
 
+def test_a_sweep_trigger_is_not_a_detection_and_counts_on_neither_side(con, rulebook):
+    """The belt for a database walked before the Sept 2026 sweep fix.
+
+    A row stamped trigger_source='reliefweb_sweep' was promoted because the
+    silence sweep found reports, which disproves absence and says nothing
+    about whether a flood occurred. 62,304 such rows were 95% of every
+    trigger in the backcast, and counting them put 100% occurrence rates in
+    front of the forecaster. The cell is UNDECIDED, so it leaves the
+    numerator and the denominator together.
+    """
+    # Six Septembers: two detector-triggered, two zeroed, two swept.
+    for year in (2018, 2019):
+        seed_trigger(
+            con, iso3="SDN", ym=f"{year}-09", hazard="FL",
+            triggered=True, trigger_source="gdacs",
+        )
+    for year in (2020, 2021):
+        seed_resolution(
+            con, iso3="SDN", ym=f"{year}-09", hazard="FL",
+            status="RESOLVED_ZERO", value=0.0, source="reliefweb_sweep",
+        )
+    for year in (2022, 2023):
+        seed_trigger(
+            con, iso3="SDN", ym=f"{year}-09", hazard="FL",
+            triggered=True, trigger_source="reliefweb_sweep",
+        )
+
+    br.compute_occurrence(con, rulebook, hazards=["FL"], today=TODAY)
+
+    row = con.execute(
+        """
+        SELECT p_occurrence, n_years FROM haz_base_rates_occurrence
+        WHERE iso3 = 'SDN' AND hazard = 'FL' AND calendar_month = 9
+        """
+    ).fetchone()
+    assert row is not None
+    # Four observed years, two of them detected. Counting the swept pair
+    # would give 4/6; counting them in the numerator alone would give 4/4.
+    assert row[1] == 4
+    assert row[0] == pytest.approx(2 / 4)
+
+
+def test_a_cell_whose_only_years_were_swept_publishes_no_rate(con, rulebook):
+    # Sparse and honest beats dense and wrong: with nothing observed the
+    # rate is withheld rather than published as 100%.
+    for year in range(2018, 2024):
+        seed_trigger(
+            con, iso3="AFG", ym=f"{year}-09", hazard="FL",
+            triggered=True, trigger_source="reliefweb_sweep",
+        )
+
+    br.compute_occurrence(con, rulebook, hazards=["FL"], today=TODAY)
+
+    row = con.execute(
+        "SELECT COUNT(*) FROM haz_base_rates_occurrence "
+        "WHERE iso3 = 'AFG' AND hazard = 'FL' AND calendar_month = 9"
+    ).fetchone()
+    assert row[0] == 0
+
+
 def test_occurrence_denominator_excludes_years_never_assessed(con, rulebook):
     """A year with no trigger row was never looked at and must not count.
 
