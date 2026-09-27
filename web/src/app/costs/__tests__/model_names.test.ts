@@ -32,6 +32,8 @@ describe("formatModelName", () => {
   });
 
   it("prettifies the current lineup", () => {
+    expect(formatModelName("gpt-6-sol")).toBe("GPT-6 Sol");
+    expect(formatModelName("gpt-6-luna")).toBe("GPT-6 Luna");
     expect(formatModelName("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
     expect(formatModelName("gpt-5.6-luna")).toBe("GPT-5.6 Luna");
     expect(formatModelName("claude-opus-5-5")).toBe("Claude Opus 5.5");

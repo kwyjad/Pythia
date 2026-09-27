@@ -244,7 +244,8 @@ jobs:
             pythia/tests/test_model_registry.py \
             forecaster/tests/test_providers.py \
             forecaster/tests/test_spd_model_params.py \
-            forecaster/tests/test_opus55_lineup.py
+            forecaster/tests/test_opus55_lineup.py \
+            forecaster/tests/test_gpt6_lineup.py
 
       - name: Run AI analysis bundle + sent-prompt logging tests
         run: |

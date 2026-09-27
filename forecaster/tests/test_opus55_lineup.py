@@ -3,7 +3,7 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""The Claude Opus 5 -> 5.5 swap, and the September 2026 OpenAI price changes.
+"""The Claude Opus 5 -> 5.5 swap. The GPT-6 swap is in test_gpt6_lineup.py.
 
 Three things changed together and each has a quiet failure mode:
 
@@ -116,10 +116,6 @@ def test_sibyl_sends_high_effort_on_every_step(monkeypatch: pytest.MonkeyPatch) 
         # platform.claude.com pricing page, read 2026-09-27.
         ("claude-opus-5-5", {"input": 4.0, "output": 20.0, "cached_input": 0.20,
                              "cache_write_5m": 5.0, "cache_write_1h": 8.0}),
-        # Promotional from 2026-08-21 through at least 2026-11-21; list is $5/$30.
-        ("gpt-5.6-sol", {"input": 4.0, "output": 20.0, "cached_input": 0.40}),
-        # Cut 80% on 2026-07-30 from $1/$6.
-        ("gpt-5.6-luna", {"input": 0.20, "output": 1.20, "cached_input": 0.02}),
     ],
 )
 def test_current_prices(model_id: str, rates: dict) -> None:
