@@ -16,7 +16,7 @@ step's prompt carries only the question, the outside-view anchor, the
 current belief state, and the LAST tool result. The belief state is the
 running memory.
 
-Trial diversity: ``claude-opus-5`` rejects sampling parameters
+Trial diversity: ``claude-opus-5-5`` rejects sampling parameters
 (temperature returns HTTP 400), so the K trials are differentiated by
 explicit perspective seeds in the prompt rather than temperature.
 """
@@ -39,6 +39,7 @@ from sibyl.belief_state import (
 )
 from sibyl.config import (
     ANTHROPIC_MAX_ATTEMPTS,
+    EFFORT,
     MAX_STEPS,
     MODEL,
     QUANTILE_LEVELS,
@@ -377,7 +378,12 @@ def _call_model(
     from forecaster.providers import call_anthropic, estimate_cost_usd  # noqa: PLC0415
 
     result = call_anthropic(
-        prompt, MODEL, 1.0, purpose="sibyl_step", cache_segments=cache_segments
+        prompt,
+        MODEL,
+        1.0,
+        purpose="sibyl_step",
+        cache_segments=cache_segments,
+        thinking_level=EFFORT if EFFORT not in ("", "off", "none") else None,
     )
     usage = dict(result.usage or {})
     if not usage.get("cost_usd"):

@@ -571,6 +571,9 @@ _ANTHROPIC_NO_TEMPERATURE_PREFIXES = (
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-opus-5",
+    # Opus 5.5 is also caught by the "claude-opus-5" prefix above, but by
+    # accident of spelling; it is listed so the next bump reads as deliberate.
+    "claude-opus-5-5",
     "claude-sonnet-5",
     "claude-fable",
 )
@@ -583,8 +586,13 @@ _ANTHROPIC_NO_TEMPERATURE_PREFIXES = (
 # safe no-op (the level is silently not sent), a wrong entry is a 400 on
 # every call, so only generations verified to take ``effort`` are listed.
 # Accepted levels: low | medium | high | xhigh | max ("high" is the model
-# default). ModelSpec.thinking values pass through verbatim.
+# default on Opus 5 — but MEDIUM on Opus 5.5, so a caller wanting Opus 5's
+# depth must send "high" explicitly). ModelSpec.thinking values pass through
+# verbatim. Opus 5.5 cannot switch thinking off at all: ``{"type": "disabled"}``
+# is a 400 at every effort level, so effort is its only depth control and
+# this module never sends a ``thinking`` field.
 _ANTHROPIC_EFFORT_PREFIXES = (
+    "claude-opus-5-5",
     "claude-opus-5",
     "claude-sonnet-5",
     "claude-fable",
@@ -1100,8 +1108,9 @@ def _prompt_cache_enabled() -> bool:
 # error, just cache_creation_input_tokens: 0), so a marker below the minimum
 # is dead weight rather than a cost — but refusing to mark a span that WOULD
 # have cached is lost money, which is what a single conservative constant was
-# doing: it was set for a 1024-token minimum while claude-opus-5 (the only
-# Anthropic model on the forecast path) caches from 512, so every binary_v2
+# doing: it was set for a 1024-token minimum while claude-opus-5 (then the
+# only Anthropic model on the forecast path; claude-opus-5-5 since Sept 2026)
+# caches from 512, so every binary_v2
 # prefix (~760 tokens) was silently left unmarked.
 #
 # The minimum is per-model and NOT monotonic across generations — 512 on the
@@ -1111,6 +1120,7 @@ def _prompt_cache_enabled() -> bool:
 # Anthropic model matching nothing falls back to the most conservative value,
 # which caches less but never mis-marks.
 _ANTHROPIC_CACHE_MIN_TOKENS: tuple[tuple[str, int], ...] = (
+    ("claude-opus-5-5", 512),
     ("claude-opus-5", 512),
     ("claude-fable-5", 512),
     ("claude-mythos-5", 512),

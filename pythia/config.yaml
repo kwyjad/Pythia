@@ -76,7 +76,7 @@ llm:
   models:
     gpt:          openai:gpt-5.6-sol              # OpenAI frontier
     gpt_mini:     openai:gpt-5.6-luna             # OpenAI small
-    claude:       anthropic:claude-opus-5         # Anthropic frontier (ensemble + Sibyl)
+    claude:       anthropic:claude-opus-5-5       # Anthropic frontier (ensemble + interpreter; Sibyl pins its own default)
     gemini_pro:   google:gemini-3.1-pro-preview   # Google frontier
     gemini_flash: google:gemini-3.5-flash         # Google fast (thinking) — HS triage/RC, Track 2, scenarios
     gemini_lite:  google:gemini-2.5-flash         # Google cheap tier (grounding/scraping fallbacks)
@@ -99,15 +99,18 @@ llm:
         - model: gpt
           thinking: high            # maps to reasoning_effort=high
 
-        # Claude Opus: rejects sampling params (the provider adapter drops
-        # temperature for the opus-4-7+/opus-5/sonnet-5+/fable family). Left
-        # with no thinking key on purpose — Opus 5 runs adaptive thinking by
-        # default. (An Anthropic thinking knob IS wired since Aug 2026 —
-        # ModelSpec.thinking -> output_config.effort for effort-capable
-        # models — but the SPD member deliberately stays on the default.)
-        # Thinking shares the max_tokens budget, hence the raised SPD ceiling
-        # in providers.py (_ANTHROPIC_SPD_MAX_OUTPUT_DEFAULT).
+        # Claude Opus 5.5: rejects sampling params (the provider adapter drops
+        # temperature for the opus-4-7+/opus-5/sonnet-5+/fable family) and
+        # cannot turn thinking off, so effort is its only depth control.
+        # `thinking: high` is explicit because Opus 5.5's DEFAULT effort is
+        # medium, one level below Opus 5's high: leaving the key out (as the
+        # Opus 5 member did) would quietly make the swap a downgrade. It maps
+        # to output_config.effort and reaches batch bodies through the same
+        # resolve_request_params seam as sync calls. Thinking shares the
+        # max_tokens budget, hence the raised SPD ceiling in providers.py
+        # (_ANTHROPIC_SPD_MAX_OUTPUT_DEFAULT).
         - model: claude
+          thinking: high            # maps to output_config.effort=high
 
         # Gemini Pro: thinking model — medium thinking for analytical depth
         # without paying for the "high" tier on every SPD call.
@@ -155,7 +158,7 @@ llm:
         # One Opus-class call per cycle; PYTHIA_INTERPRETER_MODEL_ID
         # overrides. The call site requests explicit thinking depth via
         # output_config.effort (PYTHIA_INTERPRETER_THINKING, default high)
-        # and never sends temperature (the opus-5 prefix guard drops it).
+        # and never sends temperature (the opus-5-5 prefix guard drops it).
         interpreter:      claude
 
 forecaster:

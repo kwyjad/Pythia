@@ -34,6 +34,7 @@ describe("formatModelName", () => {
   it("prettifies the current lineup", () => {
     expect(formatModelName("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
     expect(formatModelName("gpt-5.6-luna")).toBe("GPT-5.6 Luna");
+    expect(formatModelName("claude-opus-5-5")).toBe("Claude Opus 5.5");
     expect(formatModelName("claude-opus-5")).toBe("Claude Opus 5");
     expect(formatModelName("gemini-3.1-pro-preview")).toBe("Gemini 3.1 Pro");
     expect(formatModelName("gemini-3.5-flash")).toBe("Gemini 3.5 Flash");

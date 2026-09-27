@@ -30,6 +30,9 @@ on:
       - "scripts/ai_bundle/**"
       - "pythia/llm_batch.py"
       - "pythia/model_costs.json"
+      # test_opus55_lineup.py pins Sibyl's model and effort defaults.
+      - "sibyl/config.py"
+      - "sibyl/agent.py"
       - "pythia/tests/**"
       - "pythia/buckets.py"
       - "pythia/api/app.py"
@@ -240,7 +243,8 @@ jobs:
           pytest -vv \
             pythia/tests/test_model_registry.py \
             forecaster/tests/test_providers.py \
-            forecaster/tests/test_spd_model_params.py
+            forecaster/tests/test_spd_model_params.py \
+            forecaster/tests/test_opus55_lineup.py
 
       - name: Run AI analysis bundle + sent-prompt logging tests
         run: |

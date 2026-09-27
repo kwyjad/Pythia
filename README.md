@@ -215,7 +215,7 @@ llm:
   models:                # THE single place to swap a model family
     gpt:          openai:gpt-5.6-sol
     gpt_mini:     openai:gpt-5.6-luna
-    claude:       anthropic:claude-opus-5
+    claude:       anthropic:claude-opus-5-5
     gemini_pro:   google:gemini-3.1-pro-preview
     gemini_flash: google:gemini-3.5-flash
     gemini_lite:  google:gemini-2.5-flash

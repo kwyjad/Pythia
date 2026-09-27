@@ -32,7 +32,7 @@ Phase 1 (pythia/tools/):        base_rate_spd -> compute_deviation (forecast_dev
 Phase 2 (scripts/ai_bundle/):   build_current_run_bundle (attention index, deltas,
                                 blind spots, question records, 250k-token cap)
                                 + skill columns in the scored bundle
-Phase 3 (interpreter/):         pack -> Opus 5 (role: interpreter, effort=high)
+Phase 3 (interpreter/):         pack -> Opus 5.5 (role: interpreter, effort=high)
                                 -> JSON (schema-validated) -> markdown -> interpretations
 Phase 6 (interpreter/pdf.py):   interpretations row -> HTML -> WeasyPrint
                                 -> report__{YYYY-MM}__{run}__v{n}.pdf + latest copy
@@ -95,18 +95,20 @@ interpreter/
 
 ## Model configuration
 
-- Role `interpreter` → the `claude` alias (claude-opus-5) in
+- Role `interpreter` → the `claude` alias (claude-opus-5-5) in
   `pythia/config.yaml`; `PYTHIA_INTERPRETER_MODEL_ID` overrides.
 - Thinking is requested explicitly via `ModelSpec.thinking` →
   `output_config: {effort: ...}` (wired in `forecaster/providers.py`, gated
-  by `_ANTHROPIC_EFFORT_PREFIXES`; default level `high`,
+  by `_ANTHROPIC_EFFORT_PREFIXES`; default level `high`, which matters on
+  Opus 5.5 because the model's own default is `medium`,
   `PYTHIA_INTERPRETER_THINKING` overrides — thinking shares `max_tokens`,
   which is why the call runs at the 32k SPD-class ceiling).
-- Temperature is never set (the opus-5 prefix guard would drop it anyway).
+- Temperature is never set (the opus-5-5 prefix guard would drop it anyway).
 - Every call writes a rich `llm_calls` row with `phase='interpreter'`
   (`call_type='interpreter_<kind>'`), mapped to the `interpreter` bucket in
   `resolver/query/costs.py` and the Costs page. One call ≈ 250k in / ~20k
-  out ≈ $2 at Opus 5 rates.
+  out ≈ $1.40 at Opus 5.5 rates ($4 / $20 per MTok; it was ≈ $1.75 at Opus 5's
+  $5 / $25).
 - No prompt caching (one call, no reuse), no batching (the report must be
   timely).
 

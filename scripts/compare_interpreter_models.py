@@ -8,7 +8,7 @@
     python -m scripts.compare_interpreter_models \
         --db "$PYTHIA_DB_URL" \
         --pack ai_bundle/current_run_analysis__2026-08.zip \
-        --models anthropic:claude-opus-5 anthropic:claude-sonnet-5 \
+        --models anthropic:claude-opus-5-5 anthropic:claude-sonnet-5 \
         --out-dir interpreter_compare
 
 Two decisions are pending on the interpreter's model: whether Opus earns its
@@ -41,7 +41,7 @@ from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_MODELS = ("anthropic:claude-opus-5", "anthropic:claude-sonnet-5")
+DEFAULT_MODELS = ("anthropic:claude-opus-5-5", "anthropic:claude-sonnet-5")
 
 
 def _slug(model_ref: str) -> str:
