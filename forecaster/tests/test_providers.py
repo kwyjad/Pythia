@@ -341,7 +341,7 @@ def test_current_lineup_models_are_priced() -> None:
     """A missing cost entry silently logs $0 and breaks Sibyl's budget cap."""
     from forecaster import providers
 
-    for model_id in ("gpt-5.6-sol", "gpt-5.6-luna", "claude-opus-5"):
+    for model_id in ("gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-luna", "claude-opus-5-5", "claude-opus-5"):
         assert providers.resolve_price_per_1m(model_id) is not None, model_id
 
 

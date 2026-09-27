@@ -46,10 +46,18 @@ def _env_str(name: str, default: str) -> str:
 # Opus-tier deep-research model. This default is INDEPENDENT of the `claude`
 # registry alias in pythia/config.yaml — swapping the ensemble's Anthropic
 # member does not move Sibyl, so both must be edited together.
-# NOTE: claude-opus-5 rejects sampling params (temperature/top_p/top_k ->
+# NOTE: claude-opus-5-5 rejects sampling params (temperature/top_p/top_k ->
 # HTTP 400, see _ANTHROPIC_NO_TEMPERATURE_PREFIXES); trial diversity comes from
 # per-trial perspective seeds in the prompt, not temperature.
-MODEL = _env_str("SIBYL_MODEL", "claude-opus-5")
+MODEL = _env_str("SIBYL_MODEL", "claude-opus-5-5")
+
+# Thinking depth sent as output_config.effort on every step. Explicit because
+# Opus 5.5 defaults to "medium" where Opus 5 defaulted to "high": a step that
+# sent nothing would think less after the swap, and nothing would say so.
+# Opus 5.5 cannot disable thinking at all, so effort is the only lever. It is
+# emitted only for models in providers._ANTHROPIC_EFFORT_PREFIXES; "off" or ""
+# sends nothing and leaves the model's own default in force.
+EFFORT = _env_str("SIBYL_EFFORT", "high").strip().lower()
 
 # Stable model_name under which Sibyl SPDs are written to forecasts_raw /
 # forecasts_ensemble (and therefore scored). Analogous to `track2_flash`:

@@ -280,7 +280,7 @@ _forecaster_cfg = _cfg.get("forecaster", {}) if isinstance(_cfg, dict) else {}
 def _provider_display_name(provider: str, model_id: str, cfg: Dict[str, Any] | None = None) -> str:
     """Return the display name stored as ``model_name`` in forecasts_raw / scores / llm_calls.
 
-    Uses the specific model id (e.g. ``gemini-3.5-flash``, ``gpt-5.6-sol``) so
+    Uses the specific model id (e.g. ``gemini-3.5-flash``, ``gpt-6-sol``) so
     dashboards, downloads, and calibration weights always reference a clear,
     unambiguous model — never a generic family label like "Gemini" or
     "Gemini Flash". An explicit ``display_name`` in config still wins.
@@ -549,11 +549,12 @@ _GEMINI_API_KEY = _GEMINI_STATE.get("api_key", "")
 _OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
 
 # OpenAI models that reject a custom temperature (HTTP 400 if sent): the
-# GPT-5 reasoning family (gpt-5, gpt-5.4, gpt-5.6-sol, gpt-5.6-luna, ...).
-# Prefix-matched so a lineup bump (e.g. gpt-5.5) can't silently reintroduce
-# temperature on a path that doesn't set reasoning_effort (the hs_fallback
-# JSON-repair spec carries no thinking value).
-_OPENAI_NO_TEMPERATURE_PREFIXES = ("gpt-5",)
+# GPT-5 and GPT-6 reasoning families (gpt-5.4, gpt-5.6-sol, gpt-6-sol,
+# gpt-6-luna, ...). GPT-6 accepts temperature only with reasoning_effort
+# "none", and its default effort is medium, so a call that sends neither would
+# 400. Prefix-matched within a family, but "gpt-5" does not cover "gpt-6":
+# every new major version needs its own entry here.
+_OPENAI_NO_TEMPERATURE_PREFIXES = ("gpt-5", "gpt-6")
 
 
 def _openai_drops_temperature(model: str) -> bool:
@@ -571,6 +572,9 @@ _ANTHROPIC_NO_TEMPERATURE_PREFIXES = (
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-opus-5",
+    # Opus 5.5 is also caught by the "claude-opus-5" prefix above, but by
+    # accident of spelling; it is listed so the next bump reads as deliberate.
+    "claude-opus-5-5",
     "claude-sonnet-5",
     "claude-fable",
 )
@@ -583,8 +587,13 @@ _ANTHROPIC_NO_TEMPERATURE_PREFIXES = (
 # safe no-op (the level is silently not sent), a wrong entry is a 400 on
 # every call, so only generations verified to take ``effort`` are listed.
 # Accepted levels: low | medium | high | xhigh | max ("high" is the model
-# default). ModelSpec.thinking values pass through verbatim.
+# default on Opus 5 — but MEDIUM on Opus 5.5, so a caller wanting Opus 5's
+# depth must send "high" explicitly). ModelSpec.thinking values pass through
+# verbatim. Opus 5.5 cannot switch thinking off at all: ``{"type": "disabled"}``
+# is a 400 at every effort level, so effort is its only depth control and
+# this module never sends a ``thinking`` field.
 _ANTHROPIC_EFFORT_PREFIXES = (
+    "claude-opus-5-5",
     "claude-opus-5",
     "claude-sonnet-5",
     "claude-fable",
@@ -803,7 +812,7 @@ def resolve_price_per_1m(model_id: str) -> Optional[tuple[float, float]]:
 # Provider-default cache pricing multipliers (fraction of the input rate),
 # used when model_costs.json has no explicit cached-rate fields. Verified
 # against provider pricing pages 2026-07: Anthropic cache reads 0.1x, 5-min
-# cache writes 1.25x, 1h writes 2x; OpenAI gpt-5-family cached input 0.1x
+# cache writes 1.25x, 1h writes 2x; OpenAI gpt-5/gpt-6 cached input 0.1x
 # (no write premium — caching is automatic); Gemini implicit cached tokens
 # 0.25x (no write premium).
 _CACHE_RATE_DEFAULTS = (
@@ -1100,8 +1109,9 @@ def _prompt_cache_enabled() -> bool:
 # error, just cache_creation_input_tokens: 0), so a marker below the minimum
 # is dead weight rather than a cost — but refusing to mark a span that WOULD
 # have cached is lost money, which is what a single conservative constant was
-# doing: it was set for a 1024-token minimum while claude-opus-5 (the only
-# Anthropic model on the forecast path) caches from 512, so every binary_v2
+# doing: it was set for a 1024-token minimum while claude-opus-5 (then the
+# only Anthropic model on the forecast path; claude-opus-5-5 since Sept 2026)
+# caches from 512, so every binary_v2
 # prefix (~760 tokens) was silently left unmarked.
 #
 # The minimum is per-model and NOT monotonic across generations — 512 on the
@@ -1111,6 +1121,7 @@ def _prompt_cache_enabled() -> bool:
 # Anthropic model matching nothing falls back to the most conservative value,
 # which caches less but never mis-marks.
 _ANTHROPIC_CACHE_MIN_TOKENS: tuple[tuple[str, int], ...] = (
+    ("claude-opus-5-5", 512),
     ("claude-opus-5", 512),
     ("claude-fable-5", 512),
     ("claude-mythos-5", 512),

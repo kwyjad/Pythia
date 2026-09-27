@@ -15,6 +15,14 @@ from openai import OpenAI
 
 from pythia.web_research.types import EvidencePack, EvidenceSource
 
+# OpenAI reasoning families, matched by literal id prefix like the provider
+# adapter's temperature guard: every new major version needs its own entry.
+_REASONING_MODEL_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    return (model or "").lower().startswith(_REASONING_MODEL_PREFIXES)
+
 
 def _response_to_dict(resp: Any) -> Dict[str, Any]:
     if isinstance(resp, dict):
@@ -151,13 +159,20 @@ def fetch_via_openai_web_search(
 
     def _create(model: str) -> tuple[Dict[str, Any], int]:
         start = time.time()
+        extra: Dict[str, Any] = {"max_output_tokens": 800}
+        if _is_reasoning_model(model):
+            # A reasoning model spends output tokens on thinking before it
+            # answers: at the 800 that suited gpt-4.1, GPT-6's default medium
+            # effort can use the whole budget and return no answer. Low effort
+            # is enough to pick sources; the ceiling leaves room for both.
+            extra = {"max_output_tokens": 4000, "reasoning": {"effort": "low"}}
         resp = client.responses.create(
             model=model,
             input=prompt,
             tools=[{"type": "web_search"}],
             tool_choice="required",
-            max_output_tokens=800,
             include=["web_search_call.action.sources"],
+            **extra,
         )
         elapsed_ms = int((time.time() - start) * 1000)
         return _response_to_dict(resp), elapsed_ms

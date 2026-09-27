@@ -3,7 +3,7 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""Interpreter runner: pack -> Opus 5 -> validated JSON -> markdown -> DB.
+"""Interpreter runner: pack -> Opus 5.5 -> validated JSON -> markdown -> DB.
 
 Usage:
     python -m interpreter.run \
@@ -70,7 +70,7 @@ def _call_model(prompt: str, model_ref: str) -> tuple[str, dict, str]:
     _log_llm_call instead; the generic row would double-count the spend).
     Thinking depth is requested via ModelSpec.thinking -> output_config.effort
     (emitted only for effort-capable models); temperature is never set at
-    this call site (the opus-5 prefix guard would drop it anyway).
+    this call site (the opus-5-5 prefix guard would drop it anyway).
     """
     import asyncio
 

@@ -5,7 +5,7 @@
 
 """Interpreter: one plain-language report per cycle, explaining Fred's output.
 
-The model (Claude Opus 5, role ``interpreter``) explains; it never
+The model (Claude Opus 5.5, role ``interpreter``) explains; it never
 calculates. All arithmetic arrives pre-computed in the input pack (the
 Phase 1 deviation metrics and Phase 2 bundles); the model emits structured
 JSON whose prose carries ``{{fig:...}}`` placeholders that the renderer

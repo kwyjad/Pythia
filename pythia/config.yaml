@@ -74,9 +74,9 @@ llm:
   # pythia/tests/test_model_registry.py enforces registry <-> cost-table sync.
   # ==========================================================================
   models:
-    gpt:          openai:gpt-5.6-sol              # OpenAI frontier
-    gpt_mini:     openai:gpt-5.6-luna             # OpenAI small
-    claude:       anthropic:claude-opus-5         # Anthropic frontier (ensemble + Sibyl)
+    gpt:          openai:gpt-6-sol                # OpenAI frontier
+    gpt_mini:     openai:gpt-6-luna               # OpenAI small
+    claude:       anthropic:claude-opus-5-5       # Anthropic frontier (ensemble + interpreter; Sibyl pins its own default)
     gemini_pro:   google:gemini-3.1-pro-preview   # Google frontier
     gemini_flash: google:gemini-3.5-flash         # Google fast (thinking) — HS triage/RC, Track 2, scenarios
     gemini_lite:  google:gemini-2.5-flash         # Google cheap tier (grounding/scraping fallbacks)
@@ -92,22 +92,26 @@ llm:
       # carry per-model params. Legacy formats ("provider:model_id" strings or
       # {provider, model_id} dicts) still work.
       ensemble:
-        # GPT (Sol): reasoning model — temperature not supported (API rejects it).
-        # `high` is the frontier member's reasoning depth. GPT-5.6 also offers
-        # `xhigh`, which is aimed at agentic/coding loops; a single-shot SPD call
-        # is not one, so `high` stays the sweet spot.
+        # GPT-6 Sol: reasoning model — temperature is accepted only with
+        # reasoning_effort "none", so the provider adapter drops it. Its default
+        # effort is medium, which is why `high` is pinned here rather than left
+        # to the default. GPT-6 also offers `xhigh` and `max`, aimed at
+        # agentic/coding loops; a single-shot SPD call is not one.
         - model: gpt
           thinking: high            # maps to reasoning_effort=high
 
-        # Claude Opus: rejects sampling params (the provider adapter drops
-        # temperature for the opus-4-7+/opus-5/sonnet-5+/fable family). Left
-        # with no thinking key on purpose — Opus 5 runs adaptive thinking by
-        # default. (An Anthropic thinking knob IS wired since Aug 2026 —
-        # ModelSpec.thinking -> output_config.effort for effort-capable
-        # models — but the SPD member deliberately stays on the default.)
-        # Thinking shares the max_tokens budget, hence the raised SPD ceiling
-        # in providers.py (_ANTHROPIC_SPD_MAX_OUTPUT_DEFAULT).
+        # Claude Opus 5.5: rejects sampling params (the provider adapter drops
+        # temperature for the opus-4-7+/opus-5/sonnet-5+/fable family) and
+        # cannot turn thinking off, so effort is its only depth control.
+        # `thinking: high` is explicit because Opus 5.5's DEFAULT effort is
+        # medium, one level below Opus 5's high: leaving the key out (as the
+        # Opus 5 member did) would quietly make the swap a downgrade. It maps
+        # to output_config.effort and reaches batch bodies through the same
+        # resolve_request_params seam as sync calls. Thinking shares the
+        # max_tokens budget, hence the raised SPD ceiling in providers.py
+        # (_ANTHROPIC_SPD_MAX_OUTPUT_DEFAULT).
         - model: claude
+          thinking: high            # maps to output_config.effort=high
 
         # Gemini Pro: thinking model — medium thinking for analytical depth
         # without paying for the "high" tier on every SPD call.
@@ -121,8 +125,9 @@ llm:
           temperature: 0.2
           thinking: low
 
-        # GPT mini (Luna): smaller reasoning model — medium effort is the sweet
-        # spot (low degrades SPD quality; high costs nearly as much as full GPT).
+        # GPT-6 Luna: smaller reasoning model — medium effort, stated
+        # explicitly although it is GPT-6's default, so a later default change
+        # cannot move it silently.
         - model: gpt_mini
           thinking: medium           # maps to reasoning_effort=medium
 
@@ -141,8 +146,8 @@ llm:
         scenario_writer:  gemini_flash  # PYTHIA_SCENARIO_MODEL_ID overrides
         # --- Grounding / scraping fallbacks ---
         grounding_gemini: gemini_lite   # Gemini grounding backend (PYTHIA_GROUNDING_MODEL_ID overrides)
-        grounding_openai: openai:gpt-4.1  # OpenAI web search backend (PYTHIA_WEB_RESEARCH_MODEL_ID overrides)
-        grounding_openai_fallback: openai:gpt-4.1-mini  # retry model when the primary web-search call fails
+        grounding_openai: gpt           # OpenAI web search backend, sent at low effort (PYTHIA_WEB_RESEARCH_MODEL_ID overrides)
+        grounding_openai_fallback: gpt_mini  # retry model when the primary web-search call fails
         grounding_claude: anthropic:claude-haiku-4-5-20251001  # Claude web search backend — cheap tier; Opus is reserved for forecasts
         crisiswatch:      gemini_lite   # CrisisWatch Gemini grounding fallback
         # --- Resolver: hazard-resolution machine ---
@@ -155,7 +160,7 @@ llm:
         # One Opus-class call per cycle; PYTHIA_INTERPRETER_MODEL_ID
         # overrides. The call site requests explicit thinking depth via
         # output_config.effort (PYTHIA_INTERPRETER_THINKING, default high)
-        # and never sends temperature (the opus-5 prefix guard drops it).
+        # and never sends temperature (the opus-5-5 prefix guard drops it).
         interpreter:      claude
 
 forecaster:

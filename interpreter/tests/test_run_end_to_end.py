@@ -196,7 +196,7 @@ class TestRunner:
         # ...and the performance figure from the SCORED interpretation's
         # stored figure map (the scored pack is not loaded here).
         assert "+50%" in combined_md
-        assert rows[1][5] == "claude-opus-5"
+        assert rows[1][5] == "claude-opus-5-5"
         assert rows[1][6] == "high"
 
     def test_combined_without_scored_says_so(self, tmp_path, current_bundle, mock_model):
