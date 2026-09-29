@@ -902,6 +902,26 @@ def tier_from_score(score: float) -> str:
     return "quiet"
 
 
+RC_PROMOTED_TIER = "rc_promoted"
+
+
+def _stored_tier(hdata: dict, data_quality: dict, score: float) -> str:
+    """The tier written to ``hs_triage``.
+
+    A hazard promoted to Track 1 by its RC level is never triaged, so its
+    ``triage_score`` of 0.0 is a placeholder (the column is NOT NULL), not a
+    reading. Deriving the tier from that placeholder wrote "quiet" on every
+    such row, and the scored bundle then described 105 Track-1 questions as
+    quiet hazards. The tier says what happened instead.
+    """
+    status = ""
+    if isinstance(data_quality, dict):
+        status = str(data_quality.get("status") or "")
+    if (hdata or {}).get("tier") == RC_PROMOTED_TIER or status == RC_PROMOTED_TIER:
+        return RC_PROMOTED_TIER
+    return tier_from_score(score)
+
+
 def _is_missing_regime_change_column_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return "regime_change" in message and (
@@ -1017,7 +1037,7 @@ def _write_hs_triage(run_id: str, iso3: str, triage: Dict[str, Any], error_text:
                 scenario_stub = hdata.get("scenario_stub") or ""
                 regime_change = coerce_regime_change(hdata.get("regime_change"))
 
-            tier = tier_from_score(score)
+            tier = _stored_tier(hdata, data_quality, score)
             regime_change_score = compute_score(
                 regime_change.get("likelihood"), regime_change.get("magnitude")
             )

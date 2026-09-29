@@ -81,6 +81,19 @@ llm:
     gemini_flash: google:gemini-3.5-flash         # Google fast (thinking) — HS triage/RC, Track 2, scenarios
     gemini_lite:  google:gemini-2.5-flash         # Google cheap tier (grounding/scraping fallbacks)
 
+  # MODEL FAMILIES — one line of models across versions, OLDEST FIRST.
+  # When a family's newest version replaces an older one, calibration
+  # carries the older version's Brier record forward as a prior for the new
+  # version (worth CALIBRATION_FAMILY_PRIOR_QUESTIONS questions, shrinking
+  # as the new version builds its own record), and drops retired versions
+  # from the weight softmax. Append the new id here on every swap.
+  model_families:
+    gpt:          [gpt-5.4, gpt-5.6-sol, gpt-6-sol]
+    gpt_mini:     [gpt-5.4-mini, gpt-5.6-luna, gpt-6-luna]
+    claude:       [claude-opus-4-8, claude-opus-5, claude-opus-5-5]
+    gemini_pro:   [gemini-3-pro-preview, gemini-3.1-pro-preview]
+    gemini_flash: [gemini-3-flash-preview, gemini-3.5-flash]
+
   # Active profile: "prod" (frontier).
   # Override via PYTHIA_LLM_PROFILE env var.
   profile: "prod"

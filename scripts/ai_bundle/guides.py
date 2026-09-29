@@ -185,6 +185,21 @@ when the resolved value lies within 5% of a bucket boundary
 (`nearest_boundary`). A small data revision would move that outcome to the
 neighbouring bucket; weigh such "misses" accordingly.
 
+**Reference vectors.** `forecast_vs_outcome.csv` also carries rows for the
+`__ext_` reference forecasters, with the exact vector each one was scored
+on (from `baseline_scored_forecasts`), and every row carries its full
+`probs` vector as JSON. For a binary question the vector is
+`[P(yes), P(no)]`.
+
+**Cost.** `rollups.csv` carries `cost_per_question_usd`: for a member, its
+mean forecast-phase spend per question; for an aggregate row, the mean
+total spend of the questions it covered. Reference forecasters cost
+nothing and carry no figure.
+
+**Coverage.** The manifest's `resolved_questions` counts resolved questions
+by horizon and by calendar month, so a mean over "all scored questions" can
+be read against how many months it actually rests on.
+
 Skill, wherever you compute it:
 
     skill = 1 − (model_score / climatology_score)
@@ -528,13 +543,35 @@ _QUESTION_RECORD_SCHEMA = """\
 - `regime_change`: HS RC output — score/level/direction/window plus
   `rationale_bullets` and `trigger_signals` from the RC LLM.
 - `triage`: tier, triage_score, need_full_spd, drivers, data_quality.
+  An RC-promoted hazard (RC level 1+) skipped triage: `tier` reads
+  `rc_promoted`, `triage_score` is null and `triage_skipped` is true. Rows
+  stored before Oct 2026 said `quiet` / 0.0 for these; the bundle corrects
+  them from `data_quality.status`.
 - `grounding`: the FULL web-grounding evidence packs (rc + triage) the HS
   stage collected for this country-hazard: report markdown, source URLs,
   recent signals. This evidence also reached the SPD prompt.
 - `adversarial`: counter-evidence check (RC L1+ only): net_assessment,
   summary, structured payload, sources.
 - `spd_prompt`: the exact prompt sent to the ensemble (stored once).
-  `spd_prompt_source` names the llm_calls row family it came from.
+  `spd_prompt_source` names the llm_calls row family it came from. When it
+  is null, `spd_prompt_missing_reason` says why (no call logged, or calls
+  logged with an empty prompt); `questions_index.csv` flags it as
+  `spd_prompt_missing`.
+- `inject_status`: what the prompt was built on, recovered from the DB:
+  the ENSO record current on the run date (phase, ONI, `observation_date`),
+  the GDACS history window and event count (FL/DR/TC; recomputed from
+  `facts_resolved` at bundle time, so `reconstructed_at_bundle_time` is
+  true), the CrisisWatch edition and its age in months (ACE), and the
+  base-rate source from `forecast_deviation`. Every sub-block says
+  `available: false` with a `reason` rather than going missing.
+- `lineup`: the members that forecast this question (`model_id`,
+  `provider`, `effort`, `shadow`) and a `lineup_id` hashed from model ids
+  and effort. Effort comes from the config at bundle time
+  (`effort_source`), because the call log does not record it; the manifest
+  lists every lineup seen with its question count.
+- `resolution_series`: in words, the series that resolves this question.
+- `cost_usd`: forecast-phase spend for the latest run, per member and
+  `__total__`.
 - `members[]`: per ensemble member — model_name/provider, full raw
   `response_text`, parsed `spd_json`, `reasoning_trace`,
   `human_explanation`, recomputed `trace_quality`, cost/tokens/status, and
@@ -544,7 +581,11 @@ _QUESTION_RECORD_SCHEMA = """\
   `ev_value` per month, weights_profile.
 - `weights_applied`: calibration_weights rows for (hazard, metric) at the
   latest as_of_month (what the NEXT run consumes; the run being analyzed
-  used the vintage in `run_config.json` if present).
+  used the vintage in `run_config.json` if present). When no weights exist,
+  `calibration_status.csv` (and the manifest's `calibration_status`) says
+  why: each (hazard, metric) needs 20 resolved questions with member Brier
+  scores, and the file gives the count so far. A new version of a model
+  family inherits its predecessor's record as a prior (`inherited_from`).
 - `outcome`: resolutions per horizon (value, observed_month, source_desc)
   plus `unresolved_horizons` (absent ≠ zero!).
 - `scores`: [{horizon_m, model_name, score_type, value}].

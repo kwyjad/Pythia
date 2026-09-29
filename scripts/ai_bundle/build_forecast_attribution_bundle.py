@@ -84,6 +84,7 @@ from scripts.ai_bundle.common import (
     table_exists,
     write_csv,
     write_json,
+    triage_view,
 )
 from scripts.ai_bundle.guides import build_attribution_guide, build_linkage_md
 
@@ -336,7 +337,9 @@ def _load_triage(con, hs_run_id: str | None) -> dict[tuple[str, str], dict[str, 
         con,
         "SELECT iso3, hazard_code, tier, triage_score, regime_change_score, "
         "regime_change_level, regime_change_direction, regime_change_likelihood, "
-        "regime_change_magnitude FROM hs_triage WHERE run_id = ?",
+        "regime_change_magnitude"
+        + (", data_quality_json" if column_exists(con, "hs_triage", "data_quality_json") else "")
+        + " FROM hs_triage WHERE run_id = ?",
         [hs_run_id],
     )
     return {(str(r["iso3"]), str(r["hazard_code"])): r for r in rows}
@@ -940,8 +943,7 @@ def build_input_inventory(
 
         # HS view.
         t = triage.get((iso3, hz)) or {}
-        row["hs_tier"] = t.get("tier")
-        row["hs_triage_score"] = t.get("triage_score")
+        row["hs_tier"], row["hs_triage_score"] = triage_view(t)
         row["hs_rc_level"] = t.get("regime_change_level")
 
         mean_dev = dev_by_model.get("ensemble_mean_v2") or dev

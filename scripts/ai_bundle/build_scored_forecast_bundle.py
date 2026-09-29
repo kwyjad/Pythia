@@ -34,6 +34,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
+from scripts.ai_bundle import provenance as _prov
 from scripts.ai_bundle.common import (
     column_exists,
     latest_run_clause,
@@ -47,6 +48,8 @@ from scripts.ai_bundle.common import (
     write_csv,
     write_json,
     write_manifest,
+    RC_PROMOTED_TIER,
+    triage_view,
 )
 from scripts.ai_bundle.guides import build_analyst_guide, build_question_record_schema_md
 
@@ -387,9 +390,11 @@ def build_question_record(
                 "rationale_bullets": rc_json.get("rationale_bullets"),
                 "trigger_signals": rc_json.get("trigger_signals"),
             }
+            tier, triage_score = triage_view(t)
             record["triage"] = {
-                "tier": t.get("tier"),
-                "triage_score": t.get("triage_score"),
+                "tier": tier,
+                "triage_score": triage_score,
+                "triage_skipped": tier == RC_PROMOTED_TIER,
                 "need_full_spd": t.get("need_full_spd"),
                 "track": t.get("track"),
                 "drivers": safe_json_loads(t.get("drivers_json")),
@@ -636,9 +641,42 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
         )
         g["_probs"][int(r["bucket_index"] or 0)] = float(r["probability"] or 0.0)
 
+    # The reference forecasters beside Pythia's aggregates, with the exact
+    # vectors score_baselines scored (baseline_scored_forecasts), so "did we
+    # beat climatology / persistence here" is readable row by row.
+    refs = _prov.reference_vectors(con, qids)
+    if refs:
+        res_rows = rows_as_dicts(
+            con,
+            "SELECT r.question_id, r.horizon_m, r.value, q.iso3, q.hazard_code, "
+            "UPPER(q.metric) AS metric FROM resolutions r "
+            "JOIN questions q ON q.question_id = r.question_id "
+            "WHERE r.question_id IN (SELECT UNNEST(?::VARCHAR[]))",
+            [qids],
+        )
+        resolved = {(str(r["question_id"]), int(r["horizon_m"])): r for r in res_rows}
+        for (qid, model, h), vec in refs.items():
+            res = resolved.get((qid, h))
+            if res is None:
+                continue
+            grouped[(qid, model, h)] = {
+                "question_id": qid,
+                "iso3": res["iso3"],
+                "hazard_code": res["hazard_code"],
+                "metric": res["metric"],
+                "model_name": model,
+                "horizon_m": h,
+                "resolved_value": res["value"],
+                "ev_value": None,
+                "_probs": {i + 1: p for i, p in enumerate(vec)},
+            }
+
     out_rows: list[dict[str, Any]] = []
     for g in grouped.values():
         probs = g.pop("_probs")
+        g["probs"] = json.dumps(
+            [round(probs.get(i, 0.0), 6) for i in range(1, max(probs) + 1)]
+        ) if probs else None
         realized = _realized_bucket(con, g["metric"], g["resolved_value"])
         modal = max(probs, key=probs.get) if probs else None
         g["realized_bucket"] = realized
@@ -656,7 +694,7 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
             "question_id", "iso3", "hazard_code", "metric", "model_name",
             "horizon_m", "resolved_value", "realized_bucket", "p_realized_bucket",
             "modal_bucket", "p_modal_bucket", "ev_value", "bucket_edge",
-            "nearest_boundary",
+            "nearest_boundary", "probs",
         ],
         out_rows,
     )
@@ -689,7 +727,30 @@ def _attach_skill(rows: list[dict[str, Any]]) -> None:
             r["skill_vs_climatology"] = None
 
 
-def _emit_rollups(con, out_dir: Path, qids: list[str]) -> list[dict[str, Any]]:
+def _cost_per_question(costs: Mapping[str, Mapping[str, float]]) -> dict[str, float]:
+    """Mean forecast-phase cost per question, per member model.
+
+    An aggregate row (ensemble_mean_v2, track2_flash, ...) carries the mean
+    total cost of the questions it covered; its own name logs no calls.
+    """
+    per_model: dict[str, list[float]] = {}
+    totals: list[float] = []
+    for by_model in costs.values():
+        for model, cost in by_model.items():
+            if model == "__total__":
+                totals.append(float(cost))
+            else:
+                per_model.setdefault(model, []).append(float(cost))
+    out = {m: round(sum(v) / len(v), 6) for m, v in per_model.items() if v}
+    if totals:
+        out["__total__"] = round(sum(totals) / len(totals), 6)
+    return out
+
+
+def _emit_rollups(
+    con, out_dir: Path, qids: list[str],
+    costs: Mapping[str, Mapping[str, float]] | None = None,
+) -> list[dict[str, Any]]:
     rows = rows_as_dicts(
         con,
         "SELECT q.hazard_code, UPPER(q.metric) AS metric, "
@@ -704,12 +765,21 @@ def _emit_rollups(con, out_dir: Path, qids: list[str]) -> list[dict[str, Any]]:
         [qids],
     )
     _attach_skill(rows)
+    per_q = _cost_per_question(costs or {})
+    for r in rows:
+        name = str(r.get("model_name") or "")
+        if name.startswith("__ext_"):
+            r["cost_per_question_usd"] = None
+        elif name in per_q:
+            r["cost_per_question_usd"] = per_q[name]
+        else:
+            r["cost_per_question_usd"] = per_q.get("__total__")
     write_csv(
         out_dir / "rollups.csv",
         [
             "hazard_code", "metric", "score_family", "model_name", "score_type",
             "n_samples", "n_questions", "mean_value", "median_value",
-            "climatology_mean", "skill_vs_climatology",
+            "climatology_mean", "skill_vs_climatology", "cost_per_question_usd",
         ],
         rows,
     )
@@ -840,8 +910,40 @@ def _question_summary(record: dict[str, Any]) -> dict[str, Any]:
         "n_runs": len(record.get("score_runs") or []),
         "is_rerun": len(record.get("score_runs") or []) > 1,
         "latest_run_id": (record.get("score_runs") or [None])[-1],
+        "lineup_id": (record.get("lineup") or {}).get("lineup_id"),
+        "resolution_series": record.get("resolution_series"),
+        "spd_prompt_missing": record.get("spd_prompt") is None,
+        "enso_observation_date": ((record.get("inject_status") or {}).get("enso") or {}).get("observation_date"),
+        "gdacs_history_months": ((record.get("inject_status") or {}).get("gdacs_history") or {}).get("total_months"),
+        "crisiswatch_edition_age_months": ((record.get("inject_status") or {}).get("crisiswatch") or {}).get("edition_age_months"),
+        "baserate_source": ((record.get("inject_status") or {}).get("base_rate") or {}).get("source"),
+        "cost_usd": (record.get("cost_usd") or {}).get("__total__"),
         "record_path": f"questions/{q.get('question_id')}.json",
     }
+
+
+def _attach_provenance(
+    con, record: dict[str, Any], q: Mapping[str, Any], cost: Mapping[str, float]
+) -> None:
+    """Add what the forecast was made WITH to a scored question's record.
+
+    Every helper degrades to a stated reason, so a failure here costs a
+    field, never the record.
+    """
+    run_id = record.get("forecast_run_id")
+    qid = str(q.get("question_id"))
+    try:
+        record["inject_status"] = _prov.inject_status(con, q, run_id)
+    except Exception as exc:  # noqa: BLE001
+        record["inject_status"] = {"error": f"{type(exc).__name__}: {exc}"}
+    try:
+        record["lineup"] = _prov.lineup(con, run_id, qid)
+    except Exception as exc:  # noqa: BLE001
+        record["lineup"] = {"lineup_id": None, "reason": f"{type(exc).__name__}: {exc}"}
+    record["resolution_series"] = _prov.resolution_series(q.get("hazard_code"), q.get("metric"))
+    if record.get("spd_prompt") is None:
+        record["spd_prompt_missing_reason"] = _prov.spd_prompt_missing_reason(con, qid, run_id)
+    record["cost_usd"] = dict(cost)
 
 
 def _select_case_studies(
@@ -861,6 +963,25 @@ def _select_case_studies(
         selection["best"].extend([s["question_id"] for s in best])
         selection["worst"].extend([s["question_id"] for s in worst if s["question_id"] not in {b["question_id"] for b in best}])
     return selection
+
+
+def _lineups_seen(staging: Path, summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    """{lineup_id: {members, n_questions}} across the bundle's records."""
+    out: dict[str, Any] = {}
+    for summ in summaries:
+        lid = summ.get("lineup_id")
+        if not lid:
+            continue
+        entry = out.get(lid)
+        if entry is None:
+            rec = _load_staged_record(staging, str(summ.get("question_id"))) or {}
+            entry = out[lid] = {
+                "members": (rec.get("lineup") or {}).get("members") or [],
+                "effort_source": (rec.get("lineup") or {}).get("effort_source"),
+                "n_questions": 0,
+            }
+        entry["n_questions"] += 1
+    return out
 
 
 def _write_digest(
@@ -1148,6 +1269,7 @@ def build_bundle(
         # studies are re-read from staging after selection.
         summaries: list[dict[str, Any]] = []
         include_all_trials = include_sibyl_trials == "all"
+        costs = _prov.question_costs(con, qids)
         for q in questions:
             qid = str(q["question_id"])
             try:
@@ -1160,6 +1282,7 @@ def build_bundle(
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("Failed to build record for %s: %s", qid, exc)
                 continue
+            _attach_provenance(con, record, q, costs.get(qid) or {})
             write_json(staging / "questions" / f"{qid}.json", record)
             summaries.append(_question_summary(record))
             del record
@@ -1172,15 +1295,25 @@ def build_bundle(
                 "rc_score", "n_members", "avg_trace_quality",
                 "n_horizons_resolved", "ranking_model", "mean_brier", "mean_log",
                 "mean_crps", "has_sibyl", "n_runs", "is_rerun", "latest_run_id",
-                "record_path",
+                "lineup_id", "resolution_series", "spd_prompt_missing",
+                "enso_observation_date", "gdacs_history_months",
+                "crisiswatch_edition_age_months", "baserate_source",
+                "cost_usd", "record_path",
             ],
             summaries,
         )
 
         _emit_scores_flat(con, staging, qids)
         _emit_forecast_vs_outcome(con, staging, qids)
-        rollups = _emit_rollups(con, staging, qids)
+        rollups = _emit_rollups(con, staging, qids, costs)
         weight_movement = _emit_calibration(con, staging)
+        calibration_state = _prov.calibration_status(con)
+        write_csv(
+            staging / "calibration_status.csv",
+            ["hazard_code", "metric", "n_questions_with_member_scores", "floor",
+             "has_weights", "status"],
+            calibration_state,
+        )
 
         case_selection = _select_case_studies(summaries, n_case_studies)
         case_dir = staging / "case_studies"
@@ -1231,6 +1364,9 @@ def build_bundle(
                 "months_back": months_back,
                 "include_test": include_test,
                 "case_studies": case_selection,
+                "resolved_questions": _prov.resolution_counts(con, qids),
+                "calibration_status": calibration_state,
+                "lineups": _lineups_seen(staging, summaries),
             },
         )
 

@@ -134,6 +134,18 @@ class ModelSpec:
     # see _ANTHROPIC_EFFORT_PREFIXES): output_config.effort
     # ("low"|"medium"|"high"|"xhigh"|"max").
     thinking: Optional[str] = None
+    # A shadow member is called, written to forecasts_raw and scored like
+    # any other member, but it never votes: it is excluded from
+    # ensemble_mean_v2 and ensemble_bayesmc_v2 and from the partial-ensemble
+    # count. It lets a candidate model build a track record before it can
+    # move a published forecast. Set with ``shadow: true`` on the config
+    # entry.
+    shadow: bool = False
+
+
+def is_shadow(ms: Any) -> bool:
+    """True when a spec is a shadow member (see ``ModelSpec.shadow``)."""
+    return bool(getattr(ms, "shadow", False))
 
 
 _MAX_LLM_CONCURRENCY = int(os.getenv("PYTHIA_LLM_CONCURRENCY", os.getenv("LLM_MAX_CONCURRENCY", "18")))
@@ -461,6 +473,9 @@ def _load_ensemble_from_config() -> List[ModelSpec]:
             if isinstance(thinking_val, str) and thinking_val.strip():
                 ms.thinking = thinking_val.strip().lower()
 
+            shadow_val = entry.get("shadow")
+            ms.shadow = shadow_val is True or str(shadow_val).strip().lower() in {"true", "1", "yes"}
+
             specs.append(ms)
 
         return _apply_provider_block(specs)
@@ -523,6 +538,7 @@ def _apply_spd_google_model_override(specs: List[ModelSpec]) -> List[ModelSpec]:
                 weight=ms.weight,
                 active=bool(ms.active and override),
                 purpose=ms.purpose,
+                shadow=ms.shadow,
             )
         key = (ms.provider, ms.model_id)
         if key in seen:

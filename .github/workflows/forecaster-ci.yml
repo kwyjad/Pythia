@@ -39,6 +39,7 @@ on:
       - "pythia/api/core.py"
       - "pythia/api/routes/risk_index.py"
       - "pythia/api/routes/performance.py"
+      - "pythia/api/routes/diagnostics.py"
       # resolver/tests files that guard forecaster/pythia code. resolver-ci-fast
       # runs all of resolver/tests/ but triggers only on resolver/**, so without
       # naming them here a PR touching only forecaster/ or pythia/ runs none of
@@ -252,6 +253,20 @@ jobs:
             forecaster/tests/test_spd_model_params.py \
             forecaster/tests/test_opus55_lineup.py \
             forecaster/tests/test_gpt6_lineup.py
+
+      - name: Run shadow members + calibration weight tests
+        run: |
+          # Shadow members must never vote, and a new version of a model
+          # family inherits its predecessor's calibration record. The
+          # calibration and member-weight suites below ran in NO workflow
+          # before this step named them.
+          pytest -vv \
+            forecaster/tests/test_shadow_members_and_family_weights.py \
+            forecaster/tests/test_month_anchoring.py \
+            pythia/tests/test_calibration_loop_integration.py \
+            pythia/tests/test_calibration_loop_auto.py \
+            pythia/tests/test_calibration_improvements.py \
+            pythia/tests/test_calibration_safe_ddl.py
 
       - name: Run AI analysis bundle + sent-prompt logging tests
         run: |
