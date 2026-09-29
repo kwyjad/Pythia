@@ -1292,6 +1292,7 @@ from .binary_prompts import (  # noqa: E402
     build_binary_event_prompt,
     build_binary_base_rate,
     parse_binary_response,
+    parse_rc_reconciliation,
 )
 from .scenario_writer import run_scenarios_for_run  # noqa: E402
 from horizon_scanner.seasonal_context import CLIMATE_HAZARDS, load_seasonal_forecasts  # noqa: E402
@@ -4332,8 +4333,15 @@ def _write_binary_outputs(
     resolution_source: str,
     usage: dict[str, Any],
     model_name: str = "ensemble",
+    write_ensemble: bool = True,
+    extra_json: dict[str, Any] | None = None,
 ) -> None:
     """Write binary forecasts using SPD storage convention.
+
+    ``write_ensemble=False`` writes ``forecasts_raw`` only: that is how a
+    Track-1 MEMBER's own forecast is stored (Oct 2026), beside the pooled
+    rows, so members can be scored on binary questions. ``extra_json`` is
+    merged into each row's ``spd_json`` (the member's ``rc_reconciliation``).
 
     Convention: bucket_1 = P(yes), bucket_2 = P(no) = 1 - P(yes),
     buckets 3-5 = 0.  This avoids schema changes while keeping binary
@@ -4362,11 +4370,14 @@ def _write_binary_outputs(
             "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ? AND model_name = ?;",
             [run_id, qid, model_name],
         )
-        con.execute(
-            "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ? AND model_name = ?;",
-            [run_id, qid, model_name],
-        )
+        if write_ensemble:
+            con.execute(
+                "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+                [run_id, qid, model_name],
+            )
         anchor_month = _anchor_month_for_question(rec)
+        row_json = {"binary": True, "resolution_source": resolution_source}
+        row_json.update(extra_json or {})
         for month_label in sorted(month_probs.keys()):
             # Month index derived from the label itself, never from position:
             # an off-window or missing label must not shift the others.
@@ -4399,7 +4410,7 @@ def _write_binary_outputs(
                         usage.get("prompt_tokens"),
                         usage.get("completion_tokens"),
                         usage.get("total_tokens"),
-                        _json_dumps_for_db({"binary": True, "p_yes": p_yes, "resolution_source": resolution_source}),
+                        _json_dumps_for_db({**row_json, "p_yes": p_yes}),
                         "",
                         month_idx,
                         cb,
@@ -4407,6 +4418,8 @@ def _write_binary_outputs(
                         _IS_TEST,
                     ],
                 )
+                if not write_ensemble:
+                    continue
                 con.execute(
                     """
                     INSERT INTO forecasts_ensemble (
@@ -4422,6 +4435,30 @@ def _write_binary_outputs(
                 )
     finally:
         con.close()
+
+
+#: Model names a binary MEMBER row may never carry: they are the pooled
+#: aggregates, and a member written under one would overwrite it.
+_BINARY_AGGREGATE_NAMES = frozenset(
+    {"ensemble", "ensemble_mean_v2", "ensemble_bayesmc_v2", "track2_flash", "sibyl"}
+)
+
+
+def _binary_rc_level(hs_entry: Any) -> int | None:
+    """The HS regime-change level for a binary question, as the SPD path reads it."""
+    if not isinstance(hs_entry, dict):
+        return None
+    for value in (
+        hs_entry.get("regime_change_level"),
+        (hs_entry.get("regime_change") or {}).get("level")
+        if isinstance(hs_entry.get("regime_change"), dict) else None,
+    ):
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 async def _run_binary_forecast_for_question(
@@ -4448,6 +4485,7 @@ async def _run_binary_forecast_for_question(
         hs_run_id = rec.get("hs_run_id") or run_id
         hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
         structured_data = _load_structured_data(iso3, hz, hs_run_id=hs_run_id)
+        rc_level = _binary_rc_level(hs_entry)
 
         # Build binary base rate from facts_resolved
         base_rate = build_binary_base_rate(iso3, hz)
@@ -4505,6 +4543,7 @@ async def _run_binary_forecast_for_question(
             hs_triage_entry=hs_entry,
             today=date.today().isoformat() if date else str(datetime.now().date()),
             gdacs_event_history=structured_data.get("gdacs_event_history"),
+            rc_level=rc_level,
         )
 
         # Select model specs based on track
@@ -4575,6 +4614,9 @@ async def _run_binary_forecast_for_question(
         expected_months = _expected_months(anchor_month, NUM_HORIZONS) if anchor_month else []
         expected_set = set(expected_months)
         all_model_probs: list[dict[str, float]] = []
+        # (member name, its months, its usage, its rc_reconciliation) — kept
+        # so a Track-1 member's own forecast can be stored and scored.
+        member_forecasts: list[tuple[str, dict[str, float], dict[str, Any], str | None]] = []
         for call in raw_calls:
             raw_text = str(call.get("text") or "")
             if not raw_text:
@@ -4591,6 +4633,18 @@ async def _run_binary_forecast_for_question(
                 parsed = {m: p for m, p in parsed.items() if m in expected_set}
             if parsed:
                 all_model_probs.append(parsed)
+                ms = call.get("model_spec")
+                member_name = getattr(ms, "name", None) or ""
+                rc_note = parse_rc_reconciliation(raw_text)
+                if rc_level is not None and rc_level >= 1 and not rc_note:
+                    LOG.warning(
+                        "Binary forecast for %s: %s gave no rc_reconciliation at RC level %s",
+                        qid, member_name or "a member", rc_level,
+                    )
+                if member_name:
+                    member_forecasts.append(
+                        (member_name, parsed, call.get("usage") or {}, rc_note)
+                    )
 
         if not all_model_probs:
             _record_no_forecast(
@@ -4641,6 +4695,33 @@ async def _run_binary_forecast_for_question(
             usage=usage or {},
             model_name=model_name,
         )
+
+        # Track-1 members: each member's own forecast lands in forecasts_raw
+        # (never forecasts_ensemble) under its model name, so compute_scores
+        # scores members on binary questions exactly as it does on SPD ones
+        # (binary Brier, its own score family). Track 2's single model IS the
+        # pooled track2_flash row, so it has no separate member row.
+        if track == 1:
+            for member_name, member_probs, member_usage, rc_note in member_forecasts:
+                if member_name in _BINARY_AGGREGATE_NAMES:
+                    continue
+                if expected_set and set(member_probs) != expected_set:
+                    continue
+                extra = {"member": True}
+                if rc_level is not None:
+                    extra["rc_level"] = rc_level
+                if rc_note:
+                    extra["rc_reconciliation"] = rc_note
+                _write_binary_outputs(
+                    run_id,
+                    question_row,
+                    member_probs,
+                    resolution_source=resolution_source,
+                    usage=member_usage,
+                    model_name=member_name,
+                    write_ensemble=False,
+                    extra_json=extra,
+                )
 
         # Also write BayesMC aggregation for Track 1 (needs >1 model)
         if track == 1 and len(all_model_probs) > 1:
@@ -6238,7 +6319,7 @@ def main() -> None:
                         FROM llm_calls
                         WHERE run_id = ?
                           AND question_id = ?
-                          AND call_type = 'spd_v2'
+                          AND call_type IN ('spd_v2', 'binary_v2')
                           AND (error_text IS NULL OR error_text = '')
                           AND model_id IS NOT NULL
                           AND model_id <> ''

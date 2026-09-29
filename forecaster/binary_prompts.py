@@ -29,6 +29,7 @@ def build_binary_event_prompt(
     hs_triage_entry: dict | None = None,
     today: str,
     gdacs_event_history: dict | None = None,
+    rc_level: int | None = None,
 ) -> str:
     """Build the full prompt for a binary event forecast.
 
@@ -48,6 +49,9 @@ def build_binary_event_prompt(
         Today's date as ISO string.
     gdacs_event_history : dict | None
         GDACS event occurrence history for seasonal frequency context.
+    rc_level : int | None
+        Horizon Scanner regime-change level. At >= 1 the prompt requires an
+        ``rc_reconciliation`` field in the JSON.
 
     Returns
     -------
@@ -94,6 +98,10 @@ def build_binary_event_prompt(
             get_binary_hazard_reasoning_block(hazard_code),
             _section_output_instructions(forecast_months),
             (
+                "If the QUESTION DATA contains a REGIME CHANGE FLAG, add the "
+                '"rc_reconciliation" field it asks for to the JSON object.'
+            ),
+            (
                 "The QUESTION DATA follows below.\n\n"
                 f"QUESTION: Will a significant {hazard_name} event "
                 f"(GDACS Orange/Red alert) affect {country} ({iso3}) in each "
@@ -104,6 +112,7 @@ def build_binary_event_prompt(
                 current_alerts, structured_data, hs_triage_entry, country, hazard_code
             ),
             gdacs_block,
+            _section_rc_reconciliation(rc_level),
             (
                 "END OF QUESTION DATA.\n"
                 "Now apply the reasoning guidance above and produce ONLY the "
@@ -131,6 +140,9 @@ def build_binary_event_prompt(
 
     # Section 4: Hazard-specific reasoning
     sections.append(get_binary_hazard_reasoning_block(hazard_code))
+
+    # Section 4b: regime-change reconciliation requirement (RC >= 1)
+    sections.append(_section_rc_reconciliation(rc_level))
 
     # Section 5: Output instructions
     sections.append(_section_output_instructions(forecast_months))
@@ -211,6 +223,13 @@ happen 10% of the time."""
 def _section_base_rate(country: str, hazard_name: str, base_rate: dict) -> str:
     if not base_rate:
         return f"HISTORICAL BASE RATE: No historical data available for {country} / {hazard_name}."
+    if base_rate.get("history_available") is False:
+        from forecaster.gdacs_history import unavailable_line
+
+        return "HISTORICAL BASE RATE (GDACS): " + unavailable_line(
+            hazard_name, country,
+            base_rate.get("unavailable_reason") or "too few months of GDACS coverage",
+        )
 
     total_months = base_rate.get("total_months", 0)
     event_months = base_rate.get("event_months", 0)
@@ -239,8 +258,9 @@ def _section_base_rate(country: str, hazard_name: str, base_rate: dict) -> str:
 
     return f"""\
 HISTORICAL BASE RATE (GDACS, {coverage_label}):
-{country} has had significant {hazard_name} events in {event_months} of \
-{total_months} months ({base_rate_pct:.1f}%).
+{country} has had significant (Orange/Red) {hazard_name} alerts in {event_months} of \
+the {total_months} calendar months GDACS covers ({base_rate_pct:.1f}%). A month \
+with no alert naming {country} counts as a month without an event.
 
 Seasonal pattern (% of months with events by calendar month):
 {seasonal_row1}
@@ -283,11 +303,14 @@ def _section_current_situation(
             elif isinstance(nmme, dict):
                 parts.append(f"\nNMME SEASONAL OUTLOOK:\n{json.dumps(nmme, indent=2)}")
 
-        # ENSO
+        # ENSO — the header states the date the index was OBSERVED, so a
+        # model can tell a current reading from an old one. August 2026's
+        # drought prompts said "Current state: Neutral" through a strong El
+        # Niño (the pre-September scraped phase) with nothing to date it.
         enso = structured_data.get("enso") or structured_data.get("enso_context")
         if enso:
             if isinstance(enso, str):
-                parts.append(f"\nENSO STATE:\n{enso}")
+                parts.append(f"\n{_enso_header(enso)}\n{enso}")
 
         # ACAPS INFORM severity
         inform = structured_data.get("inform_severity") or structured_data.get("acaps_inform_severity")
@@ -330,6 +353,42 @@ def _section_current_situation(
         parts.append(f"\nHORIZON SCANNER TRIAGE: score={triage_score}, tier={tier}")
 
     return "\n".join(parts)
+
+
+_ENSO_OBSERVED_RE = re.compile(r"Observed (\d{4}-\d{2}(?:-\d{2})?)")
+
+
+def _enso_header(enso_text: str) -> str:
+    """``ENSO STATE (observed YYYY-MM-DD):`` from the ENSO block's own text.
+
+    The block (``ENSOForecast.to_prompt_context``) ends its state line with
+    "Observed <date>"; a block with no such date says so in the header
+    rather than letting the reading pass as current.
+    """
+    m = _ENSO_OBSERVED_RE.search(enso_text or "")
+    if m:
+        return f"ENSO STATE (index observed {m.group(1)}):"
+    return "ENSO STATE (observation date not stated; it may be stale):"
+
+
+def _section_rc_reconciliation(rc_level: int | None) -> str:
+    """Ask for an explicit reconciliation when HS flagged a regime change.
+
+    At RC level >= 1 the Horizon Scanner has judged this country-hazard to be
+    departing from its base rate. Five August 2026 drought questions carried
+    that flag and were forecast at 1.7-15% beside a near-empty history; the
+    model never had to say how it weighed the two.
+    """
+    if rc_level is None or int(rc_level) < 1:
+        return ""
+    return (
+        f"REGIME CHANGE FLAG: the Horizon Scanner rates this hazard at regime-"
+        f"change level {int(rc_level)} (a departure from the historical base "
+        "rate is judged likely). Your JSON MUST include a top-level "
+        '"rc_reconciliation" field: one or two sentences saying how you weighed '
+        "this flag against the base rate, and why your probabilities move (or "
+        "do not move) away from it."
+    )
 
 
 def _section_output_instructions(forecast_months: list[str]) -> str:
@@ -530,73 +589,31 @@ def build_binary_base_rate(
                 pass
 
 
-def _query_base_rate(conn, iso3: str, hazard_code: str) -> dict:
-    """Query facts_resolved to compute binary base rate stats."""
-    # Check if facts_resolved exists
+def _query_base_rate(conn, iso3: str, hazard_code: str, today: date | None = None) -> dict:
+    """Binary base-rate stats over the SOURCE's calendar window.
+
+    Every calendar month GDACS covers for the hazard counts once; a month is
+    an event month when any row for it is Orange/Red. The old version
+    counted the country's rows over the country's own span, which printed
+    "2026-05 to 2026-07 ... 0 of 9 months" — see ``forecaster.gdacs_history``.
+    """
+    from forecaster.gdacs_history import gdacs_calendar_series, seasonal_frequency
+
     try:
         conn.execute("SELECT 1 FROM facts_resolved LIMIT 0")
     except Exception:
         return {}
+    series = gdacs_calendar_series(conn, iso3, hazard_code, today=today)
+    months = series["months"]
+    total_months = series["total_months"]
+    event_months = series["event_months"]
+    base_rate_pct = (event_months / total_months * 100) if total_months else 0.0
+    seasonal = seasonal_frequency(months)
+    seasonal_pattern = {str(m): float(seasonal[m]["frequency_pct"]) for m in range(1, 13)}
 
-    iso3_up = iso3.upper()
-    hz_up = hazard_code.upper()
-
-    # Get all event_occurrence rows for this country/hazard
-    rows = conn.execute(
-        """
-        SELECT ym, value
-        FROM facts_resolved
-        WHERE upper(iso3) = ?
-          AND upper(hazard_code) = ?
-          AND lower(metric) = 'event_occurrence'
-        ORDER BY ym
-        """,
-        [iso3_up, hz_up],
-    ).fetchall()
-
-    if not rows:
-        return {
-            "total_months": 0,
-            "event_months": 0,
-            "base_rate_pct": 0.0,
-            "seasonal_pattern": {str(m): 0.0 for m in range(1, 13)},
-            "recent_12m_events": 0,
-            "recent_12m_rate": 0.0,
-            "trend": "unknown",
-            "coverage_start": None,
-            "coverage_end": None,
-        }
-
-    total_months = len(rows)
-    event_months = sum(1 for _, v in rows if v and float(v) >= 1)
-    base_rate_pct = (event_months / total_months * 100) if total_months > 0 else 0.0
-
-    # Seasonal pattern: count events per calendar month
-    month_counts: dict[int, int] = {m: 0 for m in range(1, 13)}
-    month_totals: dict[int, int] = {m: 0 for m in range(1, 13)}
-
-    for ym, v in rows:
-        try:
-            parts = str(ym).split("-")
-            cal_month = int(parts[1])
-        except (IndexError, ValueError):
-            continue
-        month_totals[cal_month] = month_totals.get(cal_month, 0) + 1
-        if v and float(v) >= 1:
-            month_counts[cal_month] = month_counts.get(cal_month, 0) + 1
-
-    seasonal_pattern = {}
-    for m in range(1, 13):
-        total = month_totals.get(m, 0)
-        events = month_counts.get(m, 0)
-        seasonal_pattern[str(m)] = (events / total * 100) if total > 0 else 0.0
-
-    # Recent 12 months
-    recent_rows = rows[-12:] if len(rows) >= 12 else rows
-    recent_12m_events = sum(1 for _, v in recent_rows if v and float(v) >= 1)
-    recent_12m_rate = (recent_12m_events / len(recent_rows) * 100) if recent_rows else 0.0
-
-    # Trend: compare recent 12m rate to overall rate
+    recent = months[-12:]
+    recent_12m_events = sum(1 for m in recent if m["occurred"])
+    recent_12m_rate = (recent_12m_events / len(recent) * 100) if recent else 0.0
     if total_months < 24:
         trend = "unknown"
     elif recent_12m_rate > base_rate_pct * 1.3:
@@ -614,11 +631,40 @@ def _query_base_rate(conn, iso3: str, hazard_code: str) -> dict:
         "recent_12m_events": recent_12m_events,
         "recent_12m_rate": recent_12m_rate,
         "trend": trend,
-        # Actual coverage window (rows are ORDER BY ym) — the header renders
-        # this instead of a hardcoded era label.
-        "coverage_start": str(rows[0][0])[:7],
-        "coverage_end": str(rows[-1][0])[:7],
+        # The source's calendar window — the header renders this, and the
+        # denominator is exactly the months in it.
+        "coverage_start": series["window_start"],
+        "coverage_end": series["window_end"],
+        "history_available": series["history_available"],
+        "unavailable_reason": series["unavailable_reason"],
     }
+
+
+def parse_rc_reconciliation(raw_text: str) -> str | None:
+    """The top-level ``rc_reconciliation`` string, or None when absent.
+
+    Tolerates code fences and prose around the JSON exactly as
+    :func:`parse_binary_response` does. Truncated to 1,000 characters.
+    """
+    text = (raw_text or "").strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```\s*$", "", text)
+    data = None
+    try:
+        data = json.loads(text)
+    except Exception:
+        m = re.search(r"\{.*\}", text, re.S)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                data = None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("rc_reconciliation")
+    if isinstance(value, str) and value.strip():
+        return value.strip()[:1000]
+    return None
 
 
 def parse_binary_response(raw_text: str, expected_months: list[str] | None = None) -> dict[str, float]:

@@ -1516,17 +1516,7 @@ def _format_gdacs_event_history_for_prompt(
         f"GDACS EVENT HISTORY ({iso3} — {event_label}):"
     )
     lines.append("Source: GDACS (Global Disaster Alert and Coordination System)")
-    if gdacs_history.get("history_available") is False:
-        # A handful of months is not a history; printing its rate would
-        # read as a confident 0% (see forecaster/gdacs_history.py).
-        from forecaster.gdacs_history import unavailable_line
-
-        lines.append(unavailable_line(
-            event_label, iso3,
-            gdacs_history.get("unavailable_reason") or "too few months of GDACS coverage",
-        ))
-        return "\n".join(lines)
-    lines.append(f"Coverage: {data_range} ({total} calendar months; a month with no alert counts as no event)")
+    lines.append(f"Coverage: {data_range} ({total} months)")
     lines.append(
         f"Overall event rate: {event_months} events in {total} months "
         f"({event_rate:.0f}%)"
