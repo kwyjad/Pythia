@@ -57,6 +57,8 @@ on:
       - "resolver/tests/test_group_f_small_repairs.py"
       - "resolver/tests/test_group_d_probes_and_paging.py"
       - "pythia/tools/score_views.py"
+      - "resolver/tools/fetch_conflict_forecasts.py"
+      - "resolver/connectors/views.py"
       - "pythia/db/schema.py"
       - "pythia/gdelt.py"
       - "pythia/tests/test_ingest_rows_written.py"
@@ -350,6 +352,18 @@ jobs:
             forecaster/tests/test_binary_prompts.py \
             forecaster/tests/test_aggregation_gaps.py \
             forecaster/tests/test_drought_binary_inputs.py
+
+      - name: Run calibration + benchmark scoring tests
+        run: |
+          # The 2026-09-28 review found a ViEWS benchmark that could match
+          # nothing and per-model advice no prompt read; the weighted binary
+          # mean and both of those are pinned here.
+          echo "=== Running calibration + benchmark scoring tests ==="
+          pytest -vv \
+            forecaster/tests/test_binary_pipeline.py \
+            forecaster/tests/test_binary_member_rows.py \
+            forecaster/tests/test_member_calibration_advice.py \
+            pythia/tests/test_score_views.py
 
       - name: Run deviation + baseline-scoring tests (interpreter Phase 1)
         run: |

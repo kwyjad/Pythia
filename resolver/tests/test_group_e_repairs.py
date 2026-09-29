@@ -325,7 +325,7 @@ def test_score_views_matches_the_source_name_the_connector_writes():
     )
     con.execute(
         "INSERT INTO conflict_forecasts VALUES "
-        "('VIEWS','SOM','ACE','fatalities',1,380.0,DATE '2026-07-01',DATE '2026-08-01','v1')"
+        "('VIEWS','SOM','ACE','views_predicted_fatalities',1,380.0,DATE '2026-07-01',DATE '2026-08-01','v1')"
     )
     pairs = _load_views_forecast_pairs(con)
     assert len(pairs) == 1 and pairs[0]["views_value"] == 380.0

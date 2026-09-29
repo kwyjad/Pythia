@@ -2016,6 +2016,10 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "output_tokens": "INTEGER",
                 "created_at": "TIMESTAMP",
                 "is_test": "BOOLEAN DEFAULT FALSE",
+                # Hash of the scores a scored report was written from
+                # (interpreter/store.py): a changed score set earns a new
+                # version instead of being skipped as "already exists".
+                "outcome_hash": "TEXT",
             },
         )
 

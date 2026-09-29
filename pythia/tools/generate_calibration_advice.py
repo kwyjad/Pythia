@@ -464,7 +464,7 @@ def _compute_per_model_brier(
         SELECT
             COALESCE(s.model_name, '__ensemble__') AS mn,
             AVG(s.value) AS avg_brier,
-            COUNT(*) AS n_scores
+            COUNT(DISTINCT s.question_id) AS n_questions
         FROM scores s
         JOIN questions q ON q.question_id = s.question_id
         WHERE s.score_type = 'brier'
@@ -2104,12 +2104,14 @@ def generate_calibration_advice(
 
                 for model_info in all_models:
                     mname = model_info["name"]
+                    # Distinct questions, not score rows: a question scored
+                    # at six horizons is still one question.
                     n_scored = model_info.get("n", 0)
 
                     if n_scored < MIN_QUESTIONS_PER_MODEL:
                         LOGGER.info(
                             "Skipping per-model advice for %s on %s/%s: "
-                            "only %d scored (need %d).",
+                            "only %d scored question(s) (need %d).",
                             mname, hazard_code, metric,
                             n_scored, MIN_QUESTIONS_PER_MODEL,
                         )

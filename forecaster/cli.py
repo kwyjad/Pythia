@@ -1286,7 +1286,10 @@ def _build_month_labels(start_date: Optional[date], horizon_months: int = 6) -> 
 # ---- Forecaster internals (all relative imports) --------------------------------
 from .prompts import (  # noqa: E402
     build_spd_prompt_v2,
+    load_member_calibration_advice,
     merge_evidence_packs,
+    render_member_calibration_advice,
+    reset_member_calibration_advice_cache,
 )
 from .binary_prompts import (  # noqa: E402
     build_binary_event_prompt,
@@ -2887,6 +2890,38 @@ def _cache_warm_key(ms: "ModelSpec", prompt_cache_key: str | None) -> tuple | No
 
 
 async def _call_spd_model_for_spec(
+    ms: ModelSpec,
+    prompt: str,
+    **kwargs,
+) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+    """One ensemble member's call, with that member's own calibration note.
+
+    The shared prompt is built once for every member. The per-model advice
+    ``generate_calibration_advice`` writes is appended here, to this member's
+    tail only, BEFORE the batch intercept so a batch body and a sync body
+    carry the same text; the cached prefix is untouched. Whenever a note was
+    added the true sent prompt is stashed as ``sent_prompt_text`` so the
+    ``llm_calls`` row records it — a batch replay whose stored prompt equals
+    the advised one would otherwise log the base prompt without it.
+    """
+    member_note = render_member_calibration_advice(
+        load_member_calibration_advice(
+            kwargs.get("hazard_code") or "",
+            kwargs.get("metric") or "",
+            getattr(ms, "name", "") or "",
+        )
+    )
+    if not member_note:
+        return await _call_spd_model_for_spec_inner(ms, prompt, **kwargs)
+    advised = prompt + member_note
+    text, usage, error, ms_out = await _call_spd_model_for_spec_inner(ms, advised, **kwargs)
+    if isinstance(usage, dict) and not usage.get("sent_prompt_text"):
+        usage = dict(usage)
+        usage["sent_prompt_text"] = advised
+    return text, usage, error, ms_out
+
+
+async def _call_spd_model_for_spec_inner(
     ms: ModelSpec,
     prompt: str,
     *,
@@ -4655,6 +4690,9 @@ async def _run_binary_forecast_for_question(
         # so a Track-1 member's own forecast can be stored and scored.
         member_forecasts: list[tuple[str, dict[str, float], dict[str, Any], str | None]] = []
         shadow_names: set[str] = set()
+        # The spec behind each entry of all_model_probs (same order), so the
+        # pooled mean can apply calibration weights.
+        voting_specs: list[Any] = []
         for call in raw_calls:
             raw_text = str(call.get("text") or "")
             if not raw_text:
@@ -4674,6 +4712,7 @@ async def _run_binary_forecast_for_question(
                 # A shadow member is stored and scored below but never votes.
                 if not is_shadow(ms):
                     all_model_probs.append(parsed)
+                    voting_specs.append(ms)
                 member_name = getattr(ms, "name", None) or ""
                 if is_shadow(ms) and member_name:
                     shadow_names.add(member_name)
@@ -4701,8 +4740,31 @@ async def _run_binary_forecast_for_question(
         for mp in all_model_probs:
             all_months.update(mp.keys())
 
+        # Track 1 applies the members' calibration weights, exactly as the
+        # SPD mean does; with no stored weights (or on Track 2's single
+        # model) this is the plain average it always was.
+        member_weights: Optional[list[float]] = None
+        if (
+            track == 1
+            and len(all_model_probs) > 1
+            and all(isinstance(ms, ModelSpec) for ms in voting_specs)
+        ):
+            _wbk, _keys, member_weights = _resolve_member_weights(
+                list(voting_specs), hz, metric
+            )
+
         aggregated: dict[str, float] = {}
         for month in sorted(all_months):
+            if member_weights:
+                pairs = [
+                    (w, mp[month])
+                    for w, mp in zip(member_weights, all_model_probs)
+                    if month in mp
+                ]
+                total_w = sum(w for w, _p in pairs)
+                if pairs and total_w > 0:
+                    aggregated[month] = sum(w * p for w, p in pairs) / total_w
+                continue
             probs = [mp[month] for mp in all_model_probs if month in mp]
             if probs:
                 aggregated[month] = sum(probs) / len(probs)
@@ -6245,6 +6307,7 @@ def main() -> None:
         ensure_schema()
         # Weights may have been recomputed since this process started.
         _reset_calibration_weights_cache()
+        reset_member_calibration_advice_cache()
 
         # Parse iso3 filter from CLI
         iso3_filter: Optional[set[str]] = None

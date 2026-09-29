@@ -442,3 +442,40 @@ class TestValidationRetry:
         db = tmp_path / "p3.duckdb"
         run_interpreter(db=str(db), kind="combined", pack_path=str(current_bundle))
         assert len(calls) == 1
+
+
+class TestScoredReportFollowsTheScores:
+    """The scored key is the month the bundle was built, so on 2026-09-28 the
+    report was skipped as "already exists" although ACLED had revised
+    August's fatalities since the 15 September report was written. A report
+    now stands only for the scores it was written from."""
+
+    def _write_scores(self, bundle: Path, value: str) -> None:
+        (bundle / "scores_flat.csv").write_text(
+            "question_id,horizon_m,model_name,score_type,value\n"
+            f"{QID},1,ensemble_mean_v2,brier,{value}\n",
+            encoding="utf-8",
+        )
+
+    def test_same_scores_skip_changed_scores_regenerate(
+        self, tmp_path, scored_bundle, mock_model
+    ):
+        db = tmp_path / "p.duckdb"
+        mock_model.response = json.dumps(_content("scored"))
+
+        self._write_scores(scored_bundle, "0.40")
+        first = run_interpreter(db=str(db), kind="scored", pack_path=str(scored_bundle))
+        assert first["status"] == "ok" and first["version"] == 1
+
+        # A rebuild of the same scores (the manifest timestamp moves) is skipped.
+        manifest = json.loads((scored_bundle / "manifest.json").read_text())
+        manifest["generated_at"] = "2026-08-20T00:00:00+00:00"
+        (scored_bundle / "manifest.json").write_text(json.dumps(manifest))
+        again = run_interpreter(db=str(db), kind="scored", pack_path=str(scored_bundle))
+        assert again["status"] == "skipped" and again["reason"] == "exists"
+
+        # Revised resolutions change the scores: a new version is written.
+        self._write_scores(scored_bundle, "0.55")
+        revised = run_interpreter(db=str(db), kind="scored", pack_path=str(scored_bundle))
+        assert revised["status"] == "ok" and revised["version"] == 2
+        assert len(mock_model.calls) == 2

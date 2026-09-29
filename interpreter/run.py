@@ -410,7 +410,12 @@ def run_interpreter(
         _maybe_inherit_test_mode(con, hs_run_id)
 
         if not force:
-            existing = store.existing_ok_version(con, kind, run_id, scored_run_id)
+            existing = store.existing_ok_version(
+                con, kind, run_id, scored_run_id,
+                # A scored report stands only for the scores it was written
+                # from; a changed score set earns a new version.
+                outcome_hash=(pack.outcome_hash or None) if kind == "scored" else None,
+            )
             if existing is not None:
                 LOGGER.info(
                     "[interpreter] %s interpretation v%d already exists for this "
@@ -529,6 +534,7 @@ def run_interpreter(
             prompt_hash=p_hash, pack_hash=pack.pack_hash,
             cost_usd=cost_usd, input_tokens=input_tokens,
             output_tokens=output_tokens,
+            outcome_hash=(pack.outcome_hash or None) if kind == "scored" else None,
         )
 
         content = parse_model_json(response_text) if not error else None

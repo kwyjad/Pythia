@@ -44,6 +44,10 @@ class Pack:
     records: dict[str, dict[str, Any]] = field(default_factory=dict)
     rollups: list[dict[str, Any]] = field(default_factory=list)
     pack_hash: str = ""
+    # Hash of the scored-outcome table alone (``scores_flat.csv``). The pack
+    # hash covers every file, the manifest's build timestamp included, so it
+    # differs on every build and cannot say whether the SCORES changed.
+    outcome_hash: str = ""
 
 
 def _read_all(path: Path) -> dict[str, bytes]:
@@ -85,12 +89,21 @@ def load_pack(path: str | Path) -> Pack:
         digest.update(name.encode("utf-8"))
         digest.update(raw[name])
 
+    outcome_bytes = next(
+        (raw[n] for n in sorted(raw) if n.rsplit("/", 1)[-1] == "scores_flat.csv"),
+        None,
+    )
+    outcome_hash = (
+        hashlib.sha256(outcome_bytes).hexdigest()[:16] if outcome_bytes is not None else ""
+    )
+
     pack = Pack(
         kind=kind,
         path=p,
         manifest=manifest,
         files={},
         pack_hash=digest.hexdigest()[:16],
+        outcome_hash=outcome_hash,
     )
 
     def _text(name: str) -> str | None:

@@ -76,8 +76,11 @@ jobs:
         run: |
           echo "=== Seeding bucket centroids from BUCKET_SPECS ==="
           python -m scripts.db.update_bucket_centroids
-          echo "=== EMA centroid update (all metrics) ==="
-          for METRIC in PA FATALITIES EVENT_OCCURRENCE PHASE3PLUS_IN_NEED; do
+          echo "=== EMA centroid update (SPD metrics) ==="
+          # EVENT_OCCURRENCE is binary and has no buckets (it is absent from
+          # BUCKET_SPECS by design), so it has no centroids to update; asking
+          # printed a WARNING every run for an intended state.
+          for METRIC in PA FATALITIES PHASE3PLUS_IN_NEED; do
             echo "--- metric=${METRIC} ---"
             python -m pythia.tools.compute_bucket_centroids --ema --metric "${METRIC}" --db-url "${RESOLVER_DB_URL}" \
               || echo "WARN: EMA update failed for metric=${METRIC} (non-fatal)"

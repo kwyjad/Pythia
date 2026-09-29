@@ -71,6 +71,17 @@ STALENESS_THRESHOLD_DAYS: dict[str, int] = {
 }
 DEFAULT_STALENESS_THRESHOLD_DAYS = 45
 
+# How many issue dates each source keeps, INCLUDING the one being written.
+# Prompt readers take the newest vintage and never see the rest; the rest are
+# kept for the benchmark scorer (pythia/tools/score_views.py), which needs the
+# vintage issued the month before a question's window, at lead = horizon.
+# A window starting in month W+1 is forecast by vintage W; its sixth month is
+# resolved and scored around the 28th of W+7, by which time about seven newer
+# vintages exist. So vintage W must still be the eighth newest then, and one
+# more is kept for a missed cycle. At two vintages (the old value) the lead-1
+# vintage for a window was deleted before its second horizon could be scored.
+KEEP_VINTAGES_PER_SOURCE = 9
+
 #: What each connector found on its last fetch (target months, dropped
 #: country-months, duplicates), keyed by source name, for the run summary.
 LAST_RUN_SUMMARIES: dict[str, dict] = {}
@@ -222,6 +233,28 @@ def fetch_and_store(
     return row_counts
 
 
+def prune_old_vintages(con, sources, keep: int = KEEP_VINTAGES_PER_SOURCE) -> None:
+    """Keep the ``keep`` newest issue dates per source; delete older ones."""
+    for source_name in sources:
+        dates = con.execute(
+            "SELECT DISTINCT forecast_issue_date FROM conflict_forecasts "
+            "WHERE source = ? ORDER BY forecast_issue_date DESC",
+            [source_name],
+        ).fetchall()
+        if len(dates) <= keep:
+            continue
+        cutoff = dates[keep - 1][0]  # the oldest issue date kept
+        con.execute(
+            "DELETE FROM conflict_forecasts "
+            "WHERE source = ? AND forecast_issue_date < ?",
+            [source_name, cutoff],
+        )
+        LOG.info(
+            "[fetch_conflict_forecasts] pruned %s vintages older than %s (keeping %d)",
+            source_name, cutoff, keep,
+        )
+
+
 def _write_to_db(df: pd.DataFrame, *, db_url: str | None = None) -> None:
     """Write forecast rows to the conflict_forecasts table.
 
@@ -248,25 +281,6 @@ def _write_to_db(df: pd.DataFrame, *, db_url: str | None = None) -> None:
         key_cols = ["source", "iso3", "hazard_code", "metric", "lead_months", "forecast_issue_date"]
         df = df.drop_duplicates(subset=key_cols, keep="last")
 
-        # Prune old vintages: keep only the 2 most recent issue dates per source
-        for source_name in df["source"].unique():
-            dates = con.execute(
-                "SELECT DISTINCT forecast_issue_date FROM conflict_forecasts "
-                "WHERE source = ? ORDER BY forecast_issue_date DESC",
-                [source_name],
-            ).fetchall()
-            if len(dates) > 2:
-                cutoff = dates[1][0]  # 2nd newest date
-                con.execute(
-                    "DELETE FROM conflict_forecasts "
-                    "WHERE source = ? AND forecast_issue_date < ?",
-                    [source_name, cutoff],
-                )
-                LOG.info(
-                    "[fetch_conflict_forecasts] pruned %s vintages older than %s",
-                    source_name, cutoff,
-                )
-
         # Insert new rows
         con.execute(
             "INSERT INTO conflict_forecasts "
@@ -276,6 +290,10 @@ def _write_to_db(df: pd.DataFrame, *, db_url: str | None = None) -> None:
             "       forecast_issue_date, target_month, model_version "
             "FROM df"
         )
+
+        # Prune AFTER the insert, so the count includes the vintage just
+        # written and means what KEEP_VINTAGES_PER_SOURCE says.
+        prune_old_vintages(con, df["source"].unique())
         # Every row, not only the new ones: a vintage's age is a function of
         # today, and the flag must be true on the row whenever it is true in
         # the world.
