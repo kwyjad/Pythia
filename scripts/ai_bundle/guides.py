@@ -149,7 +149,7 @@ maximally wrong confident forecast. For binary Brier: 0.25 = always saying
 """
 
 _SKILL_SEMANTICS = """\
-Two **reference forecasters** are scored beside the real models (rows in
+Three **reference forecasters** are scored beside the real models (rows in
 `scores` and `rollups.csv` under `run_id IS NULL`):
 
 - `__ext_climatology` — the base-rate SPD the forecaster was shown at prompt
@@ -158,6 +158,32 @@ Two **reference forecasters** are scored beside the real models (rows in
   question window). This is "what you would have said with no model".
 - `__ext_uniform` — flat across buckets (0.5 for binary questions). The
   floor: any model losing to uniform is actively destroying information.
+- `__ext_persistence` — "next month looks like last month": the last value
+  observed strictly before the window (ACE/FATALITIES from
+  `acled_monthly_fatalities`, a live month with no row counting as 0;
+  DR/PHASE3PLUS_IN_NEED from the latest `phase3plus_in_need` row), placed in
+  its bucket and SMOOTHED: 90% of the mass on that bucket and the other 10%
+  spread evenly over all K buckets (`PERSISTENCE_SMOOTHING = 0.1`). A pure
+  one-hot vector gives an infinite log loss whenever the outcome leaves the
+  bucket; the smoothing is a fixed constant, never tuned on outcomes. It is
+  the hard reference for persistent quantities, where standing still beats
+  a three-year base rate.
+
+**One run per question.** A question forecast in several runs has score
+and forecast rows for each. `rollups.csv`, `forecast_vs_outcome.csv`, the
+digest and every `questions/*.json` score list use the LATEST run only;
+`scores_flat.csv` keeps every run and says which is latest
+(`is_latest_run`), and `questions_index.csv` carries `n_runs`, `is_rerun`
+and `latest_run_id`.
+
+**RPS beside Brier.** For SPD metrics the digest reports RPS (stored as
+`score_type='crps'`) next to Brier. Brier ignores bucket ORDER — one bucket
+off and five buckets off score alike — and RPS does not.
+
+**Bucket edges.** `forecast_vs_outcome.csv` flags `bucket_edge = True`
+when the resolved value lies within 5% of a bucket boundary
+(`nearest_boundary`). A small data revision would move that outcome to the
+neighbouring bucket; weigh such "misses" accordingly.
 
 Skill, wherever you compute it:
 
@@ -192,6 +218,12 @@ _RESOLUTION_SEMANTICS = """\
 - `source_desc` (present for resolutions computed after July 2026) names the
   winning source, e.g. `facts_resolved:IFRC:2026-03`. NULL on older rows.
 - `observed_month` is the calendar month the horizon resolves against.
+- `acled_snapshot_date` (ACE/FATALITIES) is the date of the ACLED pull the
+  figure came from. ACLED revises counts for weeks, and every resolution run
+  REPLACES the row, so `resolution_vintages` keeps the first resolution and
+  those taken ~60 and ~90 days after month end (`vintage` = first / d60 /
+  d90, with the actual `days_after_month_end`). Compare them to see whether
+  an outcome moved after it was scored.
 """
 
 _REASONING_TRACE = """\

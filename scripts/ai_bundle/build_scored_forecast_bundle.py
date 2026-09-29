@@ -36,6 +36,7 @@ from typing import Any, Mapping
 
 from scripts.ai_bundle.common import (
     column_exists,
+    latest_run_clause,
     open_db,
     resolve_db_path,
     rows_as_dicts,
@@ -124,6 +125,29 @@ def _realized_bucket(con, metric: str, value: float | None) -> int | None:
         else:
             break
     return idx + 1
+
+
+#: A resolved value within this fraction of a bucket boundary is flagged
+#: ``bucket_edge``: it would change bucket under a revision of a few percent
+#: (ACLED revises monthly counts for weeks), so a forecast scored "wrong"
+#: against it may have been one data revision away from "right".
+BUCKET_EDGE_TOLERANCE = 0.05
+
+
+def _bucket_edge(con, metric: str, value: float | None) -> tuple[bool | None, float | None]:
+    """(is the value within 5% of a positive bucket boundary, that boundary)."""
+    if value is None or _score_family(metric) == "binary":
+        return None, None
+    thresholds = _thresholds_for_metric(con, metric) or []
+    nearest = None
+    for b in thresholds:
+        b = float(b)
+        if b <= 0:
+            continue
+        if abs(float(value) - b) <= BUCKET_EDGE_TOLERANCE * b:
+            if nearest is None or abs(float(value) - b) < abs(float(value) - nearest):
+                nearest = b
+    return (nearest is not None), nearest
 
 
 # ---------------------------------------------------------------------------
@@ -475,12 +499,25 @@ def build_question_record(
         }
 
     if table_exists(con, "scores"):
+        # One run per question: the latest. Earlier runs of a rerun question
+        # stay in scores_flat.csv (flagged is_latest_run = false) but never
+        # weigh on the record's scores or on any mean built from them.
         record["scores"] = rows_as_dicts(
             con,
-            "SELECT horizon_m, model_name, score_type, value FROM scores "
-            "WHERE question_id = ? ORDER BY model_name, score_type, horizon_m",
+            "SELECT s.horizon_m, s.model_name, s.score_type, s.value FROM scores s "
+            "WHERE s.question_id = ?" + latest_run_clause(con, "s")
+            + " ORDER BY s.model_name, s.score_type, s.horizon_m",
             [qid],
         )
+        if column_exists(con, "scores", "run_id"):
+            record["score_runs"] = [
+                r["run_id"] for r in rows_as_dicts(
+                    con,
+                    "SELECT DISTINCT run_id FROM scores WHERE question_id = ? "
+                    "AND run_id IS NOT NULL ORDER BY run_id",
+                    [qid],
+                )
+            ]
 
     # --- Sibyl cross-reference ---------------------------------------------
     if table_exists(con, "sibyl_forecasts"):
@@ -536,6 +573,11 @@ def _emit_scores_flat(con, out_dir: Path, qids: list[str]) -> None:
         "r.value AS resolved_value, r.observed_month, r.source_snapshot_ym"
         + (", r.source_desc" if has_source_desc else ", NULL AS source_desc")
         + (", s.run_id" if has_run_id else ", NULL AS run_id")
+        + (
+            ", (s.run_id IS NULL OR s.run_id = (SELECT MAX(_lr.run_id) FROM scores _lr "
+            "WHERE _lr.question_id = s.question_id AND _lr.run_id IS NOT NULL)) AS is_latest_run"
+            if has_run_id else ", TRUE AS is_latest_run"
+        )
         + " FROM scores s JOIN questions q ON q.question_id = s.question_id "
         "LEFT JOIN resolutions r ON r.question_id = s.question_id "
         "AND r.horizon_m = s.horizon_m "
@@ -549,6 +591,7 @@ def _emit_scores_flat(con, out_dir: Path, qids: list[str]) -> None:
             "question_id", "iso3", "hazard_code", "metric", "score_family",
             "horizon_m", "model_name", "score_type", "value", "resolved_value",
             "observed_month", "source_snapshot_ym", "source_desc", "run_id",
+            "is_latest_run",
         ],
         rows,
     )
@@ -567,7 +610,10 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
         "JOIN resolutions r ON r.question_id = fe.question_id "
         "AND r.horizon_m = fe.month_index "
         "WHERE fe.question_id IN (SELECT UNNEST(?::VARCHAR[])) "
-        "ORDER BY fe.question_id, fe.model_name, r.horizon_m, fe.bucket_index",
+        # One run per question: without it a rerun question's bucket rows
+        # from different runs overwrote each other in the collapse below.
+        + latest_run_clause(con, "fe", "forecasts_ensemble")
+        + " ORDER BY fe.question_id, fe.model_name, r.horizon_m, fe.bucket_index",
         [qids],
     )
     # Collapse bucket rows → one row per (question, model, horizon).
@@ -599,6 +645,9 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
         g["p_realized_bucket"] = probs.get(realized) if realized is not None else None
         g["modal_bucket"] = modal
         g["p_modal_bucket"] = probs.get(modal) if modal is not None else None
+        edge, boundary = _bucket_edge(con, g["metric"], g["resolved_value"])
+        g["bucket_edge"] = edge
+        g["nearest_boundary"] = boundary
         out_rows.append(g)
     out_rows.sort(key=lambda r: (r["question_id"], r["model_name"], r["horizon_m"]))
     write_csv(
@@ -606,7 +655,8 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
         [
             "question_id", "iso3", "hazard_code", "metric", "model_name",
             "horizon_m", "resolved_value", "realized_bucket", "p_realized_bucket",
-            "modal_bucket", "p_modal_bucket", "ev_value",
+            "modal_bucket", "p_modal_bucket", "ev_value", "bucket_edge",
+            "nearest_boundary",
         ],
         out_rows,
     )
@@ -649,7 +699,8 @@ def _emit_rollups(con, out_dir: Path, qids: list[str]) -> list[dict[str, Any]]:
         "MEDIAN(s.value) AS median_value "
         "FROM scores s JOIN questions q ON q.question_id = s.question_id "
         "WHERE s.question_id IN (SELECT UNNEST(?::VARCHAR[])) "
-        "GROUP BY 1, 2, 3, 4, 5 ORDER BY 3, 1, 2, 5, 8",
+        + latest_run_clause(con, "s")
+        + " GROUP BY 1, 2, 3, 4, 5 ORDER BY 3, 1, 2, 5, 8",
         [qids],
     )
     _attach_skill(rows)
@@ -786,6 +837,9 @@ def _question_summary(record: dict[str, Any]) -> dict[str, Any]:
         "mean_log": mean_scores.get("log"),
         "mean_crps": mean_scores.get("crps"),
         "has_sibyl": "sibyl" in record,
+        "n_runs": len(record.get("score_runs") or []),
+        "is_rerun": len(record.get("score_runs") or []) > 1,
+        "latest_run_id": (record.get("score_runs") or [None])[-1],
         "record_path": f"questions/{q.get('question_id')}.json",
     }
 
@@ -844,24 +898,29 @@ def _write_digest(
 
     lines += [
         "",
-        "## Model comparison (Brier by score family — never blend the two)",
+        "## Model comparison (Brier and RPS by score family — never blend the two)",
         "",
         "_skill = 1 − mean/climatology-mean within the same (hazard, metric, "
         "family, score_type) group, aggregated here across groups; positive = "
-        "beat the base rate. `__ext_climatology` / `__ext_uniform` are the "
-        "reference forecasters, not Pythia models._",
+        "beat the base rate. `__ext_climatology` / `__ext_uniform` / "
+        "`__ext_persistence` are the reference forecasters, not Pythia models. "
+        "One run per question (the latest); RPS is SPD-only._",
         "",
-        "| family | model | score_type | n | mean | median | skill vs climatology |",
-        "|---|---|---|---|---|---|---|",
+        "| family | model | n | mean Brier | median Brier | Brier skill vs climatology "
+        "| mean RPS | RPS skill vs climatology |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     # The rollup rows are per (hazard, metric); the digest table aggregates
-    # per (family, model). Skill is averaged over the groups that HAVE a
-    # climatology reference, weighted by sample count.
+    # per (family, model) and per score type. Skill is averaged over the
+    # groups that HAVE a climatology reference, weighted by sample count.
+    # RPS (stored as score_type 'crps') sits beside Brier for SPD metrics:
+    # Brier ignores bucket ORDER, so a forecast one bucket off and one five
+    # buckets off score the same, and RPS is the score that tells them apart.
     agg: dict[tuple, dict[str, float]] = {}
     for r in rollups:
-        if r.get("score_type") not in ("brier",):
+        if r.get("score_type") not in ("brier", "crps"):
             continue
-        key = (r["score_family"], r["model_name"])
+        key = (r["score_family"], r["model_name"], r["score_type"])
         a = agg.setdefault(key, {"n": 0, "vsum": 0.0, "msum": 0.0,
                                  "skill_n": 0, "skill_sum": 0.0})
         n = int(r["n_samples"] or 0)
@@ -871,15 +930,20 @@ def _write_digest(
         if r.get("skill_vs_climatology") is not None:
             a["skill_n"] += n
             a["skill_sum"] += float(r["skill_vs_climatology"]) * n
-    for (family, model), a in sorted(agg.items()):
-        if not a["n"]:
+
+    def _skill(a: dict[str, float] | None) -> str:
+        return f"{a['skill_sum'] / a['skill_n']:+.3f}" if a and a["skill_n"] else "—"
+
+    for family, model in sorted({(k[0], k[1]) for k in agg}):
+        b = agg.get((family, model, "brier"))
+        c = agg.get((family, model, "crps"))
+        if not b or not b["n"]:
             continue
-        skill = (
-            f"{a['skill_sum'] / a['skill_n']:+.3f}" if a["skill_n"] else "—"
-        )
+        rps = f"{c['vsum'] / c['n']:.4f}" if c and c["n"] else "—"
         lines.append(
-            f"| {family} | {model} | brier | {a['n']} "
-            f"| {a['vsum'] / a['n']:.4f} | {a['msum'] / a['n']:.4f} | {skill} |"
+            f"| {family} | {model} | {b['n']} "
+            f"| {b['vsum'] / b['n']:.4f} | {b['msum'] / b['n']:.4f} | {_skill(b)} "
+            f"| {rps} | {_skill(c) if c else '—'} |"
         )
 
     def _qline(s: dict[str, Any]) -> str:
@@ -1107,7 +1171,8 @@ def build_bundle(
                 "track", "target_month", "tier", "triage_score", "rc_level",
                 "rc_score", "n_members", "avg_trace_quality",
                 "n_horizons_resolved", "ranking_model", "mean_brier", "mean_log",
-                "mean_crps", "has_sibyl", "record_path",
+                "mean_crps", "has_sibyl", "n_runs", "is_rerun", "latest_run_id",
+                "record_path",
             ],
             summaries,
         )

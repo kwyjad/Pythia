@@ -201,3 +201,25 @@ def test_empty_when_no_scores(api_env) -> None:
     assert body["aggregate"] == {}
     # Runs still surface so the UI can show an "awaiting resolutions" state.
     assert body["runs"] and body["runs"][0]["sibyl_run_id"] == "sr1"
+
+
+def test_an_earlier_run_of_a_rerun_question_is_ignored(api_env, tmp_path) -> None:
+    """A question forecast twice keeps only its LATEST run on both sides."""
+
+    client = api_env(True)
+    db = next(tmp_path.glob("api_True.duckdb"))
+    con = duckdb.connect(str(db))
+    # run0 predates run1: a far worse Sibyl score and a far better ensemble
+    # one. If either side read run0, the delta or the pair count would move.
+    con.executemany(
+        "INSERT INTO scores VALUES (?,?,?,?,?,?,?,?)",
+        [
+            ("Q1", 1, "FATALITIES", "brier", "sibyl", 1.90, "run0", False),
+            ("Q1", 1, "FATALITIES", "brier", "ensemble_bayesmc_v2", 0.01, "run0", False),
+        ],
+    )
+    con.close()
+    _app_mod._READ_CON = None
+    body = client.get("/v1/performance/sibyl_comparison").json()
+    assert len(body["pairs"]) == 12
+    assert body["aggregate"]["spd"]["brier"]["mean_delta"] == pytest.approx(-0.05, abs=1e-9)

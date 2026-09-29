@@ -38,6 +38,7 @@ on:
       - "pythia/api/app.py"
       - "pythia/api/core.py"
       - "pythia/api/routes/risk_index.py"
+      - "pythia/api/routes/performance.py"
       # resolver/tests files that guard forecaster/pythia code. resolver-ci-fast
       # runs all of resolver/tests/ but triggers only on resolver/**, so without
       # naming them here a PR touching only forecaster/ or pythia/ runs none of
@@ -346,7 +347,9 @@ jobs:
             pythia/tests/test_base_rate_spd.py \
             pythia/tests/test_base_rate_anchor_depth.py \
             pythia/tests/test_compute_deviation.py \
-            pythia/tests/test_score_baselines.py
+            pythia/tests/test_score_baselines.py \
+            pythia/tests/test_scoring_honesty.py \
+            pythia/tests/test_api_sibyl_comparison.py
 
       - name: Run debug-bundle tests
         run: |

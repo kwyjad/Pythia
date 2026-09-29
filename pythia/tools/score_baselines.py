@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pythia.buckets import n_buckets_for
 from pythia.config import load as load_cfg
-from pythia.tools.base_rate_spd import base_rate_spd, forecast_months
+from pythia.tools.base_rate_spd import base_rate_spd, forecast_months, last_observed_value
 from pythia.tools.compute_deviation import _anchor_ym
 from pythia.tools.compute_scores import (
     _brier,
@@ -63,6 +63,32 @@ CLIMATOLOGY_MODEL_NAME = "__ext_climatology"
 UNIFORM_MODEL_NAME = "__ext_uniform"
 
 SPD_METRICS = ("PA", "FATALITIES", "PHASE3PLUS_IN_NEED")
+
+#: "Next month looks like last month": the last observed value before the
+#: window, placed in its bucket. The hardest simple reference for a
+#: persistent quantity (a Phase 3+ caseload, a war's monthly death toll),
+#: where climatology over three years is easy to beat by standing still.
+PERSISTENCE_MODEL_NAME = "__ext_persistence"
+#: (hazard, metric) pairs with a persistence reference.
+PERSISTENCE_PAIRS = frozenset({("ACE", "FATALITIES"), ("DR", "PHASE3PLUS_IN_NEED")})
+#: Share of the mass spread evenly over every bucket. A pure one-hot vector
+#: gives an infinite log loss whenever the outcome leaves the bucket, which
+#: says nothing useful; 0.1 keeps the reference sharp (90% + 0.1/k on the
+#: persisted bucket) and every log score finite. It is a fixed constant on
+#: purpose: tuning it against outcomes would make the reference a model.
+PERSISTENCE_SMOOTHING = 0.1
+
+
+def persistence_spd(value: float, metric: str) -> Optional[List[float]]:
+    """The smoothed one-hot vector for ``value``, or None when unbucketable."""
+    k = n_buckets_for(metric)
+    j = _bucket_index(float(value), metric)
+    if not k or j is None:
+        return None
+    eps = PERSISTENCE_SMOOTHING
+    vec = [eps / k] * k
+    vec[j] += 1.0 - eps
+    return vec
 
 
 def _table_exists(conn, name: str) -> bool:
@@ -160,6 +186,8 @@ def score_baselines(db_url: str) -> Dict[str, int]:
     counters = {
         "scored_climatology": 0,
         "scored_uniform": 0,
+        "scored_persistence": 0,
+        "skipped_no_persistence": 0,
         "skipped_no_baserate": 0,
         "skipped_bad_resolution": 0,
     }
@@ -209,6 +237,7 @@ def score_baselines(db_url: str) -> Dict[str, int]:
             return counters
 
         base_cache: Dict[str, Tuple[list, str, dict]] = {}
+        persist_cache: Dict[str, Optional[Tuple[float, str, str]]] = {}
         now = _utcnow_naive()
 
         for pair in pairs:
@@ -299,6 +328,31 @@ def score_baselines(db_url: str) -> Dict[str, int]:
                    "uniform", resolved, j, now)
             counters["scored_uniform"] += 1
 
+            if (str(pair["hazard_code"] or "").upper(), metric) in PERSISTENCE_PAIRS:
+                if qid not in persist_cache:
+                    persist_cache[qid] = last_observed_value(
+                        conn, pair["iso3"], pair["hazard_code"], metric, anchor
+                    )
+                last = persist_cache[qid]
+                vec = persistence_spd(last[0], metric) if last else None
+                if vec is None:
+                    counters["skipped_no_persistence"] += 1
+                else:
+                    _write_scores(
+                        conn, question_id=qid, horizon_m=hm, metric=metric,
+                        model_name=PERSISTENCE_MODEL_NAME,
+                        score_rows=[
+                            ("brier", _brier(vec, j)),
+                            ("log", _log_score(vec, j)),
+                            ("crps", _crps_like(vec, j)),
+                        ],
+                        is_test=pair["is_test"], now=now,
+                    )
+                    _audit(conn, qid, hm, PERSISTENCE_MODEL_NAME, metric, vec,
+                           f"persistence:{last[2]}:{last[1]}={last[0]:g}",
+                           resolved, j, now)
+                    counters["scored_persistence"] += 1
+
             if not base_probs:
                 counters["skipped_no_baserate"] += 1
                 LOGGER.info(
@@ -329,8 +383,9 @@ def score_baselines(db_url: str) -> Dict[str, int]:
             counters["scored_climatology"] += 1
 
         LOGGER.info(
-            "score_baselines: climatology=%d uniform=%d no_baserate=%d bad_resolution=%d",
+            "score_baselines: climatology=%d uniform=%d persistence=%d no_baserate=%d bad_resolution=%d",
             counters["scored_climatology"], counters["scored_uniform"],
+            counters["scored_persistence"],
             counters["skipped_no_baserate"], counters["skipped_bad_resolution"],
         )
         return counters

@@ -633,6 +633,114 @@ def _purge_non_series_fatalities(conn) -> int:
         return 0
 
 
+# ---------------------------------------------------------------------------
+# Resolution vintages (ACE/FATALITIES)
+# ---------------------------------------------------------------------------
+
+#: ACLED revises a month's counts for weeks after it ends, and every run of
+#: this module re-resolves every horizon and REPLACES the row, so a revision
+#: used to be invisible: the resolution a forecast was first scored against
+#: was gone. The first resolution and the ones taken at 60 and 90 days after
+#: month end are kept here and never overwritten.
+#:
+#: The resolver runs on the 28th (``resolver_update.yml``), so a month is
+#: resolved at ~28, ~58-59 and ~89-92 days after it ends; a milestone is
+#: recorded by the first run at or after ``days - VINTAGE_TOLERANCE_DAYS``,
+#: and the row carries the ACTUAL day count, never the milestone's.
+VINTAGE_MILESTONES: tuple[tuple[str, int], ...] = (("d60", 60), ("d90", 90))
+VINTAGE_TOLERANCE_DAYS = 5
+VINTAGE_METRICS = frozenset({"FATALITIES"})
+
+
+def _ensure_vintage_table(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resolution_vintages (
+          question_id TEXT,
+          horizon_m INTEGER,
+          vintage TEXT,
+          observed_month TEXT,
+          days_after_month_end INTEGER,
+          value DOUBLE,
+          source_desc TEXT,
+          acled_snapshot_date DATE,
+          recorded_at TIMESTAMP,
+          is_test BOOLEAN DEFAULT FALSE,
+          PRIMARY KEY (question_id, horizon_m, vintage)
+        )
+        """
+    )
+
+
+def _days_after_month_end(observed_month: str, today: date) -> Optional[int]:
+    try:
+        y, m = int(observed_month[:4]), int(observed_month[5:7])
+    except (TypeError, ValueError):
+        return None
+    first_next = date(y + (m // 12), m % 12 + 1, 1)
+    return (today - first_next).days + 1
+
+
+def _snapshot_date(source_ts: Optional[str]) -> Optional[str]:
+    if not source_ts:
+        return None
+    text = str(source_ts)[:10]
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return None
+    return text
+
+
+def record_vintages(
+    conn,
+    *,
+    question_id: str,
+    horizon_m: int,
+    observed_month: str,
+    value: float,
+    source_desc: str,
+    source_ts: Optional[str],
+    today: date,
+    is_test: bool,
+) -> list[str]:
+    """Insert the vintages this resolution completes; returns their labels.
+
+    ``first`` is written the first time the horizon resolves; ``d60``/``d90``
+    once the month is old enough. Existing vintages are never touched
+    (``INSERT OR IGNORE``), which is the whole point.
+    """
+    days = _days_after_month_end(observed_month, today)
+    labels = ["first"]
+    if days is not None:
+        labels += [
+            label for label, milestone in VINTAGE_MILESTONES
+            if days >= milestone - VINTAGE_TOLERANCE_DAYS
+        ]
+    written: list[str] = []
+    for label in labels:
+        before = conn.execute(
+            "SELECT COUNT(*) FROM resolution_vintages "
+            "WHERE question_id = ? AND horizon_m = ? AND vintage = ?",
+            [question_id, horizon_m, label],
+        ).fetchone()[0]
+        if before:
+            continue
+        conn.execute(
+            """
+            INSERT INTO resolution_vintages (
+              question_id, horizon_m, vintage, observed_month,
+              days_after_month_end, value, source_desc, acled_snapshot_date,
+              recorded_at, is_test
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [question_id, horizon_m, label, observed_month, days, float(value),
+             source_desc, _snapshot_date(source_ts), _utcnow_naive(), is_test],
+        )
+        written.append(label)
+    return written
+
+
 def _ensure_resolutions_table(conn) -> None:
     """Create the resolutions table if it does not exist, and add horizon_m
     column if missing (migration for existing databases)."""
@@ -667,6 +775,11 @@ def _ensure_resolutions_table(conn) -> None:
     if "is_test" not in existing:
         try:
             conn.execute("ALTER TABLE resolutions ADD COLUMN is_test BOOLEAN DEFAULT FALSE")
+        except Exception:
+            pass
+    if "acled_snapshot_date" not in existing:
+        try:
+            conn.execute("ALTER TABLE resolutions ADD COLUMN acled_snapshot_date DATE")
         except Exception:
             pass
     if "source_desc" not in existing:
@@ -706,6 +819,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
 
     try:
         _ensure_resolutions_table(conn)
+        _ensure_vintage_table(conn)
 
         # Early exit if questions table doesn't exist or is empty
         if not _table_exists(conn, "questions"):
@@ -767,6 +881,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         )
 
         written = 0
+        vintages_written = 0
         resolved_from_source = 0
         resolved_as_zero = 0
         skipped_no_data_coverage = 0
@@ -915,8 +1030,9 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                       source_snapshot_ym,
                       source_desc,
                       created_at,
-                      is_test
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                      is_test,
+                      acled_snapshot_date
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         question_id,
@@ -927,9 +1043,28 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                         source_desc,
                         _utcnow_naive(),
                         is_test_val,
+                        # The ACLED pull this figure came from (its
+                        # updated_at), stated as a date on the row.
+                        _snapshot_date(source_ts) if metric_norm == "FATALITIES" else None,
                     ],
                 )
                 written += 1
+                if metric_norm in VINTAGE_METRICS:
+                    try:
+                        vintages_written += len(record_vintages(
+                            conn,
+                            question_id=question_id,
+                            horizon_m=horizon_m,
+                            observed_month=cal_month,
+                            value=float(value),
+                            source_desc=source_desc,
+                            source_ts=source_ts,
+                            today=today,
+                            is_test=bool(is_test_val),
+                        ))
+                    except Exception as exc:  # noqa: BLE001 - a vintage never blocks a resolution
+                        LOGGER.warning("resolution vintage for %s h%d failed: %r",
+                                       question_id, horizon_m, exc)
                 LOGGER.info(
                     "Resolved %s h%d (%s/%s/%s %s) -> value=%.1f source=%s source_ts=%s",
                     question_id,
@@ -968,7 +1103,8 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             "%d horizon-months skipped (no resolution data), "
             "%d horizon-months skipped (no data coverage yet), "
             "%d horizon-months skipped (country outside source universe), "
-            "%d questions skipped (unresolvable hazard).",
+            "%d questions skipped (unresolvable hazard); "
+            "%d new FATALITIES resolution vintage(s) recorded.",
             len(rows),
             written,
             resolved_from_source,
@@ -977,6 +1113,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             skipped_no_data_coverage,
             skipped_outside_source_universe,
             skipped_unresolvable_hazard,
+            vintages_written,
         )
     finally:
         _close_db(conn)
