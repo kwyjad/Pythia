@@ -38,6 +38,8 @@ on:
       # vintage stall, and each verdict points at a different fix.
       - "scripts/ci/diagnose_acled_cast.py"
       - "scripts/ci/tests/test_diagnose_acled_cast.py"
+      # The INFORM Warning probe lives under tools/ but its tests live here.
+      - "tools/probe_inform_warning.py"
       # Guards resolver/hazard_resolution/emdat.py the same way.
       - "scripts/ci/diagnose_emdat.py"
       - "scripts/ci/tests/test_diagnose_emdat.py"
@@ -109,6 +111,8 @@ on:
       # vintage stall, and each verdict points at a different fix.
       - "scripts/ci/diagnose_acled_cast.py"
       - "scripts/ci/tests/test_diagnose_acled_cast.py"
+      # The INFORM Warning probe lives under tools/ but its tests live here.
+      - "tools/probe_inform_warning.py"
       # Guards resolver/hazard_resolution/emdat.py the same way.
       - "scripts/ci/diagnose_emdat.py"
       - "scripts/ci/tests/test_diagnose_emdat.py"

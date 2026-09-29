@@ -1,0 +1,81 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Read-only: ask the INFORM Warning service how its data can be read, before a
+# connector is written against a guessed route. The build sandbox cannot reach
+# any JRC host, so this runs where the runners can.
+#
+# It downloads no canonical DB and writes nothing back, so it is deliberately
+# NOT in the pythia-resolver-db concurrency group: it must never queue behind,
+# or cancel, a live pipeline stage.
+name: Probe INFORM Warning
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_urls:
+        description: "Optional comma-separated extra URLs to GET (a follow-up question needs no code change)"
+        required: false
+        default: ""
+        type: string
+      max_follow:
+        description: "How many data-looking links to follow one hop"
+        required: false
+        default: "40"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pypdf
+
+      - name: Probe INFORM Warning
+        # Inputs travel through the environment so a value containing shell
+        # metacharacters is data, not code.
+        env:
+          PROBE_EXTRA_URLS: ${{ inputs.extra_urls }}
+          PROBE_MAX_FOLLOW: ${{ inputs.max_follow }}
+          # Read only to report whether it is configured; the probe sends no
+          # credential, because the service's auth scheme is not yet known.
+          INFORM_WARNING_API_KEY: ${{ secrets.INFORM_WARNING_API_KEY }}
+        run: |
+          set -euo pipefail
+          python -m tools.probe_inform_warning \
+            --out-dir diagnostics/inform_warning \
+            --max-follow "${PROBE_MAX_FOLLOW}" \
+            --extra-urls "${PROBE_EXTRA_URLS}" \
+            --verbose
+
+      - name: Render the report into the step summary
+        if: always()
+        run: |
+          if [ -f diagnostics/inform_warning/inform_warning_probe.md ]; then
+            head -c 900000 diagnostics/inform_warning/inform_warning_probe.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The probe produced no report; check the previous step's log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload probe artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inform-warning-probe
+          path: |
+            diagnostics/inform_warning/
+          if-no-files-found: warn
+          retention-days: 30
