@@ -72,15 +72,17 @@ class TestACLEDAdapterMap:
         mmr_row = canonical[canonical["iso3"] == "MMR"].iloc[0]
         assert mmr_row["as_of_date"] == "2024-02-29"
 
-    def test_metric_remapped_to_canonical(
+    def test_battle_metric_keeps_its_own_name(
         self, adapter: ACLEDAdapter, acled_staging_csv: Path
     ) -> None:
         raw = adapter.load(acled_staging_csv)
         canonical = adapter.map(raw)
         metrics = set(canonical["metric"].unique())
-        # fatalities_battle_month should be mapped to fatalities
-        assert "fatalities" in metrics
-        assert "fatalities_battle_month" not in metrics
+        # The battle-only series is NOT renamed to ``fatalities``: that name
+        # is what ACE/FATALITIES questions resolved from, and they are
+        # worded against the all-types series (Sept 2026).
+        assert "fatalities_battle_month" in metrics
+        assert "fatalities" not in metrics
         # events stays as events
         assert "events" in metrics
 

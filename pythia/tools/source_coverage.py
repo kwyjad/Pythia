@@ -38,15 +38,11 @@ LOGGER = logging.getLogger(__name__)
 # resolution source tables. Mirrors the source set used by
 # compute_resolutions' zero-default rules — extend both together.
 _COVERAGE_QUERIES: dict[str, list[tuple[str, str]]] = {
+    # FATALITIES coverage is the resolution series' own coverage. A facts row
+    # named 'fatalities' is an IFRC natural-hazard death count or a legacy
+    # battle-only ACLED row, and counting either would widen the month and
+    # country gates with rows that cannot resolve a question (Sept 2026).
     "FATALITIES": [
-        ("facts_resolved",
-         "SELECT upper(iso3) AS iso3, ym, COUNT(*) AS n FROM facts_resolved "
-         "WHERE lower(metric) = 'fatalities' AND iso3 IS NOT NULL AND ym IS NOT NULL "
-         "GROUP BY 1, 2"),
-        ("facts_deltas",
-         "SELECT upper(iso3) AS iso3, ym, COUNT(*) AS n FROM facts_deltas "
-         "WHERE lower(metric) = 'fatalities' AND iso3 IS NOT NULL AND ym IS NOT NULL "
-         "GROUP BY 1, 2"),
         ("acled_monthly_fatalities",
          "SELECT upper(iso3) AS iso3, strftime(month, '%Y-%m') AS ym, COUNT(*) AS n "
          "FROM acled_monthly_fatalities WHERE iso3 IS NOT NULL AND month IS NOT NULL "

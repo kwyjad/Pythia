@@ -108,7 +108,9 @@ def test_metric_filters_in_sync_with_compute_resolutions():
     assert METRIC_FILTERS_SQL["PA"] == (
         "LOWER(metric) IN ('affected','people_affected','pa','displaced')"
     )
-    assert METRIC_FILTERS_SQL["FATALITIES"] == "LOWER(metric) = 'fatalities'"
+    # FATALITIES resolves from acled_monthly_fatalities alone since Sept
+    # 2026, so a facts-coverage filter for it would describe nothing.
+    assert "FATALITIES" not in METRIC_FILTERS_SQL
     assert METRIC_FILTERS_SQL["EVENT_OCCURRENCE"] == "LOWER(metric) = 'event_occurrence'"
     assert METRIC_FILTERS_SQL["PHASE3PLUS_IN_NEED"] == "LOWER(metric) = 'phase3plus_in_need'"
 
@@ -126,16 +128,14 @@ def test_coverage_buckets(coverage_db):
     assert fl_pa.pa_eligible_in_facts == 1  # only FL_FULL has 'affected'
     assert fl_pa.gap_event_no_pa == 1  # FL_EVENT_ONLY — the imputation-target population
 
-    ace_fat = by_key[("ACE", "FATALITIES")]
-    assert ace_fat.total == 1
-    assert ace_fat.events_in_facts == 1
-    assert ace_fat.pa_eligible_in_facts == 1  # ACE/FATALITIES filter matches 'fatalities'
+    assert ("ACE", "FATALITIES") not in by_key
 
-    # Publisher breakdown shows IFRC for FL/PA, ACLED for ACE/FATALITIES
+    # Publisher breakdown shows IFRC for FL/PA; ACE/FATALITIES is not a
+    # facts-resolved metric any more
     by_pub = {(r.hazard_code, r.metric, r.publisher): r.pa_eligible_questions
               for r in publisher}
     assert by_pub.get(("FL", "PA", "IFRC")) == 1
-    assert by_pub.get(("ACE", "FATALITIES", "ACLED")) == 1
+    assert by_pub.get(("ACE", "FATALITIES", "ACLED")) is None
 
 
 def test_retired_questions_excluded(coverage_db):

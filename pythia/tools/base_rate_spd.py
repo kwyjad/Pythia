@@ -280,6 +280,14 @@ def _fill_quiet_months(
     return values, len(values) - n_quiet, n_quiet
 
 
+#: The table the ACE/FATALITIES anchor is built from. ``compute_resolutions``
+#: resolves ACE/FATALITIES from ``ACE_FATALITIES_TABLE`` and the resolver
+#: debug bundle's ``ace_fatalities_resolve_from_the_base_rate_series`` check
+#: holds the two equal — a question scored against one series and anchored
+#: on another is the Sept 2026 battle-only fault.
+CONFLICT_FATALITIES_TABLE = "acled_monthly_fatalities"
+
+
 def _conflict_fatalities(con, iso3: str, before_ym: str) -> Tuple[List[float], str, Dict[str, Any]]:
     """ACE/FATALITIES: the ACLED monthly-fatalities series the prompt anchors on."""
     if not _table_exists(con, "acled_monthly_fatalities"):

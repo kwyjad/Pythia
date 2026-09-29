@@ -1455,3 +1455,50 @@ def test_a_row_beside_an_unconfirmed_sweep_hit_fails_unless_frozen(tmp_path, ful
     assert check["verdict"] == "FAIL"
     assert check["left"].startswith("1 unfrozen")
     assert "1 frozen row(s)" in check["detail"]
+
+
+# --------------------------------------------------------------------------
+# Sept 2026 scored-run review: ACE/FATALITIES resolved to battles only
+# --------------------------------------------------------------------------
+
+
+def test_ace_fatalities_must_resolve_from_the_base_rate_series(tmp_path, full_run):
+    """A battles-only ACLED row named 'fatalities', or an ACE/FATALITIES
+    resolution drawn from one, is the fault the check exists to catch."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "INSERT INTO facts_resolved (iso3, ym, hazard_code, metric, value, publisher, "
+        "series_semantics) VALUES ('BRA','2026-08','ACE','fatalities',37.0,'ACLED','new')"
+    )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS questions (question_id TEXT, hazard_code TEXT, metric TEXT)"
+    )
+    con.execute("INSERT INTO questions VALUES ('BRA_ACE_FAT','ACE','FATALITIES')")
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS resolutions (question_id TEXT, horizon_m INTEGER, "
+        "value DOUBLE, source_desc TEXT)"
+    )
+    con.execute(
+        "INSERT INTO resolutions VALUES ('BRA_ACE_FAT', 1, 37, 'facts_resolved:ACLED:fatalities')"
+    )
+    con.close()
+    check = _checks(tmp_path, db, full_run, "acefat1")[
+        "ace_fatalities_resolve_from_the_base_rate_series"]
+    assert check["verdict"] == "FAIL"
+    assert "still named 'fatalities'" in check["detail"]
+    assert "not drawn from acled_monthly_fatalities" in check["detail"]
+
+    con = duckdb.connect(str(db))
+    con.execute(
+        "UPDATE facts_resolved SET metric = 'fatalities_battle_month' "
+        "WHERE iso3 = 'BRA' AND metric = 'fatalities'"
+    )
+    con.execute(
+        "UPDATE resolutions SET value = 412, "
+        "source_desc = 'acled_monthly_fatalities:all_event_types'"
+    )
+    con.close()
+    assert _checks(tmp_path, db, full_run, "acefat2")[
+        "ace_fatalities_resolve_from_the_base_rate_series"]["verdict"] == "PASS"
