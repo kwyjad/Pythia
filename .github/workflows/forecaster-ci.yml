@@ -108,6 +108,8 @@ on:
       - "scripts/ci/write_stage_context.py"
       - "scripts/ci/sibyl_bundle_context.py"
       - "scripts/ci/tests/test_stage_context.py"
+      - "scripts/ci/rc_shift_diagnostic.py"
+      - "scripts/ci/tests/test_rc_shift_diagnostic.py"
       # Self-reference, as horizon-scanner-ci.yml already does: without it a PR
       # editing this workflow's own test list never runs the list it edited.
       - ".github/workflows/forecaster-ci.yml"
@@ -255,6 +257,15 @@ jobs:
             forecaster/tests/test_spd_model_params.py \
             forecaster/tests/test_opus55_lineup.py \
             forecaster/tests/test_gpt6_lineup.py
+
+      - name: Run regime-change shift guidance tests
+        run: |
+          # PYTHIA_RC_SHIFT_GUIDANCE: prompts byte-identical with the flag off,
+          # the rc_shift trace field, the sharpness check and the
+          # forecasts_raw.rc_guidance stamp; plus the read-only diagnostic.
+          pytest -vv \
+            forecaster/tests/test_rc_shift_guidance.py \
+            scripts/ci/tests/test_rc_shift_diagnostic.py
 
       - name: Run shadow members + calibration weight tests
         run: |

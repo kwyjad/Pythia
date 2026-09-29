@@ -180,10 +180,12 @@ and `latest_run_id`.
 `score_type='crps'`) next to Brier. Brier ignores bucket ORDER — one bucket
 off and five buckets off score alike — and RPS does not.
 
-**Bucket edges.** `forecast_vs_outcome.csv` flags `bucket_edge = True`
-when the resolved value lies within 5% of a bucket boundary
-(`nearest_boundary`). A small data revision would move that outcome to the
-neighbouring bucket; weigh such "misses" accordingly.
+**Bucket edges.** `forecast_vs_outcome.csv` carries `nearest_boundary`, the
+closest FINITE interior bucket boundary to the resolved value, and flags
+`bucket_edge = True` only when the value lies within 5% of it. A small data
+revision would move that outcome to the neighbouring bucket; weigh such
+"misses" accordingly. A value of 0 is never an edge case, and binary rows
+carry neither column. The file also carries the question's `track`.
 
 **Reference vectors.** `forecast_vs_outcome.csv` also carries rows for the
 `__ext_` reference forecasters, with the exact vector each one was scored
@@ -205,9 +207,23 @@ Skill, wherever you compute it:
     skill = 1 − (model_score / climatology_score)
 
 Positive = beat the base rate. Zero = matched it. Negative = lost to it.
-Compute per (score_family, score_type), NEVER across them — `rollups.csv`
-carries `climatology_mean` and `skill_vs_climatology` already grouped
-correctly.
+Compute per (score_family, score_type), NEVER across them, and on PAIRED
+scores only: the same (question_id, horizon_m) scored by both the model and
+`__ext_climatology`. `rollups.csv` has one row per (hazard, metric,
+score_family, track, model, score_type) and carries the paired figures:
+`n_paired`, `paired_model_mean`, `climatology_mean` (over the same pairs) and
+`skill_vs_climatology`. `mean_value`, `median_value`, `n_samples` and
+`n_questions_scored` describe everything the model scored; `n_questions` is
+the paired question count wherever the group has a climatology reference.
+A ratio of a model's mean over its own questions to climatology's mean over
+every question in the hazard and metric compares two different sets of
+questions, and once read Track 2 drought event skill as +0.80 where the
+paired figure was about +0.74.
+
+**Sharpness.** The digest's sharpness table gives, per (hazard, metric,
+track), the primary aggregate's mean largest bucket probability and its
+mean probability on the bucket that happened. A forecast can be sharp and
+wrong; the pair of numbers says which.
 
 **The Track 1 vs Track 2 trap**: Track 1 questions are high regime-change,
 Track 2 questions are quiet — disjoint populations, and Track 2's are

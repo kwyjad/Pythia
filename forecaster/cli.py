@@ -1288,6 +1288,7 @@ from .prompts import (  # noqa: E402
     build_spd_prompt_v2,
     load_member_calibration_advice,
     merge_evidence_packs,
+    rc_guidance_version,
     render_member_calibration_advice,
     reset_member_calibration_advice_cache,
 )
@@ -1684,8 +1685,13 @@ def _write_spd_members_v2_to_db(
     per_model_spds: list[dict[str, list[float]]],
     raw_calls: list[dict[str, object]],
     resolution_source: str,
+    rc_guidance: Optional[str] = None,
 ) -> None:
-    """Persist SPD v2 member SPDs into forecasts_raw without touching ensemble rows."""
+    """Persist SPD v2 member SPDs into forecasts_raw without touching ensemble rows.
+
+    ``rc_guidance`` names the regime-change prompt guidance the members saw
+    (``prompts.rc_guidance_version``); NULL means the legacy wording.
+    """
 
     qid = str(question_row.get("question_id") or "")
     hz = str(question_row.get("hazard_code") or "").upper()
@@ -1812,8 +1818,8 @@ def _write_spd_members_v2_to_db(
                         run_id, question_id, model_name, month_index, bucket_index,
                         probability, ok, elapsed_ms, cost_usd, prompt_tokens,
                         completion_tokens, total_tokens, status, spd_json, human_explanation,
-                        is_test, reasoning_trace_json
-                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'no_forecast', ?, ?, ?, ?)
+                        is_test, reasoning_trace_json, rc_guidance
+                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'no_forecast', ?, ?, ?, ?, ?)
                     """,
                     [
                         run_id,
@@ -1828,6 +1834,7 @@ def _write_spd_members_v2_to_db(
                         "No SPD returned for this model.",
                         _IS_TEST,
                         None,
+                        rc_guidance,
                     ],
                 )
                 continue
@@ -1860,8 +1867,8 @@ def _write_spd_members_v2_to_db(
                             run_id, question_id, model_name, month_index, bucket_index,
                             probability, ok, elapsed_ms, cost_usd, prompt_tokens,
                             completion_tokens, total_tokens, status, spd_json, human_explanation,
-                            horizon_m, class_bin, p, is_test, reasoning_trace_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?)
+                            horizon_m, class_bin, p, is_test, reasoning_trace_json, rc_guidance
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
                             run_id,
@@ -1883,6 +1890,7 @@ def _write_spd_members_v2_to_db(
                             float(prob),
                             _IS_TEST,
                             _rc_reasoning_trace,
+                            rc_guidance,
                         ],
                     )
     except Exception as exc:  # noqa: BLE001
@@ -3481,6 +3489,20 @@ async def _call_spd_members_v2(
 
         # Extract reasoning trace and human explanation from parsed JSON.
         reasoning_trace = spd_obj.get("reasoning_trace")
+        try:
+            from forecaster.trace_validation import normalise_rc_shift_in_trace
+
+            reasoning_trace = normalise_rc_shift_in_trace(reasoning_trace)
+            _rc_status = (reasoning_trace or {}).get("rc_shift_status") if isinstance(reasoning_trace, dict) else None
+            if _rc_status and _rc_status != "ok":
+                LOG.info(
+                    "rc_shift %s for %s / %s (kept; the forecast stands)",
+                    _rc_status,
+                    question_id,
+                    getattr(ms_val, "model_id", "") or getattr(ms_val, "name", ""),
+                )
+        except Exception:  # noqa: BLE001 — a trace field must never cost a forecast
+            LOG.debug("rc_shift normalisation skipped", exc_info=True)
         human_explanation = spd_obj.get("human_explanation", "")
         raw_call_entry["reasoning_trace"] = reasoning_trace
         raw_call_entry["human_explanation"] = human_explanation
@@ -5433,6 +5455,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     per_model_spds=member_spds_snapshot or per_model_spds,
                     raw_calls=member_raw_calls_snapshot or raw_calls,
                     resolution_source=resolution_source,
+                    rc_guidance=rc_guidance_version(track=1),
                 )
                 members_written = True
 
@@ -5677,6 +5700,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     per_model_spds=member_spds_snapshot or per_model_spds_bm,
                     raw_calls=member_raw_calls_snapshot or raw_calls,
                     resolution_source=resolution_source,
+                    rc_guidance=rc_guidance_version(track=1),
                 )
                 members_written = True
             raw_texts = [str(rc.get("text") or "") for rc in raw_calls if isinstance(rc, dict)]
