@@ -113,6 +113,30 @@ def safe_json_loads(text: Any) -> Any:
         return None
 
 
+RC_PROMOTED_TIER = "rc_promoted"
+
+
+def triage_view(row: Mapping[str, Any] | None) -> tuple[Any, Any]:
+    """Return ``(tier, triage_score)`` as a bundle should report them.
+
+    An RC-promoted hazard skipped triage. Its stored ``triage_score`` is a 0.0
+    placeholder, and rows written before Oct 2026 also carry ``tier='quiet'``.
+    The row's ``data_quality_json`` still says ``status: rc_promoted``, so both
+    old and new rows report ``("rc_promoted", None)``: no tier was assessed and
+    no score was measured.
+    """
+    if not row:
+        return None, None
+    tier = row.get("tier")
+    dq = row.get("data_quality")
+    if dq is None:
+        dq = safe_json_loads(row.get("data_quality_json"))
+    status = dq.get("status") if isinstance(dq, dict) else None
+    if tier == RC_PROMOTED_TIER or status == RC_PROMOTED_TIER:
+        return RC_PROMOTED_TIER, None
+    return tier, row.get("triage_score")
+
+
 def json_default(obj: Any) -> str:
     return str(obj)
 

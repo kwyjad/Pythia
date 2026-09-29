@@ -70,6 +70,7 @@ from scripts.ai_bundle.common import (
     write_csv,
     write_json,
     write_manifest,
+    triage_view,
 )
 from scripts.ai_bundle.guides import build_current_run_guide
 
@@ -243,7 +244,9 @@ def _load_triage(con, hs_run_id: str | None) -> dict[tuple, dict[str, Any]]:
     rows = rows_as_dicts(
         con,
         "SELECT iso3, hazard_code, tier, triage_score, regime_change_score, "
-        "regime_change_level FROM hs_triage WHERE run_id = ?",
+        "regime_change_level"
+        + (", data_quality_json" if column_exists(con, "hs_triage", "data_quality_json") else "")
+        + " FROM hs_triage WHERE run_id = ?",
         [hs_run_id],
     )
     return {(str(r["iso3"]), str(r["hazard_code"])): r for r in rows}
@@ -359,8 +362,8 @@ def build_attention_rows(
                 "ev_multiple": _selection.ev_multiple(log_ev),
                 "score_family": _score_family(metric),
                 "track": q.get("track"),
-                "tier": t.get("tier"),
-                "triage_score": t.get("triage_score"),
+                "tier": triage_view(t)[0],
+                "triage_score": triage_view(t)[1],
                 "rc_level": t.get("regime_change_level"),
                 "rc_score": rc_score,
                 "deviation_model": dev.get("model_name") if dev else None,
