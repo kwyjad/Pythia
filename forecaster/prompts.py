@@ -1700,6 +1700,166 @@ def _prompt_v3_order_enabled() -> bool:
     return os.getenv("PYTHIA_PROMPT_V3_ORDER", "0").strip().lower() in ("1", "true", "yes")
 
 
+# --- Regime-change SHIFT guidance (PYTHIA_RC_SHIFT_GUIDANCE) -------------------
+# The legacy RC guidance asks members to WIDEN the posterior when HS flags a
+# regime change. Country-month conflict deaths are persistent, so a widened
+# distribution loses to a sharp base-rate anchor; the shift guidance asks the
+# member to MOVE mass in the flagged direction and keep the prior's shape.
+# Off by default: with the flag off every prompt is byte-identical to before.
+RC_SHIFT_GUIDANCE_VERSION = "shift_v1"
+
+# Static text (identical for every Track 1 question while the flag is on, so it
+# lives in the cacheable prefix; the per-question numbers live in the data tail).
+_RC_SHIFT_METHOD_BLOCK = (
+    "REGIME-CHANGE FLAG: MOVE THE DISTRIBUTION, DO NOT WIDEN IT (months 1-3)\n"
+    "When the question data carries an HS regime-change flag at level 1 or above:\n"
+    "  - Start from your Step 1 base-rate prior. A flag is a claim about the DIRECTION the outcome "
+    "is heading, not a reason to be less sure of everything.\n"
+    "  - If you accept the flag, shift probability mass toward the flagged direction by an amount "
+    "that matches the flag's stated likelihood and magnitude. Keep the distribution about as "
+    "concentrated as the prior unless the evidence is genuinely two-sided.\n"
+    "  - UP moves mass to higher buckets and DOWN to lower ones; neither adds mass on the "
+    "opposite side of the prior's modal bucket. Only a mixed or unclear flag justifies adding "
+    "mass to both tails, and then only modestly.\n"
+    "  - Honour the sharpness anchor stated in the question data, or explain in "
+    "`reasoning_trace.rc_shift.why` why the evidence overrides it.\n"
+    "  - This is about the SHAPE of months 1-3 under a flag. Any widening of later months "
+    "(months 4-6) for growing uncertainty is a separate matter and still applies.\n"
+    "  - If you rebut the flag, keep the prior's shape and say so.\n\n"
+)
+_RC_SHIFT_TRACE_INSTRUCTION = (
+    "- `reasoning_trace.rc_shift` states how the regime-change flag moved your month-1 SPD: "
+    "`direction` (up, down, none or two_sided), `expected_bucket_change` (posterior minus prior "
+    "expected bucket index, signed), `mass_moved` (share of probability moved, 0 to 1), "
+    "`sharpness_kept` (true if the sharpness anchor holds) and `why` (one sentence).\n"
+)
+_RC_SHIFT_SCHEMA_LINES = (
+    '    "rc_shift": {"direction": "up or down or none or two_sided", '
+    '"expected_bucket_change": 0.4, "mass_moved": 0.15, "sharpness_kept": true, '
+    '"why": "one sentence"}\n'
+)
+
+
+def rc_shift_guidance_enabled() -> bool:
+    """PYTHIA_RC_SHIFT_GUIDANCE (0/1, default 0)."""
+
+    return os.getenv("PYTHIA_RC_SHIFT_GUIDANCE", "0").strip().lower() in ("1", "true", "yes")
+
+
+def rc_guidance_version(track: int = 1) -> Optional[str]:
+    """The RC guidance a member prompt of this track carries, for ``forecasts_raw.rc_guidance``.
+
+    ``None`` means the legacy wording. Only Track 1 prompts change.
+    """
+
+    if track < 2 and rc_shift_guidance_enabled():
+        return RC_SHIFT_GUIDANCE_VERSION
+    return None
+
+
+def _rc_direction_kind(direction: Any) -> str:
+    """'up' | 'down' | 'two_sided' (mixed, unclear or absent)."""
+
+    d = str(direction or "").strip().lower()
+    if d in ("up", "down"):
+        return d
+    return "two_sided"
+
+
+def _load_base_rate_modal(question: Dict[str, Any]) -> Optional[tuple]:
+    """``(modal_index, modal_prob, probs)`` of the base-rate SPD, or None.
+
+    The same anchor ``score_baselines`` scores as climatology
+    (``pythia.tools.base_rate_spd``). Called only when the shift guidance is
+    on, so the default path touches no database. Degrades to None, never raises.
+    """
+
+    iso3 = (question.get("iso3") or "").upper()
+    hazard = (question.get("hazard_code") or "").upper()
+    metric = (question.get("metric") or "").upper()
+    as_of = question.get("window_start_date")
+    if not iso3 or not hazard or not metric or not as_of:
+        return None
+    try:
+        from pythia.tools.base_rate_spd import base_rate_spd
+        from resolver.db import duckdb_io
+
+        db_url = os.getenv("RESOLVER_DB_URL", "").strip() or _pythia_db_url_from_config()
+        db_url = db_url or duckdb_io.DEFAULT_DB_URL
+        con = duckdb_io.get_db(db_url)
+        try:
+            probs, _source, _detail = base_rate_spd(con, iso3, hazard, metric, as_of)
+        finally:
+            duckdb_io.close_db(con)
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("[prompts] base-rate anchor unavailable for %s/%s/%s: %s", iso3, hazard, metric, exc)
+        return None
+    if not probs or len(probs) < 2:
+        return None
+    modal = max(range(len(probs)), key=lambda i: probs[i])
+    return modal, float(probs[modal]), list(probs)
+
+
+def _rc_shift_question_guidance(
+    *,
+    buckets: list[str],
+    rc_dir_display: Any,
+    rc_prob_display: Any,
+    rc_mag_display: Any,
+    base_rate_modal: Optional[tuple],
+) -> str:
+    """The per-question half of the shift guidance: this flag, this anchor."""
+
+    kind = _rc_direction_kind(rc_dir_display)
+    lines = [
+        "How to use this flag in months 1-3 (see REGIME-CHANGE FLAG in the method):",
+        "- Start from the base-rate prior. If you accept the flag, MOVE probability mass "
+        f"toward the flagged direction by an amount that matches the stated likelihood "
+        f"({rc_prob_display}) and magnitude ({rc_mag_display}). Keep the distribution about "
+        "as concentrated as the prior unless the evidence is genuinely two-sided.",
+    ]
+    if kind == "up":
+        lines.append(
+            "- Direction UP: move mass to higher buckets, taking it from the lower buckets. "
+            "Do not add mass to buckets below the prior's modal bucket."
+        )
+    elif kind == "down":
+        lines.append(
+            "- Direction DOWN: move mass to lower buckets, taking it from the higher buckets. "
+            "Do not add mass to buckets above the prior's modal bucket."
+        )
+    else:
+        lines.append(
+            "- Direction mixed or unclear: this is the only case that justifies adding mass to "
+            "both tails, and then only modestly; the modal bucket should stay the modal bucket."
+        )
+    if base_rate_modal is not None and buckets:
+        modal, modal_p, _probs = base_rate_modal
+        if 0 <= modal < len(buckets):
+            if kind == "up":
+                nb = min(modal + 1, len(buckets) - 1)
+            elif kind == "down":
+                nb = max(modal - 1, 0)
+            else:
+                nb = None
+            if nb is not None and nb != modal:
+                keep = f'the "{buckets[modal]}" and "{buckets[nb]}" buckets together'
+            else:
+                keep = f'the "{buckets[modal]}" bucket and its immediate neighbours together'
+            lines.append(
+                f'- Sharpness anchor: the base-rate distribution puts {modal_p:.0%} on its modal '
+                f'bucket "{buckets[modal]}". Your month-1 posterior must keep at least {modal_p:.0%} '
+                f"on {keep}, unless you explain why not in `reasoning_trace.rc_shift.why`."
+            )
+    else:
+        lines.append(
+            "- Sharpness anchor: your month-1 posterior must keep at least your Step 1 prior's "
+            "modal-bucket probability on that bucket plus its neighbour in the flagged direction, "
+            "unless you explain why not in `reasoning_trace.rc_shift.why`."
+        )
+    return "\n".join(lines) + "\n\n"
+
+
 def build_spd_prompt_v2(
     question: Dict[str, Any],
     history_summary: Dict[str, Any],
@@ -1868,6 +2028,28 @@ def build_spd_prompt_v2(
         "- Level 2: treat base rate as less reliable; widen posterior; ensure non-trivial tail mass in the RC direction unless rebutted.\n"
         "- Level 3: explicitly model a regime-shift scenario; avoid narrow SPDs; tails must be meaningfully represented if direction is UP/DOWN.\n\n"
     )
+    rc_shift_on = rc_guidance_version(track) is not None
+    if rc_shift_on:
+        # Same header and flag values; the legacy "widen" lines are replaced.
+        rc_guidance = (
+            "REGIME CHANGE GUIDANCE (RC):\n"
+            f"- RC level: {rc_level_display}\n"
+            f"- RC score: {rc_score_display}\n"
+            f"- RC probability: {rc_prob_display}\n"
+            f"- RC direction: {rc_dir_display}\n"
+            f"- RC magnitude: {rc_mag_display}\n"
+            f"- RC window: {rc_window_display}\n"
+        )
+        if rc_level_effective >= 1:
+            rc_guidance += _rc_shift_question_guidance(
+                buckets=_bucket_labels_for_question(question),
+                rc_dir_display=rc_dir_display,
+                rc_prob_display=rc_prob_display,
+                rc_mag_display=rc_mag_display,
+                base_rate_modal=_load_base_rate_modal(question),
+            )
+        else:
+            rc_guidance += "- No regime change flagged: stay with the base rate; still consider tails.\n\n"
     rc_self_search_line = ""
     if rc_level_effective >= 2 and _self_search_enabled():
         rc_self_search_line = (
@@ -2160,7 +2342,8 @@ def build_spd_prompt_v2(
         "  d) Verify the updated SPD sums to ~1.0.\n"
         "You must show at least 2 explicit update steps (for your top 2 signals). "
         "Remaining signals can be incorporated in a single combined step if they are small.\n\n"
-        "After all updates, state your POSTERIOR SPD for each month:\n"
+        + (_RC_SHIFT_METHOD_BLOCK if rc_shift_on else "")
+        + "After all updates, state your POSTERIOR SPD for each month:\n"
         f"  Posterior SPD month_1: {prob_ph}\n"
         f"  Posterior SPD month_2: {prob_ph}\n"
         "  ... (all 6 months)\n\n"
@@ -2207,13 +2390,19 @@ def build_spd_prompt_v2(
         f"{need_evidence_block}"
         "Output instructions:\n"
         "- Return ONLY a single JSON object with this schema (no extra commentary):\n\n"
-        "- `human_explanation` MUST include a sentence starting with \"RC:\" stating what HS RC flagged, whether you accepted it, and how it changed the SPD (widened/shifted/rebutted).\n"
+        + (
+            "- `human_explanation` MUST include a sentence starting with \"RC:\" stating what HS RC flagged, whether you accepted it, and how it changed the SPD (shifted up/shifted down/two-sided/rebutted).\n"
+            if rc_shift_on
+            else "- `human_explanation` MUST include a sentence starting with \"RC:\" stating what HS RC flagged, whether you accepted it, and how it changed the SPD (widened/shifted/rebutted).\n"
+        )
         + (
             "- `reasoning_trace.prior.spd` MUST match your Step 1 prior SPD (the base-rate-only distribution before any evidence updates).\n"
             "- `reasoning_trace.updates` MUST contain at least your top 2 update signals from Step 2, with numeric `delta` arrays showing how each signal shifted the distribution. Positive values in `delta` mean probability mass added to that bucket; negative means removed. Each `delta` array must sum to approximately 0. Write positive numbers plainly (`0.25`), never with a leading plus sign (`+0.25`) — a leading `+` is not valid JSON and makes the whole response unparseable.\n"
             "- `reasoning_trace.updates[].post_update_spd` is the running SPD after applying that signal — it must equal the previous SPD plus the delta (within rounding).\n"
             "- `reasoning_trace.point_estimate` and `point_estimate_bucket` must be consistent with your Step 6 check.\n"
-            "- `reasoning_trace.rc_assessment` must state whether you accepted, rebutted, or partially accepted the HS regime change flag.\n\n"
+            "- `reasoning_trace.rc_assessment` must state whether you accepted, rebutted, or partially accepted the HS regime change flag.\n"
+            + (_RC_SHIFT_TRACE_INSTRUCTION if rc_shift_on else "")
+            + "\n"
             "```json\n"
             "{\n"
             '  "reasoning_trace": {\n'
@@ -2233,8 +2422,13 @@ def build_spd_prompt_v2(
             "    ],\n"
             '    "point_estimate": "~NNN units (e.g. ~40 fatalities or ~15,000 people affected)",\n'
             '    "point_estimate_bucket": 3,\n'
-            '    "rc_assessment": "accepted or rebutted or partially_accepted"\n'
-            "  },\n"
+            + (
+                '    "rc_assessment": "accepted or rebutted or partially_accepted",\n'
+                + _RC_SHIFT_SCHEMA_LINES
+                if rc_shift_on
+                else '    "rc_assessment": "accepted or rebutted or partially_accepted"\n'
+            )
+            + "  },\n"
             if track < 2
             else
             "- `reasoning_trace` must include `prior` (with `spd` and `rationale`) and `rc_assessment`. The `updates` array may be empty for Track 2 forecasts. `point_estimate` and `point_estimate_bucket` are optional.\n\n"

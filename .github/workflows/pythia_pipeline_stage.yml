@@ -153,6 +153,12 @@ env:
   # caching) + Anthropic cache_control / OpenAI prompt_cache_key.
   PYTHIA_PROMPT_V3_ORDER: "1"
   PYTHIA_PROMPT_CACHE_ENABLED: "1"
+  # Track 1 regime-change guidance: "1" asks members to SHIFT the SPD in the
+  # flagged direction instead of widening it. OFF: the Sept 2026 diagnostic
+  # found the update step neither widens nor shifts, and the loss sits in the
+  # prior (scripts/ci/rc_shift_diagnostic.py). Keep in lockstep across
+  # pythia_pipeline_stage.yml and run_horizon_scanner.yml.
+  PYTHIA_RC_SHIFT_GUIDANCE: "0"
   # Anthropic cache_control inside BATCH bodies. Off by default in code
   # because batch cache hits are best-effort while the write premium is
   # certain — but with it off the batched path's hit rate is 0% BY

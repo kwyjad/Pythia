@@ -138,19 +138,27 @@ BUCKET_EDGE_TOLERANCE = 0.05
 
 
 def _bucket_edge(con, metric: str, value: float | None) -> tuple[bool | None, float | None]:
-    """(is the value within 5% of a positive bucket boundary, that boundary)."""
+    """(is the value within 5% of its nearest bucket boundary, that boundary).
+
+    ``nearest_boundary`` is the closest FINITE interior boundary (the open-ended
+    top bucket's ``inf`` is not a boundary a value can sit beside: 5% of
+    infinity is infinity, which is how 84 of 160 rows once read as edge
+    cases). A value of 0 is never an edge case — it is its own bucket, and no
+    revision of a few percent moves a zero. Binary rows carry neither.
+    """
     if value is None or _score_family(metric) == "binary":
         return None, None
-    thresholds = _thresholds_for_metric(con, metric) or []
-    nearest = None
-    for b in thresholds:
-        b = float(b)
-        if b <= 0:
-            continue
-        if abs(float(value) - b) <= BUCKET_EDGE_TOLERANCE * b:
-            if nearest is None or abs(float(value) - b) < abs(float(value) - nearest):
-                nearest = b
-    return (nearest is not None), nearest
+    v = float(value)
+    interior = sorted(
+        float(b) for b in (_thresholds_for_metric(con, metric) or [])
+        if b is not None and 0 < float(b) < float("inf")
+    )
+    if not interior:
+        return None, None
+    nearest = min(interior, key=lambda b: abs(v - b))
+    if v == 0:
+        return False, nearest
+    return (abs(v - nearest) <= BUCKET_EDGE_TOLERANCE * nearest), nearest
 
 
 # ---------------------------------------------------------------------------
@@ -602,12 +610,13 @@ def _emit_scores_flat(con, out_dir: Path, qids: list[str]) -> None:
     )
 
 
-def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
+def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> list[dict[str, Any]]:
     if not table_exists(con, "forecasts_ensemble") or not table_exists(con, "resolutions"):
-        return
+        return []
+    track_sql = "q.track" if column_exists(con, "questions", "track") else "NULL"
     rows = rows_as_dicts(
         con,
-        "SELECT fe.question_id, q.iso3, q.hazard_code, UPPER(q.metric) AS metric, "
+        f"SELECT fe.question_id, q.iso3, q.hazard_code, UPPER(q.metric) AS metric, {track_sql} AS track, "
         "fe.model_name, r.horizon_m, r.value AS resolved_value, "
         "fe.bucket_index, fe.probability, fe.ev_value "
         "FROM forecasts_ensemble fe "
@@ -632,6 +641,7 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
                 "iso3": r["iso3"],
                 "hazard_code": r["hazard_code"],
                 "metric": r["metric"],
+                "track": r.get("track"),
                 "model_name": r["model_name"],
                 "horizon_m": r["horizon_m"],
                 "resolved_value": r["resolved_value"],
@@ -649,7 +659,7 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
         res_rows = rows_as_dicts(
             con,
             "SELECT r.question_id, r.horizon_m, r.value, q.iso3, q.hazard_code, "
-            "UPPER(q.metric) AS metric FROM resolutions r "
+            f"UPPER(q.metric) AS metric, {track_sql} AS track FROM resolutions r "
             "JOIN questions q ON q.question_id = r.question_id "
             "WHERE r.question_id IN (SELECT UNNEST(?::VARCHAR[]))",
             [qids],
@@ -664,6 +674,7 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
                 "iso3": res["iso3"],
                 "hazard_code": res["hazard_code"],
                 "metric": res["metric"],
+                "track": res.get("track"),
                 "model_name": model,
                 "horizon_m": h,
                 "resolved_value": res["value"],
@@ -691,40 +702,84 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
     write_csv(
         out_dir / "forecast_vs_outcome.csv",
         [
-            "question_id", "iso3", "hazard_code", "metric", "model_name",
+            "question_id", "iso3", "hazard_code", "metric", "track", "model_name",
             "horizon_m", "resolved_value", "realized_bucket", "p_realized_bucket",
             "modal_bucket", "p_modal_bucket", "ev_value", "bucket_edge",
             "nearest_boundary", "probs",
         ],
         out_rows,
     )
+    return out_rows
 
 
-def _attach_skill(rows: list[dict[str, Any]]) -> None:
-    """Attach skill-vs-climatology columns to rollup rows in place.
+def _attach_skill(rows: list[dict[str, Any]], samples: list[dict[str, Any]]) -> None:
+    """Attach PAIRED skill-vs-climatology columns to rollup rows in place.
 
-    skill = 1 − (model_mean / climatology_mean), per
-    (hazard, metric, score_family, score_type) — NEVER across score types or
-    families. Positive = beat the base rate; 0 = matched; negative = lost.
-    Climatology comes from the `__ext_climatology` reference rows written by
-    pythia/tools/score_baselines.py; where no climatology row exists for a
-    group (no base-rate anchor for that pair), skill stays empty.
+    skill = 1 − (model mean / climatology mean), both taken over the SAME
+    (question_id, horizon_m) pairs — the ones where the model and
+    ``__ext_climatology`` both have a score of this score_type — within one
+    (hazard, metric, score_family, track, score_type) group. Never across
+    score types, families or tracks. Dividing a model's mean over its own
+    questions by climatology's mean over every question in the hazard and
+    metric (both tracks) compared two different sets of questions and
+    reported Track 2 DR/EVENT_OCCURRENCE at +0.80 where the paired figure was
+    about +0.74. Where no climatology score pairs with the model, skill stays
+    empty.
+
+    ``n_questions`` is the PAIRED question count wherever the group has a
+    climatology reference at all, else the model's own count;
+    ``n_questions_scored`` is always the model's own count.
     """
-    clim_mean: dict[tuple, float] = {}
+    clim: dict[tuple, float] = {}
+    clim_groups: set[tuple] = set()
+    for sm in samples:
+        if sm["model_name"] == "__ext_climatology" and sm["value"] is not None:
+            clim[(sm["score_type"], sm["question_id"], sm["horizon_m"])] = float(sm["value"])
+            clim_groups.add((sm["hazard_code"], sm["metric"], sm["score_family"],
+                             sm["track"], sm["score_type"]))
+    paired: dict[tuple, list[tuple[float, float, str]]] = {}
+    for sm in samples:
+        if sm["value"] is None:
+            continue
+        c = clim.get((sm["score_type"], sm["question_id"], sm["horizon_m"]))
+        if c is None:
+            continue
+        key = (sm["hazard_code"], sm["metric"], sm["score_family"], sm["track"],
+               sm["model_name"], sm["score_type"])
+        paired.setdefault(key, []).append((float(sm["value"]), c, sm["question_id"]))
     for r in rows:
-        if r.get("model_name") == "__ext_climatology" and r.get("mean_value") is not None:
-            key = (r.get("hazard_code"), r.get("metric"),
-                   r.get("score_family"), r.get("score_type"))
-            clim_mean[key] = float(r["mean_value"])
-    for r in rows:
-        key = (r.get("hazard_code"), r.get("metric"),
-               r.get("score_family"), r.get("score_type"))
-        clim = clim_mean.get(key)
-        r["climatology_mean"] = clim
-        if clim is not None and clim > 0 and r.get("mean_value") is not None:
-            r["skill_vs_climatology"] = round(1.0 - float(r["mean_value"]) / clim, 4)
+        key = (r.get("hazard_code"), r.get("metric"), r.get("score_family"),
+               r.get("track"), r.get("model_name"), r.get("score_type"))
+        pairs = paired.get(key) or []
+        has_clim = (key[0], key[1], key[2], key[3], key[5]) in clim_groups
+        r["n_paired"] = len(pairs)
+        if pairs:
+            pm = sum(p[0] for p in pairs) / len(pairs)
+            cm = sum(p[1] for p in pairs) / len(pairs)
+            r["paired_model_mean"] = round(pm, 6)
+            r["climatology_mean"] = round(cm, 6)
+            r["skill_vs_climatology"] = round(1.0 - pm / cm, 4) if cm > 0 else None
         else:
+            r["paired_model_mean"] = None
+            r["climatology_mean"] = None
             r["skill_vs_climatology"] = None
+        r["n_questions"] = len({p[2] for p in pairs}) if has_clim else r["n_questions_scored"]
+
+
+def _rollup_samples(con, qids: list[str]) -> list[dict[str, Any]]:
+    """One row per score (latest run per question), with the question's track."""
+    track_sql = "q.track" if column_exists(con, "questions", "track") else "NULL"
+    return rows_as_dicts(
+        con,
+        "SELECT q.hazard_code, UPPER(q.metric) AS metric, "
+        "CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END "
+        f"AS score_family, {track_sql} AS track, s.model_name, s.score_type, "
+        "s.question_id, s.horizon_m, s.value "
+        "FROM scores s JOIN questions q ON q.question_id = s.question_id "
+        "WHERE s.question_id IN (SELECT UNNEST(?::VARCHAR[])) "
+        + latest_run_clause(con, "s"),
+        [qids],
+    )
 
 
 def _cost_per_question(costs: Mapping[str, Mapping[str, float]]) -> dict[str, float]:
@@ -751,20 +806,28 @@ def _emit_rollups(
     con, out_dir: Path, qids: list[str],
     costs: Mapping[str, Mapping[str, float]] | None = None,
 ) -> list[dict[str, Any]]:
-    rows = rows_as_dicts(
-        con,
-        "SELECT q.hazard_code, UPPER(q.metric) AS metric, "
-        "CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END "
-        "AS score_family, s.model_name, s.score_type, COUNT(*) AS n_samples, "
-        "COUNT(DISTINCT s.question_id) AS n_questions, AVG(s.value) AS mean_value, "
-        "MEDIAN(s.value) AS median_value "
-        "FROM scores s JOIN questions q ON q.question_id = s.question_id "
-        "WHERE s.question_id IN (SELECT UNNEST(?::VARCHAR[])) "
-        + latest_run_clause(con, "s")
-        + " GROUP BY 1, 2, 3, 4, 5 ORDER BY 3, 1, 2, 5, 8",
-        [qids],
-    )
-    _attach_skill(rows)
+    import statistics
+
+    samples = _rollup_samples(con, qids)
+    groups: dict[tuple, list[dict[str, Any]]] = {}
+    for sm in samples:
+        key = (sm["hazard_code"], sm["metric"], sm["score_family"], sm["track"],
+               sm["model_name"], sm["score_type"])
+        groups.setdefault(key, []).append(sm)
+    rows: list[dict[str, Any]] = []
+    for (hz, metric, fam, track, model, st), sms in groups.items():
+        vals = [float(x["value"]) for x in sms if x["value"] is not None]
+        rows.append({
+            "hazard_code": hz, "metric": metric, "score_family": fam, "track": track,
+            "model_name": model, "score_type": st, "n_samples": len(vals),
+            "n_questions_scored": len({x["question_id"] for x in sms}),
+            "mean_value": (sum(vals) / len(vals)) if vals else None,
+            "median_value": statistics.median(vals) if vals else None,
+        })
+    rows.sort(key=lambda r: (str(r["score_family"]), str(r["hazard_code"]), str(r["metric"]),
+                             str(r["track"]), str(r["score_type"]),
+                             r["mean_value"] if r["mean_value"] is not None else 0.0))
+    _attach_skill(rows, samples)
     per_q = _cost_per_question(costs or {})
     for r in rows:
         name = str(r.get("model_name") or "")
@@ -777,9 +840,10 @@ def _emit_rollups(
     write_csv(
         out_dir / "rollups.csv",
         [
-            "hazard_code", "metric", "score_family", "model_name", "score_type",
-            "n_samples", "n_questions", "mean_value", "median_value",
-            "climatology_mean", "skill_vs_climatology", "cost_per_question_usd",
+            "hazard_code", "metric", "score_family", "track", "model_name", "score_type",
+            "n_samples", "n_questions", "n_questions_scored", "mean_value", "median_value",
+            "n_paired", "paired_model_mean", "climatology_mean", "skill_vs_climatology",
+            "cost_per_question_usd",
         ],
         rows,
     )
@@ -984,6 +1048,54 @@ def _lineups_seen(staging: Path, summaries: list[dict[str, Any]]) -> dict[str, A
     return out
 
 
+#: The aggregate that stands for each track in the sharpness table: the first
+#: of these a question carries.
+_PRIMARY_AGGREGATES = ("ensemble_bayesmc_v2", "ensemble_mean_v2", "track2_flash")
+
+
+def _sharpness_lines(fvo_rows: list[dict[str, Any]]) -> list[str]:
+    """Digest table: how concentrated the primary aggregate was, per (hazard, metric, track).
+
+    Mean max bucket probability says how sharp the forecasts were; mean
+    probability on the realised bucket says whether the sharpness landed. The
+    two move together only when the forecast is both sharp and right, which is
+    what the regime-change shift guidance is meant to buy for Track 1.
+    """
+    by_q: dict[tuple, dict[str, dict[str, Any]]] = {}
+    for r in fvo_rows:
+        if r.get("model_name") not in _PRIMARY_AGGREGATES or r.get("metric") == "EVENT_OCCURRENCE":
+            continue
+        by_q.setdefault((r["question_id"], r["horizon_m"]), {})[r["model_name"]] = r
+    groups: dict[tuple, list[dict[str, Any]]] = {}
+    for per_model in by_q.values():
+        row = next((per_model[m] for m in _PRIMARY_AGGREGATES if m in per_model), None)
+        if row is None or row.get("p_modal_bucket") is None:
+            continue
+        groups.setdefault((row.get("hazard_code"), row.get("metric"), row.get("track")), []).append(row)
+    if not groups:
+        return []
+    lines = [
+        "",
+        "## Sharpness of the primary aggregate (SPD)",
+        "",
+        "_Per (hazard, metric, track), over resolved (question, horizon) pairs of "
+        "the latest run: the mean of the largest bucket probability, and the mean "
+        "probability on the bucket that happened. Primary aggregate = "
+        "ensemble_bayesmc_v2, else ensemble_mean_v2, else track2_flash._",
+        "",
+        "| hazard | metric | track | n | mean max bucket prob | mean prob on realised bucket |",
+        "|---|---|---|---|---|---|",
+    ]
+    for (hz, metric, track), rs in sorted(groups.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
+        mx = sum(float(r["p_modal_bucket"]) for r in rs) / len(rs)
+        real = [float(r["p_realized_bucket"] or 0.0) for r in rs if r.get("realized_bucket") is not None]
+        rl = f"{sum(real) / len(real):.3f}" if real else "—"
+        lines.append(
+            f"| {hz} | {metric} | {'—' if track is None else f'T{track}'} | {len(rs)} | {mx:.3f} | {rl} |"
+        )
+    return lines
+
+
 def _write_digest(
     out_dir: Path,
     summaries: list[dict[str, Any]],
@@ -992,6 +1104,7 @@ def _write_digest(
     case_selection: dict[str, list[str]],
     *,
     months_back: int,
+    fvo_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     lines: list[str] = [
         "# Scored-Forecast Analysis — Digest",
@@ -1021,51 +1134,63 @@ def _write_digest(
         "",
         "## Model comparison (Brier and RPS by score family — never blend the two)",
         "",
-        "_skill = 1 − mean/climatology-mean within the same (hazard, metric, "
-        "family, score_type) group, aggregated here across groups; positive = "
-        "beat the base rate. `__ext_climatology` / `__ext_uniform` / "
+        "_skill = 1 − (model mean / climatology mean) over PAIRED (question, "
+        "horizon) scores only — the ones both the model and `__ext_climatology` "
+        "scored — pooled across (hazard, metric) groups within a track; positive "
+        "= beat the base rate. `__ext_climatology` / `__ext_uniform` / "
         "`__ext_persistence` are the reference forecasters, not Pythia models. "
-        "One run per question (the latest); RPS is SPD-only._",
+        "One run per question (the latest); RPS is SPD-only. Track 1 and Track 2 "
+        "are different questions and are never pooled._",
         "",
-        "| family | model | n | mean Brier | median Brier | Brier skill vs climatology "
+        "| family | track | model | n | mean Brier | median Brier | Brier skill vs climatology "
         "| mean RPS | RPS skill vs climatology |",
-        "|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
-    # The rollup rows are per (hazard, metric); the digest table aggregates
-    # per (family, model) and per score type. Skill is averaged over the
-    # groups that HAVE a climatology reference, weighted by sample count.
-    # RPS (stored as score_type 'crps') sits beside Brier for SPD metrics:
-    # Brier ignores bucket ORDER, so a forecast one bucket off and one five
-    # buckets off score the same, and RPS is the score that tells them apart.
+    # The rollup rows are per (hazard, metric, track); the digest table
+    # aggregates per (family, track, model) and per score type. Skill pools
+    # the PAIRED sums, never a ratio of unpaired means. RPS (stored as
+    # score_type 'crps') sits beside Brier for SPD metrics: Brier ignores
+    # bucket ORDER, so a forecast one bucket off and one five buckets off
+    # score the same, and RPS is the score that tells them apart.
     agg: dict[tuple, dict[str, float]] = {}
     for r in rollups:
         if r.get("score_type") not in ("brier", "crps"):
             continue
-        key = (r["score_family"], r["model_name"], r["score_type"])
+        key = (r["score_family"], r.get("track"), r["model_name"], r["score_type"])
         a = agg.setdefault(key, {"n": 0, "vsum": 0.0, "msum": 0.0,
-                                 "skill_n": 0, "skill_sum": 0.0})
+                                 "pn": 0, "psum": 0.0, "csum": 0.0})
         n = int(r["n_samples"] or 0)
         a["n"] += n
         a["vsum"] += float(r["mean_value"] or 0) * n
         a["msum"] += float(r["median_value"] or 0) * n
-        if r.get("skill_vs_climatology") is not None:
-            a["skill_n"] += n
-            a["skill_sum"] += float(r["skill_vs_climatology"]) * n
+        pn = int(r.get("n_paired") or 0)
+        if pn and r.get("paired_model_mean") is not None and r.get("climatology_mean") is not None:
+            a["pn"] += pn
+            a["psum"] += float(r["paired_model_mean"]) * pn
+            a["csum"] += float(r["climatology_mean"]) * pn
 
     def _skill(a: dict[str, float] | None) -> str:
-        return f"{a['skill_sum'] / a['skill_n']:+.3f}" if a and a["skill_n"] else "—"
+        if not a or not a["pn"] or a["csum"] <= 0:
+            return "—"
+        return f"{1.0 - a['psum'] / a['csum']:+.3f}"
 
-    for family, model in sorted({(k[0], k[1]) for k in agg}):
-        b = agg.get((family, model, "brier"))
-        c = agg.get((family, model, "crps"))
+    def _tr(t: Any) -> str:
+        return "—" if t is None else f"T{t}"
+
+    for family, track, model in sorted({(k[0], k[1], k[2]) for k in agg},
+                                       key=lambda x: (str(x[0]), str(x[1]), str(x[2]))):
+        b = agg.get((family, track, model, "brier"))
+        c = agg.get((family, track, model, "crps"))
         if not b or not b["n"]:
             continue
         rps = f"{c['vsum'] / c['n']:.4f}" if c and c["n"] else "—"
         lines.append(
-            f"| {family} | {model} | {b['n']} "
+            f"| {family} | {_tr(track)} | {model} | {b['n']} "
             f"| {b['vsum'] / b['n']:.4f} | {b['msum'] / b['n']:.4f} | {_skill(b)} "
             f"| {rps} | {_skill(c) if c else '—'} |"
         )
+
+    lines += _sharpness_lines(fvo_rows or [])
 
     def _qline(s: dict[str, Any]) -> str:
         return (
@@ -1304,7 +1429,7 @@ def build_bundle(
         )
 
         _emit_scores_flat(con, staging, qids)
-        _emit_forecast_vs_outcome(con, staging, qids)
+        fvo_rows = _emit_forecast_vs_outcome(con, staging, qids)
         rollups = _emit_rollups(con, staging, qids, costs)
         weight_movement = _emit_calibration(con, staging)
         calibration_state = _prov.calibration_status(con)
@@ -1337,7 +1462,7 @@ def build_bundle(
 
         _write_digest(
             staging, summaries, rollups, weight_movement, case_selection,
-            months_back=months_back,
+            months_back=months_back, fvo_rows=fvo_rows,
         )
         _write_briefing(staging, case_records, case_selection)
 

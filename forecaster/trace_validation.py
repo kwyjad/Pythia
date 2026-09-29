@@ -91,7 +91,161 @@ def _validate_single_trace(
         "prior_quality": prior_result,
         "delta_arithmetic": delta_result,
         "magnitude_consistency": magnitude_result,
+        # Reported beside the score and deliberately NOT in the composite, so
+        # trace_quality_score keeps meaning what it meant before.
+        "rc_sharpness": check_rc_sharpness(trace, expected_k),
         "trace_quality_score": round(composite, 4),
+    }
+
+
+# --- Regime-change shift: parsing and the sharpness check --------------------
+
+RC_SHIFT_DIRECTIONS = ("up", "down", "none", "two_sided")
+_RC_SHIFT_DIRECTION_ALIASES = {
+    "up": "up", "higher": "up", "increase": "up",
+    "down": "down", "lower": "down", "decrease": "down",
+    "none": "none", "no": "none", "no_shift": "none", "rebutted": "none",
+    "two_sided": "two_sided", "two-sided": "two_sided", "two sided": "two_sided",
+    "mixed": "two_sided", "both": "two_sided", "unclear": "two_sided",
+}
+# A posterior that keeps less than (1 - this) of the prior's modal-bucket mass...
+RC_SHARPNESS_MAX_MODAL_LOSS = 0.25
+# ...while its expected bucket index moved by less than this, has spread, not shifted.
+RC_SHARPNESS_MIN_SHIFT = 0.25
+
+
+def _as_float(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out else None  # drop NaN
+
+
+def _as_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "yes", "1"):
+        return True
+    if isinstance(value, str) and value.strip().lower() in ("false", "no", "0"):
+        return False
+    return None
+
+
+def parse_rc_shift(raw: Any) -> tuple:
+    """Normalise a member's ``reasoning_trace.rc_shift``.
+
+    Returns ``(value, status)``: ``(None, "absent")`` when the member wrote none,
+    ``(dict, "ok")`` when every field parsed, and ``(dict_or_None,
+    "malformed:<fields>")`` otherwise, keeping whatever did parse. Never raises:
+    a missing or broken rc_shift must never cost a forecast.
+    """
+    if raw is None:
+        return None, "absent"
+    if not isinstance(raw, dict):
+        return None, "malformed:not_an_object"
+    bad: list[str] = []
+    out: Dict[str, Any] = {}
+    d = str(raw.get("direction") or "").strip().lower()
+    if d in _RC_SHIFT_DIRECTION_ALIASES:
+        out["direction"] = _RC_SHIFT_DIRECTION_ALIASES[d]
+    else:
+        bad.append("direction")
+    ebc = _as_float(raw.get("expected_bucket_change"))
+    if ebc is None:
+        bad.append("expected_bucket_change")
+    else:
+        out["expected_bucket_change"] = ebc
+    mm = _as_float(raw.get("mass_moved"))
+    if mm is None or mm < 0 or mm > 1:
+        bad.append("mass_moved")
+    else:
+        out["mass_moved"] = mm
+    sk = _as_bool(raw.get("sharpness_kept"))
+    if sk is None:
+        bad.append("sharpness_kept")
+    else:
+        out["sharpness_kept"] = sk
+    why = raw.get("why")
+    if isinstance(why, str) and why.strip():
+        out["why"] = why.strip()[:500]
+    else:
+        bad.append("why")
+    if bad:
+        return (out or None), "malformed:" + ",".join(bad)
+    return out, "ok"
+
+
+def normalise_rc_shift_in_trace(trace: Any) -> Any:
+    """Replace ``trace['rc_shift']`` with its parsed form and record the status.
+
+    A trace without ``rc_shift`` is returned untouched, so traces written under
+    the legacy guidance keep their stored shape. A malformed value keeps the
+    raw object under ``rc_shift_raw``.
+    """
+    if not isinstance(trace, dict) or "rc_shift" not in trace:
+        return trace
+    raw = trace.get("rc_shift")
+    value, status = parse_rc_shift(raw)
+    trace["rc_shift_status"] = status
+    if status != "ok":
+        trace["rc_shift_raw"] = raw
+    trace["rc_shift"] = value
+    return trace
+
+
+def _norm_probs(values: Any, expected_k: int) -> Optional[List[float]]:
+    if not isinstance(values, list) or len(values) != expected_k:
+        return None
+    vals = [_as_float(v) for v in values]
+    if any(v is None or v < 0 for v in vals):
+        return None
+    total = sum(vals)  # type: ignore[arg-type]
+    if total <= 0:
+        return None
+    return [v / total for v in vals]  # type: ignore[operator]
+
+
+def check_rc_sharpness(
+    trace: dict,
+    expected_k: int,
+    posterior: Optional[List[float]] = None,
+    *,
+    max_modal_loss: float = RC_SHARPNESS_MAX_MODAL_LOSS,
+    min_shift: float = RC_SHARPNESS_MIN_SHIFT,
+) -> dict:
+    """Did the update step SPREAD the prior rather than SHIFT it?
+
+    Flags a posterior that keeps less than ``1 - max_modal_loss`` of the prior's
+    modal-bucket mass while its expected bucket index moved by less than
+    ``min_shift``. The posterior defaults to the last ``post_update_spd`` in the
+    trace. Diagnostic only: it never blocks or changes a forecast.
+    """
+    prior = trace.get("prior") if isinstance(trace, dict) else None
+    prior_spd = _norm_probs(prior.get("spd") if isinstance(prior, dict) else None, expected_k)
+    if prior_spd is None:
+        return {"checked": False, "reason": "no usable prior"}
+    if posterior is None:
+        updates = trace.get("updates") if isinstance(trace.get("updates"), list) else []
+        for u in reversed(updates):
+            if isinstance(u, dict) and _norm_probs(u.get("post_update_spd"), expected_k):
+                posterior = u.get("post_update_spd")
+                break
+    post = _norm_probs(posterior, expected_k)
+    if post is None:
+        return {"checked": False, "reason": "no usable posterior"}
+    mode = max(range(expected_k), key=lambda i: prior_spd[i])
+    modal_loss = (prior_spd[mode] - post[mode]) / prior_spd[mode] if prior_spd[mode] > 0 else 0.0
+    shift = sum(i * p for i, p in enumerate(post)) - sum(i * p for i, p in enumerate(prior_spd))
+    flagged = modal_loss > max_modal_loss and abs(shift) < min_shift
+    return {
+        "checked": True,
+        "prior_modal_bucket": mode,
+        "modal_mass_loss": round(modal_loss, 4),
+        "expected_bucket_shift": round(shift, 4),
+        "spread_without_shift": flagged,
     }
 
 

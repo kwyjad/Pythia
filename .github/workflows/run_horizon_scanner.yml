@@ -91,6 +91,12 @@ jobs:
       # sync fallback produces the same prompts as the staged path.
       PYTHIA_PROMPT_V3_ORDER: "1"
       PYTHIA_PROMPT_CACHE_ENABLED: "1"
+      # Track 1 regime-change guidance: "1" asks members to SHIFT the SPD in the
+      # flagged direction instead of widening it. OFF: the Sept 2026 diagnostic
+      # found the update step neither widens nor shifts, and the loss sits in the
+      # prior (scripts/ci/rc_shift_diagnostic.py). Keep in lockstep across
+      # pythia_pipeline_stage.yml and run_horizon_scanner.yml.
+      PYTHIA_RC_SHIFT_GUIDANCE: "0"
       BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       # HS models come from the llm.models registry + roles in pythia/config.yaml.

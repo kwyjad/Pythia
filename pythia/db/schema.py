@@ -1714,6 +1714,10 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "p": "DOUBLE",
                 "is_test": "BOOLEAN DEFAULT FALSE",
                 "reasoning_trace_json": "TEXT",
+                # Which regime-change prompt guidance the member saw
+                # ("shift_v1" under PYTHIA_RC_SHIFT_GUIDANCE=1, NULL otherwise),
+                # so anything fitted on member forecasts can tell the two apart.
+                "rc_guidance": "TEXT",
             },
         )
 
