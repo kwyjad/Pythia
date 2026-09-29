@@ -29,15 +29,16 @@ FIELDNAMES = [
     "family", "status", "verdict",
 ]
 
-#: Metrics with no per-member rows in ``forecasts_raw``. EVENT_OCCURRENCE is
-#: the only one: ``_write_binary_outputs`` writes the AGGREGATE rows alone
-#: (``ensemble_mean_v2`` or ``track2_flash``, plus ``ensemble_bayesmc_v2``
-#: on Track 1), because a binary question's members are pooled before
-#: anything is stored. Expecting a row per member per month therefore
-#: counts every binary cell as missing: on the 2026-09-15 run that put
-#: "1,602 of 4,398 forecasts missing or unusable" at the top of the
-#: executive summary when the real loss was 12 cells, and a check that
-#: cannot pass teaches the reader to skip the report.
+#: Metrics forecast as ONE probability per month (binary questions).
+#: Since Oct 2026 ``_write_binary_outputs`` stores a Track-1 binary question
+#: the way it stores an SPD one: a row per member per month in
+#: ``forecasts_raw`` (so members can be scored) beside the pooled
+#: ``ensemble_mean_v2`` (and ``ensemble_bayesmc_v2``). Track 2 writes the
+#: single ``track2_flash`` row. The family is still counted APART from the
+#: SPD one in the rollup: before members were written, folding binary into
+#: SPD put "1,602 of 4,398 forecasts missing" at the top of the 2026-09-15
+#: summary against a real loss of 12 — a check that cannot pass teaches the
+#: reader to skip the report.
 BINARY_METRICS = frozenset({"EVENT_OCCURRENCE"})
 
 #: The aggregate a binary question's forecast IS. This is the row
@@ -52,9 +53,18 @@ FAMILY_BINARY = "binary"
 
 
 def writes_member_rows(metric: str) -> bool:
-    """Does this metric store a forecast per ensemble member?"""
+    """Does this metric store a forecast per ensemble member?
 
-    return str(metric or "").upper() not in BINARY_METRICS
+    True for every metric since Oct 2026: Track-1 binary questions write a
+    member row per model too. Kept as a function because readers key their
+    per-member expectation on it.
+    """
+
+    return True
+
+
+def is_binary(metric: str) -> bool:
+    return str(metric or "").upper() in BINARY_METRICS
 
 
 def _expected_buckets(metric: str) -> int | None:
@@ -146,12 +156,16 @@ def collect(
             track_int = int(track) if track is not None else None
         except Exception:
             track_int = None
-        binary = not writes_member_rows(metric)
+        binary = is_binary(metric)
         family = FAMILY_BINARY if binary else FAMILY_SPD
         if binary:
-            # The pooled aggregate is the whole of a binary question's
-            # stored forecast — see BINARY_METRICS.
-            expected = [track2_model if track_int == 2 else AGGREGATE_MEAN]
+            # Track 2: the pooled row IS the forecast. Track 1: the pooled
+            # mean (the row compute_scores treats as the ensemble) plus one
+            # row per member — see BINARY_METRICS.
+            expected = (
+                [track2_model] if track_int == 2
+                else [AGGREGATE_MEAN, *expected_models]
+            )
         else:
             expected = [track2_model] if track_int == 2 else list(expected_models)
             # A model that wrote for this question but is not in the

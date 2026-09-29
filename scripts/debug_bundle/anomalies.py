@@ -244,7 +244,7 @@ def build(
                 FAIL if b_share > 0.10 else WARN,
                 "ensemble",
                 f"{binary['n_cells_missing']} of {binary.get('n_cells_expected')} "
-                "(question, month) BINARY forecasts are missing or unusable",
+                "(question, model, month) BINARY forecasts are missing or unusable",
                 f("model_completeness", "model_completeness.csv"),
             )
         )

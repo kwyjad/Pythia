@@ -236,7 +236,9 @@ def _build_gdacs_event_history(
 
     Only applicable for FL, DR, TC hazards.
 
-    Returns None if no GDACS data exists for this country-hazard.
+    Returns None when GDACS has no row for the HAZARD at all. A country with
+    no row in a month GDACS covered had no qualifying event, so it gets a
+    history of quiet months, not None.
     """
     iso3_up = (iso3 or "").upper().strip()
     hz_up = (hazard_code or "").upper().strip()
@@ -244,88 +246,36 @@ def _build_gdacs_event_history(
     if hz_up not in ("FL", "DR", "TC"):
         return None
 
+    from .gdacs_history import gdacs_calendar_series, seasonal_frequency
+
     con = connect(read_only=True)
     try:
-        rows = con.execute(
-            """
-            SELECT ym, value, alertlevel
-            FROM facts_resolved
-            WHERE upper(iso3) = ?
-              AND upper(hazard_code) = ?
-              AND lower(metric) = 'event_occurrence'
-            ORDER BY ym
-            """,
-            [iso3_up, hz_up],
-        ).fetchall()
+        series = gdacs_calendar_series(con, iso3_up, hz_up)
     except Exception:
         return None
     finally:
         con.close()
 
-    if not rows:
+    if not series["window_start"]:
         return None
 
-    # Parse into structured records
-    now_ym = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m")
-    events: list[dict] = []
-    for ym_raw, value, alertlevel in rows:
-        ym = str(ym_raw)[:7] if ym_raw else ""
-        if not ym or ym > now_ym:
-            continue
-        try:
-            v = float(value or 0)
-        except (TypeError, ValueError):
-            v = 0.0
-        events.append({
-            "ym": ym,
-            "occurred": v >= 1.0,
-            "alertlevel": str(alertlevel or "").strip() or None,
-        })
-
-    if not events:
-        return None
-
-    events_sorted = sorted(events, key=lambda e: e["ym"])
-
-    # Compute summary stats
-    total_months = len(events_sorted)
-    event_months = sum(1 for e in events_sorted if e["occurred"])
+    # Every calendar month of the source's window counts once; see
+    # forecaster/gdacs_history.py for why rows and the country's own span
+    # were the wrong denominator and window.
+    events_sorted = series["months"]
+    total_months = series["total_months"]
+    event_months = series["event_months"]
     event_rate = event_months / total_months if total_months > 0 else 0.0
+    first_ym = series["window_start"]
+    last_ym = series["window_end"]
 
-    # Data range
-    first_ym = events_sorted[0]["ym"]
-    last_ym = events_sorted[-1]["ym"]
-
-    # Alert level distribution (among event months only)
     alert_counts: Dict[str, int] = {}
     for e in events_sorted:
         if e["occurred"] and e["alertlevel"]:
-            level = e["alertlevel"]
-            alert_counts[level] = alert_counts.get(level, 0) + 1
+            alert_counts[e["alertlevel"]] = alert_counts.get(e["alertlevel"], 0) + 1
 
-    # Seasonal frequency: group by calendar month
-    by_cal_month: Dict[int, Dict[str, int]] = {
-        m: {"total": 0, "events": 0} for m in range(1, 13)
-    }
-    for e in events_sorted:
-        parsed = _parse_month_key(e["ym"])
-        if parsed:
-            by_cal_month[parsed.month]["total"] += 1
-            if e["occurred"]:
-                by_cal_month[parsed.month]["events"] += 1
-
-    seasonal: Dict[int, Dict[str, Any]] = {}
-    for cal_month in range(1, 13):
-        total = by_cal_month[cal_month]["total"]
-        evts = by_cal_month[cal_month]["events"]
-        seasonal[cal_month] = {
-            "years_observed": total,
-            "years_with_event": evts,
-            "frequency_pct": round(evts / total * 100, 0) if total > 0 else 0.0,
-        }
-
-    # Recent 12 months
-    recent_12 = events_sorted[-12:] if len(events_sorted) >= 12 else events_sorted[:]
+    seasonal = seasonal_frequency(events_sorted)
+    recent_12 = events_sorted[-12:]
 
     return {
         "type": "gdacs_event_history",
@@ -338,6 +288,8 @@ def _build_gdacs_event_history(
         "alert_distribution": alert_counts,
         "seasonal": seasonal,
         "recent_12": recent_12,
+        "history_available": series["history_available"],
+        "unavailable_reason": series["unavailable_reason"],
     }
 
 

@@ -321,6 +321,20 @@ jobs:
             resolver/tests/test_idmc_history_conflict_pa.py \
             resolver/tests/test_hazard_resolution_extraction.py
 
+      - name: Run binary event (EVENT_OCCURRENCE) tests
+        run: |
+          # The binary path ran in NO workflow: test_binary_prompts and
+          # test_aggregation_gaps were named nowhere, which is how a drought
+          # history block printing "0 of 9 months" for three calendar months
+          # reached production. test_drought_binary_inputs pins the calendar
+          # denominator, the dated ENSO header, the RC reconciliation field and
+          # the member rows that let members be scored on binary questions.
+          echo "=== Running binary event tests ==="
+          pytest -vv \
+            forecaster/tests/test_binary_prompts.py \
+            forecaster/tests/test_aggregation_gaps.py \
+            forecaster/tests/test_drought_binary_inputs.py
+
       - name: Run deviation + baseline-scoring tests (interpreter Phase 1)
         run: |
           # base_rate_spd / compute_deviation / score_baselines live in
