@@ -233,12 +233,18 @@ def _is_test_consistency(con, hs_run_id: str, expected: Optional[bool]) -> Dict[
             if v:
                 seen.add(k.lower())
 
-    consistent = len(seen) <= 1
+    # With no run id the tables are read whole, and a database that has
+    # carried test runs beside production ones holds both values by design.
+    # The calibration workflow calls this with no run, and reported the
+    # travelling DB's history as an INCONSISTENT stage every cycle.
+    scoped = bool(hs_run_id)
+    consistent = (len(seen) <= 1) if scoped else None
     matches_expected = None
-    if expected is not None and seen:
+    if scoped and expected is not None and seen:
         want = "true" if expected else "false"
         matches_expected = seen == {want}
     return {
+        "scoped": scoped,
         "per_table": per_table,
         "distinct_values": sorted(seen),
         "consistent": consistent,
@@ -301,6 +307,9 @@ def _cost(con, hs_run_id: str, fc_run_id: str, since: Optional[str]) -> Dict[str
     return {
         "available": True,
         "since": since,
+        # False when no run id was given: run_total is then the database's
+        # whole lifetime, and must never be printed as "this run".
+        "run_scoped": bool(ids),
         "run_total": total([], []),
         "stage_total": total(stage_where, stage_params) if since else None,
         "run_by_phase": rollup([], [], "phase"),
@@ -417,10 +426,16 @@ def _markdown(rep: Dict[str, Any]) -> str:
 
     it = rep.get("is_test") or {}
     if it.get("per_table"):
-        status = "consistent" if it["consistent"] else "**INCONSISTENT**"
-        exp = it.get("matches_expected")
-        extra = "" if exp is None else (" · matches expected" if exp else " · **does NOT match expected**")
-        L.append(f"**is_test**: {status} — values {it['distinct_values']}{extra}")
+        if it.get("scoped", True):
+            status = "consistent" if it["consistent"] else "**INCONSISTENT**"
+            exp = it.get("matches_expected")
+            extra = "" if exp is None else (" · matches expected" if exp else " · **does NOT match expected**")
+            L.append(f"**is_test**: {status} — values {it['distinct_values']}{extra}")
+        else:
+            L.append(
+                f"**is_test** (whole database — no run given, so not checked): "
+                f"values {it['distinct_values']}"
+            )
         # Always render the per-table counts, not just on failure. When this
         # first fired in production the summary said "INCONSISTENT" but the
         # breakdown was only in the JSON artifact — and artifacts are exactly
@@ -459,7 +474,8 @@ def _markdown(rep: Dict[str, Any]) -> str:
     c = rep.get("cost") or {}
     if c.get("available"):
         rt = c["run_total"]
-        L.append(f"**Cost** — run to date: {rt['n_calls']} calls, ${rt['cost_usd']}, {rt['tokens']} tokens")
+        label = "run to date" if c.get("run_scoped", True) else "database lifetime (no run given)"
+        L.append(f"**Cost** — {label}: {rt['n_calls']} calls, ${rt['cost_usd']}, {rt['tokens']} tokens")
         st = c.get("stage_total")
         if st:
             L.append("")
@@ -572,7 +588,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
 
     it = rep["is_test"]
-    if it["per_table"] and not it["consistent"]:
+    if it["per_table"] and it.get("scoped", True) and not it["consistent"]:
         print(
             f"::warning title=is_test inconsistent::stage {args.stage} has mixed is_test values "
             f"{it['distinct_values']} across stamped tables for this run."

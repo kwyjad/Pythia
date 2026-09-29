@@ -4287,7 +4287,7 @@ def emit_executive_summary(
                 f"- Binary forecasts landed: "
                 f"{binary['n_cells_expected'] - binary.get('n_cells_missing', 0)} of "
                 f"{binary['n_cells_expected']} (question, month) pooled cells "
-                "(no per-member rows exist for EVENT_OCCURRENCE)."
+                "(judged on the pooled row; member rows exist only for runs from Oct 2026)."
             )
         lines.append("")
 

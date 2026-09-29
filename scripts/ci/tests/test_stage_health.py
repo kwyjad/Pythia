@@ -438,3 +438,28 @@ def test_rc_levels_degrade_cleanly_without_data_quality_json(tmp_path):
     rc = _run(path, tmp_path)["rc_levels"]
     assert rc["n_not_assessed"] == 0
     assert rc["by_level_assessed"] == rc["by_level"]
+
+
+def test_without_a_run_the_whole_db_is_described_not_judged(tmp_path, capsys, monkeypatch):
+    """The calibration workflow calls stage_health with no run id.
+
+    On 2026-09-28 that read the travelling DB whole — eleven test runs beside
+    four production ones — reported the stage INCONSISTENT with a warning,
+    and printed the database's lifetime spend as "run to date".
+    """
+    monkeypatch.delenv("PYTHIA_TEST_MODE", raising=False)
+    path = _db(tmp_path)
+    con = duckdb.connect(path)
+    _call(con, call_id="c1", is_test=True)
+    con.execute("INSERT INTO hs_triage VALUES (?, 1, 1, FALSE)", [RUN])
+    con.close()
+
+    rep = _run(path, tmp_path, hs_run_id="")
+    out = capsys.readouterr().out
+    assert rep["is_test"]["scoped"] is False
+    assert rep["is_test"]["consistent"] is None
+    assert "::warning title=is_test inconsistent::" not in out
+    assert "not checked" in out
+    assert rep["cost"]["run_scoped"] is False
+    assert "database lifetime" in out
+    assert "run to date" not in out

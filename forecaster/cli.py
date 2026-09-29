@@ -1286,7 +1286,10 @@ def _build_month_labels(start_date: Optional[date], horizon_months: int = 6) -> 
 # ---- Forecaster internals (all relative imports) --------------------------------
 from .prompts import (  # noqa: E402
     build_spd_prompt_v2,
+    load_member_calibration_advice,
     merge_evidence_packs,
+    render_member_calibration_advice,
+    reset_member_calibration_advice_cache,
 )
 from .binary_prompts import (  # noqa: E402
     build_binary_event_prompt,
@@ -2884,6 +2887,38 @@ def _cache_warm_key(ms: "ModelSpec", prompt_cache_key: str | None) -> tuple | No
 async def _call_spd_model_for_spec(
     ms: ModelSpec,
     prompt: str,
+    **kwargs,
+) -> tuple[str, Dict[str, Any], Optional[str], ModelSpec]:
+    """One ensemble member's call, with that member's own calibration note.
+
+    The shared prompt is built once for every member. The per-model advice
+    ``generate_calibration_advice`` writes is appended here, to this member's
+    tail only, BEFORE the batch intercept so a batch body and a sync body
+    carry the same text; the cached prefix is untouched. Whenever a note was
+    added the true sent prompt is stashed as ``sent_prompt_text`` so the
+    ``llm_calls`` row records it — a batch replay whose stored prompt equals
+    the advised one would otherwise log the base prompt without it.
+    """
+    member_note = render_member_calibration_advice(
+        load_member_calibration_advice(
+            kwargs.get("hazard_code") or "",
+            kwargs.get("metric") or "",
+            getattr(ms, "name", "") or "",
+        )
+    )
+    if not member_note:
+        return await _call_spd_model_for_spec_inner(ms, prompt, **kwargs)
+    advised = prompt + member_note
+    text, usage, error, ms_out = await _call_spd_model_for_spec_inner(ms, advised, **kwargs)
+    if isinstance(usage, dict) and not usage.get("sent_prompt_text"):
+        usage = dict(usage)
+        usage["sent_prompt_text"] = advised
+    return text, usage, error, ms_out
+
+
+async def _call_spd_model_for_spec_inner(
+    ms: ModelSpec,
+    prompt: str,
     *,
     run_id: str | None = None,
     question_id: str | None = None,
@@ -4332,8 +4367,14 @@ def _write_binary_outputs(
     resolution_source: str,
     usage: dict[str, Any],
     model_name: str = "ensemble",
+    raw_only: bool = False,
 ) -> None:
     """Write binary forecasts using SPD storage convention.
+
+    ``raw_only`` writes to ``forecasts_raw`` alone. It is for MEMBER rows:
+    ``compute_scores`` scores every ``forecasts_raw`` model at bucket 1, which
+    is what lets a binary member earn a calibration weight, while
+    ``forecasts_ensemble`` holds only the pooled answer the dashboard shows.
 
     Convention: bucket_1 = P(yes), bucket_2 = P(no) = 1 - P(yes),
     buckets 3-5 = 0.  This avoids schema changes while keeping binary
@@ -4362,10 +4403,11 @@ def _write_binary_outputs(
             "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ? AND model_name = ?;",
             [run_id, qid, model_name],
         )
-        con.execute(
-            "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ? AND model_name = ?;",
-            [run_id, qid, model_name],
-        )
+        if not raw_only:
+            con.execute(
+                "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ? AND model_name = ?;",
+                [run_id, qid, model_name],
+            )
         anchor_month = _anchor_month_for_question(rec)
         for month_label in sorted(month_probs.keys()):
             # Month index derived from the label itself, never from position:
@@ -4407,6 +4449,8 @@ def _write_binary_outputs(
                         _IS_TEST,
                     ],
                 )
+                if raw_only:
+                    continue
                 con.execute(
                     """
                     INSERT INTO forecasts_ensemble (
@@ -4575,6 +4619,9 @@ async def _run_binary_forecast_for_question(
         expected_months = _expected_months(anchor_month, NUM_HORIZONS) if anchor_month else []
         expected_set = set(expected_months)
         all_model_probs: list[dict[str, float]] = []
+        # (spec, usage, parsed) per member that returned a usable answer, so
+        # each member can be stored and scored under its own name.
+        member_results: list[tuple[ModelSpec, dict[str, Any], dict[str, float]]] = []
         for call in raw_calls:
             raw_text = str(call.get("text") or "")
             if not raw_text:
@@ -4591,6 +4638,9 @@ async def _run_binary_forecast_for_question(
                 parsed = {m: p for m, p in parsed.items() if m in expected_set}
             if parsed:
                 all_model_probs.append(parsed)
+                ms_call = call.get("model_spec")
+                if isinstance(ms_call, ModelSpec):
+                    member_results.append((ms_call, call.get("usage") or {}, parsed))
 
         if not all_model_probs:
             _record_no_forecast(
@@ -4605,8 +4655,27 @@ async def _run_binary_forecast_for_question(
         for mp in all_model_probs:
             all_months.update(mp.keys())
 
+        # Track 1 applies the members' calibration weights, exactly as the
+        # SPD mean does; with no stored weights (or on Track 2's single
+        # model) this is the plain average it always was.
+        member_weights: Optional[list[float]] = None
+        if track == 1 and len(member_results) == len(all_model_probs) and len(member_results) > 1:
+            _wbk, _keys, member_weights = _resolve_member_weights(
+                [ms for ms, _u, _p in member_results], hz, metric
+            )
+
         aggregated: dict[str, float] = {}
         for month in sorted(all_months):
+            if member_weights:
+                pairs = [
+                    (w, mp[month])
+                    for w, mp in zip(member_weights, all_model_probs)
+                    if month in mp
+                ]
+                total_w = sum(w for w, _p in pairs)
+                if pairs and total_w > 0:
+                    aggregated[month] = sum(w * p for w, p in pairs) / total_w
+                continue
             probs = [mp[month] for mp in all_model_probs if month in mp]
             if probs:
                 aggregated[month] = sum(probs) / len(probs)
@@ -4641,6 +4710,31 @@ async def _run_binary_forecast_for_question(
             usage=usage or {},
             model_name=model_name,
         )
+
+        # Each member's own forecast, to forecasts_raw only. Until Sept 2026
+        # only the pooled rows were stored, so a binary member could never be
+        # scored and EVENT_OCCURRENCE could never be calibrated. Track 2 has
+        # one model whose row IS the pooled row, so there is nothing to add.
+        # A member write failing must never cost the pooled forecast above.
+        if track == 1:
+            for ms_member, usage_member, probs_member in member_results:
+                if expected_set and set(probs_member) != expected_set:
+                    continue
+                try:
+                    _write_binary_outputs(
+                        run_id,
+                        question_row,
+                        probs_member,
+                        resolution_source=resolution_source,
+                        usage=usage_member,
+                        model_name=ms_member.name,
+                        raw_only=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning(
+                        "Binary member write failed for %s / %s: %r",
+                        qid, ms_member.name, exc,
+                    )
 
         # Also write BayesMC aggregation for Track 1 (needs >1 model)
         if track == 1 and len(all_model_probs) > 1:
@@ -5789,28 +5883,48 @@ def _resolve_member_weights(
     if not stored:
         return None, keys, None
 
-    raw: list[float] = []
-    matched = 0
+    # None marks a member with no stored weight. It is filled AFTER the
+    # matched weights are rescaled, never before: stored weights are a
+    # softmax that sums to 1 across the members that were scored, so a
+    # literal 1.0 beside them is several times any calibrated weight. After
+    # a model swap that made the one member nobody had scored the heaviest
+    # in the ensemble — the opposite of calibration.
+    raw: list[Optional[float]] = []
     for ms, key in zip(specs_used, keys):
         w = stored.get(key)
         if w is None:
             w = stored.get(getattr(ms, "name", ""))
         if w is None:
-            raw.append(1.0)
-        else:
-            try:
-                raw.append(max(float(w), 0.0))
-                matched += 1
-            except Exception:
-                raw.append(1.0)
+            raw.append(None)
+            continue
+        try:
+            raw.append(max(float(w), 0.0))
+        except Exception:
+            raw.append(None)
 
-    if matched == 0:
+    matched_vals = [w for w in raw if w is not None]
+    if not matched_vals:
         return None, keys, None
 
-    mean_w = sum(raw) / len(raw)
+    mean_w = sum(matched_vals) / len(matched_vals)
     if mean_w <= 0.0:
         return None, keys, None
-    scaled = [w / mean_w for w in raw]
+    # Matched members are rescaled to mean 1.0 among themselves; an
+    # unmatched member takes 1.0, which is now exactly the calibrated
+    # average — neutral, neither rewarded nor penalised for having no record.
+    scaled = [1.0 if w is None else w / mean_w for w in raw]
+
+    unmatched = [k for k, w in zip(keys, raw) if w is None]
+    if unmatched:
+        LOG.info(
+            "Calibration weights %s/%s: %d of %d member(s) matched; neutral "
+            "weight 1.0 (the calibrated average) for %s",
+            hazard_code,
+            metric,
+            len(matched_vals),
+            len(raw),
+            ", ".join(unmatched),
+        )
 
     weights_by_key = {k: w for k, w in zip(keys, scaled)}
     return weights_by_key, keys, scaled
@@ -6090,6 +6204,7 @@ def main() -> None:
         ensure_schema()
         # Weights may have been recomputed since this process started.
         _reset_calibration_weights_cache()
+        reset_member_calibration_advice_cache()
 
         # Parse iso3 filter from CLI
         iso3_filter: Optional[set[str]] = None

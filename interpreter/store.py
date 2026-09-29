@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS interpretations (
     input_tokens INTEGER,
     output_tokens INTEGER,
     created_at TIMESTAMP DEFAULT now(),
-    is_test BOOLEAN DEFAULT FALSE
+    is_test BOOLEAN DEFAULT FALSE,
+    outcome_hash TEXT
 )
 """
 
@@ -57,7 +58,11 @@ def ensure_table(con) -> None:
         str(r[1]).lower()
         for r in con.execute("PRAGMA table_info('interpretations')").fetchall()
     }
-    for column, decl in (("figures_json", "TEXT"), ("is_test", "BOOLEAN DEFAULT FALSE")):
+    for column, decl in (
+        ("figures_json", "TEXT"),
+        ("is_test", "BOOLEAN DEFAULT FALSE"),
+        ("outcome_hash", "TEXT"),
+    ):
         if column not in existing:
             con.execute(f"ALTER TABLE interpretations ADD COLUMN {column} {decl}")
 
@@ -79,17 +84,32 @@ def next_version(con, kind: str, run_id: str | None, scored_run_id: str | None) 
 
 
 def existing_ok_version(
-    con, kind: str, run_id: str | None, scored_run_id: str | None
+    con,
+    kind: str,
+    run_id: str | None,
+    scored_run_id: str | None,
+    outcome_hash: str | None = None,
 ) -> int | None:
-    """Highest status='ok' version for this (kind, run key), else None."""
+    """Highest status='ok' version for this (kind, run key), else None.
+
+    With ``outcome_hash`` a stored version counts only if it was written from
+    the same scores. The scored key is the calendar month the bundle was
+    built, so without this a later scoring round in the same month — after
+    ACLED revised a month's fatalities, say — was skipped as "already exists"
+    and the report went on describing scores the database no longer held.
+    """
     ensure_table(con)
     key = _run_key(kind, run_id, scored_run_id)
     column = "run_id" if kind in ("current", "combined") else "scored_run_id"
-    row = con.execute(
+    sql = (
         f"SELECT MAX(version) FROM interpretations WHERE kind = ? "
-        f"AND COALESCE({column}, '') = ? AND status = 'ok'",
-        [kind, key],
-    ).fetchone()
+        f"AND COALESCE({column}, '') = ? AND status = 'ok'"
+    )
+    params: list[Any] = [kind, key]
+    if outcome_hash:
+        sql += " AND outcome_hash = ?"
+        params.append(outcome_hash)
+    row = con.execute(sql, params).fetchone()
     return int(row[0]) if row and row[0] is not None else None
 
 
@@ -114,6 +134,7 @@ def save_interpretation(
     input_tokens: int | None,
     output_tokens: int | None,
     is_test: bool | None = None,
+    outcome_hash: str | None = None,
 ) -> tuple[str, int]:
     """Insert a new versioned row; returns (interpretation_id, version)."""
     ensure_table(con)
@@ -135,8 +156,8 @@ def save_interpretation(
              version, template_version, model_name, thinking_level,
              prompt_hash, pack_hash, content_json, content_md, figures_json,
              status, validation_json, cost_usd, input_tokens, output_tokens,
-             created_at, is_test)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             created_at, is_test, outcome_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             interpretation_id, kind, run_id, hs_run_id, scored_run_id,
@@ -148,6 +169,7 @@ def save_interpretation(
             status,
             json.dumps(validation, ensure_ascii=False, default=str) if validation is not None else None,
             cost_usd, input_tokens, output_tokens, now, bool(is_test),
+            outcome_hash or None,
         ],
     )
     return interpretation_id, version

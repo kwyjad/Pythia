@@ -9,7 +9,6 @@ import importlib
 import importlib.util
 import logging
 import os
-import threading
 import re
 from datetime import date
 from typing import Any, Dict, Optional
@@ -100,90 +99,6 @@ def _load_calibration_note() -> str:
         return ""
     return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
 
-_MEMBER_ADVICE_CACHE: dict[tuple[str, str, str], str] = {}
-_MEMBER_ADVICE_LOCK = threading.Lock()
-
-
-def reset_member_calibration_advice_cache() -> None:
-    """Clear cached per-member advice (called with the weights-cache reset)."""
-    with _MEMBER_ADVICE_LOCK:
-        _MEMBER_ADVICE_CACHE.clear()
-
-
-def load_member_calibration_advice(
-    hazard_code: str, metric: str, model_name: str
-) -> str:
-    """The per-model advice for one ensemble member, or "".
-
-    The shared (hazard, metric) advice lives in the prompt's cached prefix
-    and is the same for every member. This is the member's OWN part, keyed by
-    the model name its scores are stored under, and is appended to the tail
-    of that member's prompt only. It was generated every cycle and read by
-    nothing until Oct 2026: Track 1 builds one prompt for all members, and the
-    only caller that passed a model name was Track 2, whose name is an
-    aggregate that never has advice.
-    """
-    hz = (hazard_code or "").upper()
-    m = (metric or "").upper()
-    name = (model_name or "").strip()
-    if not hz or not m or not name or os.getenv("PYTHIA_MEMBER_ADVICE", "1") == "0":
-        return ""
-    key = (hz, m, name)
-    with _MEMBER_ADVICE_LOCK:
-        if key in _MEMBER_ADVICE_CACHE:
-            return _MEMBER_ADVICE_CACHE[key]
-
-    text = ""
-    advice_version = os.getenv("PYTHIA_ADVICE_VERSION", "").strip() or None
-    try:
-        from resolver.db import duckdb_io
-
-        db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
-        db_url = db_url or duckdb_io.DEFAULT_DB_URL
-        con = duckdb_io.get_db(db_url)
-        try:
-            version_clause = " AND advice_version = ?" if advice_version else ""
-            params = [hz, m, name] + ([advice_version] if advice_version else [])
-            row = con.execute(
-                f"""
-                SELECT advice
-                FROM calibration_advice
-                WHERE hazard_code = ? AND metric = ? AND model_name = ?
-                  {version_clause}
-                ORDER BY as_of_month DESC
-                LIMIT 1
-                """,
-                params,
-            ).fetchone()
-            if row and row[0]:
-                text = str(row[0])
-                if len(text) > 2000:
-                    text = text[:1900] + "\n…[truncated]"
-        finally:
-            duckdb_io.close_db(con)
-    except Exception:
-        text = ""
-
-    with _MEMBER_ADVICE_LOCK:
-        _MEMBER_ADVICE_CACHE[key] = text
-    return text
-
-
-def render_member_calibration_advice(advice: str) -> str:
-    """The block appended to one member's prompt; "" when there is none."""
-    if not advice:
-        return ""
-    return (
-        "\n\nCALIBRATION NOTE FOR THIS MODEL (auto-generated from your own "
-        "scored forecasts on this hazard and metric; it applies to you, not "
-        "to the other forecasters):\n"
-        + advice
-        + "\n--- end model calibration note ---\n"
-        "Apply this note while following the method above, then produce ONLY the "
-        "JSON object specified in the Output instructions.\n"
-    )
-
-
 def _load_calibration_advice_for_hazard(
     hazard_code: str,
     metric: str,
@@ -273,17 +188,11 @@ def _load_calibration_advice_for_hazard(
                 txt = str(global_row[0])
                 return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
 
-            # Last resort: a legacy row that names no hazard and no model.
-            # This used to be "any most-recent row" with no filter at all, so
-            # a flood or drought prompt with no shared advice of its own was
-            # handed whichever row sorted first — another hazard's advice, a
-            # retired model's, or an external benchmark's.
+            # Fall back to any most-recent row (backwards compat)
             row = con.execute(
                 """
                 SELECT advice
                 FROM calibration_advice
-                WHERE COALESCE(model_name, '__shared__') = '__shared__'
-                  AND COALESCE(hazard_code, '*') = '*'
                 ORDER BY as_of_month DESC
                 LIMIT 1
                 """,

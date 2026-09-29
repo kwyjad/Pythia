@@ -29,12 +29,14 @@ FIELDNAMES = [
     "family", "status", "verdict",
 ]
 
-#: Metrics with no per-member rows in ``forecasts_raw``. EVENT_OCCURRENCE is
-#: the only one: ``_write_binary_outputs`` writes the AGGREGATE rows alone
-#: (``ensemble_mean_v2`` or ``track2_flash``, plus ``ensemble_bayesmc_v2``
-#: on Track 1), because a binary question's members are pooled before
-#: anything is stored. Expecting a row per member per month therefore
-#: counts every binary cell as missing: on the 2026-09-15 run that put
+#: Metrics whose completeness is judged on the POOLED row, never per member.
+#: EVENT_OCCURRENCE is the only one. Until Oct 2026 ``_write_binary_outputs``
+#: stored the aggregate rows alone (``ensemble_mean_v2`` or ``track2_flash``,
+#: plus ``ensemble_bayesmc_v2`` on Track 1); since then Track 1 also writes
+#: each member to ``forecasts_raw`` (``raw_only``) so members can be scored,
+#: but runs before that carry none, and the pooled row is still the forecast.
+#: Expecting a row per member per month counted every binary cell as missing
+#: on the older runs: on the 2026-09-15 run that put
 #: "1,602 of 4,398 forecasts missing or unusable" at the top of the
 #: executive summary when the real loss was 12 cells, and a check that
 #: cannot pass teaches the reader to skip the report.

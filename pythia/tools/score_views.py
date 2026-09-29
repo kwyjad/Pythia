@@ -39,6 +39,15 @@ if not LOGGER.handlers:
 # Prefixed with '__ext_' to distinguish from Pythia ensemble members.
 VIEWS_MODEL_NAME = "__ext_views"
 
+# The literals the ViEWS connector writes into ``conflict_forecasts``
+# (resolver/connectors/views.py::ViewsConnector._transform). Both are pinned
+# against the connector's own output in pythia/tests/test_score_views.py:
+# this reader matched ``source = 'views'`` for a year, and after that was
+# fixed it matched ``metric = 'FATALITIES'`` — a Pythia question metric the
+# connector never writes — so it still found nothing and still went green.
+VIEWS_SOURCE = "VIEWS"
+VIEWS_FATALITIES_METRIC = "views_predicted_fatalities"
+
 # Log-normal sigma parameter controlling spread around the point forecast.
 # This should be calibrated empirically once enough resolutions exist.
 # Initial value of 1.0 gives moderate spread.
@@ -153,7 +162,10 @@ def _load_views_forecast_pairs(conn) -> List[Dict]:
     # and this filter compared against the lowercase ``'views'`` from the day
     # it was written, so no row ever matched and ``views_scored_forecasts``
     # stayed empty through every scoring round while the step logged
-    # "nothing to score" and went green. Compare case-insensitively.
+    # "nothing to score" and went green. Compare case-insensitively. The
+    # metric filter had the same fault a line below it and survived the first
+    # fix: see VIEWS_FATALITIES_METRIC. The join to hs_runs that sat here
+    # selected nothing and only dropped questions without a run row.
     sql = """
         WITH ranked_views AS (
             SELECT
@@ -168,8 +180,8 @@ def _load_views_forecast_pairs(conn) -> List[Dict]:
                     ORDER BY cf.forecast_issue_date DESC
                 ) AS rn
             FROM conflict_forecasts cf
-            WHERE upper(cf.source) = 'VIEWS'
-              AND upper(cf.metric) = 'FATALITIES'
+            WHERE upper(cf.source) = upper(?)
+              AND lower(cf.metric) = lower(?)
         )
         SELECT
             q.question_id,
@@ -184,8 +196,6 @@ def _load_views_forecast_pairs(conn) -> List[Dict]:
         FROM questions q
         JOIN resolutions r
             ON q.question_id = r.question_id
-        JOIN hs_runs h
-            ON q.hs_run_id = h.hs_run_id
         JOIN ranked_views rv
             ON upper(rv.iso3) = upper(q.iso3)
             AND rv.lead_months = r.horizon_m
@@ -195,7 +205,26 @@ def _load_views_forecast_pairs(conn) -> List[Dict]:
           AND upper(q.metric) = 'FATALITIES'
         ORDER BY q.question_id, r.horizon_m
     """
-    rows = conn.execute(sql).fetchall()
+    # Counted apart from the join, so "no ViEWS rows passed the filter" and
+    # "ViEWS rows exist but none meets a resolved question" read differently:
+    # the first is a literal that no longer matches the connector, the second
+    # is timing or retention.
+    n_views_rows = conn.execute(
+        "SELECT COUNT(*) FROM conflict_forecasts "
+        "WHERE upper(source) = upper(?) AND lower(metric) = lower(?)",
+        [VIEWS_SOURCE, VIEWS_FATALITIES_METRIC],
+    ).fetchone()[0]
+    LOGGER.info(
+        "score_views: %d conflict_forecasts row(s) carry source=%s metric=%s.",
+        n_views_rows, VIEWS_SOURCE, VIEWS_FATALITIES_METRIC,
+    )
+    if not n_views_rows:
+        LOGGER.warning(
+            "score_views: no ViEWS fatality rows at all — check the connector's "
+            "source/metric literals against VIEWS_SOURCE/VIEWS_FATALITIES_METRIC."
+        )
+
+    rows = conn.execute(sql, [VIEWS_SOURCE, VIEWS_FATALITIES_METRIC]).fetchall()
 
     pairs = []
     for row in rows:
