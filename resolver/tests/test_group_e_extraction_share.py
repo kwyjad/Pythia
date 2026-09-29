@@ -121,7 +121,13 @@ def test_load_budget_honours_the_override(monkeypatch, tmp_path):
 
     assert raised.backcast_max_calls_per_month == 8500
     assert plain.backcast_max_calls_per_month == 8000
-    assert raised.remaining > plain.remaining, "the raise must buy calls"
+    # Compared on the SHARE's headroom: since 2026-09-29 the shipped
+    # 800-call per-run cap binds `remaining` for both, which says nothing
+    # about whether the raise bought share.
+    assert (
+        raised.headroom()["backcast_share_headroom"]
+        > plain.headroom()["backcast_share_headroom"]
+    ), "the raise must buy calls"
 
 
 def test_a_live_run_ignores_the_override(monkeypatch, tmp_path):
