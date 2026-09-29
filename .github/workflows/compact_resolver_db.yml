@@ -27,6 +27,17 @@
 # artifact it replaced.
 #
 # Dry run is the default. Read the plan, then re-dispatch with apply=true.
+#
+# maintenance=conflict_resolution_reset (Sept 2026) is a second, separate job
+# on the same canonical producer, so no new producer joins the discovery
+# lists. ACE/FATALITIES had resolved to ACLED's battles-only series; before
+# the post-fix rerun of compute_resolutions -> scores -> calibration, this
+# (1) exports an audit copy of the wrong ACE/FATALITIES rows as the
+# pythia-audit-prefix-conflict-resolution artifact (always, even on a dry
+# run), (2) relabels battles-only ACLED facts rows to fatalities_battle_month,
+# and (3) deletes the hazard-specific ACE/FATALITIES bucket centroids so EIV
+# falls back to the seeds (the EMA only moves a wrong centroid a tenth of the
+# way per run). The compaction steps do not run in this mode.
 
 ---
 name: Compact Resolver DB
@@ -43,6 +54,14 @@ concurrency:
         required: false
         default: false
         type: boolean
+      maintenance:
+        description: "What to do: compact (the raw-cache compaction) or conflict_resolution_reset (audit + relabel + centroid reset before the ACE/FATALITIES rerun)"
+        required: false
+        default: compact
+        type: choice
+        options:
+          - compact
+          - conflict_resolution_reset
       db_run_id:
         description: "Optional: force canonical DB from an Actions run ID. Blank = latest successful producer."
         required: false
@@ -136,6 +155,7 @@ jobs:
       # Always runs, apply or not: the plan is what a human reads before
       # authorising the write.
       - name: "Dry run: the compaction plan"
+        if: inputs.maintenance != 'conflict_resolution_reset'
         run: |
           set -euo pipefail
           python -m resolver.hazard_resolution.retention \
@@ -148,7 +168,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collapse the raw caches
-        if: inputs.apply == true || inputs.apply == 'true'
+        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance != 'conflict_resolution_reset'
         run: |
           set -euo pipefail
           python -m resolver.hazard_resolution.retention \
@@ -167,7 +187,7 @@ jobs:
       # publish_latest_data.yml's own "~14 GB runner disk" note is stale. A
       # copy that dies for want of space otherwise looks like a DuckDB error.
       - name: Reclaim the file
-        if: inputs.apply == true || inputs.apply == 'true'
+        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance != 'conflict_resolution_reset'
         run: |
           set -euo pipefail
           echo "disk before: $(df -h . | tail -1)"
@@ -196,6 +216,55 @@ jobs:
             echo ""
             echo "Disk: \`$(df -h . | tail -1)\`"
             echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # --- maintenance=conflict_resolution_reset ------------------------
+      # The audit copy runs on a dry run as well: it is read-only, and it is
+      # the record of what the rerun is about to replace.
+      - name: "Conflict reset: export the audit copy"
+        if: inputs.maintenance == 'conflict_resolution_reset'
+        run: |
+          set -euo pipefail
+          rm -f data/resolver.duckdb.wal
+          python -m scripts.reset_conflict_centroids \
+            --db "duckdb:///${{ github.workspace }}/data/resolver.duckdb" \
+            --audit-dir audit/prefix_conflict_resolution --audit-only \
+            --summary-out diagnostics/conflict_reset_plan.json \
+            | tee diagnostics/conflict_reset_plan.txt
+          python -m resolver.tools.repair_acled_fatalities_metric \
+            --db "duckdb:///${{ github.workspace }}/data/resolver.duckdb" --dry-run \
+            --summary-out diagnostics/relabel_plan.json | tee -a diagnostics/conflict_reset_plan.txt
+          {
+            echo "#### ACE/FATALITIES reset plan"
+            echo '```'
+            cat diagnostics/conflict_reset_plan.json diagnostics/relabel_plan.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Conflict reset: upload the audit copy"
+        if: inputs.maintenance == 'conflict_resolution_reset'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pythia-audit-prefix-conflict-resolution
+          path: audit/prefix_conflict_resolution/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: "Conflict reset: relabel battles-only facts and reset centroids"
+        if: format('{0}', inputs.apply) == 'true' && inputs.maintenance == 'conflict_resolution_reset'
+        run: |
+          set -euo pipefail
+          python -m resolver.tools.repair_acled_fatalities_metric \
+            --db "duckdb:///${{ github.workspace }}/data/resolver.duckdb" \
+            --summary-out diagnostics/relabel_applied.json
+          python -m scripts.reset_conflict_centroids \
+            --db "duckdb:///${{ github.workspace }}/data/resolver.duckdb" \
+            --summary-out diagnostics/conflict_reset_applied.json
+          {
+            echo "#### ACE/FATALITIES reset applied"
+            echo '```'
+            cat diagnostics/relabel_applied.json diagnostics/conflict_reset_applied.json
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The proof that the resume ledger and the verdicts survived. A

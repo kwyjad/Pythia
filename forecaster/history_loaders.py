@@ -900,8 +900,10 @@ def _load_acled_fatalities_history(
     """
     Load a 36-month ACLED fatalities history for conflict questions.
 
-    First try facts_resolved with metric='fatalities'; fall back to
-    db.acled_monthly_fatalities if needed.
+    Reads ``acled_monthly_fatalities`` — deaths over ALL ACLED event types,
+    the series ACE/FATALITIES questions resolve against. It used to try
+    ``facts_resolved`` 'fatalities' first, which held the battles-only
+    series (and, unfiltered by hazard, IFRC natural-hazard deaths).
     """
 
     try:
@@ -909,61 +911,35 @@ def _load_acled_fatalities_history(
     except Exception:
         return "", {"error": "missing_db", "history_rows_detail": [], "summary_text": ""}
 
+    history: List[Dict[str, Any]] = []
+    values: List[float] = []
     try:
-        rows = con.execute(
+        rows2 = con.execute(
             """
-            SELECT ym, value, source_type
-            FROM facts_resolved
+            SELECT strftime(month, '%Y-%m') AS ym, fatalities, source
+            FROM acled_monthly_fatalities
             WHERE iso3 = ?
-              AND lower(metric) = 'fatalities'
-            ORDER BY ym DESC
+            ORDER BY month DESC
             LIMIT ?
             """,
             [iso3, months],
         ).fetchall()
     except Exception as exc:
-        rows = []
-        facts_err = f"facts_query_error:{type(exc).__name__}"
-    else:
-        facts_err = ""
+        con.close()
+        return "", {
+            "error": f"acled_query_error:{type(exc).__name__}",
+            "history_rows_detail": [],
+            "summary_text": "",
+        }
 
-    history: List[Dict[str, Any]] = []
-    values: List[float] = []
+    if not rows2:
+        con.close()
+        return "", {"error": "no_rows", "history_rows_detail": [], "summary_text": ""}
 
-    if rows:
-        for ym, val, source_type in rows:
-            ym_str = str(ym)
-            v = float(val or 0)
-            history.append({"ym": ym_str, "value": v, "source": source_type or "acled"})
-            values.append(v)
-    else:
-        try:
-            rows2 = con.execute(
-                """
-                SELECT strftime(month, '%Y-%m') AS ym, fatalities, source
-                FROM acled_monthly_fatalities
-                WHERE iso3 = ?
-                ORDER BY month DESC
-                LIMIT ?
-                """,
-                [iso3, months],
-            ).fetchall()
-        except Exception as exc:
-            con.close()
-            return "", {
-                "error": facts_err or f"acled_query_error:{type(exc).__name__}",
-                "history_rows_detail": [],
-                "summary_text": "",
-            }
-
-        if not rows2:
-            con.close()
-            return "", {"error": "no_rows", "history_rows_detail": [], "summary_text": ""}
-
-        for ym_str, fatalities, src in rows2:
-            v = float(fatalities or 0)
-            history.append({"ym": ym_str, "value": v, "source": src or "acled"})
-            values.append(v)
+    for ym_str, fatalities, src in rows2:
+        v = float(fatalities or 0)
+        history.append({"ym": ym_str, "value": v, "source": src or "acled"})
+        values.append(v)
 
     con.close()
 

@@ -5836,6 +5836,10 @@ def _load_calibration_advice_db(
     mt = (metric or "").upper().strip()
     if not hz or not mt:
         return None
+    from forecaster.prompts import _advice_blocked
+
+    if _advice_blocked(hz, mt):
+        return None
 
     db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
     if not db_url:

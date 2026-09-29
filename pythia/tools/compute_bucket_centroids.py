@@ -115,10 +115,26 @@ def compute_bucket_centroids(db_url: str, metric: str = "PA") -> None:
         elif metric == "PA":
             metric_filter = "lower(metric) IN ('affected','people_affected','pa','displaced')"
         elif metric == "FATALITIES":
-            metric_filter = "lower(metric) = 'fatalities'"
+            # facts_resolved carries no all-types conflict series: its
+            # ACLED rows are the battles-only 'fatalities_battle_month' and
+            # its 'fatalities' rows are IFRC natural-hazard deaths. ACE
+            # centroids are learned from acled_monthly_fatalities below,
+            # the series ACE/FATALITIES questions resolve against.
+            metric_filter = "lower(metric) = 'fatalities' AND upper(hazard_code) NOT IN ('ACE','ACO')"
         else:
             metric_filter = f"lower(metric) = '{metric.lower()}'"
 
+        conflict_union = ""
+        if metric == "FATALITIES":
+            has_acled = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_name = 'acled_monthly_fatalities'"
+            ).fetchone()[0]
+            if has_acled:
+                conflict_union = (
+                    "UNION ALL SELECT 'ACE' AS hazard_code, CAST(fatalities AS DOUBLE) AS v "
+                    "FROM acled_monthly_fatalities WHERE fatalities IS NOT NULL"
+                )
         LOGGER.info("Computing centroids from facts_resolved (metric=%s, filter=%s).", metric, metric_filter)
         conn.execute(
             f"""
@@ -129,6 +145,7 @@ def compute_bucket_centroids(db_url: str, metric: str = "PA") -> None:
               FROM facts_resolved
               WHERE value IS NOT NULL
                 AND {metric_filter}
+              {conflict_union}
             ),
             binned AS (
               SELECT

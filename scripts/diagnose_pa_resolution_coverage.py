@@ -49,7 +49,9 @@ LOGGER = logging.getLogger(__name__)
 # If those filters change, mirror them here.
 METRIC_FILTERS_SQL: dict[str, str] = {
     "PA": "LOWER(metric) IN ('affected','people_affected','pa','displaced')",
-    "FATALITIES": "LOWER(metric) = 'fatalities'",
+    # FATALITIES is absent on purpose: since Sept 2026 it resolves from
+    # acled_monthly_fatalities alone, never from facts_resolved, so a
+    # facts-coverage count for it would describe rows that cannot resolve.
     "EVENT_OCCURRENCE": "LOWER(metric) = 'event_occurrence'",
     "PHASE3PLUS_IN_NEED": "LOWER(metric) = 'phase3plus_in_need'",
 }

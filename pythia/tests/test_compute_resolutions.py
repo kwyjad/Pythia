@@ -94,16 +94,27 @@ class TestResolveValue:
         assert source_ts is not None
 
     def test_fatalities_found(self, resolver_db):
+        """FATALITIES resolves from acled_monthly_fatalities (all event types)
+        and never from a facts row, which holds the battles-only series."""
         resolver_db.execute(
             """
             INSERT INTO facts_resolved (ym, iso3, hazard_code, metric, value, created_at)
             VALUES ('2025-01', 'SOM', 'ACE', 'fatalities', 200.0, '2025-02-10 08:00:00')
             """
         )
+        resolver_db.execute(
+            "CREATE TABLE IF NOT EXISTS acled_monthly_fatalities "
+            "(iso3 TEXT, month DATE, fatalities BIGINT, source TEXT, updated_at TIMESTAMP)"
+        )
+        resolver_db.execute(
+            "INSERT INTO acled_monthly_fatalities VALUES "
+            "('SOM', DATE '2025-01-01', 480, 'ACLED', TIMESTAMP '2025-02-10 08:00:00')"
+        )
         result = _resolve_value(resolver_db, "SOM", "ACE", "2025-01", "FATALITIES")
         assert result is not None
-        value, _, _source_desc = result
-        assert value == 200.0
+        value, _, source_desc = result
+        assert value == 480.0
+        assert source_desc == "acled_monthly_fatalities:all_event_types"
 
     def test_no_match_returns_none(self, resolver_db):
         result = _resolve_value(resolver_db, "ZZZ", "XX", "2099-01", "PA")
@@ -132,11 +143,11 @@ class TestResolveValue:
             INSERT INTO facts_resolved
                 (ym, iso3, hazard_code, metric, series_semantics, value, created_at)
             VALUES
-                ('2025-01', 'ETH', 'ACE', 'fatalities', 'old', 100.0, '2025-01-01 00:00:00'),
-                ('2025-01', 'ETH', 'ACE', 'fatalities', 'new', 200.0, '2025-02-01 00:00:00')
+                ('2025-01', 'ETH', 'FL', 'affected', 'old', 100.0, '2025-01-01 00:00:00'),
+                ('2025-01', 'ETH', 'FL', 'affected', 'new', 200.0, '2025-02-01 00:00:00')
             """
         )
-        result = _resolve_value(resolver_db, "ETH", "ACE", "2025-01", "FATALITIES")
+        result = _resolve_value(resolver_db, "ETH", "FL", "2025-01", "PA")
         assert result is not None
         assert result[0] == 200.0
 
@@ -306,9 +317,10 @@ class TestTryFactsDeltas:
             VALUES ('2024-09', 'SOM', 'ACE', 'fatalities', 88.0, '2024-10-10 00:00:00')
             """
         )
+        # A facts_deltas 'fatalities' row is the battles-only series; it must
+        # never resolve an ACE/FATALITIES question (Sept 2026).
         result = _try_facts_deltas(multi_table_db, "SOM", "ACE", "2024-09", "FATALITIES")
-        assert result is not None
-        assert result[0] == 88.0
+        assert result is None
 
     def test_value_stock_fallback(self, multi_table_db):
         """When value_new is NULL, should fall back to value_stock."""

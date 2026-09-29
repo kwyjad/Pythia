@@ -109,6 +109,11 @@ on:
       - ".github/workflows/forecaster-ci.yml"
       - "tests/test_poll_llm_batches_guard.py"
       - "tests/test_check_pipeline_active.py"
+      # ACE/FATALITIES resolves from the all-event-types series (Sept 2026):
+      # the adapter, the relabel pass and the centroid reset it depends on.
+      - "resolver/transform/adapters/acled.py"
+      - "resolver/tools/repair_acled_fatalities_metric.py"
+      - "scripts/reset_conflict_centroids.py"
 
   workflow_dispatch:
     inputs:
@@ -302,10 +307,16 @@ jobs:
           # step and now asserts its llm_calls telemetry lands (it imports
           # pythia for the end-to-end row check), so it runs here as well as
           # in resolver-ci-fast — duplicate execution is cheap, a gap is not.
+          # test_ace_fatalities_all_event_types pins ACE/FATALITIES to the
+          # series its base rate uses: 27 of 32 August 2026 conflict questions
+          # resolved to ACLED's battles-only count instead.
           pytest -vv \
             forecaster/tests/test_history_summary.py \
             forecaster/tests/test_fewsnet_history.py \
             forecaster/tests/test_base_rate_matches_resolution_source.py \
+            pythia/tests/test_ace_fatalities_all_event_types.py \
+            pythia/tests/test_compute_resolutions.py \
+            pythia/tests/test_diagnose_pa_coverage.py \
             forecaster/tests/test_haz_base_rate_prompt.py \
             resolver/tests/test_idmc_history_conflict_pa.py \
             resolver/tests/test_hazard_resolution_extraction.py

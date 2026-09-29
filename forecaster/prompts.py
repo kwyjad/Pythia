@@ -99,6 +99,22 @@ def _load_calibration_note() -> str:
         return ""
     return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
 
+def _advice_blocked(hazard_code: str, metric: str) -> bool:
+    """True when ``PYTHIA_ADVICE_BLOCK_GROUPS`` lists ``HAZARD/METRIC``.
+
+    Same format as ``pythia.tools.generate_calibration_advice
+    .advice_blocked_groups`` (comma-separated ``HAZARD/METRIC``); parsed here
+    so the prompt builder does not import the advice generator. Used to
+    withhold advice learned from outcomes known to be wrong — ACE/FATALITIES
+    in Sept 2026, which had resolved to battles-only counts.
+    """
+    raw = os.getenv("PYTHIA_ADVICE_BLOCK_GROUPS", "") or ""
+    key = f"{(hazard_code or '').strip().upper()}/{(metric or '').strip().upper()}"
+    return any(
+        part.strip().upper() == key for part in raw.split(",") if part.strip()
+    )
+
+
 def _load_calibration_advice_for_hazard(
     hazard_code: str,
     metric: str,
@@ -110,11 +126,17 @@ def _load_calibration_advice_for_hazard(
       1. Shared advice for (hazard_code, metric, '__shared__')
          + Per-model advice for (hazard_code, metric, model_name)
       2. Global advice for ('*', '*', '__shared__')
-      3. Any most-recent row (backwards compat)
-      4. Empty string
+      3. Empty string
+
+    A group listed in ``PYTHIA_ADVICE_BLOCK_GROUPS`` gets nothing at all.
+    Until Sept 2026 a third step returned "any most-recent row regardless of
+    hazard", so a flood question with no advice of its own could be shown
+    conflict advice; that step is gone.
     """
     hz = (hazard_code or "").upper()
     m = (metric or "").upper()
+    if _advice_blocked(hz, m):
+        return ""
 
     # Read experiment version from env (default: any version)
     advice_version = os.getenv("PYTHIA_ADVICE_VERSION", "").strip() or None
@@ -186,20 +208,6 @@ def _load_calibration_advice_for_hazard(
 
             if global_row and global_row[0]:
                 txt = str(global_row[0])
-                return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
-
-            # Fall back to any most-recent row (backwards compat)
-            row = con.execute(
-                """
-                SELECT advice
-                FROM calibration_advice
-                ORDER BY as_of_month DESC
-                LIMIT 1
-                """,
-            ).fetchone()
-
-            if row and row[0]:
-                txt = str(row[0])
                 return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
         finally:
             duckdb_io.close_db(con)

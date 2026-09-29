@@ -14,11 +14,17 @@ import pandas as pd
 from .base import BaseAdapter, CANONICAL_COLUMNS, LOGGER
 
 
-# Map ACLED-internal metric names to the canonical names expected by
-# downstream consumers (compute_resolutions.py, forecaster, etc.).
-_METRIC_MAP: dict[str, str] = {
-    "fatalities_battle_month": "fatalities",
-}
+# ACLED metric names pass through UNCHANGED. The connector writes
+# ``fatalities_battle_month`` — deaths in events of type *Battles* only — and
+# until Sept 2026 this adapter renamed it to ``fatalities``, which is the name
+# ``compute_resolutions`` resolves ACE/FATALITIES questions from. Those
+# questions, their prompt base rate and their climatology reference are all
+# worded against ``acled_monthly_fatalities``, the sum over ALL event types, so
+# 27 of 32 August conflict questions resolved to a battle-only count. The
+# battle series keeps its own name; the all-types series is the resolution
+# source (``compute_resolutions.ACE_FATALITIES_SERIES``). An empty map is kept
+# so a future rename has to be written here, in view of this comment.
+_METRIC_MAP: dict[str, str] = {}
 
 
 class ACLEDAdapter(BaseAdapter):
@@ -73,7 +79,7 @@ class ACLEDAdapter(BaseAdapter):
             return pd.DataFrame(columns=CANONICAL_COLUMNS)
 
         # ------------------------------------------------------------------
-        # metric: remap to canonical names for downstream consumers
+        # metric: passed through (see _METRIC_MAP above)
         # ------------------------------------------------------------------
         metric_series = df.get("metric", pd.Series(dtype=str)).astype(str).str.strip()
         df["metric"] = metric_series.replace(_METRIC_MAP)
