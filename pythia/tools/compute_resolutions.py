@@ -74,6 +74,21 @@ PA_FACTS_RESOLVED_METRICS: tuple[str, ...] = (
 PA_FACTS_DELTAS_METRICS: tuple[str, ...] = ("new_displacements",) + PA_FACTS_RESOLVED_METRICS
 
 
+# ACE/FATALITIES resolves from ONE series: ``acled_monthly_fatalities``, the
+# monthly sum of ACLED deaths over ALL event types. It is the series the
+# question is worded against, the series the prompt base rate
+# (forecaster ``_build_conflict_base_rate``) is drawn from, and the series the
+# climatology reference (``pythia.tools.base_rate_spd``) is built from.
+#
+# Until Sept 2026 FATALITIES read ``facts_resolved``/``facts_deltas`` FIRST,
+# where the ACLED adapter had stored the connector's BATTLES-ONLY series under
+# the name ``fatalities``: 27 of 32 August ACE/FATALITIES questions resolved
+# to a battle-only count, a median 0.42 of the all-types level the model was
+# shown. A question's base rate and its resolution must be one quantity.
+ACE_FATALITIES_TABLE = "acled_monthly_fatalities"
+ACE_FATALITIES_SERIES = f"{ACE_FATALITIES_TABLE}:all_event_types"
+
+
 def _metric_in_clause(metrics: tuple[str, ...], column: str = "metric") -> str:
     """SQL ``lower(col) IN (...)`` over a metric tuple."""
     joined = ",".join(f"'{m}'" for m in metrics)
@@ -258,20 +273,10 @@ def _data_freshness_cutoff(conn, metric: str) -> Optional[str]:
                 pass
 
     elif metric == "FATALITIES":
-        for table, filt in [
-            ("facts_resolved", "lower(metric) = 'fatalities'"),
-            ("facts_deltas", "lower(metric) = 'fatalities'"),
-        ]:
-            if _table_exists(conn, table):
-                try:
-                    row = conn.execute(
-                        f"SELECT MAX(ym) FROM {table} WHERE {filt}"
-                    ).fetchone()
-                    if row and row[0]:
-                        max_yms.append(str(row[0]))
-                except Exception:
-                    pass
-        if _table_exists(conn, "acled_monthly_fatalities"):
+        # The resolution series alone decides freshness: a facts row named
+        # 'fatalities' is an IFRC natural-hazard death count or a legacy
+        # battle-only ACLED row, and neither can resolve ACE/FATALITIES.
+        if _table_exists(conn, ACE_FATALITIES_TABLE):
             try:
                 row = conn.execute(
                     "SELECT MAX(strftime(month, '%Y-%m')) "
@@ -363,9 +368,8 @@ def _try_facts_resolved(
         return None
     if metric == "PA":
         metric_filter = _metric_in_clause(PA_FACTS_RESOLVED_METRICS)
-    elif metric == "FATALITIES":
-        metric_filter = "lower(metric) = 'fatalities'"
     else:
+        # FATALITIES resolves from ACE_FATALITIES_TABLE alone (see above).
         return None
     # Legacy DBs / minimal test fixtures may lack the publisher column;
     # degrade to metric-preference + recency ordering.
@@ -402,9 +406,8 @@ def _try_facts_deltas(
         return None
     if metric == "PA":
         metric_filter = _metric_in_clause(PA_FACTS_DELTAS_METRICS)
-    elif metric == "FATALITIES":
-        metric_filter = "lower(metric) = 'fatalities'"
     else:
+        # FATALITIES resolves from ACE_FATALITIES_TABLE alone (see above).
         return None
     sql = f"""
         SELECT COALESCE(value_new, value_stock) AS value, created_at, metric
@@ -449,12 +452,12 @@ def _try_emdat_pa(
 def _try_acled_fatalities(
     conn, iso3: str, calendar_month: str,
 ) -> Optional[tuple[float, Optional[str], str]]:
-    """Look up fatalities in ``acled_monthly_fatalities``."""
-    if not _table_exists(conn, "acled_monthly_fatalities"):
+    """Look up all-event-type fatalities in ``acled_monthly_fatalities``."""
+    if not _table_exists(conn, ACE_FATALITIES_TABLE):
         return None
-    sql = """
+    sql = f"""
         SELECT fatalities, updated_at
-        FROM acled_monthly_fatalities
+        FROM {ACE_FATALITIES_TABLE}
         WHERE iso3 = ? AND strftime(month, '%Y-%m') = ?
         LIMIT 1
     """
@@ -467,7 +470,7 @@ def _try_acled_fatalities(
     return (
         float(row[0]),
         (str(row[1]) if row[1] is not None else None),
-        "acled_monthly_fatalities",
+        ACE_FATALITIES_SERIES,
     )
 
 
@@ -551,9 +554,10 @@ def _resolve_value(
       2. ``facts_deltas``   — IDMC flow data and derived deltas
       3. ``emdat_pa``       — EM-DAT people-affected
     FATALITIES:
-      1. ``facts_resolved``
-      2. ``facts_deltas``
-      3. ``acled_monthly_fatalities`` — ACLED fatalities
+      1. ``acled_monthly_fatalities`` — ACLED deaths over ALL event types,
+         the series the question and its base rate are defined on. Nothing
+         else: the battle-only series and IFRC death counts are different
+         quantities.
     EVENT_OCCURRENCE:
       1. ``facts_resolved`` (GDACS binary event rows)
     PHASE3PLUS_IN_NEED:
@@ -566,7 +570,10 @@ def _resolve_value(
     if metric == "PHASE3PLUS_IN_NEED":
         return _try_phase3plus(conn, iso3, hazard_code, calendar_month)
 
-    # PA and FATALITIES: existing priority cascade
+    if metric == "FATALITIES":
+        return _try_acled_fatalities(conn, iso3, calendar_month)
+
+    # PA: priority cascade
     # 1. facts_resolved (IFRC stock rows, highest priority)
     result = _try_facts_resolved(conn, iso3, hazard_code, calendar_month, metric)
     if result is not None:
@@ -583,12 +590,6 @@ def _resolve_value(
         if result is not None:
             return result
 
-    # 4. acled_monthly_fatalities for FATALITIES metric
-    if metric == "FATALITIES":
-        result = _try_acled_fatalities(conn, iso3, calendar_month)
-        if result is not None:
-            return result
-
     return None
 
 
@@ -600,6 +601,144 @@ def _should_default_to_zero(metric_norm: str, hazard_norm: str) -> bool:
         return True
     return False
 
+
+
+def _purge_non_series_fatalities(conn) -> int:
+    """Delete FATALITIES resolutions not drawn from ``ACE_FATALITIES_TABLE``.
+
+    Zero defaults are kept (they are re-derived from the same series'
+    coverage). Idempotent: a DB with no such rows is untouched.
+    """
+    if not (_table_exists(conn, "resolutions") and _table_exists(conn, "questions")):
+        return 0
+    where = f"""
+        question_id IN (
+            SELECT question_id FROM questions WHERE upper(metric) = 'FATALITIES'
+        )
+        AND COALESCE(source_desc, '') <> 'zero_default'
+        AND COALESCE(source_desc, '') NOT LIKE '{ACE_FATALITIES_TABLE}%'
+    """
+    try:
+        n = int(conn.execute(f"SELECT COUNT(*) FROM resolutions WHERE {where}").fetchone()[0])
+        if n:
+            conn.execute(f"DELETE FROM resolutions WHERE {where}")
+            LOGGER.warning(
+                "compute_resolutions: purged %d FATALITIES resolution(s) not drawn "
+                "from %s (battle-only facts rows); they are re-resolved below.",
+                n, ACE_FATALITIES_SERIES,
+            )
+        return n
+    except Exception as exc:  # noqa: BLE001 - the purge never blocks resolution
+        LOGGER.warning("compute_resolutions: FATALITIES purge failed: %r", exc)
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# Resolution vintages (ACE/FATALITIES)
+# ---------------------------------------------------------------------------
+
+#: ACLED revises a month's counts for weeks after it ends, and every run of
+#: this module re-resolves every horizon and REPLACES the row, so a revision
+#: used to be invisible: the resolution a forecast was first scored against
+#: was gone. The first resolution and the ones taken at 60 and 90 days after
+#: month end are kept here and never overwritten.
+#:
+#: The resolver runs on the 28th (``resolver_update.yml``), so a month is
+#: resolved at ~28, ~58-59 and ~89-92 days after it ends; a milestone is
+#: recorded by the first run at or after ``days - VINTAGE_TOLERANCE_DAYS``,
+#: and the row carries the ACTUAL day count, never the milestone's.
+VINTAGE_MILESTONES: tuple[tuple[str, int], ...] = (("d60", 60), ("d90", 90))
+VINTAGE_TOLERANCE_DAYS = 5
+VINTAGE_METRICS = frozenset({"FATALITIES"})
+
+
+def _ensure_vintage_table(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resolution_vintages (
+          question_id TEXT,
+          horizon_m INTEGER,
+          vintage TEXT,
+          observed_month TEXT,
+          days_after_month_end INTEGER,
+          value DOUBLE,
+          source_desc TEXT,
+          acled_snapshot_date DATE,
+          recorded_at TIMESTAMP,
+          is_test BOOLEAN DEFAULT FALSE,
+          PRIMARY KEY (question_id, horizon_m, vintage)
+        )
+        """
+    )
+
+
+def _days_after_month_end(observed_month: str, today: date) -> Optional[int]:
+    try:
+        y, m = int(observed_month[:4]), int(observed_month[5:7])
+    except (TypeError, ValueError):
+        return None
+    first_next = date(y + (m // 12), m % 12 + 1, 1)
+    return (today - first_next).days + 1
+
+
+def _snapshot_date(source_ts: Optional[str]) -> Optional[str]:
+    if not source_ts:
+        return None
+    text = str(source_ts)[:10]
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return None
+    return text
+
+
+def record_vintages(
+    conn,
+    *,
+    question_id: str,
+    horizon_m: int,
+    observed_month: str,
+    value: float,
+    source_desc: str,
+    source_ts: Optional[str],
+    today: date,
+    is_test: bool,
+) -> list[str]:
+    """Insert the vintages this resolution completes; returns their labels.
+
+    ``first`` is written the first time the horizon resolves; ``d60``/``d90``
+    once the month is old enough. Existing vintages are never touched
+    (``INSERT OR IGNORE``), which is the whole point.
+    """
+    days = _days_after_month_end(observed_month, today)
+    labels = ["first"]
+    if days is not None:
+        labels += [
+            label for label, milestone in VINTAGE_MILESTONES
+            if days >= milestone - VINTAGE_TOLERANCE_DAYS
+        ]
+    written: list[str] = []
+    for label in labels:
+        before = conn.execute(
+            "SELECT COUNT(*) FROM resolution_vintages "
+            "WHERE question_id = ? AND horizon_m = ? AND vintage = ?",
+            [question_id, horizon_m, label],
+        ).fetchone()[0]
+        if before:
+            continue
+        conn.execute(
+            """
+            INSERT INTO resolution_vintages (
+              question_id, horizon_m, vintage, observed_month,
+              days_after_month_end, value, source_desc, acled_snapshot_date,
+              recorded_at, is_test
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [question_id, horizon_m, label, observed_month, days, float(value),
+             source_desc, _snapshot_date(source_ts), _utcnow_naive(), is_test],
+        )
+        written.append(label)
+    return written
 
 
 def _ensure_resolutions_table(conn) -> None:
@@ -636,6 +775,11 @@ def _ensure_resolutions_table(conn) -> None:
     if "is_test" not in existing:
         try:
             conn.execute("ALTER TABLE resolutions ADD COLUMN is_test BOOLEAN DEFAULT FALSE")
+        except Exception:
+            pass
+    if "acled_snapshot_date" not in existing:
+        try:
+            conn.execute("ALTER TABLE resolutions ADD COLUMN acled_snapshot_date DATE")
         except Exception:
             pass
     if "source_desc" not in existing:
@@ -675,6 +819,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
 
     try:
         _ensure_resolutions_table(conn)
+        _ensure_vintage_table(conn)
 
         # Early exit if questions table doesn't exist or is empty
         if not _table_exists(conn, "questions"):
@@ -692,6 +837,13 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         # Purge any stale resolutions beyond the cutoff (left over from
         # earlier pipeline runs before the calendar guard was added).
         _purge_stale_resolutions(conn, cal_cutoff)
+
+        # Purge ACE/FATALITIES resolutions read from a facts table: every one
+        # of them is a battle-only count (see ACE_FATALITIES_SERIES). This run
+        # rewrites each horizon from the all-types series; deleting first
+        # means a horizon it can no longer resolve is left unresolved rather
+        # than keeping the wrong figure.
+        _purge_non_series_fatalities(conn)
 
         # Data-driven guard: don't resolve beyond what sources actually cover.
         _SUPPORTED_METRICS = ("PA", "FATALITIES", "EVENT_OCCURRENCE", "PHASE3PLUS_IN_NEED")
@@ -729,6 +881,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         )
 
         written = 0
+        vintages_written = 0
         resolved_from_source = 0
         resolved_as_zero = 0
         skipped_no_data_coverage = 0
@@ -877,8 +1030,9 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                       source_snapshot_ym,
                       source_desc,
                       created_at,
-                      is_test
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                      is_test,
+                      acled_snapshot_date
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         question_id,
@@ -889,9 +1043,28 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                         source_desc,
                         _utcnow_naive(),
                         is_test_val,
+                        # The ACLED pull this figure came from (its
+                        # updated_at), stated as a date on the row.
+                        _snapshot_date(source_ts) if metric_norm == "FATALITIES" else None,
                     ],
                 )
                 written += 1
+                if metric_norm in VINTAGE_METRICS:
+                    try:
+                        vintages_written += len(record_vintages(
+                            conn,
+                            question_id=question_id,
+                            horizon_m=horizon_m,
+                            observed_month=cal_month,
+                            value=float(value),
+                            source_desc=source_desc,
+                            source_ts=source_ts,
+                            today=today,
+                            is_test=bool(is_test_val),
+                        ))
+                    except Exception as exc:  # noqa: BLE001 - a vintage never blocks a resolution
+                        LOGGER.warning("resolution vintage for %s h%d failed: %r",
+                                       question_id, horizon_m, exc)
                 LOGGER.info(
                     "Resolved %s h%d (%s/%s/%s %s) -> value=%.1f source=%s source_ts=%s",
                     question_id,
@@ -930,7 +1103,8 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             "%d horizon-months skipped (no resolution data), "
             "%d horizon-months skipped (no data coverage yet), "
             "%d horizon-months skipped (country outside source universe), "
-            "%d questions skipped (unresolvable hazard).",
+            "%d questions skipped (unresolvable hazard); "
+            "%d new FATALITIES resolution vintage(s) recorded.",
             len(rows),
             written,
             resolved_from_source,
@@ -939,6 +1113,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             skipped_no_data_coverage,
             skipped_outside_source_universe,
             skipped_unresolvable_hazard,
+            vintages_written,
         )
     finally:
         _close_db(conn)

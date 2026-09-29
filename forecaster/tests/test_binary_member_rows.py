@@ -1,18 +1,15 @@
 # Pythia / Copyright (c) 2025 Kevin Wyjad
 """Binary members are stored, scored and weighted like SPD members.
 
-Until Sept 2026 ``_run_binary_forecast_for_question`` parsed every member's
-answer and then wrote only the pooled rows. ``compute_calibration_pythia``
-therefore reported "No member-model Brier samples" for every
-EVENT_OCCURRENCE group on 2026-09-28: a binary member could never be scored,
-so binary questions could never be calibrated.
+Member storage itself is pinned by ``test_drought_binary_inputs.py``; this
+file pins that the pooled Track-1 mean applies calibration weights, as the
+SPD mean does, and that Track 2 adds no member row.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date
 from unittest.mock import patch
 
 import pytest
@@ -21,7 +18,6 @@ duckdb = pytest.importorskip("duckdb")
 
 import forecaster.cli as cli
 from forecaster.providers import ModelSpec
-from pythia.db import schema as db_schema
 
 _QROW = {
     "question_id": "TST_FL_EVENT_OCCURRENCE_2026-04",
@@ -59,8 +55,9 @@ def _run(answers: list[str], *, track: int = 1, weights: dict | None = None):
         return None
 
     def fake_write(run_id, question_row, month_probs, *, resolution_source, usage,
-                   model_name="ensemble", raw_only=False):
-        writes.append({"model_name": model_name, "raw_only": raw_only, "months": dict(month_probs)})
+                   model_name="ensemble", write_ensemble=True, extra_json=None):
+        writes.append({"model_name": model_name, "raw_only": not write_ensemble,
+                       "months": dict(month_probs)})
 
     specs = _SPECS if track == 1 else [cli.TRACK2_MODEL_SPEC]
     cli._CALIB_WEIGHTS_CACHE.clear()
@@ -111,29 +108,3 @@ def test_the_pooled_mean_uses_calibration_weights() -> None:
     mean = next(w for w in writes if w["model_name"] == "ensemble_mean_v2")
     # Matched rescaled to mean 1: a=1.5, b=0.5; c=1.0. (1.5*.1+.5*.2+1*.6)/3
     assert mean["months"]["2026-04"] == pytest.approx((0.15 + 0.1 + 0.6) / 3.0)
-
-
-def test_raw_only_writes_nothing_to_forecasts_ensemble(tmp_path) -> None:
-    db_path = str(tmp_path / "binary_members.duckdb")
-    con = duckdb.connect(db_path)
-    db_schema.ensure_schema(con)
-    con.close()
-
-    row = dict(_QROW, window_start_date=date(2026, 4, 1))
-    with patch("forecaster.cli.connect") as mock_connect:
-        mock_connect.return_value = duckdb.connect(db_path)
-        cli._write_binary_outputs(
-            "run-x", row, {m: 0.25 for m in _WINDOW},
-            resolution_source="GDACS", usage={}, model_name="model-a", raw_only=True,
-        )
-
-    con = duckdb.connect(db_path)
-    try:
-        raw = con.execute(
-            "SELECT COUNT(*) FROM forecasts_raw WHERE model_name = 'model-a' AND bucket_index = 1"
-        ).fetchone()[0]
-        ens = con.execute("SELECT COUNT(*) FROM forecasts_ensemble").fetchone()[0]
-    finally:
-        con.close()
-    assert raw == len(_WINDOW)
-    assert ens == 0

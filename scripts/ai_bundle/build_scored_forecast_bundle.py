@@ -34,8 +34,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
+from scripts.ai_bundle import provenance as _prov
 from scripts.ai_bundle.common import (
     column_exists,
+    latest_run_clause,
     open_db,
     resolve_db_path,
     rows_as_dicts,
@@ -46,6 +48,8 @@ from scripts.ai_bundle.common import (
     write_csv,
     write_json,
     write_manifest,
+    RC_PROMOTED_TIER,
+    triage_view,
 )
 from scripts.ai_bundle.guides import build_analyst_guide, build_question_record_schema_md
 
@@ -124,6 +128,29 @@ def _realized_bucket(con, metric: str, value: float | None) -> int | None:
         else:
             break
     return idx + 1
+
+
+#: A resolved value within this fraction of a bucket boundary is flagged
+#: ``bucket_edge``: it would change bucket under a revision of a few percent
+#: (ACLED revises monthly counts for weeks), so a forecast scored "wrong"
+#: against it may have been one data revision away from "right".
+BUCKET_EDGE_TOLERANCE = 0.05
+
+
+def _bucket_edge(con, metric: str, value: float | None) -> tuple[bool | None, float | None]:
+    """(is the value within 5% of a positive bucket boundary, that boundary)."""
+    if value is None or _score_family(metric) == "binary":
+        return None, None
+    thresholds = _thresholds_for_metric(con, metric) or []
+    nearest = None
+    for b in thresholds:
+        b = float(b)
+        if b <= 0:
+            continue
+        if abs(float(value) - b) <= BUCKET_EDGE_TOLERANCE * b:
+            if nearest is None or abs(float(value) - b) < abs(float(value) - nearest):
+                nearest = b
+    return (nearest is not None), nearest
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +390,11 @@ def build_question_record(
                 "rationale_bullets": rc_json.get("rationale_bullets"),
                 "trigger_signals": rc_json.get("trigger_signals"),
             }
+            tier, triage_score = triage_view(t)
             record["triage"] = {
-                "tier": t.get("tier"),
-                "triage_score": t.get("triage_score"),
+                "tier": tier,
+                "triage_score": triage_score,
+                "triage_skipped": tier == RC_PROMOTED_TIER,
                 "need_full_spd": t.get("need_full_spd"),
                 "track": t.get("track"),
                 "drivers": safe_json_loads(t.get("drivers_json")),
@@ -475,12 +504,25 @@ def build_question_record(
         }
 
     if table_exists(con, "scores"):
+        # One run per question: the latest. Earlier runs of a rerun question
+        # stay in scores_flat.csv (flagged is_latest_run = false) but never
+        # weigh on the record's scores or on any mean built from them.
         record["scores"] = rows_as_dicts(
             con,
-            "SELECT horizon_m, model_name, score_type, value FROM scores "
-            "WHERE question_id = ? ORDER BY model_name, score_type, horizon_m",
+            "SELECT s.horizon_m, s.model_name, s.score_type, s.value FROM scores s "
+            "WHERE s.question_id = ?" + latest_run_clause(con, "s")
+            + " ORDER BY s.model_name, s.score_type, s.horizon_m",
             [qid],
         )
+        if column_exists(con, "scores", "run_id"):
+            record["score_runs"] = [
+                r["run_id"] for r in rows_as_dicts(
+                    con,
+                    "SELECT DISTINCT run_id FROM scores WHERE question_id = ? "
+                    "AND run_id IS NOT NULL ORDER BY run_id",
+                    [qid],
+                )
+            ]
 
     # --- Sibyl cross-reference ---------------------------------------------
     if table_exists(con, "sibyl_forecasts"):
@@ -536,6 +578,11 @@ def _emit_scores_flat(con, out_dir: Path, qids: list[str]) -> None:
         "r.value AS resolved_value, r.observed_month, r.source_snapshot_ym"
         + (", r.source_desc" if has_source_desc else ", NULL AS source_desc")
         + (", s.run_id" if has_run_id else ", NULL AS run_id")
+        + (
+            ", (s.run_id IS NULL OR s.run_id = (SELECT MAX(_lr.run_id) FROM scores _lr "
+            "WHERE _lr.question_id = s.question_id AND _lr.run_id IS NOT NULL)) AS is_latest_run"
+            if has_run_id else ", TRUE AS is_latest_run"
+        )
         + " FROM scores s JOIN questions q ON q.question_id = s.question_id "
         "LEFT JOIN resolutions r ON r.question_id = s.question_id "
         "AND r.horizon_m = s.horizon_m "
@@ -549,6 +596,7 @@ def _emit_scores_flat(con, out_dir: Path, qids: list[str]) -> None:
             "question_id", "iso3", "hazard_code", "metric", "score_family",
             "horizon_m", "model_name", "score_type", "value", "resolved_value",
             "observed_month", "source_snapshot_ym", "source_desc", "run_id",
+            "is_latest_run",
         ],
         rows,
     )
@@ -567,7 +615,10 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
         "JOIN resolutions r ON r.question_id = fe.question_id "
         "AND r.horizon_m = fe.month_index "
         "WHERE fe.question_id IN (SELECT UNNEST(?::VARCHAR[])) "
-        "ORDER BY fe.question_id, fe.model_name, r.horizon_m, fe.bucket_index",
+        # One run per question: without it a rerun question's bucket rows
+        # from different runs overwrote each other in the collapse below.
+        + latest_run_clause(con, "fe", "forecasts_ensemble")
+        + " ORDER BY fe.question_id, fe.model_name, r.horizon_m, fe.bucket_index",
         [qids],
     )
     # Collapse bucket rows → one row per (question, model, horizon).
@@ -590,15 +641,51 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
         )
         g["_probs"][int(r["bucket_index"] or 0)] = float(r["probability"] or 0.0)
 
+    # The reference forecasters beside Pythia's aggregates, with the exact
+    # vectors score_baselines scored (baseline_scored_forecasts), so "did we
+    # beat climatology / persistence here" is readable row by row.
+    refs = _prov.reference_vectors(con, qids)
+    if refs:
+        res_rows = rows_as_dicts(
+            con,
+            "SELECT r.question_id, r.horizon_m, r.value, q.iso3, q.hazard_code, "
+            "UPPER(q.metric) AS metric FROM resolutions r "
+            "JOIN questions q ON q.question_id = r.question_id "
+            "WHERE r.question_id IN (SELECT UNNEST(?::VARCHAR[]))",
+            [qids],
+        )
+        resolved = {(str(r["question_id"]), int(r["horizon_m"])): r for r in res_rows}
+        for (qid, model, h), vec in refs.items():
+            res = resolved.get((qid, h))
+            if res is None:
+                continue
+            grouped[(qid, model, h)] = {
+                "question_id": qid,
+                "iso3": res["iso3"],
+                "hazard_code": res["hazard_code"],
+                "metric": res["metric"],
+                "model_name": model,
+                "horizon_m": h,
+                "resolved_value": res["value"],
+                "ev_value": None,
+                "_probs": {i + 1: p for i, p in enumerate(vec)},
+            }
+
     out_rows: list[dict[str, Any]] = []
     for g in grouped.values():
         probs = g.pop("_probs")
+        g["probs"] = json.dumps(
+            [round(probs.get(i, 0.0), 6) for i in range(1, max(probs) + 1)]
+        ) if probs else None
         realized = _realized_bucket(con, g["metric"], g["resolved_value"])
         modal = max(probs, key=probs.get) if probs else None
         g["realized_bucket"] = realized
         g["p_realized_bucket"] = probs.get(realized) if realized is not None else None
         g["modal_bucket"] = modal
         g["p_modal_bucket"] = probs.get(modal) if modal is not None else None
+        edge, boundary = _bucket_edge(con, g["metric"], g["resolved_value"])
+        g["bucket_edge"] = edge
+        g["nearest_boundary"] = boundary
         out_rows.append(g)
     out_rows.sort(key=lambda r: (r["question_id"], r["model_name"], r["horizon_m"]))
     write_csv(
@@ -606,7 +693,8 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> None:
         [
             "question_id", "iso3", "hazard_code", "metric", "model_name",
             "horizon_m", "resolved_value", "realized_bucket", "p_realized_bucket",
-            "modal_bucket", "p_modal_bucket", "ev_value",
+            "modal_bucket", "p_modal_bucket", "ev_value", "bucket_edge",
+            "nearest_boundary", "probs",
         ],
         out_rows,
     )
@@ -639,7 +727,30 @@ def _attach_skill(rows: list[dict[str, Any]]) -> None:
             r["skill_vs_climatology"] = None
 
 
-def _emit_rollups(con, out_dir: Path, qids: list[str]) -> list[dict[str, Any]]:
+def _cost_per_question(costs: Mapping[str, Mapping[str, float]]) -> dict[str, float]:
+    """Mean forecast-phase cost per question, per member model.
+
+    An aggregate row (ensemble_mean_v2, track2_flash, ...) carries the mean
+    total cost of the questions it covered; its own name logs no calls.
+    """
+    per_model: dict[str, list[float]] = {}
+    totals: list[float] = []
+    for by_model in costs.values():
+        for model, cost in by_model.items():
+            if model == "__total__":
+                totals.append(float(cost))
+            else:
+                per_model.setdefault(model, []).append(float(cost))
+    out = {m: round(sum(v) / len(v), 6) for m, v in per_model.items() if v}
+    if totals:
+        out["__total__"] = round(sum(totals) / len(totals), 6)
+    return out
+
+
+def _emit_rollups(
+    con, out_dir: Path, qids: list[str],
+    costs: Mapping[str, Mapping[str, float]] | None = None,
+) -> list[dict[str, Any]]:
     rows = rows_as_dicts(
         con,
         "SELECT q.hazard_code, UPPER(q.metric) AS metric, "
@@ -649,16 +760,26 @@ def _emit_rollups(con, out_dir: Path, qids: list[str]) -> list[dict[str, Any]]:
         "MEDIAN(s.value) AS median_value "
         "FROM scores s JOIN questions q ON q.question_id = s.question_id "
         "WHERE s.question_id IN (SELECT UNNEST(?::VARCHAR[])) "
-        "GROUP BY 1, 2, 3, 4, 5 ORDER BY 3, 1, 2, 5, 8",
+        + latest_run_clause(con, "s")
+        + " GROUP BY 1, 2, 3, 4, 5 ORDER BY 3, 1, 2, 5, 8",
         [qids],
     )
     _attach_skill(rows)
+    per_q = _cost_per_question(costs or {})
+    for r in rows:
+        name = str(r.get("model_name") or "")
+        if name.startswith("__ext_"):
+            r["cost_per_question_usd"] = None
+        elif name in per_q:
+            r["cost_per_question_usd"] = per_q[name]
+        else:
+            r["cost_per_question_usd"] = per_q.get("__total__")
     write_csv(
         out_dir / "rollups.csv",
         [
             "hazard_code", "metric", "score_family", "model_name", "score_type",
             "n_samples", "n_questions", "mean_value", "median_value",
-            "climatology_mean", "skill_vs_climatology",
+            "climatology_mean", "skill_vs_climatology", "cost_per_question_usd",
         ],
         rows,
     )
@@ -786,8 +907,43 @@ def _question_summary(record: dict[str, Any]) -> dict[str, Any]:
         "mean_log": mean_scores.get("log"),
         "mean_crps": mean_scores.get("crps"),
         "has_sibyl": "sibyl" in record,
+        "n_runs": len(record.get("score_runs") or []),
+        "is_rerun": len(record.get("score_runs") or []) > 1,
+        "latest_run_id": (record.get("score_runs") or [None])[-1],
+        "lineup_id": (record.get("lineup") or {}).get("lineup_id"),
+        "resolution_series": record.get("resolution_series"),
+        "spd_prompt_missing": record.get("spd_prompt") is None,
+        "enso_observation_date": ((record.get("inject_status") or {}).get("enso") or {}).get("observation_date"),
+        "gdacs_history_months": ((record.get("inject_status") or {}).get("gdacs_history") or {}).get("total_months"),
+        "crisiswatch_edition_age_months": ((record.get("inject_status") or {}).get("crisiswatch") or {}).get("edition_age_months"),
+        "baserate_source": ((record.get("inject_status") or {}).get("base_rate") or {}).get("source"),
+        "cost_usd": (record.get("cost_usd") or {}).get("__total__"),
         "record_path": f"questions/{q.get('question_id')}.json",
     }
+
+
+def _attach_provenance(
+    con, record: dict[str, Any], q: Mapping[str, Any], cost: Mapping[str, float]
+) -> None:
+    """Add what the forecast was made WITH to a scored question's record.
+
+    Every helper degrades to a stated reason, so a failure here costs a
+    field, never the record.
+    """
+    run_id = record.get("forecast_run_id")
+    qid = str(q.get("question_id"))
+    try:
+        record["inject_status"] = _prov.inject_status(con, q, run_id)
+    except Exception as exc:  # noqa: BLE001
+        record["inject_status"] = {"error": f"{type(exc).__name__}: {exc}"}
+    try:
+        record["lineup"] = _prov.lineup(con, run_id, qid)
+    except Exception as exc:  # noqa: BLE001
+        record["lineup"] = {"lineup_id": None, "reason": f"{type(exc).__name__}: {exc}"}
+    record["resolution_series"] = _prov.resolution_series(q.get("hazard_code"), q.get("metric"))
+    if record.get("spd_prompt") is None:
+        record["spd_prompt_missing_reason"] = _prov.spd_prompt_missing_reason(con, qid, run_id)
+    record["cost_usd"] = dict(cost)
 
 
 def _select_case_studies(
@@ -807,6 +963,25 @@ def _select_case_studies(
         selection["best"].extend([s["question_id"] for s in best])
         selection["worst"].extend([s["question_id"] for s in worst if s["question_id"] not in {b["question_id"] for b in best}])
     return selection
+
+
+def _lineups_seen(staging: Path, summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    """{lineup_id: {members, n_questions}} across the bundle's records."""
+    out: dict[str, Any] = {}
+    for summ in summaries:
+        lid = summ.get("lineup_id")
+        if not lid:
+            continue
+        entry = out.get(lid)
+        if entry is None:
+            rec = _load_staged_record(staging, str(summ.get("question_id"))) or {}
+            entry = out[lid] = {
+                "members": (rec.get("lineup") or {}).get("members") or [],
+                "effort_source": (rec.get("lineup") or {}).get("effort_source"),
+                "n_questions": 0,
+            }
+        entry["n_questions"] += 1
+    return out
 
 
 def _write_digest(
@@ -844,24 +1019,29 @@ def _write_digest(
 
     lines += [
         "",
-        "## Model comparison (Brier by score family — never blend the two)",
+        "## Model comparison (Brier and RPS by score family — never blend the two)",
         "",
         "_skill = 1 − mean/climatology-mean within the same (hazard, metric, "
         "family, score_type) group, aggregated here across groups; positive = "
-        "beat the base rate. `__ext_climatology` / `__ext_uniform` are the "
-        "reference forecasters, not Pythia models._",
+        "beat the base rate. `__ext_climatology` / `__ext_uniform` / "
+        "`__ext_persistence` are the reference forecasters, not Pythia models. "
+        "One run per question (the latest); RPS is SPD-only._",
         "",
-        "| family | model | score_type | n | mean | median | skill vs climatology |",
-        "|---|---|---|---|---|---|---|",
+        "| family | model | n | mean Brier | median Brier | Brier skill vs climatology "
+        "| mean RPS | RPS skill vs climatology |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     # The rollup rows are per (hazard, metric); the digest table aggregates
-    # per (family, model). Skill is averaged over the groups that HAVE a
-    # climatology reference, weighted by sample count.
+    # per (family, model) and per score type. Skill is averaged over the
+    # groups that HAVE a climatology reference, weighted by sample count.
+    # RPS (stored as score_type 'crps') sits beside Brier for SPD metrics:
+    # Brier ignores bucket ORDER, so a forecast one bucket off and one five
+    # buckets off score the same, and RPS is the score that tells them apart.
     agg: dict[tuple, dict[str, float]] = {}
     for r in rollups:
-        if r.get("score_type") not in ("brier",):
+        if r.get("score_type") not in ("brier", "crps"):
             continue
-        key = (r["score_family"], r["model_name"])
+        key = (r["score_family"], r["model_name"], r["score_type"])
         a = agg.setdefault(key, {"n": 0, "vsum": 0.0, "msum": 0.0,
                                  "skill_n": 0, "skill_sum": 0.0})
         n = int(r["n_samples"] or 0)
@@ -871,15 +1051,20 @@ def _write_digest(
         if r.get("skill_vs_climatology") is not None:
             a["skill_n"] += n
             a["skill_sum"] += float(r["skill_vs_climatology"]) * n
-    for (family, model), a in sorted(agg.items()):
-        if not a["n"]:
+
+    def _skill(a: dict[str, float] | None) -> str:
+        return f"{a['skill_sum'] / a['skill_n']:+.3f}" if a and a["skill_n"] else "—"
+
+    for family, model in sorted({(k[0], k[1]) for k in agg}):
+        b = agg.get((family, model, "brier"))
+        c = agg.get((family, model, "crps"))
+        if not b or not b["n"]:
             continue
-        skill = (
-            f"{a['skill_sum'] / a['skill_n']:+.3f}" if a["skill_n"] else "—"
-        )
+        rps = f"{c['vsum'] / c['n']:.4f}" if c and c["n"] else "—"
         lines.append(
-            f"| {family} | {model} | brier | {a['n']} "
-            f"| {a['vsum'] / a['n']:.4f} | {a['msum'] / a['n']:.4f} | {skill} |"
+            f"| {family} | {model} | {b['n']} "
+            f"| {b['vsum'] / b['n']:.4f} | {b['msum'] / b['n']:.4f} | {_skill(b)} "
+            f"| {rps} | {_skill(c) if c else '—'} |"
         )
 
     def _qline(s: dict[str, Any]) -> str:
@@ -1084,6 +1269,7 @@ def build_bundle(
         # studies are re-read from staging after selection.
         summaries: list[dict[str, Any]] = []
         include_all_trials = include_sibyl_trials == "all"
+        costs = _prov.question_costs(con, qids)
         for q in questions:
             qid = str(q["question_id"])
             try:
@@ -1096,6 +1282,7 @@ def build_bundle(
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("Failed to build record for %s: %s", qid, exc)
                 continue
+            _attach_provenance(con, record, q, costs.get(qid) or {})
             write_json(staging / "questions" / f"{qid}.json", record)
             summaries.append(_question_summary(record))
             del record
@@ -1107,15 +1294,26 @@ def build_bundle(
                 "track", "target_month", "tier", "triage_score", "rc_level",
                 "rc_score", "n_members", "avg_trace_quality",
                 "n_horizons_resolved", "ranking_model", "mean_brier", "mean_log",
-                "mean_crps", "has_sibyl", "record_path",
+                "mean_crps", "has_sibyl", "n_runs", "is_rerun", "latest_run_id",
+                "lineup_id", "resolution_series", "spd_prompt_missing",
+                "enso_observation_date", "gdacs_history_months",
+                "crisiswatch_edition_age_months", "baserate_source",
+                "cost_usd", "record_path",
             ],
             summaries,
         )
 
         _emit_scores_flat(con, staging, qids)
         _emit_forecast_vs_outcome(con, staging, qids)
-        rollups = _emit_rollups(con, staging, qids)
+        rollups = _emit_rollups(con, staging, qids, costs)
         weight_movement = _emit_calibration(con, staging)
+        calibration_state = _prov.calibration_status(con)
+        write_csv(
+            staging / "calibration_status.csv",
+            ["hazard_code", "metric", "n_questions_with_member_scores", "floor",
+             "has_weights", "status"],
+            calibration_state,
+        )
 
         case_selection = _select_case_studies(summaries, n_case_studies)
         case_dir = staging / "case_studies"
@@ -1166,6 +1364,9 @@ def build_bundle(
                 "months_back": months_back,
                 "include_test": include_test,
                 "case_studies": case_selection,
+                "resolved_questions": _prov.resolution_counts(con, qids),
+                "calibration_status": calibration_state,
+                "lineups": _lineups_seen(staging, summaries),
             },
         )
 

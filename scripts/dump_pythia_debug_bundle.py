@@ -3465,11 +3465,9 @@ def _member_gap_summary(question_run_metrics: list[dict[str, Any]]) -> dict[str,
     n_expected = 0
     n_questions = 0
     for row in question_run_metrics or []:
-        # Binary questions store one pooled forecast per month rather than
-        # one per member, so a per-member expectation is not a thing they
-        # can satisfy. Rows written before Sept 2026 still carry one; skip
-        # them here rather than reporting 265 phantom misses.
-        if not model_completeness.writes_member_rows(str(row.get("metric") or "")):
+        # Binary questions are counted by model_completeness under their own
+        # family; this per-member tally is the SPD family's alone.
+        if model_completeness.is_binary(str(row.get("metric") or "")):
             continue
         expected = row.get("n_spd_models_expected")
         try:
@@ -4277,17 +4275,16 @@ def emit_executive_summary(
                 f"{roll.get('n_question_months_short', 0)} question-months were aggregated "
                 "from fewer members than expected. See model_completeness.csv."
             )
-        # Binary questions store one pooled forecast per month rather than
-        # one per member, so they are counted apart — folded in, they made
-        # the summary report 1,602 missing forecasts against a real loss of
-        # 12 (2026-09-15).
+        # Binary questions are counted apart from SPD ones — folded in, they
+        # made the summary report 1,602 missing forecasts against a real loss
+        # of 12 (2026-09-15), when binary members were not yet stored.
         binary = (roll.get("binary") or {}) if roll else {}
         if binary.get("n_cells_expected"):
             lines.append(
                 f"- Binary forecasts landed: "
                 f"{binary['n_cells_expected'] - binary.get('n_cells_missing', 0)} of "
-                f"{binary['n_cells_expected']} (question, month) pooled cells "
-                "(judged on the pooled row; member rows exist only for runs from Oct 2026)."
+                f"{binary['n_cells_expected']} (question, model, month) cells "
+                "(Track 1: the pooled mean plus each member; Track 2: the single model)."
             )
         lines.append("")
 

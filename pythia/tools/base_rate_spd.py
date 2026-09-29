@@ -280,6 +280,14 @@ def _fill_quiet_months(
     return values, len(values) - n_quiet, n_quiet
 
 
+#: The table the ACE/FATALITIES anchor is built from. ``compute_resolutions``
+#: resolves ACE/FATALITIES from ``ACE_FATALITIES_TABLE`` and the resolver
+#: debug bundle's ``ace_fatalities_resolve_from_the_base_rate_series`` check
+#: holds the two equal — a question scored against one series and anchored
+#: on another is the Sept 2026 battle-only fault.
+CONFLICT_FATALITIES_TABLE = "acled_monthly_fatalities"
+
+
 def _conflict_fatalities(con, iso3: str, before_ym: str) -> Tuple[List[float], str, Dict[str, Any]]:
     """ACE/FATALITIES: the ACLED monthly-fatalities series the prompt anchors on."""
     if not _table_exists(con, "acled_monthly_fatalities"):
@@ -408,6 +416,74 @@ def _phase3_history(con, iso3: str, before_ym: str) -> Tuple[List[float], str, D
         "n_months_used": len(values),
     }
     return probs, f"facts_resolved:phase3plus_in_need:{len(values)}m", detail
+
+
+def last_observed_value(
+    con, iso3: str, hazard_code: str, metric: str, as_of: Any
+) -> Optional[Tuple[float, str, str]]:
+    """The last value OBSERVED strictly before the question window.
+
+    Returns ``(value, ym, source)`` or None. It is the input of the
+    persistence reference forecaster (``score_baselines``), and is drawn from
+    the same series as the climatology anchor, for the same reason: a
+    reference scored against one quantity and built from another measures
+    the difference between them.
+
+    * ACE/FATALITIES: ``acled_monthly_fatalities`` (all event types). The
+      month before the window counts as an observed ZERO when ACLED was live
+      that month and the country is in its universe but has no row — the
+      quiet-month rule the climatology anchor applies.
+    * DR/PHASE3PLUS_IN_NEED: the latest ``phase3plus_in_need`` row before the
+      window (a stock, reported every few months).
+
+    Other pairs have no persistence reference.
+    """
+    hz = (hazard_code or "").upper()
+    m = (metric or "").upper()
+    before = _as_of_ym(as_of)
+    iso = (iso3 or "").upper()
+    try:
+        if hz == "ACE" and m == "FATALITIES":
+            if not _table_exists(con, CONFLICT_FATALITIES_TABLE):
+                return None
+            prev = _add_months(before, -1)
+            row = con.execute(
+                f"""
+                SELECT substr(CAST(month AS VARCHAR), 1, 7) AS ym, SUM(fatalities)
+                FROM {CONFLICT_FATALITIES_TABLE}
+                WHERE iso3 = ? AND substr(CAST(month AS VARCHAR), 1, 7) < ?
+                GROUP BY ym ORDER BY ym DESC LIMIT 1
+                """,
+                [iso, before],
+            ).fetchone()
+            if row and str(row[0]) == prev:
+                return float(row[1] or 0), prev, CONFLICT_FATALITIES_TABLE
+            if row and prev in _live_months(con, CONFLICT_FATALITIES_TABLE, "month", [prev]):
+                return 0.0, prev, f"{CONFLICT_FATALITIES_TABLE}:quiet_month"
+            if row:
+                return float(row[1] or 0), str(row[0]), CONFLICT_FATALITIES_TABLE
+            return None
+        if hz == "DR" and m == "PHASE3PLUS_IN_NEED":
+            if not _table_exists(con, "facts_resolved"):
+                return None
+            row = con.execute(
+                """
+                SELECT substr(CAST(ym AS VARCHAR), 1, 7), value
+                FROM facts_resolved
+                WHERE iso3 = ? AND hazard_code = 'DR'
+                  AND lower(metric) = 'phase3plus_in_need'
+                  AND value IS NOT NULL
+                  AND substr(CAST(ym AS VARCHAR), 1, 7) < ?
+                ORDER BY ym DESC LIMIT 1
+                """,
+                [iso, before],
+            ).fetchone()
+            if row:
+                return float(row[1]), str(row[0]), "facts_resolved:phase3plus_in_need"
+            return None
+    except Exception:  # noqa: BLE001 - no reference is better than a wrong one
+        return None
+    return None
 
 
 def _event_occurrence_rates(

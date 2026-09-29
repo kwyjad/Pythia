@@ -1295,6 +1295,7 @@ from .binary_prompts import (  # noqa: E402
     build_binary_event_prompt,
     build_binary_base_rate,
     parse_binary_response,
+    parse_rc_reconciliation,
 )
 from .scenario_writer import run_scenarios_for_run  # noqa: E402
 from horizon_scanner.seasonal_context import CLIMATE_HAZARDS, load_seasonal_forecasts  # noqa: E402
@@ -1307,6 +1308,7 @@ from .providers import (  # noqa: E402
     call_chat_ms,
     disabled_providers_for_run,
     is_provider_disabled_for_run,
+    is_shadow,
     parse_ensemble_specs,
     reset_provider_failures_for_run,
 )
@@ -1835,6 +1837,9 @@ def _write_spd_members_v2_to_db(
                 "member_source": "spd_v2_member_call",
                 "spds": {},
             }
+            if is_shadow(ms):
+                # Scored like any member, never part of the ensemble.
+                spd_json_payload["shadow"] = True
             ordered_months = _month_indices(model_spd)
             if len(ordered_months) < 6:
                 next_idx = len(ordered_months) + 1
@@ -3518,12 +3523,20 @@ async def _call_spd_members_v2(
 
     failed_providers = sorted({provider for provider, ok in model_success if not ok and provider})
     n_models_ok = sum(1 for _, ok in model_success if ok)
+    # A shadow member is called and scored but never votes, so its failure
+    # is not a partial ensemble and its success does not fill one.
+    shadow_flags = [is_shadow(ms) for ms in specs_used]
+    n_voting_ok = sum(
+        1 for (_, ok), sh in zip(model_success, shadow_flags) if ok and not sh
+    )
+    n_voting_active = sum(1 for ms in specs_active if not is_shadow(ms))
     ensemble_meta = {
         "n_models_active": len(specs_active),
         "n_models_called": len(specs_used),
         "n_models_ok": n_models_ok,
+        "n_shadow_members": sum(1 for ms in specs_active if is_shadow(ms)),
         "failed_providers": failed_providers,
-        "partial_ensemble": n_models_ok < len(specs_active),
+        "partial_ensemble": n_voting_ok < n_voting_active,
         "skipped_providers": skipped_providers,
     }
 
@@ -3619,6 +3632,30 @@ async def _call_spd_model_compat(
             kwargs[key] = value
     return await fn(prompt, **kwargs)
 
+
+
+def _voting_members(
+    per_model_spds: list[dict[str, list[float]]],
+    specs: list[ModelSpec],
+) -> tuple[list[dict[str, list[float]]], list[ModelSpec]]:
+    """Drop shadow members before aggregation, keeping the lists aligned.
+
+    A shadow member's forecast is written to ``forecasts_raw`` and scored, but
+    it must not move ``ensemble_mean_v2`` or ``ensemble_bayesmc_v2``. A zero
+    weight cannot do this: the BayesMC aggregator reads ``weight or 1.0``, so
+    0.0 becomes 1.0. The member is removed from both lists instead.
+    """
+    if not any(is_shadow(ms) for ms in specs):
+        return per_model_spds, specs
+    if len(per_model_spds) != len(specs):
+        LOG.warning(
+            "shadow filter: %d member SPDs against %d specs; cannot tell which "
+            "SPD belongs to the shadow member, so none is dropped",
+            len(per_model_spds), len(specs),
+        )
+        return per_model_spds, specs
+    kept = [(spd, ms) for spd, ms in zip(per_model_spds, specs) if not is_shadow(ms)]
+    return [k[0] for k in kept], [k[1] for k in kept]
 
 
 def _build_bayesmc_spd_obj(
@@ -3768,13 +3805,14 @@ async def _call_spd_bayesmc_v2(
         except Exception:
             continue
 
+    voting_spds, voting_specs = _voting_members(per_model_spds, specs_used)
     member_weights_by_key, _member_keys, _member_weight_list = _resolve_member_weights(
-        specs_used, hazard_code, metric
+        voting_specs, hazard_code, metric
     )
     spd_obj, _diag = _build_bayesmc_spd_obj(
-        per_model_spds,
+        voting_spds,
         anchor_month=anchor_month,
-        specs_used=specs_used,
+        specs_used=voting_specs,
         n_buckets=_n_buckets_for_metric(metric),
         member_weights=member_weights_by_key,
     )
@@ -4367,14 +4405,15 @@ def _write_binary_outputs(
     resolution_source: str,
     usage: dict[str, Any],
     model_name: str = "ensemble",
-    raw_only: bool = False,
+    write_ensemble: bool = True,
+    extra_json: dict[str, Any] | None = None,
 ) -> None:
     """Write binary forecasts using SPD storage convention.
 
-    ``raw_only`` writes to ``forecasts_raw`` alone. It is for MEMBER rows:
-    ``compute_scores`` scores every ``forecasts_raw`` model at bucket 1, which
-    is what lets a binary member earn a calibration weight, while
-    ``forecasts_ensemble`` holds only the pooled answer the dashboard shows.
+    ``write_ensemble=False`` writes ``forecasts_raw`` only: that is how a
+    Track-1 MEMBER's own forecast is stored (Oct 2026), beside the pooled
+    rows, so members can be scored on binary questions. ``extra_json`` is
+    merged into each row's ``spd_json`` (the member's ``rc_reconciliation``).
 
     Convention: bucket_1 = P(yes), bucket_2 = P(no) = 1 - P(yes),
     buckets 3-5 = 0.  This avoids schema changes while keeping binary
@@ -4403,12 +4442,14 @@ def _write_binary_outputs(
             "DELETE FROM forecasts_raw WHERE run_id = ? AND question_id = ? AND model_name = ?;",
             [run_id, qid, model_name],
         )
-        if not raw_only:
+        if write_ensemble:
             con.execute(
                 "DELETE FROM forecasts_ensemble WHERE run_id = ? AND question_id = ? AND model_name = ?;",
                 [run_id, qid, model_name],
             )
         anchor_month = _anchor_month_for_question(rec)
+        row_json = {"binary": True, "resolution_source": resolution_source}
+        row_json.update(extra_json or {})
         for month_label in sorted(month_probs.keys()):
             # Month index derived from the label itself, never from position:
             # an off-window or missing label must not shift the others.
@@ -4441,7 +4482,7 @@ def _write_binary_outputs(
                         usage.get("prompt_tokens"),
                         usage.get("completion_tokens"),
                         usage.get("total_tokens"),
-                        _json_dumps_for_db({"binary": True, "p_yes": p_yes, "resolution_source": resolution_source}),
+                        _json_dumps_for_db({**row_json, "p_yes": p_yes}),
                         "",
                         month_idx,
                         cb,
@@ -4449,7 +4490,7 @@ def _write_binary_outputs(
                         _IS_TEST,
                     ],
                 )
-                if raw_only:
+                if not write_ensemble:
                     continue
                 con.execute(
                     """
@@ -4466,6 +4507,30 @@ def _write_binary_outputs(
                 )
     finally:
         con.close()
+
+
+#: Model names a binary MEMBER row may never carry: they are the pooled
+#: aggregates, and a member written under one would overwrite it.
+_BINARY_AGGREGATE_NAMES = frozenset(
+    {"ensemble", "ensemble_mean_v2", "ensemble_bayesmc_v2", "track2_flash", "sibyl"}
+)
+
+
+def _binary_rc_level(hs_entry: Any) -> int | None:
+    """The HS regime-change level for a binary question, as the SPD path reads it."""
+    if not isinstance(hs_entry, dict):
+        return None
+    for value in (
+        hs_entry.get("regime_change_level"),
+        (hs_entry.get("regime_change") or {}).get("level")
+        if isinstance(hs_entry.get("regime_change"), dict) else None,
+    ):
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 async def _run_binary_forecast_for_question(
@@ -4492,6 +4557,7 @@ async def _run_binary_forecast_for_question(
         hs_run_id = rec.get("hs_run_id") or run_id
         hs_entry = load_hs_triage_entry(hs_run_id, iso3, hz)
         structured_data = _load_structured_data(iso3, hz, hs_run_id=hs_run_id)
+        rc_level = _binary_rc_level(hs_entry)
 
         # Build binary base rate from facts_resolved
         base_rate = build_binary_base_rate(iso3, hz)
@@ -4549,6 +4615,7 @@ async def _run_binary_forecast_for_question(
             hs_triage_entry=hs_entry,
             today=date.today().isoformat() if date else str(datetime.now().date()),
             gdacs_event_history=structured_data.get("gdacs_event_history"),
+            rc_level=rc_level,
         )
 
         # Select model specs based on track
@@ -4619,9 +4686,13 @@ async def _run_binary_forecast_for_question(
         expected_months = _expected_months(anchor_month, NUM_HORIZONS) if anchor_month else []
         expected_set = set(expected_months)
         all_model_probs: list[dict[str, float]] = []
-        # (spec, usage, parsed) per member that returned a usable answer, so
-        # each member can be stored and scored under its own name.
-        member_results: list[tuple[ModelSpec, dict[str, Any], dict[str, float]]] = []
+        # (member name, its months, its usage, its rc_reconciliation) — kept
+        # so a Track-1 member's own forecast can be stored and scored.
+        member_forecasts: list[tuple[str, dict[str, float], dict[str, Any], str | None]] = []
+        shadow_names: set[str] = set()
+        # The spec behind each entry of all_model_probs (same order), so the
+        # pooled mean can apply calibration weights.
+        voting_specs: list[Any] = []
         for call in raw_calls:
             raw_text = str(call.get("text") or "")
             if not raw_text:
@@ -4637,10 +4708,24 @@ async def _run_binary_forecast_for_question(
                     )
                 parsed = {m: p for m, p in parsed.items() if m in expected_set}
             if parsed:
-                all_model_probs.append(parsed)
-                ms_call = call.get("model_spec")
-                if isinstance(ms_call, ModelSpec):
-                    member_results.append((ms_call, call.get("usage") or {}, parsed))
+                ms = call.get("model_spec")
+                # A shadow member is stored and scored below but never votes.
+                if not is_shadow(ms):
+                    all_model_probs.append(parsed)
+                    voting_specs.append(ms)
+                member_name = getattr(ms, "name", None) or ""
+                if is_shadow(ms) and member_name:
+                    shadow_names.add(member_name)
+                rc_note = parse_rc_reconciliation(raw_text)
+                if rc_level is not None and rc_level >= 1 and not rc_note:
+                    LOG.warning(
+                        "Binary forecast for %s: %s gave no rc_reconciliation at RC level %s",
+                        qid, member_name or "a member", rc_level,
+                    )
+                if member_name:
+                    member_forecasts.append(
+                        (member_name, parsed, call.get("usage") or {}, rc_note)
+                    )
 
         if not all_model_probs:
             _record_no_forecast(
@@ -4659,9 +4744,13 @@ async def _run_binary_forecast_for_question(
         # SPD mean does; with no stored weights (or on Track 2's single
         # model) this is the plain average it always was.
         member_weights: Optional[list[float]] = None
-        if track == 1 and len(member_results) == len(all_model_probs) and len(member_results) > 1:
+        if (
+            track == 1
+            and len(all_model_probs) > 1
+            and all(isinstance(ms, ModelSpec) for ms in voting_specs)
+        ):
             _wbk, _keys, member_weights = _resolve_member_weights(
-                [ms for ms, _u, _p in member_results], hz, metric
+                list(voting_specs), hz, metric
             )
 
         aggregated: dict[str, float] = {}
@@ -4711,30 +4800,34 @@ async def _run_binary_forecast_for_question(
             model_name=model_name,
         )
 
-        # Each member's own forecast, to forecasts_raw only. Until Sept 2026
-        # only the pooled rows were stored, so a binary member could never be
-        # scored and EVENT_OCCURRENCE could never be calibrated. Track 2 has
-        # one model whose row IS the pooled row, so there is nothing to add.
-        # A member write failing must never cost the pooled forecast above.
+        # Track-1 members: each member's own forecast lands in forecasts_raw
+        # (never forecasts_ensemble) under its model name, so compute_scores
+        # scores members on binary questions exactly as it does on SPD ones
+        # (binary Brier, its own score family). Track 2's single model IS the
+        # pooled track2_flash row, so it has no separate member row.
         if track == 1:
-            for ms_member, usage_member, probs_member in member_results:
-                if expected_set and set(probs_member) != expected_set:
+            for member_name, member_probs, member_usage, rc_note in member_forecasts:
+                if member_name in _BINARY_AGGREGATE_NAMES:
                     continue
-                try:
-                    _write_binary_outputs(
-                        run_id,
-                        question_row,
-                        probs_member,
-                        resolution_source=resolution_source,
-                        usage=usage_member,
-                        model_name=ms_member.name,
-                        raw_only=True,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    LOG.warning(
-                        "Binary member write failed for %s / %s: %r",
-                        qid, ms_member.name, exc,
-                    )
+                if expected_set and set(member_probs) != expected_set:
+                    continue
+                extra = {"member": True}
+                if member_name in shadow_names:
+                    extra["shadow"] = True
+                if rc_level is not None:
+                    extra["rc_level"] = rc_level
+                if rc_note:
+                    extra["rc_reconciliation"] = rc_note
+                _write_binary_outputs(
+                    run_id,
+                    question_row,
+                    member_probs,
+                    resolution_source=resolution_source,
+                    usage=member_usage,
+                    model_name=member_name,
+                    write_ensemble=False,
+                    extra_json=extra,
+                )
 
         # Also write BayesMC aggregation for Track 1 (needs >1 model)
         if track == 1 and len(all_model_probs) > 1:
@@ -5182,11 +5275,12 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     member_spds_snapshot = per_model_spds
                     member_specs_snapshot = specs_active
                     member_raw_calls_snapshot = raw_calls
+                voting_spds, voting_specs = _voting_members(per_model_spds, specs_active)
                 member_weights_by_key, _member_keys, member_weight_list = (
-                    _resolve_member_weights(specs_active, hz, metric)
+                    _resolve_member_weights(voting_specs, hz, metric)
                 )
                 spd_mean = aggregate_spd_v2_mean(
-                    per_model_spds,
+                    voting_spds,
                     n_buckets=_n_buckets_for_metric(metric),
                     member_weights=member_weight_list,
                 )
@@ -5194,9 +5288,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 _attach_ensemble_meta(spd_v2, ensemble_meta)
 
                 spd_bm, diag_bm = _build_bayesmc_spd_obj(
-                    per_model_spds,
+                    voting_spds,
                     anchor_month=anchor_month,
-                    specs_used=specs_active,
+                    specs_used=voting_specs,
                     n_buckets=_n_buckets_for_metric(metric),
                     member_weights=member_weights_by_key,
                 )
@@ -5417,8 +5511,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
             except Exception:  # noqa: BLE001
                 LOG.debug("Trace validation skipped for %s", qid, exc_info=True)
 
+            voting_spds, voting_specs = _voting_members(per_model_spds, specs_used_for_bayesmc)
             member_weights_by_key, _member_keys, member_weight_list = (
-                _resolve_member_weights(specs_used_for_bayesmc, hz, metric)
+                _resolve_member_weights(voting_specs, hz, metric)
             )
             if member_weights_by_key:
                 LOG.info(
@@ -5429,7 +5524,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     {k: round(v, 3) for k, v in member_weights_by_key.items()},
                 )
             spd_mean = aggregate_spd_v2_mean(
-                per_model_spds,
+                voting_spds,
                 n_buckets=_n_buckets_for_metric(metric),
                 member_weights=member_weight_list,
             )
@@ -5438,9 +5533,9 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 _attach_ensemble_meta(spd_mean_obj, ensemble_meta)
 
             spd_bm_obj, diag_bm = _build_bayesmc_spd_obj(
-                per_model_spds,
+                voting_spds,
                 anchor_month=anchor_month,
-                specs_used=specs_used_for_bayesmc,
+                specs_used=voting_specs,
                 n_buckets=_n_buckets_for_metric(metric),
                 member_weights=member_weights_by_key,
             )
@@ -5861,7 +5956,8 @@ def _resolve_member_weights(
     Stored calibration weights are keyed by member display name — the plain
     spec name ('Claude') or the disambiguated 'Name (model_id)' form used
     when two specs share a name; both are tried. Members without a stored
-    weight get 1.0 (neutral). Weights are rescaled to mean 1.0 across
+    weight take a family predecessor's weight when one is stored, otherwise
+    the mean of the matched weights (neutral). Weights are rescaled to mean 1.0 across
     members so the total BayesMC evidence mass stays comparable to the
     unweighted case (softmax weights sum to 1 and would otherwise shrink
     the evidence relative to the prior).
@@ -5883,48 +5979,51 @@ def _resolve_member_weights(
     if not stored:
         return None, keys, None
 
-    # None marks a member with no stored weight. It is filled AFTER the
-    # matched weights are rescaled, never before: stored weights are a
-    # softmax that sums to 1 across the members that were scored, so a
-    # literal 1.0 beside them is several times any calibrated weight. After
-    # a model swap that made the one member nobody had scored the heaviest
-    # in the ensemble — the opposite of calibration.
+    try:
+        from pythia.llm_profiles import family_predecessors as _family_predecessors
+    except Exception:  # noqa: BLE001
+        _family_predecessors = lambda _mid: []  # noqa: E731
+
     raw: list[Optional[float]] = []
+    matched = 0
     for ms, key in zip(specs_used, keys):
         w = stored.get(key)
         if w is None:
             w = stored.get(getattr(ms, "name", ""))
         if w is None:
+            # A new version of a model family takes its predecessor's stored
+            # weight until calibration has run with it in the lineup.
+            for pred in _family_predecessors(getattr(ms, "model_id", "")):
+                if stored.get(pred) is not None:
+                    w = stored.get(pred)
+                    LOG.info(
+                        "Calibration weight for %s carried over from %s", key, pred
+                    )
+                    break
+        if w is None:
             raw.append(None)
-            continue
-        try:
-            raw.append(max(float(w), 0.0))
-        except Exception:
-            raw.append(None)
+        else:
+            try:
+                raw.append(max(float(w), 0.0))
+                matched += 1
+            except Exception:
+                raw.append(None)
 
-    matched_vals = [w for w in raw if w is not None]
-    if not matched_vals:
+    if matched == 0:
         return None, keys, None
 
-    mean_w = sum(matched_vals) / len(matched_vals)
+    # A member with no stored weight takes the mean of the matched members'
+    # weights, i.e. neutral. It used to take 1.0 against stored shares that
+    # sum to 1 across the lineup (about 0.2 each), so after rescaling an
+    # unknown member outweighed each known one about fivefold.
+    known = [w for w in raw if w is not None]
+    neutral = sum(known) / len(known)
+    raw = [neutral if w is None else w for w in raw]
+
+    mean_w = sum(raw) / len(raw)
     if mean_w <= 0.0:
         return None, keys, None
-    # Matched members are rescaled to mean 1.0 among themselves; an
-    # unmatched member takes 1.0, which is now exactly the calibrated
-    # average — neutral, neither rewarded nor penalised for having no record.
-    scaled = [1.0 if w is None else w / mean_w for w in raw]
-
-    unmatched = [k for k, w in zip(keys, raw) if w is None]
-    if unmatched:
-        LOG.info(
-            "Calibration weights %s/%s: %d of %d member(s) matched; neutral "
-            "weight 1.0 (the calibrated average) for %s",
-            hazard_code,
-            metric,
-            len(matched_vals),
-            len(raw),
-            ", ".join(unmatched),
-        )
+    scaled = [w / mean_w for w in raw]
 
     weights_by_key = {k: w for k, w in zip(keys, scaled)}
     return weights_by_key, keys, scaled
@@ -5949,6 +6048,10 @@ def _load_calibration_advice_db(
     hz = (hazard_code or "").upper().strip()
     mt = (metric or "").upper().strip()
     if not hz or not mt:
+        return None
+    from forecaster.prompts import _advice_blocked
+
+    if _advice_blocked(hz, mt):
         return None
 
     db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
@@ -6349,7 +6452,7 @@ def main() -> None:
                         FROM llm_calls
                         WHERE run_id = ?
                           AND question_id = ?
-                          AND call_type = 'spd_v2'
+                          AND call_type IN ('spd_v2', 'binary_v2')
                           AND (error_text IS NULL OR error_text = '')
                           AND model_id IS NOT NULL
                           AND model_id <> ''

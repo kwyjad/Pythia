@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -45,6 +46,44 @@ HALF_LIFE_MONTHS = 12.0
 AGGREGATE_MODEL_NAMES = frozenset(
     {"ensemble_mean_v2", "ensemble_bayesmc_v2", "track2_flash", "ensemble", "sibyl"}
 )
+
+# A new version of a model family inherits its predecessor's time-decayed
+# Brier as a prior worth this many questions. With n questions of its own
+# the new version's Brier is (n*own + K*prior) / (n + K), so the prior fades
+# as its own record grows: after 10 questions it carries half the weight.
+FAMILY_PRIOR_QUESTIONS = float(os.getenv("CALIBRATION_FAMILY_PRIOR_QUESTIONS", "10"))
+
+
+def _current_members() -> Optional[List[str]]:
+    """Voting ensemble model ids from config, or None if unreadable."""
+    try:
+        from pythia.llm_profiles import voting_ensemble_model_ids
+
+        ids = voting_ensemble_model_ids()
+        return ids or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _retired_ids(current: List[str]) -> set:
+    """Ids named in a model family that are no longer a voting member."""
+    try:
+        from pythia.llm_profiles import get_model_families
+
+        named = {mid for ids in get_model_families().values() for mid in ids}
+    except Exception:  # noqa: BLE001
+        return set()
+    return named - set(current)
+
+
+def _predecessors(model_id: str) -> List[str]:
+    try:
+        from pythia.llm_profiles import family_predecessors
+
+        return family_predecessors(model_id)
+    except Exception:  # noqa: BLE001
+        return []
+
 
 # Adaptive softmax temperature (replaces fixed TEMP_SOFTMAX = 0.1)
 TEMP_SOFTMAX_BASE = 0.1       # asymptotic temperature at high N
@@ -155,7 +194,11 @@ def _group_by_hazard_metric(samples: List[Sample]) -> Dict[Tuple[str, str], List
     return groups
 
 
-def _compute_weights_for_group(as_of_month: str, samples: List[Sample]) -> Tuple[List[Dict], str]:
+def _compute_weights_for_group(
+    as_of_month: str,
+    samples: List[Sample],
+    current_members: Optional[List[str]] = None,
+) -> Tuple[List[Dict], str]:
     # Weights are computed over individual ensemble members only — aggregate
     # rows (ensemble_mean_v2/bayesmc/track2_flash/NULL) are excluded so they
     # cannot dilute member weights or win "best model" advice.
@@ -199,6 +242,44 @@ def _compute_weights_for_group(as_of_month: str, samples: List[Sample]) -> Tuple
     if not brier_avgs:
         return [], "No Brier scores after aggregation."
 
+    inherited_from: Dict[Optional[str], str] = {}
+    if current_members:
+        # The softmax is over the members that will actually vote. A retired
+        # version keeps no share of it (a share it holds is weight no current
+        # member can use), but its record is carried to its successor as a
+        # prior that fades as the successor builds its own.
+        brier_wtot = {m: wt for m, (_, wt) in agg.get("brier", {}).items()}
+        retired = _retired_ids(current_members)
+        # Scored models that are neither current nor a known retired version
+        # (an ad-hoc override run, a name from before the model registry)
+        # keep their place: only a version the registry says was replaced
+        # is removed.
+        carried: Dict[Optional[str], float] = {
+            m: b for m, b in brier_avgs.items()
+            if m not in retired and m not in current_members
+        }
+        for m in current_members:
+            own = brier_avgs.get(m)
+            own_w = brier_wtot.get(m, 0.0)
+            prior = None
+            for pred in _predecessors(m):
+                if pred in brier_avgs:
+                    prior = pred
+                    break
+            if prior is not None and FAMILY_PRIOR_QUESTIONS > 0:
+                k = FAMILY_PRIOR_QUESTIONS
+                own_part = (own or 0.0) * own_w if own is not None else 0.0
+                carried[m] = (own_part + k * brier_avgs[prior]) / ((own_w if own is not None else 0.0) + k)
+                inherited_from[m] = prior
+            elif own is not None:
+                carried[m] = own
+        if not carried:
+            return [], (
+                "No current ensemble member (or predecessor in its model family) "
+                "has Brier samples in this group."
+            )
+        brier_avgs = carried
+
     model_names = list(brier_avgs.keys())
 
     # Adaptive temperature — milder differentiation at low N
@@ -230,6 +311,7 @@ def _compute_weights_for_group(as_of_month: str, samples: List[Sample]) -> Tuple
                     "avg_crps": avg_scores.get("crps", {}).get(m),
                     "n_samples": counts_samples.get(m, 0),
                     "n_questions": n_questions,
+                    "inherited_from": inherited_from.get(m),
                 }
                 for m in model_names
             ],
@@ -250,6 +332,7 @@ def _compute_weights_for_group(as_of_month: str, samples: List[Sample]) -> Tuple
                 "avg_crps": avg_scores.get("crps", {}).get(m),
                 "n_samples": counts_samples.get(m, 0),
                 "n_questions": n_questions,
+                "inherited_from": inherited_from.get(m),
             }
         )
 
@@ -268,6 +351,13 @@ def _compute_weights_for_group(as_of_month: str, samples: List[Sample]) -> Tuple
         f"Weights computed via time-decayed Brier (half-life {HALF_LIFE_MONTHS:.0f}mo) "
         f"and softmax (adaptive temp={temp:.3f} for n={n_questions})."
     )
+
+    if inherited_from:
+        advice_lines.append(
+            "Carried forward from a predecessor in the same model family: "
+            + ", ".join(f"{m} <- {p}" for m, p in sorted(inherited_from.items()))
+            + f" (prior worth {FAMILY_PRIOR_QUESTIONS:g} questions)."
+        )
 
     advice_text = " ".join(advice_lines)
     return weights_rows, advice_text
@@ -312,6 +402,9 @@ def compute_calibration_pythia(
         # in an aborted-transaction state when the column already exists.
         _add_column_if_missing(
             conn, "calibration_weights", "train_cutoff_month", "TEXT"
+        )
+        _add_column_if_missing(
+            conn, "calibration_weights", "inherited_from", "TEXT"
         )
         # calibration_advice schema must match pythia/db/schema.py — 4-column PK
         # including model_name. The previous 3-column PK here would re-trigger
@@ -363,6 +456,8 @@ def compute_calibration_pythia(
 
         samples = _load_samples(conn, train_cutoff_month)
         groups = _group_by_hazard_metric(samples)
+        current_members = _current_members()
+        LOGGER.info("Calibration softmax members: %s", current_members or "all scored models")
 
         total_weight_rows = 0
         for (hazard_code, metric), group_samples in groups.items():
@@ -372,7 +467,9 @@ def compute_calibration_pythia(
                 metric,
                 len(group_samples),
             )
-            weight_rows, advice_text = _compute_weights_for_group(as_of_month, group_samples)
+            weight_rows, advice_text = _compute_weights_for_group(
+                as_of_month, group_samples, current_members=current_members
+            )
             if not weight_rows:
                 LOGGER.info(
                     "Skipping calibration for hazard=%s metric=%s: %s",
@@ -406,8 +503,8 @@ def compute_calibration_pythia(
                 INSERT INTO calibration_weights (
                   as_of_month, hazard_code, metric, model_name, weight,
                   n_questions, n_samples, avg_brier, avg_log, avg_crps,
-                  train_cutoff_month, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  train_cutoff_month, created_at, inherited_from
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -423,6 +520,7 @@ def compute_calibration_pythia(
                         row["avg_crps"],
                         train_cutoff_month,
                         now,
+                        row.get("inherited_from"),
                     )
                     for row in weight_rows
                 ],

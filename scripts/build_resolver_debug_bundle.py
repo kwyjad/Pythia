@@ -2428,6 +2428,7 @@ class BundleBuilder:
             self._check_no_drought_verdict_for_a_month_in_progress,
             self._check_no_row_beside_an_unconfirmed_sweep_hit,
             self._check_no_future_publication_date,
+            self._check_ace_fatalities_resolve_from_the_base_rate_series,
             self._check_declared_active_tables_hold_rows,
             self._check_emdat_read_when_enabled,
             self._check_bundle_records_the_checked_out_commit,
@@ -4487,6 +4488,74 @@ class BundleBuilder:
             or "No fact claims to have been published on a day that has not happened. "
             "`resolver/tools/repair_publication_dates.py` runs on every Resolver Update "
             "and is what keeps this true for rows written before the fix.",
+        )
+
+    def _check_ace_fatalities_resolve_from_the_base_rate_series(self) -> None:
+        """ACE/FATALITIES must resolve from the series its base rate uses.
+
+        Until Sept 2026 the ACLED adapter stored the battles-only series as
+        ``fatalities`` and ``compute_resolutions`` read it before
+        ``acled_monthly_fatalities`` (all event types), so 27 of 32 August
+        conflict questions were scored against a different quantity from the
+        one their prompt and climatology anchor described.
+        """
+
+        name = "ace_fatalities_resolve_from_the_base_rate_series"
+        try:
+            from pythia.tools.base_rate_spd import CONFLICT_FATALITIES_TABLE as series
+        except Exception:  # noqa: BLE001 - the literal is the fallback
+            series = "acled_monthly_fatalities"
+        tables = self.tables()
+        problems: list[str] = []
+        n_checked = 0
+        # (a) no ACLED row may still carry the name the resolver once read.
+        for table in ("facts_resolved", "facts_deltas"):
+            if table not in tables:
+                continue
+            cols = {c for c, _t in self.columns_of(table)}
+            ident = ["upper(hazard_code) IN ('ACE','ACO')"]
+            for col in ("publisher", "source_id"):
+                if col in cols:
+                    ident.append(f"lower(COALESCE({col}, '')) LIKE '%acled%'")
+            result = self.query(
+                f'SELECT COUNT(*) FROM "{table}" WHERE lower(metric) = \'fatalities\' '
+                f"AND ({' OR '.join(ident)})"
+            )
+            n = int(result[1][0][0] or 0) if result and result[1] else 0
+            if n:
+                problems.append(
+                    f"{table}: {n} ACLED row(s) still named 'fatalities' "
+                    "(battles-only; repair_acled_fatalities_metric relabels them)"
+                )
+        # (b) every stored ACE/FATALITIES resolution names the base-rate series.
+        if {"resolutions", "questions"}.issubset(tables):
+            result = self.query(
+                "SELECT COUNT(*), "
+                "COUNT(*) FILTER (WHERE COALESCE(r.source_desc, '') <> 'zero_default' "
+                f"AND COALESCE(r.source_desc, '') NOT LIKE '{series}%'), "
+                "string_agg(DISTINCT r.source_desc, ', ') "
+                "FROM resolutions r JOIN questions q ON q.question_id = r.question_id "
+                "WHERE upper(q.hazard_code) = 'ACE' AND upper(q.metric) = 'FATALITIES'"
+            )
+            if result and result[1]:
+                total, wrong, seen = result[1][0]
+                n_checked = int(total or 0)
+                if int(wrong or 0):
+                    problems.append(
+                        f"resolutions: {wrong} of {total} ACE/FATALITIES resolution(s) "
+                        f"not drawn from {series} (sources seen: {seen})"
+                    )
+        if not problems and not n_checked and not (
+            {"facts_resolved", "facts_deltas"} & tables
+        ):
+            return self._check(name, "SKIP", "", series, "no facts or resolutions tables")
+        self._check(
+            name, "FAIL" if problems else "PASS",
+            "; ".join(problems) or f"{n_checked} resolution(s) checked", series,
+            "; ".join(problems)
+            or f"Every ACE/FATALITIES resolution is drawn from {series} (all event types), "
+            "the series the prompt base rate and the climatology reference use, and no "
+            "battles-only ACLED row is named 'fatalities'.",
         )
 
     #: Tables the Resolver Update itself writes, by phase. Every one of them

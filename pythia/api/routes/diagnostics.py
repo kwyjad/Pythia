@@ -1476,9 +1476,11 @@ def diagnostics_run_summary(
     # surface the specific Track 2 model id so the dashboard never has to
     # hardcode a generic label like "Gemini Flash".
     try:
-        from pythia.llm_profiles import get_ensemble_resolved, get_role_model, split_model_ref
+        from pythia.llm_profiles import get_role_model, split_model_ref, voting_ensemble_model_ids
 
-        expected_members = len(get_ensemble_resolved()) or 5
+        # Shadow members are scored but never vote, so they are not expected
+        # in the ensemble count.
+        expected_members = len(voting_ensemble_model_ids()) or 5
         tracks["track2"]["model"] = split_model_ref(get_role_model("track2_spd"))[1]
     except Exception:
         expected_members = 5

@@ -1051,6 +1051,22 @@ jobs:
           fi
 
       # === PHASE 5: VERIFY + EXPORT ===
+      # ACLED's battles-only series was stored as 'fatalities' until Sept
+      # 2026, the name ACE/FATALITIES questions resolved from. The adapter no
+      # longer renames it; this pass relabels the rows already written to
+      # 'fatalities_battle_month', idempotently, on every update. Non-fatal.
+      - name: "Phase 5: Relabel battles-only ACLED fatalities"
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          python -m resolver.tools.repair_acled_fatalities_metric \
+            --db "${BACKFILL_DB_PATH}" \
+            --summary-out diagnostics/repair_acled_fatalities_metric.json \
+            2>&1 | tee diagnostics/phase5_repair_acled_fatalities_metric.log \
+            || echo "::warning::ACLED fatalities relabel failed or left mislabelled rows (non-fatal; exit $?)"
+
       # A publication date after today is false in the plain sense. The two
       # writers that produced one (enrich raising every date to the period
       # end, the deltas fallback copying it) are fixed; this pass repairs the

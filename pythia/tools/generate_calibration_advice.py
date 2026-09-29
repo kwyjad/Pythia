@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -102,6 +103,97 @@ from pythia.tools._db_utils import (
     row_count as _row_count,
     table_exists as _table_exists,
 )
+
+
+# ---------------------------------------------------------------------------
+# One run per question, reference forecasters, blocked groups (Sept 2026)
+# ---------------------------------------------------------------------------
+
+#: Model names that are REFERENCE forecasters (``__ext_views``,
+#: ``__ext_climatology``, ``__ext_uniform``), scored beside the ensemble so
+#: skill can be measured. They are not models: ranking them as the best or
+#: worst member, or writing advice addressed to them, is advice nobody reads.
+EXT_MODEL_PREFIX = "__ext_"
+
+
+def _latest_run_clause(conn: Any, table: str, alias: str) -> str:
+    """SQL restricting ``alias`` rows to the latest run of their question.
+
+    A question forecast in several runs (reruns, backfills, a same-epoch test
+    run adopted by production) used to count once per run: the Sept 2026
+    scored bundle held questions forecast in up to nine runs, every one of
+    them weighing on the advice. The latest ``run_id`` per question, taken
+    from ``forecasts_ensemble``, is the forecast that stands. Rows with no
+    run id (the reference forecasters' scores) are kept. Empty when either
+    table lacks a ``run_id`` column, so an older database degrades to the
+    previous behaviour rather than failing every query.
+    """
+
+    if not (_has_column(conn, table, "run_id")
+            and _has_column(conn, "forecasts_ensemble", "run_id")):
+        return ""
+    return (
+        f" AND ({alias}.run_id IS NULL OR {alias}.run_id = ("
+        f"SELECT MAX(_lr.run_id) FROM forecasts_ensemble _lr "
+        f"WHERE _lr.question_id = {alias}.question_id))"
+    )
+
+
+def advice_blocked_groups() -> set[Tuple[str, str]]:
+    """``PYTHIA_ADVICE_BLOCK_GROUPS`` as a set of (HAZARD, METRIC) pairs.
+
+    Comma-separated ``HAZARD/METRIC`` entries, e.g. ``ACE/FATALITIES``.
+    Default empty. Honoured by generation (the group is skipped) and by
+    ``forecaster/prompts.py`` injection (nothing is shown for it), so advice
+    learned from outcomes known to be wrong can be withheld without a code
+    change.
+    """
+
+    raw = os.getenv("PYTHIA_ADVICE_BLOCK_GROUPS", "") or ""
+    out: set[Tuple[str, str]] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if "/" not in part:
+            continue
+        hz, m = part.split("/", 1)
+        if hz.strip() and m.strip():
+            out.add((hz.strip().upper(), m.strip().upper()))
+    return out
+
+
+#: The series ACE/FATALITIES must resolve from (mirrors
+#: ``compute_resolutions.ACE_FATALITIES_TABLE``).
+_FATALITIES_SERIES_TABLE = "acled_monthly_fatalities"
+
+
+def _fatalities_resolutions_predate_fix(conn: Any, hazard_code: str, metric: str) -> int:
+    """Count FATALITIES resolutions for the group drawn from a pre-fix source.
+
+    Before Sept 2026 ACE/FATALITIES resolved to a battles-only count read
+    from ``facts_resolved``. Advice learned from those outcomes tells the
+    models they overpredict when they did not, so a group still carrying any
+    such row is not advised until ``compute_resolutions`` has rewritten it.
+    """
+
+    if metric.upper() != "FATALITIES" or not _table_exists(conn, "resolutions"):
+        return 0
+    if not _has_column(conn, "resolutions", "source_desc"):
+        return 0
+    try:
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) FROM resolutions r
+            JOIN questions q ON q.question_id = r.question_id
+            WHERE upper(q.hazard_code) = ? AND upper(q.metric) = 'FATALITIES'
+              AND COALESCE(r.source_desc, '') <> 'zero_default'
+              AND COALESCE(r.source_desc, '') NOT LIKE '{_FATALITIES_SERIES_TABLE}%'
+            """,
+            [hazard_code.upper()],
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        _rollback_quietly(conn)
+        return 0
+    return int(row[0] or 0) if row else 0
 
 
 def _get_db_url_from_config() -> str:
@@ -259,7 +351,7 @@ def _compute_tail_coverage(
               AND upper(q.metric) = ?
               AND COALESCE(q.is_test, FALSE) = FALSE
               AND fe.class_bin IS NOT NULL
-              AND fe.p IS NOT NULL
+              AND fe.p IS NOT NULL{_latest_run_clause(conn, "forecasts_ensemble", "fe")}
             GROUP BY fe.question_id, fe.horizon_m
         )
         SELECT
@@ -330,7 +422,7 @@ def _compute_bucket_calibration(
           AND upper(q.metric) = ?
           AND COALESCE(q.is_test, FALSE) = FALSE
           AND fe.class_bin IS NOT NULL
-          AND fe.p IS NOT NULL
+          AND fe.p IS NOT NULL{_latest_run_clause(conn, "forecasts_ensemble", "fe")}
         GROUP BY fe.class_bin
         ORDER BY fe.class_bin
     """
@@ -368,7 +460,7 @@ def _compute_per_model_brier(
     hz = hazard_code.upper()
     m = metric.upper()
 
-    sql = """
+    sql = f"""
         SELECT
             COALESCE(s.model_name, '__ensemble__') AS mn,
             AVG(s.value) AS avg_brier,
@@ -379,11 +471,8 @@ def _compute_per_model_brier(
           AND upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
           AND COALESCE(q.is_test, FALSE) = FALSE
-          -- External benchmarks (__ext_views, __ext_climatology,
-          -- __ext_uniform) are references, not forecasters with a prompt:
-          -- they received per-model advice nothing could read and could be
-          -- named "best model" in the shared advice.
-          AND NOT starts_with(COALESCE(s.model_name, ''), '__ext_')
+          AND COALESCE(s.model_name, '') NOT LIKE '{EXT_MODEL_PREFIX}%'
+          {_latest_run_clause(conn, "scores", "s")}
         GROUP BY mn
         ORDER BY avg_brier ASC
     """
@@ -461,7 +550,7 @@ def _compute_month_position_bias(
     if not _table_exists(conn, "forecasts_raw"):
         return None
 
-    sql = """
+    sql = f"""
         SELECT
             fr.month_index,
             fr.bucket_index,
@@ -470,7 +559,7 @@ def _compute_month_position_bias(
         JOIN questions q ON q.question_id = fr.question_id
         WHERE upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
-          AND COALESCE(q.is_test, FALSE) = FALSE
+          AND COALESCE(q.is_test, FALSE) = FALSE{_latest_run_clause(conn, "forecasts_raw", "fr")}
           AND fr.month_index BETWEEN 1 AND 6
           AND fr.bucket_index BETWEEN 1 AND ?
           AND fr.probability IS NOT NULL
@@ -554,7 +643,7 @@ def _compute_per_model_bucket_calibration(
           AND upper(q.metric) = ?
           AND COALESCE(q.is_test, FALSE) = FALSE
           AND fr.model_name = ?
-          AND fr.probability IS NOT NULL
+          AND fr.probability IS NOT NULL{_latest_run_clause(conn, "forecasts_raw", "fr")}
         GROUP BY fr.bucket_index
         ORDER BY fr.bucket_index
     """
@@ -619,7 +708,7 @@ def _compute_per_model_tail_coverage(
               AND upper(q.metric) = ?
               AND COALESCE(q.is_test, FALSE) = FALSE
               AND fr.model_name = ?
-              AND fr.probability IS NOT NULL
+              AND fr.probability IS NOT NULL{_latest_run_clause(conn, "forecasts_raw", "fr")}
             GROUP BY fr.question_id, fr.month_index
         )
         SELECT
@@ -661,7 +750,7 @@ def _compute_per_model_horizon_diff(
     hz = hazard_code.upper()
     m = metric.upper()
 
-    sql = """
+    sql = f"""
         SELECT
             fr.month_index,
             fr.bucket_index,
@@ -671,7 +760,7 @@ def _compute_per_model_horizon_diff(
         WHERE upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
           AND COALESCE(q.is_test, FALSE) = FALSE
-          AND fr.model_name = ?
+          AND fr.model_name = ?{_latest_run_clause(conn, "forecasts_raw", "fr")}
           AND fr.month_index BETWEEN 1 AND 6
           AND fr.bucket_index BETWEEN 1 AND ?
           AND fr.probability IS NOT NULL
@@ -773,7 +862,7 @@ def _compute_advice_impact(
         return None
 
     # Compare pre-advice vs post-advice Brier per model
-    sql_compare = """
+    sql_compare = f"""
         SELECT
             s.model_name,
             AVG(CASE WHEN r.observed_month < ? THEN s.value END) AS pre_brier,
@@ -788,6 +877,7 @@ def _compute_advice_impact(
           AND upper(q.metric) = ?
           AND COALESCE(q.is_test, FALSE) = FALSE
           AND s.model_name IS NOT NULL
+          AND s.model_name NOT LIKE '{EXT_MODEL_PREFIX}%'{_latest_run_clause(conn, "scores", "s")}
         GROUP BY s.model_name
     """
     try:
@@ -836,7 +926,7 @@ def _compute_rc_conditional(
 
     tail_bin_1, tail_bin_2 = _tail_bins(m)
 
-    sql = """
+    sql = f"""
         WITH forecast_tail AS (
             SELECT
                 fe.question_id,
@@ -848,7 +938,7 @@ def _compute_rc_conditional(
               AND upper(q.metric) = ?
               AND COALESCE(q.is_test, FALSE) = FALSE
               AND fe.class_bin IS NOT NULL
-              AND fe.p IS NOT NULL
+              AND fe.p IS NOT NULL{_latest_run_clause(conn, "forecasts_ensemble", "fe")}
             GROUP BY fe.question_id, fe.horizon_m
         )
         SELECT
@@ -1894,7 +1984,49 @@ def generate_calibration_advice(
         total_written = 0
         all_model_briers: List[Dict[str, Any]] = []
 
+        # Advice addressed to a reference forecaster is advice nobody reads;
+        # rows written before the exclusion are removed, every month.
+        try:
+            n_ext = conn.execute(
+                "SELECT COUNT(*) FROM calibration_advice WHERE model_name LIKE ?",
+                [f"{EXT_MODEL_PREFIX}%"],
+            ).fetchone()[0]
+            if n_ext:
+                conn.execute(
+                    "DELETE FROM calibration_advice WHERE model_name LIKE ?",
+                    [f"{EXT_MODEL_PREFIX}%"],
+                )
+                LOGGER.info("Removed %d advice row(s) addressed to reference forecasters.", n_ext)
+        except Exception as exc:  # noqa: BLE001
+            _rollback_quietly(conn)
+            LOGGER.warning("Could not remove reference-forecaster advice rows: %s", exc)
+
+        blocked = advice_blocked_groups()
         for hazard_code, metric in pairs:
+            skip_reason = ""
+            if (hazard_code.upper(), metric.upper()) in blocked:
+                skip_reason = "listed in PYTHIA_ADVICE_BLOCK_GROUPS"
+            else:
+                n_prefix = _fatalities_resolutions_predate_fix(conn, hazard_code, metric)
+                if n_prefix:
+                    skip_reason = (
+                        f"{n_prefix} resolution(s) predate the all-event-types fix "
+                        "(battles-only); re-run compute_resolutions first"
+                    )
+            if skip_reason:
+                LOGGER.warning(
+                    "Skipping %s/%s advice: %s. This month's rows for the group are removed.",
+                    hazard_code, metric, skip_reason,
+                )
+                try:
+                    conn.execute(
+                        "DELETE FROM calibration_advice WHERE as_of_month = ? "
+                        "AND upper(hazard_code) = ? AND upper(metric) = ?",
+                        [as_of_month, hazard_code.upper(), metric.upper()],
+                    )
+                except Exception:  # noqa: BLE001
+                    _rollback_quietly(conn)
+                continue
             n_resolved = _count_resolved(conn, hazard_code, metric)
             if n_resolved < MIN_QUESTIONS:
                 LOGGER.info(

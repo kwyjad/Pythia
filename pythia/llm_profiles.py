@@ -240,3 +240,56 @@ def get_purpose_model(purpose: str) -> str | None:
     """
 
     return get_role_model(purpose) or None
+
+
+def get_model_families() -> Dict[str, List[str]]:
+    """Return ``llm.model_families``: family key -> model ids, oldest first.
+
+    A family is one model line across versions (every Claude Opus, every
+    GPT frontier model). Calibration uses it to carry a retired version's
+    track record to its successor as a prior, so a version bump does not
+    start the new model from nothing.
+    """
+
+    fams = _get_llm_cfg().get("model_families")
+    out: Dict[str, List[str]] = {}
+    if isinstance(fams, dict):
+        for key, ids in fams.items():
+            if isinstance(ids, list):
+                out[str(key)] = [str(i).strip() for i in ids if str(i).strip()]
+    return out
+
+
+def model_family(model_id: Optional[str]) -> Optional[str]:
+    """The family key a model id belongs to, or None."""
+
+    if not model_id:
+        return None
+    mid = str(model_id).strip()
+    for key, ids in get_model_families().items():
+        if mid in ids:
+            return key
+    return None
+
+
+def family_predecessors(model_id: Optional[str]) -> List[str]:
+    """Earlier versions in the model's family, newest first."""
+
+    fam = model_family(model_id)
+    if not fam:
+        return []
+    ids = get_model_families().get(fam, [])
+    idx = ids.index(str(model_id).strip())
+    return list(reversed(ids[:idx]))
+
+
+def voting_ensemble_model_ids() -> List[str]:
+    """Model ids of the ensemble members that vote (shadow members excluded)."""
+
+    out: List[str] = []
+    for entry in get_ensemble_resolved():
+        shadow = entry.get("shadow")
+        if shadow is True or str(shadow).strip().lower() in {"true", "1", "yes"}:
+            continue
+        out.append(entry["model_id"])
+    return out

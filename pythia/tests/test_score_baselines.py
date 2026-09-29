@@ -150,17 +150,20 @@ class TestScoreBaselinesEndToEnd:
         finally:
             con.close()
         # 2 SPD horizons x 2 models x 3 types + 1 CU horizon x 1 model x 3 types
-        # + 1 binary horizon x 2 models x 1 type = 12 + 3 + 2 = 17
-        assert n == 17
-        # Audit: one row per (question, horizon, model) actually scored = 7.
-        assert audit == 7
+        # + 1 binary horizon x 2 models x 1 type = 12 + 3 + 2 = 17, plus the
+        # ACE/FATALITIES persistence reference: 2 horizons x 3 types = 23.
+        assert n == 23
+        # Audit: one row per (question, horizon, model) actually scored = 9.
+        assert audit == 9
 
     def test_excluded_from_calibration_softmax_filter(self):
         # The calibration query filters model_name NOT LIKE '__ext_%' — pin
         # that both new sentinels match the exclusion pattern.
         import fnmatch
 
-        for name in (CLIMATOLOGY_MODEL_NAME, UNIFORM_MODEL_NAME):
+        from pythia.tools.score_baselines import PERSISTENCE_MODEL_NAME
+
+        for name in (CLIMATOLOGY_MODEL_NAME, UNIFORM_MODEL_NAME, PERSISTENCE_MODEL_NAME):
             assert name.startswith("__ext_")
             assert fnmatch.fnmatch(name, "__ext_*")
 

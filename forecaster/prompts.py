@@ -128,6 +128,8 @@ def load_member_calibration_advice(
     name = (model_name or "").strip()
     if not hz or not m or not name or os.getenv("PYTHIA_MEMBER_ADVICE", "1") == "0":
         return ""
+    if _advice_blocked(hz, m):
+        return ""
     key = (hz, m, name)
     with _MEMBER_ADVICE_LOCK:
         if key in _MEMBER_ADVICE_CACHE:
@@ -184,6 +186,22 @@ def render_member_calibration_advice(advice: str) -> str:
     )
 
 
+def _advice_blocked(hazard_code: str, metric: str) -> bool:
+    """True when ``PYTHIA_ADVICE_BLOCK_GROUPS`` lists ``HAZARD/METRIC``.
+
+    Same format as ``pythia.tools.generate_calibration_advice
+    .advice_blocked_groups`` (comma-separated ``HAZARD/METRIC``); parsed here
+    so the prompt builder does not import the advice generator. Used to
+    withhold advice learned from outcomes known to be wrong — ACE/FATALITIES
+    in Sept 2026, which had resolved to battles-only counts.
+    """
+    raw = os.getenv("PYTHIA_ADVICE_BLOCK_GROUPS", "") or ""
+    key = f"{(hazard_code or '').strip().upper()}/{(metric or '').strip().upper()}"
+    return any(
+        part.strip().upper() == key for part in raw.split(",") if part.strip()
+    )
+
+
 def _load_calibration_advice_for_hazard(
     hazard_code: str,
     metric: str,
@@ -195,11 +213,17 @@ def _load_calibration_advice_for_hazard(
       1. Shared advice for (hazard_code, metric, '__shared__')
          + Per-model advice for (hazard_code, metric, model_name)
       2. Global advice for ('*', '*', '__shared__')
-      3. Any most-recent row (backwards compat)
-      4. Empty string
+      3. Empty string
+
+    A group listed in ``PYTHIA_ADVICE_BLOCK_GROUPS`` gets nothing at all.
+    Until Sept 2026 a third step returned "any most-recent row regardless of
+    hazard", so a flood question with no advice of its own could be shown
+    conflict advice; that step is gone.
     """
     hz = (hazard_code or "").upper()
     m = (metric or "").upper()
+    if _advice_blocked(hz, m):
+        return ""
 
     # Read experiment version from env (default: any version)
     advice_version = os.getenv("PYTHIA_ADVICE_VERSION", "").strip() or None
@@ -271,26 +295,6 @@ def _load_calibration_advice_for_hazard(
 
             if global_row and global_row[0]:
                 txt = str(global_row[0])
-                return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
-
-            # Last resort: a legacy row that names no hazard and no model.
-            # This used to be "any most-recent row" with no filter at all, so
-            # a flood or drought prompt with no shared advice of its own was
-            # handed whichever row sorted first — another hazard's advice, a
-            # retired model's, or an external benchmark's.
-            row = con.execute(
-                """
-                SELECT advice
-                FROM calibration_advice
-                WHERE COALESCE(model_name, '__shared__') = '__shared__'
-                  AND COALESCE(hazard_code, '*') = '*'
-                ORDER BY as_of_month DESC
-                LIMIT 1
-                """,
-            ).fetchone()
-
-            if row and row[0]:
-                txt = str(row[0])
                 return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
         finally:
             duckdb_io.close_db(con)
@@ -1599,7 +1603,17 @@ def _format_gdacs_event_history_for_prompt(
         f"GDACS EVENT HISTORY ({iso3} — {event_label}):"
     )
     lines.append("Source: GDACS (Global Disaster Alert and Coordination System)")
-    lines.append(f"Coverage: {data_range} ({total} months)")
+    if gdacs_history.get("history_available") is False:
+        # A handful of months is not a history; printing its rate would
+        # read as a confident 0% (see forecaster/gdacs_history.py).
+        from forecaster.gdacs_history import unavailable_line
+
+        lines.append(unavailable_line(
+            event_label, iso3,
+            gdacs_history.get("unavailable_reason") or "too few months of GDACS coverage",
+        ))
+        return "\n".join(lines)
+    lines.append(f"Coverage: {data_range} ({total} calendar months; a month with no alert counts as no event)")
     lines.append(
         f"Overall event rate: {event_months} events in {total} months "
         f"({event_rate:.0f}%)"

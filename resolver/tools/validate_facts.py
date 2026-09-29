@@ -49,10 +49,11 @@ ALLOWED_SOURCE_TYPES = {"appeal","sitrep","gov","cluster","agency","media"}
 ALLOWED_CONFIDENCE   = {"high","med","low"}
 ALLOWED_UNITS        = {"persons","persons_cases","events"}
 
-INTEGER_METRICS = {"fatalities", "events", "participants"}
+INTEGER_METRICS = {"fatalities", "fatalities_battle_month", "events", "participants"}
 METRIC_UNIT_RULES = {
     "cases": {"persons_cases"},
     "fatalities": {"persons"},
+    "fatalities_battle_month": {"persons"},
     "events": {"events"},
     "participants": {"persons"},
 }
