@@ -629,11 +629,22 @@ def sibyl_comparison(
         )
         meta_join = ""
 
+    # One run per question, the latest, on BOTH sides: a question forecast
+    # in several runs has score rows for each, and without this the Sibyl
+    # side contributed one pair per run while the standard side kept an
+    # arbitrary one of them (the ROW_NUMBER below ties across runs).
+    _latest = (
+        " AND (s.run_id IS NULL OR s.run_id = (SELECT MAX(_lr.run_id) FROM scores _lr "
+        "WHERE _lr.question_id = s.question_id AND _lr.run_id IS NOT NULL))"
+        if _table_has_columns(con, "scores", ["run_id"])
+        else ""
+    )
+
     sql = f"""
     WITH sib AS (
       SELECT s.question_id, s.horizon_m, s.score_type, s.value AS sibyl_value
       FROM scores s
-      WHERE s.model_name = '{_SIBYL_MODEL_NAME}'{_tf_s} {sib_run_filter}
+      WHERE s.model_name = '{_SIBYL_MODEL_NAME}'{_tf_s} {sib_run_filter}{_latest}
     ),
     std_ranked AS (
       SELECT s.question_id, s.horizon_m, s.score_type, s.model_name, s.value,
@@ -644,7 +655,7 @@ def sibyl_comparison(
                  ELSE 99 END
              ) AS rn
       FROM scores s
-      WHERE s.model_name IN ({pref_in}) {baseline_filter}{_tf_s}
+      WHERE s.model_name IN ({pref_in}) {baseline_filter}{_tf_s}{_latest}
     ),
     std AS (SELECT * FROM std_ranked WHERE rn = 1)
     {meta_cte}
