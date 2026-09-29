@@ -194,16 +194,19 @@ issues:
   - id: views_stale_vintage
     owner: external
     first_seen: 2026-07-01
-    # Three weeks. Nothing has been escalated yet, and the review is not
-    # "has VIEWS fixed it" but "have we asked" — which is a week's work
-    # nobody has done. A date far enough out to be fair and near enough to
-    # sting.
-    review_by: 2026-10-01
+    # One more monthly cycle (2026-09-29). The vintage MOVED since the last
+    # review, so VIEWS is publishing; what is left to settle is whether its
+    # release lag simply exceeds our 45-day threshold. Two points so far.
+    review_by: 2026-11-01
     recovers_on_rerun: false
     note: >-
-      VIEWS has served the 2026-07-01 vintage since July — 69 days against a
-      45-day threshold as of run 34222175003. Same shape as ACLED CAST: the
-      connector reads the API successfully and the API's newest run is old.
-      Upstream to VIEWS.
+      VIEWS served the 2026-07-01 vintage on 2026-09-09 (69 days) and the
+      2026-08-01 vintage on 2026-09-28 (58 days, run 36401252026). The
+      vintage moves, so the connector and the API are both working; VIEWS
+      appears to release a vintage about six weeks after the date it
+      carries. If the October run again finds the previous month's vintage
+      at 55-60 days, the fault is our 45-day threshold measured against a
+      release lag it was never reasoned from, and the fix is a per-source
+      threshold in STALENESS_THRESHOLD_DAYS rather than an escalation.
     # Same as ACLED CAST: found by the vintage check, logged as a WARNING,
     # so no log signature can match and none is claimed.

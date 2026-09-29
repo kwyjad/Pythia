@@ -1019,9 +1019,14 @@ jobs:
             --backfill-editions "$MISSING" \
             --verbose 2>&1 | tee diagnostics/phase4_crisiswatch_backfill.log || true
           python -c "
-          from horizon_scanner.crisiswatch import store_backfilled_editions
+          from horizon_scanner.crisiswatch import record_backfill_attempts, store_backfilled_editions
           out = store_backfilled_editions()
           print(f'BACKFILL_ROWS={out[\"rows\"]} FILES={out[\"files\"]}')
+          # After the store: an edition the table now holds is forgotten, one
+          # still absent gains an attempt, and missing_editions stops asking
+          # for it after three fruitless runs.
+          att = record_backfill_attempts('${MISSING}'.split(','))
+          print(f'BACKFILL_ATTEMPTS recovered={att[\"recovered\"]} still_missing={att[\"still_missing\"]}')
           " 2>&1 | tee -a diagnostics/phase4_crisiswatch_backfill.log || true
 
       - name: "Phase 4: Store CrisisWatch"

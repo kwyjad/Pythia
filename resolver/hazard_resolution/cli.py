@@ -364,8 +364,19 @@ def run_impact_ladder(
     """Fetch the ladder's sources and resolve every triggered cell."""
     from resolver.hazard_resolution import impact as impact_mod
 
+    from resolver.hazard_resolution import detect as detect_mod
+    from resolver.hazard_resolution.rulebook import HAZARD_CODE_BY_RULEBOOK_NAME
+
     triggered = impact_mod.triggered_iso3s(con, ym, hazard)
-    if not triggered:
+    # Sweep-hit cells are walked too when the rulebook says so, and promoted
+    # only if the ladder finds an admissible figure (impact.resolve_triggered_cells).
+    hazard_key = {v: k for k, v in HAZARD_CODE_BY_RULEBOOK_NAME.items()}.get(hazard, "")
+    confirm: list[str] = []
+    if hazard_key and rulebook.get(
+        f"{hazard_key}.reliefweb_sweep.confirm_hits_with_ladder", False
+    ):
+        confirm = detect_mod.sweep_hit_iso3s(con, ym, hazard)
+    if not triggered and not confirm:
         LOG.info("[cli] %s %s: no triggered cells — ladder has nothing to do", hazard, ym)
         return impact_mod.LadderRun(hazard=hazard, ym=ym)
 
@@ -391,6 +402,7 @@ def run_impact_ladder(
         # free anyway.
         fetch_documents=not skip_fetch,
         run_type=run_type,
+        confirm_iso3s=confirm,
     )
 
 
@@ -986,7 +998,7 @@ def _write_run_summary(
                 for ym in months:
                     payload["months"][ym] = {
                         "rc": int(month_rcs.get(ym, 1)),
-                        **month_counts(con, hazard_code, ym),
+                        **month_counts(con, hazard_code, ym, since=started),
                     }
             finally:
                 close_db(con)

@@ -60,6 +60,9 @@ DEFAULT_ALIAS_SOURCE: Mapping[str, str] = {
     "Turks and Caicos Islands": "TCA",
     "Saint-Martin (French Republic)": "MAF",
     "Saint Martin (French part)": "MAF",
+    # ACLED spells it "Faroe Islands"; countries.csv carries "Faeroe Islands".
+    # One ACLED political event was dropped for want of it (run 36401252026).
+    "Faroe Islands": "FRO",
 }
 
 

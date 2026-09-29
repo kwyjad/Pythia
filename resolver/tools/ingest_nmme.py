@@ -181,6 +181,32 @@ def _earlier_issue_months(newest_issue: str, months: int) -> list[str]:
     return out
 
 
+#: The variables one NMME vintage carries. A vintage holding fewer is
+#: partial and is fetched again.
+_NMME_VARIABLES = 2
+
+
+def _vintage_is_held(con, year_month: str) -> bool:
+    """Does ``seasonal_forecasts`` already hold this issue month in full?
+
+    Never raises: a table that cannot be read answers "no", and the vintage
+    is fetched as it always was.
+    """
+
+    try:
+        row = con.execute(
+            """
+            SELECT COUNT(DISTINCT variable)
+            FROM seasonal_forecasts
+            WHERE strftime(CAST(forecast_issue_date AS DATE), '%Y%m') = ?
+            """,
+            [year_month],
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - a guard that cannot read must not stop the fetch
+        return False
+    return bool(row) and int(row[0] or 0) >= _NMME_VARIABLES
+
+
 def _backfill_earlier_issues(
     con, *, months: int, newest_issue: str, max_leads: int
 ) -> dict:
@@ -206,7 +232,15 @@ def _backfill_earlier_issues(
         "[nmme] backfill: asking CPC for %d earlier issue month(s): %s",
         len(wanted), ", ".join(wanted),
     )
+    held: list[str] = []
     for year_month in wanted:
+        # A vintage already in the table is not asked for again. CPC does not
+        # revise a published issue, and every run re-downloaded all twelve
+        # to merge them onto themselves with a delta of zero (run
+        # 36401252026: 2m41s for no row).
+        if _vintage_is_held(con, year_month):
+            held.append(year_month)
+            continue
         try:
             frame = fetch_and_process(year_month=year_month, max_leads=max_leads)
         except FileNotFoundError as exc:
@@ -237,13 +271,14 @@ def _backfill_earlier_issues(
         )
 
     LOG.info(
-        "[nmme] backfill complete: %d of %d vintage(s) recovered (%d rows); "
-        "not held by the archive: %s",
-        len(recovered), len(wanted), rows_written,
+        "[nmme] backfill complete: %d of %d vintage(s) recovered (%d rows), "
+        "%d already held; not held by the archive: %s",
+        len(recovered), len(wanted), rows_written, len(held),
         ", ".join(absent) or "none",
     )
     return {
         "wanted": wanted,
+        "already_held": held,
         "recovered": recovered,
         "absent": absent,
         "failed": failed,

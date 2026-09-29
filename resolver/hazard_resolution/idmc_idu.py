@@ -105,7 +105,34 @@ def _api_key() -> tuple[str, str] | None:
     return None
 
 
+#: One IDU "all" download per process. The endpoint takes no date filter, so
+#: every hazard-month pass asked for the identical body: run 36401252026 fetched
+#: it six times, about 240 MB each. The body cannot change within a run in any
+#: way that matters to a monthly resolution, and holding the parsed rows keeps
+#: the process's peak where one fetch already put it. Cleared by
+#: :func:`reset_idu_memo`, because a module-level store that outlives a test
+#: serves the first test's data to every later one.
+_IDU_MEMO: dict[tuple[str, tuple[tuple[str, str], ...]], list] = {}
+
+
+def reset_idu_memo() -> None:
+    """Forget every IDU body fetched in this process."""
+
+    _IDU_MEMO.clear()
+
+
 def _default_get(url: str, params: dict, timeout: float) -> list:
+    key = (url, tuple(sorted((str(k), str(v)) for k, v in params.items())))
+    remembered = _IDU_MEMO.get(key)
+    if remembered is not None:
+        LOG.info("[idmc_idu] reusing this process's IDU download (%d rows)", len(remembered))
+        return remembered
+    rows = _fetch_rows(url, params, timeout)
+    _IDU_MEMO[key] = rows
+    return rows
+
+
+def _fetch_rows(url: str, params: dict, timeout: float) -> list:
     resp = requests.get(
         url,
         params=params,

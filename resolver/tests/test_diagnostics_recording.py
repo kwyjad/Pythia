@@ -285,3 +285,20 @@ def test_the_ledgers_are_silent_when_recording_is_off(monkeypatch, tmp_path):
     cell_ledger.record_cell(stage="ladder", iso3="PHL", hazard="TC", ym="2026-08")
     cell_ledger.record_figure(iso3="PHL", hazard="TC", ym="2026-08", outcome="accepted")
     assert not list(tmp_path.glob("*.jsonl"))
+
+
+def test_a_module_run_as_main_is_named_by_its_spec():
+    """`python -m resolver.ingestion.acled_client` is `__main__` to itself.
+
+    Its calls were attributed to "unknown" (179 of them in run 36401252026),
+    so a refusal there could never reach the refusal alarm."""
+
+    import types
+
+    from resolver.diagnostics import http_recorder
+
+    spec = types.SimpleNamespace(name="resolver.ingestion.acled_client")
+    namespace = {"__name__": "__main__", "__spec__": spec,
+                 "caller": http_recorder._caller}
+    exec("def call():\n    return caller()\n", namespace)
+    assert namespace["call"]() == "resolver.ingestion.acled_client"

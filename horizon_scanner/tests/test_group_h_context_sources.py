@@ -378,3 +378,70 @@ class TestCastUnavailabilityIsStated:
         assert "2025-12-10" in reason
         assert "2026-05-01" in reason
         assert "not as a forecast of no events" in reason
+
+
+class TestArchiveGaps:
+    """An edition the archive does not hold is not asked for forever.
+
+    Run 36401252026 was the fourth in a row to spend 35 downloads looking
+    for 2026-05 and find nothing."""
+
+    def test_an_edition_given_up_on_is_not_asked_for(self, monkeypatch, tmp_path):
+        import duckdb
+
+        from horizon_scanner import crisiswatch as cw
+
+        db = tmp_path / "gaps.duckdb"
+        con = duckdb.connect(str(db))
+        con.execute(
+            "CREATE TABLE crisiswatch_entries (iso3 TEXT, year INTEGER, month INTEGER)"
+        )
+        con.close()
+        monkeypatch.setattr(
+            "pythia.db.schema.connect",
+            lambda *a, **k: duckdb.connect(str(db)),
+            raising=False,
+        )
+        wanted = cw.missing_editions(2)
+        assert len(wanted) == 2
+        gap = wanted[0]
+        today = datetime.utcnow().date()
+        for _ in range(cw.BACKFILL_GIVE_UP_AFTER_RUNS - 1):
+            cw.record_backfill_attempts([gap], today=today)
+        # Below the threshold it is still asked for.
+        assert gap in cw.missing_editions(2)
+        cw.record_backfill_attempts([gap], today=today)
+        assert gap not in cw.missing_editions(2)
+        assert wanted[1] in cw.missing_editions(2)
+
+    def test_a_recovered_edition_is_forgotten(self, monkeypatch, tmp_path):
+        import duckdb
+
+        from horizon_scanner import crisiswatch as cw
+
+        db = tmp_path / "recovered.duckdb"
+        con = duckdb.connect(str(db))
+        con.execute(
+            "CREATE TABLE crisiswatch_entries (iso3 TEXT, year INTEGER, month INTEGER)"
+        )
+        con.close()
+        monkeypatch.setattr(
+            "pythia.db.schema.connect",
+            lambda *a, **k: duckdb.connect(str(db)),
+            raising=False,
+        )
+        today = datetime.utcnow().date()
+        assert cw.record_backfill_attempts(["2026-05"], today=today) == {
+            "recovered": 0, "still_missing": 1,
+        }
+        con = duckdb.connect(str(db))
+        con.execute("INSERT INTO crisiswatch_entries VALUES ('SOM', 2026, 5)")
+        con.close()
+        assert cw.record_backfill_attempts(["2026-05"], today=today) == {
+            "recovered": 1, "still_missing": 0,
+        }
+        con = duckdb.connect(str(db))
+        assert con.execute(
+            "SELECT COUNT(*) FROM crisiswatch_backfill_attempts"
+        ).fetchone()[0] == 0
+        con.close()

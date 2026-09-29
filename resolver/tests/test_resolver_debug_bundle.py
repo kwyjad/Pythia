@@ -1137,6 +1137,12 @@ def test_an_empty_calibration_weights_is_explained_in_the_writers_terms(tmp_path
     con.execute("INSERT INTO questions VALUES ('SOM_ACE_FATALITIES_2026-08','ACE','FATALITIES',FALSE)")
     con.execute("INSERT INTO resolutions VALUES ('SOM_ACE_FATALITIES_2026-08',1,415.0)")
     con.execute("INSERT INTO scores VALUES ('SOM_ACE_FATALITIES_2026-08',1,'brier','gemini-3.5-flash',0.4,'FATALITIES')")
+    # A Track-2 question is scored only under its aggregate name. The writer
+    # weighs members only, so it must not swell the pool the check reports
+    # (run 36401252026 said 32 against a floor of 20 beside an empty table).
+    con.execute("INSERT INTO questions VALUES ('ETH_ACE_FATALITIES_2026-08','ACE','FATALITIES',FALSE)")
+    con.execute("INSERT INTO resolutions VALUES ('ETH_ACE_FATALITIES_2026-08',1,12.0)")
+    con.execute("INSERT INTO scores VALUES ('ETH_ACE_FATALITIES_2026-08',1,'brier','track2_flash',0.2,'FATALITIES')")
     con.close()
     checks = _checks(tmp_path, db, full_run, "e4")
     check = checks["no_declared_active_table_is_empty_after_the_run"]
@@ -1419,3 +1425,33 @@ def test_an_unlabelled_web_page_still_fails_the_acled_check(tmp_path, full_run):
     check = checks["acled_html_responses_are_recorded_as_connector_failures"]
     assert check["verdict"] == "FAIL"
     assert "acled_client" in check["left"]
+
+
+def test_a_row_beside_an_unconfirmed_sweep_hit_fails_unless_frozen(tmp_path, full_run):
+    """94 live rows of run 36401252026 stood beside trigger rows saying the
+    cell was undecided. A frozen one is history; an unfrozen one is a fault."""
+
+    from resolver.hazard_resolution.schema import ensure_haz_schema
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    ensure_haz_schema(con)
+    hit = json.dumps({"reliefweb_sweep": {"silent": False, "total_hits": 27}})
+    for iso3, frozen in (("AFG", "2099-01-01"), ("NPL", "2000-01-01")):
+        con.execute(
+            "INSERT INTO haz_triggers (iso3, year, month, hazard, triggered, "
+            "trigger_source, trigger_detail_json) VALUES (?, 2026, 7, 'FL', FALSE, "
+            "'none', ?)", [iso3, hit],
+        )
+        con.execute(
+            "INSERT INTO haz_resolutions (iso3, year, month, hazard, status, value, "
+            "provenance_json, rule_fired, flagged, frozen_at) VALUES "
+            "(?, 2026, 7, 'FL', 'RESOLVED_VALUE', 55000, '{}', 'ladder:x', FALSE, ?)",
+            [iso3, frozen],
+        )
+    con.close()
+    checks = _checks(tmp_path, db, full_run, "sweep_hit")
+    check = checks["no_resolution_beside_an_unconfirmed_sweep_hit"]
+    assert check["verdict"] == "FAIL"
+    assert check["left"].startswith("1 unfrozen")
+    assert "1 frozen row(s)" in check["detail"]

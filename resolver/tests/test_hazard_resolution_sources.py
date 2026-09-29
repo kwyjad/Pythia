@@ -568,6 +568,32 @@ def test_idu_stores_displacement_and_never_calls_it_affected(con, rulebook, monk
     assert "affected" not in record and "num_affected" not in record
 
 
+def test_idu_downloads_once_per_process_whatever_the_months(con, rulebook, monkeypatch):
+    """The endpoint takes no date filter, so every pass asked for the same
+    body: run 36401252026 downloaded it six times, about 240 MB each."""
+
+    monkeypatch.setenv("IDMC_API_KEY", "test-key")
+    idu_mod.reset_idu_memo()
+    calls = []
+
+    def fake_fetch(url, params, timeout):
+        calls.append(url)
+        return [_IDU_ROW]
+
+    monkeypatch.setattr(idu_mod, "_fetch_rows", fake_fetch)
+    try:
+        for ym in ("2024-02", "2024-03", "2024-04"):
+            assert idu_mod.fetch_idmc_idu(con, ym, "FL", rulebook).ok is True
+        idu_mod.fetch_idmc_idu(con, "2024-03", "TC", rulebook)
+        assert len(calls) == 1
+        # A reset forgets it, so a test never inherits another's body.
+        idu_mod.reset_idu_memo()
+        idu_mod.fetch_idmc_idu(con, "2024-03", "FL", rulebook)
+        assert len(calls) == 2
+    finally:
+        idu_mod.reset_idu_memo()
+
+
 def test_idu_sends_the_key_as_client_id_from_the_environment(con, rulebook, monkeypatch):
     monkeypatch.setenv("IDMC_API_KEY", "idmc-secret")
     seen = {}
@@ -802,6 +828,65 @@ def test_gdacs_fetch_survives_one_malformed_event(con, rulebook, monkeypatch):
     assert outcome.ok is True
     assert outcome.records == 1
     assert outcome.detail["events_skipped_malformed"] == 1
+
+
+class TestNoCeilingHazardsDoNotAskForExposure:
+    """Flood takes no GDACS ceiling, so its exposure figure is discarded.
+
+    In run 36401252026 all 131 refused per-event requests, and all 131
+    `geteventdata` follow-ups, were flood events. An event discovery has
+    already placed is not asked about at all; one it has not placed is,
+    because the per-event RSS can supply its country.
+    """
+
+    @staticmethod
+    def _run(con, rulebook, monkeypatch, hazard, events):
+        asked: list[str] = []
+
+        class Recorder:
+            def _search_events(self, *a, **kw):
+                return [dict(e) for e in events]
+
+            def _enrich_with_population(
+                self, session, evs, delay, name_to_iso3, **_kwargs
+            ):
+                asked.extend(str(e["eventid"]) for e in evs)
+                return evs
+
+        from resolver.connectors import gdacs as core
+
+        monkeypatch.setattr(core, "GdacsConnector", Recorder)
+        monkeypatch.setattr(core, "_build_session", lambda: object())
+        monkeypatch.setattr(core, "_load_countries", lambda: ({}, {}))
+        monkeypatch.setattr(
+            gdacs_mod, "seed_exposure_memo_from_static_feed", lambda *a, **k: 0
+        )
+        outcome = gdacs_mod.fetch_gdacs_events(con, "2024-03", hazard, rulebook)
+        return outcome, asked
+
+    PLACED = {
+        "eventid": "1", "eventtype": "FL", "iso3": "PHL", "iso3_list": ["PHL"],
+        "fromdate": "2024-03-05", "todate": "2024-03-09", "alertlevel": "Orange",
+    }
+    UNPLACED = {
+        "eventid": "2", "eventtype": "FL", "iso3": "", "iso3_list": [],
+        "fromdate": "2024-03-05", "todate": "2024-03-09", "alertlevel": "Orange",
+    }
+
+    def test_a_placed_flood_event_is_not_enriched(self, con, rulebook, monkeypatch):
+        outcome, asked = self._run(
+            con, rulebook, monkeypatch, "FL", [self.PLACED, self.UNPLACED]
+        )
+        assert asked == ["2"], "only the event with nowhere to put it is asked"
+        assert outcome.ok is True
+        assert outcome.detail["events_enrichment_skipped_no_ceiling"] == 1
+        assert outcome.detail["events_discovered"] == 2
+
+    def test_a_cyclone_event_is_still_enriched(self, con, rulebook, monkeypatch):
+        tc = {**self.PLACED, "eventtype": "TC"}
+        outcome, asked = self._run(con, rulebook, monkeypatch, "TC", [tc])
+        assert asked == ["1"], "cyclone keeps its GDACS ceiling, so it asks"
+        assert outcome.detail["events_enrichment_skipped_no_ceiling"] == 0
 
 
 # ---------------------------------------------------------------------------

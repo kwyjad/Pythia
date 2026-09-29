@@ -479,6 +479,34 @@ def test_the_ledger_records_extraction_spend_and_frozen_skips(con, rulebook):
     assert cost == pytest.approx(0.03)
 
 
+def test_month_counts_separates_this_runs_spend_from_the_months_total(con):
+    """A live month is re-walked every run, so its cumulative spend is not
+    this run's. The 28 Sept 2026 flood summary reported 844 calls and $1.59
+    where 12 calls and $0.02 were billed that day."""
+
+    con.execute(
+        """
+        INSERT INTO haz_doc_extractions
+            (doc_id, iso3, year, month, hazard, model, prompt_version, status,
+             figures_json, prompt_tokens, completion_tokens, cost_usd, created_at)
+        VALUES
+            ('old', 'PHL', 2026, 7, 'FL', 'm', 'v2', 'ok', '{}', 6000, 200, 0.50,
+             TIMESTAMP '2026-09-01 04:00:00'),
+            ('new', 'PHL', 2026, 7, 'FL', 'm', 'v2', 'ok', '{}', 6000, 200, 0.02,
+             TIMESTAMP '2026-09-28 10:00:00'),
+            ('cached', 'PHL', 2026, 7, 'FL', 'm', 'v2', 'error', '{}', 0, 0, 0.0,
+             TIMESTAMP '2026-09-28 10:05:00')
+        """
+    )
+    started = dt.datetime(2026, 9, 28, 9, 0, tzinfo=dt.timezone.utc)
+    counts = bc.month_counts(con, "FL", "2026-07", since=started)
+    assert counts["extraction_calls"] == 2
+    assert counts["extraction_calls_this_run"] == 1
+    assert counts["extraction_cost_usd_this_run"] == pytest.approx(0.02)
+    # Without a bound the shape is what the backcast ledger has always read.
+    assert "extraction_calls_this_run" not in bc.month_counts(con, "FL", "2026-07")
+
+
 def test_time_budget_defers_cleanly_and_resumes(con, rulebook):
     """A spent time budget defers months (exit-0 semantics), never fails them."""
 

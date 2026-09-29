@@ -52,6 +52,10 @@ LOG = logging.getLogger(__name__)
 TRIGGER_SOURCE_IBTRACS = "ibtracs"
 TRIGGER_SOURCE_GDACS = "gdacs"
 TRIGGER_SOURCE_RELIEFWEB = "reliefweb_sweep"
+#: A sweep hit CONFIRMED by the ladder: reports exist, and one of them (or
+#: IFRC GO, IDMC, EM-DAT) states an admissible figure about this country and
+#: month. Counted as an occurrence, unlike a bare sweep hit.
+TRIGGER_SOURCE_RELIEFWEB_LADDER = "reliefweb_ladder"
 TRIGGER_SOURCE_NONE = "none"
 
 _WIND_COLUMNS = {
@@ -536,6 +540,74 @@ def record_sweep_hit(
         WHERE hazard = ? AND iso3 = ? AND year = ? AND month = ?
         """,
         [json.dumps(detail), hazard, iso3, year, month],
+    )
+
+
+def sweep_hit_iso3s(
+    con: "duckdb.DuckDBPyConnection", ym: str, hazard: str
+) -> list[str]:
+    """Countries the detector did not trigger but the ReliefWeb sweep hit.
+
+    The sweep's verdict lives in ``trigger_detail_json.reliefweb_sweep``
+    (written by :func:`record_sweep_hit`); an inconclusive sweep is not a hit.
+    """
+
+    year, month = ym_to_year_month(ym)
+    rows = con.execute(
+        """
+        SELECT iso3 FROM haz_triggers
+        WHERE hazard = ? AND year = ? AND month = ?
+          AND NOT COALESCE(triggered, FALSE)
+          AND json_extract_string(trigger_detail_json, '$.reliefweb_sweep.silent') = 'false'
+          AND COALESCE(
+                json_extract_string(trigger_detail_json, '$.reliefweb_sweep.inconclusive'),
+                'false') = 'false'
+        ORDER BY iso3
+        """,
+        [hazard, year, month],
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def promote_on_ladder_evidence(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    hazard: str,
+    iso3: str,
+    ym: str,
+    confirmation: dict,
+) -> None:
+    """Mark a sweep-hit cell as triggered because the ladder confirmed it.
+
+    A bare sweep hit disproves absence and asserts nothing more. A sweep hit
+    beside an admissible figure — quote-verified, from a document about this
+    country and this month, or a record from IFRC GO, IDMC or EM-DAT — is
+    evidence that the hazard happened here, and the cell is counted as an
+    occurrence. The reason a cell had no row goes, because now it has one.
+    """
+
+    year, month = ym_to_year_month(ym)
+    row = con.execute(
+        """
+        SELECT trigger_detail_json FROM haz_triggers
+        WHERE hazard = ? AND iso3 = ? AND year = ? AND month = ?
+        """,
+        [hazard, iso3, year, month],
+    ).fetchone()
+    if row is None:
+        return
+    detail = json.loads(row[0]) if row[0] else {}
+    detail.pop("no_row_reason", None)
+    detail.pop("no_row_note", None)
+    detail["ladder_confirmation"] = confirmation
+    con.execute(
+        """
+        UPDATE haz_triggers
+        SET triggered = TRUE, trigger_source = ?, trigger_detail_json = ?
+        WHERE hazard = ? AND iso3 = ? AND year = ? AND month = ?
+        """,
+        [TRIGGER_SOURCE_RELIEFWEB_LADDER, json.dumps(detail),
+         hazard, iso3, year, month],
     )
 
 

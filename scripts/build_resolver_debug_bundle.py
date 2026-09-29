@@ -2102,6 +2102,28 @@ class BundleBuilder:
     #: ladder is where the machine reads what people reported.
     _SHARE_EXHAUSTION_ALARM_DAY = 25
 
+    #: The monthly spend the extraction caps are sized to (the rulebook's
+    #: `extraction` block states the same figure in prose).
+    _EXTRACTION_USD_CEILING = 50.0
+
+    def _observed_cost_per_call(self) -> float | None:
+        """Mean cost of a BILLED extraction over the last 30 days, or None."""
+
+        result = self.query(
+            """
+            SELECT SUM(COALESCE(cost_usd, 0)), COUNT(*)
+            FROM haz_doc_extractions
+            WHERE COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) > 0
+              AND created_at >= CURRENT_TIMESTAMP - INTERVAL 30 DAY
+            """
+        )
+        if not result or not result[1]:
+            return None
+        cost, calls = result[1][0]
+        if not calls:
+            return None
+        return float(cost or 0.0) / int(calls)
+
     def _report_extraction_headroom(self, caps: dict[str, Any]) -> None:
         """Carry the budget into the register: `info`, or `degraded` when raced."""
 
@@ -2158,6 +2180,30 @@ class BundleBuilder:
                 f"{headroom.get('backcast_daily_ceiling')}"
                 f"; binding limit {headroom['binding_limit']}"
             )
+        # The caps were once sized from a guessed price (USD 0.009 a call)
+        # four times the real one, which starved the backcast for nothing.
+        # They are sized from the ledger now, so the ledger also says when a
+        # price change makes the cap dearer than the ceiling it was sized to.
+        price = self._observed_cost_per_call()
+        if price is not None:
+            implied = price * int(total)
+            evidence += (
+                f"; observed USD {price:.4f} a billed call over 30 days, so the "
+                f"monthly cap implies USD {implied:.2f} against a USD "
+                f"{self._EXTRACTION_USD_CEILING:.0f} ceiling"
+            )
+            if implied > self._EXTRACTION_USD_CEILING:
+                self.extra_issues.append(issue_sources.issue_from_measurement(
+                    "extraction_cap_exceeds_cost_ceiling",
+                    f"At the observed price the extraction cap of {int(total):,} "
+                    f"calls would cost USD {implied:.2f} a month, above the USD "
+                    f"{self._EXTRACTION_USD_CEILING:.0f} the rulebook sizes it to.",
+                    severity=issues_mod.DEGRADED,
+                    evidence=evidence,
+                    cost=round(implied - self._EXTRACTION_USD_CEILING, 2),
+                    cost_unit="USD a month over the ceiling",
+                    source="hazard/extraction_budget.csv",
+                ))
         self.extra_issues.append(issue_sources.issue_from_measurement(
             "extraction_budget_headroom",
             "Extraction budget headroom, monthly and daily.",
@@ -2380,6 +2426,7 @@ class BundleBuilder:
             self._check_nmme_read_when_table_covers_month,
             self._check_no_zero_rests_on_one_feed,
             self._check_no_drought_verdict_for_a_month_in_progress,
+            self._check_no_row_beside_an_unconfirmed_sweep_hit,
             self._check_no_future_publication_date,
             self._check_declared_active_tables_hold_rows,
             self._check_emdat_read_when_enabled,
@@ -3867,9 +3914,17 @@ class BundleBuilder:
             # `population_share`), while `source` names the GDACS event the
             # figure came from. Only the first answers "which fix does this
             # row belong to".
-            basis = str(columns.get("ceiling_basis") or "") or "(none recorded)"
+            basis = str(columns.get("ceiling_basis") or "")
+            if not basis and str(columns.get("ceiling_source") or "") == "gdacs_exposed":
+                # A row written before `basis` existed carries the bound in
+                # `source`, which then held the `sanity.ceiling_source`
+                # constant. Read without this, all 1,807 pre-fix flood
+                # breaches of run 36401252026 counted as the LIVE residual,
+                # and the register reported 56% where the truth was ~2%.
+                basis = "gdacs_exposed (legacy row)"
+            basis = basis or "(none recorded)"
             by_basis[basis] = by_basis.get(basis, 0) + 1
-            if hazard == "FL" and basis == "gdacs_exposed":
+            if hazard == "FL" and basis.startswith("gdacs_exposed"):
                 flood_pre_fix += 1
         if not by_hazard:
             return ""
@@ -4353,6 +4408,49 @@ class BundleBuilder:
             or "No drought row for a month that has not ended.",
         )
 
+    def _check_no_row_beside_an_unconfirmed_sweep_hit(self) -> None:
+        """An undecided sweep-hit cell carries no row unless it is frozen.
+
+        Run 36401252026 held 94 live flood and cyclone rows written before
+        the 17 Sept 2026 sweep fix beside trigger rows saying the cell was
+        undecided. A sweep hit the ladder confirms is promoted to triggered;
+        one it does not confirm has its unfrozen row retracted. What is left
+        here is a contradiction, and a frozen one is reported, not failed.
+        """
+
+        name = "no_resolution_beside_an_unconfirmed_sweep_hit"
+        if not {"haz_resolutions", "haz_triggers"} <= self.tables():
+            return self._check(name, "SKIP", "", "", "machine tables absent")
+        rows = self.query(
+            """
+            SELECT r.hazard, printf('%04d-%02d', r.year, r.month) AS ym,
+                   COUNT(*) AS n,
+                   SUM(CASE WHEN CAST(r.frozen_at AS DATE) < CURRENT_DATE
+                            THEN 1 ELSE 0 END) AS frozen
+            FROM haz_resolutions r
+            JOIN haz_triggers t
+              ON t.iso3 = r.iso3 AND t.hazard = r.hazard
+             AND t.year = r.year AND t.month = r.month
+            WHERE NOT COALESCE(t.triggered, FALSE)
+              AND json_extract_string(t.trigger_detail_json,
+                                      '$.reliefweb_sweep.silent') = 'false'
+              AND r.status <> 'RESOLVED_ZERO'
+            GROUP BY 1, 2 ORDER BY 2, 1
+            """
+        )
+        found = [(str(h), str(ym), int(n), int(f or 0)) for h, ym, n, f in (rows[1] if rows else [])]
+        live = sum(n - f for _h, _ym, n, f in found)
+        frozen = sum(f for *_x, f in found)
+        self._check(
+            name, "FAIL" if live else "PASS",
+            f"{live} unfrozen row(s) beside an unconfirmed sweep hit",
+            "0",
+            ("; ".join(f"{h}/{ym}: {n} ({f} frozen)" for h, ym, n, f in found[:20])
+             if found else "No row stands beside an undecided sweep-hit cell.")
+            + (f" {frozen} frozen row(s) are history the freeze guard owns."
+               if frozen else ""),
+        )
+
     def _check_no_future_publication_date(self) -> None:
         """A publication date after the run date is false in the plain sense.
 
@@ -4519,11 +4617,24 @@ class BundleBuilder:
                 AGGREGATE_MODEL_NAMES, MIN_QUESTIONS,
             )
         except Exception:  # noqa: BLE001 - the bundle must build without pythia
-            AGGREGATE_MODEL_NAMES, MIN_QUESTIONS = frozenset(), 20  # type: ignore[assignment]
+            AGGREGATE_MODEL_NAMES, MIN_QUESTIONS = frozenset({  # type: ignore[assignment]
+                "ensemble_mean_v2", "ensemble_bayesmc_v2", "track2_flash", "sibyl",
+            }), 20
         if not {"scores", "questions", "resolutions"} <= self.tables():
             return ""
+        # Member rows only, exactly as the writer counts them. With the
+        # aggregates left in, a Track-2 question scored only as
+        # `track2_flash` counted toward the pool, and run 36401252026 said
+        # "the largest pool is ACE/FATALITIES at 32" of a 20 floor beside an
+        # empty table — which reads as a writer that failed.
+        aggregates = sorted(str(n) for n in AGGREGATE_MODEL_NAMES if n)
+        exclude = ""
+        if aggregates:
+            exclude = "AND s.model_name NOT IN (" + ", ".join(
+                "'" + name.replace("'", "''") + "'" for name in aggregates
+            ) + ")"
         result = self.query(
-            """
+            f"""
             SELECT q.hazard_code, s.metric, COUNT(DISTINCT s.question_id) AS n
             FROM scores s
             JOIN questions q ON q.question_id = s.question_id
@@ -4531,6 +4642,7 @@ class BundleBuilder:
             WHERE s.score_type = 'brier'
               AND s.model_name IS NOT NULL
               AND s.model_name NOT LIKE '__ext_%'
+              {exclude}
               AND COALESCE(q.is_test, FALSE) = FALSE
             GROUP BY 1, 2 ORDER BY 3 DESC
             """
@@ -4545,9 +4657,7 @@ class BundleBuilder:
         best = [(h, m, n) for h, m, n in best if h and m]
         if not best:
             return "no scored, resolved SPD questions yet"
-        # Member-only counts: aggregate names are excluded by the writer.
         h, m, n = best[0]
-        _ = AGGREGATE_MODEL_NAMES
         return (
             f"writer needs {MIN_QUESTIONS} resolved questions per hazard/metric; "
             f"the largest pool is {h}/{m} at {n}"

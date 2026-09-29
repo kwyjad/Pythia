@@ -274,6 +274,9 @@ class Rulebook:
         "extraction.max_calls_per_month",
         "extraction.live_reserve_calls",
         "extraction.backcast_max_calls_per_month",
+        # A per-run cap stops a run early; the cells it did not reach are
+        # budget-capped (live) or deferred (backcast), never answered.
+        "extraction.max_calls_per_run",
         # Housekeeping. Storage size, not content.
         "raw_cache.compaction",
     })
@@ -537,6 +540,7 @@ def validate_rulebook(data: Mapping[str, Any]) -> list[str]:
                     f"{sweep}.{key} must be one of "
                     f"{sorted(KNOWN_SWEEP_COUNTRY_FIELDS)}, got {country_field!r}"
                 )
+        _require_bool(f"{sweep}.confirm_hits_with_ladder")
         _require_int_in(f"{sweep}.publication_pad_days", 0, 90)
         _require_int_in(f"{sweep}.max_hits_for_silence", 0, 100)
         _require_int_in(f"{sweep}.sample_size", 1, 50)

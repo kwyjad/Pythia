@@ -122,6 +122,14 @@ def _caller() -> str:
             if frame is None:
                 break
             module = frame.f_globals.get("__name__", "")
+            if module == "__main__":
+                # A connector run as `python -m resolver.ingestion.acled_client`
+                # is `__main__` to itself, and every one of its calls was
+                # attributed to "unknown" — 179 of them in run 36401252026, so
+                # a refusal there could never reach the refusal alarm. The
+                # module spec still carries the real dotted name.
+                spec = frame.f_globals.get("__spec__")
+                module = str(getattr(spec, "name", "") or "")
             if not module or module in _SKIP_MODULES:
                 continue
             root = module.split(".")[0]
