@@ -52,6 +52,7 @@ PACING = (
     "extraction.max_calls_per_month",
     "extraction.live_reserve_calls",
     "extraction.backcast_max_calls_per_month",
+    "extraction.max_calls_per_run",
 )
 
 #: Keys that decide an answer and must keep moving the digest.
@@ -291,9 +292,16 @@ SWEPT_AWAY_BY_THE_SWEEP_FIX = "29ccb0bbbe515dad"
 #: primary country moved the deciding keys a second time.
 SWEPT_AWAY_BY_THE_TAXONOMY_SCOPING = "77adeb967c90d4b3"
 
+#: And again on 2026-09-29, deliberately: `confirm_hits_with_ladder` makes a
+#: sweep-hit cell with an admissible figure an occurrence, which changes what
+#: decides a cyclone month, so the backcast re-walks it. (The same change set
+#: `extraction.max_calls_per_run`, which is a budget and excluded from the
+#: live digest but, like every key, part of the legacy one.)
+SWEPT_AWAY_BY_LADDER_CONFIRMATION = "a1779b6326ffe0e5"
+
 #: Today's pre-narrowing digest. Pinned for the same reason the values above
 #: were: an accidental move should fail here, loudly, with a diff to read.
-CURRENT_LEGACY_CYCLONE_DIGEST = "a1779b6326ffe0e5"
+CURRENT_LEGACY_CYCLONE_DIGEST = "66c76f4fb6949d2f"
 
 
 def test_the_legacy_digest_is_pinned_so_an_accidental_move_is_loud():
@@ -310,6 +318,10 @@ def test_the_legacy_digest_is_pinned_so_an_accidental_move_is_loud():
     assert (
         rb.legacy_hazard_fingerprint("cyclone")
         != SWEPT_AWAY_BY_THE_TAXONOMY_SCOPING
+    )
+    assert (
+        rb.legacy_hazard_fingerprint("cyclone")
+        != SWEPT_AWAY_BY_LADDER_CONFIRMATION
     )
 
 
@@ -380,3 +392,11 @@ def test_the_re_stamp_touches_only_its_own_hazard(con):
         "SELECT rulebook_hash FROM haz_backcast_progress WHERE hazard = 'FL'"
     ).fetchone()
     assert stored[0] == legacy_tc, "the flood ledger is not this hazard's to bless"
+
+
+def test_the_ladder_confirmation_change_leaves_drought_untouched():
+    """Drought has no sweep and no ladder, and the per-run extraction cap
+    set beside the confirmation switch is a budget. Its 114 backcast months
+    must not re-walk for a change that cannot reach them."""
+
+    assert load_rulebook().hazard_fingerprint("drought") == "fd3dd63f6d197723"

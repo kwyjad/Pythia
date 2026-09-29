@@ -40,7 +40,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 
 import requests
 
@@ -999,7 +999,128 @@ def missing_editions(months_back: int = 12) -> List[str]:
         len(months), len(months) - len(missing), len(missing),
         (" (" + ", ".join(missing) + ")") if missing else "",
     )
+    gaps = _archive_gaps(today)
+    if gaps:
+        resting = [ym for ym in missing if ym in gaps]
+        if resting:
+            log.info(
+                "CrisisWatch editions not asked for this run — %d earlier runs "
+                "each walked the archive for them and found nothing, so they "
+                "are treated as archive gaps until %d days pass: %s",
+                BACKFILL_GIVE_UP_AFTER_RUNS, BACKFILL_RETRY_AFTER_DAYS,
+                ", ".join(resting),
+            )
+        missing = [ym for ym in missing if ym not in gaps]
     return missing
+
+
+#: How many runs may walk the archive for one edition and find nothing
+#: before it is treated as a gap the archive does not hold. Run 36401252026
+#: was the fourth in a row to spend 35 downloads on 2026-05 for nothing.
+BACKFILL_GIVE_UP_AFTER_RUNS = 3
+
+#: A gap is asked about again after this long, because archive.org does
+#: occasionally surface an old capture late.
+BACKFILL_RETRY_AFTER_DAYS = 90
+
+_ATTEMPTS_TABLE = "crisiswatch_backfill_attempts"
+
+
+def _ensure_attempts_table(con: Any) -> None:
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_ATTEMPTS_TABLE} (
+            edition TEXT PRIMARY KEY,
+            attempts INTEGER NOT NULL,
+            last_attempt DATE NOT NULL
+        )
+        """
+    )
+
+
+def _archive_gaps(today: Any) -> set:
+    """Editions the backfill has given up on for now. Never raises."""
+
+    try:
+        from pythia.db.schema import connect
+
+        con = connect(read_only=False)
+    except Exception:  # noqa: BLE001 - no table, no gaps: ask as before
+        return set()
+    try:
+        rows = con.execute(
+            f"SELECT edition, attempts, last_attempt FROM {_ATTEMPTS_TABLE}"
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - the table appears on the first attempt
+        return set()
+    finally:
+        try:
+            con.close()
+        except Exception:  # noqa: BLE001
+            pass
+    gaps = set()
+    for edition, attempts, last_attempt in rows:
+        if int(attempts or 0) < BACKFILL_GIVE_UP_AFTER_RUNS or last_attempt is None:
+            continue
+        if (today - last_attempt).days < BACKFILL_RETRY_AFTER_DAYS:
+            gaps.add(str(edition))
+    return gaps
+
+
+def record_backfill_attempts(wanted: Iterable[str], today: Any | None = None) -> Dict[str, int]:
+    """Count one more fruitless walk for each wanted edition still absent.
+
+    An edition the table now holds is forgotten; one it still lacks gains an
+    attempt. Never raises; returns ``{"recovered": n, "still_missing": n}``.
+    """
+
+    editions = [str(e).strip() for e in wanted if str(e).strip()]
+    outcome = {"recovered": 0, "still_missing": 0}
+    if not editions:
+        return outcome
+    today = today or datetime.now(timezone.utc).date()
+    try:
+        from pythia.db.schema import connect
+
+        con = connect(read_only=False)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not record CrisisWatch backfill attempts: %s", exc)
+        return outcome
+    try:
+        _ensure_attempts_table(con)
+        present = {
+            f"{int(y):04d}-{int(m):02d}"
+            for y, m in con.execute(
+                "SELECT DISTINCT year, month FROM crisiswatch_entries"
+            ).fetchall()
+            if y and m
+        }
+        for edition in editions:
+            if edition in present:
+                con.execute(
+                    f"DELETE FROM {_ATTEMPTS_TABLE} WHERE edition = ?", [edition]
+                )
+                outcome["recovered"] += 1
+                continue
+            con.execute(
+                f"""
+                INSERT INTO {_ATTEMPTS_TABLE} (edition, attempts, last_attempt)
+                VALUES (?, 1, ?)
+                ON CONFLICT (edition) DO UPDATE
+                SET attempts = {_ATTEMPTS_TABLE}.attempts + 1,
+                    last_attempt = excluded.last_attempt
+                """,
+                [edition, today],
+            )
+            outcome["still_missing"] += 1
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not record CrisisWatch backfill attempts: %s", exc)
+    finally:
+        try:
+            con.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return outcome
 
 
 def store_backfilled_editions(directory: Path | str | None = None) -> Dict[str, Any]:

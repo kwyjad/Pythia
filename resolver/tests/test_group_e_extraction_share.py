@@ -95,7 +95,9 @@ def test_the_rulebook_default_is_not_raised():
     total = int(rb.get("extraction.max_calls_per_month"))
     share = int(rb.get("extraction.backcast_max_calls_per_month"))
     reserve = int(rb.get("extraction.live_reserve_calls"))
-    assert share == 2000, "the backcast's standing share must stay where it was"
+    # 8000 since 2026-09-29, a deliberate re-sizing from the ledger's price
+    # (owner decision), not a backlog cleared by editing the standing policy.
+    assert share == 8000, "the backcast's standing share must stay where it was"
     assert reserve + share <= total, "the reserve must still fit beside the share"
 
 
@@ -114,12 +116,18 @@ def test_load_budget_honours_the_override(monkeypatch, tmp_path):
     monkeypatch.delenv(SHARE_OVERRIDE_ENV, raising=False)
     plain = ex.load_budget(con, rb, run_type="backcast")
 
-    monkeypatch.setenv(SHARE_OVERRIDE_ENV, "2400")
+    monkeypatch.setenv(SHARE_OVERRIDE_ENV, "8500")
     raised = ex.load_budget(con, rb, run_type="backcast")
 
-    assert raised.backcast_max_calls_per_month == 2400
-    assert plain.backcast_max_calls_per_month == 2000
-    assert raised.remaining > plain.remaining, "the raise must buy calls"
+    assert raised.backcast_max_calls_per_month == 8500
+    assert plain.backcast_max_calls_per_month == 8000
+    # Compared on the SHARE's headroom: since 2026-09-29 the shipped
+    # 800-call per-run cap binds `remaining` for both, which says nothing
+    # about whether the raise bought share.
+    assert (
+        raised.headroom()["backcast_share_headroom"]
+        > plain.headroom()["backcast_share_headroom"]
+    ), "the raise must buy calls"
 
 
 def test_a_live_run_ignores_the_override(monkeypatch, tmp_path):

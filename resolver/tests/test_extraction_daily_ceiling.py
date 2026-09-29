@@ -176,7 +176,7 @@ class TestTheOneDispatchOverride:
 class TestItReachesTheRegister:
     """A budget nobody reads is a budget that races again next month."""
 
-    def _bundle_register(self, tmp_path, rows):
+    def _bundle_register(self, tmp_path, rows, cost=0.009):
         duckdb = pytest.importorskip("duckdb")
         from scripts import build_resolver_debug_bundle as bundle
 
@@ -188,13 +188,12 @@ class TestItReachesTheRegister:
             "month INTEGER, status TEXT, run_type TEXT, prompt_tokens INTEGER, "
             "completion_tokens INTEGER, cost_usd DOUBLE, created_at TIMESTAMP)"
         )
-        for i in range(rows):
-            con.execute(
-                "INSERT INTO haz_doc_extractions VALUES "
-                "(?, 'haiku', 'v1', 'PHL', 'FL', 2026, 9, 'ok', 'backcast', "
-                "100, 100, 0.009, CURRENT_TIMESTAMP)",
-                [f"rw-{i}"],
-            )
+        con.execute(
+            "INSERT INTO haz_doc_extractions "
+            "SELECT 'rw-' || i, 'haiku', 'v1', 'PHL', 'FL', 2026, 9, 'ok', "
+            "'backcast', 100, 100, ?, CURRENT_TIMESTAMP FROM range(?) t(i)",
+            [cost, rows],
+        )
         con.close()
         diagnostics = tmp_path / "diagnostics"
         diagnostics.mkdir()
@@ -208,7 +207,7 @@ class TestItReachesTheRegister:
         register = self._bundle_register(tmp_path, rows=5)
         issue = next(i for i in register.issues if i.id == "extraction_budget_headroom")
         assert issue.severity == "info"
-        assert "backcast share 5 of 2000" in issue.evidence
+        assert "backcast share 5 of 8000" in issue.evidence
         # The reporter reads the budget's own definition of headroom rather
         # than re-deriving one, so it can name the limit that would bind.
         assert "binding limit" in issue.evidence
@@ -226,9 +225,30 @@ class TestItReachesTheRegister:
                 return cls(2026, 9, 8)
 
         monkeypatch.setattr(bundle.dt, "date", _Mid)
-        register = self._bundle_register(tmp_path, rows=2000)
+        register = self._bundle_register(tmp_path, rows=8000, cost=0.002)
         issue = next(
             i for i in register.issues if i.id == "backcast_extraction_share_raced"
         )
         assert issue.severity == "degraded"
         assert issue.cost == 22  # days of September left with no extraction
+
+    def test_a_price_that_makes_the_cap_dearer_than_its_ceiling_is_degraded(
+        self, tmp_path
+    ):
+        """The caps are sized from the ledger's own price. A price rise that
+        pushes the cap past the USD 50 it was sized to must say so."""
+
+        register = self._bundle_register(tmp_path, rows=5, cost=0.009)
+        issue = next(
+            i for i in register.issues
+            if i.id == "extraction_cap_exceeds_cost_ceiling"
+        )
+        assert issue.severity == "degraded"
+        assert "USD 108.00" in issue.title
+
+    def test_the_observed_price_is_stated_and_quiet_under_the_ceiling(self, tmp_path):
+        register = self._bundle_register(tmp_path, rows=5, cost=0.002)
+        ids = {i.id for i in register.issues}
+        assert "extraction_cap_exceeds_cost_ceiling" not in ids
+        issue = next(i for i in register.issues if i.id == "extraction_budget_headroom")
+        assert "observed USD 0.0020 a billed call" in issue.evidence

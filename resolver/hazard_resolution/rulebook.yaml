@@ -61,6 +61,14 @@ cyclone:
     taxonomy_country_field: "primary_country.iso3"
     keyword_fields: ["title"]
     keyword_country_field: "primary_country.iso3"
+    # A sweep hit disproves absence and asserts nothing more. When this is
+    # true the ladder is walked for sweep-hit cells too, and one that yields
+    # an admissible figure (a quote-verified figure from a document about
+    # this country and window, or an IFRC GO / IDMC / EM-DAT record) is
+    # promoted to triggered with trigger_source `reliefweb_ladder` and counted
+    # as an occurrence. A hit the ladder cannot confirm stays undecided and
+    # writes nothing. Deciding, so it moves the fingerprint and re-walks.
+    confirm_hits_with_ladder: true
     # Sweep window: month start .. month end + publication_pad_days
     # (reports about a late-month landfall publish into the next month).
     publication_pad_days: 14
@@ -129,6 +137,8 @@ flood:
     taxonomy_country_field: "primary_country.iso3"
     keyword_fields: ["title"]
     keyword_country_field: "primary_country.iso3"
+    # Confirmation by the ladder — see the cyclone block.
+    confirm_hits_with_ladder: true
     publication_pad_days: 14
     max_hits_for_silence: 0
     sample_size: 5
@@ -908,14 +918,15 @@ reliefweb:
 # which model backs that role. Putting an id here would fork the repo's
 # single source of truth for model choice.
 #
-# Cost arithmetic at the shipped defaults: a Haiku-class call over a
-# 24,000-character document is roughly 6k input + 500 output tokens, about
-# USD 0.009. max_calls_per_month = 3000 therefore caps LLM spend near
-# USD 28/month, inside the USD 50 ceiling. Every other source in the
-# machine is free. (Raised from 1500 on 2026-08-26: the nightly backcast
-# shares this calendar-month cap with the live trailing-window runs and had
-# consumed all 1500 August calls by mid-month, leaving the first live
-# resolver_update run zero extraction budget — owner decision to double it.)
+# Cost arithmetic, from the LEDGER (Sept 2026): 5,665 billed calls from
+# August to 28 September cost USD 10.36, i.e. USD 0.0018 a call. The caps were
+# first sized from a guessed USD 0.009, four times the real price, and the
+# backcast share bound on 1 September with 70 cells deferred while live runs
+# used 480 of their 1,500 reserve. Sized now at USD 0.0025 a call (headroom
+# for a price rise) against the USD 50 ceiling: 12,000 calls ~ USD 30/month.
+# The resolver debug bundle reprices the cap from the ledger every run and
+# raises `extraction_cap_exceeds_cost_ceiling` if a price change pushes it
+# over. Every other source in the machine is free.
 # ---------------------------------------------------------------------------
 extraction:
   enabled: true
@@ -942,12 +953,10 @@ extraction:
   # instead of quietly spending. Cells skipped by the cap record
   # extraction_budget_capped in their provenance; they are never silently
   # treated as "ReliefWeb had nothing".
-  # Raised 3000 -> 4000 in Sept 2026. The August split gave the live pass a
-  # 1000-call reserve and cyclone August exhausted it partway through,
-  # stopping at Jamaica with documents fetched and never read. At roughly
-  # USD 0.009 a call this is about USD 36/month, still inside the USD 50
-  # ceiling above.
-  max_calls_per_month: 4000
+  # 3000 -> 4000 in Sept 2026 (cyclone August ran out at Jamaica), then
+  # 4000 -> 12000 on 2026-09-29 once the ledger showed the real price —
+  # see the cost arithmetic above.
+  max_calls_per_month: 12000
 
   # Calls the backcast may NEVER take, whatever its own share says.
   #
@@ -959,12 +968,18 @@ extraction:
   # monthly remainder says. Rung 2 reads documents one at a time (~2.5 s a
   # call), so a live pass handed 2,000 calls runs ~85 minutes and a workflow
   # step that kills it records nothing — a budget stop is recorded per cell.
-  # Absent by default; set it when a step budget binds.
+  # Set to 800 on 2026-09-29: sweep-hit confirmation adds cells to the live
+  # ladder, and 800 calls at ~2.5 s fit inside the 90-minute Phase 2.5 step
+  # beside the rest of a hazard's pass.
   # live_reserve_calls + backcast_max_calls_per_month <= max_calls_per_month.
   #
   # Sized for the live pass: three hazards over the trailing three unfrozen
   # months, which is what resolver_update Phase 2.5 runs on the 28th.
-  live_reserve_calls: 1500
+  # 1500 -> 3000 on 2026-09-29: sweep-hit cells are now walked by the live
+  # ladder too (reliefweb_sweep.confirm_hits_with_ladder), which reads
+  # documents a bare trigger pass did not.
+  live_reserve_calls: 3000
+  max_calls_per_run: 800
   # The nightly backcast's share of that monthly total (it is a carve-out,
   # never an addition — the validator enforces sub-cap <= total). The live
   # trailing-window runs check only the total, so the difference is in
@@ -975,7 +990,7 @@ extraction:
   # still converging. Pre-split ledger rows carry run_type NULL and count
   # against the backcast share — every one of them was backcast-created
   # (the live path first runs 2026-08-28).
-  backcast_max_calls_per_month: 2000
+  backcast_max_calls_per_month: 8000
   # Skip extraction for a cell whose HIGHER ladder rung already has a
   # figure. reliefweb_extracted sits below emdat, so it cannot win those
   # cells — reading them buys only adjacent-rung conflict flags, at roughly

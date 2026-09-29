@@ -40,7 +40,10 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from resolver.hazard_resolution.rulebook import Rulebook
-from resolver.hazard_resolution.rules import event_months
+from resolver.hazard_resolution.rules import (
+    NO_POPULATION_EXPOSURE_HAZARDS,
+    event_months,
+)
 from resolver.hazard_resolution.sources import (
     FetchOutcome,
     RawRecord,
@@ -545,6 +548,20 @@ def _carry_forward_exposure(
     return filled
 
 
+def _event_is_placed(event: dict[str, Any]) -> bool:
+    """Does discovery already say where this event is?
+
+    A stated country, or a position the geometry fallback can place. Only an
+    event with neither needs the per-event RSS for anything but exposure.
+    """
+
+    if str(event.get("iso3") or "").strip():
+        return True
+    if any(str(code or "").strip() for code in (event.get("iso3_list") or [])):
+        return True
+    return event.get("lat") is not None and event.get("lon") is not None
+
+
 def fetch_gdacs_events(
     con: "duckdb.DuckDBPyConnection",
     ym: str,
@@ -574,21 +591,44 @@ def fetch_gdacs_events(
         events = connector._search_events(
             session, start, end, delay, event_types=[hazard]
         )
+        # A hazard that takes no GDACS ceiling has no use for the exposure
+        # figure, and asking for it was most of this fetch's traffic: in run
+        # 36401252026 all 131 refused per-event requests and all 131
+        # `geteventdata` follow-ups were flood events, whose figure
+        # `usable_exposure` then discards. Only an event that still needs
+        # PLACING (no country, no coordinates) is enriched, because the RSS
+        # can also supply those.
+        no_ceiling = str(hazard).upper() in NO_POPULATION_EXPOSURE_HAZARDS
+        skipped_enrichment = 0
+        if no_ceiling:
+            placed = [e for e in events if _event_is_placed(e)]
+            events = [e for e in events if not _event_is_placed(e)]
+            skipped_enrichment = len(placed)
+        else:
+            placed = []
         # Discovery carries no exposure figure; the per-event RSS does. But
         # ask only for the ones we do not already have. An event that ended
         # more than `exposure_refresh_days` ago has a settled figure, so the
         # cache answers for it and no request is spent.
-        seeded = seed_exposure_memo(
-            con, refresh_days=_exposure_refresh_days(rulebook)
+        seeded = (
+            {"seeded": 0, "still_live": 0, "no_usable_figure": 0}
+            if no_ceiling and not events
+            else seed_exposure_memo(
+                con, refresh_days=_exposure_refresh_days(rulebook)
+            )
         )
         # Then the 3-month feed, which states an exposure for every event it
         # lists in one request. It runs second so its live figure wins over
         # the cache's stored one where both answer; a window it cannot cover
         # costs no request at all.
-        from_feed = seed_exposure_memo_from_static_feed(
-            hazard, window_end=end, session=session
+        from_feed = (
+            {"listed": 0, "seeded": 0, "no_usable_figure": 0}
+            if no_ceiling and not events
+            else seed_exposure_memo_from_static_feed(
+                hazard, window_end=end, session=session
+            )
         )
-        events = connector._enrich_with_population(
+        events = placed + connector._enrich_with_population(
             session, events, delay, name_to_iso3,
             # The rulebook owns the pacing it claims to own.
             workers=_rb_int(rulebook, "flood.gdacs.enrich_workers", 1),
@@ -656,6 +696,9 @@ def fetch_gdacs_events(
         "events_discovered": len(events),
         "events_skipped_malformed": skipped_malformed,
         "events_enrichment_refused": refused,
+        # Events a no-ceiling hazard did not ask GDACS about at all, because
+        # the figure would be discarded and the event was already placed.
+        "events_enrichment_skipped_no_ceiling": skipped_enrichment,
         # Answered from the cache without a request. The number that says
         # whether the cache-first read is doing its job.
         "events_exposure_from_cache": from_cache,

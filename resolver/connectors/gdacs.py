@@ -1670,11 +1670,17 @@ class GdacsConnector:
                     )
             if not iso3_list:
                 self.events_without_country.append(f"{ev['eventtype']}-{ev['eventid']}")
-                LOG.warning(
+                # An event WITH a position that lands on no country is a
+                # storm at sea — the ordinary case, counted and named at INFO
+                # as the machine path does, or a reader learns to skip the
+                # warnings. One with no position at all is a feed fault.
+                at_sea = ev.get("lat") is not None and ev.get("lon") is not None
+                (LOG.info if at_sea else LOG.warning)(
                     "[gdacs] cannot resolve country for event %s/%s (country=%r, "
-                    "lat=%r, lon=%r) — dropped",
+                    "lat=%r, lon=%r) — dropped%s",
                     ev["eventtype"], ev["eventid"], ev.get("country"),
                     ev.get("lat"), ev.get("lon"),
+                    " (at sea, beyond the attribution radius)" if at_sea else "",
                 )
                 continue
 

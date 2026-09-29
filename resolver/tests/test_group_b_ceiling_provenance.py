@@ -465,6 +465,40 @@ def test_the_pre_fix_share_is_named_apart_from_the_live_residual(tmp_path):
     assert issue.cost == 20.0
 
 
+def test_a_legacy_row_naming_the_bound_in_source_counts_as_pre_fix(tmp_path):
+    """Rows written before `basis` existed carry the bound in `source`.
+
+    Run 36401252026 held 1,807 such flood rows; read by `basis` alone every
+    one of them landed in the live residual, and the register reported a
+    56% residual where the truth was about 2%."""
+
+    legacy = json.dumps({"decision": {
+        "flags": ["ceiling_exceeded"],
+        "ceiling": {"exposed_population": 900.0, "source": "gdacs_exposed"},
+    }})
+    current = json.dumps({"decision": {
+        "flags": ["ceiling_exceeded"],
+        "ceiling": {"exposed_population": 900.0, "basis": "population_share",
+                    "source": "haz_raw_population"},
+    }})
+    builder = _bundle_over(
+        tmp_path,
+        [("PHL", "FL", 2024, 3, "RESOLVED_VALUE", 40_000.0, True, legacy),
+         ("BGD", "FL", 2024, 4, "RESOLVED_VALUE", 40_000.0, True, legacy),
+         ("VNM", "FL", 2024, 6, "RESOLVED_VALUE", 40_000.0, True, current),
+         ("THA", "FL", 2024, 7, "RESOLVED_VALUE", 1_000.0, False, "{}")],
+    )
+    builder._check_flagged_resolutions_name_their_flag()
+    detail = _verdict(builder, CHECK)["detail"]
+    assert "2 were" in detail and "predate the fix" in detail
+    assert "live residual of 1 (25.0%)" in detail
+    assert "gdacs_exposed (legacy row) 2" in detail
+    issue = next(
+        i for i in builder.extra_issues if i.id == "flood_ceiling_exceeded_rate"
+    )
+    assert issue.cost == 25.0
+
+
 def test_a_flood_rate_with_no_denominator_says_so_rather_than_dividing(tmp_path):
     """Every flood row flagged and none resolved to a value is possible on a
     scoped run. Printing a rate there would be inventing one."""

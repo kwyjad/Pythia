@@ -258,3 +258,37 @@ def test_a_vintage_the_archive_lacks_is_named_not_raised(monkeypatch):
     assert set(out["absent"]) == {"202605", "202606"}
     assert out["rows_written"] == 0
     assert out["failed"] == {}
+
+
+def test_a_vintage_already_held_is_not_fetched_again(monkeypatch):
+    """CPC does not revise a published issue. Run 36401252026 re-downloaded
+    all twelve vintages and merged each onto itself with a delta of zero."""
+
+    import duckdb as _duckdb
+
+    from resolver.tools import ingest_nmme
+
+    con = _duckdb.connect()
+    con.execute(
+        "CREATE TABLE seasonal_forecasts (iso3 TEXT, variable TEXT, "
+        "lead_months INTEGER, forecast_issue_date DATE, value DOUBLE)"
+    )
+    con.execute(
+        "INSERT INTO seasonal_forecasts VALUES "
+        "('KEN','prate',1,DATE '2026-05-01',0.1), "
+        "('KEN','tmp2m',1,DATE '2026-05-01',0.2), "
+        # A partial vintage (one variable) is fetched again.
+        "('KEN','prate',1,DATE '2026-06-01',0.1)"
+    )
+    asked: list[str] = []
+
+    def _fetch(year_month, max_leads):
+        asked.append(year_month)
+        raise FileNotFoundError("not held")
+
+    monkeypatch.setattr("resolver.ingestion.nmme.fetch_and_process", _fetch)
+    out = ingest_nmme._backfill_earlier_issues(
+        con=con, months=2, newest_issue="2026-07-08", max_leads=7
+    )
+    assert asked == ["202606"]
+    assert out["already_held"] == ["202605"]

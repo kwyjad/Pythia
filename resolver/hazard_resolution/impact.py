@@ -84,6 +84,14 @@ class LadderRun:
     #: Cells reconciled with ceiling basis "none": no positive GDACS
     #: exposure and no population denominator, so no sanity bound at all.
     no_ceiling: int = 0
+    #: Sweep-hit cells the ladder confirmed with an admissible figure, and
+    #: so promoted to triggered (see :func:`resolve_triggered_cells`).
+    confirmed: int = 0
+    #: Sweep-hit cells the ladder could not confirm: no row, still undecided.
+    unconfirmed: int = 0
+    #: Unfrozen rows an unconfirmed cell carried from before the 17 Sept
+    #: 2026 sweep fix, deleted because nothing now supports them.
+    retracted: int = 0
 
     @property
     def unavailable_sources(self) -> list[str]:
@@ -406,10 +414,21 @@ def resolve_triggered_cells(
     call: "extract_mod.CallFn | None" = None,
     post: Any = None,
     run_type: str = RUN_TYPE_LIVE,
+    confirm_iso3s: list[str] | None = None,
 ) -> LadderRun:
-    """Walk the ladder for every triggered cell in ``iso3s``."""
+    """Walk the ladder for every triggered cell in ``iso3s``.
+
+    ``confirm_iso3s`` are cells the detector did NOT trigger and the
+    ReliefWeb sweep hit. The ladder is walked for them too, but only a
+    RESOLVED_VALUE is written: it is evidence that the hazard happened here,
+    so the trigger row is promoted (``reliefweb_ladder``). Anything short of
+    a figure writes nothing — never a NO_DATA, which would assert a
+    detection nobody made — and an unfrozen row left from before the
+    17 Sept 2026 sweep fix is retracted, because nothing supports it now.
+    """
 
     ensure_haz_schema(con)
+    confirm = {str(c).upper() for c in (confirm_iso3s or [])}
     run = LadderRun(hazard=hazard, ym=ym, fetches=fetches or {})
     year = int(ym.split("-")[0])
     unavailable = run.unavailable_sources
@@ -424,7 +443,9 @@ def resolve_triggered_cells(
     # answers: the walk is per-cell, each cell's writes are transactional,
     # and a failed cell is recorded on the run (and in the exit code) so a
     # re-run can retry exactly what is missing.
-    for iso3 in sorted(iso3s):
+    detected = set(iso3s)
+    for iso3 in sorted(detected | confirm):
+        confirming = iso3 in confirm and iso3 not in detected
         try:
             extracted: list[Any] = []
             extraction_provenance: dict[str, Any] = {"ran": False}
@@ -494,6 +515,40 @@ def resolve_triggered_cells(
             # documents, which must never be mistaken for ReliefWeb silence.
             verdict.provenance["reliefweb_extraction"] = extraction_provenance
 
+            if confirming:
+                if verdict.status != reconcile_mod.STATUS_RESOLVED_VALUE:
+                    run.unconfirmed += 1
+                    capped = bool(
+                        (extraction_provenance.get("extraction") or {}).get("budget_capped")
+                    )
+                    # Documents left UNREAD are not a failed confirmation: a
+                    # budget stop must never retract a row an unread document
+                    # might have supported. Left as it stands for the next run.
+                    retracted = RETRACT_NONE if (dry_run or capped) else _retract_unconfirmed_row(
+                        con, iso3=iso3, ym=ym, hazard=hazard, rulebook=rulebook,
+                        today=today,
+                    )
+                    run.retracted += int(retracted == RETRACT_DELETED)
+                    cell_ledger.record_cell(
+                        stage=cell_ledger.STAGE_LADDER,
+                        iso3=iso3, hazard=hazard, ym=ym, triggered=False,
+                        write_outcome="no_row",
+                        reason_code=cell_ledger.REASON_SWEEP_HIT,
+                        rungs_unavailable=unavailable,
+                        detail={"ladder_status": verdict.status, "retracted": retracted,
+                                "extraction_budget_capped": capped},
+                        run_type=run_type,
+                    )
+                    continue
+                verdict.provenance["trigger_confirmation"] = {
+                    "trigger_source": detect_mod.TRIGGER_SOURCE_RELIEFWEB_LADDER,
+                    "note": (
+                        "the detector did not trigger this cell; the ReliefWeb "
+                        "sweep hit it and the ladder found an admissible figure"
+                    ),
+                }
+                run.confirmed += 1
+
             run.cells += 1
             ceiling_basis = (
                 (verdict.provenance.get("decision") or {}).get("ceiling") or {}
@@ -520,6 +575,15 @@ def resolve_triggered_cells(
             outcome = res_mod.write_reconciliation(
                 con, verdict, rulebook, today=today, run_type=run_type
             )
+            if confirming:
+                detect_mod.promote_on_ladder_evidence(
+                    con, hazard=hazard, iso3=iso3, ym=ym,
+                    confirmation={
+                        "winning_rung": verdict.provenance.get("winning_rung"),
+                        "value": verdict.value,
+                        "rule_fired": verdict.rule_fired,
+                    },
+                )
             if outcome == res_mod.WRITE_FROZEN_SKIP:
                 run.frozen_skipped += 1
             if outcome == res_mod.WRITE_PENDING:
@@ -570,6 +634,14 @@ def resolve_triggered_cells(
         hazard, ym, run.cells, run.resolved_value, run.lower_bound,
         run.no_data, run.pending, run.flagged, run.provisional, run.frozen_skipped,
     )
+    if confirm:
+        LOG.info(
+            "[impact] %s %s sweep-hit confirmation: %d of %d cell(s) confirmed by "
+            "an admissible figure and counted as occurrences; %d left undecided "
+            "(%d unfrozen row(s) retracted)",
+            hazard, ym, run.confirmed, len(confirm - detected), run.unconfirmed,
+            run.retracted,
+        )
     if unavailable:
         LOG.warning(
             "[impact] %s %s: ladder ran with unavailable sources %s — NO_DATA "
@@ -715,6 +787,63 @@ def reconsider_rejected_cells(
 
 #: Write outcomes that leave no row in ``haz_resolutions``, and the reason
 #: each one is not a missing answer but a deliberate silence.
+RETRACT_NONE = "no_row_to_retract"
+RETRACT_DELETED = "deleted"
+RETRACT_RETAINED = "retained_frozen"
+
+
+def _retract_unconfirmed_row(
+    con: "duckdb.DuckDBPyConnection",
+    *,
+    iso3: str,
+    ym: str,
+    hazard: str,
+    rulebook: Rulebook,
+    today: dt.date | None = None,
+) -> str:
+    """Delete an unfrozen row on a sweep-hit cell the ladder did not confirm.
+
+    Before 17 Sept 2026 a sweep hit TRIGGERED the cell and the ladder wrote
+    whatever it found, a NO_DATA included. 94 live rows of run 36401252026
+    sat beside trigger rows saying the cell was undecided. A frozen row is
+    never touched (hard rule 4); the freeze guard owns it.
+    """
+
+    from resolver.hazard_resolution.rules import freeze_deadline
+
+    year, month = detect_mod.ym_to_year_month(ym)
+    existing = con.execute(
+        """
+        SELECT frozen_at FROM haz_resolutions
+        WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ?
+        """,
+        [iso3, year, month, hazard],
+    ).fetchone()
+    if existing is None:
+        return RETRACT_NONE
+    frozen_at = existing[0]
+    deadline = (
+        frozen_at.date() if isinstance(frozen_at, dt.datetime)
+        else frozen_at if isinstance(frozen_at, dt.date)
+        else freeze_deadline(year, month, rulebook)
+    )
+    if (today or dt.date.today()) > deadline:
+        return RETRACT_RETAINED
+    con.execute(
+        """
+        DELETE FROM haz_resolutions
+        WHERE iso3 = ? AND year = ? AND month = ? AND hazard = ?
+        """,
+        [iso3, year, month, hazard],
+    )
+    LOG.info(
+        "[impact] %s/%s/%s: retracted an unfrozen row the ladder no longer "
+        "supports — the sweep hit this cell and no admissible figure confirmed it",
+        iso3, hazard, ym,
+    )
+    return RETRACT_DELETED
+
+
 _LADDER_NO_ROW_REASON = {
     res_mod.WRITE_PENDING: cell_ledger.REASON_PENDING,
     res_mod.WRITE_FROZEN_SKIP: cell_ledger.REASON_FROZEN,

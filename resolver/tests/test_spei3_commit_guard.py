@@ -209,6 +209,25 @@ class TestTheRegistersVerdict:
         assert state.state == mod.CLASS_REFUSED_AUTH
         assert any("/jobs" in c for c in calls)
 
+    def test_the_live_reader_asks_the_producers_own_runs_endpoint(self):
+        """A repo-wide page cannot see a monthly producer.
+
+        Run 36401252026 skipped this check with "no runs found" while nine
+        SPEI-3 runs existed: the batch poller alone fills a twenty-run page
+        in under two hours."""
+
+        calls = []
+
+        def fetch(path):
+            calls.append(path)
+            return {"workflow_runs": []}
+
+        mod.read_producer_state(repo="kwyjad/Pythia", fetch=fetch)
+        assert calls[0].startswith(
+            f"/repos/kwyjad/Pythia/actions/workflows/{mod.SPEI3_WORKFLOW_FILE}/runs"
+        )
+        assert (WORKFLOW.parent / mod.SPEI3_WORKFLOW_FILE) == WORKFLOW
+
 
 class TestTheWorkflowHonoursTheContract:
     """The step names are the only channel a refused push has."""

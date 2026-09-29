@@ -59,6 +59,12 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 #: exactly as `check_workflow_freshness.py` does.
 SPEI3_WORKFLOW = "SPEI-3 Feed Refresh"
 
+#: The producer's workflow FILE, which is what the runs are asked for by. A
+#: repo-wide ``/actions/runs`` page filtered by name cannot see a monthly
+#: producer: the batch poller alone fills twenty runs in under two hours, so
+#: the guard read "no runs found" on every Resolver Update until Sept 2026.
+SPEI3_WORKFLOW_FILE = "spei3_refresh.yml"
+
 # -- classes ------------------------------------------------------------
 #
 # Four outcomes of an attempt to commit, and they are deliberately not a
@@ -326,6 +332,7 @@ def read_producer_state(
     workflow: str = SPEI3_WORKFLOW,
     repo: str | None = None,
     fetch: Fetch | None = None,
+    workflow_file: str = SPEI3_WORKFLOW_FILE,
 ) -> ProducerCommitState:
     """``decide_producer_state`` over the live Actions API.
 
@@ -342,7 +349,9 @@ def read_producer_state(
         state.detail = "GITHUB_REPOSITORY is unset, so the producer's runs cannot be read"
         return state
 
-    payload = get(f"/repos/{slug}/actions/runs?per_page=20")
+    # Ask the workflow's OWN runs endpoint. The name filter below stays as a
+    # guard against a renamed file answering for a different workflow.
+    payload = get(f"/repos/{slug}/actions/workflows/{workflow_file}/runs?per_page=10")
     runs: list[Mapping[str, Any]] | None
     if isinstance(payload, Mapping):
         runs = [

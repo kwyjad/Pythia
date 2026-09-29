@@ -593,7 +593,9 @@ def deferred_months(con, hazard: str) -> dict[str, list[str]]:
     return out
 
 
-def month_counts(con, hazard: str, ym: str) -> dict[str, Any]:
+def month_counts(
+    con, hazard: str, ym: str, *, since: Any | None = None
+) -> dict[str, Any]:
     """What the resolution tables now hold for this cell-month.
 
     Read back from the tables rather than threaded out of the run objects:
@@ -606,6 +608,13 @@ def month_counts(con, hazard: str, ym: str) -> dict[str, Any]:
     has no live-run extractions to blur into. (Before this read-back the
     two extraction columns in ``haz_backcast_progress`` were always zero:
     ``record_month`` read keys ``month_counts`` never produced.)
+
+    For a LIVE month the two are not the same thing: the trailing window
+    re-walks months every earlier run already extracted for, so the
+    cumulative figure read as this run's spend — 844 calls and $1.59 on the
+    28 Sept 2026 flood summary, against 12 calls and $0.02 billed that day.
+    Pass ``since`` (the run's start) and the counts billed at or after it
+    are reported beside the cumulative ones as ``*_this_run``.
     """
 
     year, month = (int(p) for p in ym.split("-"))
@@ -649,6 +658,26 @@ def month_counts(con, hazard: str, ym: str) -> dict[str, Any]:
     # has NO resolution row (impact._defer_for_budget) — so it is counted
     # from the trigger rows, which are the record whether or not the
     # run-log ledger was switched on.
+    this_run: dict[str, Any] = {}
+    if since is not None:
+        # created_at is a naive UTC TIMESTAMP; an aware bound is converted
+        # rather than left to DuckDB's session time zone.
+        if getattr(since, "tzinfo", None) is not None:
+            since = since.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        billed = con.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(cost_usd), 0.0)
+            FROM haz_doc_extractions
+            WHERE hazard = ? AND year = ? AND month = ?
+              AND created_at >= ?
+              AND COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0) > 0
+            """,
+            [hazard, year, month, since],
+        ).fetchone()
+        this_run = {
+            "extraction_calls_this_run": int(billed[0] or 0),
+            "extraction_cost_usd_this_run": float(billed[1] or 0.0),
+        }
     deferred_rows = con.execute(
         """
         SELECT t.iso3,
@@ -677,6 +706,7 @@ def month_counts(con, hazard: str, ym: str) -> dict[str, Any]:
         "cells_deferred_for_budget": len(deferred_rows),
         "deferred_cells": [str(row[0]) for row in deferred_rows],
         "deferred_note": str(deferred_rows[0][1] or "") if deferred_rows else "",
+        **this_run,
     }
 
 
