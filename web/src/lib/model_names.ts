@@ -19,9 +19,22 @@ const GROUNDING_SENTINEL_LABELS: Record<string, string> = {
   "grounding-budget-exceeded": "Grounding skipped (budget)",
 };
 
+// Family recalibration stores copies of a member's forecast: "<model>__raw" is
+// the member's own forecast where a correction was applied, "<model>__recal"
+// the corrected forecast where it was only shadowed. Neither is a member.
+const RECALIBRATION_SUFFIXES: Array<[string, string]> = [
+  ["__raw", "uncorrected"],
+  ["__recal", "recalibrated, shadow"],
+];
+
 export function formatModelName(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return raw;
+  for (const [suffix, label] of RECALIBRATION_SUFFIXES) {
+    if (trimmed.toLowerCase().endsWith(suffix) && trimmed.length > suffix.length) {
+      return `${formatModelName(trimmed.slice(0, -suffix.length))} (${label})`;
+    }
+  }
   const lowered = trimmed.toLowerCase();
 
   if (AGGREGATE_LABELS[lowered]) {

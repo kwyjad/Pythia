@@ -103,6 +103,17 @@ jobs:
           python -m pythia.tools.generate_calibration_advice --db-url "${RESOLVER_DB_URL}"
           echo "=== generate_calibration_advice completed ==="
 
+      # Per-family recalibration factors, read by the forecaster when
+      # PYTHIA_FAMILY_RECALIBRATION_MODE is shadow or apply. Non-fatal: a
+      # failed fit leaves last month's factors, and the forecaster falls back
+      # to the uncorrected forecast wherever none fit.
+      - name: Fit family recalibration factors
+        continue-on-error: true
+        env:
+          PYTHIA_CONFIG_YAML: "pythia/config.yaml"
+        run: |
+          python -m pythia.tools.family_recalibration --db-url "${RESOLVER_DB_URL}"
+
       # stage_health windows its cost rollup on this — llm_calls accumulates
       # in the travelling DB, so without a start marker the interpreter step
       # below could only be costed as "the DB's cumulative spend".

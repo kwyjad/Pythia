@@ -195,6 +195,22 @@ distribution at all: it showed six months, while climatology uses thirty-six.
 A member that "ignored the base rate" there ignored a number it was never
 given.
 
+**Two experiments.** `advice_experiment.csv` compares questions whose
+members were shown calibration advice with questions shown none
+(`PYTHIA_ADVICE_EXPERIMENT_SHARE`; the arm is a hash of the question id and
+is recorded on `forecasts_raw.advice_arm` / `forecasts_ensemble.advice_arm`):
+primary aggregate mean Brier per arm over distinct questions, the difference
+(advice minus no advice, negative = advice helped) and a bootstrap 90%
+interval. `recalibration_effect.csv` compares a member's corrected forecast
+with its uncorrected one on the same (question, horizon)
+(`PYTHIA_FAMILY_RECALIBRATION_MODE`): `<model>` against `<model>__raw` where
+the correction was applied, `<model>__recal` against `<model>` where it was
+only shadowed, plus an unweighted member mean rebuilt both ways, each with a
+paired bootstrap 90% interval. `<model>__raw` and `<model>__recal` rows appear
+in the score tables as models; they are copies of a member, never members,
+and never vote, carry calibration weight or receive advice. Each member row
+says what was done to it in `forecasts_raw.recalibration_json`.
+
 **One run per question.** A question forecast in several runs has score
 and forecast rows for each. `rollups.csv`, `forecast_vs_outcome.csv`, the
 digest and every `questions/*.json` score list use the LATEST run only;

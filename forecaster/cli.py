@@ -1296,6 +1296,7 @@ from .prompts import (  # noqa: E402
     merge_evidence_packs,
     rc_guidance_version,
     prior_anchor_block_version,
+    advice_arm,
     render_member_calibration_advice,
     reset_member_calibration_advice_cache,
 )
@@ -1694,8 +1695,17 @@ def _write_spd_members_v2_to_db(
     resolution_source: str,
     rc_guidance: Optional[str] = None,
     base_rate_block_version: Optional[str] = None,
+    recalibrate: bool = False,
+    _recalibration_json: Optional[list] = None,
 ) -> None:
     """Persist SPD v2 member SPDs into forecasts_raw without touching ensemble rows.
+
+    ``recalibrate`` (Track 1 only) applies ``PYTHIA_FAMILY_RECALIBRATION_MODE``
+    to what is stored: under ``apply`` the corrected forecast is written under
+    the member's name and the uncorrected one as ``<model>__raw``; under
+    ``shadow`` (or a group whose factors belong to another prompt version) the
+    member's own forecast is written and the corrected one as
+    ``<model>__recal``. Each row carries ``recalibration_json``.
 
     ``rc_guidance`` names the regime-change prompt guidance the members saw
     (``prompts.rc_guidance_version``); NULL means the legacy wording.
@@ -1721,6 +1731,17 @@ def _write_spd_members_v2_to_db(
     metric = str(question_row.get("metric") or "").upper()
     class_bins = _spd_class_bins_for(metric, hz)
     bucket_count = len(class_bins)
+
+    _recal_extras: list[tuple[ModelSpec, dict, dict, str]] = []
+    if recalibrate and _recalibration_json is None:
+        try:
+            per_model_spds, _recalibration_json, _recal_extras = _recalibrate_for_write(
+                per_model_spds, raw_calls, specs_used, hz, metric,
+                base_rate_block_version=base_rate_block_version, rc_guidance=rc_guidance,
+            )
+        except Exception as exc:  # noqa: BLE001 - a correction never costs a forecast
+            LOG.warning("recalibration skipped for %s: %s", qid, exc)
+            _recalibration_json, _recal_extras = None, []
 
     try:
         con = connect(read_only=False)
@@ -1844,6 +1865,10 @@ def _write_spd_members_v2_to_db(
                     idx, exc,
                 )
 
+            _recal_meta = None
+            if _recalibration_json is not None and idx < len(_recalibration_json):
+                _recal_meta = _recalibration_json[idx]
+
             if not isinstance(model_spd, dict) or not model_spd:
                 con.execute(
                     """
@@ -1851,8 +1876,9 @@ def _write_spd_members_v2_to_db(
                         run_id, question_id, model_name, month_index, bucket_index,
                         probability, ok, elapsed_ms, cost_usd, prompt_tokens,
                         completion_tokens, total_tokens, status, spd_json, human_explanation,
-                        is_test, reasoning_trace_json, rc_guidance, base_rate_block_version
-                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'no_forecast', ?, ?, ?, ?, ?, ?)
+                        is_test, reasoning_trace_json, rc_guidance, base_rate_block_version,
+                        recalibration_json
+                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'no_forecast', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         run_id,
@@ -1869,6 +1895,7 @@ def _write_spd_members_v2_to_db(
                         None,
                         rc_guidance,
                         base_rate_block_version,
+                        None,
                     ],
                 )
                 continue
@@ -1902,8 +1929,8 @@ def _write_spd_members_v2_to_db(
                             probability, ok, elapsed_ms, cost_usd, prompt_tokens,
                             completion_tokens, total_tokens, status, spd_json, human_explanation,
                             horizon_m, class_bin, p, is_test, reasoning_trace_json, rc_guidance,
-                            base_rate_block_version
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            base_rate_block_version, recalibration_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
                             run_id,
@@ -1927,6 +1954,7 @@ def _write_spd_members_v2_to_db(
                             _rc_reasoning_trace,
                             rc_guidance,
                             base_rate_block_version,
+                            _recal_meta,
                         ],
                     )
     except Exception as exc:  # noqa: BLE001
@@ -1936,6 +1964,186 @@ def _write_spd_members_v2_to_db(
             con.close()
         except Exception:
             pass
+
+    if _recal_extras:
+        _write_spd_members_v2_to_db(
+            run_id=run_id,
+            question_row=question_row,
+            specs_used=[e[0] for e in _recal_extras],
+            per_model_spds=[e[1] for e in _recal_extras],
+            raw_calls=[e[2] for e in _recal_extras],
+            resolution_source=resolution_source,
+            rc_guidance=rc_guidance,
+            base_rate_block_version=base_rate_block_version,
+            _recalibration_json=[e[3] for e in _recal_extras],
+        )
+
+
+def _recalibrate_for_write(
+    per_model_spds: list,
+    raw_calls: list,
+    specs_used: list,
+    hz: str,
+    metric: str,
+    *,
+    base_rate_block_version: Optional[str],
+    rc_guidance: Optional[str],
+) -> tuple[list, Optional[list], list]:
+    """(spds to store under the members' names, per-member recalibration_json,
+    derived rows to store as ``<model>__raw`` / ``<model>__recal``)."""
+    from pythia.tools import family_recalibration as fr
+
+    if fr.recalibration_mode() == "off":
+        return per_model_spds, None, []
+    stored = list(per_model_spds)
+    metas: list = []
+    extras: list = []
+    for idx, spd in enumerate(per_model_spds):
+        ms = None
+        rc: dict = {}
+        if idx < len(raw_calls) and isinstance(raw_calls[idx], dict):
+            rc = raw_calls[idx]
+            ms = rc.get("model_spec")
+        if not isinstance(ms, ModelSpec) and idx < len(specs_used):
+            ms = specs_used[idx]
+        if not isinstance(ms, ModelSpec) or not isinstance(spd, dict) or not spd or is_shadow(ms):
+            metas.append(None)
+            continue
+        info = fr.lookup(ms.name, hz, metric,
+                         base_rate_block_version=base_rate_block_version, rc_guidance=rc_guidance)
+        corrected = fr.recalibrate_spd(spd, info["factors"]) if info.get("factors") else None
+        if corrected is None:
+            metas.append(fr.meta_json(info, False, "member"))
+            continue
+        derived_rc = dict(rc)
+        if info["mode"] == "apply":
+            stored[idx] = corrected
+            metas.append(fr.meta_json(info, True, "corrected"))
+            raw_ms = replace(ms, name=ms.name + fr.RAW_SUFFIX, shadow=True)
+            derived_rc["model_spec"] = raw_ms
+            extras.append((raw_ms, spd, derived_rc, fr.meta_json(info, False, "raw")))
+        else:
+            metas.append(fr.meta_json(info, False, "raw"))
+            recal_ms = replace(ms, name=ms.name + fr.RECAL_SUFFIX, shadow=True)
+            derived_rc["model_spec"] = recal_ms
+            extras.append((recal_ms, corrected, derived_rc, fr.meta_json(info, False, "shadow_corrected")))
+    return stored, metas, extras
+
+
+def _stamp_advice_arm(run_id: str, question_id: str) -> None:
+    """Record the advice-experiment arm on the question's forecast rows.
+
+    Nothing is touched when the experiment is off (``advice_arm`` is None),
+    so the default path writes exactly what it wrote before.
+    """
+    arm = advice_arm(question_id)
+    if not arm or not question_id:
+        return
+    try:
+        con = connect(read_only=False)
+        try:
+            for table in ("forecasts_raw", "forecasts_ensemble"):
+                con.execute(
+                    f"UPDATE {table} SET advice_arm = ? WHERE run_id = ? AND question_id = ?",
+                    [arm, run_id, question_id],
+                )
+        finally:
+            con.close()
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("advice arm not stamped for %s: %s", question_id, exc)
+
+
+def _recalibrate_binary_members(
+    all_model_probs: list,
+    voting_specs: list,
+    member_forecasts: list,
+    hz: str,
+    metric: str,
+    shadow_names: set,
+) -> tuple[list, list, dict]:
+    """Apply ``PYTHIA_FAMILY_RECALIBRATION_MODE`` to Track 1 binary members.
+
+    Under ``apply`` a member's probabilities are logit-shifted before pooling
+    and its uncorrected forecast is kept as ``<model>__raw``; under
+    ``shadow`` the shifted one is stored as ``<model>__recal``. Derived rows
+    are added to ``shadow_names`` so they never vote. Never raises.
+    """
+    try:
+        from pythia.tools import family_recalibration as fr
+
+        if fr.recalibration_mode() == "off":
+            return all_model_probs, member_forecasts, {}
+        metas: dict[str, dict] = {}
+        new_members = list(member_forecasts)
+        new_probs = list(all_model_probs)
+        vote_index = {getattr(ms, "name", None): i for i, ms in enumerate(voting_specs)}
+        for member_name, probs, usage, rc_note in member_forecasts:
+            if member_name in shadow_names:
+                continue
+            info = fr.lookup(member_name, hz, metric, base_rate_block_version=None, rc_guidance=None)
+            corrected = None
+            if info.get("factors"):
+                corrected = {}
+                for month, p in probs.items():
+                    c = fr.recalibrate_binary(p, info["factors"])
+                    if c is None:
+                        corrected = None
+                        break
+                    corrected[month] = c
+            meta = json.loads(fr.meta_json(info, bool(corrected) and info.get("mode") == "apply", "member"))
+            metas[member_name] = meta
+            if corrected is None:
+                continue
+            if info["mode"] == "apply":
+                i = vote_index.get(member_name)
+                if i is not None and i < len(new_probs):
+                    new_probs[i] = corrected
+                new_members = [
+                    (n, corrected if n == member_name else pr, u, r) for n, pr, u, r in new_members
+                ]
+                raw_name = member_name + fr.RAW_SUFFIX
+                new_members.append((raw_name, probs, {}, rc_note))
+                shadow_names.add(raw_name)
+                metas[raw_name] = json.loads(fr.meta_json(info, False, "raw"))
+            else:
+                recal_name = member_name + fr.RECAL_SUFFIX
+                new_members.append((recal_name, corrected, {}, rc_note))
+                shadow_names.add(recal_name)
+                metas[recal_name] = json.loads(fr.meta_json(info, False, "shadow_corrected"))
+        return new_probs, new_members, metas
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("binary recalibration skipped: %s", exc)
+        return all_model_probs, member_forecasts, {}
+
+
+def _recalibrate_voting(
+    voting_spds: list,
+    voting_specs: list,
+    hz: str,
+    metric: str,
+    *,
+    base_rate_block_version: Optional[str],
+    rc_guidance: Optional[str],
+) -> list:
+    """The voting SPDs with APPLIED corrections; unchanged in any other mode."""
+    try:
+        from pythia.tools import family_recalibration as fr
+
+        if fr.recalibration_mode() != "apply":
+            return voting_spds
+        out = []
+        for spd, ms in zip(voting_spds, voting_specs):
+            info = fr.lookup(getattr(ms, "name", ""), hz, metric,
+                             base_rate_block_version=base_rate_block_version,
+                             rc_guidance=rc_guidance)
+            corrected = None
+            if info.get("mode") == "apply" and isinstance(spd, dict) and spd:
+                corrected = fr.recalibrate_spd(spd, info["factors"])
+            out.append(corrected if corrected is not None else spd)
+        return out
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("recalibration of voting members skipped: %s", exc)
+        return voting_spds
 
 def _safe_row_get(row: Any, index: int, name: str) -> Any:
     """
@@ -2953,15 +3161,24 @@ async def _call_spd_model_for_spec(
             kwargs.get("hazard_code") or "",
             kwargs.get("metric") or "",
             getattr(ms, "name", "") or "",
+            question_id=kwargs.get("question_id"),
         )
     )
+    arm = advice_arm(kwargs.get("question_id"))
     if not member_note:
-        return await _call_spd_model_for_spec_inner(ms, prompt, **kwargs)
+        text, usage, error, ms_out = await _call_spd_model_for_spec_inner(ms, prompt, **kwargs)
+        if arm and isinstance(usage, dict):
+            usage = dict(usage)
+            usage["advice_arm"] = arm
+        return text, usage, error, ms_out
     advised = prompt + member_note
     text, usage, error, ms_out = await _call_spd_model_for_spec_inner(ms, advised, **kwargs)
     if isinstance(usage, dict) and not usage.get("sent_prompt_text"):
         usage = dict(usage)
         usage["sent_prompt_text"] = advised
+    if arm and isinstance(usage, dict):
+        usage = dict(usage)
+        usage["advice_arm"] = arm
     return text, usage, error, ms_out
 
 
@@ -3806,6 +4023,7 @@ async def _call_spd_bayesmc_v2(
     batch_family: str | None = None,
     cache_prefix: str | None = None,
     prompt_cache_key: str | None = None,
+    recal_versions: tuple[Optional[str], Optional[str]] | None = None,
 ) -> tuple[
     dict[str, object],
     dict[str, object],
@@ -3864,6 +4082,11 @@ async def _call_spd_bayesmc_v2(
             continue
 
     voting_spds, voting_specs = _voting_members(per_model_spds, specs_used)
+    if recal_versions is not None:
+        voting_spds = _recalibrate_voting(
+            voting_spds, voting_specs, (hazard_code or "").upper(), (metric or "").upper(),
+            base_rate_block_version=recal_versions[0], rc_guidance=recal_versions[1],
+        )
     member_weights_by_key, _member_keys, _member_weight_list = _resolve_member_weights(
         voting_specs, hazard_code, metric
     )
@@ -4785,6 +5008,12 @@ async def _run_binary_forecast_for_question(
                         (member_name, parsed, call.get("usage") or {}, rc_note)
                     )
 
+        recal_by_member: dict[str, dict] = {}
+        if track == 1:
+            all_model_probs, member_forecasts, recal_by_member = _recalibrate_binary_members(
+                all_model_probs, voting_specs, member_forecasts, hz, metric, shadow_names,
+            )
+
         if not all_model_probs:
             _record_no_forecast(
                 run_id, qid or "", iso3, hz, metric,
@@ -4876,6 +5105,8 @@ async def _run_binary_forecast_for_question(
                     extra["rc_level"] = rc_level
                 if rc_note:
                     extra["rc_reconciliation"] = rc_note
+                if member_name in recal_by_member:
+                    extra["recalibration"] = recal_by_member[member_name]
                 _write_binary_outputs(
                     run_id,
                     question_row,
@@ -5335,6 +5566,11 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     member_specs_snapshot = specs_active
                     member_raw_calls_snapshot = raw_calls
                 voting_spds, voting_specs = _voting_members(per_model_spds, specs_active)
+                voting_spds = _recalibrate_voting(
+                    voting_spds, voting_specs, hz, metric.upper(),
+                    base_rate_block_version=prior_anchor_block_version(rec),
+                    rc_guidance=rc_guidance_version(track=1),
+                )
                 member_weights_by_key, _member_keys, member_weight_list = (
                     _resolve_member_weights(voting_specs, hz, metric)
                 )
@@ -5494,6 +5730,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     resolution_source=resolution_source,
                     rc_guidance=rc_guidance_version(track=1),
                     base_rate_block_version=prior_anchor_block_version(rec),
+                    recalibrate=True,
                 )
                 members_written = True
 
@@ -5573,6 +5810,11 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 LOG.debug("Trace validation skipped for %s", qid, exc_info=True)
 
             voting_spds, voting_specs = _voting_members(per_model_spds, specs_used_for_bayesmc)
+            voting_spds = _recalibrate_voting(
+                voting_spds, voting_specs, hz, metric.upper(),
+                base_rate_block_version=prior_anchor_block_version(rec),
+                rc_guidance=rc_guidance_version(track=1),
+            )
             member_weights_by_key, _member_keys, member_weight_list = (
                 _resolve_member_weights(voting_specs, hz, metric)
             )
@@ -5717,6 +5959,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                 batch_family="spd_v2",
                 cache_prefix=spd_cache_prefix,
                 prompt_cache_key=spd_prompt_cache_key,
+                recal_versions=(prior_anchor_block_version(rec), rc_guidance_version(track=1)),
             )
             if _batch_submit_active():
                 # Members were enqueued as Batch-API requests; parsing,
@@ -5740,6 +5983,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     resolution_source=resolution_source,
                     rc_guidance=rc_guidance_version(track=1),
                     base_rate_block_version=prior_anchor_block_version(rec),
+                    recalibrate=True,
                 )
                 members_written = True
             raw_texts = [str(rc.get("text") or "") for rc in raw_calls if isinstance(rc, dict)]
@@ -6634,6 +6878,7 @@ def main() -> None:
                         await _run_track2_spd_for_question(run_id, q)
                     else:
                         await _run_spd_for_question(run_id, q)
+                    _stamp_advice_arm(run_id, qid)
                 if not qid:
                     return
                 start_ms = question_start_ms.get(qid)

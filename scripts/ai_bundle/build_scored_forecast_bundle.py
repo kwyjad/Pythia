@@ -1453,6 +1453,13 @@ def build_bundle(
         _emit_scores_flat(con, staging, qids)
         fvo_rows = _emit_forecast_vs_outcome(con, staging, qids)
         rollups = _emit_rollups(con, staging, qids, costs)
+        try:
+            from scripts.ai_bundle import experiments as _exp
+
+            _exp.emit_advice_experiment(con, staging, qids)
+            _exp.emit_recalibration_effect(con, staging, qids)
+        except Exception as exc:  # noqa: BLE001 - an experiment table never costs the bundle
+            LOGGER.warning("experiment rollups skipped: %s", exc)
         weight_movement = _emit_calibration(con, staging)
         calibration_state = _prov.calibration_status(con)
         write_csv(

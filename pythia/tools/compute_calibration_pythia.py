@@ -206,6 +206,9 @@ def _compute_weights_for_group(
         s
         for s in samples
         if s.model_name is not None and s.model_name not in AGGREGATE_MODEL_NAMES
+        # ``<model>__raw`` / ``<model>__recal`` (family recalibration) are
+        # scored so the correction can be judged, and never weighted.
+        and not str(s.model_name).endswith(("__raw", "__recal"))
     ]
     brier_samples = [s for s in member_samples if s.score_type == "brier"]
     if not brier_samples:

@@ -51,6 +51,13 @@ describe("formatModelName", () => {
     expect(formatModelName("sibyl")).toBe("Sibyl (deep research)");
   });
 
+  it("labels family-recalibration copies as copies of their member", () => {
+    expect(formatModelName("gpt-6-sol__raw")).toBe("GPT-6 Sol (uncorrected)");
+    expect(formatModelName("claude-opus-5-5__recal")).toBe(
+      "Claude Opus 5.5 (recalibrated, shadow)",
+    );
+  });
+
   it("leaves genuinely unmapped values untouched", () => {
     // "unknown" still reaches the frontend for rows where the DB has no model at
     // all (resolver/query/costs.py fillna) — that case is legitimately unknown.

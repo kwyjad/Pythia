@@ -164,6 +164,16 @@ env:
   # 2026 conflict-death questions was in the prior). Keep in lockstep across
   # pythia_pipeline_stage.yml and run_horizon_scanner.yml; "0" reverts.
   PYTHIA_PRIOR_ANCHOR_SPD: "1"
+  # A new version of a model line is shown its predecessors' calibration
+  # notes until it has twenty questions of its own; half the questions
+  # (hashed on the question id) get no advice at all, so the advice can be
+  # measured; and per-family recalibration factors correct each member
+  # before pooling where they were fitted under the same prompt versions
+  # (otherwise they are stored beside it and never vote). Keep in lockstep
+  # across pythia_pipeline_stage.yml and run_horizon_scanner.yml.
+  PYTHIA_ADVICE_FAMILY_CARRYOVER: "1"
+  PYTHIA_ADVICE_EXPERIMENT_SHARE: "0.5"
+  PYTHIA_FAMILY_RECALIBRATION_MODE: "apply"
   # Anthropic cache_control inside BATCH bodies. Off by default in code
   # because batch cache hits are best-effort while the write premium is
   # certain — but with it off the batched path's hit rate is 0% BY

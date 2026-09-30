@@ -1667,6 +1667,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "human_explanation": "TEXT",
                 "is_test": "BOOLEAN DEFAULT FALSE",
                 "reasoning_trace_json": "TEXT",
+                # Advice experiment arm (PYTHIA_ADVICE_EXPERIMENT_SHARE).
+                "advice_arm": "TEXT",
             },
         )
 
@@ -1719,6 +1721,11 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # so anything fitted on member forecasts can tell the two apart.
                 "rc_guidance": "TEXT",
                 "base_rate_block_version": "TEXT",
+                # Family recalibration (PYTHIA_FAMILY_RECALIBRATION_MODE): what
+                # was applied or shadowed on this member row, and why.
+                "recalibration_json": "TEXT",
+                # Advice experiment arm (PYTHIA_ADVICE_EXPERIMENT_SHARE).
+                "advice_arm": "TEXT",
             },
         )
 
