@@ -101,7 +101,7 @@ def _load_calibration_note() -> str:
         return ""
     return txt if len(txt) <= 4000 else (txt[:3800] + "\n…[truncated]")
 
-_MEMBER_ADVICE_CACHE: dict[tuple[str, str, str], str] = {}
+_MEMBER_ADVICE_CACHE: dict[tuple, str] = {}
 _MEMBER_ADVICE_LOCK = threading.Lock()
 
 
@@ -111,8 +111,207 @@ def reset_member_calibration_advice_cache() -> None:
         _MEMBER_ADVICE_CACHE.clear()
 
 
+# --- Advice carry-over, the no-advice arm (PR feat/family-advice-and-recalibration)
+
+#: Stored names that are not model ids but stand for one: Track 2's single
+#: forecast is stored as ``track2_flash`` and is made by the flash model of
+#: the ``track2_spd`` role, so it takes that family's advice.
+ADVICE_FAMILY_ALIASES = {"track2_flash": "gemini_flash"}
+#: Distinct questions of a model's own before its exact advice is used and
+#: carried family advice stops.
+ADVICE_OWN_QUESTIONS = 20
+ADVICE_TENDENCY_LINE = "Treat these as tendencies to check, not corrections to apply mechanically."
+
+
+def advice_family_carryover_enabled() -> bool:
+    """``PYTHIA_ADVICE_FAMILY_CARRYOVER`` (default off)."""
+    return os.getenv("PYTHIA_ADVICE_FAMILY_CARRYOVER", "0").strip().lower() in ("1", "true", "yes")
+
+
+def advice_experiment_share() -> float:
+    """``PYTHIA_ADVICE_EXPERIMENT_SHARE`` clamped to [0, 1] (default 0)."""
+    try:
+        v = float(os.getenv("PYTHIA_ADVICE_EXPERIMENT_SHARE", "0") or 0)
+    except ValueError:
+        return 0.0
+    return min(max(v, 0.0), 1.0)
+
+
+def advice_arm(question_id: Optional[str]) -> Optional[str]:
+    """``"no_advice"`` or ``"advice"`` for a question, None when the experiment is off.
+
+    The arm is a pure function of the question id (``sha1(qid)[:8]`` as a
+    fraction of 2^32 against the share), so a rerun lands in the same arm and
+    nothing has to be stored before the prompt is built.
+    """
+    share = advice_experiment_share()
+    if share <= 0 or not question_id:
+        return None
+    import hashlib
+
+    frac = int(hashlib.sha1(str(question_id).encode("utf-8")).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return "no_advice" if frac < share else "advice"
+
+
+def advice_family_for(model_name: Optional[str]) -> Optional[str]:
+    name = (model_name or "").strip()
+    if name in ADVICE_FAMILY_ALIASES:
+        return ADVICE_FAMILY_ALIASES[name]
+    try:
+        from pythia.llm_profiles import model_family
+
+        return model_family(name)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _advice_rows(hz: str, m: str, names: list[str]) -> dict[str, dict]:
+    """{model_name: findings} for the newest advice row of each name."""
+    out: dict[str, dict] = {}
+    advice_version = os.getenv("PYTHIA_ADVICE_VERSION", "").strip() or None
+    try:
+        from resolver.db import duckdb_io
+
+        db_url = _pythia_db_url_from_config() or os.getenv("RESOLVER_DB_URL", "").strip()
+        db_url = db_url or duckdb_io.DEFAULT_DB_URL
+        con = duckdb_io.get_db(db_url)
+        try:
+            version_clause = " AND advice_version = ?" if advice_version else ""
+            for name in names:
+                params = [hz, m, name] + ([advice_version] if advice_version else [])
+                row = con.execute(
+                    f"""
+                    SELECT findings_json FROM calibration_advice
+                    WHERE hazard_code = ? AND metric = ? AND model_name = ?{version_clause}
+                    ORDER BY as_of_month DESC LIMIT 1
+                    """,
+                    params,
+                ).fetchone()
+                if row and row[0]:
+                    try:
+                        out[name] = json.loads(row[0]) if isinstance(row[0], str) else dict(row[0])
+                    except Exception:  # noqa: BLE001
+                        continue
+        finally:
+            duckdb_io.close_db(con)
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
+def render_advice_observations(
+    findings: dict,
+    *,
+    header: str,
+    weight: float = 1.0,
+    drop_buckets: bool = False,
+    drop_prior: bool = False,
+) -> str:
+    """Advice as OBSERVATIONS ("you assigned 9%, observed 34%"), never orders.
+
+    ``weight`` below 1 shrinks each carried gap toward what was assigned and
+    says so. ``drop_buckets`` leaves out per-bucket numbers where family
+    recalibration already corrects them; ``drop_prior`` leaves out prior
+    anchoring where the prompt now hands the member its prior.
+    """
+    lines: list[str] = [header]
+
+    def _obs(a: float, o: float) -> float:
+        return a + (o - a) * weight
+
+    tc = findings.get("tail_coverage") or {}
+    if tc and not drop_buckets:
+        a = 100 * float(tc.get("avg_assigned_tail") or 0)
+        o = 100 * _obs(float(tc.get("avg_assigned_tail") or 0), float(tc.get("actual_tail_rate") or 0))
+        lines.append(f"- Top two buckets: you assigned {a:.0f}% on average; observed {o:.0f}%.")
+    bc = findings.get("bucket_calibration") or []
+    if bc and not drop_buckets:
+        for e in bc:
+            a = float(e.get("mean_assigned") or 0)
+            o = _obs(a, float(e.get("actual_rate") or 0))
+            if abs(a - o) * 100 < 3:
+                continue
+            lines.append(
+                f"- Bucket {e.get('class_bin')}: you assigned {100 * a:.0f}%; observed {100 * o:.0f}%."
+            )
+    hd = findings.get("horizon_diff") or {}
+    if hd and hd.get("flat"):
+        lines.append(
+            "- Your month-1 and month-6 distributions were nearly identical "
+            f"(JS divergence {float(hd.get('jsd_m1_m6') or 0):.4f})."
+        )
+    pa = findings.get("prior_anchoring") or {}
+    worst = pa.get("worst_bucket_gap") or {}
+    if worst and not drop_prior and abs(float(worst.get("gap_pp") or 0)) > 5:
+        gap = float(worst.get("gap_pp") or 0) * weight
+        more = "more" if gap > 0 else "less"
+        lines.append(
+            f"- Your declared priors put {abs(gap):.0f} points {more} on bucket "
+            f"{worst.get('bucket')} than resolved outcomes did."
+        )
+    if len(lines) == 1:
+        return ""
+    if weight < 1.0:
+        lines.append(
+            f"- Observed figures above are shown at {weight:.0%} of the measured gap, "
+            "because you now have scored questions of your own."
+        )
+    lines.append(ADVICE_TENDENCY_LINE)
+    return "\n".join(lines)
+
+
+def _structured_member_advice(hz: str, m: str, name: str) -> str:
+    """The member note under family carry-over or applied recalibration."""
+    family = advice_family_for(name)
+    names = [name] + ([f"family:{family}"] if family else [])
+    rows = _advice_rows(hz, m, names)
+    drop_prior = prior_anchor_enabled() and hz == "ACE" and m == "FATALITIES"
+    drop_buckets = False
+    try:
+        from pythia.tools import family_recalibration as fr
+
+        if fr.recalibration_mode() == "apply":
+            brbv = None
+            if drop_prior:
+                from pythia.tools.base_rate_spd import LEVEL_VOLATILITY_VERSION
+
+                brbv = LEVEL_VOLATILITY_VERSION
+            info = fr.lookup(name, hz, m, base_rate_block_version=brbv,
+                             rc_guidance=rc_guidance_version(track=1))
+            drop_buckets = info.get("mode") == "apply"
+    except Exception:  # noqa: BLE001
+        drop_buckets = False
+    exact = rows.get(name) or {}
+    if int(exact.get("n_questions") or 0) >= ADVICE_OWN_QUESTIONS:
+        return render_advice_observations(
+            exact,
+            header=f"From your own {int(exact['n_questions'])} scored questions on this hazard and metric:",
+            drop_buckets=drop_buckets,
+            drop_prior=drop_prior,
+        )
+    if not advice_family_carryover_enabled() or not family:
+        return ""
+    fam = rows.get(f"family:{family}") or {}
+    if not fam:
+        return ""
+    ids = fam.get("contributing_ids") or {}
+    own = int(ids.get(name) or 0)
+    others = {k: v for k, v in ids.items() if k != name}
+    if not others:
+        return ""
+    weight = 1.0 - own / ADVICE_OWN_QUESTIONS if 0 < own < ADVICE_OWN_QUESTIONS else 1.0
+    who = ", ".join(sorted(others))
+    header = (
+        f"Carried from earlier versions of your model line ({who}; "
+        f"{int(fam.get('n_questions') or 0)} scored questions on this hazard and metric):"
+    )
+    return render_advice_observations(
+        fam, header=header, weight=weight, drop_buckets=drop_buckets, drop_prior=drop_prior,
+    )
+
+
 def load_member_calibration_advice(
-    hazard_code: str, metric: str, model_name: str
+    hazard_code: str, metric: str, model_name: str, question_id: Optional[str] = None,
 ) -> str:
     """The per-model advice for one ensemble member, or "".
 
@@ -131,10 +330,29 @@ def load_member_calibration_advice(
         return ""
     if _advice_blocked(hz, m):
         return ""
-    key = (hz, m, name)
+    if advice_arm(question_id) == "no_advice":
+        return ""
+    structured = advice_family_carryover_enabled()
+    if not structured:
+        try:
+            from pythia.tools import family_recalibration as _fr
+
+            structured = _fr.recalibration_mode() == "apply"
+        except Exception:  # noqa: BLE001
+            structured = False
+    key = (hz, m, name, "structured" if structured else "text")
     with _MEMBER_ADVICE_LOCK:
         if key in _MEMBER_ADVICE_CACHE:
             return _MEMBER_ADVICE_CACHE[key]
+
+    if structured:
+        try:
+            text = _structured_member_advice(hz, m, name)
+        except Exception:  # noqa: BLE001
+            text = ""
+        with _MEMBER_ADVICE_LOCK:
+            _MEMBER_ADVICE_CACHE[key] = text
+        return text
 
     text = ""
     advice_version = os.getenv("PYTHIA_ADVICE_VERSION", "").strip() or None
@@ -2028,7 +2246,9 @@ def build_spd_prompt_v2(
     wording = question.get("wording") or question.get("title") or ""
 
     # Load hazard-specific calibration advice
-    cal_advice_text = _load_calibration_advice_for_hazard(hazard, metric, model_name=model_name)
+    cal_advice_text = ""
+    if advice_arm(question.get("question_id")) != "no_advice":
+        cal_advice_text = _load_calibration_advice_for_hazard(hazard, metric, model_name=model_name)
     calibration_section = ""
     if cal_advice_text:
         calibration_section = (

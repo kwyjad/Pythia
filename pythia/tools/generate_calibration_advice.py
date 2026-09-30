@@ -36,7 +36,15 @@ if not LOGGER.handlers:
     LOGGER.addHandler(logging.NullHandler())
 
 MIN_QUESTIONS = 20
-MIN_QUESTIONS_PER_MODEL = 10
+#: Distinct questions (the latest run of each) a model, or a model family,
+#: must have scored before advice is written for it. Rows and reruns do not
+#: count: nine reruns of two questions are two questions.
+MIN_DISTINCT_QUESTIONS_PER_MODEL = 20
+MIN_QUESTIONS_PER_MODEL = MIN_DISTINCT_QUESTIONS_PER_MODEL  # legacy name
+#: Suffixes of family-recalibration rows: scored, never advised as models.
+DERIVED_MODEL_SUFFIXES = ("__raw", "__recal")
+#: Prefix of the family advice rows (``family:<family>``).
+FAMILY_ADVICE_PREFIX = "family:"
 MAX_ADVICE_CHARS = 3800
 
 HAZARD_LABELS = {
@@ -137,6 +145,29 @@ def _latest_run_clause(conn: Any, table: str, alias: str) -> str:
         f"SELECT MAX(_lr.run_id) FROM forecasts_ensemble _lr "
         f"WHERE _lr.question_id = {alias}.question_id))"
     )
+
+
+def _member_source_clause(names: Sequence[str] | str, alias: str = "fr") -> Tuple[str, List[Any]]:
+    """SQL (+ params) selecting the forecasts that stand for ``names``.
+
+    Advice is about what a model forecast, so where family recalibration
+    stored a corrected row under the model's name and the model's own
+    forecast as ``<model>__raw``, the raw row is read and the corrected one
+    skipped; a question with no raw row is read under the model's name.
+    """
+    if isinstance(names, str):
+        names = [names]
+    names = [str(n) for n in names if n]
+    raws = [n + "__raw" for n in names]
+    ph = ",".join("?" for _ in names) or "NULL"
+    rph = ",".join("?" for _ in raws) or "NULL"
+    sql = (
+        f"(({alias}.model_name IN ({ph}) AND NOT EXISTS (SELECT 1 FROM forecasts_raw _raw "
+        f"WHERE _raw.question_id = {alias}.question_id AND _raw.run_id = {alias}.run_id "
+        f"AND _raw.model_name = {alias}.model_name || '__raw')) "
+        f"OR {alias}.model_name IN ({rph}))"
+    )
+    return sql, list(names) + raws
 
 
 def advice_blocked_groups() -> set[Tuple[str, str]]:
@@ -495,6 +526,8 @@ def _compute_per_model_brier(
         # Aggregates are stored under explicit model names
         # (ensemble_mean_v2 etc.); '__ensemble__' covers legacy NULL-model
         # rows in old DBs.
+        if name.endswith(DERIVED_MODEL_SUFFIXES):
+            continue
         if name == "__ensemble__" or name in AGGREGATE_MODEL_NAMES:
             agg_briers[name] = brier
         else:
@@ -609,13 +642,14 @@ def _compute_month_position_bias(
 
 
 def _compute_per_model_bucket_calibration(
-    conn: Any, hazard_code: str, metric: str, model_name: str,
+    conn: Any, hazard_code: str, metric: str, model_name: "str | Sequence[str]",
 ) -> Optional[List[Dict[str, Any]]]:
     """Per-bucket reliability for a single model (from forecasts_raw)."""
     hz = hazard_code.upper()
     m = metric.upper()
     bins = _class_bins_for_metric(m)
     bucket_case = _bucket_case_sql(m)
+    src_sql, src_params = _member_source_clause(model_name)
 
     sql = f"""
         WITH resolved_with_bucket AS (
@@ -642,13 +676,13 @@ def _compute_per_model_bucket_calibration(
         WHERE upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
           AND COALESCE(q.is_test, FALSE) = FALSE
-          AND fr.model_name = ?
+          AND {src_sql}
           AND fr.probability IS NOT NULL{_latest_run_clause(conn, "forecasts_raw", "fr")}
         GROUP BY fr.bucket_index
         ORDER BY fr.bucket_index
     """
     try:
-        rows = conn.execute(sql, [hz, m, hz, m, model_name]).fetchall()
+        rows = conn.execute(sql, [hz, m, hz, m] + src_params).fetchall()
     except Exception as exc:
         LOGGER.warning(
             "Per-model bucket calibration failed for %s/%s/%s: %s",
@@ -677,11 +711,12 @@ def _compute_per_model_bucket_calibration(
 
 
 def _compute_per_model_tail_coverage(
-    conn: Any, hazard_code: str, metric: str, model_name: str,
+    conn: Any, hazard_code: str, metric: str, model_name: "str | Sequence[str]",
 ) -> Optional[Dict[str, Any]]:
     """Tail coverage (top two buckets) for a single model from forecasts_raw."""
     hz = hazard_code.upper()
     m = metric.upper()
+    src_sql, src_params = _member_source_clause(model_name)
     bucket_case = _bucket_case_sql(m)
     tail_start = max(n_buckets_for(m) - 1, 2)  # top two buckets
 
@@ -707,7 +742,7 @@ def _compute_per_model_tail_coverage(
             WHERE upper(q.hazard_code) = ?
               AND upper(q.metric) = ?
               AND COALESCE(q.is_test, FALSE) = FALSE
-              AND fr.model_name = ?
+              AND {src_sql}
               AND fr.probability IS NOT NULL{_latest_run_clause(conn, "forecasts_raw", "fr")}
             GROUP BY fr.question_id, fr.month_index
         )
@@ -723,7 +758,7 @@ def _compute_per_model_tail_coverage(
             ON rb.question_id = mt.question_id AND rb.horizon_m = mt.horizon_m
     """
     try:
-        row = conn.execute(sql, [hz, m, hz, m, model_name]).fetchone()
+        row = conn.execute(sql, [hz, m, hz, m] + src_params).fetchone()
     except Exception as exc:
         LOGGER.warning(
             "Per-model tail coverage failed for %s/%s/%s: %s",
@@ -743,12 +778,13 @@ def _compute_per_model_tail_coverage(
 
 
 def _compute_per_model_horizon_diff(
-    conn: Any, hazard_code: str, metric: str, model_name: str,
+    conn: Any, hazard_code: str, metric: str, model_name: "str | Sequence[str]",
     n_buckets: int = 5,
 ) -> Optional[Dict[str, Any]]:
     """Check horizon differentiation for a single model using JS divergence."""
     hz = hazard_code.upper()
     m = metric.upper()
+    src_sql, src_params = _member_source_clause(model_name)
 
     sql = f"""
         SELECT
@@ -760,7 +796,7 @@ def _compute_per_model_horizon_diff(
         WHERE upper(q.hazard_code) = ?
           AND upper(q.metric) = ?
           AND COALESCE(q.is_test, FALSE) = FALSE
-          AND fr.model_name = ?{_latest_run_clause(conn, "forecasts_raw", "fr")}
+          AND {src_sql}{_latest_run_clause(conn, "forecasts_raw", "fr")}
           AND fr.month_index BETWEEN 1 AND 6
           AND fr.bucket_index BETWEEN 1 AND ?
           AND fr.probability IS NOT NULL
@@ -768,7 +804,7 @@ def _compute_per_model_horizon_diff(
         ORDER BY fr.month_index, fr.bucket_index
     """
     try:
-        rows = conn.execute(sql, [hz, m, model_name, n_buckets]).fetchall()
+        rows = conn.execute(sql, [hz, m] + src_params + [n_buckets]).fetchall()
     except Exception as exc:
         LOGGER.warning(
             "Per-model horizon diff failed for %s/%s/%s: %s",
@@ -1144,7 +1180,7 @@ def _compute_prior_anchoring_quality(
     conn: Any,
     hazard_code: str,
     metric: str,
-    model_name: str | None = None,
+    model_name: "str | Sequence[str] | None" = None,
 ) -> Optional[Dict[str, Any]]:
     """Analyze how well models anchor their stated priors on the base rate.
 
@@ -1171,8 +1207,9 @@ def _compute_prior_anchoring_quality(
     """
     params: list[Any] = [hazard_code, metric]
     if model_name:
-        sql += " AND fr.model_name = ?"
-        params.append(model_name)
+        src_sql, src_params = _member_source_clause(model_name)
+        sql += f" AND {src_sql}"
+        params.extend(src_params)
 
     try:
         rows = conn.execute(sql, params).fetchall()
@@ -1733,6 +1770,175 @@ def _format_per_model_advice(
     return text
 
 
+def _family_question_counts(
+    conn: Any, hazard_code: str, metric: str, ids: Sequence[str]
+) -> Tuple[Dict[str, int], int]:
+    """({model id: distinct scored questions}, distinct questions across the
+    ids), the latest run of each question only."""
+    if not ids:
+        return {}, 0
+    ph = ",".join("?" for _ in ids)
+    base = f"""
+        FROM scores s
+        JOIN questions q ON q.question_id = s.question_id
+        WHERE s.score_type = 'brier'
+          AND upper(q.hazard_code) = ? AND upper(q.metric) = ?
+          AND COALESCE(q.is_test, FALSE) = FALSE
+          AND s.model_name IN ({ph}){_latest_run_clause(conn, "scores", "s")}
+    """
+    params = [hazard_code.upper(), metric.upper(), *ids]
+    try:
+        per = {
+            str(r[0]): int(r[1] or 0)
+            for r in conn.execute(
+                f"SELECT s.model_name, COUNT(DISTINCT s.question_id) {base} GROUP BY 1", params
+            ).fetchall()
+        }
+        total = conn.execute(f"SELECT COUNT(DISTINCT s.question_id) {base}", params).fetchone()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Family question count failed for %s/%s: %s", hazard_code, metric, exc)
+        return {}, 0
+    return per, int(total[0] or 0) if total else 0
+
+
+#: Distinct questions each arm of the advice experiment needs before the
+#: comparison is reported at all.
+MIN_QUESTIONS_PER_ARM = 10
+
+
+def compute_advice_arm_impact(conn: Any, hazard_code: str, metric: str) -> Dict[str, Any]:
+    """Advice arm against no-advice arm (``PYTHIA_ADVICE_EXPERIMENT_SHARE``).
+
+    Primary aggregate Brier (ensemble_mean_v2, else track2_flash) per
+    distinct question, the latest run, by the arm recorded on
+    ``forecasts_ensemble.advice_arm``. Below ``MIN_QUESTIONS_PER_ARM`` in
+    either arm the result is ``{"available": False, "reason": ...}``: a
+    difference over a handful of questions is noise that reads as a finding.
+    """
+    if not _has_column(conn, "forecasts_ensemble", "advice_arm"):
+        return {"available": False, "reason": "forecasts_ensemble has no advice_arm column"}
+    sql = f"""
+        WITH arm AS (
+            SELECT fe.question_id, ANY_VALUE(fe.advice_arm) AS arm
+            FROM forecasts_ensemble fe
+            WHERE fe.advice_arm IS NOT NULL
+              AND fe.run_id = (SELECT MAX(_lr.run_id) FROM forecasts_ensemble _lr
+                               WHERE _lr.question_id = fe.question_id)
+            GROUP BY fe.question_id
+        )
+        SELECT arm.arm, s.question_id, AVG(s.value)
+        FROM scores s
+        JOIN arm ON arm.question_id = s.question_id
+        JOIN questions q ON q.question_id = s.question_id
+        WHERE s.score_type = 'brier'
+          AND s.model_name IN ('ensemble_mean_v2', 'track2_flash')
+          AND upper(q.hazard_code) = ? AND upper(q.metric) = ?
+          AND COALESCE(q.is_test, FALSE) = FALSE{_latest_run_clause(conn, "scores", "s")}
+        GROUP BY arm.arm, s.question_id
+    """
+    try:
+        rows = conn.execute(sql, [hazard_code.upper(), metric.upper()]).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": f"query failed: {type(exc).__name__}"}
+    by_arm: Dict[str, List[float]] = {}
+    for arm, _qid, v in rows:
+        by_arm.setdefault(str(arm), []).append(float(v))
+    n_adv = len(by_arm.get("advice", []))
+    n_no = len(by_arm.get("no_advice", []))
+    if n_adv < MIN_QUESTIONS_PER_ARM or n_no < MIN_QUESTIONS_PER_ARM:
+        return {
+            "available": False,
+            "n_advice": n_adv,
+            "n_no_advice": n_no,
+            "reason": f"each arm needs {MIN_QUESTIONS_PER_ARM} scored questions",
+        }
+    ma = sum(by_arm["advice"]) / n_adv
+    mn = sum(by_arm["no_advice"]) / n_no
+    return {
+        "available": True,
+        "n_advice": n_adv,
+        "n_no_advice": n_no,
+        "mean_brier_advice": round(ma, 4),
+        "mean_brier_no_advice": round(mn, 4),
+        "difference": round(ma - mn, 4),
+    }
+
+
+def _write_family_advice(
+    conn: Any,
+    hazard_code: str,
+    metric: str,
+    as_of_month: str,
+    all_models: List[Dict[str, Any]],
+    shared_findings: Dict[str, Any],
+    advice_version: Optional[str],
+) -> int:
+    """Write one ``family:<family>`` row per model family seen in this group.
+
+    A family row pools every version of a model line (``llm.model_families``)
+    so a new version can be shown what its predecessors got wrong before it
+    has twenty questions of its own. The findings record which ids
+    contributed and how many distinct questions each, which is what the
+    prompt uses to name the predecessors and to decay the carried advice as
+    the new version builds its own record.
+    """
+    try:
+        from pythia.llm_profiles import get_model_families, model_family
+    except Exception:  # noqa: BLE001
+        return 0
+    families = get_model_families()
+    seen: set[str] = set()
+    written = 0
+    for info in all_models:
+        fam = model_family(info.get("name"))
+        if not fam or fam in seen:
+            continue
+        seen.add(fam)
+        per_id, total = _family_question_counts(conn, hazard_code, metric, families.get(fam, []))
+        contributing = {k: v for k, v in per_id.items() if v > 0}
+        if total < MIN_DISTINCT_QUESTIONS_PER_MODEL:
+            LOGGER.info(
+                "Skipping family advice for %s on %s/%s: %d distinct question(s) (need %d).",
+                fam, hazard_code, metric, total, MIN_DISTINCT_QUESTIONS_PER_MODEL,
+            )
+            continue
+        ids = sorted(contributing)
+        findings: Dict[str, Any] = {
+            "family": fam,
+            "n_questions": total,
+            "contributing_ids": contributing,
+            "tail_coverage": _compute_per_model_tail_coverage(conn, hazard_code, metric, ids),
+            "bucket_calibration": _compute_per_model_bucket_calibration(conn, hazard_code, metric, ids),
+            "horizon_diff": _compute_per_model_horizon_diff(conn, hazard_code, metric, ids),
+        }
+        try:
+            findings["prior_anchoring"] = _compute_prior_anchoring_quality(
+                conn, hazard_code, metric, model_name=ids,
+            )
+        except Exception:  # noqa: BLE001
+            findings["prior_anchoring"] = None
+        text = _format_per_model_advice(
+            model_name=f"{FAMILY_ADVICE_PREFIX}{fam}",
+            findings=findings,
+            hazard_code=hazard_code,
+            metric=metric,
+            as_of_month=as_of_month,
+            n_scored=total,
+            shared_findings=shared_findings,
+        )
+        _upsert_advice(
+            conn, as_of_month, hazard_code, metric, text, findings,
+            model_name=f"{FAMILY_ADVICE_PREFIX}{fam}",
+            advice_version=advice_version,
+        )
+        written += 1
+        LOGGER.info(
+            "Wrote family advice for %s on %s/%s (%d questions from %s).",
+            fam, hazard_code, metric, total, ", ".join(f"{k}={v}" for k, v in sorted(contributing.items())),
+        )
+    return written
+
+
 # ---------------------------------------------------------------------------
 # Upsert
 # ---------------------------------------------------------------------------
@@ -2043,6 +2249,9 @@ def generate_calibration_advice(
             findings["per_model_brier"] = _compute_per_model_brier(
                 conn, hazard_code, metric,
             )
+            findings["advice_impact"] = compute_advice_arm_impact(
+                conn, hazard_code, metric,
+            )
             findings["month_position_bias"] = _compute_month_position_bias(
                 conn, hazard_code, metric,
             )
@@ -2097,6 +2306,20 @@ def generate_calibration_advice(
             )
 
             # --- Per-model advice (after shared advice) ---
+            # This month's model and family rows are rebuilt from scratch: a
+            # model that no longer qualifies (the threshold rose from 10 rows
+            # to 20 distinct questions) must not keep a row written earlier in
+            # the same month.
+            try:
+                conn.execute(
+                    "DELETE FROM calibration_advice WHERE as_of_month = ? AND hazard_code = ? "
+                    "AND metric = ? AND COALESCE(model_name, '__shared__') <> '__shared__'",
+                    [as_of_month, hazard_code, metric],
+                )
+            except Exception as exc:  # noqa: BLE001
+                _rollback_quietly(conn)
+                LOGGER.warning("Could not clear stale per-model advice for %s/%s: %s",
+                               hazard_code, metric, exc)
             model_brier_data = findings.get("per_model_brier")
             if model_brier_data and model_brier_data.get("all_models"):
                 all_models = model_brier_data["all_models"]
@@ -2108,16 +2331,16 @@ def generate_calibration_advice(
                     # at six horizons is still one question.
                     n_scored = model_info.get("n", 0)
 
-                    if n_scored < MIN_QUESTIONS_PER_MODEL:
+                    if n_scored < MIN_DISTINCT_QUESTIONS_PER_MODEL:
                         LOGGER.info(
                             "Skipping per-model advice for %s on %s/%s: "
-                            "only %d scored question(s) (need %d).",
+                            "only %d distinct scored question(s) (need %d).",
                             mname, hazard_code, metric,
-                            n_scored, MIN_QUESTIONS_PER_MODEL,
+                            n_scored, MIN_DISTINCT_QUESTIONS_PER_MODEL,
                         )
                         continue
 
-                    model_findings: Dict[str, Any] = {}
+                    model_findings: Dict[str, Any] = {"n_questions": n_scored}
 
                     # Relative standing
                     rank = next(
@@ -2180,6 +2403,11 @@ def generate_calibration_advice(
                         "Wrote per-model advice for %s on %s/%s (%d chars).",
                         mname, hazard_code, metric, len(model_advice),
                     )
+
+                total_written += _write_family_advice(
+                    conn, hazard_code, metric, as_of_month, all_models,
+                    findings, advice_version,
+                )
 
         # Write global row
         global_findings = _compute_global_findings(all_model_briers)

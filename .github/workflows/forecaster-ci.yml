@@ -267,6 +267,19 @@ jobs:
             forecaster/tests/test_rc_shift_guidance.py \
             scripts/ci/tests/test_rc_shift_diagnostic.py
 
+      - name: Run family advice + recalibration tests
+        run: |
+          # PYTHIA_ADVICE_FAMILY_CARRYOVER, PYTHIA_ADVICE_EXPERIMENT_SHARE and
+          # PYTHIA_FAMILY_RECALIBRATION_MODE: advice counted in distinct
+          # questions and carried by model family, the no-advice arm, and
+          # per-family factors (fit, version gate, what votes, what is stored).
+          pytest -vv \
+            pythia/tests/test_family_recalibration.py \
+            pythia/tests/test_family_advice.py \
+            forecaster/tests/test_family_recalibration_members.py \
+            forecaster/tests/test_family_advice_prompt.py \
+            forecaster/tests/test_member_calibration_advice.py
+
       - name: Run conflict prior-anchor tests
         run: |
           # PYTHIA_PRIOR_ANCHOR_SPD: prompts byte-identical with the flag off,

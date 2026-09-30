@@ -30,7 +30,7 @@ _A = ModelSpec(name="model-a", provider="google", model_id="model-a", active=Tru
 _B = ModelSpec(name="model-b", provider="google", model_id="model-b", active=True)
 
 
-def _fake_advice(hz, metric, name):
+def _fake_advice(hz, metric, name, **_kw):
     return "You over-forecast the top bucket." if name == "model-a" else ""
 
 

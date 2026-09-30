@@ -173,7 +173,11 @@ def collect(
             # swapped member) is still reported: it is evidence about what
             # ran.
             for extra in sorted(models_seen.get(qid, set()) - set(expected)):
-                if extra and not extra.startswith("ensemble_"):
+                # ``<model>__raw`` / ``<model>__recal`` are family-recalibration
+                # copies of a member, not members: they never count as one.
+                if extra and not extra.startswith("ensemble_") and not extra.endswith(
+                    ("__raw", "__recal")
+                ):
                     expected.append(extra)
         n_expected = _expected_buckets(metric)
         for model in expected:
