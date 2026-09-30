@@ -11,8 +11,7 @@ import logging
 import os
 import threading
 import re
-from datetime import date, datetime
-import functools
+from datetime import date
 from typing import Any, Dict, Optional
 import json
 from pythia.buckets import labels_for, n_buckets_for
@@ -1861,143 +1860,6 @@ def _rc_shift_question_guidance(
     return "\n".join(lines) + "\n\n"
 
 
-# --- Base-rate distribution as the prior (PYTHIA_PRIOR_ANCHOR_SPD) ------------
-# On the resolved August 2026 conflict-death questions the members' priors put
-# 0.38 on the realised bucket where the climatology SPD put 0.54, and the loss
-# was in that prior, not in the update. The flag hands ACE/FATALITIES members
-# the level-and-volatility distribution (base_rate_spd.level_volatility_spds)
-# and tells them to copy it as the prior, so every departure has to be argued
-# as an update. Off by default: with the flag off every prompt is
-# byte-identical to before.
-
-#: Rendered block over this many characters is logged, and a test fails; the
-#: block is never cut, because a distribution cut off mid-bucket still reads
-#: as a complete one.
-PRIOR_ANCHOR_MAX_CHARS = 1400
-
-_PRIOR_ANCHOR_STEP1 = (
-    "Your prior MUST be the BASE-RATE DISTRIBUTION given {ref}, copied exactly: month 1 and "
-    "month 6 as printed, months 2 to 5 interpolated linearly between them. Do not adjust it "
-    "here. Every departure from it is an update: argue it in STEP 3 and record it in "
-    "`updates[]` with its delta.\n"
-)
-
-
-def prior_anchor_enabled() -> bool:
-    """True when ``PYTHIA_PRIOR_ANCHOR_SPD`` is on (default off)."""
-    return os.getenv("PYTHIA_PRIOR_ANCHOR_SPD", "0").strip().lower() in ("1", "true", "yes")
-
-
-@functools.lru_cache(maxsize=512)
-def _prior_anchor_cached(db_url: str, iso3: str, window_ym: str, today_iso: str):
-    from pythia.tools.base_rate_spd import level_volatility_spds
-    from resolver.db import duckdb_io
-
-    con = duckdb_io.get_db(db_url)
-    try:
-        return level_volatility_spds(con, iso3, window_ym, known_at=today_iso)
-    finally:
-        duckdb_io.close_db(con)
-
-
-def load_prior_anchor(question: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The level-and-volatility distribution for an ACE/FATALITIES question, or None.
-
-    None when the flag is off, the question is another hazard or metric, or
-    there is no complete ACLED month to anchor on. Never raises.
-    """
-
-    if not prior_anchor_enabled():
-        return None
-    hazard = (question.get("hazard_code") or "").upper()
-    metric = (question.get("metric") or "").upper()
-    if hazard != "ACE" or metric != "FATALITIES":
-        return None
-    iso3 = (question.get("iso3") or "").upper()
-    window = str(question.get("window_start_date") or "")[:7]
-    if not iso3 or len(window) != 7:
-        return None
-    try:
-        from pythia.tools.base_rate_spd import LEVEL_VOLATILITY_VERSION
-        from resolver.db import duckdb_io
-
-        db_url = os.getenv("RESOLVER_DB_URL", "").strip() or _pythia_db_url_from_config()
-        db_url = db_url or duckdb_io.DEFAULT_DB_URL
-        today = os.getenv("PYTHIA_PRIOR_ANCHOR_TODAY", "").strip() or date.today().isoformat()
-        spds, source, detail = _prior_anchor_cached(db_url, iso3, window, today)
-    except Exception as exc:  # noqa: BLE001
-        LOG.warning("[prompts] prior anchor unavailable for %s: %s", iso3, exc)
-        return None
-    if 1 not in spds or 6 not in spds:
-        if detail.get("reason"):
-            LOG.info("[prompts] no prior anchor for %s: %s", iso3, detail.get("reason"))
-        return None
-    return {"version": LEVEL_VOLATILITY_VERSION, "spds": spds, "source": source, "detail": detail}
-
-
-def prior_anchor_block_version(question: Dict[str, Any]) -> Optional[str]:
-    """What ``forecasts_raw.base_rate_block_version`` records for this question."""
-    anchor = load_prior_anchor(question)
-    return anchor["version"] if anchor else None
-
-
-def _pct(p: float) -> str:
-    v = 100.0 * float(p)
-    return f"{v:.1f}%" if v < 1 else f"{v:.0f}%"
-
-
-def render_prior_anchor_block(anchor: Dict[str, Any], forecast_keys: list[str]) -> str:
-    """The BASE-RATE DISTRIBUTION block (per-question data; after the cache prefix)."""
-    from pythia.buckets import labels_for
-
-    labels = labels_for("FATALITIES")
-    detail = anchor["detail"]
-    h1 = (detail.get("horizons") or {}).get("1") or {}
-    level_ym = str(detail.get("level_month") or "")
-    try:
-        level_name = datetime.strptime(level_ym, "%Y-%m").strftime("%B %Y")
-    except ValueError:
-        level_name = level_ym
-    level_value = int(round(float(detail.get("level_value") or 0)))
-    level_label = labels[int(detail.get("level_bucket") or 0)]
-    gap = int(h1.get("gap_months") or 1)
-    later = "one month later" if gap == 1 else f"{gap} months later"
-    n_months = int(detail.get("n_months_in_window") or 0)
-    sentence = (
-        f"Over the last {n_months} complete months, the count {later} stayed in the same "
-        f"bucket {_pct(h1.get('share_same', 0))} of the time, moved one bucket "
-        f"{_pct(h1.get('share_one', 0))}, and two or more {_pct(h1.get('share_two_plus', 0))}."
-    )
-    if h1.get("pooled"):
-        sentence += (
-            f" This country's own record gives only {int(h1.get('n_own_pairs') or 0)} such "
-            f"pairs, so the shares pool {int(h1.get('n_band_countries') or 0)} countries whose "
-            f"typical month falls in the same bucket."
-        )
-
-    def _row(h: int) -> str:
-        probs = anchor["spds"][h]
-        key = forecast_keys[h - 1] if len(forecast_keys) >= h else f"month {h}"
-        cells = "; ".join(f"{lab} {_pct(p)}" for lab, p in zip(labels, probs))
-        return f"  Month {h} ({key}): {cells}"
-
-    block = (
-        "BASE-RATE DISTRIBUTION (your Step 1 prior):\n"
-        f"  Level: {level_value:,} deaths in {level_name} (bucket {level_label}), "
-        "the last complete month in the record.\n"
-        f"  Spread: {sentence}\n"
-        f"{_row(1)}\n"
-        f"{_row(6)}\n"
-        "  Months 2 to 5: interpolate linearly between month 1 and month 6.\n"
-    )
-    if len(block) > PRIOR_ANCHOR_MAX_CHARS:
-        LOG.warning(
-            "[prompts] prior anchor block is %d chars, over the %d budget (not truncated)",
-            len(block), PRIOR_ANCHOR_MAX_CHARS,
-        )
-    return block
-
-
 def build_spd_prompt_v2(
     question: Dict[str, Any],
     history_summary: Dict[str, Any],
@@ -2416,18 +2278,6 @@ def build_spd_prompt_v2(
     rc_self_search_in_method = "" if v3_order else rc_self_search_line
     rc_self_search_in_data = rc_self_search_line if v3_order else ""
 
-    base_rate_text = _build_base_rate_text(history_summary, forecast_keys, iso3, hazard, metric)
-    prior_anchor = load_prior_anchor(question)
-    prior_anchor_section = ""
-    if prior_anchor:
-        # The trajectory block calls itself the prior anchor; with the
-        # distribution below it is context, and one prior is enough.
-        base_rate_text = base_rate_text.replace(
-            "Use as your prior anchor.",
-            "Use as context; your prior is the BASE-RATE DISTRIBUTION below.",
-        )
-        prior_anchor_section = render_prior_anchor_block(prior_anchor, forecast_keys) + "\n"
-
     # --- PROMPT_EXCERPT: spd_v2_start ---
     role_line = (
         "You are a careful probabilistic forecaster on a humanitarian early warning panel.\n\n"
@@ -2443,8 +2293,7 @@ def build_spd_prompt_v2(
         f"{_json_dumps_for_prompt(question, indent=2)}\n"
         "```\n\n"
         f"{horizon_note}"
-        f"{base_rate_text}\n\n"
-        f"{prior_anchor_section}"
+        f"{_build_base_rate_text(history_summary, forecast_keys, iso3, hazard, metric)}\n\n"
         f"{haz_base_rate_section}"
         f"{base_rate_note_in_data}"
         "HS triage output:\n"
@@ -2468,17 +2317,10 @@ def build_spd_prompt_v2(
         "You must follow these steps IN ORDER. Do not skip steps. Show your work for each step.\n\n"
         "STEP 1 — DECLARE YOUR PRIOR SPD\n"
         "Before considering ANY evidence, state your prior (base-rate) SPD for each month. "
-        + (
-            _PRIOR_ANCHOR_STEP1.format(ref=history_ref)
-            if prior_anchor
-            else (
-                f"Derive this prior from the Resolver history summary {history_ref}. "
-                "If Resolver history is available, convert the historical distribution into bucket probabilities. "
-                "If history is missing or sparse, state an uninformative prior (e.g. heavy weight on the \"0\" "
-                "bucket for countries with no recent events) and explain your reasoning.\n"
-            )
-        )
-        +
+        f"Derive this prior from the Resolver history summary {history_ref}. "
+        "If Resolver history is available, convert the historical distribution into bucket probabilities. "
+        "If history is missing or sparse, state an uninformative prior (e.g. heavy weight on the \"0\" "
+        "bucket for countries with no recent events) and explain your reasoning.\n"
         f"{base_rate_note_in_method}"
         "Write out the prior explicitly:\n"
         f"  Prior SPD: {prob_ph} for each month (or a single prior if months are similar).\n"

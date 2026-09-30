@@ -149,25 +149,51 @@ maximally wrong confident forecast. For binary Brier: 0.25 = always saying
 """
 
 _SKILL_SEMANTICS = """\
-Three **reference forecasters** are scored beside the real models (rows in
+Four **reference forecasters** are scored beside the real models (rows in
 `scores` and `rollups.csv` under `run_id IS NULL`):
 
-- `__ext_climatology` — the base-rate SPD the forecaster was shown at prompt
-  time (built by `pythia.tools.base_rate_spd` from the same tables the
-  prompt's base-rate block queries, using only history strictly before the
-  question window). This is "what you would have said with no model".
+- `__ext_climatology` — a base-rate SPD built by `pythia.tools.base_rate_spd`
+  from the series that resolves the question, using only complete months
+  strictly before the question window. This is "what you would have said with
+  no model". It is NOT, in general, what the prompt showed: see the table
+  below.
 - `__ext_uniform` — flat across buckets (0.5 for binary questions). The
   floor: any model losing to uniform is actively destroying information.
-- `__ext_persistence` — "next month looks like last month": the last value
-  observed strictly before the window (ACE/FATALITIES from
+- `__ext_persistence` — "next month looks like last month": the last complete
+  value observed strictly before the window (ACE/FATALITIES from
   `acled_monthly_fatalities`, a live month with no row counting as 0;
   DR/PHASE3PLUS_IN_NEED from the latest `phase3plus_in_need` row), placed in
   its bucket and SMOOTHED: 90% of the mass on that bucket and the other 10%
   spread evenly over all K buckets (`PERSISTENCE_SMOOTHING = 0.1`). A pure
   one-hot vector gives an infinite log loss whenever the outcome leaves the
-  bucket; the smoothing is a fixed constant, never tuned on outcomes. It is
-  the hard reference for persistent quantities, where standing still beats
-  a three-year base rate.
+  bucket; the smoothing is a fixed constant, never tuned on outcomes.
+- `__ext_level_volatility` (ACE/FATALITIES only) — the LEVEL is the last
+  complete month the forecaster could have read at forecast time (a month
+  counts once it ended 14 days before the forecast and the table holds it
+  complete); the SPREAD is how far a monthly count moved, in buckets, over
+  the same number of months as separates the level from the target month,
+  measured on the country's last 36 complete months (quiet months zero),
+  pooled with countries in the same activity band when the country gives
+  fewer than 12 pairs; every bucket is floored at 0.005. Under
+  `PYTHIA_PRIOR_ANCHOR_SPD=1` this is the distribution the prompt shows and
+  tells members to copy as their prior, so its score is the score of a
+  member that changed nothing. The audit row in `baseline_scored_forecasts`
+  names the level month, its value, the gap and whether pairs were pooled.
+
+What the prompt showed, against how each reference is built:
+
+| hazard / metric | what the SPD prompt shows as base rate | climatology | persistence | level + volatility |
+|---|---|---|---|---|
+| ACE / FATALITIES | a 6-month trajectory from `acled_monthly_fatalities` (last complete month, 3-month average, trend); with `PYTHIA_PRIOR_ANCHOR_SPD=1` also the level + volatility distribution for months 1 and 6 (`forecasts_raw.base_rate_block_version = prior_anchor_v1`) | empirical buckets over the last 36 complete months, quiet months as zero | last complete month before the window | as above |
+| ACE / PA | a 6-month IDMC displacement trajectory from `facts_deltas` | empirical buckets over the last 36 months of IDMC flows, quiet months as zero | — | — |
+| DR / PHASE3PLUS_IN_NEED | up to 36 months of FEWS NET / IPC Phase 3+ values, gaps shown as null | empirical buckets over the last 36 Phase 3+ values | latest Phase 3+ value | — |
+| FL, TC / PA | a seasonal profile of reported PA, GDACS alert history and (flood, cyclone) the PA machine's base-rate block | GDACS occurrence rate for the month × the distribution of reported PA magnitudes | — | — |
+| FL, DR, TC / EVENT_OCCURRENCE | GDACS alert history counted in calendar months over the source's own window | per-calendar-month event rate from GDACS `event_occurrence` rows | — | — |
+
+For ACE/FATALITIES before `prior_anchor_v1`, the prompt never showed a
+distribution at all: it showed six months, while climatology uses thirty-six.
+A member that "ignored the base rate" there ignored a number it was never
+given.
 
 **One run per question.** A question forecast in several runs has score
 and forecast rows for each. `rollups.csv`, `forecast_vs_outcome.csv`, the

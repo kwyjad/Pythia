@@ -124,5 +124,24 @@ def test_digest_pools_paired_sums_and_reports_sharpness(tmp_path):
     assert "-0.083" in text
     assert "## Sharpness of the primary aggregate (SPD)" in text
     # bayesmc stands for the question, not mean.
-    assert "| ACE | FATALITIES | T1 | 1 | 0.600 | 0.400 |" in text
-    assert "| ACE | FATALITIES | T2 | 1 | 0.700 | 0.700 |" in text
+    assert "| ACE | FATALITIES | T1 | primary | 1 | 0.600 | 0.400 |" in text
+    assert "| ACE | FATALITIES | T2 | primary | 1 | 0.700 | 0.700 |" in text
+
+
+def test_sharpness_reports_references_on_the_same_pairs(tmp_path):
+    fvo = [
+        {"question_id": "q1", "horizon_m": 1, "model_name": "ensemble_mean_v2", "hazard_code": "ACE",
+         "metric": "FATALITIES", "track": 1, "p_modal_bucket": 0.4, "realized_bucket": 4,
+         "p_realized_bucket": 0.2},
+        {"question_id": "q1", "horizon_m": 1, "model_name": "__ext_level_volatility", "hazard_code": "ACE",
+         "metric": "FATALITIES", "track": 1, "p_modal_bucket": 0.8, "realized_bucket": 4,
+         "p_realized_bucket": 0.8},
+        # A reference row with no aggregate beside it stays out.
+        {"question_id": "q2", "horizon_m": 1, "model_name": "__ext_level_volatility", "hazard_code": "ACE",
+         "metric": "FATALITIES", "track": 1, "p_modal_bucket": 0.1, "realized_bucket": 4,
+         "p_realized_bucket": 0.1},
+    ]
+    b._write_digest(tmp_path, [], [], [], {}, months_back=12, fvo_rows=fvo)
+    text = (tmp_path / "digest.md").read_text()
+    assert "| ACE | FATALITIES | T1 | primary | 1 | 0.400 | 0.200 |" in text
+    assert "| ACE | FATALITIES | T1 | __ext_level_volatility | 1 | 0.800 | 0.800 |" in text

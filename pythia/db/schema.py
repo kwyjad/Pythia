@@ -1718,6 +1718,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # ("shift_v1" under PYTHIA_RC_SHIFT_GUIDANCE=1, NULL otherwise),
                 # so anything fitted on member forecasts can tell the two apart.
                 "rc_guidance": "TEXT",
+                "base_rate_block_version": "TEXT",
             },
         )
 

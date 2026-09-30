@@ -267,6 +267,16 @@ jobs:
             forecaster/tests/test_rc_shift_guidance.py \
             scripts/ci/tests/test_rc_shift_diagnostic.py
 
+      - name: Run conflict prior-anchor tests
+        run: |
+          # PYTHIA_PRIOR_ANCHOR_SPD: prompts byte-identical with the flag off,
+          # the level-and-volatility block and Step 1 wording with it on, the
+          # forecasts_raw.base_rate_block_version stamp and the distance
+          # diagnostic; and the complete-month rule every ACLED reader uses.
+          pytest -vv \
+            forecaster/tests/test_prior_anchor_prompt.py \
+            pythia/tests/test_level_volatility_spd.py
+
       - name: Run shadow members + calibration weight tests
         run: |
           # Shadow members must never vote, and a new version of a model

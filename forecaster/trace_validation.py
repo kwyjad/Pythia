@@ -12,6 +12,7 @@ Never blocks or modifies forecasts — purely diagnostic.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, List, Optional
 
 from pythia.buckets import interior_thresholds_for, n_buckets_for
@@ -445,3 +446,56 @@ def _check_magnitude_consistency(trace: dict, expected_k: int) -> dict:
 
     score = n_pass / max(n_total, 1)
     return {"score": round(score, 4), "n_updates": n_total, "n_pass": n_pass}
+
+
+# ---------------------------------------------------------------------------
+# Prior anchor (PYTHIA_PRIOR_ANCHOR_SPD)
+# ---------------------------------------------------------------------------
+
+def _declared_month1_prior(trace: Any) -> Optional[List[float]]:
+    """The declared prior as a month-1 vector: a single list, or the first month."""
+    if not isinstance(trace, dict):
+        return None
+    prior = trace.get("prior")
+    spd = prior.get("spd") if isinstance(prior, dict) else None
+    if isinstance(spd, dict):
+        keys = sorted(spd.keys())
+        spd = spd.get(keys[0]) if keys else None
+        if isinstance(spd, dict):
+            spd = spd.get("probs")
+    if not isinstance(spd, list) or not spd:
+        return None
+    try:
+        return [float(x) for x in spd]
+    except (TypeError, ValueError):
+        return None
+
+
+def prior_anchor_check(trace: Any, shown_month1: List[float], version: str) -> Dict[str, Any]:
+    """How far the declared prior sits from the distribution the prompt showed.
+
+    Jensen-Shannon DISTANCE (square root of the base-2 divergence, 0..1): 0
+    means the member copied the distribution as told. Stored on the trace as
+    ``prior_anchor_check`` and never blocks a forecast.
+    """
+    declared = _declared_month1_prior(trace)
+    out: Dict[str, Any] = {"version": version, "js_distance": None, "status": "ok"}
+    if declared is None:
+        out["status"] = "no_declared_prior"
+        return out
+    if len(declared) != len(shown_month1):
+        out["status"] = f"length_mismatch:{len(declared)}!={len(shown_month1)}"
+        return out
+    p = _norm_probs(declared, len(shown_month1))
+    q = _norm_probs(shown_month1, len(shown_month1))
+    if p is None or q is None:
+        out["status"] = "unnormalisable"
+        return out
+    m = [(a + b) / 2.0 for a, b in zip(p, q)]
+
+    def _kl(x: List[float], y: List[float]) -> float:
+        return sum(a * math.log2(a / b) for a, b in zip(x, y) if a > 0 and b > 0)
+
+    jsd = max(0.0, 0.5 * _kl(p, m) + 0.5 * _kl(q, m))
+    out["js_distance"] = round(math.sqrt(jsd), 6)
+    return out

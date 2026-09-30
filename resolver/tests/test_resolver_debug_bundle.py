@@ -1502,3 +1502,41 @@ def test_ace_fatalities_must_resolve_from_the_base_rate_series(tmp_path, full_ru
     con.close()
     assert _checks(tmp_path, db, full_run, "acefat2")[
         "ace_fatalities_resolve_from_the_base_rate_series"]["verdict"] == "PASS"
+
+
+# --------------------------------------------------------------------------
+# Sept 2026: a partial ACLED month read as a whole one
+# --------------------------------------------------------------------------
+
+
+def test_a_partial_acled_month_row_fails_the_check(tmp_path, full_run):
+    """A row written before its month ended is a partial count; the check
+    names it whether it is the month in progress or a past month nobody
+    rewrote."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS acled_monthly_fatalities (iso3 TEXT, month DATE, "
+        "fatalities BIGINT, source TEXT, updated_at TIMESTAMP)"
+    )
+    con.execute("DELETE FROM acled_monthly_fatalities")
+    con.execute(
+        "INSERT INTO acled_monthly_fatalities VALUES "
+        "('AFG','2026-06-01',117,'ACLED','2026-08-28 14:47:01'),"
+        "('AFG','2026-07-01',9,'ACLED','2026-07-15 10:02:45')"
+    )
+    con.close()
+    check = _checks(tmp_path, db, full_run, "acledpartial1")[
+        "no_acled_month_row_written_before_its_month_ended"]
+    assert check["verdict"] == "FAIL"
+    assert "2026-07 (1 rows, last written 2026-07-15)" in check["detail"]
+
+    con = duckdb.connect(str(db))
+    con.execute(
+        "UPDATE acled_monthly_fatalities SET fatalities = 64, "
+        "updated_at = TIMESTAMP '2026-09-28 09:09:42' WHERE month = DATE '2026-07-01'"
+    )
+    con.close()
+    assert _checks(tmp_path, db, full_run, "acledpartial2")[
+        "no_acled_month_row_written_before_its_month_ended"]["verdict"] == "PASS"
