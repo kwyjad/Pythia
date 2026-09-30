@@ -97,6 +97,11 @@ jobs:
       # prior (scripts/ci/rc_shift_diagnostic.py). Keep in lockstep across
       # pythia_pipeline_stage.yml and run_horizon_scanner.yml.
       PYTHIA_RC_SHIFT_GUIDANCE: "0"
+      # ACE/FATALITIES prompts show the level-and-volatility distribution and
+      # tell members to copy it as their Step 1 prior (the loss on the August
+      # 2026 conflict-death questions was in the prior). Keep in lockstep across
+      # pythia_pipeline_stage.yml and run_horizon_scanner.yml; "0" reverts.
+      PYTHIA_PRIOR_ANCHOR_SPD: "1"
       BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       # HS models come from the llm.models registry + roles in pythia/config.yaml.

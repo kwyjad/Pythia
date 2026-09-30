@@ -151,10 +151,11 @@ class TestScoreBaselinesEndToEnd:
             con.close()
         # 2 SPD horizons x 2 models x 3 types + 1 CU horizon x 1 model x 3 types
         # + 1 binary horizon x 2 models x 1 type = 12 + 3 + 2 = 17, plus the
-        # ACE/FATALITIES persistence reference: 2 horizons x 3 types = 23.
-        assert n == 23
-        # Audit: one row per (question, horizon, model) actually scored = 9.
-        assert audit == 9
+        # ACE/FATALITIES persistence reference: 2 horizons x 3 types = 23,
+        # plus the level-and-volatility reference: 2 horizons x 3 types = 29.
+        assert n == 29
+        # Audit: one row per (question, horizon, model) actually scored = 11.
+        assert audit == 11
 
     def test_excluded_from_calibration_softmax_filter(self):
         # The calibration query filters model_name NOT LIKE '__ext_%' — pin
@@ -174,3 +175,42 @@ class TestScoreBaselinesEndToEnd:
         counters = score_baselines(db)
         assert counters["scored_uniform"] == 0
         assert counters["scored_climatology"] == 0
+
+
+def test_level_volatility_reads_the_level_known_at_forecast_time(tmp_path):
+    """The reference reads the level the forecaster could have read: with no
+    forecast row the forecast time is the window start, so on 1 August July
+    has not settled and June (300 deaths) is the level."""
+
+    from pythia.tools.score_baselines import LEVEL_VOLATILITY_MODEL_NAME
+
+    db = str(tmp_path / "lv.duckdb")
+    _seed_db(db)
+    counters = score_baselines(db)
+    assert counters["scored_level_volatility"] == 2
+    con = duckdb.connect(db, read_only=True)
+    try:
+        rows = con.execute(
+            "SELECT horizon_m, baserate_source, spd_json FROM baseline_scored_forecasts "
+            "WHERE model_name = ? ORDER BY horizon_m",
+            [LEVEL_VOLATILITY_MODEL_NAME],
+        ).fetchall()
+        n_scores = con.execute(
+            "SELECT COUNT(*) FROM scores WHERE model_name = ? AND run_id IS NULL",
+            [LEVEL_VOLATILITY_MODEL_NAME],
+        ).fetchone()[0]
+    finally:
+        con.close()
+    assert n_scores == 6
+    assert rows[0][1].startswith("level_volatility:2026-06=300:gap2:")
+    assert "known_at=2026-08-01" in rows[0][1]
+    import json as _json
+
+    vec = _json.loads(rows[0][2])
+    assert sum(vec) == pytest.approx(1.0) and len(vec) == n_buckets_for("FATALITIES")
+    # 300 deaths is bucket 100-<500 (index 4). The fixture's only two-month
+    # moves are +3, +2 and +1 buckets (0 -> 30, 5 -> 120, 30 -> 300), so a
+    # third of the mass lands one bucket up and two thirds pile on the top
+    # bucket, where moves past the end are kept rather than dropped.
+    assert vec[5] == pytest.approx(1 / 3, abs=0.02)
+    assert vec[6] == pytest.approx(2 / 3, abs=0.02)

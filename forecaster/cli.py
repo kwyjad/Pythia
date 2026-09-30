@@ -892,12 +892,18 @@ def _build_conflict_base_rate(
         # --- Fatalities from ACLED ---
         fatalities_data: Dict[str, Any]
         try:
+            # Complete months only: a row written before its month ended is
+            # a partial count (see base_rate_spd.ACLED_COMPLETE_MONTH_SQL).
+            from pythia.tools.base_rate_spd import acled_complete_month_clause
+
+            complete_sql = acled_complete_month_clause(con)
             fat_rows = con.execute(
-                """
+                f"""
                 SELECT month, fatalities
                 FROM acled_monthly_fatalities
                 WHERE iso3 = ?
                   AND substr(CAST(month AS VARCHAR), 1, 7) < ?
+                  AND {complete_sql}
                 ORDER BY month DESC
                 LIMIT 6
                 """,
@@ -1289,6 +1295,7 @@ from .prompts import (  # noqa: E402
     load_member_calibration_advice,
     merge_evidence_packs,
     rc_guidance_version,
+    prior_anchor_block_version,
     render_member_calibration_advice,
     reset_member_calibration_advice_cache,
 )
@@ -1686,12 +1693,28 @@ def _write_spd_members_v2_to_db(
     raw_calls: list[dict[str, object]],
     resolution_source: str,
     rc_guidance: Optional[str] = None,
+    base_rate_block_version: Optional[str] = None,
 ) -> None:
     """Persist SPD v2 member SPDs into forecasts_raw without touching ensemble rows.
 
     ``rc_guidance`` names the regime-change prompt guidance the members saw
     (``prompts.rc_guidance_version``); NULL means the legacy wording.
+    ``base_rate_block_version`` names the base-rate distribution the prompt
+    told members to copy as their prior (``prompts.prior_anchor_block_version``);
+    NULL means the prompt showed none. When set, each member's trace gains a
+    ``prior_anchor_check`` recording how far its declared prior sat from it.
     """
+
+    _anchor_month1: Optional[list] = None
+    if base_rate_block_version:
+        try:
+            from forecaster.prompts import load_prior_anchor
+
+            _anchor = load_prior_anchor(dict(question_row))
+            if _anchor:
+                _anchor_month1 = list(_anchor["spds"][1])
+        except Exception:  # noqa: BLE001 — a diagnostic never costs a forecast
+            _anchor_month1 = None
 
     qid = str(question_row.get("question_id") or "")
     hz = str(question_row.get("hazard_code") or "").upper()
@@ -1800,6 +1823,16 @@ def _write_spd_members_v2_to_db(
                 _rc_entry = raw_calls[idx]
                 if isinstance(_rc_entry, dict):
                     _rt = _rc_entry.get("reasoning_trace")
+                    if _rt and _anchor_month1 and isinstance(_rt, dict):
+                        try:
+                            from forecaster.trace_validation import prior_anchor_check
+
+                            _rt = dict(_rt)
+                            _rt["prior_anchor_check"] = prior_anchor_check(
+                                _rt, _anchor_month1, str(base_rate_block_version)
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                     if _rt:
                         _rc_reasoning_trace = json.dumps(_rt, default=str)
                     _he = _rc_entry.get("human_explanation")
@@ -1818,8 +1851,8 @@ def _write_spd_members_v2_to_db(
                         run_id, question_id, model_name, month_index, bucket_index,
                         probability, ok, elapsed_ms, cost_usd, prompt_tokens,
                         completion_tokens, total_tokens, status, spd_json, human_explanation,
-                        is_test, reasoning_trace_json, rc_guidance
-                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'no_forecast', ?, ?, ?, ?, ?)
+                        is_test, reasoning_trace_json, rc_guidance, base_rate_block_version
+                    ) VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, 'no_forecast', ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         run_id,
@@ -1835,6 +1868,7 @@ def _write_spd_members_v2_to_db(
                         _IS_TEST,
                         None,
                         rc_guidance,
+                        base_rate_block_version,
                     ],
                 )
                 continue
@@ -1867,8 +1901,9 @@ def _write_spd_members_v2_to_db(
                             run_id, question_id, model_name, month_index, bucket_index,
                             probability, ok, elapsed_ms, cost_usd, prompt_tokens,
                             completion_tokens, total_tokens, status, spd_json, human_explanation,
-                            horizon_m, class_bin, p, is_test, reasoning_trace_json, rc_guidance
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, ?)
+                            horizon_m, class_bin, p, is_test, reasoning_trace_json, rc_guidance,
+                            base_rate_block_version
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ok', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
                             run_id,
@@ -1891,6 +1926,7 @@ def _write_spd_members_v2_to_db(
                             _IS_TEST,
                             _rc_reasoning_trace,
                             rc_guidance,
+                            base_rate_block_version,
                         ],
                     )
     except Exception as exc:  # noqa: BLE001
@@ -5064,6 +5100,7 @@ async def _run_track2_spd_for_question(run_id: str, question_row: Any) -> None:
             per_model_spds=per_model_spds,
             raw_calls=raw_calls,
             resolution_source=resolution_source,
+            base_rate_block_version=prior_anchor_block_version(rec),
         )
 
     except Exception:
@@ -5456,6 +5493,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     raw_calls=member_raw_calls_snapshot or raw_calls,
                     resolution_source=resolution_source,
                     rc_guidance=rc_guidance_version(track=1),
+                    base_rate_block_version=prior_anchor_block_version(rec),
                 )
                 members_written = True
 
@@ -5701,6 +5739,7 @@ async def _run_spd_for_question(run_id: str, question_row: Any) -> None:
                     raw_calls=member_raw_calls_snapshot or raw_calls,
                     resolution_source=resolution_source,
                     rc_guidance=rc_guidance_version(track=1),
+                    base_rate_block_version=prior_anchor_block_version(rec),
                 )
                 members_written = True
             raw_texts = [str(rc.get("text") or "") for rc in raw_calls if isinstance(rc, dict)]

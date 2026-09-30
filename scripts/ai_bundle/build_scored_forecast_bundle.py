@@ -1053,25 +1053,40 @@ def _lineups_seen(staging: Path, summaries: list[dict[str, Any]]) -> dict[str, A
 _PRIMARY_AGGREGATES = ("ensemble_bayesmc_v2", "ensemble_mean_v2", "track2_flash")
 
 
+_SHARPNESS_REFERENCES = (
+    "__ext_climatology",
+    "__ext_persistence",
+    "__ext_level_volatility",
+)
+
+
 def _sharpness_lines(fvo_rows: list[dict[str, Any]]) -> list[str]:
     """Digest table: how concentrated the primary aggregate was, per (hazard, metric, track).
 
     Mean max bucket probability says how sharp the forecasts were; mean
     probability on the realised bucket says whether the sharpness landed. The
-    two move together only when the forecast is both sharp and right, which is
-    what the regime-change shift guidance is meant to buy for Track 1.
+    two move together only when the forecast is both sharp and right. The
+    reference forecasters are reported beside it over the SAME (question,
+    horizon) pairs, so a reader can see whether the aggregate was blunter
+    than a reference that scored better.
     """
     by_q: dict[tuple, dict[str, dict[str, Any]]] = {}
     for r in fvo_rows:
-        if r.get("model_name") not in _PRIMARY_AGGREGATES or r.get("metric") == "EVENT_OCCURRENCE":
+        if r.get("metric") == "EVENT_OCCURRENCE":
+            continue
+        if r.get("model_name") not in _PRIMARY_AGGREGATES + _SHARPNESS_REFERENCES:
             continue
         by_q.setdefault((r["question_id"], r["horizon_m"]), {})[r["model_name"]] = r
-    groups: dict[tuple, list[dict[str, Any]]] = {}
+    groups: dict[tuple, dict[str, list[dict[str, Any]]]] = {}
     for per_model in by_q.values():
         row = next((per_model[m] for m in _PRIMARY_AGGREGATES if m in per_model), None)
         if row is None or row.get("p_modal_bucket") is None:
             continue
-        groups.setdefault((row.get("hazard_code"), row.get("metric"), row.get("track")), []).append(row)
+        g = groups.setdefault((row.get("hazard_code"), row.get("metric"), row.get("track")), {})
+        g.setdefault("primary", []).append(row)
+        for ref in _SHARPNESS_REFERENCES:
+            if ref in per_model and per_model[ref].get("p_modal_bucket") is not None:
+                g.setdefault(ref, []).append(per_model[ref])
     if not groups:
         return []
     lines = [
@@ -1081,18 +1096,24 @@ def _sharpness_lines(fvo_rows: list[dict[str, Any]]) -> list[str]:
         "_Per (hazard, metric, track), over resolved (question, horizon) pairs of "
         "the latest run: the mean of the largest bucket probability, and the mean "
         "probability on the bucket that happened. Primary aggregate = "
-        "ensemble_bayesmc_v2, else ensemble_mean_v2, else track2_flash._",
+        "ensemble_bayesmc_v2, else ensemble_mean_v2, else track2_flash; the "
+        "reference rows cover the same pairs._",
         "",
-        "| hazard | metric | track | n | mean max bucket prob | mean prob on realised bucket |",
-        "|---|---|---|---|---|---|",
+        "| hazard | metric | track | forecaster | n | mean max bucket prob | mean prob on realised bucket |",
+        "|---|---|---|---|---|---|---|",
     ]
-    for (hz, metric, track), rs in sorted(groups.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
-        mx = sum(float(r["p_modal_bucket"]) for r in rs) / len(rs)
-        real = [float(r["p_realized_bucket"] or 0.0) for r in rs if r.get("realized_bucket") is not None]
-        rl = f"{sum(real) / len(real):.3f}" if real else "—"
-        lines.append(
-            f"| {hz} | {metric} | {'—' if track is None else f'T{track}'} | {len(rs)} | {mx:.3f} | {rl} |"
-        )
+    for (hz, metric, track), per in sorted(groups.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
+        for who in ("primary",) + _SHARPNESS_REFERENCES:
+            rs = per.get(who)
+            if not rs:
+                continue
+            mx = sum(float(r["p_modal_bucket"]) for r in rs) / len(rs)
+            real = [float(r["p_realized_bucket"] or 0.0) for r in rs if r.get("realized_bucket") is not None]
+            rl = f"{sum(real) / len(real):.3f}" if real else "—"
+            lines.append(
+                f"| {hz} | {metric} | {'—' if track is None else f'T{track}'} | {who} "
+                f"| {len(rs)} | {mx:.3f} | {rl} |"
+            )
     return lines
 
 
@@ -1138,7 +1159,8 @@ def _write_digest(
         "horizon) scores only — the ones both the model and `__ext_climatology` "
         "scored — pooled across (hazard, metric) groups within a track; positive "
         "= beat the base rate. `__ext_climatology` / `__ext_uniform` / "
-        "`__ext_persistence` are the reference forecasters, not Pythia models. "
+        "`__ext_persistence` / `__ext_level_volatility` are the reference "
+        "forecasters, not Pythia models. "
         "One run per question (the latest); RPS is SPD-only. Track 1 and Track 2 "
         "are different questions and are never pooled._",
         "",

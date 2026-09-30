@@ -288,18 +288,46 @@ def _fill_quiet_months(
 CONFLICT_FATALITIES_TABLE = "acled_monthly_fatalities"
 
 
+#: A month row is COMPLETE when it was written after the month ended. Until
+#: Sept 2026 ``acled_to_duckdb`` also wrote the month in progress, and the
+#: monthly ingest runs on the 28th while the forecast runs on the 1st, so the
+#: "last month" in the 1 August 2026 prompts was a row written on 15 July
+#: holding a median 28% of July's settled deaths (Afghanistan: 9 against 64),
+#: and on 1 September a row written on 28 August holding 75%. The writer now
+#: skips the month in progress; this predicate keeps the rows it wrote before
+#: that fix out of every reader until the next ingest rewrites them.
+ACLED_COMPLETE_MONTH_SQL = "updated_at >= CAST(month AS DATE) + INTERVAL 1 MONTH"
+
+#: A month is USABLE at time t once this many days have passed since it
+#: ended. The level-and-volatility reference is scored months after the
+#: forecast, when every month before the window is complete, so without a
+#: calendar rule it would read a month the forecaster never saw. Fourteen
+#: days reproduces what the monthly cadence delivers: on the 1st the month
+#: that has just ended is not yet in the table (the ingest runs on the 28th),
+#: and a mid-month run already has the month before it.
+ACLED_SETTLE_DAYS = 14
+
+
+def acled_complete_month_clause(con, table: str = "acled_monthly_fatalities") -> str:
+    """``ACLED_COMPLETE_MONTH_SQL`` when the table records ``updated_at``,
+    else ``TRUE`` (a hand-built table in a test, or a pre-stamp database)."""
+    return ACLED_COMPLETE_MONTH_SQL if _column_exists(con, table, "updated_at") else "TRUE"
+
+
 def _conflict_fatalities(con, iso3: str, before_ym: str) -> Tuple[List[float], str, Dict[str, Any]]:
     """ACE/FATALITIES: the ACLED monthly-fatalities series the prompt anchors on."""
     if not _table_exists(con, "acled_monthly_fatalities"):
         return [], NO_BASE_RATE_SOURCE, {"reason": "acled_monthly_fatalities missing"}
     months = _window_months(before_ym, CONFLICT_WINDOW_MONTHS)
+    complete = acled_complete_month_clause(con)
     rows = con.execute(
-        """
+        f"""
         SELECT substr(CAST(month AS VARCHAR), 1, 7) AS ym, SUM(fatalities)
         FROM acled_monthly_fatalities
         WHERE iso3 = ?
           AND substr(CAST(month AS VARCHAR), 1, 7) < ?
           AND substr(CAST(month AS VARCHAR), 1, 7) >= ?
+          AND {complete}
         GROUP BY ym
         """,
         [iso3, before_ym, months[0]],
@@ -310,7 +338,9 @@ def _conflict_fatalities(con, iso3: str, before_ym: str) -> Tuple[List[float], s
         # The country gate: a country that never appears in the table is
         # outside ACLED's universe, and its silence says nothing. `observed`
         # being non-empty is that gate, evaluated over this window.
-        live = _live_months(con, "acled_monthly_fatalities", "month", months)
+        live = _live_months(
+            con, "acled_monthly_fatalities", "month", months, extra_where=complete
+        )
         values, n_reported, n_quiet = _fill_quiet_months(observed, months, live)
     else:
         values = [observed[k] for k in sorted(observed)]
@@ -447,18 +477,22 @@ def last_observed_value(
             if not _table_exists(con, CONFLICT_FATALITIES_TABLE):
                 return None
             prev = _add_months(before, -1)
+            complete = acled_complete_month_clause(con, CONFLICT_FATALITIES_TABLE)
             row = con.execute(
                 f"""
                 SELECT substr(CAST(month AS VARCHAR), 1, 7) AS ym, SUM(fatalities)
                 FROM {CONFLICT_FATALITIES_TABLE}
                 WHERE iso3 = ? AND substr(CAST(month AS VARCHAR), 1, 7) < ?
+                  AND {complete}
                 GROUP BY ym ORDER BY ym DESC LIMIT 1
                 """,
                 [iso, before],
             ).fetchone()
             if row and str(row[0]) == prev:
                 return float(row[1] or 0), prev, CONFLICT_FATALITIES_TABLE
-            if row and prev in _live_months(con, CONFLICT_FATALITIES_TABLE, "month", [prev]):
+            if row and prev in _live_months(
+                con, CONFLICT_FATALITIES_TABLE, "month", [prev], extra_where=complete
+            ):
                 return 0.0, prev, f"{CONFLICT_FATALITIES_TABLE}:quiet_month"
             if row:
                 return float(row[1] or 0), str(row[0]), CONFLICT_FATALITIES_TABLE
@@ -484,6 +518,255 @@ def last_observed_value(
     except Exception:  # noqa: BLE001 - no reference is better than a wrong one
         return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Level and volatility (ACE/FATALITIES)
+# ---------------------------------------------------------------------------
+
+#: The prompt-block version a forecast was shown when it carries this anchor.
+LEVEL_VOLATILITY_VERSION = "prior_anchor_v1"
+LEVEL_VOLATILITY_MODEL_SOURCE = "level_volatility:acled_monthly_fatalities"
+#: Fewer bucket-move pairs than this and the country's own history is too
+#: thin to say how far a count wanders, so pairs are pooled from countries in
+#: the same activity band (the bucket of their median month).
+LEVEL_VOLATILITY_MIN_PAIRS = 12
+#: No bucket falls below this before renormalising: a reference that says a
+#: bucket is impossible pays an unbounded log loss the first time it happens.
+LEVEL_VOLATILITY_FLOOR = 0.005
+
+
+def _ym_of(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value.strftime("%Y-%m")
+    return _parse_ym(value)
+
+
+def _month_diff(a: str, b: str) -> int:
+    """Months from ``a`` to ``b`` ('YYYY-MM')."""
+    return (int(b[:4]) - int(a[:4])) * 12 + int(b[5:7]) - int(a[5:7])
+
+
+def _usable_at(ym: str, known_at: date) -> bool:
+    """True when month ``ym`` had ended ``ACLED_SETTLE_DAYS`` before ``known_at``."""
+    from datetime import timedelta
+
+    nxt = _add_months(ym, 1)
+    first_after = date(int(nxt[:4]), int(nxt[5:7]), 1)
+    return first_after + timedelta(days=ACLED_SETTLE_DAYS) <= known_at
+
+
+def _as_date(value: Any) -> date:
+    from datetime import datetime
+
+    if value is None:
+        return date.today()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    s = str(value).strip()[:10]
+    return date(int(s[:4]), int(s[5:7]), int(s[8:10]) if len(s) >= 10 else 1)
+
+
+def _acled_series_all(con, first_ym: str, last_ym: str) -> Tuple[Dict[str, Dict[str, float]], set]:
+    """Complete-month ACLED fatalities for every country over [first, last],
+    plus the months the source was live for (any complete row)."""
+    complete = acled_complete_month_clause(con)
+    rows = con.execute(
+        f"""
+        SELECT iso3, substr(CAST(month AS VARCHAR), 1, 7) AS ym, SUM(fatalities)
+        FROM acled_monthly_fatalities
+        WHERE substr(CAST(month AS VARCHAR), 1, 7) >= ?
+          AND substr(CAST(month AS VARCHAR), 1, 7) <= ?
+          AND iso3 IS NOT NULL
+          AND {complete}
+        GROUP BY iso3, ym
+        """,
+        [first_ym, last_ym],
+    ).fetchall()
+    by_iso: Dict[str, Dict[str, float]] = {}
+    live: set = set()
+    for iso, ym, v in rows:
+        if not ym:
+            continue
+        by_iso.setdefault(str(iso).upper(), {})[str(ym)] = float(v or 0)
+        live.add(str(ym))
+    return by_iso, live
+
+
+def _filled(observed: Dict[str, float], months: List[str], live: set) -> Dict[str, float]:
+    """The window as {month: value}, quiet live months as zero, dark months absent."""
+    out: Dict[str, float] = {}
+    for ym in months:
+        if ym in observed:
+            out[ym] = observed[ym]
+        elif ym in live:
+            out[ym] = 0.0
+    return out
+
+
+def _bucket_moves(series: Dict[str, float], gap: int) -> List[int]:
+    """Bucket index change between every pair of months ``gap`` apart."""
+    moves: List[int] = []
+    for ym, v in series.items():
+        later = _add_months(ym, gap)
+        if later not in series:
+            continue
+        a = _bucket_index_for_value(v, "FATALITIES")
+        b = _bucket_index_for_value(series[later], "FATALITIES")
+        if a is None or b is None:
+            continue
+        moves.append(b - a)
+    return moves
+
+
+def _median(values: Sequence[float]) -> float:
+    vals = sorted(values)
+    n = len(vals)
+    mid = n // 2
+    return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+
+def level_volatility_spds(
+    con,
+    iso3: str,
+    as_of: Any,
+    horizons: Sequence[int] = (1, 2, 3, 4, 5, 6),
+    known_at: Any = None,
+) -> Tuple[Dict[int, List[float]], str, Dict[str, Any]]:
+    """The ACE/FATALITIES level-and-volatility distribution for each horizon.
+
+    * The LEVEL is the last complete month the forecaster could have read:
+      before the window (``as_of``), ended at least ``ACLED_SETTLE_DAYS``
+      before ``known_at`` (the forecast date; today when omitted), and held
+      in the table as a complete row. A country with no row that month, in a
+      month ACLED was live for, is at level zero.
+    * The SPREAD is how far a monthly count moved, in buckets, over the same
+      number of months as separates the level from the target month, across
+      the country's last ``CONFLICT_WINDOW_MONTHS`` complete months (quiet
+      months zero, dark months left out, the climatology rules). Below
+      ``LEVEL_VOLATILITY_MIN_PAIRS`` pairs, pairs come from every country in
+      the same activity band as well, and the detail says so.
+    * That move distribution is centred on the level's bucket; mass that
+      would fall off either end lands on the end bucket; every bucket is
+      floored at ``LEVEL_VOLATILITY_FLOOR`` and the vector renormalised.
+
+    Returns ``({horizon: probs}, source, detail)``; an empty dict with a
+    ``reason`` when there is nothing to anchor on.
+    """
+    k = n_buckets_for("FATALITIES")
+    iso = (iso3 or "").upper()
+    window_ym = _as_of_ym(as_of)
+    when = _as_date(known_at)
+    if not _table_exists(con, CONFLICT_FATALITIES_TABLE) or not k:
+        return {}, NO_BASE_RATE_SOURCE, {"reason": "acled_monthly_fatalities missing"}
+
+    # Candidate level months, newest first: before the window and settled.
+    candidate = _add_months(window_ym, -1)
+    for _ in range(24):
+        if _usable_at(candidate, when):
+            break
+        candidate = _add_months(candidate, -1)
+    first = _add_months(candidate, -(CONFLICT_WINDOW_MONTHS + 3))
+    by_iso, live = _acled_series_all(con, first, candidate)
+    if iso not in by_iso:
+        return {}, NO_BASE_RATE_SOURCE, {
+            "reason": "country has no complete ACLED month before the window"
+        }
+    level_ym = None
+    for back in range(4):
+        ym = _add_months(candidate, -back)
+        if ym in live:
+            level_ym = ym
+            break
+    if level_ym is None:
+        return {}, NO_BASE_RATE_SOURCE, {"reason": "no complete ACLED month near the window"}
+    level_value = by_iso[iso].get(level_ym, 0.0)
+    level_bucket = _bucket_index_for_value(level_value, "FATALITIES")
+    if level_bucket is None:
+        return {}, NO_BASE_RATE_SOURCE, {"reason": "level value not bucketable"}
+
+    window = _window_months(_add_months(level_ym, 1), CONFLICT_WINDOW_MONTHS)
+    series = _filled(by_iso[iso], window, live)
+    median_bucket = _bucket_index_for_value(_median(list(series.values())), "FATALITIES")
+    band_series: Optional[List[Dict[str, float]]] = None
+
+    out: Dict[int, List[float]] = {}
+    per_horizon: Dict[str, Any] = {}
+    for h in horizons:
+        target = _add_months(window_ym, int(h) - 1)
+        gap = _month_diff(level_ym, target)
+        moves = _bucket_moves(series, gap)
+        n_own = len(moves)
+        pooled = False
+        n_band_countries = 0
+        if n_own < LEVEL_VOLATILITY_MIN_PAIRS:
+            if band_series is None:
+                band_series = []
+                for other, obs in by_iso.items():
+                    if other == iso:
+                        continue
+                    s2 = _filled(obs, window, live)
+                    if not s2:
+                        continue
+                    if _bucket_index_for_value(_median(list(s2.values())), "FATALITIES") == median_bucket:
+                        band_series.append(s2)
+            for s2 in band_series:
+                moves.extend(_bucket_moves(s2, gap))
+            pooled = True
+            n_band_countries = len(band_series)
+        if not moves:
+            continue
+        counts: Dict[int, int] = {}
+        for d in moves:
+            counts[d] = counts.get(d, 0) + 1
+        probs = [0.0] * k
+        for d, c in counts.items():
+            j = min(max(level_bucket + d, 0), k - 1)
+            probs[j] += c / len(moves)
+        probs = [max(p, LEVEL_VOLATILITY_FLOOR) for p in probs]
+        total = sum(probs)
+        out[int(h)] = [p / total for p in probs]
+        n = float(len(moves))
+        per_horizon[str(int(h))] = {
+            "gap_months": gap,
+            "n_pairs": len(moves),
+            "n_own_pairs": n_own,
+            "pooled": pooled,
+            "n_band_countries": n_band_countries,
+            "share_same": sum(c for d, c in counts.items() if d == 0) / n,
+            "share_one": sum(c for d, c in counts.items() if abs(d) == 1) / n,
+            "share_two_plus": sum(c for d, c in counts.items() if abs(d) >= 2) / n,
+        }
+    if not out:
+        return {}, NO_BASE_RATE_SOURCE, {"reason": "no month pairs to measure movement from"}
+    detail = {
+        "score_family": "spd",
+        "method": "level_plus_bucket_moves",
+        "version": LEVEL_VOLATILITY_VERSION,
+        "level_month": level_ym,
+        "level_value": level_value,
+        "level_bucket": level_bucket,
+        "known_at": when.isoformat(),
+        "window_months": CONFLICT_WINDOW_MONTHS,
+        "n_months_in_window": len(series),
+        "activity_band": median_bucket,
+        "horizons": per_horizon,
+    }
+    return out, LEVEL_VOLATILITY_MODEL_SOURCE, detail
+
+
+def level_volatility_spd(
+    con, iso3: str, as_of: Any, horizon_k: int, known_at: Any = None
+) -> Tuple[List[float], str, Dict[str, Any]]:
+    """One horizon of :func:`level_volatility_spds` (``[]`` when unavailable)."""
+    spds, source, detail = level_volatility_spds(
+        con, iso3, as_of, horizons=(int(horizon_k),), known_at=known_at
+    )
+    return spds.get(int(horizon_k), []), source, detail
 
 
 def _event_occurrence_rates(

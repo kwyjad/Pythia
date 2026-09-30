@@ -44,6 +44,13 @@ ACLED_CLI_FRAME_DIAG_PATH = ACLED_DIAGNOSTICS_DIR / "acled_cli_frame_diag.json"
 SUMMARY_HEADER = "### ACLED HTTP summary"
 
 
+def _current_month_start() -> pd.Timestamp:
+    """First day of the current UTC month (``ACLED_TODAY`` overrides it in tests)."""
+    override = os.environ.get("ACLED_TODAY", "").strip()
+    today = pd.Timestamp(override) if override else pd.Timestamp.now(tz="UTC").tz_convert(None)
+    return today.to_period("M").to_timestamp(how="start")
+
+
 def _relpath(path: Path) -> str:
     try:
         return path.relative_to(ROOT).as_posix()
@@ -439,6 +446,20 @@ def run(argv: Sequence[str] | None = None) -> int:
         if isinstance(work["updated_at"].dtype, pd.DatetimeTZDtype):
             work["updated_at"] = work["updated_at"].dt.tz_convert(None)
         work = work.sort_values(["iso3", "month"]).reset_index(drop=True)
+        # A month still in progress is not written. The ingest runs on the
+        # 28th and the forecast on the 1st, so a partial row was what the
+        # forecast read as "last month" (median 28% of the settled count on
+        # 1 August 2026, 75% on 1 September). The window always reaches back
+        # past the month that has just ended, so every run rewrites it whole.
+        current_month = _current_month_start()
+        in_progress = work["month"] >= current_month
+        if bool(in_progress.any()):
+            LOGGER.info(
+                "acled_to_duckdb.skip_in_progress_month | month=%s rows=%d",
+                current_month.strftime("%Y-%m"),
+                int(in_progress.sum()),
+            )
+            work = work.loc[~in_progress].reset_index(drop=True)
         frame = work
     else:
         LOGGER.warning(

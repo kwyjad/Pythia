@@ -2429,6 +2429,7 @@ class BundleBuilder:
             self._check_no_row_beside_an_unconfirmed_sweep_hit,
             self._check_no_future_publication_date,
             self._check_ace_fatalities_resolve_from_the_base_rate_series,
+            self._check_no_stale_partial_acled_month,
             self._check_declared_active_tables_hold_rows,
             self._check_emdat_read_when_enabled,
             self._check_bundle_records_the_checked_out_commit,
@@ -4556,6 +4557,53 @@ class BundleBuilder:
             or f"Every ACE/FATALITIES resolution is drawn from {series} (all event types), "
             "the series the prompt base rate and the climatology reference use, and no "
             "battles-only ACLED row is named 'fatalities'.",
+        )
+
+    def _check_no_stale_partial_acled_month(self) -> None:
+        """No ACLED month row is partial: written before its month ended.
+
+        The ingest runs on the 28th and the forecast on the 1st, so a row for
+        the month in progress was what the 1 August 2026 prompts read as "last
+        month" (a median 28% of the settled count). ``acled_to_duckdb`` no
+        longer writes the month in progress, and the readers skip a partial
+        row, so one still in the table after its month ended means the writer
+        regressed or a run was skipped.
+        """
+
+        name = "no_acled_month_row_written_before_its_month_ended"
+        table = "acled_monthly_fatalities"
+        if table not in self.tables():
+            return self._check(name, "SKIP", "", table, "table absent")
+        cols = {c for c, _t in self.columns_of(table)}
+        if "updated_at" not in cols:
+            return self._check(name, "SKIP", "", table, "no updated_at column")
+        today = dt.date.today()
+        result = self.query(
+            f'SELECT substr(CAST(month AS VARCHAR), 1, 7) AS ym, COUNT(*), MAX(updated_at) '
+            f'FROM "{table}" WHERE updated_at < CAST(month AS DATE) + INTERVAL 1 MONTH '
+            "GROUP BY ym ORDER BY ym"
+        )
+        rows = result[1] if result else []
+        current = f"{today:%Y-%m}"
+        in_progress = [(ym, n) for ym, n, _u in rows if str(ym) >= current]
+        stale = [(ym, n, u) for ym, n, u in rows if str(ym) < current]
+        problems: list[str] = []
+        if in_progress:
+            problems.append(
+                "month still in progress written: "
+                + ", ".join(f"{ym} ({n} rows)" for ym, n in in_progress)
+            )
+        if stale:
+            problems.append(
+                "partial month never rewritten after it ended: "
+                + ", ".join(f"{ym} ({n} rows, last written {str(u)[:10]})" for ym, n, u in stale)
+            )
+        self._check(
+            name, "FAIL" if problems else "PASS",
+            "; ".join(problems) or "0 partial month rows", table,
+            "; ".join(problems)
+            or "Every ACLED month row was written after its month ended, so no reader "
+            "can take a partial count for a month's total.",
         )
 
     #: Tables the Resolver Update itself writes, by phase. Every one of them

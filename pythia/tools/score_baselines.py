@@ -29,10 +29,11 @@ The ``__ext_`` prefix keeps these rows out of the calibration weight softmax
 (``compute_calibration_pythia`` filters ``model_name NOT LIKE '__ext_%'``) and
 routes them into the Performance page's external-benchmark rendering.
 
-Persistence (carry-forward of the last observation) is deliberately NOT
-implemented: a one-hot persistence forecast produces infinite log loss
-whenever it is wrong, and smoothing it introduces an arbitrary parameter.
-Deferred until there is evidence it is worth arguing about.
+Two more references score ACE/FATALITIES (and persistence DR Phase 3+):
+``__ext_persistence`` (the last observed value, smoothed at a fixed 0.1) and
+``__ext_level_volatility`` (the last complete month the forecaster could have
+read, spread by how far counts like it move; the distribution the prompt
+shows under PYTHIA_PRIOR_ANCHOR_SPD).
 """
 
 from __future__ import annotations
@@ -45,7 +46,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pythia.buckets import n_buckets_for
 from pythia.config import load as load_cfg
-from pythia.tools.base_rate_spd import base_rate_spd, forecast_months, last_observed_value
+from pythia.tools.base_rate_spd import (
+    base_rate_spd,
+    forecast_months,
+    last_observed_value,
+    level_volatility_spds,
+)
 from pythia.tools.compute_deviation import _anchor_ym
 from pythia.tools.compute_scores import (
     _brier,
@@ -77,6 +83,33 @@ PERSISTENCE_PAIRS = frozenset({("ACE", "FATALITIES"), ("DR", "PHASE3PLUS_IN_NEED
 #: persisted bucket) and every log score finite. It is a fixed constant on
 #: purpose: tuning it against outcomes would make the reference a model.
 PERSISTENCE_SMOOTHING = 0.1
+
+#: Where the level is now and how far counts like it move: the last complete
+#: month the forecaster could have read, spread by the bucket moves observed
+#: over the same number of months (``base_rate_spd.level_volatility_spds``).
+#: It is the distribution the prompt shows under PYTHIA_PRIOR_ANCHOR_SPD, so
+#: it is also the score of a member that copied its prior and changed nothing.
+LEVEL_VOLATILITY_MODEL_NAME = "__ext_level_volatility"
+LEVEL_VOLATILITY_PAIRS = frozenset({("ACE", "FATALITIES")})
+
+
+def _forecast_time(conn, question_id: str):
+    """When the question's latest production forecast was made (None if unknown).
+
+    The level-and-volatility reference must read the level the forecaster
+    could have read, not the one the table holds at scoring time.
+    """
+    for test_clause in ("AND NOT COALESCE(is_test, FALSE)", ""):
+        try:
+            row = conn.execute(
+                f"SELECT MAX(created_at) FROM forecasts_ensemble WHERE question_id = ? {test_clause}",
+                [question_id],
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            return None
+        if row and row[0] is not None:
+            return row[0]
+    return None
 
 
 def persistence_spd(value: float, metric: str) -> Optional[List[float]]:
@@ -188,6 +221,8 @@ def score_baselines(db_url: str) -> Dict[str, int]:
         "scored_uniform": 0,
         "scored_persistence": 0,
         "skipped_no_persistence": 0,
+        "scored_level_volatility": 0,
+        "skipped_no_level_volatility": 0,
         "skipped_no_baserate": 0,
         "skipped_bad_resolution": 0,
     }
@@ -238,6 +273,7 @@ def score_baselines(db_url: str) -> Dict[str, int]:
 
         base_cache: Dict[str, Tuple[list, str, dict]] = {}
         persist_cache: Dict[str, Optional[Tuple[float, str, str]]] = {}
+        lv_cache: Dict[str, Tuple[dict, str, dict]] = {}
         now = _utcnow_naive()
 
         for pair in pairs:
@@ -353,6 +389,41 @@ def score_baselines(db_url: str) -> Dict[str, int]:
                            resolved, j, now)
                     counters["scored_persistence"] += 1
 
+            if (str(pair["hazard_code"] or "").upper(), metric) in LEVEL_VOLATILITY_PAIRS:
+                if qid not in lv_cache:
+                    known_at = _forecast_time(conn, qid) or anchor + "-01"
+                    lv_cache[qid] = level_volatility_spds(
+                        conn, pair["iso3"], anchor, known_at=known_at
+                    )
+                lv_spds, _lv_source, lv_detail = lv_cache[qid]
+                lv_vec = lv_spds.get(hm)
+                if not lv_vec or len(lv_vec) != k:
+                    counters["skipped_no_level_volatility"] += 1
+                else:
+                    hd = (lv_detail.get("horizons") or {}).get(str(hm)) or {}
+                    _write_scores(
+                        conn, question_id=qid, horizon_m=hm, metric=metric,
+                        model_name=LEVEL_VOLATILITY_MODEL_NAME,
+                        score_rows=[
+                            ("brier", _brier(lv_vec, j)),
+                            ("log", _log_score(lv_vec, j)),
+                            ("crps", _crps_like(lv_vec, j)),
+                        ],
+                        is_test=pair["is_test"], now=now,
+                    )
+                    _audit(
+                        conn, qid, hm, LEVEL_VOLATILITY_MODEL_NAME, metric, lv_vec,
+                        (
+                            f"level_volatility:{lv_detail.get('level_month')}="
+                            f"{float(lv_detail.get('level_value') or 0):g}"
+                            f":gap{hd.get('gap_months')}:pairs{hd.get('n_pairs')}"
+                            f"{':pooled' if hd.get('pooled') else ''}"
+                            f":known_at={lv_detail.get('known_at')}"
+                        ),
+                        resolved, j, now,
+                    )
+                    counters["scored_level_volatility"] += 1
+
             if not base_probs:
                 counters["skipped_no_baserate"] += 1
                 LOGGER.info(
@@ -383,9 +454,10 @@ def score_baselines(db_url: str) -> Dict[str, int]:
             counters["scored_climatology"] += 1
 
         LOGGER.info(
-            "score_baselines: climatology=%d uniform=%d persistence=%d no_baserate=%d bad_resolution=%d",
+            "score_baselines: climatology=%d uniform=%d persistence=%d level_volatility=%d "
+            "no_baserate=%d bad_resolution=%d",
             counters["scored_climatology"], counters["scored_uniform"],
-            counters["scored_persistence"],
+            counters["scored_persistence"], counters["scored_level_volatility"],
             counters["skipped_no_baserate"], counters["skipped_bad_resolution"],
         )
         return counters

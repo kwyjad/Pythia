@@ -159,6 +159,11 @@ env:
   # prior (scripts/ci/rc_shift_diagnostic.py). Keep in lockstep across
   # pythia_pipeline_stage.yml and run_horizon_scanner.yml.
   PYTHIA_RC_SHIFT_GUIDANCE: "0"
+  # ACE/FATALITIES prompts show the level-and-volatility distribution and
+  # tell members to copy it as their Step 1 prior (the loss on the August
+  # 2026 conflict-death questions was in the prior). Keep in lockstep across
+  # pythia_pipeline_stage.yml and run_horizon_scanner.yml; "0" reverts.
+  PYTHIA_PRIOR_ANCHOR_SPD: "1"
   # Anthropic cache_control inside BATCH bodies. Off by default in code
   # because batch cache hits are best-effort while the write premium is
   # certain — but with it off the batched path's hit rate is 0% BY
