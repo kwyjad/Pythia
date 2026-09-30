@@ -2306,6 +2306,20 @@ def generate_calibration_advice(
             )
 
             # --- Per-model advice (after shared advice) ---
+            # This month's model and family rows are rebuilt from scratch: a
+            # model that no longer qualifies (the threshold rose from 10 rows
+            # to 20 distinct questions) must not keep a row written earlier in
+            # the same month.
+            try:
+                conn.execute(
+                    "DELETE FROM calibration_advice WHERE as_of_month = ? AND hazard_code = ? "
+                    "AND metric = ? AND COALESCE(model_name, '__shared__') <> '__shared__'",
+                    [as_of_month, hazard_code, metric],
+                )
+            except Exception as exc:  # noqa: BLE001
+                _rollback_quietly(conn)
+                LOGGER.warning("Could not clear stale per-model advice for %s/%s: %s",
+                               hazard_code, metric, exc)
             model_brier_data = findings.get("per_model_brier")
             if model_brier_data and model_brier_data.get("all_models"):
                 all_models = model_brier_data["all_models"]
