@@ -42,7 +42,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 
@@ -82,6 +82,100 @@ class AcledHtmlResponse(AcledResponseError):
         if description:
             message += f" | {description}"
         super().__init__(message)
+
+
+# ---------------------------------------------------------------------------
+# Cursor pagination (ACLED notice, Sept 2026)
+# ---------------------------------------------------------------------------
+# ACLED replaced offset pagination (``page=N``) with a cursor and deprecates
+# ``page`` on 27 October 2026. A walk starts at ``cursor=0``; every response
+# carries ``next_cursor`` (a body field for JSON, the ``X-Next-Cursor`` header
+# for ``_format=csv``), and a null ``next_cursor`` is the last page. When both
+# are sent the cursor wins, so no request here sends ``page`` any more. The
+# exception is ``export_type=monadic``, which cursors do not support; nothing
+# in this repository asks for it.
+
+CURSOR_PARAM = "cursor"
+CURSOR_START = 0
+NEXT_CURSOR_KEY = "next_cursor"
+NEXT_CURSOR_HEADER = "X-Next-Cursor"
+_NULL_CURSOR_SPELLINGS = {"", "null", "none"}
+
+
+class AcledPaginationError(RuntimeError):
+    """A cursor walk that cannot continue and must not be read as complete."""
+
+
+def _normalise_cursor(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in _NULL_CURSOR_SPELLINGS:
+        return None
+    return value
+
+
+def read_next_cursor(payload: Any, resp: Any = None) -> Tuple[bool, Any]:
+    """Return ``(stated, next_cursor)`` for one ACLED response.
+
+    ``stated`` is False when the response carried no cursor at all, neither
+    the body field nor the header. That is a different statement from a
+    stated null: a null says "this was the last page", an absent field says
+    the server did not answer the question.
+    """
+
+    if isinstance(payload, dict) and NEXT_CURSOR_KEY in payload:
+        return True, _normalise_cursor(payload.get(NEXT_CURSOR_KEY))
+    headers = getattr(resp, "headers", None)
+    if headers is not None:
+        try:
+            value = headers.get(NEXT_CURSOR_HEADER)
+        except Exception:  # pragma: no cover - defensive
+            value = None
+        # Only a real header value counts; anything else (a test double, a
+        # mapping that answers every key) says nothing about the cursor.
+        if isinstance(value, (str, bytes, int)):
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", "replace")
+            return True, _normalise_cursor(value)
+    return False, None
+
+
+def advance_cursor(
+    current: Any,
+    payload: Any,
+    *,
+    page_rows: int,
+    limit: int,
+    resp: Any = None,
+    what: str = "read",
+) -> Any:
+    """The cursor for the next call, or None when the walk is finished.
+
+    A stated null ends the walk. A short page with no cursor stated ends it
+    too: it is the last page whatever the server says. A FULL page with no
+    cursor raises, because more rows exist and there is no way to ask for
+    them, and a truncated record set read as complete is the failure this
+    repository has paid for before. A cursor that does not move raises for
+    the same reason in the other direction: it would loop forever.
+    """
+
+    stated, nxt = read_next_cursor(payload, resp)
+    if not stated:
+        if page_rows < limit:
+            return None
+        raise AcledPaginationError(
+            f"ACLED {what} returned a full page ({page_rows} rows, limit {limit}) "
+            f"with no {NEXT_CURSOR_KEY!r} field and no {NEXT_CURSOR_HEADER} header, "
+            "so the rest of the result set cannot be requested"
+        )
+    if nxt is None:
+        return None
+    if str(nxt) == str(current):
+        raise AcledPaginationError(
+            f"ACLED {what} returned {NEXT_CURSOR_KEY}={nxt!r}, the cursor it was "
+            "asked with; refusing to loop on it"
+        )
+    return nxt
 
 # ACLED's token endpoint sits behind a WAF, and on 2026-09-03 both grants were
 # answered HTTP 200 with a body that was not JSON: the status check passed and

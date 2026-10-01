@@ -262,15 +262,20 @@ class AcledCastConnector:
         """
         from resolver.ingestion.acled_auth import get_auth_header
 
+        from resolver.ingestion import acled_auth
+
         headers = get_auth_header()
         headers["Accept"] = "application/json"
         all_records: List[Dict[str, Any]] = []
+        # Cursor pagination (acled_auth.advance_cursor): ``page`` is
+        # deprecated by ACLED on 27 Oct 2026.
+        cursor: Any = acled_auth.CURSOR_START
 
         for page in range(1, _MAX_PAGES + 1):
-            LOG.debug("[acled_cast] fetching page %d", page)
+            LOG.debug("[acled_cast] fetching page %d cursor=%s", page, cursor)
             params: Dict[str, Any] = {
                 "limit": _PAGE_SIZE,
-                "page": page,
+                acled_auth.CURSOR_PARAM: cursor,
             }
             if year is not None:
                 params["year"] = year
@@ -302,11 +307,21 @@ class AcledCastConnector:
             all_records.extend(data)
             LOG.debug("[acled_cast] page %d returned %d records", page, len(data))
 
-            if len(data) < _PAGE_SIZE:
+            cursor = acled_auth.advance_cursor(
+                cursor, body, page_rows=len(data), limit=_PAGE_SIZE,
+                resp=resp, what="CAST read",
+            )
+            if cursor is None:
                 break  # last page
 
             # Brief courtesy sleep between pages
             time.sleep(0.5)
+        else:
+            LOG.warning(
+                "[acled_cast] stopped at the %d-page safety cap with a next "
+                "cursor still in hand (%s); %d records read, more exist",
+                _MAX_PAGES, cursor, len(all_records),
+            )
 
         LOG.info("[acled_cast] fetched %d total records", len(all_records))
         return all_records

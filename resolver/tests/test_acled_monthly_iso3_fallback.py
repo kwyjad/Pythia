@@ -29,7 +29,8 @@ def _patch_fetch(monkeypatch: pytest.MonkeyPatch, payloads: Dict[int, Dict[str, 
 
     def _fake_fetch(self: ACLEDClient, params: Dict[str, Any]) -> Dict[str, Any]:
         calls.append(dict(params))
-        page = int(params.get("page", 1))
+        # Cursor pagination: cursor 0 is the first page.
+        page = int(params.get("cursor", 0)) + 1
         return payloads.get(page, {"data": []})
 
     monkeypatch.setattr(ACLEDClient, "_fetch_page", _fake_fetch)

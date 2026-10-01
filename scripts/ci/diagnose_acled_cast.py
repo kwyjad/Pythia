@@ -96,7 +96,7 @@ def _fetch(limit: int) -> tuple[int, dict[str, Any], str]:
     headers = get_auth_header()
     headers["Accept"] = "application/json"
     resp = requests.get(
-        API_URL, params={"limit": limit, "page": 1}, headers=headers, timeout=TIMEOUT
+        API_URL, params={"limit": limit, "cursor": 0}, headers=headers, timeout=TIMEOUT
     )
     text = resp.text or ""
     try:

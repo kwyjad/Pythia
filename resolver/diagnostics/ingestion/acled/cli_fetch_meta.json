@@ -7,11 +7,11 @@
   "page_size": 5000,
   "params_keys": [
     "_format",
+    "cursor",
     "event_date",
     "event_date_where",
     "fields",
-    "limit",
-    "page"
+    "limit"
   ],
   "result_rows": 2,
   "start": "2023-02-01"
