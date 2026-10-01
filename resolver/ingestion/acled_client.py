@@ -454,7 +454,6 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
 
     params: Dict[str, Any] = {
         "limit": limit,
-        "page": 1,
     }
 
     params.update(_resolve_query_params(config))
@@ -462,7 +461,11 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
     params["event_date"] = f"{start_date:%Y-%m-%d}|{end_date:%Y-%m-%d}"
     params.setdefault("event_date_where", "BETWEEN")
     params.setdefault("limit", limit)
-    params.setdefault("page", 1)
+    # Cursor pagination (acled_auth.advance_cursor): ``page`` is deprecated on
+    # 27 Oct 2026, and a config that still names it must not send it.
+    params.pop("page", None)
+    params[acled_auth.CURSOR_PARAM] = acled_auth.CURSOR_START
+    limit = int(params.get("limit") or limit)
 
     token_keys = {"access_token", "key", "token", "email", "username", "password"}
     source_url = _build_source_url(base_url, params, token_keys)
@@ -483,6 +486,7 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
     headers = {"Authorization": f"Bearer {access_token}"}
 
     page = 1
+    cursor: Any = acled_auth.CURSOR_START
     last_status: Optional[int] = None
     last_url: Optional[str] = None
     while True:
@@ -505,11 +509,11 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
             )
             diagnostics_meta["truncated_by_deadline"] = True
             break
-        params["page"] = page
+        params[acled_auth.CURSOR_PARAM] = cursor
         # Progress to stdout so the connector log shows pagination advancing
         # (previously nothing printed between auth and the timeout SIGKILL).
         print(
-            f"[acled_client] fetching page {page} (rows so far={len(records)})",
+            f"[acled_client] fetching page {page} cursor={cursor} (rows so far={len(records)})",
             flush=True,
         )
         dbg(f"fetching page {page}")
@@ -623,7 +627,10 @@ def fetch_events(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str, Dic
             dbg("max results reached; truncating")
             records = records[:max_results]
             break
-        if len(data) < limit:
+        cursor = acled_auth.advance_cursor(
+            cursor, payload, page_rows=len(data), limit=limit, resp=resp, what="event read",
+        )
+        if cursor is None:
             break
         page += 1
 
@@ -1393,7 +1400,7 @@ class ACLEDClient:
         params: Dict[str, Any] = {
             "event_date": f"{start.strftime('%Y-%m-%d')}|{end.strftime('%Y-%m-%d')}",
             "event_date_where": "BETWEEN",
-            "page": 1,
+            acled_auth.CURSOR_PARAM: acled_auth.CURSOR_START,
             "limit": self.page_size,
             "_format": ACLED_DEFAULT_FORMAT,
             "fields": fields_text,
@@ -1428,8 +1435,9 @@ class ACLEDClient:
 
         records: List[Dict[str, Any]] = []
         page = 1
+        cursor: Any = acled_auth.CURSOR_START
         while True:
-            params["page"] = page
+            params[acled_auth.CURSOR_PARAM] = cursor
             payload = self._fetch_page(params)
             data = payload.get("data") or payload.get("results") or []
             if not isinstance(data, list):
@@ -1441,7 +1449,11 @@ class ACLEDClient:
                 "Fetched ACLED records",
                 extra={"page": page, "page_rows": len(data), "total_rows": len(records)},
             )
-            if len(data) < self.page_size:
+            cursor = acled_auth.advance_cursor(
+                cursor, payload, page_rows=len(data), limit=self.page_size,
+                what="monthly-fatalities read",
+            )
+            if cursor is None:
                 break
             page += 1
 
