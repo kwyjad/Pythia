@@ -176,7 +176,7 @@ class TestTheOneDispatchOverride:
 class TestItReachesTheRegister:
     """A budget nobody reads is a budget that races again next month."""
 
-    def _bundle_register(self, tmp_path, rows, cost=0.009):
+    def _bundle_register(self, tmp_path, rows, cost=0.009, created_at=None):
         duckdb = pytest.importorskip("duckdb")
         from scripts import build_resolver_debug_bundle as bundle
 
@@ -191,8 +191,9 @@ class TestItReachesTheRegister:
         con.execute(
             "INSERT INTO haz_doc_extractions "
             "SELECT 'rw-' || i, 'haiku', 'v1', 'PHL', 'FL', 2026, 9, 'ok', "
-            "'backcast', 100, 100, ?, CURRENT_TIMESTAMP FROM range(?) t(i)",
-            [cost, rows],
+            "'backcast', 100, 100, ?, COALESCE(CAST(? AS TIMESTAMP), "
+            "CURRENT_TIMESTAMP) FROM range(?) t(i)",
+            [cost, created_at, rows],
         )
         con.close()
         diagnostics = tmp_path / "diagnostics"
@@ -225,7 +226,13 @@ class TestItReachesTheRegister:
                 return cls(2026, 9, 8)
 
         monkeypatch.setattr(bundle.dt, "date", _Mid)
-        register = self._bundle_register(tmp_path, rows=8000, cost=0.002)
+        # The rows are stamped on the pinned day, not the real clock: the
+        # budget counts by calendar month, so a CURRENT_TIMESTAMP stamp
+        # stopped matching the pinned September on 1 October and the test
+        # failed on the calendar rather than on the code.
+        register = self._bundle_register(
+            tmp_path, rows=8000, cost=0.002, created_at="2026-09-08 12:00:00",
+        )
         issue = next(
             i for i in register.issues if i.id == "backcast_extraction_share_raced"
         )
