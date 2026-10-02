@@ -149,7 +149,7 @@ maximally wrong confident forecast. For binary Brier: 0.25 = always saying
 """
 
 _SKILL_SEMANTICS = """\
-Four **reference forecasters** are scored beside the real models (rows in
+Five **reference forecasters** are scored beside the real models (rows in
 `scores` and `rollups.csv` under `run_id IS NULL`):
 
 - `__ext_climatology` — a base-rate SPD built by `pythia.tools.base_rate_spd`
@@ -179,16 +179,24 @@ Four **reference forecasters** are scored beside the real models (rows in
   tells members to copy as their prior, so its score is the score of a
   member that changed nothing. The audit row in `baseline_scored_forecasts`
   names the level month, its value, the gap and whether pairs were pooled.
+- `__ext_level_transition` (ACE/FATALITIES only, scored, never shown to a
+  model) — the level-and-volatility recipe with one change: a bucket move
+  counts only when the month it started from sits in the level's bucket
+  (own country first, pooled with the same activity band below 12 pairs,
+  under the same start-bucket rule). The plain recipe pools every move, so a
+  country at zero inherits the downward moves of months that started higher
+  and they pile onto bucket 0 at the edge. A horizon with no pair from the
+  level's bucket has no row. The audit source starts `level_transition:`.
 
 What the prompt showed, against how each reference is built:
 
-| hazard / metric | what the SPD prompt shows as base rate | climatology | persistence | level + volatility |
-|---|---|---|---|---|
-| ACE / FATALITIES | a 6-month trajectory from `acled_monthly_fatalities` (last complete month, 3-month average, trend); with `PYTHIA_PRIOR_ANCHOR_SPD=1` also the level + volatility distribution for months 1 and 6 (`forecasts_raw.base_rate_block_version = prior_anchor_v1`) | empirical buckets over the last 36 complete months, quiet months as zero | last complete month before the window | as above |
-| ACE / PA | a 6-month IDMC displacement trajectory from `facts_deltas` | empirical buckets over the last 36 months of IDMC flows, quiet months as zero | — | — |
-| DR / PHASE3PLUS_IN_NEED | up to 36 months of FEWS NET / IPC Phase 3+ values, gaps shown as null | empirical buckets over the last 36 Phase 3+ values | latest Phase 3+ value | — |
-| FL, TC / PA | a seasonal profile of reported PA, GDACS alert history and (flood, cyclone) the PA machine's base-rate block | GDACS occurrence rate for the month × the distribution of reported PA magnitudes | — | — |
-| FL, DR, TC / EVENT_OCCURRENCE | GDACS alert history counted in calendar months over the source's own window | per-calendar-month event rate from GDACS `event_occurrence` rows | — | — |
+| hazard / metric | what the SPD prompt shows as base rate | climatology | persistence | level + volatility | level + transition |
+|---|---|---|---|---|---|
+| ACE / FATALITIES | a 6-month trajectory from `acled_monthly_fatalities` (last complete month, 3-month average, trend); with `PYTHIA_PRIOR_ANCHOR_SPD=1` also the level + volatility distribution for months 1 and 6 (`forecasts_raw.base_rate_block_version = prior_anchor_v1`) | empirical buckets over the last 36 complete months, quiet months as zero | last complete month before the window | as above | as above, moves only from the level's bucket (never shown) |
+| ACE / PA | a 6-month IDMC displacement trajectory from `facts_deltas` | empirical buckets over the last 36 months of IDMC flows, quiet months as zero | — | — | — |
+| DR / PHASE3PLUS_IN_NEED | up to 36 months of FEWS NET / IPC Phase 3+ values, gaps shown as null | empirical buckets over the last 36 Phase 3+ values | latest Phase 3+ value | — | — |
+| FL, TC / PA | a seasonal profile of reported PA, GDACS alert history and (flood, cyclone) the PA machine's base-rate block | GDACS occurrence rate for the month × the distribution of reported PA magnitudes | — | — | — |
+| FL, DR, TC / EVENT_OCCURRENCE | GDACS alert history counted in calendar months over the source's own window | per-calendar-month event rate from GDACS `event_occurrence` rows | — | — | — |
 
 For ACE/FATALITIES before `prior_anchor_v1`, the prompt never showed a
 distribution at all: it showed six months, while climatology uses thirty-six.

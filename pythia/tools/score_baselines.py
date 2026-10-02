@@ -33,7 +33,9 @@ Two more references score ACE/FATALITIES (and persistence DR Phase 3+):
 ``__ext_persistence`` (the last observed value, smoothed at a fixed 0.1) and
 ``__ext_level_volatility`` (the last complete month the forecaster could have
 read, spread by how far counts like it move; the distribution the prompt
-shows under PYTHIA_PRIOR_ANCHOR_SPD).
+shows under PYTHIA_PRIOR_ANCHOR_SPD). ``__ext_level_transition`` is the same
+recipe with moves counted only from months that started in the level's
+bucket; it is scored and never shown to a model.
 """
 
 from __future__ import annotations
@@ -50,6 +52,7 @@ from pythia.tools.base_rate_spd import (
     base_rate_spd,
     forecast_months,
     last_observed_value,
+    level_transition_spds,
     level_volatility_spds,
 )
 from pythia.tools.compute_deviation import _anchor_ym
@@ -91,6 +94,19 @@ PERSISTENCE_SMOOTHING = 0.1
 #: it is also the score of a member that copied its prior and changed nothing.
 LEVEL_VOLATILITY_MODEL_NAME = "__ext_level_volatility"
 LEVEL_VOLATILITY_PAIRS = frozenset({("ACE", "FATALITIES")})
+
+#: The same recipe with moves counted only from pairs that START in the
+#: level's bucket (``base_rate_spd.level_transition_spds``). Scored, never
+#: shown to a model: it tests whether conditioning the spread on where a
+#: country is now beats pooling every move it has made.
+LEVEL_TRANSITION_MODEL_NAME = "__ext_level_transition"
+
+#: The level references, in the order they are scored:
+#: (model name, counter stem, builder).
+_LEVEL_REFERENCES = (
+    (LEVEL_VOLATILITY_MODEL_NAME, "level_volatility", level_volatility_spds),
+    (LEVEL_TRANSITION_MODEL_NAME, "level_transition", level_transition_spds),
+)
 
 
 def _forecast_time(conn, question_id: str):
@@ -223,6 +239,8 @@ def score_baselines(db_url: str) -> Dict[str, int]:
         "skipped_no_persistence": 0,
         "scored_level_volatility": 0,
         "skipped_no_level_volatility": 0,
+        "scored_level_transition": 0,
+        "skipped_no_level_transition": 0,
         "skipped_no_baserate": 0,
         "skipped_bad_resolution": 0,
     }
@@ -273,7 +291,8 @@ def score_baselines(db_url: str) -> Dict[str, int]:
 
         base_cache: Dict[str, Tuple[list, str, dict]] = {}
         persist_cache: Dict[str, Optional[Tuple[float, str, str]]] = {}
-        lv_cache: Dict[str, Tuple[dict, str, dict]] = {}
+        lv_cache: Dict[Tuple[str, str], Tuple[dict, str, dict]] = {}
+        known_cache: Dict[str, Any] = {}
         now = _utcnow_naive()
 
         for pair in pairs:
@@ -390,20 +409,23 @@ def score_baselines(db_url: str) -> Dict[str, int]:
                     counters["scored_persistence"] += 1
 
             if (str(pair["hazard_code"] or "").upper(), metric) in LEVEL_VOLATILITY_PAIRS:
-                if qid not in lv_cache:
-                    known_at = _forecast_time(conn, qid) or anchor + "-01"
-                    lv_cache[qid] = level_volatility_spds(
-                        conn, pair["iso3"], anchor, known_at=known_at
-                    )
-                lv_spds, _lv_source, lv_detail = lv_cache[qid]
-                lv_vec = lv_spds.get(hm)
-                if not lv_vec or len(lv_vec) != k:
-                    counters["skipped_no_level_volatility"] += 1
-                else:
+                if qid not in known_cache:
+                    known_cache[qid] = _forecast_time(conn, qid) or anchor + "-01"
+                for ref_name, stem, builder in _LEVEL_REFERENCES:
+                    key = (ref_name, qid)
+                    if key not in lv_cache:
+                        lv_cache[key] = builder(
+                            conn, pair["iso3"], anchor, known_at=known_cache[qid]
+                        )
+                    lv_spds, _lv_source, lv_detail = lv_cache[key]
+                    lv_vec = lv_spds.get(hm)
+                    if not lv_vec or len(lv_vec) != k:
+                        counters[f"skipped_no_{stem}"] += 1
+                        continue
                     hd = (lv_detail.get("horizons") or {}).get(str(hm)) or {}
                     _write_scores(
                         conn, question_id=qid, horizon_m=hm, metric=metric,
-                        model_name=LEVEL_VOLATILITY_MODEL_NAME,
+                        model_name=ref_name,
                         score_rows=[
                             ("brier", _brier(lv_vec, j)),
                             ("log", _log_score(lv_vec, j)),
@@ -412,9 +434,9 @@ def score_baselines(db_url: str) -> Dict[str, int]:
                         is_test=pair["is_test"], now=now,
                     )
                     _audit(
-                        conn, qid, hm, LEVEL_VOLATILITY_MODEL_NAME, metric, lv_vec,
+                        conn, qid, hm, ref_name, metric, lv_vec,
                         (
-                            f"level_volatility:{lv_detail.get('level_month')}="
+                            f"{stem}:{lv_detail.get('level_month')}="
                             f"{float(lv_detail.get('level_value') or 0):g}"
                             f":gap{hd.get('gap_months')}:pairs{hd.get('n_pairs')}"
                             f"{':pooled' if hd.get('pooled') else ''}"
@@ -422,7 +444,7 @@ def score_baselines(db_url: str) -> Dict[str, int]:
                         ),
                         resolved, j, now,
                     )
-                    counters["scored_level_volatility"] += 1
+                    counters[f"scored_{stem}"] += 1
 
             if not base_probs:
                 counters["skipped_no_baserate"] += 1
@@ -455,9 +477,10 @@ def score_baselines(db_url: str) -> Dict[str, int]:
 
         LOGGER.info(
             "score_baselines: climatology=%d uniform=%d persistence=%d level_volatility=%d "
-            "no_baserate=%d bad_resolution=%d",
+            "level_transition=%d no_baserate=%d bad_resolution=%d",
             counters["scored_climatology"], counters["scored_uniform"],
             counters["scored_persistence"], counters["scored_level_volatility"],
+            counters["scored_level_transition"],
             counters["skipped_no_baserate"], counters["skipped_bad_resolution"],
         )
         return counters

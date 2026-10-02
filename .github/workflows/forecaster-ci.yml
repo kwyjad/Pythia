@@ -296,9 +296,11 @@ jobs:
           # the level-and-volatility block and Step 1 wording with it on, the
           # forecasts_raw.base_rate_block_version stamp and the distance
           # diagnostic; and the complete-month rule every ACLED reader uses.
+          # test_level_transition_spd: the scored-only transition reference.
           pytest -vv \
             forecaster/tests/test_prior_anchor_prompt.py \
-            pythia/tests/test_level_volatility_spd.py
+            pythia/tests/test_level_volatility_spd.py \
+            pythia/tests/test_level_transition_spd.py
 
       - name: Run shadow members + calibration weight tests
         run: |

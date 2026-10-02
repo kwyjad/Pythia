@@ -214,3 +214,18 @@ def test_level_volatility_reads_the_level_known_at_forecast_time(tmp_path):
     # bucket, where moves past the end are kept rather than dropped.
     assert vec[5] == pytest.approx(1 / 3, abs=0.02)
     assert vec[6] == pytest.approx(2 / 3, abs=0.02)
+
+
+def test_level_transition_is_scored_only_from_its_own_bucket(tmp_path):
+    """The fixture's level (300 deaths, bucket 4) has no two-month pair that
+    started in bucket 4, so the transition reference writes nothing rather
+    than borrowing moves from other buckets; it never votes either."""
+
+    from pythia.tools.score_baselines import LEVEL_TRANSITION_MODEL_NAME
+
+    assert LEVEL_TRANSITION_MODEL_NAME.startswith("__ext_")
+    db = str(tmp_path / "lt.duckdb")
+    _seed_db(db)
+    counters = score_baselines(db)
+    assert counters["scored_level_transition"] == 0
+    assert counters["skipped_no_level_transition"] == 2

@@ -1057,6 +1057,7 @@ _SHARPNESS_REFERENCES = (
     "__ext_climatology",
     "__ext_persistence",
     "__ext_level_volatility",
+    "__ext_level_transition",
 )
 
 
@@ -1159,7 +1160,8 @@ def _write_digest(
         "horizon) scores only — the ones both the model and `__ext_climatology` "
         "scored — pooled across (hazard, metric) groups within a track; positive "
         "= beat the base rate. `__ext_climatology` / `__ext_uniform` / "
-        "`__ext_persistence` / `__ext_level_volatility` are the reference "
+        "`__ext_persistence` / `__ext_level_volatility` / `__ext_level_transition` "
+        "are the reference "
         "forecasters, not Pythia models. "
         "One run per question (the latest); RPS is SPD-only. Track 1 and Track 2 "
         "are different questions and are never pooled._",

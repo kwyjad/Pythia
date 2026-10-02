@@ -608,8 +608,15 @@ def _filled(observed: Dict[str, float], months: List[str], live: set) -> Dict[st
     return out
 
 
-def _bucket_moves(series: Dict[str, float], gap: int) -> List[int]:
-    """Bucket index change between every pair of months ``gap`` apart."""
+def _bucket_moves(
+    series: Dict[str, float], gap: int, from_bucket: Optional[int] = None
+) -> List[int]:
+    """Bucket index change between every pair of months ``gap`` apart.
+
+    With ``from_bucket`` only pairs whose START month sits in that bucket
+    count: the transition reference's rule, under which a country at level
+    zero can never borrow a downward move from a pair that started higher.
+    """
     moves: List[int] = []
     for ym, v in series.items():
         later = _add_months(ym, gap)
@@ -618,6 +625,8 @@ def _bucket_moves(series: Dict[str, float], gap: int) -> List[int]:
         a = _bucket_index_for_value(v, "FATALITIES")
         b = _bucket_index_for_value(series[later], "FATALITIES")
         if a is None or b is None:
+            continue
+        if from_bucket is not None and a != from_bucket:
             continue
         moves.append(b - a)
     return moves
@@ -628,6 +637,32 @@ def _median(values: Sequence[float]) -> float:
     n = len(vals)
     mid = n // 2
     return vals[mid] if n % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+
+#: The transition reference (scored only, never shown in a prompt): the
+#: level-and-volatility recipe with moves counted only from pairs whose start
+#: month sits in the level's bucket. The plain recipe pools every pair, so a
+#: country at zero inherits the downward moves of months that started higher
+#: and they pile onto bucket 0 at the edge — which is how a vector can put 71%
+#: on "no deaths" beside a stated 42% chance of staying put.
+LEVEL_TRANSITION_MODEL_SOURCE = "level_transition:acled_monthly_fatalities"
+
+
+def level_transition_spds(
+    con,
+    iso3: str,
+    as_of: Any,
+    horizons: Sequence[int] = (1, 2, 3, 4, 5, 6),
+    known_at: Any = None,
+) -> Tuple[Dict[int, List[float]], str, Dict[str, Any]]:
+    """:func:`level_volatility_spds` with moves conditioned on the start bucket.
+
+    Same level, settle rule, floor, window and pooling (the country's own
+    pairs first; below ``LEVEL_VOLATILITY_MIN_PAIRS`` the same-band
+    countries' pairs that also start in the level's bucket). A horizon with
+    no such pair at all is left out rather than borrowed from other buckets.
+    """
+    return _level_reference_spds(con, iso3, as_of, horizons, known_at, transition=True)
 
 
 def level_volatility_spds(
@@ -657,6 +692,18 @@ def level_volatility_spds(
     Returns ``({horizon: probs}, source, detail)``; an empty dict with a
     ``reason`` when there is nothing to anchor on.
     """
+    return _level_reference_spds(con, iso3, as_of, horizons, known_at, transition=False)
+
+
+def _level_reference_spds(
+    con,
+    iso3: str,
+    as_of: Any,
+    horizons: Sequence[int],
+    known_at: Any,
+    *,
+    transition: bool,
+) -> Tuple[Dict[int, List[float]], str, Dict[str, Any]]:
     k = n_buckets_for("FATALITIES")
     iso = (iso3 or "").upper()
     window_ym = _as_of_ym(as_of)
@@ -699,7 +746,8 @@ def level_volatility_spds(
     for h in horizons:
         target = _add_months(window_ym, int(h) - 1)
         gap = _month_diff(level_ym, target)
-        moves = _bucket_moves(series, gap)
+        from_bucket = level_bucket if transition else None
+        moves = _bucket_moves(series, gap, from_bucket)
         n_own = len(moves)
         pooled = False
         n_band_countries = 0
@@ -715,7 +763,7 @@ def level_volatility_spds(
                     if _bucket_index_for_value(_median(list(s2.values())), "FATALITIES") == median_bucket:
                         band_series.append(s2)
             for s2 in band_series:
-                moves.extend(_bucket_moves(s2, gap))
+                moves.extend(_bucket_moves(s2, gap, from_bucket))
             pooled = True
             n_band_countries = len(band_series)
         if not moves:
@@ -740,12 +788,14 @@ def level_volatility_spds(
             "share_same": sum(c for d, c in counts.items() if d == 0) / n,
             "share_one": sum(c for d, c in counts.items() if abs(d) == 1) / n,
             "share_two_plus": sum(c for d, c in counts.items() if abs(d) >= 2) / n,
+            "share_up": sum(c for d, c in counts.items() if d > 0) / n,
+            "share_down": sum(c for d, c in counts.items() if d < 0) / n,
         }
     if not out:
         return {}, NO_BASE_RATE_SOURCE, {"reason": "no month pairs to measure movement from"}
     detail = {
         "score_family": "spd",
-        "method": "level_plus_bucket_moves",
+        "method": "level_plus_transition_moves" if transition else "level_plus_bucket_moves",
         "version": LEVEL_VOLATILITY_VERSION,
         "level_month": level_ym,
         "level_value": level_value,
@@ -756,6 +806,8 @@ def level_volatility_spds(
         "activity_band": median_bucket,
         "horizons": per_horizon,
     }
+    if transition:
+        return out, LEVEL_TRANSITION_MODEL_SOURCE, detail
     return out, LEVEL_VOLATILITY_MODEL_SOURCE, detail
 
 
