@@ -170,3 +170,60 @@ def test_run_without_cap_pressure_is_not_flagged(tmp_path, monkeypatch):
     assert summary["budget_capped"] is False
     assert summary["n_forecast"] == 2
     assert summary["n_skipped"] == 0
+
+
+def test_time_cap_skips_and_persists(tmp_path, monkeypatch):
+    """Past SIBYL_MAX_RUNTIME_MIN no new question starts: the question in
+    flight (Q1) finishes and is persisted ok, Q2 is stored skipped with
+    reason 'run time cap', and the run record carries time_capped=TRUE while
+    budget_capped stays FALSE."""
+    seed_db(tmp_path, monkeypatch)
+
+    def fake_model_call(prompt: str):
+        return make_submit_response(), {"cost_usd": 0.01}, ""
+
+    monkeypatch.setattr(sibyl_run, "load_base_rate", lambda *a, **k: stub_base_rate())
+    monkeypatch.setattr(sibyl_agent, "log_sibyl_call", lambda **kwargs: None)
+
+    # Monotonic seconds: the loop starts at 0, Q1 starts at 0, and by the
+    # time Q2 would start 181 minutes have passed.
+    ticks = iter([0.0, 0.0, 181 * 60.0, 181 * 60.0, 181 * 60.0])
+    summary = sibyl_run.run_sibyl(
+        HS_RUN_ID, n_questions=2, model_call=fake_model_call,
+        max_runtime_min=180, clock=lambda: next(ticks),
+    )
+    assert summary["time_capped"] is True
+    assert summary["budget_capped"] is False
+    assert summary["n_forecast"] == 1
+    assert summary["n_skipped"] == 1
+
+    from pythia.db.schema import connect
+
+    con = connect(read_only=False)
+    try:
+        by_qid = {
+            r[0]: r
+            for r in con.execute(
+                "SELECT question_id, status, skip_reason, selection_pass "
+                "FROM sibyl_forecasts"
+            ).fetchall()
+        }
+        assert by_qid[Q1][1] == "ok"
+        assert by_qid[Q2][1:3] == ("skipped", "run time cap")
+        assert by_qid[Q1][3] == "floor" and by_qid[Q2][3] == "floor"
+        assert con.execute("SELECT time_capped FROM sibyl_runs").fetchone()[0] is True
+    finally:
+        con.close()
+
+
+def test_no_time_limit_when_zero(tmp_path, monkeypatch):
+    seed_db(tmp_path, monkeypatch)
+    monkeypatch.setattr(sibyl_run, "load_base_rate", lambda *a, **k: stub_base_rate())
+    monkeypatch.setattr(sibyl_agent, "log_sibyl_call", lambda **kwargs: None)
+    summary = sibyl_run.run_sibyl(
+        HS_RUN_ID, n_questions=2,
+        model_call=lambda p: (make_submit_response(), {"cost_usd": 0.01}, ""),
+        max_runtime_min=0, clock=lambda: 10**9,
+    )
+    assert summary["time_capped"] is False
+    assert summary["n_forecast"] == 2

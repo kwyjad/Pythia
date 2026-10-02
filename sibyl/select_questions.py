@@ -3,24 +3,37 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
-"""Sibyl question selection.
+"""Sibyl question selection: floor, then fill.
 
-Selects the top-N highest-volatility affected/fatalities questions for a
-run. There is no first-class "volatility" score in Pythia; the proxy is the
-Regime Change score (``hs_triage.regime_change_score`` = likelihood x
-magnitude), which measures exactly "expected departure from the historical
-base rate" — with ``triage_score`` as tiebreak and ``question_id`` for
-determinism (see DISCOVERY.md §1).
+Selects N affected/fatalities questions for a run, spread across the
+hazards. There is no first-class "volatility" score in Pythia; the proxy is
+the Regime Change score (``hs_triage.regime_change_score`` = likelihood x
+magnitude), which measures "expected departure from the historical base
+rate" (see DISCOVERY.md §1).
+
+The rule (``floor_then_fill``):
+
+1. rank candidates by volatility, highest first;
+2. FLOOR: each hazard takes its ``MIN_PER_HAZARD`` most volatile questions;
+3. FILL: take the most volatile remaining candidate whose hazard is under
+   ``MAX_PER_HAZARD``, until N are chosen;
+4. ties go to the hazard holding fewer picks so far, then to question_id.
+
+A plain top-N let one hazard take the run: the 1 October 2026 run chose six
+drought questions and no cyclone. The floor keeps every hazard in Sibyl's
+scored record; the fill still spends most slots where the RC signal is
+strongest. ``triage_score`` is NOT a tiebreak: every row with RC >= 0.1 is
+tier ``rc_promoted`` and carries a placeholder 0, so the tiebreak was dead.
 
 Scope is strict: numeric affected/fatalities magnitude questions only
 (``ELIGIBLE_HAZARD_METRICS``). Binary EVENT_OCCURRENCE questions are never
-eligible and are never used as padding — when fewer than N questions
-qualify the shortfall is logged loudly and the run proceeds with what
-exists.
+eligible and are never used as padding — a hazard short of its floor takes
+what it has, and a pool short of N is logged and the run proceeds with
+fewer.
 
-Questions are returned in DESCENDING volatility order so that when the run
-hard cap fires mid-cycle, the questions left unforecast are the least
-volatile — the cap sacrifices the lowest-value work first.
+Run order is floor picks first, then fill picks, each by falling
+volatility, so a budget or time cut removes fill picks first and the
+hazard floor is the last thing a cut reaches.
 """
 
 from __future__ import annotations
@@ -28,12 +41,20 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from pythia.db.schema import connect
 from pythia.test_mode import is_test_mode
 
-from sibyl.config import ELIGIBLE_HAZARD_METRICS, N_QUESTIONS
+from sibyl.config import (
+    ELIGIBLE_HAZARD_METRICS,
+    MAX_PER_HAZARD,
+    MIN_PER_HAZARD,
+    N_QUESTIONS,
+)
+
+SELECTION_FLOOR = "floor"
+SELECTION_FILL = "fill"
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +71,9 @@ class SibylQuestion:
     wording: str
     volatility_score: float
     triage_score: float
+    # Which pass chose the question (SELECTION_FLOOR / SELECTION_FILL);
+    # persisted on sibyl_forecasts.selection_pass.
+    selection_pass: Optional[str] = None
 
     def to_row_dict(self) -> dict:
         """Shape compatible with forecaster month/window helpers."""
@@ -120,12 +144,81 @@ def hs_run_is_test(hs_run_id: Optional[str], con: Any = None) -> bool:
             con.close()
 
 
-def select_top_questions(
+def floor_then_fill(
+    candidates: Sequence[SibylQuestion],
+    n: int,
+    *,
+    min_per_hazard: int = MIN_PER_HAZARD,
+    max_per_hazard: int = MAX_PER_HAZARD,
+) -> List[SibylQuestion]:
+    """Choose up to *n* of *candidates* by the floor-then-fill rule.
+
+    Pure (no DB). Returns the chosen questions in RUN order — floor picks
+    first, then fill picks, each by falling volatility — with
+    ``selection_pass`` stamped on each.
+
+    When *n* is smaller than the floor would take (``n < hazards x min``),
+    the floor is taken in rounds — every hazard's best, then every hazard's
+    second best, ... — so as many hazards as *n* allows stay represented.
+    """
+    n = max(int(n), 0)
+    if n == 0 or not candidates:
+        return []
+    cap = max(int(max_per_hazard), 1)
+    floor = max(min(int(min_per_hazard), cap), 0)
+
+    # One ordering everywhere: falling volatility, then question_id.
+    ranked = sorted(candidates, key=lambda q: (-q.volatility_score, q.question_id))
+    by_hazard: Dict[str, List[SibylQuestion]] = {}
+    for q in ranked:
+        by_hazard.setdefault(q.hazard_code, []).append(q)
+
+    picks: Dict[str, int] = {hz: 0 for hz in by_hazard}
+    chosen_ids: set = set()
+    floor_picks: List[SibylQuestion] = []
+    fill_picks: List[SibylQuestion] = []
+
+    def _take(q: SibylQuestion, how: str, into: List[SibylQuestion]) -> None:
+        q.selection_pass = how
+        picks[q.hazard_code] += 1
+        chosen_ids.add(q.question_id)
+        into.append(q)
+
+    # FLOOR, in rounds. Within a round, order by falling volatility; ties go
+    # to the hazard holding fewer picks, then question_id.
+    for rnd in range(floor):
+        round_qs = [qs[rnd] for qs in by_hazard.values() if len(qs) > rnd]
+        round_qs.sort(
+            key=lambda q: (-q.volatility_score, picks[q.hazard_code], q.question_id)
+        )
+        for q in round_qs:
+            if len(floor_picks) >= n:
+                break
+            _take(q, SELECTION_FLOOR, floor_picks)
+
+    # FILL: the most volatile remaining candidate under its hazard's cap.
+    while len(floor_picks) + len(fill_picks) < n:
+        open_qs = [
+            q for q in ranked
+            if q.question_id not in chosen_ids and picks[q.hazard_code] < cap
+        ]
+        if not open_qs:
+            break
+        best = min(
+            open_qs,
+            key=lambda q: (-q.volatility_score, picks[q.hazard_code], q.question_id),
+        )
+        _take(best, SELECTION_FILL, fill_picks)
+
+    order = lambda q: (-q.volatility_score, q.question_id)  # noqa: E731
+    return sorted(floor_picks, key=order) + sorted(fill_picks, key=order)
+
+
+def load_candidates(
     hs_run_id: Optional[str] = None,
-    n: int = N_QUESTIONS,
     con: Any = None,
 ) -> List[SibylQuestion]:
-    """Top-*n* eligible questions for *hs_run_id*, descending volatility."""
+    """Every eligible active question of the HS run, by falling volatility."""
     own = con is None
     if own:
         con = connect(read_only=False)
@@ -166,15 +259,14 @@ def select_top_questions(
               AND q.hs_run_id = ?
               AND {_eligibility_sql()}
               {test_filter}
-            ORDER BY volatility_score DESC, triage_score DESC, q.question_id
-            LIMIT {int(n)}
+            ORDER BY volatility_score DESC, q.question_id
         """
         rows = con.execute(sql, [run_id]).fetchall()
     finally:
         if own:
             con.close()
 
-    questions = [
+    return [
         SibylQuestion(
             question_id=str(r[0]),
             hs_run_id=str(r[1]),
@@ -190,16 +282,57 @@ def select_top_questions(
         for r in rows
     ]
 
+
+def select_top_questions(
+    hs_run_id: Optional[str] = None,
+    n: int = N_QUESTIONS,
+    con: Any = None,
+    *,
+    min_per_hazard: int = MIN_PER_HAZARD,
+    max_per_hazard: int = MAX_PER_HAZARD,
+) -> List[SibylQuestion]:
+    """The run's Sibyl questions by floor-then-fill, in run order.
+
+    The name is kept for the workflow gate and callers; the rule is no
+    longer a plain top-N (see the module docstring).
+    """
+    candidates = load_candidates(hs_run_id, con)
+    questions = floor_then_fill(
+        candidates, n,
+        min_per_hazard=min_per_hazard, max_per_hazard=max_per_hazard,
+    )
+
+    counts: Dict[str, int] = {}
+    for q in questions:
+        counts[q.hazard_code] = counts.get(q.hazard_code, 0) + 1
+    short = sorted(
+        hz for hz in {hz for hz, _ in ELIGIBLE_HAZARD_METRICS}
+        if counts.get(hz, 0) < min(min_per_hazard, max_per_hazard)
+    )
+    if short and n >= len(ELIGIBLE_HAZARD_METRICS) * min_per_hazard:
+        logger.warning(
+            "sibyl.select_questions: hazard(s) %s hold fewer than the floor "
+            "of %d eligible questions for hs_run_id=%s; they take what they have.",
+            ", ".join(short), min_per_hazard, hs_run_id or "(latest)",
+        )
     if len(questions) < n:
         # Loud but expected (small runs legitimately have < N eligible
         # questions), so WARNING not ERROR: proceed with what exists —
         # never pad with binary (EVENT_OCCURRENCE) questions.
         logger.warning(
             "sibyl.select_questions: only %d of %d requested eligible "
-            "affected/fatalities questions exist for hs_run_id=%s; "
-            "proceeding without padding.",
-            len(questions), n, hs_run_id or "(latest)",
+            "affected/fatalities questions could be chosen for hs_run_id=%s "
+            "(pool %d, per-hazard cap %d); proceeding without padding.",
+            len(questions), n, hs_run_id or "(latest)", len(candidates),
+            max_per_hazard,
         )
+    logger.info(
+        "sibyl.select_questions: chose %d (%s) — %d floor, %d fill",
+        len(questions),
+        ", ".join(f"{hz} {c}" for hz, c in sorted(counts.items())) or "none",
+        sum(1 for q in questions if q.selection_pass == SELECTION_FLOOR),
+        sum(1 for q in questions if q.selection_pass == SELECTION_FILL),
+    )
     return questions
 
 

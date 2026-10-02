@@ -457,6 +457,13 @@ function SibylSection({ data }: Props) {
           ) : (
             <div className="mt-1 text-xl font-bold text-green-600">Within budget</div>
           )}
+          {s.time_capped ? (
+            <div className="mt-1 text-xs font-semibold text-red-600">
+              TIME CAPPED — {s.n_skipped_time_cap ?? 0} question
+              {(s.n_skipped_time_cap ?? 0) === 1 ? "" : "s"} skipped by the run
+              time limit
+            </div>
+          ) : null}
         </div>
       </div>
     </Section>

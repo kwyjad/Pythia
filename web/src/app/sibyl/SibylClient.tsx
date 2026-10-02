@@ -521,6 +521,11 @@ const SibylClient = ({
               BUDGET CAPPED — remaining questions skipped
             </div>
           ) : null}
+          {run.time_capped ? (
+            <div className="mt-2 inline-block rounded bg-red-100 px-2 py-1 text-xs font-semibold text-red-700">
+              TIME CAPPED — remaining questions skipped
+            </div>
+          ) : null}
         </div>
         <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
           <div className="text-xs uppercase text-fred-muted">Run cost</div>

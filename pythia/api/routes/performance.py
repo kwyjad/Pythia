@@ -703,6 +703,11 @@ def _load_sibyl_runs(
     if sibyl_run_id:
         where += " AND sibyl_run_id = :srid"
         params["srid"] = sibyl_run_id
+    time_capped = (
+        "COALESCE(time_capped, FALSE) AS time_capped"
+        if _table_has_columns(con, "sibyl_runs", ["time_capped"])
+        else "FALSE AS time_capped"
+    )
     try:
         return _rows_from_cursor(
             _execute(
@@ -710,6 +715,7 @@ def _load_sibyl_runs(
                 f"""
                 SELECT sibyl_run_id, hs_run_id, created_at,
                        n_selected, n_forecast, n_skipped, budget_capped,
+                       {time_capped},
                        run_cost_usd, opus_cost_usd, brave_cost_usd, run_hard_cap_usd
                 FROM sibyl_runs
                 {where}

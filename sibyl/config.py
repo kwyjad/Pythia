@@ -87,17 +87,31 @@ CALIBRATION_ENABLED = _env_bool("SIBYL_CALIBRATION_ENABLED", False)
 # --- Budget ------------------------------------------------------------------
 # Hard run cut-off: stop STARTING new questions/trials once cumulative run
 # cost reaches this. The in-flight unit runs to completion, so realized
-# spend can exceed the cap by roughly one question's cost. Load-bearing:
-# Sibyl is expected to dominate Pythia's API spend. At K=3 an expected cycle
-# is ~$12-15, so $40 is a tail backstop (~2.5-3x expected).
-RUN_HARD_CAP_USD = _env_float("SIBYL_RUN_HARD_CAP_USD", 40.0)
+# spend can exceed the cap by roughly one question's cost. At 25 questions a
+# cycle costs ~$14 at the October 2026 rate ($0.55 a question, Opus 5.5) and
+# ~$35 at the August rate (~$1.40 a question, Opus 5), so $60 is a tail
+# backstop that a dear month does not reach.
+RUN_HARD_CAP_USD = _env_float("SIBYL_RUN_HARD_CAP_USD", 60.0)
 
 # Optional secondary per-question guard; None/0 = unset.
 _bpq = _env_float("SIBYL_BUDGET_USD_PER_QUESTION", 0.0)
 BUDGET_USD_PER_QUESTION: float | None = _bpq if _bpq > 0 else None
 
+# Wall-clock limit on the trial loop, in minutes. Same behaviour as the budget
+# cap: past it no new question starts, the question in flight finishes, and
+# the rest are stored as skipped ("run time cap"). The Sibyl job is the forecast
+# chain's ONLY release trigger and times out at 330 minutes; 25 questions at
+# August's pace (~8.4 min a question) take about 210, and the interpreter,
+# bundles and canonical upload still have to run after the loop. 0 = no limit.
+MAX_RUNTIME_MIN = _env_float("SIBYL_MAX_RUNTIME_MIN", 180.0)
+
 # --- Question selection ------------------------------------------------------
-N_QUESTIONS = _env_int("SIBYL_N_QUESTIONS", 10)
+# Floor-then-fill (sibyl/select_questions.py): each hazard first takes its
+# MIN_PER_HAZARD most volatile questions, then the remaining slots go to the
+# most volatile candidates whose hazard is under MAX_PER_HAZARD.
+N_QUESTIONS = _env_int("SIBYL_N_QUESTIONS", 25)
+MIN_PER_HAZARD = _env_int("SIBYL_MIN_PER_HAZARD", 3)
+MAX_PER_HAZARD = _env_int("SIBYL_MAX_PER_HAZARD", 10)
 
 # Numeric affected/fatalities magnitude questions only (spec scope:
 # "ACE fatalities; DR/FL/TC affected"). DR "affected" is represented as

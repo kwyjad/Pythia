@@ -27,6 +27,7 @@ from pythia.api.core import (
     _execute,
     _rows_from_cursor,
     _table_exists,
+    _table_has_columns,
     _test_filter,
 )
 
@@ -48,6 +49,13 @@ def _maybe_json(raw: Any) -> Any:
         return json.loads(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _selection_pass_col(con) -> str:
+    """``selection_pass`` (floor | fill) when the column exists, else NULL."""
+    if _table_has_columns(con, "sibyl_forecasts", ["selection_pass"]):
+        return "selection_pass"
+    return "CAST(NULL AS TEXT) AS selection_pass"
 
 
 def _latest_sibyl_run_id(con, include_test: bool) -> Optional[str]:
@@ -93,7 +101,7 @@ def sibyl_summary(
     sibyl_run_id: Optional[str] = Query(None),
     include_test: bool = Query(False),
 ):
-    """Run-level coverage: forecast/skipped counts, cost, budget_capped."""
+    """Run-level coverage: forecast/skipped counts, cost, budget_capped, time_capped."""
     con = _con()
     if not _table_exists(con, "sibyl_runs"):
         return {"run": None, "questions": []}
@@ -109,17 +117,19 @@ def sibyl_summary(
         return {"run": None, "questions": []}
     run = run_rows[0]
     run["config"] = _maybe_json(run.pop("config_json", None))
+    # Pre-Oct-2026 rows: the column is absent, and absence is "not capped".
+    run.setdefault("time_capped", False)
 
     questions: List[Dict[str, Any]] = []
     if _table_exists(con, "sibyl_forecasts"):
         questions = _rows_from_cursor(
             _execute(
                 con,
-                """
+                f"""
                 SELECT question_id, iso3, hazard_code, metric, status,
                        skip_reason, k, cost_usd, opus_cost_usd, brave_cost_usd,
                        volatility_score, js_divergence_vs_standard,
-                       js_divergence_inter_trial
+                       js_divergence_inter_trial, {_selection_pass_col(con)}
                 FROM sibyl_forecasts
                 WHERE sibyl_run_id = ?
                 ORDER BY volatility_score DESC NULLS LAST, question_id
@@ -151,13 +161,13 @@ def sibyl_questions(
     rows = _rows_from_cursor(
         _execute(
             con,
-            """
+            f"""
             SELECT sibyl_run_id, run_id, question_id, iso3, hazard_code,
                    metric, status, skip_reason, as_of, k, aggregation,
                    volatility_score, triage_score,
                    js_divergence_vs_standard, js_divergence_inter_trial,
                    cost_usd, opus_cost_usd, brave_cost_usd,
-                   pooled_quantiles_json
+                   pooled_quantiles_json, {_selection_pass_col(con)}
             FROM sibyl_forecasts
             WHERE sibyl_run_id = ?
             ORDER BY js_divergence_vs_standard DESC NULLS LAST, question_id
