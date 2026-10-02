@@ -444,7 +444,7 @@ _FILE_ACCESS_ERROR = {
         "code": "invalid_request",
         "message": (
             "Cannot find file file-7wYyFx3ukHp3twZpEfpXHG, or organization "
-            "org-bfatceYjmHrvj9PuKL8lDweY does not have access to it."
+            "org-EXAMPLE0000000000000000 does not have access to it."
         ),
         "param": "file_id",
         "line": None,

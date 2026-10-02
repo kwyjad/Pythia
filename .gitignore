@@ -203,3 +203,15 @@ resolver/diagnostics/ingestion/acled_client/
 # Editions recovered by refresh_crisiswatch.py --backfill-editions. They are
 # stored into DuckDB by the same run; the file is the transport, not a record.
 horizon_scanner/data/crisiswatch_editions/
+
+# Credentials never belong in the repository (security PR 5). The templates
+# are the documented way to show which variables exist, so they stay tracked.
+.env.*
+!.env.template
+!*.example
+!*.sample
+*.pem
+*.key
+.cdsapirc
+.netrc
+.streamlit/secrets.toml
