@@ -7,7 +7,7 @@
 name = "pythia"
 version = "0.1.0"
 description = ""
-authors = ["Vasile Popescu <elisescu@elisescu.com>"]
+authors = ["Kevin Wyjad"]
 readme = "README.md"
 packages = [
     { include = "resolver" }
