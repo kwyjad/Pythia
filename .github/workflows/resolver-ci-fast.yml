@@ -179,11 +179,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "Event: ${{ github.event_name }}"
-          echo "Ref: ${{ github.ref }}"
-          if [ -n "${{ github.base_ref }}" ]; then
-            git fetch origin "${{ github.base_ref }}" --depth=1 || true
-            git diff --name-only "origin/${{ github.base_ref }}"...HEAD || true
+          echo "Event: ${GITHUB_EVENT_NAME}"
+          echo "Ref: ${GITHUB_REF}"
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch origin "${GITHUB_BASE_REF}" --depth=1 || true
+            git diff --name-only "origin/${GITHUB_BASE_REF}"...HEAD || true
           else
             echo "No base_ref available; skipping diff."
           fi
@@ -224,7 +224,8 @@ jobs:
       - name: Capture baseline diagnostics files
         run: |
           set -euo pipefail
-          env | sort > "$ART_DIR/env.txt" || true
+          # No env dump: the artifact is public once the repo is, and the
+          # environment is the one place a credential could sit by name.
           python -m pip freeze > "$ART_DIR/pip-freeze.txt" || true
 
       - name: Import probes (python, pytest, duckdb)

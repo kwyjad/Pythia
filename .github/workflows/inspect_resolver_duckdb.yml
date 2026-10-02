@@ -21,6 +21,9 @@ on:
   workflow_run:
     workflows: ["Resolver Update"]
     types: [completed]
+    # A run triggered from a fork's pull request is never one of ours,
+    # whatever its branch is called; the job if: below checks both.
+    branches: [main]
 
 permissions:
   contents: read
@@ -32,7 +35,7 @@ jobs:
     # A Resolver Update that died in Phase 1 has no pythia-resolver-db
     # artifact; inspecting it would only add a second red run beside the
     # real one. Same guard every other consumer of this workflow carries.
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request') }}
 
     steps:
       - name: Checkout repo
@@ -119,4 +122,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: resolver-inspect
+          retention-days: 14
           path: resolver_inspect.md

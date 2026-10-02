@@ -21,7 +21,11 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+      # The write token stays off disk while pip installs run; the push step
+      # passes it to git for that one command.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -52,9 +56,13 @@ jobs:
           PY
 
       - name: Commit updated parquet
+        env:
+          PUSH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -f Dashboard/data/forecasts.parquet
           git commit -m "chore(dashboard): refresh parquet snapshot" || echo "No changes"
-          git push
+          AUTH="$(printf 'x-access-token:%s' "${PUSH_TOKEN}" | base64 -w0)"
+          echo "::add-mask::${AUTH}"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH}" push

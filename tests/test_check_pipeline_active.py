@@ -29,6 +29,7 @@ def _final_run(hours_ago: float, conclusion: str = "success") -> dict:
         "displayTitle": "Pythia Pipeline Stage: pl_1 — fc_collect_finalize",
         "conclusion": conclusion,
         "createdAt": _iso(hours_ago),
+        "event": "workflow_dispatch",
     }
 
 
@@ -102,15 +103,20 @@ def _live_final_run(hours_ago: float, conclusion: str = "success") -> dict:
     return {**_final_run(0, conclusion), "createdAt": _live_iso(hours_ago)}
 
 
+_OURS = {"head_repository_id": 42, "head_branch": "main"}
+
+
 def _run(monkeypatch, tmp_path, argv, *, in_flight, gh_raises=False, force=None):
     """Drive main() with gh mocked out; return the parsed $GITHUB_OUTPUT."""
 
     def fake_gh_json(*args):
         if gh_raises:
             raise RuntimeError("gh exploded")
+        if "api" in args and not any("artifacts" in a for a in args):
+            return {"id": 42}
         if "api" in args:
             # A batch-state artifact 3h old (inside the 72h window).
-            return {"artifacts": [{"created_at": _live_iso(3)}]}
+            return {"artifacts": [{"created_at": _live_iso(3), "workflow_run": _OURS}]}
         # A successful final stage AFTER the artifact clears the gate.
         return [_live_final_run(1)] if not in_flight else []
 
@@ -191,3 +197,36 @@ def test_the_gate_still_decides_correctly_a_year_from_now(monkeypatch, tmp_path)
     assert _run(monkeypatch, tmp_path, ["--emit", "proceed"], in_flight=False) == {
         "proceed": "true"
     }
+
+
+# A fork's pull-request run can upload an artifact under the same name.
+def test_an_artifact_from_another_repository_is_not_ours():
+    fork = {"created_at": "2026-10-02T10:00:00Z",
+            "workflow_run": {"head_repository_id": 99, "head_branch": "main"}}
+    ours = {"created_at": "2026-09-01T10:00:00Z", "workflow_run": _OURS}
+    assert cpa.newest_trusted_artifact([fork, ours], 42) == "2026-09-01T10:00:00Z"
+    assert cpa.newest_trusted_artifact([fork], 42) is None
+    side = {"created_at": "2026-10-02T11:00:00Z",
+            "workflow_run": {"head_repository_id": 42, "head_branch": "feature"}}
+    assert cpa.newest_trusted_artifact([side, ours], 42) == "2026-09-01T10:00:00Z"
+    # No repository id means no artifact can be shown to be ours.
+    assert cpa.newest_trusted_artifact([ours], None) is None
+
+
+def test_a_forks_final_stage_run_cannot_clear_the_gate(monkeypatch, tmp_path):
+    def fake_gh_json(*args):
+        if "api" in args and not any("artifacts" in a for a in args):
+            return {"id": 42}
+        if "api" in args:
+            return {"artifacts": [{"created_at": _live_iso(3), "workflow_run": _OURS}]}
+        return [{**_live_final_run(1), "event": "pull_request"}]
+
+    out = tmp_path / "gh_output"
+    out.write_text("", encoding="utf-8")
+    monkeypatch.setattr(cpa, "_gh_json", fake_gh_json)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "kwyjad/Pythia")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(out))
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.delenv("FORCE", raising=False)
+    assert cpa.main(["--emit", "active"]) == 0
+    assert "active=true" in out.read_text(encoding="utf-8")

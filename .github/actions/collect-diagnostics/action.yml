@@ -40,11 +40,15 @@ runs:
       shell: bash
       env:
         ART_DIR: ${{ env.ART_DIR }}
+        IN_JOB_NAME: ${{ inputs.job_name }}
+        IN_MODE: ${{ inputs.mode }}
+        IN_SMOKE_DIR: ${{ inputs.smoke_canonical_dir }}
+        IN_SMOKE_MIN_ROWS: ${{ inputs.smoke_min_rows }}
       run: |
         set -euo pipefail
         DIR="${GITHUB_ACTION_PATH}"
         bash "$DIR/collect.sh" \
-          "${{ inputs.job_name }}" \
-          "${{ inputs.mode }}" \
-          "${{ inputs.smoke_canonical_dir }}" \
-          "${{ inputs.smoke_min_rows }}"
+          "${IN_JOB_NAME}" \
+          "${IN_MODE}" \
+          "${IN_SMOKE_DIR}" \
+          "${IN_SMOKE_MIN_ROWS}"

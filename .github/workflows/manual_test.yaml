@@ -118,14 +118,17 @@ jobs:
         run: poetry install --no-interaction --no-ansi
 
       - name: Run Forecaster test set
+        env:
+          IN_LIMIT: ${{ inputs.limit }}
         run: |
-          poetry run python -m forecaster.cli --mode test_questions --limit ${{ inputs.limit }}
+          poetry run python -m forecaster.cli --mode test_questions --limit "${IN_LIMIT}"
 
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: forecaster-test-run-${{ github.run_id }}
+          retention-days: 14
           path: |
             forecast_logs/**
             forecasts.csv

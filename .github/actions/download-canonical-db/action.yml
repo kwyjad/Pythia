@@ -214,6 +214,12 @@ runs:
         EOF_WF
         )
 
+        # Only runs our own triggers started. A fork can open a pull request
+        # from a branch it named `main`, so --branch alone would accept its
+        # runs; GitHub records those as event pull_request, which no producer
+        # of a canonical DB ever is. (TRUSTED_EVENTS)
+        TRUSTED_EVENTS='["schedule","workflow_dispatch","workflow_run","push"]'
+
         CANDIDATES_FILE=$(mktemp)
         printf '%s\n%s\n' "${CANONICAL_WORKFLOWS}" "${EXTRA_WORKFLOWS}" \
           | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | awk 'NF' | sort -u \
@@ -221,8 +227,9 @@ runs:
               gh run list \
                 --workflow "${WF}" \
                 --branch main --status success \
-                --json databaseId,createdAt --limit "${PER_WF_LIMIT}" \
-                | jq -r --arg wf "${WF}" '.[] | "\(.createdAt),\(.databaseId),\($wf)"' \
+                --json databaseId,createdAt,event --limit "${PER_WF_LIMIT}" \
+                | jq -r --arg wf "${WF}" --argjson trusted "${TRUSTED_EVENTS}" \
+                    '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),\($wf)"' \
                 >>"${CANDIDATES_FILE}" || true
             done
 
@@ -237,8 +244,9 @@ runs:
               gh run list \
                 --workflow "${WF}" \
                 --branch main --status failure \
-                --json databaseId,createdAt --limit "${PER_WF_LIMIT}" \
-                | jq -r --arg wf "${WF}" '.[] | "\(.createdAt),\(.databaseId),\($wf) (failed run)"' \
+                --json databaseId,createdAt,event --limit "${PER_WF_LIMIT}" \
+                | jq -r --arg wf "${WF}" --argjson trusted "${TRUSTED_EVENTS}" \
+                    '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),\($wf) (failed run)"' \
                 >>"${CANDIDATES_FILE}" || true
             done
 

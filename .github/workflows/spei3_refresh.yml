@@ -160,6 +160,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -307,17 +309,16 @@ jobs:
     # commit after a fetch that spent its whole deadline.
     timeout-minutes: 350
     steps:
-      # The token, not the default GITHUB_TOKEN. actions/checkout persists
-      # whatever credential it authenticated with, and every later `git push`
-      # uses that persisted credential — so checking out with the default and
-      # only setting GH_TOKEN in the commit step leaves the push authenticated
-      # as GITHUB_TOKEN, which branch protection refuses (GH006) with a message
-      # about the rule rather than about the credential. Checking out with the
-      # token is what actually makes the push work.
+      # No credential is left on disk. actions/checkout persists whatever token
+      # it authenticated with into .git/config, where every later step can
+      # read it, and the steps below install and run third-party packages for
+      # hours. SPEI3_COMMIT_TOKEN can bypass branch protection, so it appears
+      # in the commit step alone, passed to git as a header for the pull and
+      # the push and never written anywhere.
       - name: Check out code
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.SPEI3_COMMIT_TOKEN || secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -599,9 +600,13 @@ jobs:
           # six-hour job is long enough for main to move under it, and the
           # only files this commit touches are ones nothing else writes.
           CLASS=""
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${COMMIT_TOKEN}" | base64 -w0)"
+          echo "::add-mask::${AUTH_HEADER#AUTHORIZATION: basic }"
           for attempt in 1 2 3 4; do
-            OUT=$( { git pull --rebase --autostash origin "${GITHUB_REF_NAME}" \
-                       && git push origin "HEAD:${GITHUB_REF_NAME}"; } 2>&1 )
+            OUT=$( { git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" \
+                       pull --rebase --autostash origin "${GITHUB_REF_NAME}" \
+                     && git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" \
+                       push origin "HEAD:${GITHUB_REF_NAME}"; } 2>&1 )
             RC=$?
             echo "${OUT}"
             if [ "${RC}" = "0" ]; then

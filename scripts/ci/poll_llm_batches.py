@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -58,6 +59,46 @@ FAILED_CONCLUSIONS = ("failure", "cancelled", "timed_out", "startup_failure")
 # disable_brave, a single batch provider) would otherwise quietly revert to
 # full production settings the moment the poller dispatched stage 2.
 CARRIED_INPUTS = ("batch_providers", "only_countries", "grounding_primary", "disable_brave")
+
+# Runs our own triggers start. A fork can open a pull request from a branch
+# it named `main`, upload a pythia-batch-state artifact, and so choose what
+# this poller dispatches; GitHub records that run as event pull_request.
+TRUSTED_EVENTS = frozenset({"schedule", "workflow_dispatch", "workflow_run", "push"})
+
+STAGES = frozenset({"hs_submit", "hs_rc_collect", "hs_finalize_fc_submit", "fc_submit", "fc_collect_finalize"})
+
+# The shape of every value a state artifact hands to `gh workflow run`. The
+# stage reads them as variables, never as shell text, so this is a second
+# line: an artifact that does not match is not ours, and is skipped.
+_FIELD_SHAPES = {
+    "pipeline_id": re.compile(r"^(pl|hs)_[A-Za-z0-9_]+$"),
+    "db_run_id": re.compile(r"^[0-9]*$"),
+}
+_CARRIED_SHAPES = {
+    "batch_providers": re.compile(r"^[a-z, ]*$"),
+    "only_countries": re.compile(r"^[A-Za-z, ]*$"),
+    "grounding_primary": re.compile(r"^(brave|openai|gemini)?$"),
+    "disable_brave": re.compile(r"^(true|false|True|False|0|1)?$"),
+}
+
+
+def state_problem(state: dict) -> str | None:
+    """Why *state* may not be dispatched, or None when it is well formed."""
+
+    if str(state.get("next_stage") or "") not in STAGES:
+        return f"next_stage {state.get('next_stage')!r} is not a known stage"
+    for key, shape in _FIELD_SHAPES.items():
+        value = "" if state.get(key) is None else str(state.get(key))
+        if not shape.match(value):
+            return f"{key} has an unexpected shape"
+    carried = state.get("dispatch_inputs") or {}
+    if not isinstance(carried, dict):
+        return "dispatch_inputs is not a mapping"
+    for key, shape in _CARRIED_SHAPES.items():
+        if key in carried and not shape.match(str(carried.get(key) or "")):
+            return f"dispatch_inputs.{key} has an unexpected shape"
+    return None
+
 
 _DECISION_PATH = os.getenv("POLLER_DECISION_PATH", "diagnostics/poll_decision.json")
 
@@ -270,10 +311,11 @@ def _list_runs(workflow: str) -> list[dict]:
     try:
         out = _gh(
             "run", "list", "--workflow", workflow, "--branch", "main",
-            "--json", "databaseId,createdAt,status,conclusion,displayTitle",
+            "--json", "databaseId,createdAt,status,conclusion,displayTitle,event",
             "--limit", str(RUNS_PER_WORKFLOW),
         )
-        return json.loads(out or "[]")
+        runs = json.loads(out or "[]")
+        return [r for r in runs if r.get("event") in TRUSTED_EVENTS]
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] gh run list failed for {workflow!r}: {exc}")
         return []
@@ -336,6 +378,10 @@ def main() -> int:
                 run_id = run["databaseId"]
                 state = _download_state(run_id, os.path.join(tmp, str(run_id)))
                 if not state or not state.get("pipeline_id") or not state.get("next_stage"):
+                    continue
+                problem = state_problem(state)
+                if problem:
+                    print(f"::warning::skipping batch state from run {run_id}: {problem}")
                     continue
                 pid = str(state["pipeline_id"])
                 if pid not in states or str(state.get("created_at") or "") > str(

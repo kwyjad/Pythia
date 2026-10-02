@@ -73,7 +73,9 @@ def _write_text(filename: str, content: str) -> None:
 
 
 def _collect_env() -> None:
-    lines = [f"{key}={value}" for key, value in sorted(os.environ.items())]
+    # Names only. The diagnostics land in a public artifact, and the values
+    # are where a credential would sit.
+    lines = sorted(os.environ)
     _write_text("env.txt", "\n".join(lines))
 
 

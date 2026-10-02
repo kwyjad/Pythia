@@ -52,9 +52,12 @@ jobs:
         run: pip install duckdb
 
       - name: Download production DB
+        env:
+          IN_DB_ARTIFACT_RUN_ID: ${{ inputs.db_artifact_run_id }}
+          IN_DB_ARTIFACT_NAME: ${{ inputs.db_artifact_name }}
         run: |
-          gh run download "${{ inputs.db_artifact_run_id }}" \
-            -n "${{ inputs.db_artifact_name }}" \
+          gh run download "${IN_DB_ARTIFACT_RUN_ID}" \
+            -n "${IN_DB_ARTIFACT_NAME}" \
             --dir data
           SRC=$(find data -maxdepth 4 -type f -name "resolver.duckdb" | head -n 1)
           if [ -z "$SRC" ]; then
@@ -66,13 +69,16 @@ jobs:
           echo "DB downloaded: $(ls -lh data/resolver.duckdb)"
 
       - name: Run mark script
+        env:
+          IN_RUN_IDS: ${{ inputs.run_ids }}
         run: |
           python scripts/mark_test_runs.py \
             --db "duckdb:///data/resolver.duckdb" \
-            --run-ids "${{ inputs.run_ids }}"
+            --run-ids "${IN_RUN_IDS}"
 
       - name: Upload modified DB
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db
+          retention-days: 90
           path: data/resolver.duckdb

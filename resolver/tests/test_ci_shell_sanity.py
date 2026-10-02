@@ -211,3 +211,136 @@ def test_the_backcast_share_override_reaches_the_run_step():
         r"PYTHIA_HAZ_BACKCAST_EXTRACTION_SHARE:\s*\$\{\{\s*inputs\.backcast_extraction_share",
         text,
     ), "the input must reach the run step as the env var load_budget reads"
+
+
+# --------------------------------------------------------------------------
+# Public-repo hardening (security PR 4, Oct 2026)
+#
+# Once the repository is public, anyone can open a pull request from a fork,
+# name a branch `main`, and run workflows that upload artifacts. Three rules
+# keep that from reaching the canonical DB, the release or a secret, and they
+# are checked here because ci-lint runs this file on every PR.
+# --------------------------------------------------------------------------
+
+_RUN_KEY = re.compile(r"^(?P<indent>\s*)(?:-\s+)?run:\s*(?P<rest>.*)$")
+
+
+def _run_blocks(text):
+    """Yield (first line number, body) for every `run:` value in a YAML file.
+
+    Stdlib only, like the rest of this file: a block scalar (`|`, `>`) runs
+    until the first non-blank line indented no deeper than the key.
+    """
+
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        m = _RUN_KEY.match(lines[i])
+        if not m or lines[i].lstrip().startswith("#"):
+            i += 1
+            continue
+        key_indent = len(m.group("indent"))
+        rest = m.group("rest").strip()
+        start = i + 1
+        if rest and rest[0] not in "|>":
+            yield start, rest
+            i += 1
+            continue
+        body = []
+        i += 1
+        while i < len(lines):
+            line = lines[i]
+            if line.strip() and len(line) - len(line.lstrip()) <= key_indent:
+                break
+            body.append(line)
+            i += 1
+        yield start, "\n".join(body)
+
+
+# Values an attacker cannot choose. Everything else that reaches shell goes
+# through env: so the shell sees a variable, never pasted text.
+_SAFE_EXPR = re.compile(
+    r"^(?:github\.(?:run_id|run_number|run_attempt|repository|repository_owner|sha|"
+    r"workspace|server_url|api_url|job|workflow|ref_name|action_path)|"
+    r"runner\.[a-z_]+|env\.[A-Za-z_][A-Za-z0-9_]*|secrets\.[A-Za-z_][A-Za-z0-9_]*|"
+    r"matrix\.[A-Za-z_][A-Za-z0-9_.]*)$"
+)
+
+
+def test_no_untrusted_expression_is_pasted_into_shell():
+    offenders = []
+    for path, text in _workflow_texts():
+        for lineno, body in _run_blocks(text):
+            for expr in re.findall(r"\$\{\{\s*(.*?)\s*\}\}", body):
+                if not _SAFE_EXPR.match(expr):
+                    offenders.append(f"{path}:{lineno}: ${{{{ {expr} }}}}")
+    assert not offenders, (
+        "Move these expressions into the step's env: and read them as \"${VAR}\" "
+        "in the script; a value pasted into run: is shell source:\n" + "\n".join(offenders)
+    )
+
+
+def test_every_workflow_declares_its_permissions():
+    missing = [
+        str(path)
+        for path, text in _workflow_texts()
+        if path.parent == WF_DIR and not re.search(r"(?m)^permissions:", text)
+    ]
+    assert not missing, (
+        "Every workflow needs a top-level permissions: block (contents: read at "
+        "least), or it inherits the repository default token: " + ", ".join(missing)
+    )
+
+
+def test_workflow_run_consumers_refuse_runs_from_forks():
+    offenders = []
+    for path, text in _workflow_texts():
+        if path.parent != WF_DIR or not re.search(r"(?m)^\s{2}workflow_run:", text):
+            continue
+        trigger = text.split("workflow_run:", 1)[1].split("\n  workflow_dispatch", 1)[0]
+        if not re.search(r"branches:\s*\[?\s*main", trigger):
+            offenders.append(f"{path}: workflow_run trigger has no branches: [main]")
+        if "github.event.workflow_run.head_repository.full_name == github.repository" not in text:
+            offenders.append(f"{path}: no job checks the triggering run's head repository")
+        if "github.event.workflow_run.event != 'pull_request'" not in text:
+            offenders.append(f"{path}: no job refuses a triggering pull_request run")
+    assert not offenders, "\n".join(offenders)
+
+
+def test_third_party_actions_are_pinned_to_a_commit():
+    offenders = []
+    for path, text in _workflow_texts():
+        for ref in re.findall(r"(?m)^\s*(?:-\s+)?uses:\s*([^\s#]+)", text):
+            if ref.startswith(("actions/", "./", "docker://")):
+                continue
+            if not re.search(r"@[0-9a-f]{40}$", ref):
+                offenders.append(f"{path}: {ref}")
+    assert not offenders, "Pin third-party actions to a full commit SHA: " + ", ".join(offenders)
+
+
+def test_run_discovery_never_accepts_a_pull_request_run():
+    """Every place that picks a run for its artifact filters on event.
+
+    A fork can name its branch `main`, so `--branch main` alone selects its
+    runs. GitHub records those runs as event pull_request, which no producer
+    of a trusted artifact ever is.
+    """
+
+    sources = [
+        pathlib.Path(".github/actions/download-canonical-db/action.yml"),
+        WF_DIR / "run_horizon_scanner.yml",
+        WF_DIR / "publish_latest_data.yml",
+        pathlib.Path("scripts/ci/poll_llm_batches.py"),
+        pathlib.Path("scripts/ci/check_pipeline_active.py"),
+    ]
+    offenders = []
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        for m in re.finditer(r'(?m)^\s*gh run list[^\n]*|"run", "list"[^\n]*', text):
+            window = text[m.start(): m.start() + 600]
+            if "event" not in window:
+                offenders.append(f"{path}: {m.group(0)[:80]}")
+    assert not offenders, (
+        "A `gh run list` that selects artifacts must also filter on event "
+        "(TRUSTED_EVENTS): " + ", ".join(offenders)
+    )
