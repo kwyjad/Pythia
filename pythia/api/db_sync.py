@@ -445,6 +445,24 @@ def mark_served() -> None:
     _SERVED_KEY = _LAST_DOWNLOADED_KEY
 
 
+def _public_error(text: Optional[str]) -> Optional[str]:
+    """The sync error as the public /v1/health and /v1/version show it.
+
+    The text names a cause an operator can act on ("Insufficient disk space",
+    "does not match"), so it stays readable; it is scrubbed of credentials and
+    cut short, because it is served to anyone who asks.
+    """
+    if not text:
+        return text
+    try:
+        from pythia.secret_scrub import scrub_text
+
+        text = scrub_text(text)
+    except Exception:  # noqa: BLE001
+        pass
+    return text[:300]
+
+
 def get_sync_status() -> Dict[str, Any]:
     """Return a snapshot of the most recent DB-sync outcome.
 
@@ -460,7 +478,7 @@ def get_sync_status() -> Dict[str, Any]:
     else:
         in_sync = _LAST_FETCHED_KEY == current
     return {
-        "last_error": _LAST_SYNC_ERROR,
+        "last_error": _public_error(_LAST_SYNC_ERROR),
         "last_ok_at": _LAST_SYNC_OK_AT,
         "last_attempt_at": _LAST_SYNC_ATTEMPT_AT,
         "manifest_key": _LAST_FETCHED_KEY,
@@ -524,11 +542,16 @@ def _sync_locked(dest_path: Path, interval_s: int) -> Optional[Dict[str, Any]]:
             should_download = not dest_path.exists()
 
         if should_download:
-            expected_sha = manifest.get("db_sha256")
-            if expected_sha:
-                download_db_atomic(dest_path, expected_sha256=str(expected_sha))
-            else:
-                download_db_atomic(dest_path)
+            # The manifest's digest is the only thing that ties the file we
+            # are about to serve to the one the publish workflow built. A
+            # manifest without one is refused rather than trusted: the swap
+            # below replaces the data every visitor reads.
+            expected_sha = str(manifest.get("db_sha256") or "").strip().lower()
+            if not _SHA256_RE.match(expected_sha):
+                raise DbSyncError(
+                    "Manifest carries no valid db_sha256; refusing to install an unverified DB"
+                )
+            download_db_atomic(dest_path, expected_sha256=expected_sha)
             _DB_REFRESHED.set()
             _LAST_DOWNLOADED_KEY = manifest_key
             logger.info("DB refreshed from release (key=%s)", manifest_key)

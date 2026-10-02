@@ -14,6 +14,7 @@ import { useCallback, useMemo } from "react";
 
 import InfoTooltip from "../../components/InfoTooltip";
 import RiskIndexMap from "../../components/RiskIndexMap";
+import { safeHref } from "../../lib/safe_href";
 import { SCORE_GLOSSARY } from "../../lib/score_glossary";
 import type {
   InterpreterAttentionMapResponse,
@@ -232,10 +233,10 @@ export default function InterpreterClient({
             </select>
           </label>
         ) : null}
-        {reportPdfUrl ? (
+        {safeHref(reportPdfUrl) ? (
           <a
             className="rounded-md border border-fred-primary bg-fred-primary px-3 py-1 text-sm text-white hover:opacity-90"
-            href={reportPdfUrl}
+            href={safeHref(reportPdfUrl) ?? undefined}
             target="_blank"
             rel="noopener noreferrer"
           >

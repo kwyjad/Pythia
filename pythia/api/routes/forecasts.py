@@ -30,10 +30,11 @@ router = APIRouter()
 
 # Row cap for the unfiltered JSON endpoints: _rows_from_cursor materializes
 # every row as a Python dict, so an unbounded pull of forecasts_ensemble can
-# take hundreds of MB. The default is generous (well above current data
-# volume); explicit ?limit= raises it to the hard max.
-_DEFAULT_ROW_CAP = 200_000
-_MAX_ROW_CAP = 500_000
+# take hundreds of MB. The dashboard does not call these endpoints; a public
+# caller wanting the whole table uses the release DB or the CSV exports, so
+# the cap is set for a query, not for a bulk pull.
+_DEFAULT_ROW_CAP = 20_000
+_MAX_ROW_CAP = 20_000
 
 
 def _capped_rows(con, sql: str, params, cap: int) -> dict:

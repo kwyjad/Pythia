@@ -3,6 +3,7 @@
 # Licensed under the Pythia Non-Commercial Public License v1.0.
 # See the LICENSE file in the project root for details.
 
+import hmac
 import os
 
 from fastapi import Header, HTTPException, Request
@@ -37,23 +38,6 @@ def _provided_token(
     return provided
 
 
-def require_token(
-    request: Request,
-    authorization: str | None = Header(default=None),
-    x_pythia_token: str | None = Header(default=None, convert_underscores=False),
-):
-    expected = _env_token()
-
-    # If no token is configured, allow requests (useful for local dev/testing).
-    if not expected:
-        return
-
-    provided = _provided_token(request, authorization, x_pythia_token)
-
-    if provided != expected:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-
 def require_admin_token(
     request: Request,
     authorization: str | None = Header(default=None),
@@ -66,5 +50,5 @@ def require_admin_token(
 
     provided = _provided_token(request, authorization, x_pythia_token)
 
-    if provided != expected:
+    if not provided or not hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Unauthorized")

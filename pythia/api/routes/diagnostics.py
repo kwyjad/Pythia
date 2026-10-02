@@ -29,6 +29,7 @@ from pythia.api.core import (
     _parse_year_month,
     _pick_col,
     _pick_timestamp_column,
+    _heavy,
     _require_debug_token,
     _rows_from_cursor,
     _shift_ym,
@@ -79,8 +80,11 @@ def _aggregate_model_names() -> List[str]:
     return list(_AGGREGATE_MODEL_NAMES_FALLBACK)
 
 @router.get("/v1/diagnostics/memory")
-def diagnostics_memory():
-    """Return current process memory and DuckDB buffer pool usage."""
+def diagnostics_memory(
+    x_fred_debug_token: Optional[str] = Header(default=None, alias="X-Fred-Debug-Token"),
+):
+    """Return current process memory and DuckDB buffer pool usage (debug token)."""
+    _require_debug_token(x_fred_debug_token)
     rusage = resource.getrusage(resource.RUSAGE_SELF)
     rss_bytes = rusage.ru_maxrss
     # macOS returns bytes, Linux returns KB
@@ -454,6 +458,7 @@ def resolution_rates(
 
 
 @router.get("/v1/diagnostics/kpi_scopes")
+@_heavy
 def diagnostics_kpi_scopes(
     metric_scope: str = Query("PA"),
     year_month: Optional[str] = Query(None),
@@ -1075,6 +1080,7 @@ def diagnostics_kpi_scopes(
 # ---------------------------------------------------------------------------
 
 @router.get("/v1/diagnostics/run_summary")
+@_heavy
 def diagnostics_run_summary(
     year_month: Optional[str] = Query(None),
     forecaster_run_id: Optional[str] = Query(None),

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from pathlib import Path
 
 import pytest
@@ -45,7 +47,7 @@ def test_maybe_sync_latest_db_downloads_and_throttles(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHIA_DATA_SYNC_INTERVAL_S", "60")
 
     manifest_payload = {
-        "db_sha256": "abc123",
+        "db_sha256": hashlib.sha256(b"duckdb-bytes").hexdigest(),
         "latest_hs_run_id": "run-1",
         "latest_hs_created_at": "2024-01-01T00:00:00Z",
     }
@@ -76,7 +78,7 @@ def test_maybe_sync_latest_db_downloads_and_throttles(tmp_path, monkeypatch):
     assert db_path.exists()
     assert db_path.read_bytes() == b"duckdb-bytes"
     assert manifest == db_sync.get_cached_manifest()
-    assert manifest["db_sha256"] == "abc123"
+    assert manifest["db_sha256"] == hashlib.sha256(b"duckdb-bytes").hexdigest()
     assert len(calls) == 2
 
     times["value"] = 30.0
@@ -143,7 +145,7 @@ def test_get_sync_status_reports_drift_on_failed_download(tmp_path, monkeypatch)
     times = {"value": 0.0}
     monkeypatch.setattr(db_sync.time, "monotonic", lambda: times["value"])
 
-    state = {"key": "key-1", "db_fails": False}
+    state = {"key": hashlib.sha256(b"db-bytes").hexdigest(), "db_fails": False}
 
     def fake_get(url, headers=None, stream=False, timeout=None):
         if "manifest.json" in url:
@@ -167,14 +169,14 @@ def test_get_sync_status_reports_drift_on_failed_download(tmp_path, monkeypatch)
 
     # A newer release appears but its DB download now fails on every attempt.
     times["value"] = 120.0
-    state["key"] = "key-2"
+    state["key"] = "f" * 64
     state["db_fails"] = True
     with pytest.raises(db_sync.DbSyncError):
         db_sync.maybe_sync_latest_db()
     status = db_sync.get_sync_status()
     assert status["last_error"]
-    assert status["manifest_key"] == "key-2"
-    assert status["downloaded_key"] == "key-1"
+    assert status["manifest_key"] == "f" * 64
+    assert status["downloaded_key"] == hashlib.sha256(b"db-bytes").hexdigest()
     assert status["in_sync"] is False  # drift is visible, not silently green
 
 

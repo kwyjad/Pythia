@@ -832,11 +832,13 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          url="${PYTHIA_API_BASE_URL%/}/v1/admin/force_sync?token=${FRED_DEBUG_TOKEN}"
+          # The token goes in a header: the API refuses it in the URL, where
+          # it would land in every access log on the way.
+          url="${PYTHIA_API_BASE_URL%/}/v1/admin/force_sync"
           echo "POST ${PYTHIA_API_BASE_URL%/}/v1/admin/force_sync"
           # Two attempts: a Render free/idle instance can need one request to wake.
           for attempt in 1 2; do
-            body="$(curl -sS -X POST -m 90 "${url}" 2>&1)" && {
+            body="$(curl -sS -X POST -m 90 -H "X-Fred-Debug-Token: ${FRED_DEBUG_TOKEN}" "${url}" 2>&1)" && {
               echo "force_sync response: ${body}"
               exit 0
             }

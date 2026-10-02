@@ -18,7 +18,7 @@ import logging
 import re
 from importlib.util import find_spec
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
 from pythia.api.core import (
@@ -158,20 +158,34 @@ def download_scores_model_csv(include_test: bool = Query(False)):
     )
 
 
+_HAZARD_PARAM = re.compile(r"^[A-Z]{2,4}$")
+_MODEL_PARAM = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
+_CACHEABLE_HAZARDS = frozenset({"ACE", "ACO", "CU", "DI", "DR", "EC", "FL", "HW", "PHE", "TC"})
+
+
 @router.get("/v1/downloads/rationales.csv")
 def download_rationales_csv(
     hazard: str = Query(..., description="Hazard code filter (e.g. FL, DR, TC)"),
     model: str | None = Query(None, description="Model name filter (e.g. gpt-6-sol, claude-opus-5-5, gemini-3.5-flash)"),
     include_test: bool = Query(False),
 ):
-    parts = ["rationales", hazard.strip().upper()]
+    hazard = hazard.strip().upper()
+    if not _HAZARD_PARAM.match(hazard):
+        raise HTTPException(status_code=400, detail="Invalid hazard parameter")
+    if model is not None and not _MODEL_PARAM.match(model):
+        raise HTTPException(status_code=400, detail="Invalid model parameter")
+    parts = ["rationales", hazard]
     if model:
         safe_model = re.sub(r"[^a-zA-Z0-9_-]", "_", model)
         parts.append(safe_model)
+    # Every distinct cache key is a file on disk until the next publish, so
+    # only the bounded set of combinations is cached: a known hazard and no
+    # model filter. Anything else is built, served and deleted.
+    cacheable = hazard in _CACHEABLE_HAZARDS and model is None
     return _serve_export(
         lambda: build_rationale_export(_con(), hazard_code=hazard, model_name=model, include_test=include_test),
         "_".join(parts) + ".csv",
         build_error_detail="Failed to build rationale export",
-        cache_slug="rationales",
+        cache_slug="rationales" if cacheable else None,
         cache_params={"hazard": hazard, "model": model, "include_test": include_test},
     )

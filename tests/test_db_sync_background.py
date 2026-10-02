@@ -102,7 +102,7 @@ def test_a_sha256_mismatch_never_replaces_the_served_db(env, monkeypatch):
 
 def test_a_truncated_download_is_refused(env, monkeypatch):
     env.write_bytes(b"old-good-db")
-    _serve(monkeypatch, {"db_sha256": "run-key"}, b"half", length=100)
+    _serve(monkeypatch, {"db_sha256": "a" * 64}, b"half", length=100)
     with pytest.raises(db_sync.DbSyncError, match="Truncated"):
         db_sync.maybe_sync_latest_db()
     assert env.read_bytes() == b"old-good-db"
@@ -110,7 +110,7 @@ def test_a_truncated_download_is_refused(env, monkeypatch):
 
 def test_a_disk_too_small_for_two_copies_is_named(env, monkeypatch):
     env.write_bytes(b"old")
-    _serve(monkeypatch, {"db_sha256": "k"}, b"x" * 10, length=800_000_000)
+    _serve(monkeypatch, {"db_sha256": "b" * 64}, b"x" * 10, length=800_000_000)
 
     class _Usage:
         free = 500_000_000
