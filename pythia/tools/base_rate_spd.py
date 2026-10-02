@@ -526,6 +526,13 @@ def last_observed_value(
 
 #: The prompt-block version a forecast was shown when it carries this anchor.
 LEVEL_VOLATILITY_VERSION = "prior_anchor_v1"
+#: The same distribution with its Spread sentence read off the vector shown
+#: (stay / up / down at months 1 and 6) instead of the pooled move shares,
+#: which disagree with the vector at the edge buckets once mass that would
+#: fall off the end is clipped onto the end bucket (Israel, November 2026
+#: test run: "stayed 42%" beside 71% on zero). Selected by
+#: ``PYTHIA_PRIOR_ANCHOR_BLOCK_VERSION=v2``; the distribution is unchanged.
+LEVEL_VOLATILITY_VERSION_V2 = "prior_anchor_v2"
 LEVEL_VOLATILITY_MODEL_SOURCE = "level_volatility:acled_monthly_fatalities"
 #: Fewer bucket-move pairs than this and the country's own history is too
 #: thin to say how far a count wanders, so pairs are pooled from countries in

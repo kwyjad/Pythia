@@ -273,7 +273,9 @@ def _structured_member_advice(hz: str, m: str, name: str) -> str:
         if fr.recalibration_mode() == "apply":
             brbv = None
             if drop_prior:
-                brbv = prior_anchor_version()
+                from pythia.tools.base_rate_spd import LEVEL_VOLATILITY_VERSION
+
+                brbv = LEVEL_VOLATILITY_VERSION
             info = fr.lookup(name, hz, m, base_rate_block_version=brbv,
                              rc_guidance=rc_guidance_version(track=1))
             drop_buckets = info.get("mode") == "apply"
@@ -2104,26 +2106,6 @@ def prior_anchor_enabled() -> bool:
     return os.getenv("PYTHIA_PRIOR_ANCHOR_SPD", "0").strip().lower() in ("1", "true", "yes")
 
 
-def prior_anchor_version() -> str:
-    """The block wording in force: ``prior_anchor_v1`` unless
-    ``PYTHIA_PRIOR_ANCHOR_BLOCK_VERSION`` is ``v2`` (or ``prior_anchor_v2``).
-
-    The distribution is the same under both; only the Spread sentence moves.
-    v1 stays the default until the October 2026 run (the first v1 run) has
-    been scored, because a correction is fitted per block version and two
-    wordings in one month would split that month's evidence.
-    """
-    from pythia.tools.base_rate_spd import (
-        LEVEL_VOLATILITY_VERSION,
-        LEVEL_VOLATILITY_VERSION_V2,
-    )
-
-    raw = os.getenv("PYTHIA_PRIOR_ANCHOR_BLOCK_VERSION", "").strip().lower()
-    if raw in ("v2", "2", LEVEL_VOLATILITY_VERSION_V2):
-        return LEVEL_VOLATILITY_VERSION_V2
-    return LEVEL_VOLATILITY_VERSION
-
-
 @functools.lru_cache(maxsize=512)
 def _prior_anchor_cached(db_url: str, iso3: str, window_ym: str, today_iso: str):
     from pythia.tools.base_rate_spd import level_volatility_spds
@@ -2154,6 +2136,7 @@ def load_prior_anchor(question: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not iso3 or len(window) != 7:
         return None
     try:
+        from pythia.tools.base_rate_spd import LEVEL_VOLATILITY_VERSION
         from resolver.db import duckdb_io
 
         db_url = os.getenv("RESOLVER_DB_URL", "").strip() or _pythia_db_url_from_config()
@@ -2167,7 +2150,7 @@ def load_prior_anchor(question: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if detail.get("reason"):
             LOG.info("[prompts] no prior anchor for %s: %s", iso3, detail.get("reason"))
         return None
-    return {"version": prior_anchor_version(), "spds": spds, "source": source, "detail": detail}
+    return {"version": LEVEL_VOLATILITY_VERSION, "spds": spds, "source": source, "detail": detail}
 
 
 def prior_anchor_block_version(question: Dict[str, Any]) -> Optional[str]:
@@ -2179,12 +2162,6 @@ def prior_anchor_block_version(question: Dict[str, Any]) -> Optional[str]:
 def _pct(p: float) -> str:
     v = 100.0 * float(p)
     return f"{v:.1f}%" if v < 1 else f"{v:.0f}%"
-
-
-def _prior_anchor_v2_name() -> str:
-    from pythia.tools.base_rate_spd import LEVEL_VOLATILITY_VERSION_V2
-
-    return LEVEL_VOLATILITY_VERSION_V2
 
 
 def render_prior_anchor_block(anchor: Dict[str, Any], forecast_keys: list[str]) -> str:
@@ -2204,44 +2181,17 @@ def render_prior_anchor_block(anchor: Dict[str, Any], forecast_keys: list[str]) 
     gap = int(h1.get("gap_months") or 1)
     later = "one month later" if gap == 1 else f"{gap} months later"
     n_months = int(detail.get("n_months_in_window") or 0)
-    if anchor.get("version") == _prior_anchor_v2_name():
-        # v2 reads the Spread off the vectors printed below, so the sentence
-        # and the numbers a member copies cannot disagree. The v1 shares are
-        # of raw moves, before mass past either end is clipped onto the end
-        # bucket and before the floor, so at bucket 0 or the top bucket they
-        # understate "stays".
-        lb = int(detail.get("level_bucket") or 0)
-
-        def _split(vec: list) -> tuple:
-            return (sum(vec[lb + 1:]), float(vec[lb]), sum(vec[:lb]))
-
-        up1, stay1, down1 = _split(anchor["spds"][1])
-        up6, stay6, down6 = _split(anchor["spds"][6])
-        sentence = (
-            f"Read off the distribution below: in month 1 the count stays in bucket "
-            f"{level_label} with probability {_pct(stay1)}, moves to a higher bucket "
-            f"{_pct(up1)} and to a lower one {_pct(down1)}; by month 6, "
-            f"{_pct(stay6)}, {_pct(up6)} and {_pct(down6)}. These come from how far "
-            f"counts moved over the same gap in the last {n_months} complete months."
+    sentence = (
+        f"Over the last {n_months} complete months, the count {later} stayed in the same "
+        f"bucket {_pct(h1.get('share_same', 0))} of the time, moved one bucket "
+        f"{_pct(h1.get('share_one', 0))}, and two or more {_pct(h1.get('share_two_plus', 0))}."
+    )
+    if h1.get("pooled"):
+        sentence += (
+            f" This country's own record gives only {int(h1.get('n_own_pairs') or 0)} such "
+            f"pairs, so the shares pool {int(h1.get('n_band_countries') or 0)} countries whose "
+            f"typical month falls in the same bucket."
         )
-        if h1.get("pooled"):
-            sentence += (
-                f" This country's own record gives only {int(h1.get('n_own_pairs') or 0)} "
-                f"such pairs, so the moves pool {int(h1.get('n_band_countries') or 0)} "
-                f"countries whose typical month falls in the same bucket."
-            )
-    else:
-        sentence = (
-            f"Over the last {n_months} complete months, the count {later} stayed in the same "
-            f"bucket {_pct(h1.get('share_same', 0))} of the time, moved one bucket "
-            f"{_pct(h1.get('share_one', 0))}, and two or more {_pct(h1.get('share_two_plus', 0))}."
-        )
-        if h1.get("pooled"):
-            sentence += (
-                f" This country's own record gives only {int(h1.get('n_own_pairs') or 0)} such "
-                f"pairs, so the shares pool {int(h1.get('n_band_countries') or 0)} countries whose "
-                f"typical month falls in the same bucket."
-            )
 
     def _row(h: int) -> str:
         probs = anchor["spds"][h]

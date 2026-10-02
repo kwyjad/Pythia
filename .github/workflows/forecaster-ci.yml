@@ -288,7 +288,8 @@ jobs:
             pythia/tests/test_family_advice.py \
             forecaster/tests/test_family_recalibration_members.py \
             forecaster/tests/test_family_advice_prompt.py \
-            forecaster/tests/test_member_calibration_advice.py
+            forecaster/tests/test_member_calibration_advice.py \
+            pythia/tests/test_stale_member_advice_cleanup.py
 
       - name: Run conflict prior-anchor tests
         run: |
@@ -300,7 +301,8 @@ jobs:
           pytest -vv \
             forecaster/tests/test_prior_anchor_prompt.py \
             pythia/tests/test_level_volatility_spd.py \
-            pythia/tests/test_level_transition_spd.py
+            pythia/tests/test_level_transition_spd.py \
+            forecaster/tests/test_prior_anchor_v2_wording.py
 
       - name: Run shadow members + calibration weight tests
         run: |
