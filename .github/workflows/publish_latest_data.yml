@@ -816,7 +816,7 @@ jobs:
             MISSING="${MISSING}FRED_DEBUG_TOKEN (repo secret)"
           fi
           if [ -n "${MISSING}" ]; then
-            echo "::warning::API sync poke skipped — not configured: ${MISSING}. The release IS published; the dashboard will pick it up on its own 60s poll instead of immediately."
+            echo "::notice::API sync poke skipped — not configured: ${MISSING}. The next step confirms the dashboard caught up without it."
             {
               echo "#### API sync poke skipped"
               echo ""
@@ -842,3 +842,20 @@ jobs:
           done
           echo "::warning::API sync poke failed twice; the API will pick up the release on its periodic poll."
           exit 0
+
+      # The poke above is optional; THIS is the confirmation. It compares the
+      # release's db_sha256 with what the live API says it has loaded, using
+      # only the public /v1/version (no secret), and polls while the API
+      # downloads. Its GET also wakes an idle API. Until Oct 2026 nothing in CI
+      # checked publish -> dashboard end to end, so a dashboard stuck on the
+      # previous month read as a green cycle. Non-fatal: everything after a
+      # release upload is diagnostics. The daily Cron Watchdog runs the same
+      # check and DOES go red.
+      - name: Confirm the dashboard API serves the new release
+        if: ${{ steps.regression_guard.outputs.skip_publish != 'true' }}
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          PYTHIA_API_BASE_URL: ${{ vars.PYTHIA_API_BASE_URL || secrets.PYTHIA_API_BASE_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -m scripts.ci.check_dashboard_sync --mode publish --wait-min 25

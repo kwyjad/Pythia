@@ -65,7 +65,7 @@ jobs:
       - name: Cron watchdog tests
         env:
           PYTHONPATH: .
-        run: pytest -vv --noconftest tests/test_check_workflow_freshness.py
+        run: pytest -vv --noconftest tests/test_check_workflow_freshness.py tests/test_check_dashboard_sync.py
 
       - name: Set up Go
         uses: actions/setup-go@v5

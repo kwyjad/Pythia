@@ -100,6 +100,19 @@ def _close_all_pooled() -> None:
 atexit.register(_close_all_pooled)
 
 
+def close_pooled_connections() -> None:
+    """Really close every idle pooled connection.
+
+    ``_PooledConnection.close()`` keeps the underlying DuckDB connection open
+    in the pool, and DuckDB caches a database instance per path while ANY
+    connection to it is open. A long-lived process that swaps the file under
+    a path (the API's release sync) must call this first, or every reopen is
+    handed the instance it already had: the API served the DB it booted with
+    until it restarted (Oct 2026).
+    """
+    _close_all_pooled()
+
+
 def get_db_url() -> str:
     """Return the DuckDB URL Pythia should use.
 

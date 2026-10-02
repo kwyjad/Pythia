@@ -13,6 +13,17 @@ export type VersionResponse = {
   // page compares it against the newest version the API can serve, because
   // a v10 download button beside a v9 report tells the reader nothing.
   interpreter_report_versioned_asset?: string | null;
+  // The DB the API serves against the newest release it has seen
+  // (pythia/api/db_sync.py::get_sync_status). in_sync === false means the
+  // dashboard is behind what was published.
+  sync_status?: {
+    last_error?: string | null;
+    last_ok_at?: string | null;
+    last_attempt_at?: string | null;
+    manifest_key?: string | null;
+    downloaded_key?: string | null;
+    in_sync?: boolean | null;
+  } | null;
 };
 
 export type DiagnosticsSummaryResponse = {

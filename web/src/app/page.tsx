@@ -63,6 +63,13 @@ export default async function OverviewPage({
   // Every field is optional/nullable downstream, so the empty shape is safe:
   // the month and run selectors render empty and the panel falls back to its
   // month-window branch rather than crashing.
+  // The API answered but serves an older DB than the release publishes: say
+  // so, rather than presenting last month's run as the latest one.
+  const syncStatus = version.sync_status ?? null;
+  const behindRelease = Boolean(
+    syncStatus && (syncStatus.in_sync === false || syncStatus.last_error)
+  );
+
   let kpiScopes: DiagnosticsKpiScopesResponse = {
     available_months: [],
     selected_month: null,
@@ -114,6 +121,19 @@ export default async function OverviewPage({
           incomplete or out of date. This usually means the API is still syncing
           a freshly published database; check <code>/v1/health</code> for
           sync status.
+        </div>
+      )}
+      {behindRelease && (
+        <div
+          role="status"
+          className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
+        >
+          <span className="font-medium">Newer data has been published</span> —
+          the API is still serving an earlier database and will switch over once
+          its download completes.
+          {syncStatus?.last_error ? (
+            <> Last sync error: <code>{syncStatus.last_error}</code></>
+          ) : null}
         </div>
       )}
       <section className="space-y-2">

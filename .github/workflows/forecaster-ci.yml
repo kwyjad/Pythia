@@ -37,6 +37,9 @@ on:
       - "pythia/buckets.py"
       - "pythia/api/app.py"
       - "pythia/api/core.py"
+      - "pythia/api/db_sync.py"
+      - "tests/test_db_sync.py"
+      - "tests/test_db_sync_background.py"
       - "pythia/api/routes/risk_index.py"
       - "pythia/api/routes/performance.py"
       - "pythia/api/routes/diagnostics.py"
@@ -59,7 +62,6 @@ on:
       - "pythia/tools/score_views.py"
       - "resolver/tools/fetch_conflict_forecasts.py"
       - "resolver/connectors/views.py"
-      - "pythia/db/schema.py"
       - "pythia/gdelt.py"
       - "pythia/tests/test_ingest_rows_written.py"
       - "pythia/tools/ingest_structured_data.py"
@@ -330,6 +332,15 @@ jobs:
             scripts/ci/tests/test_stage_health.py \
             scripts/ci/tests/test_build_release_db.py \
             scripts/ci/tests/test_db_table_sizes.py
+
+      - name: Run API release-sync tests
+        run: |
+          # The API's release sync was in no workflow, so the bug that left
+          # the dashboard on the DB it booted with (a pooled connection pinning
+          # the old file, Oct 2026) could return with green CI.
+          pytest -vv \
+            tests/test_db_sync.py \
+            tests/test_db_sync_background.py
 
       - name: Run base-rate history + rendering tests
         run: |
