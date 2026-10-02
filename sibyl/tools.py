@@ -15,10 +15,13 @@ config-gated extension point exists for authoritative live lookups
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
 from dataclasses import dataclass, field
 from datetime import date
-from typing import List, Optional
+from typing import List, Optional, Tuple
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -28,7 +31,9 @@ from pythia.web_research.types import EvidenceSource
 from sibyl.config import (
     BRAVE_MAX_RESULTS,
     BRAVE_TIMEOUT_SEC,
+    FETCH_URL_MAX_BYTES,
     FETCH_URL_MAX_CHARS,
+    FETCH_URL_MAX_REDIRECTS,
     FETCH_URL_TIMEOUT_SEC,
     SEARCH_WINDOW_DAYS,
 )
@@ -128,6 +133,104 @@ def _html_to_text(html: str) -> str:
     return "\n".join(ln for ln in lines if ln)
 
 
+class UnsafeURL(ValueError):
+    """The URL points somewhere a research fetch must never go."""
+
+
+def _resolve(host: str) -> List[str]:
+    """Every address ``host`` resolves to (seam for tests)."""
+
+    infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    return sorted({info[4][0] for info in infos})
+
+
+def check_public_url(url: str) -> None:
+    """Raise ``UnsafeURL`` unless ``url`` is http(s) to public addresses only.
+
+    The model chooses what Sibyl fetches, and a prompt can be steered by the
+    pages it read. Without this check a fetch could reach the runner's own
+    services, a cloud metadata endpoint (169.254.169.254) or anything else on
+    a private network. Every address the host resolves to must be global; a
+    name with one private answer among public ones is refused.
+    """
+
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise UnsafeURL(f"scheme {parts.scheme or '(none)'!r} is not http(s)")
+    host = parts.hostname
+    if not host:
+        raise UnsafeURL("no host")
+    try:
+        literal = ipaddress.ip_address(host)
+        addresses = [str(literal)]
+    except ValueError:
+        try:
+            addresses = _resolve(host)
+        except OSError as exc:
+            raise UnsafeURL(f"host does not resolve ({type(exc).__name__})") from exc
+    if not addresses:
+        raise UnsafeURL("host resolves to nothing")
+    for addr in addresses:
+        ip = ipaddress.ip_address(addr.split("%", 1)[0])
+        # ::ffff:127.0.0.1 is 127.0.0.1; judge the IPv4 address it carries,
+        # since some Python releases call the mapped form global.
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        if not ip.is_global or ip.is_multicast:
+            raise UnsafeURL(f"host resolves to a non-public address ({ip})")
+
+
+def _guarded_get(url: str) -> Tuple[requests.Response, bytes, str]:
+    """GET ``url``, re-checking every redirect hop and capping the body.
+
+    Returns the final response, at most ``FETCH_URL_MAX_BYTES`` of its body,
+    and the URL it came from. Redirects are followed by hand, because
+    ``requests`` would follow one to a private address without asking.
+    """
+
+    current = url
+    for _ in range(FETCH_URL_MAX_REDIRECTS + 1):
+        check_public_url(current)
+        resp = requests.get(
+            current,
+            timeout=FETCH_URL_TIMEOUT_SEC,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; PythiaSibyl/1.0)"},
+            allow_redirects=False,
+            stream=True,
+        )
+        if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("Location"):
+            nxt = urljoin(current, resp.headers["Location"])
+            resp.close()
+            current = nxt
+            continue
+        body = bytearray()
+        try:
+            for chunk in resp.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                body.extend(chunk)
+                if len(body) >= FETCH_URL_MAX_BYTES:
+                    del body[FETCH_URL_MAX_BYTES:]
+                    break
+        finally:
+            resp.close()
+        return resp, bytes(body), current
+    raise UnsafeURL(f"more than {FETCH_URL_MAX_REDIRECTS} redirects")
+
+
+def _decode(resp: requests.Response, body: bytes) -> str:
+    """The body as text: the charset the server named, else utf-8."""
+
+    content_type = resp.headers.get("Content-Type") or ""
+    encoding = "utf-8"
+    if "charset=" in content_type.lower():
+        encoding = content_type.lower().split("charset=", 1)[1].split(";", 1)[0].strip(" \"'") or "utf-8"
+    try:
+        return body.decode(encoding, errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
+
+
 def fetch_url(url: str, as_of: date, *, today: Optional[date] = None) -> ToolResult:
     """Fetch a page the agent found via search and return readable text.
 
@@ -149,10 +252,13 @@ def fetch_url(url: str, as_of: date, *, today: Optional[date] = None) -> ToolRes
         )
 
     try:
-        resp = requests.get(
-            url,
-            timeout=FETCH_URL_TIMEOUT_SEC,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; PythiaSibyl/1.0)"},
+        resp, body, final_url = _guarded_get(url)
+    except UnsafeURL as exc:
+        logger.warning("sibyl.fetch_url: refused %s: %s", url, exc)
+        return ToolResult(
+            tool="fetch_url", ok=False,
+            text=f"[fetch refused: {exc}] {url}",
+            leakage=stats, error="unsafe_url",
         )
     except requests.RequestException as exc:
         return ToolResult(
@@ -167,11 +273,24 @@ def fetch_url(url: str, as_of: date, *, today: Optional[date] = None) -> ToolRes
             leakage=stats, error=f"http_{resp.status_code}",
         )
 
+    # A redirect may have landed on a resolution source the first URL hid.
+    if final_url != url and is_blocked_url(final_url):
+        stats.dropped_blocked_domain = 1
+        return ToolResult(
+            tool="fetch_url", ok=False,
+            text=(
+                "This URL redirects to a resolution data source and is blocked "
+                "for Sibyl. Rely on open-web reporting instead."
+            ),
+            leakage=stats, error="blocked_domain",
+        )
+
+    raw = _decode(resp, body)
     content_type = (resp.headers.get("Content-Type") or "").lower()
-    if "html" in content_type or resp.text.lstrip()[:1] == "<":
-        text = _html_to_text(resp.text)
+    if "html" in content_type or raw.lstrip()[:1] == "<":
+        text = _html_to_text(raw)
     else:
-        text = resp.text
+        text = raw
     text = (text or "").strip()[:FETCH_URL_MAX_CHARS]
     if not text:
         return ToolResult(

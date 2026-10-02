@@ -370,3 +370,67 @@ class TestBranding:
         assert 'href="https://example.org/questions/SOM_FL_PA_2026-08"' in html
         # The underscores in the id must survive the emphasis pass.
         assert ">SOM_FL_PA_2026-08</a>" in html
+
+
+class TestHostileReportText:
+    """The report is model output and the PDF is published.
+
+    An injected SVG or image tag that names a file or URL must reach the PDF
+    as text, and the renderer must refuse to load anything but inline data.
+    """
+
+    def test_an_svg_that_references_a_file_is_printed_as_text(self):
+        hostile = '<svg xmlns="http://www.w3.org/2000/svg"><image href="file:///proc/self/environ"/></svg>'
+        html = pdf.markdown_to_html(f"# Report\n\n{hostile}\n")
+        assert "<image" not in html
+        assert "&lt;svg" in html
+
+    @pytest.mark.parametrize("payload", [
+        "<svg><script>alert(1)</script></svg>",
+        '<svg><use xlink:href="http://evil.example/x.svg#a"/></svg>',
+        '<svg><rect style="fill:url(http://evil.example/a)"/></svg>',
+        '<svg onload="x()"></svg>',
+        '<svg><foreignObject><img src="file:///etc/passwd"/></foreignObject></svg>',
+    ])
+    def test_every_loading_construct_is_refused(self, payload):
+        assert not pdf._svg_is_inert(payload)
+
+    def test_our_own_charts_still_draw(self):
+        from interpreter import charts
+
+        chart = charts.second_opinion_chart(
+            [{"country_name": "Somalia", "hazard_name": "Armed conflict",
+              "fred_expected": 100.0, "sibyl_expected": 150.0}],
+            title="Where the two readers differ",
+        )
+        assert chart, "the chart renderer produced nothing"
+        assert pdf._svg_is_inert(chart)
+        html = pdf.markdown_to_html(f"# Report\n\n{chart}\n")
+        assert '<div class="figure"><svg' in html
+
+    def test_an_img_tag_in_prose_is_escaped(self):
+        html = pdf.markdown_to_html('A line <img src="file:///etc/passwd"> here.')
+        assert "<img" not in html
+
+    @pytest.mark.parametrize("url", [
+        "file:///proc/self/environ",
+        "http://169.254.169.254/latest/meta-data/",
+        "https://example.org/x.png",
+    ])
+    def test_the_fetcher_refuses_everything_but_data_uris(self, url):
+        with pytest.raises(ValueError):
+            pdf._refuse_fetch(url)
+
+    def test_a_real_render_loads_no_file(self, tmp_path):
+        pytest.importorskip("weasyprint")
+        secret = tmp_path / "secret.txt"
+        secret.write_text("not for the pdf")
+        png = (
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQ"
+            "DwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        out = tmp_path / "r.pdf"
+        pdf._render_pdf(f'<html><body><img src="file://{secret}"></body></html>', out)
+        assert out.read_bytes().count(b"/Subtype /Image") == 0
+        pdf._render_pdf(f'<html><body><img src="{png}"></body></html>', out)
+        assert out.read_bytes().count(b"/Subtype /Image") >= 1

@@ -362,7 +362,8 @@ jobs:
             pythia/tests/test_api_security.py \
             pythia/tests/test_api_input_validation.py \
             pythia/tests/test_api_forecasts_limit.py \
-            tests/test_api_public_read_admin_only.py
+            tests/test_api_public_read_admin_only.py \
+            pythia/tests/test_gdelt.py
 
       - name: Run base-rate history + rendering tests
         run: |

@@ -56,5 +56,6 @@ jobs:
                      tests/test_sibyl_belief_state.py \
                      tests/test_sibyl_base_rates.py \
                      tests/test_sibyl_leakage.py \
+                     tests/test_sibyl_fetch_url_guard.py \
                      tests/test_sibyl_cost.py \
                      tests/test_sibyl_smoke.py

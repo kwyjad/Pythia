@@ -41,6 +41,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+#: The largest a GDELT daily export may unpack to before it is refused.
+_MAX_UNZIPPED_BYTES = 1_000_000_000
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -238,8 +241,14 @@ def fetch_gdelt_daily_events(target_date: date) -> Optional[list[dict[str, Any]]
             if not names:
                 logger.warning("[gdelt] empty zip for %s", date_str)
                 return None
+            # A daily export unpacks to tens of megabytes. The read stops one
+            # byte past the cap however large the zip claims the member is.
             with zf.open(names[0]) as fh:
-                raw = fh.read().decode("utf-8", errors="replace")
+                data = fh.read(_MAX_UNZIPPED_BYTES + 1)
+            if len(data) > _MAX_UNZIPPED_BYTES:
+                logger.warning("[gdelt] %s unpacks past %d MB; skipped", date_str, _MAX_UNZIPPED_BYTES // 1_000_000)
+                return None
+            raw = data.decode("utf-8", errors="replace")
     except zipfile.BadZipFile as exc:
         logger.warning("[gdelt] bad zip for %s: %s", date_str, exc)
         return None

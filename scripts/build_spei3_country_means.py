@@ -104,7 +104,6 @@ import json
 import logging
 import math
 import re
-import shutil
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -122,6 +121,9 @@ DEFAULT_OUT = REPO_ROOT / "resolver" / "data" / "spei3_country_means.csv"
 #: water-balance anomaly in sigma units, which is why the rulebook can
 #: threshold it at -1.0 exactly as it thresholds the NMME anomaly.
 CDS_DATASET = "derived-drought-historical-monthly"
+#: The largest one NetCDF member of a downloaded year may unpack to. A year
+#: arrives as about 95 MB zipped; anything past this is not a year of SPEI.
+MAX_UNPACKED_MEMBER_BYTES = 5_000_000_000
 
 #: The request the CDS actually accepts, as separate constants so a
 #: rejection costs one line rather than a re-reading of the whole function.
@@ -828,7 +830,19 @@ def unpack_if_archive(path: Path) -> list[Path]:
             # in two years' archives cannot collide.
             target = path.parent / f"{stem}__{Path(member).name}"
             with archive.open(member) as src, target.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
+                # Copied in bounded chunks: a member that unpacks past the
+                # cap is a broken or hostile archive, not a year of SPEI.
+                copied = 0
+                while chunk := src.read(1 << 20):
+                    copied += len(chunk)
+                    if copied > MAX_UNPACKED_MEMBER_BYTES:
+                        dst.close()
+                        target.unlink(missing_ok=True)
+                        raise ValueError(
+                            f"{path.name}: member {member} unpacks past "
+                            f"{MAX_UNPACKED_MEMBER_BYTES // 1_000_000_000} GB; refused"
+                        )
+                    dst.write(chunk)
             written.append(target)
             LOG.info(
                 "[spei3] unpacked %s -> %s (%.1f MB)",

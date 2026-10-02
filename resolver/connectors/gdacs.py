@@ -994,6 +994,15 @@ class GdacsConnector:
     ) -> list[dict[str, Any]]:
         """Parse RSS XML and extract relevant event records."""
         events: list[dict[str, Any]] = []
+        # GDACS feeds declare no entities. A body that does is not a GDACS
+        # feed, and entity declarations are how an XML body expands itself
+        # or reaches outside the document, so it is refused unparsed. (The
+        # bundled expat limits expansion and ElementTree resolves no external
+        # entities; this is a check on the input, not a second parser.)
+        head = bytes(xml_bytes[:65536]) if isinstance(xml_bytes, (bytes, bytearray)) else str(xml_bytes)[:65536].encode()
+        if b"<!ENTITY" in head.upper() or b"<!DOCTYPE" in head.upper():
+            LOG.warning("[gdacs] refused an XML body that declares a DOCTYPE or entities")
+            return events
         try:
             root = ET.fromstring(xml_bytes)
         except ET.ParseError as exc:
