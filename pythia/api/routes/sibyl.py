@@ -140,6 +140,66 @@ def sibyl_summary(
     return {"run": run, "questions": questions}
 
 
+@router.get("/v1/sibyl/calibration")
+def sibyl_calibration(as_of_month: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}$")):
+    """Sibyl's own calibration record and the advice in force.
+
+    One row per (hazard, metric) class plus the pooled row (``*``/``*``) for
+    the newest generation on or before *as_of_month*: distinct scored
+    questions, coverage and bias with 90% intervals, the advice text (empty
+    when the class is gated, with ``gate`` saying why), and the pooled row's
+    advice / no-advice arm comparison. A DB without the table answers
+    ``has_advice_table: false``, never a 500.
+    """
+    con = _con()
+    empty = {
+        "has_advice_table": False, "as_of_month": None, "months": [],
+        "min_questions": None, "rows": [], "arm_comparison": None,
+    }
+    if not _table_exists(con, "sibyl_calibration_advice"):
+        return empty
+    months = [
+        str(r[0]) for r in _execute(
+            con,
+            "SELECT DISTINCT as_of_month FROM sibyl_calibration_advice ORDER BY 1 DESC",
+        ).fetchall()
+    ]
+    chosen = next((m for m in months if as_of_month is None or m <= as_of_month), None)
+    out = dict(empty, has_advice_table=True, months=months, as_of_month=chosen)
+    try:
+        from sibyl.config import ADVICE_MIN_QUESTIONS
+
+        out["min_questions"] = ADVICE_MIN_QUESTIONS
+    except Exception:  # noqa: BLE001
+        pass
+    if chosen is None:
+        return out
+    rows = _rows_from_cursor(
+        _execute(
+            con,
+            """
+            SELECT as_of_month, hazard_code, metric, scope, n_questions, advice,
+                   findings_json, advice_version, created_at
+            FROM sibyl_calibration_advice
+            WHERE as_of_month = ?
+            ORDER BY CASE WHEN hazard_code = '*' THEN 1 ELSE 0 END, hazard_code, metric
+            """,
+            [chosen],
+        )
+    )
+    for r in rows:
+        findings = _maybe_json(r.pop("findings_json", None)) or {}
+        r["gate"] = findings.get("gate")
+        r["diagnostics"] = findings.get("diagnostics") or {}
+        r["calibrated_values"] = findings.get("calibrated_values") or {}
+        r["perspective_bias"] = findings.get("perspective_bias") or {}
+        r["paired_skill"] = findings.get("paired_skill") or {}
+        if r["scope"] == "pooled":
+            out["arm_comparison"] = findings.get("arm_comparison")
+    out["rows"] = rows
+    return out
+
+
 @router.get("/v1/sibyl/questions")
 def sibyl_questions(
     sibyl_run_id: Optional[str] = Query(None),

@@ -458,6 +458,7 @@ jobs:
             pythia/tests/test_compute_deviation.py \
             pythia/tests/test_score_baselines.py \
             pythia/tests/test_scoring_honesty.py \
+            pythia/tests/test_score_is_test_from_forecast.py \
             pythia/tests/test_api_sibyl_comparison.py
 
       - name: Run debug-bundle tests

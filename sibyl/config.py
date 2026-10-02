@@ -84,6 +84,15 @@ AGGREGATION = _env_str("SIBYL_AGGREGATION", "linear_pool")
 # --- Calibration hook (deferred) --------------------------------------------
 CALIBRATION_ENABLED = _env_bool("SIBYL_CALIBRATION_ENABLED", False)
 
+# --- Calibration advice (sibyl/advice.py) -----------------------------------
+# A (hazard, metric) class gets its own advice at this many distinct scored
+# questions; below it the pooled row (all four classes) stands in at the same
+# threshold; below that no advice is written and the prompt carries none.
+ADVICE_MIN_QUESTIONS = _env_int("SIBYL_ADVICE_MIN_QUESTIONS", 20)
+# Share of questions held out WITHOUT advice (hash of "sibyl:" + question_id,
+# so a rerun keeps its arm), so the advice's effect can be measured.
+ADVICE_EXPERIMENT_SHARE = _env_float("SIBYL_ADVICE_EXPERIMENT_SHARE", 0.5)
+
 # --- Budget ------------------------------------------------------------------
 # Hard run cut-off: stop STARTING new questions/trials once cumulative run
 # cost reaches this. The in-flight unit runs to completion, so realized

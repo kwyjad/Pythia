@@ -6,6 +6,7 @@ import InfoTooltip from "../../components/InfoTooltip";
 import { apiGet } from "../../lib/api";
 import { safeHref } from "../../lib/safe_href";
 import SibylMetricsAbout from "./SibylMetricsAbout";
+import SibylCalibration from "./SibylCalibration";
 import type {
   SibylQuestionDetailResponse,
   SibylQuestionRow,
@@ -389,7 +390,7 @@ const SibylClient = ({
   const [sortKey, setSortKey] = useState<SortKey>("js_divergence_vs_standard");
   const [sortDesc, setSortDesc] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [tab, setTab] = useState<"questions" | "about">("questions");
+  const [tab, setTab] = useState<"questions" | "calibration" | "about">("questions");
 
   const run = summary.run;
   const rows = questions.rows;
@@ -443,8 +444,9 @@ const SibylClient = ({
       {(
         [
           { key: "questions", label: "Questions" },
+          { key: "calibration", label: "Calibration" },
           { key: "about", label: "About these metrics" },
-        ] as { key: "questions" | "about"; label: string }[]
+        ] as { key: "questions" | "calibration" | "about"; label: string }[]
       ).map(({ key, label }) => (
         <button
           key={key}
@@ -461,6 +463,15 @@ const SibylClient = ({
       ))}
     </div>
   );
+
+  if (tab === "calibration") {
+    return (
+      <div className="space-y-6">
+        {tabBar}
+        <SibylCalibration />
+      </div>
+    );
+  }
 
   if (tab === "about") {
     return (

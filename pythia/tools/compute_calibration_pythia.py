@@ -156,6 +156,11 @@ def _load_samples(conn, as_of_month: str) -> List[Sample]:
         AND (s.model_name IS NULL OR s.model_name NOT LIKE '__ext_%')
         AND COALESCE(q.is_test, FALSE) = FALSE
     """
+    # A production question can carry a same-epoch test run's scores, which
+    # compute_scores stamps is_test on the SCORE row; the question flag alone
+    # let them into the weights.
+    if _column_exists(conn, "scores", "is_test"):
+        sql += "        AND COALESCE(s.is_test, FALSE) = FALSE\n"
     rows = conn.execute(sql, [as_of_month]).fetchall()
 
     samples: List[Sample] = []

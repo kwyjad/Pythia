@@ -108,7 +108,7 @@ Forecast window (6 calendar months): {forecast_months}
 You are forecasting the distribution of the MONTHLY value of this metric over the window months. Your quantiles must describe a single month drawn from this window — account for both month-to-month variation (seasonality, escalation) and your own uncertainty.
 
 === OUTSIDE VIEW (base-rate anchor — reason from it and away from it, never treat it as a target) ===
-{base_rate_block}{track_record_block}
+{base_rate_block}
 
 === YOUR TRIAL PERSPECTIVE ===
 {perspective}
@@ -211,7 +211,7 @@ Forecast window (6 calendar months): {forecast_months}
 You are forecasting the distribution of the MONTHLY value of this metric over the window months. Your quantiles must describe a single month drawn from this window — account for both month-to-month variation (seasonality, escalation) and your own uncertainty.
 
 === OUTSIDE VIEW (base-rate anchor — reason from it and away from it, never treat it as a target) ===
-{base_rate_block}{track_record_block}
+{base_rate_block}
 """
 
 SIBYL_STEP_TRIAL_V3 = """
@@ -227,29 +227,6 @@ SIBYL_STEP_STEP_V3 = """
 {last_tool_result}
 {parse_feedback}
 Now decide your next action per "YOUR TASK EACH STEP" above and respond with ONLY the JSON object."""
-
-
-# Sibyl's own calibration feedback (sibyl/advice.py -> sibyl.calibration.
-# load_advice). Rendered right after the outside view and, under V3 order,
-# inside the per-question segment: it is constant across a question's trials
-# and steps, so the cache breakpoints hold. Absent entirely when there is no
-# advice for the class or the question is in the no-advice arm; an empty
-# block leaves the prompt byte-identical to before.
-TRACK_RECORD_HEADING = "=== YOUR TRACK RECORD ==="
-
-
-def render_track_record(advice_text: Optional[str]) -> str:
-    """The track-record block, or '' when there is nothing to show."""
-    text = (advice_text or "").strip()
-    if not text:
-        return ""
-    return (
-        "\n\n" + TRACK_RECORD_HEADING + "\n"
-        "Feedback on how your past forecasts of this class of question compared "
-        "with what then happened. Weigh it alongside the evidence you find; it is "
-        "a tendency to correct, never a target for this question.\n"
-        + text
-    )
 
 
 @dataclass
@@ -331,7 +308,6 @@ def build_step_prompt(
     country_name: str,
     parse_feedback: str = "",
     return_segments: bool = False,
-    track_record: str = "",
 ):
     """Build the step prompt (legacy or V3 section order).
 
@@ -363,7 +339,6 @@ def build_step_prompt(
         ),
         forecast_months=", ".join(forecast_months),
         base_rate_block=base_rate.prompt_text,
-        track_record_block=render_track_record(track_record),
         perspective=perspective,
         step=step,
         max_steps=MAX_STEPS,
@@ -437,7 +412,6 @@ def run_trial(
     forecast_months: List[str],
     country_name: str,
     model_call: Optional[Callable[[str], tuple[str, Dict[str, Any], str]]] = None,
-    track_record: str = "",
 ) -> TrialResult:
     """Run one independent agentic trial for *question*.
 
@@ -473,7 +447,6 @@ def run_trial(
                 country_name=country_name,
                 parse_feedback=parse_feedback,
                 return_segments=True,
-                track_record=track_record,
             )
             prompt = "".join(text for text, _ in segments)
             # The injectable test seam takes a plain prompt string; the

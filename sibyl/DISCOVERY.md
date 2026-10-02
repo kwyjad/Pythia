@@ -313,3 +313,43 @@ disagreement is the mean pairwise JSD of the K trial bucket vectors.
 | `docs/fred_overview.md` | Sibyl section (after snapshot) |
 | `.github/workflows/run_sibyl.yml` | new workflow |
 | `CLAUDE.md`, `README.md` | documentation |
+
+## Calibration advice (Oct 2026)
+
+`sibyl/calibration.py::calibrate` stays an identity pass-through: six scored
+questions cannot fit a statistical correction. What was added instead is an
+advice loop built only on Sibyl's own record.
+
+**Decision: the record is defined by `sibyl_forecasts`, never by `scores`
+alone.** Status `ok`, production Sibyl runs only, the latest run per
+question, joined to `resolutions`. The reason is a fault found on the way:
+`compute_scores` stamped a score's `is_test` from the question, and question
+ids are epoch-keyed, so a production question also forecast by a same-epoch
+test run carried that run's scores as production rows (on the 2026-10-02
+release: 9 Sibyl questions in `scores`, 3 of them test-only). Fixed in
+`compute_scores` (a score is test when its forecast is) and in the two
+latest-run helpers.
+
+**Decision: the unit is the question.** A Sibyl question's six months share
+one forecast. Counts are of distinct questions and intervals come from a
+bootstrap over whole questions (2,000 draws, fixed seed, numpy).
+
+**Decision: gate twice.** A class gets its own advice at 20 distinct scored
+questions (`SIBYL_ADVICE_MIN_QUESTIONS`), the pooled row across the four
+classes stands in at 20 otherwise, and a finding becomes an instruction
+only when its 90% interval excludes the calibrated value. Perspective bias
+and paired skill against `ensemble_mean_v2` / `__ext_climatology` are
+findings only and never reach a prompt (independence).
+
+**Decision: a held-out arm.** `SIBYL_ADVICE_EXPERIMENT_SHARE` (0.5) of
+questions get no advice, by a hash of `"sibyl:" + question_id` (a split
+independent of the standard track's). `sibyl_forecasts.advice_arm` and
+`advice_as_of_month` record what each forecast saw, and `base_rate_json`
+the outside view at forecast time (the anchor-departure diagnostic needs it).
+
+**Decision: own table.** `sibyl_calibration_advice`, keyed
+`(as_of_month, hazard_code, metric)`, pooled row `*`/`*`, not the standard
+`calibration_advice` (whose non-shared rows are deleted monthly). In
+backtest mode `load_advice` returns nothing: advice learned after the as-of
+date is leakage.
+

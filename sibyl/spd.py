@@ -303,9 +303,10 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             volatility_score, triage_score, pooled_quantiles_json,
             trials_json, bucket_probs_json, js_divergence_vs_standard,
             js_divergence_inter_trial, cost_usd, opus_cost_usd,
-            brave_cost_usd, leakage_json, created_at, is_test, selection_pass
+            brave_cost_usd, leakage_json, created_at, is_test, selection_pass,
+            base_rate_json, advice_arm, advice_as_of_month
         ) VALUES (?, ?, ?, ?, ?, ?, 'sibyl', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -332,6 +333,12 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             json.dumps(record.get("leakage"), default=str),
             is_test_mode(),
             record.get("selection_pass"),
+            (
+                json.dumps(record["base_rate"], default=str)
+                if record.get("base_rate") is not None else None
+            ),
+            record.get("advice_arm"),
+            record.get("advice_as_of_month"),
         ],
     )
 

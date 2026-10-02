@@ -4651,6 +4651,7 @@ class BundleBuilder:
         "views_scored_forecasts": "score_views (compute_scores.yml)",
         "calibration_weights": "compute_calibration_pythia (needs 20 resolved questions per hazard/metric)",
         "calibration_advice": "compute_calibration_pythia + generate_calibration_advice",
+        "sibyl_calibration_advice": "sibyl.advice (compute_calibration_pythia; needs scored Sibyl questions)",
         "forecasts_raw": "forecaster (pythia_pipeline_stage)",
         "forecasts_ensemble": "forecaster (pythia_pipeline_stage)",
         "questions": "create_questions_from_triage (HS)",
