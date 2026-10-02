@@ -32,3 +32,15 @@ def test_every_reference_forecaster_is_described():
     text = _guide()
     for name in ("__ext_climatology", "__ext_uniform", "__ext_persistence", "__ext_level_volatility"):
         assert f"`{name}`" in text
+
+
+def test_every_error_attribution_file_is_described():
+    text = _guide()
+    for name in (
+        "headline.json", "trace_stages.csv", "trace_stages_summary.csv", "update_value.csv",
+        "update_value_summary.csv", "rc_outcomes.csv", "rc_outcomes_summary.csv",
+        "unasked_outcomes.csv", "experiments.csv", "skill_history.csv", "tail_outcomes.csv",
+        "binary_reliability.csv", "inject_health.csv", "input_partial_month", "base_rate_shown",
+    ):
+        assert f"`{name}`" in text, name
+    assert "CLAIMED attribution" in text

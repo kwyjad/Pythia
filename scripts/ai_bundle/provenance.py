@@ -176,6 +176,13 @@ def _gdacs_status(con, iso3: str, hz: str, as_of: date | None) -> dict[str, Any]
 
 
 def _crisiswatch_status(con, iso3: str, hz: str, as_of: date | None) -> dict[str, Any]:
+    """The CrisisWatch edition an ACE prompt could carry, with its arrow and alert.
+
+    ACE questions ALWAYS carry this block: the edition month, its age in
+    editions (months from the edition month to the run month; ICG publishes
+    one a month), the country's arrow and alert, or ``available: false`` with
+    the reason.
+    """
     if hz != "ACE":
         return {"applicable": False}
     if not table_exists(con, "crisiswatch_entries"):
@@ -185,9 +192,13 @@ def _crisiswatch_status(con, iso3: str, hz: str, as_of: date | None) -> dict[str
     if as_of is not None and column_exists(con, "crisiswatch_entries", "fetched_at"):
         where += " AND CAST(fetched_at AS DATE) <= ?"
         params.append(as_of)
+    extra = ", ".join(
+        c if column_exists(con, "crisiswatch_entries", c) else f"NULL AS {c}"
+        for c in ("arrow", "alert_type")
+    )
     try:
         row = con.execute(
-            f"SELECT year, month FROM crisiswatch_entries WHERE {where} "
+            f"SELECT year, month, {extra} FROM crisiswatch_entries WHERE {where} "
             "ORDER BY year DESC, month DESC LIMIT 1",
             params,
         ).fetchone()
@@ -198,9 +209,56 @@ def _crisiswatch_status(con, iso3: str, hz: str, as_of: date | None) -> dict[str
         return {"applicable": True, "available": False,
                 "reason": "no edition for this country on or before the run date"}
     year, month = int(row[0]), int(row[1])
-    out = {"applicable": True, "available": True, "edition": f"{year:04d}-{month:02d}"}
+    out = {
+        "applicable": True, "available": True, "edition": f"{year:04d}-{month:02d}",
+        "arrow": row[2], "alert": row[3],
+    }
     if as_of is not None:
-        out["edition_age_months"] = _months_between(date(year, month, 1), as_of)
+        age = _months_between(date(year, month, 1), as_of)
+        out["edition_age_months"] = age
+        out["edition_age_editions"] = age
+        out["stale"] = age >= CRISISWATCH_STALE_EDITIONS
+    return out
+
+
+#: An edition this many months old is labelled stale in the prompt
+#: (horizon_scanner.crisiswatch._STALE_EDITION_MONTHS).
+CRISISWATCH_STALE_EDITIONS = 3
+
+#: Conflict-forecast vintage staleness, from the issue date
+#: (resolver.tools.fetch_conflict_forecasts.STALENESS_THRESHOLD_DAYS).
+CONFLICT_FORECAST_STALE_DAYS = 45
+
+#: Bundle label -> conflict_forecasts.source.
+CONFLICT_FORECAST_SOURCES = {"acled_cast": "ACLED_CAST", "views": "VIEWS"}
+
+
+def _conflict_forecast_vintage(con, iso3: str, source: str, as_of: date | None) -> dict[str, Any]:
+    """The newest vintage of one conflict-forecast source on or before the run date."""
+    if not table_exists(con, "conflict_forecasts"):
+        return {"available": False, "reason": "conflict_forecasts absent"}
+    params: list[Any] = [iso3.upper(), source.upper()]
+    where = "upper(iso3) = ? AND upper(source) = ?"
+    if as_of is not None:
+        where += " AND forecast_issue_date <= ?"
+        params.append(as_of)
+    try:
+        row = con.execute(
+            f"SELECT MAX(forecast_issue_date) FROM conflict_forecasts WHERE {where}",
+            params,
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": f"conflict_forecasts unreadable ({type(exc).__name__})"}
+    if not row or row[0] is None:
+        return {"available": False,
+                "reason": "no vintage for this country on or before the run date "
+                          "(never ingested, or pruned by vintage retention)"}
+    issued = row[0] if isinstance(row[0], date) else datetime.fromisoformat(str(row[0])[:10]).date()
+    out: dict[str, Any] = {"available": True, "vintage": str(issued)}
+    if as_of is not None:
+        age = (as_of - issued).days
+        out["age_days"] = age
+        out["stale"] = age > CONFLICT_FORECAST_STALE_DAYS
     return out
 
 
@@ -240,6 +298,13 @@ def inject_status(con, q: Mapping[str, Any], run_id: str | None) -> dict[str, An
         "gdacs_history": _gdacs_status(con, iso3, hz, as_of),
         "crisiswatch": _crisiswatch_status(con, iso3, hz, as_of),
         "base_rate": _base_rate_status(con, str(q.get("question_id")), run_id),
+        **{
+            label: (
+                {"applicable": True, **_conflict_forecast_vintage(con, iso3, source, as_of)}
+                if hz == "ACE" else {"applicable": False}
+            )
+            for label, source in CONFLICT_FORECAST_SOURCES.items()
+        },
     }
 
 
@@ -297,12 +362,46 @@ def lineup(con, run_id: str | None, qid: str | None = None) -> dict[str, Any]:
         })
     if not members:
         return {"lineup_id": None, "members": [], "reason": "no member calls logged"}
-    key = "|".join(f"{m['model_id']}:{m['effort'] or ''}" for m in members)
     return {
-        "lineup_id": hashlib.sha1(key.encode("utf-8")).hexdigest()[:10],
+        "lineup_id": lineup_key(members),
         "members": members,
         "effort_source": "config_at_bundle_time",
     }
+
+
+def lineup_key(members: list[Mapping[str, Any]]) -> str:
+    """The lineup id: sha1 over "model_id:effort" of each member, sorted by id.
+
+    One recipe, so a per-question record and the bulk id below agree.
+    """
+    ordered = sorted(members, key=lambda m: str(m.get("model_id") or ""))
+    key = "|".join(f"{m.get('model_id')}:{m.get('effort') or ''}" for m in ordered)
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]
+
+
+def lineup_ids_bulk(con) -> dict[tuple[str, str], str]:
+    """{(run_id, question_id): lineup_id} for every question with member calls.
+
+    The same recipe as :func:`lineup`, in one query, for tables that span the
+    whole database (skill history) rather than one question at a time.
+    """
+    if not table_exists(con, "llm_calls"):
+        return {}
+    try:
+        rows = con.execute(
+            "SELECT DISTINCT run_id, question_id, model_id FROM llm_calls "
+            "WHERE phase IN ('spd_v2', 'binary_v2') AND model_id IS NOT NULL "
+            "AND run_id IS NOT NULL AND question_id IS NOT NULL"
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return {}
+    efforts = _config_efforts()
+    by: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for run_id, qid, mid in rows:
+        by.setdefault((str(run_id), str(qid)), []).append(
+            {"model_id": str(mid), "effort": efforts.get(str(mid), {}).get("effort")}
+        )
+    return {k: lineup_key(v) for k, v in by.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -484,6 +583,8 @@ __all__ = [
     "inject_status",
     "latest_run_clause",
     "lineup",
+    "lineup_ids_bulk",
+    "lineup_key",
     "question_costs",
     "reference_vectors",
     "resolution_counts",

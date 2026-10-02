@@ -34,6 +34,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
+from scripts.ai_bundle import error_attribution as _err
 from scripts.ai_bundle import provenance as _prov
 from scripts.ai_bundle.common import (
     column_exists,
@@ -576,14 +577,19 @@ def build_question_record(
 
 
 def _emit_scores_flat(con, out_dir: Path, qids: list[str]) -> None:
-    has_source_desc = column_exists(con, "resolutions", "source_desc")
+    has_res = table_exists(con, "resolutions")
+    has_source_desc = has_res and column_exists(con, "resolutions", "source_desc")
     has_run_id = column_exists(con, "scores", "run_id")
+    res_cols = (
+        "r.value AS resolved_value, r.observed_month, r.source_snapshot_ym"
+        if has_res else
+        "NULL AS resolved_value, NULL AS observed_month, NULL AS source_snapshot_ym"
+    )
     rows = rows_as_dicts(
         con,
         "SELECT s.question_id, q.iso3, q.hazard_code, UPPER(q.metric) AS metric, "
         "CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END "
-        "AS score_family, s.horizon_m, s.model_name, s.score_type, s.value, "
-        "r.value AS resolved_value, r.observed_month, r.source_snapshot_ym"
+        f"AS score_family, s.horizon_m, s.model_name, s.score_type, s.value, {res_cols}"
         + (", r.source_desc" if has_source_desc else ", NULL AS source_desc")
         + (", s.run_id" if has_run_id else ", NULL AS run_id")
         + (
@@ -592,9 +598,9 @@ def _emit_scores_flat(con, out_dir: Path, qids: list[str]) -> None:
             if has_run_id else ", TRUE AS is_latest_run"
         )
         + " FROM scores s JOIN questions q ON q.question_id = s.question_id "
-        "LEFT JOIN resolutions r ON r.question_id = s.question_id "
-        "AND r.horizon_m = s.horizon_m "
-        "WHERE s.question_id IN (SELECT UNNEST(?::VARCHAR[]))"
+        + ("LEFT JOIN resolutions r ON r.question_id = s.question_id "
+           "AND r.horizon_m = s.horizon_m " if has_res else "")
+        + "WHERE s.question_id IN (SELECT UNNEST(?::VARCHAR[]))"
         " ORDER BY s.question_id, s.model_name, s.score_type, s.horizon_m",
         [qids],
     )
@@ -610,7 +616,7 @@ def _emit_scores_flat(con, out_dir: Path, qids: list[str]) -> None:
     )
 
 
-def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> list[dict[str, Any]]:
+def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str], ctx: Any = None) -> list[dict[str, Any]]:
     if not table_exists(con, "forecasts_ensemble") or not table_exists(con, "resolutions"):
         return []
     track_sql = "q.track" if column_exists(con, "questions", "track") else "NULL"
@@ -697,6 +703,10 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> list[dict[
         edge, boundary = _bucket_edge(con, g["metric"], g["resolved_value"])
         g["bucket_edge"] = edge
         g["nearest_boundary"] = boundary
+        g["input_partial_month"] = (
+            (ctx.qmeta.get(str(g["question_id"])) or {}).get("input_partial_month")
+            if ctx is not None else None
+        )
         out_rows.append(g)
     out_rows.sort(key=lambda r: (r["question_id"], r["model_name"], r["horizon_m"]))
     write_csv(
@@ -705,7 +715,7 @@ def _emit_forecast_vs_outcome(con, out_dir: Path, qids: list[str]) -> list[dict[
             "question_id", "iso3", "hazard_code", "metric", "track", "model_name",
             "horizon_m", "resolved_value", "realized_bucket", "p_realized_bucket",
             "modal_bucket", "p_modal_bucket", "ev_value", "bucket_edge",
-            "nearest_boundary", "probs",
+            "nearest_boundary", "input_partial_month", "probs",
         ],
         out_rows,
     )
@@ -735,8 +745,7 @@ def _attach_skill(rows: list[dict[str, Any]], samples: list[dict[str, Any]]) -> 
     for sm in samples:
         if sm["model_name"] == "__ext_climatology" and sm["value"] is not None:
             clim[(sm["score_type"], sm["question_id"], sm["horizon_m"])] = float(sm["value"])
-            clim_groups.add((sm["hazard_code"], sm["metric"], sm["score_family"],
-                             sm["track"], sm["score_type"]))
+            clim_groups.add(_group_key(sm) + (sm["score_type"],))
     paired: dict[tuple, list[tuple[float, float, str]]] = {}
     for sm in samples:
         if sm["value"] is None:
@@ -744,14 +753,12 @@ def _attach_skill(rows: list[dict[str, Any]], samples: list[dict[str, Any]]) -> 
         c = clim.get((sm["score_type"], sm["question_id"], sm["horizon_m"]))
         if c is None:
             continue
-        key = (sm["hazard_code"], sm["metric"], sm["score_family"], sm["track"],
-               sm["model_name"], sm["score_type"])
+        key = _row_key(sm)
         paired.setdefault(key, []).append((float(sm["value"]), c, sm["question_id"]))
     for r in rows:
-        key = (r.get("hazard_code"), r.get("metric"), r.get("score_family"),
-               r.get("track"), r.get("model_name"), r.get("score_type"))
+        key = _row_key(r)
         pairs = paired.get(key) or []
-        has_clim = (key[0], key[1], key[2], key[3], key[5]) in clim_groups
+        has_clim = (_group_key(r) + (r.get("score_type"),)) in clim_groups
         r["n_paired"] = len(pairs)
         if pairs:
             pm = sum(p[0] for p in pairs) / len(pairs)
@@ -766,10 +773,29 @@ def _attach_skill(rows: list[dict[str, Any]], samples: list[dict[str, Any]]) -> 
         r["n_questions"] = len({p[2] for p in pairs}) if has_clim else r["n_questions_scored"]
 
 
-def _rollup_samples(con, qids: list[str]) -> list[dict[str, Any]]:
-    """One row per score (latest run per question), with the question's track."""
+#: rollups.csv is split on these per-question columns as well as on hazard,
+#: metric, family and track, so one row never pools two prompt versions, two
+#: advice arms, two lineups or a partial-month input with a complete one.
+ROLLUP_SPLIT_KEYS = _err.ROLLUP_SPLIT_KEYS
+
+
+def _group_key(sm: Mapping[str, Any]) -> tuple:
+    """The question-level part of a rollup key (shared with climatology)."""
+    return (sm.get("hazard_code"), sm.get("metric"), sm.get("score_family"), sm.get("track")) + tuple(
+        sm.get(k) for k in ROLLUP_SPLIT_KEYS
+    )
+
+
+def _row_key(sm: Mapping[str, Any]) -> tuple:
+    """A rollup row's key: the group, the forecaster and its correction, the score."""
+    return _group_key(sm) + (sm.get("correction"), sm.get("model_name"), sm.get("score_type"))
+
+
+def _rollup_samples(con, qids: list[str], ctx: Any = None) -> list[dict[str, Any]]:
+    """One row per score (latest run per question), with the question's track
+    and, when an error-attribution context is given, its split columns."""
     track_sql = "q.track" if column_exists(con, "questions", "track") else "NULL"
-    return rows_as_dicts(
+    rows = rows_as_dicts(
         con,
         "SELECT q.hazard_code, UPPER(q.metric) AS metric, "
         "CASE WHEN UPPER(q.metric) = 'EVENT_OCCURRENCE' THEN 'binary' ELSE 'spd' END "
@@ -780,6 +806,13 @@ def _rollup_samples(con, qids: list[str]) -> list[dict[str, Any]]:
         + latest_run_clause(con, "s"),
         [qids],
     )
+    for r in rows:
+        if ctx is not None:
+            r.update(ctx.sample_attrs(str(r["question_id"]), str(r["model_name"])))
+        else:
+            r.update({k: None for k in ROLLUP_SPLIT_KEYS})
+            r["correction"] = None
+    return rows
 
 
 def _cost_per_question(costs: Mapping[str, Mapping[str, float]]) -> dict[str, float]:
@@ -805,27 +838,32 @@ def _cost_per_question(costs: Mapping[str, Mapping[str, float]]) -> dict[str, fl
 def _emit_rollups(
     con, out_dir: Path, qids: list[str],
     costs: Mapping[str, Mapping[str, float]] | None = None,
+    ctx: Any = None,
 ) -> list[dict[str, Any]]:
     import statistics
 
-    samples = _rollup_samples(con, qids)
+    samples = _rollup_samples(con, qids, ctx)
     groups: dict[tuple, list[dict[str, Any]]] = {}
     for sm in samples:
-        key = (sm["hazard_code"], sm["metric"], sm["score_family"], sm["track"],
-               sm["model_name"], sm["score_type"])
-        groups.setdefault(key, []).append(sm)
+        groups.setdefault(_row_key(sm), []).append(sm)
     rows: list[dict[str, Any]] = []
-    for (hz, metric, fam, track, model, st), sms in groups.items():
+    for key, sms in groups.items():
+        first = sms[0]
         vals = [float(x["value"]) for x in sms if x["value"] is not None]
         rows.append({
-            "hazard_code": hz, "metric": metric, "score_family": fam, "track": track,
-            "model_name": model, "score_type": st, "n_samples": len(vals),
+            "hazard_code": first["hazard_code"], "metric": first["metric"],
+            "score_family": first["score_family"], "track": first["track"],
+            **{k: first.get(k) for k in ROLLUP_SPLIT_KEYS},
+            "correction": first.get("correction"),
+            "model_name": first["model_name"], "score_type": first["score_type"],
+            "n_samples": len(vals),
             "n_questions_scored": len({x["question_id"] for x in sms}),
             "mean_value": (sum(vals) / len(vals)) if vals else None,
             "median_value": statistics.median(vals) if vals else None,
         })
     rows.sort(key=lambda r: (str(r["score_family"]), str(r["hazard_code"]), str(r["metric"]),
-                             str(r["track"]), str(r["score_type"]),
+                             str(r["track"]), tuple(str(r.get(k)) for k in ROLLUP_SPLIT_KEYS),
+                             str(r["score_type"]),
                              r["mean_value"] if r["mean_value"] is not None else 0.0))
     _attach_skill(rows, samples)
     per_q = _cost_per_question(costs or {})
@@ -840,7 +878,8 @@ def _emit_rollups(
     write_csv(
         out_dir / "rollups.csv",
         [
-            "hazard_code", "metric", "score_family", "track", "model_name", "score_type",
+            "hazard_code", "metric", "score_family", "track", *ROLLUP_SPLIT_KEYS, "correction",
+            "model_name", "score_type",
             "n_samples", "n_questions", "n_questions_scored", "mean_value", "median_value",
             "n_paired", "paired_model_mean", "climatology_mean", "skill_vs_climatology",
             "cost_per_question_usd",
@@ -982,6 +1021,9 @@ def _question_summary(record: dict[str, Any]) -> dict[str, Any]:
         "crisiswatch_edition_age_months": ((record.get("inject_status") or {}).get("crisiswatch") or {}).get("edition_age_months"),
         "baserate_source": ((record.get("inject_status") or {}).get("base_rate") or {}).get("source"),
         "cost_usd": (record.get("cost_usd") or {}).get("__total__"),
+        "input_partial_month": record.get("input_partial_month"),
+        **{k: (record.get("forecast_versions") or {}).get(k)
+           for k in ("base_rate_block_version", "rc_guidance", "advice_arm", "recalibration_mode")},
         "record_path": f"questions/{q.get('question_id')}.json",
     }
 
@@ -1008,6 +1050,36 @@ def _attach_provenance(
     if record.get("spd_prompt") is None:
         record["spd_prompt_missing_reason"] = _prov.spd_prompt_missing_reason(con, qid, run_id)
     record["cost_usd"] = dict(cost)
+
+
+def _attach_error_fields(
+    con, record: dict[str, Any], q: Mapping[str, Any], ctx: Any, ctx_error: str | None
+) -> dict[str, Any]:
+    """Add input_partial_month, the forecast's prompt versions and
+    base_rate_shown to a record; return the metadata inject_health reads.
+
+    Degrades field by field: a failure states its reason in the record.
+    """
+    qid = str(q.get("question_id"))
+    meta = (ctx.qmeta.get(qid) if ctx is not None else None) or dict(q)
+    record["input_partial_month"] = meta.get("input_partial_month")
+    record["input_partial_month_basis"] = meta.get(
+        "input_partial_month_basis", ctx_error or "error-attribution context unavailable"
+    )
+    record["forecast_versions"] = {
+        k: meta.get(k) for k in (
+            "lineup_id", "base_rate_block_version", "rc_guidance", "advice_arm",
+            "recalibration_mode", "forecast_date",
+        )
+    }
+    if ctx is None:
+        record["base_rate_shown"] = {"available": False, "reason": ctx_error or "context unavailable"}
+        return meta
+    try:
+        record["base_rate_shown"] = _err.base_rate_shown(con, meta, record)
+    except Exception as exc:  # noqa: BLE001
+        record["base_rate_shown"] = {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+    return meta
 
 
 def _select_case_studies(
@@ -1127,12 +1199,18 @@ def _write_digest(
     *,
     months_back: int,
     fvo_rows: list[dict[str, Any]] | None = None,
+    error_parts: Mapping[str, Any] | None = None,
 ) -> None:
+    error_parts = error_parts or {}
     lines: list[str] = [
         "# Scored-Forecast Analysis — Digest",
         "",
         f"_Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · "
         f"question-epoch window: last {months_back} months_",
+        "",
+        # The first table is generated from headline.json and nothing else,
+        # so a report quoting the headline and this digest cannot disagree.
+        *_err.headline_digest_lines(error_parts.get("headline") or {}),
         "",
         f"**{len(summaries)} scored questions** "
         f"({sum(1 for s in summaries if s['score_family'] == 'spd')} SPD, "
@@ -1215,6 +1293,7 @@ def _write_digest(
         )
 
     lines += _sharpness_lines(fvo_rows or [])
+    lines += _error_digest_lines(error_parts)
 
     def _qline(s: dict[str, Any]) -> str:
         return (
@@ -1250,11 +1329,77 @@ def _write_digest(
         "- `case_studies/` — the best/worst records above (with Sibyl trials).",
         "- `scores_flat.csv`, `forecast_vs_outcome.csv`, `rollups.csv`, "
         "`calibration_weights.csv`, `calibration_advice.md`, `eiv_scores.csv`.",
+        "- Error attribution: `headline.json`, `trace_stages.csv` (+ summary), "
+        "`update_value.csv` (+ summary), `rc_outcomes.csv` (+ summary), "
+        "`unasked_outcomes.csv`, `experiments.csv`, `skill_history.csv`, "
+        "`tail_outcomes.csv`, `binary_reliability.csv`, `inject_health.csv`.",
         "- `briefing/` — condensed chat-uploadable digest + case studies.",
     ]
     path = out_dir / "digest.md"
     path.write_text("\n".join(lines), encoding="utf-8")
     size_guard(path, DIGEST_BUDGET_KB)
+
+
+def _error_digest_lines(parts: Mapping[str, Any]) -> list[str]:
+    """Digest sections for the error-attribution files: where error came from,
+    which adjustments helped, the history, inject health, unasked outcomes."""
+    lines: list[str] = []
+    ts = [r for r in parts.get("trace_summary") or [] if r.get("score_type") == "rps"]
+    if ts:
+        lines += [
+            "", "## Where the error came from (`trace_stages_summary.csv`, RPS)", "",
+            "_Mean RPS of the base rate shown, the member's declared prior and its final "
+            "SPD; prior − shown is the cost of the starting point, final − prior the cost "
+            "of the adjustments (negative = better). 90% intervals resample questions._", "",
+            "| hazard | metric | track | block | RC guidance | partial input | n q | shown | prior | final "
+            "| prior − shown [90%] | final − prior [90%] |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+
+        def ci(m: Any, lo: Any, hi: Any) -> str:
+            if m is None:
+                return "—"
+            return f"{m:+.3f}" + (f" [{lo:+.3f}, {hi:+.3f}]" if lo is not None else " [—]")
+
+        for r in ts:
+            lines.append(
+                f"| {r['hazard_code']} | {r['metric']} | T{r['track']} | {r['base_rate_block_version']} "
+                f"| {r['rc_guidance']} | {r['input_partial_month']} | {r['n_questions']} "
+                f"| {r['mean_shown'] if r['mean_shown'] is not None else '—'} | {r['mean_prior']} "
+                f"| {r['mean_final']} | {ci(r['prior_minus_shown'], r['prior_minus_shown_ci90_low'], r['prior_minus_shown_ci90_high'])} "
+                f"| {ci(r['final_minus_prior'], r['final_minus_prior_ci90_low'], r['final_minus_prior_ci90_high'])} |"
+            )
+    us = sorted(parts.get("update_summary") or [], key=lambda r: -int(r.get("n_updates") or 0))[:15]
+    if us:
+        lines += [
+            "", "## Which adjustments helped (`update_value_summary.csv`, CLAIMED attribution)", "",
+            "| signal class | hazard | metric | updates | toward outcome | mean ΔRPS [90%] | verdict |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for r in us:
+            ci90 = (f" [{r['delta_rps_ci90_low']:+.3f}, {r['delta_rps_ci90_high']:+.3f}]"
+                    if r.get("delta_rps_ci90_low") is not None else "")
+            lines.append(
+                f"| {r['signal_class']} | {r['hazard_code']} | {r['metric']} | {r['n_updates']} "
+                f"| {r['share_toward_outcome']} | {r['mean_delta_rps']:+.3f}{ci90} | {r['verdict']} |"
+            )
+    lines += list(parts.get("history") or [])
+    lines += _err.inject_digest_lines(parts.get("inject") or [])
+    unasked = parts.get("unasked") or []
+    if unasked:
+        from collections import Counter as _Counter
+
+        by = _Counter((r["month"], r["hazard_code"], r["trigger"]) for r in unasked)
+        not_assessed = sum(1 for r in unasked if r.get("triage_tier") == "not assessed")
+        lines += [
+            "", "## Large outcomes with no question (`unasked_outcomes.csv`)", "",
+            f"_{len(unasked)} cells across the horizon scanner's country list had a large "
+            f"outcome and no question; {not_assessed} of them were not assessed by HS at all._", "",
+            "| month | hazard | trigger | cells |", "|---|---|---|---|",
+        ]
+        for (month, hz, trig), n in sorted(by.items()):
+            lines.append(f"| {month} | {hz} | {trig} | {n} |")
+    return lines
 
 
 def _load_staged_record(staging: Path, qid: str) -> dict[str, Any] | None:
@@ -1419,6 +1564,17 @@ def build_bundle(
         summaries: list[dict[str, Any]] = []
         include_all_trials = include_sibyl_trials == "all"
         costs = _prov.question_costs(con, qids)
+        # One read of what every error-attribution section shares. A failure
+        # here stubs those files with the reason and costs nothing else.
+        err_ctx = None
+        err_ctx_error = None
+        try:
+            err_ctx = _err.build_context(con, qids, include_test)
+        except Exception as exc:  # noqa: BLE001
+            err_ctx_error = f"{type(exc).__name__}: {exc}"
+            LOGGER.warning("error-attribution context unavailable: %s", err_ctx_error)
+        inject_rows: list[dict[str, Any]] = []
+        inject_error: str | None = None
         for q in questions:
             qid = str(q["question_id"])
             try:
@@ -1432,6 +1588,13 @@ def build_bundle(
                 LOGGER.warning("Failed to build record for %s: %s", qid, exc)
                 continue
             _attach_provenance(con, record, q, costs.get(qid) or {})
+            meta = _attach_error_fields(con, record, q, err_ctx, err_ctx_error)
+            try:
+                inject_rows.extend(
+                    _err.inject_health_rows(qid, meta, record.get("inject_status") or {})
+                )
+            except Exception as exc:  # noqa: BLE001
+                inject_error = f"{type(exc).__name__}: {exc}"
             write_json(staging / "questions" / f"{qid}.json", record)
             summaries.append(_question_summary(record))
             del record
@@ -1447,14 +1610,19 @@ def build_bundle(
                 "lineup_id", "resolution_series", "spd_prompt_missing",
                 "enso_observation_date", "gdacs_history_months",
                 "crisiswatch_edition_age_months", "baserate_source",
-                "cost_usd", "record_path",
+                "cost_usd", "input_partial_month", "base_rate_block_version",
+                "rc_guidance", "advice_arm", "recalibration_mode", "record_path",
             ],
             summaries,
         )
+        if inject_error:
+            _err.write_stub(staging / "inject_health.csv", inject_error)
+        else:
+            write_csv(staging / "inject_health.csv", _err.INJECT_HEALTH_COLUMNS, inject_rows)
 
         _emit_scores_flat(con, staging, qids)
-        fvo_rows = _emit_forecast_vs_outcome(con, staging, qids)
-        rollups = _emit_rollups(con, staging, qids, costs)
+        fvo_rows = _emit_forecast_vs_outcome(con, staging, qids, err_ctx)
+        rollups = _emit_rollups(con, staging, qids, costs, err_ctx)
         try:
             from scripts.ai_bundle import experiments as _exp
 
@@ -1462,6 +1630,12 @@ def build_bundle(
             _exp.emit_recalibration_effect(con, staging, qids)
         except Exception as exc:  # noqa: BLE001 - an experiment table never costs the bundle
             LOGGER.warning("experiment rollups skipped: %s", exc)
+        err_sections, err_digest = _err.emit_all(err_ctx, staging, ctx_error=err_ctx_error)
+        err_sections.files["inject_health.csv"] = (
+            {"status": "stub", "rows": 0, "reason": inject_error} if inject_error
+            else {"status": "ok", "rows": len(inject_rows)}
+        )
+        err_digest["inject"] = inject_rows
         weight_movement = _emit_calibration(con, staging)
         calibration_state = _prov.calibration_status(con)
         write_csv(
@@ -1493,7 +1667,7 @@ def build_bundle(
 
         _write_digest(
             staging, summaries, rollups, weight_movement, case_selection,
-            months_back=months_back, fvo_rows=fvo_rows,
+            months_back=months_back, fvo_rows=fvo_rows, error_parts=err_digest,
         )
         _write_briefing(staging, case_records, case_selection)
 
@@ -1523,6 +1697,11 @@ def build_bundle(
                 "resolved_questions": _prov.resolution_counts(con, qids),
                 "calibration_status": calibration_state,
                 "lineups": _lineups_seen(staging, summaries),
+                "error_attribution": {
+                    "files": err_sections.files,
+                    "context_error": err_ctx_error,
+                    "context_problems": err_ctx.problems if err_ctx is not None else [],
+                },
             },
         )
 
@@ -1566,15 +1745,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="[ai_bundle] %(message)s")
-    zip_path = build_bundle(
-        args.db,
-        Path(args.out_dir),
-        months_back=args.months_back,
-        n_case_studies=args.n_case_studies,
-        include_test=args.include_test,
-        include_sibyl_trials=args.include_sibyl_trials,
-        keep_staging=args.keep_staging,
-    )
+    try:
+        zip_path = build_bundle(
+            args.db,
+            Path(args.out_dir),
+            months_back=args.months_back,
+            n_case_studies=args.n_case_studies,
+            include_test=args.include_test,
+            include_sibyl_trials=args.include_sibyl_trials,
+            keep_staging=args.keep_staging,
+        )
+    except Exception as exc:  # noqa: BLE001 - the bundle never fails calibration
+        LOGGER.exception("scored bundle failed")
+        print(f"::warning title=Scored bundle failed::{type(exc).__name__}: {exc}")
+        return 0
     if zip_path is None:
         # Nothing to bundle is a soft outcome, not a failure — the workflow
         # step is continue-on-error anyway, but exit 0 keeps logs green.

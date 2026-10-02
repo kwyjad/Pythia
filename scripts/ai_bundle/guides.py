@@ -404,6 +404,143 @@ Honest limits of this bundle — do not chase these:
 """
 
 
+_ERROR_ATTRIBUTION = """\
+These files split a score into its parts. Every one keeps the bundle's three
+rules: binary and SPD scores are never blended; skill is computed only on
+(question, horizon) pairs both sides scored, within one track; one run per
+question (the latest). Intervals are 90% and resample QUESTIONS (horizons of
+one question share an outcome history), seeded so a rebuild gives the same
+numbers: 4000 resamples, except `skill_history.csv` (1000, it has thousands of
+cells). A verdict reads "too few" below 10 questions. A file whose only column
+is `stub_reason` (or a JSON `{"stub": true, "reason": ...}`) is a section that
+could not be computed; the manifest's `error_attribution.files` lists every
+file with its status, row count and reason.
+
+**`input_partial_month`** (every question, on `questions_index.csv`,
+`forecast_vs_outcome.csv`, `rollups.csv`, `skill_history.csv`,
+`trace_stages*.csv`, and each record with `input_partial_month_basis`): true
+where the conflict prompt's "last month" was written before that month ended.
+Before 30 Sept 2026 the ACLED writer stored the month in progress, so the
+1 August 2026 run read a July row written on 15 July (a median 28% of the
+settled count) and the 1 September run an August row written on 28 August.
+Reconstructed from the scheduled-ingest calendar (the 15th until 3 Aug 2026,
+the 28th since), because a rewritten row keeps no history; a manual ingest in
+between is not seen. False for non-ACE questions (no ACLED trajectory in the
+prompt), null where the forecast date is unknown. Rollups and history are
+split on it: never pool a partial-input forecast with a complete one.
+
+**`headline.json`** — the figures a report quotes. Per (hazard, metric,
+track) and score type (`brier`; `crps` = RPS for SPD): paired questions and
+pairs, the primary aggregate's mean (bayesmc, else mean, else track2_flash),
+each reference's mean on the same pairs, wins and losses (questions where
+the primary's mean score is below / above the reference's), skill against
+`__ext_climatology` and `__ext_level_volatility` with its interval, and
+`warning` below 10 paired questions. Also `questions_resolved_per_horizon`.
+The digest's first table is generated from this file and nothing else.
+
+**`trace_stages.csv`** — one row per (question, resolved horizon, member)
+for Track 1 and Track 2 SPD questions (Track 2's member is `track2_flash`).
+Three distributions, each a JSON vector: `shown_spd`, the base rate the prompt
+showed (`__ext_level_volatility` from `baseline_scored_forecasts` when the
+member saw the prior-anchor block, `base_rate_block_version` set; otherwise
+the `__ext_climatology` anchor; `shown_source` says which, or `absent`);
+`prior_spd`, the member's declared prior from its reasoning trace (one vector,
+compared with every horizon); `final_spd`, what it wrote for that month. For
+each: Brier, log, RPS against the outcome, max bucket probability, entropy in
+bits, expected bucket (1-based). Then `js_distance_prior_vs_shown` (sqrt of
+the natural-log Jensen-Shannon divergence), the expected-bucket shift and
+entropy change from prior to final, and the RC level, direction and the
+member's `rc_assessment`, with the prompt versions, advice arm, recalibration
+mode and lineup. **`trace_stages_summary.csv`** per (hazard, metric, track,
+`base_rate_block_version`, `rc_guidance`, `input_partial_month`, score type):
+mean score of shown, prior and final, with intervals on `prior_minus_shown`
+(the cost of the starting point) and `final_minus_prior` (the cost of the
+adjustments). Negative is better. This is the question "did the error come
+from the start or from the adjustments?". The prior is what the member SAID
+its prior was; a member that wrote an anchored prior and then ignored it
+reads as a good start and bad adjustments.
+
+**`update_value.csv`** — one row per (trace update, resolved horizon it
+touched): the update's `attribution_id` (the attribution bundle's join key,
+same recipe), `signal_class` (the attribution bundle's taxonomy,
+`signal_taxonomy.csv`), mass moved, the probability on the realised bucket
+before and after that update alone, and the RPS change it caused
+(`post_update_spd` against the SPD before it). `months_affected` is the
+trace's own wording; an unreadable one counts as all six months.
+**`update_value_summary.csv`** per signal class and hazard: updates, the share
+that moved toward the outcome, mean RPS change with its interval. This is
+CLAIMED attribution: the update is the model's own account of what moved it,
+written after the fact. It says whether the adjustments a model reports
+helped, not whether the evidence caused them.
+
+**`rc_outcomes.csv`** — one row per (scored SPD question, resolved horizon)
+where a last value exists (ACE/FATALITIES, DR/PHASE3PLUS_IN_NEED; PA has
+none): the HS regime-change level, score and direction, the last value
+before the window (`base_rate_spd.last_observed_value`, read as the table
+stands now; `input_partial_month` marks where the prompt saw a partial count
+instead), the outcome, the signed bucket move and whether it matched the
+flagged direction (null for mixed/unclear). **`rc_outcomes_summary.csv`** by
+metric, RC level and direction: mean absolute move, share moving 2+ buckets,
+share matching direction. RC 0 rows are the control.
+
+**`unasked_outcomes.csv`** — cells across the horizon scanner's country list
+(`horizon_scanner/hs_country_list.txt`) and the four forecast hazards, in the
+scored months, with NO question whose window covered them, where ACE
+all-types deaths reached bucket 5 (100+) or rose two buckets above the last
+month before the epoch; a GDACS Orange or Red FL/DR/TC event occurred; or IPC
+Phase 3+ rose a bucket. With the value, the source, and the HS tier, triage
+score and RC level recorded for the cell, or `not assessed`.
+
+**`experiments.csv`** — for each flag holding more than one value
+(`lineup_id`, `base_rate_block_version`, `rc_guidance`, `advice_arm`,
+`recalibration_mode`, `input_partial_month`), within (hazard, metric, track)
+and score type: each arm against the most common one. Arms hold different
+questions, so each question is first paired with climatology on its own
+horizons (primary minus `__ext_climatology`) and the arms are compared on
+that excess: question difficulty drops out. `correction` rows are genuinely
+paired: a member's corrected forecast against its own `__raw` one. Verdict:
+`too few`, `no clear difference`, or `arm X better` (lower score is better).
+`rollups.csv` carries the same split columns plus `correction` (`raw`,
+`corrected`, `shadow_corrected`, `none`), and its paired skill is computed
+within them.
+
+**`skill_history.csv`** — every resolved (question, horizon) in the DATABASE,
+not only this bundle's window: paired skill against `__ext_climatology`,
+`__ext_persistence` and `__ext_level_volatility` (where scored), for the
+primary aggregate (`forecaster = primary`) and each member, per observed
+month, hazard, metric, track, lineup and prompt versions, with n and an
+interval. The digest shows the last six months, pooled across lineups and
+versions.
+
+**`tail_outcomes.csv`** — every resolved SPD outcome in the top two buckets
+and every binary event that occurred, with the probability each member,
+aggregate, Sibyl and reference forecaster gave it (`forecaster_kind`).
+**`binary_reliability.csv`** per hazard, track and forecaster: bins 0-5%,
+5-20%, 20-50%, 50-80%, 80-100%, with n, mean forecast and observed rate.
+
+**`inject_health.csv`** — one row per question and inject (ENSO, GDACS
+history, CrisisWatch, ACLED CAST, ViEWS, base rate, the ACLED trajectory):
+present, the observation or vintage, age in days or months, stale, and the
+reason when absent. Stale means: ENSO carried forward or over 100 days old;
+CrisisWatch three or more editions old; a conflict-forecast vintage over 45
+days; the ACLED trajectory when `input_partial_month`. The digest counts
+stale and absent injects per hazard and lists CrisisWatch status for ACE.
+
+**Record fields.** `base_rate_shown`: the structured figures behind the
+prompt's base-rate block. For ACE: the six ACLED months before the forecast
+month (value, month, the row's `updated_at` and `updated_after_forecast`, true
+where the row was rewritten after the forecast, so the value read now may
+differ from the value shown), the three-month means and trend computed by
+the same function the prompt uses, and the level-and-volatility vector when
+the prompt showed it (months 1 and 6 printed). For every question: the anchor
+`forecast_deviation` reconstructs. `forecast_versions`: lineup, prompt
+versions, advice arm, recalibration mode, forecast date. `inject_status` for
+ACE always carries `crisiswatch` (edition, `edition_age_months`, `arrow`,
+`alert`, `stale`, or `available: false` with the reason), `acled_cast` and
+`views` (vintage, `age_days`, `stale`).
+"""
+
+
 def build_analyst_guide(context: Mapping[str, Any]) -> str:
     """Assemble the full ANALYST_GUIDE.md."""
     n_questions = context.get("n_questions", "?")
@@ -429,6 +566,10 @@ def build_analyst_guide(context: Mapping[str, Any]) -> str:
         "family (same record shape, plus Sibyl trial traces when available).",
         "5. Flat tables: `scores_flat.csv`, `forecast_vs_outcome.csv`, "
         "`rollups.csv`, `calibration_weights.csv`, `calibration_advice.md`.",
+        "6. Error attribution: `headline.json` first, then `trace_stages_summary.csv` "
+        "(start or adjustments?), `update_value_summary.csv`, `rc_outcomes_summary.csv`, "
+        "`experiments.csv`, `skill_history.csv`, `tail_outcomes.csv`, "
+        "`binary_reliability.csv`, `unasked_outcomes.csv`, `inject_health.csv`.",
         "",
         "`briefing/` holds condensed, size-capped versions of the digest and "
         "case studies for chat-upload contexts. If you can read the whole "
@@ -463,6 +604,9 @@ def build_analyst_guide(context: Mapping[str, Any]) -> str:
         "## Prompts and llm_calls vocabulary",
         "",
         _LLM_CALLS_VOCAB,
+        "## Error attribution files",
+        "",
+        _ERROR_ATTRIBUTION,
         "## Suggested analyses",
         "",
         _ANALYSIS_PROMPTS,
