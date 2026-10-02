@@ -787,8 +787,9 @@ jobs:
           STEP_HAZ_MONTHS_MONTHS: ${{ steps.haz_months.outputs.months }}
         run: |
           set -o pipefail
+          read -r -a HAZ_MONTHS <<< "${STEP_HAZ_MONTHS_MONTHS}"
           echo "::group::PA machine (flood)"
-          timeout 85m python -m resolver.hazard_resolution.cli --hazard flood --months ${STEP_HAZ_MONTHS_MONTHS} --summary-out diagnostics/haz_run_flood.json 2>&1 | tee diagnostics/phase25_haz_flood.log || echo "::warning::flood resolution machine failed or timed out (non-fatal; exit $?)"
+          timeout 85m python -m resolver.hazard_resolution.cli --hazard flood --months "${HAZ_MONTHS[@]}" --summary-out diagnostics/haz_run_flood.json 2>&1 | tee diagnostics/phase25_haz_flood.log || echo "::warning::flood resolution machine failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
       - name: "Phase 2.5: PA machine — cyclone"
@@ -799,8 +800,9 @@ jobs:
           STEP_HAZ_MONTHS_MONTHS: ${{ steps.haz_months.outputs.months }}
         run: |
           set -o pipefail
+          read -r -a HAZ_MONTHS <<< "${STEP_HAZ_MONTHS_MONTHS}"
           echo "::group::PA machine (cyclone)"
-          timeout 85m python -m resolver.hazard_resolution.cli --hazard cyclone --months ${STEP_HAZ_MONTHS_MONTHS} --summary-out diagnostics/haz_run_cyclone.json 2>&1 | tee diagnostics/phase25_haz_cyclone.log || echo "::warning::cyclone resolution machine failed or timed out (non-fatal; exit $?)"
+          timeout 85m python -m resolver.hazard_resolution.cli --hazard cyclone --months "${HAZ_MONTHS[@]}" --summary-out diagnostics/haz_run_cyclone.json 2>&1 | tee diagnostics/phase25_haz_cyclone.log || echo "::warning::cyclone resolution machine failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
       # A corrected ceiling rule must reach the rows it would have changed,
@@ -829,8 +831,9 @@ jobs:
           STEP_HAZ_MONTHS_MONTHS: ${{ steps.haz_months.outputs.months }}
         run: |
           set -o pipefail
+          read -r -a HAZ_MONTHS <<< "${STEP_HAZ_MONTHS_MONTHS}"
           echo "::group::PA machine (drought)"
-          timeout 27m python -m resolver.hazard_resolution.cli --hazard drought --months ${STEP_HAZ_MONTHS_MONTHS} --summary-out diagnostics/haz_run_drought.json 2>&1 | tee diagnostics/phase25_haz_drought.log || echo "::warning::drought resolution machine failed or timed out (non-fatal; exit $?)"
+          timeout 27m python -m resolver.hazard_resolution.cli --hazard drought --months "${HAZ_MONTHS[@]}" --summary-out diagnostics/haz_run_drought.json 2>&1 | tee diagnostics/phase25_haz_drought.log || echo "::warning::drought resolution machine failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
       - name: "Phase 2.5: Refresh machine base rates + acceptance report"

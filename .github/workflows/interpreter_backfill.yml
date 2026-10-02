@@ -309,11 +309,13 @@ jobs:
             exit 0
           fi
           mkdir -p diagnostics
+          # Space-separated on purpose: one argument per model.
+          read -r -a MODELS <<< "${IN_COMPARE_MODELS}"
           python -m scripts.compare_interpreter_models \
             --db "${RESOLVER_DB_URL}" \
             --pack "${PACK}" \
             --kind "${IN_KIND}" \
-            --models ${IN_COMPARE_MODELS} \
+            --models "${MODELS[@]}" \
             --out-dir interpreter_compare \
             2>&1 | tee diagnostics/model_comparison.txt
           {

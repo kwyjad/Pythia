@@ -121,7 +121,7 @@ jobs:
         env:
           IN_LIMIT: ${{ inputs.limit }}
         run: |
-          poetry run python -m forecaster.cli --mode test_questions --limit ${IN_LIMIT}
+          poetry run python -m forecaster.cli --mode test_questions --limit "${IN_LIMIT}"
 
       - name: Upload artifacts
         if: always()
