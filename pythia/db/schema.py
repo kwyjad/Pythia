@@ -1785,6 +1785,10 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "config_json": "TEXT",
                 "created_at": "TIMESTAMP",
                 "is_test": "BOOLEAN DEFAULT FALSE",
+                # The trial loop stopped starting questions at
+                # SIBYL_MAX_RUNTIME_MIN (the job is the release trigger and
+                # has a hard timeout). Separate from budget_capped.
+                "time_capped": "BOOLEAN DEFAULT FALSE",
             },
         )
 
@@ -1845,6 +1849,10 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "leakage_json": "TEXT",
                 "created_at": "TIMESTAMP",
                 "is_test": "BOOLEAN DEFAULT FALSE",
+                # Which selection pass chose the question: 'floor' (one of a
+                # hazard's guaranteed slots) or 'fill' (open competition on
+                # volatility). NULL on rows written before Oct 2026.
+                "selection_pass": "TEXT",
             },
         )
 

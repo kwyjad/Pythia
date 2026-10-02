@@ -431,7 +431,7 @@ export default function RiskIndexPanel({
               title={
                 sibylSource
                   ? "Showing Sibyl deep-research forecasts — click for the standard ensemble"
-                  : "Showing standard ensemble forecasts — click to overlay the Sibyl deep-research track (top-10 volatile questions only)"
+                  : "Showing standard ensemble forecasts — click to overlay the Sibyl deep-research track (25 questions per run, spread across hazards)"
               }
             >
               {sibylSource ? "Sibyl ON" : "Sibyl OFF"}

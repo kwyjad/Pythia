@@ -303,9 +303,9 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             volatility_score, triage_score, pooled_quantiles_json,
             trials_json, bucket_probs_json, js_divergence_vs_standard,
             js_divergence_inter_trial, cost_usd, opus_cost_usd,
-            brave_cost_usd, leakage_json, created_at, is_test
+            brave_cost_usd, leakage_json, created_at, is_test, selection_pass
         ) VALUES (?, ?, ?, ?, ?, ?, 'sibyl', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -331,6 +331,7 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             record.get("brave_cost_usd", 0.0),
             json.dumps(record.get("leakage"), default=str),
             is_test_mode(),
+            record.get("selection_pass"),
         ],
     )
 
@@ -347,9 +348,9 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             sibyl_run_id, hs_run_id, as_of, model, k, max_steps, aggregation,
             run_hard_cap_usd, budget_capped, run_cost_usd, opus_cost_usd,
             brave_cost_usd, n_selected, n_forecast, n_skipped, config_json,
-            created_at, is_test
+            created_at, is_test, time_capped
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  CURRENT_TIMESTAMP, ?)
+                  CURRENT_TIMESTAMP, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -369,5 +370,6 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             record.get("n_skipped", 0),
             json.dumps(record.get("config"), default=str),
             is_test_mode(),
+            bool(record.get("time_capped", False)),
         ],
     )

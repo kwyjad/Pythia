@@ -21,8 +21,28 @@ questions.iso3 = hs_triage.iso3 AND questions.hazard_code =
 hs_triage.hazard_code`.
 
 **Decision:** `volatility := regime_change_score` (primary key, descending),
-with `triage_score` as tiebreak, then `question_id` for determinism. This is
-documented in `sibyl/select_questions.py`.
+then `question_id` for determinism. This is documented in
+`sibyl/select_questions.py`.
+
+**Superseded (Oct 2026): the selection rule.** Until October 2026 Sibyl took a
+plain top 10 by volatility with `triage_score` as tiebreak. Two things were
+wrong with that. The tiebreak was dead: every row with RC >= 0.1 is tier
+`rc_promoted` and carries a placeholder `triage_score` of 0. And the mix
+swung by month with no floor under any hazard: the 1 October run chose six
+drought, two conflict and two flood questions and no cyclone, so Sibyl's
+scored record could say nothing about cyclones. Selection is now
+floor-then-fill (`floor_then_fill`): 25 questions (`SIBYL_N_QUESTIONS`), each
+hazard first takes its three most volatile (`SIBYL_MIN_PER_HAZARD`), then the
+most volatile remaining candidate whose hazard holds fewer than ten
+(`SIBYL_MAX_PER_HAZARD`) until 25 are chosen. Ties go to the hazard holding
+fewer picks, then `question_id`. Run order is floor picks first, then fill
+picks, each by falling volatility, so a budget or time cut removes fill picks
+first. Each `sibyl_forecasts` row records its `selection_pass`. Replayed on
+the 1 Aug, 15 Sep and 1 Oct 2026 runs the rule gives 25 questions in 22-24
+countries: conflict 6-10, drought 6-10, flood 3-6, cyclone 3-6
+(`tests/fixtures/sibyl_candidate_pools.json` pins it). The pool limits how
+selective 25 can be: eligible questions with RC >= 0.1 numbered 18, 29 and 26
+in those runs, so in August 8 of the 25 picks fell below 0.1.
 
 **Hazard/metric scope.** Question generation
 (`scripts/create_questions_from_triage.py`) emits, for the active hazards:

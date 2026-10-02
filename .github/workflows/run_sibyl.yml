@@ -8,8 +8,9 @@ name: Sibyl Deep Research
 
 # Sibling to the standard forecasting pipeline: runs once a Horizon Scanner
 # Triage run (which writes the volatility/RC scores and questions Sibyl
-# selects from) has completed. Forecasts the top-10 highest-volatility
-# affected/fatalities questions via agentic open-web research (Opus + Brave)
+# selects from) has completed. Forecasts 25 affected/fatalities questions,
+# spread across the four hazards (a floor of three each) and led by the
+# highest regime-change scores, via agentic open-web research (Opus + Brave),
 # and writes the results beside the standard track in the canonical DB.
 #
 # It is also the forecast cycle's TERMINUS (Sept 2026): every end-of-cycle
@@ -43,7 +44,7 @@ on:
       run_hard_cap_usd:
         description: "Hard run budget cap in USD"
         required: false
-        default: "40"
+        default: "60"
       db_run_id:
         description: "Force pythia-resolver-db from this workflow run id"
         required: false
@@ -74,9 +75,10 @@ jobs:
   sibyl:
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request') }}
     runs-on: ubuntu-latest
-    # Sibyl (40+ min at the $40 cap) + interpreter + PDF + two bundles all run
-    # BEFORE the canonical upload; a slow month at 180 was killed with the
-    # forecasts unpublished. 330 matches the pipeline stage jobs.
+    # Sibyl (its trial loop bounded by SIBYL_MAX_RUNTIME_MIN, 180) +
+    # interpreter + PDF + two bundles all run BEFORE the canonical upload; a
+    # slow month at 180 was killed with the forecasts unpublished. 330 matches
+    # the pipeline stage jobs and leaves ~150 minutes after the trial loop.
     timeout-minutes: 330
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -202,7 +204,7 @@ jobs:
           # MODEL_COSTS_JSON env override removed 2026-07: pythia/model_costs.json
           # (now per-1M-token rates) is authoritative and carries the
           # claude-opus-5-5 entry Sibyl's budget cap depends on.
-          SIBYL_RUN_HARD_CAP_USD: ${{ github.event.inputs.run_hard_cap_usd || '40' }}
+          SIBYL_RUN_HARD_CAP_USD: ${{ github.event.inputs.run_hard_cap_usd || '60' }}
           SIBYL_BUDGET_USD_PER_QUESTION: ${{ vars.SIBYL_BUDGET_USD_PER_QUESTION || '' }}
         run: |
           set -euo pipefail
@@ -576,7 +578,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-      # Sibyl ran 40+ minutes on Claude Opus under a $40 hard cap with NO
+      # Sibyl ran 40+ minutes on Claude Opus under a hard cap with NO
       # telemetry of any kind — plausibly the most expensive stage in the
       # pipeline and the only one whose spend was unmeasured. Same never-fail
       # contract as the pipeline stages: a reporting bug must not cost a run

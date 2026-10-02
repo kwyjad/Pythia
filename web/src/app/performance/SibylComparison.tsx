@@ -461,6 +461,8 @@ export default function SibylComparison({ data: initial, includeTest }: Props) {
                   value={
                     latestRun?.budget_capped ? (
                       <span className="text-red-700">Capped</span>
+                    ) : latestRun?.time_capped ? (
+                      <span className="text-red-700">Time capped</span>
                     ) : (
                       <span className="text-emerald-700">OK</span>
                     )

@@ -202,6 +202,9 @@ export type RunSummaryResponse = {
   sibyl?: {
     sibyl_run_id: string;
     budget_capped: boolean;
+    /** Trial loop stopped at SIBYL_MAX_RUNTIME_MIN; absent on older APIs. */
+    time_capped?: boolean;
+    n_skipped_time_cap?: number;
     run_cost_usd: number;
     opus_cost_usd: number;
     brave_cost_usd: number;
@@ -377,6 +380,7 @@ export type SibylComparisonRunRow = {
   n_forecast: number | null;
   n_skipped: number | null;
   budget_capped: boolean | null;
+  time_capped?: boolean | null;
   run_cost_usd: number | null;
   opus_cost_usd: number | null;
   brave_cost_usd: number | null;
@@ -444,6 +448,7 @@ export type SibylRun = {
   aggregation?: string | null;
   run_hard_cap_usd?: number | null;
   budget_capped?: boolean | null;
+  time_capped?: boolean | null;
   run_cost_usd?: number | null;
   opus_cost_usd?: number | null;
   brave_cost_usd?: number | null;

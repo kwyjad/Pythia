@@ -1625,17 +1625,23 @@ def diagnostics_run_summary(
     sibyl_block: Optional[Dict[str, Any]] = None
     if hs_run_id and _table_exists(con, "sibyl_runs"):
         tf_sr = _test_filter_for(con, "sibyl_runs", include_test)
+        _tc_col = (
+            "COALESCE(time_capped, FALSE)"
+            if _table_has_columns(con, "sibyl_runs", ["time_capped"])
+            else "FALSE"
+        )
         sibyl_run = _q(
             "SELECT sibyl_run_id, budget_capped, run_cost_usd, opus_cost_usd, "
-            "brave_cost_usd, n_selected, n_forecast, n_skipped, k, aggregation "
-            "FROM sibyl_runs "
+            "brave_cost_usd, n_selected, n_forecast, n_skipped, k, aggregation, "
+            + _tc_col + " FROM sibyl_runs "
             "WHERE hs_run_id = ?" + tf_sr + " "
             "ORDER BY created_at DESC LIMIT 1",
             [hs_run_id],
         )
         if sibyl_run:
             (s_run_id, s_capped, s_cost, s_opus, s_brave,
-             s_selected, s_forecast, s_skipped, s_k, s_agg) = sibyl_run[0]
+             s_selected, s_forecast, s_skipped, s_k, s_agg,
+             s_time_capped) = sibyl_run[0]
             skipped_by_cap = _q1(
                 "SELECT COUNT(*) FROM sibyl_forecasts "
                 "WHERE sibyl_run_id = ? AND status = 'skipped' "
@@ -1643,9 +1649,18 @@ def diagnostics_run_summary(
                 + _test_filter_for(con, "sibyl_forecasts", include_test),
                 [s_run_id],
             ) or 0
+            skipped_by_time = _q1(
+                "SELECT COUNT(*) FROM sibyl_forecasts "
+                "WHERE sibyl_run_id = ? AND status = 'skipped' "
+                "AND skip_reason = 'run time cap'"
+                + _test_filter_for(con, "sibyl_forecasts", include_test),
+                [s_run_id],
+            ) or 0
             sibyl_block = {
                 "sibyl_run_id": s_run_id,
                 "budget_capped": bool(s_capped),
+                "time_capped": bool(s_time_capped),
+                "n_skipped_time_cap": int(skipped_by_time),
                 "run_cost_usd": round(float(s_cost or 0.0), 2),
                 "opus_cost_usd": round(float(s_opus or 0.0), 2),
                 "brave_cost_usd": round(float(s_brave or 0.0), 2),

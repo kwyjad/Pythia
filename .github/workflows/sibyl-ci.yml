@@ -16,6 +16,9 @@ on:
       - "pythia/db/schema.py"
       - "pythia/buckets.py"
       - "pythia/web_research/backends/brave_search.py"
+      - "pythia/api/routes/sibyl.py"
+      - "tests/test_api_sibyl_routes.py"
+      - "tests/fixtures/sibyl_candidate_pools.json"
       - ".github/workflows/sibyl-ci.yml"
   pull_request:
     paths:
@@ -25,6 +28,9 @@ on:
       - "pythia/db/schema.py"
       - "pythia/buckets.py"
       - "pythia/web_research/backends/brave_search.py"
+      - "pythia/api/routes/sibyl.py"
+      - "tests/test_api_sibyl_routes.py"
+      - "tests/fixtures/sibyl_candidate_pools.json"
       - ".github/workflows/sibyl-ci.yml"
   workflow_dispatch: {}
 
@@ -58,4 +64,6 @@ jobs:
                      tests/test_sibyl_leakage.py \
                      tests/test_sibyl_fetch_url_guard.py \
                      tests/test_sibyl_cost.py \
-                     tests/test_sibyl_smoke.py
+                     tests/test_sibyl_select_questions.py \
+                     tests/test_sibyl_smoke.py \
+                     tests/test_api_sibyl_routes.py

@@ -391,8 +391,10 @@ Honest limits of this bundle — do not chase these:
   retained only as `llm_calls.response_text`; members with no llm_calls row
   (e.g. provider errors before logging) appear only via their error status
   in `members[]`.
-- Sibyl covers only the top-volatility subset of questions; absence of a
-  `sibyl` section is normal.
+- Sibyl covers a subset of questions (25 a run since October 2026: each
+  hazard's three most volatile, then the most volatile of the rest, at most
+  ten per hazard; ten by plain volatility before that); absence of a `sibyl`
+  section is normal.
 - Resolutions before July 2026 have no `source_desc`.
 - HS-side prompts (RC/triage) are not inlined per question record (they are
   per country-hazard, not per question); the RC/triage *outputs* and full
@@ -669,7 +671,7 @@ Honest limits of this pack — do not chase these:
   uses only the impact orderings.
 - `deltas.json` matches runs on (iso3, hazard_code, metric) — question ids
   are epoch-suffixed and never match across months by design.
-- Sibyl covers only the top-volatility subset; absence of a `sibyl` section
+- Sibyl covers a subset (25 questions a run, spread across hazards); absence of a `sibyl` section
   in a record is normal. Sibyl rows in `forecast_deviation` exist only
   when the pack is built after the Sibyl stage.
 - The PA resolution machine runs in shadow mode: its base rates inform

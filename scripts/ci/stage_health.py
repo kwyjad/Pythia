@@ -351,7 +351,8 @@ def _sibyl(con, hs_run_id: str, sibyl_run_id: str = "") -> Dict[str, Any]:
                COALESCE(run_hard_cap_usd, 0), COALESCE(budget_capped, FALSE),
                COALESCE(run_cost_usd, 0), COALESCE(opus_cost_usd, 0),
                COALESCE(brave_cost_usd, 0), COALESCE(n_selected, 0),
-               COALESCE(n_forecast, 0), COALESCE(n_skipped, 0)
+               COALESCE(n_forecast, 0), COALESCE(n_skipped, 0),
+               {"COALESCE(time_capped, FALSE)" if _has_column(con, "sibyl_runs", "time_capped") else "FALSE"}
         FROM sibyl_runs WHERE {where}
         ORDER BY created_at DESC LIMIT 1
         """,
@@ -375,6 +376,7 @@ def _sibyl(con, hs_run_id: str, sibyl_run_id: str = "") -> Dict[str, Any]:
         "n_selected": int(r[9] or 0),
         "n_forecast": int(r[10] or 0),
         "n_skipped": int(r[11] or 0),
+        "time_capped": bool(r[12]),
     }
 
     if _has_table(con, "sibyl_forecasts"):
@@ -452,6 +454,7 @@ def _markdown(rep: Dict[str, Any]) -> str:
     sb = rep.get("sibyl") or {}
     if sb.get("available"):
         cap = "**CAPPED**" if sb["budget_capped"] else "ok"
+        tcap = "**CAPPED**" if sb.get("time_capped") else "ok"
         L.append(
             f"**Sibyl** `{sb['sibyl_run_id']}` — {sb['model']}, K={sb['k']}, "
             f"{sb['aggregation']}"
@@ -460,7 +463,7 @@ def _markdown(rep: Dict[str, Any]) -> str:
         L.append(
             f"Coverage {sb['n_forecast']}/{sb['n_selected']} selected "
             f"({sb['n_skipped']} skipped) · budget {cap} "
-            f"(${sb['run_cost_usd']} of ${sb['run_hard_cap_usd']} cap) · "
+            f"(${sb['run_cost_usd']} of ${sb['run_hard_cap_usd']} cap) · time {tcap} · "
             f"opus ${sb['opus_cost_usd']} + brave ${sb['brave_cost_usd']}"
         )
         L.append("")

@@ -28,6 +28,32 @@ for f in "$SRC_FORECASTER" "$SRC_HS" "$SRC_GEMINI" "$SRC_RC_PROMPTS" "$SRC_RC_GR
   fi
 done
 
+# A dated snapshot is an archive. When one already exists for DATE and any
+# prompt file has changed since, write DATE-2 (then DATE-3, ...) rather than
+# overwrite it: a second prompt edit on the same day would otherwise replace
+# the "before" copy with the "after" one, and the About page would lose a
+# version.
+same_as_snapshot() {
+  local d="$1"
+  cmp -s "$SRC_FORECASTER" "$d/forecaster_prompts.py" \
+    && cmp -s "$SRC_HS" "$d/hs_prompts.py" \
+    && cmp -s "$SRC_GEMINI" "$d/gemini_grounding.py" \
+    && cmp -s "$SRC_RC_PROMPTS" "$d/rc_prompts.py" \
+    && cmp -s "$SRC_RC_GROUNDING" "$d/rc_grounding_prompts.py" \
+    && cmp -s "$SRC_TRIAGE_GROUNDING" "$d/hs_triage_grounding_prompts.py"
+}
+if [ -f "$DIR/forecaster_prompts.py" ] && ! same_as_snapshot "$DIR"; then
+  BASE_DATE="$DATE"
+  n=2
+  while [ -f "$REPO_ROOT/docs/prompts/$BASE_DATE-$n/forecaster_prompts.py" ] \
+        && ! same_as_snapshot "$REPO_ROOT/docs/prompts/$BASE_DATE-$n"; do
+    n=$((n + 1))
+  done
+  DATE="$BASE_DATE-$n"
+  DIR="$REPO_ROOT/docs/prompts/$DATE"
+  echo "Snapshot for $BASE_DATE already holds different prompts; writing $DATE"
+fi
+
 # Create snapshot directory
 mkdir -p "$DIR"
 

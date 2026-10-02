@@ -5,9 +5,10 @@
 
 """Sibyl run orchestrator.
 
-Per run: select the top-N volatile affected/fatalities questions, and for
-each (in DESCENDING volatility order, so the budget cap sacrifices the
-lowest-value work first):
+Per run: select N affected/fatalities questions by the floor-then-fill rule
+(sibyl/select_questions.py), and for each, in run order (floor picks first,
+then fill picks, each by falling volatility, so a cap removes fill picks
+first):
 
 1. load the Resolver base rate (outside view),
 2. run K independent agentic trials (Opus over open-web research),
@@ -20,7 +21,10 @@ lowest-value work first):
 The hard budget cap is checked at every question boundary and between
 trials; once reached, no new work starts, completed work is persisted,
 remaining questions are marked ``skipped: run budget cap``, and the
-run-level ``budget_capped`` flag is set.
+run-level ``budget_capped`` flag is set. The wall-clock cap
+(``SIBYL_MAX_RUNTIME_MIN``) behaves the same way at question boundaries:
+the question in flight finishes, the rest are ``skipped: run time cap``,
+and ``time_capped`` is set.
 
 Usage: ``python -m sibyl.run [--hs-run-id RUN] [--n N]``
 """
@@ -47,7 +51,10 @@ from sibyl.config import (
     AGGREGATION,
     BACKTEST_MODE,
     K,
+    MAX_PER_HAZARD,
+    MAX_RUNTIME_MIN,
     MAX_STEPS,
+    MIN_PER_HAZARD,
     MODEL,
     N_QUESTIONS,
     RUN_HARD_CAP_USD,
@@ -74,6 +81,15 @@ from sibyl.spd import (
 logger = logging.getLogger(__name__)
 
 SKIP_REASON_BUDGET = "run budget cap"
+SKIP_REASON_TIME = "run time cap"
+
+
+def _runtime_cap_reached(started: float, limit_min: float, now: Optional[float] = None) -> bool:
+    """True once the trial loop has run *limit_min* minutes (0 = no limit)."""
+    if not limit_min or limit_min <= 0:
+        return False
+    elapsed = (time.monotonic() if now is None else now) - started
+    return elapsed >= limit_min * 60.0
 
 
 @dataclass
@@ -265,6 +281,7 @@ def process_question(
             "aggregation": AGGREGATION,
             "volatility_score": question.volatility_score,
             "triage_score": question.triage_score,
+            "selection_pass": question.selection_pass,
             "pooled_quantiles": spd_payload["pooled_quantiles"],
             "trials": [t.to_dict() for t in outcome.trials],
             "bucket_probs": list(bucket_probs),
@@ -307,6 +324,7 @@ def _persist_non_ok(
             "aggregation": AGGREGATION,
             "volatility_score": question.volatility_score,
             "triage_score": question.triage_score,
+            "selection_pass": question.selection_pass,
             "pooled_quantiles": None,
             "trials": [t.to_dict() for t in (trials or [])],
             "bucket_probs": None,
@@ -325,13 +343,20 @@ def run_sibyl(
     *,
     n_questions: int = N_QUESTIONS,
     model_call: Any = None,
+    max_runtime_min: float = MAX_RUNTIME_MIN,
+    clock: Any = None,
 ) -> Dict[str, Any]:
-    """Execute a full Sibyl cycle. Returns the run summary dict."""
+    """Execute a full Sibyl cycle. Returns the run summary dict.
+
+    *clock* is a monotonic-seconds callable (test seam for the time cap).
+    """
     ensure_schema()
     sibyl_run_id = f"sibyl_{int(time.time() * 1000)}"
     tracker = CostTracker()
     con = connect(read_only=False)
+    clock = clock or time.monotonic
     budget_capped = False
+    time_capped = False
     n_forecast = 0
     n_skipped = 0
     resolved_hs_run_id = hs_run_id
@@ -359,7 +384,26 @@ def run_sibyl(
             sibyl_run_id, len(questions), tracker.run_hard_cap_usd, K, MODEL,
         )
 
+        loop_started = clock()
         for question in questions:
+            if time_capped or _runtime_cap_reached(loop_started, max_runtime_min, clock()):
+                # Wall-clock cut-off: the Sibyl job is the release trigger
+                # and has a hard timeout, so no new question starts once the
+                # limit has passed. The question in flight already finished.
+                if not time_capped:
+                    logger.warning(
+                        "sibyl.run: time cap (%.0f min) reached — no new "
+                        "questions start; the rest are skipped.",
+                        max_runtime_min,
+                    )
+                time_capped = True
+                n_skipped += 1
+                _persist_non_ok(
+                    con, question,
+                    sibyl_run_id=sibyl_run_id, status="skipped",
+                    skip_reason=SKIP_REASON_TIME, tracker=tracker,
+                )
+                continue
             if tracker.hard_cap_reached():
                 # Hard cut-off: no new question starts. Persist the skip so
                 # the dashboard shows exactly what the cap sacrificed.
@@ -434,6 +478,7 @@ def run_sibyl(
             "aggregation": AGGREGATION,
             "run_hard_cap_usd": tracker.run_hard_cap_usd,
             "budget_capped": budget_capped,
+            "time_capped": time_capped,
             "run_cost_usd": breakdown.total_usd,
             "opus_cost_usd": breakdown.opus_usd,
             "brave_cost_usd": breakdown.brave_usd,
@@ -442,6 +487,9 @@ def run_sibyl(
             "n_skipped": n_skipped,
             "config": {
                 "N_QUESTIONS": n_questions,
+                "MIN_PER_HAZARD": MIN_PER_HAZARD,
+                "MAX_PER_HAZARD": MAX_PER_HAZARD,
+                "MAX_RUNTIME_MIN": max_runtime_min,
                 "QUANTILE_LEVELS": sibyl_config.QUANTILE_LEVELS,
                 "BACKTEST_MODE": sibyl_config.BACKTEST_MODE,
                 "BUDGET_USD_PER_QUESTION": sibyl_config.BUDGET_USD_PER_QUESTION,
@@ -453,14 +501,15 @@ def run_sibyl(
         con.close()
 
     logger.info(
-        "sibyl.run: %s done — %d forecast, %d skipped, $%.2f spent%s",
+        "sibyl.run: %s done — %d forecast, %d skipped, $%.2f spent%s%s",
         sibyl_run_id, n_forecast, n_skipped, tracker.run_cost_usd,
         " [BUDGET CAPPED]" if budget_capped else "",
+        " [TIME CAPPED]" if time_capped else "",
     )
     print(
         f"sibyl_run_id={sibyl_run_id} forecast={n_forecast} "
         f"skipped={n_skipped} cost_usd={tracker.run_cost_usd:.2f} "
-        f"budget_capped={budget_capped}"
+        f"budget_capped={budget_capped} time_capped={time_capped}"
     )
     return run_record
 

@@ -1,0 +1,1922 @@
+{
+"_note": "Eligible Sibyl candidates (status active, non-test) for three production HS runs, read from the published resolver.duckdb of 2026-10-02 (sha256 362a8f26...). Used to pin the floor-then-fill selection shape.",
+"runs": {
+"hs_20260801T025754": [
+{
+"question_id": "UGA_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "UGA",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.2475
+},
+{
+"question_id": "LBN_ACE_FATALITIES_2026-09",
+"iso3": "LBN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.225
+},
+{
+"question_id": "MLI_ACE_FATALITIES_2026-09",
+"iso3": "MLI",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.225
+},
+{
+"question_id": "PRK_TC_PA_2026-09",
+"iso3": "PRK",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.225
+},
+{
+"question_id": "PSE_ACE_FATALITIES_2026-09",
+"iso3": "PSE",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.225
+},
+{
+"question_id": "SOM_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "SOM",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.225
+},
+{
+"question_id": "SSD_ACE_FATALITIES_2026-09",
+"iso3": "SSD",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.19
+},
+{
+"question_id": "AFG_ACE_FATALITIES_2026-09",
+"iso3": "AFG",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.18
+},
+{
+"question_id": "CHN_TC_PA_2026-09",
+"iso3": "CHN",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.1575
+},
+{
+"question_id": "COL_ACE_FATALITIES_2026-09",
+"iso3": "COL",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.1575
+},
+{
+"question_id": "CAF_ACE_FATALITIES_2026-09",
+"iso3": "CAF",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.14
+},
+{
+"question_id": "TWN_TC_PA_2026-09",
+"iso3": "TWN",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.14
+},
+{
+"question_id": "TCD_ACE_FATALITIES_2026-09",
+"iso3": "TCD",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.128
+},
+{
+"question_id": "IRN_ACE_FATALITIES_2026-09",
+"iso3": "IRN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.125
+},
+{
+"question_id": "CHL_FL_PA_2026-09",
+"iso3": "CHL",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.12
+},
+{
+"question_id": "NER_ACE_FATALITIES_2026-09",
+"iso3": "NER",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.112
+},
+{
+"question_id": "PAK_ACE_FATALITIES_2026-09",
+"iso3": "PAK",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.112
+},
+{
+"question_id": "ETH_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "ETH",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.105
+},
+{
+"question_id": "ISR_ACE_FATALITIES_2026-09",
+"iso3": "ISR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.099
+},
+{
+"question_id": "ETH_ACE_FATALITIES_2026-09",
+"iso3": "ETH",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.098
+},
+{
+"question_id": "SOM_ACE_FATALITIES_2026-09",
+"iso3": "SOM",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.098
+},
+{
+"question_id": "NPL_ACE_FATALITIES_2026-09",
+"iso3": "NPL",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.084
+},
+{
+"question_id": "PHL_TC_PA_2026-09",
+"iso3": "PHL",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.075
+},
+{
+"question_id": "ZAF_ACE_FATALITIES_2026-09",
+"iso3": "ZAF",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.07
+},
+{
+"question_id": "AGO_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "AGO",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0625
+},
+{
+"question_id": "KOR_TC_PA_2026-09",
+"iso3": "KOR",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0625
+},
+{
+"question_id": "LAO_TC_PA_2026-09",
+"iso3": "LAO",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0625
+},
+{
+"question_id": "MDG_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "MDG",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0625
+},
+{
+"question_id": "MOZ_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "MOZ",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0625
+},
+{
+"question_id": "NIC_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "NIC",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0625
+},
+{
+"question_id": "VNM_TC_PA_2026-09",
+"iso3": "VNM",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0625
+},
+{
+"question_id": "BEN_ACE_FATALITIES_2026-09",
+"iso3": "BEN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.055
+},
+{
+"question_id": "KEN_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "KEN",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.05
+},
+{
+"question_id": "SLV_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "SLV",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.05
+},
+{
+"question_id": "HTI_TC_PA_2026-09",
+"iso3": "HTI",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.045
+},
+{
+"question_id": "SDN_ACE_FATALITIES_2026-09",
+"iso3": "SDN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.045
+},
+{
+"question_id": "SYR_ACE_FATALITIES_2026-09",
+"iso3": "SYR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.045
+},
+{
+"question_id": "JOR_ACE_FATALITIES_2026-09",
+"iso3": "JOR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0375
+},
+{
+"question_id": "KHM_TC_PA_2026-09",
+"iso3": "KHM",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0375
+},
+{
+"question_id": "YEM_ACE_FATALITIES_2026-09",
+"iso3": "YEM",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0375
+},
+{
+"question_id": "BFA_ACE_FATALITIES_2026-09",
+"iso3": "BFA",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.03
+},
+{
+"question_id": "LBY_ACE_FATALITIES_2026-09",
+"iso3": "LBY",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.03
+},
+{
+"question_id": "MEX_TC_PA_2026-09",
+"iso3": "MEX",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.03
+},
+{
+"question_id": "THA_TC_PA_2026-09",
+"iso3": "THA",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.03
+},
+{
+"question_id": "GIN_ACE_FATALITIES_2026-09",
+"iso3": "GIN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.027
+},
+{
+"question_id": "HND_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "HND",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0225
+},
+{
+"question_id": "IDN_TC_PA_2026-09",
+"iso3": "IDN",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0225
+},
+{
+"question_id": "HTI_ACE_FATALITIES_2026-09",
+"iso3": "HTI",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.018
+},
+{
+"question_id": "MOZ_ACE_FATALITIES_2026-09",
+"iso3": "MOZ",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.018
+},
+{
+"question_id": "COL_FL_PA_2026-09",
+"iso3": "COL",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.015
+},
+{
+"question_id": "GHA_FL_PA_2026-09",
+"iso3": "GHA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.015
+},
+{
+"question_id": "ECU_ACE_FATALITIES_2026-09",
+"iso3": "ECU",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "MEX_ACE_FATALITIES_2026-09",
+"iso3": "MEX",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "PHL_ACE_FATALITIES_2026-09",
+"iso3": "PHL",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "VEN_ACE_FATALITIES_2026-09",
+"iso3": "VEN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "IRQ_ACE_FATALITIES_2026-09",
+"iso3": "IRQ",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0105
+},
+{
+"question_id": "RUS_ACE_FATALITIES_2026-09",
+"iso3": "RUS",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0105
+},
+{
+"question_id": "BGD_FL_PA_2026-09",
+"iso3": "BGD",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.008
+},
+{
+"question_id": "CHN_FL_PA_2026-09",
+"iso3": "CHN",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0064
+},
+{
+"question_id": "IND_FL_PA_2026-09",
+"iso3": "IND",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0064
+},
+{
+"question_id": "MMR_FL_PA_2026-09",
+"iso3": "MMR",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0064
+},
+{
+"question_id": "MRT_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "MRT",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0064
+},
+{
+"question_id": "NGA_FL_PA_2026-09",
+"iso3": "NGA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0064
+},
+{
+"question_id": "MMR_ACE_FATALITIES_2026-09",
+"iso3": "MMR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0056
+},
+{
+"question_id": "ZMB_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "ZMB",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0048
+},
+{
+"question_id": "MWI_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "MWI",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.004
+},
+{
+"question_id": "PAK_FL_PA_2026-09",
+"iso3": "PAK",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.004
+},
+{
+"question_id": "COD_ACE_FATALITIES_2026-09",
+"iso3": "COD",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0035
+},
+{
+"question_id": "BDI_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "BDI",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.003
+},
+{
+"question_id": "BRA_ACE_FATALITIES_2026-09",
+"iso3": "BRA",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.003
+},
+{
+"question_id": "CMR_ACE_FATALITIES_2026-09",
+"iso3": "CMR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.003
+},
+{
+"question_id": "NGA_ACE_FATALITIES_2026-09",
+"iso3": "NGA",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.003
+},
+{
+"question_id": "UKR_ACE_FATALITIES_2026-09",
+"iso3": "UKR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.003
+},
+{
+"question_id": "AFG_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "AFG",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0025
+},
+{
+"question_id": "AFG_FL_PA_2026-09",
+"iso3": "AFG",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "BDI_FL_PA_2026-09",
+"iso3": "BDI",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "CUB_FL_PA_2026-09",
+"iso3": "CUB",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "ETH_FL_PA_2026-09",
+"iso3": "ETH",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "GIN_FL_PA_2026-09",
+"iso3": "GIN",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "HND_ACE_FATALITIES_2026-09",
+"iso3": "HND",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0025
+},
+{
+"question_id": "HTI_FL_PA_2026-09",
+"iso3": "HTI",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "LAO_FL_PA_2026-09",
+"iso3": "LAO",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "NAM_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "NAM",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0025
+},
+{
+"question_id": "NER_FL_PA_2026-09",
+"iso3": "NER",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "NPL_FL_PA_2026-09",
+"iso3": "NPL",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "PHL_FL_PA_2026-09",
+"iso3": "PHL",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "PNG_FL_PA_2026-09",
+"iso3": "PNG",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "PRK_FL_PA_2026-09",
+"iso3": "PRK",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "PSE_FL_PA_2026-09",
+"iso3": "PSE",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "RKS_FL_PA_2026-09",
+"iso3": "RKS",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "SDN_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "SDN",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0025
+},
+{
+"question_id": "SDN_FL_PA_2026-09",
+"iso3": "SDN",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "SSD_FL_PA_2026-09",
+"iso3": "SSD",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "SYR_DR_PHASE3PLUS_IN_NEED_2026-09",
+"iso3": "SYR",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0025
+},
+{
+"question_id": "VNM_FL_PA_2026-09",
+"iso3": "VNM",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "PNG_TC_PA_2026-09",
+"iso3": "PNG",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0015
+}
+],
+"hs_20260915T130009": [
+{
+"question_id": "PER_FL_PA_2026-10",
+"iso3": "PER",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.3575
+},
+{
+"question_id": "HND_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "HND",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.33
+},
+{
+"question_id": "YEM_ACE_FATALITIES_2026-10",
+"iso3": "YEM",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.319
+},
+{
+"question_id": "ETH_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "ETH",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.2925
+},
+{
+"question_id": "TUR_ACE_FATALITIES_2026-10",
+"iso3": "TUR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.275
+},
+{
+"question_id": "KEN_FL_PA_2026-10",
+"iso3": "KEN",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.2475
+},
+{
+"question_id": "PSE_ACE_FATALITIES_2026-10",
+"iso3": "PSE",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.231
+},
+{
+"question_id": "MDG_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "MDG",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.225
+},
+{
+"question_id": "THA_FL_PA_2026-10",
+"iso3": "THA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.1925
+},
+{
+"question_id": "COL_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "COL",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.18
+},
+{
+"question_id": "MLI_ACE_FATALITIES_2026-10",
+"iso3": "MLI",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.18
+},
+{
+"question_id": "MOZ_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "MOZ",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.18
+},
+{
+"question_id": "SOM_FL_PA_2026-10",
+"iso3": "SOM",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.18
+},
+{
+"question_id": "SSD_ACE_FATALITIES_2026-10",
+"iso3": "SSD",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.171
+},
+{
+"question_id": "LSO_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "LSO",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.1575
+},
+{
+"question_id": "NER_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "NER",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.1575
+},
+{
+"question_id": "UGA_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "UGA",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.1575
+},
+{
+"question_id": "ETH_ACE_FATALITIES_2026-10",
+"iso3": "ETH",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.144
+},
+{
+"question_id": "NIC_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "NIC",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.14
+},
+{
+"question_id": "NPL_FL_PA_2026-10",
+"iso3": "NPL",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.14
+},
+{
+"question_id": "VNM_TC_PA_2026-10",
+"iso3": "VNM",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.14
+},
+{
+"question_id": "ZWE_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "ZWE",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.14
+},
+{
+"question_id": "IRN_ACE_FATALITIES_2026-10",
+"iso3": "IRN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.126
+},
+{
+"question_id": "NER_ACE_FATALITIES_2026-10",
+"iso3": "NER",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.126
+},
+{
+"question_id": "TCD_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "TCD",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.1225
+},
+{
+"question_id": "AGO_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "AGO",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.105
+},
+{
+"question_id": "BDI_FL_PA_2026-10",
+"iso3": "BDI",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.105
+},
+{
+"question_id": "CHL_FL_PA_2026-10",
+"iso3": "CHL",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.105
+},
+{
+"question_id": "TZA_FL_PA_2026-10",
+"iso3": "TZA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.105
+},
+{
+"question_id": "COL_ACE_FATALITIES_2026-10",
+"iso3": "COL",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.08
+},
+{
+"question_id": "CHN_TC_PA_2026-10",
+"iso3": "CHN",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0625
+},
+{
+"question_id": "MEX_TC_PA_2026-10",
+"iso3": "MEX",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0625
+},
+{
+"question_id": "PAK_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "PAK",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0625
+},
+{
+"question_id": "RWA_FL_PA_2026-10",
+"iso3": "RWA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0625
+},
+{
+"question_id": "IRQ_ACE_FATALITIES_2026-10",
+"iso3": "IRQ",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.055
+},
+{
+"question_id": "SOM_ACE_FATALITIES_2026-10",
+"iso3": "SOM",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.055
+},
+{
+"question_id": "GIN_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "GIN",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.05
+},
+{
+"question_id": "LAO_TC_PA_2026-10",
+"iso3": "LAO",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.05
+},
+{
+"question_id": "MLI_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "MLI",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.05
+},
+{
+"question_id": "NAM_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "NAM",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.05
+},
+{
+"question_id": "SSD_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "SSD",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.05
+},
+{
+"question_id": "CAF_ACE_FATALITIES_2026-10",
+"iso3": "CAF",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.045
+},
+{
+"question_id": "SYR_ACE_FATALITIES_2026-10",
+"iso3": "SYR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.045
+},
+{
+"question_id": "HTI_ACE_FATALITIES_2026-10",
+"iso3": "HTI",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0375
+},
+{
+"question_id": "IND_TC_PA_2026-10",
+"iso3": "IND",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0375
+},
+{
+"question_id": "KEN_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "KEN",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0375
+},
+{
+"question_id": "PAK_ACE_FATALITIES_2026-10",
+"iso3": "PAK",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0375
+},
+{
+"question_id": "TCD_ACE_FATALITIES_2026-10",
+"iso3": "TCD",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0375
+},
+{
+"question_id": "TWN_TC_PA_2026-10",
+"iso3": "TWN",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0375
+},
+{
+"question_id": "MOZ_ACE_FATALITIES_2026-10",
+"iso3": "MOZ",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.036
+},
+{
+"question_id": "BDI_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "BDI",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.03
+},
+{
+"question_id": "BEN_ACE_FATALITIES_2026-10",
+"iso3": "BEN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.03
+},
+{
+"question_id": "THA_TC_PA_2026-10",
+"iso3": "THA",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.03
+},
+{
+"question_id": "ZMB_ACE_FATALITIES_2026-10",
+"iso3": "ZMB",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.03
+},
+{
+"question_id": "LBN_ACE_FATALITIES_2026-10",
+"iso3": "LBN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.028
+},
+{
+"question_id": "NGA_ACE_FATALITIES_2026-10",
+"iso3": "NGA",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.024
+},
+{
+"question_id": "BFA_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "BFA",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0225
+},
+{
+"question_id": "ZMB_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "ZMB",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0225
+},
+{
+"question_id": "ETH_FL_PA_2026-10",
+"iso3": "ETH",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.018
+},
+{
+"question_id": "LBY_ACE_FATALITIES_2026-10",
+"iso3": "LBY",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.018
+},
+{
+"question_id": "BFA_ACE_FATALITIES_2026-10",
+"iso3": "BFA",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.016
+},
+{
+"question_id": "ISR_ACE_FATALITIES_2026-10",
+"iso3": "ISR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "KEN_ACE_FATALITIES_2026-10",
+"iso3": "KEN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "RUS_ACE_FATALITIES_2026-10",
+"iso3": "RUS",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "UKR_ACE_FATALITIES_2026-10",
+"iso3": "UKR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.009
+},
+{
+"question_id": "MMR_ACE_FATALITIES_2026-10",
+"iso3": "MMR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0084
+},
+{
+"question_id": "MWI_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "MWI",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0064
+},
+{
+"question_id": "YEM_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "YEM",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0064
+},
+{
+"question_id": "CMR_ACE_FATALITIES_2026-10",
+"iso3": "CMR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0056
+},
+{
+"question_id": "SYR_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "SYR",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.004
+},
+{
+"question_id": "COD_ACE_FATALITIES_2026-10",
+"iso3": "COD",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0035
+},
+{
+"question_id": "SOM_DR_PHASE3PLUS_IN_NEED_2026-10",
+"iso3": "SOM",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0035
+},
+{
+"question_id": "ECU_ACE_FATALITIES_2026-10",
+"iso3": "ECU",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.003
+},
+{
+"question_id": "MEX_ACE_FATALITIES_2026-10",
+"iso3": "MEX",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.003
+},
+{
+"question_id": "COD_FL_PA_2026-10",
+"iso3": "COD",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "GHA_FL_PA_2026-10",
+"iso3": "GHA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "HND_ACE_FATALITIES_2026-10",
+"iso3": "HND",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0025
+},
+{
+"question_id": "IND_FL_PA_2026-10",
+"iso3": "IND",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "MMR_FL_PA_2026-10",
+"iso3": "MMR",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "MOZ_FL_PA_2026-10",
+"iso3": "MOZ",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "PSE_FL_PA_2026-10",
+"iso3": "PSE",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "SDN_FL_PA_2026-10",
+"iso3": "SDN",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "SLB_TC_PA_2026-10",
+"iso3": "SLB",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "VNM_FL_PA_2026-10",
+"iso3": "VNM",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+}
+],
+"hs_20261001T045127": [
+{
+"question_id": "MDG_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "MDG",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.455
+},
+{
+"question_id": "ETH_ACE_FATALITIES_2026-11",
+"iso3": "ETH",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.3575
+},
+{
+"question_id": "HND_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "HND",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.3575
+},
+{
+"question_id": "MEX_FL_PA_2026-11",
+"iso3": "MEX",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.3575
+},
+{
+"question_id": "SDN_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "SDN",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.3575
+},
+{
+"question_id": "COL_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "COL",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.2925
+},
+{
+"question_id": "SLV_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "SLV",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.27
+},
+{
+"question_id": "YEM_ACE_FATALITIES_2026-11",
+"iso3": "YEM",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.26
+},
+{
+"question_id": "KEN_FL_PA_2026-11",
+"iso3": "KEN",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.25
+},
+{
+"question_id": "ETH_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "ETH",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.225
+},
+{
+"question_id": "PHL_TC_PA_2026-11",
+"iso3": "PHL",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.225
+},
+{
+"question_id": "SOM_FL_PA_2026-11",
+"iso3": "SOM",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.225
+},
+{
+"question_id": "PER_FL_PA_2026-11",
+"iso3": "PER",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.2025
+},
+{
+"question_id": "UGA_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "UGA",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.2
+},
+{
+"question_id": "LSO_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "LSO",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.18
+},
+{
+"question_id": "MOZ_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "MOZ",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.18
+},
+{
+"question_id": "NIC_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "NIC",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.18
+},
+{
+"question_id": "TCD_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "TCD",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.18
+},
+{
+"question_id": "NER_ACE_FATALITIES_2026-11",
+"iso3": "NER",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.171
+},
+{
+"question_id": "ECU_FL_PA_2026-11",
+"iso3": "ECU",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.16
+},
+{
+"question_id": "IRN_ACE_FATALITIES_2026-11",
+"iso3": "IRN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.16
+},
+{
+"question_id": "THA_FL_PA_2026-11",
+"iso3": "THA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.1575
+},
+{
+"question_id": "IRQ_ACE_FATALITIES_2026-11",
+"iso3": "IRQ",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.12
+},
+{
+"question_id": "COL_ACE_FATALITIES_2026-11",
+"iso3": "COL",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.112
+},
+{
+"question_id": "LAO_TC_PA_2026-11",
+"iso3": "LAO",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.105
+},
+{
+"question_id": "TZA_FL_PA_2026-11",
+"iso3": "TZA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.105
+},
+{
+"question_id": "PSE_ACE_FATALITIES_2026-11",
+"iso3": "PSE",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.099
+},
+{
+"question_id": "PAK_ACE_FATALITIES_2026-11",
+"iso3": "PAK",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.098
+},
+{
+"question_id": "ECU_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "ECU",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.09
+},
+{
+"question_id": "MEX_TC_PA_2026-11",
+"iso3": "MEX",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.08
+},
+{
+"question_id": "ZMB_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "ZMB",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.075
+},
+{
+"question_id": "AFG_ACE_FATALITIES_2026-11",
+"iso3": "AFG",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.07
+},
+{
+"question_id": "BRA_FL_PA_2026-11",
+"iso3": "BRA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.07
+},
+{
+"question_id": "PHL_ACE_FATALITIES_2026-11",
+"iso3": "PHL",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.066
+},
+{
+"question_id": "ETH_FL_PA_2026-11",
+"iso3": "ETH",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0625
+},
+{
+"question_id": "KHM_TC_PA_2026-11",
+"iso3": "KHM",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0625
+},
+{
+"question_id": "SSD_ACE_FATALITIES_2026-11",
+"iso3": "SSD",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0625
+},
+{
+"question_id": "THA_TC_PA_2026-11",
+"iso3": "THA",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0625
+},
+{
+"question_id": "TWN_TC_PA_2026-11",
+"iso3": "TWN",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0625
+},
+{
+"question_id": "GIN_ACE_FATALITIES_2026-11",
+"iso3": "GIN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.055
+},
+{
+"question_id": "MLI_ACE_FATALITIES_2026-11",
+"iso3": "MLI",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0525
+},
+{
+"question_id": "UGA_FL_PA_2026-11",
+"iso3": "UGA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.05
+},
+{
+"question_id": "ISR_ACE_FATALITIES_2026-11",
+"iso3": "ISR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.048
+},
+{
+"question_id": "LBY_ACE_FATALITIES_2026-11",
+"iso3": "LBY",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0396
+},
+{
+"question_id": "CHN_TC_PA_2026-11",
+"iso3": "CHN",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0375
+},
+{
+"question_id": "HTI_TC_PA_2026-11",
+"iso3": "HTI",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0375
+},
+{
+"question_id": "SOM_ACE_FATALITIES_2026-11",
+"iso3": "SOM",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0375
+},
+{
+"question_id": "TCD_ACE_FATALITIES_2026-11",
+"iso3": "TCD",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0375
+},
+{
+"question_id": "VNM_TC_PA_2026-11",
+"iso3": "VNM",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0375
+},
+{
+"question_id": "CAF_ACE_FATALITIES_2026-11",
+"iso3": "CAF",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.03
+},
+{
+"question_id": "FJI_TC_PA_2026-11",
+"iso3": "FJI",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.03
+},
+{
+"question_id": "GIN_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "GIN",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.03
+},
+{
+"question_id": "LKA_FL_PA_2026-11",
+"iso3": "LKA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.03
+},
+{
+"question_id": "NIC_TC_PA_2026-11",
+"iso3": "NIC",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.03
+},
+{
+"question_id": "SSD_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "SSD",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.03
+},
+{
+"question_id": "LBN_ACE_FATALITIES_2026-11",
+"iso3": "LBN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.028
+},
+{
+"question_id": "BDI_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "BDI",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0225
+},
+{
+"question_id": "BFA_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "BFA",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0225
+},
+{
+"question_id": "GHA_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "GHA",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.018
+},
+{
+"question_id": "MOZ_ACE_FATALITIES_2026-11",
+"iso3": "MOZ",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.018
+},
+{
+"question_id": "SYR_ACE_FATALITIES_2026-11",
+"iso3": "SYR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.016
+},
+{
+"question_id": "KEN_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "KEN",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.015
+},
+{
+"question_id": "MLI_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "MLI",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.015
+},
+{
+"question_id": "MOZ_FL_PA_2026-11",
+"iso3": "MOZ",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.015
+},
+{
+"question_id": "RWA_FL_PA_2026-11",
+"iso3": "RWA",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.015
+},
+{
+"question_id": "GTM_ACE_FATALITIES_2026-11",
+"iso3": "GTM",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0135
+},
+{
+"question_id": "HTI_ACE_FATALITIES_2026-11",
+"iso3": "HTI",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "KEN_ACE_FATALITIES_2026-11",
+"iso3": "KEN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "NGA_ACE_FATALITIES_2026-11",
+"iso3": "NGA",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "RUS_ACE_FATALITIES_2026-11",
+"iso3": "RUS",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "UKR_ACE_FATALITIES_2026-11",
+"iso3": "UKR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.012
+},
+{
+"question_id": "BEN_ACE_FATALITIES_2026-11",
+"iso3": "BEN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0105
+},
+{
+"question_id": "MMR_ACE_FATALITIES_2026-11",
+"iso3": "MMR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0105
+},
+{
+"question_id": "AGO_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "AGO",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.01
+},
+{
+"question_id": "BDI_FL_PA_2026-11",
+"iso3": "BDI",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.01
+},
+{
+"question_id": "BFA_ACE_FATALITIES_2026-11",
+"iso3": "BFA",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.009
+},
+{
+"question_id": "SDN_ACE_FATALITIES_2026-11",
+"iso3": "SDN",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.008
+},
+{
+"question_id": "COD_ACE_FATALITIES_2026-11",
+"iso3": "COD",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.007
+},
+{
+"question_id": "AFG_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "AFG",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0064
+},
+{
+"question_id": "SYR_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "SYR",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0064
+},
+{
+"question_id": "CMR_ACE_FATALITIES_2026-11",
+"iso3": "CMR",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0048
+},
+{
+"question_id": "MWI_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "MWI",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.004
+},
+{
+"question_id": "ZWE_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "ZWE",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.004
+},
+{
+"question_id": "ECU_ACE_FATALITIES_2026-11",
+"iso3": "ECU",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0035
+},
+{
+"question_id": "MEX_ACE_FATALITIES_2026-11",
+"iso3": "MEX",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.003
+},
+{
+"question_id": "BRA_ACE_FATALITIES_2026-11",
+"iso3": "BRA",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0025
+},
+{
+"question_id": "HND_ACE_FATALITIES_2026-11",
+"iso3": "HND",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0025
+},
+{
+"question_id": "IND_ACE_FATALITIES_2026-11",
+"iso3": "IND",
+"hazard_code": "ACE",
+"metric": "FATALITIES",
+"volatility_score": 0.0025
+},
+{
+"question_id": "IND_FL_PA_2026-11",
+"iso3": "IND",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "PHL_FL_PA_2026-11",
+"iso3": "PHL",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "PSE_FL_PA_2026-11",
+"iso3": "PSE",
+"hazard_code": "FL",
+"metric": "PA",
+"volatility_score": 0.0025
+},
+{
+"question_id": "SOM_DR_PHASE3PLUS_IN_NEED_2026-11",
+"iso3": "SOM",
+"hazard_code": "DR",
+"metric": "PHASE3PLUS_IN_NEED",
+"volatility_score": 0.0025
+},
+{
+"question_id": "SLB_TC_PA_2026-11",
+"iso3": "SLB",
+"hazard_code": "TC",
+"metric": "PA",
+"volatility_score": 0.0009
+}
+]
+}
+}

@@ -49,8 +49,9 @@ export default async function SibylPage({
       <section className="space-y-2">
         <h1 className="text-3xl font-semibold">Sibyl — Deep-Research Track</h1>
         <p className="text-sm text-fred-text">
-          A parallel oracle beside the standard pipeline: for the ten most
-          volatile affected/fatalities questions of each run, Claude Opus
+          A parallel oracle beside the standard pipeline: for 25
+          affected/fatalities questions of each run (three per hazard first,
+          then the most volatile of the rest), Claude Opus
           researches the open web in independent agentic trials and produces
           its own probability distribution. The only shared input with the
           standard track is the Resolver base rate. Track-vs-track divergence

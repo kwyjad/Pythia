@@ -182,11 +182,12 @@ export default function SibylMetricsAbout() {
             <>
               The question&apos;s Horizon Scanner{" "}
               <Formula>regime_change_score = likelihood × magnitude</Formula> of
-              a departure from the historical base rate (tie-broken by{" "}
-              <Formula>triage_score</Formula>). It is <strong>not</strong>{" "}
-              computed by Sibyl — it is the criterion used to pick the top-N most
-              volatile affected/fatalities questions each run and hand them to
-              Sibyl.
+              a departure from the historical base rate. It is{" "}
+              <strong>not</strong> computed by Sibyl. It is the criterion that
+              picks Sibyl&apos;s questions each run: every hazard first takes its
+              three most volatile affected/fatalities questions, then the
+              remaining slots go to the most volatile questions left, at most ten
+              per hazard.
             </>
           }
           plain={
