@@ -1067,3 +1067,71 @@ def base_rate_spd(
         return _conflict_displacement(con, iso3_up, hz, as_of_ym)
 
     return [], NO_BASE_RATE_SOURCE, {"reason": f"no base-rate loader for {hz}/{m}"}
+
+
+# ---------------------------------------------------------------------------
+# Conflict trajectory (the figures the ACE base-rate block prints)
+# ---------------------------------------------------------------------------
+
+
+def conflict_trajectory(
+    rows: list[tuple],
+    source_name: str,
+) -> Dict[str, Any]:
+    """Trajectory stats the conflict base-rate block prints, from (ym, value) rows in
+    ASCENDING month order: the last month, the trailing and prior three-month means, and
+    the trend. One implementation, used by forecaster.cli._build_conflict_base_rate
+    (the prompt) and by the scored bundle's base_rate_shown (the record of it)."""
+    if not rows:
+        return {
+            "source": source_name,
+            "last_month": None,
+            "trailing_3m_avg": None,
+            "prior_3m_avg": None,
+            "trend_pct": None,
+            "trend_direction": None,
+            "last_6m": [],
+            "note": f"No {source_name} data available for this country.",
+        }
+
+    # rows should be sorted ascending by ym
+    last_6 = [{"ym": str(ym), "value": round(float(val or 0))} for ym, val in rows]
+    values = [entry["value"] for entry in last_6]
+
+    last_month_entry = last_6[-1]
+    # trailing 3m = last 3 months, prior 3m = months 4-6
+    trailing_3m_vals = values[-3:] if len(values) >= 3 else values
+    prior_3m_vals = values[-6:-3] if len(values) >= 6 else values[:max(0, len(values) - 3)]
+
+    trailing_3m_avg = round(sum(trailing_3m_vals) / len(trailing_3m_vals)) if trailing_3m_vals else None
+    prior_3m_avg = round(sum(prior_3m_vals) / len(prior_3m_vals)) if prior_3m_vals else None
+
+    trend_pct: Any = None
+    trend_direction: Any = None
+    if trailing_3m_avg is not None and prior_3m_avg is not None:
+        if prior_3m_avg == 0:
+            if trailing_3m_avg > 0:
+                trend_pct = "new_activity"
+                trend_direction = "escalating"
+            else:
+                trend_pct = 0.0
+                trend_direction = "stable"
+        else:
+            pct = ((trailing_3m_avg - prior_3m_avg) / prior_3m_avg) * 100
+            trend_pct = round(pct, 1)
+            if pct > 10:
+                trend_direction = "escalating"
+            elif pct < -10:
+                trend_direction = "de-escalating"
+            else:
+                trend_direction = "stable"
+
+    return {
+        "source": source_name,
+        "last_month": last_month_entry,
+        "trailing_3m_avg": trailing_3m_avg,
+        "prior_3m_avg": prior_3m_avg,
+        "trend_pct": trend_pct,
+        "trend_direction": trend_direction,
+        "last_6m": last_6,
+    }
