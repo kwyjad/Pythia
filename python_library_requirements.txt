@@ -18,10 +18,15 @@ numpy>=2.3,<3
 pydantic>=2.6,<3
 python-docx>=1.1,<2
 pdfplumber>=0.10,<1
+# Floor, not a pin: pdfminer.six before 20251107 carries CVE-2025-64512.
+pdfminer.six>=20251107
 beautifulsoup4>=4.12,<5
 
 # --- API server (used by pythia/api) ---
 fastapi>=0.110,<1
+# Floor, not a pin: Starlette before 0.47.2 has a published DoS in
+# multipart parsing, and fastapi's range alone could resolve to one.
+starlette>=0.47.2
 uvicorn[standard]>=0.30,<1
 
 # --- Geospatial / NMME ingestion ---

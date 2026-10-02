@@ -329,7 +329,7 @@ jobs:
         run: |
           set +e
           sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 >/dev/null 2>&1
-          pip install weasyprint >/dev/null 2>&1
+          pip install "weasyprint==70.0" >/dev/null 2>&1
           python -m interpreter.pdf \
             --db "${RESOLVER_DB_URL}" \
             --kind combined \

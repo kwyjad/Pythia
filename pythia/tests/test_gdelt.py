@@ -197,3 +197,24 @@ def test_db_roundtrip_and_format(temp_db):
     assert "Iraq" in text
     assert "GDELT indicators are media-derived" in text
     assert "Material Conflict share" in text
+
+
+def test_a_daily_export_that_unpacks_past_the_cap_is_skipped(monkeypatch):
+    """A zip states its own sizes; the read stops at the cap regardless."""
+    import io
+    import zipfile
+    from datetime import date
+
+    from pythia import gdelt
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("20261001.export.CSV", b"x\t" * 40_000)
+
+    class _Resp:
+        status_code = 200
+        content = buf.getvalue()
+
+    monkeypatch.setattr(gdelt, "_MAX_UNZIPPED_BYTES", 1000)
+    monkeypatch.setattr(gdelt.requests, "get", lambda *a, **k: _Resp())
+    assert gdelt.fetch_gdelt_daily_events(date(2026, 10, 1)) is None

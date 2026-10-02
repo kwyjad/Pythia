@@ -52,6 +52,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r python_library_requirements.txt
           pip install pytest
+          # The same WeasyPrint the report workflows pin, so the PDF tests
+          # render for real and prove the data-only URL fetcher. Best effort:
+          # without it those tests skip rather than fail.
+          sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 >/dev/null 2>&1 || true
+          pip install "weasyprint==70.0" || true
 
       - name: Run interpreter tests
         run: |

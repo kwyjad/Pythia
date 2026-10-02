@@ -138,6 +138,11 @@ BRAVE_TIMEOUT_SEC = _env_int("SIBYL_BRAVE_TIMEOUT_SEC", 20)
 SEARCH_WINDOW_DAYS = _env_int("SIBYL_SEARCH_WINDOW_DAYS", 120)
 FETCH_URL_TIMEOUT_SEC = _env_int("SIBYL_FETCH_URL_TIMEOUT_SEC", 20)
 FETCH_URL_MAX_CHARS = _env_int("SIBYL_FETCH_URL_MAX_CHARS", 6000)
+# The page body is read up to this many bytes and no further: the model only
+# ever sees FETCH_URL_MAX_CHARS of text, and an unbounded read lets a hostile
+# page fill the runner's memory.
+FETCH_URL_MAX_BYTES = _env_int("SIBYL_FETCH_URL_MAX_BYTES", 3_000_000)
+FETCH_URL_MAX_REDIRECTS = _env_int("SIBYL_FETCH_URL_MAX_REDIRECTS", 5)
 
 # --- LLM call limits ----------------------------------------------------------
 ANTHROPIC_MAX_ATTEMPTS = _env_int("SIBYL_ANTHROPIC_MAX_ATTEMPTS", 3)

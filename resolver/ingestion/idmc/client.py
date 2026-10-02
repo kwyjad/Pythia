@@ -291,6 +291,9 @@ def _build_http_headers(extra: Optional[Mapping[str, str]] = None) -> Dict[str, 
     return headers
 
 
+_TLS_OFF_WARNED = False
+
+
 def _http_verify() -> bool | str:
     raw = os.getenv("IDMC_HTTP_VERIFY")
     if raw is None:
@@ -300,6 +303,13 @@ def _http_verify() -> bool | str:
         return True
     lowered = candidate.lower()
     if lowered in {"0", "false", "no", "off"}:
+        # A switch that turns off certificate checks must never be quiet: a
+        # leftover setting would let anyone on the path feed IDMC figures in.
+        global _TLS_OFF_WARNED
+        if not _TLS_OFF_WARNED:
+            _TLS_OFF_WARNED = True
+            LOGGER.warning("IDMC_HTTP_VERIFY=%s: TLS certificate verification is OFF for IDMC", candidate)
+            print(f"::warning title=IDMC TLS verification off::IDMC_HTTP_VERIFY={candidate} disables certificate checks")
         return False
     if lowered in {"1", "true", "yes", "on"}:
         return True

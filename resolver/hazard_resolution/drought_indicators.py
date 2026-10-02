@@ -409,6 +409,11 @@ def _expand_url(url: str, ym: str) -> str:
 _ZIP_MAGIC = b"PK\x03\x04"
 
 
+#: The largest table a drought feed's zip may unpack to. The ASAP hotspot
+#: archive, the largest feed read this way, is a few megabytes.
+_MAX_UNZIPPED_BYTES = 200_000_000
+
+
 def _unzip_first_table(blob: bytes) -> tuple[str, str]:
     """The first CSV (else JSON) member of a zip archive, decoded."""
 
@@ -422,7 +427,16 @@ def _unzip_first_table(blob: bytes) -> tuple[str, str]:
         if not tables:
             raise ValueError(f"zip archive holds no CSV or JSON member: {names[:10]}")
         member = tables[0]
-        text = archive.read(member).decode("utf-8-sig", errors="replace")
+        # A zip states its members' sizes and can lie about them; a few
+        # hundred bytes can unpack to gigabytes. The read stops one byte past
+        # the cap whatever the header says, and a feed that large is refused.
+        with archive.open(member) as fh:
+            data = fh.read(_MAX_UNZIPPED_BYTES + 1)
+        if len(data) > _MAX_UNZIPPED_BYTES:
+            raise ValueError(
+                f"zip member {member} unpacks past {_MAX_UNZIPPED_BYTES // 1_000_000} MB; refused"
+            )
+        text = data.decode("utf-8-sig", errors="replace")
         return text, ("application/json" if member.lower().endswith(".json") else "text/csv")
 
 

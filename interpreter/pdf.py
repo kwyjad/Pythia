@@ -121,7 +121,15 @@ def markdown_to_blocks(md: str) -> list[str]:
                 i += 1
                 svg.append(lines[i].strip())
             i += 1
-            out.append('<div class="figure">' + "".join(svg) + "</div>")
+            markup = "".join(svg)
+            if _svg_is_inert(markup):
+                out.append('<div class="figure">' + markup + "</div>")
+            else:
+                # The markdown also carries model-written text. An "<svg"
+                # line that can load or run something did not come from our
+                # charts, so it is printed as text, not drawn.
+                LOGGER.warning("pdf: refused an SVG block that references external content")
+                out.append(f"<p>{_html.escape(markup)}</p>")
             continue
         if stripped.startswith("### "):
             out.append(f"<h3>{_inline(stripped[4:])}</h3>")
@@ -385,11 +393,54 @@ def build_report_html(
     )
 
 
+# Anything in an SVG that can make the renderer fetch a resource or run code.
+# Our charts and map use none of it.
+_SVG_UNSAFE = re.compile(
+    r"href|url\s*\(|<\s*(?:image|use|script|foreignObject|style|iframe|object|embed)\b|@import|on[a-z]+\s*=",
+    re.IGNORECASE,
+)
+
+
+def _svg_is_inert(markup: str) -> bool:
+    return markup.rstrip().endswith("</svg>") and not _SVG_UNSAFE.search(markup)
+
+
+def _refuse_fetch(url: str, *args, **kwargs):
+    """Fetcher for WeasyPrint before 67: inline ``data:`` URIs and nothing else.
+
+    The PDF is published and the report text is model output. WeasyPrint's
+    default fetcher follows ``file://`` and ``http(s)://`` references, so an
+    injected ``<img src="file:///proc/self/environ">`` would read the runner's
+    environment into the public PDF. Every image and font the report needs is
+    inline, so nothing else is ever required.
+    """
+
+    if url.startswith("data:"):
+        from weasyprint import default_url_fetcher  # noqa: PLC0415
+
+        return default_url_fetcher(url, *args, **kwargs)
+    raise ValueError(f"external resource refused: {url[:80]}")
+
+
+def _url_fetcher():
+    """The data-only fetcher in whichever form this WeasyPrint expects.
+
+    WeasyPrint 67 replaced the fetcher function with a ``URLFetcher`` object
+    that takes the allowed schemes itself; older releases take a function.
+    """
+
+    try:
+        from weasyprint.urls import URLFetcher  # noqa: PLC0415
+    except ImportError:
+        return _refuse_fetch
+    return URLFetcher(allowed_protocols={"data"})
+
+
 def _render_pdf(html: str, out_path: Path) -> None:
     """WeasyPrint seam (lazy import; tests monkeypatch this)."""
     from weasyprint import HTML  # noqa: PLC0415 - heavy optional dep
 
-    HTML(string=html).write_pdf(str(out_path))
+    HTML(string=html, url_fetcher=_url_fetcher()).write_pdf(str(out_path))
 
 
 # ---------------------------------------------------------------------------
