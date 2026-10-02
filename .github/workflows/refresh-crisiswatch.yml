@@ -83,11 +83,12 @@ jobs:
 
       - name: Run CrisisWatch refresh (wayback source)
         env:
+          IN_FORCE: ${{ inputs.force }}
           IA_S3_ACCESS_KEY: ${{ secrets.IA_S3_ACCESS_KEY }}
           IA_S3_SECRET_KEY: ${{ secrets.IA_S3_SECRET_KEY }}
         run: |
           FORCE_FLAG=""
-          if [ "${{ inputs.force }}" = "true" ]; then
+          if [ "${IN_FORCE}" = "true" ]; then
             FORCE_FLAG="--force"
           fi
           python -m scripts.refresh_crisiswatch \

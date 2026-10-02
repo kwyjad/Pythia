@@ -30,6 +30,9 @@ on:
   workflow_run:
     workflows: ["Horizon Scanner Triage"]
     types: [completed]
+    # A run triggered from a fork's pull request is never one of ours,
+    # whatever its branch is called; the job if: below checks both.
+    branches: [main]
 
   workflow_dispatch:
     inputs:
@@ -69,7 +72,7 @@ permissions:
 
 jobs:
   sibyl:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request') }}
     runs-on: ubuntu-latest
     # Sibyl (40+ min at the $40 cap) + interpreter + PDF + two bundles all run
     # BEFORE the canonical upload; a slow month at 180 was killed with the
@@ -193,6 +196,7 @@ jobs:
         if: steps.gate.outputs.eligible != '0' && steps.gate.outputs.eligible != ''
         continue-on-error: true
         env:
+          IN_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
           # MODEL_COSTS_JSON env override removed 2026-07: pythia/model_costs.json
@@ -202,8 +206,8 @@ jobs:
           SIBYL_BUDGET_USD_PER_QUESTION: ${{ vars.SIBYL_BUDGET_USD_PER_QUESTION || '' }}
         run: |
           set -euo pipefail
-          if [ -n "${{ github.event.inputs.hs_run_id }}" ]; then
-            python -m sibyl.run --hs-run-id "${{ github.event.inputs.hs_run_id }}" | tee sibyl_stdout.txt
+          if [ -n "${IN_HS_RUN_ID}" ]; then
+            python -m sibyl.run --hs-run-id "${IN_HS_RUN_ID}" | tee sibyl_stdout.txt
           else
             python -m sibyl.run | tee sibyl_stdout.txt
           fi
@@ -582,6 +586,8 @@ jobs:
       - name: Stage health (Sibyl)
         if: always()
         continue-on-error: true
+        env:
+          IN_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
         run: |
           set +e
           mkdir -p diagnostics
@@ -592,7 +598,7 @@ jobs:
           SIBYL_RUN_ID=$(grep -oE 'sibyl_run_id=[A-Za-z0-9_]+' sibyl_stdout.txt 2>/dev/null \
             | tail -n 1 | cut -d= -f2 || true)
           # Keep the value sibyl_bundle_context resolved on the workflow_run path.
-          HS_RUN_ID="${HS_RUN_ID:-${{ github.event.inputs.hs_run_id }}}"
+          HS_RUN_ID="${HS_RUN_ID:-${IN_HS_RUN_ID}}"
           if [ -n "${SIBYL_RUN_ID}" ] && [ -z "${HS_RUN_ID}" ]; then
             HS_RUN_ID=$(python - "${SIBYL_RUN_ID}" <<'EOF'
           import os
@@ -641,6 +647,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db
+          retention-days: 90
           path: data/resolver.duckdb
 
       # This is the forecast pipeline's SOLE release trigger: HS Triage no longer

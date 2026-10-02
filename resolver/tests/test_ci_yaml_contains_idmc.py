@@ -38,8 +38,12 @@ def test_backfill_runs_direct_idmc_step() -> None:
     run_script = direct_step.get("run")
     assert isinstance(run_script, str)
     assert "--network-mode helix" in run_script
-    assert "--start \"${{ steps.window.outputs.start_iso }}\"" in run_script
-    assert "--end   \"${{ steps.window.outputs.end_iso }}\"" in run_script
+    # The window reaches the script through env:, never as pasted text.
+    assert "--start \"${STEP_WINDOW_START_ISO}\"" in run_script
+    assert "--end   \"${STEP_WINDOW_END_ISO}\"" in run_script
+    env = direct_step.get("env") or {}
+    assert env.get("STEP_WINDOW_START_ISO") == "${{ steps.window.outputs.start_iso }}"
+    assert env.get("STEP_WINDOW_END_ISO") == "${{ steps.window.outputs.end_iso }}"
 
 
 def test_backfill_uses_load_and_derive() -> None:

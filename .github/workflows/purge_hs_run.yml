@@ -83,13 +83,14 @@ jobs:
 
       - name: "Dry run: preview rows to delete"
         env:
+          IN_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
         run: |
           set -e
-          echo "=== Dry-run purge preview for hs_run_id=${{ github.event.inputs.hs_run_id }} ==="
+          echo "=== Dry-run purge preview for hs_run_id=${IN_HS_RUN_ID} ==="
           python -m scripts.purge_hs_run \
             --db "${PYTHIA_DB_URL}" \
-            --hs-run-id "${{ github.event.inputs.hs_run_id }}" | tee diagnostics/purge_dry_run.txt
+            --hs-run-id "${IN_HS_RUN_ID}" | tee diagnostics/purge_dry_run.txt
 
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             {
@@ -102,13 +103,14 @@ jobs:
 
       - name: "Execute purge"
         env:
+          IN_HS_RUN_ID: ${{ github.event.inputs.hs_run_id }}
           PYTHIA_DB_URL: ${{ env.RESOLVER_DB_URL }}
         run: |
           set -e
-          echo "=== Executing purge for hs_run_id=${{ github.event.inputs.hs_run_id }} ==="
+          echo "=== Executing purge for hs_run_id=${IN_HS_RUN_ID} ==="
           python -m scripts.purge_hs_run \
             --db "${PYTHIA_DB_URL}" \
-            --hs-run-id "${{ github.event.inputs.hs_run_id }}" \
+            --hs-run-id "${IN_HS_RUN_ID}" \
             --execute | tee diagnostics/purge_execute.txt
 
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -143,6 +145,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: purge-diagnostics
+          retention-days: 14
           path: |
             diagnostics/purge_dry_run.txt
             diagnostics/purge_execute.txt
@@ -155,4 +158,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db
+          retention-days: 90
           path: data/resolver.duckdb

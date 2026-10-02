@@ -19,6 +19,9 @@ on:
     workflows:
       - "Pythia — Compute Calibration Weights & Advice"
     types: [completed]
+    # A run triggered from a fork's pull request is never one of ours,
+    # whatever its branch is called; the job if: below checks both.
+    branches: [main]
   workflow_dispatch:
     inputs:
       run_id:
@@ -50,7 +53,7 @@ concurrency:
 jobs:
   publish:
     # Run on manual dispatch always, or on successful workflow_run events.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request') }}
     runs-on: ubuntu-latest
 
     env:
@@ -102,6 +105,9 @@ jobs:
           # list below in sync with the composite action (the authoritative list).
           echo "No run_id provided; searching for most recent successful upstream run with '${ARTIFACT_NAME}'..."
           CANDIDATES_FILE=$(mktemp)
+          # Runs our own triggers started, never a fork's pull request on a
+          # branch it called main (see the download-canonical-db action).
+          TRUSTED_EVENTS='["schedule","workflow_dispatch","workflow_run","push"]'
 
           for WF in \
             "Resolver Update" \
@@ -121,8 +127,9 @@ jobs:
             gh run list \
               --workflow "${WF}" \
               --branch main --status success \
-              --json databaseId,createdAt --limit 10 \
-              | jq -r --arg LABEL "${WF}" '.[] | "\(.createdAt),\(.databaseId),\($LABEL)"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event --limit 10 \
+              | jq -r --arg LABEL "${WF}" --argjson trusted "${TRUSTED_EVENTS}" \
+                  '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),\($LABEL)"' >>"${CANDIDATES_FILE}" || true
           done
 
           if [ ! -s "${CANDIDATES_FILE}" ]; then
@@ -543,12 +550,18 @@ jobs:
               --json assets \
               --jq '.assets[] | select(.name=="interpreter_report_latest.pdf") | .updatedAt' \
               2>/dev/null | head -n 1 || true)"
+            # The report goes into the public release, so only an artifact a
+            # run of THIS repository's main uploaded may supply it: a fork's
+            # pull-request run can upload an artifact under the same name.
+            REPO_ID="$(gh api "/repos/${GH_REPO}" --jq .id 2>/dev/null || true)"
             CAND="$(gh api -H "Accept: application/vnd.github+json" \
               "/repos/${GH_REPO}/actions/artifacts?name=pythia-interpreter-report&per_page=30" \
               2>/dev/null \
-              | jq -r --arg since "${RELEASE_PDF_AT:-}" '
+              | jq -r --arg since "${RELEASE_PDF_AT:-}" --arg repo_id "${REPO_ID:-none}" '
                   [ .artifacts[]?
                     | select(.expired == false)
+                    | select((.workflow_run.head_repository_id | tostring) == $repo_id)
+                    | select(.workflow_run.head_branch == "main")
                     # Never regress the release to an older report: an artifact
                     # expires at 90 days while a release asset does not, so the
                     # newest artifact can be older than what is published.
@@ -785,6 +798,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: resolver-inspect
+          retention-days: 14
           path: resolver_inspect.md
 
       # Close the publish→dashboard loop: tell the API to sync NOW instead of

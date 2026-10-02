@@ -103,6 +103,31 @@ def _gh_json(*args: str) -> object:
     return json.loads(out or "null")
 
 
+# Runs our own triggers start; see scripts/ci/poll_llm_batches.py.
+TRUSTED_EVENTS = frozenset({"schedule", "workflow_dispatch", "workflow_run", "push"})
+
+
+def newest_trusted_artifact(artifacts: list[dict], repo_id: int | str | None) -> str | None:
+    """created_at of the newest artifact a run of this repository's main uploaded.
+
+    A fork's pull-request run can upload a pythia-batch-state artifact too, and
+    would then hold the weekly ingest back or keep the poller busy for three
+    days. An artifact whose run came from another repository is not ours.
+    """
+
+    if repo_id in (None, ""):
+        return None
+    ours = [
+        a for a in artifacts or []
+        if str((a.get("workflow_run") or {}).get("head_repository_id")) == str(repo_id)
+        and (a.get("workflow_run") or {}).get("head_branch") == "main"
+        and a.get("created_at")
+    ]
+    if not ours:
+        return None
+    return max(str(a["created_at"]) for a in ours)
+
+
 def main(argv: list[str] | None = None) -> int:
     # Two consumers, opposite senses of the same question:
     #
@@ -136,15 +161,17 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             repo = os.environ["GITHUB_REPOSITORY"]
+            repo_id = (_gh_json("api", f"repos/{repo}") or {}).get("id")
             artifacts = _gh_json(
-                "api", f"repos/{repo}/actions/artifacts?name=pythia-batch-state&per_page=1"
+                "api", f"repos/{repo}/actions/artifacts?name=pythia-batch-state&per_page=30"
             )
             arts = (artifacts or {}).get("artifacts") or []
-            latest_created = arts[0].get("created_at") if arts else None
+            latest_created = newest_trusted_artifact(arts, repo_id)
             runs = _gh_json(
                 "run", "list", "--workflow", STAGE_WORKFLOW_NAME, "--branch", "main",
-                "--json", "createdAt,conclusion,displayTitle", "--limit", "30",
+                "--json", "createdAt,conclusion,displayTitle,event", "--limit", "30",
             ) or []
+            runs = [r for r in runs if r.get("event") in TRUSTED_EVENTS]
             if pipeline_in_flight(
                 latest_created, runs, datetime.now(timezone.utc),
                 window_hours=_window_hours(),

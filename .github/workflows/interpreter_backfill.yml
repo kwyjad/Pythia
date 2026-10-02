@@ -298,6 +298,8 @@ jobs:
         if: ${{ inputs.compare_models != '' }}
         continue-on-error: true
         env:
+          IN_KIND: ${{ inputs.kind }}
+          IN_COMPARE_MODELS: ${{ inputs.compare_models }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set +e
@@ -310,8 +312,8 @@ jobs:
           python -m scripts.compare_interpreter_models \
             --db "${RESOLVER_DB_URL}" \
             --pack "${PACK}" \
-            --kind "${{ inputs.kind }}" \
-            --models ${{ inputs.compare_models }} \
+            --kind "${IN_KIND}" \
+            --models ${IN_COMPARE_MODELS} \
             --out-dir interpreter_compare \
             2>&1 | tee diagnostics/model_comparison.txt
           {
@@ -352,16 +354,20 @@ jobs:
       - name: Render PDFs
         if: always()
         continue-on-error: true
+        env:
+          IN_KIND_OR_DEFAULT: ${{ inputs.kind || 'combined' }}
+          IN_INCLUDE_TEST: ${{ inputs.include_test }}
+          STEP_RUNS_RUN_IDS: ${{ steps.runs.outputs.run_ids }}
         run: |
           set +e
           sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 >/dev/null 2>&1
           pip install "weasyprint==70.0" >/dev/null 2>&1
-          KIND="${{ inputs.kind || 'combined' }}"
+          KIND="${IN_KIND_OR_DEFAULT}"
           TEST_ARG=""
-          if [ "${{ inputs.include_test }}" = "true" ]; then
+          if [ "${IN_INCLUDE_TEST}" = "true" ]; then
             TEST_ARG="--include-test"
           fi
-          for RUN in ${{ steps.runs.outputs.run_ids }}; do
+          for RUN in ${STEP_RUNS_RUN_IDS}; do
             IID="$(grep -oE '"interpretation_id": "[^"]+"' "diagnostics/interpreter_${RUN}.log" 2>/dev/null | tail -n 1 | cut -d'"' -f4)"
             if [ -n "${IID}" ]; then
               python -m interpreter.pdf --db "${RESOLVER_DB_URL}" \

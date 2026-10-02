@@ -262,6 +262,11 @@ jobs:
       # — a short FEWS NET/IPC window only sees countries with a recent
       # analysis cycle.
       - name: Echo effective ingest windows
+        env:
+          STEP_WINDOW_START_ISO: ${{ steps.window.outputs.start_iso }}
+          STEP_WINDOW_END_ISO: ${{ steps.window.outputs.end_iso }}
+          IN_RESET_DB: ${{ inputs.reset_db }}
+          MONTHS_BACK_IN: ${{ inputs.months_back }}
         run: |
           FEWSNET_NOTE=""
           if [ "${FEWSNET_MONTHS}" -lt 12 ] 2>/dev/null; then
@@ -276,15 +281,13 @@ jobs:
             echo ""
             echo "| Setting | Value |"
             echo "| --- | --- |"
-            echo "| ACLED/IDMC window | ${{ steps.window.outputs.start_iso }} → ${{ steps.window.outputs.end_iso }} (months_back=${MONTHS_BACK_IN:-3}) |"
+            echo "| ACLED/IDMC window | ${STEP_WINDOW_START_ISO} → ${STEP_WINDOW_END_ISO} (months_back=${MONTHS_BACK_IN:-3}) |"
             echo "| FEWSNET_MONTHS | ${FEWSNET_MONTHS}${FEWSNET_NOTE} |"
             echo "| IPC_API_MONTHS | ${IPC_API_MONTHS}${IPC_NOTE} |"
             echo "| GDACS_MONTHS | ${GDACS_MONTHS} |"
-            echo "| reset_db | ${{ inputs.reset_db }} |"
+            echo "| reset_db | ${IN_RESET_DB} |"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
-        env:
-          MONTHS_BACK_IN: ${{ inputs.months_back }}
 
       # Canonical discovery via the shared composite action (single home of
       # the candidate list). Per-candidate signature validation rejects DBs
@@ -426,6 +429,9 @@ jobs:
       # === PHASE 1: RESOLVER CONNECTORS (ground truth — fatal) ===
       - name: "Phase 1: Run IDMC (HELIX)"
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'idmc') }}
+        env:
+          STEP_WINDOW_START_ISO: ${{ steps.window.outputs.start_iso }}
+          STEP_WINDOW_END_ISO: ${{ steps.window.outputs.end_iso }}
         run: |
           set -euo pipefail
           echo "::group::IDMC (HELIX)"
@@ -434,8 +440,8 @@ jobs:
             --series flow \
             --enable-export \
             --write-outputs \
-            --start "${{ steps.window.outputs.start_iso }}" \
-            --end   "${{ steps.window.outputs.end_iso }}" \
+            --start "${STEP_WINDOW_START_ISO}" \
+            --end   "${STEP_WINDOW_END_ISO}" \
             --debug
 
           # Emit IDMC diagnostics line from its summary.json
@@ -777,20 +783,24 @@ jobs:
         timeout-minutes: 90
         if: ${{ inputs.only_connector == '' && steps.haz_months.outputs.months != '' }}
         continue-on-error: true
+        env:
+          STEP_HAZ_MONTHS_MONTHS: ${{ steps.haz_months.outputs.months }}
         run: |
           set -o pipefail
           echo "::group::PA machine (flood)"
-          timeout 85m python -m resolver.hazard_resolution.cli --hazard flood --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_flood.json 2>&1 | tee diagnostics/phase25_haz_flood.log || echo "::warning::flood resolution machine failed or timed out (non-fatal; exit $?)"
+          timeout 85m python -m resolver.hazard_resolution.cli --hazard flood --months ${STEP_HAZ_MONTHS_MONTHS} --summary-out diagnostics/haz_run_flood.json 2>&1 | tee diagnostics/phase25_haz_flood.log || echo "::warning::flood resolution machine failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
       - name: "Phase 2.5: PA machine — cyclone"
         timeout-minutes: 90
         if: ${{ inputs.only_connector == '' && steps.haz_months.outputs.months != '' }}
         continue-on-error: true
+        env:
+          STEP_HAZ_MONTHS_MONTHS: ${{ steps.haz_months.outputs.months }}
         run: |
           set -o pipefail
           echo "::group::PA machine (cyclone)"
-          timeout 85m python -m resolver.hazard_resolution.cli --hazard cyclone --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_cyclone.json 2>&1 | tee diagnostics/phase25_haz_cyclone.log || echo "::warning::cyclone resolution machine failed or timed out (non-fatal; exit $?)"
+          timeout 85m python -m resolver.hazard_resolution.cli --hazard cyclone --months ${STEP_HAZ_MONTHS_MONTHS} --summary-out diagnostics/haz_run_cyclone.json 2>&1 | tee diagnostics/phase25_haz_cyclone.log || echo "::warning::cyclone resolution machine failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
       # A corrected ceiling rule must reach the rows it would have changed,
@@ -815,10 +825,12 @@ jobs:
         timeout-minutes: 30
         if: ${{ inputs.only_connector == '' && steps.haz_months.outputs.months != '' }}
         continue-on-error: true
+        env:
+          STEP_HAZ_MONTHS_MONTHS: ${{ steps.haz_months.outputs.months }}
         run: |
           set -o pipefail
           echo "::group::PA machine (drought)"
-          timeout 27m python -m resolver.hazard_resolution.cli --hazard drought --months ${{ steps.haz_months.outputs.months }} --summary-out diagnostics/haz_run_drought.json 2>&1 | tee diagnostics/phase25_haz_drought.log || echo "::warning::drought resolution machine failed or timed out (non-fatal; exit $?)"
+          timeout 27m python -m resolver.hazard_resolution.cli --hazard drought --months ${STEP_HAZ_MONTHS_MONTHS} --summary-out diagnostics/haz_run_drought.json 2>&1 | tee diagnostics/phase25_haz_drought.log || echo "::warning::drought resolution machine failed or timed out (non-fatal; exit $?)"
           echo "::endgroup::"
 
       - name: "Phase 2.5: Refresh machine base rates + acceptance report"
@@ -1172,6 +1184,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db
+          retention-days: 90
           path: data/resolver.duckdb
 
       - name: Upload reset resolver DB snapshot
@@ -1179,6 +1192,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db-reset
+          retention-days: 90
           path: data/resolver.duckdb
 
       # One self-contained zip an analyst can open with no repo, no workflow
@@ -1246,10 +1260,13 @@ jobs:
       # `only_connector` run) never fire it — `outcome` is then `skipped`.
       - name: "Phase 1 gate: ACLED must have been readable"
         if: always()
+        env:
+          STEP_PHASE1_CONNECTORS_OUTCOME: ${{ steps.phase1_connectors.outcome }}
+          STEP_PHASE1_ACLED_FATALITIES_OUTCOME: ${{ steps.phase1_acled_fatalities.outcome }}
         run: |
           set -euo pipefail
-          CONNECTORS='${{ steps.phase1_connectors.outcome }}'
-          FATALITIES='${{ steps.phase1_acled_fatalities.outcome }}'
+          CONNECTORS="${STEP_PHASE1_CONNECTORS_OUTCOME}"
+          FATALITIES="${STEP_PHASE1_ACLED_FATALITIES_OUTCOME}"
           echo "phase1 connectors outcome: ${CONNECTORS}"
           echo "phase1 acled fatalities outcome: ${FATALITIES}"
           FAILED=0

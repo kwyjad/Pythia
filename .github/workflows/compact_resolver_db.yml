@@ -113,14 +113,17 @@ jobs:
       # retained for 90 days, so recovering from a bad compaction is a
       # re-dispatch with force-run-id set to the run named here.
       - name: Record the source run for rollback
+        env:
+          IN_DB_RUN_ID: ${{ inputs.db_run_id }}
+          IN_APPLY: ${{ inputs.apply }}
         run: |
           set -euo pipefail
-          SRC_RUN="${CANONICAL_DB_RUN_ID:-${{ inputs.db_run_id }}}"
+          SRC_RUN="${CANONICAL_DB_RUN_ID:-${IN_DB_RUN_ID}}"
           echo "Canonical DB came from run: ${SRC_RUN:-<discovery, see previous step>}"
           {
             echo "### Compact Resolver DB"
             echo ""
-            echo "- apply: \`${{ inputs.apply }}\`"
+            echo "- apply: \`${IN_APPLY}\`"
             echo "- source canonical run: \`${SRC_RUN:-see download step log}\`"
             echo ""
             echo "To roll back, re-dispatch any canonical consumer with"
@@ -300,6 +303,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: compact-resolver-db-diagnostics
+          retention-days: 90
           path: diagnostics/
           if-no-files-found: warn
 
@@ -312,4 +316,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db
+          retention-days: 90
           path: data/resolver.duckdb

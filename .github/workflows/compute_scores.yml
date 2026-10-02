@@ -10,6 +10,9 @@ on:
   workflow_run:
     workflows: ["Pythia — Compute Resolutions"]
     types: [completed]
+    # A run triggered from a fork's pull request is never one of ours,
+    # whatever its branch is called; the job if: below checks both.
+    branches: [main]
 
   # Optional manual trigger
   workflow_dispatch: {}
@@ -24,7 +27,7 @@ permissions:
 
 jobs:
   compute-scores:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request') }}
     runs-on: ubuntu-latest
     env:
       RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
@@ -87,4 +90,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db
+          retention-days: 90
           path: data/resolver.duckdb

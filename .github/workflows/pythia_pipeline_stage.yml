@@ -107,6 +107,12 @@ env:
   # would stamp a whole production month as test data (invisible on the
   # dashboard, excluded from calibration).
   PYTHIA_TEST_MODE: ${{ (inputs.test_mode == true || inputs.test_mode == 'true') && '1' || '0' }}
+  # Dispatch inputs reach shell as variables, never as pasted text: the
+  # poller dispatches stages 2..N with values read from an artifact, and a
+  # value spliced into run: is shell source. Every stage checks both
+  # before it does anything else.
+  INPUT_PIPELINE_ID: ${{ inputs.pipeline_id }}
+  INPUT_DB_RUN_ID: ${{ inputs.db_run_id }}
   RESOLVER_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
   PYTHIA_DB_URL: duckdb:///${{ github.workspace }}/data/resolver.duckdb
   PYTHIA_LLM_CONCURRENCY: "32"
@@ -219,6 +225,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 330
     steps:
+      - name: Validate input shapes
+        run: |
+          set -e
+          if ! [[ "${INPUT_PIPELINE_ID}" =~ ^((pl|hs)_[A-Za-z0-9_]+)?$ ]]; then
+            echo "::error::pipeline_id has an unexpected shape: refusing to run."
+            exit 1
+          fi
+          if ! [[ "${INPUT_DB_RUN_ID}" =~ ^[0-9]*$ ]]; then
+            echo "::error::db_run_id must be a numeric run id."
+            exit 1
+          fi
+
       - name: Check out code
         uses: actions/checkout@v4
 
@@ -287,7 +305,7 @@ jobs:
           mkdir -p diagnostics
           python -m horizon_scanner.horizon_scanner \
             --stage hs_submit \
-            --pipeline-id "${{ inputs.pipeline_id }}" 2>&1 | tee diagnostics/hs_stdout.txt
+            --pipeline-id "${INPUT_PIPELINE_ID}" 2>&1 | tee diagnostics/hs_stdout.txt
           HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           BATCH_PIPELINE_ID=$(grep -E '^BATCH_PIPELINE_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           if [ -z "${HS_RUN_ID}" ]; then
@@ -295,7 +313,7 @@ jobs:
             exit 1
           fi
           if [ -z "${BATCH_PIPELINE_ID}" ]; then
-            BATCH_PIPELINE_ID="${{ inputs.pipeline_id }}"
+            BATCH_PIPELINE_ID="${INPUT_PIPELINE_ID}"
           fi
           {
             echo "HS_RUN_ID=${HS_RUN_ID}"
@@ -428,6 +446,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-stage-diagnostics
+          retention-days: 14
           path: |
             diagnostics/hs_stdout.txt
             diagnostics/batch_economics__*.json
@@ -463,11 +482,20 @@ jobs:
       - name: Validate inputs
         run: |
           set -e
-          if [ -z "${{ inputs.pipeline_id }}" ]; then
+          # The step runs before checkout, so the shape check is inline.
+          if ! [[ "${INPUT_PIPELINE_ID}" =~ ^((pl|hs)_[A-Za-z0-9_]+)?$ ]]; then
+            echo "::error::pipeline_id has an unexpected shape: refusing to run."
+            exit 1
+          fi
+          if ! [[ "${INPUT_DB_RUN_ID}" =~ ^[0-9]*$ ]]; then
+            echo "::error::db_run_id must be a numeric run id."
+            exit 1
+          fi
+          if [ -z "${INPUT_PIPELINE_ID}" ]; then
             echo "ERROR: pipeline_id is required for hs_rc_collect."
             exit 1
           fi
-          if [ -z "${{ inputs.db_run_id }}" ]; then
+          if [ -z "${INPUT_DB_RUN_ID}" ]; then
             echo "ERROR: db_run_id (the hs_submit run id) is required for hs_rc_collect."
             exit 1
           fi
@@ -515,7 +543,7 @@ jobs:
           mkdir -p diagnostics
           python -m horizon_scanner.horizon_scanner \
             --stage hs_rc_collect \
-            --pipeline-id "${{ inputs.pipeline_id }}" 2>&1 | tee diagnostics/hs_stdout.txt
+            --pipeline-id "${INPUT_PIPELINE_ID}" 2>&1 | tee diagnostics/hs_stdout.txt
           HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           if [ -z "${HS_RUN_ID}" ]; then
             echo "ERROR: HS_RUN_ID not found in Horizon Scanner output."
@@ -545,7 +573,7 @@ jobs:
           set -e
           python -m scripts.ci.emit_batch_state \
             --db "${PYTHIA_DB_URL}" \
-            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --pipeline-id "${INPUT_PIPELINE_ID}" \
             --stage hs_rc_collect \
             --next-stage hs_finalize_fc_submit \
             --db-run-id "${GITHUB_RUN_ID}" \
@@ -605,7 +633,7 @@ jobs:
           mkdir -p diagnostics
           python -m scripts.ci.batch_economics \
             --db "${PYTHIA_DB_URL}" \
-            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --pipeline-id "${INPUT_PIPELINE_ID}" \
             --stage hs_rc_collect \
             --hs-run-id "${HS_RUN_ID:-}" \
             --fc-run-id "${FC_RUN_ID:-}" \
@@ -641,6 +669,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-stage-diagnostics
+          retention-days: 14
           path: |
             diagnostics/hs_stdout.txt
             diagnostics/batch_economics__*.json
@@ -676,11 +705,20 @@ jobs:
       - name: Validate inputs
         run: |
           set -e
-          if [ -z "${{ inputs.pipeline_id }}" ]; then
+          # The step runs before checkout, so the shape check is inline.
+          if ! [[ "${INPUT_PIPELINE_ID}" =~ ^((pl|hs)_[A-Za-z0-9_]+)?$ ]]; then
+            echo "::error::pipeline_id has an unexpected shape: refusing to run."
+            exit 1
+          fi
+          if ! [[ "${INPUT_DB_RUN_ID}" =~ ^[0-9]*$ ]]; then
+            echo "::error::db_run_id must be a numeric run id."
+            exit 1
+          fi
+          if [ -z "${INPUT_PIPELINE_ID}" ]; then
             echo "ERROR: pipeline_id is required for hs_finalize_fc_submit."
             exit 1
           fi
-          if [ -z "${{ inputs.db_run_id }}" ]; then
+          if [ -z "${INPUT_DB_RUN_ID}" ]; then
             echo "ERROR: db_run_id (the hs_rc_collect run id) is required for hs_finalize_fc_submit."
             exit 1
           fi
@@ -728,7 +766,7 @@ jobs:
           mkdir -p diagnostics
           python -m horizon_scanner.horizon_scanner \
             --stage hs_finalize \
-            --pipeline-id "${{ inputs.pipeline_id }}" 2>&1 | tee diagnostics/hs_stdout.txt
+            --pipeline-id "${INPUT_PIPELINE_ID}" 2>&1 | tee diagnostics/hs_stdout.txt
           HS_RUN_ID=$(grep -E '^HS_RUN_ID=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           HS_RESOLVED_ISO3S=$(grep -E '^HS_RESOLVED_ISO3S=' diagnostics/hs_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           if [ -z "${HS_RUN_ID}" ]; then
@@ -770,7 +808,7 @@ jobs:
             --batch-size 100 \
             --purpose hs_pipeline \
             --phase submit \
-            --pipeline-id "${{ inputs.pipeline_id }}" | tee diagnostics/forecaster_submit_stdout.txt
+            --pipeline-id "${INPUT_PIPELINE_ID}" | tee diagnostics/forecaster_submit_stdout.txt
           FC_RUN_ID=$(grep -E '^FC_RUN_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           echo "FC_RUN_ID=${FC_RUN_ID}" >> "$GITHUB_ENV"
 
@@ -796,7 +834,7 @@ jobs:
           set -e
           python -m scripts.ci.emit_batch_state \
             --db "${PYTHIA_DB_URL}" \
-            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --pipeline-id "${INPUT_PIPELINE_ID}" \
             --stage hs_finalize_fc_submit \
             --next-stage fc_collect_finalize \
             --db-run-id "${GITHUB_RUN_ID}" \
@@ -857,7 +895,7 @@ jobs:
           mkdir -p diagnostics
           python -m scripts.ci.batch_economics \
             --db "${PYTHIA_DB_URL}" \
-            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --pipeline-id "${INPUT_PIPELINE_ID}" \
             --stage hs_finalize_fc_submit \
             --hs-run-id "${HS_RUN_ID:-}" \
             --fc-run-id "${FC_RUN_ID:-}" \
@@ -893,6 +931,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-stage-diagnostics
+          retention-days: 14
           path: |
             diagnostics/hs_stdout.txt
             diagnostics/forecaster_submit_stdout.txt
@@ -926,6 +965,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 330
     steps:
+      - name: Validate input shapes
+        run: |
+          set -e
+          if ! [[ "${INPUT_PIPELINE_ID}" =~ ^((pl|hs)_[A-Za-z0-9_]+)?$ ]]; then
+            echo "::error::pipeline_id has an unexpected shape: refusing to run."
+            exit 1
+          fi
+          if ! [[ "${INPUT_DB_RUN_ID}" =~ ^[0-9]*$ ]]; then
+            echo "::error::db_run_id must be a numeric run id."
+            exit 1
+          fi
+
       - name: Check out code
         uses: actions/checkout@v4
 
@@ -1008,14 +1059,14 @@ jobs:
             --batch-size 100 \
             --purpose hs_pipeline \
             --phase submit \
-            --pipeline-id "${{ inputs.pipeline_id }}" | tee diagnostics/forecaster_submit_stdout.txt
+            --pipeline-id "${INPUT_PIPELINE_ID}" | tee diagnostics/forecaster_submit_stdout.txt
           BATCH_PIPELINE_ID=$(grep -E '^BATCH_PIPELINE_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           FC_RUN_ID=$(grep -E '^FC_RUN_ID=' diagnostics/forecaster_submit_stdout.txt | tail -n 1 | cut -d= -f2- || true)
           # No questions → no markers printed; the pipeline still proceeds to
           # the finalize stage (which finds nothing to collect) so the
           # canonical DB is still published at the end of the cycle.
           if [ -z "${BATCH_PIPELINE_ID}" ]; then
-            BATCH_PIPELINE_ID="${{ inputs.pipeline_id }}"
+            BATCH_PIPELINE_ID="${INPUT_PIPELINE_ID}"
           fi
           if [ -z "${BATCH_PIPELINE_ID}" ]; then
             BATCH_PIPELINE_ID="pl_${GITHUB_RUN_ID}"
@@ -1153,6 +1204,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-stage-diagnostics
+          retention-days: 14
           path: |
             diagnostics/hs_stdout.txt
             diagnostics/forecaster_submit_stdout.txt
@@ -1193,11 +1245,20 @@ jobs:
       - name: Validate inputs
         run: |
           set -e
-          if [ -z "${{ inputs.pipeline_id }}" ]; then
+          # The step runs before checkout, so the shape check is inline.
+          if ! [[ "${INPUT_PIPELINE_ID}" =~ ^((pl|hs)_[A-Za-z0-9_]+)?$ ]]; then
+            echo "::error::pipeline_id has an unexpected shape: refusing to run."
+            exit 1
+          fi
+          if ! [[ "${INPUT_DB_RUN_ID}" =~ ^[0-9]*$ ]]; then
+            echo "::error::db_run_id must be a numeric run id."
+            exit 1
+          fi
+          if [ -z "${INPUT_PIPELINE_ID}" ]; then
             echo "ERROR: pipeline_id is required for fc_collect_finalize."
             exit 1
           fi
-          if [ -z "${{ inputs.db_run_id }}" ]; then
+          if [ -z "${INPUT_DB_RUN_ID}" ]; then
             echo "ERROR: db_run_id (the fc_submit run id) is required for fc_collect_finalize."
             exit 1
           fi
@@ -1314,7 +1375,7 @@ jobs:
             --batch-size 100 \
             --purpose hs_pipeline \
             --phase collect \
-            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --pipeline-id "${INPUT_PIPELINE_ID}" \
             --hs-run-id "${HS_RUN_ID}" | tee diagnostics/forecaster_stdout.txt
           FORECASTER_RUN_ID=$(grep -Eo 'run_id=fc_[0-9]+' diagnostics/forecaster_stdout.txt | tail -n 1 | cut -d= -f2 || true)
           if [ -n "${FORECASTER_RUN_ID}" ]; then
@@ -1464,7 +1525,7 @@ jobs:
           mkdir -p diagnostics
           python -m scripts.ci.batch_economics \
             --db "${PYTHIA_DB_URL}" \
-            --pipeline-id "${{ inputs.pipeline_id }}" \
+            --pipeline-id "${INPUT_PIPELINE_ID}" \
             --stage fc_collect_finalize \
             --hs-run-id "${HS_RUN_ID:-}" \
             --fc-run-id "${FC_RUN_ID:-}" \
@@ -1491,6 +1552,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-stage-diagnostics
+          retention-days: 14
           path: |
             diagnostics/forecaster_stdout.txt
             diagnostics/batch_economics__*.json
@@ -1504,6 +1566,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db
+          retention-days: 90
           path: data/resolver.duckdb
 
       # Preserve the release chain: pythia → Sibyl → publish. Sibyl's
@@ -1522,10 +1585,10 @@ jobs:
           # pipeline_id, and the bundles are pinned to this run's ids.
           gh workflow run run_sibyl.yml --ref main \
             -f db_run_id="${GITHUB_RUN_ID}" \
-            -f pipeline_id="${{ inputs.pipeline_id }}" \
+            -f pipeline_id="${INPUT_PIPELINE_ID}" \
             -f hs_run_id="${HS_RUN_ID:-}" \
             -f forecaster_run_id="${FORECASTER_RUN_ID:-}"
-          echo "Dispatched run_sibyl.yml with db_run_id=${GITHUB_RUN_ID} pipeline_id=${{ inputs.pipeline_id }} hs_run_id=${HS_RUN_ID:-} forecaster_run_id=${FORECASTER_RUN_ID:-}"
+          echo "Dispatched run_sibyl.yml with db_run_id=${GITHUB_RUN_ID} pipeline_id=${INPUT_PIPELINE_ID} hs_run_id=${HS_RUN_ID:-} forecaster_run_id=${FORECASTER_RUN_ID:-}"
 
       # The canonical upload + Sibyl dispatch above are signature-gated;
       # when the gate fires, the whole month's pipeline output goes

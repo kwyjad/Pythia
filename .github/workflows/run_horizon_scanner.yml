@@ -223,6 +223,8 @@ jobs:
       - name: Download canonical resolver DB with signature guardrail
         id: canonical_download
         env:
+          IN_DB_RUN_ID: ${{ github.event.inputs.db_run_id }}
+          IN_DB_ARTIFACT_NAME: ${{ github.event.inputs.db_artifact_name }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -230,8 +232,8 @@ jobs:
           rm -f diagnostics/db_signature_before.json
           rm -rf data/pythia-resolver-db
 
-          OVERRIDE_RUN_ID="${{ github.event.inputs.db_run_id }}"
-          DB_ARTIFACT_NAME_INPUT="${{ github.event.inputs.db_artifact_name }}"
+          OVERRIDE_RUN_ID="${IN_DB_RUN_ID}"
+          DB_ARTIFACT_NAME_INPUT="${IN_DB_ARTIFACT_NAME}"
           DB_ARTIFACT_NAME="${DB_ARTIFACT_NAME_INPUT:-pythia-resolver-db}"
 
           download_artifact_with_retries() {
@@ -279,13 +281,16 @@ jobs:
           fi
 
           if [ -z "${DB_RUN_ID:-}" ]; then
+            # Runs our own triggers started, never a fork's pull request on a
+            # branch it called main (see the download-canonical-db action).
+            TRUSTED_EVENTS='["schedule","workflow_dispatch","workflow_run","push"]'
             CANDIDATES_FILE=$(mktemp)
             gh run list \
               --workflow "Horizon Scanner Triage" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Horizon Scanner Triage"' >>"${CANDIDATES_FILE}" || true
             # Staged pipeline: only its fc_collect_finalize runs upload the
             # canonical artifact; other stage runs are skipped naturally when
             # the artifact download fails and the loop moves on.
@@ -293,34 +298,34 @@ jobs:
               --workflow "Pythia Pipeline Stage" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia Pipeline Stage"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Pythia Pipeline Stage"' >>"${CANDIDATES_FILE}" || true
             gh run list \
               --workflow "Sibyl Deep Research" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Sibyl Deep Research"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Sibyl Deep Research"' >>"${CANDIDATES_FILE}" || true
             gh run list \
               --workflow "Resolver Update" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Resolver Update"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Resolver Update"' >>"${CANDIDATES_FILE}" || true
             gh run list \
               --workflow "Ingest Structured Data" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Ingest Structured Data"' >>"${CANDIDATES_FILE}" || true
             # Nightly PA-machine backcast — re-uploads the canonical DB with
             # haz_* progress; usually the newest artifact on any given day.
             gh run list \
               --workflow "Hazard Backcast" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Hazard Backcast"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Hazard Backcast"' >>"${CANDIDATES_FILE}" || true
             # One-shot raw-cache compaction — rebuilds and re-uploads the
             # canonical DB, so a run after one must not start from the
             # pre-compaction artifact it replaced.
@@ -328,15 +333,15 @@ jobs:
               --workflow "Compact Resolver DB" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Compact Resolver DB"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Compact Resolver DB"' >>"${CANDIDATES_FILE}" || true
             # Manual interpreter backfill/recovery — also re-uploads canonical.
             gh run list \
               --workflow "Interpreter Backfill" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Interpreter Backfill"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Interpreter Backfill"' >>"${CANDIDATES_FILE}" || true
             # Maintenance workflows that re-upload the canonical DB after
             # editing it — without these, a purge or test-marking lands in an
             # artifact nothing discovers and is silently reverted by the next
@@ -345,14 +350,14 @@ jobs:
               --workflow "Purge HS Run" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Purge HS Run"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Purge HS Run"' >>"${CANDIDATES_FILE}" || true
             gh run list \
               --workflow "Mark runs as test" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Mark runs as test"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Mark runs as test"' >>"${CANDIDATES_FILE}" || true
             # Include the post-pipeline chain so HS Triage starts from the
             # most-complete DB (calibration is the chain terminus and carries
             # all prior tables). Without this, calibration's artifact never
@@ -362,20 +367,20 @@ jobs:
               --workflow "Pythia — Compute Calibration Weights & Advice" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Calibration Weights & Advice"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Pythia — Compute Calibration Weights & Advice"' >>"${CANDIDATES_FILE}" || true
             gh run list \
               --workflow "Pythia — Compute SPD Scores" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute SPD Scores"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Pythia — Compute SPD Scores"' >>"${CANDIDATES_FILE}" || true
             gh run list \
               --workflow "Pythia — Compute Resolutions" \
               --branch main \
               --status success \
-              --json databaseId,createdAt \
-              --limit 20 | jq -r '.[] | "\(.createdAt),\(.databaseId),Pythia — Compute Resolutions"' >>"${CANDIDATES_FILE}" || true
+              --json databaseId,createdAt,event \
+              --limit 20 | jq -r --argjson trusted "${TRUSTED_EVENTS}" '.[] | select(.event as $e | $trusted | index($e)) | "\(.createdAt),\(.databaseId),Pythia — Compute Resolutions"' >>"${CANDIDATES_FILE}" || true
 
             if [ ! -s "${CANDIDATES_FILE}" ]; then
               echo "ERROR: No successful Horizon Scanner, Resolver Update, Ingest Structured Data, or post-pipeline runs found; refusing to start without canonical DB."
@@ -655,6 +660,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hs-triage-coverage
+          retention-days: 14
           path: |
             diagnostics/hs_stdout.txt
             diagnostics/hs_triage_coverage__*.csv
@@ -716,6 +722,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hs-triage-diagnostics
+          retention-days: 14
           path: |
             diagnostics/hs_assertion.md
             diagnostics/hs_stdout.txt
@@ -774,6 +781,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hs-question-diagnostics
+          retention-days: 14
           path: |
             diagnostics/hs_assertion.md
             diagnostics/hs_stdout.txt
@@ -988,6 +996,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-eval
+          retention-days: 14
           path: debug/eval/*
           if-no-files-found: warn
 
@@ -996,4 +1005,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pythia-resolver-db
+          retention-days: 90
           path: data/resolver.duckdb

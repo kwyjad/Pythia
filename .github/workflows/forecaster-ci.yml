@@ -491,13 +491,14 @@ jobs:
       - name: Run SPD experimental mode (dual/bayesmc)
         if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.spd_mode == 'bayesmc_write' || github.event.inputs.spd_mode == 'dual_compare_bayesmc_write') }}
         env:
+          IN_SPD_MODE: ${{ github.event.inputs.spd_mode }}
           PYTHIA_DEBUG_SPD: "1"
           PYTHIA_DEBUG_DB: "1"
           PYTHIA_SPD_V2_DUAL_RUN: "0"
           PYTHIA_SPD_V2_USE_BAYESMC: "0"
         run: |
           echo "=== Running SPD experimental mode ==="
-          echo "spd_mode=${{ github.event.inputs.spd_mode }}"
+          echo "spd_mode=${IN_SPD_MODE}"
           echo "PYTHIA_SPD_V2_DUAL_RUN=$PYTHIA_SPD_V2_DUAL_RUN"
           echo "PYTHIA_SPD_V2_USE_BAYESMC=$PYTHIA_SPD_V2_USE_BAYESMC"
           pytest -vv forecaster/tests/test_spd.py -k "bayesmc_flag"
@@ -551,6 +552,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: spd-compare-tests
+          retention-days: 14
           path: debug/spd_compare_tests/*.json
           if-no-files-found: warn
 
@@ -559,5 +561,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: spd-compare-smoke
+          retention-days: 14
           path: debug/spd_compare_smoke/*.json
           if-no-files-found: warn
