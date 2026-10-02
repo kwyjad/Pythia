@@ -37,8 +37,13 @@ only way to choose what to cut was to guess. Now the same log block that says
         --src data/resolver.duckdb --out data_out/resolver.duckdb \
         [--max-bytes 2147483648] [--keep-all]
 
-Exit codes: 0 on success, 1 when the result still exceeds --max-bytes (so the
-publish workflow stops BEFORE it clobbers a working asset).
+Exit codes: 0 on success, 1 when the result still exceeds --max-bytes, 2 when
+credential-shaped text survives the scrub. Either failure stops the publish
+workflow BEFORE it clobbers a working asset.
+
+Since Oct 2026 it also drops licensed and internal tables (``EXCLUDED_TABLES``)
+and scrubs every text column of credential-shaped strings
+(``scrub_database``), because the release is public.
 """
 
 from __future__ import annotations
@@ -66,6 +71,34 @@ GITHUB_ASSET_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
 # is a serving copy and the machine's state belongs in the canonical artifact.
 EXCLUDED_TABLE_PREFIXES = ("haz_",)
 
+# Whole tables excluded from the PUBLISHED copy for reasons other than size
+# (Oct 2026 security audit). The canonical artifact keeps every one of them,
+# so the forecaster and the PA machine are untouched; only the public asset
+# loses them.
+#
+# - Licensed third-party rows whose terms do not allow public redistribution:
+#   ACLED event-level data, EM-DAT figures, ACAPS narrative products, and the
+#   raw staging copy of every connector (facts_raw). Derived monthly
+#   aggregates (facts_resolved, acled_monthly_fatalities) still ship.
+# - Pipeline internals nothing serves: provider Batch-API state and request
+#   bodies, and the in-process run ledger.
+#
+# acaps_inform_severity (published index scores) stays pending the owner's
+# licence check; add it here if ACAPS says otherwise.
+EXCLUDED_TABLES = frozenset(
+    {
+        "acled_political_events",
+        "emdat_pa",
+        "facts_raw",
+        "acaps_risk_radar",
+        "acaps_daily_monitoring",
+        "acaps_humanitarian_access",
+        "llm_batches",
+        "llm_batch_requests",
+        "ui_runs",
+    }
+)
+
 
 def _connect():
     import duckdb
@@ -83,7 +116,63 @@ def tables_in(con, alias: str) -> list[str]:
 
 
 def is_excluded(table: str) -> bool:
-    return any(table.lower().startswith(p) for p in EXCLUDED_TABLE_PREFIXES)
+    name = table.lower()
+    return name in EXCLUDED_TABLES or any(name.startswith(p) for p in EXCLUDED_TABLE_PREFIXES)
+
+
+def _text_columns(con, alias: str) -> list[tuple[str, str]]:
+    rows = con.execute(
+        "SELECT table_name, column_name FROM information_schema.columns "
+        "WHERE table_catalog = ? AND table_schema = 'main' "
+        "AND data_type IN ('VARCHAR', 'JSON') ORDER BY table_name, column_name",
+        [alias],
+    ).fetchall()
+    return [(str(t), str(c)) for t, c in rows]
+
+
+def _count_matches(con, alias: str, table: str, column: str, pattern: str) -> int:
+    row = con.execute(
+        f'SELECT COUNT(*) FROM {alias}."{table}" '
+        f'WHERE regexp_matches(CAST("{column}" AS VARCHAR), ?)',
+        [pattern],
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def scrub_database(con, alias: str) -> dict[str, object]:
+    """Replace every credential-shaped string in every text column.
+
+    A request error can quote the URL it failed on, and until Oct 2026 the
+    Gemini key travelled in that URL, so error and debug columns could hold a
+    live key. The writers now scrub at write time; this pass is the net under
+    them, run over the copy that is about to become public.
+
+    One existence scan per column (the combined pattern), and a rewrite only
+    for columns that matched, so the large prompt and response columns cost
+    one read each. Returns ``scrubbed`` (rows changed per ``table.column``)
+    and ``residual`` (matches left after the rewrite, which must be empty).
+    """
+
+    from pythia.secret_scrub import COMBINED_PATTERN, SQL_PATTERNS
+
+    scrubbed: dict[str, int] = {}
+    residual: dict[str, int] = {}
+    for table, column in _text_columns(con, alias):
+        hits = _count_matches(con, alias, table, column, COMBINED_PATTERN)
+        if not hits:
+            continue
+        for pattern, replacement in SQL_PATTERNS:
+            con.execute(
+                f'UPDATE {alias}."{table}" SET "{column}" = '
+                f'regexp_replace(CAST("{column}" AS VARCHAR), ?, ?, \'g\') '
+                f'WHERE regexp_matches(CAST("{column}" AS VARCHAR), ?)',
+                [pattern, replacement, pattern],
+            )
+        scrubbed[f"{table}.{column}"] = hits
+        left = _count_matches(con, alias, table, column, COMBINED_PATTERN)
+        if left:
+            residual[f"{table}.{column}"] = left
+    return {"scrubbed": scrubbed, "residual": residual}
 
 
 def compact_database(src: str, out: str) -> dict[str, int]:
@@ -161,6 +250,7 @@ def build_release_db(
 
     src_bytes = src_path.stat().st_size
     dropped: list[str] = []
+    scrub: dict[str, object] = {"scrubbed": {}, "residual": {}}
     before: list[str] = []
     after: list[str] = []
 
@@ -178,6 +268,10 @@ def build_release_db(
                 if is_excluded(table):
                     con.execute(f"DROP TABLE IF EXISTS work.{table}")
                     dropped.append(table)
+        # The scrub runs whatever --keep-all says: keeping a table is a
+        # decision about size, never about publishing a credential.
+        scrub = scrub_database(con, "work")
+        con.execute("CHECKPOINT work")
         con.execute("DETACH src")
         con.execute(f"ATTACH '{out_path}' AS dst")
         con.execute("COPY FROM DATABASE work TO dst")
@@ -193,6 +287,8 @@ def build_release_db(
         "src_bytes": src_bytes,
         "out_bytes": out_bytes,
         "dropped_tables": dropped,
+        "scrubbed": scrub["scrubbed"],
+        "residual": scrub["residual"],
         "saved_bytes": src_bytes - out_bytes,
         "sizes_before": before,
         "sizes_after": after,
@@ -224,9 +320,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     if stats["dropped_tables"]:
         LOGGER.info(
-            "dropped %d machine-cache table(s) the API never reads: %s",
+            "dropped %d table(s) the release does not publish (machine caches, "
+            "licensed sources, pipeline internals): %s",
             len(stats["dropped_tables"]), ", ".join(stats["dropped_tables"]),
         )
+    if stats["scrubbed"]:
+        # A non-zero count means a credential reached the canonical DB and
+        # would have been published: rotate it, whatever else this run does.
+        for col, n in sorted(stats["scrubbed"].items()):
+            LOGGER.warning("scrubbed credential-shaped text from %d row(s) of %s", n, col)
+        print("::warning title=Credentials scrubbed from release::"
+              f"{sum(stats['scrubbed'].values())} row(s) across "
+              f"{len(stats['scrubbed'])} column(s) carried credential-shaped text; "
+              "the published copy is clean, but rotate the affected key.")
+    else:
+        LOGGER.info("credential scan: no credential-shaped text found")
+    if stats["residual"]:
+        LOGGER.error("credential-shaped text survived the scrub: %s",
+                     ", ".join(sorted(stats["residual"])))
+        print("::error::Release DB still carries credential-shaped text after "
+              "the scrub; publish aborted before clobbering the existing asset.")
+        return 2
     # Log the attribution in the SAME block as any size error, so whoever
     # reads the failure also reads what caused it.
     for label, key in (("canonical", "sizes_before"), ("published", "sizes_after")):

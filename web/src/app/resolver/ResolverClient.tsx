@@ -66,17 +66,17 @@ const CATEGORIES = [
   {
     key: "situation_reports",
     title: "Situation Reports",
-    sources: ["reliefweb", "acaps_daily", "acled_political"],
+    sources: ["reliefweb"],
   },
   {
     key: "other_alerts",
     title: "Other Alerts",
-    sources: ["hdx_signals", "acaps_risk_radar", "gdelt"],
+    sources: ["hdx_signals", "gdelt"],
   },
   {
     key: "other",
     title: "Other",
-    sources: ["acaps_inform", "acaps_access"],
+    sources: ["acaps_inform"],
   },
 ];
 

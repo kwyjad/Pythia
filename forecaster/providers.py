@@ -1443,11 +1443,14 @@ def call_google(
     if not _GEMINI_API_KEY:
         return ProviderResult("", usage_to_dict(None), 0.0, model, error="missing GEMINI_API_KEY")
     api_model = model.split("/", 1)[-1] if "/" in model else model
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={_GEMINI_API_KEY}"
+    # The key travels in a header, never the URL: a request error quotes the
+    # URL, and that error text is stored in llm_calls and published.
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent"
     body = build_google_body(prompt, model, temperature, thinking_level=thinking_level)
     try:
         resp = requests.post(
             url,
+            headers={"x-goog-api-key": _GEMINI_API_KEY},
             json=body,
             timeout=timeout_sec if timeout_sec is not None else _GEMINI_TIMEOUT,
         )

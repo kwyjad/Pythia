@@ -52,16 +52,9 @@ SECRET_NAME_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
-_TOKEN_SHAPES: tuple[re.Pattern[str], ...] = (
-    re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),            # OpenAI
-    re.compile(r"sk-ant-[A-Za-z0-9_\-]{16,}"),        # Anthropic
-    re.compile(r"AIza[A-Za-z0-9_\-]{16,}"),           # Google
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}"),        # GitHub
-    re.compile(r"github_pat_[A-Za-z0-9_]{16,}"),      # GitHub fine-grained
-    re.compile(r"BSA[A-Za-z0-9_\-]{16,}"),            # Brave Search
-    re.compile(r"xox[abposr]-[A-Za-z0-9\-]{10,}"),    # Slack
-    re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),  # JWT
-)
+# The provider credential shapes live in one place, shared with the writers
+# that store error text and with the release builder's scrub.
+from pythia.secret_scrub import TOKEN_SHAPES as _TOKEN_SHAPES  # noqa: E402
 
 # key=value / "key": "value" / Authorization: Bearer xxx, where the key half
 # names a secret. Runs after the shape patterns so a recognised token is

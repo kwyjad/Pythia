@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 
 from pythia.db.schema import connect, ensure_schema
 from pythia.db.util import ensure_llm_calls_columns
+from pythia.secret_scrub import scrub_text
 from resolver.query.debug_ui import (
     _extract_hazard_scores_with_diagnostics,
     _extract_json_candidate,
@@ -290,16 +291,16 @@ def log_hs_llm_call(
                 prompt_text,
                 response_text,
                 None,  # parsed_json; HS triage is currently stored as raw text
-                usage_json,
+                scrub_text(usage_json),
                 elapsed_ms,
                 prompt_tokens,
                 completion_tokens,
                 total_tokens,
                 cost_usd,
-                error_text_local,
+                scrub_text(error_text_local),
                 status,
                 error_type,
-                error_message[:500] if error_message else None,
+                scrub_text(error_message)[:500] if error_message else None,
                 hazard_scores_json,
                 hazard_scores_parse_ok if hazard_scores_json is not None else None,
                 response_format,

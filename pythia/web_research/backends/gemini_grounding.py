@@ -186,7 +186,7 @@ def fetch_via_gemini(
 
     def _post(url: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         try:
-            resp = requests.post(url, params={"key": api_key}, json=body, timeout=timeout_sec)
+            resp = requests.post(url, headers={"x-goog-api-key": api_key}, json=body, timeout=timeout_sec)
             try:
                 return resp.status_code, resp.json()
             except Exception:
@@ -372,7 +372,7 @@ def fetch_unverified_summary_via_gemini(
 
     def _post(url: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
         try:
-            resp = requests.post(url, params={"key": api_key}, json=body, timeout=timeout_sec)
+            resp = requests.post(url, headers={"x-goog-api-key": api_key}, json=body, timeout=timeout_sec)
             try:
                 return resp.status_code, resp.json()
             except Exception:

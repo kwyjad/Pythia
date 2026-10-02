@@ -614,7 +614,7 @@ def test_fetch_via_gemini_retries_once_when_missing_grounding(monkeypatch):
                 ]
             }
 
-    def fake_post(url, params=None, json=None, timeout=None):
+    def fake_post(url, params=None, headers=None, json=None, timeout=None):
         calls.append({"url": url, "body": json})
         return FakeResponse()
 

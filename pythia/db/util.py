@@ -211,7 +211,12 @@ def log_web_research_call(
     except Exception:
         cost_usd = 0.0
 
-    usage_json = json.dumps(usage_dict or {}, ensure_ascii=False)
+    from pythia.secret_scrub import scrub_text
+
+    # Error and usage text is scrubbed where it is written: the table ships
+    # in the public release, and a request error can quote a credential.
+    error_text = scrub_text(error_text)
+    usage_json = scrub_text(json.dumps(usage_dict or {}, ensure_ascii=False))
     status = derive_status(error_text)
     error_type = derive_error_type(error_text)
     error_message = derive_error_message(error_text)

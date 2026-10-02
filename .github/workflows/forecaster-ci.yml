@@ -29,6 +29,7 @@ on:
       - "python_library_requirements.txt"
       - "scripts/ai_bundle/**"
       - "pythia/llm_batch.py"
+      - "pythia/secret_scrub.py"
       - "pythia/model_costs.json"
       # test_opus55_lineup.py pins Sibyl's model and effort defaults.
       - "sibyl/config.py"
@@ -331,7 +332,9 @@ jobs:
             scripts/ci/tests/test_batch_canary.py \
             scripts/ci/tests/test_stage_health.py \
             scripts/ci/tests/test_build_release_db.py \
-            scripts/ci/tests/test_db_table_sizes.py
+            scripts/ci/tests/test_db_table_sizes.py \
+            pythia/tests/test_secret_scrub.py \
+            forecaster/tests/test_gemini_key_header.py
 
       - name: Run API release-sync tests
         run: |

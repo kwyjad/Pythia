@@ -48,6 +48,8 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import requests
 
+from pythia.secret_scrub import scrub_text
+
 from resolver.hazard_resolution.rulebook import Rulebook
 from resolver.hazard_resolution.rules import event_months
 from resolver.hazard_resolution.sources import (
@@ -388,8 +390,11 @@ def fetch_ipc(
                 "analyses": len(api_records),
             }
         except Exception as exc:
-            LOG.error("[ipc] IPC API fetch failed for %s: %s", ym, exc)
-            detail["paths"][PATH_API] = {"ok": False, "error": str(exc)}
+            # The key is a query parameter, so the error text quotes it, and
+            # this detail is stored in the haz_* provenance.
+            error = scrub_text(str(exc))
+            LOG.error("[ipc] IPC API fetch failed for %s: %s", ym, error)
+            detail["paths"][PATH_API] = {"ok": False, "error": error}
     else:
         LOG.warning(
             "[ipc] %s is not set — falling back to the Phase 3+ rows already in "
