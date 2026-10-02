@@ -253,6 +253,46 @@ def _db_file_mtime() -> Optional[float]:
         return None
 
 
+_SERVE_LINK_MARKER = ".serve-"
+
+
+def _serving_path(db_url: str) -> str:
+    """Return a per-version path to open the DB through.
+
+    DuckDB caches one database instance per PATH while any connection to it
+    is open, so after ``os.replace`` swaps the file a "fresh" connection to
+    the same path is handed the old instance whenever anything else in the
+    process still holds that path open — a pooled schema connection did,
+    and the API then served the DB it booted with until it restarted
+    (Oct 2026). Opening through a hard link named for the file's inode and
+    mtime makes every new file a new path, which no stale handle can pin.
+    A hard link costs no disk space. Where one cannot be made (another
+    filesystem, no permission) the canonical path is used as before.
+    """
+    src = Path(db_url)
+    try:
+        st = src.stat()
+    except OSError:
+        return db_url
+    link = src.parent / f".{src.name}{_SERVE_LINK_MARKER}{st.st_ino}-{st.st_mtime_ns}"
+    try:
+        if not link.exists():
+            os.link(src, link)
+    except OSError as exc:
+        logger.warning("Could not hard-link %s for serving (%s); opening it directly", src, exc)
+        return db_url
+    # Sweep links to earlier files. Nothing reads them: the connection that
+    # did was closed before this open (``_swap_read_connection`` closes first).
+    for stale in src.parent.glob(f".{src.name}{_SERVE_LINK_MARKER}*"):
+        if stale.name.startswith(link.name):
+            continue
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    return str(link)
+
+
 def _open_duckdb_connection() -> duckdb.DuckDBPyConnection:
     """Open a fresh DuckDB connection to the configured DB path.
 
@@ -270,7 +310,7 @@ def _open_duckdb_connection() -> duckdb.DuckDBPyConnection:
     the last incomplete transaction, which is acceptable for a read-heavy API
     server whose authoritative data comes from the synced DB file.
     """
-    db_url = load_cfg()["app"]["db_url"].replace("duckdb:///", "")
+    db_url = _serving_path(load_cfg()["app"]["db_url"].replace("duckdb:///", ""))
     try:
         con = duckdb.connect(db_url, read_only=False)
     except (duckdb.CatalogException, duckdb.InternalException) as exc:
@@ -286,7 +326,13 @@ def _open_duckdb_connection() -> duckdb.DuckDBPyConnection:
             raise
     con.execute(f"SET memory_limit='{_DUCKDB_MEMORY_LIMIT}'")
     con.execute(f"SET threads={_DUCKDB_THREADS}")
-    logger.info("DuckDB connection opened (memory_limit=%s threads=%s)", _DUCKDB_MEMORY_LIMIT, _DUCKDB_THREADS)
+    from pythia.api import db_sync as _db_sync  # noqa: PLC0415
+
+    _db_sync.mark_served()
+    logger.info(
+        "DuckDB connection opened on %s (memory_limit=%s threads=%s)",
+        db_url, _DUCKDB_MEMORY_LIMIT, _DUCKDB_THREADS,
+    )
     return con
 
 
@@ -350,11 +396,16 @@ def _maybe_refresh_db() -> None:
         return
     _LAST_SYNC_CHECK = now
 
-    try:
-        maybe_sync_latest_db()
-    except DbSyncError as exc:
-        logger.warning("Periodic DB sync check failed: %s", exc)
-        return
+    # When the background loop owns syncing, a request only checks whether a
+    # new file has landed; it never fetches or downloads itself.
+    from pythia.api import db_sync as _db_sync  # noqa: PLC0415
+
+    if not _db_sync.background_sync_running():
+        try:
+            maybe_sync_latest_db()
+        except DbSyncError as exc:
+            logger.warning("Periodic DB sync check failed: %s", exc)
+            return
 
     flag_refreshed = db_was_refreshed()
     current_mtime = _db_file_mtime()
@@ -396,6 +447,14 @@ def _swap_read_connection() -> bool:
                 old_con.close()
         except Exception:
             pass
+        # Idle pooled connections (pythia.db.schema.connect) stay OPEN after
+        # close() and pin the old database instance; release them too.
+        try:
+            from pythia.db.schema import close_pooled_connections  # noqa: PLC0415
+
+            close_pooled_connections()
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to release pooled DuckDB connections", exc_info=True)
         try:
             _READ_CON = _open_duckdb_connection()
             _READ_CON_MTIME = _db_file_mtime()
@@ -610,6 +669,14 @@ def _reopen_read_connection() -> duckdb.DuckDBPyConnection:
                 old_con.close()
         except Exception:
             pass
+        # Idle pooled connections (pythia.db.schema.connect) stay OPEN after
+        # close() and pin the old database instance; release them too.
+        try:
+            from pythia.db.schema import close_pooled_connections  # noqa: PLC0415
+
+            close_pooled_connections()
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to release pooled DuckDB connections", exc_info=True)
     return _ensure_read_connection().cursor()
 
 

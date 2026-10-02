@@ -67,7 +67,7 @@ from pythia.api.models import (
     LlmCallsBundle,
     QuestionBundleResponse,
 )
-from pythia.db.schema import connect as db_connect, ensure_schema
+from pythia.db.schema import close_pooled_connections, connect as db_connect, ensure_schema
 from pythia.db.util import ensure_llm_calls_columns
 from pythia.config import load as load_cfg
 from resolver.query.countries_index import compute_countries_index
@@ -223,7 +223,7 @@ def admin_force_sync(token: Optional[str] = Query(None)):
     _db_sync_mod._LAST_SYNC_AT = None  # noqa: SLF001
     _db_sync_mod._LAST_MANIFEST = None  # noqa: SLF001
     try:
-        manifest = maybe_sync_latest_db()
+        manifest = maybe_sync_latest_db(wait=True)
     except DbSyncError as exc:
         raise HTTPException(status_code=502, detail=f"Sync failed: {exc}") from exc
     flag_refreshed = db_was_refreshed()
@@ -255,10 +255,20 @@ def admin_force_sync(token: Optional[str] = Query(None)):
     }
 
 
+def _on_background_refresh() -> None:
+    """Swap the read connection after the background loop landed a new DB.
+
+    With no connection open yet there is nothing to swap: the first request
+    opens the file that is on disk now.
+    """
+    if _core._READ_CON is not None and _core._swap_read_connection():
+        logger.info("Background sync: new DB loaded and read connection swapped")
+
+
 @app.on_event("startup")
 def _startup_sync():
     try:
-        maybe_sync_latest_db()
+        maybe_sync_latest_db(wait=True)
     except DbSyncError as exc:
         logger.warning("DB sync failed during startup: %s", exc)
         _try_artifact_sync()
@@ -277,6 +287,19 @@ def _startup_sync():
                 con.close()
         except Exception:
             pass
+        # close() above only returns the connection to the pool, where it
+        # stays OPEN and pins the boot-time database instance for the life
+        # of the process; every later swap then reopened onto it. Release it.
+        try:
+            close_pooled_connections()
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to release pooled DuckDB connections", exc_info=True)
+    # Poll the release on our own clock rather than waiting for a visitor.
+    # Started after the schema pass so the loop never races ensure_schema.
+    try:
+        _db_sync_mod.start_background_sync(on_refresh=_on_background_refresh)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to start background DB sync: %s", exc)
 
 
 @app.get("/v1/health")
@@ -462,11 +485,13 @@ def api_version(include_test: bool = Query(False)) -> Dict[str, Any]:
     if not manifest:
         raise HTTPException(status_code=503, detail="Manifest not available yet")
     result = dict(manifest)
-    # Surface DB-sync health so a stale/drifted API is obvious at a glance.
-    result["sync_status"] = get_sync_status()
     # Add DB staleness diagnostics so operators can verify the API has the
     # latest data. Probes are cached per DB version (see _staleness_probes).
     probes = _staleness_probes(include_test)
+    # Surface DB-sync health so a stale/drifted API is obvious at a glance.
+    # Read AFTER the probes: they may open or swap the read connection, and
+    # in_sync compares the release with the DB actually SERVED.
+    result["sync_status"] = get_sync_status()
     result["latest_forecast_month"] = probes["latest_forecast_month"]
     result["latest_forecast_run_id"] = probes["latest_forecast_run_id"]
 

@@ -60,3 +60,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 -m scripts.ci.check_workflow_freshness
+
+  dashboard_sync:
+    # Does the live dashboard API serve the DB the release publishes? Added
+    # Oct 2026, after the 1 October forecasts were published green and the
+    # dashboard kept showing September. Fails LOUD like the job above; a
+    # release younger than the grace window is still catching up, not stuck.
+    name: Is the dashboard serving the latest release?
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Compare the release with the live API
+        env:
+          PYTHIA_API_BASE_URL: ${{ vars.PYTHIA_API_BASE_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 -m scripts.ci.check_dashboard_sync --mode watchdog --wait-min 15 --grace-min 90
