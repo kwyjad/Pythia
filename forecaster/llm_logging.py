@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from pythia.db.schema import connect, ensure_schema
 from pythia.test_mode import is_test_mode
+from pythia.secret_scrub import scrub_text
 from pythia.db.util import (
     derive_error_message,
     derive_error_type,
@@ -257,16 +258,16 @@ async def log_forecaster_llm_call(
             prompt_text,
             response,
             json.dumps(parsed_payload) if parsed_payload is not None else None,
-            usage_json,
+            scrub_text(usage_json),
             elapsed_ms,
             prompt_tokens,
             completion_tokens,
             total_tokens,
             cost_usd,
-            error_text_local,
+            scrub_text(error_text_local),
             status,
             error_type,
-            error_message,
+            scrub_text(error_message),
             response_format,
             None,
             None,

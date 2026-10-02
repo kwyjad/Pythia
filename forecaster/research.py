@@ -385,7 +385,7 @@ def _grounded_search(query: str, *, max_results: int = 12, timeout: float = None
         try:
             r = requests.post(
                 _gemini_base_url(model),
-                params={"key": api_key},
+                headers={"x-goog-api-key": api_key},
                 json=body,
                 timeout=timeout,
             )

@@ -11,6 +11,7 @@ on:
     branches: [main]
     paths:
       - "horizon_scanner/**"
+      - "pythia/secret_scrub.py"
       - "scripts/ci/snapshot_prompt_artifact.py"
       - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
       - "resolver/tests/test_hs_hazard_tail_packs_schema_and_writer.py"
@@ -38,6 +39,7 @@ on:
   pull_request:
     paths:
       - "horizon_scanner/**"
+      - "pythia/secret_scrub.py"
       - "scripts/ci/snapshot_prompt_artifact.py"
       - "scripts/ci/tests/test_snapshot_prompt_artifact.py"
       - "resolver/tests/test_hs_hazard_tail_packs_schema_and_writer.py"

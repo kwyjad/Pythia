@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 
 from pythia.db.schema import connect, ensure_schema
+from pythia.secret_scrub import scrub_text
 from pythia.test_mode import is_test_mode
 from pythia.utils.ids import scenario_id as sid, question_id as qid
 
@@ -505,7 +506,9 @@ def log_hs_country_reports_to_db(
         sources = payload.get("sources") or []
         sources_json = json.dumps(sources, ensure_ascii=False)
         grounded = bool(payload.get("grounded"))
-        grounding_debug_json = json.dumps(payload.get("grounding_debug") or {}, ensure_ascii=False)
+        grounding_debug_json = scrub_text(
+            json.dumps(payload.get("grounding_debug") or {}, ensure_ascii=False)
+        )
         structural_context = payload.get("structural_context") or ""
         recent_signals = payload.get("recent_signals") or []
         if not isinstance(recent_signals, list):
@@ -560,7 +563,9 @@ def log_hs_hazard_tail_packs_to_db(
             sources = [sources]
         sources_json = json.dumps(sources, ensure_ascii=False)
         grounded = bool(pack.get("grounded"))
-        grounding_debug_json = json.dumps(pack.get("grounding_debug") or {}, ensure_ascii=False)
+        grounding_debug_json = scrub_text(
+            json.dumps(pack.get("grounding_debug") or {}, ensure_ascii=False)
+        )
         structural_context = pack.get("structural_context") or ""
         recent_signals = pack.get("recent_signals") or []
         if not isinstance(recent_signals, list):

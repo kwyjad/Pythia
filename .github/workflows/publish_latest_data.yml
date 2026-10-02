@@ -252,7 +252,10 @@ jobs:
       # database at all. build_release_db exits non-zero when the result is
       # still over the limit, which stops the job here — with the existing
       # asset untouched — instead of destroying it and then failing.
-      - name: Build publishable DB (strip machine caches, compact, size-guard)
+      # Since Oct 2026 it is also the CREDENTIAL GUARD: it drops licensed and
+      # internal tables, scrubs credential-shaped text from every column, and
+      # exits 2 if any survives, again before anything is clobbered.
+      - name: Build publishable DB (strip, scrub credentials, compact, size-guard)
         run: |
           set -euo pipefail
           python -c "import duckdb" 2>/dev/null || pip install duckdb >/dev/null

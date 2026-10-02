@@ -133,7 +133,7 @@ def _fetch_google(batch: dict[str, Any]) -> dict[str, Any]:
         return {"skipped": "no provider batch name recorded"}
     # Google carries the operation, its metadata and its inlined responses in
     # one object; there are no separate files to fetch.
-    return {"batch_object": _http_get(f"{base}/{name}?key={key}", {})}
+    return {"batch_object": _http_get(f"{base}/{name}", {"x-goog-api-key": key})}
 
 
 _FETCHERS = {

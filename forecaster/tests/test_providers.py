@@ -543,8 +543,11 @@ def test_body_builders_match_sync_call_bodies(monkeypatch: pytest.MonkeyPatch) -
         def json(self):
             return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}], "usageMetadata": {}}
 
-    def _fake_post_google(url, json=None, timeout=None):
+    def _fake_post_google(url, headers=None, json=None, timeout=None):
         captured["body"] = json
+        # The key travels in a header, never the URL (Oct 2026 security audit).
+        assert "key=" not in url
+        assert (headers or {}).get("x-goog-api-key") == "k"
         return _FakeGoogleResp()
 
     monkeypatch.setattr(providers, "_GEMINI_API_KEY", "k")

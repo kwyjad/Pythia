@@ -37,6 +37,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from pythia.secret_scrub import scrub_text
+
 from .protocol import CANONICAL_COLUMNS
 from .validate import empty_canonical, validate_canonical
 
@@ -264,7 +266,8 @@ class IpcApiConnector:
             resp = session.get(_POPULATION_ENDPOINT, params=params, timeout=120)
             resp.raise_for_status()
         except requests.RequestException as exc:
-            LOG.error("[ipc_api] fetch failed: %s", exc)
+            # The key is a query parameter, so the error text quotes it.
+            LOG.error("[ipc_api] fetch failed: %s", scrub_text(str(exc)))
             return empty_canonical()
 
         if delay > 0:

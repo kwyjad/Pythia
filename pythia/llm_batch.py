@@ -61,6 +61,8 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import requests
 
+from pythia.secret_scrub import scrub_text
+
 LOGGER = logging.getLogger(__name__)
 
 # Batch families. Forecaster families key rows by (question_id, model_key);
@@ -866,6 +868,11 @@ class _GoogleBatch:
         self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
         self.base = "https://generativelanguage.googleapis.com/v1beta"
 
+    def _headers(self) -> Dict[str, str]:
+        # The key travels in a header, never the URL: requests quotes the
+        # URL in every HTTPError, and that text is stored in llm_batches.
+        return {"x-goog-api-key": self.api_key}
+
     def submit(self, rows: List[Tuple[str, Dict[str, Any]]], *, model_id: str) -> Dict[str, Any]:
         api_model = model_id.split("/", 1)[-1] if "/" in model_id else model_id
         body = {
@@ -882,7 +889,8 @@ class _GoogleBatch:
             }
         }
         resp = requests.post(
-            f"{self.base}/models/{api_model}:batchGenerateContent?key={self.api_key}",
+            f"{self.base}/models/{api_model}:batchGenerateContent",
+            headers=self._headers(),
             json=body,
             timeout=_HTTP_TIMEOUT,
         )
@@ -903,7 +911,8 @@ class _GoogleBatch:
     def _get(self, provider_batch_id: str) -> Dict[str, Any]:
         name = provider_batch_id.lstrip("/")
         resp = requests.get(
-            f"{self.base}/{name}?key={self.api_key}",
+            f"{self.base}/{name}",
+            headers=self._headers(),
             timeout=_HTTP_TIMEOUT,
         )
         resp.raise_for_status()
@@ -955,7 +964,8 @@ class _GoogleBatch:
         try:
             name = provider_batch_id.lstrip("/")
             requests.post(
-                f"{self.base}/{name}:cancel?key={self.api_key}",
+                f"{self.base}/{name}:cancel",
+                headers=self._headers(),
                 timeout=_HTTP_TIMEOUT,
             )
         except Exception:  # noqa: BLE001
@@ -1235,7 +1245,7 @@ def _record_submit_failure(
             "model_id": group_model,
             "chunk_idx": chunk_idx,
             "n_requests": len(chunk),
-            "error": str(exc)[:600],
+            "error": scrub_text(str(exc))[:600],
             "error_class": error_class,
         }
     )
@@ -1243,7 +1253,7 @@ def _record_submit_failure(
         "warning",
         "Batch submit failed",
         f"{report.family} {provider}/{group_model or '?'} chunk {chunk_idx} "
-        f"({len(chunk)} requests) [{error_class}]: {str(exc)[:300]} — rows stay pending; "
+        f"({len(chunk)} requests) [{error_class}]: {scrub_text(str(exc))[:300]} — rows stay pending; "
         "the collect stage re-batches them, then falls back to sync at full price",
     )
 
@@ -1346,7 +1356,7 @@ def _record_empty_batch(
     except Exception as exc:  # noqa: BLE001 - diagnostics only
         detail["poll_error"] = f"{type(exc).__name__}: {exc}"
 
-    text = json.dumps(detail, default=str)[:4000]
+    text = scrub_text(json.dumps(detail, default=str))[:4000]
     try:
         con.execute(
             "UPDATE llm_batches SET error_text = ? WHERE batch_id = ?", [text, batch_id]
@@ -1432,8 +1442,8 @@ def collect_batch(con, batch_id: str) -> Dict[str, int]:
             [
                 "succeeded" if ok else "errored",
                 text or "",
-                json.dumps(usage, ensure_ascii=False),
-                error or None,
+                scrub_text(json.dumps(usage, ensure_ascii=False)),
+                scrub_text(error) or None,
                 _now(),
                 cid,
             ],
@@ -1875,7 +1885,7 @@ def _annotate_resubmitted(con, old_batch_id: str, new_batch_ids: Sequence[str]) 
         info["resubmitted_as"] = merged
         con.execute(
             "UPDATE llm_batches SET error_text = ? WHERE batch_id = ?",
-            [json.dumps(info, default=str)[:4000], old_batch_id],
+            [scrub_text(json.dumps(info, default=str))[:4000], old_batch_id],
         )
     except Exception as exc:  # noqa: BLE001 - bookkeeping only
         LOGGER.warning("llm_batch: could not annotate %s as resubmitted: %s", old_batch_id, exc)

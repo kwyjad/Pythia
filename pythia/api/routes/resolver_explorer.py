@@ -63,11 +63,7 @@ _DB_SUMMARY_TABLES = [
     ("acled_monthly_fatalities", ["updated_at"], True),
     ("conflict_forecasts", ["created_at", "forecast_issue_date"], True),
     ("reliefweb_reports", ["fetched_at", "published_date"], True),
-    ("acled_political_events", ["fetched_at", "event_date"], True),
     ("acaps_inform_severity", ["fetched_at", "snapshot_date"], True),
-    ("acaps_risk_radar", ["fetched_at"], True),
-    ("acaps_daily_monitoring", ["fetched_at", "entry_date"], True),
-    ("acaps_humanitarian_access", ["fetched_at", "snapshot_date"], True),
     ("seasonal_forecasts", ["created_at", "forecast_issue_date"], True),
     ("enso_state", ["created_at", "fetch_date"], False),
     ("seasonal_tc_outlooks", ["fetched_at"], False),
@@ -183,29 +179,18 @@ def get_resolver_reliefweb_reports(
                            order_by="date DESC", exclude_cols=exclude)
 
 
-@router.get("/v1/resolver/acled_political_events")
-def get_resolver_acled_political_events(
-    iso3: str | None = Query(None), limit: int = Query(500),
-):
-    return _resolver_query("acled_political_events", iso3, limit,
-                           order_by="event_date DESC")
-
-
 @router.get("/v1/resolver/acaps")
 def get_resolver_acaps(
     iso3: str | None = Query(None),
-    dataset: str = Query("inform_severity",
-                         description="inform_severity|risk_radar|daily_monitoring|humanitarian_access"),
+    dataset: str = Query("inform_severity", description="inform_severity"),
     limit: int = Query(500),
 ):
-    table_map = {
-        "inform_severity": ("acaps_inform_severity", "snapshot_date DESC"),
-        "risk_radar": ("acaps_risk_radar", "fetched_at DESC"),
-        "daily_monitoring": ("acaps_daily_monitoring", "entry_date DESC"),
-        "humanitarian_access": ("acaps_humanitarian_access", "snapshot_date DESC"),
-    }
-    tbl, order = table_map.get(dataset, ("acaps_inform_severity", "snapshot_date DESC"))
-    return _resolver_query(tbl, iso3, limit, order_by=order)
+    # Only the published INFORM Severity index is served. ACAPS's Risk Radar,
+    # Daily Monitoring and Humanitarian Access products come from a
+    # credentialed API and are not republished (Oct 2026 security audit);
+    # any other dataset value answers with the index, as before.
+    return _resolver_query("acaps_inform_severity", iso3, limit,
+                           order_by="snapshot_date DESC")
 
 
 @router.get("/v1/resolver/seasonal_forecasts")
@@ -339,25 +324,12 @@ _SOURCE_REGISTRY: dict[str, dict] = {
                                      "published_date", "url"],
                          "order": "published_date DESC",
                          "exclude_default": {"body_excerpt"}},
-    "acaps_daily":      {"table": "acaps_daily_monitoring",
-                         "columns": ["iso3", "entry_date",
-                                     "latest_developments", "source"],
-                         "order": "entry_date DESC"},
-    "acled_political":  {"table": "acled_political_events",
-                         "columns": ["iso3", "event_date", "event_type",
-                                     "sub_event_type", "fatalities",
-                                     "actor1", "location"],
-                         "order": "event_date DESC"},
     # --- Other Alerts ---
     "hdx_signals":      {"table": "hdx_signals",
                          "columns": ["iso3", "hazard_code", "indicator",
                                      "concern_level", "indicator_value",
                                      "signal_date"],
                          "order": "signal_date DESC"},
-    "acaps_risk_radar": {"table": "acaps_risk_radar",
-                         "columns": ["iso3", "risk_title", "risk_level",
-                                     "risk_type", "risk_trend"],
-                         "order": "fetched_at DESC"},
     "gdelt":            {"table": "gdelt_conflict_indicators",
                          "columns": ["iso3", "event_date", "total_events",
                                      "tier1_events", "tier2_events",
@@ -369,10 +341,6 @@ _SOURCE_REGISTRY: dict[str, dict] = {
                          "columns": ["iso3", "crisis_name", "severity_score",
                                      "severity_category", "snapshot_date"],
                          "order": "snapshot_date DESC"},
-    "acaps_access":     {"table": "acaps_humanitarian_access",
-                         "columns": ["iso3", "access_score",
-                                     "access_category", "snapshot_date"],
-                         "order": "snapshot_date DESC"},
 }
 
 _SOURCE_LABELS: dict[str, str] = {
@@ -383,12 +351,10 @@ _SOURCE_LABELS: dict[str, str] = {
     "acled_cast": "ACLED CAST", "crisiswatch": "CrisisWatch",
     "nmme": "NMME Seasonal", "enso": "ENSO State",
     "seasonal_tc": "Seasonal TC Outlooks", "tc_context": "TC Context",
-    "reliefweb": "ReliefWeb", "acaps_daily": "ACAPS Daily Monitoring",
-    "acled_political": "ACLED Political Events",
-    "hdx_signals": "HDX Signals", "acaps_risk_radar": "ACAPS Risk Radar",
+    "reliefweb": "ReliefWeb",
+    "hdx_signals": "HDX Signals",
     "gdelt": "GDELT Conflict Events",
     "acaps_inform": "ACAPS INFORM Severity",
-    "acaps_access": "ACAPS Humanitarian Access",
     "ipc_api": "IPC API",
 }
 
@@ -400,11 +366,10 @@ _SOURCE_CATEGORIES: dict[str, str] = {
     "acled_cast": "conflict_forecasts", "crisiswatch": "conflict_forecasts",
     "nmme": "weather_climate", "enso": "weather_climate",
     "seasonal_tc": "weather_climate", "tc_context": "weather_climate",
-    "reliefweb": "situation_reports", "acaps_daily": "situation_reports",
-    "acled_political": "situation_reports",
-    "hdx_signals": "other_alerts", "acaps_risk_radar": "other_alerts",
+    "reliefweb": "situation_reports",
+    "hdx_signals": "other_alerts",
     "gdelt": "other_alerts",
-    "acaps_inform": "other", "acaps_access": "other",
+    "acaps_inform": "other",
     "ipc_api": "resolution_data",
 }
 

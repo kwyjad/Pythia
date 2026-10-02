@@ -284,7 +284,7 @@ def _call_gemini_grounding(prompt: str, *, timeout_sec: int = 30) -> str:
         )
         try:
             resp = requests.post(
-                url, params={"key": api_key}, json=body, timeout=timeout_sec,
+                url, headers={"x-goog-api-key": api_key}, json=body, timeout=timeout_sec,
             )
             status_code = resp.status_code
             try:

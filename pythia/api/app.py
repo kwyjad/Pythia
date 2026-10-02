@@ -715,7 +715,6 @@ from pythia.api.routes.resolver_explorer import (  # noqa: E402,F401
     _validated_columns,
     get_resolver_acaps,
     get_resolver_acled_monthly_fatalities,
-    get_resolver_acled_political_events,
     get_resolver_conflict_forecasts,
     get_resolver_connector_status,
     get_resolver_country_facts,

@@ -240,3 +240,119 @@ class TestExclusionListMatchesTheDocumentedSet:
         """`haz_` is a table-name prefix, not a substring match."""
         assert not brd.is_excluded("hazard_lookup")
         assert not brd.is_excluded("questions_haz_raw_notes")
+
+
+# ---------------------------------------------------------------------------
+# Oct 2026 security audit: licensed and internal tables, and credentials.
+# ---------------------------------------------------------------------------
+
+GEMINI_KEY = "AIzaSyLEAKED0123456789abcdefghij"
+ANTHROPIC_KEY = "sk-ant-api03-leakedleakedleaked"
+
+
+def _src_with_secrets(tmp_path):
+    path = _src(tmp_path, with_machine_tables=False)
+    con = duckdb.connect(str(path))
+    for table in sorted(brd.EXCLUDED_TABLES):
+        con.execute(f"CREATE TABLE {table} (x TEXT)")
+        con.execute(f"INSERT INTO {table} VALUES ('row')")
+    con.execute(
+        "CREATE TABLE llm_calls (call_id TEXT, prompt_text TEXT, error_text TEXT, usage_json JSON)"
+    )
+    con.execute(
+        "INSERT INTO llm_calls VALUES "
+        "('c1', 'assess the risk-assessment-framework', "
+        f"'ConnectionError for url: https://g/v1beta/m:generateContent?key={GEMINI_KEY}', "
+        f"'{{\"note\": \"{ANTHROPIC_KEY}\"}}'), "
+        "('c2', 'a clean prompt', NULL, '{\"prompt_tokens\": 10}')"
+    )
+    con.execute("CREATE TABLE hs_country_reports (iso3 TEXT, grounding_debug_json TEXT)")
+    con.execute(
+        "INSERT INTO hs_country_reports VALUES "
+        "('SOM', '{\"provider_error_message\": \"GET https://api.ipcinfo.org/population?key=deadbeef0123456789abcdef01234567\"}')"
+    )
+    con.close()
+    return path
+
+
+class TestLicensedAndInternalTables:
+    @pytest.mark.parametrize("table", sorted(brd.EXCLUDED_TABLES))
+    def test_each_listed_table_is_dropped(self, tmp_path, table):
+        out = tmp_path / "r.duckdb"
+        stats = brd.build_release_db(str(_src_with_secrets(tmp_path)), str(out))
+        assert table in stats["dropped_tables"]
+        con = duckdb.connect(str(out))
+        try:
+            assert table not in brd.tables_in(con, "r")
+        finally:
+            con.close()
+
+    def test_the_licence_list_is_the_documented_one(self):
+        assert brd.EXCLUDED_TABLES == {
+            "acled_political_events", "emdat_pa", "facts_raw",
+            "acaps_risk_radar", "acaps_daily_monitoring", "acaps_humanitarian_access",
+            "llm_batches", "llm_batch_requests", "ui_runs",
+        }
+
+    def test_aggregates_and_the_inform_index_still_ship(self):
+        for table in ("acled_monthly_fatalities", "acaps_inform_severity",
+                      "acaps_inform_severity_trend", "facts_resolved"):
+            assert not brd.is_excluded(table)
+
+
+class TestCredentialScrub:
+    def _build(self, tmp_path, *extra):
+        out = tmp_path / "r.duckdb"
+        stats = brd.build_release_db(str(_src_with_secrets(tmp_path)), str(out), *extra)
+        con = duckdb.connect(str(out))
+        try:
+            calls = con.execute(
+                "SELECT call_id, prompt_text, error_text, CAST(usage_json AS VARCHAR) "
+                "FROM llm_calls ORDER BY call_id"
+            ).fetchall()
+            reports = con.execute("SELECT grounding_debug_json FROM hs_country_reports").fetchall()
+        finally:
+            con.close()
+        return stats, calls, reports
+
+    def test_planted_keys_are_removed_and_counted(self, tmp_path):
+        stats, calls, reports = self._build(tmp_path)
+        published = repr(calls) + repr(reports)
+        for secret in (GEMINI_KEY, ANTHROPIC_KEY, "deadbeef0123456789abcdef01234567"):
+            assert secret not in published
+        assert stats["scrubbed"] == {
+            "hs_country_reports.grounding_debug_json": 1,
+            "llm_calls.error_text": 1,
+            "llm_calls.usage_json": 1,
+        }
+        assert stats["residual"] == {}
+
+    def test_text_without_a_credential_is_byte_identical(self, tmp_path):
+        _, calls, _ = self._build(tmp_path)
+        assert calls[0][1] == "assess the risk-assessment-framework"
+        assert calls[1][1:] == ("a clean prompt", None, '{"prompt_tokens": 10}')
+
+    def test_keep_all_still_scrubs(self, tmp_path):
+        out = tmp_path / "r.duckdb"
+        stats = brd.build_release_db(
+            str(_src_with_secrets(tmp_path)), str(out), keep_all=True
+        )
+        assert stats["dropped_tables"] == []
+        assert stats["scrubbed"]
+
+    def test_a_scrub_warning_is_printed_so_the_key_gets_rotated(self, tmp_path, capsys):
+        rc = brd.main(["--src", str(_src_with_secrets(tmp_path)),
+                       "--out", str(tmp_path / "r.duckdb"), "--report-top", "0"])
+        assert rc == 0
+        assert "::warning title=Credentials scrubbed from release::" in capsys.readouterr().out
+
+    def test_a_residual_match_stops_the_publish(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(
+            brd, "scrub_database",
+            lambda con, alias: {"scrubbed": {}, "residual": {"llm_calls.error_text": 1}},
+        )
+        rc = brd.main(["--src", str(_src_with_secrets(tmp_path)),
+                       "--out", str(tmp_path / "r.duckdb"), "--report-top", "0"])
+        assert rc == 2
+        out = capsys.readouterr().out
+        assert "::error::" in out and "clobber" in out
