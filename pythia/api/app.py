@@ -167,7 +167,27 @@ from pythia.api.core import (  # noqa: F401
     _validate_iso3_param,
 )
 
-app = FastAPI(title="Pythia API", version="1.0.0")
+from pythia.api.security import (  # noqa: E402
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+    docs_enabled,
+)
+
+# The interactive docs and the schema describe every route, the debug ones
+# included; a public API has no need to hand that map to every visitor.
+_DOCS = docs_enabled()
+app = FastAPI(
+    title="Pythia API",
+    version="1.0.0",
+    docs_url="/docs" if _DOCS else None,
+    redoc_url="/redoc" if _DOCS else None,
+    openapi_url="/openapi.json" if _DOCS else None,
+)
+# The middleware added LAST runs outermost: CORS (added below), then the
+# security headers, then the limiter. That order puts the headers on a 429
+# as well as on a route's own answer.
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 cors_origins_env = os.getenv("PYTHIA_CORS_ALLOW_ORIGINS", "*").strip()
 cors_origins = (
     ["*"]
@@ -199,8 +219,24 @@ def _try_artifact_sync() -> None:
         logger.warning("Artifact-based DB sync failed: %s", exc)
 
 
+# One forced sync per window. A forced sync downloads the whole release DB
+# (hundreds of MB) and swaps the read connection; without a cooldown a leaked
+# token is a way to keep the API busy doing nothing else.
+_FORCE_SYNC_LAST_AT: Optional[float] = None
+
+
+def _force_sync_cooldown_s() -> float:
+    try:
+        return max(0.0, float(os.getenv("PYTHIA_FORCE_SYNC_COOLDOWN_S", "300")))
+    except ValueError:
+        return 300.0
+
+
 @app.post("/v1/admin/force_sync")
-def admin_force_sync(token: Optional[str] = Query(None)):
+def admin_force_sync(
+    token: Optional[str] = Query(None),
+    x_fred_debug_token: Optional[str] = Header(default=None, alias="X-Fred-Debug-Token"),
+):
     """Force an immediate DB sync from the GitHub release, bypassing the throttle.
 
     Also forcibly reopens the DuckDB read connection if the on-disk DB file
@@ -218,14 +254,34 @@ def admin_force_sync(token: Optional[str] = Query(None)):
     # attribute assignments on the core module — identical semantics, single
     # authoritative state. Kept out of the docstring so the OpenAPI
     # description stays byte-identical to the pre-decomposition schema.
-    _require_debug_token(token)
+    # The token travels in a header only. A query string lands in every
+    # access log between the caller and the API, so a token sent that way is
+    # refused even when it is correct.
+    if token is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="Send the token in the X-Fred-Debug-Token header, not the URL",
+        )
+    _require_debug_token(x_fred_debug_token)
+    global _FORCE_SYNC_LAST_AT
+    now = time.monotonic()
+    cooldown = _force_sync_cooldown_s()
+    if _FORCE_SYNC_LAST_AT is not None and now - _FORCE_SYNC_LAST_AT < cooldown:
+        retry_after = int(cooldown - (now - _FORCE_SYNC_LAST_AT)) + 1
+        raise HTTPException(
+            status_code=429,
+            detail="force_sync ran recently; the background sync will pick up a new release",
+            headers={"Retry-After": str(retry_after)},
+        )
+    _FORCE_SYNC_LAST_AT = now
     _core._LAST_SYNC_CHECK = None
     _db_sync_mod._LAST_SYNC_AT = None  # noqa: SLF001
     _db_sync_mod._LAST_MANIFEST = None  # noqa: SLF001
     try:
         manifest = maybe_sync_latest_db(wait=True)
     except DbSyncError as exc:
-        raise HTTPException(status_code=502, detail=f"Sync failed: {exc}") from exc
+        logger.warning("Force sync failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Sync failed") from exc
     flag_refreshed = db_was_refreshed()
     current_mtime = _db_file_mtime()
     mtime_newer = (
@@ -481,7 +537,7 @@ def api_version(include_test: bool = Query(False)) -> Dict[str, Any]:
     except DbSyncError as exc:
         manifest = get_cached_manifest()
         if not manifest:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(status_code=503, detail="DB not available yet") from exc
     if not manifest:
         raise HTTPException(status_code=503, detail="Manifest not available yet")
     result = dict(manifest)

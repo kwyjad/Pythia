@@ -19,10 +19,12 @@ spot; the wedged temp path) — see "Known failure modes" in CLAUDE.md before
 changing anything here.
 """
 
+import functools
 import gc
 import hashlib
 import json
 import logging
+import hmac
 import math
 import os
 import re
@@ -326,6 +328,13 @@ def _open_duckdb_connection() -> duckdb.DuckDBPyConnection:
             raise
     con.execute(f"SET memory_limit='{_DUCKDB_MEMORY_LIMIT}'")
     con.execute(f"SET threads={_DUCKDB_THREADS}")
+    # The serving connection reads one DuckDB file and nothing else. With
+    # external access off it cannot read or write other files (read_csv,
+    # COPY, ATTACH) or reach the network, so a query a visitor could ever
+    # shape cannot become a file read or an SSRF. DuckDB refuses to turn it
+    # back on for the life of the instance.
+    if os.getenv("PYTHIA_API_EXTERNAL_ACCESS", "0").strip() != "1":
+        con.execute("SET enable_external_access=false")
     from pythia.api import db_sync as _db_sync  # noqa: PLC0415
 
     _db_sync.mark_served()
@@ -358,7 +367,7 @@ def _ensure_read_connection() -> duckdb.DuckDBPyConnection:
             maybe_sync_latest_db()
         except DbSyncError as exc:
             if not db_path.exists():
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
+                raise HTTPException(status_code=503, detail="DB not available yet") from exc
             logger.warning("DB sync failed: %s", exc)
         if not db_path.exists():
             raise HTTPException(status_code=503, detail="DB not available yet")
@@ -470,10 +479,15 @@ def _con():
 
 
 def _require_debug_token(token: Optional[str]) -> None:
+    """Admit a request carrying FRED_DEBUG_TOKEN; 404 when none is configured.
+
+    The comparison is constant-time: ``!=`` returns at the first differing
+    byte, which leaks the token one character at a time to a patient caller.
+    """
     expected = os.getenv("FRED_DEBUG_TOKEN")
     if not expected:
         raise HTTPException(status_code=404, detail="Not found")
-    if token != expected:
+    if not token or not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
@@ -1079,6 +1093,24 @@ def _acquire_heavy() -> None:
     """Acquire the heavy-request semaphore or raise 503."""
     if not _HEAVY_REQUEST_SEMAPHORE.acquire(timeout=30):
         raise HTTPException(status_code=503, detail="Server busy, try again")
+
+
+def _heavy(func):
+    """Run a route under the heavy-request semaphore, released on return.
+
+    For routes that run many full-table queries in one request. The wrapper
+    keeps the signature, so FastAPI still reads the route's parameters.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        _acquire_heavy()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            _HEAVY_REQUEST_SEMAPHORE.release()
+
+    return wrapper
 
 
 def _stream_csv(df: pd.DataFrame, filename: str):

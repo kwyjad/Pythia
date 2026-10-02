@@ -1,5 +1,7 @@
 import React from "react";
 
+import { safeHref } from "./safe_href";
+
 const INLINE_TOKEN_REGEX = /(\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\)|https?:\/\/\S+)/g;
 const TABLE_ROW_REGEX = /^\|.+\|$/;
 const TABLE_SEP_REGEX = /^\|[\s:-]+\|$/;
@@ -21,11 +23,17 @@ function renderInline(text: string): React.ReactNode[] {
     const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
     if (linkMatch) {
       inlineKey += 1;
+      // The markdown is model output: a `javascript:` target renders as
+      // its label, never as a link.
+      const href = safeHref(linkMatch[2]);
+      if (!href) {
+        return <span key={`mdlink-${inlineKey}`}>{linkMatch[1]}</span>;
+      }
       return (
         <a
           key={`mdlink-${inlineKey}`}
           className="text-fred-primary underline underline-offset-2 hover:text-fred-secondary"
-          href={linkMatch[2]}
+          href={href}
           rel="noreferrer"
           target="_blank"
         >

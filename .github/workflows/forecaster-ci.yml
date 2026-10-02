@@ -39,6 +39,13 @@ on:
       - "pythia/api/app.py"
       - "pythia/api/core.py"
       - "pythia/api/db_sync.py"
+      - "pythia/api/auth.py"
+      - "pythia/api/security.py"
+      - "pythia/api/routes/downloads.py"
+      - "pythia/api/routes/forecasts.py"
+      - "pythia/api/routes/questions.py"
+      - "pythia/api/routes/resolver_explorer.py"
+      - "tests/test_api_public_read_admin_only.py"
       - "tests/test_db_sync.py"
       - "tests/test_db_sync_background.py"
       - "pythia/api/routes/risk_index.py"
@@ -344,6 +351,18 @@ jobs:
           pytest -vv \
             tests/test_db_sync.py \
             tests/test_db_sync_background.py
+
+      - name: Run API security tests
+        run: |
+          # Token handling, rate limits, docs, headers, row caps and the
+          # serving connection's external-access lockdown. Most API test files
+          # run in no workflow; these guard what a stranger can do once the
+          # dashboard is shared.
+          pytest -vv \
+            pythia/tests/test_api_security.py \
+            pythia/tests/test_api_input_validation.py \
+            pythia/tests/test_api_forecasts_limit.py \
+            tests/test_api_public_read_admin_only.py
 
       - name: Run base-rate history + rendering tests
         run: |

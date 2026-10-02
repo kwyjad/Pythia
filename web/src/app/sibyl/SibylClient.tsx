@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import InfoTooltip from "../../components/InfoTooltip";
 import { apiGet } from "../../lib/api";
+import { safeHref } from "../../lib/safe_href";
 import SibylMetricsAbout from "./SibylMetricsAbout";
 import type {
   SibylQuestionDetailResponse,
@@ -219,18 +220,27 @@ const TrialCard = ({ trial }: { trial: SibylTrial }) => {
             <div>
               <div className="text-xs font-semibold text-fred-primary">Sources consulted</div>
               <ul className="list-disc pl-4 text-xs">
-                {trial.source_urls.slice(0, 12).map((u) => (
-                  <li key={u}>
-                    <a
-                      className="break-all text-fred-primary underline"
-                      href={u}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                    >
-                      {u}
-                    </a>
-                  </li>
-                ))}
+                {trial.source_urls.slice(0, 12).map((u) => {
+                  // Source URLs are written by the model; only a web address
+                  // becomes a link.
+                  const href = safeHref(u);
+                  return (
+                    <li key={u}>
+                      {href ? (
+                        <a
+                          className="break-all text-fred-primary underline"
+                          href={href}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                        >
+                          {u}
+                        </a>
+                      ) : (
+                        <span className="break-all">{u}</span>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           ) : null}

@@ -94,8 +94,11 @@ const DebugClient = () => {
 
   const [runsError, setRunsError] = useState<string | null>(null);
 
+  // The token lives for the tab only. localStorage outlives the session and
+  // is readable by any script that ever runs on this origin.
   useEffect(() => {
-    const stored = window.localStorage.getItem("fred_debug_token");
+    window.localStorage.removeItem("fred_debug_token");
+    const stored = window.sessionStorage.getItem("fred_debug_token");
     if (stored) {
       setToken(stored);
     }
@@ -103,9 +106,9 @@ const DebugClient = () => {
 
   useEffect(() => {
     if (token) {
-      window.localStorage.setItem("fred_debug_token", token);
+      window.sessionStorage.setItem("fred_debug_token", token);
     } else {
-      window.localStorage.removeItem("fred_debug_token");
+      window.sessionStorage.removeItem("fred_debug_token");
     }
   }, [token]);
 

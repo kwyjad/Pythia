@@ -313,6 +313,12 @@ def _build_llm_calls_bundle(
     )
 
 
+# A ceiling on one response, set well above the whole table (about 600
+# questions a month) so the dashboard never meets it; it exists so an
+# unfiltered call cannot materialise an unbounded list.
+_QUESTIONS_ROW_CAP = 20_000
+
+
 @router.get("/v1/questions")
 def get_questions(
     iso3: Optional[str] = Query(None),
@@ -364,6 +370,7 @@ def get_questions(
         sql += " ORDER BY target_month, iso3, hazard_code, metric"
         if run_col:
             sql += f", {run_col}"
+        sql += f" LIMIT {_QUESTIONS_ROW_CAP}"
         rows = _rows_from_cursor(_execute(con, sql, params))
     else:
         # latest_only=True: one row per concept (iso3, hazard, metric, target_month) from latest run
@@ -387,6 +394,7 @@ def get_questions(
         if run_id and run_col:
             sql += " AND rn = 1"
         sql += " ORDER BY target_month, iso3, hazard_code, metric"
+        sql += f" LIMIT {_QUESTIONS_ROW_CAP}"
         rows = _rows_from_cursor(_execute(con, sql, params))
 
     # Enrich with forecast and triage summaries.

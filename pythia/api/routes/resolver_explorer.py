@@ -41,7 +41,7 @@ def get_resolver_connector_status():
 @router.get("/v1/resolver/country_facts")
 def get_resolver_country_facts(
     iso3: str = Query(..., description="ISO3 country code"),
-    limit: int = Query(5000, description="Maximum rows to return"),
+    limit: int = Query(5000, ge=1, le=5000, description="Maximum rows to return"),
 ):
     iso3_value = (iso3 or "").strip().upper()
     if not re.fullmatch(r"[A-Z]{3}", iso3_value or ""):
@@ -139,14 +139,14 @@ def _resolver_query(table: str, iso3: str | None, limit: int,
 
 @router.get("/v1/resolver/facts_deltas")
 def get_resolver_facts_deltas(
-    iso3: str | None = Query(None), limit: int = Query(500),
+    iso3: str | None = Query(None), limit: int = Query(500, ge=1, le=5000),
 ):
     return _resolver_query("facts_deltas", iso3, limit, order_by="created_at DESC")
 
 
 @router.get("/v1/resolver/acled_monthly_fatalities")
 def get_resolver_acled_monthly_fatalities(
-    iso3: str | None = Query(None), limit: int = Query(500),
+    iso3: str | None = Query(None), limit: int = Query(500, ge=1, le=5000),
 ):
     return _resolver_query("acled_monthly_fatalities", iso3, limit,
                            order_by="year DESC, month DESC")
@@ -195,7 +195,7 @@ def get_resolver_acaps(
 
 @router.get("/v1/resolver/seasonal_forecasts")
 def get_resolver_seasonal_forecasts(
-    iso3: str | None = Query(None), limit: int = Query(500),
+    iso3: str | None = Query(None), limit: int = Query(500, ge=1, le=5000),
 ):
     return _resolver_query("seasonal_forecasts", iso3, limit,
                            order_by="forecast_issue_date DESC")
@@ -203,7 +203,7 @@ def get_resolver_seasonal_forecasts(
 
 @router.get("/v1/resolver/hdx_signals")
 def get_resolver_hdx_signals(
-    iso3: str | None = Query(None), limit: int = Query(500),
+    iso3: str | None = Query(None), limit: int = Query(500, ge=1, le=5000),
 ):
     return _resolver_query("hdx_signals", iso3, limit,
                            order_by="signal_date DESC")
@@ -211,7 +211,7 @@ def get_resolver_hdx_signals(
 
 @router.get("/v1/resolver/crisiswatch")
 def get_resolver_crisiswatch(
-    iso3: str | None = Query(None), limit: int = Query(500),
+    iso3: str | None = Query(None), limit: int = Query(500, ge=1, le=5000),
 ):
     return _resolver_query("crisiswatch_entries", iso3, limit,
                            order_by="year DESC, month DESC")
