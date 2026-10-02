@@ -1232,6 +1232,31 @@ def _write_rows(rows: Sequence[MutableMapping[str, Any]], path: Path) -> None:
     ensure_manifest_for_csv(path)
 
 
+def _year_summary_row(
+    year: int, frame: Optional[pd.DataFrame], exc: Optional[BaseException]
+) -> Dict[str, Any]:
+    """What one year of an ACLED fetch served (or why it served nothing)."""
+    if exc is not None or frame is None:
+        return {"year": int(year), "events": 0, "countries": 0, "months": 0,
+                "fatalities": 0, "error": repr(exc)[:300] if exc else "no frame"}
+    if frame.empty:
+        return {"year": int(year), "events": 0, "countries": 0, "months": 0,
+                "fatalities": 0, "error": None}
+    months = 0
+    if "event_date" in frame.columns:
+        months = int(pd.to_datetime(frame["event_date"], errors="coerce")
+                     .dt.to_period("M").nunique())
+    return {
+        "year": int(year),
+        "events": int(len(frame)),
+        "countries": int(frame["iso3"].nunique()) if "iso3" in frame.columns else 0,
+        "months": months,
+        "fatalities": int(pd.to_numeric(frame.get("fatalities"), errors="coerce").fillna(0).sum())
+        if "fatalities" in frame.columns else 0,
+        "error": None,
+    }
+
+
 class ACLEDClient:
     """Thin ACLED API client supporting monthly fatalities aggregation."""
 
@@ -1511,6 +1536,61 @@ class ACLEDClient:
         frame = frame.sort_values(["event_date", "iso3"]).reset_index(drop=True)
         return frame
 
+    def _fetch_events_by_year(
+        self,
+        start_date: str | date,
+        end_date: str | date,
+        *,
+        countries: Optional[Sequence[str]] = None,
+    ) -> pd.DataFrame:
+        """``fetch_events`` one calendar year at a time, saying what each served.
+
+        A window inside one year is a single call, exactly as before. A longer
+        one (the history backfill reaches back to 2018) is split by calendar
+        year so the run can report what the account was actually served per
+        year — an ACLED tier may cap how far back it reads, and "2018 came
+        back empty" must be visible as such rather than folded into a total.
+        A year whose fetch fails is recorded with its error and the others
+        still land; only when every year fails is the last error re-raised,
+        because then the source could not be read at all.
+        """
+        start = pd.to_datetime(start_date, utc=True).normalize()
+        end = pd.to_datetime(end_date, utc=True).normalize()
+        if start > end:
+            start, end = end, start
+        self.year_summary = []
+        if start.year == end.year:
+            frame = self.fetch_events(start, end, countries=countries)
+            self.year_summary.append(_year_summary_row(start.year, frame, None))
+            return frame
+        frames: List[pd.DataFrame] = []
+        last_exc: Optional[BaseException] = None
+        for year in range(start.year, end.year + 1):
+            y_start = max(start, pd.Timestamp(year=year, month=1, day=1, tz="UTC"))
+            y_end = min(end, pd.Timestamp(year=year, month=12, day=31, tz="UTC"))
+            try:
+                part = self.fetch_events(y_start, y_end, countries=countries)
+            except acled_auth.AcledResponseError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - recorded per year
+                last_exc = exc
+                self.year_summary.append(_year_summary_row(year, None, exc))
+                self.logger.error("ACLED year %s could not be read: %r", year, exc)
+                continue
+            self.year_summary.append(_year_summary_row(year, part, None))
+            row = self.year_summary[-1]
+            print(
+                f"[acled] {year}: events={row['events']} countries={row['countries']} "
+                f"months={row['months']} fatalities={row['fatalities']}"
+            )
+            if not part.empty:
+                frames.append(part)
+        if last_exc is not None and all(r.get("error") for r in self.year_summary):
+            raise last_exc
+        if not frames:
+            return pd.DataFrame(columns=list(self.fields or self._DEFAULT_FIELDS))
+        return pd.concat(frames, ignore_index=True)
+
     def monthly_fatalities(
         self,
         start_date: str | date,
@@ -1540,7 +1620,7 @@ class ACLEDClient:
                     (frame["event_date"] >= start_ts) & (frame["event_date"] <= end_ts)
                 ].copy()
         else:
-            frame = self.fetch_events(start_date, end_date, countries=countries)
+            frame = self._fetch_events_by_year(start_date, end_date, countries=countries)
         if frame.empty:
             result = pd.DataFrame(
                 columns=["iso3", "month", "fatalities", "source", "updated_at"],

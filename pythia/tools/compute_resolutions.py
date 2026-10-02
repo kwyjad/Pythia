@@ -124,6 +124,7 @@ from pythia.tools._db_utils import (
     table_exists as _table_exists,
 )
 from pythia.tools.source_coverage import (
+    acled_complete_clause as _acled_complete_clause,
     countries_with_source_data as _coverage_countries,
     months_with_source_data as _coverage_months,
     refresh_source_coverage as _refresh_source_coverage,
@@ -278,9 +279,13 @@ def _data_freshness_cutoff(conn, metric: str) -> Optional[str]:
         # battle-only ACLED row, and neither can resolve ACE/FATALITIES.
         if _table_exists(conn, ACE_FATALITIES_TABLE):
             try:
+                # Complete rows only: a month whose only rows were written
+                # before it ended has not happened yet as far as resolution
+                # is concerned (the prompt readers' rule, base_rate_spd).
+                complete = _acled_complete_clause(conn, ACE_FATALITIES_TABLE)
                 row = conn.execute(
                     "SELECT MAX(strftime(month, '%Y-%m')) "
-                    "FROM acled_monthly_fatalities"
+                    f"FROM acled_monthly_fatalities WHERE {complete}"
                 ).fetchone()
                 if row and row[0]:
                     max_yms.append(str(row[0]))
@@ -452,13 +457,21 @@ def _try_emdat_pa(
 def _try_acled_fatalities(
     conn, iso3: str, calendar_month: str,
 ) -> Optional[tuple[float, Optional[str], str]]:
-    """Look up all-event-type fatalities in ``acled_monthly_fatalities``."""
+    """Look up all-event-type fatalities in ``acled_monthly_fatalities``.
+
+    Only a COMPLETE row resolves: one written after its month ended. A row
+    written before then is a partial count (the ingest used to write the
+    month in progress), and resolving against it scores a forecast against
+    a fraction of the month — see :func:`_acled_partial_row_exists`.
+    """
     if not _table_exists(conn, ACE_FATALITIES_TABLE):
         return None
+    complete = _acled_complete_clause(conn, ACE_FATALITIES_TABLE)
     sql = f"""
         SELECT fatalities, updated_at
         FROM {ACE_FATALITIES_TABLE}
         WHERE iso3 = ? AND strftime(month, '%Y-%m') = ?
+          AND {complete}
         LIMIT 1
     """
     try:
@@ -472,6 +485,34 @@ def _try_acled_fatalities(
         (str(row[1]) if row[1] is not None else None),
         ACE_FATALITIES_SERIES,
     )
+
+
+def _acled_partial_row_exists(conn, iso3: str, calendar_month: str) -> bool:
+    """True when the series holds a row for this cell that was written
+    before its month ended (and so was refused by :func:`_try_acled_fatalities`).
+
+    Such a horizon stays UNRESOLVED: it must neither resolve to the partial
+    figure nor zero-default, because "the source has a row and we will not
+    read it" is not "the source reported nothing".
+    """
+    if not _table_exists(conn, ACE_FATALITIES_TABLE):
+        return False
+    complete = _acled_complete_clause(conn, ACE_FATALITIES_TABLE)
+    if complete == "TRUE":
+        return False
+    try:
+        row = conn.execute(
+            f"""
+            SELECT 1 FROM {ACE_FATALITIES_TABLE}
+            WHERE iso3 = ? AND strftime(month, '%Y-%m') = ?
+              AND NOT ({complete})
+            LIMIT 1
+            """,
+            [iso3, calendar_month],
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
 
 
 def _try_gdacs_binary(
@@ -888,6 +929,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         skipped_null_resolution = 0
         skipped_unresolvable_hazard = 0
         skipped_outside_source_universe = 0
+        skipped_partial_month = 0
 
         # Rebuild the source_coverage table from the metric source tables so
         # the gates below (and any dashboard consumer) see current coverage.
@@ -984,6 +1026,16 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             for horizon_m in range(1, NUM_HORIZONS + 1):
                 cal_month = horizon_to_calendar_month(ws_date, horizon_m)
 
+                # A FATALITIES cell whose only row was written before its
+                # month ended stays unresolved and is counted as such, not
+                # filed under "no data coverage yet" — the reader should see
+                # that the row exists and was refused.
+                if metric_norm == "FATALITIES" and (
+                    data_cutoff is None or cal_month > data_cutoff
+                ) and _acled_partial_row_exists(conn, iso3_norm, cal_month):
+                    skipped_partial_month += 1
+                    continue
+
                 # Only resolve months for which source data exists.
                 if data_cutoff is None or cal_month > data_cutoff:
                     skipped_no_data_coverage += 1
@@ -992,6 +1044,13 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
                 resolved = _resolve_value(
                     conn, iso3_norm, hazard_norm, cal_month, metric_norm,
                 )
+                if resolved is None and metric_norm == "FATALITIES" and (
+                    _acled_partial_row_exists(conn, iso3_norm, cal_month)
+                ):
+                    # A row exists but was written before its month ended:
+                    # unresolved, never zero (CLAUDE.md, Invariants).
+                    skipped_partial_month += 1
+                    continue
                 if resolved is None:
                     # Source-aware null handling: only default to zero for
                     # sources where absence genuinely means zero impact —
@@ -1103,6 +1162,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             "%d horizon-months skipped (no resolution data), "
             "%d horizon-months skipped (no data coverage yet), "
             "%d horizon-months skipped (country outside source universe), "
+            "%d horizon-months skipped (only a partial-month ACLED row), "
             "%d questions skipped (unresolvable hazard); "
             "%d new FATALITIES resolution vintage(s) recorded.",
             len(rows),
@@ -1112,6 +1172,7 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
             skipped_null_resolution,
             skipped_no_data_coverage,
             skipped_outside_source_universe,
+            skipped_partial_month,
             skipped_unresolvable_hazard,
             vintages_written,
         )

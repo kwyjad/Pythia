@@ -276,6 +276,29 @@ def _write_cli_frame_diag(payload: dict) -> None:
         LOGGER.debug("acled_to_duckdb.frame_diag_write_failed", exc_info=True)
 
 
+#: Per-year account of what an API fetch served (the history backfill reads
+#: this to report how far back the ACLED account actually reaches).
+ACLED_YEAR_SUMMARY_PATH = Path("diagnostics/acled/acled_fetch_by_year.json")
+
+
+def _write_year_summary(rows) -> None:
+    """Write and print the client's per-year summary; never raises."""
+    if not rows:
+        return
+    try:
+        ACLED_YEAR_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ACLED_YEAR_SUMMARY_PATH.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        print("ACLED CLI — served per year:")
+        for r in rows:
+            note = f" ERROR {r['error']}" if r.get("error") else ""
+            print(
+                f" - {r['year']}: events={r['events']} countries={r['countries']} "
+                f"months={r['months']}{note}"
+            )
+    except Exception:  # pragma: no cover - diagnostics best effort
+        LOGGER.debug("acled_to_duckdb.year_summary_skipped", exc_info=True)
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start", required=True, help="Inclusive start date (YYYY-MM-DD)")
@@ -402,6 +425,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             pass
         raise
     LOGGER.info("acled_to_duckdb.fetch_done | rows=%s", len(frame))
+    _write_year_summary(getattr(client, "year_summary", None))
 
     fetch_meta = _load_cli_fetch_meta()
     _print_cli_fetch_summary(

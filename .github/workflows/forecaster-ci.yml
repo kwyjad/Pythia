@@ -120,6 +120,8 @@ on:
       - "scripts/ci/tests/test_stage_context.py"
       - "scripts/ci/rc_shift_diagnostic.py"
       - "scripts/ci/tests/test_rc_shift_diagnostic.py"
+      - "scripts/ci/acled_history_report.py"
+      - "scripts/ci/tests/test_acled_history_report.py"
       # Self-reference, as horizon-scanner-ci.yml already does: without it a PR
       # editing this workflow's own test list never runs the list it edited.
       - ".github/workflows/forecaster-ci.yml"
@@ -288,7 +290,8 @@ jobs:
             pythia/tests/test_family_advice.py \
             forecaster/tests/test_family_recalibration_members.py \
             forecaster/tests/test_family_advice_prompt.py \
-            forecaster/tests/test_member_calibration_advice.py
+            forecaster/tests/test_member_calibration_advice.py \
+            pythia/tests/test_stale_member_advice_cleanup.py
 
       - name: Run conflict prior-anchor tests
         run: |
@@ -296,9 +299,13 @@ jobs:
           # the level-and-volatility block and Step 1 wording with it on, the
           # forecasts_raw.base_rate_block_version stamp and the distance
           # diagnostic; and the complete-month rule every ACLED reader uses.
+          # test_level_transition_spd: the scored-only transition reference.
           pytest -vv \
             forecaster/tests/test_prior_anchor_prompt.py \
-            pythia/tests/test_level_volatility_spd.py
+            pythia/tests/test_level_volatility_spd.py \
+            pythia/tests/test_level_transition_spd.py \
+            forecaster/tests/test_prior_anchor_v2_wording.py \
+            scripts/ci/tests/test_acled_history_report.py
 
       - name: Run shadow members + calibration weight tests
         run: |
@@ -396,12 +403,17 @@ jobs:
           # test_ace_fatalities_all_event_types pins ACE/FATALITIES to the
           # series its base rate uses: 27 of 32 August 2026 conflict questions
           # resolved to ACLED's battles-only count instead.
+          # test_acled_partial_month_resolution and test_source_coverage pin
+          # that a row written before its month ended neither resolves a
+          # horizon nor makes the month "covered" for zero-defaulting.
           pytest -vv \
             forecaster/tests/test_history_summary.py \
             forecaster/tests/test_fewsnet_history.py \
             forecaster/tests/test_base_rate_matches_resolution_source.py \
             pythia/tests/test_ace_fatalities_all_event_types.py \
             pythia/tests/test_compute_resolutions.py \
+            pythia/tests/test_acled_partial_month_resolution.py \
+            pythia/tests/test_source_coverage.py \
             pythia/tests/test_diagnose_pa_coverage.py \
             forecaster/tests/test_haz_base_rate_prompt.py \
             resolver/tests/test_idmc_history_conflict_pa.py \

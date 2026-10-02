@@ -1,5 +1,13 @@
 [
   {
+    "date": "2026-10-02",
+    "label": "Before prior_anchor_v2 wording"
+  },
+  {
+    "date": "2026-10-01",
+    "label": "After the conflict prior anchor and family advice (#947, #948)"
+  },
+  {
     "date": "2026-09-30",
     "label": "Before the conflict prior anchor"
   },

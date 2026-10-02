@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from pythia.tools._db_utils import rollback_quietly, table_exists
+from pythia.tools._db_utils import column_exists, rollback_quietly, table_exists
 
 LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ _COVERAGE_QUERIES: dict[str, list[tuple[str, str]]] = {
         ("acled_monthly_fatalities",
          "SELECT upper(iso3) AS iso3, strftime(month, '%Y-%m') AS ym, COUNT(*) AS n "
          "FROM acled_monthly_fatalities WHERE iso3 IS NOT NULL AND month IS NOT NULL "
+         "AND {acled_complete} "
          "GROUP BY 1, 2"),
     ],
     "EVENT_OCCURRENCE": [
@@ -55,6 +56,26 @@ _COVERAGE_QUERIES: dict[str, list[tuple[str, str]]] = {
          "GROUP BY 1, 2"),
     ],
 }
+
+
+#: A row of ``acled_monthly_fatalities`` written before its month ended is a
+#: PARTIAL count, not a month (Sept 2026, CLAUDE.md "Connectors and upstream
+#: data"). It must not make the month "covered", or a country with no row
+#: that month would zero-default against a month the source has not finished
+#: reporting. The predicate is the one every prompt reader uses
+#: (``pythia.tools.base_rate_spd.ACLED_COMPLETE_MONTH_SQL``), imported rather
+#: than copied so the two can never drift.
+def acled_complete_clause(conn, table: str = "acled_monthly_fatalities") -> str:
+    """The complete-month predicate when ``table`` records ``updated_at``,
+    else ``TRUE`` (a hand-built test table or a pre-stamp database)."""
+    from pythia.tools.base_rate_spd import ACLED_COMPLETE_MONTH_SQL
+
+    try:
+        if column_exists(conn, table, "updated_at"):
+            return ACLED_COMPLETE_MONTH_SQL
+    except Exception:  # noqa: BLE001 - a probe failure keeps the old behaviour
+        rollback_quietly(conn)
+    return "TRUE"
 
 
 def _ensure_table(conn) -> None:
@@ -88,6 +109,8 @@ def refresh_source_coverage(conn) -> dict[str, int]:
         for table, sql in queries:
             if not table_exists(conn, table):
                 continue
+            if "{acled_complete}" in sql:
+                sql = sql.replace("{acled_complete}", acled_complete_clause(conn, table))
             try:
                 for iso3, ym, n in conn.execute(sql).fetchall():
                     if not iso3 or not ym:
