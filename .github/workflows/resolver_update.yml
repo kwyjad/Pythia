@@ -29,6 +29,8 @@ concurrency:
           Resolution: fewsnet_ipc (see fewsnet_months), ipc_api (see ipc_api_months), gdacs (see gdacs_months).
           Structured: conflict (views+cf+cast), acaps, reliefweb, acled_political, nmme, gdelt.
           Context: enso, seasonal_tc, hdx_signals, crisiswatch.
+          History: acled_history (ACLED monthly fatalities from 2018-01 to the month before last,
+          one API year at a time, then the reference scores re-run; months_back is ignored).
           Leave empty to run all. Examples: "gdacs" or "gdacs, fewsnet_ipc".
         required: false
         default: ""
@@ -521,31 +523,109 @@ jobs:
           python -m scripts.ci.run_connectors
           echo "::endgroup::"
 
+      # ACLED history backfill (only_connector=acled_history). The 36-month
+      # windows the climatology and level references read held ~13 months
+      # because acled_monthly_fatalities began in 2025-08. The reference
+      # scores are saved BEFORE anything is written, so the effect of the
+      # backfill can be read off one artifact.
+      - name: "ACLED history: reference scores before the backfill"
+        if: ${{ contains(inputs.only_connector, 'acled_history') }}
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          ACLED_HISTORY_SCORE_EPOCH: "2026-08"
+        run: |
+          set -o pipefail
+          mkdir -p diagnostics/acled_history
+          python -m scripts.ci.acled_history_report snapshot \
+            --db "${BACKFILL_DB_PATH}" \
+            --epoch "${ACLED_HISTORY_SCORE_EPOCH}" \
+            --out diagnostics/acled_history/reference_scores_before.csv
+
       - name: "Phase 1: ACLED monthly fatalities → DuckDB"
-        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_client') }}
+        if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'acled_client') || contains(inputs.only_connector, 'acled_history') }}
         # Same reasoning as the connectors step above: recorded here, raised
         # by the terminal gate, so the rest of the ingest still happens.
         continue-on-error: true
         id: phase1_acled_fatalities
-        timeout-minutes: ${{ inputs.reset_db && 60 || 30 }}
+        # The history mode reads ~9 years of global events, one year per
+        # paginated pull; at ~5,000 events a page that is several hundred pages.
+        timeout-minutes: ${{ contains(inputs.only_connector, 'acled_history') && 300 || (inputs.reset_db && 60 || 30) }}
         env:
           BACKFILL_START_ISO: ${{ steps.window.outputs.start_iso }}
           BACKFILL_END_ISO: ${{ steps.window.outputs.end_iso }}
+          ACLED_HISTORY_MODE: ${{ contains(inputs.only_connector, 'acled_history') && '1' || '0' }}
+          ACLED_HISTORY_START: "2018-01-01"
         run: |
           set -euo pipefail
           echo "::group::ACLED monthly fatalities"
           mkdir -p diagnostics/acled
-          # --events-file reuses the raw events the connector step just staged
-          # (single ACLED pull per run). Falls back to a fresh API fetch when
-          # the file is missing, truncated, or doesn't cover the window.
-          python -m resolver.cli.acled_to_duckdb \
-            --start "${BACKFILL_START_ISO}" \
-            --end "${BACKFILL_END_ISO}" \
-            --db "${BACKFILL_DB_PATH}" \
-            --events-file resolver/staging/acled_events_raw.csv \
-            --log-level "${LOG_LEVEL}" \
-            2>&1 | tee diagnostics/acled/acled_to_duckdb.log
+          if [ "${ACLED_HISTORY_MODE}" = "1" ]; then
+            # From 2018 to the end of the month BEFORE last: the month that
+            # has just ended is only days old and would be stored as complete
+            # with a fraction of its reports; the monthly run on the 28th
+            # writes it. No staged events file: the connector did not run.
+            HIST_END="$(python -c "import datetime as d; t=d.date.today().replace(day=1); p=(t-d.timedelta(days=1)).replace(day=1); print((p-d.timedelta(days=1)).isoformat())")"
+            echo "ACLED history window: ${ACLED_HISTORY_START} -> ${HIST_END}"
+            python -m resolver.cli.acled_to_duckdb \
+              --start "${ACLED_HISTORY_START}" \
+              --end "${HIST_END}" \
+              --db "${BACKFILL_DB_PATH}" \
+              --log-level "${LOG_LEVEL}" \
+              2>&1 | tee diagnostics/acled/acled_to_duckdb.log
+          else
+            # --events-file reuses the raw events the connector step just staged
+            # (single ACLED pull per run). Falls back to a fresh API fetch when
+            # the file is missing, truncated, or doesn't cover the window.
+            python -m resolver.cli.acled_to_duckdb \
+              --start "${BACKFILL_START_ISO}" \
+              --end "${BACKFILL_END_ISO}" \
+              --db "${BACKFILL_DB_PATH}" \
+              --events-file resolver/staging/acled_events_raw.csv \
+              --log-level "${LOG_LEVEL}" \
+              2>&1 | tee diagnostics/acled/acled_to_duckdb.log
+          fi
           echo "::endgroup::"
+
+      - name: "ACLED history: verify, re-score the references, compare"
+        if: ${{ contains(inputs.only_connector, 'acled_history') && steps.phase1_acled_fatalities.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 30
+        env:
+          ACLED_HISTORY_SCORE_EPOCH: "2026-08"
+        run: |
+          set -o pipefail
+          mkdir -p diagnostics/acled_history
+          cp diagnostics/acled/acled_fetch_by_year.json diagnostics/acled_history/ 2>/dev/null || true
+          python -m scripts.ci.acled_history_report verify \
+            --db "${BACKFILL_DB_PATH}" --since 2018-01 \
+            --out diagnostics/acled_history/verify.json \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
+          python -m pythia.tools.score_baselines \
+            --db-url "duckdb:///${GITHUB_WORKSPACE}/${BACKFILL_DB_PATH}" \
+            2>&1 | tee diagnostics/acled_history/score_baselines.log
+          python -m scripts.ci.acled_history_report snapshot \
+            --db "${BACKFILL_DB_PATH}" \
+            --epoch "${ACLED_HISTORY_SCORE_EPOCH}" \
+            --out diagnostics/acled_history/reference_scores_after.csv
+          python -m scripts.ci.acled_history_report compare \
+            --before diagnostics/acled_history/reference_scores_before.csv \
+            --after diagnostics/acled_history/reference_scores_after.csv \
+            --epoch "${ACLED_HISTORY_SCORE_EPOCH}" \
+            --out diagnostics/acled_history/comparison.md \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: "ACLED history: upload evidence"
+        if: ${{ always() && contains(inputs.only_connector, 'acled_history') }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: acled-history-backfill
+          path: |
+            diagnostics/acled_history/
+            diagnostics/acled/
+          retention-days: 14
+          if-no-files-found: warn
 
       - name: "Phase 1: Normalize + load_and_derive → facts_resolved"
         if: ${{ inputs.only_connector == '' || contains(inputs.only_connector, 'idmc') || contains(inputs.only_connector, 'acled_client') || contains(inputs.only_connector, 'ifrc_go_client') }}

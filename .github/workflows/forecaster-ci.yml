@@ -120,6 +120,8 @@ on:
       - "scripts/ci/tests/test_stage_context.py"
       - "scripts/ci/rc_shift_diagnostic.py"
       - "scripts/ci/tests/test_rc_shift_diagnostic.py"
+      - "scripts/ci/acled_history_report.py"
+      - "scripts/ci/tests/test_acled_history_report.py"
       # Self-reference, as horizon-scanner-ci.yml already does: without it a PR
       # editing this workflow's own test list never runs the list it edited.
       - ".github/workflows/forecaster-ci.yml"
@@ -302,7 +304,8 @@ jobs:
             forecaster/tests/test_prior_anchor_prompt.py \
             pythia/tests/test_level_volatility_spd.py \
             pythia/tests/test_level_transition_spd.py \
-            forecaster/tests/test_prior_anchor_v2_wording.py
+            forecaster/tests/test_prior_anchor_v2_wording.py \
+            scripts/ci/tests/test_acled_history_report.py
 
       - name: Run shadow members + calibration weight tests
         run: |
