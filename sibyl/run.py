@@ -46,8 +46,10 @@ from sibyl import config as sibyl_config
 from sibyl.agent import TrialResult, run_trial
 from sibyl.aggregate import aggregate_trials
 from sibyl.base_rates import load_base_rate
-from sibyl.calibration import calibrate
+from sibyl.advice import advice_arm
+from sibyl.calibration import calibrate, load_advice
 from sibyl.config import (
+    ADVICE_EXPERIMENT_SHARE,
     AGGREGATION,
     BACKTEST_MODE,
     K,
@@ -176,6 +178,18 @@ def process_question(
         question.iso3, question.hazard_code, question.metric, forecast_keys
     )
 
+    # Sibyl's own track record for this class (sibyl/advice.py). Loaded once
+    # per question: the text is constant across its trials and steps. No
+    # advice for the class -> no arm and no section; otherwise the question's
+    # arm (hash of "sibyl:" + question_id) decides whether the prompt shows it.
+    advice = load_advice(question.hazard_code, question.metric, as_of, con=con)
+    arm: Optional[str] = None
+    track_record = ""
+    if advice is not None:
+        arm = advice_arm(question.question_id, ADVICE_EXPERIMENT_SHARE)
+        if arm == "advice":
+            track_record = advice.text
+
     for trial_index in range(K):
         if tracker.hard_cap_reached():
             logger.warning(
@@ -200,6 +214,7 @@ def process_question(
             forecast_months=forecast_keys,
             country_name=country,
             model_call=model_call,
+            track_record=track_record,
         )
         outcome.trials.append(trial)
 
@@ -282,6 +297,9 @@ def process_question(
             "volatility_score": question.volatility_score,
             "triage_score": question.triage_score,
             "selection_pass": question.selection_pass,
+            "base_rate": base_rate.to_dict(),
+            "advice_arm": arm,
+            "advice_as_of_month": advice.as_of_month if track_record else None,
             "pooled_quantiles": spd_payload["pooled_quantiles"],
             "trials": [t.to_dict() for t in outcome.trials],
             "bucket_probs": list(bucket_probs),

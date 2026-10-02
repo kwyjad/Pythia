@@ -191,6 +191,30 @@ def _table_columns(conn, name: str) -> set:
         return set()
 
 
+def _forecast_is_test_map(conn, has_run_id: bool) -> Dict[Tuple[str, Optional[str], str], bool]:
+    """(question_id, run_id, model_name) -> whether any of its forecast rows is test.
+
+    Empty when forecasts_raw lacks ``is_test`` (old DBs); callers then fall
+    back to the question's own flag.
+    """
+    cols = _table_columns(conn, "forecasts_raw") if _table_exists(conn, "forecasts_raw") else set()
+    if "is_test" not in cols:
+        return {}
+    rid = "run_id" if has_run_id and "run_id" in cols else "CAST(NULL AS TEXT)"
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT question_id, {rid}, model_name, bool_or(COALESCE(is_test, FALSE))
+            FROM forecasts_raw
+            GROUP BY 1, 2, 3
+            """
+        ).fetchall()
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning("forecast is_test lookup failed: %r; using question flags only.", exc)
+        return {}
+    return {(q, r, m): bool(t) for q, r, m, t in rows if t}
+
+
 def _forecast_tables_have_run_id(conn) -> bool:
     """Check if forecasts_ensemble has a run_id column (backward compat for old DBs)."""
     return "run_id" in _table_columns(conn, "forecasts_ensemble")
@@ -687,6 +711,19 @@ def compute_scores(db_url: str) -> None:
         # Pre-fetch is_test for all questions to avoid repeated lookups.
         _is_test_cache: Dict[str, bool] = {}
 
+        # A score is test data when its QUESTION is a test question OR the
+        # FORECAST it scores came from a test run. Question ids are
+        # epoch-keyed, so a production question can also carry a test run's
+        # forecasts (same-epoch reuse); stamping from the question alone
+        # wrote those scores as production. On the 2026-10-02 release that
+        # was 473 score rows on 6 questions across 12 models, Sibyl included.
+        forecast_is_test = _forecast_is_test_map(conn, has_run_id)
+
+        def _row_is_test(qid: str, run_id: Optional[str], model_name: Optional[str]) -> bool:
+            return bool(_is_test_cache.get(qid, False)) or forecast_is_test.get(
+                (qid, run_id, model_name), False
+            )
+
         for question_id, iso3, hazard_code, metric, horizon_m, resolved_value in qrows:
             # Guard against NULL resolution values (should not happen with
             # source-aware null handling, but defend against edge cases).
@@ -702,7 +739,6 @@ def compute_scores(db_url: str) -> None:
                     _is_test_cache[question_id] = _qt[0] if _qt else False
                 except Exception:
                     _is_test_cache[question_id] = False
-            is_test_val = _is_test_cache[question_id]
 
             # Binary EVENT_OCCURRENCE questions use Brier score directly.
             # Every scored entity is keyed by an explicit model_name — the
@@ -766,7 +802,8 @@ def compute_scores(db_url: str) -> None:
                                                     model_name, value, run_id, created_at, is_test)
                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """,
-                                [question_id, horizon_m, metric, "brier", model_name, brier_m, run_id, now, is_test_val],
+                                [question_id, horizon_m, metric, "brier", model_name, brier_m, run_id, now,
+                                 _row_is_test(question_id, run_id, model_name)],
                             )
                             n_written += 1
                 continue  # skip SPD scoring for binary questions
@@ -829,6 +866,7 @@ def compute_scores(db_url: str) -> None:
                         [question_id, horizon_m, metric, model_name] + rid_params,
                     )
                     now = _utcnow_naive()
+                    is_test_val = _row_is_test(question_id, run_id, model_name)
                     conn.executemany(
                         """
                         INSERT INTO scores (question_id, horizon_m, metric, score_type,
@@ -880,7 +918,8 @@ def compute_scores(db_url: str) -> None:
                                         is_test)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                [(*row, now, _is_test_cache.get(row[0], False)) for row in eiv_rows],
+                # row: (qid, horizon_m, metric, model, ..., run_id)
+                [(*row, now, _row_is_test(row[0], row[9], row[3])) for row in eiv_rows],
             )
             LOGGER.info("compute_scores: wrote %d EIV score rows.", len(eiv_rows))
     finally:

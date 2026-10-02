@@ -19,9 +19,10 @@ SRC_GEMINI="$REPO_ROOT/pythia/web_research/backends/gemini_grounding.py"
 SRC_RC_PROMPTS="$REPO_ROOT/horizon_scanner/rc_prompts.py"
 SRC_RC_GROUNDING="$REPO_ROOT/horizon_scanner/rc_grounding_prompts.py"
 SRC_TRIAGE_GROUNDING="$REPO_ROOT/horizon_scanner/hs_triage_grounding_prompts.py"
+SRC_SIBYL="$REPO_ROOT/sibyl/agent.py"
 
 # Check source files exist
-for f in "$SRC_FORECASTER" "$SRC_HS" "$SRC_GEMINI" "$SRC_RC_PROMPTS" "$SRC_RC_GROUNDING" "$SRC_TRIAGE_GROUNDING"; do
+for f in "$SRC_FORECASTER" "$SRC_HS" "$SRC_GEMINI" "$SRC_RC_PROMPTS" "$SRC_RC_GROUNDING" "$SRC_TRIAGE_GROUNDING" "$SRC_SIBYL"; do
   if [ ! -f "$f" ]; then
     echo "ERROR: Source file not found: $f"
     exit 1
@@ -40,7 +41,8 @@ same_as_snapshot() {
     && cmp -s "$SRC_GEMINI" "$d/gemini_grounding.py" \
     && cmp -s "$SRC_RC_PROMPTS" "$d/rc_prompts.py" \
     && cmp -s "$SRC_RC_GROUNDING" "$d/rc_grounding_prompts.py" \
-    && cmp -s "$SRC_TRIAGE_GROUNDING" "$d/hs_triage_grounding_prompts.py"
+    && cmp -s "$SRC_TRIAGE_GROUNDING" "$d/hs_triage_grounding_prompts.py" \
+    && cmp -s "$SRC_SIBYL" "$d/sibyl_agent.py"
 }
 if [ -f "$DIR/forecaster_prompts.py" ] && ! same_as_snapshot "$DIR"; then
   BASE_DATE="$DATE"
@@ -64,6 +66,9 @@ cp "$SRC_GEMINI"            "$DIR/gemini_grounding.py"
 cp "$SRC_RC_PROMPTS"        "$DIR/rc_prompts.py"
 cp "$SRC_RC_GROUNDING"      "$DIR/rc_grounding_prompts.py"
 cp "$SRC_TRIAGE_GROUNDING"  "$DIR/hs_triage_grounding_prompts.py"
+# Sibyl's step prompt templates. The About page does not render this file
+# yet; it is archived so a Sibyl prompt change has a dated "before" copy.
+cp "$SRC_SIBYL"             "$DIR/sibyl_agent.py"
 
 # Update versions.json manifest
 if [ ! -f "$MANIFEST" ]; then

@@ -705,6 +705,48 @@ def _seed_bucket_centroids(
         )
 
 
+def ensure_sibyl_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
+    """Sibyl's own calibration advice, one row per (month, class).
+
+    Written by ``sibyl.advice`` and read by ``sibyl.calibration.load_advice``.
+    Deliberately separate from ``calibration_advice``: the standard generator
+    deletes that table's non-shared rows every month, and Sibyl's advice must
+    not depend on (or leak into) the standard track's. The pooled row across
+    the four classes carries ``hazard_code = metric = '*'``. A row is written
+    for every class with a scored question, with an empty ``advice`` when the
+    class is gated, so ``findings_json`` always says how far it has to go.
+    """
+    _ensure_table_and_columns(
+        con,
+        "sibyl_calibration_advice",
+        """
+        CREATE TABLE IF NOT EXISTS sibyl_calibration_advice (
+            as_of_month TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            scope TEXT,
+            n_questions INTEGER,
+            advice TEXT,
+            findings_json TEXT,
+            advice_version TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (as_of_month, hazard_code, metric)
+        );
+        """,
+        {
+            "as_of_month": "TEXT",
+            "hazard_code": "TEXT",
+            "metric": "TEXT",
+            "scope": "TEXT",
+            "n_questions": "INTEGER",
+            "advice": "TEXT",
+            "findings_json": "TEXT",
+            "advice_version": "TEXT",
+            "created_at": "TIMESTAMP",
+        },
+    )
+
+
 def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure the calibration_advice table exists with all columns."""
 
@@ -1853,6 +1895,16 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # hazard's guaranteed slots) or 'fill' (open competition on
                 # volatility). NULL on rows written before Oct 2026.
                 "selection_pass": "TEXT",
+                # The outside view as it stood at forecast time
+                # (BaseRate.to_dict()), so the advice generator can ask
+                # whether departing from it helped. NULL before Oct 2026.
+                "base_rate_json": "TEXT",
+                # Advice experiment (SIBYL_ADVICE_EXPERIMENT_SHARE): 'advice',
+                # 'no_advice', or NULL when no advice existed for the class.
+                "advice_arm": "TEXT",
+                # The sibyl_calibration_advice month whose text the prompt
+                # carried (NULL when it carried none).
+                "advice_as_of_month": "TEXT",
             },
         )
 
@@ -2441,6 +2493,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
         _ensure_acaps_daily_monitoring_table(con)
         _ensure_acaps_humanitarian_access_table(con)
         _ensure_calibration_advice_table(con)
+        ensure_sibyl_calibration_advice_table(con)
         _ensure_crisiswatch_entries_table(con)
         _ensure_hdx_signals_table(con)
         _ensure_gdelt_conflict_indicators_table(con)

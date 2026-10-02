@@ -116,3 +116,47 @@ def test_current_schema_serves_time_capped_and_selection_pass(tmp_path, monkeypa
     assert summary["run"]["time_capped"] is True
     assert summary["questions"][0]["selection_pass"] == "floor"
     assert c.get("/v1/sibyl/questions").json()["rows"][0]["selection_pass"] == "floor"
+
+
+def test_calibration_endpoint_without_the_table(tmp_path, monkeypatch, reset_api):
+    db = tmp_path / "legacy.duckdb"
+    _legacy_db(db)
+    c = _client(tmp_path, db, monkeypatch)
+    r = c.get("/v1/sibyl/calibration")
+    assert r.status_code == 200
+    assert r.json()["has_advice_table"] is False and r.json()["rows"] == []
+
+
+def test_calibration_endpoint_serves_the_newest_month(tmp_path, monkeypatch, reset_api):
+    import json
+
+    from sibyl.advice import build_rows
+    from tests.test_sibyl_advice import _records
+
+    db = tmp_path / "advice.duckdb"
+    _legacy_db(db)
+    con = duckdb.connect(str(db))
+    from pythia.db.schema import ensure_sibyl_calibration_advice_table
+
+    ensure_sibyl_calibration_advice_table(con)
+    for month, scale, n in (("2026-10", 1.0, 6), ("2026-11", 0.2, 24)):
+        for row in build_rows(_records(n, scale=scale), {}, as_of_month=month):
+            con.execute(
+                "INSERT INTO sibyl_calibration_advice VALUES (?, ?, ?, ?, ?, ?, ?, 'v', now())",
+                [row["as_of_month"], row["hazard_code"], row["metric"], row["scope"],
+                 row["n_questions"], row["advice"], json.dumps(row["findings"])],
+            )
+    con.close()
+    c = _client(tmp_path, db, monkeypatch)
+
+    body = c.get("/v1/sibyl/calibration").json()
+    assert body["as_of_month"] == "2026-11" and body["months"] == ["2026-11", "2026-10"]
+    group = next(r for r in body["rows"] if r["scope"] == "group")
+    assert group["n_questions"] == 24 and group["advice"]
+    assert group["diagnostics"]["coverage_10_90"]["n_questions"] == 24
+    assert body["arm_comparison"]["status"] == "not yet"
+
+    old = c.get("/v1/sibyl/calibration?as_of_month=2026-10").json()
+    assert old["as_of_month"] == "2026-10"
+    assert next(r for r in old["rows"] if r["scope"] == "group")["gate"] == "6 of 20 resolved questions"
+    assert c.get("/v1/sibyl/calibration?as_of_month=bad").status_code == 422

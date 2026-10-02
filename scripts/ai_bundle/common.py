@@ -87,10 +87,16 @@ def latest_run_clause(con, alias: str = "s", table: str = "scores") -> str:
     """
     if not column_exists(con, table, "run_id"):
         return ""
+    # The latest PRODUCTION run: a same-epoch test run forecast later than
+    # the production one must not become "the forecast that stands".
+    not_test = (
+        " AND NOT COALESCE(_lr.is_test, FALSE)"
+        if column_exists(con, table, "is_test") else ""
+    )
     return (
         f" AND ({alias}.run_id IS NULL OR {alias}.run_id = ("
         f"SELECT MAX(_lr.run_id) FROM {table} _lr "
-        f"WHERE _lr.question_id = {alias}.question_id AND _lr.run_id IS NOT NULL))"
+        f"WHERE _lr.question_id = {alias}.question_id AND _lr.run_id IS NOT NULL{not_test}))"
     )
 
 

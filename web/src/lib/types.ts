@@ -694,3 +694,46 @@ export type InterpreterAttentionMapResponse = {
   run_id: string | null;
   rows: InterpreterAttentionMapRow[];
 };
+
+/** One diagnostic from sibyl/advice.py: a bootstrap estimate over questions. */
+export type SibylCalibrationStat = {
+  value: number | null;
+  lo: number | null;
+  hi: number | null;
+  n_questions: number;
+  numerator?: number | null;
+  denominator?: number | null;
+};
+
+export type SibylCalibrationRow = {
+  as_of_month: string;
+  hazard_code: string;
+  metric: string;
+  scope: "group" | "pooled" | string;
+  n_questions: number;
+  advice: string;
+  gate: string | null;
+  advice_version?: string | null;
+  created_at?: string | null;
+  diagnostics: Record<string, SibylCalibrationStat>;
+  calibrated_values: Record<string, number>;
+  perspective_bias: Record<string, SibylCalibrationStat>;
+  paired_skill: Record<string, Record<string, SibylCalibrationStat>>;
+};
+
+export type SibylArmComparison = {
+  status: "ok" | "not yet" | string;
+  min_questions_per_arm: number;
+  n_questions: Record<string, number>;
+  brier?: Record<string, SibylCalibrationStat>;
+  crps?: Record<string, SibylCalibrationStat>;
+};
+
+export type SibylCalibrationResponse = {
+  has_advice_table: boolean;
+  as_of_month: string | null;
+  months: string[];
+  min_questions: number | null;
+  rows: SibylCalibrationRow[];
+  arm_comparison: SibylArmComparison | null;
+};
