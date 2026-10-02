@@ -396,12 +396,17 @@ jobs:
           # test_ace_fatalities_all_event_types pins ACE/FATALITIES to the
           # series its base rate uses: 27 of 32 August 2026 conflict questions
           # resolved to ACLED's battles-only count instead.
+          # test_acled_partial_month_resolution and test_source_coverage pin
+          # that a row written before its month ended neither resolves a
+          # horizon nor makes the month "covered" for zero-defaulting.
           pytest -vv \
             forecaster/tests/test_history_summary.py \
             forecaster/tests/test_fewsnet_history.py \
             forecaster/tests/test_base_rate_matches_resolution_source.py \
             pythia/tests/test_ace_fatalities_all_event_types.py \
             pythia/tests/test_compute_resolutions.py \
+            pythia/tests/test_acled_partial_month_resolution.py \
+            pythia/tests/test_source_coverage.py \
             pythia/tests/test_diagnose_pa_coverage.py \
             forecaster/tests/test_haz_base_rate_prompt.py \
             resolver/tests/test_idmc_history_conflict_pa.py \
