@@ -78,4 +78,3 @@ jobs:
             tests/test_crisiswatch_publication_days.py \
             scripts/ci/tests/test_crisiswatch_edition_gate.py \
             horizon_scanner/tests/test_crisiswatch_regional_merge.py
-
