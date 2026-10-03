@@ -465,7 +465,7 @@ forecasting prompts found it lowers accuracy.
 - `sibyl/reader.py` reads a document properly. For HTML it keeps the main content, renders tables as `a | b` rows, and drops navigation and boilerplate. For a PDF it keeps the first two pages plus the pages that score highest on the country and the question's terms, up to 40 pages. Every document is capped at 80,000 characters.
 - `sibyl/extract.py` handles long documents. Anything over 6,000 characters goes to role `sibyl_extraction` (Haiku 4.5) along with the agent's `extraction_request`. The model returns at most 500 words, with figures quoted word for word. If extraction fails, the agent sees the first 6,000 characters instead. Extraction is its own cost kind and is logged per call.
 - `reliefweb_search` uses the ReliefWeb API, filtered on the question's primary country. A ReliefWeb report link is read through the API, together with its PDF attachment. The tool needs `RELIEFWEB_APPNAME`, which now goes to the Run Sibyl step. The secret already existed for the resolution machine. Dates are capped only in backtest.
-- `brave_search` has two lanes. `nowcast` covers the last 120 days. `reference` covers the last ten years, for base rates and past seasons. Both accept optional language and country hints.
+- `brave_search` has two lanes. `news` covers the last 120 days. `reference` covers the last ten years, for base rates and past seasons. Both accept optional language and country hints.
 - A step may carry up to three tool calls. A submit sent beside tool calls is dropped. `MAX_STEPS` moved from 10 to 12.
 - The belief now carries a six-slot plan: resolver, nowcast, drivers, calendar, reversion, disconfirm.
   - A submit is refused until every slot is done or failed and three documents have been read.
