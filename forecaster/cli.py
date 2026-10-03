@@ -931,12 +931,16 @@ def _load_fewsnet_phase3_history(
         }
 
     try:
-        # Get last N months of data
-        today = date.today()  # noqa: F841
-
+        # Read the window, not the newest N rows. "LIMIT 36" counted the 36
+        # most recent analyses wherever they fell, so Ethiopia, whose newest
+        # Current Situation figure is 2026-01, read "36 of 36 (100%
+        # coverage) ... Data quality: high" in October 2026 beside six
+        # empty months (Oct 2026). IPC API rows (publisher IPC) are the
+        # same quantity for the countries FEWS NET does not cover; where
+        # both report a month, FEWS NET wins.
         rows = con.execute(
             """
-            SELECT ym, value, created_at
+            SELECT ym, value, created_at, publisher
             FROM facts_resolved
             WHERE iso3 = ?
               AND hazard_code = 'DR'
@@ -944,57 +948,95 @@ def _load_fewsnet_phase3_history(
             ORDER BY ym DESC
             LIMIT ?
             """,
-            [iso3, months],
+            [iso3, months * 3],
         ).fetchall()
     except Exception:
         rows = []
+    projection_rows: list = []
+    try:
+        projection_rows = con.execute(
+            """
+            SELECT ym, value, publisher
+            FROM facts_resolved
+            WHERE iso3 = ?
+              AND hazard_code = 'DR'
+              AND lower(metric) = 'phase3plus_projection'
+            ORDER BY ym DESC
+            LIMIT 12
+            """,
+            [iso3],
+        ).fetchall()
+    except Exception:
+        projection_rows = []
     finally:
         con.close()
 
-    if not rows:
+    # The window: the current month and the months before it.
+    all_yms = []
+    d = date.today().replace(day=1)
+    current_ym = f"{d.year:04d}-{d.month:02d}"
+    for _ in range(months):
+        all_yms.append(f"{d.year:04d}-{d.month:02d}")
+        d = d.replace(year=d.year - 1, month=12) if d.month == 1 else d.replace(month=d.month - 1)
+    all_yms.reverse()
+    window = set(all_yms)
+
+    def _ym(v: Any) -> str:
+        return str(v)[:7]
+
+    def _pub(row: tuple) -> str:
+        return str(row[3]) if len(row) > 3 and row[3] is not None else ""
+
+    data_by_ym: Dict[str, Optional[float]] = {}
+    pub_by_ym: Dict[str, str] = {}
+    last_obs: Optional[tuple] = None
+    for row in rows:
+        ym_str, value = _ym(row[0]), row[1]
+        val = float(value) if value is not None else None
+        if val is not None and val > 0 and (last_obs is None or ym_str > last_obs[0]):
+            last_obs = (ym_str, val, _pub(row))
+        if ym_str not in window:
+            continue
+        if ym_str in data_by_ym and data_by_ym[ym_str] is not None and "fews" in pub_by_ym.get(ym_str, "").lower():
+            continue
+        data_by_ym[ym_str] = val
+        pub_by_ym[ym_str] = _pub(row)
+
+    publishers = sorted({p for p in pub_by_ym.values() if p})
+    source_label = " + ".join(publishers) if publishers else "FEWS NET / IPC"
+
+    projections = []
+    seen_proj: set[str] = set()
+    for row in projection_rows:
+        ym_str = _ym(row[0])
+        if ym_str in seen_proj or row[1] is None or ym_str < current_ym:
+            continue
+        seen_proj.add(ym_str)
+        projections.append({"ym": ym_str, "value": float(row[1])})
+    projections.sort(key=lambda e: e["ym"])
+
+    if not data_by_ym and last_obs is None:
         return {
             "type": "fewsnet_phase3",
             "source": "FEWSNET_IPC",
             "history_length_months": months,
             "observed_months": 0,
             "coverage_pct": 0.0,
-            "note": "No FEWS NET Phase 3+ data available for this country.",
+            "projections": projections,
+            "note": "No FEWS NET or IPC Phase 3+ data available for this country.",
         }
 
-    # Build a set of months that have data
-    data_by_ym = {}
-    for ym, value, created_at in rows:
-        ym_str = str(ym)
-        data_by_ym[ym_str] = float(value) if value is not None else None
+    last_6m_values = [{"ym": ym, "value": data_by_ym.get(ym)} for ym in all_yms[-6:]]
 
-    # Build monthly series (most recent N months)
-
-    all_yms = []
-    d = date.today().replace(day=1)
-    for i in range(months):
-        ym = f"{d.year:04d}-{d.month:02d}"
-        all_yms.append(ym)
-        # Go back one month
-        if d.month == 1:
-            d = d.replace(year=d.year - 1, month=12)
-        else:
-            d = d.replace(month=d.month - 1)
-    all_yms.reverse()
-
-    last_6m_values = []
-    for ym in all_yms[-6:]:
-        val = data_by_ym.get(ym)
-        last_6m_values.append({"ym": ym, "value": val})
-
-    # Compute stats over observed months only
+    # Coverage is over the displayed metric and the displayed window only.
     observed_values = [v for v in data_by_ym.values() if v is not None and v > 0]
     total_observed = len(observed_values)
     coverage_pct = (total_observed / months * 100) if months > 0 else 0.0
 
     recent_6m_yms = all_yms[-6:]
-    recent_observed = [data_by_ym[ym] for ym in recent_6m_yms if ym in data_by_ym and data_by_ym[ym] is not None]
+    recent_observed = [data_by_ym[ym] for ym in recent_6m_yms if data_by_ym.get(ym) is not None]
     prior_6m_yms = all_yms[-12:-6]
-    prior_observed = [data_by_ym[ym] for ym in prior_6m_yms if ym in data_by_ym and data_by_ym[ym] is not None]
+    prior_observed = [data_by_ym[ym] for ym in prior_6m_yms if data_by_ym.get(ym) is not None]
 
     recent_mean = sum(recent_observed) / len(recent_observed) if recent_observed else None
     recent_max = max(recent_observed) if recent_observed else None
@@ -1011,9 +1053,22 @@ def _load_fewsnet_phase3_history(
         trend = "insufficient_data"
         trend_pct = None
 
-    if coverage_pct > 80:
+    last_obs_age = None
+    if last_obs is not None:
+        try:
+            last_obs_age = (
+                (int(current_ym[:4]) - int(last_obs[0][:4])) * 12
+                + int(current_ym[5:7]) - int(last_obs[0][5:7])
+            )
+        except ValueError:
+            last_obs_age = None
+
+    # "High" needs recent observations as well as coverage: a full window
+    # that stopped half a year ago describes the past.
+    recent_enough = last_obs_age is not None and last_obs_age <= 3
+    if coverage_pct > 80 and recent_enough:
         data_quality = "high"
-    elif coverage_pct >= 50:
+    elif coverage_pct >= 50 and recent_enough:
         data_quality = "medium"
     else:
         data_quality = "low"
@@ -1021,7 +1076,9 @@ def _load_fewsnet_phase3_history(
     return {
         "type": "fewsnet_phase3",
         "source": "FEWSNET_IPC",
+        "source_label": source_label,
         "history_length_months": months,
+        "window": f"{all_yms[0]} to {all_yms[-1]}",
         "observed_months": total_observed,
         "coverage_pct": round(coverage_pct, 1),
         "recent_mean": round(recent_mean) if recent_mean else None,
@@ -1029,6 +1086,12 @@ def _load_fewsnet_phase3_history(
         "trend": trend,
         "trend_pct": round(trend_pct, 1) if trend_pct is not None else None,
         "data_quality": data_quality,
+        "last_observed": (
+            {"ym": last_obs[0], "value": round(last_obs[1]), "publisher": last_obs[2],
+             "months_before_forecast": last_obs_age}
+            if last_obs else None
+        ),
+        "projections": projections,
         "last_6m_values": last_6m_values,
         "notes": (
             "FEWS NET Phase 3+ (Current Situation). Months without data reflect "

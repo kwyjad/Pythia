@@ -369,19 +369,37 @@ def _format_base_rate_for_prompt(
         data_quality = history_summary.get("data_quality", "unknown")
         last_6m = history_summary.get("last_6m_values", [])
 
+        label = history_summary.get("source_label") or "FEWS NET IPC"
+        window = history_summary.get("window")
+        window_txt = f" ({window})" if window else ""
         lines = [
-            "RESOLVER HISTORY (FEWS NET IPC Phase 3+, Current Situation):",
-            f"Phase 3+ population reported in {observed} of the last {total} months ({coverage:.0f}% coverage).",
+            f"RESOLVER HISTORY ({label} Phase 3+, Current Situation):",
+            f"Phase 3+ population reported in {observed} of the last {total} months"
+            f"{window_txt} ({coverage:.0f}% coverage).",
         ]
 
-        # Latest value
-        latest = None
-        for entry in reversed(last_6m):
-            if entry.get("value") is not None:
-                latest = entry
-                break
-        if latest:
-            lines.append(f"Latest value: {latest['ym']}: {_fmt(latest['value'])}")
+        # The newest observation, with its month and age. The six-month
+        # table below can be all null while an older figure stands.
+        last_obs = history_summary.get("last_observed")
+        if last_obs:
+            age = last_obs.get("months_before_forecast")
+            age_txt = (
+                "" if age is None else
+                " (the month of this forecast)" if age == 0 else
+                f" ({age} month{'s' if age != 1 else ''} before this forecast)"
+            )
+            pub = f", {last_obs['publisher']}" if last_obs.get("publisher") else ""
+            lines.append(
+                f"Last observed value: {last_obs['ym']}: {_fmt(last_obs['value'])}{age_txt}{pub}"
+            )
+        else:
+            latest = None
+            for entry in reversed(last_6m):
+                if entry.get("value") is not None:
+                    latest = entry
+                    break
+            if latest:
+                lines.append(f"Latest value: {latest['ym']}: {_fmt(latest['value'])}")
 
         if recent_mean is not None:
             lines.append(f"Recent 6-month average (observed only): {_fmt(recent_mean)}")
@@ -392,7 +410,10 @@ def _format_base_rate_for_prompt(
         if trend_pct is not None:
             trend_str = f"{trend} ({'+' if trend_pct > 0 else ''}{trend_pct:.0f}% over 12 months)"
         lines.append(f"Trend: {trend_str}")
-        lines.append(f"Data quality: {data_quality} ({coverage:.0f}% monthly coverage)")
+        quality_txt = f"Data quality: {data_quality} ({coverage:.0f}% monthly coverage"
+        if last_obs and (last_obs.get("months_before_forecast") or 0) > 3:
+            quality_txt += f"; no observation since {last_obs['ym']}"
+        lines.append(quality_txt + ")")
 
         lines.append("")
         lines.append("Recent values (null = no FEWS NET assessment that month):")
@@ -407,6 +428,17 @@ def _format_base_rate_for_prompt(
             lines.append(" | ".join(parts))
 
         lines.append("")
+        projections = history_summary.get("projections") or []
+        if projections:
+            lines.append("")
+            lines.append(
+                "Projections (Most Likely scenario, a FORECAST by the analysts, not an "
+                "observation; the question resolves on the Current Situation figure):"
+            )
+            lines.append(
+                "  " + " | ".join(f"{p['ym']}: {_fmt(p['value'])}" for p in projections[:6])
+            )
+            lines.append("")
         lines.append(
             "Note: Months marked 'null' mean FEWS NET did not publish a Current "
             "Situation assessment for this country that month. This does NOT mean "
