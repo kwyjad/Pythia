@@ -265,7 +265,7 @@ class TestPersistence:
 
     def test_persistence_reads_as_words(self):
         assert persistence.persistence_phrase(1) == "new this month"
-        assert persistence.persistence_phrase(3) == "flagged for 3 consecutive runs"
+        assert persistence.persistence_phrase(3) == "flagged for 3 consecutive months"
 
     def test_movement_is_measured_only_on_the_shared_months(self):
         previous = {"2026-08": 100.0, "2026-09": 100.0, "2026-10": 100.0}

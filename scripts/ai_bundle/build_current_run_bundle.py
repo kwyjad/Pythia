@@ -147,15 +147,42 @@ def _resolve_run_id(con, include_test: bool) -> str | None:
 
 
 def _previous_run_id(con, run_id: str, include_test: bool) -> str | None:
-    rows = rows_as_dicts(
+    """The run this one is compared against: the latest PRODUCTION run of the
+    previous window epoch.
+
+    "The newest run id below this one whose questions are not test" picked a
+    test run: question ids are epoch-keyed, so a same-epoch test run forecasts
+    production questions, and the 1 Oct 2026 report compared itself with
+    fc_1789641908, a 13-question test run of 17 Sept, rather than the 15 Sept
+    production run (Oct 2026). A run is a test run by its OWN forecast rows'
+    ``is_test``; ``include_test`` lets a test run compare with test runs.
+    """
+    if not table_exists(con, "forecasts_raw"):
+        return None
+    has_is_test = column_exists(con, "forecasts_raw", "is_test")
+    epoch = rows_as_dicts(
         con,
-        "SELECT MAX(fr.run_id) AS run_id FROM forecasts_raw fr "
-        "JOIN questions q ON q.question_id = fr.question_id "
-        "WHERE fr.run_id IS NOT NULL AND fr.run_id <> '' AND fr.run_id < ?"
-        + _test_clause(con, "questions", "q", include_test),
+        "SELECT MIN(q.window_start_date) AS ws FROM forecasts_raw fr "
+        "JOIN questions q ON q.question_id = fr.question_id WHERE fr.run_id = ?",
         [run_id],
     )
-    return str(rows[0]["run_id"]) if rows and rows[0].get("run_id") else None
+    ws = str((epoch[0] or {}).get("ws") or "")[:7] if epoch else ""
+    test_filter = (
+        " HAVING NOT bool_or(COALESCE(fr.is_test, FALSE))"
+        if has_is_test and not include_test else ""
+    )
+    rows = rows_as_dicts(
+        con,
+        "SELECT fr.run_id, MIN(substr(CAST(q.window_start_date AS VARCHAR), 1, 7)) AS ws "
+        "FROM forecasts_raw fr JOIN questions q ON q.question_id = fr.question_id "
+        "WHERE fr.run_id IS NOT NULL AND fr.run_id <> '' AND fr.run_id < ? "
+        "GROUP BY fr.run_id" + test_filter + " ORDER BY fr.run_id DESC",
+        [run_id],
+    )
+    for r in rows:
+        if not ws or (r.get("ws") and str(r["ws"]) < ws):
+            return str(r["run_id"])
+    return None
 
 
 def _questions_for_run(con, run_id: str, include_test: bool) -> list[dict[str, Any]]:
@@ -686,6 +713,7 @@ def _build_persistence(
     previous_questions: list[dict[str, Any]],
     current_questions: list[dict[str, Any]],
     previous_reports: list[dict[str, Any]],
+    current_month: str | None = None,
 ) -> dict[str, Any]:
     """How long each shown risk has been flagged, and how it has moved.
 
@@ -696,6 +724,10 @@ def _build_persistence(
     Movement is measured only on the calendar months the two runs share.
     """
     flag_sets = [r.get("flagged_keys") or [] for r in previous_reports]
+    by_month = [
+        (str(r.get("month_label") or ""), r.get("flagged_keys") or [])
+        for r in previous_reports
+    ]
     cur_starts = {
         str(q["question_id"]): q.get("window_start_date") for q in current_questions
     }
@@ -711,7 +743,10 @@ def _build_persistence(
     for row in shown:
         key = _persistence.match_key(row)
         qid = str(row["question_id"])
-        runs = _persistence.consecutive_runs(key, flag_sets)
+        runs = (
+            _persistence.consecutive_months(key, by_month, current_month)
+            if current_month else _persistence.consecutive_runs(key, flag_sets)
+        )
         move = None
         prev_q = prev_by_key.get(key)
         if previous_run_id and prev_q is not None:
@@ -782,6 +817,7 @@ def build_deltas(
     current_questions: list[dict[str, Any]] | None = None,
     previous_reports: list[dict[str, Any]] | None = None,
     top_n: int,
+    current_month: str | None = None,
 ) -> dict[str, Any]:
     """Entries/exits from the top-N attention list, largest SPD movements,
     and how the previous run's flagged risks are tracking. Matched on
@@ -797,6 +833,7 @@ def build_deltas(
         attention_rows=attention_rows,
         previous_questions=previous_questions,
         current_questions=current_questions or [],
+        current_month=current_month,
         previous_reports=previous_reports,
     )
 
@@ -1170,7 +1207,24 @@ def build_sector_comparison(con, attention_rows: list[dict[str, Any]]) -> dict[s
 # ---------------------------------------------------------------------------
 
 
-def _previous_reports(con, *, include_test: bool, limit: int = 12) -> list[dict[str, Any]]:
+def _report_month(hs_run_id: Any, created_at: Any) -> str:
+    """The month a report is ABOUT: its scan's date (hs_YYYYMMDD...), else
+    the day it was written. A report backfilled in August for a July scan is
+    July's report."""
+    text = str(hs_run_id or "")
+    if text.startswith("hs_") and len(text) >= 9 and text[3:9].isdigit():
+        return f"{text[3:7]}-{text[7:9]}"
+    return str(created_at or "")[:7]
+
+
+def _previous_reports(
+    con,
+    *,
+    include_test: bool,
+    limit: int = 12,
+    before_month: str | None = None,
+    exclude_run_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Stored interpretations, newest first, with their attention entries.
 
     The reports themselves are the only honest record of what was flagged:
@@ -1194,16 +1248,33 @@ def _previous_reports(con, *, include_test: bool, limit: int = 12) -> list[dict[
 
     out: list[dict[str, Any]] = []
     seen_runs: set[str] = set()
+    seen_months: set[str] = set()
+    # Newest MONTH first, then newest report within it: one report per month
+    # (the cycle can publish twice in one), never this run's own report, and
+    # never a month at or after this one.
+    rows = sorted(
+        rows,
+        key=lambda r: (_report_month(r.get("hs_run_id"), r.get("created_at")),
+                       str(r.get("created_at") or "")),
+        reverse=True,
+    )
     for r in rows:
         run = str(r.get("run_id") or r.get("hs_run_id") or "")
-        if run in seen_runs:
+        month = _report_month(r.get("hs_run_id"), r.get("created_at"))
+        if run in seen_runs or (exclude_run_id and run == exclude_run_id):
             continue  # one report per run: later versions supersede earlier
+        if before_month and month >= before_month:
+            continue
         seen_runs.add(run)
+        if before_month is not None:
+            if month in seen_months:
+                continue
+            seen_months.add(month)
         content = safe_json_loads(r.get("content_json")) or {}
         entries = [e for e in (content.get("attention") or []) if isinstance(e, dict)]
         out.append({
             "run_id": r.get("run_id"),
-            "month_label": str(r.get("created_at") or "")[:7],
+            "month_label": month,
             "entries": entries,
             "flagged_keys": [
                 _persistence.match_key(e) for e in entries
@@ -1581,7 +1652,11 @@ def build_bundle(
         sector_block = build_sector_comparison(con, attention_rows)
 
         previous_run = _previous_run_id(con, run_id, include_test)
-        previous_reports = _previous_reports(con, include_test=include_test)
+        current_month = _report_month(hs_run_id, "") or None
+        previous_reports = _previous_reports(
+            con, include_test=include_test,
+            before_month=current_month, exclude_run_id=run_id,
+        )
         deltas = build_deltas(
             con,
             run_id=run_id,
@@ -1594,6 +1669,7 @@ def build_bundle(
             current_questions=questions,
             previous_reports=previous_reports,
             top_n=top_n,
+            current_month=current_month,
         )
         blind_spots = build_blind_spots(attention_rows)
         outlook = build_performance_outlook(

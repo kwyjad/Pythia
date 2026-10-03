@@ -313,9 +313,58 @@ def test_same_epoch_test_rerun_never_taints_production_question(
         )
     finally:
         con.close()
+    con = duckdb.connect(str(db_path))
+    before = con.execute(
+        "SELECT question_id, hs_run_id, track, pythia_metadata_json FROM questions ORDER BY 1"
+    ).fetchall()
+    con.close()
     monkeypatch.setenv("PYTHIA_TEST_MODE", "1")
     assert create_questions_from_triage(db_url, hs_run_id="hs_run_test2") == 0
     assert _question_is_test_flags(db_path) == {False}
+    # A test run changes NOTHING on a production question (Oct 2026: same-
+    # epoch test scans re-pointed 28 production questions at themselves).
+    con = duckdb.connect(str(db_path))
+    after = con.execute(
+        "SELECT question_id, hs_run_id, track, pythia_metadata_json FROM questions ORDER BY 1"
+    ).fetchall()
+    con.close()
+    assert after == before
+
+
+def test_production_questions_pointing_at_test_scans_are_repaired(tmp_path: Path) -> None:
+    from scripts.create_questions_from_triage import repair_questions_pointing_at_test_scans
+
+    db_path = tmp_path / "repair.duckdb"
+    con = duckdb.connect(str(db_path))
+    ensure_schema(con)
+    for hs, test in [("hs_20260915T130009", False), ("hs_20260917T104316", True)]:
+        con.execute(
+            "INSERT INTO hs_runs (hs_run_id, generated_at, git_sha, config_profile, countries_json, is_test) "
+            "VALUES (?, CURRENT_TIMESTAMP, 'x', 'default', '[]', ?)",
+            [hs, test],
+        )
+        con.execute(
+            "INSERT INTO hs_triage (run_id, iso3, hazard_code, tier, triage_score, need_full_spd, "
+            "drivers_json, regime_shifts_json, data_quality_json, scenario_stub) "
+            "VALUES (?, 'SOM', 'ACE', 'priority', 0.8, TRUE, '[]', '[]', '{}', '')",
+            [hs],
+        )
+    con.execute(
+        "INSERT INTO questions (question_id, hs_run_id, iso3, hazard_code, metric, target_month, "
+        "window_start_date, window_end_date, wording, status, pythia_metadata_json, is_test) "
+        "VALUES ('SOM_ACE_PA_2026-10', 'hs_20260917T104316', 'SOM', 'ACE', 'PA', '2027-03', "
+        "DATE '2026-10-01', DATE '2027-03-31', 'w', 'active', "
+        "'{\"hs_run_id\": \"hs_20260917T104316\", \"tier\": \"priority\"}', FALSE)"
+    )
+    assert repair_questions_pointing_at_test_scans(con) == {"repaired": 1, "unrepairable": 0}
+    assert repair_questions_pointing_at_test_scans(con) == {"repaired": 0, "unrepairable": 0}
+    hs, meta = con.execute(
+        "SELECT hs_run_id, pythia_metadata_json FROM questions"
+    ).fetchone()
+    con.close()
+    assert hs == "hs_20260915T130009"
+    assert '"hs_run_id":"hs_20260915T130009"' in meta.replace(" ", "")
+    assert '"tier":"priority"' in meta.replace(" ", "")
 
 
 _FACTS_RESOLVED_DDL = """

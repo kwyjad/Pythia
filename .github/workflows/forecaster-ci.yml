@@ -127,6 +127,10 @@ on:
       - ".github/workflows/forecaster-ci.yml"
       - "tests/test_poll_llm_batches_guard.py"
       - "tests/test_check_pipeline_active.py"
+      # Question creation: a test run must change nothing on a production
+      # question. This file ran in no workflow until Oct 2026.
+      - "scripts/create_questions_from_triage.py"
+      - "tests/test_create_questions_from_triage.py"
       # ACE/FATALITIES resolves from the all-event-types series (Sept 2026):
       # the adapter, the relabel pass and the centroid reset it depends on.
       - "resolver/transform/adapters/acled.py"
@@ -342,6 +346,7 @@ jobs:
             forecaster/tests/test_prompt_cache_wiring.py \
             tests/test_poll_llm_batches_guard.py \
             tests/test_check_pipeline_active.py \
+            tests/test_create_questions_from_triage.py \
             scripts/ci/tests/test_batch_economics.py \
             scripts/ci/tests/test_batch_canary.py \
             scripts/ci/tests/test_stage_health.py \

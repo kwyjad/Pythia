@@ -393,9 +393,15 @@ def _upsert_question(
     is_test: bool = False,
 ) -> bool:
     existing = con.execute(
-        "SELECT 1 FROM questions WHERE question_id = ?", [question_id]
+        "SELECT COALESCE(is_test, FALSE) FROM questions WHERE question_id = ?", [question_id]
     ).fetchone()
     meta_json = json.dumps(metadata, ensure_ascii=False)
+    if existing and is_test and not bool(existing[0]):
+        # A test run changes nothing on a production question. Same-epoch
+        # test scans used to re-point hs_run_id and the metadata at
+        # themselves, so 28 production questions on the 1 Oct 2026 release
+        # named a test scan as their origin (Oct 2026).
+        return False
     if existing:
         # Same-epoch re-run: update hs_run_id so the assertion can find
         # questions belonging to the current run.  Window dates are identical
@@ -444,11 +450,64 @@ def _upsert_question(
     return True  # new row inserted
 
 
+def repair_questions_pointing_at_test_scans(con: duckdb.DuckDBPyConnection) -> dict:
+    """Point production questions back at a production scan. Idempotent.
+
+    A production question whose ``hs_run_id`` names a test scan was re-pointed
+    by a same-epoch test run before that was stopped. It goes back to the
+    latest production scan that triaged the same country and hazard in the
+    month before its window opens (the scan that set its epoch). A question
+    with no such scan is left alone and counted.
+    """
+    try:
+        bad = con.execute(
+            """
+            SELECT q.question_id, q.iso3, q.hazard_code,
+                   strftime(CAST(q.window_start_date AS DATE) - INTERVAL 1 MONTH, '%Y%m')
+            FROM questions q JOIN hs_runs h ON h.hs_run_id = q.hs_run_id
+            WHERE NOT COALESCE(q.is_test, FALSE) AND COALESCE(h.is_test, FALSE)
+            """
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - a repair must never stop question creation
+        print(f"repair_questions_pointing_at_test_scans: skipped ({exc})")
+        return {"repaired": 0, "unrepairable": 0}
+    repaired = unrepairable = 0
+    for qid, iso3, hz, ym in bad:
+        row = con.execute(
+            """
+            SELECT MAX(t.run_id) FROM hs_triage t JOIN hs_runs h ON h.hs_run_id = t.run_id
+            WHERE NOT COALESCE(h.is_test, FALSE) AND t.iso3 = ? AND t.hazard_code = ?
+              AND substr(t.run_id, 4, 6) = ?
+            """,
+            [iso3, hz, ym],
+        ).fetchone()
+        target = row[0] if row else None
+        if not target:
+            unrepairable += 1
+            continue
+        con.execute(
+            "UPDATE questions SET hs_run_id = ?, "
+            "pythia_metadata_json = CASE WHEN json_valid(pythia_metadata_json) "
+            "THEN CAST(json_merge_patch(pythia_metadata_json, json_object('hs_run_id', ?)) AS VARCHAR) "
+            "ELSE pythia_metadata_json END "
+            "WHERE question_id = ?",
+            [target, target, qid],
+        )
+        repaired += 1
+    if bad:
+        print(
+            f"repair_questions_pointing_at_test_scans: repaired {repaired}, "
+            f"left {unrepairable} with no production scan to point at"
+        )
+    return {"repaired": repaired, "unrepairable": unrepairable}
+
+
 def create_questions_from_triage(db_url: str, hs_run_id: Optional[str] = None) -> int:
     db_path = _resolve_db_path(db_url)
     con = duckdb.connect(db_path)
     try:
         ensure_schema(con)
+        repair_questions_pointing_at_test_scans(con)
         run_id = _select_hs_run_id(con, hs_run_id)
         if not run_id:
             print("create_questions_from_triage: no hs_run_id found; nothing to do.")

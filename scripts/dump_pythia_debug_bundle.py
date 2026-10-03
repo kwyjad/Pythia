@@ -3130,6 +3130,10 @@ class BundleData:
     crisiswatch_table_exists: bool = False
     crisiswatch_load_error: str | None = None
 
+    # Production questions whose hs_run_id names a TEST scan (Oct 2026).
+    # None = could not be checked.
+    production_questions_on_test_scans: list[str] | None = None
+
     # Run summary stats (for executive summary bottom sections)
     rc_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
     triage_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
@@ -3422,7 +3426,29 @@ def _load_bundle_data(
     except Exception as exc:
         data.crisiswatch_load_error = str(exc)
 
+    data.production_questions_on_test_scans = _production_questions_on_test_scans(con)
+
     return data
+
+
+def _production_questions_on_test_scans(con) -> list[str] | None:
+    """Production questions whose ``hs_run_id`` names a test scan.
+
+    A same-epoch test run used to re-point production questions at itself;
+    28 such questions sat in the 1 Oct 2026 release. None when the tables or
+    columns are absent.
+    """
+    try:
+        if not (_safe_table_exists(con, "questions") and _safe_table_exists(con, "hs_runs")):
+            return None
+        rows = con.execute(
+            "SELECT q.question_id FROM questions q JOIN hs_runs h ON h.hs_run_id = q.hs_run_id "
+            "WHERE NOT COALESCE(q.is_test, FALSE) AND COALESCE(h.is_test, FALSE) "
+            "ORDER BY q.question_id"
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+    except Exception:  # noqa: BLE001 - a check that cannot run reports None
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -3525,6 +3551,19 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         hs_status = "FAIL"
         hs_detail = f"{data.n_hazards_triaged_total}/{expected_hs} rows, {missing_count} missing"
     checks.append({"subsystem": "HS Triage", "status": hs_status, "detail": hs_detail})
+
+    # Question provenance: a production question must name a production scan.
+    bad_q = data.production_questions_on_test_scans
+    if bad_q is not None:
+        checks.append({
+            "subsystem": "Question Provenance",
+            "status": "FAIL" if bad_q else "OK",
+            "detail": (
+                f"{len(bad_q)} production question(s) name a test scan as their origin: "
+                + ", ".join(bad_q[:8]) + (" ..." if len(bad_q) > 8 else "")
+                if bad_q else "every production question names a production scan"
+            ),
+        })
 
     # CrisisWatch (ICG conflict arrows — ACE data source)
     if data.crisiswatch_load_error:

@@ -1,0 +1,76 @@
+# Pythia / Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+"""The run a report compares with, and how persistence is counted (Oct 2026).
+
+The 1 Oct 2026 report compared itself with fc_1789641908, a 13-question test
+run of 17 Sept, because the previous-run lookup filtered on the QUESTIONS'
+is_test and same-epoch test runs forecast production questions. And with two
+production reports in September, a risk flagged since August would read "4
+consecutive runs" in October across three months.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+duckdb = pytest.importorskip("duckdb")
+
+from interpreter import persistence
+from scripts.ai_bundle import build_current_run_bundle as b
+
+
+@pytest.fixture()
+def con():
+    c = duckdb.connect(":memory:")
+    c.execute("CREATE TABLE questions (question_id TEXT, window_start_date DATE, is_test BOOLEAN)")
+    c.execute("CREATE TABLE forecasts_raw (run_id TEXT, question_id TEXT, is_test BOOLEAN)")
+    for qid, ws in [("Q10", "2026-10-01"), ("Q11", "2026-11-01")]:
+        c.execute("INSERT INTO questions VALUES (?, ?, FALSE)", [qid, ws])
+    for run, qid, test in [
+        ("fc_1788237725", "Q10", False),   # 1 Sept, production, epoch 10
+        ("fc_1789534892", "Q10", False),   # 15 Sept, production, epoch 10
+        ("fc_1789641908", "Q10", True),    # 17 Sept, TEST run on a production question
+        ("fc_1790831584", "Q11", False),   # 1 Oct, production, epoch 11
+    ]:
+        c.execute("INSERT INTO forecasts_raw VALUES (?, ?, ?)", [run, qid, test])
+    return c
+
+
+def test_previous_run_is_the_latest_production_run_of_the_previous_epoch(con):
+    assert b._previous_run_id(con, "fc_1790831584", False) == "fc_1789534892"
+    # A same-epoch run is not "the previous month".
+    assert b._previous_run_id(con, "fc_1789534892", False) is None
+
+
+def test_reports_are_one_per_month_and_never_this_runs_own(con):
+    con.execute(
+        "CREATE TABLE interpretations (kind TEXT, run_id TEXT, hs_run_id TEXT, status TEXT, "
+        "content_json TEXT, created_at TIMESTAMP, version INTEGER, is_test BOOLEAN)"
+    )
+    flag = json.dumps({"attention": [{"iso3": "SOM", "hazard_code": "DR", "metric": "PA"}]})
+    for run, hs, at in [
+        ("fc_a", "hs_20260801T000000", "2026-08-01"),
+        ("fc_b", "hs_20260901T000000", "2026-09-01"),
+        ("fc_c", "hs_20260915T000000", "2026-09-16"),
+        ("fc_d", "hs_20261001T000000", "2026-10-01"),
+    ]:
+        con.execute(
+            "INSERT INTO interpretations VALUES ('combined', ?, ?, 'ok', ?, ?, 1, FALSE)",
+            [run, hs, flag, at],
+        )
+    reports = b._previous_reports(
+        con, include_test=False, before_month="2026-10", exclude_run_id="fc_d",
+    )
+    assert [r["month_label"] for r in reports] == ["2026-09", "2026-08"]
+    assert reports[0]["run_id"] == "fc_c"
+    months = [(r["month_label"], r["flagged_keys"]) for r in reports]
+    assert persistence.consecutive_months(("SOM", "DR", "PA"), months, "2026-10") == 3
+
+
+def test_a_missing_month_breaks_the_run():
+    key = ("SOM", "DR", "PA")
+    assert persistence.consecutive_months(key, [("2026-08", [key])], "2026-10") == 1
+    assert persistence.persistence_phrase(3) == "flagged for 3 consecutive months"

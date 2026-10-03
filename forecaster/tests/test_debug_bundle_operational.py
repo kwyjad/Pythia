@@ -964,3 +964,22 @@ def test_a_failing_collector_writes_a_stub_and_the_run_continues(tmp_path: Path,
     assert "upstream went away" in text
     assert _COLLECTOR_ERRORS and _COLLECTOR_ERRORS[0]["collector"] == "thing"
     _COLLECTOR_ERRORS.clear()
+
+
+def test_a_production_question_on_a_test_scan_is_named():
+    """Oct 2026: same-epoch test scans re-pointed 28 production questions."""
+
+    import duckdb
+
+    from scripts import dump_pythia_debug_bundle as dump
+
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE TABLE hs_runs (hs_run_id TEXT, is_test BOOLEAN)")
+    con.execute("CREATE TABLE questions (question_id TEXT, hs_run_id TEXT, is_test BOOLEAN)")
+    con.execute("INSERT INTO hs_runs VALUES ('hs_prod', FALSE), ('hs_test', TRUE)")
+    con.execute(
+        "INSERT INTO questions VALUES ('Q_OK', 'hs_prod', FALSE), "
+        "('Q_BAD', 'hs_test', FALSE), ('Q_TEST', 'hs_test', TRUE)"
+    )
+    assert dump._production_questions_on_test_scans(con) == ["Q_BAD"]
+    assert dump._production_questions_on_test_scans(duckdb.connect(":memory:")) is None
