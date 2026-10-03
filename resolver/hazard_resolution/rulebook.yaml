@@ -399,13 +399,15 @@ drought:
         where: "variable = 'prate'"
         match: threshold
         absence_means_no_drought: false
-        # NOT -0.43. That is NMME's below-normal TERCILE boundary, which by
-        # construction covers a third of countries in any month — under
-        # combine: any it would attribute a third of the world's food
-        # insecurity to drought, which is precisely the conflict-driven
-        # deterioration this gate exists to keep out. -1.0 sigma is roughly
-        # the driest sixth of the distribution: a statement that conditions
-        # are dry, rather than a statement that they are on the dry side.
+        # The value is the ensemble-mean precipitation anomaly in mm/day
+        # (resolver.ingestion.nmme.UNITS). It was written as "-1.0 sigma"
+        # until Oct 2026, but CPC publishes the anomaly in mm/s and the
+        # ingest stored that rounded to zero, so this entry never fired.
+        # -1.0 mm/day is about 30 mm below normal over a month: a statement
+        # that the month is forecast dry, and one a hyper-arid country can
+        # never meet, which is the conservative failure for an attribution
+        # gate. NOT a tercile split, which would cover a third of countries
+        # in any month and file conflict-driven food insecurity as drought.
         threshold: -1.0
         direction: below
 

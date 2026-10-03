@@ -42,11 +42,25 @@ VARIABLES = {
 # Maximum lead months available in the NMME ENSMEAN product.
 MAX_LEAD_MONTHS = 7
 
-# Tercile thresholds (σ).  ±0.43 σ ≈ 33rd / 67th percentile of a
-# standard normal distribution, which is the conventional split for
-# NMME anomaly terciles.
-TERCILE_UPPER = 0.43
-TERCILE_LOWER = -0.43
+# What the CPC ENSMEAN anomaly files carry, read off the files' own
+# ``units`` attribute (run 37124829343, 2026-10-03): ``prate`` in mm/s and
+# ``tmp2m`` in kelvin. They are NOT standardised. Until Oct 2026 this module
+# stored the raw mm/s figure rounded to four decimals, so every precipitation
+# anomaly (typically 1e-5 mm/s) was stored as 0.0 or +/-0.0001, and every
+# prompt labelled the result in sigma. The anomaly is now converted to a unit
+# a reader can weigh before it is rounded, and the unit is stored on the row.
+UNITS = {"tmp2m": "degC", "prate": "mm/day"}
+_SCALE_TO_UNITS = {"tmp2m": 1.0, "prate": 86400.0}  # K anomaly == degC anomaly
+
+# Category thresholds in the stored units. These are thresholds of our
+# choosing, not terciles: the ensemble mean anomaly carries no climatological
+# spread, so a tercile cannot be computed from it. +/-0.5 degC and
+# +/-0.5 mm/day (about 15 mm a month) mark a forecast clearly off normal.
+CATEGORY_THRESHOLDS = {"tmp2m": 0.5, "prate": 0.5}
+
+# Legacy names, kept for callers; the threshold is per variable now.
+TERCILE_UPPER = 0.5
+TERCILE_LOWER = -0.5
 
 # One-time diagnostic flag — logs a complete region dump on the first call.
 _NMME_FULL_DUMP_DONE = False
@@ -564,6 +578,8 @@ def _aggregate_nc_to_countries(
         ds.close()
         return pd.DataFrame(columns=["iso3", "anomaly_value"])
 
+    da = da * _SCALE_TO_UNITS.get(variable, 1.0)
+
     # Squeeze out any singleton non-spatial dimensions.
     for dim in list(da.dims):
         if dim not in ("lat", "lon") and da.sizes[dim] == 1:
@@ -602,6 +618,8 @@ def _aggregate_multi_lead_nc(
         log.warning("No data variables in %s", nc_path)
         ds.close()
         return []
+
+    da = da * _SCALE_TO_UNITS.get(variable, 1.0)
 
     # Squeeze out singleton time dimensions but keep the lead dimension.
     lead_dim = _find_lead_dim(da)
@@ -643,13 +661,26 @@ def _aggregate_multi_lead_nc(
     return results
 
 
-def _classify_tercile(anomaly: float) -> str:
-    """Return tercile category from anomaly value (σ units)."""
-    if anomaly > TERCILE_UPPER:
+def _classify_tercile(anomaly: float, variable: Optional[str] = None) -> str:
+    """Category from an anomaly in the variable's stored units (``UNITS``)."""
+    limit = CATEGORY_THRESHOLDS.get(variable or "", TERCILE_UPPER)
+    if anomaly > limit:
         return "above_normal"
-    if anomaly < TERCILE_LOWER:
+    if anomaly < -limit:
         return "below_normal"
     return "near_normal"
+
+
+def near_zero_share(values, tol: float = 0.01) -> float:
+    """Share of ``values`` within ``tol`` of zero (0.0 for none).
+
+    A variable whose rows are almost all at zero has been stored in the wrong
+    unit (the October 2026 fault); the debug bundle fails above 95%.
+    """
+    vals = [float(v) for v in values if v is not None]
+    if not vals:
+        return 0.0
+    return sum(1 for v in vals if abs(v) <= tol) / len(vals)
 
 
 # ------------------------------------------------------------------
@@ -730,7 +761,11 @@ def fetch_and_process(
     result = pd.concat(all_rows, ignore_index=True)
 
     # 4. Derive tercile classification.
-    result["tercile_category"] = result["anomaly_value"].apply(_classify_tercile)
+    result["tercile_category"] = [
+        _classify_tercile(v, var)
+        for v, var in zip(result["anomaly_value"], result["variable"])
+    ]
+    result["units"] = result["variable"].map(UNITS)
 
     # 5. Add metadata.
     result["forecast_issue_date"] = forecast_issue_date
@@ -739,7 +774,7 @@ def fetch_and_process(
     result = result[
         [
             "iso3", "variable", "lead_months", "anomaly_value",
-            "tercile_category", "forecast_issue_date",
+            "tercile_category", "forecast_issue_date", "units",
         ]
     ]
 

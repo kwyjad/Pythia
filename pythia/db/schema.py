@@ -2600,6 +2600,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 forecast_issue_date DATE NOT NULL,
                 created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 fetched_at        TIMESTAMP,
+                units             TEXT,
                 CONSTRAINT seasonal_forecasts_unique
                     UNIQUE (iso3, variable, lead_months, forecast_issue_date)
             );
@@ -2613,6 +2614,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "forecast_issue_date": "DATE",
                 "created_at": "TIMESTAMP",
                 "fetched_at": "TIMESTAMP",
+                "units": "TEXT",
             },
         )
 

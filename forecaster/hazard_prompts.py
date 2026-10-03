@@ -211,9 +211,10 @@ forecast months overlap with the country's wet/rainy season. During dry season m
 the prior should be heavily weighted toward the 0 and 1-<10k buckets. During peak rainy \
 season, the prior should shift substantially rightward based on historical flood impacts.
 - NMME seasonal outlook (if provided) is a key signal. Above-normal precipitation \
-anomalies (positive σ) during rainy season months are a moderate-to-strong signal for \
+anomalies (positive, in mm/day) during rainy season months are a moderate-to-strong signal for \
 rightward shift. Below-normal anomalies are a signal for leftward shift. The magnitude \
-matters: +0.5σ is a modest signal, +1.5σ is a strong signal.
+matters relative to the season's normal rain: +0.5 mm/day is a modest signal in a wet \
+season, +2 mm/day a strong one.
 - ENSO and IOD phases affect flood risk regionally. La Niña typically increases flood \
 risk in Southeast Asia, East Africa, and Australia. El Niño increases flood risk in \
 Peru, Ecuador, and parts of East Africa. If these teleconnection patterns are relevant \
@@ -259,7 +260,7 @@ drought impacts. If the country has already experienced one or more poor rainy \
 seasons, the current forecast window starts from a weakened baseline — even \
 near-normal rainfall may not prevent significant drought impacts.
 - NMME seasonal outlook is especially important for drought. Below-normal \
-precipitation anomalies (negative σ) are a direct driver. Temperature anomalies \
+precipitation anomalies (negative, in mm/day) are a direct driver. Temperature anomalies \
 matter too: above-normal temperatures increase evapotranspiration and worsen \
 drought conditions even with near-normal rainfall.
 - IPC food insecurity phases (if provided in structured data) are one of the \
@@ -437,7 +438,7 @@ hot season for each country. Your SPD should have the strongest rightward shift 
 during known hot-season months and be heavily weighted toward the 0 and 1-<10k \
 buckets during cool-season months.
 - NMME temperature anomalies are a direct driver. Above-normal temperature forecasts \
-(positive σ) during the hot season are a moderate-to-strong signal for higher PA. \
+(positive, in °C) during the hot season are a moderate-to-strong signal for higher PA. \
 The combination of above-normal temperatures AND above-normal humidity (or below-normal \
 precipitation limiting cooling) is the strongest signal.
 - Climate trend matters. Global warming means heatwave base rates are shifting upward \

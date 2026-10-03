@@ -23,6 +23,15 @@ from .hazard_prompts import get_hazard_reasoning_block
 LOG = logging.getLogger(__name__)
 
 
+
+# NMME anomalies are stored in their own units (resolver.ingestion.nmme.UNITS).
+# Until Oct 2026 this note said "sigma", which they never were.
+NMME_UNITS_NOTE = (
+    "Note: Anomalies are departures from the model climatology: temperature in °C, "
+    "precipitation in mm/day (0.5 mm/day is about 15 mm a month). They are not "
+    "standardised, so a dry country's precipitation anomaly is small in absolute terms."
+)
+
 def _json_dumps_for_prompt(obj: Any, **kwargs: Any) -> str:
     """
     JSON-encode helper for prompts that tolerates Python objects like date
@@ -1544,7 +1553,7 @@ def build_research_prompt_v2(
         for _key, _val in _seasonal_outlook.items():
             _label = _key.replace("_", " ").capitalize()
             _seasonal_lines.append(f"- {_label}: {_val}")
-        _seasonal_lines.append("Note: Anomalies are in σ (standard deviations from climatology).")
+        _seasonal_lines.append(NMME_UNITS_NOTE)
         parts.append("\n".join(_seasonal_lines))
 
     # Render conflict forecasts for ACE hazard.
@@ -2482,7 +2491,7 @@ def build_spd_prompt_v2(
         for _k, _v in _seasonal_data.items():
             _label = _k.replace("_", " ").capitalize()
             _lines.append(f"- {_label}: {_v}")
-        _lines.append("Note: Anomalies are in σ (standard deviations from climatology).\n")
+        _lines.append(NMME_UNITS_NOTE + "\n")
         seasonal_outlook_section = "\n".join(_lines) + "\n"
 
     # --- NEW: Structured data sections from connectors ---

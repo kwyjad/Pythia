@@ -1585,3 +1585,33 @@ def test_a_partial_acled_month_row_fails_the_check(tmp_path, full_run):
     con.close()
     assert _checks(tmp_path, db, full_run, "acledpartial2")[
         "no_acled_month_row_written_before_its_month_ended"]["verdict"] == "PASS"
+
+
+def test_an_nmme_variable_stored_at_zero_is_a_contradiction(tmp_path, full_run):
+    """Oct 2026: prate stored in mm/s rounded to four decimals, all at zero."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "CREATE TABLE seasonal_forecasts (iso3 TEXT, variable TEXT, lead_months INTEGER, "
+        "anomaly_value DOUBLE, forecast_issue_date DATE)"
+    )
+    for i in range(40):
+        con.execute(
+            "INSERT INTO seasonal_forecasts VALUES (?, 'prate', 1, 0.0001, DATE '2026-09-08')",
+            [f"C{i:02d}"],
+        )
+        con.execute(
+            "INSERT INTO seasonal_forecasts VALUES (?, 'tmp2m', 1, 0.8, DATE '2026-09-08')",
+            [f"C{i:02d}"],
+        )
+    con.close()
+    check = _checks(tmp_path, db, full_run)["nmme_no_variable_is_almost_all_zero"]
+    assert check["verdict"] == "FAIL"
+    assert "prate (40 of 40)" in check["detail"]
+
+    con = duckdb.connect(str(db))
+    con.execute("UPDATE seasonal_forecasts SET anomaly_value = -1.3 WHERE variable = 'prate'")
+    con.close()
+    check = _checks(tmp_path, db, full_run, "again")["nmme_no_variable_is_almost_all_zero"]
+    assert check["verdict"] == "PASS"
