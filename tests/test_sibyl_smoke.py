@@ -61,8 +61,14 @@ def smoke_env(tmp_path, monkeypatch):
 
     # Deterministic agent: each trial runs three searches (two Brave, one
     # ReliefWeb), reads three documents, then submits with its plan done.
+    # Trials run on worker threads (Oct 2026), so the script position is kept
+    # per trial, keyed by the lane its prompt names.
+    import re
+    import threading
+
     script = research_script()
-    state = {"calls": 0}
+    state: dict = {}
+    lock = threading.Lock()
 
     def fake_model_call(prompt: str):
         usage = {
@@ -71,9 +77,11 @@ def smoke_env(tmp_path, monkeypatch):
             "total_tokens": 700,
             "cost_usd": 0.10,
         }
-        text = script[state["calls"] % len(script)]
-        state["calls"] += 1
-        return text, usage, ""
+        lane = re.search(r"Lane ([A-E]),", prompt).group(1)
+        with lock:
+            n = state.get(lane, 0)
+            state[lane] = n + 1
+        return script[n % len(script)], usage, ""
 
     return fake_model_call
 

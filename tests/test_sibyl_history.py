@@ -169,7 +169,7 @@ def _segments(transcript_text: str, step: int = 1):
 def test_breakpoints_sit_on_question_trial_and_transcript():
     first = _segments("")
     assert [bp for _, bp in first] == [False, True, True, False]
-    assert "=== QUESTION ===" in first[1][0] and "TRIAL PERSPECTIVE" in first[2][0]
+    assert "=== QUESTION ===" in first[1][0] and "RESEARCH LANE" in first[2][0]
     later = _segments("=== STEP 1: YOUR RESPONSE ===\n{}\n", step=2)
     assert [bp for _, bp in later] == [False, True, True, True, False]
     assert later[3][0].startswith("=== STEP 1") and later[4][0].startswith("=== STEP 2 of ")

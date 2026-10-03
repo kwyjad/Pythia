@@ -263,7 +263,7 @@ def diagnose(records: Sequence[SibylRecord]) -> Dict[str, Stat]:
 
 
 def perspective_bias(records: Sequence[SibylRecord]) -> Dict[str, Dict[str, Any]]:
-    """Centre bias per trial perspective seed. Findings only, never advice."""
+    """Centre bias per trial lane (the perspective seed before Oct 2026). Findings only, never advice."""
     by: Dict[str, List[Tuple[float, float]]] = {}
     for r in records:
         ys = [float(y) for y in r.outcomes if y is not None]

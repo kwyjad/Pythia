@@ -367,9 +367,10 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             brave_cost_usd, leakage_json, created_at, is_test, selection_pass,
             base_rate_json, advice_arm, advice_as_of_month, evidence_ok,
             reference_json, raw_by_month_json, final_by_month_json,
-            extraction_cost_usd
+            extraction_cost_usd, extra_trials_rule, trial_checks_json
         ) VALUES (?, ?, ?, ?, ?, ?, 'sibyl', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -407,6 +408,8 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             _json_or_none(record.get("raw_by_month")),
             _json_or_none(record.get("final_by_month")),
             record.get("extraction_cost_usd", 0.0),
+            record.get("extra_trials_rule"),
+            _json_or_none(record.get("trial_checks") or None),
         ],
     )
 

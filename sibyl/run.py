@@ -5,21 +5,23 @@
 
 """Sibyl run orchestrator.
 
-Per run: select N affected/fatalities questions by the floor-then-fill rule
-(sibyl/select_questions.py), and for each, in run order (floor picks first,
-then fill picks, each by falling volatility, so a cap removes fill picks
-first):
+Per run: select N affected/fatalities questions (sibyl/select_questions.py:
+floor-then-fill plus controls), and for each, in run order (floor picks,
+then controls, then fill picks, so a cap removes fill picks first):
 
-1. load the Resolver base rate (outside view),
-2. run K independent agentic trials (Opus over open-web research),
-3. linear-pool the K trial CDFs,
+1. build Sibyl's reference (sibyl/reference.py),
+2. run K independent agentic trials on lanes A, B, C in parallel threads
+   (a control runs one, on lane A); when they disagree or their pool
+   departs far from the reference, run up to K_MAX - K more on lanes D and E
+   (sibyl/trials.py),
+3. leave out an outlier trial, then linear-pool the trial CDFs,
 4. calibrate (identity hook while CALIBRATION_ENABLED is off),
 5. serialize to the native SPD format beside the standard track,
 6. record cost, and
 7. compute the JS divergence vs the standard-Pythia SPD.
 
-The hard budget cap is checked at every question boundary and between
-trials; once reached, no new work starts, completed work is persisted,
+The hard budget cap is checked at every question boundary and before each
+batch of trials (trials already running are never cut); once reached, no new work starts, completed work is persisted,
 remaining questions are marked ``skipped: run budget cap``, and the
 run-level ``budget_capped`` flag is set. The wall-clock cap
 (``SIBYL_MAX_RUNTIME_MIN``) behaves the same way at question boundaries:
@@ -43,7 +45,8 @@ from typing import Any, Dict, List, Optional
 from pythia.db.schema import connect, ensure_schema
 
 from sibyl import config as sibyl_config
-from sibyl.agent import TrialResult, run_trial
+import sibyl.agent as _agent
+from sibyl.agent import LANE_IDS, TrialResult, lane_for_trial, run_trial
 from sibyl.aggregate import dist_from_vector, pool_months, publish_vectors
 from sibyl.belief_state import MonthBelief, legacy_quantiles
 from sibyl.reference import NO_REFERENCE_TEXT, build_reference
@@ -67,6 +70,7 @@ from sibyl import tools as sibyl_tools
 from sibyl.cost import CostTracker
 from sibyl.evidence import backfill_evidence_ok
 from sibyl.leakage import LeakageStats
+from sibyl.trials import extra_trials_rule, month_median, outlier_indices, run_trial_batch
 from sibyl.select_questions import (
     SibylQuestion,
     hs_run_is_test,
@@ -115,6 +119,19 @@ class QuestionOutcome:
     trials: List[TrialResult] = field(default_factory=list)
     js_vs_standard: Optional[float] = None
     js_inter_trial: Optional[float] = None
+    # The extra-trial rule that fired ('disagreement' / 'departure'), and the
+    # measures behind the extra-trial and outlier decisions.
+    extra_trials_rule: Optional[str] = None
+    trial_checks: Dict[str, Any] = field(default_factory=dict)
+
+
+def _write_log(**kw: Any) -> None:
+    """Write one buffered llm_calls row, on the main thread.
+
+    Looked up on the agent module at call time, so a test that replaces
+    ``sibyl.agent.log_sibyl_call`` sees these rows too.
+    """
+    _agent.log_sibyl_call(**kw)
 
 
 def resolve_as_of(question: SibylQuestion) -> date:
@@ -204,21 +221,10 @@ def process_question(
         if arm == "advice":
             track_record = advice.text
 
-    for trial_index in range(K):
-        if tracker.hard_cap_reached():
-            logger.warning(
-                "sibyl.run: hard cap reached between trials of %s "
-                "(%d/%d trials done); pooling completed trials.",
-                question.question_id, trial_index, K,
-            )
-            break
-        if tracker.question_cap_reached(question.question_id):
-            logger.warning(
-                "sibyl.run: per-question budget reached for %s after %d trials.",
-                question.question_id, trial_index,
-            )
-            break
-        trial = run_trial(
+    is_control = question.is_control
+
+    def _run_one(trial_index: int, lane: str, sink: List[Dict[str, Any]]) -> TrialResult:
+        return run_trial(
             question,
             base_rate,
             as_of=as_of,
@@ -229,16 +235,86 @@ def process_question(
             country_name=country,
             model_call=model_call,
             track_record=track_record,
+            lane=lane,
+            log_sink=sink,
         )
-        outcome.trials.append(trial)
+
+    def _batch(jobs, role: str) -> None:
+        if not jobs:
+            return
+        if tracker.hard_cap_reached() or tracker.question_cap_reached(question.question_id):
+            logger.warning(
+                "sibyl.run: budget reached before %s trials of %s; %d not started",
+                role, question.question_id, len(jobs),
+            )
+            return
+        results = run_trial_batch(jobs, _run_one, write_log=_write_log)
+        for trial in results:
+            if trial is None:
+                continue
+            trial.role = role
+            outcome.trials.append(trial)
+
+    # Production trials: K on lanes A, B, C (a control: one, on lane A).
+    n_production = 1 if is_control else K
+    _batch([(i, "A" if is_control else lane_for_trial(i)) for i in range(n_production)], "production")
+
+    def _valid() -> List[TrialResult]:
+        return [t for t in outcome.trials if t.ok and t.evidence_ok]
+
+    # Extra trials (lanes D, E) when the production trials disagree or their
+    # pool departs far from the reference. Never for a control.
+    metric = question.metric
+    if not is_control and _cfg.K_MAX > n_production and len(_valid()) >= 2:
+        from sibyl.aggregate import month_vector  # noqa: PLC0415
+
+        valid = _valid()
+        try:
+            vecs = [month_vector(t.month_beliefs[1].dist(), metric) for t in valid]
+            pooled1 = pool_months(
+                [{1: t.month_beliefs[1].dist(), 6: t.month_beliefs[6].dist()} for t in valid],
+                metric,
+            ).vectors[1]
+            ref1 = reference.by_month.get(1) if reference and reference.by_month else None
+            rule, measures = extra_trials_rule(vecs, pooled1, ref1)
+        except (ValueError, KeyError) as exc:
+            rule, measures = None, {"error": str(exc)}
+        outcome.trial_checks["extra_trials_measures"] = measures
+        if rule:
+            extra = [
+                (n_production + j, LANE_IDS[(n_production + j) % len(LANE_IDS)])
+                for j in range(_cfg.K_MAX - n_production)
+            ]
+            logger.info(
+                "sibyl.run: %s calls for %d extra trial(s) (%s, %s)",
+                question.question_id, len(extra), rule, measures,
+            )
+            outcome.extra_trials_rule = rule
+            _batch(extra, rule)
+    outcome.trial_checks["n_trials_run"] = len(outcome.trials)
+
+    # Outlier guard: a trial whose month-1 median sits more than
+    # OUTLIER_LOG10 orders of magnitude from the others' is left out of the
+    # pool while two remain; it stays in trials_json, marked.
+    valid = _valid()
+    if len(valid) >= 3:
+        medians = [
+            month_median(t.month_beliefs[1].p_zero, t.month_beliefs[1].quantiles_positive)
+            for t in valid
+        ]
+        dropped = outlier_indices(medians)
+        for i in dropped:
+            valid[i].outlier_dropped = True
+        outcome.trial_checks["month1_medians"] = medians
+        outcome.trial_checks["outliers_dropped"] = [valid[i].trial_index for i in dropped]
 
     # Evidence gate: pool only trials that finished AND saw something. A
-    # question short of MIN_VALID_TRIALS such trials is stored failed with its
-    # trials kept, and nothing reaches the forecast tables.
+    # question short of the required number of such trials is stored failed
+    # with its trials kept, and nothing reaches the forecast tables.
     finished = [t for t in outcome.trials if t.ok]
-    ok_trials = [t for t in finished if t.evidence_ok]
-    required = max(1, min(_cfg.MIN_VALID_TRIALS, K))
-    if len(ok_trials) < required:
+    ok_trials = [t for t in finished if t.evidence_ok and not t.outlier_dropped]
+    required = 1 if is_control else max(1, min(_cfg.MIN_VALID_TRIALS, K))
+    if len([t for t in finished if t.evidence_ok]) < required:
         if not finished:
             outcome.skip_reason = "no successful trials"
         else:
@@ -252,7 +328,6 @@ def process_question(
 
     from pythia.buckets import n_buckets_for  # noqa: PLC0415
 
-    metric = question.metric
     try:
         trial_months = [
             {1: t.month_beliefs[1].dist(), 6: t.month_beliefs[6].dist()} for t in ok_trials
@@ -309,7 +384,7 @@ def process_question(
         "track": "sibyl",
         "as_of": as_of.isoformat(),
         "k": len(ok_trials),
-        "k_requested": K,
+        "k_requested": len(outcome.trials),
         "aggregation": "linear_pool_by_month",
         "model": MODEL,
         "pooled_quantiles": raw_m1_legacy,
@@ -370,6 +445,8 @@ def process_question(
             "extraction_cost_usd": qcost.extraction_usd,
             "leakage": leakage.to_dict(),
             "evidence_ok": True,
+            "extra_trials_rule": outcome.extra_trials_rule,
+            "trial_checks": outcome.trial_checks,
         },
     )
     outcome.status = "ok"
@@ -385,6 +462,8 @@ def _persist_non_ok(
     skip_reason: str,
     tracker: CostTracker,
     trials: Optional[List[TrialResult]] = None,
+    extra_trials_rule: Optional[str] = None,
+    trial_checks: Optional[Dict[str, Any]] = None,
 ) -> None:
     qcost = tracker.question_breakdown(question.question_id)
     persist_sibyl_forecast(
@@ -417,6 +496,8 @@ def _persist_non_ok(
             # A question that ran trials and stored no forecast had none that
             # rested on evidence; a skip that ran nothing has no verdict.
             "evidence_ok": (False if trials else None),
+            "extra_trials_rule": extra_trials_rule,
+            "trial_checks": trial_checks,
         },
     )
 
@@ -465,7 +546,11 @@ def run_sibyl(
                 resolved_hs_run_id,
             )
 
-        questions = select_top_questions(resolved_hs_run_id, n=n_questions, con=con)
+        questions = select_top_questions(
+            resolved_hs_run_id, n=n_questions, con=con,
+            n_control=_cfg.N_CONTROL,
+            max_per_hazard_overrides=_cfg.MAX_PER_HAZARD_OVERRIDES,
+        )
         if questions:
             resolved_hs_run_id = questions[0].hs_run_id
         logger.info(
@@ -547,6 +632,8 @@ def run_sibyl(
                     sibyl_run_id=sibyl_run_id, status=outcome.status,
                     skip_reason=outcome.skip_reason or "unknown",
                     tracker=tracker, trials=outcome.trials,
+                    extra_trials_rule=outcome.extra_trials_rule,
+                    trial_checks=outcome.trial_checks,
                 )
 
         # The cap can also fire during the LAST question's trials (no
@@ -590,6 +677,13 @@ def run_sibyl(
                 "N_QUESTIONS": n_questions,
                 "MIN_PER_HAZARD": MIN_PER_HAZARD,
                 "MAX_PER_HAZARD": MAX_PER_HAZARD,
+                "MAX_PER_HAZARD_OVERRIDES": _cfg.MAX_PER_HAZARD_OVERRIDES,
+                "N_CONTROL": _cfg.N_CONTROL,
+                "K_MAX": _cfg.K_MAX,
+                "EXTRA_TRIALS_JSD": _cfg.EXTRA_TRIALS_JSD,
+                "EXTRA_TRIALS_DEPARTURE_JSD": _cfg.EXTRA_TRIALS_DEPARTURE_JSD,
+                "OUTLIER_LOG10": _cfg.OUTLIER_LOG10,
+                "TRIAL_WORKERS": _cfg.TRIAL_WORKERS,
                 "MAX_RUNTIME_MIN": max_runtime_min,
                 "QUANTILE_LEVELS": sibyl_config.QUANTILE_LEVELS,
                 "BACKTEST_MODE": sibyl_config.BACKTEST_MODE,

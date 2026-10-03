@@ -500,3 +500,54 @@ The JSON action loop stays, so Part 7 can drive `call_openai` through the same c
 - breakpoint placement;
 - ledger cleaning, numbering and storage;
 - the size guard, alone and inside a trial.
+
+## 2026-10-03 — Part 5: lanes, parallel and extra trials, outlier guard, controls
+
+Three trials with five loosely worded perspective seeds gave little diversity
+where it matters, which is in what a trial reads first. Each trial now takes a
+research lane:
+
+- Lane A starts with the resolver and nowcast slots.
+- Lane B starts with drivers and calendar.
+- Lane C starts with reversion and disconfirm.
+- Lane D starts with local-language sources.
+- Lane E starts with reference-class material.
+
+Every lane fills every slot. The lane text is still stored as `perspective`, so
+the advice loop's per-seed bias table becomes a per-lane table.
+
+How trials run:
+
+- A question's trials run in threads. DuckDB is written only on the main
+  thread: each trial buffers its `llm_calls` rows and the batch writes them in
+  trial order.
+- The budget is checked before each question and each batch, never between
+  trials already running. The hard-cap test now expects a batch of three to
+  finish.
+
+Extra trials:
+
+- After lanes A to C, lanes D and E run when either rule fires.
+  - `disagreement`: the largest pairwise month-1 JSD is above 0.10.
+  - `departure`: the pool's month-1 JSD from the reference is above 0.25.
+- The rule and both measures are stored (`extra_trials_rule`,
+  `trial_checks_json`).
+- The outlier guard leaves out a trial whose month-1 median sits more than 1.5
+  orders of magnitude from the others' median, while two trials remain. The
+  dropped trial stays in `trials_json`.
+
+Selection:
+
+- 20 questions by floor-then-fill, with flood and cyclone held at 3.
+- Plus 5 controls: ACE and DR questions with no RC flag, three and two, drawn
+  by a hash of the run and question id.
+- A control runs one trial on lane A and gets no extras. It is what Sibyl does
+  where nothing is flagged as moving, which the volatility-ranked picks cannot
+  show.
+- Run order is floor, controls, fill.
+- Replayed on the three fixture pools, the 20 come out ACE/DR/FL/TC 10/4/3/3,
+  6/8/3/3 and 4/10/3/3.
+- The fixture carries no RC level, so the control draw is tested on synthetic
+  pools rather than replayed.
+
+Tests: `tests/test_sibyl_lanes.py`.

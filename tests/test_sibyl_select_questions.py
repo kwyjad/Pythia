@@ -309,6 +309,35 @@ def test_shape_on_three_production_pools():
     assert sum(q.volatility_score < 0.1 for q in aug) == 8
 
 
+def test_shape_on_three_production_pools_under_the_october_rule():
+    """The rule since Oct 2026: 20 by floor-then-fill with flood and cyclone
+    held at their floor of 3 (the five controls are drawn separately).
+
+    The fixture carries no RC level, so the control draw is tested on
+    synthetic pools below rather than replayed here.
+    """
+    expected = {
+        "hs_20260801T025754": {"ACE": 10, "DR": 4, "FL": 3, "TC": 3},
+        "hs_20260915T130009": {"ACE": 6, "DR": 8, "FL": 3, "TC": 3},
+        "hs_20261001T045127": {"ACE": 4, "DR": 10, "FL": 3, "TC": 3},
+    }
+    for run, pool in _fixture_pools().items():
+        qs = floor_then_fill(
+            pool, 20, min_per_hazard=3, max_per_hazard=10,
+            max_per_hazard_overrides={"FL": 3, "TC": 3},
+        )
+        assert len(qs) == 20, run
+        assert _counts(qs) == expected[run], (run, _counts(qs))
+        assert sum(q.selection_pass == SELECTION_FLOOR for q in qs) == 12, run
+        assert 18 <= len({q.iso3 for q in qs}) <= 19, run
+    # Fewer slots below RC 0.1 than under the old 25: August drops from 8 to 3.
+    aug = floor_then_fill(
+        _fixture_pools()["hs_20260801T025754"], 20,
+        max_per_hazard_overrides={"FL": 3, "TC": 3},
+    )
+    assert sum(q.volatility_score < 0.1 for q in aug) == 3
+
+
 def test_selection_pass_is_persisted(tmp_path, monkeypatch):
     seed_db(tmp_path, monkeypatch)
     from sibyl.select_questions import select_top_questions

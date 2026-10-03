@@ -31,13 +31,21 @@ eligible and are never used as padding — a hazard short of its floor takes
 what it has, and a pool short of N is logged and the run proceeds with
 fewer.
 
-Run order is floor picks first, then fill picks, each by falling
-volatility, so a budget or time cut removes fill picks first and the
-hazard floor is the last thing a cut reaches.
+Since October 2026 a run is ``N_QUESTIONS - N_CONTROL`` (20) questions by
+floor-then-fill, with flood and cyclone capped at their floor of 3
+(``MAX_PER_HAZARD_OVERRIDES``), plus ``N_CONTROL`` (5) CONTROLS
+(``draw_controls``): ACE and DR questions with no RC flag, drawn by hash.
+The controls say what Sibyl does where nothing is flagged as moving, which
+the volatility-ranked picks cannot.
+
+Run order is floor picks, then controls, then fill picks (floor and fill
+each by falling volatility), so a budget or time cut removes fill picks
+first and the hazard floor is the last thing a cut reaches.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import date
@@ -49,12 +57,18 @@ from pythia.test_mode import is_test_mode
 from sibyl.config import (
     ELIGIBLE_HAZARD_METRICS,
     MAX_PER_HAZARD,
+    MAX_PER_HAZARD_OVERRIDES,
     MIN_PER_HAZARD,
+    N_CONTROL,
     N_QUESTIONS,
 )
 
 SELECTION_FLOOR = "floor"
 SELECTION_FILL = "fill"
+SELECTION_CONTROL = "control"
+
+# Control classes and their order of preference (Oct 2026).
+CONTROL_CLASSES = (("ACE", "FATALITIES"), ("DR", "PHASE3PLUS_IN_NEED"))
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +88,12 @@ class SibylQuestion:
     # Which pass chose the question (SELECTION_FLOOR / SELECTION_FILL);
     # persisted on sibyl_forecasts.selection_pass.
     selection_pass: Optional[str] = None
+    # hs_triage.regime_change_level (None when the hazard has no triage row).
+    rc_level: Optional[int] = None
+
+    @property
+    def is_control(self) -> bool:
+        return self.selection_pass == SELECTION_CONTROL
 
     def to_row_dict(self) -> dict:
         """Shape compatible with forecaster month/window helpers."""
@@ -150,8 +170,12 @@ def floor_then_fill(
     *,
     min_per_hazard: int = MIN_PER_HAZARD,
     max_per_hazard: int = MAX_PER_HAZARD,
+    max_per_hazard_overrides: Optional[Dict[str, int]] = None,
 ) -> List[SibylQuestion]:
     """Choose up to *n* of *candidates* by the floor-then-fill rule.
+
+    *max_per_hazard_overrides* sets a hazard's own cap (e.g. ``{"FL": 3}``);
+    a hazard's floor never exceeds its cap.
 
     Pure (no DB). Returns the chosen questions in RUN order — floor picks
     first, then fill picks, each by falling volatility — with
@@ -164,8 +188,13 @@ def floor_then_fill(
     n = max(int(n), 0)
     if n == 0 or not candidates:
         return []
-    cap = max(int(max_per_hazard), 1)
-    floor = max(min(int(min_per_hazard), cap), 0)
+    default_cap = max(int(max_per_hazard), 1)
+    overrides = {str(k).upper(): max(int(v), 0) for k, v in (max_per_hazard_overrides or {}).items()}
+
+    def cap_for(hz: str) -> int:
+        return overrides.get(str(hz).upper(), default_cap)
+
+    floor = max(int(min_per_hazard), 0)
 
     # One ordering everywhere: falling volatility, then question_id.
     ranked = sorted(candidates, key=lambda q: (-q.volatility_score, q.question_id))
@@ -187,7 +216,10 @@ def floor_then_fill(
     # FLOOR, in rounds. Within a round, order by falling volatility; ties go
     # to the hazard holding fewer picks, then question_id.
     for rnd in range(floor):
-        round_qs = [qs[rnd] for qs in by_hazard.values() if len(qs) > rnd]
+        round_qs = [
+            qs[rnd] for hz, qs in by_hazard.items()
+            if len(qs) > rnd and rnd < cap_for(hz)
+        ]
         round_qs.sort(
             key=lambda q: (-q.volatility_score, picks[q.hazard_code], q.question_id)
         )
@@ -200,7 +232,7 @@ def floor_then_fill(
     while len(floor_picks) + len(fill_picks) < n:
         open_qs = [
             q for q in ranked
-            if q.question_id not in chosen_ids and picks[q.hazard_code] < cap
+            if q.question_id not in chosen_ids and picks[q.hazard_code] < cap_for(q.hazard_code)
         ]
         if not open_qs:
             break
@@ -212,6 +244,59 @@ def floor_then_fill(
 
     order = lambda q: (-q.volatility_score, q.question_id)  # noqa: E731
     return sorted(floor_picks, key=order) + sorted(fill_picks, key=order)
+
+
+def _control_key(q: SibylQuestion) -> str:
+    return hashlib.sha1(f"{q.hs_run_id}{q.question_id}".encode("utf-8")).hexdigest()
+
+
+def draw_controls(
+    candidates: Sequence[SibylQuestion],
+    n: int,
+    *,
+    exclude: Sequence[str] = (),
+) -> List[SibylQuestion]:
+    """Draw *n* control questions: no RC flag, ACE and DR, by hash.
+
+    Pure (no DB). Eligible: ACE/FATALITIES and DR/PHASE3PLUS_IN_NEED
+    candidates whose ``rc_level`` is 0 or None and whose id is not in
+    *exclude*. Each class is ordered by SHA-1 of hs_run_id + question_id, so
+    the draw is fixed for a run and blind to volatility. The split is
+    ``n - n // 2`` conflict and ``n // 2`` drought (3 and 2 at five); a class
+    short of its share is made up from the other. Returned in run order
+    (conflict, then drought, each in hash order), stamped ``control``.
+    """
+    n = max(int(n), 0)
+    if n == 0:
+        return []
+    excluded = set(exclude)
+    pools: Dict[tuple, List[SibylQuestion]] = {}
+    for cls in CONTROL_CLASSES:
+        pools[cls] = sorted(
+            (
+                q for q in candidates
+                if (q.hazard_code, q.metric) == cls
+                and q.question_id not in excluded
+                and not q.rc_level
+            ),
+            key=_control_key,
+        )
+    ace, dr = CONTROL_CLASSES
+    want = {ace: n - n // 2, dr: n // 2}
+    take = {cls: min(want[cls], len(pools[cls])) for cls in CONTROL_CLASSES}
+    short = n - sum(take.values())
+    for cls in CONTROL_CLASSES:
+        if short <= 0:
+            break
+        extra = min(short, len(pools[cls]) - take[cls])
+        take[cls] += extra
+        short -= extra
+    out: List[SibylQuestion] = []
+    for cls in CONTROL_CLASSES:
+        for q in pools[cls][: take[cls]]:
+            q.selection_pass = SELECTION_CONTROL
+            out.append(q)
+    return out
 
 
 def load_candidates(
@@ -249,7 +334,8 @@ def load_candidates(
                 upper(q.metric) AS metric,
                 q.window_start_date, q.target_month, q.wording,
                 COALESCE(t.regime_change_score, 0.0) AS volatility_score,
-                COALESCE(t.triage_score, 0.0) AS triage_score
+                COALESCE(t.triage_score, 0.0) AS triage_score,
+                t.regime_change_level AS rc_level
             FROM questions q
             LEFT JOIN hs_triage t
               ON t.run_id = q.hs_run_id
@@ -278,6 +364,7 @@ def load_candidates(
             wording=str(r[7] or ""),
             volatility_score=float(r[8] or 0.0),
             triage_score=float(r[9] or 0.0),
+            rc_level=(int(r[10]) if r[10] is not None else None),
         )
         for r in rows
     ]
@@ -290,48 +377,70 @@ def select_top_questions(
     *,
     min_per_hazard: int = MIN_PER_HAZARD,
     max_per_hazard: int = MAX_PER_HAZARD,
+    max_per_hazard_overrides: Optional[Dict[str, int]] = None,
+    n_control: int = N_CONTROL,
 ) -> List[SibylQuestion]:
-    """The run's Sibyl questions by floor-then-fill, in run order.
+    """The run's Sibyl questions, in run order: floor, controls, fill.
 
-    The name is kept for the workflow gate and callers; the rule is no
-    longer a plain top-N (see the module docstring).
+    ``n - n_control`` questions are chosen by floor-then-fill (with the
+    per-hazard cap overrides, FL:3 and TC:3 by default) and ``n_control``
+    controls are drawn from the questions left (``draw_controls``). A run
+    asking for no more than ``n_control`` questions takes no controls. The
+    name is kept for the workflow gate and callers.
     """
+    overrides = MAX_PER_HAZARD_OVERRIDES if max_per_hazard_overrides is None else max_per_hazard_overrides
+    n = max(int(n), 0)
+    n_control = max(int(n_control), 0) if n > max(int(n_control), 0) else 0
+    n_selected = n - n_control
+
     candidates = load_candidates(hs_run_id, con)
-    questions = floor_then_fill(
-        candidates, n,
+    chosen = floor_then_fill(
+        candidates, n_selected,
         min_per_hazard=min_per_hazard, max_per_hazard=max_per_hazard,
+        max_per_hazard_overrides=overrides,
     )
+    controls = draw_controls(
+        candidates, n_control, exclude=[q.question_id for q in chosen]
+    )
+    floor_picks = [q for q in chosen if q.selection_pass == SELECTION_FLOOR]
+    fill_picks = [q for q in chosen if q.selection_pass == SELECTION_FILL]
+    questions = floor_picks + controls + fill_picks
 
     counts: Dict[str, int] = {}
-    for q in questions:
+    for q in chosen:
         counts[q.hazard_code] = counts.get(q.hazard_code, 0) + 1
     short = sorted(
         hz for hz in {hz for hz, _ in ELIGIBLE_HAZARD_METRICS}
-        if counts.get(hz, 0) < min(min_per_hazard, max_per_hazard)
+        if counts.get(hz, 0) < min(min_per_hazard, overrides.get(hz, max_per_hazard))
     )
-    if short and n >= len(ELIGIBLE_HAZARD_METRICS) * min_per_hazard:
+    if short and n_selected >= len(ELIGIBLE_HAZARD_METRICS) * min_per_hazard:
         logger.warning(
             "sibyl.select_questions: hazard(s) %s hold fewer than the floor "
             "of %d eligible questions for hs_run_id=%s; they take what they have.",
             ", ".join(short), min_per_hazard, hs_run_id or "(latest)",
         )
-    if len(questions) < n:
+    if len(chosen) < n_selected:
         # Loud but expected (small runs legitimately have < N eligible
         # questions), so WARNING not ERROR: proceed with what exists —
         # never pad with binary (EVENT_OCCURRENCE) questions.
         logger.warning(
             "sibyl.select_questions: only %d of %d requested eligible "
             "affected/fatalities questions could be chosen for hs_run_id=%s "
-            "(pool %d, per-hazard cap %d); proceeding without padding.",
-            len(questions), n, hs_run_id or "(latest)", len(candidates),
-            max_per_hazard,
+            "(pool %d, per-hazard cap %d, overrides %s); proceeding without padding.",
+            len(chosen), n_selected, hs_run_id or "(latest)", len(candidates),
+            max_per_hazard, overrides,
+        )
+    if len(controls) < n_control:
+        logger.warning(
+            "sibyl.select_questions: only %d of %d controls could be drawn "
+            "(ACE/DR questions with no RC flag, not already chosen)",
+            len(controls), n_control,
         )
     logger.info(
-        "sibyl.select_questions: chose %d (%s) — %d floor, %d fill",
+        "sibyl.select_questions: chose %d (%s) — %d floor, %d control, %d fill",
         len(questions),
         ", ".join(f"{hz} {c}" for hz, c in sorted(counts.items())) or "none",
-        sum(1 for q in questions if q.selection_pass == SELECTION_FLOOR),
-        sum(1 for q in questions if q.selection_pass == SELECTION_FILL),
+        len(floor_picks), len(controls), len(fill_picks),
     )
     return questions
 

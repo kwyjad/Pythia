@@ -12,8 +12,8 @@ state, and the new items for its evidence ledger.
 
 Nothing the agent reads is lost between steps (Oct 2026). Each step's prompt
 is four cached segments and a short tail: the static head, the question
-block (reference, resolver card, track record), the trial's research lane
-and starting belief, then the append-only transcript of every earlier step (the
+block (reference, resolver card, track record), the trial's perspective and
+starting belief, then the append-only transcript of every earlier step (the
 model's JSON, the ledger ids assigned, each tool result), and finally the
 instruction for this step. An earlier step's text is stored once and reused
 byte for byte (``sibyl/transcript.py``), so the prompt of step n+1 begins
@@ -22,13 +22,8 @@ prompt for a trial's first step and, after that, a hash and length of the
 prefix the previous step already logged plus the new tail.
 
 Trial diversity: ``claude-opus-5-5`` rejects sampling parameters
-(temperature returns HTTP 400), so the trials are differentiated by the
-research LANE each takes (``TRIAL_LANES``, Oct 2026): where it starts, not
-what it may skip. The lane's text is stored as the trial's ``perspective``.
-
-A trial running on a worker thread must not write DuckDB: ``run_trial``
-takes a ``log_sink`` list, and its ``llm_calls`` rows are written by the
-caller on the main thread (sibyl/trials.py).
+(temperature returns HTTP 400), so the K trials are differentiated by
+explicit perspective seeds in the prompt rather than temperature.
 """
 
 from __future__ import annotations
@@ -69,51 +64,32 @@ from sibyl.transcript import ToolOutput, Transcript, TranscriptEntry
 
 logger = logging.getLogger(__name__)
 
-# Research lanes (Oct 2026). Each trial takes one lane; the lane decides where
-# the trial STARTS, never which slots it may skip: every lane fills every slot
-# of the plan. Lanes A-C are the K production trials; D and E are the extra
-# trials a disagreement or a large departure from the reference calls for
-# (sibyl/run.py). The text before the colon is the lane's key: it is stored
-# as the trial's ``perspective`` and the advice loop groups by it.
-LANE_IDS = ("A", "B", "C", "D", "E")
-TRIAL_LANES: Dict[str, str] = {
-    "A": (
-        "Lane A, resolver and nowcast first: begin with the 'resolver' and "
-        "'nowcast' slots. Find the resolving source's latest published figures "
-        "for this country and estimate the months between the last reference "
-        "month and today before you look at drivers. Then fill every other slot."
+# Per-trial perspective seeds (temperature substitute — see module docstring).
+TRIAL_PERSPECTIVES = [
+    (
+        "Base-rate-weighted perspective: give the outside view substantial "
+        "weight; demand strong evidence before departing far from it."
     ),
-    "B": (
-        "Lane B, drivers and calendar first: begin with the 'drivers' and "
-        "'calendar' slots. Establish what is driving the level now and which "
-        "dated events fall inside the window. Then fill every other slot."
+    (
+        "Tail-risk-sensitive perspective: actively probe for escalation and "
+        "compounding-shock scenarios that would put the outcome in the "
+        "upper quantiles; remain calibrated, not alarmist."
     ),
-    "C": (
-        "Lane C, reversion and disconfirmation first: begin with the "
-        "'reversion' and 'disconfirm' slots. Build the case that the series "
-        "returns to its 12-month norm and search for evidence against the "
-        "reference before you look for reasons to move. Then fill every other slot."
+    (
+        "Recent-signal-driven perspective: weight the freshest ground "
+        "reporting most heavily and stress-test whether the base rate is "
+        "already stale."
     ),
-    "D": (
-        "Lane D, local-language sources first: begin by searching in the "
-        "country's own languages (set \"language\" and \"country\" on "
-        "brave_search) and reading national and local reporting, then fill "
-        "every slot."
+    (
+        "Contrarian-check perspective: identify the consensus narrative in "
+        "the reporting and search for disconfirming evidence before "
+        "settling your quantiles."
     ),
-    "E": (
-        "Lane E, reference-class material first: begin with the reference lane "
-        "(lane=\"reference\"): past episodes in this country and its "
-        "neighbours, seasonal patterns and structural reports, then fill every slot."
+    (
+        "Structural perspective: prioritize slow-moving drivers (seasonal "
+        "cycles, economic strain, response capacity) over headline events."
     ),
-}
-# Kept for older callers: the lane texts in lane order.
-TRIAL_PERSPECTIVES = [TRIAL_LANES[k] for k in LANE_IDS]
-
-
-def lane_for_trial(trial_index: int) -> str:
-    """The lane a trial takes by default: A, B, C, D, E, then round again."""
-    return LANE_IDS[int(trial_index) % len(LANE_IDS)]
-
+]
 
 _METRIC_DEFINITIONS = {
     "FATALITIES": (
@@ -205,7 +181,7 @@ Rules for weighing evidence:
 #
 #   1 static     head + task rules + JSON schema                — no breakpoint
 #   2 question   question, resolver card, reference, track rec. — breakpoint
-#   3 trial      research lane + starting belief                — breakpoint
+#   3 trial      perspective seed + starting belief             — breakpoint
 #   4 transcript every earlier step, stored text reused as-is   — breakpoint
 #   5 tail       this step's number and any feedback            — churns
 #
@@ -218,7 +194,7 @@ SIBYL_STATIC = _HEAD + "\n\n" + _TASK + "\n"
 SIBYL_QUESTION = "\n" + _QUESTION + "\n"
 
 SIBYL_TRIAL = """
-=== YOUR RESEARCH LANE ===
+=== YOUR TRIAL PERSPECTIVE ===
 {perspective}
 
 === YOUR STARTING BELIEF (from the reference; your plan is empty) ===
@@ -335,12 +311,6 @@ class TrialResult:
     # many tool results the transcript size guard replaced with a stub.
     ledger: List[Dict[str, Any]] = field(default_factory=list)
     n_transcript_stubbed: int = 0
-    # The research lane (A-E) and why the trial ran: 'production', or the
-    # extra-trial rule that called for it ('disagreement' / 'departure').
-    lane: str = ""
-    role: str = "production"
-    # Set by sibyl.run when the outlier guard leaves the trial out of the pool.
-    outlier_dropped: bool = False
 
     @property
     def ok(self) -> bool:
@@ -381,9 +351,6 @@ class TrialResult:
             "degraded": self.degraded,
             "ledger": list(self.ledger),
             "transcript_stubbed": self.n_transcript_stubbed,
-            "lane": self.lane,
-            "role": self.role,
-            "outlier_dropped": self.outlier_dropped,
         }
 
 
@@ -574,8 +541,6 @@ def run_trial(
     model_call: Optional[Callable[[str], tuple[str, Dict[str, Any], str]]] = None,
     track_record: str = "",
     extraction_call: Optional[Callable[[str, str], tuple[str, Dict[str, Any], str]]] = None,
-    lane: Optional[str] = None,
-    log_sink: Optional[List[Dict[str, Any]]] = None,
 ) -> TrialResult:
     """Run one independent agentic trial for *question*.
 
@@ -583,21 +548,10 @@ def run_trial(
     default goes through ``forecaster.providers.call_anthropic``.
     """
     call = model_call or _call_model
-    lane = lane if lane in TRIAL_LANES else lane_for_trial(trial_index)
-    perspective = TRIAL_LANES[lane]
-
-    def _log(**kw: Any) -> None:
-        # A trial running on a worker thread must not write DuckDB: its rows
-        # go to *log_sink* and the caller writes them on the main thread.
-        if log_sink is not None:
-            log_sink.append(kw)
-        else:
-            log_sibyl_call(**kw)
-
+    perspective = TRIAL_PERSPECTIVES[trial_index % len(TRIAL_PERSPECTIVES)]
     result = TrialResult(
         trial_index=trial_index,
         perspective=perspective,
-        lane=lane,
         quantiles=None,
         confidence="low",
     )
@@ -645,7 +599,7 @@ def run_trial(
             cost = float(usage.get("cost_usd") or 0.0)
             result.cost.add(COST_KIND_OPUS, cost)
             tracker.add(question.question_id, COST_KIND_OPUS, cost)
-            _log(
+            log_sibyl_call(
                 run_id=run_id,
                 question_id=question.question_id,
                 prompt_text=prompt_for_log(prompt, logged_prefix),
@@ -738,7 +692,7 @@ def run_trial(
                 req = str((tcall.options or {}).get("extraction_request") or "")
 
                 def _log_extract(prompt, response, usage, model_id, error):
-                    _log(
+                    log_sibyl_call(
                         run_id=run_id, question_id=question.question_id,
                         prompt_text=prompt, response_text=response,
                         provider="anthropic", model_id=model_id, usage=usage,
@@ -782,7 +736,7 @@ def run_trial(
                     seen_urls.add(src.url)
                     result.source_urls.append(src.url)
             if tool_result.tool == "brave_search" and tool_result.cost_usd > 0:
-                _log(
+                log_sibyl_call(
                     run_id=run_id,
                     question_id=question.question_id,
                     prompt_text=tcall.action_input,

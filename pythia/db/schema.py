@@ -1932,6 +1932,13 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "raw_by_month_json": "TEXT",
                 "final_by_month_json": "TEXT",
                 "extraction_cost_usd": "DOUBLE",
+                # Extra trials and the outlier guard (Oct 2026): which rule
+                # called for extra trials ('disagreement' | 'departure', NULL
+                # when none), and the measures behind both decisions (largest
+                # pairwise month-1 JSD, departure JSD, month-1 medians, the
+                # trials left out as outliers).
+                "extra_trials_rule": "TEXT",
+                "trial_checks_json": "TEXT",
             },
         )
 
