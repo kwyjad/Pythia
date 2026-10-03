@@ -18,6 +18,8 @@ name: CrisisWatch CI
       - "horizon_scanner/crisiswatch.py"
       - "tests/test_refresh_crisiswatch.py"
       - "horizon_scanner/tests/test_crisiswatch_regional_merge.py"
+      - "scripts/ci/crisiswatch_publication_days.py"
+      - "tests/test_crisiswatch_publication_days.py"
       - "tests/fixtures/crisiswatch_*"
       - ".github/workflows/crisiswatch-ci.yml"
       - ".github/workflows/refresh-crisiswatch.yml"
@@ -27,6 +29,8 @@ name: CrisisWatch CI
       - "horizon_scanner/crisiswatch.py"
       - "tests/test_refresh_crisiswatch.py"
       - "horizon_scanner/tests/test_crisiswatch_regional_merge.py"
+      - "scripts/ci/crisiswatch_publication_days.py"
+      - "tests/test_crisiswatch_publication_days.py"
       - "tests/fixtures/crisiswatch_*"
       - ".github/workflows/crisiswatch-ci.yml"
       - ".github/workflows/refresh-crisiswatch.yml"
@@ -67,4 +71,23 @@ jobs:
         run: |
           pytest -vv \
             tests/test_refresh_crisiswatch.py \
+            tests/test_crisiswatch_publication_days.py \
             horizon_scanner/tests/test_crisiswatch_regional_merge.py
+
+  # TEMPORARY (PR 1 of the October 2026 review): the publication-day
+  # measurement needs archive.org, which only a runner can reach. Removed
+  # before merge; the permanent route is refresh-crisiswatch.yml's
+  # measure_publication_days input.
+  measure-publication-days:
+    name: Measure CrisisWatch publication days (temporary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install "requests>=2.32,<3" "beautifulsoup4>=4.12,<5" "PyYAML>=6.0,<7"
+      - name: Measure
+        run: python -m scripts.ci.crisiswatch_publication_days

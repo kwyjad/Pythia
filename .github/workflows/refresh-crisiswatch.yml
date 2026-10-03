@@ -50,6 +50,11 @@ concurrency:
         required: false
         default: false
         type: boolean
+      measure_publication_days:
+        description: "Measure, from the Wayback Machine, the day each recent edition was first published (scripts/ci/crisiswatch_publication_days.py), and skip the refresh"
+        required: false
+        default: false
+        type: boolean
 
 # read-only since the commit step was removed: the refreshed edition reaches
 # its consumer through resolver_update's Phase 4, not through a push to main.
@@ -81,7 +86,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install "requests>=2.32,<3" "beautifulsoup4>=4.12,<5" "PyYAML>=6.0,<7"
 
+      - name: Measure CrisisWatch publication days
+        # The monthly forecast cycle (pythia_pipeline_stage.yml, the 13th) is
+        # scheduled on the assumption that ICG has published last month's
+        # edition by the 9th. This is the evidence for that assumption.
+        if: inputs.measure_publication_days == true || inputs.measure_publication_days == 'true'
+        run: python -m scripts.ci.crisiswatch_publication_days
+
       - name: Run CrisisWatch refresh (wayback source)
+        if: inputs.measure_publication_days != true && inputs.measure_publication_days != 'true'
         env:
           IN_FORCE: ${{ inputs.force }}
           IA_S3_ACCESS_KEY: ${{ secrets.IA_S3_ACCESS_KEY }}
@@ -107,4 +120,5 @@ jobs:
           path: |
             horizon_scanner/data/crisiswatch_latest.json
             horizon_scanner/data/crisiswatch_debug.html
+            diagnostics/crisiswatch_publication_days.json
           retention-days: 90
