@@ -136,6 +136,7 @@ def main(argv: list[str] | None = None) -> dict | None:
     con = get_db(db_url)
     try:
         ensure_schema(con)
+        purged = purge_unitless_rows(con)
         result = upsert_dataframe(
             con,
             "seasonal_forecasts",
@@ -149,6 +150,7 @@ def main(argv: list[str] | None = None) -> dict | None:
             result.rows_after,
         )
         summary = {
+            "rows_purged_unitless": int(purged),
             "rows_written": int(result.rows_written),
             "rows_before": int(result.rows_before),
             "rows_after": int(result.rows_after),
@@ -199,12 +201,36 @@ def _vintage_is_held(con, year_month: str) -> bool:
             SELECT COUNT(DISTINCT variable)
             FROM seasonal_forecasts
             WHERE strftime(CAST(forecast_issue_date AS DATE), '%Y%m') = ?
+              AND units IS NOT NULL
             """,
             [year_month],
         ).fetchone()
     except Exception:  # noqa: BLE001 - a guard that cannot read must not stop the fetch
         return False
     return bool(row) and int(row[0] or 0) >= _NMME_VARIABLES
+
+
+def purge_unitless_rows(con) -> int:
+    """Delete ``seasonal_forecasts`` rows written before the unit fix.
+
+    Until Oct 2026 the precipitation anomaly was stored in raw mm/s rounded
+    to four decimals (all 21,294 prate rows of the 1 Oct release sat within
+    0.0002 of zero) and both variables carried a sigma-based category. Rows
+    with no ``units`` are that vintage; deleting them makes the backfill
+    fetch each vintage again in real units (``_vintage_is_held`` counts only
+    rows carrying units). Idempotent; never raises.
+    """
+    try:
+        n = con.execute(
+            "SELECT COUNT(*) FROM seasonal_forecasts WHERE units IS NULL"
+        ).fetchone()[0]
+        if n:
+            con.execute("DELETE FROM seasonal_forecasts WHERE units IS NULL")
+            LOG.info("[nmme] purged %d row(s) stored before the unit fix", n)
+        return int(n or 0)
+    except Exception as exc:  # noqa: BLE001 - a purge must not stop the ingest
+        LOG.warning("[nmme] unitless-row purge skipped: %s", exc)
+        return 0
 
 
 def _backfill_earlier_issues(

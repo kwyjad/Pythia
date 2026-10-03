@@ -293,6 +293,14 @@ def _build_gdacs_event_history(
     }
 
 
+def _months_between(a: str, b: str):
+    """Whole months from YYYY-MM ``a`` to YYYY-MM ``b``; None if either is unreadable."""
+    try:
+        return (int(b[:4]) - int(a[:4])) * 12 + int(b[5:7]) - int(a[5:7])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def _format_base_rate_for_prompt(
     history_summary: Dict[str, Any],
     forecast_keys: list[str],
@@ -361,19 +369,37 @@ def _format_base_rate_for_prompt(
         data_quality = history_summary.get("data_quality", "unknown")
         last_6m = history_summary.get("last_6m_values", [])
 
+        label = history_summary.get("source_label") or "FEWS NET IPC"
+        window = history_summary.get("window")
+        window_txt = f" ({window})" if window else ""
         lines = [
-            "RESOLVER HISTORY (FEWS NET IPC Phase 3+, Current Situation):",
-            f"Phase 3+ population reported in {observed} of the last {total} months ({coverage:.0f}% coverage).",
+            f"RESOLVER HISTORY ({label} Phase 3+, Current Situation):",
+            f"Phase 3+ population reported in {observed} of the last {total} months"
+            f"{window_txt} ({coverage:.0f}% coverage).",
         ]
 
-        # Latest value
-        latest = None
-        for entry in reversed(last_6m):
-            if entry.get("value") is not None:
-                latest = entry
-                break
-        if latest:
-            lines.append(f"Latest value: {latest['ym']}: {_fmt(latest['value'])}")
+        # The newest observation, with its month and age. The six-month
+        # table below can be all null while an older figure stands.
+        last_obs = history_summary.get("last_observed")
+        if last_obs:
+            age = last_obs.get("months_before_forecast")
+            age_txt = (
+                "" if age is None else
+                " (the month of this forecast)" if age == 0 else
+                f" ({age} month{'s' if age != 1 else ''} before this forecast)"
+            )
+            pub = f", {last_obs['publisher']}" if last_obs.get("publisher") else ""
+            lines.append(
+                f"Last observed value: {last_obs['ym']}: {_fmt(last_obs['value'])}{age_txt}{pub}"
+            )
+        else:
+            latest = None
+            for entry in reversed(last_6m):
+                if entry.get("value") is not None:
+                    latest = entry
+                    break
+            if latest:
+                lines.append(f"Latest value: {latest['ym']}: {_fmt(latest['value'])}")
 
         if recent_mean is not None:
             lines.append(f"Recent 6-month average (observed only): {_fmt(recent_mean)}")
@@ -384,7 +410,10 @@ def _format_base_rate_for_prompt(
         if trend_pct is not None:
             trend_str = f"{trend} ({'+' if trend_pct > 0 else ''}{trend_pct:.0f}% over 12 months)"
         lines.append(f"Trend: {trend_str}")
-        lines.append(f"Data quality: {data_quality} ({coverage:.0f}% monthly coverage)")
+        quality_txt = f"Data quality: {data_quality} ({coverage:.0f}% monthly coverage"
+        if last_obs and (last_obs.get("months_before_forecast") or 0) > 3:
+            quality_txt += f"; no observation since {last_obs['ym']}"
+        lines.append(quality_txt + ")")
 
         lines.append("")
         lines.append("Recent values (null = no FEWS NET assessment that month):")
@@ -399,6 +428,16 @@ def _format_base_rate_for_prompt(
             lines.append(" | ".join(parts))
 
         lines.append("")
+        projections = history_summary.get("projections") or []
+        if projections:
+            lines.append(
+                "Projections (Most Likely scenario, a FORECAST by the analysts, not an "
+                "observation; the question resolves on the Current Situation figure):"
+            )
+            lines.append(
+                "  " + " | ".join(f"{p['ym']}: {_fmt(p['value'])}" for p in projections[:6])
+            )
+            lines.append("")
         lines.append(
             "Note: Months marked 'null' mean FEWS NET did not publish a Current "
             "Situation assessment for this country that month. This does NOT mean "
@@ -448,6 +487,7 @@ def _format_base_rate_for_prompt(
     if summary_type == "conflict_trajectory":
         fat = history_summary.get("fatalities", {})
         disp = history_summary.get("displacements", {})
+        as_of_ym = str(history_summary.get("as_of_ym") or "")
 
         def _series_block(
             series: Dict[str, Any],
@@ -465,6 +505,15 @@ def _format_base_rate_for_prompt(
                 return [f"{heading}: {series.get('note', empty_note)}"]
 
             last = series["last_month"]
+            last_ym = str(last.get("ym", "?"))
+            recent = [str(e.get("ym")) for e in (series.get("last_6m") or [])][-3:]
+            consecutive = len(recent) == 3 and all(
+                _months_between(recent[i], recent[i + 1]) == 1 for i in range(2)
+            )
+            window_word = (
+                "prior 3-month window" if consecutive or len(recent) < 3
+                else "the 3 reports before them"
+            )
             trend_pct = series.get("trend_pct")
             trend_dir = series.get("trend_direction", "unknown")
             if trend_pct == "new_activity":
@@ -472,16 +521,39 @@ def _format_base_rate_for_prompt(
             elif trend_pct is not None:
                 trend_str = (
                     f"{trend_dir} ({'+' if trend_pct > 0 else ''}{trend_pct}% "
-                    "vs prior 3-month window)"
+                    f"vs {window_word})"
                 )
+            elif series.get("trend_note"):
+                trend_str = str(series["trend_note"])
             else:
                 trend_str = "insufficient data for trend"
-            return [
+
+            # Name the month and its age. A source that reports irregularly
+            # (IDMC) can have its latest month half a year back, and calling
+            # that "Last month" told the model it was current (Oct 2026).
+            age = _months_between(last_ym, as_of_ym)
+            if age is None or age == 1:
+                last_label = f"Last month ({last_ym})"
+            else:
+                last_label = (
+                    f"Latest month reported ({last_ym}, {age} months before this forecast)"
+                )
+            if consecutive or len(recent) < 3:
+                avg_label = "3-month avg"
+            else:
+                avg_label = f"Average of the last 3 months reported ({recent[0]} to {recent[-1]})"
+            out = [
                 f"{heading}:",
-                f"  Last month ({last.get('ym', '?')}): {_fmt(last.get('value'))}{unit_suffix}",
-                f"  3-month avg: {_fmt(series.get('trailing_3m_avg'))}/month",
+                f"  {last_label}: {_fmt(last.get('value'))}{unit_suffix}",
+                f"  {avg_label}: {_fmt(series.get('trailing_3m_avg'))}/month",
                 f"  Trend: {trend_str}",
             ]
+            if series.get("n_negative_dropped"):
+                out.append(
+                    f"  ({series['n_negative_dropped']} negative monthly value(s) left out: "
+                    "a monthly flow cannot be negative)"
+                )
+            return out
 
         # PA resolves on displacement, FATALITIES on fatalities. Lead with the
         # series the question is actually scored against; the other stays as

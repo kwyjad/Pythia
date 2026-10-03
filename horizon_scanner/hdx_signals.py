@@ -98,6 +98,25 @@ _SIGNALS_CACHE: list[dict[str, str]] | None = None
 # ---------------------------------------------------------------------------
 
 
+
+def format_indicator_value(raw: str) -> str:
+    """A signal's value as a reader would write it.
+
+    The CSV carries floating-point residue ("171615.00000000003"); the
+    prompt printed it verbatim (Oct 2026). Whole numbers print with
+    thousands separators, other numbers to at most two decimals, and text
+    that is not a number is passed through.
+    """
+    try:
+        v = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return str(raw)
+    if v != v or v in (float("inf"), float("-inf")):
+        return str(raw)
+    if abs(v - round(v)) < 1e-6:
+        return f"{int(round(v)):,}"
+    return f"{v:,.2f}".rstrip("0").rstrip(".")
+
 def fetch_and_cache() -> Path | None:
     """Download hdx_signals.csv from HDX and cache locally.
 
@@ -335,7 +354,7 @@ def format_hdx_signals_for_prompt(
             lines.append(summary)
 
         if value:
-            lines.append(f"Indicator value: {value}")
+            lines.append(f"Indicator value: {format_indicator_value(value)}")
 
         source_url = (s.get("source_url") or "").strip()
         if source_url:

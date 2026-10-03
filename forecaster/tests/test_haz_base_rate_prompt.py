@@ -264,3 +264,58 @@ def test_the_block_costs_less_than_its_declared_budget(case, seeded_db):
     budget = int(make_rulebook().get("base_rates.prompt.max_chars"))
     assert len(block) <= budget
     assert len(block) / 4 < 300
+
+
+# ---------------------------------------------------------------------------
+# One anchor per prompt (Oct 2026)
+# ---------------------------------------------------------------------------
+
+
+def _profile(n_obs_march: int) -> dict:
+    months = {m: {"min": 0, "max": 0, "mean": 0, "median": 0, "n_observations": 0}
+              for m in range(1, 13)}
+    if n_obs_march:
+        months[3] = {"min": 12500, "max": 12500, "mean": 12500, "median": 12500,
+                     "n_observations": n_obs_march}
+    return {
+        "type": "seasonal_profile", "source": "IFRC",
+        "data_range": "2026-03 to 2026-03" if n_obs_march else "",
+        "years_of_data": 1 if n_obs_march else 0, "months": months,
+    }
+
+
+def test_the_ifrc_profile_is_not_shown_beside_the_machine_block(seeded_db):
+    iso3, _name, hazard, window_start, _months, _window = CASES["flood"]
+    prompt_text = prompts.build_spd_prompt_v2(
+        question=_question(iso3, hazard, window_start),
+        history_summary=_profile(1),
+        hs_triage_entry=TRIAGE,
+        research_json=RESEARCH,
+    )
+    assert "PA RESOLUTION BASE RATES" in prompt_text
+    assert "Seasonal profile for your forecast months" not in prompt_text
+    assert "IFRC data from" not in prompt_text
+
+
+def test_an_empty_ifrc_profile_says_so_in_one_line(monkeypatch):
+    monkeypatch.setattr(prompts, "_load_haz_base_rate_block", lambda *a, **k: "")
+    prompt_text = prompts.build_spd_prompt_v2(
+        question=_question("KEN", "FL", "2026-11-01"),
+        history_summary=_profile(0),
+        hs_triage_entry=TRIAGE,
+        research_json=RESEARCH,
+    )
+    assert "(0 years)" not in prompt_text
+    assert "Seasonal profile for your forecast months" not in prompt_text
+    assert "BASE RATE: no reported people-affected figure for KEN FL" in prompt_text
+
+
+def test_a_profile_with_observations_stands_without_a_machine_block(monkeypatch):
+    monkeypatch.setattr(prompts, "_load_haz_base_rate_block", lambda *a, **k: "")
+    prompt_text = prompts.build_spd_prompt_v2(
+        question=_question("KEN", "FL", "2026-11-01"),
+        history_summary=_profile(1),
+        hs_triage_entry=TRIAGE,
+        research_json=RESEARCH,
+    )
+    assert "Seasonal profile for your forecast months" in prompt_text

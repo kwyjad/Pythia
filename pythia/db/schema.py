@@ -495,6 +495,7 @@ def _ensure_acaps_inform_severity_trend_table(
             snapshot_date  VARCHAR NOT NULL,
             score          DOUBLE,
             fetched_at     VARCHAR,
+            source         VARCHAR,
             PRIMARY KEY (iso3, snapshot_date)
         );
         """,
@@ -503,6 +504,7 @@ def _ensure_acaps_inform_severity_trend_table(
             "snapshot_date": "VARCHAR",
             "score": "DOUBLE",
             "fetched_at": "VARCHAR",
+            "source": "VARCHAR",
         },
     )
 
@@ -2602,6 +2604,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 forecast_issue_date DATE NOT NULL,
                 created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 fetched_at        TIMESTAMP,
+                units             TEXT,
                 CONSTRAINT seasonal_forecasts_unique
                     UNIQUE (iso3, variable, lead_months, forecast_issue_date)
             );
@@ -2615,6 +2618,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "forecast_issue_date": "DATE",
                 "created_at": "TIMESTAMP",
                 "fetched_at": "TIMESTAMP",
+                "units": "TEXT",
             },
         )
 

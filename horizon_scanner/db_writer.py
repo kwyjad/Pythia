@@ -101,7 +101,7 @@ HAZARD_CONFIG = {
 
 DISPLACEMENT_TEMPLATES = {
     "acled_fatalities": (
-        "How many battle-related fatalities will ACLED record in {country_name} "
+        "How many conflict fatalities (all ACLED event types) will ACLED record in {country_name} "
         "between {start_date} and {end_date}?"
     ),
     "conflict_displacement": (

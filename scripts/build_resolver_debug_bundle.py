@@ -2435,6 +2435,8 @@ class BundleBuilder:
             self._check_no_unexplained_no_row,
             self._check_drought_severity_base_rates,
             self._check_nmme_read_when_table_covers_month,
+            self._check_nmme_values_are_not_all_zero,
+            self._check_inform_severity_on_its_scale,
             self._check_no_zero_rests_on_one_feed,
             self._check_no_drought_verdict_for_a_month_in_progress,
             self._check_no_row_beside_an_unconfirmed_sweep_hit,
@@ -4389,6 +4391,74 @@ class BundleBuilder:
             "Missing: " + (", ".join(missing) or "none") + ". A month a vintage "
             "forecasts (issue + lead_months) must yield an nmme_precip_anomaly "
             "snapshot; a miss means the lookup, not the ingest, is broken.",
+        )
+
+    def _check_nmme_values_are_not_all_zero(self) -> None:
+        """No NMME variable has almost every row at zero (Oct 2026).
+
+        CPC publishes the precipitation anomaly in mm/s; the ingest stored it
+        rounded to four decimals, so all 21,294 prate rows of the 1 Oct 2026
+        release sat within 0.0002 of zero and every prompt read "near-normal".
+        A variable with more than 95% of its rows within 0.01 of zero has been
+        stored in the wrong unit.
+        """
+
+        name = "nmme_no_variable_is_almost_all_zero"
+        if "seasonal_forecasts" not in self.tables():
+            return self._check(name, "SKIP", "", "", "seasonal_forecasts absent")
+        res = self.query(
+            """
+            SELECT variable, COUNT(*) AS n,
+                   SUM(CASE WHEN abs(anomaly_value) <= 0.01 THEN 1 ELSE 0 END) AS near_zero
+            FROM seasonal_forecasts WHERE anomaly_value IS NOT NULL
+            GROUP BY variable ORDER BY variable
+            """
+        )
+        rows = res[1] if res else []
+        if not rows:
+            return self._check(name, "SKIP", "", "", "no NMME rows")
+        bad = [
+            f"{var} ({int(nz)} of {int(n)})" for var, n, nz in rows
+            if n and float(nz) / float(n) > 0.95
+        ]
+        summary = ", ".join(f"{var}: {int(nz)}/{int(n)} near zero" for var, n, nz in rows)
+        self._check(
+            name, "FAIL" if bad else "PASS", summary, "<= 95% of rows within 0.01 of zero",
+            ("Almost all zero: " + ", ".join(bad) + ". The anomaly was stored in a unit "
+             "that rounds to nothing; check resolver.ingestion.nmme.UNITS.") if bad
+            else "Every NMME variable carries non-zero anomalies.",
+        )
+
+    def _check_inform_severity_on_its_scale(self) -> None:
+        """No INFORM Severity figure lies outside the index's 0-10 scale.
+
+        The trend table held the country-log's component indicators beside
+        the index (Afghanistan: 652230.0, 1.82 and 9.2; Oct 2026), and the
+        prompt printed the index over 5.
+        """
+
+        name = "inform_severity_scores_lie_on_the_0_to_10_scale"
+        tables = [t for t in ("acaps_inform_severity", "acaps_inform_severity_trend")
+                  if t in self.tables()]
+        if not tables:
+            return self._check(name, "SKIP", "", "", "no INFORM tables")
+        col = {"acaps_inform_severity": "severity_score",
+               "acaps_inform_severity_trend": "score"}
+        bad: list[str] = []
+        for t in tables:
+            res = self.query(
+                f"SELECT COUNT(*), MIN({col[t]}), MAX({col[t]}) FROM {t} "
+                f"WHERE {col[t]} < 0 OR {col[t]} > 10"
+            )
+            n = int((res[1][0][0] if res and res[1] else 0) or 0)
+            if n:
+                bad.append(f"{t}: {n} row(s), range {res[1][0][1]}..{res[1][0][2]}")
+        self._check(
+            name, "FAIL" if bad else "PASS",
+            "; ".join(bad) or "every score within 0..10", "0..10",
+            ("Off the scale: " + "; ".join(bad) + ". A trend row from the "
+             "country-log is a component indicator, not the index.") if bad
+            else "INFORM Severity runs 0 to 10 and every stored figure does too.",
         )
 
     def _check_no_zero_rests_on_one_feed(self) -> None:
