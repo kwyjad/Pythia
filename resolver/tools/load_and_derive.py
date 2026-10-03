@@ -431,7 +431,8 @@ def _derive_deltas(
 
     query = f"""
         SELECT ym, iso3, hazard_code, hazard_label, hazard_class, metric,
-               unit, value, as_of_date, source_id, event_id
+               unit, value, as_of_date, source_id, event_id,
+               lower(COALESCE(series_semantics, 'stock')) AS series_semantics
         FROM facts_resolved
         WHERE ym IN ({month_ph}){source_clause}
         ORDER BY iso3, hazard_code, metric, unit, source_id, ym
@@ -456,7 +457,14 @@ def _derive_deltas(
         first = True
         for row in group.to_dict(orient="records"):
             stock_value = float(row["value"])
-            delta = stock_value - prev_stock
+            if row.get("series_semantics") == "new":
+                # Already a monthly flow (IDMC new displacements, ACLED
+                # monthly counts). Differencing it as a stock printed a quiet
+                # month after a busy one as NEGATIVE new displacements
+                # (Afghanistan, August 2026: -1,791). Oct 2026.
+                delta = stock_value
+            else:
+                delta = stock_value - prev_stock
             if first:
                 first = False
             if not allow_negatives and delta < 0:
@@ -489,6 +497,56 @@ def _derive_deltas(
     written = _insert_dataframe(conn, "facts_deltas", output)
     LOGGER.info("facts_deltas inserted rows (derived): %s", written)
     return written
+
+
+def repair_flow_deltas(conn) -> dict[str, int]:
+    """Rewrite ``facts_deltas`` rows derived from a FLOW by differencing.
+
+    Until Oct 2026 ``_derive_deltas`` differenced every ``facts_resolved``
+    series, including the ones that are already monthly flows
+    (``series_semantics = 'new'``: IDMC new displacements, ACLED monthly
+    counts), so ``value_new`` held "this month minus last month" and went
+    negative after a busy month. For such a row the correct ``value_new`` is
+    the flow itself. Idempotent: a second run finds nothing to change.
+    Stock series are left alone; their deltas are differences by design.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT COUNT(*),
+                   SUM(CASE WHEN d.value_new < 0 THEN 1 ELSE 0 END)
+            FROM facts_deltas d
+            JOIN facts_resolved r
+              ON r.ym = d.ym AND r.iso3 = d.iso3
+             AND r.hazard_code = d.hazard_code AND r.metric = d.metric
+             AND COALESCE(r.source_id, '') = COALESCE(d.source_id, '')
+            WHERE lower(COALESCE(r.series_semantics, '')) = 'new'
+              AND r.value IS NOT NULL
+              AND d.value_new IS DISTINCT FROM r.value
+            """
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001 - a repair must never end the load
+        LOGGER.warning("facts_deltas flow repair skipped: %s", exc)
+        return {"repaired": 0, "negative_repaired": 0}
+    n, n_neg = int(rows[0] or 0), int(rows[1] or 0)
+    if n:
+        conn.execute(
+            """
+            UPDATE facts_deltas AS d
+               SET value_new = r.value, value_stock = r.value
+              FROM facts_resolved r
+             WHERE r.ym = d.ym AND r.iso3 = d.iso3
+               AND r.hazard_code = d.hazard_code AND r.metric = d.metric
+               AND COALESCE(r.source_id, '') = COALESCE(d.source_id, '')
+               AND lower(COALESCE(r.series_semantics, '')) = 'new'
+               AND r.value IS NOT NULL
+               AND d.value_new IS DISTINCT FROM r.value
+            """
+        )
+    LOGGER.info(
+        "facts_deltas flow repair | repaired=%s (of which negative=%s)", n, n_neg,
+    )
+    return {"repaired": n, "negative_repaired": n_neg}
 
 
 def _export_parquet(
@@ -612,6 +670,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             sources=loaded_sources,
         )
         LOGGER.info("Derived %s delta rows for period %s", derived, period.label)
+        repair_flow_deltas(conn)
         export_dir = Path(args.snapshots_root).expanduser().resolve() / args.period
         try:
             export_counts = _export_parquet(conn, period, export_dir)

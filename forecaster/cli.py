@@ -869,34 +869,20 @@ def _build_conflict_base_rate(
             }
 
         # --- Displacements from IDMC via facts_deltas ---
+        # One reader, shared with the ACE/PA anchor in base_rate_spd: it
+        # drops and counts a negative "new displacements" figure rather than
+        # printing it (Oct 2026).
         displacements_data: Dict[str, Any]
         try:
-            disp_rows = con.execute(
-                """
-                SELECT ym, SUM(COALESCE(value_new, 0)) AS flow_value
-                FROM facts_deltas
-                WHERE upper(iso3) = ?
-                  AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') IN (?, 'IDU')
-                  AND lower(series_semantics) = 'new'
-                  AND (
-                      lower(source_id) IN ('idmc', 'idmc_idu')
-                      OR lower(metric) IN (
-                          'new_displacements',
-                          'idp_displacement_new_dtm',
-                          'idp_displacement_flow_idmc'
-                      )
-                  )
-                  AND substr(CAST(ym AS VARCHAR), 1, 7) < ?
-                GROUP BY ym
-                ORDER BY ym DESC
-                LIMIT 6
-                """,
-                [iso3_up, hz_up, current_ym],
-            ).fetchall()
+            from pythia.tools.base_rate_spd import idmc_flow_rows
+
+            disp_rows, n_negative = idmc_flow_rows(
+                con, iso3_up, hz_up, current_ym, limit=6,
+            )
             logging.debug("IDMC displacement query for %s/%s: %d rows", iso3_up, hz_up, len(disp_rows))
-            disp_rows = list(reversed(disp_rows))
-            disp_rows = [(str(r[0])[:7] if len(str(r[0])) >= 7 else str(r[0]), r[1]) for r in disp_rows]
             displacements_data = _compute_trajectory(disp_rows, "IDMC")
+            if n_negative:
+                displacements_data["n_negative_dropped"] = n_negative
         except Exception as exc:
             logging.warning("IDMC displacement query failed for %s/%s: %s", iso3_up, hz_up, exc)
             displacements_data = {
@@ -909,6 +895,9 @@ def _build_conflict_base_rate(
 
         return {
             "type": "conflict_trajectory",
+            # The month this forecast is made in: the formatter states how
+            # old each series' latest month is against it.
+            "as_of_ym": current_ym,
             "fatalities": fatalities_data,
             "displacements": displacements_data,
         }
