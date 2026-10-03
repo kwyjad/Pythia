@@ -87,5 +87,6 @@ jobs:
                      tests/test_sibyl_evidence.py \
                      tests/test_sibyl_reference.py \
                      tests/test_sibyl_documents.py \
+                     tests/test_sibyl_history.py \
                      tests/test_sibyl_smoke.py \
                      tests/test_api_sibyl_routes.py

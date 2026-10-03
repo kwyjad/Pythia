@@ -479,3 +479,24 @@ forecasting prompts found it lowers accuracy.
 **Unverified.** The sandbox cannot reach api.reliefweb.int. The `url_alias` lookup for a report link that the search did not list has not been tested against the live API. If it fails, the agent is told so and can read the report through a search result instead.
 
 **Tests.** `tests/test_sibyl_documents.py` (30 cases), with fixtures `tests/fixtures/sibyl/report.{pdf,html}` built by `build_fixtures.py`. The smoke test now runs a full three-step trial with a plan.
+
+## 2026-10-03 — Part 4: keep the history
+
+**What was wrong.** A step's prompt carried the belief state and the LAST tool result only. A figure read at step 2 survived to step 6 only if the model had copied it into `evidence_higher` or `evidence_lower`, which are free-text lists with no source, date or tier.
+
+**What changed.**
+- **Append-only transcript** (`sibyl/transcript.py`). Every earlier step stays in the prompt: the model's JSON as it returned it, the ledger ids the code assigned, and each tool result. An entry is rendered once and reused byte for byte. The prompt is built from five segments: static head, question block, trial perspective plus starting belief, transcript, and a short tail.
+- **Caching.** Cache breakpoints sit on the question block, the trial segment and the end of the transcript, using the existing `cache_segments` argument. The legacy single-segment template is gone.
+- **Evidence ledger** (`sibyl/ledger.py`). The model returns `ledger_add` each step. The code assigns ids and drops repeats, and the final ledger is stored with the trial.
+- **Size guard.** Above `SIBYL_TRANSCRIPT_MAX_CHARS` (400,000 characters), the oldest tool results are replaced by a stub that keeps the URL.
+- **Delta logging.** `llm_calls.prompt_text` holds the first step of a trial whole. Later steps are stored as a prefix hash and length plus the new tail.
+
+The JSON action loop stays, so Part 7 can drive `call_openai` through the same code.
+
+**Tests.** `tests/test_sibyl_history.py` (15 cases) covers:
+- the prefix property;
+- a step-2 figure still present at step 6;
+- reconstruction of each logged prompt from the prefix and its tail;
+- breakpoint placement;
+- ledger cleaning, numbering and storage;
+- the size guard, alone and inside a trial.

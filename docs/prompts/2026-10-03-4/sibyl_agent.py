@@ -6,20 +6,15 @@
 """Sibyl agentic trial loop — the inside view.
 
 Each trial is a sequential tool-use loop: at every step the model returns,
-as structured JSON, up to three tool calls (``brave_search`` /
-``reliefweb_search`` / ``fetch_url``) or a ``submit``, an UPDATED belief
-state, and the new items for its evidence ledger.
+as structured JSON, an action (``brave_search`` / ``fetch_url`` /
+``submit``) and an UPDATED belief state. This sequential, belief-updating
+structure — not a search-dump-then-reason-once design — is the
+highest-leverage part of the method.
 
-Nothing the agent reads is lost between steps (Oct 2026). Each step's prompt
-is four cached segments and a short tail: the static head, the question
-block (reference, resolver card, track record), the trial's perspective and
-starting belief, then the append-only transcript of every earlier step (the
-model's JSON, the ledger ids assigned, each tool result), and finally the
-instruction for this step. An earlier step's text is stored once and reused
-byte for byte (``sibyl/transcript.py``), so the prompt of step n+1 begins
-with the prompt of step n less its tail. ``llm_calls`` stores the whole
-prompt for a trial's first step and, after that, a hash and length of the
-prefix the previous step already logged plus the new tail.
+Raw retrieved text is never accumulated into an ever-growing context: each
+step's prompt carries only the question, the outside-view anchor, the
+current belief state, and the LAST tool result. The belief state is the
+running memory.
 
 Trial diversity: ``claude-opus-5-5`` rejects sampling parameters
 (temperature returns HTTP 400), so the K trials are differentiated by
@@ -28,7 +23,6 @@ explicit perspective seeds in the prompt rather than temperature.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from pathlib import Path
@@ -58,9 +52,7 @@ from sibyl.leakage import LeakageStats, is_backtest
 from sibyl.select_questions import SibylQuestion
 from sibyl import extract as sibyl_extract
 from sibyl.cost import COST_KIND_EXTRACTION
-from sibyl.ledger import EvidenceLedger, render_added
 from sibyl.tools import ToolResult, brave_search, fetch_url, reliefweb_search
-from sibyl.transcript import ToolOutput, Transcript, TranscriptEntry
 
 logger = logging.getLogger(__name__)
 
@@ -143,12 +135,9 @@ Your research plan has six slots. Work through all of them; report each one's st
 - "reversion": the case that the series returns to its 12-month norm.
 - "disconfirm": one search aimed at evidence against your current median.
 
-Your earlier steps are shown in full in the transcript, with every tool result, so nothing you read is lost. Record each new piece of evidence once in "ledger_add"; the code numbers the items ([E1], [E2], ...) and keeps the ledger for the whole trial. List only items not already in the ledger.
-
 Respond with ONLY a JSON object, no prose outside it:
 {{
   "actions": [{{"action": "brave_search" | "reliefweb_search" | "fetch_url" | "submit", "action_input": {{...}}}}],
-  "ledger_add": [{{"url": "...", "date": "YYYY-MM-DD the figure or claim refers to or was published", "tier": 1 | 2 | 3 | 4 | 5, "kind": "measurement" | "forecast" | "statement" | "speculation", "quote": "the figure or quote, word for word", "direction": "higher" | "lower" | "neutral"}}],
   "belief_state": {{
     "month_1": {{"p_zero": <probability>, "quantiles_positive": {{{quantile_keys}}}}},
     "month_6": {{"p_zero": <probability>, "quantiles_positive": {{{quantile_keys}}}}},
@@ -167,8 +156,6 @@ Rules for the belief state:
 - quantiles_positive are the 0.05, 0.25, 0.5, 0.75 and 0.95 quantiles of the month's {metric} count GIVEN that it is positive: raw units (people/fatalities, not thousands), each at least 1, non-decreasing;
 - update the belief state EVERY step, even when the action is another search.
 
-Source tiers for the ledger: 1 the resolving source or official statistics; 2 a UN, cluster or NGO report; 3 a wire service or major outlet; 4 national or local media; 5 an aggregator, blog or social media.
-
 Rules for weighing evidence:
 - The reference is your prior. Keep it unless dated, specific evidence says otherwise.
 - A rise in the news is often already in the latest months of the table. Check before you add it again.
@@ -177,34 +164,53 @@ Rules for weighing evidence:
 - For month 6, move away from the reference only on evidence that the change will last: a dated event, a seasonal cause, or a structural shift. Most spikes fade.
 - Forecast what the resolving source will record."""
 
-# --- Prompt segments (Oct 2026) ------------------------------------------
-#
-#   1 static     head + task rules + JSON schema                — no breakpoint
-#   2 question   question, resolver card, reference, track rec. — breakpoint
-#   3 trial      perspective seed + starting belief             — breakpoint
-#   4 transcript every earlier step, stored text reused as-is   — breakpoint
-#   5 tail       this step's number and any feedback            — churns
-#
-# The legacy single-segment template was dropped in Oct 2026: Sibyl always
-# sends segments, and cache_control applies when PYTHIA_PROMPT_CACHE_ENABLED
-# is on.
+SIBYL_STEP_PROMPT_TEMPLATE = (
+    _HEAD + "\n\n" + _QUESTION + """
 
-SIBYL_STATIC = _HEAD + "\n\n" + _TASK + "\n"
-
-SIBYL_QUESTION = "\n" + _QUESTION + "\n"
-
-SIBYL_TRIAL = """
 === YOUR TRIAL PERSPECTIVE ===
 {perspective}
 
-=== YOUR STARTING BELIEF (from the reference; your plan is empty) ===
-{start_belief_json}
+=== CURRENT BELIEF STATE (step {step} of {max_steps}) ===
+{belief_json}
 
-=== TRANSCRIPT OF YOUR EARLIER STEPS ===
+=== RESULT OF YOUR LAST ACTION ===
+{last_tool_result}
+
+""" + _TASK + "\n{parse_feedback}"
+)
+
+
+# --- V3 (static-first) segment templates -----------------------------------
+#
+# Same content as SIBYL_STEP_PROMPT_TEMPLATE, reordered so the stable spans
+# lead and the per-step churn trails:
+#   B1 run-static (head + as-of + task/action rules + JSON schema)  — stable
+#      across every step/trial/question of a run (modulo {metric})
+#   B2 per-question (question block + reference)                    — stable
+#      across all K trials x MAX_STEPS steps of a question  → cache breakpoint
+#   B3 per-trial (perspective seed)                                 — stable
+#      across the trial's steps                             → cache breakpoint
+#   B4 per-step (belief state, last tool result, parse feedback)    — churns
+# Active only when both PYTHIA_PROMPT_V3_ORDER and PYTHIA_PROMPT_CACHE_ENABLED
+# are on.
+
+SIBYL_STEP_RUN_STATIC_V3 = _HEAD + "\n\n" + _TASK + "\n"
+
+SIBYL_STEP_QUESTION_V3 = "\n" + _QUESTION + "\n"
+
+SIBYL_STEP_TRIAL_V3 = """
+=== YOUR TRIAL PERSPECTIVE ===
+{perspective}
 """
 
-SIBYL_TAIL = """=== STEP {step} of {max_steps} ===
-{feedback}Decide your next actions per "YOUR TASK EACH STEP" above and respond with ONLY the JSON object."""
+SIBYL_STEP_STEP_V3 = """
+=== CURRENT BELIEF STATE (step {step} of {max_steps}) ===
+{belief_json}
+
+=== RESULT OF YOUR LAST ACTION ===
+{last_tool_result}
+{parse_feedback}
+Now decide your next action per "YOUR TASK EACH STEP" above and respond with ONLY the JSON object."""
 
 
 # Sibyl's own calibration feedback (sibyl/advice.py -> sibyl.calibration.
@@ -307,10 +313,6 @@ class TrialResult:
     # Set when the trial kept its last valid belief after a later step failed
     # on every attempt (e.g. "model_step_failed"); the trial still counts.
     degraded: Optional[str] = None
-    # The evidence ledger at the end of the trial (sibyl/ledger.py), and how
-    # many tool results the transcript size guard replaced with a stub.
-    ledger: List[Dict[str, Any]] = field(default_factory=list)
-    n_transcript_stubbed: int = 0
 
     @property
     def ok(self) -> bool:
@@ -349,8 +351,6 @@ class TrialResult:
             "n_docs_read": self.n_docs_read,
             "evidence_ok": self.evidence_ok,
             "degraded": self.degraded,
-            "ledger": list(self.ledger),
-            "transcript_stubbed": self.n_transcript_stubbed,
         }
 
 
@@ -387,25 +387,28 @@ def _zero_note(question: SibylQuestion) -> str:
 def build_step_prompt(
     question: SibylQuestion,
     base_rate: BaseRate,
-    start_belief: BeliefState,
+    belief: BeliefState,
     *,
     step: int,
     as_of: date,
     perspective: str,
     forecast_months: List[str],
-    transcript_text: str,
+    last_tool_result: str,
     country_name: str,
-    feedback: str = "",
+    parse_feedback: str = "",
     return_segments: bool = False,
     track_record: str = "",
 ):
-    """Build a step's prompt as ``(text, is_cache_breakpoint)`` segments.
+    """Build the step prompt (legacy or V3 section order).
 
-    The segments concatenate to the prompt. The transcript segment is
-    present once a step has been taken; it carries the third breakpoint, so
-    everything up to the end of the previous step can be served from cache.
-    With ``return_segments=False`` the joined prompt is returned.
+    With ``return_segments=True`` returns an ordered list of
+    ``(text, is_cache_breakpoint)`` tuples whose concatenation is the prompt;
+    under legacy order that's a single unmarked segment (nothing usefully
+    cacheable), under V3 order the per-question and per-trial spans carry
+    breakpoints for Anthropic cache_control.
     """
+    from forecaster.prompts import _prompt_v3_order_enabled  # noqa: PLC0415
+
     backtest_note = ""
     if is_backtest(as_of):
         backtest_note = (
@@ -431,44 +434,32 @@ def build_step_prompt(
         base_rate_block=base_rate.prompt_text,
         track_record_block=render_track_record(track_record),
         perspective=perspective,
-        start_belief_json=json.dumps(start_belief.to_dict(), indent=2),
         step=step,
         max_steps=MAX_STEPS,
+        belief_json=json.dumps(belief.to_dict(), indent=2),
+        last_tool_result=last_tool_result,
         quantile_keys=_quantile_keys_hint(),
         max_actions=_cfg.MAX_ACTIONS_PER_STEP,
         submit_min_docs=_cfg.SUBMIT_MIN_DOCS,
         resolver_card=resolver_card(question.hazard_code, question.metric),
-        feedback=(feedback.strip() + "\n" if feedback and feedback.strip() else ""),
+        parse_feedback=parse_feedback,
     )
+
+    if not _prompt_v3_order_enabled():
+        prompt = SIBYL_STEP_PROMPT_TEMPLATE.format(**common)
+        if return_segments:
+            return [(prompt, False)]
+        return prompt
+
     segments = [
-        (SIBYL_STATIC.format(**common), False),
-        (SIBYL_QUESTION.format(**common), True),
-        (SIBYL_TRIAL.format(**common), True),
+        (SIBYL_STEP_RUN_STATIC_V3.format(**common), False),
+        (SIBYL_STEP_QUESTION_V3.format(**common), True),   # cache breakpoint 1
+        (SIBYL_STEP_TRIAL_V3.format(**common), True),      # cache breakpoint 2
+        (SIBYL_STEP_STEP_V3.format(**common), False),
     ]
-    if transcript_text:
-        segments.append((transcript_text, True))
-    segments.append((SIBYL_TAIL.format(**common), False))
     if return_segments:
         return segments
     return "".join(text for text, _ in segments)
-
-
-def prompt_for_log(prompt: str, logged_prefix: Optional[str]) -> str:
-    """What ``llm_calls.prompt_text`` stores for a step.
-
-    The first step of a trial is stored whole. After that, when the prompt
-    begins with the prefix an earlier step already stored, only a marker
-    (SHA-256 and length of that prefix) and the new tail are stored: the
-    whole transcript at every step would carry the published database past
-    its 2 GB release limit. A prompt the size guard rewrote is stored whole.
-    """
-    if not logged_prefix or not prompt.startswith(logged_prefix):
-        return prompt
-    digest = hashlib.sha256(logged_prefix.encode("utf-8")).hexdigest()
-    return (
-        f"[prefix sha256={digest} chars={len(logged_prefix)}: the prompt of the "
-        f"previous step less its tail]\n" + prompt[len(logged_prefix):]
-    )
 
 
 def _call_model(
@@ -558,13 +549,9 @@ def run_trial(
 
     # The reference (sibyl/reference.py) seeds the belief; an object without
     # reference vectors (no history) seeds a labelled placeholder.
-    start_belief = initial_belief(getattr(base_rate, "by_month", None), question.metric)
-    start_belief.plan = empty_plan()
-    belief = start_belief
-    transcript = Transcript()
-    ledger = EvidenceLedger()
-    # The prompt prefix an earlier step's llm_calls row already holds.
-    logged_prefix: Optional[str] = None
+    belief = initial_belief(getattr(base_rate, "by_month", None), question.metric)
+    belief.plan = empty_plan()
+    last_tool_result = "(none yet — this is your first step)"
     seen_urls: set[str] = set()
     resolver_failed_steps = 0
     terms = _search_terms(question, country_name)
@@ -572,20 +559,18 @@ def run_trial(
     for step in range(1, MAX_STEPS + 1):
         decision: Optional[StepDecision] = None
         parse_feedback = ""
-        accepted_text = ""
-        next_prefix: Optional[str] = None
         for attempt in range(1, ANTHROPIC_MAX_ATTEMPTS + 1):
             segments = build_step_prompt(
                 question,
                 base_rate,
-                start_belief,
+                belief,
                 step=step,
                 as_of=as_of,
                 perspective=perspective,
                 forecast_months=forecast_months,
-                transcript_text=transcript.text(),
+                last_tool_result=last_tool_result,
                 country_name=country_name,
-                feedback=parse_feedback,
+                parse_feedback=parse_feedback,
                 return_segments=True,
                 track_record=track_record,
             )
@@ -602,7 +587,7 @@ def run_trial(
             log_sibyl_call(
                 run_id=run_id,
                 question_id=question.question_id,
-                prompt_text=prompt_for_log(prompt, logged_prefix),
+                prompt_text=prompt,
                 response_text=text,
                 provider="anthropic",
                 model_id=MODEL,
@@ -616,14 +601,12 @@ def run_trial(
             )
             if error:
                 parse_feedback = (
-                    "NOTE: your previous response failed with a provider "
+                    "\nNOTE: your previous response failed with a provider "
                     f"error ({error[:200]}). Respond again."
                 )
                 continue
             try:
                 decision = parse_step_response(text)
-                accepted_text = text
-                next_prefix = prompt[: len(prompt) - len(segments[-1][0])]
                 break
             except BeliefStateError as exc:
                 logger.warning(
@@ -631,7 +614,7 @@ def run_trial(
                     question.question_id, trial_index, step, attempt, exc,
                 )
                 parse_feedback = (
-                    "NOTE: your previous response was rejected "
+                    "\nNOTE: your previous response was rejected "
                     f"({exc}). Output ONLY the JSON object, exactly in the "
                     "specified shape, with all required quantile levels."
                 )
@@ -652,13 +635,11 @@ def run_trial(
                 result.error = "model_step_failed"
             break
 
-        logged_prefix = next_prefix
         if not decision.plan_given:
             decision.belief.plan = dict(belief.plan) or empty_plan()
         belief = decision.belief
         if (belief.plan.get("resolver") or {}).get("status") == "failed":
             resolver_failed_steps += 1
-        added = ledger.add(decision.ledger_add, step=step)
         record = TrialStepRecord(
             step=step,
             action=decision.action,
@@ -674,18 +655,15 @@ def run_trial(
             missing = submit_gate_missing(belief.plan, result.n_docs_read, resolver_failed_steps)
             if missing and step < MAX_STEPS:
                 record.gate_rejected = missing
-                transcript.append(TranscriptEntry(
-                    step=step, response=accepted_text, ledger_block=render_added(added),
-                    note=(
-                        "Your submit was NOT accepted. Still missing:\n"
-                        + "\n".join(f"- {m}" for m in missing)
-                    ),
-                ))
+                last_tool_result = (
+                    "Your submit was NOT accepted. Still missing:\n"
+                    + "\n".join(f"- {m}" for m in missing)
+                )
                 continue
             result.submitted = True
             break
 
-        outputs: List[ToolOutput] = []
+        outputs: List[str] = []
         for i, tcall in enumerate(decision.calls):
             tool_result = _execute_tool(tcall, as_of, question=question, terms=terms)
             if tool_result.tool == "fetch_url" and tool_result.ok and tool_result.doc_text:
@@ -756,19 +734,11 @@ def run_trial(
                     hs_run_id=question.hs_run_id,
                     call_type=f"sibyl_trial{trial_index}_search",
                 )
-            outputs.append(ToolOutput(
-                action=tcall.action, target=str(tcall.action_input), text=tool_result.text,
-                url=(str(tcall.action_input) if tcall.action == "fetch_url" else ""),
-            ))
-        transcript.append(TranscriptEntry(
-            step=step, response=accepted_text, ledger_block=render_added(added),
-            outputs=outputs,
-            note=("(Your submit was ignored: submit must be a step of its own.)"
-                  if decision.submit_dropped else ""),
-        ))
+            outputs.append(f"--- {tcall.action}: {tcall.action_input}\n{tool_result.text}")
+        if decision.submit_dropped:
+            outputs.append("(Your submit was ignored: submit must be a step of its own.)")
+        last_tool_result = "\n\n".join(outputs)
 
-    result.ledger = ledger.to_list()
-    result.n_transcript_stubbed = transcript.n_stubbed
     # A trial that ran out of steps without submitting still counts: the
     # belief state was updated every step, so the latest quantiles stand.
     if result.belief_trace and result.error is None:

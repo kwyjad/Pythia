@@ -79,6 +79,10 @@ MAX_ACTIONS_PER_STEP = _env_int("SIBYL_MAX_ACTIONS_PER_STEP", 3)
 # Documents a trial must have read before a submit is accepted (the step
 # limit overrides it; the evidence gate below does not).
 SUBMIT_MIN_DOCS = _env_int("SIBYL_SUBMIT_MIN_DOCS", 3)
+# Above this many characters the oldest tool results in a trial's transcript
+# are replaced by a one-line stub that keeps the URL (sibyl/transcript.py).
+# 400,000 characters is about 100,000 tokens, well inside Opus 5.5's window.
+TRANSCRIPT_MAX_CHARS = _env_int("SIBYL_TRANSCRIPT_MAX_CHARS", 400_000)
 
 # Quantile levels each trial must report (discretized CDF).
 QUANTILE_LEVELS = [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
