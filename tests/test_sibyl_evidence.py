@@ -151,11 +151,13 @@ def _run_env(tmp_path, monkeypatch, pack_fn):
     seed_db(tmp_path, monkeypatch)
     monkeypatch.setattr(sibyl_run, "build_reference", stub_reference)
     monkeypatch.setattr(sibyl_tools, "fetch_via_brave_search", pack_fn)
-    state = {"n": 0}
-
+    # Each trial searches once and then submits. The decision is read from the
+    # trial's own prompt (its transcript holds step 1 once it has searched),
+    # never from a counter shared across trials: trials run on worker threads
+    # and a shared counter interleaves between them.
     def model_call(prompt):
-        state["n"] += 1
-        return (make_search_response() if state["n"] % 2 else make_submit_response()), _usage(), ""
+        searched = "=== STEP 1: YOUR RESPONSE ===" in prompt
+        return (make_submit_response() if searched else make_search_response()), _usage(), ""
 
     return model_call
 
