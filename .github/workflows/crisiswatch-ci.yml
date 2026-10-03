@@ -98,3 +98,31 @@ jobs:
         env:
           RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
         run: python -m scripts.ci.crisiswatch_publication_days
+      - name: Does a per-edition page parse like the main page? (temporary)
+        run: |
+          python - <<'PY'
+          import requests
+          from scripts import refresh_crisiswatch as rc
+          for slug, ts in [
+              ("september-trends-and-october-alerts-2025", "20251005"),
+              ("may-trends-and-june-alerts-2026", "20260601"),
+          ]:
+              url = f"https://web.archive.org/web/{ts}id_/https://www.crisisgroup.org/crisiswatch/{slug}"
+              try:
+                  r = requests.get(url, timeout=90, headers={"User-Agent": rc._WAYBACK_USER_AGENT})
+                  html = rc._maybe_gunzip(r.content).decode("utf-8", "replace")
+                  print(slug, "HTTP", r.status_code, "final", r.url, "len", len(html),
+                        "entries", html.count("c-crisiswatch-entry"))
+                  if html.count("c-crisiswatch-entry") >= 20:
+                      d = rc.parse_edition(html, provenance="probe")
+                      print("  parsed edition:", d.get("month"), "entries:", len(d.get("entries", [])))
+              except Exception as exc:
+                  print(slug, "failed:", exc)
+              # Is the live page still there? (SPN would capture it.)
+              try:
+                  r = requests.get(f"https://www.crisisgroup.org/crisiswatch/{slug}", timeout=60,
+                                   headers={"User-Agent": rc._USER_AGENT})
+                  print("  live:", r.status_code, len(r.content))
+              except Exception as exc:
+                  print("  live failed:", exc)
+          PY
