@@ -291,3 +291,29 @@ REFERENCE_WEIGHT = _env_float("SIBYL_REFERENCE_WEIGHT", 0.5)
 # DR/PHASE3PLUS_IN_NEED reference: this weight on "the last figure persists",
 # the rest on the 36-month history vector. A starting value, no backtest.
 DR_PERSISTENCE_WEIGHT = _env_float("SIBYL_DR_PERSISTENCE_WEIGHT", 0.5)
+
+# --- Measurement, pool weight and post-mortems (Oct 2026, Part 6) ----------
+# The pre-extraction text of a document read is stored in sibyl_evidence up
+# to this many characters (the shown text is stored whole).
+EVIDENCE_DOC_MAX_CHARS = _env_int("SIBYL_EVIDENCE_DOC_MAX_CHARS", 40_000)
+
+# How the reference weight in the published pool is set. "fitted" reads the
+# newest sibyl_pool_weights row (sibyl/score_variants.py chooses it from
+# {0.25, 0.5, 0.75} once POOL_WEIGHT_MIN_QUESTIONS questions carry both a raw
+# and a reference score, with a prior worth POOL_WEIGHT_PRIOR_QUESTIONS
+# questions at 0.5); with no row it falls back to REFERENCE_WEIGHT. "fixed"
+# always uses REFERENCE_WEIGHT. Backtest always uses REFERENCE_WEIGHT.
+REFERENCE_WEIGHT_MODE = _env_str("SIBYL_REFERENCE_WEIGHT_MODE", "fitted").strip().lower()
+POOL_WEIGHT_GRID = (0.25, 0.5, 0.75)
+POOL_WEIGHT_MIN_QUESTIONS = _env_int("SIBYL_POOL_WEIGHT_MIN_QUESTIONS", 20)
+POOL_WEIGHT_PRIOR_QUESTIONS = _env_int("SIBYL_POOL_WEIGHT_PRIOR_QUESTIONS", 20)
+
+# Post-mortems (sibyl/postmortem.py): a note on each newly resolved
+# question, and per class, once POSTMORTEM_MIN_NOTES notes exist, lessons of
+# at most LESSONS_MAX_CHARS, each resting on LESSON_MIN_CASES cases or more.
+POSTMORTEM_EFFORT = _env_str("SIBYL_POSTMORTEM_EFFORT", "medium").strip().lower()
+POSTMORTEM_CAP_USD = _env_float("SIBYL_POSTMORTEM_CAP_USD", 5.0)
+POSTMORTEM_MIN_NOTES = _env_int("SIBYL_POSTMORTEM_MIN_NOTES", 8)
+LESSONS_MAX_CHARS = _env_int("SIBYL_LESSONS_MAX_CHARS", 6000)
+LESSON_MIN_CASES = _env_int("SIBYL_LESSON_MIN_CASES", 3)
+MAX_ANALOGUES = _env_int("SIBYL_MAX_ANALOGUES", 4)

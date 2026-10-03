@@ -511,3 +511,16 @@ def test_sibyl_run_before_the_counters_existed_is_not_judged(tmp_path):
     con.close()
     sb = _run(path, tmp_path, stage="sibyl", sibyl_run_id=SIBYL_RUN)["sibyl"]
     assert "degraded" not in sb and "tools" not in sb
+
+
+def test_sibyl_section_reports_the_evidence_record_size(tmp_path):
+    path = _sibyl_db(tmp_path)
+    con = duckdb.connect(path)
+    _add_sibyl_run(con, SIBYL_RUN, RUN, "2026-07-29 10:00:00")
+    con.execute("CREATE TABLE sibyl_evidence (sibyl_run_id TEXT, shown_text TEXT, doc_text TEXT)")
+    con.execute("INSERT INTO sibyl_evidence VALUES (?, 'abc', 'defgh'), (?, 'xy', NULL), "
+                "('older', 'zzzz', NULL)", [SIBYL_RUN, SIBYL_RUN])
+    con.close()
+    sb = _run(path, tmp_path, stage="sibyl", sibyl_run_id=SIBYL_RUN)["sibyl"]
+    assert sb["evidence_table"] == {"run_rows": 2, "run_chars": 10,
+                                    "table_rows": 3, "table_chars": 14}

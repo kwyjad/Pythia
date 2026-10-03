@@ -160,3 +160,41 @@ def test_calibration_endpoint_serves_the_newest_month(tmp_path, monkeypatch, res
     assert old["as_of_month"] == "2026-10"
     assert next(r for r in old["rows"] if r["scope"] == "group")["gate"] == "6 of 20 resolved questions"
     assert c.get("/v1/sibyl/calibration?as_of_month=bad").status_code == 422
+
+
+def test_process_measures_and_month_vectors_on_both_schemas(tmp_path, monkeypatch, reset_api):
+    """Oct 2026, Part 6: process measures read None on an older DB, and the
+    question detail parses the reference and the published vectors by month."""
+    import json
+
+    db = tmp_path / "legacy.duckdb"
+    _legacy_db(db)
+    c = _client(tmp_path, db, monkeypatch)
+    run = c.get("/v1/sibyl/summary").json()["run"]
+    assert run["docs_per_trial"] is None and run["reference_weight"] is None
+    detail = c.get("/v1/sibyl/question_detail",
+                   params={"question_id": "ETH_ACE_FATALITIES_2026-10"}).json()
+    assert detail["record"]["reference"] is None
+
+    con = duckdb.connect(str(db))
+    for col, typ in (("docs_per_trial", "DOUBLE"), ("reference_weight", "DOUBLE"),
+                     ("reference_weight_source", "TEXT")):
+        con.execute(f"ALTER TABLE sibyl_runs ADD COLUMN {col} {typ}")
+    for col in ("reference_json", "final_by_month_json"):
+        con.execute(f"ALTER TABLE sibyl_forecasts ADD COLUMN {col} TEXT")
+    con.execute("UPDATE sibyl_runs SET docs_per_trial = 2.5, reference_weight = 0.75, "
+                "reference_weight_source = 'fitted'")
+    con.execute("UPDATE sibyl_forecasts SET reference_json = ?, final_by_month_json = ?",
+                [json.dumps({"by_month": {"1": [0.5, 0.5], "6": [0.4, 0.6]}}),
+                 json.dumps({"1": [0.6, 0.4], "6": [0.3, 0.7]})])
+    con.close()
+    import pythia.api.app as app_mod
+
+    app_mod._READ_CON = None
+    run = c.get("/v1/sibyl/summary").json()["run"]
+    assert (run["docs_per_trial"], run["reference_weight"], run["reference_weight_source"]) == (
+        2.5, 0.75, "fitted")
+    rec = c.get("/v1/sibyl/question_detail",
+                params={"question_id": "ETH_ACE_FATALITIES_2026-10"}).json()["record"]
+    assert rec["reference"]["by_month"]["6"] == [0.4, 0.6]
+    assert rec["final_by_month"]["1"] == [0.6, 0.4]

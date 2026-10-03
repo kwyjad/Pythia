@@ -11,6 +11,7 @@ import type {
   SibylQuestionDetailResponse,
   SibylQuestionRow,
   SibylQuestionsResponse,
+  SibylRun,
   SibylRunsResponse,
   SibylSummaryResponse,
   SibylTrial,
@@ -80,13 +81,15 @@ const OverlayChart = ({
   sibyl,
   standard,
   standardName,
+  reference = null,
 }: {
   labels: string[];
   sibyl: number[];
   standard: number[] | null;
   standardName: string | null;
+  reference?: number[] | null;
 }) => {
-  const maxProb = Math.max(0.0001, ...sibyl, ...(standard ?? []));
+  const maxProb = Math.max(0.0001, ...sibyl, ...(standard ?? []), ...(reference ?? []));
   return (
     <div className="rounded-lg border border-fred-secondary bg-fred-surface px-4 py-4">
       <div className="mb-2 flex items-center gap-4 text-xs text-fred-text">
@@ -97,14 +100,28 @@ const OverlayChart = ({
           <span className="inline-block h-3 w-3 rounded-sm bg-fred-primary" />{" "}
           {standardName ? `Standard (${standardName})` : "Standard (none)"}
         </span>
+        {reference ? (
+          <span className="flex items-center gap-1">
+            <span className="inline-block h-3 w-3 rounded-sm border-2 border-amber-500" />{" "}
+            Sibyl&apos;s reference (prior)
+          </span>
+        ) : null}
       </div>
       <div className="flex h-56 items-end gap-3">
         {labels.map((label, i) => {
           const sp = sibyl[i] ?? 0;
           const st = standard ? standard[i] ?? 0 : 0;
+          const rf = reference ? reference[i] ?? 0 : null;
           return (
             <div key={label} className="flex flex-1 flex-col items-center gap-1">
-              <div className="flex h-40 w-full items-end justify-center gap-1">
+              <div className="relative flex h-40 w-full items-end justify-center gap-1">
+                {rf !== null ? (
+                  <div
+                    className="pointer-events-none absolute inset-x-0 border-t-2 border-amber-500"
+                    style={{ bottom: `${(rf / maxProb) * 100}%` }}
+                    title={`Reference: ${pct.format(rf)}`}
+                  />
+                ) : null}
                 <div
                   className="w-1/2 rounded-t-sm bg-indigo-500"
                   style={{ height: `${(sp / maxProb) * 100}%` }}
@@ -251,6 +268,68 @@ const TrialCard = ({ trial }: { trial: SibylTrial }) => {
   );
 };
 
+const fmtShare = (v: number | null | undefined) =>
+  v === null || v === undefined ? "—" : pct.format(v);
+
+// How Sibyl researched in this run (sibyl/measure.py). Never a score: the
+// About tab says what each one is for.
+export const ProcessMeasures = ({ run }: { run: SibylRun }) => {
+  const items: { label: string; value: string; tip: string }[] = [
+    {
+      label: "Resolver slot done",
+      value: fmtShare(run.share_resolver_done),
+      tip: "Share of trials that found how the question resolves before submitting.",
+    },
+    {
+      label: "Documents per trial",
+      value:
+        run.docs_per_trial === null || run.docs_per_trial === undefined
+          ? "—"
+          : run.docs_per_trial.toFixed(1),
+      tip: "Documents (pages and PDFs) read per research trial.",
+    },
+    {
+      label: "Dated figures in ledger",
+      value: fmtShare(run.share_ledger_dated_figure),
+      tip: "Share of evidence-ledger items carrying both a date and a figure.",
+    },
+    {
+      label: "Forecasts at the floor",
+      value: fmtShare(run.share_forecasts_at_floor),
+      tip: "Share of forecasts with a bucket at the minimum probability Sibyl allows.",
+    },
+    {
+      label: "Divergence from reference",
+      value: fmtJsd(run.mean_jsd_from_reference),
+      tip: "Mean month-1 Jensen–Shannon divergence of the trials' pool from Sibyl's reference.",
+    },
+    {
+      label: "Reference weight",
+      value:
+        run.reference_weight === null || run.reference_weight === undefined
+          ? "—"
+          : `${run.reference_weight.toFixed(2)} (${run.reference_weight_source ?? "?"})`,
+      tip: "The reference's share of the published forecast: fitted from scores, or fixed.",
+    },
+  ];
+  return (
+    <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
+      <div className="text-xs uppercase text-fred-muted">How this run researched</div>
+      <div className="mt-2 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        {items.map((it) => (
+          <div key={it.label}>
+            <div className="flex items-center gap-1 text-[11px] text-fred-muted">
+              {it.label}
+              <InfoTooltip text={it.tip} />
+            </div>
+            <div className="text-sm font-semibold text-fred-text">{it.value}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const QuestionDetail = ({
   questionId,
   sibylRunId,
@@ -297,7 +376,11 @@ const QuestionDetail = ({
     return null;
   }
 
-  const sibylProbs = detail.record.bucket_probs ?? [];
+  // Since Oct 2026 Sibyl writes a vector per window month (months 1 and 6
+  // elicited, 2 to 5 mixed); older rows carry one vector for all six.
+  const sibylProbs =
+    detail.record.final_by_month?.[String(month)] ?? detail.record.bucket_probs ?? [];
+  const referenceProbs = detail.record.reference?.by_month?.[String(month)] ?? null;
   const standardByMonth = detail.standard_spd.by_month ?? {};
   const standardProbs = standardByMonth[String(month)] ?? null;
   const trials = detail.record.trials ?? [];
@@ -310,7 +393,7 @@ const QuestionDetail = ({
 
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-xs font-medium text-fred-text">
-          Standard-track month (Sibyl&apos;s distribution applies to every window month):
+          Window month (Sibyl elicits months 1 and 6; 2 to 5 mix them):
         </span>
         {[1, 2, 3, 4, 5, 6].map((m) => (
           <button
@@ -324,6 +407,7 @@ const QuestionDetail = ({
             }`}
           >
             M{m}
+            {m === 1 || m === 6 ? "*" : ""}
           </button>
         ))}
       </div>
@@ -333,6 +417,7 @@ const QuestionDetail = ({
         sibyl={sibylProbs}
         standard={standardProbs}
         standardName={detail.standard_spd.model_name}
+        reference={referenceProbs}
       />
 
       <div className="overflow-x-auto rounded-lg border border-fred-secondary">
@@ -559,6 +644,8 @@ const SibylClient = ({
           </div>
         </div>
       </div>
+
+      <ProcessMeasures run={run} />
 
       <div className="overflow-x-auto rounded-lg border border-fred-secondary">
         <table className="min-w-full text-sm">

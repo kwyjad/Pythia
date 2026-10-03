@@ -542,6 +542,7 @@ def sibyl_comparison(
         "aggregate": {},
         "by_hazard_metric": [],
         "runs": [],
+        "variants": {},
     }
 
     # runs are useful even with zero scores (coverage/cost/budget KPIs).
@@ -577,6 +578,8 @@ def sibyl_comparison(
             f"{_tf_s} LIMIT 1",
         ).fetchall()
     )
+    if has_sibyl:
+        empty["variants"] = _sibyl_variant_comparison(con, include_test)
     if not has_sibyl or not available_baselines:
         return empty
 
@@ -703,7 +706,103 @@ def sibyl_comparison(
         "aggregate": _aggregate_pairs(pairs),
         "by_hazard_metric": _by_hazard_metric(pairs),
         "runs": runs,
+        "variants": empty["variants"],
     }
+
+
+#: Sibyl's comparisons beyond the standard track (Oct 2026, Part 6). Each is
+#: (left series, right series); in the aggregate "sibyl_*" is the left side
+#: and "standard_*" the right, so a negative mean_delta means the left won.
+_SIBYL_VARIANT_PAIRS = {
+    "vs_sibyl_ref": (_SIBYL_MODEL_NAME, "__ext_sibyl_ref"),
+    "vs_conflictology12": (_SIBYL_MODEL_NAME, "__ext_conflictology12"),
+    "raw_vs_sibyl_ref": ("__ext_sibyl_raw", "__ext_sibyl_ref"),
+    "vs_raw": (_SIBYL_MODEL_NAME, "__ext_sibyl_raw"),
+}
+
+
+def _sibyl_variant_comparison(con, include_test: bool) -> Dict[str, Any]:
+    """Sibyl against its own reference, the 12-month conflictology and its raw pool.
+
+    Paired on (question, horizon, score_type), on the questions whose latest
+    Sibyl forecast rested on evidence; Sibyl's side is its latest scored
+    run, the references are the ``run_id IS NULL`` rows. Each comparison is
+    also split by the selection pass that chose the question (floor, fill,
+    control). Never raises: an older DB gives ``{}`` or empty comparisons.
+    """
+    if not _table_exists(con, "sibyl_forecasts"):
+        return {}
+    try:
+        sel = (
+            "sf.selection_pass" if _table_has_columns(con, "sibyl_forecasts", ["selection_pass"])
+            else "CAST(NULL AS TEXT)"
+        )
+        ev = (
+            "AND COALESCE(sf.evidence_ok, TRUE)"
+            if _table_has_columns(con, "sibyl_forecasts", ["evidence_ok"]) else ""
+        )
+        _tf_sf = _test_filter(include_test, "sf")
+        _tf_s = _test_filter(include_test, "s")
+        rows = _execute(
+            con,
+            f"""
+            WITH pick AS (
+              SELECT sf.question_id, {sel} AS selection_pass,
+                     ROW_NUMBER() OVER (PARTITION BY sf.question_id
+                                        ORDER BY sf.created_at DESC) AS rn
+              FROM sibyl_forecasts sf
+              WHERE sf.status = 'ok' {ev}{_tf_sf}
+            ),
+            sib_latest AS (
+              SELECT s.question_id, MAX(s.run_id) AS run_id FROM scores s
+              WHERE s.model_name = '{_SIBYL_MODEL_NAME}'{_tf_s}
+              GROUP BY s.question_id
+            )
+            SELECT s.question_id, s.horizon_m, s.score_type, s.model_name, s.value,
+                   p.selection_pass, q.hazard_code, UPPER(q.metric)
+            FROM scores s
+            JOIN pick p ON p.question_id = s.question_id AND p.rn = 1
+            JOIN questions q ON q.question_id = s.question_id
+            LEFT JOIN sib_latest l ON l.question_id = s.question_id
+            WHERE ((s.model_name = '{_SIBYL_MODEL_NAME}' AND s.run_id = l.run_id)
+                   OR (s.model_name IN ('__ext_sibyl_ref', '__ext_sibyl_raw',
+                                        '__ext_conflictology12') AND s.run_id IS NULL)){_tf_s}
+            """,
+        ).fetchall()
+    except Exception:
+        logger.debug("sibyl variant comparison failed", exc_info=True)
+        return {}
+
+    values: Dict[tuple, Dict[str, float]] = {}
+    meta: Dict[str, tuple] = {}
+    for qid, h, st, model, v, sp, hz, metric in rows:
+        if v is None:
+            continue
+        values.setdefault((qid, int(h), st), {})[model] = float(v)
+        meta[qid] = (sp, hz, metric)
+
+    out: Dict[str, Any] = {}
+    for name, (left, right) in _SIBYL_VARIANT_PAIRS.items():
+        pairs = []
+        for (qid, h, st), bym in sorted(values.items()):
+            if left in bym and right in bym:
+                sp, hz, metric = meta[qid]
+                pairs.append({
+                    "question_id": qid, "horizon_m": h, "score_type": st,
+                    "hazard_code": hz, "metric": metric, "selection_pass": sp or "unknown",
+                    "score_family": _family_of(metric),
+                    "sibyl_value": bym[left], "standard_value": bym[right],
+                })
+        split: Dict[str, Any] = {}
+        for sp in sorted({p["selection_pass"] for p in pairs}):
+            split[sp] = _aggregate_pairs([p for p in pairs if p["selection_pass"] == sp])
+        out[name] = {
+            "left": left, "right": right,
+            "n_questions": len({p["question_id"] for p in pairs}),
+            "aggregate": _aggregate_pairs(pairs),
+            "by_selection_pass": split,
+        }
+    return out
 
 
 def _load_sibyl_runs(

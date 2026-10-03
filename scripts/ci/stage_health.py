@@ -388,6 +388,27 @@ def _sibyl(con, hs_run_id: str, sibyl_run_id: str = "") -> Dict[str, Any]:
         )
         out["by_status"] = {str(s): int(n) for s, n in status_rows}
 
+    # The evidence record (Oct 2026, Part 6): rows and stored characters for
+    # this run, and the table's total, so its growth is visible run by run.
+    if _has_table(con, "sibyl_evidence"):
+        erow = _q(
+            con,
+            "SELECT COUNT(*), COALESCE(SUM(length(shown_text) + COALESCE(length(doc_text), 0)), 0) "
+            "FROM sibyl_evidence WHERE sibyl_run_id = ?",
+            [out["sibyl_run_id"]],
+        )
+        trow = _q(
+            con,
+            "SELECT COUNT(*), COALESCE(SUM(length(shown_text) + COALESCE(length(doc_text), 0)), 0) "
+            "FROM sibyl_evidence",
+        )
+        out["evidence_table"] = {
+            "run_rows": int(erow[0][0]) if erow else 0,
+            "run_chars": int(erow[0][1]) if erow else 0,
+            "table_rows": int(trow[0][0]) if trow else 0,
+            "table_chars": int(trow[0][1]) if trow else 0,
+        }
+
     # Tool health (Oct 2026). The July 2026 run lost all 216 searches to a
     # tripped breaker and still stored ten "ok" forecasts; a run whose share
     # of failed searches passes SIBYL_DEGRADED_SEARCH_FAIL_SHARE is degraded.
@@ -506,6 +527,13 @@ def _markdown(rep: Dict[str, Any]) -> str:
             f"opus ${sb['opus_cost_usd']} + brave ${sb['brave_cost_usd']}"
         )
         L.append("")
+        ev = sb.get("evidence_table") or {}
+        if ev:
+            L.append(
+                f"Evidence record: {ev['run_rows']} row(s), {ev['run_chars']:,} chars this run · "
+                f"table {ev['table_rows']} row(s), {ev['table_chars']:,} chars"
+            )
+            L.append("")
         tools = sb.get("tools") or {}
         if tools:
             L.append(

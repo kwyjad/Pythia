@@ -747,6 +747,144 @@ def ensure_sibyl_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> Non
     )
 
 
+def ensure_sibyl_measurement_tables(con: duckdb.DuckDBPyConnection) -> None:
+    """The tables Sibyl's measurement loop writes (Oct 2026, Part 6).
+
+    * ``sibyl_evidence``: one row per tool result a trial saw (the text shown
+      to the model, and for a document its text before extraction, capped).
+      Third-party page text: left out of the public release.
+    * ``sibyl_variant_scores``: scores that do not fit ``scores``' shape (the
+      FL/TC two-part scores; later the shadow comparison).
+    * ``sibyl_pool_weights``: the fitted reference weight, one row per month.
+    * ``sibyl_postmortem_notes`` and ``sibyl_lessons``: the post-mortem loop.
+    """
+    _ensure_table_and_columns(
+        con,
+        "sibyl_evidence",
+        """
+        CREATE TABLE IF NOT EXISTS sibyl_evidence (
+            sibyl_run_id TEXT,
+            question_id TEXT,
+            trial_index INTEGER,
+            step INTEGER,
+            call_index INTEGER,
+            tool TEXT,
+            target TEXT,
+            lane TEXT,
+            retrieved_at TIMESTAMP,
+            http_status INTEGER,
+            ok BOOLEAN,
+            sha256 TEXT,
+            shown_text TEXT,
+            doc_text TEXT,
+            doc_chars INTEGER,
+            is_test BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """,
+        {
+            "sibyl_run_id": "TEXT", "question_id": "TEXT", "trial_index": "INTEGER",
+            "step": "INTEGER", "call_index": "INTEGER", "tool": "TEXT", "target": "TEXT",
+            "lane": "TEXT", "retrieved_at": "TIMESTAMP", "http_status": "INTEGER",
+            "ok": "BOOLEAN", "sha256": "TEXT", "shown_text": "TEXT", "doc_text": "TEXT",
+            "doc_chars": "INTEGER", "is_test": "BOOLEAN DEFAULT FALSE",
+            "created_at": "TIMESTAMP",
+        },
+    )
+    _ensure_table_and_columns(
+        con,
+        "sibyl_variant_scores",
+        """
+        CREATE TABLE IF NOT EXISTS sibyl_variant_scores (
+            question_id TEXT,
+            horizon_m INTEGER,
+            series TEXT,
+            score_type TEXT,
+            value DOUBLE,
+            sibyl_run_id TEXT,
+            detail_json TEXT,
+            is_test BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """,
+        {
+            "question_id": "TEXT", "horizon_m": "INTEGER", "series": "TEXT",
+            "score_type": "TEXT", "value": "DOUBLE", "sibyl_run_id": "TEXT",
+            "detail_json": "TEXT", "is_test": "BOOLEAN DEFAULT FALSE",
+            "created_at": "TIMESTAMP",
+        },
+    )
+    _ensure_table_and_columns(
+        con,
+        "sibyl_pool_weights",
+        """
+        CREATE TABLE IF NOT EXISTS sibyl_pool_weights (
+            as_of_month TEXT PRIMARY KEY,
+            weight DOUBLE,
+            n_questions INTEGER,
+            fitted_weight DOUBLE,
+            status TEXT,
+            losses_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """,
+        {
+            "as_of_month": "TEXT", "weight": "DOUBLE", "n_questions": "INTEGER",
+            "fitted_weight": "DOUBLE", "status": "TEXT", "losses_json": "TEXT",
+            "created_at": "TIMESTAMP",
+        },
+    )
+    _ensure_table_and_columns(
+        con,
+        "sibyl_postmortem_notes",
+        """
+        CREATE TABLE IF NOT EXISTS sibyl_postmortem_notes (
+            question_id TEXT,
+            sibyl_run_id TEXT,
+            iso3 TEXT,
+            hazard_code TEXT,
+            metric TEXT,
+            note_json TEXT,
+            model TEXT,
+            cost_usd DOUBLE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (question_id, sibyl_run_id)
+        );
+        """,
+        {
+            "question_id": "TEXT", "sibyl_run_id": "TEXT", "iso3": "TEXT",
+            "hazard_code": "TEXT", "metric": "TEXT", "note_json": "TEXT",
+            "model": "TEXT", "cost_usd": "DOUBLE", "created_at": "TIMESTAMP",
+        },
+    )
+    _ensure_table_and_columns(
+        con,
+        "sibyl_lessons",
+        """
+        CREATE TABLE IF NOT EXISTS sibyl_lessons (
+            hazard_code TEXT,
+            metric TEXT,
+            version INTEGER,
+            as_of_month TEXT,
+            lessons_text TEXT,
+            lessons_json TEXT,
+            n_notes INTEGER,
+            rejected_json TEXT,
+            model TEXT,
+            cost_usd DOUBLE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (hazard_code, metric, version)
+        );
+        """,
+        {
+            "hazard_code": "TEXT", "metric": "TEXT", "version": "INTEGER",
+            "as_of_month": "TEXT", "lessons_text": "TEXT", "lessons_json": "TEXT",
+            "n_notes": "INTEGER", "rejected_json": "TEXT", "model": "TEXT",
+            "cost_usd": "DOUBLE", "created_at": "TIMESTAMP",
+        },
+    )
+
+
 def _ensure_calibration_advice_table(con: duckdb.DuckDBPyConnection) -> None:
     """Ensure the calibration_advice table exists with all columns."""
 
@@ -1841,6 +1979,21 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # Spend on the document-extraction model (sibyl/extract.py),
                 # inside run_cost_usd beside opus and brave. Oct 2026.
                 "extraction_cost_usd": "DOUBLE",
+                # Process measures (Oct 2026, Part 6), over the run's
+                # trials and forecasts: share of trials whose resolver plan
+                # slot ended done, documents read per trial, share of ledger
+                # items carrying both a date and a figure, share of forecasts
+                # with a bucket at the floor, and the mean month-1 JSD of the
+                # raw pool from Sibyl's reference. NULL on earlier runs.
+                "share_resolver_done": "DOUBLE",
+                "docs_per_trial": "DOUBLE",
+                "share_ledger_dated_figure": "DOUBLE",
+                "share_forecasts_at_floor": "DOUBLE",
+                "mean_jsd_from_reference": "DOUBLE",
+                # The reference weight the run's pool used, and where it came
+                # from ('fitted' | 'fixed' | 'backtest').
+                "reference_weight": "DOUBLE",
+                "reference_weight_source": "TEXT",
             },
         )
 
@@ -1941,6 +2094,8 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "trial_checks_json": "TEXT",
             },
         )
+
+        ensure_sibyl_measurement_tables(con)
 
         _ensure_table_and_columns(
             con,

@@ -106,6 +106,18 @@ jobs:
           python -m pythia.tools.generate_calibration_advice --db-url "${RESOLVER_DB_URL}"
           echo "=== generate_calibration_advice completed ==="
 
+      # Sibyl's two ingredients scored on their own (__ext_sibyl_raw, the raw
+      # pool of its trials; __ext_sibyl_ref, its reference), the FL/TC
+      # two-part scores, and the fitted reference weight the next run reads.
+      # Non-fatal: main() returns 0 on any failure, and a missing weight row
+      # leaves the run on SIBYL_REFERENCE_WEIGHT.
+      - name: Score Sibyl variants
+        continue-on-error: true
+        env:
+          PYTHIA_CONFIG_YAML: "pythia/config.yaml"
+        run: |
+          python -m sibyl.score_variants --db-url "${RESOLVER_DB_URL}"
+
       # Sibyl's own advice: what its scored record says it gets wrong, per
       # class, written to sibyl_calibration_advice and shown in Sibyl's prompt
       # on the next run (to half the questions). Non-fatal: a failure leaves
@@ -116,6 +128,18 @@ jobs:
           PYTHIA_CONFIG_YAML: "pythia/config.yaml"
         run: |
           python -m sibyl.advice --db-url "${RESOLVER_DB_URL}"
+
+      # Sibyl post-mortems: a note on each newly resolved question, and per
+      # class (from 8 notes) lessons the next run shows in the track-record
+      # arm. One model at medium effort, capped at SIBYL_POSTMORTEM_CAP_USD
+      # ($5). Uses the existing ANTHROPIC_API_KEY secret. Non-fatal.
+      - name: Sibyl post-mortems
+        continue-on-error: true
+        env:
+          PYTHIA_CONFIG_YAML: "pythia/config.yaml"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python -m sibyl.postmortem --db-url "${RESOLVER_DB_URL}"
 
       # Per-family recalibration factors, read by the forecaster when
       # PYTHIA_FAMILY_RECALIBRATION_MODE is shadow or apply. Non-fatal: a
