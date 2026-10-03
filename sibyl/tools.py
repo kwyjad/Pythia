@@ -22,7 +22,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urljoin, urlsplit
 
 import requests
@@ -31,6 +31,7 @@ from pythia.web_research.backends.brave_search import fetch_via_brave_search
 from pythia.web_research.types import EvidenceSource
 
 from sibyl import config as _cfg
+from sibyl import reader
 from sibyl.config import (
     BRAVE_MAX_RESULTS,
     BRAVE_TIMEOUT_SEC,
@@ -64,6 +65,9 @@ class ToolResult:
     leakage: LeakageStats = field(default_factory=LeakageStats)
     error: Optional[str] = None
     status_code: Optional[int] = None
+    # A document read: its full text BEFORE the extraction model saw it.
+    doc_text: Optional[str] = None
+    url: Optional[str] = None
 
     @property
     def search_failed(self) -> bool:
@@ -72,7 +76,7 @@ class ToolResult:
         "No results" with HTTP 200 is Brave saying nothing matched; every
         other error (a tripped breaker, a missing key, a non-200) is a failure.
         """
-        if self.tool != "brave_search" or self.ok:
+        if self.tool not in ("brave_search", "reliefweb_search") or self.ok:
             return False
         return not (self.error == "no_results" and self.status_code in (None, 200))
 
@@ -132,14 +136,29 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _run_brave(query: str, freshness: str):
+LANES = ("news", "reference")
+
+
+def lane_window_days(lane: str) -> int:
+    """News: the last SEARCH_WINDOW_DAYS; reference: REFERENCE_WINDOW_DAYS."""
+    return _cfg.REFERENCE_WINDOW_DAYS if lane == "reference" else SEARCH_WINDOW_DAYS
+
+
+def _run_brave(query: str, freshness: str, *, window_days: int = SEARCH_WINDOW_DAYS,
+               language: Optional[str] = None, country: Optional[str] = None):
+    kwargs = {}
+    if language:
+        kwargs["search_lang"] = language
+    if country:
+        kwargs["country"] = country
     return fetch_via_brave_search(
         query,
-        recency_days=SEARCH_WINDOW_DAYS,
+        recency_days=window_days,
         include_structural=False,
         timeout_sec=BRAVE_TIMEOUT_SEC,
         max_results=BRAVE_MAX_RESULTS,
         freshness_override=freshness,
+        **kwargs,
     )
 
 
@@ -171,20 +190,33 @@ def _maybe_reset_breaker() -> bool:
     return True
 
 
-def brave_search(query: str, as_of: date, *, today: Optional[date] = None) -> ToolResult:
+def brave_search(
+    query: str,
+    as_of: date,
+    *,
+    today: Optional[date] = None,
+    lane: str = "news",
+    language: Optional[str] = None,
+    country: Optional[str] = None,
+) -> ToolResult:
     """Date-filtered web search through the shared Brave wrapper.
 
-    The freshness date-range always ends at *as_of* (harmless live, a hard
-    cap in backtest); leakage post-filtering runs on the results. A tripped
-    circuit breaker is waited out, reset and retried once (bounded per run).
+    Two lanes (Oct 2026): ``news`` (the last SEARCH_WINDOW_DAYS) and
+    ``reference`` (ten years back), both ending at *as_of* (harmless live, a
+    hard cap in backtest); optional language and country hints. Leakage
+    post-filtering runs on the results. A tripped circuit breaker is waited
+    out, reset and retried once (bounded per run).
     """
     COUNTERS.add("search_calls")
-    freshness = date_range_freshness(as_of, SEARCH_WINDOW_DAYS)
-    pack = _run_brave(query, freshness)
+    lane = lane if lane in LANES else "news"
+    window = lane_window_days(lane)
+    freshness = date_range_freshness(as_of, window)
+    hints = dict(window_days=window, language=language, country=country)
+    pack = _run_brave(query, freshness, **hints)
     if _pack_error_type(pack) == "circuit_breaker_tripped":
         COUNTERS.add("breaker_trips")
         if _maybe_reset_breaker():
-            pack = _run_brave(query, freshness)
+            pack = _run_brave(query, freshness, **hints)
             if _pack_error_type(pack) == "circuit_breaker_tripped":
                 COUNTERS.add("breaker_trips")
     cost = 0.0
@@ -227,7 +259,7 @@ def brave_search(query: str, as_of: date, *, today: Optional[date] = None) -> To
             leakage=stats,
         )
 
-    lines = [f"Search results for: {query} (window ending {as_of.isoformat()})"]
+    lines = [f"Search results ({lane} lane) for: {query} (window ending {as_of.isoformat()})"]
     for i, src in enumerate(kept, start=1):
         date_str = f" [{src.date}]" if src.date else ""
         summary = (src.summary or "").strip()
@@ -305,9 +337,10 @@ def check_public_url(url: str) -> None:
 def _guarded_get(url: str) -> Tuple[requests.Response, bytes, str]:
     """GET ``url``, re-checking every redirect hop and capping the body.
 
-    Returns the final response, at most ``FETCH_URL_MAX_BYTES`` of its body,
-    and the URL it came from. Redirects are followed by hand, because
-    ``requests`` would follow one to a private address without asking.
+    Returns the final response, at most ``FETCH_URL_MAX_BYTES`` of its body
+    (``FETCH_PDF_MAX_BYTES`` for a PDF), and the URL it came from. Redirects
+    are followed by hand, because ``requests`` would follow one to a private
+    address without asking.
     """
 
     current = url
@@ -326,13 +359,19 @@ def _guarded_get(url: str) -> Tuple[requests.Response, bytes, str]:
             current = nxt
             continue
         body = bytearray()
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        cap = (
+            max(FETCH_URL_MAX_BYTES, _cfg.FETCH_PDF_MAX_BYTES)
+            if ("pdf" in ctype or current.lower().split("?", 1)[0].endswith(".pdf"))
+            else FETCH_URL_MAX_BYTES
+        )
         try:
             for chunk in resp.iter_content(chunk_size=65536):
                 if not chunk:
                     continue
                 body.extend(chunk)
-                if len(body) >= FETCH_URL_MAX_BYTES:
-                    del body[FETCH_URL_MAX_BYTES:]
+                if len(body) >= cap:
+                    del body[cap:]
                     break
         finally:
             resp.close()
@@ -353,7 +392,13 @@ def _decode(resp: requests.Response, body: bytes) -> str:
         return body.decode("utf-8", errors="replace")
 
 
-def fetch_url(url: str, as_of: date, *, today: Optional[date] = None) -> ToolResult:
+def fetch_url(
+    url: str,
+    as_of: date,
+    *,
+    today: Optional[date] = None,
+    terms: Sequence[str] = (),
+) -> ToolResult:
     """Fetch a page the agent found via search and return readable text.
 
     Resolution-source URLs are refused in backtest only (live runs may read
@@ -361,6 +406,9 @@ def fetch_url(url: str, as_of: date, *, today: Optional[date] = None) -> ToolRes
     through the snippet leak classifier before being returned.
     """
     stats = LeakageStats(total_retrieved=1)
+    if _is_reliefweb_report(url):
+        # reliefweb.int answers page fetches with HTTP 202; read via the API.
+        return reliefweb_report(url, as_of, today=today, terms=terms)
     if is_blocked_for(url, as_of, today=today):
         stats.dropped_blocked_domain = 1
         return ToolResult(
@@ -409,13 +457,20 @@ def fetch_url(url: str, as_of: date, *, today: Optional[date] = None) -> ToolRes
             leakage=stats, error="blocked_domain",
         )
 
-    raw = _decode(resp, body)
     content_type = (resp.headers.get("Content-Type") or "").lower()
-    if "html" in content_type or raw.lstrip()[:1] == "<":
-        text = _html_to_text(raw)
-    else:
-        text = raw
-    text = (text or "").strip()[:FETCH_URL_MAX_CHARS]
+    try:
+        text = reader.document_text(
+            body, content_type=content_type, url=final_url,
+            text=None if reader.is_pdf(body, content_type, final_url) else _decode(resp, body),
+            terms=terms,
+        )
+    except ValueError as exc:
+        return ToolResult(
+            tool="fetch_url", ok=False,
+            text=f"[fetch returned an unreadable document: {exc}] {url}",
+            leakage=stats, error="unreadable",
+        )
+    text = (text or "").strip()
     if not text:
         return ToolResult(
             tool="fetch_url", ok=False,
@@ -442,6 +497,159 @@ def fetch_url(url: str, as_of: date, *, today: Optional[date] = None) -> ToolRes
     COUNTERS.add("docs_read")
     return ToolResult(
         tool="fetch_url", ok=True,
-        text=f"Content of {url} (truncated to {FETCH_URL_MAX_CHARS} chars):\n{text}",
-        leakage=stats,
+        text=f"Content of {url}:\n{text}",
+        leakage=stats, doc_text=text, url=url,
     )
+
+
+# --- ReliefWeb through its API (Oct 2026) -------------------------------------
+#
+# reliefweb.int answered all 45 page fetches of the Sept 2026 runs with HTTP
+# 202. The API is open (the resolution machine already uses it, with the same
+# RELIEFWEB_APPNAME). Without the name, or when the API fails, the tool says
+# so and the agent carries on with Brave. In backtest mode only reports
+# created on or before the as-of date are returned.
+
+_RW_IDS: Dict[str, int] = {}
+_RW_LOCK = threading.Lock()
+
+
+def _is_reliefweb_report(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    host = (parts.hostname or "").lower()
+    return (host == "reliefweb.int" or host.endswith(".reliefweb.int")) and parts.path.startswith(
+        ("/report/", "/node/")
+    )
+
+
+def _rw_post(payload: dict) -> dict:
+    """POST to the ReliefWeb reports endpoint (seam for tests)."""
+    import os  # noqa: PLC0415
+
+    from resolver.hazard_resolution.reliefweb_sweep import default_post  # noqa: PLC0415
+
+    name = os.getenv("RELIEFWEB_APPNAME", "").strip()
+    if not name:
+        raise RuntimeError("RELIEFWEB_APPNAME is not set")
+    url = _cfg.RELIEFWEB_API_BASE.rstrip("/") + "/reports"
+    return default_post(url, payload, {"appname": name}, _cfg.RELIEFWEB_TIMEOUT_SEC)
+
+
+def _rw_date_filter(as_of: date, today: Optional[date]) -> Optional[dict]:
+    if not is_backtest(as_of, today=today):
+        return None
+    return {"field": "date.created", "value": {"to": f"{as_of.isoformat()}T23:59:59+00:00"}}
+
+
+def reliefweb_search(
+    query: str,
+    as_of: date,
+    *,
+    today: Optional[date] = None,
+    country_iso3: Optional[str] = None,
+) -> ToolResult:
+    """Search ReliefWeb reports: title, source, original date, format, URL."""
+    COUNTERS.add("search_calls")
+    conditions = []
+    if country_iso3:
+        conditions.append({"field": "primary_country.iso3", "value": country_iso3.upper()})
+    date_cond = _rw_date_filter(as_of, today)
+    if date_cond:
+        conditions.append(date_cond)
+    payload: Dict[str, object] = {
+        "query": {"value": query},
+        "fields": {"include": ["id", "title", "url", "url_alias", "source.shortname",
+                               "date.original", "date.created", "format.name"]},
+        "sort": ["date.created:desc"],
+        "limit": _cfg.RELIEFWEB_MAX_RESULTS,
+    }
+    if conditions:
+        payload["filter"] = {"operator": "AND", "conditions": conditions}
+    try:
+        data = _rw_post(payload)
+    except Exception as exc:  # noqa: BLE001 - the agent carries on with Brave
+        COUNTERS.add("search_failed")
+        return ToolResult(
+            tool="reliefweb_search", ok=False,
+            text=f"[ReliefWeb search failed: {exc}] Use brave_search instead. Query: {query}",
+            error="reliefweb_unavailable",
+        )
+    items = data.get("data") or []
+    lines = [f"ReliefWeb reports for: {query} (created on or before {as_of.isoformat()})"]
+    sources: List[EvidenceSource] = []
+    for i, item in enumerate(items, start=1):
+        f = item.get("fields") or {}
+        url = f.get("url_alias") or f.get("url") or ""
+        rid = item.get("id") or f.get("id")
+        if url and rid:
+            with _RW_LOCK:
+                _RW_IDS[url] = int(rid)
+                if f.get("url"):
+                    _RW_IDS[f["url"]] = int(rid)
+        src = ", ".join(s.get("shortname", "") for s in (f.get("source") or []) if isinstance(s, dict))
+        fmt = ", ".join(x.get("name", "") for x in (f.get("format") or []) if isinstance(x, dict))
+        when = (f.get("date") or {}).get("original") or (f.get("date") or {}).get("created") or ""
+        lines.append(f"{i}. {f.get('title', '')} [{str(when)[:10]}] ({src}; {fmt})\n   {url}")
+        sources.append(EvidenceSource(title=f.get("title", ""), url=url, publisher=src,
+                                      date=str(when)[:10] or None, summary=fmt))
+    if not sources:
+        return ToolResult(tool="reliefweb_search", ok=False, text=lines[0] + "\n(no reports)",
+                          error="no_results", status_code=200)
+    return ToolResult(tool="reliefweb_search", ok=True, text="\n".join(lines), sources=sources)
+
+
+def reliefweb_report(
+    url: str,
+    as_of: date,
+    *,
+    today: Optional[date] = None,
+    terms: Sequence[str] = (),
+) -> ToolResult:
+    """Read one ReliefWeb report through the API, with its PDF attachment."""
+    stats = LeakageStats(total_retrieved=1)
+    with _RW_LOCK:
+        rid = _RW_IDS.get(url)
+    cond = {"field": "id", "value": rid} if rid else {"field": "url_alias", "value": url}
+    conditions = [cond]
+    date_cond = _rw_date_filter(as_of, today)
+    if date_cond:
+        conditions.append(date_cond)
+    payload = {
+        "filter": {"operator": "AND", "conditions": conditions},
+        "fields": {"include": ["id", "title", "body", "url", "date.original",
+                               "source.shortname", "file"]},
+        "limit": 1,
+    }
+    try:
+        data = _rw_post(payload)
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(tool="fetch_url", ok=False,
+                          text=f"[ReliefWeb read failed: {exc}] {url}",
+                          leakage=stats, error="reliefweb_unavailable")
+    items = data.get("data") or []
+    if not items:
+        return ToolResult(tool="fetch_url", ok=False,
+                          text=f"[ReliefWeb has no such report on or before {as_of.isoformat()}] {url}",
+                          leakage=stats, error="not_found")
+    f = items[0].get("fields") or {}
+    parts = [str(f.get("title") or ""), str(f.get("body") or "")]
+    for att in f.get("file") or []:
+        if not isinstance(att, dict) or "pdf" not in str(att.get("mimetype", "")).lower():
+            continue
+        try:
+            resp, body, final_url = _guarded_get(att.get("url", ""))
+            if resp.status_code == 200:
+                parts.append(reader.pdf_text(body, terms))
+                break
+        except (UnsafeURL, requests.RequestException, ValueError) as exc:
+            parts.append(f"[attachment not read: {type(exc).__name__}]")
+    text = "\n\n".join(p for p in parts if p.strip())[: _cfg.DOC_MAX_CHARS]
+    if not text.strip():
+        return ToolResult(tool="fetch_url", ok=False, text=f"[empty report] {url}",
+                          leakage=stats, error="empty")
+    COUNTERS.add("docs_read")
+    return ToolResult(tool="fetch_url", ok=True, text=f"Content of {url} (via the ReliefWeb API):\n{text}",
+                      leakage=stats, doc_text=text, url=url)

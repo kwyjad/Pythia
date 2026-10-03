@@ -19,7 +19,11 @@ from typing import Any, Dict, List, Optional
 
 from sibyl.config import QUANTILE_LEVELS
 
-VALID_ACTIONS = ("brave_search", "fetch_url", "submit")
+VALID_ACTIONS = ("brave_search", "reliefweb_search", "fetch_url", "submit")
+TOOL_ACTIONS = ("brave_search", "reliefweb_search", "fetch_url")
+#: The research plan's slots, in the default order (Part 5 lanes reorder them).
+PLAN_SLOTS = ("resolver", "nowcast", "drivers", "calendar", "reversion", "disconfirm")
+PLAN_STATUSES = ("pending", "done", "failed")
 # Each step returns month_1 and month_6 objects (p_zero + positive quantiles).
 VALID_CONFIDENCE = ("low", "medium", "high")
 
@@ -71,6 +75,8 @@ class BeliefState:
     open_questions: List[str] = field(default_factory=list)
     baserate_reconciliation: str = ""
     step_rationale: str = ""
+    # The research plan (Oct 2026): {slot: {"status", "finding"}}.
+    plan: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
     @property
     def quantiles(self) -> Dict[float, float]:
@@ -86,7 +92,12 @@ class BeliefState:
             "open_questions": list(self.open_questions),
             "baserate_reconciliation": self.baserate_reconciliation,
             "step_rationale": self.step_rationale,
+            "plan": {k: dict(v) for k, v in self.plan.items()},
         }
+
+
+def empty_plan() -> Dict[str, Dict[str, str]]:
+    return {slot: {"status": "pending", "finding": ""} for slot in PLAN_SLOTS}
 
 
 def legacy_quantiles(month: MonthBelief) -> Dict[float, float]:
@@ -99,13 +110,29 @@ def legacy_quantiles(month: MonthBelief) -> Dict[float, float]:
 
 
 @dataclass
+class ToolCall:
+    """One tool call in a step: the action, its input text and options."""
+
+    action: str
+    action_input: str
+    options: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class StepDecision:
-    """One parsed agent step: an action plus the updated belief state."""
+    """One parsed agent step: up to MAX_ACTIONS_PER_STEP actions + the belief.
+
+    ``action`` / ``action_input`` are the first call (or ``submit``), kept for
+    older readers of the trace.
+    """
 
     action: str
     action_input: str
     belief: BeliefState
     repaired: bool = False  # the belief needed a clamp or monotonicity repair
+    calls: List[ToolCall] = field(default_factory=list)
+    submit_dropped: bool = False  # a submit sent beside tool calls was ignored
+    plan_given: bool = False
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
@@ -172,6 +199,68 @@ def enforce_monotone_quantiles(
 POS_LEVELS = (0.05, 0.25, 0.5, 0.75, 0.95)
 
 
+def _one_call(raw: Any) -> ToolCall:
+    if not isinstance(raw, dict):
+        raise BeliefStateError("each action must be an object with 'action' and 'action_input'")
+    action = str(raw.get("action", "")).strip().lower()
+    if action not in VALID_ACTIONS:
+        raise BeliefStateError(f"invalid action {action!r}; expected one of {VALID_ACTIONS}")
+    inp = raw.get("action_input", "")
+    options: Dict[str, Any] = {}
+    if isinstance(inp, dict):
+        options = {k: v for k, v in inp.items()}
+        text = str(options.pop("query", None) or options.pop("url", None) or "").strip()
+    else:
+        text = str(inp or "").strip()
+    for key in ("lane", "language", "country", "extraction_request"):
+        if key in raw and key not in options:
+            options[key] = raw[key]
+    if action in TOOL_ACTIONS and not text:
+        raise BeliefStateError(f"action {action!r} requires a non-empty action_input")
+    return ToolCall(action=action, action_input=text, options=options)
+
+
+def _parse_actions(obj: Dict[str, Any]) -> tuple[List[ToolCall], bool, bool]:
+    """(tool calls, submit dropped, truncated). No tool call means submit.
+
+    A step may carry up to MAX_ACTIONS_PER_STEP calls in ``actions``, or the
+    single ``action`` / ``action_input`` form. A submit sent beside tool calls
+    is dropped: it must be a step of its own.
+    """
+    from sibyl.config import MAX_ACTIONS_PER_STEP  # noqa: PLC0415
+
+    raw = obj.get("actions")
+    if isinstance(raw, list) and raw:
+        items = [_one_call(x) for x in raw]
+    elif "action" in obj:
+        items = [_one_call(obj)]
+    else:
+        raise BeliefStateError("no 'action' or 'actions' in the response")
+    tools = [c for c in items if c.action != "submit"]
+    dropped = bool(tools) and len(tools) < len(items)
+    truncated = len(tools) > MAX_ACTIONS_PER_STEP
+    return tools[:MAX_ACTIONS_PER_STEP], dropped, truncated
+
+
+def _parse_plan(raw: Any) -> tuple[Dict[str, Dict[str, str]], bool]:
+    """The plan as {slot: {status, finding}}; (empty plan, False) when absent."""
+    plan = empty_plan()
+    if not isinstance(raw, dict):
+        return plan, False
+    for slot in PLAN_SLOTS:
+        entry = raw.get(slot)
+        if isinstance(entry, str):
+            entry = {"status": entry}
+        if not isinstance(entry, dict):
+            continue
+        status = str(entry.get("status", "pending")).strip().lower()
+        plan[slot] = {
+            "status": status if status in PLAN_STATUSES else "pending",
+            "finding": str(entry.get("finding", "") or "")[:300],
+        }
+    return plan, True
+
+
 def _parse_month(raw: Any, key: str) -> tuple[MonthBelief, bool]:
     """One horizon object. Repairs (clamps, monotonicity) are flagged, not refused."""
     if not isinstance(raw, dict):
@@ -233,13 +322,7 @@ def parse_step_response(text: str) -> StepDecision:
     """
     obj = _extract_json(text)
 
-    action = str(obj.get("action", "")).strip().lower()
-    if action not in VALID_ACTIONS:
-        raise BeliefStateError(f"invalid action {action!r}; expected one of {VALID_ACTIONS}")
-
-    action_input = str(obj.get("action_input", "") or "").strip()
-    if action in ("brave_search", "fetch_url") and not action_input:
-        raise BeliefStateError(f"action {action!r} requires a non-empty action_input")
+    calls, submit_dropped, repaired_actions = _parse_actions(obj)
 
     bs = obj.get("belief_state")
     if not isinstance(bs, dict):
@@ -264,7 +347,9 @@ def parse_step_response(text: str) -> StepDecision:
             return [str(x) for x in raw if str(x).strip()]
         return []
 
+    plan, plan_given = _parse_plan(bs.get("plan"))
     belief = BeliefState(
+        plan=plan,
         month_1=months["month_1"],
         month_6=months["month_6"],
         confidence=confidence,
@@ -274,8 +359,14 @@ def parse_step_response(text: str) -> StepDecision:
         baserate_reconciliation=str(bs.get("baserate_reconciliation", "") or ""),
         step_rationale=str(bs.get("step_rationale", "") or ""),
     )
+    if calls:
+        action, action_input = calls[0].action, calls[0].action_input
+    else:
+        action, action_input = "submit", ""
     return StepDecision(
-        action=action, action_input=action_input, belief=belief, repaired=repaired
+        action=action, action_input=action_input, belief=belief,
+        repaired=repaired or repaired_actions, calls=calls,
+        submit_dropped=submit_dropped, plan_given=plan_given,
     )
 
 

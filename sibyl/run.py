@@ -367,6 +367,7 @@ def process_question(
             "cost_usd": qcost.total_usd,
             "opus_cost_usd": qcost.opus_usd,
             "brave_cost_usd": qcost.brave_usd,
+            "extraction_cost_usd": qcost.extraction_usd,
             "leakage": leakage.to_dict(),
             "evidence_ok": True,
         },
@@ -411,6 +412,7 @@ def _persist_non_ok(
             "cost_usd": qcost.total_usd,
             "opus_cost_usd": qcost.opus_usd,
             "brave_cost_usd": qcost.brave_usd,
+            "extraction_cost_usd": qcost.extraction_usd,
             "leakage": None,
             # A question that ran trials and stored no forecast had none that
             # rested on evidence; a skip that ran nothing has no verdict.
@@ -579,6 +581,7 @@ def run_sibyl(
             "run_cost_usd": breakdown.total_usd,
             "opus_cost_usd": breakdown.opus_usd,
             "brave_cost_usd": breakdown.brave_usd,
+            "extraction_cost_usd": breakdown.extraction_usd,
             "n_selected": len(questions),
             "n_forecast": n_forecast,
             "n_skipped": n_skipped,

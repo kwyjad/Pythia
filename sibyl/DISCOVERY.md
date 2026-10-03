@@ -456,3 +456,26 @@ last 12 values with buckets, the ACLED incompleteness note, the month-1 and
 month-6 vectors, and stay/rise/fall read off those vectors) and seven rules
 on weighing evidence. No wording about Bayesian updating: tests on
 forecasting prompts found it lowers accuracy.
+
+## 2026-10-03 — Part 3: documents, ReliefWeb, a plan, and a submit gate
+
+**What the runs showed.** 43 of the 57 pages Sibyl read in four production runs were Wikipedia. `fetch_url` kept 6,000 characters of stripped HTML and could not read a PDF, though the situation reports and appeals that carry the figures are PDFs. reliefweb.int answered all 45 page fetches in the September runs with HTTP 202. The prompt invited a submit "as soon as further research would not materially change" the belief, and most trials took that invitation early.
+
+**What changed.**
+- `sibyl/reader.py` reads a document properly. For HTML it keeps the main content, renders tables as `a | b` rows, and drops navigation and boilerplate. For a PDF it keeps the first two pages plus the pages that score highest on the country and the question's terms, up to 40 pages. Every document is capped at 80,000 characters.
+- `sibyl/extract.py` handles long documents. Anything over 6,000 characters goes to role `sibyl_extraction` (Haiku 4.5) along with the agent's `extraction_request`. The model returns at most 500 words, with figures quoted word for word. If extraction fails, the agent sees the first 6,000 characters instead. Extraction is its own cost kind and is logged per call.
+- `reliefweb_search` uses the ReliefWeb API, filtered on the question's primary country. A ReliefWeb report link is read through the API, together with its PDF attachment. The tool needs `RELIEFWEB_APPNAME`, which now goes to the Run Sibyl step. The secret already existed for the resolution machine. Dates are capped only in backtest.
+- `brave_search` has two lanes. `news` covers the last 120 days. `reference` covers the last ten years, for base rates and past seasons. Both accept optional language and country hints.
+- A step may carry up to three tool calls. A submit sent beside tool calls is dropped. `MAX_STEPS` moved from 10 to 12.
+- The belief now carries a six-slot plan: resolver, nowcast, drivers, calendar, reversion, disconfirm.
+  - A submit is refused until every slot is done or failed and three documents have been read.
+  - The refusal names what is missing.
+  - The resolver slot may be marked failed only after two steps that failed to find it.
+  - The step limit still ends a trial.
+- The evidence gate rose to three successful searches and two documents read.
+- The early-submit sentence is gone.
+- Each class has a resolver card in `sibyl/resolver_cards/`, shown under HOW THIS RESOLVES. Update the cards whenever resolution changes.
+
+**Unverified.** The sandbox cannot reach api.reliefweb.int. The `url_alias` lookup for a report link that the search did not list has not been tested against the live API. If it fails, the agent is told so and can read the report through a search result instead.
+
+**Tests.** `tests/test_sibyl_documents.py` (30 cases), with fixtures `tests/fixtures/sibyl/report.{pdf,html}` built by `build_fixtures.py`. The smoke test now runs a full three-step trial with a plan.

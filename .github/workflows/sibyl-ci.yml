@@ -25,6 +25,9 @@ on:
       - "interpreter/secondopinion.py"
       - "pythia/tools/base_rate_spd.py"
       - "pythia/tools/score_baselines.py"
+      - "tests/fixtures/sibyl/**"
+      - "pythia/config.yaml"
+      - "pythia/llm_profiles.py"
       - ".github/workflows/sibyl-ci.yml"
   pull_request:
     paths:
@@ -43,6 +46,9 @@ on:
       - "interpreter/secondopinion.py"
       - "pythia/tools/base_rate_spd.py"
       - "pythia/tools/score_baselines.py"
+      - "tests/fixtures/sibyl/**"
+      - "pythia/config.yaml"
+      - "pythia/llm_profiles.py"
       - ".github/workflows/sibyl-ci.yml"
   workflow_dispatch: {}
 
@@ -80,5 +86,6 @@ jobs:
                      tests/test_sibyl_advice.py \
                      tests/test_sibyl_evidence.py \
                      tests/test_sibyl_reference.py \
+                     tests/test_sibyl_documents.py \
                      tests/test_sibyl_smoke.py \
                      tests/test_api_sibyl_routes.py

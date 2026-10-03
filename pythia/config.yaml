@@ -169,6 +169,10 @@ llm:
         # Haiku-class model: the task is copying a number and its sentence,
         # not judgement, and it is the machine's only paid step.
         hazard_extraction: anthropic:claude-haiku-4-5-20251001
+        # --- Sibyl document extraction (sibyl/extract.py, Oct 2026) ---
+        # Returns at most 500 words of verbatim figures from a long document
+        # the agent fetched; Haiku-class for the same reason as above.
+        sibyl_extraction: anthropic:claude-haiku-4-5-20251001
         # --- Interpreter (plain-language report, interpreter/run.py) ---
         # One Opus-class call per cycle; PYTHIA_INTERPRETER_MODEL_ID
         # overrides. The call site requests explicit thinking depth via

@@ -144,8 +144,13 @@ def _run_single_query(
     freshness: str,
     timeout_sec: int,
     count: int = 10,
+    search_lang: str | None = None,
+    country: str | None = None,
 ) -> tuple[List[Dict[str, Any]], int]:
     """Execute a single Brave Search API query.
+
+    ``search_lang`` (ISO 639-1, e.g. "fr") and ``country`` (ISO 3166-1
+    alpha-2, e.g. "ML") are passed to Brave only when set (Sibyl, Oct 2026).
 
     Returns
     -------
@@ -164,6 +169,10 @@ def _run_single_query(
         "extra_snippets": True,
         "text_decorations": False,
     }
+    if search_lang:
+        params["search_lang"] = search_lang
+    if country:
+        params["country"] = country
 
     breaker = _get_brave_breaker()
     resp = None
@@ -212,6 +221,8 @@ def fetch_via_brave_search(
     hazard_code: str | None = None,
     country_name: str | None = None,
     freshness_override: str | None = None,
+    search_lang: str | None = None,
+    country: str | None = None,
 ) -> EvidencePack:
     """Fetch web research evidence via Brave Search API.
 
@@ -240,6 +251,9 @@ def fetch_via_brave_search(
         ``YYYY-MM-DDtoYYYY-MM-DD``). When set it is passed through verbatim
         instead of the value mapped from *recency_days*. Used by Sibyl to
         cap searches at an ``asOf`` date (backtest leakage control).
+    search_lang, country : str or None
+        Optional Brave ``search_lang`` / ``country`` parameters, passed
+        through only when set (Sibyl's language and country hints).
 
     Returns
     -------
@@ -280,7 +294,10 @@ def fetch_via_brave_search(
     last_status_code = 0
 
     for q in queries:
-        results, status_code = _run_single_query(q, api_key, freshness, timeout_sec, count=max_results)
+        results, status_code = _run_single_query(
+            q, api_key, freshness, timeout_sec, count=max_results,
+            search_lang=search_lang, country=country,
+        )
         total_queries += 1
         last_status_code = status_code
         for r in results:
