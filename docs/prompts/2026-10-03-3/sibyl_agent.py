@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Callable, Dict, List, Optional
@@ -36,7 +35,6 @@ from sibyl.belief_state import (
     BeliefStateError,
     StepDecision,
     MonthBelief,
-    empty_plan,
     initial_belief,
     parse_step_response,
 )
@@ -50,9 +48,7 @@ from sibyl.config import (
 from sibyl.cost import COST_KIND_BRAVE, COST_KIND_OPUS, CostBreakdown, CostTracker, log_sibyl_call
 from sibyl.leakage import LeakageStats, is_backtest
 from sibyl.select_questions import SibylQuestion
-from sibyl import extract as sibyl_extract
-from sibyl.cost import COST_KIND_EXTRACTION
-from sibyl.tools import ToolResult, brave_search, fetch_url, reliefweb_search
+from sibyl.tools import ToolResult, brave_search, fetch_url
 
 logger = logging.getLogger(__name__)
 
@@ -112,36 +108,24 @@ Metric definition: {metric_definition}
 Forecast window (6 calendar months): {forecast_months}
 You forecast two months of this window: MONTH 1 ({month_1}) and MONTH 6 ({month_6}). Months 2 to 5 are taken as mixtures of the two.
 
-=== HOW THIS RESOLVES ===
-{resolver_card}
-
 === REFERENCE (your prior) ===
 {base_rate_block}{track_record_block}"""
 
 _TASK = """=== YOUR TASK EACH STEP ===
-Decide your next actions and update your belief state.
+Decide your next action and update your belief state.
 
-Tools (up to {max_actions} calls in one step, listed in "actions"):
-- "brave_search": web search. action_input = {{"query": "...", "lane": "news" | "reference", "language": "<optional ISO 639-1 code, e.g. fr, ar, es>", "country": "<optional 2-letter country code>"}}. The news lane covers the last four months; the reference lane covers ten years, for past episodes, seasonal patterns and structural reports. Both end at the as-of date. Search in the country's own languages as well as English.
-- "reliefweb_search": search ReliefWeb's situation reports, appeals and assessments (UN, NGO, government). action_input = {{"query": "..."}}.
-- "fetch_url": read a document (web page or PDF) found in results. action_input = {{"url": "...", "extraction_request": "the figures or facts you want from it"}}. A long document is read for you by a second model that returns what you asked for, figures word for word; say exactly what you need.
-- "submit": finalize your forecast, as a step of its own. It is accepted only once the "resolver" slot of your plan is done (or has failed twice), you have read at least {submit_min_docs} documents, and the "disconfirm" slot is done. You MUST submit by step {max_steps}.
-
-Your research plan has six slots. Work through all of them; report each one's status and a one-line finding every step:
-- "resolver": how the question resolves, and the resolving source's latest published figures for this country.
-- "nowcast": an estimate for the months between the last month in the reference table and today.
-- "drivers": what is driving the level now.
-- "calendar": dated events inside the window (elections, ceasefire expiries, mission withdrawals, IPC analysis dates, the seasonal climate outlook).
-- "reversion": the case that the series returns to its 12-month norm.
-- "disconfirm": one search aimed at evidence against your current median.
+Actions:
+- "brave_search": run a web search. action_input = the query (natural language, include the country name; searches are date-filtered to the as-of date).
+- "fetch_url": read a page found in earlier search results. action_input = the URL.
+- "submit": finalize your forecast. Use this as soon as further research would not materially change your forecast — do not burn steps for their own sake. You MUST submit by step {max_steps}.
 
 Respond with ONLY a JSON object, no prose outside it:
 {{
-  "actions": [{{"action": "brave_search" | "reliefweb_search" | "fetch_url" | "submit", "action_input": {{...}}}}],
+  "action": "brave_search" | "fetch_url" | "submit",
+  "action_input": "<query or url; empty string for submit>",
   "belief_state": {{
     "month_1": {{"p_zero": <probability>, "quantiles_positive": {{{quantile_keys}}}}},
     "month_6": {{"p_zero": <probability>, "quantiles_positive": {{{quantile_keys}}}}},
-    "plan": {{"resolver": {{"status": "pending" | "done" | "failed", "finding": "one line"}}, "nowcast": {{...}}, "drivers": {{...}}, "calendar": {{...}}, "reversion": {{...}}, "disconfirm": {{...}}}},
     "confidence": "low" | "medium" | "high",
     "evidence_higher": ["evidence found so far that pushes the estimate HIGHER"],
     "evidence_lower": ["evidence found so far that pushes the estimate LOWER"],
@@ -244,11 +228,6 @@ class TrialStepRecord:
     tool_ok: Optional[bool]
     belief: Dict[str, Any]
     repaired: bool
-    # Every call of the step (Oct 2026: up to MAX_ACTIONS_PER_STEP); the
-    # action / action_input / tool_ok fields above are the first call's.
-    calls: List[Dict[str, Any]] = field(default_factory=list)
-    # A submit the research gate refused: what was missing.
-    gate_rejected: Optional[List[str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -258,35 +237,7 @@ class TrialStepRecord:
             "tool_ok": self.tool_ok,
             "belief": self.belief,
             "repaired": self.repaired,
-            "calls": list(self.calls),
-            "gate_rejected": self.gate_rejected,
         }
-
-
-def submit_gate_missing(
-    plan: Dict[str, Dict[str, str]], docs_read: int, resolver_failed_steps: int
-) -> List[str]:
-    """What a submit still lacks; empty when it may stand.
-
-    The resolver slot must be done (or have been reported failed on two
-    steps), SUBMIT_MIN_DOCS documents read, and the disconfirm slot done.
-    """
-    missing: List[str] = []
-    resolver = (plan.get("resolver") or {}).get("status")
-    if resolver != "done" and resolver_failed_steps < 2:
-        missing.append(
-            "the 'resolver' slot: find how this resolves and the resolving source's "
-            "latest figures for this country"
-        )
-    if docs_read < _cfg.SUBMIT_MIN_DOCS:
-        missing.append(
-            f"documents read: {docs_read} of {_cfg.SUBMIT_MIN_DOCS} (use fetch_url)"
-        )
-    if (plan.get("disconfirm") or {}).get("status") != "done":
-        missing.append(
-            "the 'disconfirm' slot: one search aimed at evidence against your median"
-        )
-    return missing
 
 
 @dataclass
@@ -360,21 +311,6 @@ def _quantile_keys_hint() -> str:
     return ", ".join(f'"{lv}": <number>' for lv in POS_LEVELS)
 
 
-_CARD_DIR = Path(__file__).resolve().parent / "resolver_cards"
-
-
-def resolver_card(hazard_code: str, metric: str) -> str:
-    """The class's resolver card (sibyl/resolver_cards/), or a plain line.
-
-    Update the cards whenever resolution changes (CLAUDE.md says so).
-    """
-    path = _CARD_DIR / f"{str(hazard_code).upper()}_{str(metric).upper()}.md"
-    try:
-        return path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return "The resolving source is named in the question above."
-
-
 def _zero_note(question: SibylQuestion) -> str:
     if str(question.hazard_code).upper() in ("FL", "TC") and str(question.metric).upper() == "PA":
         return (
@@ -439,9 +375,6 @@ def build_step_prompt(
         belief_json=json.dumps(belief.to_dict(), indent=2),
         last_tool_result=last_tool_result,
         quantile_keys=_quantile_keys_hint(),
-        max_actions=_cfg.MAX_ACTIONS_PER_STEP,
-        submit_min_docs=_cfg.SUBMIT_MIN_DOCS,
-        resolver_card=resolver_card(question.hazard_code, question.metric),
         parse_feedback=parse_feedback,
     )
 
@@ -488,35 +421,14 @@ def _call_model(
     return result.text or "", usage, result.error or ""
 
 
-def _search_terms(question: SibylQuestion, country_name: str) -> List[str]:
-    """Words a PDF page must carry to be worth reading for this question."""
-    by_metric = {
-        "FATALITIES": ["killed", "fatalities", "deaths", "dead"],
-        "PA": ["affected", "displaced", "people", "households"],
-        "PHASE3PLUS_IN_NEED": ["IPC", "Phase 3", "food insecurity", "crisis"],
-    }
-    by_hazard = {"FL": ["flood"], "TC": ["cyclone", "storm", "typhoon", "hurricane"],
-                 "DR": ["drought"], "ACE": ["conflict", "clashes", "attack"]}
-    terms = [country_name, question.iso3]
-    terms += by_metric.get(str(question.metric).upper(), [])
-    terms += by_hazard.get(str(question.hazard_code).upper(), [])
-    return [t for t in terms if t]
-
-
-def _execute_tool(call, as_of: date, *, question: SibylQuestion, terms: List[str]) -> ToolResult:
-    opts = getattr(call, "options", {}) or {}
-    if call.action == "brave_search":
-        return brave_search(
-            call.action_input, as_of,
-            lane=str(opts.get("lane") or "news"),
-            language=(str(opts["language"]) if opts.get("language") else None),
-            country=(str(opts["country"]) if opts.get("country") else None),
-        )
-    if call.action == "reliefweb_search":
-        return reliefweb_search(call.action_input, as_of, country_iso3=question.iso3)
-    if call.action == "fetch_url":
-        return fetch_url(call.action_input, as_of, terms=terms)
-    raise ValueError(f"not a tool action: {call.action}")
+def _execute_tool(
+    decision: StepDecision, as_of: date
+) -> ToolResult:
+    if decision.action == "brave_search":
+        return brave_search(decision.action_input, as_of)
+    if decision.action == "fetch_url":
+        return fetch_url(decision.action_input, as_of)
+    raise ValueError(f"not a tool action: {decision.action}")
 
 
 def run_trial(
@@ -531,7 +443,6 @@ def run_trial(
     country_name: str,
     model_call: Optional[Callable[[str], tuple[str, Dict[str, Any], str]]] = None,
     track_record: str = "",
-    extraction_call: Optional[Callable[[str, str], tuple[str, Dict[str, Any], str]]] = None,
 ) -> TrialResult:
     """Run one independent agentic trial for *question*.
 
@@ -550,11 +461,8 @@ def run_trial(
     # The reference (sibyl/reference.py) seeds the belief; an object without
     # reference vectors (no history) seeds a labelled placeholder.
     belief = initial_belief(getattr(base_rate, "by_month", None), question.metric)
-    belief.plan = empty_plan()
     last_tool_result = "(none yet — this is your first step)"
     seen_urls: set[str] = set()
-    resolver_failed_steps = 0
-    terms = _search_terms(question, country_name)
 
     for step in range(1, MAX_STEPS + 1):
         decision: Optional[StepDecision] = None
@@ -635,11 +543,7 @@ def run_trial(
                 result.error = "model_step_failed"
             break
 
-        if not decision.plan_given:
-            decision.belief.plan = dict(belief.plan) or empty_plan()
         belief = decision.belief
-        if (belief.plan.get("resolver") or {}).get("status") == "failed":
-            resolver_failed_steps += 1
         record = TrialStepRecord(
             step=step,
             action=decision.action,
@@ -651,93 +555,45 @@ def run_trial(
         result.belief_trace.append(record)
         result.steps_used = step
 
-        if not decision.calls:
-            missing = submit_gate_missing(belief.plan, result.n_docs_read, resolver_failed_steps)
-            if missing and step < MAX_STEPS:
-                record.gate_rejected = missing
-                last_tool_result = (
-                    "Your submit was NOT accepted. Still missing:\n"
-                    + "\n".join(f"- {m}" for m in missing)
-                )
-                continue
+        if decision.action == "submit":
             result.submitted = True
             break
 
-        outputs: List[str] = []
-        for i, tcall in enumerate(decision.calls):
-            tool_result = _execute_tool(tcall, as_of, question=question, terms=terms)
-            if tool_result.tool == "fetch_url" and tool_result.ok and tool_result.doc_text:
-                req = str((tcall.options or {}).get("extraction_request") or "")
-
-                def _log_extract(prompt, response, usage, model_id, error):
-                    log_sibyl_call(
-                        run_id=run_id, question_id=question.question_id,
-                        prompt_text=prompt, response_text=response,
-                        provider="anthropic", model_id=model_id, usage=usage,
-                        iso3=question.iso3, hazard_code=question.hazard_code,
-                        metric=question.metric, error_text=error or "",
-                        hs_run_id=question.hs_run_id,
-                        call_type=f"sibyl_trial{trial_index}_extract",
-                    )
-
-                ex = sibyl_extract.extract(
-                    tool_result.doc_text, req, url=tcall.action_input,
-                    question=question.wording or "", country=country_name,
-                    call=extraction_call, log=_log_extract,
-                )
-                result.cost.add(COST_KIND_EXTRACTION, ex.cost_usd)
-                tracker.add(question.question_id, COST_KIND_EXTRACTION, ex.cost_usd)
-                note = (
-                    f"(read by the extraction model from {len(tool_result.doc_text):,} characters)"
-                    if ex.extracted else
-                    ("" if len(tool_result.doc_text) < _cfg.EXTRACTION_SKIP_CHARS
-                     else f"(extraction unavailable; first {_cfg.EXTRACTION_SKIP_CHARS:,} characters)")
-                )
-                tool_result.text = f"Content of {tcall.action_input} {note}:\n{ex.text}"
-            call_ok = tool_result.ok
-            if i == 0:
-                record.tool_ok = call_ok
-            record.calls.append({
-                "action": tcall.action, "action_input": tcall.action_input,
-                "options": {k: v for k, v in (tcall.options or {}).items()},
-                "tool_ok": call_ok,
-            })
-            if call_ok and tool_result.tool in ("brave_search", "reliefweb_search") and tool_result.sources:
-                result.n_search_ok += 1
-            if call_ok and tool_result.tool == "fetch_url":
-                result.n_docs_read += 1
-            result.cost.add(COST_KIND_BRAVE, tool_result.cost_usd)
-            tracker.add(question.question_id, COST_KIND_BRAVE, tool_result.cost_usd)
-            result.leakage.merge(tool_result.leakage)
-            for src in tool_result.sources:
-                if src.url and src.url not in seen_urls:
-                    seen_urls.add(src.url)
-                    result.source_urls.append(src.url)
-            if tool_result.tool == "brave_search" and tool_result.cost_usd > 0:
-                log_sibyl_call(
-                    run_id=run_id,
-                    question_id=question.question_id,
-                    prompt_text=tcall.action_input,
-                    response_text=tool_result.text[:2000],
-                    provider="brave",
-                    model_id="brave-web-search",
-                    usage={
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0,
-                        "cost_usd": tool_result.cost_usd,
-                    },
-                    iso3=question.iso3,
-                    hazard_code=question.hazard_code,
-                    metric=question.metric,
-                    error_text=tool_result.error or "",
-                    hs_run_id=question.hs_run_id,
-                    call_type=f"sibyl_trial{trial_index}_search",
-                )
-            outputs.append(f"--- {tcall.action}: {tcall.action_input}\n{tool_result.text}")
-        if decision.submit_dropped:
-            outputs.append("(Your submit was ignored: submit must be a step of its own.)")
-        last_tool_result = "\n\n".join(outputs)
+        tool_result = _execute_tool(decision, as_of)
+        record.tool_ok = tool_result.ok
+        if tool_result.ok and tool_result.tool == "brave_search" and tool_result.sources:
+            result.n_search_ok += 1
+        if tool_result.ok and tool_result.tool == "fetch_url":
+            result.n_docs_read += 1
+        result.cost.add(COST_KIND_BRAVE, tool_result.cost_usd)
+        tracker.add(question.question_id, COST_KIND_BRAVE, tool_result.cost_usd)
+        result.leakage.merge(tool_result.leakage)
+        for src in tool_result.sources:
+            if src.url and src.url not in seen_urls:
+                seen_urls.add(src.url)
+                result.source_urls.append(src.url)
+        if tool_result.tool == "brave_search" and tool_result.cost_usd > 0:
+            log_sibyl_call(
+                run_id=run_id,
+                question_id=question.question_id,
+                prompt_text=decision.action_input,
+                response_text=tool_result.text[:2000],
+                provider="brave",
+                model_id="brave-web-search",
+                usage={
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "cost_usd": tool_result.cost_usd,
+                },
+                iso3=question.iso3,
+                hazard_code=question.hazard_code,
+                metric=question.metric,
+                error_text=tool_result.error or "",
+                hs_run_id=question.hs_run_id,
+                call_type=f"sibyl_trial{trial_index}_search",
+            )
+        last_tool_result = tool_result.text
 
     # A trial that ran out of steps without submitting still counts: the
     # belief state was updated every step, so the latest quantiles stand.

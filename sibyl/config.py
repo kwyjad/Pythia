@@ -70,8 +70,15 @@ SIBYL_MODEL_NAME = "sibyl"
 # variance-reduction benefit.
 K = _env_int("SIBYL_K", 3)
 
-# Agent steps per trial (search/fetch/submit). Early submit is allowed.
-MAX_STEPS = _env_int("SIBYL_MAX_STEPS", 10)
+# Agent steps per trial. Since Oct 2026 a step may carry up to
+# MAX_ACTIONS_PER_STEP tool calls and a submit must pass the research gate
+# (sibyl/agent.py::submit_gate_missing); at the step limit the trial ends
+# with what it has.
+MAX_STEPS = _env_int("SIBYL_MAX_STEPS", 12)
+MAX_ACTIONS_PER_STEP = _env_int("SIBYL_MAX_ACTIONS_PER_STEP", 3)
+# Documents a trial must have read before a submit is accepted (the step
+# limit overrides it; the evidence gate below does not).
+SUBMIT_MIN_DOCS = _env_int("SIBYL_SUBMIT_MIN_DOCS", 3)
 
 # Quantile levels each trial must report (discretized CDF).
 QUANTILE_LEVELS = [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
@@ -157,8 +164,11 @@ LIVE_LOOKUPS_ENABLED = _env_bool("SIBYL_LIVE_LOOKUPS_ENABLED", False)
 # --- Search ------------------------------------------------------------------
 BRAVE_MAX_RESULTS = _env_int("SIBYL_BRAVE_MAX_RESULTS", 8)
 BRAVE_TIMEOUT_SEC = _env_int("SIBYL_BRAVE_TIMEOUT_SEC", 20)
-# Default lookback window for date-filtered searches (days before asOf).
+# Lookback windows for date-filtered searches (days before asOf): the
+# "news" lane (default) and the "reference" lane (ten years, for base rates,
+# past episodes and structural material). Both end at asOf.
 SEARCH_WINDOW_DAYS = _env_int("SIBYL_SEARCH_WINDOW_DAYS", 120)
+REFERENCE_WINDOW_DAYS = _env_int("SIBYL_REFERENCE_WINDOW_DAYS", 3650)
 FETCH_URL_TIMEOUT_SEC = _env_int("SIBYL_FETCH_URL_TIMEOUT_SEC", 20)
 FETCH_URL_MAX_CHARS = _env_int("SIBYL_FETCH_URL_MAX_CHARS", 6000)
 # The page body is read up to this many bytes and no further: the model only
@@ -166,6 +176,27 @@ FETCH_URL_MAX_CHARS = _env_int("SIBYL_FETCH_URL_MAX_CHARS", 6000)
 # page fill the runner's memory.
 FETCH_URL_MAX_BYTES = _env_int("SIBYL_FETCH_URL_MAX_BYTES", 3_000_000)
 FETCH_URL_MAX_REDIRECTS = _env_int("SIBYL_FETCH_URL_MAX_REDIRECTS", 5)
+
+# --- Document reader (Oct 2026, sibyl/reader.py) ------------------------------
+# PDFs may be larger than pages; their first two pages plus the pages that
+# score highest on the country and the question's terms are kept, up to
+# PDF_MAX_PAGES; every document's text is capped at DOC_MAX_CHARS.
+FETCH_PDF_MAX_BYTES = _env_int("SIBYL_FETCH_PDF_MAX_BYTES", 15_000_000)
+PDF_MAX_PAGES = _env_int("SIBYL_PDF_MAX_PAGES", 40)
+DOC_MAX_CHARS = _env_int("SIBYL_DOC_MAX_CHARS", 80_000)
+# Documents longer than this go to the cheaper extraction model (role
+# sibyl_extraction) with the agent's extraction_request; shorter ones are
+# shown whole. On extraction failure the first this-many characters are shown.
+EXTRACTION_SKIP_CHARS = _env_int("SIBYL_EXTRACTION_SKIP_CHARS", 6000)
+EXTRACTION_MAX_WORDS = _env_int("SIBYL_EXTRACTION_MAX_WORDS", 500)
+
+# --- ReliefWeb (Oct 2026) -----------------------------------------------------
+# reliefweb.int answers page fetches with HTTP 202 (45 of 45 failed in the
+# Sept 2026 runs), so Sibyl reads reports through the API, with the
+# RELIEFWEB_APPNAME the resolution machine already uses.
+RELIEFWEB_API_BASE = _env_str("SIBYL_RELIEFWEB_API_BASE", "https://api.reliefweb.int/v2")
+RELIEFWEB_MAX_RESULTS = _env_int("SIBYL_RELIEFWEB_MAX_RESULTS", 10)
+RELIEFWEB_TIMEOUT_SEC = _env_float("SIBYL_RELIEFWEB_TIMEOUT_SEC", 30.0)
 
 # --- LLM call limits ----------------------------------------------------------
 ANTHROPIC_MAX_ATTEMPTS = _env_int("SIBYL_ANTHROPIC_MAX_ATTEMPTS", 3)
@@ -179,8 +210,10 @@ ANTHROPIC_MAX_ATTEMPTS = _env_int("SIBYL_ANTHROPIC_MAX_ATTEMPTS", 3)
 # search failed; these defaults catch a blind trial and no more (Opus 5.5
 # averages three searches a trial, so a stricter gate would fail most
 # questions until the agent is made to research in depth).
-MIN_SEARCH_OK = _env_int("SIBYL_MIN_SEARCH_OK", 1)
-MIN_DOCS_READ = _env_int("SIBYL_MIN_DOCS_READ", 0)
+# Raised from 1 / 0 in Part 3 (Oct 2026), once the plan and the submit gate
+# make the agent research in depth.
+MIN_SEARCH_OK = _env_int("SIBYL_MIN_SEARCH_OK", 3)
+MIN_DOCS_READ = _env_int("SIBYL_MIN_DOCS_READ", 2)
 MIN_VALID_TRIALS = _env_int("SIBYL_MIN_VALID_TRIALS", 2)
 
 # --- Brave circuit breaker (Oct 2026) -----------------------------------------

@@ -36,6 +36,7 @@ from tests.sibyl_test_utils import (
     Q1,
     Q2,
     STANDARD_RUN_ID,
+    disable_submit_gate,
     make_search_response,
     make_submit_response,
     seed_db,
@@ -78,6 +79,12 @@ def _http_fail_pack(query, **kwargs):
 
 @pytest.fixture(autouse=True)
 def _quiet(monkeypatch):
+    # These tests pin the evidence gate's mechanics at its Part 1 thresholds
+    # (one search, no document). Part 3 raised the defaults and added a
+    # submit gate; both are tested in tests/test_sibyl_documents.py.
+    monkeypatch.setattr(sibyl_config, "MIN_SEARCH_OK", 1)
+    monkeypatch.setattr(sibyl_config, "MIN_DOCS_READ", 0)
+    disable_submit_gate(monkeypatch)
     monkeypatch.setattr(sibyl_agent, "log_sibyl_call", lambda **kwargs: None)
     monkeypatch.setattr(sibyl_tools, "_sleep", lambda s: None)
     sibyl_tools.reset_run_state()
@@ -107,7 +114,7 @@ def test_trial_counts_successful_searches_and_documents_read(monkeypatch):
     monkeypatch.setattr(sibyl_tools, "fetch_via_brave_search", _ok_pack)
     monkeypatch.setattr(
         sibyl_agent, "fetch_url",
-        lambda url, as_of: sibyl_tools.ToolResult(tool="fetch_url", ok=True, text="page"),
+        lambda url, as_of, **kw: sibyl_tools.ToolResult(tool="fetch_url", ok=True, text="page"),
     )
     script = iter([
         make_search_response("q1"),

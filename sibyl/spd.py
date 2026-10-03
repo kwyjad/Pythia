@@ -366,9 +366,10 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             js_divergence_inter_trial, cost_usd, opus_cost_usd,
             brave_cost_usd, leakage_json, created_at, is_test, selection_pass,
             base_rate_json, advice_arm, advice_as_of_month, evidence_ok,
-            reference_json, raw_by_month_json, final_by_month_json
+            reference_json, raw_by_month_json, final_by_month_json,
+            extraction_cost_usd
         ) VALUES (?, ?, ?, ?, ?, ?, 'sibyl', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -405,6 +406,7 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             _json_or_none(record.get("reference")),
             _json_or_none(record.get("raw_by_month")),
             _json_or_none(record.get("final_by_month")),
+            record.get("extraction_cost_usd", 0.0),
         ],
     )
 
@@ -426,9 +428,9 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             run_hard_cap_usd, budget_capped, run_cost_usd, opus_cost_usd,
             brave_cost_usd, n_selected, n_forecast, n_skipped, config_json,
             created_at, is_test, time_capped, n_search_calls,
-            n_search_failed, n_breaker_trips, n_docs_read
+            n_search_failed, n_breaker_trips, n_docs_read, extraction_cost_usd
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
+                  CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -453,5 +455,6 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             record.get("n_search_failed"),
             record.get("n_breaker_trips"),
             record.get("n_docs_read"),
+            record.get("extraction_cost_usd", 0.0),
         ],
     )

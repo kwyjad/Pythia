@@ -48,6 +48,7 @@ CONSUMED_ROLES = [
     "grounding_claude",
     "crisiswatch",
     "hazard_extraction",
+    "sibyl_extraction",
     "interpreter",
 ]
 

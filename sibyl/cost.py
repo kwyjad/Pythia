@@ -37,20 +37,25 @@ logger = logging.getLogger(__name__)
 
 COST_KIND_OPUS = "opus"
 COST_KIND_BRAVE = "brave"
+# The cheaper document-extraction model (sibyl/extract.py, Oct 2026).
+COST_KIND_EXTRACTION = "extraction"
 
 
 @dataclass
 class CostBreakdown:
     opus_usd: float = 0.0
     brave_usd: float = 0.0
+    extraction_usd: float = 0.0
 
     @property
     def total_usd(self) -> float:
-        return self.opus_usd + self.brave_usd
+        return self.opus_usd + self.brave_usd + self.extraction_usd
 
     def add(self, kind: str, cost_usd: float) -> None:
         if kind == COST_KIND_BRAVE:
             self.brave_usd += cost_usd
+        elif kind == COST_KIND_EXTRACTION:
+            self.extraction_usd += cost_usd
         else:
             self.opus_usd += cost_usd
 
@@ -58,6 +63,7 @@ class CostBreakdown:
         return {
             "opus_usd": round(self.opus_usd, 6),
             "brave_usd": round(self.brave_usd, 6),
+            "extraction_usd": round(self.extraction_usd, 6),
             "total_usd": round(self.total_usd, 6),
         }
 
@@ -91,12 +97,12 @@ class CostTracker:
 
     def run_breakdown(self) -> CostBreakdown:
         with self._lock:
-            return CostBreakdown(self._run.opus_usd, self._run.brave_usd)
+            return CostBreakdown(self._run.opus_usd, self._run.brave_usd, self._run.extraction_usd)
 
     def question_breakdown(self, question_id: str) -> CostBreakdown:
         with self._lock:
             b = self._questions.get(question_id, CostBreakdown())
-            return CostBreakdown(b.opus_usd, b.brave_usd)
+            return CostBreakdown(b.opus_usd, b.brave_usd, b.extraction_usd)
 
     def question_cost_usd(self, question_id: str) -> float:
         return self.question_breakdown(question_id).total_usd

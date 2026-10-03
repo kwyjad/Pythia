@@ -1838,6 +1838,9 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "n_search_failed": "INTEGER",
                 "n_breaker_trips": "INTEGER",
                 "n_docs_read": "INTEGER",
+                # Spend on the document-extraction model (sibyl/extract.py),
+                # inside run_cost_usd beside opus and brave. Oct 2026.
+                "extraction_cost_usd": "DOUBLE",
             },
         )
 
@@ -1928,6 +1931,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "reference_json": "TEXT",
                 "raw_by_month_json": "TEXT",
                 "final_by_month_json": "TEXT",
+                "extraction_cost_usd": "DOUBLE",
             },
         )
 

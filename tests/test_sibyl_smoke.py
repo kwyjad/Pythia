@@ -21,11 +21,10 @@ from tests.sibyl_test_utils import (
     HS_RUN_ID,
     Q1,
     STANDARD_RUN_ID,
-    make_search_response,
-    make_submit_response,
+    research_script,
     seed_db,
-    stub_base_rate,
     stub_reference,
+    stub_tools,
 )
 
 pytestmark = pytest.mark.db
@@ -58,20 +57,23 @@ def smoke_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sibyl_tools, "fetch_via_brave_search", fake_brave)
 
-    # Deterministic agent: each trial searches once, then submits.
+    stub_tools(monkeypatch)
+
+    # Deterministic agent: each trial runs three searches (two Brave, one
+    # ReliefWeb), reads three documents, then submits with its plan done.
+    script = research_script()
     state = {"calls": 0}
 
     def fake_model_call(prompt: str):
-        state["calls"] += 1
         usage = {
             "prompt_tokens": 500,
             "completion_tokens": 200,
             "total_tokens": 700,
             "cost_usd": 0.10,
         }
-        if state["calls"] % 2 == 1:
-            return make_search_response("Ethiopia conflict latest"), usage, ""
-        return make_submit_response(), usage, ""
+        text = script[state["calls"] % len(script)]
+        state["calls"] += 1
+        return text, usage, ""
 
     return fake_model_call
 
@@ -143,21 +145,26 @@ def test_end_to_end_single_question(smoke_env):
         for trial in trials:
             assert trial["quantiles"] is not None
             steps = trial["belief_trace"]
-            assert [s["action"] for s in steps] == ["brave_search", "submit"]
+            assert [s["action"] for s in steps] == ["brave_search", "fetch_url", "submit"]
+            assert [c["action"] for c in steps[0]["calls"]] == [
+                "brave_search", "brave_search", "reliefweb_search"]
+            assert steps[0]["calls"][1]["options"]["lane"] == "reference"
+            assert (trial["n_search_ok"], trial["n_docs_read"]) == (3, 3)
+            assert steps[2]["belief"]["plan"]["disconfirm"]["status"] == "done"
             assert steps[0]["belief"]["month_1"]["quantiles_positive"]
             assert trial["month_1"]["p_zero"] == pytest.approx(0.1)
             assert trial["month_6"]["p_zero"] == pytest.approx(0.15)
-            assert trial["source_urls"] == ["https://news.example.com/report"]
+            assert "https://news.example.com/report" in trial["source_urls"]
 
         # Divergences computed (identical trials -> inter-trial JSD of 0.0,
         # but present; standard track differs -> positive JSD).
         assert rec[5] is not None and rec[5] > 0.0
         assert rec[6] is not None and rec[6] == pytest.approx(0.0, abs=1e-9)
 
-        # Costs: 6 Opus calls x $0.10 + 3 Brave queries x $0.005.
-        assert rec[7] == pytest.approx(0.615, abs=1e-6)
-        assert rec[8] == pytest.approx(0.6, abs=1e-6)
-        assert rec[9] == pytest.approx(0.015, abs=1e-6)
+        # Costs: 9 Opus calls x $0.10 + 6 Brave queries x $0.005.
+        assert rec[7] == pytest.approx(0.93, abs=1e-6)
+        assert rec[8] == pytest.approx(0.9, abs=1e-6)
+        assert rec[9] == pytest.approx(0.03, abs=1e-6)
         assert rec[10] is not None  # asOf persisted for deferred calibration
 
         # --- reference, raw pool and published vectors (Oct 2026) -----------
@@ -200,10 +207,10 @@ def test_end_to_end_single_question(smoke_env):
             [Q1],
         ).fetchall()
         by_provider = {r[0]: (r[1], r[2]) for r in ledger}
-        assert by_provider["anthropic"][0] == 6
-        assert by_provider["brave"][0] == 3
-        assert by_provider["anthropic"][1] == pytest.approx(0.6, abs=1e-6)
-        assert by_provider["brave"][1] == pytest.approx(0.015, abs=1e-6)
+        assert by_provider["anthropic"][0] == 9
+        assert by_provider["brave"][0] == 6
+        assert by_provider["anthropic"][1] == pytest.approx(0.9, abs=1e-6)
+        assert by_provider["brave"][1] == pytest.approx(0.03, abs=1e-6)
     finally:
         con.close()
 
