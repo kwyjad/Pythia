@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from sibyl.config import QUANTILE_LEVELS
+from sibyl.ledger import parse_ledger_add
 
 VALID_ACTIONS = ("brave_search", "reliefweb_search", "fetch_url", "submit")
 TOOL_ACTIONS = ("brave_search", "reliefweb_search", "fetch_url")
@@ -133,6 +134,8 @@ class StepDecision:
     calls: List[ToolCall] = field(default_factory=list)
     submit_dropped: bool = False  # a submit sent beside tool calls was ignored
     plan_given: bool = False
+    # New evidence-ledger items this step (sibyl/ledger.py), cleaned.
+    ledger_add: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
@@ -367,6 +370,7 @@ def parse_step_response(text: str) -> StepDecision:
         action=action, action_input=action_input, belief=belief,
         repaired=repaired or repaired_actions, calls=calls,
         submit_dropped=submit_dropped, plan_given=plan_given,
+        ledger_add=parse_ledger_add(obj),
     )
 
 
