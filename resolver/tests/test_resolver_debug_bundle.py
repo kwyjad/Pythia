@@ -1374,9 +1374,7 @@ def test_crisiswatch_edition_gap_and_unmapped_headings_are_named(tmp_path):
         "arrow TEXT, alert_type TEXT, summary TEXT, country_name TEXT, "
         "fetched_at TIMESTAMP, content_hash TEXT)"
     )
-    from horizon_scanner.crisiswatch import expected_editions_window
-
-    window = expected_editions_window(_dt.date.today(), 12)
+    window = bundle.expected_crisiswatch_window(_dt.date.today())
     gap = window[4]
     for (yy, mm) in window:
         if (yy, mm) != gap:

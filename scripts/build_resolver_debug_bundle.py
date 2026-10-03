@@ -448,6 +448,17 @@ def _superseded_connectors(records: list[dict]) -> dict[str, str]:
     }
 
 
+def expected_crisiswatch_window(today: dt.date) -> list[tuple[int, int]]:
+    """The twelve CrisisWatch editions a run on *today* should hold.
+
+    One rule, in ``horizon_scanner.crisiswatch.expected_edition``; imported
+    here lazily so the bundle does not load the horizon scanner to start.
+    """
+    from horizon_scanner.crisiswatch import expected_editions_window
+
+    return expected_editions_window(today, 12)
+
+
 class BundleBuilder:
     """Assembles the bundle. Every section is best-effort and records problems."""
 
@@ -2998,9 +3009,7 @@ class BundleBuilder:
             return self._check(name, "SKIP", "", "", "crisiswatch_entries absent")
         result = self.query("SELECT DISTINCT year, month FROM crisiswatch_entries")
         held = {(int(r[0]), int(r[1])) for r in (result[1] if result else []) if r[0] and r[1]}
-        from horizon_scanner.crisiswatch import expected_editions_window
-
-        window = expected_editions_window(dt.date.today(), 12)
+        window = expected_crisiswatch_window(dt.date.today())
         missing = sorted(k for k in window if k not in held)
         if not missing:
             return self._check(name, "PASS", 12, 12, "all twelve editions held")
