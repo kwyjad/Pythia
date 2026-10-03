@@ -201,3 +201,13 @@ DEGRADED_SEARCH_FAIL_SHARE = _env_float("SIBYL_DEGRADED_SEARCH_FAIL_SHARE", 0.20
 # Interpolation left ten of 258 buckets at exactly zero; compute_scores floors
 # at 1e-9, so such a bucket occurring costs about 20.7 nats of log loss.
 BUCKET_FLOOR = _env_float("SIBYL_BUCKET_FLOOR", 0.005)
+
+# --- Reference and pooling (Oct 2026, sibyl/reference.py) --------------------
+# Sibyl publishes, per window month, REFERENCE_WEIGHT x its mechanical
+# reference + the rest x its pooled trials (the trials alone when there is no
+# reference). 0.5 is a starting value; Part 6 fits it once 20 questions have
+# both series scored.
+REFERENCE_WEIGHT = _env_float("SIBYL_REFERENCE_WEIGHT", 0.5)
+# DR/PHASE3PLUS_IN_NEED reference: this weight on "the last figure persists",
+# the rest on the 36-month history vector. A starting value, no backtest.
+DR_PERSISTENCE_WEIGHT = _env_float("SIBYL_DR_PERSISTENCE_WEIGHT", 0.5)

@@ -75,6 +75,8 @@ REFERENCES = (
     "__ext_persistence",
     "__ext_level_volatility",
     "__ext_level_transition",
+    "__ext_conflictology12",
+    "__ext_ref_pool",
     "__ext_uniform",
 )
 #: The references skill is quoted against (history, headline).

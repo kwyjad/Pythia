@@ -187,6 +187,15 @@ Five **reference forecasters** are scored beside the real models (rows in
   country at zero inherits the downward moves of months that started higher
   and they pile onto bucket 0 at the edge. A horizon with no pair from the
   level's bucket has no row. The audit source starts `level_transition:`.
+- `__ext_conflictology12` (ACE/FATALITIES only, scored, never shown to the
+  ensemble, Oct 2026) — bucket shares of the country's last 12 complete
+  monthly values ending at the same level month, the same vector at every
+  horizon, each bucket floored at 0.005. The audit source starts
+  `conflictology12:`.
+- `__ext_ref_pool` (ACE/FATALITIES only, Oct 2026) — per horizon 0.75 x
+  `__ext_conflictology12` + 0.25 x `__ext_level_transition` (the 12-month
+  vector alone where the transition vector is missing). It is the reference
+  Sibyl starts from and is pooled with; the audit source starts `ref_pool:`.
 
 What the prompt showed, against how each reference is built:
 

@@ -15,7 +15,7 @@ import pytest
 from sibyl.belief_state import (
     BeliefStateError,
     enforce_monotone_quantiles,
-    initial_belief_from_anchor,
+    initial_belief,
     parse_step_response,
 )
 from sibyl.config import QUANTILE_LEVELS
@@ -58,15 +58,29 @@ def test_parse_rejects_tool_action_without_input():
 
 def test_parse_rejects_missing_quantile_levels():
     bad = json.loads(make_submit_response())
-    del bad["belief_state"]["quantiles"]["0.95"]
-    with pytest.raises(BeliefStateError, match="missing required quantile levels"):
+    del bad["belief_state"]["month_1"]["quantiles_positive"]["0.95"]
+    with pytest.raises(BeliefStateError, match="missing required positive quantile levels"):
+        parse_step_response(json.dumps(bad))
+
+
+def test_parse_rejects_a_missing_horizon():
+    bad = json.loads(make_submit_response())
+    del bad["belief_state"]["month_6"]
+    with pytest.raises(BeliefStateError, match="month_6"):
         parse_step_response(json.dumps(bad))
 
 
 def test_parse_rejects_non_numeric_quantiles():
     bad = json.loads(make_submit_response())
-    bad["belief_state"]["quantiles"]["0.5"] = "around a hundred"
+    bad["belief_state"]["month_1"]["quantiles_positive"]["0.5"] = "around a hundred"
     with pytest.raises(BeliefStateError, match="non-numeric"):
+        parse_step_response(json.dumps(bad))
+
+
+def test_parse_rejects_a_missing_p_zero():
+    bad = json.loads(make_submit_response())
+    del bad["belief_state"]["month_1"]["p_zero"]
+    with pytest.raises(BeliefStateError, match="p_zero"):
         parse_step_response(json.dumps(bad))
 
 
@@ -84,17 +98,32 @@ def test_parse_rejects_empty_and_json_free_responses():
 
 def test_monotone_violation_is_repaired_not_rejected():
     bad = json.loads(make_submit_response())
-    bad["belief_state"]["quantiles"] = {
-        "0.1": 100, "0.25": 50, "0.5": 200, "0.75": 150,
-        "0.9": 500, "0.95": 400, "0.99": 1000,
+    bad["belief_state"]["month_1"]["quantiles_positive"] = {
+        "0.05": 100, "0.25": 50, "0.5": 200, "0.75": 150, "0.95": 400,
     }
     decision = parse_step_response(json.dumps(bad))
     assert decision.repaired is True
-    values = [decision.belief.quantiles[lv] for lv in QUANTILE_LEVELS]
-    assert values == sorted(values)
-    # Running-max repair: raised to at least the previous level's value.
-    assert decision.belief.quantiles[0.25] == 100
-    assert decision.belief.quantiles[0.95] == 500
+    q = decision.belief.month_1.quantiles_positive
+    assert [q[lv] for lv in (0.05, 0.25, 0.5, 0.75, 0.95)] == [100, 100, 200, 200, 400]
+
+
+def test_out_of_range_values_are_clamped_and_flagged():
+    bad = json.loads(make_submit_response())
+    bad["belief_state"]["month_6"]["p_zero"] = 1.4
+    bad["belief_state"]["month_6"]["quantiles_positive"]["0.05"] = 0
+    decision = parse_step_response(json.dumps(bad))
+    assert decision.repaired is True
+    assert decision.belief.month_6.p_zero == 1.0
+    assert decision.belief.month_6.quantiles_positive[0.05] == 1.0
+
+
+def test_legacy_quantiles_read_month_1_at_the_old_levels():
+    decision = parse_step_response(make_submit_response())
+    q = decision.belief.quantiles
+    assert set(q) == set(QUANTILE_LEVELS)
+    # p_zero 0.1: the 0.1 quantile sits at (or just above) zero.
+    assert q[0.1] < 1.0
+    assert [q[lv] for lv in QUANTILE_LEVELS] == sorted(q[lv] for lv in QUANTILE_LEVELS)
 
 
 def test_negative_quantiles_floored_at_zero():
@@ -110,13 +139,16 @@ def test_enforce_monotone_no_op_on_valid_input():
     assert repaired == q
 
 
-def test_initial_belief_seeds_from_anchor():
-    anchor = {0.1: 1.0, 0.25: 2.0, 0.5: 5.0, 0.75: 9.0, 0.9: 20.0, 0.95: 40.0, 0.99: 90.0}
-    belief = initial_belief_from_anchor(anchor)
-    assert belief.quantiles == anchor
+def test_initial_belief_seeds_from_the_reference():
+    ref = {1: [0.3, 0.1, 0.3, 0.2, 0.05, 0.03, 0.02], 6: [0.2, 0.1, 0.3, 0.2, 0.1, 0.05, 0.05]}
+    belief = initial_belief(ref, "FATALITIES")
+    assert belief.month_1.p_zero == pytest.approx(0.3)
+    assert belief.month_6.p_zero == pytest.approx(0.2)
     assert belief.confidence == "low"
+    assert "reference" in belief.baserate_reconciliation
 
 
-def test_initial_belief_without_anchor_is_zero_knowledge():
-    belief = initial_belief_from_anchor(None)
-    assert all(belief.quantiles[lv] == 0.0 for lv in QUANTILE_LEVELS)
+def test_initial_belief_without_reference_is_a_labelled_placeholder():
+    belief = initial_belief(None, "FATALITIES")
+    assert "placeholder" in belief.baserate_reconciliation
+    assert all(v == 1.0 for v in belief.month_1.quantiles_positive.values())

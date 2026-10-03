@@ -23,6 +23,8 @@ on:
       - "scripts/create_questions_from_triage.py"
       - "scripts/ai_bundle/build_current_run_bundle.py"
       - "interpreter/secondopinion.py"
+      - "pythia/tools/base_rate_spd.py"
+      - "pythia/tools/score_baselines.py"
       - ".github/workflows/sibyl-ci.yml"
   pull_request:
     paths:
@@ -39,6 +41,8 @@ on:
       - "scripts/create_questions_from_triage.py"
       - "scripts/ai_bundle/build_current_run_bundle.py"
       - "interpreter/secondopinion.py"
+      - "pythia/tools/base_rate_spd.py"
+      - "pythia/tools/score_baselines.py"
       - ".github/workflows/sibyl-ci.yml"
   workflow_dispatch: {}
 
@@ -75,5 +79,6 @@ jobs:
                      tests/test_sibyl_select_questions.py \
                      tests/test_sibyl_advice.py \
                      tests/test_sibyl_evidence.py \
+                     tests/test_sibyl_reference.py \
                      tests/test_sibyl_smoke.py \
                      tests/test_api_sibyl_routes.py

@@ -152,10 +152,11 @@ class TestScoreBaselinesEndToEnd:
         # 2 SPD horizons x 2 models x 3 types + 1 CU horizon x 1 model x 3 types
         # + 1 binary horizon x 2 models x 1 type = 12 + 3 + 2 = 17, plus the
         # ACE/FATALITIES persistence reference: 2 horizons x 3 types = 23,
-        # plus the level-and-volatility reference: 2 horizons x 3 types = 29.
-        assert n == 29
-        # Audit: one row per (question, horizon, model) actually scored = 11.
-        assert audit == 11
+        # plus the level-and-volatility reference: 2 horizons x 3 types = 29,
+        # plus __ext_conflictology12 and __ext_ref_pool (Oct 2026): 2 x 2 x 3 = 41.
+        assert n == 41
+        # Audit: one row per (question, horizon, model) actually scored = 15.
+        assert audit == 15
 
     def test_excluded_from_calibration_softmax_filter(self):
         # The calibration query filters model_name NOT LIKE '__ext_%' — pin

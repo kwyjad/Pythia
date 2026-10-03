@@ -1918,6 +1918,16 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # and scored, and every reader of Sibyl's record leaves them
                 # out (the July 2026 run's searches all failed).
                 "evidence_ok": "BOOLEAN",
+                # Sibyl's reference and pool (Oct 2026): the reference
+                # vectors by month with source and weight; the pooled trials
+                # BEFORE the reference (bucket vectors and quantiles per
+                # month — what the advice loop compares outcomes with); and
+                # the published vectors. bucket_probs_json keeps the final
+                # month-1 vector and pooled_quantiles_json the raw month-1
+                # quantiles at the old seven levels, for older readers.
+                "reference_json": "TEXT",
+                "raw_by_month_json": "TEXT",
+                "final_by_month_json": "TEXT",
             },
         )
 

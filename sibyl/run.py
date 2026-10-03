@@ -44,10 +44,11 @@ from pythia.db.schema import connect, ensure_schema
 
 from sibyl import config as sibyl_config
 from sibyl.agent import TrialResult, run_trial
-from sibyl.aggregate import aggregate_trials
-from sibyl.base_rates import load_base_rate
+from sibyl.aggregate import dist_from_vector, pool_months, publish_vectors
+from sibyl.belief_state import MonthBelief, legacy_quantiles
+from sibyl.reference import NO_REFERENCE_TEXT, build_reference
 from sibyl.advice import advice_arm
-from sibyl.calibration import calibrate, load_advice
+from sibyl.calibration import load_advice
 from sibyl.config import (
     ADVICE_EXPERIMENT_SHARE,
     AGGREGATION,
@@ -74,9 +75,8 @@ from sibyl.select_questions import (
 )
 from sibyl.spd import (
     apply_bucket_floor,
-    bucket_probs_from_distribution,
     find_standard_run_id,
-    inter_trial_divergence,
+    inter_trial_divergence_vectors,
     load_standard_spd_by_month,
     persist_sibyl_forecast,
     persist_sibyl_run,
@@ -97,6 +97,14 @@ def _runtime_cap_reached(started: float, limit_min: float, now: Optional[float] 
         return False
     elapsed = (time.monotonic() if now is None else now) - started
     return elapsed >= limit_min * 60.0
+
+
+@dataclass
+class _NoReference:
+    """Stands in for a Reference when a question has no history."""
+
+    prompt_text: str = NO_REFERENCE_TEXT
+    by_month: Optional[Dict[int, List[float]]] = None
 
 
 @dataclass
@@ -179,9 +187,10 @@ def process_question(
         return outcome
 
     country = _country_name(question.iso3)
-    base_rate = load_base_rate(
-        question.iso3, question.hazard_code, question.metric, forecast_keys
-    )
+    # Sibyl's own prior (sibyl/reference.py): one bucket vector per window
+    # month, the block the prompt shows, and the seed of every trial's belief.
+    reference = build_reference(con, question, forecast_keys, as_of, known_at=as_of)
+    base_rate = reference or _NoReference()
 
     # Sibyl's own track record for this class (sibyl/advice.py). Loaded once
     # per question: the text is constant across its trials and steps. No
@@ -241,34 +250,59 @@ def process_question(
             )
         return outcome
 
+    from pythia.buckets import n_buckets_for  # noqa: PLC0415
+
+    metric = question.metric
     try:
-        pooled = aggregate_trials([t.quantiles for t in ok_trials], AGGREGATION)
-        # Identity hook while CALIBRATION_ENABLED is off; horizon-specific
-        # application is part of the deferred PIT work (see calibration.py).
-        pooled = calibrate(pooled, question.hazard_code, 0)
-        bucket_probs = apply_bucket_floor(
-            bucket_probs_from_distribution(pooled, question.metric)
-        )
-    except ValueError as exc:
+        trial_months = [
+            {1: t.month_beliefs[1].dist(), 6: t.month_beliefs[6].dist()} for t in ok_trials
+        ]
+        pool = pool_months(trial_months, metric)
+        ref_vectors = reference.by_month if reference else None
+        weight = float(_cfg.REFERENCE_WEIGHT)
+        final = {
+            m: apply_bucket_floor(v)
+            for m, v in publish_vectors(pool.vectors, ref_vectors, weight).items()
+        }
+        trial_vectors = []
+        for tm in trial_months:
+            from sibyl.aggregate import month_vector  # noqa: PLC0415
+
+            trial_vectors.append(month_vector(tm[1], metric))
+    except (ValueError, KeyError) as exc:
         outcome.skip_reason = f"aggregation failed: {exc}"
         logger.error("sibyl.run: aggregation failed for %s: %s", question.question_id, exc)
         return outcome
-
-    from pythia.buckets import n_buckets_for  # noqa: PLC0415
 
     standard_run_id = find_standard_run_id(con, question.question_id)
     forecast_run_id = standard_run_id or sibyl_run_id
     standard = (
         load_standard_spd_by_month(
-            con, standard_run_id, question.question_id, n_buckets_for(question.metric)
+            con, standard_run_id, question.question_id, n_buckets_for(metric)
         )
         if standard_run_id
         else None
     )
-    outcome.js_vs_standard = track_divergence(bucket_probs, standard)
-    outcome.js_inter_trial = inter_trial_divergence(
-        [t.quantiles for t in ok_trials], question.metric
-    )
+    outcome.js_vs_standard = track_divergence(final, standard)
+    outcome.js_inter_trial = inter_trial_divergence_vectors(trial_vectors)
+
+    # Legacy views for older readers: the raw month-1 quantiles at the old
+    # seven levels, and the final month-1 vector.
+    raw_m1_legacy = {
+        str(lv): float(pool.quantiles[1][lv]) for lv in sibyl_config.QUANTILE_LEVELS
+    }
+    reference_record = None
+    base_rate_record = None
+    if reference is not None:
+        reference_record = dict(reference.to_dict(), weight=weight)
+        ref_m1 = dist_from_vector(reference.by_month[1], metric)
+        anchor = legacy_quantiles(MonthBelief(ref_m1.p_zero, ref_m1.qpos))
+        base_rate_record = {
+            "summary": {"type": "sibyl_reference", "source": reference.source},
+            "prompt_text": reference.prompt_text,
+            "anchor_quantiles": {str(k): v for k, v in sorted(anchor.items())},
+            "framing_notes": [],
+        }
 
     qcost = tracker.question_breakdown(question.question_id)
     spd_payload = {
@@ -276,13 +310,15 @@ def process_question(
         "as_of": as_of.isoformat(),
         "k": len(ok_trials),
         "k_requested": K,
-        "aggregation": AGGREGATION,
+        "aggregation": "linear_pool_by_month",
         "model": MODEL,
-        "pooled_quantiles": {str(k): v for k, v in sorted(pooled.quantiles.items())},
+        "pooled_quantiles": raw_m1_legacy,
         "trial_quantiles": [
             {str(k): v for k, v in sorted(t.quantiles.items())} for t in ok_trials
         ],
         "forecast_months": forecast_keys,
+        "reference_source": reference.source if reference else None,
+        "reference_weight": weight if reference else 0.0,
         "js_divergence_vs_standard": outcome.js_vs_standard,
         "js_divergence_inter_trial": outcome.js_inter_trial,
     }
@@ -290,7 +326,7 @@ def process_question(
         con,
         run_id=forecast_run_id,
         question=question,
-        bucket_probs=bucket_probs,
+        bucket_probs=final,
         spd_payload=spd_payload,
         human_explanation=_human_explanation(question, outcome.trials),
         cost_usd=qcost.total_usd,
@@ -313,16 +349,19 @@ def process_question(
             "skip_reason": None,
             "as_of": as_of.isoformat(),
             "k": len(ok_trials),
-            "aggregation": AGGREGATION,
+            "aggregation": "linear_pool_by_month",
             "volatility_score": question.volatility_score,
             "triage_score": question.triage_score,
             "selection_pass": question.selection_pass,
-            "base_rate": base_rate.to_dict(),
+            "base_rate": base_rate_record,
             "advice_arm": arm,
             "advice_as_of_month": advice.as_of_month if track_record else None,
             "pooled_quantiles": spd_payload["pooled_quantiles"],
             "trials": [t.to_dict() for t in outcome.trials],
-            "bucket_probs": list(bucket_probs),
+            "bucket_probs": list(final[1]),
+            "reference": reference_record,
+            "raw_by_month": pool.to_dict(),
+            "final_by_month": {str(m): v for m, v in sorted(final.items())},
             "js_divergence_vs_standard": outcome.js_vs_standard,
             "js_divergence_inter_trial": outcome.js_inter_trial,
             "cost_usd": qcost.total_usd,

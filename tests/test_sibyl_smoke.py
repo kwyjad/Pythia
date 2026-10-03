@@ -25,6 +25,7 @@ from tests.sibyl_test_utils import (
     make_submit_response,
     seed_db,
     stub_base_rate,
+    stub_reference,
 )
 
 pytestmark = pytest.mark.db
@@ -33,7 +34,7 @@ pytestmark = pytest.mark.db
 @pytest.fixture()
 def smoke_env(tmp_path, monkeypatch):
     seed_db(tmp_path, monkeypatch)
-    monkeypatch.setattr(sibyl_run, "load_base_rate", lambda *a, **k: stub_base_rate())
+    monkeypatch.setattr(sibyl_run, "build_reference", stub_reference)
 
     def fake_brave(query, **kwargs):
         pack = EvidencePack(query=query, backend="brave", grounded=True)
@@ -88,7 +89,7 @@ def test_end_to_end_single_question(smoke_env):
     con = connect(read_only=False)
     try:
         # --- valid native SPD in forecasts_raw (what compute_scores reads) --
-        raw = con.execute(
+        raw_rows = raw = con.execute(
             """
             SELECT month_index, bucket_index, probability
             FROM forecasts_raw
@@ -132,7 +133,7 @@ def test_end_to_end_single_question(smoke_env):
         ).fetchone()
         assert rec[0] == "ok"
         assert rec[1] == 3  # K trials completed
-        assert rec[2] == "linear_pool"
+        assert rec[2] == "linear_pool_by_month"
 
         pooled = json.loads(rec[3])
         assert set(pooled) == {"0.1", "0.25", "0.5", "0.75", "0.9", "0.95", "0.99"}
@@ -143,7 +144,9 @@ def test_end_to_end_single_question(smoke_env):
             assert trial["quantiles"] is not None
             steps = trial["belief_trace"]
             assert [s["action"] for s in steps] == ["brave_search", "submit"]
-            assert steps[0]["belief"]["quantiles"]
+            assert steps[0]["belief"]["month_1"]["quantiles_positive"]
+            assert trial["month_1"]["p_zero"] == pytest.approx(0.1)
+            assert trial["month_6"]["p_zero"] == pytest.approx(0.15)
             assert trial["source_urls"] == ["https://news.example.com/report"]
 
         # Divergences computed (identical trials -> inter-trial JSD of 0.0,
@@ -156,6 +159,25 @@ def test_end_to_end_single_question(smoke_env):
         assert rec[8] == pytest.approx(0.6, abs=1e-6)
         assert rec[9] == pytest.approx(0.015, abs=1e-6)
         assert rec[10] is not None  # asOf persisted for deferred calibration
+
+        # --- reference, raw pool and published vectors (Oct 2026) -----------
+        ref_j, raw_j, fin_j = con.execute(
+            "SELECT reference_json, raw_by_month_json, final_by_month_json "
+            "FROM sibyl_forecasts WHERE sibyl_run_id = ? AND question_id = ?",
+            [sibyl_run_id, Q1],
+        ).fetchone()
+        ref = json.loads(ref_j)
+        raw = json.loads(raw_j)
+        fin = json.loads(fin_j)
+        assert ref["source"] == "stub" and ref["weight"] == pytest.approx(0.5)
+        assert set(raw["quantiles"]["1"]) >= {"0.05", "0.5", "0.95"}
+        for m in ("1", "6"):
+            stated = [0.5 * a + 0.5 * b for a, b in zip(ref["by_month"][m], raw["vectors"][m])]
+            assert fin[m] == pytest.approx(stated, abs=0.01)  # before/after the floor
+        by_month_written = {}
+        for month, bucket, p in raw_rows:
+            by_month_written.setdefault(month, []).append(p)
+        assert by_month_written[1] != pytest.approx(by_month_written[6])
 
         # --- run-level record -------------------------------------------------
         run_row = con.execute(

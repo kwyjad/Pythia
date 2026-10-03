@@ -52,8 +52,10 @@ from pythia.tools.base_rate_spd import (
     base_rate_spd,
     forecast_months,
     last_observed_value,
+    conflictology_spds,
     level_transition_spds,
     level_volatility_spds,
+    reference_pool_spds,
 )
 from pythia.tools.compute_deviation import _anchor_ym
 from pythia.tools.compute_scores import (
@@ -101,11 +103,23 @@ LEVEL_VOLATILITY_PAIRS = frozenset({("ACE", "FATALITIES")})
 #: country is now beats pooling every move it has made.
 LEVEL_TRANSITION_MODEL_NAME = "__ext_level_transition"
 
+#: Bucket shares of the country's last 12 complete months, the same at every
+#: horizon (``base_rate_spd.conflictology_spds``). Sibyl's reference is built
+#: from it, and scoring it on every ACE/FATALITIES question lets the owner
+#: compare anchors. Scored only; the ensemble's prior is unchanged.
+CONFLICTOLOGY12_MODEL_NAME = "__ext_conflictology12"
+
+#: 0.75 x the 12-month vector + 0.25 x level_transition, per horizon
+#: (``base_rate_spd.reference_pool_spds``): Sibyl's ACE/FATALITIES reference.
+REF_POOL_MODEL_NAME = "__ext_ref_pool"
+
 #: The level references, in the order they are scored:
 #: (model name, counter stem, builder).
 _LEVEL_REFERENCES = (
     (LEVEL_VOLATILITY_MODEL_NAME, "level_volatility", level_volatility_spds),
     (LEVEL_TRANSITION_MODEL_NAME, "level_transition", level_transition_spds),
+    (CONFLICTOLOGY12_MODEL_NAME, "conflictology12", conflictology_spds),
+    (REF_POOL_MODEL_NAME, "ref_pool", reference_pool_spds),
 )
 
 
@@ -241,6 +255,10 @@ def score_baselines(db_url: str) -> Dict[str, int]:
         "skipped_no_level_volatility": 0,
         "scored_level_transition": 0,
         "skipped_no_level_transition": 0,
+        "scored_conflictology12": 0,
+        "skipped_no_conflictology12": 0,
+        "scored_ref_pool": 0,
+        "skipped_no_ref_pool": 0,
         "skipped_no_baserate": 0,
         "skipped_bad_resolution": 0,
     }
@@ -422,6 +440,8 @@ def score_baselines(db_url: str) -> Dict[str, int]:
                     if not lv_vec or len(lv_vec) != k:
                         counters[f"skipped_no_{stem}"] += 1
                         continue
+                    # The pool's level lives in its conflictology part.
+                    lv_level = lv_detail.get("conflictology") or lv_detail
                     hd = (lv_detail.get("horizons") or {}).get(str(hm)) or {}
                     _write_scores(
                         conn, question_id=qid, horizon_m=hm, metric=metric,
@@ -436,11 +456,11 @@ def score_baselines(db_url: str) -> Dict[str, int]:
                     _audit(
                         conn, qid, hm, ref_name, metric, lv_vec,
                         (
-                            f"{stem}:{lv_detail.get('level_month')}="
-                            f"{float(lv_detail.get('level_value') or 0):g}"
+                            f"{stem}:{lv_level.get('level_month')}="
+                            f"{float(lv_level.get('level_value') or 0):g}"
                             f":gap{hd.get('gap_months')}:pairs{hd.get('n_pairs')}"
                             f"{':pooled' if hd.get('pooled') else ''}"
-                            f":known_at={lv_detail.get('known_at')}"
+                            f":known_at={lv_level.get('known_at')}"
                         ),
                         resolved, j, now,
                     )

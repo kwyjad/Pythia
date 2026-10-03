@@ -350,6 +350,7 @@ def test_run_shows_advice_only_in_the_advice_arm(tmp_path, monkeypatch, share, e
     import sibyl.run as sibyl_run
     from tests.sibyl_test_utils import (
         HS_RUN_ID, Q1, disable_evidence_gate, make_submit_response, seed_db, stub_base_rate,
+    stub_reference,
     )
 
     seed_db(tmp_path, monkeypatch)
@@ -369,7 +370,7 @@ def test_run_shows_advice_only_in_the_advice_arm(tmp_path, monkeypatch, share, e
         prompts.append(prompt)
         return make_submit_response(), {"cost_usd": 0.01}, ""
 
-    monkeypatch.setattr(sibyl_run, "load_base_rate", lambda *a, **k: stub_base_rate())
+    monkeypatch.setattr(sibyl_run, "build_reference", stub_reference)
     monkeypatch.setattr(sibyl_agent, "log_sibyl_call", lambda **kwargs: None)
     monkeypatch.setattr(sibyl_run, "ADVICE_EXPERIMENT_SHARE", share)
     sibyl_run.run_sibyl(HS_RUN_ID, n_questions=1, model_call=fake_model_call)
@@ -394,12 +395,13 @@ def test_run_without_any_advice_stores_no_arm(tmp_path, monkeypatch):
     import sibyl.run as sibyl_run
     from tests.sibyl_test_utils import (
         HS_RUN_ID, Q1, disable_evidence_gate, make_submit_response, seed_db, stub_base_rate,
+    stub_reference,
     )
 
     seed_db(tmp_path, monkeypatch)
     disable_evidence_gate(monkeypatch)
     prompts: List[str] = []
-    monkeypatch.setattr(sibyl_run, "load_base_rate", lambda *a, **k: stub_base_rate())
+    monkeypatch.setattr(sibyl_run, "build_reference", stub_reference)
     monkeypatch.setattr(sibyl_agent, "log_sibyl_call", lambda **kwargs: None)
     sibyl_run.run_sibyl(
         HS_RUN_ID, n_questions=1,

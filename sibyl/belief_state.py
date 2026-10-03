@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from sibyl.config import QUANTILE_LEVELS
 
 VALID_ACTIONS = ("brave_search", "fetch_url", "submit")
+# Each step returns month_1 and month_6 objects (p_zero + positive quantiles).
 VALID_CONFIDENCE = ("low", "medium", "high")
 
 
@@ -28,10 +29,42 @@ class BeliefStateError(ValueError):
 
 
 @dataclass
-class BeliefState:
-    """Structured belief state, values in the question's native units."""
+class MonthBelief:
+    """One horizon: P(zero) and the 0.05..0.95 quantiles given a positive value.
 
-    quantiles: Dict[float, float]
+    For flood and cyclone questions ``p_zero`` is the chance of zero OR no
+    record, since a month the source has no record for does not resolve.
+    """
+
+    p_zero: float
+    quantiles_positive: Dict[float, float]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "p_zero": round(float(self.p_zero), 6),
+            "quantiles_positive": {
+                str(k): v for k, v in sorted(self.quantiles_positive.items())
+            },
+        }
+
+    def dist(self):
+        from sibyl.aggregate import MonthDist  # noqa: PLC0415
+
+        return MonthDist(p_zero=self.p_zero, qpos=dict(self.quantiles_positive))
+
+
+@dataclass
+class BeliefState:
+    """Structured belief state, values in the question's native units.
+
+    Elicited at two horizons, month 1 and month 6 of the window (Oct 2026);
+    months 2-5 are mixtures of the two. ``quantiles`` is the legacy view:
+    the month-1 distribution read at the seven old levels, kept so stored
+    records stay readable by older code.
+    """
+
+    month_1: MonthBelief
+    month_6: MonthBelief
     confidence: str = "low"
     evidence_higher: List[str] = field(default_factory=list)
     evidence_lower: List[str] = field(default_factory=list)
@@ -39,9 +72,14 @@ class BeliefState:
     baserate_reconciliation: str = ""
     step_rationale: str = ""
 
+    @property
+    def quantiles(self) -> Dict[float, float]:
+        return legacy_quantiles(self.month_1)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "quantiles": {str(k): v for k, v in sorted(self.quantiles.items())},
+            "month_1": self.month_1.to_dict(),
+            "month_6": self.month_6.to_dict(),
             "confidence": self.confidence,
             "evidence_higher": list(self.evidence_higher),
             "evidence_lower": list(self.evidence_lower),
@@ -51,6 +89,15 @@ class BeliefState:
         }
 
 
+def legacy_quantiles(month: MonthBelief) -> Dict[float, float]:
+    """A month's distribution read at the old seven QUANTILE_LEVELS."""
+    from sibyl.aggregate import _grid, quantiles_from_cdf_fn  # noqa: PLC0415
+
+    d = month.dist()
+    q = quantiles_from_cdf_fn(d.cdf, _grid([d]), QUANTILE_LEVELS)
+    return {lv: float(q[lv]) for lv in QUANTILE_LEVELS}
+
+
 @dataclass
 class StepDecision:
     """One parsed agent step: an action plus the updated belief state."""
@@ -58,7 +105,7 @@ class StepDecision:
     action: str
     action_input: str
     belief: BeliefState
-    repaired: bool = False  # quantiles needed a monotonicity repair
+    repaired: bool = False  # the belief needed a clamp or monotonicity repair
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
@@ -122,6 +169,46 @@ def enforce_monotone_quantiles(
     return out, repaired
 
 
+POS_LEVELS = (0.05, 0.25, 0.5, 0.75, 0.95)
+
+
+def _parse_month(raw: Any, key: str) -> tuple[MonthBelief, bool]:
+    """One horizon object. Repairs (clamps, monotonicity) are flagged, not refused."""
+    if not isinstance(raw, dict):
+        raise BeliefStateError(f"belief_state.{key} missing or not an object")
+    repaired = False
+    try:
+        p_zero = float(raw.get("p_zero"))
+    except (TypeError, ValueError) as exc:
+        raise BeliefStateError(f"belief_state.{key}.p_zero missing or not a number") from exc
+    if p_zero != p_zero:
+        raise BeliefStateError(f"belief_state.{key}.p_zero is not a number")
+    if not 0.0 <= p_zero <= 1.0:
+        p_zero = min(max(p_zero, 0.0), 1.0)
+        repaired = True
+    qraw = raw.get("quantiles_positive")
+    if not isinstance(qraw, dict) or not qraw:
+        raise BeliefStateError(f"belief_state.{key}.quantiles_positive missing or empty")
+    q: Dict[float, float] = {}
+    for k, v in qraw.items():
+        try:
+            level, value = float(k), float(v)
+        except (TypeError, ValueError) as exc:
+            raise BeliefStateError(f"non-numeric {key} quantile entry {k!r}: {v!r}") from exc
+        if value != value or value in (float("inf"), float("-inf")):
+            raise BeliefStateError(f"non-finite {key} quantile value at level {level}")
+        q[round(level, 4)] = value
+    missing = [lv for lv in POS_LEVELS if lv not in q]
+    if missing:
+        raise BeliefStateError(f"{key}: missing required positive quantile levels: {missing}")
+    q = {lv: q[lv] for lv in POS_LEVELS}
+    if any(v < 1.0 for v in q.values()):
+        q = {lv: max(1.0, v) for lv, v in q.items()}
+        repaired = True
+    q, rep = enforce_monotone_quantiles(q)
+    return MonthBelief(p_zero=p_zero, quantiles_positive=q), repaired or rep
+
+
 def parse_step_response(text: str) -> StepDecision:
     """Parse a model step response into a validated :class:`StepDecision`.
 
@@ -131,7 +218,8 @@ def parse_step_response(text: str) -> StepDecision:
           "action": "brave_search" | "fetch_url" | "submit",
           "action_input": "<query or url; empty for submit>",
           "belief_state": {
-            "quantiles": {"0.1": n, ..., "0.99": n},
+            "month_1": {"p_zero": p, "quantiles_positive": {"0.05": n, ..., "0.95": n}},
+            "month_6": {"p_zero": p, "quantiles_positive": {...}},
             "confidence": "low|medium|high",
             "evidence_higher": [...], "evidence_lower": [...],
             "open_questions": [...],
@@ -157,28 +245,12 @@ def parse_step_response(text: str) -> StepDecision:
     if not isinstance(bs, dict):
         raise BeliefStateError("missing belief_state object")
 
-    raw_q = bs.get("quantiles")
-    if not isinstance(raw_q, dict) or not raw_q:
-        raise BeliefStateError("belief_state.quantiles missing or empty")
-
-    quantiles: Dict[float, float] = {}
-    for key, val in raw_q.items():
-        try:
-            level = float(key)
-            value = float(val)
-        except (TypeError, ValueError) as exc:
-            raise BeliefStateError(f"non-numeric quantile entry {key!r}: {val!r}") from exc
-        if not (0.0 < level < 1.0):
-            raise BeliefStateError(f"quantile level {level} outside (0, 1)")
-        if value != value or value in (float("inf"), float("-inf")):
-            raise BeliefStateError(f"non-finite quantile value at level {level}")
-        quantiles[level] = value
-
-    missing = [lv for lv in QUANTILE_LEVELS if lv not in quantiles]
-    if missing:
-        raise BeliefStateError(f"missing required quantile levels: {missing}")
-
-    quantiles, repaired = enforce_monotone_quantiles(quantiles)
+    repaired = False
+    months: Dict[str, MonthBelief] = {}
+    for key in ("month_1", "month_6"):
+        mb, rep = _parse_month(bs.get(key), key)
+        months[key] = mb
+        repaired = repaired or rep
 
     confidence = str(bs.get("confidence", "low")).strip().lower()
     if confidence not in VALID_CONFIDENCE:
@@ -193,7 +265,8 @@ def parse_step_response(text: str) -> StepDecision:
         return []
 
     belief = BeliefState(
-        quantiles=quantiles,
+        month_1=months["month_1"],
+        month_6=months["month_6"],
         confidence=confidence,
         evidence_higher=_str_list("evidence_higher"),
         evidence_lower=_str_list("evidence_lower"),
@@ -206,25 +279,40 @@ def parse_step_response(text: str) -> StepDecision:
     )
 
 
-def initial_belief_from_anchor(anchor_quantiles: Optional[Dict[float, float]]) -> BeliefState:
-    """Seed a step-0 belief state from the outside-view anchor.
+def initial_belief(reference: Optional[Dict[int, List[float]]], metric: str) -> BeliefState:
+    """Seed the step-0 belief from the reference vectors (months 1 and 6).
 
-    When the base rate provides no usable numbers the seed is an explicit
-    zero-knowledge state; the agent's first update replaces it.
+    With no reference the seed is a labelled placeholder, never a claimed
+    base rate; the agent's first update replaces it.
     """
-    if anchor_quantiles:
-        q, _ = enforce_monotone_quantiles(dict(anchor_quantiles))
-        reconciliation = "Seeded from the outside-view base-rate anchor."
-    else:
-        q = {lv: 0.0 for lv in QUANTILE_LEVELS}
-        reconciliation = (
-            "No base-rate anchor was available for this question. These "
-            "all-zero quantiles are a placeholder, not a prior: replace them "
-            "from your research."
+    from sibyl.aggregate import dist_from_vector  # noqa: PLC0415
+
+    if reference and reference.get(1):
+        months = {}
+        for m in (1, 6):
+            d = dist_from_vector(reference.get(m) or reference[1], metric)
+            months[m] = MonthBelief(p_zero=round(d.p_zero, 4),
+                                    quantiles_positive={k: round(v, 2) for k, v in d.qpos.items()})
+        return BeliefState(
+            month_1=months[1],
+            month_6=months[6],
+            confidence="low",
+            baserate_reconciliation="Seeded from the reference: this is the prior.",
+            step_rationale="Step 0: prior only, no inside-view evidence yet.",
         )
+    placeholder = MonthBelief(p_zero=0.5, quantiles_positive={lv: 1.0 for lv in POS_LEVELS})
     return BeliefState(
-        quantiles=q,
+        month_1=placeholder,
+        month_6=MonthBelief(p_zero=0.5, quantiles_positive={lv: 1.0 for lv in POS_LEVELS}),
         confidence="low",
-        baserate_reconciliation=reconciliation,
+        baserate_reconciliation=(
+            "No reference was available for this question. These values are a "
+            "placeholder, not a prior: replace them from your research."
+        ),
         step_rationale="Step 0: prior only, no inside-view evidence yet.",
     )
+
+
+def initial_belief_from_anchor(anchor_quantiles: Optional[Dict[float, float]]) -> BeliefState:
+    """Legacy entry point: no reference vectors, so the labelled placeholder."""
+    return initial_belief(None, "FATALITIES")

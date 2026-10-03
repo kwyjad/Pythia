@@ -17,9 +17,11 @@ as the standard track for the question, so:
 * the question-detail SPD panel offers ``sibyl`` as a selectable source
   next to the ensemble aggregates.
 
-A Sibyl trial emits ONE quantile set describing the monthly value across
-the 6-month window (the window months are treated exchangeably), so the
-same bucket vector is written for each month_index 1..6.
+Since Oct 2026 a trial states month 1 and month 6 of the window (an explicit
+P(zero) plus positive quantiles each); months 2-5 are mixtures, and each
+month's published vector is a pool with Sibyl's reference
+(``sibyl/reference.py``), so the six month_index rows differ. Before then
+one vector was written to all six months.
 
 Full trial-level provenance — per-trial final quantiles, belief-state
 traces and evidence lists, asOf, K, aggregation method, per-question cost,
@@ -164,19 +166,35 @@ def load_standard_spd_by_month(
 
 
 def track_divergence(
-    sibyl_probs: Sequence[float], standard_by_month: Optional[Dict[int, List[float]]]
+    sibyl_probs: Any, standard_by_month: Optional[Dict[int, List[float]]]
 ) -> Optional[float]:
     """Mean JS divergence between Sibyl's SPD and the standard track.
 
-    Sibyl's vector is identical across the window months, so this is the
-    mean of per-month JSD(sibyl, standard_m).
+    Compared month by month (Oct 2026): ``sibyl_probs`` is a {month: vector}
+    dict; a single vector (the pre-Oct-2026 shape) is compared with every
+    month.
     """
     if not standard_by_month:
         return None
-    vals = [
-        _js_divergence(sibyl_probs, vec) for vec in standard_by_month.values()
-    ]
+    vals = []
+    for m, vec in standard_by_month.items():
+        mine = sibyl_probs.get(m) if isinstance(sibyl_probs, dict) else sibyl_probs
+        if mine and len(mine) == len(vec):
+            vals.append(_js_divergence(mine, vec))
     return float(np.mean(vals)) if vals else None
+
+
+def inter_trial_divergence_vectors(vectors: Sequence[Sequence[float]]) -> Optional[float]:
+    """Mean pairwise JS divergence across trial bucket vectors (month 1)."""
+    vecs = [list(v) for v in vectors if v]
+    if len(vecs) < 2:
+        return None
+    pair_vals = [
+        _js_divergence(vecs[i], vecs[j])
+        for i in range(len(vecs))
+        for j in range(i + 1, len(vecs))
+    ]
+    return float(np.mean(pair_vals))
 
 
 def inter_trial_divergence(
@@ -221,7 +239,7 @@ def write_native_spd(
     *,
     run_id: str,
     question: Any,  # SibylQuestion
-    bucket_probs: Sequence[float],
+    bucket_probs: Any,  # {month: vector} or one vector for all months
     spd_payload: Dict[str, Any],
     human_explanation: str,
     cost_usd: float,
@@ -235,13 +253,22 @@ def write_native_spd(
 
     metric = question.metric
     n_buckets = n_buckets_for(metric)
-    if len(bucket_probs) != n_buckets:
-        raise ValueError(
-            f"bucket vector length {len(bucket_probs)} != {n_buckets} for {metric}"
-        )
+    # One vector per window month (Oct 2026); a bare vector is written to all six.
+    if isinstance(bucket_probs, dict):
+        by_month = {int(m): list(v) for m, v in bucket_probs.items()}
+    else:
+        by_month = {m: list(bucket_probs) for m in range(1, NUM_HORIZONS + 1)}
+    missing = [m for m in range(1, NUM_HORIZONS + 1) if m not in by_month]
+    if missing:
+        raise ValueError(f"no bucket vector for month(s) {missing}")
+    for m, vec in by_month.items():
+        if len(vec) != n_buckets:
+            raise ValueError(
+                f"bucket vector length {len(vec)} != {n_buckets} for {metric} (month {m})"
+            )
     labels = labels_for(metric)
     # Every written vector carries the floor (idempotent on a floored one).
-    bucket_probs = apply_bucket_floor(bucket_probs)
+    by_month = {m: apply_bucket_floor(v) for m, v in by_month.items()}
     is_test = is_test_mode()
     spd_json = json.dumps(spd_payload, default=str)
     trace_json = json.dumps(
@@ -266,7 +293,7 @@ def write_native_spd(
     )
 
     for month_idx in range(1, NUM_HORIZONS + 1):
-        for bucket_idx, prob in enumerate(bucket_probs, start=1):
+        for bucket_idx, prob in enumerate(by_month[month_idx], start=1):
             label = labels[bucket_idx - 1] if bucket_idx - 1 < len(labels) else str(bucket_idx)
             con.execute(
                 """
@@ -338,9 +365,10 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             trials_json, bucket_probs_json, js_divergence_vs_standard,
             js_divergence_inter_trial, cost_usd, opus_cost_usd,
             brave_cost_usd, leakage_json, created_at, is_test, selection_pass,
-            base_rate_json, advice_arm, advice_as_of_month, evidence_ok
+            base_rate_json, advice_arm, advice_as_of_month, evidence_ok,
+            reference_json, raw_by_month_json, final_by_month_json
         ) VALUES (?, ?, ?, ?, ?, ?, 'sibyl', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
+                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -374,8 +402,15 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             record.get("advice_arm"),
             record.get("advice_as_of_month"),
             record.get("evidence_ok"),
+            _json_or_none(record.get("reference")),
+            _json_or_none(record.get("raw_by_month")),
+            _json_or_none(record.get("final_by_month")),
         ],
     )
+
+
+def _json_or_none(obj: Any) -> Optional[str]:
+    return None if obj is None else json.dumps(obj, default=str)
 
 
 def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
