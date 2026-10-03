@@ -1501,8 +1501,10 @@ def crisiswatch_edition_age_months(
 
 #: The day of the month by which ICG has normally published the previous
 #: month's edition. Measured from the Wayback Machine in October 2026
-#: (scripts/ci/crisiswatch_publication_days.py): most editions were first
-#: seen on days 3 to 6, two on days 10 and 15 (upper bounds).
+#: (scripts/ci/crisiswatch_publication_days.py, Wayback plus ReliefWeb's
+#: reposts): eleven of thirteen editions first seen by day 7, June 2026 on
+#: 10 July (an upper bound with no earlier capture to narrow it), May 2026
+#: never captured at all.
 EDITION_PUBLISHED_BY_DAY = 10
 
 
