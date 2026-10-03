@@ -495,6 +495,7 @@ def _ensure_acaps_inform_severity_trend_table(
             snapshot_date  VARCHAR NOT NULL,
             score          DOUBLE,
             fetched_at     VARCHAR,
+            source         VARCHAR,
             PRIMARY KEY (iso3, snapshot_date)
         );
         """,
@@ -503,6 +504,7 @@ def _ensure_acaps_inform_severity_trend_table(
             "snapshot_date": "VARCHAR",
             "score": "DOUBLE",
             "fetched_at": "VARCHAR",
+            "source": "VARCHAR",
         },
     )
 

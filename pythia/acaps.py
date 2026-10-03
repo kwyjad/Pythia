@@ -306,6 +306,62 @@ def _first_present(entry: dict, keys: tuple[str, ...]) -> object | None:
     return None
 
 
+#: INFORM Severity runs 0 to 10 (category 1-5 is a separate field). Read off
+#: the API on 2026-10-03: Afghanistan "INFORM Severity Index": 9.2,
+#: "INFORM Severity category (numeric)": 5. The prompts printed "/5.0".
+INFORM_SEVERITY_SCALE_MAX = 10.0
+
+#: The only source a trend row may come from. The country-log endpoint is NOT
+#: a severity log: it carries the index's component indicators (CPI, BTI,
+#: HIIK conflict intensity, population...), so a trend built from its
+#: ``value`` field mixed quantities (Afghanistan's table held 652230.0, 1.82
+#: and 9.2 side by side).
+TREND_SOURCE = "monthly_snapshot"
+
+
+def on_inform_scale(value: object) -> bool:
+    v = _safe_float(value)
+    return v is not None and 0.0 <= v <= INFORM_SEVERITY_SCALE_MAX
+
+
+def _month_index(text: object) -> int | None:
+    """Month index of an ISO date ('2026-09-01') or a label ('Sep2026')."""
+    s = str(text or "").strip()
+    try:
+        if len(s) >= 7 and s[4] == "-":
+            return int(s[:4]) * 12 + int(s[5:7]) - 1
+        d = datetime.strptime(s, "%b%Y")
+        return d.year * 12 + d.month - 1
+    except (ValueError, IndexError):
+        return None
+
+
+def severity_deltas(
+    score: object, snapshot_label: object, trend: list[dict]
+) -> tuple[float | None, float | None]:
+    """Change against the snapshot exactly 1 and 3 months before this one.
+
+    Only like is compared with like: both sides are monthly snapshots of the
+    index on its own 0-10 scale. A month with no snapshot gives None, never
+    a difference against whatever row happened to be last.
+    """
+    current = _safe_float(score)
+    here = _month_index(snapshot_label)
+    if current is None or here is None or not on_inform_scale(current):
+        return None, None
+    by_month = {
+        _month_index(e.get("date")): _safe_float(e.get("score"))
+        for e in trend or []
+        if on_inform_scale(e.get("score"))
+    }
+
+    def _back(n: int) -> float | None:
+        prev = by_month.get(here - n)
+        return None if prev is None else round(current - prev, 2)
+
+    return _back(1), _back(3)
+
+
 def _trend_from_country_log(iso3: str, token: str) -> list[dict]:
     """Severity trend from the country-log endpoint. Never raises.
 
@@ -347,6 +403,13 @@ def _trend_from_country_log(iso3: str, token: str) -> list[dict]:
     return entries
 
 
+#: Where a snapshot record keeps the index (display label first, as the API
+#: serves it; snake_case names for older fixtures).
+_SNAPSHOT_SCORE_KEYS = (
+    "INFORM Severity Index", "severity_index_score", "severity_score", "score",
+)
+
+
 def _trend_from_monthly_snapshots(
     iso3: str,
     token: str,
@@ -378,11 +441,9 @@ def _trend_from_monthly_snapshots(
             continue
         record = _pick_country_crisis(results)
         score = _safe_float(
-            record.get("severity_index_score")
-            or record.get("severity_score")
-            or record.get("score")
+            _first_present(record, _SNAPSHOT_SCORE_KEYS)
         )
-        if score is None:
+        if score is None or not on_inform_scale(score):
             continue
         try:
             stamp = datetime.strptime(label, "%b%Y").date().isoformat()
@@ -517,29 +578,11 @@ def fetch_inform_severity(
     # asked once per month back. A trend built from snapshots is the same
     # quantity from the same publisher, and it is rows where there were
     # none.
-    trend_entries = _trend_from_country_log(iso3, token)
-    # The fallback fires on STALENESS as well as on count. Gating it on
-    # "fewer than two entries" alone assumed the log's failure mode was
-    # returning nothing; the actual one is returning plenty of OLD rows.
-    # ACAPS served 3,000 country-log records in run 34081262443 and
-    # acaps_inform_severity_trend stayed frozen at 2024-01-29 — 952 days —
-    # because two-or-more stale entries satisfied the old condition and the
-    # snapshots were never asked. A trend whose newest point predates the
-    # window it claims to describe is not a trend.
-    if len(trend_entries) < 2 or _trend_is_stale(trend_entries, months_back):
-        snapshot_trend = _trend_from_monthly_snapshots(
-            iso3, token, months_back=months_back,
-            skip_label=snapshot_date,
-        )
-        if _trend_is_better(snapshot_trend, trend_entries):
-            log.info(
-                "ACAPS INFORM trend for %s: country-log gave %d entries "
-                "(newest %s), monthly snapshots gave %d (newest %s) — "
-                "using the snapshots",
-                iso3, len(trend_entries), _newest_trend_date(trend_entries) or "none",
-                len(snapshot_trend), _newest_trend_date(snapshot_trend) or "none",
-            )
-            trend_entries = snapshot_trend
+    # The trend is read from the monthly snapshots alone. The country-log
+    # carries the index's component indicators, not the index (Oct 2026).
+    trend_entries = _trend_from_monthly_snapshots(
+        iso3, token, months_back=months_back, skip_label=snapshot_date,
+    )
 
     # Sort by date ascending
     trend_entries.sort(key=lambda e: e["date"])
@@ -548,13 +591,7 @@ def fetch_inform_severity(
     if len(trend_entries) > months_back:
         trend_entries = trend_entries[-months_back:]
 
-    # Compute deltas
-    delta_1m = None
-    delta_3m = None
-    if severity_score is not None and len(trend_entries) >= 2:
-        delta_1m = round(severity_score - trend_entries[-1]["score"], 2)
-    if severity_score is not None and len(trend_entries) >= 4:
-        delta_3m = round(severity_score - trend_entries[-3]["score"], 2)
+    delta_1m, delta_3m = severity_deltas(severity_score, snapshot_date, trend_entries)
 
     # --- Fetch top indicators from dimension endpoints ---
     top_indicators: list[dict] = []
@@ -684,15 +721,19 @@ def store_inform_severity(
         )
         stored += 1
 
-        # Store trend entries
+        # Store trend entries: monthly snapshots of the index on its own
+        # scale, and nothing else.
+        purge_mixed_trend_rows(con)
         for entry in data.get("trend_6m", []):
+            if not on_inform_scale(entry.get("score")):
+                continue
             con.execute(
                 """
                 INSERT OR REPLACE INTO acaps_inform_severity_trend
-                    (iso3, snapshot_date, score, fetched_at)
-                VALUES (?, ?, ?, ?)
+                    (iso3, snapshot_date, score, fetched_at, source)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                [iso3.upper(), entry["date"], entry["score"], now],
+                [iso3.upper(), entry["date"], entry["score"], now, TREND_SOURCE],
             )
             stored += 1
     except Exception as exc:
@@ -700,6 +741,33 @@ def store_inform_severity(
     finally:
         con.close()
     return stored
+
+
+def purge_mixed_trend_rows(con) -> int:
+    """Delete trend rows that are not monthly snapshots of the index.
+
+    Rows written before Oct 2026 came from the country-log, which mixes
+    component indicators; they carry no ``source``. Idempotent; never raises.
+    """
+    try:
+        n = con.execute(
+            "SELECT COUNT(*) FROM acaps_inform_severity_trend "
+            "WHERE source IS NULL OR source <> ? OR score IS NULL "
+            "OR score < 0 OR score > ?",
+            [TREND_SOURCE, INFORM_SEVERITY_SCALE_MAX],
+        ).fetchone()[0]
+        if n:
+            con.execute(
+                "DELETE FROM acaps_inform_severity_trend "
+                "WHERE source IS NULL OR source <> ? OR score IS NULL "
+                "OR score < 0 OR score > ?",
+                [TREND_SOURCE, INFORM_SEVERITY_SCALE_MAX],
+            )
+            log.info("ACAPS INFORM: purged %d trend row(s) that were not snapshots of the index", n)
+        return int(n or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("ACAPS INFORM trend purge skipped: %s", exc)
+        return 0
 
 
 def load_inform_severity(
@@ -771,7 +839,8 @@ def load_inform_severity(
             """
             SELECT snapshot_date, score
             FROM acaps_inform_severity_trend
-            WHERE iso3 = ?
+            WHERE iso3 = ? AND source = 'monthly_snapshot'
+              AND score BETWEEN 0 AND 10
             ORDER BY snapshot_date ASC
             """,
             [iso3.upper()],
@@ -779,13 +848,7 @@ def load_inform_severity(
 
         trend_6m = [{"date": r[0], "score": r[1]} for r in trend_rows]
 
-        # Compute deltas
-        delta_1m = None
-        delta_3m = None
-        if severity_score is not None and len(trend_6m) >= 2:
-            delta_1m = round(severity_score - trend_6m[-1]["score"], 2)
-        if severity_score is not None and len(trend_6m) >= 4:
-            delta_3m = round(severity_score - trend_6m[-3]["score"], 2)
+        delta_1m, delta_3m = severity_deltas(severity_score, snapshot_date, trend_6m)
 
         try:
             top_indicators = json.loads(top_indicators_json or "[]")
@@ -813,6 +876,11 @@ def load_inform_severity(
         return None
     finally:
         close_db(con)
+
+
+def _fmt_dim(value: object) -> str:
+    v = _safe_float(value)
+    return "n/a" if v is None else f"{v:.1f}"
 
 
 def format_inform_severity_for_prompt(data: dict | None) -> str:
@@ -844,16 +912,16 @@ def format_inform_severity_for_prompt(data: dict | None) -> str:
 
     parts: list[str] = [
         f"INFORM SEVERITY INDEX ({iso3}):",
-        f"Overall: {score}/5.0 ({cat}) | Snapshot: {snap}",
+        f"Overall: {score}/10 ({cat}) | Snapshot: {snap}",
     ]
 
     dim_parts: list[str] = []
     if impact is not None:
-        dim_parts.append(f"Impact {impact}/5")
+        dim_parts.append(f"Impact {_fmt_dim(impact)}/10")
     if conditions is not None:
-        dim_parts.append(f"Conditions {conditions}/5")
+        dim_parts.append(f"Conditions {_fmt_dim(conditions)}/10")
     if complexity is not None:
-        dim_parts.append(f"Complexity {complexity}/5")
+        dim_parts.append(f"Complexity {_fmt_dim(complexity)}/10")
     if dim_parts:
         parts.append(f"Dimensions: {' | '.join(dim_parts)}")
 
@@ -871,9 +939,10 @@ def format_inform_severity_for_prompt(data: dict | None) -> str:
 
     parts.append(
         "\nINFORM Severity is an institutional composite of 31 indicators. "
-        "Use it as a severity benchmark. Large positive deltas (>0.3/month) "
-        "suggest rapid deterioration that should be reflected in your "
-        "assessment."
+        "It runs 0 to 10; 8 and above is the Very High category. Changes "
+        "compare monthly snapshots of the index. A rise above 0.3 in a "
+        "month suggests rapid deterioration that should be reflected in "
+        "your assessment."
     )
 
     return "\n".join(parts)
@@ -905,7 +974,7 @@ def format_inform_severity_for_spd(data: dict | None) -> str:
     d3_str = f"{d3:+.1f}" if d3 is not None else "n/a"
 
     return (
-        f"INFORM SEVERITY ({iso3}): {score}/5.0 ({cat}) "
+        f"INFORM SEVERITY ({iso3}): {score}/10 ({cat}) "
         f"[D1m: {d1_str}, D3m: {d3_str}]"
     )
 

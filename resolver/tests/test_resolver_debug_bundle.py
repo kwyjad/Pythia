@@ -1615,3 +1615,28 @@ def test_an_nmme_variable_stored_at_zero_is_a_contradiction(tmp_path, full_run):
     con.close()
     check = _checks(tmp_path, db, full_run, "again")["nmme_no_variable_is_almost_all_zero"]
     assert check["verdict"] == "PASS"
+
+
+def test_an_inform_score_off_its_scale_is_a_contradiction(tmp_path, full_run):
+    """Oct 2026: the trend table mixed component indicators with the index."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "CREATE TABLE acaps_inform_severity_trend (iso3 TEXT, snapshot_date TEXT, "
+        "score DOUBLE, fetched_at TEXT)"
+    )
+    con.execute(
+        "INSERT INTO acaps_inform_severity_trend VALUES "
+        "('AFG','2026-08-01',9.0,'x'),('AFG','2024-01-29',652230.0,'x')"
+    )
+    con.close()
+    check = _checks(tmp_path, db, full_run)["inform_severity_scores_lie_on_the_0_to_10_scale"]
+    assert check["verdict"] == "FAIL"
+    assert "652230" in check["detail"]
+
+    con = duckdb.connect(str(db))
+    con.execute("DELETE FROM acaps_inform_severity_trend WHERE score > 10")
+    con.close()
+    check = _checks(tmp_path, db, full_run, "again")["inform_severity_scores_lie_on_the_0_to_10_scale"]
+    assert check["verdict"] == "PASS"

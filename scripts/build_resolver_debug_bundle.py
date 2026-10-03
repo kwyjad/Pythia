@@ -2436,6 +2436,7 @@ class BundleBuilder:
             self._check_drought_severity_base_rates,
             self._check_nmme_read_when_table_covers_month,
             self._check_nmme_values_are_not_all_zero,
+            self._check_inform_severity_on_its_scale,
             self._check_no_zero_rests_on_one_feed,
             self._check_no_drought_verdict_for_a_month_in_progress,
             self._check_no_row_beside_an_unconfirmed_sweep_hit,
@@ -4426,6 +4427,38 @@ class BundleBuilder:
             ("Almost all zero: " + ", ".join(bad) + ". The anomaly was stored in a unit "
              "that rounds to nothing; check resolver.ingestion.nmme.UNITS.") if bad
             else "Every NMME variable carries non-zero anomalies.",
+        )
+
+    def _check_inform_severity_on_its_scale(self) -> None:
+        """No INFORM Severity figure lies outside the index's 0-10 scale.
+
+        The trend table held the country-log's component indicators beside
+        the index (Afghanistan: 652230.0, 1.82 and 9.2; Oct 2026), and the
+        prompt printed the index over 5.
+        """
+
+        name = "inform_severity_scores_lie_on_the_0_to_10_scale"
+        tables = [t for t in ("acaps_inform_severity", "acaps_inform_severity_trend")
+                  if t in self.tables()]
+        if not tables:
+            return self._check(name, "SKIP", "", "", "no INFORM tables")
+        col = {"acaps_inform_severity": "severity_score",
+               "acaps_inform_severity_trend": "score"}
+        bad: list[str] = []
+        for t in tables:
+            res = self.query(
+                f"SELECT COUNT(*), MIN({col[t]}), MAX({col[t]}) FROM {t} "
+                f"WHERE {col[t]} < 0 OR {col[t]} > 10"
+            )
+            n = int((res[1][0][0] if res and res[1] else 0) or 0)
+            if n:
+                bad.append(f"{t}: {n} row(s), range {res[1][0][1]}..{res[1][0][2]}")
+        self._check(
+            name, "FAIL" if bad else "PASS",
+            "; ".join(bad) or "every score within 0..10", "0..10",
+            ("Off the scale: " + "; ".join(bad) + ". A trend row from the "
+             "country-log is a component indicator, not the index.") if bad
+            else "INFORM Severity runs 0 to 10 and every stored figure does too.",
         )
 
     def _check_no_zero_rests_on_one_feed(self) -> None:

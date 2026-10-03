@@ -499,6 +499,7 @@ jobs:
             resolver/tests/test_group_f_small_repairs.py \
             resolver/tests/test_group_d_probes_and_paging.py \
             pythia/tests/test_ingest_rows_written.py \
+            pythia/tests/test_inform_severity_scale.py \
             resolver/tests/test_eiv_scoring.py \
             resolver/tests/test_risk_index_prefers_bayesmc.py
 
