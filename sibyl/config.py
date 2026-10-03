@@ -169,3 +169,35 @@ FETCH_URL_MAX_REDIRECTS = _env_int("SIBYL_FETCH_URL_MAX_REDIRECTS", 5)
 
 # --- LLM call limits ----------------------------------------------------------
 ANTHROPIC_MAX_ATTEMPTS = _env_int("SIBYL_ANTHROPIC_MAX_ATTEMPTS", 3)
+
+# --- Evidence gate (Oct 2026) -------------------------------------------------
+# A trial has evidence when it ran at least MIN_SEARCH_OK searches that
+# returned a source and read at least MIN_DOCS_READ documents. A question is
+# pooled from trials that are ok AND have evidence; below MIN_VALID_TRIALS such
+# trials it is stored failed ("no evidence") and nothing is written to the
+# forecast tables. The July 2026 run stored ten "ok" forecasts with every
+# search failed; these defaults catch a blind trial and no more (Opus 5.5
+# averages three searches a trial, so a stricter gate would fail most
+# questions until the agent is made to research in depth).
+MIN_SEARCH_OK = _env_int("SIBYL_MIN_SEARCH_OK", 1)
+MIN_DOCS_READ = _env_int("SIBYL_MIN_DOCS_READ", 0)
+MIN_VALID_TRIALS = _env_int("SIBYL_MIN_VALID_TRIALS", 2)
+
+# --- Brave circuit breaker (Oct 2026) -----------------------------------------
+# The shared breaker trips after three consecutive Brave failures and then
+# short-circuits every later call for the life of the process. Sibyl resets it
+# at the start of a run, and when a search finds it tripped it waits this long,
+# resets it and retries once, at most BREAKER_MAX_RESETS times a run (a dead
+# key must not loop).
+BREAKER_COOLDOWN_SEC = _env_float("SIBYL_BREAKER_COOLDOWN_SEC", 60.0)
+BREAKER_MAX_RESETS = _env_int("SIBYL_BREAKER_MAX_RESETS", 5)
+
+# A run whose share of failed searches exceeds this is reported degraded by
+# scripts/ci/stage_health.py.
+DEGRADED_SEARCH_FAIL_SHARE = _env_float("SIBYL_DEGRADED_SEARCH_FAIL_SHARE", 0.20)
+
+# --- Written vectors (Oct 2026) ---------------------------------------------
+# Every bucket of every vector Sibyl writes is floored here and renormalised.
+# Interpolation left ten of 258 buckets at exactly zero; compute_scores floors
+# at 1e-9, so such a bucket occurring costs about 20.7 nats of log loss.
+BUCKET_FLOOR = _env_float("SIBYL_BUCKET_FLOOR", 0.005)

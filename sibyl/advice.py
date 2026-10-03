@@ -15,7 +15,8 @@ is the comparison arm.
 
 What counts as Sibyl's record
 -----------------------------
-``sibyl_forecasts`` rows with ``status = 'ok'`` from production runs, the
+``sibyl_forecasts`` rows with ``status = 'ok'`` from production runs that
+rested on evidence (``evidence_ok`` not FALSE, see ``sibyl/evidence.py``), the
 LATEST Sibyl run of each question, joined to ``resolutions``. Never ``scores``
 alone: until October 2026 compute_scores stamped a score's ``is_test`` from
 the question, so a production question carrying a same-epoch test run's
@@ -450,6 +451,9 @@ def load_records(con, as_of_month: Optional[str] = None) -> List[SibylRecord]:
         if _has_table(con, "questions") else ""
     )
     opt = lambda c: f"f.{c}" if c in f_cols else f"CAST(NULL AS TEXT) AS {c}"  # noqa: E731
+    # A forecast that rested on no evidence (the July 2026 run) is kept and
+    # scored, but it is not Sibyl's record.
+    evidence = " AND COALESCE(f.evidence_ok, TRUE)" if "evidence_ok" in f_cols else ""
     rows = con.execute(
         f"""
         SELECT question_id, hazard_code, metric, pooled_quantiles_json,
@@ -467,7 +471,7 @@ def load_records(con, as_of_month: Optional[str] = None) -> List[SibylRecord]:
             FROM sibyl_forecasts f
             {run_join}
             {q_join}
-            WHERE f.status = 'ok' AND NOT COALESCE(f.is_test, FALSE)
+            WHERE f.status = 'ok' AND NOT COALESCE(f.is_test, FALSE){evidence}
         )
         WHERE rn = 1
         """
@@ -686,7 +690,10 @@ def generate(con, *, as_of_month: Optional[str] = None) -> List[Dict[str, Any]]:
     """Measure, build and write this month's rows. Returns them."""
     from pythia.tools.generate_calibration_advice import advice_blocked_groups  # noqa: PLC0415
 
+    from sibyl.evidence import backfill_evidence_ok  # noqa: PLC0415
+
     as_of_month = as_of_month or date.today().strftime("%Y-%m")
+    backfill_evidence_ok(con)
     records = load_records(con, as_of_month)
     scores = load_question_scores(con, records)
     rows = build_rows(records, scores, as_of_month=as_of_month, blocked=advice_blocked_groups())

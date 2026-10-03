@@ -214,11 +214,17 @@ def initial_belief_from_anchor(anchor_quantiles: Optional[Dict[float, float]]) -
     """
     if anchor_quantiles:
         q, _ = enforce_monotone_quantiles(dict(anchor_quantiles))
+        reconciliation = "Seeded from the outside-view base-rate anchor."
     else:
         q = {lv: 0.0 for lv in QUANTILE_LEVELS}
+        reconciliation = (
+            "No base-rate anchor was available for this question. These "
+            "all-zero quantiles are a placeholder, not a prior: replace them "
+            "from your research."
+        )
     return BeliefState(
         quantiles=q,
         confidence="low",
-        baserate_reconciliation="Seeded from the outside-view base-rate anchor.",
+        baserate_reconciliation=reconciliation,
         step_rationale="Step 0: prior only, no inside-view evidence yet.",
     )

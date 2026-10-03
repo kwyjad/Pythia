@@ -463,3 +463,51 @@ def test_without_a_run_the_whole_db_is_described_not_judged(tmp_path, capsys, mo
     assert rep["cost"]["run_scoped"] is False
     assert "database lifetime" in out
     assert "run to date" not in out
+
+
+def _add_tool_counters(con, sibyl_run_id, calls, failed, trips, docs):
+    for col in ("n_search_calls", "n_search_failed", "n_breaker_trips", "n_docs_read"):
+        try:
+            con.execute(f"ALTER TABLE sibyl_runs ADD COLUMN {col} INTEGER")
+        except duckdb.CatalogException:
+            pass
+    con.execute(
+        "UPDATE sibyl_runs SET n_search_calls = ?, n_search_failed = ?, "
+        "n_breaker_trips = ?, n_docs_read = ? WHERE sibyl_run_id = ?",
+        [calls, failed, trips, docs, sibyl_run_id],
+    )
+
+
+def test_sibyl_run_with_most_searches_failed_is_degraded(tmp_path):
+    """The July 2026 shape: the breaker tripped and every search failed."""
+    path = _sibyl_db(tmp_path)
+    con = duckdb.connect(path)
+    _add_sibyl_run(con, SIBYL_RUN, RUN, "2026-07-29 10:00:00")
+    _add_tool_counters(con, SIBYL_RUN, calls=216, failed=216, trips=216, docs=0)
+    con.close()
+
+    sb = _run(path, tmp_path, stage="sibyl", sibyl_run_id=SIBYL_RUN)["sibyl"]
+    assert sb["degraded"] is True
+    assert sb["tools"]["search_fail_share"] == pytest.approx(1.0)
+    assert "216 of 216" in sb["degraded_reason"]
+
+
+def test_sibyl_run_with_few_failed_searches_is_not_degraded(tmp_path):
+    path = _sibyl_db(tmp_path)
+    con = duckdb.connect(path)
+    _add_sibyl_run(con, SIBYL_RUN, RUN, "2026-07-29 10:00:00")
+    _add_tool_counters(con, SIBYL_RUN, calls=100, failed=20, trips=0, docs=40)
+    con.close()
+
+    sb = _run(path, tmp_path, stage="sibyl", sibyl_run_id=SIBYL_RUN)["sibyl"]
+    assert sb["degraded"] is False  # 20% is the limit, not over it
+    assert sb["tools"]["n_docs_read"] == 40
+
+
+def test_sibyl_run_before_the_counters_existed_is_not_judged(tmp_path):
+    path = _sibyl_db(tmp_path)
+    con = duckdb.connect(path)
+    _add_sibyl_run(con, SIBYL_RUN, RUN, "2026-07-29 10:00:00")
+    con.close()
+    sb = _run(path, tmp_path, stage="sibyl", sibyl_run_id=SIBYL_RUN)["sibyl"]
+    assert "degraded" not in sb and "tools" not in sb

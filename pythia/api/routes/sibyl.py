@@ -58,6 +58,19 @@ def _selection_pass_col(con) -> str:
     return "CAST(NULL AS TEXT) AS selection_pass"
 
 
+def _evidence_ok_col(con) -> str:
+    """``evidence_ok`` when the column exists, else NULL (unknown).
+
+    FALSE marks a forecast that rested on no evidence (the July 2026 run,
+    whose searches all failed). Such rows are listed, so the page can show
+    them with a "no evidence" badge, and left out of every summary figure
+    computed here and of every comparison elsewhere.
+    """
+    if _table_has_columns(con, "sibyl_forecasts", ["evidence_ok"]):
+        return "evidence_ok"
+    return "CAST(NULL AS BOOLEAN) AS evidence_ok"
+
+
 def _latest_sibyl_run_id(con, include_test: bool) -> Optional[str]:
     # Pre-Sibyl / partial-schema DBs may have sibyl_forecasts without
     # sibyl_runs (or neither); this module's contract is to never 500 there.
@@ -129,7 +142,8 @@ def sibyl_summary(
                 SELECT question_id, iso3, hazard_code, metric, status,
                        skip_reason, k, cost_usd, opus_cost_usd, brave_cost_usd,
                        volatility_score, js_divergence_vs_standard,
-                       js_divergence_inter_trial, {_selection_pass_col(con)}
+                       js_divergence_inter_trial, {_selection_pass_col(con)},
+                       {_evidence_ok_col(con)}
                 FROM sibyl_forecasts
                 WHERE sibyl_run_id = ?
                 ORDER BY volatility_score DESC NULLS LAST, question_id
@@ -137,6 +151,12 @@ def sibyl_summary(
                 [run_id],
             )
         )
+    # A forecast stored ok but resting on no evidence is not counted as a
+    # forecast in the run's figures.
+    run["n_no_evidence"] = sum(
+        1 for q in questions
+        if q.get("status") == "ok" and q.get("evidence_ok") is False
+    )
     return {"run": run, "questions": questions}
 
 
@@ -227,7 +247,8 @@ def sibyl_questions(
                    volatility_score, triage_score,
                    js_divergence_vs_standard, js_divergence_inter_trial,
                    cost_usd, opus_cost_usd, brave_cost_usd,
-                   pooled_quantiles_json, {_selection_pass_col(con)}
+                   pooled_quantiles_json, {_selection_pass_col(con)},
+                   {_evidence_ok_col(con)}
             FROM sibyl_forecasts
             WHERE sibyl_run_id = ?
             ORDER BY js_divergence_vs_standard DESC NULLS LAST, question_id

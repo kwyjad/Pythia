@@ -223,3 +223,24 @@ def test_an_earlier_run_of_a_rerun_question_is_ignored(api_env, tmp_path) -> Non
     body = client.get("/v1/performance/sibyl_comparison").json()
     assert len(body["pairs"]) == 12
     assert body["aggregate"]["spd"]["brier"]["mean_delta"] == pytest.approx(-0.05, abs=1e-9)
+
+
+def test_a_forecast_without_evidence_is_left_out(api_env, tmp_path) -> None:
+    """sibyl_forecasts.evidence_ok FALSE (the July 2026 run): the score rows
+    stay in the table, and the comparison leaves the question out."""
+
+    client = api_env(True)
+    db = next(tmp_path.glob("api_True.duckdb"))
+    con = duckdb.connect(str(db))
+    con.execute("ALTER TABLE sibyl_forecasts ADD COLUMN run_id TEXT")
+    con.execute("ALTER TABLE sibyl_forecasts ADD COLUMN status TEXT")
+    con.execute("ALTER TABLE sibyl_forecasts ADD COLUMN evidence_ok BOOLEAN")
+    con.execute(
+        "UPDATE sibyl_forecasts SET run_id = 'run1', status = 'ok', "
+        "evidence_ok = (question_id <> 'Q2')"
+    )
+    con.close()
+    _app_mod._READ_CON = None
+    body = client.get("/v1/performance/sibyl_comparison").json()
+    assert {p["question_id"] for p in body["pairs"]} == {"Q1"}
+    assert len(body["pairs"]) == 6

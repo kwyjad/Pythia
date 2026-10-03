@@ -353,3 +353,55 @@ the outside view at forecast time (the anchor-departure diagnostic needs it).
 backtest mode `load_advice` returns nothing: advice learned after the as-of
 date is leakage.
 
+
+## 2026-10-03 — Part 1: an honest record
+
+A review of the 2 October 2026 release found that all six scored Sibyl
+forecasts came from the 15 July run (`sibyl_1784113515141`), in which the
+shared Brave circuit breaker tripped on the first three calls and all 216
+searches failed. Sibyl stored ten forecasts with status `ok` anyway. Later
+runs read little: 78 of 120 trials read no page.
+
+**Decision: an evidence gate.** A trial counts searches that returned a
+source (`n_search_ok`) and documents read (`n_docs_read`); it has evidence
+at `SIBYL_MIN_SEARCH_OK` (1) and `SIBYL_MIN_DOCS_READ` (0). Only trials that
+finished AND have evidence are pooled; below `SIBYL_MIN_VALID_TRIALS` (2)
+the question is stored `failed` / `no evidence`, its trials kept, nothing
+written to `forecasts_raw` or `forecasts_ensemble`. The thresholds are low
+on purpose: Opus 5.5 averages three searches a trial, and Part 3 raises them
+once the agent is made to research in depth.
+
+**Decision: old forecasts are flagged, not deleted.**
+`sibyl_forecasts.evidence_ok` is written for every new row and backfilled
+for old ones (`sibyl/evidence.py`: evidence when at least two trials made a
+search whose tool call succeeded), at the start of every run and of every
+advice generation. The July run's ten forecasts read FALSE. Their rows and
+scores stay; the advice loop, the head-to-head comparison, the Sibyl API's
+figures and the interpreter's second opinion leave them out, and the Sibyl
+page shows them with a "no evidence" badge.
+
+**Decision: Sibyl owns its breaker reset.** The breaker is a process-wide
+singleton shared with HS grounding. `run_sibyl` resets it at the start, and
+a search that finds it tripped waits `SIBYL_BREAKER_COOLDOWN_SEC` (60),
+resets it and retries once, at most `SIBYL_BREAKER_MAX_RESETS` (5) times a
+run. `sibyl_runs` records searches made, searches failed (an empty HTTP 200
+answer is not a failure), breaker trips and documents read;
+`scripts/ci/stage_health.py` marks a run degraded above 20% failed.
+
+**Decision (owner, 2026-10-03): resolution sources are open in live runs.**
+ACLED, IFRC GO, IDMC, GDACS, FEWS NET and IPC are blocked only in backtest
+mode (`sibyl.leakage.is_blocked_for`). In a live run the outcome does not
+exist yet, so the resolving source's latest figures are the best evidence
+of where a series stands; forecast products (ACLED CAST, VIEWS) may be read
+too. This reverses the "always blocked" rule of July 2026.
+
+**Smaller fixes.** Every written vector is floored at `SIBYL_BUCKET_FLOOR`
+(0.005) and renormalised (ten of 258 buckets were exactly zero, and
+`compute_scores` floors at 1e-9: about 20.7 nats if one occurs). A trial
+whose later step fails on every attempt keeps its last valid belief
+(`degraded: model_step_failed`). A seed with no anchor no longer claims a
+base rate. Flood, cyclone and drought PA questions no longer say "as
+resolved by EM-DAT"; they name IFRC GO and IDMC and say an unrecorded month
+does not resolve. The standard calibration advice's month-position check
+reads ensemble members only (Sibyl wrote one vector to all six months) and
+uses the metric's real bucket count.

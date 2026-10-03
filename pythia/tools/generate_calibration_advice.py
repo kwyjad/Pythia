@@ -580,6 +580,17 @@ def _js_divergence(p: np.ndarray, q: np.ndarray) -> float:
     return 0.5 * (kl_pm + kl_qm)
 
 
+def _month_position_n_buckets(metric: str) -> int:
+    """The metric's real bucket count; binary rows are stored padded to 5."""
+    try:
+        from pythia.buckets import n_buckets_for  # noqa: PLC0415
+
+        n = int(n_buckets_for(metric) or 0)
+    except Exception:  # noqa: BLE001
+        n = 0
+    return n if n > 0 else 5
+
+
 def _compute_month_position_bias(
     conn: Any, hazard_code: str, metric: str,
     n_buckets: int = 5,
@@ -588,12 +599,19 @@ def _compute_month_position_bias(
 
     Uses Jensen-Shannon divergence between month-1 and month-6 average SPDs
     (full distribution check), plus legacy bucket-5 stdev for compatibility.
+
+    Members only: aggregates (``ensemble_*``, ``track2_flash``, ``sibyl``) and
+    ``__ext_`` references are left out. Sibyl wrote one vector to all six
+    months until Oct 2026, so averaging it in read as members failing to
+    separate the horizons when they had not.
     """
     hz = hazard_code.upper()
     m = metric.upper()
 
     if not _table_exists(conn, "forecasts_raw"):
         return None
+    excluded = sorted(AGGREGATE_MODEL_NAMES)
+    excluded_sql = ", ".join("?" for _ in excluded)
 
     sql = f"""
         SELECT
@@ -608,11 +626,14 @@ def _compute_month_position_bias(
           AND fr.month_index BETWEEN 1 AND 6
           AND fr.bucket_index BETWEEN 1 AND ?
           AND fr.probability IS NOT NULL
+          AND fr.model_name IS NOT NULL
+          AND fr.model_name NOT IN ({excluded_sql})
+          AND fr.model_name NOT LIKE '{EXT_MODEL_PREFIX}%'
         GROUP BY fr.month_index, fr.bucket_index
         ORDER BY fr.month_index, fr.bucket_index
     """
     try:
-        rows = conn.execute(sql, [hz, m, n_buckets]).fetchall()
+        rows = conn.execute(sql, [hz, m, n_buckets, *excluded]).fetchall()
     except Exception as exc:
         LOGGER.warning("Month position query failed for %s/%s: %s", hz, m, exc)
         return None
@@ -630,8 +651,9 @@ def _compute_month_position_bias(
         if 1 <= bi <= n_buckets:
             month_spds[mi][bi - 1] = float(avg_prob or 0)
 
-    # Legacy bucket-5 stdev
-    b5_probs = [month_spds[mi][4] for mi in sorted(month_spds.keys()) if mi in month_spds]
+    # Legacy bucket-5 stdev (the top bucket when a metric has fewer than 5)
+    b5 = min(4, n_buckets - 1)
+    b5_probs = [month_spds[mi][b5] for mi in sorted(month_spds.keys()) if mi in month_spds]
     b5_stdev = float(np.std(b5_probs)) if len(b5_probs) >= 2 else 0.0
 
     # JSD between month 1 and month 6
@@ -645,7 +667,7 @@ def _compute_month_position_bias(
     flat = (jsd is not None and jsd < 0.005) or (jsd is None and b5_stdev < 0.02)
 
     return {
-        "by_month_b5": {mi: month_spds[mi][4] for mi in sorted(month_spds.keys())},
+        "by_month_b5": {mi: month_spds[mi][b5] for mi in sorted(month_spds.keys())},
         "stdev": b5_stdev,
         "jsd_m1_m6": jsd,
         "mean_top_bucket_prob": sum(b5_probs) / len(b5_probs) if b5_probs else 0.0,
@@ -2266,6 +2288,7 @@ def generate_calibration_advice(
             )
             findings["month_position_bias"] = _compute_month_position_bias(
                 conn, hazard_code, metric,
+                n_buckets=_month_position_n_buckets(metric),
             )
             findings["rc_conditional"] = _compute_rc_conditional(
                 conn, hazard_code, metric,

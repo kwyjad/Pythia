@@ -191,8 +191,8 @@ def _seed_record_db(tmp_path, monkeypatch):
         con.execute(
             "INSERT INTO sibyl_forecasts (sibyl_run_id, run_id, question_id, hazard_code, "
             "metric, status, pooled_quantiles_json, bucket_probs_json, trials_json, "
-            "created_at, is_test) VALUES (?, 'fc', ?, 'ACE', 'FATALITIES', ?, ?, ?, ?, "
-            "CURRENT_TIMESTAMP, ?)",
+            "created_at, is_test, evidence_ok) VALUES (?, 'fc', ?, 'ACE', 'FATALITIES', ?, ?, ?, ?, "
+            "CURRENT_TIMESTAMP, ?, TRUE)",
             [srid, qid, status, json.dumps(qs), json.dumps([0.0] * 7),
              json.dumps([{"perspective": "Base-rate-weighted perspective: x", "quantiles": qs}]),
              is_test],
@@ -348,9 +348,12 @@ def test_run_shows_advice_only_in_the_advice_arm(tmp_path, monkeypatch, share, e
                                                   expect_section):
     import sibyl.agent as sibyl_agent
     import sibyl.run as sibyl_run
-    from tests.sibyl_test_utils import HS_RUN_ID, Q1, make_submit_response, seed_db, stub_base_rate
+    from tests.sibyl_test_utils import (
+        HS_RUN_ID, Q1, disable_evidence_gate, make_submit_response, seed_db, stub_base_rate,
+    )
 
     seed_db(tmp_path, monkeypatch)
+    disable_evidence_gate(monkeypatch)
     from pythia.db.schema import connect
 
     con = connect(read_only=False)
@@ -389,9 +392,12 @@ def test_run_shows_advice_only_in_the_advice_arm(tmp_path, monkeypatch, share, e
 def test_run_without_any_advice_stores_no_arm(tmp_path, monkeypatch):
     import sibyl.agent as sibyl_agent
     import sibyl.run as sibyl_run
-    from tests.sibyl_test_utils import HS_RUN_ID, Q1, make_submit_response, seed_db, stub_base_rate
+    from tests.sibyl_test_utils import (
+        HS_RUN_ID, Q1, disable_evidence_gate, make_submit_response, seed_db, stub_base_rate,
+    )
 
     seed_db(tmp_path, monkeypatch)
+    disable_evidence_gate(monkeypatch)
     prompts: List[str] = []
     monkeypatch.setattr(sibyl_run, "load_base_rate", lambda *a, **k: stub_base_rate())
     monkeypatch.setattr(sibyl_agent, "log_sibyl_call", lambda **kwargs: None)

@@ -40,7 +40,7 @@ from pythia.buckets import NUM_HORIZONS, n_buckets_for, thresholds_for
 from pythia.test_mode import is_test_mode
 
 from sibyl.aggregate import PooledDistribution, cdf_from_quantiles
-from sibyl.config import SIBYL_MODEL_NAME, STANDARD_MODEL_PREFERENCE
+from sibyl.config import BUCKET_FLOOR, SIBYL_MODEL_NAME, STANDARD_MODEL_PREFERENCE
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +62,38 @@ def _probs_from_cdf_values(cdf_at_thresholds: np.ndarray) -> List[float]:
     if total <= 0:
         raise ValueError("degenerate CDF produced a zero-sum bucket vector")
     return [float(p / total) for p in probs]
+
+
+def apply_bucket_floor(probs: Sequence[float], floor: float = BUCKET_FLOOR) -> List[float]:
+    """Floor every bucket at *floor* and renormalise, so none ends below it.
+
+    A single "max then divide" pass can leave a floored bucket slightly under
+    the floor; this fixes the floored buckets at exactly *floor* and scales
+    the rest into what is left, repeating until nothing falls below.
+    """
+    p = np.clip(np.asarray(probs, dtype=float), 0.0, None)
+    n = len(p)
+    if n == 0:
+        return []
+    total = float(p.sum())
+    if total <= 0:
+        return [1.0 / n] * n
+    p = p / total
+    if floor <= 0:
+        return [float(x) for x in p]
+    if floor * n >= 1.0:
+        return [1.0 / n] * n
+    fixed = np.zeros(n, dtype=bool)
+    for _ in range(n + 1):
+        low = (~fixed) & (p < floor)
+        if not low.any():
+            break
+        fixed |= low
+        rest = float(p[~fixed].sum())
+        p[fixed] = floor
+        if rest > 0:
+            p[~fixed] = p[~fixed] * (1.0 - floor * fixed.sum()) / rest
+    return [float(x) for x in p / p.sum()]
 
 
 def bucket_probs_from_distribution(dist: PooledDistribution, metric: str) -> List[float]:
@@ -208,6 +240,8 @@ def write_native_spd(
             f"bucket vector length {len(bucket_probs)} != {n_buckets} for {metric}"
         )
     labels = labels_for(metric)
+    # Every written vector carries the floor (idempotent on a floored one).
+    bucket_probs = apply_bucket_floor(bucket_probs)
     is_test = is_test_mode()
     spd_json = json.dumps(spd_payload, default=str)
     trace_json = json.dumps(
@@ -304,9 +338,9 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             trials_json, bucket_probs_json, js_divergence_vs_standard,
             js_divergence_inter_trial, cost_usd, opus_cost_usd,
             brave_cost_usd, leakage_json, created_at, is_test, selection_pass,
-            base_rate_json, advice_arm, advice_as_of_month
+            base_rate_json, advice_arm, advice_as_of_month, evidence_ok
         ) VALUES (?, ?, ?, ?, ?, ?, 'sibyl', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
+                  ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -339,6 +373,7 @@ def persist_sibyl_forecast(con: Any, record: Dict[str, Any]) -> None:
             ),
             record.get("advice_arm"),
             record.get("advice_as_of_month"),
+            record.get("evidence_ok"),
         ],
     )
 
@@ -355,9 +390,10 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             sibyl_run_id, hs_run_id, as_of, model, k, max_steps, aggregation,
             run_hard_cap_usd, budget_capped, run_cost_usd, opus_cost_usd,
             brave_cost_usd, n_selected, n_forecast, n_skipped, config_json,
-            created_at, is_test, time_capped
+            created_at, is_test, time_capped, n_search_calls,
+            n_search_failed, n_breaker_trips, n_docs_read
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  CURRENT_TIMESTAMP, ?, ?)
+                  CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -378,5 +414,9 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             json.dumps(record.get("config"), default=str),
             is_test_mode(),
             bool(record.get("time_capped", False)),
+            record.get("n_search_calls"),
+            record.get("n_search_failed"),
+            record.get("n_breaker_trips"),
+            record.get("n_docs_read"),
         ],
     )

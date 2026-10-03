@@ -125,14 +125,26 @@ def test_a_public_redirect_is_followed(dns, transport):
     assert "story text" in result.text
 
 
-def test_a_redirect_into_a_resolution_source_is_blocked(dns, transport, monkeypatch):
+def test_a_redirect_into_a_resolution_source_is_blocked_in_backtest(dns, transport, monkeypatch):
     _, routes = transport
     dns["go.ifrc.org"] = ["93.184.216.36"]
     routes["https://example.org/r"] = lambda: _Resp(302, {"Location": "https://go.ifrc.org/emergencies/1"})
     routes["https://go.ifrc.org/emergencies/1"] = lambda: _Resp(body=b"figures")
-    result = sibyl_tools.fetch_url("https://example.org/r", TODAY)
+    as_of = date(2026, 6, 1)
+    result = sibyl_tools.fetch_url("https://example.org/r", as_of, today=TODAY)
     assert result.ok is False
     assert result.error == "blocked_domain"
+
+
+def test_a_resolution_source_is_read_in_a_live_run(dns, transport):
+    """Open in live runs (owner decision Oct 2026); the SSRF guard still applies."""
+    _, routes = transport
+    dns["go.ifrc.org"] = ["93.184.216.36"]
+    routes["https://example.org/r"] = lambda: _Resp(302, {"Location": "https://go.ifrc.org/emergencies/1"})
+    routes["https://go.ifrc.org/emergencies/1"] = lambda: _Resp(body=b"figures")
+    result = sibyl_tools.fetch_url("https://example.org/r", TODAY, today=TODAY)
+    assert result.ok is True
+    assert "figures" in result.text
 
 
 def test_a_redirect_loop_is_cut_off(dns, transport):

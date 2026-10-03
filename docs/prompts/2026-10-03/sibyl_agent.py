@@ -37,7 +37,6 @@ from sibyl.belief_state import (
     initial_belief_from_anchor,
     parse_step_response,
 )
-from sibyl import config as _cfg
 from sibyl.config import (
     ANTHROPIC_MAX_ATTEMPTS,
     EFFORT,
@@ -288,24 +287,10 @@ class TrialResult:
     cost: CostBreakdown = field(default_factory=CostBreakdown)
     leakage: LeakageStats = field(default_factory=LeakageStats)
     error: Optional[str] = None
-    # Searches that returned at least one source, and documents read.
-    n_search_ok: int = 0
-    n_docs_read: int = 0
-    # Set when the trial kept its last valid belief after a later step failed
-    # on every attempt (e.g. "model_step_failed"); the trial still counts.
-    degraded: Optional[str] = None
 
     @property
     def ok(self) -> bool:
         return self.quantiles is not None and self.error is None
-
-    @property
-    def evidence_ok(self) -> bool:
-        """Did the trial see anything? Thresholds read at call time."""
-        return (
-            self.n_search_ok >= _cfg.MIN_SEARCH_OK
-            and self.n_docs_read >= _cfg.MIN_DOCS_READ
-        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -326,10 +311,6 @@ class TrialResult:
             "cost": self.cost.to_dict(),
             "leakage": self.leakage.to_dict(),
             "error": self.error,
-            "n_search_ok": self.n_search_ok,
-            "n_docs_read": self.n_docs_read,
-            "evidence_ok": self.evidence_ok,
-            "degraded": self.degraded,
         }
 
 
@@ -540,19 +521,8 @@ def run_trial(
                 )
 
         if decision is None:
+            result.error = "model_step_failed"
             result.steps_used = step
-            if result.belief_trace:
-                # Salvage: the belief from the last valid step stands. The
-                # step that failed added nothing, and discarding a trial that
-                # had already read the web wastes what it learned.
-                result.degraded = "model_step_failed"
-                logger.warning(
-                    "sibyl.agent: q=%s trial=%d step %d failed on every attempt; "
-                    "keeping the belief from step %d",
-                    question.question_id, trial_index, step, step - 1,
-                )
-            else:
-                result.error = "model_step_failed"
             break
 
         belief = decision.belief
@@ -573,10 +543,6 @@ def run_trial(
 
         tool_result = _execute_tool(decision, as_of)
         record.tool_ok = tool_result.ok
-        if tool_result.ok and tool_result.tool == "brave_search" and tool_result.sources:
-            result.n_search_ok += 1
-        if tool_result.ok and tool_result.tool == "fetch_url":
-            result.n_docs_read += 1
         result.cost.add(COST_KIND_BRAVE, tool_result.cost_usd)
         tracker.add(question.question_id, COST_KIND_BRAVE, tool_result.cost_usd)
         result.leakage.merge(tool_result.leakage)

@@ -14,8 +14,11 @@ is nothing to leak):
    material,
 3. optional live lookups are clamped to ``asOf`` (extension point; lookups
    are disabled by default),
-4. known resolution-source URLs are blocked so the agent cannot read the
-   ground truth it is being scored against.
+4. known resolution-source URLs are blocked IN BACKTEST so the agent cannot
+   read the ground truth it is being scored against. In a live run the
+   outcome does not exist yet, so the resolving sources (and forecast
+   products such as ACLED CAST and VIEWS) are open: they are the best
+   evidence there is of where a series stands (owner decision, Oct 2026).
 
 The residual leak rate (snippets dropped by the classifier / total
 retrieved) is tracked per trial and persisted for backtest audits.
@@ -37,7 +40,8 @@ from sibyl.config import SEARCH_WINDOW_DAYS
 logger = logging.getLogger(__name__)
 
 # Domains of Pythia's resolution sources (the ground truth Sibyl is scored
-# against). Always blocked, in live and backtest mode alike.
+# against). Blocked in backtest mode only (``is_blocked_for``); open in live
+# runs since Oct 2026, where reading them leaks nothing.
 RESOLUTION_SOURCE_DOMAINS = (
     "go.ifrc.org",  # IFRC GO / Montandon (natural-hazard PA resolution)
     "acleddata.com",  # ACLED (ACE fatalities resolution)
@@ -139,6 +143,11 @@ def is_blocked_url(url: str) -> bool:
     return any(host == d or host.endswith("." + d) for d in RESOLUTION_SOURCE_DOMAINS)
 
 
+def is_blocked_for(url: str, as_of: date, *, today: Optional[date] = None) -> bool:
+    """True when *url* is a resolution source AND the run is a backtest."""
+    return is_backtest(as_of, today=today) and is_blocked_url(url)
+
+
 def extract_dates(text: str, *, limit: int = 8) -> List[date]:
     """Best-effort extraction of explicit dates from a snippet.
 
@@ -207,12 +216,11 @@ def filter_sources(
     *,
     today: Optional[date] = None,
 ) -> Tuple[List[EvidenceSource], LeakageStats]:
-    """Apply blocked-domain and (in backtest) post-asOf filters to sources.
+    """Apply the backtest filters to sources: blocked domains and post-asOf.
 
-    Blocked resolution-source domains are dropped unconditionally. The
-    date-based classifier only runs when ``as_of`` is in the past — in live
-    mode there is nothing to leak and news snippets legitimately carry
-    today's date.
+    Both run only when ``as_of`` is in the past. In live mode there is
+    nothing to leak: news snippets legitimately carry today's date, and the
+    resolution sources are open.
     """
     stats = LeakageStats()
     backtest = is_backtest(as_of, today=today)
@@ -220,7 +228,7 @@ def filter_sources(
 
     for src in sources:
         stats.total_retrieved += 1
-        if is_blocked_url(src.url):
+        if backtest and is_blocked_url(src.url):
             stats.dropped_blocked_domain += 1
             continue
         if backtest:

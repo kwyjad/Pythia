@@ -61,7 +61,10 @@ from sibyl.config import (
     N_QUESTIONS,
     RUN_HARD_CAP_USD,
 )
+from sibyl import config as _cfg
+from sibyl import tools as sibyl_tools
 from sibyl.cost import CostTracker
+from sibyl.evidence import backfill_evidence_ok
 from sibyl.leakage import LeakageStats
 from sibyl.select_questions import (
     SibylQuestion,
@@ -70,6 +73,7 @@ from sibyl.select_questions import (
     select_top_questions,
 )
 from sibyl.spd import (
+    apply_bucket_floor,
     bucket_probs_from_distribution,
     find_standard_run_id,
     inter_trial_divergence,
@@ -84,6 +88,7 @@ logger = logging.getLogger(__name__)
 
 SKIP_REASON_BUDGET = "run budget cap"
 SKIP_REASON_TIME = "run time cap"
+SKIP_REASON_NO_EVIDENCE = "no evidence"
 
 
 def _runtime_cap_reached(started: float, limit_min: float, now: Optional[float] = None) -> bool:
@@ -218,9 +223,22 @@ def process_question(
         )
         outcome.trials.append(trial)
 
-    ok_trials = [t for t in outcome.trials if t.ok]
-    if not ok_trials:
-        outcome.skip_reason = "no successful trials"
+    # Evidence gate: pool only trials that finished AND saw something. A
+    # question short of MIN_VALID_TRIALS such trials is stored failed with its
+    # trials kept, and nothing reaches the forecast tables.
+    finished = [t for t in outcome.trials if t.ok]
+    ok_trials = [t for t in finished if t.evidence_ok]
+    required = max(1, min(_cfg.MIN_VALID_TRIALS, K))
+    if len(ok_trials) < required:
+        if not finished:
+            outcome.skip_reason = "no successful trials"
+        else:
+            outcome.skip_reason = SKIP_REASON_NO_EVIDENCE
+            logger.warning(
+                "sibyl.run: %s has %d trial(s) with evidence of %d finished "
+                "(need %d); stored as failed, nothing written",
+                question.question_id, len(ok_trials), len(finished), required,
+            )
         return outcome
 
     try:
@@ -228,7 +246,9 @@ def process_question(
         # Identity hook while CALIBRATION_ENABLED is off; horizon-specific
         # application is part of the deferred PIT work (see calibration.py).
         pooled = calibrate(pooled, question.hazard_code, 0)
-        bucket_probs = bucket_probs_from_distribution(pooled, question.metric)
+        bucket_probs = apply_bucket_floor(
+            bucket_probs_from_distribution(pooled, question.metric)
+        )
     except ValueError as exc:
         outcome.skip_reason = f"aggregation failed: {exc}"
         logger.error("sibyl.run: aggregation failed for %s: %s", question.question_id, exc)
@@ -309,6 +329,7 @@ def process_question(
             "opus_cost_usd": qcost.opus_usd,
             "brave_cost_usd": qcost.brave_usd,
             "leakage": leakage.to_dict(),
+            "evidence_ok": True,
         },
     )
     outcome.status = "ok"
@@ -352,6 +373,9 @@ def _persist_non_ok(
             "opus_cost_usd": qcost.opus_usd,
             "brave_cost_usd": qcost.brave_usd,
             "leakage": None,
+            # A question that ran trials and stored no forecast had none that
+            # rested on evidence; a skip that ran nothing has no verdict.
+            "evidence_ok": (False if trials else None),
         },
     )
 
@@ -380,6 +404,12 @@ def run_sibyl(
     resolved_hs_run_id = hs_run_id
 
     try:
+        # Start-of-run state: the shared Brave breaker (a trip left over from
+        # earlier in the process blinded every search of the July 2026 run)
+        # and the tool counters written to sibyl_runs.
+        sibyl_tools.reset_run_state()
+        backfill_evidence_ok(con)
+
         # Derive test mode from the target HS run (workflow_run triggers
         # cannot carry the upstream run's test_mode input). Setting the env
         # var here makes every downstream is_test_mode() consumer — question
@@ -486,6 +516,16 @@ def run_sibyl(
             budget_capped = True
 
         breakdown = tracker.run_breakdown()
+        tool_counts = sibyl_tools.COUNTERS.snapshot()
+        if tool_counts["n_search_calls"]:
+            fail_share = tool_counts["n_search_failed"] / tool_counts["n_search_calls"]
+            if fail_share > _cfg.DEGRADED_SEARCH_FAIL_SHARE:
+                logger.warning(
+                    "sibyl.run: %d of %d searches failed (%.0f%%; %d breaker "
+                    "trip(s)) — this run's research is degraded",
+                    tool_counts["n_search_failed"], tool_counts["n_search_calls"],
+                    100 * fail_share, tool_counts["n_breaker_trips"],
+                )
         run_record = {
             "sibyl_run_id": sibyl_run_id,
             "hs_run_id": resolved_hs_run_id,
@@ -503,6 +543,7 @@ def run_sibyl(
             "n_selected": len(questions),
             "n_forecast": n_forecast,
             "n_skipped": n_skipped,
+            **tool_counts,
             "config": {
                 "N_QUESTIONS": n_questions,
                 "MIN_PER_HAZARD": MIN_PER_HAZARD,
@@ -512,6 +553,10 @@ def run_sibyl(
                 "BACKTEST_MODE": sibyl_config.BACKTEST_MODE,
                 "BUDGET_USD_PER_QUESTION": sibyl_config.BUDGET_USD_PER_QUESTION,
                 "RUN_HARD_CAP_USD": RUN_HARD_CAP_USD,
+                "MIN_SEARCH_OK": _cfg.MIN_SEARCH_OK,
+                "MIN_DOCS_READ": _cfg.MIN_DOCS_READ,
+                "MIN_VALID_TRIALS": _cfg.MIN_VALID_TRIALS,
+                "BUCKET_FLOOR": _cfg.BUCKET_FLOOR,
             },
         }
         persist_sibyl_run(con, run_record)

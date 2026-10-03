@@ -83,6 +83,16 @@ def seed_db(tmp_path: Path, monkeypatch) -> str:
     return db_url
 
 
+def disable_evidence_gate(monkeypatch) -> None:
+    """For tests about caps, arms or plumbing whose fake agent submits at
+    step 1 without searching: such a trial has no evidence and the gate
+    (sibyl.config.MIN_SEARCH_OK) would correctly fail the question."""
+    import sibyl.config as sibyl_config
+
+    monkeypatch.setattr(sibyl_config, "MIN_SEARCH_OK", 0)
+    monkeypatch.setattr(sibyl_config, "MIN_DOCS_READ", 0)
+
+
 def stub_base_rate() -> BaseRate:
     """Deterministic outside-view stub (no Resolver DB / forecaster import)."""
     anchor = {0.1: 0.0, 0.25: 2.0, 0.5: 10.0, 0.75: 40.0, 0.9: 150.0, 0.95: 400.0, 0.99: 1500.0}
