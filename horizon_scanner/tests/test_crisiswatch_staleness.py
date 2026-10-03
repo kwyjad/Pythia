@@ -47,10 +47,12 @@ def test_edition_age_counts_months():
 
 def test_three_month_old_edition_gets_a_warning():
     today = datetime(2026, 9, 1, tzinfo=timezone.utc)
-    text = format_crisiswatch_for_prompt("AFG", _entry("June", 2026), today=today)
+    text = format_crisiswatch_for_prompt(
+        "AFG", _entry("June", 2026), today=today, editions=[(2026, 6)],
+    )
     assert text is not None
     assert "STALENESS WARNING" in text
-    assert "June 2026 edition, 3 months old" in text
+    assert "newest edition held is June 2026, 3 months old" in text
     # The original signal is still there — flagged, not dropped.
     assert "cross-border attacks" in text
     assert "CONFLICT RISK" in text
@@ -59,7 +61,9 @@ def test_three_month_old_edition_gets_a_warning():
 def test_normal_publication_lag_carries_no_warning():
     today = datetime(2026, 9, 1, tzinfo=timezone.utc)
     for month in ("July", "August"):
-        text = format_crisiswatch_for_prompt("AFG", _entry(month, 2026), today=today)
+        text = format_crisiswatch_for_prompt(
+            "AFG", _entry(month, 2026), today=today, editions=[],
+        )
         assert text is not None
         assert "STALENESS WARNING" not in text
 

@@ -56,7 +56,10 @@ def rich_db(mini_db: str) -> str:  # noqa: F811
     )
     con.execute(
         "INSERT INTO crisiswatch_entries VALUES ('ETH', 10, 2025, TIMESTAMP '2025-11-05'),"
-        "('ETH', 1, 2026, TIMESTAMP '2026-02-05')"
+        "('ETH', 1, 2026, TIMESTAMP '2026-02-05'),"
+        # Another country in a newer edition held before the run: ETH is
+        # then "not listed in the newest edition".
+        "('SOM', 12, 2025, TIMESTAMP '2026-01-01')"
     )
     con.execute(
         "CREATE TABLE forecast_deviation (run_id TEXT, question_id TEXT, "
@@ -103,6 +106,8 @@ def test_inject_status_reads_what_was_current_on_the_run_date(extracted: Path):
     assert inj["enso"]["observation_date"] == "2025-11-01"
     assert inj["crisiswatch"]["edition"] == "2025-10"
     assert inj["crisiswatch"]["edition_age_months"] == 3
+    assert inj["crisiswatch"]["newest_edition_held"] == "2025-12"
+    assert inj["crisiswatch"]["coverage"] == "not_listed_in_newest"
     assert inj["base_rate"]["source"] == "acled_monthly_fatalities"
     assert inj["gdacs_history"] == {"applicable": False}
 

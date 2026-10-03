@@ -96,8 +96,8 @@ in some regions reduces mobility), or exhaustion of combatant capacity.
 allow for meaningful month-to-month differences when there are time-specific signals \
 (e.g. a planned offensive in month 2, elections in month 4). Do not default to \
 identical SPDs across all 6 months unless the situation is genuinely static.
-- ICG CrisisWatch flags (if present): "Deteriorated" or "Situation of Concern" flags \
-are expert-curated signals. Treat them as moderate-strength evidence for rightward shift.
+- ICG CrisisWatch (if present): a "Deteriorated" arrow or a "Conflict Risk Alert" \
+is an expert-curated signal. Treat it as moderate-strength evidence for a rightward shift.
 
 Common calibration errors to avoid:
 - Anchoring too heavily on the most recent month rather than the 6–12 month trend.

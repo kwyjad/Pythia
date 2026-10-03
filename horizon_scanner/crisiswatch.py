@@ -84,6 +84,10 @@ _ICG_COUNTRY_ISO3: dict[str, str] = {
     "Chad": "TCD",
     "Chile": "CHL",
     "China": "CHN",
+    # A bilateral heading whose second party (the United States) is not a
+    # Pythia country; the entry is about China's side of it. Explicit, because
+    # it used to resolve only through the substring test that is now gone.
+    "China-U.S.": "CHN",
     "Colombia": "COL",
     "Comoros": "COM",
     "Congo": "COG",
@@ -123,13 +127,13 @@ _ICG_COUNTRY_ISO3: dict[str, str] = {
     "Iran": "IRN",
     "Iraq": "IRQ",
     "Israel": "ISR",
-    "Israel/Palestine": "ISR",
-    "Israel-Palestine": "ISR",
     "Jamaica": "JAM",
     "Jordan": "JOR",
     "Kazakhstan": "KAZ",
     "Kenya": "KEN",
-    "Kosovo": "XKX",
+    # RKS is the code resolver/data/countries.csv and the question list use;
+    # XKX (the user-assigned code some libraries carry) matched nothing.
+    "Kosovo": "RKS",
     "Kuwait": "KWT",
     "Kyrgyzstan": "KGZ",
     "Laos": "LAO",
@@ -147,7 +151,6 @@ _ICG_COUNTRY_ISO3: dict[str, str] = {
     "Moldova": "MDA",
     "Mongolia": "MNG",
     "Morocco": "MAR",
-    "Morocco/Western Sahara": "MAR",
     "Mozambique": "MOZ",
     "Myanmar": "MMR",
     "Nagorno-Karabakh": "AZE",
@@ -163,6 +166,9 @@ _ICG_COUNTRY_ISO3: dict[str, str] = {
     "Nigeria": "NGA",
     "North Korea": "PRK",
     "North Macedonia": "MKD",
+    # First seen unmapped in the September 2026 edition, as "Northern Ireland
+    # (UK)"; the bracketed qualifier is stripped before lookup.
+    "Northern Ireland": "GBR",
     "Oman": "OMN",
     "Pakistan": "PAK",
     "Palestine": "PSE",
@@ -184,6 +190,9 @@ _ICG_COUNTRY_ISO3: dict[str, str] = {
     "Somalia": "SOM",
     "Somaliland": "SOM",
     "South Africa": "ZAF",
+    # A maritime zone rather than a pair of places; ICG's entry is written
+    # around Chinese activity. Kept explicit for the same reason as China-U.S.
+    "South China Sea": "CHN",
     "South Korea": "KOR",
     "South Sudan": "SSD",
     "Sri Lanka": "LKA",
@@ -215,22 +224,78 @@ _ICG_COUNTRY_ISO3: dict[str, str] = {
     "Zimbabwe": "ZWE",
 }
 
+#: Headings that name MORE THAN ONE country. Each is expanded into one row
+#: per member state, stamped ``regional_source`` so a country's own entry
+#: still wins the merge (``_merge_country_rows``). The single source of this
+#: map: ``scripts/refresh_crisiswatch.py`` imports it as its
+#: ``_REGIONAL_ENTRY_MAP``. Until October 2026 "Israel/Palestine" resolved to
+#: ISR alone, so PSE's conflict questions ran with no CrisisWatch entry, and
+#: "India-Pakistan (Kashmir)" reached India alone.
+MULTI_COUNTRY_HEADINGS: dict[str, list[tuple[str, str]]] = {
+    "Amazon": [("Brazil", "BRA"), ("Ecuador", "ECU"), ("Colombia", "COL")],
+    "Nile Waters": [("Ethiopia", "ETH"), ("Sudan", "SDN"), ("Egypt", "EGY")],
+    "Korean Peninsula": [("South Korea", "KOR"), ("North Korea", "PRK")],
+    "Israel/Palestine": [("Israel", "ISR"), ("Palestine", "PSE")],
+    "Israel-Palestine": [("Israel", "ISR"), ("Palestine", "PSE")],
+    "India-Pakistan (Kashmir)": [("India", "IND"), ("Pakistan", "PAK")],
+    "Morocco/Western Sahara": [("Morocco", "MAR"), ("Western Sahara", "ESH")],
+}
+
+_MULTI_LOOKUP: dict[str, str] = {k.upper(): k for k in MULTI_COUNTRY_HEADINGS}
+
 # Case-insensitive lookup version (built once).
 _ICG_LOOKUP: dict[str, str] = {k.upper(): v for k, v in _ICG_COUNTRY_ISO3.items()}
 
+#: Headings seen this process that resolved to nothing, in first-seen order.
+#: Read by the scraper's parse accounting and by the run issue register.
+_UNMAPPED_HEADINGS: list[str] = []
+
+
+def multi_country_heading(country_name: str) -> str | None:
+    """The canonical spelling of a multi-country heading, or None."""
+    if not country_name:
+        return None
+    return _MULTI_LOOKUP.get(country_name.strip().upper())
+
+
+def unmapped_headings() -> list[str]:
+    """Headings this process could not resolve (a copy)."""
+    return list(_UNMAPPED_HEADINGS)
+
 
 def _resolve_iso3(country_name: str) -> str | None:
-    """Resolve an ICG country name to ISO3. Returns None if unknown."""
+    """Resolve an ICG heading to ONE ISO3, by explicit alias only.
+
+    Exact match, then the heading with a bracketed qualifier removed
+    ("Russia (Internal)", "New Caledonia (France)"). There is no substring
+    fallback: until October 2026 one tested ``key in k or k in key``, which
+    can put Niger inside Nigeria, Guinea inside Guinea-Bissau and Mali inside
+    Somalia, depending only on dictionary order. A heading that names several
+    countries is not resolved here (see ``MULTI_COUNTRY_HEADINGS``). Anything
+    else unknown returns None and is logged by name, once per process, so it
+    reaches the parse accounting as a named issue rather than a guess.
+    """
     if not country_name:
         return None
     key = country_name.strip().upper()
     iso3 = _ICG_LOOKUP.get(key)
     if iso3:
         return iso3
-    # Try substring matches for composite names like "Israel/Palestine"
-    for k, v in _ICG_LOOKUP.items():
-        if key in k or k in key:
-            return v
+    stripped = re.sub(r"\s*\(.*?\)\s*", "", country_name).strip().upper()
+    if stripped and stripped != key:
+        iso3 = _ICG_LOOKUP.get(stripped)
+        if iso3:
+            return iso3
+    if key in _MULTI_LOOKUP:
+        return None
+    name = country_name.strip()
+    if name not in _UNMAPPED_HEADINGS:
+        _UNMAPPED_HEADINGS.append(name)
+        log.warning(
+            "CrisisWatch heading %r maps to no country; add it to "
+            "_ICG_COUNTRY_ISO3 or MULTI_COUNTRY_HEADINGS.",
+            name,
+        )
     return None
 
 
@@ -574,8 +639,14 @@ def _merge_country_rows(
             break
         summary += addition
 
+    # A country with no entry of its own is named by the heading it came
+    # from ("Israel/Palestine"), so the prompt says which entry it is reading.
+    country = primary.get("country", "")
+    if not _is_own(primary):
+        country = (primary.get("regional_source") or country).strip()
+
     return {
-        "country": primary.get("country", ""),
+        "country": country,
         "iso3": iso3,
         "arrow": arrow,
         "alert_type": alert_type,
@@ -654,6 +725,33 @@ def entry_content_hash(entry: Dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def expand_multi_country_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Expand any multi-country heading into one entry per member state.
+
+    The scraper already does this for files it writes now. A file written
+    before October 2026 carries "Israel/Palestine" with ``iso3: ISR`` stamped
+    on it, and re-reading it must give Palestine its entry too. An entry the
+    scraper already expanded carries ``regional_source`` and passes through.
+    """
+    out: List[Dict[str, Any]] = []
+    for entry in entries:
+        heading = None
+        if not (entry.get("regional_source") or "").strip():
+            heading = multi_country_heading(str(entry.get("country") or ""))
+        if heading is None:
+            out.append(entry)
+            continue
+        for sub_country, sub_iso3 in MULTI_COUNTRY_HEADINGS[heading]:
+            out.append({
+                **entry,
+                "country": sub_country,
+                "iso3": sub_iso3,
+                "regional_source": heading,
+                "iso3_reason": "regional_expansion",
+            })
+    return out
+
+
 def _load_from_json(path: Path | None = None) -> Dict[str, Any] | None:
     """Load CrisisWatch data from a scraped JSON file (primary source).
 
@@ -700,6 +798,7 @@ def _load_from_json(path: Path | None = None) -> Dict[str, Any] | None:
         # by _REGIONAL_ENTRY_MAP (Nile Waters -> ETH/SDN/EGY), a bilateral
         # heading that resolves by name (China-U.S. -> CHN), or a territory
         # (Somaliland -> SOM).  They are merged, never overwritten.
+        entries = expand_multi_country_entries(entries)
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         accounting = _new_accounting(len(entries), data.get("month", ""))
         for entry in entries:
@@ -868,6 +967,7 @@ def store_crisiswatch_entries(entries: Dict[str, Any]) -> Dict[str, Any]:
                     key + values,
                 )
                 counts["inserted"] += 1
+        counts.update(repair_stored_headings(con))
         for year, month_num in editions:
             counts["rows_for_edition"] += int(
                 con.execute(
@@ -891,6 +991,71 @@ def store_crisiswatch_entries(entries: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
     return counts
+
+
+#: Stored codes that were wrong and what they should have been. Kosovo was
+#: stored as XKX; every other table and the question list use RKS.
+_RENAMED_ISO3 = {"XKX": "RKS"}
+
+
+def repair_stored_headings(con: Any) -> Dict[str, int]:
+    """Give every stored multi-country heading a row for each member state.
+
+    Rows written before October 2026 hold "Israel/Palestine" under ISR only,
+    so PSE had no entry in any edition. For each stored row whose
+    ``country_name`` is a multi-country heading, a copy is inserted for every
+    member state that has no row for that edition; a member's own row is never
+    touched. Codes in ``_RENAMED_ISO3`` move to their correct code where the
+    correct code holds no row. Idempotent: a second run inserts nothing.
+    """
+
+    out = {"heading_rows_added": 0, "iso3_renamed": 0}
+    rows = con.execute(
+        "SELECT iso3, year, month, arrow, alert_type, summary, country_name, "
+        "fetched_at, content_hash FROM crisiswatch_entries"
+    ).fetchall()
+    held = {(r[0], int(r[1]), int(r[2])) for r in rows}
+    for iso3, year, month, arrow, alert, summary, name, fetched, chash in rows:
+        heading = multi_country_heading(str(name or ""))
+        if heading is None:
+            continue
+        for _sub_country, sub_iso3 in MULTI_COUNTRY_HEADINGS[heading]:
+            k = (sub_iso3, int(year), int(month))
+            if k in held:
+                continue
+            con.execute(
+                """
+                INSERT INTO crisiswatch_entries
+                    (iso3, year, month, arrow, alert_type, summary,
+                     country_name, fetched_at, content_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [sub_iso3, int(year), int(month), arrow, alert, summary,
+                 heading, fetched, chash],
+            )
+            held.add(k)
+            out["heading_rows_added"] += 1
+    for wrong, right in _RENAMED_ISO3.items():
+        for (iso3, year, month) in sorted(k for k in held if k[0] == wrong):
+            if (right, year, month) in held:
+                con.execute(
+                    "DELETE FROM crisiswatch_entries WHERE iso3 = ? AND year = ? AND month = ?",
+                    [wrong, year, month],
+                )
+            else:
+                con.execute(
+                    "UPDATE crisiswatch_entries SET iso3 = ? "
+                    "WHERE iso3 = ? AND year = ? AND month = ?",
+                    [right, wrong, year, month],
+                )
+            out["iso3_renamed"] += 1
+    if out["heading_rows_added"] or out["iso3_renamed"]:
+        log.info(
+            "CrisisWatch: repaired stored headings — %d member row(s) added for "
+            "multi-country headings, %d row(s) moved to a corrected ISO3",
+            out["heading_rows_added"], out["iso3_renamed"],
+        )
+    return out
 
 
 def bulk_store_crisiswatch(path: Path | str | None = None) -> int:
@@ -1334,54 +1499,187 @@ def crisiswatch_edition_age_months(
     return (now.year - year) * 12 + (now.month - month_num)
 
 
+#: The day of the month by which ICG has normally published the previous
+#: month's edition. Measured from the Wayback Machine in October 2026
+#: (scripts/ci/crisiswatch_publication_days.py, Wayback plus ReliefWeb's
+#: reposts): eleven of thirteen editions first seen by day 7, June 2026 on
+#: 10 July (an upper bound with no earlier capture to narrow it), May 2026
+#: never captured at all.
+EDITION_PUBLISHED_BY_DAY = 10
+
+
+def expected_edition(today: Any) -> tuple:
+    """The newest edition a run on *today* should be able to hold.
+
+    The previous calendar month from ``EDITION_PUBLISHED_BY_DAY`` onward, the
+    month before that earlier: a forecast on the 1st cannot hold an edition
+    ICG has not published yet, and a check that demanded it would fail every
+    month for nothing.
+    """
+    y, m = today.year, today.month - 1
+    if today.day < EDITION_PUBLISHED_BY_DAY:
+        m -= 1
+    while m <= 0:
+        y, m = y - 1, m + 12
+    return (y, m)
+
+
+def expected_editions_window(today: Any, n: int = 12) -> List[tuple]:
+    """The *n* editions ending at ``expected_edition(today)``, oldest first."""
+    y, m = expected_edition(today)
+    out = []
+    for _ in range(n):
+        out.append((y, m))
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    return sorted(out)
+
+
+def _edition_label(year: int, month: int) -> str:
+    return f"{calendar.month_name[month]} {year}" if 1 <= month <= 12 and year else ""
+
+
+def editions_held() -> List[tuple]:
+    """Every ``(year, month)`` edition ``crisiswatch_entries`` holds, oldest first.
+
+    ``[]`` when the table cannot be read; never raises.
+    """
+    try:
+        from pythia.db.schema import connect
+    except ImportError:
+        return []
+    try:
+        con = connect(read_only=True)
+    except Exception:
+        return []
+    try:
+        rows = con.execute(
+            "SELECT DISTINCT year, month FROM crisiswatch_entries "
+            "WHERE year IS NOT NULL AND month IS NOT NULL ORDER BY year, month"
+        ).fetchall()
+        return [(int(y), int(m)) for y, m in rows]
+    except Exception as exc:  # noqa: BLE001
+        log.debug("CrisisWatch editions query failed: %s", exc)
+        return []
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+_COUNTRY_NAMES: Dict[str, str] = {}
+
+
+def _country_name(iso3: str) -> str:
+    """A readable name for *iso3* from resolver/data/countries.csv, else the code."""
+    if not _COUNTRY_NAMES:
+        path = _CURRENT_DIR.parent / "resolver" / "data" / "countries.csv"
+        try:
+            import csv  # noqa: PLC0415
+
+            with open(path, encoding="utf-8-sig") as fh:
+                for row in csv.DictReader(fh):
+                    code = (row.get("iso3") or "").strip().upper()
+                    name = (row.get("country_name") or row.get("name") or "").strip()
+                    if code and name:
+                        _COUNTRY_NAMES.setdefault(code, name)
+        except Exception:  # noqa: BLE001
+            pass
+    return _COUNTRY_NAMES.get(iso3.upper(), iso3.upper())
+
+
 def format_crisiswatch_for_prompt(
     iso3: str,
     crisiswatch_data: Dict[str, Any] | None = None,
     today: datetime | None = None,
+    editions: List[tuple] | None = None,
 ) -> str | None:
-    """Format CrisisWatch entry for injection into RC/triage/SPD prompts.
+    """Format the CrisisWatch picture for one country, for RC/triage/SPD prompts.
 
-    If *crisiswatch_data* (keyed by ISO3) is provided, uses it directly.
-    Otherwise loads from DuckDB. Entries older than ``_STALE_EDITION_MONTHS``
-    editions carry an explicit staleness warning (*today* is a test seam).
+    It always says which edition is the newest the system holds, so a reader
+    can tell three different situations apart (until October 2026 the first
+    two printed nothing, which 33 of 120 conflict RC prompts on 1 October did):
+
+    * the country is in the newest edition: its arrow, alert and summary;
+    * it has an entry, but not in the newest edition: "not listed in the
+      <newest> edition; last entry <month>", followed by that older entry;
+    * it has no entry in any edition held: one line saying ICG does not cover
+      it.
+
+    *editions* (``[(year, month), ...]``) and *today* are test seams; by
+    default the editions come from ``crisiswatch_entries``, else from the
+    months of *crisiswatch_data*. Returns None only when the system holds no
+    edition at all, since then there is nothing true to say.
     """
     entry = None
     if crisiswatch_data:
         entry = crisiswatch_data.get(iso3.upper())
     if entry is None:
         entry = load_crisiswatch_for_country(iso3)
-    if not entry:
+
+    held = list(editions) if editions is not None else editions_held()
+    if not held and crisiswatch_data:
+        held = sorted({
+            (int(e.get("year") or 0), _month_num_from_str(str(e.get("month") or "")))
+            for e in crisiswatch_data.values()
+            if e.get("year") and _month_num_from_str(str(e.get("month") or ""))
+        })
+    if not held and entry:
+        y, m = int(entry.get("year") or 0), _month_num_from_str(str(entry.get("month") or ""))
+        if y and m:
+            held = [(y, m)]
+    if not held:
         return None
+
+    newest = max(held)
+    newest_label = _edition_label(*newest)
+    header = f"ICG CRISISWATCH (newest edition held: {newest_label}):"
+    parts = [header]
+
+    # The newest edition itself can be stale: CrisisWatch covers month M and
+    # is published early in M+1, so one or two editions old is the normal
+    # cadence and three means an edition was missed.
+    now = today or datetime.now(timezone.utc)
+    newest_age = (now.year - newest[0]) * 12 + (now.month - newest[1])
+    if newest_age >= _STALE_EDITION_MONTHS:
+        parts.append(
+            f"STALENESS WARNING: the newest edition held is {newest_label}, "
+            f"{newest_age} months old; no newer CrisisWatch edition has been "
+            "ingested. Treat it as background on the situation as of that month, "
+            "not as a description of current conditions, and weight recent "
+            "sources above it."
+        )
+
+    name = (entry or {}).get("country") or _country_name(iso3)
+    if not entry:
+        span = (
+            f"{_edition_label(*min(held))} to {newest_label}"
+            if len(held) > 1 else newest_label
+        )
+        parts.append(
+            f"ICG does not cover {_country_name(iso3)}: no entry in any of the "
+            f"{len(held)} edition(s) held ({span})."
+        )
+        return "\n".join(parts)
 
     arrow = (entry.get("arrow") or "").strip()
     alert_type = (entry.get("alert_type") or "").strip()
     summary = (entry.get("summary") or "").strip()
-    country = entry.get("country") or iso3
     month = entry.get("month") or ""
+    entry_key = (int(entry.get("year") or 0), _month_num_from_str(str(month)))
 
-    if not arrow and not alert_type and not summary:
-        return None
-
-    parts = [f'ICG CRISISWATCH — {country} ({month}):']
-
-    # Edition age. CrisisWatch covers month M and is published early in M+1,
-    # so an entry one or two editions old is the normal cadence. Beyond that
-    # the prompt is quoting an event from a previous quarter as if it were
-    # the current picture — on 2026-09-01 the June edition (a cross-border
-    # attack signal) fed an October-to-March forecast with no caveat, while
-    # the 45-day VIEWS flag next to it said "stale". Say so in the prompt.
-    age = crisiswatch_edition_age_months(entry, today=today)
-    if age is not None and age >= _STALE_EDITION_MONTHS:
+    if entry_key != newest:
         parts.append(
-            f"STALENESS WARNING: this is the {month} edition, {age} months old; no "
-            "newer CrisisWatch edition has been ingested. Treat it as background on "
-            "the situation as of that month, not as a description of current "
-            "conditions, and weight recent sources above it."
+            f"{_country_name(iso3)} is not listed in the {newest_label} edition; "
+            f"its last entry is from {month or 'an undated edition'}. The lines "
+            "below describe that month, not the present."
         )
+    parts.append(f"{name} ({month}):")
 
     if arrow:
-        arrow_label = arrow.capitalize()
-        parts.append(f"Arrow: {arrow_label}")
+        parts.append(f"Arrow: {arrow.capitalize()}")
 
     if alert_type:
         if alert_type == "conflict_risk":

@@ -339,6 +339,44 @@ def test_crisiswatch_names_the_ace_questions_forecast_without_an_arrow(tmp_path:
     assert detail["n_ace_questions_without_crisiswatch"] == 2
 
 
+def test_crisiswatch_fails_when_the_expected_edition_or_a_month_is_missing(tmp_path: Path):
+    """The October 2026 review: May 2026 was absent and nothing said so."""
+    from scripts.debug_bundle import anomalies
+
+    con = _crisiswatch_db(tmp_path)
+    # A run on 13 October expects the September edition; May is a hole.
+    for y, m in [(2025, 10), (2025, 11), (2025, 12), (2026, 1), (2026, 2),
+                 (2026, 3), (2026, 4), (2026, 6), (2026, 7), (2026, 8)]:
+        con.execute("INSERT INTO crisiswatch_entries VALUES ('SOM','unchanged','',?,?)", [y, m])
+    detail = connector_freshness.crisiswatch_detail(
+        con, questions=[], today=datetime(2026, 10, 13).date(),
+    )
+    assert detail["expected_edition"] == "2026-09"
+    assert detail["expected_edition_held"] is False
+    assert detail["editions_missing_last_12"] == ["2026-05", "2026-09"]
+    found = [a for a in anomalies.build(crisiswatch=detail) if a["subsystem"] == "crisiswatch"]
+    fails = [a for a in found if a["severity"] == anomalies.FAIL]
+    assert any("2026-09" in a["description"] and "2026-08 edition" in a["description"] for a in fails)
+    assert any("2026-05" in a["description"] for a in fails)
+
+
+def test_crisiswatch_quiet_when_every_edition_is_held(tmp_path: Path):
+    from scripts.debug_bundle import anomalies
+
+    con = _crisiswatch_db(tmp_path)
+    for (y, m) in connector_freshness.last_twelve_editions(datetime(2026, 10, 13).date()):
+        con.execute("INSERT INTO crisiswatch_entries VALUES ('SOM','unchanged','',?,?)", [y, m])
+    detail = connector_freshness.crisiswatch_detail(
+        con, questions=[], today=datetime(2026, 10, 13).date(),
+    )
+    assert detail["expected_edition_held"] is True
+    assert detail["editions_missing_last_12"] == []
+    assert not [
+        a for a in anomalies.build(crisiswatch=detail)
+        if a["subsystem"] == "crisiswatch" and a["severity"] == anomalies.FAIL
+    ]
+
+
 def test_idmc_dates_itself_by_as_of_on_a_schema_sql_built_db(tmp_path: Path):
     # resolver/db/schema.sql creates facts_deltas with as_of only, while
     # duckdb_io.py's path adds as_of_date — so which one exists depends on
