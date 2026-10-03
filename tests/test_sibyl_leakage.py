@@ -22,6 +22,7 @@ from sibyl.leakage import (
     extract_dates,
     filter_sources,
     is_backtest,
+    is_blocked_for,
     is_blocked_url,
     snippet_leaks,
 )
@@ -128,18 +129,34 @@ def test_open_web_urls_not_blocked():
     assert is_blocked_url("https://notacleddata.com/x") is False
 
 
-def test_blocked_domains_dropped_in_live_mode_too():
+def test_resolution_sources_are_open_in_live_mode():
+    """Owner decision Oct 2026: in a live run the outcome does not exist yet,
+    so the resolving sources are evidence, not leakage."""
     kept, stats = filter_sources(
         [_src("https://acleddata.com/data", date_str=TODAY.isoformat())],
         TODAY,
         today=TODAY,
     )
+    assert [s.url for s in kept] == ["https://acleddata.com/data"]
+    assert stats.dropped_blocked_domain == 0
+    assert is_blocked_for("https://go.ifrc.org/emergencies/1", TODAY, today=TODAY) is False
+
+
+def test_resolution_sources_are_blocked_in_backtest():
+    kept, stats = filter_sources(
+        [_src("https://acleddata.com/data", date_str=PAST_AS_OF.isoformat())],
+        PAST_AS_OF,
+        today=TODAY,
+    )
     assert kept == []
     assert stats.dropped_blocked_domain == 1
+    assert is_blocked_for("https://go.ifrc.org/emergencies/1", PAST_AS_OF, today=TODAY) is True
 
 
-def test_fetch_url_refuses_blocked_domain():
-    result = sibyl_tools.fetch_url("https://go.ifrc.org/emergencies/1", TODAY)
+def test_fetch_url_refuses_blocked_domain_in_backtest():
+    result = sibyl_tools.fetch_url(
+        "https://go.ifrc.org/emergencies/1", PAST_AS_OF, today=TODAY
+    )
     assert result.ok is False
     assert result.error == "blocked_domain"
     assert result.leakage.dropped_blocked_domain == 1

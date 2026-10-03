@@ -26,6 +26,12 @@ Three things a reader wants:
   not reach an answer. That is a different signal from disagreeing with Fred,
   and it is worth printing as its own flag.
 
+A Sibyl forecast that rested on no evidence (``sibyl_forecasts.evidence_ok``
+FALSE, the July 2026 run whose searches all failed) is not a second opinion:
+the bundle builder that feeds this module
+(``scripts/ai_bundle/build_current_run_bundle.py``) leaves such rows out, so
+they reach none of these functions.
+
 Pure functions over plain values. The extraction is substring and token
 matching, deliberately: it is a prompt for a reader's attention, not a claim
 that a fact is new to the world, and a cleverer method would invite the

@@ -1831,6 +1831,13 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # SIBYL_MAX_RUNTIME_MIN (the job is the release trigger and
                 # has a hard timeout). Separate from budget_capped.
                 "time_capped": "BOOLEAN DEFAULT FALSE",
+                # Tool health (Oct 2026): Brave searches made, searches the
+                # provider did not answer, circuit-breaker trips seen, and
+                # documents read. NULL on runs written before.
+                "n_search_calls": "INTEGER",
+                "n_search_failed": "INTEGER",
+                "n_breaker_trips": "INTEGER",
+                "n_docs_read": "INTEGER",
             },
         )
 
@@ -1905,6 +1912,12 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # The sibyl_calibration_advice month whose text the prompt
                 # carried (NULL when it carried none).
                 "advice_as_of_month": "TEXT",
+                # Did the forecast rest on evidence (Oct 2026)? Written by
+                # sibyl.run; rows from before are filled by
+                # sibyl.evidence.backfill_evidence_ok. FALSE rows stay stored
+                # and scored, and every reader of Sibyl's record leaves them
+                # out (the July 2026 run's searches all failed).
+                "evidence_ok": "BOOLEAN",
             },
         )
 

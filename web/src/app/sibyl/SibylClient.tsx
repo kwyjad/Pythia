@@ -604,7 +604,14 @@ const SibylClient = ({
                     </div>
                   </td>
                   <td className="px-3 py-2 text-xs">
-                    {row.status === "ok" ? (
+                    {row.status === "ok" && row.evidence_ok === false ? (
+                      <span
+                        className="rounded bg-red-100 px-2 py-0.5 text-red-700"
+                        title="This forecast rested on no evidence: its trials' searches failed. It is kept and scored, and left out of every comparison."
+                      >
+                        no evidence
+                      </span>
+                    ) : row.status === "ok" ? (
                       <span className="rounded bg-green-100 px-2 py-0.5 text-green-700">
                         forecast
                       </span>

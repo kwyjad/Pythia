@@ -243,10 +243,17 @@ def _build_question_wording(
         )
 
     if hz in {"DR", "FL", "TC"} and m == "PA":
+        # Named after what resolves it today (pythia/tools/compute_resolutions.py,
+        # docs/montandon_assessment.md): people-affected figures in the Resolver
+        # facts, IFRC GO ahead of IDMC and direct affected counts ahead of
+        # displacement. EM-DAT has no active connector. A month with no such
+        # record stays unresolved; it is never scored as zero.
         hazard_name = HAZARD_HUMAN_NAMES.get(hz, hz)
         return (
             f"How many people will be affected each month by {hazard_name} in {country} "
-            f"between {start_str} and {end_str}, as resolved by EM-DAT?"
+            f"between {start_str} and {end_str}, as reported by IFRC GO (field reports, "
+            f"DREF and emergency appeals) or, failing that, IDMC displacement records? "
+            f"A month with no such record is not resolved."
         )
 
     return (

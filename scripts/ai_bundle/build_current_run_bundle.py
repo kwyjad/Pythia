@@ -252,6 +252,23 @@ def _load_triage(con, hs_run_id: str | None) -> dict[tuple, dict[str, Any]]:
     return {(str(r["iso3"]), str(r["hazard_code"])): r for r in rows}
 
 
+def _sibyl_evidence_clause(con) -> str:
+    """Leave out Sibyl forecasts that rested on no evidence (Oct 2026).
+
+    ``sibyl_forecasts.evidence_ok`` FALSE marks one (the July 2026 run, whose
+    searches all failed). It is not a second opinion, so the interpreter must
+    not read it as one.
+    """
+    try:
+        cols = {
+            str(r[1]).lower()
+            for r in con.execute("PRAGMA table_info('sibyl_forecasts')").fetchall()
+        }
+    except Exception:  # noqa: BLE001
+        return ""
+    return " AND COALESCE(evidence_ok, TRUE)" if "evidence_ok" in cols else ""
+
+
 def _sibyl_covered(con, qids: list[str]) -> set[str]:
     if not table_exists(con, "sibyl_forecasts") or not qids:
         return set()
@@ -259,7 +276,7 @@ def _sibyl_covered(con, qids: list[str]) -> set[str]:
         con,
         "SELECT DISTINCT question_id FROM sibyl_forecasts "
         "WHERE question_id IN (SELECT UNNEST(?::VARCHAR[])) "
-        "AND status NOT IN ('skipped')",
+        "AND status NOT IN ('skipped')" + _sibyl_evidence_clause(con),
         [qids],
     )
     return {str(r["question_id"]) for r in rows}
@@ -997,7 +1014,9 @@ def build_sibyl_section(
             con,
             "SELECT question_id, status, skip_reason, volatility_score, "
             "js_divergence_vs_standard, js_divergence_inter_trial, trials_json, "
-            "cost_usd FROM sibyl_forecasts WHERE run_id = ? ORDER BY question_id",
+            "cost_usd FROM sibyl_forecasts WHERE run_id = ?"
+            + _sibyl_evidence_clause(con)
+            + " ORDER BY question_id",
             [run_id],
         )
     except Exception as exc:  # noqa: BLE001

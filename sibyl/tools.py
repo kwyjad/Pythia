@@ -18,6 +18,8 @@ from __future__ import annotations
 import ipaddress
 import logging
 import socket
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from typing import List, Optional, Tuple
@@ -28,6 +30,7 @@ import requests
 from pythia.web_research.backends.brave_search import fetch_via_brave_search
 from pythia.web_research.types import EvidenceSource
 
+from sibyl import config as _cfg
 from sibyl.config import (
     BRAVE_MAX_RESULTS,
     BRAVE_TIMEOUT_SEC,
@@ -42,7 +45,7 @@ from sibyl.leakage import (
     date_range_freshness,
     filter_sources,
     is_backtest,
-    is_blocked_url,
+    is_blocked_for,
     snippet_leaks,
 )
 
@@ -60,16 +63,77 @@ class ToolResult:
     sources: List[EvidenceSource] = field(default_factory=list)
     leakage: LeakageStats = field(default_factory=LeakageStats)
     error: Optional[str] = None
+    status_code: Optional[int] = None
+
+    @property
+    def search_failed(self) -> bool:
+        """A search the provider did not answer (not merely an empty one).
+
+        "No results" with HTTP 200 is Brave saying nothing matched; every
+        other error (a tripped breaker, a missing key, a non-200) is a failure.
+        """
+        if self.tool != "brave_search" or self.ok:
+            return False
+        return not (self.error == "no_results" and self.status_code in (None, 200))
 
 
-def brave_search(query: str, as_of: date, *, today: Optional[date] = None) -> ToolResult:
-    """Date-filtered web search through the shared Brave wrapper.
+class RunCounters:
+    """Run-scoped tool counters, thread-safe (trials may run concurrently).
 
-    The freshness date-range always ends at *as_of* (harmless live, a hard
-    cap in backtest); leakage post-filtering runs on the results.
+    Reset at the start of every run by ``sibyl.run.run_sibyl`` and written
+    to ``sibyl_runs`` at its end.
     """
-    freshness = date_range_freshness(as_of, SEARCH_WINDOW_DAYS)
-    pack = fetch_via_brave_search(
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self) -> None:
+        with getattr(self, "_lock", threading.Lock()):
+            self.search_calls = 0
+            self.search_failed = 0
+            self.breaker_trips = 0
+            self.breaker_resets = 0
+            self.docs_read = 0
+
+    def add(self, name: str, n: int = 1) -> None:
+        with self._lock:
+            setattr(self, name, getattr(self, name) + n)
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "n_search_calls": self.search_calls,
+                "n_search_failed": self.search_failed,
+                "n_breaker_trips": self.breaker_trips,
+                "n_breaker_resets": self.breaker_resets,
+                "n_docs_read": self.docs_read,
+            }
+
+
+COUNTERS = RunCounters()
+
+
+def reset_run_state() -> None:
+    """Start-of-run reset: the shared Brave breaker and Sibyl's counters.
+
+    The breaker is a module singleton shared with the HS grounding code; a
+    trip left over from anything earlier in the process would otherwise blind
+    every Sibyl search (the July 2026 run lost all 216 searches that way).
+    """
+    from pythia.web_research import brave_circuit_breaker  # noqa: PLC0415
+
+    brave_circuit_breaker.reset()
+    COUNTERS.reset()
+
+
+def _sleep(seconds: float) -> None:
+    """Seam for tests."""
+    time.sleep(seconds)
+
+
+def _run_brave(query: str, freshness: str):
+    return fetch_via_brave_search(
         query,
         recency_days=SEARCH_WINDOW_DAYS,
         include_structural=False,
@@ -77,21 +141,78 @@ def brave_search(query: str, as_of: date, *, today: Optional[date] = None) -> To
         max_results=BRAVE_MAX_RESULTS,
         freshness_override=freshness,
     )
+
+
+def _pack_error_type(pack) -> Optional[str]:
+    if pack.error and not pack.sources:
+        return (pack.error or {}).get("type", "unknown")
+    return None
+
+
+def _maybe_reset_breaker() -> bool:
+    """Wait, reset the tripped breaker and say whether a retry is allowed.
+
+    At most ``BREAKER_MAX_RESETS`` resets a run, counted under the counter
+    lock so concurrent trials cannot overspend it.
+    """
+    from pythia.web_research import brave_circuit_breaker  # noqa: PLC0415
+
+    with COUNTERS._lock:
+        if COUNTERS.breaker_resets >= _cfg.BREAKER_MAX_RESETS:
+            return False
+        COUNTERS.breaker_resets += 1
+    logger.warning(
+        "sibyl.tools: Brave circuit breaker tripped; waiting %.0fs, resetting "
+        "and retrying once (%d of %d resets this run)",
+        _cfg.BREAKER_COOLDOWN_SEC, COUNTERS.breaker_resets, _cfg.BREAKER_MAX_RESETS,
+    )
+    _sleep(_cfg.BREAKER_COOLDOWN_SEC)
+    brave_circuit_breaker.reset()
+    return True
+
+
+def brave_search(query: str, as_of: date, *, today: Optional[date] = None) -> ToolResult:
+    """Date-filtered web search through the shared Brave wrapper.
+
+    The freshness date-range always ends at *as_of* (harmless live, a hard
+    cap in backtest); leakage post-filtering runs on the results. A tripped
+    circuit breaker is waited out, reset and retried once (bounded per run).
+    """
+    COUNTERS.add("search_calls")
+    freshness = date_range_freshness(as_of, SEARCH_WINDOW_DAYS)
+    pack = _run_brave(query, freshness)
+    if _pack_error_type(pack) == "circuit_breaker_tripped":
+        COUNTERS.add("breaker_trips")
+        if _maybe_reset_breaker():
+            pack = _run_brave(query, freshness)
+            if _pack_error_type(pack) == "circuit_breaker_tripped":
+                COUNTERS.add("breaker_trips")
     cost = 0.0
     try:
         cost = float((pack.debug.get("usage") or {}).get("cost_usd", 0.0))
     except (TypeError, ValueError):
         cost = 0.0
+    status: Optional[int] = None
+    try:
+        raw_status = (pack.debug or {}).get("status_code")
+        status = int(raw_status) if raw_status not in (None, "", 0) else None
+    except (TypeError, ValueError):
+        status = None
 
-    if pack.error and not pack.sources:
-        err_type = (pack.error or {}).get("type", "unknown")
-        return ToolResult(
+    err_type = _pack_error_type(pack)
+    if err_type:
+        status_txt = f" HTTP {status}" if status and status != 200 else ""
+        result = ToolResult(
             tool="brave_search",
             ok=False,
-            text=f"[search failed: {err_type}] No results for query: {query}",
+            text=f"[search failed: {err_type}{status_txt}] No results for query: {query}",
             cost_usd=cost,
             error=err_type,
+            status_code=status,
         )
+        if result.search_failed:
+            COUNTERS.add("search_failed")
+        return result
 
     kept, stats = filter_sources(pack.sources, as_of, today=today)
     if not kept:
@@ -118,6 +239,7 @@ def brave_search(query: str, as_of: date, *, today: Optional[date] = None) -> To
         cost_usd=cost,
         sources=kept,
         leakage=stats,
+        status_code=status,
     )
 
 
@@ -234,18 +356,19 @@ def _decode(resp: requests.Response, body: bytes) -> str:
 def fetch_url(url: str, as_of: date, *, today: Optional[date] = None) -> ToolResult:
     """Fetch a page the agent found via search and return readable text.
 
-    Blocked resolution-source URLs are refused; in backtest the extracted
-    text goes through the snippet leak classifier before being returned.
+    Resolution-source URLs are refused in backtest only (live runs may read
+    them, owner decision Oct 2026); in backtest the extracted text also goes
+    through the snippet leak classifier before being returned.
     """
     stats = LeakageStats(total_retrieved=1)
-    if is_blocked_url(url):
+    if is_blocked_for(url, as_of, today=today):
         stats.dropped_blocked_domain = 1
         return ToolResult(
             tool="fetch_url",
             ok=False,
             text=(
                 "This URL belongs to a resolution data source and is blocked "
-                "for Sibyl. Rely on open-web reporting instead."
+                "for Sibyl in backtest mode. Rely on open-web reporting instead."
             ),
             leakage=stats,
             error="blocked_domain",
@@ -271,16 +394,17 @@ def fetch_url(url: str, as_of: date, *, today: Optional[date] = None) -> ToolRes
             tool="fetch_url", ok=False,
             text=f"[fetch failed: HTTP {resp.status_code}] {url}",
             leakage=stats, error=f"http_{resp.status_code}",
+            status_code=resp.status_code,
         )
 
     # A redirect may have landed on a resolution source the first URL hid.
-    if final_url != url and is_blocked_url(final_url):
+    if final_url != url and is_blocked_for(final_url, as_of, today=today):
         stats.dropped_blocked_domain = 1
         return ToolResult(
             tool="fetch_url", ok=False,
             text=(
                 "This URL redirects to a resolution data source and is blocked "
-                "for Sibyl. Rely on open-web reporting instead."
+                "for Sibyl in backtest mode. Rely on open-web reporting instead."
             ),
             leakage=stats, error="blocked_domain",
         )
@@ -315,6 +439,7 @@ def fetch_url(url: str, as_of: date, *, today: Optional[date] = None) -> ToolRes
             leakage=stats, error="post_asof",
         )
 
+    COUNTERS.add("docs_read")
     return ToolResult(
         tool="fetch_url", ok=True,
         text=f"Content of {url} (truncated to {FETCH_URL_MAX_CHARS} chars):\n{text}",

@@ -23,12 +23,20 @@ from tests.sibyl_test_utils import (
     HS_RUN_ID,
     Q1,
     Q2,
+    disable_evidence_gate,
     make_submit_response,
     seed_db,
     stub_base_rate,
 )
 
 pytestmark = pytest.mark.db
+
+
+@pytest.fixture(autouse=True)
+def _no_evidence_gate(monkeypatch):
+    # The fake agent here submits at step 1 without searching; these tests
+    # are about the caps, not the evidence gate (tests/test_sibyl_evidence.py).
+    disable_evidence_gate(monkeypatch)
 
 
 # --- CostTracker unit behaviour ----------------------------------------------

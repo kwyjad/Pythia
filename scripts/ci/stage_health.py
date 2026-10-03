@@ -387,7 +387,46 @@ def _sibyl(con, hs_run_id: str, sibyl_run_id: str = "") -> Dict[str, Any]:
             [out["sibyl_run_id"]],
         )
         out["by_status"] = {str(s): int(n) for s, n in status_rows}
+
+    # Tool health (Oct 2026). The July 2026 run lost all 216 searches to a
+    # tripped breaker and still stored ten "ok" forecasts; a run whose share
+    # of failed searches passes SIBYL_DEGRADED_SEARCH_FAIL_SHARE is degraded.
+    counter_cols = ("n_search_calls", "n_search_failed", "n_breaker_trips", "n_docs_read")
+    if all(_has_column(con, "sibyl_runs", c) for c in counter_cols):
+        crow = _q(
+            con,
+            f"SELECT {', '.join(counter_cols)} FROM sibyl_runs WHERE sibyl_run_id = ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            [out["sibyl_run_id"]],
+        )
+        if crow and crow[0][0] is not None:
+            calls, failed, trips, docs = (int(x or 0) for x in crow[0])
+            share = (failed / calls) if calls else None
+            limit = _degraded_share()
+            out["tools"] = {
+                "n_search_calls": calls,
+                "n_search_failed": failed,
+                "n_breaker_trips": trips,
+                "n_docs_read": docs,
+                "search_fail_share": None if share is None else round(share, 4),
+                "degraded_limit": limit,
+            }
+            out["degraded"] = bool(share is not None and share > limit)
+            if out["degraded"]:
+                out["degraded_reason"] = (
+                    f"{failed} of {calls} searches failed ({100 * share:.0f}%, "
+                    f"limit {100 * limit:.0f}%; {trips} breaker trip(s))"
+                )
     return out
+
+
+def _degraded_share() -> float:
+    try:
+        from sibyl.config import DEGRADED_SEARCH_FAIL_SHARE  # noqa: PLC0415
+
+        return float(DEGRADED_SEARCH_FAIL_SHARE)
+    except Exception:  # noqa: BLE001
+        return 0.20
 
 
 def _markdown(rep: Dict[str, Any]) -> str:
@@ -467,6 +506,16 @@ def _markdown(rep: Dict[str, Any]) -> str:
             f"opus ${sb['opus_cost_usd']} + brave ${sb['brave_cost_usd']}"
         )
         L.append("")
+        tools = sb.get("tools") or {}
+        if tools:
+            L.append(
+                f"Tools: {tools['n_search_calls']} searches, {tools['n_search_failed']} failed, "
+                f"{tools['n_breaker_trips']} breaker trip(s), {tools['n_docs_read']} document(s) read"
+            )
+            L.append("")
+        if sb.get("degraded"):
+            L.append(f"**DEGRADED** — {sb.get('degraded_reason')}")
+            L.append("")
         if sb.get("by_status"):
             L.append("| status | questions |")
             L.append("|---|--:|")
@@ -601,6 +650,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"::warning title=is_test does not match PYTHIA_TEST_MODE::expected "
             f"{it['expected']} but stamped values are {it['distinct_values']} at stage {args.stage}."
         )
+
+    sb = rep.get("sibyl") or {}
+    if sb.get("degraded"):
+        print(f"::warning title=Sibyl research degraded::{sb.get('degraded_reason')}")
 
     return 0
 

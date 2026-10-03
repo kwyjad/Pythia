@@ -479,6 +479,9 @@ export type SibylQuestionRow = {
   opus_cost_usd?: number | null;
   brave_cost_usd?: number | null;
   pooled_quantiles?: Record<string, number> | null;
+  // FALSE: the forecast rested on no evidence (e.g. the July 2026 run, whose
+  // searches all failed). Kept and scored, left out of every comparison.
+  evidence_ok?: boolean | null;
 };
 
 export type SibylSummaryResponse = {

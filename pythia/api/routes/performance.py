@@ -644,11 +644,27 @@ def sibyl_comparison(
         else ""
     )
 
+    # A Sibyl forecast that rested on no evidence (sibyl_forecasts.evidence_ok
+    # FALSE — the July 2026 run, whose searches all failed) keeps its score
+    # rows but is left out of the comparison. Judged on the latest stored ok
+    # forecast for the question and forecast run, as compute_scores scored it.
+    _evidence = ""
+    if has_sf and _table_has_columns(con, "sibyl_forecasts", ["evidence_ok"]):
+        _evidence = (
+            " AND COALESCE((SELECT _ev.evidence_ok FROM sibyl_forecasts _ev "
+            "WHERE _ev.question_id = s.question_id AND _ev.run_id = s.run_id "
+            "AND _ev.status = 'ok' ORDER BY _ev.created_at DESC LIMIT 1), TRUE)"
+        )
+        meta_cte = meta_cte.replace(
+            f"WHERE 1=1 {sf_run_filter}{_tf_sf}",
+            f"WHERE COALESCE(sf.evidence_ok, TRUE) {sf_run_filter}{_tf_sf}",
+        )
+
     sql = f"""
     WITH sib AS (
       SELECT s.question_id, s.horizon_m, s.score_type, s.value AS sibyl_value
       FROM scores s
-      WHERE s.model_name = '{_SIBYL_MODEL_NAME}'{_tf_s} {sib_run_filter}{_latest}
+      WHERE s.model_name = '{_SIBYL_MODEL_NAME}'{_tf_s} {sib_run_filter}{_latest}{_evidence}
     ),
     std_ranked AS (
       SELECT s.question_id, s.horizon_m, s.score_type, s.model_name, s.value,
