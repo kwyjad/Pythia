@@ -91,6 +91,8 @@ jobs:
         # scheduled on the assumption that ICG has published last month's
         # edition by the 9th. This is the evidence for that assumption.
         if: inputs.measure_publication_days == true || inputs.measure_publication_days == 'true'
+        env:
+          RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
         run: python -m scripts.ci.crisiswatch_publication_days
 
       - name: Run CrisisWatch refresh (wayback source)

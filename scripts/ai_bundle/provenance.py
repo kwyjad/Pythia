@@ -205,13 +205,32 @@ def _crisiswatch_status(con, iso3: str, hz: str, as_of: date | None) -> dict[str
     except Exception as exc:  # noqa: BLE001
         return {"applicable": True, "available": False,
                 "reason": f"crisiswatch_entries unreadable ({type(exc).__name__})"}
+    # The newest edition the system held at the run date: the prompt states
+    # it, and says when this country is absent from it (Oct 2026).
+    newest = None
+    try:
+        nwhere, nparams = "TRUE", []
+        if as_of is not None and column_exists(con, "crisiswatch_entries", "fetched_at"):
+            nwhere, nparams = "CAST(fetched_at AS DATE) <= ?", [as_of]
+        n = con.execute(
+            f"SELECT MAX(year * 100 + month) FROM crisiswatch_entries WHERE {nwhere}", nparams,
+        ).fetchone()
+        if n and n[0]:
+            newest = f"{int(n[0]) // 100:04d}-{int(n[0]) % 100:02d}"
+    except Exception:  # noqa: BLE001
+        newest = None
     if not row:
         return {"applicable": True, "available": False,
+                "newest_edition_held": newest,
+                "coverage": "not_covered" if newest else "no_edition_held",
                 "reason": "no edition for this country on or before the run date"}
     year, month = int(row[0]), int(row[1])
+    edition = f"{year:04d}-{month:02d}"
     out = {
-        "applicable": True, "available": True, "edition": f"{year:04d}-{month:02d}",
+        "applicable": True, "available": True, "edition": edition,
         "arrow": row[2], "alert": row[3],
+        "newest_edition_held": newest,
+        "coverage": "listed" if newest in (None, edition) else "not_listed_in_newest",
     }
     if as_of is not None:
         age = _months_between(date(year, month, 1), as_of)

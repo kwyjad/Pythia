@@ -186,6 +186,32 @@ def build(
                     f("connector_freshness", "connector_freshness.csv"),
                 )
             )
+        if cw.get("expected_edition") and cw.get("expected_edition_held") is False:
+            out.append(
+                _entry(
+                    FAIL,
+                    "crisiswatch",
+                    f"the {cw['expected_edition']} CrisisWatch edition was not held when this "
+                    f"run read the table; prompts used the {cw.get('latest_edition') or 'no'} "
+                    "edition (the hs_submit edition gate retried and proceeded)",
+                    f("connector_freshness", "connector_freshness.csv"),
+                    expected_edition=cw["expected_edition"],
+                    edition_held=cw.get("latest_edition"),
+                )
+            )
+        gaps = list(cw.get("editions_missing_last_12") or [])
+        if gaps:
+            out.append(
+                _entry(
+                    FAIL,
+                    "crisiswatch",
+                    f"{len(gaps)} of the last twelve CrisisWatch editions are absent from the "
+                    f"table: {', '.join(gaps)} — a country absent from a later edition is "
+                    "described from an older entry, so a gap changes what the prompt says",
+                    f("connector_freshness", "connector_freshness.csv"),
+                    editions_missing=gaps,
+                )
+            )
         missing = int(cw.get("ace_countries_without_crisiswatch_row") or 0)
         if missing:
             out.append(

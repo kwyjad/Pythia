@@ -79,6 +79,8 @@ class EditionDay:
     edition_page_url: str | None = None
     main_page_first: str | None = None
     main_page_last_older: str | None = None
+    reliefweb_first: str | None = None
+    reliefweb_title: str | None = None
     notes: list[str] = field(default_factory=list)
 
     @staticmethod
@@ -103,6 +105,7 @@ class EditionDay:
             d for d in (
                 self._day(self.edition_page_first, self.edition),
                 self._day(self.main_page_first, self.edition),
+                self._day(self.reliefweb_first, self.edition),
             ) if d is not None
         ]
         return min(days) if days else None
@@ -126,8 +129,23 @@ def first_capture(cdx: CdxFn, urls: Iterable[str], start: str, end: str) -> tupl
     return (best[0], best[1]) if best else (None, None)
 
 
-def measure_edition(year: int, month: int, *, cdx: CdxFn, edition_of: EditionFn) -> EditionDay:
+# (year, month) -> (YYYYMMDD of ReliefWeb's earliest date for the repost, title) or None
+ReliefWebFn = Callable[[int, int], "tuple[str, str] | None"]
+
+
+def measure_edition(
+    year: int, month: int, *, cdx: CdxFn, edition_of: EditionFn,
+    reliefweb: ReliefWebFn | None = None,
+) -> EditionDay:
     row = EditionDay(edition=f"{year:04d}-{month:02d}")
+    if reliefweb is not None:
+        try:
+            found = reliefweb(year, month)
+        except Exception as exc:  # noqa: BLE001
+            found = None
+            row.notes.append(f"reliefweb lookup failed: {exc}")
+        if found:
+            row.reliefweb_first, row.reliefweb_title = found
     ny, nm = add_months(year, month, 1)
     start, end = _window(ny, nm, 2)
 
@@ -190,13 +208,13 @@ def render(rows: list[EditionDay], v: dict) -> str:
         return f"{ts[:4]}-{ts[4:6]}-{ts[6:8]}" if ts else "-"
 
     lines = [
-        "| edition | edition page first capture | main page: last older | main page: first showing it | day (upper bound) | notes |",
-        "|---|---|---|---|---|---|",
+        "| edition | edition page first capture | main page: last older | main page: first showing it | ReliefWeb repost | day (upper bound) | notes |",
+        "|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         lines.append(
             f"| {r.edition} | {fmt(r.edition_page_first)} | {fmt(r.main_page_last_older)} "
-            f"| {fmt(r.main_page_first)} | {r.upper_bound_day if r.upper_bound_day is not None else '-'} "
+            f"| {fmt(r.main_page_first)} | {fmt(r.reliefweb_first)} | {r.upper_bound_day if r.upper_bound_day is not None else '-'} "
             f"| {'; '.join(r.notes)} |"
         )
     lines.append("")
@@ -245,6 +263,47 @@ def _live_cdx(url: str, start: str, end: str, match_type: str) -> list[tuple[str
     return []
 
 
+def _live_reliefweb(year: int, month: int) -> tuple[str, str] | None:
+    """ReliefWeb's earliest date for its repost of the edition, if it has one.
+
+    ReliefWeb reposts each edition as "CrisisWatch <Month> <Year>" from the
+    International Crisis Group; its ``date.original`` (or ``date.created``)
+    is a third, independent upper bound. Needs RELIEFWEB_APPNAME.
+    """
+    import requests  # noqa: PLC0415
+
+    appname = os.environ.get("RELIEFWEB_APPNAME", "").strip()
+    if not appname:
+        return None
+    title = f"CrisisWatch {calendar.month_name[month]} {year}"
+    body = {
+        "query": {"value": f'"{title}"', "fields": ["title"], "operator": "AND"},
+        "filter": {"field": "source.shortname", "value": "ICG"},
+        "fields": {"include": ["title", "date.original", "date.created"]},
+        "limit": 20,
+    }
+    resp = requests.post(
+        f"https://api.reliefweb.int/v2/reports?appname={appname}", json=body, timeout=60,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+    best: tuple[str, str] | None = None
+    for item in resp.json().get("data") or []:
+        f = item.get("fields") or {}
+        name = str(f.get("title") or "")
+        if title.lower() not in name.lower():
+            continue
+        dates = f.get("date") or {}
+        candidates = [str(dates.get(k) or "")[:10] for k in ("original", "created")]
+        candidates = [c.replace("-", "") for c in candidates if c]
+        if not candidates:
+            continue
+        first = min(candidates)
+        if best is None or first < best[0]:
+            best = (first, name)
+    return best
+
+
 def _live_edition_of(ts: str) -> tuple[int, int] | None:
     from scripts import refresh_crisiswatch as rc  # noqa: PLC0415
 
@@ -270,7 +329,9 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[EditionDay] = []
     try:
         for y, m in editions_in(args.from_edition, args.to_edition):
-            rows.append(measure_edition(y, m, cdx=_live_cdx, edition_of=_live_edition_of))
+            rows.append(measure_edition(
+                y, m, cdx=_live_cdx, edition_of=_live_edition_of, reliefweb=_live_reliefweb,
+            ))
             log.info("measured %s: %s", rows[-1].edition, asdict(rows[-1]))
     except Exception as exc:  # noqa: BLE001 - a diagnostic never fails its job
         log.error("measurement stopped: %s", exc)

@@ -269,32 +269,27 @@ jobs:
             --optional "${SIGNATURE_OPTIONAL_TABLES}"
             --out diagnostics/db_signature_before.json
 
-      # Last chance for a current CrisisWatch edition before the scan reads
-      # it from the DB (Sep 2026): the monthly Resolver Update refresh runs on
-      # the 28th and archive.org is flaky, so a failure there used to mean a
-      # whole cycle on a stale edition — the Sep 1 run quoted June's
-      # cross-border-attack signal into an October-to-March forecast. Best
-      # effort, bounded, never fatal; --only-if-newer never regresses.
-      - name: Refresh CrisisWatch edition (Wayback, best effort)
+      # CrisisWatch edition gate (Oct 2026). The scan should read the edition
+      # horizon_scanner.crisiswatch.expected_edition names: the previous month
+      # once ICG has normally published it (from the 10th), the month before
+      # that earlier, so on the 1st it expects M-2. The gate refreshes from the
+      # Wayback Machine and stores the edition; if the expected edition is still
+      # absent it retries within its time cap and then lets the scan PROCEED,
+      # with an ::error annotation naming the edition held. The debug bundle
+      # raises a FAIL anomaly for the same fact. It never blocks the run: every
+      # prompt states the newest edition held and labels an older entry as
+      # older. --only-if-newer inside the refresh never regresses an edition.
+      - name: CrisisWatch edition gate (refresh, retry, proceed)
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 25
         env:
           IA_S3_ACCESS_KEY: ${{ secrets.IA_S3_ACCESS_KEY }}
           IA_S3_SECRET_KEY: ${{ secrets.IA_S3_SECRET_KEY }}
         run: |
           set -uo pipefail
           mkdir -p diagnostics
-          python -m scripts.refresh_crisiswatch \
-            --source wayback \
-            --only-if-newer \
-            --max-age-days 60 \
-            --verbose 2>&1 | tee diagnostics/crisiswatch_refresh.log
-          echo "[crisiswatch] refresh exit=${PIPESTATUS[0]} (non-fatal)"
-          python -c "
-          from horizon_scanner.crisiswatch import bulk_store_crisiswatch
-          n = bulk_store_crisiswatch()
-          print(f'[crisiswatch] stored {n} entries')
-          " 2>&1 | tee diagnostics/crisiswatch_store.log
+          python -m scripts.ci.crisiswatch_edition_gate \
+            --deadline-min 20 --retry-min 5 2>&1 | tee diagnostics/crisiswatch_refresh.log
 
       - name: Run Horizon Scanner — stage hs_submit
         env:

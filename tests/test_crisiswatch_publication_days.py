@@ -54,3 +54,14 @@ def test_nothing_captured_is_reported_unmeasured_not_ok_silently():
     v = pd.verdict([row], 9)
     assert v["unmeasured_editions"] == ["2026-01"]
     assert "Not measured" in pd.render([row], v)
+
+
+def test_reliefweb_repost_can_tighten_the_upper_bound():
+    cdx = _cdx({("crisisgroup.org/crisiswatch", "exact"): [("20260715000000", "200")]})
+    row = pd.measure_edition(
+        2026, 6, cdx=cdx, edition_of=lambda ts: (2026, 6),
+        reliefweb=lambda y, m: ("20260703", "CrisisWatch June 2026"),
+    )
+    assert row.main_page_first == "20260715000000"
+    assert row.upper_bound_day == 3
+    assert "2026-07-03" in pd.render([row], pd.verdict([row], 9))

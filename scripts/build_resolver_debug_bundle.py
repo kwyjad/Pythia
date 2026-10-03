@@ -2437,6 +2437,8 @@ class BundleBuilder:
             self._check_no_extraction_lost_to_truncation,
             self._check_backcast_deferral_is_recorded,
             self._check_crisiswatch_entries_accounted_for,
+            self._check_crisiswatch_holds_the_last_twelve_editions,
+            self._check_crisiswatch_headings_all_map_to_a_country,
             self._check_spei3_feed_is_current,
             self._check_spei3_producer_can_commit,
         ):
@@ -2980,6 +2982,76 @@ class BundleBuilder:
             name, "PASS", parsed, loaded,
             f"{detail}; store inserted={rec.get('inserted')} updated={rec.get('updated')} "
             f"unchanged={rec.get('unchanged')}",
+        )
+
+    def _check_crisiswatch_holds_the_last_twelve_editions(self) -> None:
+        """Every edition of the twelve ending at the expected one is in the table.
+
+        A country absent from the newest edition is described in its prompt
+        from its last entry, so a missing month changes what a prompt says
+        (May 2026 was absent in October 2026, with no line anywhere). One
+        issue per missing edition, so the register names the month.
+        """
+
+        name = "crisiswatch_holds_every_edition_in_the_last_twelve_months"
+        if "crisiswatch_entries" not in self.tables():
+            return self._check(name, "SKIP", "", "", "crisiswatch_entries absent")
+        result = self.query("SELECT DISTINCT year, month FROM crisiswatch_entries")
+        held = {(int(r[0]), int(r[1])) for r in (result[1] if result else []) if r[0] and r[1]}
+        from horizon_scanner.crisiswatch import expected_editions_window
+
+        window = expected_editions_window(dt.date.today(), 12)
+        missing = sorted(k for k in window if k not in held)
+        if not missing:
+            return self._check(name, "PASS", 12, 12, "all twelve editions held")
+        labels = [f"{a}-{b:02d}" for a, b in missing]
+        return self._check(
+            name, "FAIL", 12 - len(missing), 12,
+            f"{len(missing)} edition(s) absent: {', '.join(labels)}. The Phase 4 "
+            "backfill walks the archive for them each run.",
+            issues=[{
+                "id": f"crisiswatch_edition_missing_{label}",
+                "title": f"The {label} CrisisWatch edition is not in crisiswatch_entries.",
+                "evidence": "crisiswatch_entries holds no row for it; prompts for a "
+                            "country absent from a later edition fall back further.",
+                "cost": 1, "cost_unit": "editions",
+                "recovers_on_rerun": True,
+            } for label in labels],
+        )
+
+    def _check_crisiswatch_headings_all_map_to_a_country(self) -> None:
+        """No CrisisWatch heading is dropped for want of an ISO3.
+
+        The resolver used to guess an unknown heading by substring. It no
+        longer guesses, so an unknown heading is stored nowhere, and each one
+        is named as its own issue so it can be added to the alias table.
+        """
+
+        name = "crisiswatch_every_heading_maps_to_a_country"
+        stream = self._stream_file("crisiswatch_store")
+        if stream is None:
+            return self._check(name, "SKIP", "", "", "no crisiswatch_store stream this run")
+        records = list(run_log.read_stream(stream))
+        if not records:
+            return self._check(name, "SKIP", "", "", "crisiswatch_store stream is empty")
+        unmapped = sorted({
+            str(item.get("country") or "").strip()
+            for item in records[-1].get("not_stored") or []
+            if item.get("reason") == "unresolved_iso3" and str(item.get("country") or "").strip()
+        })
+        if not unmapped:
+            return self._check(name, "PASS", 0, 0, "every heading mapped")
+        return self._check(
+            name, "FAIL", len(unmapped), 0,
+            f"{len(unmapped)} heading(s) map to no country: {', '.join(unmapped)}",
+            issues=[{
+                "id": "crisiswatch_unmapped_heading_" + re.sub(r"[^a-z0-9]+", "_", h.lower()).strip("_"),
+                "title": f"CrisisWatch heading {h!r} maps to no country and was not stored.",
+                "evidence": "add it to _ICG_COUNTRY_ISO3 or MULTI_COUNTRY_HEADINGS in "
+                            "horizon_scanner/crisiswatch.py",
+                "cost": 1, "cost_unit": "entries",
+                "recovers_on_rerun": False,
+            } for h in unmapped],
         )
 
     def _check_enso_vs_tc_narrative(self) -> None:

@@ -1362,6 +1362,53 @@ def test_the_crisiswatch_accounting_check_reads_the_store_stream(tmp_path):
     assert check["verdict"] == "FAIL" and "parsed 12" in check["detail"]
 
 
+def test_crisiswatch_edition_gap_and_unmapped_headings_are_named(tmp_path):
+    """October 2026: May was missing and an unknown heading would vanish."""
+
+    import datetime as _dt
+
+    db = tmp_path / "pythia.duckdb"
+    con = duckdb.connect(str(db))
+    con.execute(
+        "CREATE TABLE crisiswatch_entries (iso3 TEXT, month INTEGER, year INTEGER, "
+        "arrow TEXT, alert_type TEXT, summary TEXT, country_name TEXT, "
+        "fetched_at TIMESTAMP, content_hash TEXT)"
+    )
+    from horizon_scanner.crisiswatch import expected_editions_window
+
+    window = expected_editions_window(_dt.date.today(), 12)
+    gap = window[4]
+    for (yy, mm) in window:
+        if (yy, mm) != gap:
+            con.execute(
+                "INSERT INTO crisiswatch_entries VALUES ('SOM', ?, ?, '', '', '', 'Somalia', now(), 'h')",
+                [mm, yy],
+            )
+    con.close()
+    log_dir = tmp_path / "run_log"
+    log_dir.mkdir()
+    (log_dir / "crisiswatch_store.jsonl").write_text(json.dumps({
+        "edition": "x", "parsed": 1, "loaded": 0,
+        "load_reasons": {"unresolved_iso3": 1},
+        "not_stored": [{"country": "Niger Delta", "reason": "unresolved_iso3"}],
+    }) + "\n", encoding="utf-8")
+    builder = bundle.BundleBuilder(
+        out_path=tmp_path / "b.zip", db_path=db, diagnostics_dir=tmp_path / "diag",
+        run_log_dir=log_dir, staging=tmp_path / "staging",
+        max_bytes=bundle.DEFAULT_MAX_BYTES, environ={},
+    )
+    builder._check_crisiswatch_holds_the_last_twelve_editions()
+    check = builder.checks[-1]
+    label = f"{gap[0]}-{gap[1]:02d}"
+    assert check["verdict"] == "FAIL" and label in check["detail"]
+    assert [i["id"] for i in check["issues"]] == [f"crisiswatch_edition_missing_{label}"]
+
+    builder._check_crisiswatch_headings_all_map_to_a_country()
+    check = builder.checks[-1]
+    assert check["verdict"] == "FAIL"
+    assert check["issues"][0]["id"] == "crisiswatch_unmapped_heading_niger_delta"
+
+
 def test_a_probe_web_page_does_not_fail_the_acled_check(tmp_path, full_run):
     """Run 34124705852's actual shape: one probe 405, three healthy connectors."""
 

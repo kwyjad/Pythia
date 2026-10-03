@@ -20,6 +20,8 @@ name: CrisisWatch CI
       - "horizon_scanner/tests/test_crisiswatch_regional_merge.py"
       - "scripts/ci/crisiswatch_publication_days.py"
       - "tests/test_crisiswatch_publication_days.py"
+      - "scripts/ci/crisiswatch_edition_gate.py"
+      - "scripts/ci/tests/test_crisiswatch_edition_gate.py"
       - "tests/fixtures/crisiswatch_*"
       - ".github/workflows/crisiswatch-ci.yml"
       - ".github/workflows/refresh-crisiswatch.yml"
@@ -31,6 +33,8 @@ name: CrisisWatch CI
       - "horizon_scanner/tests/test_crisiswatch_regional_merge.py"
       - "scripts/ci/crisiswatch_publication_days.py"
       - "tests/test_crisiswatch_publication_days.py"
+      - "scripts/ci/crisiswatch_edition_gate.py"
+      - "scripts/ci/tests/test_crisiswatch_edition_gate.py"
       - "tests/fixtures/crisiswatch_*"
       - ".github/workflows/crisiswatch-ci.yml"
       - ".github/workflows/refresh-crisiswatch.yml"
@@ -72,6 +76,7 @@ jobs:
           pytest -vv \
             tests/test_refresh_crisiswatch.py \
             tests/test_crisiswatch_publication_days.py \
+            scripts/ci/tests/test_crisiswatch_edition_gate.py \
             horizon_scanner/tests/test_crisiswatch_regional_merge.py
 
   # TEMPORARY (PR 1 of the October 2026 review): the publication-day
@@ -90,4 +95,6 @@ jobs:
           python-version: "3.11"
       - run: pip install "requests>=2.32,<3" "beautifulsoup4>=4.12,<5" "PyYAML>=6.0,<7"
       - name: Measure
+        env:
+          RELIEFWEB_APPNAME: ${{ secrets.RELIEFWEB_APPNAME }}
         run: python -m scripts.ci.crisiswatch_publication_days

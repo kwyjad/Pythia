@@ -66,7 +66,13 @@ from bs4 import BeautifulSoup, Tag
 # ---------------------------------------------------------------------------
 
 try:
-    from horizon_scanner.crisiswatch import _ICG_COUNTRY_ISO3, _resolve_iso3
+    from horizon_scanner.crisiswatch import (
+        _ICG_COUNTRY_ISO3,
+        MULTI_COUNTRY_HEADINGS,
+        _resolve_iso3,
+        multi_country_heading,
+        unmapped_headings,
+    )
 except ImportError:
     # Fallback: if the import fails (e.g. running outside the project root),
     # provide a stub.  The script will still parse, but ISO3 resolution will
@@ -75,6 +81,14 @@ except ImportError:
 
     def _resolve_iso3(name: str) -> str | None:  # type: ignore[misc]
         return None
+
+    MULTI_COUNTRY_HEADINGS: dict[str, list[tuple[str, str]]] = {}  # type: ignore[no-redef]
+
+    def multi_country_heading(name: str) -> str | None:  # type: ignore[misc]
+        return None
+
+    def unmapped_headings() -> list[str]:  # type: ignore[misc]
+        return []
 
 
 log = logging.getLogger(__name__)
@@ -182,24 +196,10 @@ _SVG_STATUS_MAP: dict[str, tuple[str, str]] = {
     "#resolution": ("", "resolution_opportunity"),
 }
 
-# Regional CrisisWatch entries that map to multiple countries.
-# Each entry is expanded into one output row per ISO3 code.
-_REGIONAL_ENTRY_MAP: dict[str, list[tuple[str, str]]] = {
-    "Amazon": [
-        ("Brazil", "BRA"),
-        ("Ecuador", "ECU"),
-        ("Colombia", "COL"),
-    ],
-    "Nile Waters": [
-        ("Ethiopia", "ETH"),
-        ("Sudan", "SDN"),
-        ("Egypt", "EGY"),
-    ],
-    "Korean Peninsula": [
-        ("South Korea", "KOR"),
-        ("North Korea", "PRK"),
-    ],
-}
+# Headings that name more than one country, expanded into one row per member
+# state. Defined once, in horizon_scanner/crisiswatch.py, so the scraper and
+# the loader that re-reads older JSON files cannot disagree.
+_REGIONAL_ENTRY_MAP: dict[str, list[tuple[str, str]]] = MULTI_COUNTRY_HEADINGS
 
 
 # ---------------------------------------------------------------------------
@@ -1213,17 +1213,16 @@ def _parse_country_entries(
         # below. Warning here made "Nile Waters" and "Korean Peninsula" look
         # like parse failures in every single run, which is how a real
         # unmatched country goes unread.
-        is_regional = country_name in _REGIONAL_ENTRY_MAP
+        regional_key = multi_country_heading(country_name)
+        is_regional = regional_key is not None
+        # _resolve_iso3 strips a bracketed qualifier itself and logs an
+        # unmapped heading by name; there is no substring guess any more.
         iso3 = "" if is_regional else (_resolve_iso3(country_name) or "")
         if not iso3 and not is_regional:
-            # Try cleaning up: "Israel/Palestine", "India (Jammu and Kashmir)"
-            clean_name = re.sub(r"\s*\(.*?\)\s*", "", country_name).strip()
-            iso3 = _resolve_iso3(clean_name) or ""
-            if not iso3:
-                log.warning(
-                    "Unmatched country: '%s' (slug=%s)",
-                    country_name, country_slug,
-                )
+            log.warning(
+                "Unmatched country: '%s' (slug=%s)",
+                country_name, country_slug,
+            )
 
         # --- Extract arrow/status from SVG icons in the <h3> ---
         # Icons: <span class="o-icon ..."><svg><use xlink:href="#deteriorated"></use></svg></span>
@@ -1288,7 +1287,7 @@ def _parse_country_entries(
         # consumer can tell a country's own entry from a regional one and
         # merge rather than overwrite (see crisiswatch._merge_country_rows).
         if is_regional:
-            for sub_country, sub_iso3 in _REGIONAL_ENTRY_MAP[country_name]:
+            for sub_country, sub_iso3 in _REGIONAL_ENTRY_MAP[regional_key]:
                 entries.append({
                     "country": sub_country,
                     "iso3": sub_iso3,
@@ -1300,7 +1299,7 @@ def _parse_country_entries(
                 })
             log.info(
                 "Expanded regional entry '%s' into %d countries",
-                country_name, len(_REGIONAL_ENTRY_MAP[country_name]),
+                country_name, len(_REGIONAL_ENTRY_MAP[regional_key]),
             )
         else:
             entries.append({

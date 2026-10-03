@@ -293,6 +293,17 @@ def _cw_age(con, row: dict[str, Any], today: date) -> None:
         row["note"] = ""
 
 
+def last_twelve_editions(today: date) -> list[tuple[int, int]]:
+    """The twelve editions ending at the edition a run on *today* should hold.
+
+    ``horizon_scanner.crisiswatch.expected_edition`` decides that edition (the
+    previous month from the 10th, the month before that earlier).
+    """
+    from horizon_scanner.crisiswatch import expected_editions_window  # noqa: PLC0415
+
+    return expected_editions_window(today, 12)
+
+
 def crisiswatch_detail(
     con, *, questions: list[dict[str, Any]] | None = None, today: date | None = None
 ) -> dict[str, Any]:
@@ -355,6 +366,21 @@ def crisiswatch_detail(
         if len(editions) > 1:
             first = sorted(editions)[0]
             out["edition_span"] = f"{first} .. {latest}"
+
+    # The edition this run should have read (the previous month once ICG has
+    # normally published it, the month before that earlier). And every month of the last twelve should be held, because a
+    # country absent from the newest edition is described from its last entry.
+    held = set()
+    for r in rows:
+        if r.get("year") and r.get("month"):
+            held.add((int(r["year"]), int(r["month"])))
+    window = last_twelve_editions(today)
+    expected = window[-1]
+    out["expected_edition"] = f"{expected[0]}-{expected[1]:02d}"
+    out["expected_edition_held"] = expected in held
+    out["editions_missing_last_12"] = [
+        f"{y}-{m:02d}" for (y, m) in window if (y, m) not in held
+    ]
 
     arrows: dict[str, int] = {}
     for r in rows:

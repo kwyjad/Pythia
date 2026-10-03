@@ -19,7 +19,7 @@ import re
 import zipfile
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Set, Tuple
 
@@ -6386,10 +6386,15 @@ def emit_operational_files(
     cf_path = out_dir / f"connector_freshness__{run}.csv"
 
     def _connectors() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        # Ages and the expected CrisisWatch edition are measured from the day
+        # the scan ran, not the day the bundle happened to be built.
+        _m = re.match(r"hs_(\d{4})(\d{2})(\d{2})", str(data.hs_run_id or ""))
+        _run_start = date(int(_m.group(1)), int(_m.group(2)), int(_m.group(3))) if _m else None
         rows, crisiswatch = connector_freshness.collect(
             con,
             countries=data.resolved_countries_sorted,
             questions=data.questions,
+            run_start=_run_start,
         )
         fieldnames = list(rows[0].keys()) if rows else []
         if fieldnames:
