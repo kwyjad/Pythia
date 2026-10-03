@@ -1399,6 +1399,7 @@ def _run_hs_for_country(run_id: str, iso3: str, country_name: str, crisiswatch_d
                                 ),
                                 "grounded": adv_result.get("grounded", False),
                                 "model_id": adv_result.get("model_id", ""),
+                                "prompt_version": adv_result.get("prompt_version"),
                             }
                         ],
                         is_test=is_test_mode(),

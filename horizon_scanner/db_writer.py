@@ -681,8 +681,8 @@ def log_hs_adversarial_checks_to_db(
                 hs_run_id, iso3, hazard_code, rc_level,
                 net_assessment, summary, payload_json,
                 sources_json, grounded, model_id,
-                is_test
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                is_test, prompt_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             [
                 hs_run_id,
@@ -696,6 +696,7 @@ def log_hs_adversarial_checks_to_db(
                 bool(check.get("grounded")),
                 check.get("model_id") or "",
                 is_test,
+                check.get("prompt_version"),
             ],
         )
 

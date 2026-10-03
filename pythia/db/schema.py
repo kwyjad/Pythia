@@ -1704,6 +1704,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 sources_json    TEXT,
                 grounded        BOOLEAN,
                 model_id        TEXT,
+                prompt_version  TEXT,
                 created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """,
@@ -1718,6 +1719,7 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 "sources_json": "TEXT",
                 "grounded": "BOOLEAN",
                 "model_id": "TEXT",
+                "prompt_version": "TEXT",
                 "created_at": "TIMESTAMP",
                 "is_test": "BOOLEAN DEFAULT FALSE",
             },
