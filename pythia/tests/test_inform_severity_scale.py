@@ -26,6 +26,9 @@ def test_the_prompt_prints_the_ten_point_scale():
     assert "Overall: 9.2/10 (Very High)" in text
     assert "Impact 9.6/10" in text
     assert "/5" not in text
+    # The release data: 8.0 is "High" and "Very High" runs from 8.2.
+    assert "above 8 fall in the Very High category" in text
+    assert "8 and above" not in text
     spd = acaps.format_inform_severity_for_spd({"iso3": "AFG", "severity_score": 9.2})
     assert "9.2/10" in spd
 
