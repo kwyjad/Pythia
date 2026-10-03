@@ -108,6 +108,23 @@ class SibylRecord:
     advice_arm: Optional[str] = None
     sibyl_run_id: Optional[str] = None
     forecast_run_id: Optional[str] = None
+    # Oct 2026: the raw pooled series by window month (BEFORE the reference
+    # pool), and the horizon of each outcome. A resolved month is compared
+    # with its own month's quantiles where they exist; the advice speaks to
+    # the agent about its own distribution, never the published pool.
+    month_quantiles: Dict[int, Dict[float, float]] = field(default_factory=dict)
+    month_zero_mass: Dict[int, float] = field(default_factory=dict)
+    outcome_horizons: List[Optional[int]] = field(default_factory=list)
+
+    def per_outcome(self) -> List[Tuple[float, Dict[float, float], Optional[float]]]:
+        """(outcome, quantiles for its month, zero mass for its month)."""
+        out = []
+        hs = self.outcome_horizons or [None] * len(self.outcomes)
+        for y, h in zip(self.outcomes, hs):
+            q = self.month_quantiles.get(h) if h is not None else None
+            z = self.month_zero_mass.get(h) if h is not None else None
+            out.append((y, q or self.quantiles, z if z is not None else self.zero_mass))
+        return out
 
 
 def _q(quantiles: Dict[float, float], level: float) -> Optional[float]:
@@ -201,26 +218,35 @@ def diagnose(records: Sequence[SibylRecord]) -> Dict[str, Stat]:
     cov, below, above, above99, bias, zero_gap, anchor = [], [], [], [], [], [], []
     zero_share, zero_mass = [], []
     for r in records:
-        ys = [float(y) for y in r.outcomes if y is not None and math.isfinite(float(y))]
-        if not ys:
+        rows = [
+            (float(y), q, z) for y, q, z in r.per_outcome()
+            if y is not None and math.isfinite(float(y))
+        ]
+        if not rows:
             continue
-        m = float(len(ys))
-        q10, q50, q90, q99 = (_q(r.quantiles, lv) for lv in (0.1, 0.5, 0.9, 0.99))
-        if q10 is not None and q90 is not None:
-            cov.append((sum(q10 <= y <= q90 for y in ys), m))
-            below.append((sum(y < q10 for y in ys), m))
-            above.append((sum(y > q90 for y in ys), m))
-        if q99 is not None:
-            above99.append((sum(y > q99 for y in ys), m))
-        if q50 is not None:
-            bias.append((sum(math.log1p(max(y, 0.0)) - math.log1p(max(q50, 0.0)) for y in ys), m))
-        if r.zero_mass is not None:
-            zero_gap.append((sum(y == 0 for y in ys) - m * float(r.zero_mass), m))
-            zero_share.append((sum(y == 0 for y in ys), m))
-            zero_mass.append((m * float(r.zero_mass), m))
-        if q50 is not None and r.base_median is not None:
-            err_s = np.mean([abs(math.log1p(max(y, 0.0)) - math.log1p(max(q50, 0.0))) for y in ys])
-            err_b = np.mean([abs(math.log1p(max(y, 0.0)) - math.log1p(max(r.base_median, 0.0))) for y in ys])
+        m = float(len(rows))
+        qs = [(y, _q(q, 0.1), _q(q, 0.5), _q(q, 0.9), _q(q, 0.99), z) for y, q, z in rows]
+        if all(a[1] is not None and a[3] is not None for a in qs):
+            cov.append((sum(q10 <= y <= q90 for y, q10, _, q90, _, _ in qs), m))
+            below.append((sum(y < q10 for y, q10, _, _, _, _ in qs), m))
+            above.append((sum(y > q90 for y, _, _, q90, _, _ in qs), m))
+        if all(a[4] is not None for a in qs):
+            above99.append((sum(y > q99 for y, _, _, _, q99, _ in qs), m))
+        if all(a[2] is not None for a in qs):
+            bias.append((sum(math.log1p(max(y, 0.0)) - math.log1p(max(q50, 0.0))
+                             for y, _, q50, _, _, _ in qs), m))
+        if all(a[5] is not None for a in qs):
+            n0 = sum(y == 0 for y, *_ in qs)
+            mass = sum(float(z) for *_, z in qs)
+            zero_gap.append((n0 - mass, m))
+            zero_share.append((n0, m))
+            zero_mass.append((mass, m))
+        q50s = [a[2] for a in qs]
+        if all(v is not None for v in q50s) and r.base_median is not None:
+            err_s = np.mean([abs(math.log1p(max(y, 0.0)) - math.log1p(max(q50, 0.0)))
+                             for y, _, q50, _, _, _ in qs])
+            err_b = np.mean([abs(math.log1p(max(y, 0.0)) - math.log1p(max(r.base_median, 0.0)))
+                             for y, *_ in qs])
             anchor.append((1.0 if err_s < err_b else 0.0, 1.0))
     return {
         "coverage_10_90": bootstrap_ratio(cov),
@@ -458,12 +484,13 @@ def load_records(con, as_of_month: Optional[str] = None) -> List[SibylRecord]:
         f"""
         SELECT question_id, hazard_code, metric, pooled_quantiles_json,
                bucket_probs_json, trials_json, base_rate_json, advice_arm,
-               sibyl_run_id, run_id
+               sibyl_run_id, run_id, raw_by_month_json
         FROM (
             SELECT f.question_id, upper(f.hazard_code) AS hazard_code,
                    upper(f.metric) AS metric, f.pooled_quantiles_json,
                    f.bucket_probs_json, f.trials_json, {opt('base_rate_json')},
                    {opt('advice_arm')}, f.sibyl_run_id, f.run_id,
+                   {opt('raw_by_month_json')},
                    ROW_NUMBER() OVER (
                        PARTITION BY f.question_id
                        ORDER BY {run_order}f.created_at DESC NULLS LAST, f.sibyl_run_id DESC
@@ -488,13 +515,16 @@ def load_records(con, as_of_month: Optional[str] = None) -> List[SibylRecord]:
         where.append("observed_month <= ?")
         params.append(as_of_month)
     outcomes: Dict[str, List[float]] = {}
-    for qid, val in con.execute(
-        f"SELECT question_id, value FROM resolutions WHERE {' AND '.join(where)}", params
+    horizons: Dict[str, List[Optional[int]]] = {}
+    h_col = "horizon_m" if "horizon_m" in r_cols else "CAST(NULL AS INTEGER)"
+    for qid, val, h in con.execute(
+        f"SELECT question_id, value, {h_col} FROM resolutions WHERE {' AND '.join(where)}", params
     ).fetchall():
         outcomes.setdefault(str(qid), []).append(float(val))
+        horizons.setdefault(str(qid), []).append(int(h) if h is not None else None)
 
     records: List[SibylRecord] = []
-    for (qid, hz, metric, pq, bp, trials, base, arm, srid, rid) in rows:
+    for (qid, hz, metric, pq, bp, trials, base, arm, srid, rid, raw_bm) in rows:
         ys = outcomes.get(str(qid))
         if not ys:
             continue
@@ -525,11 +555,25 @@ def load_records(con, as_of_month: Optional[str] = None) -> List[SibylRecord]:
                     trial_medians[key] = med
         except (TypeError, ValueError):
             pass
+        month_q: Dict[int, Dict[float, float]] = {}
+        month_z: Dict[int, float] = {}
+        try:
+            bm = json.loads(raw_bm) if isinstance(raw_bm, str) else raw_bm
+            if isinstance(bm, dict):
+                for mk, qd in (bm.get("quantiles") or {}).items():
+                    month_q[int(mk)] = _quantile_dict(qd)
+                for mk, vec in (bm.get("vectors") or {}).items():
+                    if isinstance(vec, list) and vec:
+                        month_z[int(mk)] = float(vec[0])
+        except (TypeError, ValueError):
+            pass
         records.append(SibylRecord(
             question_id=str(qid), hazard_code=str(hz), metric=str(metric),
             quantiles=quantiles, outcomes=ys, zero_mass=zero_mass,
             base_median=base_median, trial_medians=trial_medians,
             advice_arm=arm, sibyl_run_id=srid, forecast_run_id=rid,
+            month_quantiles=month_q, month_zero_mass=month_z,
+            outcome_horizons=horizons.get(str(qid), []),
         ))
     return records
 

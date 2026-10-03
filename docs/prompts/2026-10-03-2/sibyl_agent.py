@@ -34,8 +34,7 @@ from sibyl.belief_state import (
     BeliefState,
     BeliefStateError,
     StepDecision,
-    MonthBelief,
-    initial_belief,
+    initial_belief_from_anchor,
     parse_step_response,
 )
 from sibyl import config as _cfg
@@ -44,6 +43,7 @@ from sibyl.config import (
     EFFORT,
     MAX_STEPS,
     MODEL,
+    QUANTILE_LEVELS,
 )
 from sibyl.cost import COST_KIND_BRAVE, COST_KIND_OPUS, CostBreakdown, CostTracker, log_sibyl_call
 from sibyl.leakage import LeakageStats, is_backtest
@@ -96,60 +96,20 @@ _METRIC_DEFINITIONS = {
     ),
 }
 
-_HEAD = """You are a superforecaster running a deep-research investigation to produce a probabilistic forecast. You start from the REFERENCE below, a mechanical forecast built from the resolving source's own history, gather evidence from the open web, and adjust the reference only as far as that evidence justifies.
+SIBYL_STEP_PROMPT_TEMPLATE = """You are a superforecaster running a deep-research investigation to produce a probabilistic forecast. You reason like the best geopolitical forecasters: you start from the OUTSIDE VIEW (the historical base rate below), gather INSIDE-VIEW evidence from the open web, and explicitly reconcile the two at every step.
 
-FORECAST AS-OF DATE: {as_of}. Treat this as "today". You must not use, cite, or rely on any information published after this date.{backtest_note}"""
+FORECAST AS-OF DATE: {as_of}. Treat this as "today". You must not use, cite, or rely on any information published after this date.{backtest_note}
 
-_QUESTION = """=== QUESTION ===
+=== QUESTION ===
 {wording}
 
 Country: {country} ({iso3}) | Hazard: {hazard_code} | Metric: {metric}
 Metric definition: {metric_definition}
 Forecast window (6 calendar months): {forecast_months}
-You forecast two months of this window: MONTH 1 ({month_1}) and MONTH 6 ({month_6}). Months 2 to 5 are taken as mixtures of the two.
+You are forecasting the distribution of the MONTHLY value of this metric over the window months. Your quantiles must describe a single month drawn from this window — account for both month-to-month variation (seasonality, escalation) and your own uncertainty.
 
-=== REFERENCE (your prior) ===
-{base_rate_block}{track_record_block}"""
-
-_TASK = """=== YOUR TASK EACH STEP ===
-Decide your next action and update your belief state.
-
-Actions:
-- "brave_search": run a web search. action_input = the query (natural language, include the country name; searches are date-filtered to the as-of date).
-- "fetch_url": read a page found in earlier search results. action_input = the URL.
-- "submit": finalize your forecast. Use this as soon as further research would not materially change your forecast — do not burn steps for their own sake. You MUST submit by step {max_steps}.
-
-Respond with ONLY a JSON object, no prose outside it:
-{{
-  "action": "brave_search" | "fetch_url" | "submit",
-  "action_input": "<query or url; empty string for submit>",
-  "belief_state": {{
-    "month_1": {{"p_zero": <probability>, "quantiles_positive": {{{quantile_keys}}}}},
-    "month_6": {{"p_zero": <probability>, "quantiles_positive": {{{quantile_keys}}}}},
-    "confidence": "low" | "medium" | "high",
-    "evidence_higher": ["evidence found so far that pushes the estimate HIGHER"],
-    "evidence_lower": ["evidence found so far that pushes the estimate LOWER"],
-    "open_questions": ["what you still need to find out"],
-    "baserate_reconciliation": "how your current forecast relates to the reference and why it departs (or does not)",
-    "step_rationale": "what THIS step's information changed and why"
-  }}
-}}
-
-Rules for the belief state:
-- p_zero is the probability that the resolving source records ZERO for that month{zero_note};
-- quantiles_positive are the 0.05, 0.25, 0.5, 0.75 and 0.95 quantiles of the month's {metric} count GIVEN that it is positive: raw units (people/fatalities, not thousands), each at least 1, non-decreasing;
-- update the belief state EVERY step, even when the action is another search.
-
-Rules for weighing evidence:
-- The reference is your prior. Keep it unless dated, specific evidence says otherwise.
-- A rise in the news is often already in the latest months of the table. Check before you add it again.
-- Count one event once, however many articles report it.
-- Heavy coverage is no evidence of escalation. Thin coverage is no evidence of calm.
-- For month 6, move away from the reference only on evidence that the change will last: a dated event, a seasonal cause, or a structural shift. Most spikes fade.
-- Forecast what the resolving source will record."""
-
-SIBYL_STEP_PROMPT_TEMPLATE = (
-    _HEAD + "\n\n" + _QUESTION + """
+=== OUTSIDE VIEW (base-rate anchor — reason from it and away from it, never treat it as a target) ===
+{base_rate_block}{track_record_block}
 
 === YOUR TRIAL PERSPECTIVE ===
 {perspective}
@@ -160,8 +120,36 @@ SIBYL_STEP_PROMPT_TEMPLATE = (
 === RESULT OF YOUR LAST ACTION ===
 {last_tool_result}
 
-""" + _TASK + "\n{parse_feedback}"
-)
+=== YOUR TASK THIS STEP ===
+Decide your next action and update your belief state.
+
+Actions:
+- "brave_search": run a web search. action_input = the query (natural language, include the country name; searches are date-filtered to the as-of date).
+- "fetch_url": read a page found in earlier search results. action_input = the URL.
+- "submit": finalize your forecast. Use this as soon as further research would not materially change your quantiles — do not burn steps for their own sake. You MUST submit by step {max_steps}.
+
+Respond with ONLY a JSON object, no prose outside it:
+{{
+  "action": "brave_search" | "fetch_url" | "submit",
+  "action_input": "<query or url; empty string for submit>",
+  "belief_state": {{
+    "quantiles": {{{quantile_keys}}},
+    "confidence": "low" | "medium" | "high",
+    "evidence_higher": ["evidence found so far that pushes the estimate HIGHER"],
+    "evidence_lower": ["evidence found so far that pushes the estimate LOWER"],
+    "open_questions": ["what you still need to find out"],
+    "baserate_reconciliation": "how your current estimate relates to the outside-view anchor and why it departs (or does not)",
+    "step_rationale": "what THIS step's information changed and why"
+  }}
+}}
+
+Rules for quantiles:
+- values are {metric} counts for one month, in raw units (people/fatalities), NOT thousands;
+- non-decreasing across levels (q0.1 <= q0.25 <= ... <= q0.99);
+- this data is right-skewed and heavy-tailed: keep q0.95/q0.99 honest — for this class of data q0.99 is typically several multiples of the median;
+- 0 is a legitimate value (many country-months have zero impact);
+- update the belief state EVERY step, even when the action is another search.
+{parse_feedback}"""
 
 
 # --- V3 (static-first) segment templates -----------------------------------
@@ -170,17 +158,62 @@ SIBYL_STEP_PROMPT_TEMPLATE = (
 # lead and the per-step churn trails:
 #   B1 run-static (head + as-of + task/action rules + JSON schema)  — stable
 #      across every step/trial/question of a run (modulo {metric})
-#   B2 per-question (question block + reference)                    — stable
+#   B2 per-question (question block + outside-view base rate)       — stable
 #      across all K trials x MAX_STEPS steps of a question  → cache breakpoint
 #   B3 per-trial (perspective seed)                                 — stable
 #      across the trial's steps                             → cache breakpoint
 #   B4 per-step (belief state, last tool result, parse feedback)    — churns
-# Active only when both PYTHIA_PROMPT_V3_ORDER and PYTHIA_PROMPT_CACHE_ENABLED
-# are on.
+# Anthropic cache_control on B2/B3 turns ~29 of the ~30 Opus reads per
+# question into 0.1x cache reads on the stable span. Active only when both
+# PYTHIA_PROMPT_V3_ORDER and PYTHIA_PROMPT_CACHE_ENABLED are on.
 
-SIBYL_STEP_RUN_STATIC_V3 = _HEAD + "\n\n" + _TASK + "\n"
+SIBYL_STEP_RUN_STATIC_V3 = """You are a superforecaster running a deep-research investigation to produce a probabilistic forecast. You reason like the best geopolitical forecasters: you start from the OUTSIDE VIEW (the historical base rate below), gather INSIDE-VIEW evidence from the open web, and explicitly reconcile the two at every step.
 
-SIBYL_STEP_QUESTION_V3 = "\n" + _QUESTION + "\n"
+FORECAST AS-OF DATE: {as_of}. Treat this as "today". You must not use, cite, or rely on any information published after this date.{backtest_note}
+
+=== YOUR TASK EACH STEP ===
+Decide your next action and update your belief state.
+
+Actions:
+- "brave_search": run a web search. action_input = the query (natural language, include the country name; searches are date-filtered to the as-of date).
+- "fetch_url": read a page found in earlier search results. action_input = the URL.
+- "submit": finalize your forecast. Use this as soon as further research would not materially change your quantiles — do not burn steps for their own sake. You MUST submit by step {max_steps}.
+
+Respond with ONLY a JSON object, no prose outside it:
+{{
+  "action": "brave_search" | "fetch_url" | "submit",
+  "action_input": "<query or url; empty string for submit>",
+  "belief_state": {{
+    "quantiles": {{{quantile_keys}}},
+    "confidence": "low" | "medium" | "high",
+    "evidence_higher": ["evidence found so far that pushes the estimate HIGHER"],
+    "evidence_lower": ["evidence found so far that pushes the estimate LOWER"],
+    "open_questions": ["what you still need to find out"],
+    "baserate_reconciliation": "how your current estimate relates to the outside-view anchor and why it departs (or does not)",
+    "step_rationale": "what THIS step's information changed and why"
+  }}
+}}
+
+Rules for quantiles:
+- values are {metric} counts for one month, in raw units (people/fatalities), NOT thousands;
+- non-decreasing across levels (q0.1 <= q0.25 <= ... <= q0.99);
+- this data is right-skewed and heavy-tailed: keep q0.95/q0.99 honest — for this class of data q0.99 is typically several multiples of the median;
+- 0 is a legitimate value (many country-months have zero impact);
+- update the belief state EVERY step, even when the action is another search.
+"""
+
+SIBYL_STEP_QUESTION_V3 = """
+=== QUESTION ===
+{wording}
+
+Country: {country} ({iso3}) | Hazard: {hazard_code} | Metric: {metric}
+Metric definition: {metric_definition}
+Forecast window (6 calendar months): {forecast_months}
+You are forecasting the distribution of the MONTHLY value of this metric over the window months. Your quantiles must describe a single month drawn from this window — account for both month-to-month variation (seasonality, escalation) and your own uncertainty.
+
+=== OUTSIDE VIEW (base-rate anchor — reason from it and away from it, never treat it as a target) ===
+{base_rate_block}{track_record_block}
+"""
 
 SIBYL_STEP_TRIAL_V3 = """
 === YOUR TRIAL PERSPECTIVE ===
@@ -255,9 +288,6 @@ class TrialResult:
     cost: CostBreakdown = field(default_factory=CostBreakdown)
     leakage: LeakageStats = field(default_factory=LeakageStats)
     error: Optional[str] = None
-    # The two elicited horizons (Oct 2026); ``quantiles`` above is the legacy
-    # month-1 view at the seven old levels.
-    month_beliefs: Dict[int, MonthBelief] = field(default_factory=dict)
     # Searches that returned at least one source, and documents read.
     n_search_ok: int = 0
     n_docs_read: int = 0
@@ -296,8 +326,6 @@ class TrialResult:
             "cost": self.cost.to_dict(),
             "leakage": self.leakage.to_dict(),
             "error": self.error,
-            "month_1": (self.month_beliefs[1].to_dict() if 1 in self.month_beliefs else None),
-            "month_6": (self.month_beliefs[6].to_dict() if 6 in self.month_beliefs else None),
             "n_search_ok": self.n_search_ok,
             "n_docs_read": self.n_docs_read,
             "evidence_ok": self.evidence_ok,
@@ -306,18 +334,7 @@ class TrialResult:
 
 
 def _quantile_keys_hint() -> str:
-    from sibyl.belief_state import POS_LEVELS  # noqa: PLC0415
-
-    return ", ".join(f'"{lv}": <number>' for lv in POS_LEVELS)
-
-
-def _zero_note(question: SibylQuestion) -> str:
-    if str(question.hazard_code).upper() in ("FL", "TC") and str(question.metric).upper() == "PA":
-        return (
-            " OR has no record at all (a month with no IFRC GO or IDMC record "
-            "does not resolve, so treat 'no record' like zero here)"
-        )
-    return ""
+    return ", ".join(f'"{lv}": <number>' for lv in QUANTILE_LEVELS)
 
 
 def build_step_prompt(
@@ -364,9 +381,6 @@ def build_step_prompt(
             question.metric, "monthly impact magnitude"
         ),
         forecast_months=", ".join(forecast_months),
-        month_1=(forecast_months[0] if forecast_months else "month 1"),
-        month_6=(forecast_months[min(5, len(forecast_months) - 1)] if forecast_months else "month 6"),
-        zero_note=_zero_note(question),
         base_rate_block=base_rate.prompt_text,
         track_record_block=render_track_record(track_record),
         perspective=perspective,
@@ -458,9 +472,7 @@ def run_trial(
         confidence="low",
     )
 
-    # The reference (sibyl/reference.py) seeds the belief; an object without
-    # reference vectors (no history) seeds a labelled placeholder.
-    belief = initial_belief(getattr(base_rate, "by_month", None), question.metric)
+    belief = initial_belief_from_anchor(base_rate.anchor_quantiles)
     last_tool_result = "(none yet — this is your first step)"
     seen_urls: set[str] = set()
 
@@ -599,7 +611,6 @@ def run_trial(
     # belief state was updated every step, so the latest quantiles stand.
     if result.belief_trace and result.error is None:
         result.quantiles = dict(belief.quantiles)
-        result.month_beliefs = {1: belief.month_1, 6: belief.month_6}
         result.confidence = belief.confidence
         result.evidence_higher = list(belief.evidence_higher)
         result.evidence_lower = list(belief.evidence_lower)

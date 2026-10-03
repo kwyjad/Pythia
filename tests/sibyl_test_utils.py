@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 
 from sibyl.base_rates import BaseRate
-from sibyl.config import QUANTILE_LEVELS
 
 HS_RUN_ID = "hs_sibyl_test"
 STANDARD_RUN_ID = "fc_sibyl_test"
@@ -104,44 +103,58 @@ def stub_base_rate() -> BaseRate:
     )
 
 
-def make_submit_response(quantiles: dict[float, float] | None = None) -> str:
+DEFAULT_M1 = {"p_zero": 0.1, "q": {0.05: 2, 0.25: 6, 0.5: 15, 0.75: 60, 0.95: 400}}
+DEFAULT_M6 = {"p_zero": 0.15, "q": {0.05: 2, 0.25: 5, 0.5: 12, 0.75: 50, 0.95: 500}}
+
+
+def _month(spec: dict) -> dict:
+    return {
+        "p_zero": spec["p_zero"],
+        "quantiles_positive": {str(k): v for k, v in spec["q"].items()},
+    }
+
+
+def make_belief(m1: dict | None = None, m6: dict | None = None, **extra) -> dict:
+    """A valid belief_state object in the two-horizon shape (Oct 2026)."""
+    belief = {
+        "month_1": _month(m1 or DEFAULT_M1),
+        "month_6": _month(m6 or DEFAULT_M6),
+        "confidence": "medium",
+        "evidence_higher": ["escalating clashes reported"],
+        "evidence_lower": ["ceasefire talks ongoing"],
+        "open_questions": [],
+        "baserate_reconciliation": "slightly above the reference",
+        "step_rationale": "final submission",
+    }
+    belief.update(extra)
+    return belief
+
+
+def make_submit_response(m1: dict | None = None, m6: dict | None = None) -> str:
     """A valid single-step 'submit' model response."""
-    q = quantiles or {0.1: 0, 0.25: 3, 0.5: 12, 0.75: 60, 0.9: 250, 0.95: 700, 0.99: 2500}
-    assert set(q) == set(QUANTILE_LEVELS)
-    return json.dumps(
-        {
-            "action": "submit",
-            "action_input": "",
-            "belief_state": {
-                "quantiles": {str(k): v for k, v in q.items()},
-                "confidence": "medium",
-                "evidence_higher": ["escalating clashes reported"],
-                "evidence_lower": ["ceasefire talks ongoing"],
-                "open_questions": [],
-                "baserate_reconciliation": "slightly above the anchor",
-                "step_rationale": "final submission",
-            },
-        }
-    )
+    return json.dumps({"action": "submit", "action_input": "", "belief_state": make_belief(m1, m6)})
 
 
 def make_search_response(query: str = "test query") -> str:
     """A valid 'brave_search' step response."""
-    return json.dumps(
-        {
-            "action": "brave_search",
-            "action_input": query,
-            "belief_state": {
-                "quantiles": {
-                    "0.1": 0, "0.25": 2, "0.5": 10, "0.75": 50,
-                    "0.9": 200, "0.95": 500, "0.99": 2000,
-                },
-                "confidence": "low",
-                "evidence_higher": [],
-                "evidence_lower": [],
-                "open_questions": ["current intensity"],
-                "baserate_reconciliation": "at the anchor",
-                "step_rationale": "need recent reporting",
-            },
-        }
-    )
+    return json.dumps({
+        "action": "brave_search",
+        "action_input": query,
+        "belief_state": make_belief(
+            {"p_zero": 0.2, "q": {0.05: 1, 0.25: 4, 0.5: 10, 0.75: 50, 0.95: 300}},
+            confidence="low", step_rationale="need recent reporting",
+        ),
+    })
+
+
+def stub_reference(*args, **kwargs):
+    """A deterministic Reference (no Resolver DB): FATALITIES, months 1-6."""
+    from sibyl.reference import Reference
+
+    m1 = [0.2, 0.15, 0.3, 0.2, 0.1, 0.03, 0.02]
+    m6 = [0.25, 0.15, 0.25, 0.2, 0.1, 0.03, 0.02]
+    by_month = {m: [(1 - (m - 1) / 5) * a + ((m - 1) / 5) * b for a, b in zip(m1, m6)]
+                for m in range(1, 7)}
+    return Reference(by_month=by_month, source="stub", detail={},
+                     history=[("2026-06", 12.0)], current_value=12.0,
+                     prompt_text="REFERENCE: test stub")

@@ -405,3 +405,54 @@ resolved by EM-DAT"; they name IFRC GO and IDMC and say an unrecorded month
 does not resolve. The standard calibration advice's month-position check
 reads ensemble members only (Sibyl wrote one vector to all six months) and
 uses the metric's real bucket count.
+
+## 2026-10-03 — Part 2: start from the reference, pool with it
+
+**Decision (owner): Sibyl gets its own prior.** `sibyl/reference.py` builds
+one bucket vector per window month; the ensemble's anchor
+(`PYTHIA_PRIOR_ANCHOR_SPD`, `forecaster/prompts.py`) is untouched.
+
+* ACE/FATALITIES: `base_rate_spd.reference_pool_spds`, 0.75 x the bucket
+  shares of the last 12 complete months (`conflictology_spds`) + 0.25 x
+  `level_transition_spds`; the 12-month vector alone for a horizon with no
+  transition vector. A mechanical ACLED backtest (8,371 country-forecasts,
+  Mar 2021 - Dec 2025, production timing) gave Brier 0.390 for the 12-month
+  shares, 0.384 for the pool, 0.470 for level_volatility. The backtest
+  script was not supplied with the brief, so it is not committed.
+* FL/PA, TC/PA: `_seasonal_pa` now returns `probs_by_month`, one vector per
+  forecast calendar month from that month's event rate and PA records, with
+  the pooled severity shares standing in below three records. The pooled
+  return value is unchanged for existing callers.
+* DR/PHASE3PLUS_IN_NEED: `SIBYL_DR_PERSISTENCE_WEIGHT` (0.5) x persistence
+  of the last observed figure + the rest x the 36-month history vector, the
+  same for all months. A starting value with no backtest behind it.
+
+`score_baselines` scores `__ext_conflictology12` and `__ext_ref_pool` on
+every ACE/FATALITIES question (both tracks), so the anchors can be compared.
+
+**Decision: elicit two horizons with an explicit zero.** A trial states, for
+month 1 and month 6, `p_zero` (for FL/TC: zero or no record) and the 0.05,
+0.25, 0.5, 0.75, 0.95 quantiles given a positive value. Each month: mass
+`p_zero` at zero, the rest on a monotone curve through the positive
+quantiles in log space from half a unit to 5 x q0.95; bucket edges are
+evaluated half a unit low so a quantile of exactly 100 cannot flip a bucket.
+Trials are linearly pooled per month; months 2-5 are linear mixtures of 1
+and 6. The belief is seeded from the reference vectors.
+
+**Decision: publish a pool with the reference.** Per month, `SIBYL_REFERENCE_WEIGHT`
+(0.5) x reference + the rest x the pooled trials, floored at 0.005. The
+six month rows now differ. `sibyl_forecasts` gains `reference_json`,
+`raw_by_month_json` (the pooled trials before the reference, vectors and
+quantiles) and `final_by_month_json`; `bucket_probs_json` keeps the final
+month-1 vector and `pooled_quantiles_json` the raw month-1 quantiles at the
+old seven levels, and each trial keeps a legacy `quantiles` field. The
+advice loop compares each resolved month with the RAW quantiles of that
+month: it speaks to the agent about its own distribution. The identity
+`calibrate` hook is no longer called (it took the old pooled CDF); it was a
+pass-through and stays one.
+
+**Prompt.** The outside-view block is replaced by the reference block (the
+last 12 values with buckets, the ACLED incompleteness note, the month-1 and
+month-6 vectors, and stay/rise/fall read off those vectors) and seven rules
+on weighing evidence. No wording about Bayesian updating: tests on
+forecasting prompts found it lowers accuracy.

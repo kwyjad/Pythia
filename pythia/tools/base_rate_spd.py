@@ -702,6 +702,144 @@ def level_volatility_spds(
     return _level_reference_spds(con, iso3, as_of, horizons, known_at, transition=False)
 
 
+def _acled_level(
+    con, iso3: str, as_of: Any, known_at: Any
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    """The level month the forecaster could have read, and the series behind it.
+
+    Shared by every ACE/FATALITIES reference that starts from "where the
+    country is now": the last month before the window that had ended
+    ``ACLED_SETTLE_DAYS`` before ``known_at`` and that ACLED was live for.
+    Returns ``(state, {})`` or ``(None, {"reason": ...})``; ``state`` carries
+    ``level_ym``, ``by_iso``, ``live``, ``window_ym`` and ``when``.
+    """
+    iso = (iso3 or "").upper()
+    window_ym = _as_of_ym(as_of)
+    when = _as_date(known_at)
+    if not _table_exists(con, CONFLICT_FATALITIES_TABLE):
+        return None, {"reason": "acled_monthly_fatalities missing"}
+    candidate = _add_months(window_ym, -1)
+    for _ in range(24):
+        if _usable_at(candidate, when):
+            break
+        candidate = _add_months(candidate, -1)
+    first = _add_months(candidate, -(CONFLICT_WINDOW_MONTHS + 3))
+    by_iso, live = _acled_series_all(con, first, candidate)
+    if iso not in by_iso:
+        return None, {"reason": "country has no complete ACLED month before the window"}
+    level_ym = None
+    for back in range(4):
+        ym = _add_months(candidate, -back)
+        if ym in live:
+            level_ym = ym
+            break
+    if level_ym is None:
+        return None, {"reason": "no complete ACLED month near the window"}
+    return {
+        "iso": iso, "level_ym": level_ym, "by_iso": by_iso, "live": live,
+        "window_ym": window_ym, "when": when,
+    }, {}
+
+
+#: The 12-month conflictology reference: bucket shares of the country's last
+#: twelve complete monthly values ending at the level month. In a backtest
+#: over 8,371 country-forecasts (Mar 2021 - Dec 2025, production timing) it
+#: scored Brier 0.390 against 0.470 for level_volatility; pooled 75/25 with
+#: level_transition it scored 0.384 (scripts/analysis/sibyl_reference_backtest.py).
+CONFLICTOLOGY_MONTHS = 12
+CONFLICTOLOGY_MODEL_SOURCE = "conflictology12:acled_monthly_fatalities"
+REFERENCE_POOL_WEIGHT_CONFLICTOLOGY = 0.75
+REFERENCE_POOL_MODEL_SOURCE = "ref_pool:conflictology12_0.75+level_transition_0.25"
+
+
+def conflictology_spds(
+    con,
+    iso3: str,
+    as_of: Any,
+    horizons: Sequence[int] = (1, 2, 3, 4, 5, 6),
+    known_at: Any = None,
+) -> Tuple[Dict[int, List[float]], str, Dict[str, Any]]:
+    """Bucket shares of the last 12 monthly values, the same at every horizon.
+
+    The months end at the level month (:func:`_acled_level`, the rule the
+    level references use): complete rows only, a live month with no row is a
+    quiet month at zero, a dark month is left out. Each bucket is floored at
+    ``LEVEL_VOLATILITY_FLOOR`` and the vector renormalised.
+    """
+    k = n_buckets_for("FATALITIES")
+    state, why = _acled_level(con, iso3, as_of, known_at)
+    if state is None or not k:
+        return {}, NO_BASE_RATE_SOURCE, why or {"reason": "no FATALITIES buckets"}
+    level_ym = state["level_ym"]
+    months = _window_months(_add_months(level_ym, 1), CONFLICTOLOGY_MONTHS)
+    series = _filled(state["by_iso"][state["iso"]], months, state["live"])
+    if not series:
+        return {}, NO_BASE_RATE_SOURCE, {"reason": "no complete month in the last 12"}
+    counts = [0.0] * k
+    for v in series.values():
+        j = _bucket_index_for_value(v, "FATALITIES")
+        if j is not None:
+            counts[j] += 1.0
+    total = sum(counts)
+    if total <= 0:
+        return {}, NO_BASE_RATE_SOURCE, {"reason": "no bucketable month in the last 12"}
+    probs = [max(c / total, LEVEL_VOLATILITY_FLOOR) for c in counts]
+    z = sum(probs)
+    probs = [p / z for p in probs]
+    detail = {
+        "score_family": "spd",
+        "method": "last_12_monthly_bucket_shares",
+        "level_month": level_ym,
+        "level_value": state["by_iso"][state["iso"]].get(level_ym, 0.0),
+        "known_at": state["when"].isoformat(),
+        "months": sorted(series),
+        "values": [series[m] for m in sorted(series)],
+        "n_months": len(series),
+    }
+    return {int(h): list(probs) for h in horizons}, CONFLICTOLOGY_MODEL_SOURCE, detail
+
+
+def reference_pool_spds(
+    con,
+    iso3: str,
+    as_of: Any,
+    horizons: Sequence[int] = (1, 2, 3, 4, 5, 6),
+    known_at: Any = None,
+    weight: float = REFERENCE_POOL_WEIGHT_CONFLICTOLOGY,
+) -> Tuple[Dict[int, List[float]], str, Dict[str, Any]]:
+    """Per horizon: ``weight`` x conflictology + the rest x level_transition.
+
+    Where the transition vector is missing for a horizon the 12-month vector
+    stands alone, and the detail says which horizons that happened to.
+    """
+    c12, _src, c_detail = conflictology_spds(con, iso3, as_of, horizons, known_at)
+    if not c12:
+        return {}, NO_BASE_RATE_SOURCE, c_detail
+    tr, _tsrc, t_detail = level_transition_spds(con, iso3, as_of, horizons, known_at)
+    out: Dict[int, List[float]] = {}
+    alone: List[int] = []
+    for h in horizons:
+        h = int(h)
+        a = c12[h]
+        b = tr.get(h)
+        if not b or len(b) != len(a):
+            out[h] = list(a)
+            alone.append(h)
+            continue
+        mixed = [weight * x + (1.0 - weight) * y for x, y in zip(a, b)]
+        z = sum(mixed)
+        out[h] = [x / z for x in mixed]
+    detail = {
+        "score_family": "spd",
+        "method": "pool_conflictology12_level_transition",
+        "weight_conflictology": weight,
+        "conflictology": c_detail,
+        "transition": t_detail,
+        "horizons_without_transition": alone,
+    }
+    return out, REFERENCE_POOL_MODEL_SOURCE, detail
+
+
 def _level_reference_spds(
     con,
     iso3: str,
@@ -712,32 +850,17 @@ def _level_reference_spds(
     transition: bool,
 ) -> Tuple[Dict[int, List[float]], str, Dict[str, Any]]:
     k = n_buckets_for("FATALITIES")
-    iso = (iso3 or "").upper()
-    window_ym = _as_of_ym(as_of)
-    when = _as_date(known_at)
-    if not _table_exists(con, CONFLICT_FATALITIES_TABLE) or not k:
+    if not k:
         return {}, NO_BASE_RATE_SOURCE, {"reason": "acled_monthly_fatalities missing"}
-
-    # Candidate level months, newest first: before the window and settled.
-    candidate = _add_months(window_ym, -1)
-    for _ in range(24):
-        if _usable_at(candidate, when):
-            break
-        candidate = _add_months(candidate, -1)
-    first = _add_months(candidate, -(CONFLICT_WINDOW_MONTHS + 3))
-    by_iso, live = _acled_series_all(con, first, candidate)
-    if iso not in by_iso:
-        return {}, NO_BASE_RATE_SOURCE, {
-            "reason": "country has no complete ACLED month before the window"
-        }
-    level_ym = None
-    for back in range(4):
-        ym = _add_months(candidate, -back)
-        if ym in live:
-            level_ym = ym
-            break
-    if level_ym is None:
-        return {}, NO_BASE_RATE_SOURCE, {"reason": "no complete ACLED month near the window"}
+    state, why = _acled_level(con, iso3, as_of, known_at)
+    if state is None:
+        return {}, NO_BASE_RATE_SOURCE, why
+    iso = state["iso"]
+    window_ym = state["window_ym"]
+    when = state["when"]
+    by_iso = state["by_iso"]
+    live = state["live"]
+    level_ym = state["level_ym"]
     level_value = by_iso[iso].get(level_ym, 0.0)
     level_bucket = _bucket_index_for_value(level_value, "FATALITIES")
     if level_bucket is None:
@@ -892,6 +1015,11 @@ def _binary_base_rate(
     return [p, 1.0 - p], "facts_resolved:event_occurrence", detail
 
 
+#: Below this many PA records for a calendar month, its per-month vector
+#: borrows the pooled severity shares (``_seasonal_pa`` probs_by_month).
+PER_MONTH_MIN_SEVERITY = 3
+
+
 def _seasonal_pa(
     con, iso3: str, hazard_code: str, as_of_ym: str
 ) -> Tuple[List[float], str, Dict[str, Any]]:
@@ -930,6 +1058,7 @@ def _seasonal_pa(
         rows = []
 
     severity_values: List[float] = []
+    severity_by_cal: Dict[int, List[float]] = {}
     n_pa_months_all = 0
     yms_seen: set[str] = set()
     for ym_raw, value in rows:
@@ -945,6 +1074,7 @@ def _seasonal_pa(
                 v = 0.0
             if v >= 1.0:
                 severity_values.append(v)
+                severity_by_cal.setdefault(int(ym[5:7]), []).append(v)
 
     by_month = _event_occurrence_rates(con, iso3, hazard_code, as_of_ym)
 
@@ -991,9 +1121,41 @@ def _seasonal_pa(
     total = sum(probs)
     probs = [p / total for p in probs]
 
+    # One vector per forecast calendar month, built the same way from that
+    # month's own event rate and PA records. Below PER_MONTH_MIN_SEVERITY
+    # records the pooled severity shares stand in for the non-zero buckets.
+    # Callers of the pooled return value are unaffected.
+    years_seen = {ym[:4] for ym in yms_seen}
+    probs_by_month: Dict[str, List[float]] = {}
+    for ym in months:
+        cal = int(ym[5:7])
+        if occurrence_method == "gdacs_seasonal_event_rate":
+            obs, events = by_month.get(cal, (0, 0))
+        elif occurrence_method == "reported_pa_month_frequency":
+            obs = len(years_seen)
+            events = sum(1 for y in yms_seen if int(y[5:7]) == cal)
+        else:
+            obs, events = 0, 0
+        p_m = (events + SMOOTHING_PSEUDOCOUNT) / (obs + 2 * SMOOTHING_PSEUDOCOUNT)
+        p_m = min(max(p_m, 0.001), 0.999)
+        month_vals = severity_by_cal.get(cal, [])
+        if len(month_vals) >= PER_MONTH_MIN_SEVERITY:
+            mc = [0.0] * (k - 1)
+            for v in month_vals:
+                j = _bucket_index_for_value(v, "PA")
+                if j is not None and j > 0:
+                    mc[j - 1] += 1.0
+            sev_m = _counts_to_probs(mc)
+        else:
+            sev_m = sev_probs
+        vec = [1.0 - p_m] + [p_m * x for x in sev_m]
+        z = sum(vec)
+        probs_by_month[ym] = [x / z for x in vec]
+
     detail = {
         "score_family": "spd",
         "method": "occurrence_x_severity",
+        "probs_by_month": probs_by_month,
         "occurrence_method": occurrence_method,
         "p_event_pooled": p_event,
         "forecast_months": months,

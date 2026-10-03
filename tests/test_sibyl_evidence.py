@@ -40,6 +40,7 @@ from tests.sibyl_test_utils import (
     make_submit_response,
     seed_db,
     stub_base_rate,
+    stub_reference,
 )
 
 pytestmark = pytest.mark.db
@@ -141,7 +142,7 @@ def test_a_search_that_found_nothing_is_not_evidence(monkeypatch):
 
 def _run_env(tmp_path, monkeypatch, pack_fn):
     seed_db(tmp_path, monkeypatch)
-    monkeypatch.setattr(sibyl_run, "load_base_rate", lambda *a, **k: stub_base_rate())
+    monkeypatch.setattr(sibyl_run, "build_reference", stub_reference)
     monkeypatch.setattr(sibyl_tools, "fetch_via_brave_search", pack_fn)
     state = {"n": 0}
 
@@ -208,7 +209,7 @@ def test_a_run_with_evidence_writes_a_floored_forecast(tmp_path, monkeypatch):
 
 def test_one_trial_with_evidence_is_not_enough(tmp_path, monkeypatch):
     seed_db(tmp_path, monkeypatch)
-    monkeypatch.setattr(sibyl_run, "load_base_rate", lambda *a, **k: stub_base_rate())
+    monkeypatch.setattr(sibyl_run, "build_reference", stub_reference)
     monkeypatch.setattr(sibyl_tools, "fetch_via_brave_search", _ok_pack)
     # Trial 0 searches then submits; trials 1 and 2 submit blind.
     calls = iter([make_search_response(), make_submit_response(),
@@ -427,9 +428,8 @@ def test_a_trial_with_no_valid_step_is_discarded():
 
 def test_seed_without_anchor_does_not_claim_a_base_rate():
     belief = initial_belief_from_anchor(None)
-    assert "Seeded from the outside-view base-rate anchor" not in belief.baserate_reconciliation
-    assert "No base-rate anchor" in belief.baserate_reconciliation
-    assert "Seeded from" in initial_belief_from_anchor({0.5: 3.0}).baserate_reconciliation
+    assert "Seeded from" not in belief.baserate_reconciliation
+    assert "No reference" in belief.baserate_reconciliation
 
 
 # --- 10. question wording ----------------------------------------------------------------

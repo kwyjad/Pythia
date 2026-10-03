@@ -27,6 +27,7 @@ from tests.sibyl_test_utils import (
     make_submit_response,
     seed_db,
     stub_base_rate,
+    stub_reference,
 )
 
 pytestmark = pytest.mark.db
@@ -113,8 +114,8 @@ def test_run_hard_cap_fires_at_boundary_and_persists_completed_work(
         }
         return make_submit_response(), usage, ""
 
-    monkeypatch.setattr(sibyl_run, "load_base_rate",
-                        lambda *a, **k: stub_base_rate())
+    monkeypatch.setattr(sibyl_run, "build_reference",
+                        stub_reference)
     monkeypatch.setattr(
         sibyl_run, "CostTracker",
         lambda *a, **k: CostTracker(run_hard_cap_usd=1.0,
@@ -169,8 +170,8 @@ def test_run_without_cap_pressure_is_not_flagged(tmp_path, monkeypatch):
     def cheap_model_call(prompt: str):
         return make_submit_response(), {"cost_usd": 0.01}, ""
 
-    monkeypatch.setattr(sibyl_run, "load_base_rate",
-                        lambda *a, **k: stub_base_rate())
+    monkeypatch.setattr(sibyl_run, "build_reference",
+                        stub_reference)
     monkeypatch.setattr(sibyl_agent, "log_sibyl_call", lambda **kwargs: None)
 
     summary = sibyl_run.run_sibyl(HS_RUN_ID, n_questions=2,
@@ -190,7 +191,7 @@ def test_time_cap_skips_and_persists(tmp_path, monkeypatch):
     def fake_model_call(prompt: str):
         return make_submit_response(), {"cost_usd": 0.01}, ""
 
-    monkeypatch.setattr(sibyl_run, "load_base_rate", lambda *a, **k: stub_base_rate())
+    monkeypatch.setattr(sibyl_run, "build_reference", stub_reference)
     monkeypatch.setattr(sibyl_agent, "log_sibyl_call", lambda **kwargs: None)
 
     # Monotonic seconds: the loop starts at 0, Q1 starts at 0, and by the
@@ -226,7 +227,7 @@ def test_time_cap_skips_and_persists(tmp_path, monkeypatch):
 
 def test_no_time_limit_when_zero(tmp_path, monkeypatch):
     seed_db(tmp_path, monkeypatch)
-    monkeypatch.setattr(sibyl_run, "load_base_rate", lambda *a, **k: stub_base_rate())
+    monkeypatch.setattr(sibyl_run, "build_reference", stub_reference)
     monkeypatch.setattr(sibyl_agent, "log_sibyl_call", lambda **kwargs: None)
     summary = sibyl_run.run_sibyl(
         HS_RUN_ID, n_questions=2,
