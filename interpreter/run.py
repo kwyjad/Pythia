@@ -617,6 +617,10 @@ def run_interpreter(
             if report.checks.get("proper_nouns") else []
         )
         retries = 0
+        # Why the correction pass ran, kept on the stored row: the interpreter
+        # logs a "{kind}_retry" call and stored only the FINAL validation, so
+        # the first answer's faults were nowhere a bundle could show (Oct 2026).
+        correction: dict[str, Any] = {"attempted": False}
         if (not report.passed or noun_violations) and config.validation_retries() > 0:
             complaints = [
                 f"- {name}: {err}"
@@ -644,6 +648,17 @@ def run_interpreter(
                 hs_run_id=hs_run_id, kind=f"{kind}_retry",
             )
             retries = 1
+            correction = {
+                "attempted": True,
+                "n_first_attempt_complaints": len(complaints),
+                "first_attempt_complaints": complaints[:60],
+                "failed_checks": sorted(
+                    name for name, check in report.checks.items() if not check.passed
+                ),
+                "kept": "first",
+            }
+            if retry_error:
+                correction["retry_error"] = str(retry_error)[:300]
             retry_content = parse_model_json(retry_text) if not retry_error else None
             if retry_content is not None:
                 _repair_entry_identity(retry_content, packs.pack_identity(pack))
@@ -651,6 +666,7 @@ def run_interpreter(
                 if retry_report.passed or len(_error_count(retry_report)) < len(complaints):
                     # Keep the better answer, never the worse one.
                     content, report = retry_content, retry_report
+                    correction["kept"] = "retry"
                 # The retry's tokens are part of this interpretation's cost.
                 try:
                     from forecaster.providers import estimate_cost_usd
@@ -705,6 +721,7 @@ def run_interpreter(
             con, content=content, content_md=content_md, figures=figures,
             status=status,
             validation={**report.as_dict(),
+                        "correction": correction,
                         "unresolved_figures": resolver.misses,
                         "strict": config.strict_validation(),
                         "pack_stats": pack_stats},

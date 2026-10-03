@@ -177,18 +177,57 @@ def _build_adversarial_queries(
 # LLM synthesis
 # ---------------------------------------------------------------------------
 
+#: Recorded on every hs_adversarial_checks row. Bump on any edit to the
+#: synthesis prompt, so a stored verdict can be read against the wording
+#: that produced it.
+ADVERSARIAL_PROMPT_VERSION = "2.0.0"
+
+#: The verdicts a check may return. Until Oct 2026 the schema offered
+#: "moderate" while the models wrote "moderate_counter" (2 of 15 ACE checks
+#: on 1 Oct 2026), and nothing checked either.
+NET_ASSESSMENTS = ("strong_counter", "moderate_counter", "weak_counter", "inconclusive")
+_NET_ALIASES = {"moderate": "moderate_counter", "strong": "strong_counter", "weak": "weak_counter"}
+
+#: What each hazard's regime change is a change IN: the metric its
+#: questions resolve on.
+_HAZARD_METRICS = {
+    "ACE": "monthly conflict deaths (ACLED, all event types) and conflict displacement (IDMC)",
+    "DR": "the population in IPC Phase 3 or worse",
+    "FL": "the number of people affected by floods",
+    "TC": "the number of people affected by tropical cyclones",
+}
+_HAZARD_NAMES = {
+    "ACE": "armed conflict", "DR": "drought", "FL": "flood", "TC": "tropical cyclone",
+}
+
+
+def normalise_net_assessment(value: Any) -> tuple[str, str | None]:
+    """(valid verdict, the raw value when it was not one)."""
+    raw = str(value or "").strip().lower()
+    if raw in NET_ASSESSMENTS:
+        return raw, None
+    if raw in _NET_ALIASES:
+        return _NET_ALIASES[raw], raw
+    return "inconclusive", (raw or None)
+
+
 _SYNTHESIS_PROMPT_TEMPLATE = """\
 You are a devil's advocate analyst reviewing a regime change assessment.
 
-The RC assessment for {country_name} ({iso3}) — {hazard_code} predicts:
+A regime change here means a departure of {metric} in {country_name} from its
+recent level, in the stated direction, over the forecast window. It is not a
+judgement about whether the {hazard_name} situation is serious; a severe
+situation that stays at its usual level is NOT a regime change.
+
+The RC assessment for {country_name} ({iso3}) — {hazard_name} ({hazard_code}) predicts:
 - Direction: {direction} (regime change {direction_label})
 - Likelihood: {likelihood}
 - Magnitude: {magnitude}
 - Window: {window}
 - Key triggers: {trigger_bullets}
 
-Your task: Based on the evidence below, identify reasons this regime change
-might NOT materialize as predicted. Be specific and cite sources.
+Your task: Based on the evidence below, identify reasons {metric} might NOT
+depart from its recent level as predicted. Be specific and cite sources.
 
 Search evidence:
 {evidence_text}
@@ -202,7 +241,7 @@ Respond in JSON only (no commentary):
     {{"analog": "...", "outcome": "...", "relevance": "..."}}
   ],
   "stabilizing_factors": ["...", "..."],
-  "net_assessment": "strong_counter|moderate|weak_counter|inconclusive",
+  "net_assessment": "strong_counter|moderate_counter|weak_counter|inconclusive",
   "summary": "One sentence on counter-evidence strength"
 }}
 
@@ -211,6 +250,8 @@ Rules:
 - "strong" counter-evidence directly contradicts a named trigger signal
 - "moderate" provides context that weakens the RC hypothesis
 - "weak" is tangential or speculative
+- net_assessment must be exactly one of: strong_counter, moderate_counter,
+  weak_counter, inconclusive
 - If you find no meaningful counter-evidence, set net_assessment to "inconclusive"\
   and say so in the summary — do not fabricate counter-evidence
 - Historical analogs should be from the same country or closely comparable contexts
@@ -263,6 +304,8 @@ async def _synthesize_counter_evidence(
         country_name=country_name,
         iso3=iso3,
         hazard_code=hazard_code,
+        hazard_name=_HAZARD_NAMES.get((hazard_code or "").upper(), hazard_code),
+        metric=_HAZARD_METRICS.get((hazard_code or "").upper(), "the impact metric"),
         direction=direction,
         direction_label=_DIRECTION_LABELS.get(direction, direction),
         likelihood=rc_result.get("likelihood", 0.0),
@@ -290,7 +333,7 @@ async def _synthesize_counter_evidence(
         prompt,
         temperature=0.0,
         prompt_key="hs.adversarial_check",
-        prompt_version="1.0.0",
+        prompt_version=ADVERSARIAL_PROMPT_VERSION,
         component="HorizonScanner",
         run_id=run_id,
         log_call=False,  # rich-logged below with run/hazard linkage
@@ -336,9 +379,17 @@ async def _synthesize_counter_evidence(
     result["counter_evidence"] = (result.get("counter_evidence") or [])[:_MAX_COUNTER_EVIDENCE]
     result["historical_analogs"] = (result.get("historical_analogs") or [])[:_MAX_HISTORICAL_ANALOGS]
     result["stabilizing_factors"] = (result.get("stabilizing_factors") or [])[:_MAX_STABILIZING_FACTORS]
-    result.setdefault("net_assessment", "inconclusive")
+    net, raw = normalise_net_assessment(result.get("net_assessment"))
+    result["net_assessment"] = net
+    if raw is not None:
+        result["net_assessment_raw"] = raw
+        logger.info(
+            "Adversarial check %s %s: net_assessment %r is not a valid verdict; stored as %s",
+            iso3, hazard_code, raw, net,
+        )
     result.setdefault("summary", "")
     result["model_id"] = model_id
+    result["prompt_version"] = ADVERSARIAL_PROMPT_VERSION
 
     return result
 
@@ -544,6 +595,7 @@ def run_adversarial_check(
             "sources": all_sources,
             "grounded": any_grounded,
             "model_id": "",
+            "prompt_version": ADVERSARIAL_PROMPT_VERSION,
         }
 
     # 5. LLM synthesis

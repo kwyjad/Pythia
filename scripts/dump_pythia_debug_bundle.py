@@ -3130,6 +3130,18 @@ class BundleData:
     crisiswatch_table_exists: bool = False
     crisiswatch_load_error: str | None = None
 
+    # Production questions whose hs_run_id names a TEST scan (Oct 2026).
+    # None = could not be checked.
+    production_questions_on_test_scans: list[str] | None = None
+
+    # Forecast calls that returned without an error and whose answer does
+    # not parse (Oct 2026: five Gemini answers cut mid-JSON read as "ok").
+    unparseable_forecast_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    # The interpreter report stored for this run, and why it needed a
+    # correction pass if it did (Oct 2026). None = no interpretations table.
+    interpretation: dict[str, Any] | None = None
+
     # Run summary stats (for executive summary bottom sections)
     rc_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
     triage_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
@@ -3422,7 +3434,94 @@ def _load_bundle_data(
     except Exception as exc:
         data.crisiswatch_load_error = str(exc)
 
+    data.production_questions_on_test_scans = _production_questions_on_test_scans(con)
+    data.unparseable_forecast_calls = _unparseable_forecast_calls(con, data.forecaster_run_id)
+    data.interpretation = _interpretation_for_run(con, data.forecaster_run_id)
+
     return data
+
+
+def _interpretation_for_run(con, run_id: str | None) -> dict[str, Any] | None:
+    """Newest interpretation row for the run, with its correction record."""
+    if not run_id:
+        return None
+    try:
+        if not _safe_table_exists(con, "interpretations"):
+            return None
+        row = con.execute(
+            "SELECT kind, version, status, validation_json FROM interpretations "
+            "WHERE run_id = ? ORDER BY created_at DESC, version DESC LIMIT 1",
+            [run_id],
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    if not row:
+        return {"present": False}
+    try:
+        validation = json.loads(row[3] or "{}")
+    except (TypeError, ValueError):
+        validation = {}
+    return {
+        "present": True, "kind": row[0], "version": row[1], "status": row[2],
+        "correction": validation.get("correction") or {},
+    }
+
+
+def _unparseable_forecast_calls(con, run_id: str | None) -> list[dict[str, Any]]:
+    """SPD and binary calls logged without an error whose answer will not parse.
+
+    ``llm_calls.status`` describes the HTTP call; an answer cut mid-JSON is a
+    lost member all the same, and the "LLM Calls" line read OK above five of
+    them on 1 Oct 2026. Never raises.
+    """
+    if not run_id:
+        return []
+    try:
+        from forecaster.cli import _safe_json_loads  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        def _safe_json_loads(text: str):  # type: ignore[no-redef]
+            t = str(text or "")
+            i, j = t.find("{"), t.rfind("}")
+            return json.loads(t[i:j + 1]) if 0 <= i < j else None
+    try:
+        rows = con.execute(
+            "SELECT question_id, model_id, phase, response_text FROM llm_calls "
+            "WHERE run_id = ? AND phase IN ('spd_v2', 'binary_v2') "
+            "AND COALESCE(error_text, '') = ''",
+            [run_id],
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    bad: list[dict[str, Any]] = []
+    for qid, model, phase, text in rows:
+        try:
+            ok = isinstance(_safe_json_loads(text or ""), dict)
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            bad.append({"question_id": qid, "model_id": model, "phase": phase,
+                        "response_chars": len(text or "")})
+    return bad
+
+
+def _production_questions_on_test_scans(con) -> list[str] | None:
+    """Production questions whose ``hs_run_id`` names a test scan.
+
+    A same-epoch test run used to re-point production questions at itself;
+    28 such questions sat in the 1 Oct 2026 release. None when the tables or
+    columns are absent.
+    """
+    try:
+        if not (_safe_table_exists(con, "questions") and _safe_table_exists(con, "hs_runs")):
+            return None
+        rows = con.execute(
+            "SELECT q.question_id FROM questions q JOIN hs_runs h ON h.hs_run_id = q.hs_run_id "
+            "WHERE NOT COALESCE(q.is_test, FALSE) AND COALESCE(h.is_test, FALSE) "
+            "ORDER BY q.question_id"
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+    except Exception:  # noqa: BLE001 - a check that cannot run reports None
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -3525,6 +3624,41 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         hs_status = "FAIL"
         hs_detail = f"{data.n_hazards_triaged_total}/{expected_hs} rows, {missing_count} missing"
     checks.append({"subsystem": "HS Triage", "status": hs_status, "detail": hs_detail})
+
+    # The interpreter report, and why it needed a correction pass if it did.
+    interp = data.interpretation
+    if interp is not None:
+        if not interp.get("present"):
+            checks.append({"subsystem": "Interpreter", "status": "WARN",
+                           "detail": "no interpretation stored for this run"})
+        else:
+            corr = interp.get("correction") or {}
+            detail = f"{interp.get('kind')} v{interp.get('version')} {interp.get('status')}"
+            if corr.get("attempted"):
+                first = (corr.get("first_attempt_complaints") or [""])[0]
+                detail += (
+                    f"; correction pass ran after {corr.get('n_first_attempt_complaints')} "
+                    f"complaint(s) in {', '.join(corr.get('failed_checks') or []) or 'proper_nouns'} "
+                    f"(first: {str(first)[:160]}); kept the {corr.get('kept')} answer"
+                )
+            checks.append({
+                "subsystem": "Interpreter",
+                "status": "OK" if interp.get("status") == "ok" else "FAIL",
+                "detail": detail,
+            })
+
+    # Question provenance: a production question must name a production scan.
+    bad_q = data.production_questions_on_test_scans
+    if bad_q is not None:
+        checks.append({
+            "subsystem": "Question Provenance",
+            "status": "FAIL" if bad_q else "OK",
+            "detail": (
+                f"{len(bad_q)} production question(s) name a test scan as their origin: "
+                + ", ".join(bad_q[:8]) + (" ..." if len(bad_q) > 8 else "")
+                if bad_q else "every production question names a production scan"
+            ),
+        })
 
     # CrisisWatch (ICG conflict arrows — ACE data source)
     if data.crisiswatch_load_error:
@@ -3772,6 +3906,16 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         else:
             llm_status = "FAIL"
             llm_detail = f"{total_calls} calls, {total_errors} errors ({error_rate:.1%})"
+    unparseable = data.unparseable_forecast_calls or []
+    if unparseable:
+        llm_detail += (
+            f"; {len(unparseable)} forecast answer(s) returned without an error "
+            "but do not parse: "
+            + ", ".join(f"{u['question_id']}/{u['model_id']}" for u in unparseable[:6])
+            + (" ..." if len(unparseable) > 6 else "")
+        )
+        if llm_status == "OK":
+            llm_status = "WARN"
     checks.append({"subsystem": "LLM Calls", "status": llm_status, "detail": llm_detail})
 
     # Batch economics. "LLM Calls: OK, 80 calls, 0 errors" was true and useless

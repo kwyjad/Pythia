@@ -964,3 +964,72 @@ def test_a_failing_collector_writes_a_stub_and_the_run_continues(tmp_path: Path,
     assert "upstream went away" in text
     assert _COLLECTOR_ERRORS and _COLLECTOR_ERRORS[0]["collector"] == "thing"
     _COLLECTOR_ERRORS.clear()
+
+
+def test_a_production_question_on_a_test_scan_is_named():
+    """Oct 2026: same-epoch test scans re-pointed 28 production questions."""
+
+    import duckdb
+
+    from scripts import dump_pythia_debug_bundle as dump
+
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE TABLE hs_runs (hs_run_id TEXT, is_test BOOLEAN)")
+    con.execute("CREATE TABLE questions (question_id TEXT, hs_run_id TEXT, is_test BOOLEAN)")
+    con.execute("INSERT INTO hs_runs VALUES ('hs_prod', FALSE), ('hs_test', TRUE)")
+    con.execute(
+        "INSERT INTO questions VALUES ('Q_OK', 'hs_prod', FALSE), "
+        "('Q_BAD', 'hs_test', FALSE), ('Q_TEST', 'hs_test', TRUE)"
+    )
+    assert dump._production_questions_on_test_scans(con) == ["Q_BAD"]
+    assert dump._production_questions_on_test_scans(duckdb.connect(":memory:")) is None
+
+
+def test_an_ok_forecast_call_that_will_not_parse_is_named():
+    """Oct 2026: five Gemini answers cut mid-JSON were logged as ok calls."""
+
+    import duckdb
+
+    from scripts import dump_pythia_debug_bundle as dump
+
+    con = duckdb.connect(":memory:")
+    con.execute(
+        "CREATE TABLE llm_calls (run_id TEXT, question_id TEXT, model_id TEXT, phase TEXT, "
+        "response_text TEXT, error_text TEXT)"
+    )
+    con.execute(
+        "INSERT INTO llm_calls VALUES "
+        "('fc_1','Q1','m','spd_v2','{\"spds\": {}}', NULL),"
+        "('fc_1','Q2','m','spd_v2','```json\\n{\"reason', NULL),"
+        "('fc_1','Q3','m','spd_v2','', 'timeout'),"
+        "('fc_1','Q4','m','scenario_v2','not json', NULL)"
+    )
+    bad = dump._unparseable_forecast_calls(con, "fc_1")
+    assert [b["question_id"] for b in bad] == ["Q2"]
+
+
+def test_the_interpreter_correction_reason_is_read_back():
+    """Oct 2026: the retry's cause lived only in a job log."""
+
+    import json as _json
+
+    import duckdb
+
+    from scripts import dump_pythia_debug_bundle as dump
+
+    con = duckdb.connect(":memory:")
+    con.execute(
+        "CREATE TABLE interpretations (run_id TEXT, kind TEXT, version INTEGER, "
+        "status TEXT, validation_json TEXT, created_at TIMESTAMP)"
+    )
+    con.execute(
+        "INSERT INTO interpretations VALUES ('fc_1', 'combined', 1, 'ok', ?, now())",
+        [_json.dumps({"correction": {
+            "attempted": True, "n_first_attempt_complaints": 2,
+            "first_attempt_complaints": ["- style: em dash in run_summary"],
+            "failed_checks": ["style"], "kept": "retry"}})],
+    )
+    got = dump._interpretation_for_run(con, "fc_1")
+    assert got["status"] == "ok"
+    assert got["correction"]["failed_checks"] == ["style"]
+    assert dump._interpretation_for_run(con, "fc_2") == {"present": False}

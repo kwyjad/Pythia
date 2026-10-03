@@ -414,7 +414,7 @@ class TestV3Pack:
         assert somalia is not None, by_country
         # Flagged in the July report and again now.
         assert somalia["consecutive_runs"] == 2
-        assert somalia["persistence"] == "flagged for 2 consecutive runs"
+        assert somalia["persistence"] == "flagged for 2 consecutive months"
         # Movement is read on the months the two windows share, and the
         # planning figure went up.
         assert somalia["movement"]["n_overlapping_months"] == 5

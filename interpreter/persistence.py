@@ -75,11 +75,46 @@ def consecutive_runs(
     return count
 
 
+def _month_index(ym: str) -> int | None:
+    try:
+        return int(str(ym)[:4]) * 12 + int(str(ym)[5:7]) - 1
+    except (TypeError, ValueError):
+        return None
+
+
+def consecutive_months(
+    key: tuple[str, str, str],
+    previous: Sequence[tuple[str, Iterable[tuple[str, str, str]]]],
+    current_month: str,
+) -> int:
+    """How many calendar months running this risk has been flagged.
+
+    ``previous`` is ``(YYYY-MM, flagged keys)`` per earlier report, one per
+    month, NEWEST FIRST. Counting REPORTS overstated it: the cycle published
+    on the 1st and the 15th of September, so a risk flagged since August read
+    "4 consecutive runs" in October across three months (Oct 2026). The count
+    stops at a month with no report as surely as at one that did not flag it.
+    """
+    count = 1
+    expected = _month_index(current_month)
+    if expected is None:
+        return consecutive_runs(key, [f for _m, f in previous])
+    for month, flagged in previous:
+        idx = _month_index(month)
+        if idx is None or idx >= expected:
+            continue
+        if idx != expected - 1 or key not in set(flagged):
+            break
+        count += 1
+        expected = idx
+    return count
+
+
 def persistence_phrase(runs: int) -> str:
-    """The words the report prints for a persistence count."""
+    """The words the report prints for a persistence count (in months)."""
     if runs <= 1:
         return "new this month"
-    return f"flagged for {runs} consecutive runs"
+    return f"flagged for {runs} consecutive months"
 
 
 def movement(

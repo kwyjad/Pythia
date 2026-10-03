@@ -942,7 +942,11 @@ class _GoogleBatch:
                     yield entry
 
     def fetch(self, provider_batch_id: str) -> Iterator[Tuple[str, bool, str, Dict[str, Any], str]]:
-        from forecaster.providers import _google_usage_from_payload  # noqa: PLC0415
+        from forecaster.providers import (  # noqa: PLC0415
+            _google_usage_from_payload,
+            google_finish_problem,
+            google_text_and_finish,
+        )
 
         payload = self._get(provider_batch_id)
         for entry in self._iter_inlined(payload):
@@ -951,14 +955,18 @@ class _GoogleBatch:
                 yield cid, False, "", {}, f"Gemini batch item error: {json.dumps(entry['error'])[:300]}"
                 continue
             item_response = entry.get("response") or {}
-            text = ""
-            try:
-                text = (
-                    item_response["candidates"][0]["content"]["parts"][0].get("text", "").strip()
-                )
-            except Exception:  # noqa: BLE001
-                text = str(item_response.get("text", "") or "")
-            yield cid, True, text, _google_usage_from_payload(item_response), ""
+            text, finish = google_text_and_finish(item_response)
+            usage = _google_usage_from_payload(item_response)
+            if finish:
+                usage["finish_reason"] = finish
+            problem = google_finish_problem(finish)
+            if problem:
+                # A cut answer is an errored item: the caller costs the
+                # tokens and takes the synchronous path once, which is the
+                # one retry at collect.
+                yield cid, False, text, usage, problem
+                continue
+            yield cid, True, text, usage, ""
 
     def cancel(self, provider_batch_id: str) -> None:
         try:

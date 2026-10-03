@@ -20,6 +20,7 @@ on:
       # helpers, so a change to either must re-run this suite.
       - "scripts/refresh_crisiswatch.py"
       - "pythia/acaps.py"
+      - "pythia/adversarial_check.py"
       # More resolver/tests files that guard horizon_scanner/. resolver-ci-fast
       # runs them but triggers only on resolver/**, so a horizon_scanner-only PR
       # re-ran none of them. test_ci_shell_sanity.py enforces this wiring.
@@ -48,6 +49,7 @@ on:
       # helpers, so a change to either must re-run this suite.
       - "scripts/refresh_crisiswatch.py"
       - "pythia/acaps.py"
+      - "pythia/adversarial_check.py"
       # More resolver/tests files that guard horizon_scanner/. resolver-ci-fast
       # runs them but triggers only on resolver/**, so a horizon_scanner-only PR
       # re-ran none of them. test_ci_shell_sanity.py enforces this wiring.

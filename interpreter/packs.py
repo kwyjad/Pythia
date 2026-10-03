@@ -547,6 +547,7 @@ _RUN_SUMMARY_KEYS = (
     "countries_with_questions",
     "countries_track1",
     "countries_track2",
+    "countries_track2_only",
     "n_questions",
     "n_above_base_rate",
     "n_below_base_rate",
