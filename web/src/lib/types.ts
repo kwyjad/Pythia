@@ -476,6 +476,30 @@ export type SibylRun = {
   mean_jsd_from_reference?: number | null;
   reference_weight?: number | null;
   reference_weight_source?: string | null;
+  // The shadow arm (Oct 2026): whether it ran, on what, and its own spend.
+  shadow_status?: string | null;
+  shadow_model?: string | null;
+  n_shadow_trials?: number | null;
+  n_shadow_series?: number | null;
+  n_shadow_skipped?: number | null;
+  shadow_cost_usd?: number | null;
+};
+
+// Shadow minus Sibyl, one score type (negative: the shadow arm scored better).
+export type SibylShadowStat = {
+  status: "ok" | "not_yet";
+  n_questions: number;
+  min_questions?: number;
+  mean_diff?: number | null;
+  lo?: number | null;
+  hi?: number | null;
+};
+
+export type SibylShadowComparison = {
+  series: Record<string, SibylShadowStat>;
+  trial: Record<string, SibylShadowStat>;
+  min_questions: number;
+  model: string | null;
 };
 
 export type SibylQuestionRow = {
@@ -506,6 +530,7 @@ export type SibylQuestionRow = {
 export type SibylSummaryResponse = {
   run: SibylRun | null;
   questions: SibylQuestionRow[];
+  shadow?: SibylShadowComparison | null;
 };
 
 export type SibylQuestionsResponse = {

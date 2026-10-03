@@ -624,23 +624,13 @@ def run_trial(
     lane: Optional[str] = None,
     log_sink: Optional[List[Dict[str, Any]]] = None,
     lessons: str = "",
-    provider: str = "anthropic",
-    model_id: Optional[str] = None,
-    cost_kind: Optional[str] = None,
 ) -> TrialResult:
     """Run one independent agentic trial for *question*.
 
     *model_call* is injectable for tests (deterministic smoke test); the
-    default goes through ``forecaster.providers.call_anthropic``. The shadow
-    arm (sibyl/shadow.py) passes its own *model_call* with the *provider* and
-    *model_id* its ``llm_calls`` rows carry, and a *cost_kind* under which
-    every dollar the trial spends (steps, searches, extractions) is counted.
+    default goes through ``forecaster.providers.call_anthropic``.
     """
     call = model_call or _call_model
-    step_model_id = model_id or MODEL
-
-    def _kind(default: str) -> str:
-        return cost_kind or default
     lane = lane if lane in TRIAL_LANES else lane_for_trial(trial_index)
     perspective = TRIAL_LANES[lane]
 
@@ -702,15 +692,15 @@ def run_trial(
             else:
                 text, usage, error = _call_model(prompt, cache_segments=segments)
             cost = float(usage.get("cost_usd") or 0.0)
-            result.cost.add(_kind(COST_KIND_OPUS), cost)
-            tracker.add(question.question_id, _kind(COST_KIND_OPUS), cost)
+            result.cost.add(COST_KIND_OPUS, cost)
+            tracker.add(question.question_id, COST_KIND_OPUS, cost)
             _log(
                 run_id=run_id,
                 question_id=question.question_id,
                 prompt_text=prompt_for_log(prompt, logged_prefix),
                 response_text=text,
-                provider=provider,
-                model_id=step_model_id,
+                provider="anthropic",
+                model_id=MODEL,
                 usage=usage,
                 iso3=question.iso3,
                 hazard_code=question.hazard_code,
@@ -813,8 +803,8 @@ def run_trial(
                     question=question.wording or "", country=country_name,
                     call=extraction_call, log=_log_extract,
                 )
-                result.cost.add(_kind(COST_KIND_EXTRACTION), ex.cost_usd)
-                tracker.add(question.question_id, _kind(COST_KIND_EXTRACTION), ex.cost_usd)
+                result.cost.add(COST_KIND_EXTRACTION, ex.cost_usd)
+                tracker.add(question.question_id, COST_KIND_EXTRACTION, ex.cost_usd)
                 note = (
                     f"(read by the extraction model from {len(tool_result.doc_text):,} characters)"
                     if ex.extracted else
@@ -838,8 +828,8 @@ def run_trial(
                 result.n_search_ok += 1
             if call_ok and tool_result.tool == "fetch_url":
                 result.n_docs_read += 1
-            result.cost.add(_kind(COST_KIND_BRAVE), tool_result.cost_usd)
-            tracker.add(question.question_id, _kind(COST_KIND_BRAVE), tool_result.cost_usd)
+            result.cost.add(COST_KIND_BRAVE, tool_result.cost_usd)
+            tracker.add(question.question_id, COST_KIND_BRAVE, tool_result.cost_usd)
             result.leakage.merge(tool_result.leakage)
             for src in tool_result.sources:
                 if src.url and src.url not in seen_urls:

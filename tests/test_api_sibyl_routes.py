@@ -198,3 +198,32 @@ def test_process_measures_and_month_vectors_on_both_schemas(tmp_path, monkeypatc
                 params={"question_id": "ETH_ACE_FATALITIES_2026-10"}).json()["record"]
     assert rec["reference"]["by_month"]["6"] == [0.4, 0.6]
     assert rec["final_by_month"]["1"] == [0.6, 0.4]
+
+
+def test_summary_carries_the_shadow_arm_on_both_schemas(tmp_path, monkeypatch, reset_api):
+    """Oct 2026, Part 7: the run's shadow fields read None on an older DB and
+    the comparison says "not yet" rather than failing."""
+    import json
+
+    db = tmp_path / "legacy.duckdb"
+    _legacy_db(db)
+    c = _client(tmp_path, db, monkeypatch)
+    body = c.get("/v1/sibyl/summary").json()
+    assert body["run"]["shadow_status"] is None and body["run"]["shadow_cost_usd"] is None
+    assert body["shadow"]["series"]["brier"]["status"] == "not_yet"
+
+    con = duckdb.connect(str(db))
+    con.execute("ALTER TABLE sibyl_runs ADD COLUMN shadow_status TEXT")
+    con.execute("ALTER TABLE sibyl_forecasts ADD COLUMN shadow_json TEXT")
+    con.execute("UPDATE sibyl_runs SET shadow_status = 'no_key'")
+    con.execute("UPDATE sibyl_forecasts SET shadow_json = ?",
+                [json.dumps({"status": "ok", "model": "openai:gpt-6-sol"})])
+    con.close()
+    import pythia.api.app as app_mod
+
+    app_mod._READ_CON = None
+    body = c.get("/v1/sibyl/summary").json()
+    assert body["run"]["shadow_status"] == "no_key"
+    assert body["shadow"]["model"] == "openai:gpt-6-sol"
+    assert body["shadow"]["series"]["brier"] == {
+        "status": "not_yet", "n_questions": 0, "min_questions": 20}

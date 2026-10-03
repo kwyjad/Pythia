@@ -12,6 +12,8 @@ import type {
   SibylQuestionRow,
   SibylQuestionsResponse,
   SibylRun,
+  SibylShadowComparison,
+  SibylShadowStat,
   SibylRunsResponse,
   SibylSummaryResponse,
   SibylTrial,
@@ -270,6 +272,69 @@ const TrialCard = ({ trial }: { trial: SibylTrial }) => {
 
 const fmtShare = (v: number | null | undefined) =>
   v === null || v === undefined ? "—" : pct.format(v);
+
+const SHADOW_STATUS_TEXT: Record<string, string> = {
+  on: "ran",
+  off: "switched off",
+  backtest: "not run in backtest",
+  expired: "ended (past its last month)",
+  no_key: "skipped: the OpenAI key was missing",
+  no_shadow_call: "not run (test run)",
+  unknown_model: "skipped: the model did not resolve",
+  unsupported_provider: "skipped: provider not wired",
+};
+
+const fmtDiff = (st: SibylShadowStat | undefined) => {
+  if (!st) return "—";
+  if (st.status !== "ok" || st.mean_diff === null || st.mean_diff === undefined) {
+    return `not yet (${st.n_questions} of ${st.min_questions ?? 20} questions)`;
+  }
+  const f = (v: number | null | undefined) => (v === null || v === undefined ? "?" : v.toFixed(4));
+  return `${f(st.mean_diff)} [${f(st.lo)}, ${f(st.hi)}] · ${st.n_questions} questions`;
+};
+
+// The shadow arm (sibyl/shadow.py): a second model family's lane C trial,
+// scored apart and never published. A finding; nothing here switches it on.
+export const ShadowArm = ({
+  run,
+  shadow,
+}: {
+  run: SibylRun;
+  shadow: SibylShadowComparison | null | undefined;
+}) => {
+  if (!run.shadow_status && !shadow?.model) return null;
+  const status = run.shadow_status
+    ? SHADOW_STATUS_TEXT[run.shadow_status] ?? run.shadow_status
+    : "—";
+  return (
+    <div className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
+      <div className="flex items-center gap-1 text-xs uppercase text-fred-muted">
+        Shadow arm ({run.shadow_model ?? shadow?.model ?? "second model"})
+        <InfoTooltip text="One extra research trial per question on a second model family. Its pool (with Claude's lane C trial swapped for it) is scored apart and never published. Differences are shadow minus Sibyl; negative means the shadow arm scored better. 90% intervals resample questions." />
+      </div>
+      <div className="mt-1 text-sm text-fred-text">
+        This run: {status}
+        {run.shadow_status === "on"
+          ? ` · ${run.n_shadow_trials ?? 0} trials, ${run.n_shadow_series ?? 0} series, ${
+              run.n_shadow_skipped ?? 0
+            } skipped near the caps · ${usd.format(run.shadow_cost_usd ?? 0)}`
+          : ""}
+      </div>
+      {shadow ? (
+        <div className="mt-2 grid gap-1 text-xs text-fred-text sm:grid-cols-2">
+          <div>
+            <span className="text-fred-muted">Pool, Δ Brier: </span>
+            {fmtDiff(shadow.series?.brier)}
+          </div>
+          <div>
+            <span className="text-fred-muted">Single trial vs Claude lane C, Δ Brier: </span>
+            {fmtDiff(shadow.trial?.brier)}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+};
 
 // How Sibyl researched in this run (sibyl/measure.py). Never a score: the
 // About tab says what each one is for.
@@ -646,6 +711,7 @@ const SibylClient = ({
       </div>
 
       <ProcessMeasures run={run} />
+      <ShadowArm run={run} shadow={summary.shadow} />
 
       <div className="overflow-x-auto rounded-lg border border-fred-secondary">
         <table className="min-w-full text-sm">

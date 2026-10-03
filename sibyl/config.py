@@ -317,3 +317,24 @@ POSTMORTEM_MIN_NOTES = _env_int("SIBYL_POSTMORTEM_MIN_NOTES", 8)
 LESSONS_MAX_CHARS = _env_int("SIBYL_LESSONS_MAX_CHARS", 6000)
 LESSON_MIN_CASES = _env_int("SIBYL_LESSON_MIN_CASES", 3)
 MAX_ANALOGUES = _env_int("SIBYL_MAX_ANALOGUES", 4)
+
+# --- Shadow arm (Oct 2026, Part 7) -------------------------------------------
+# One extra lane C trial per selected question (controls excluded) on a second
+# model family, run AFTER every question's production trials. Its result
+# replaces the Claude lane C trial in a shadow copy of the pool, stored in
+# sibyl_forecasts.shadow_json and scored as __ext_sibyl_shadow; it never
+# reaches forecasts_raw or forecasts_ensemble and never changes what Sibyl
+# publishes. A registry alias or provider:model_id; only OpenAI is wired.
+SHADOW_MODEL = _env_str("SIBYL_SHADOW_MODEL", "gpt").strip()
+SHADOW_EFFORT = _env_str("SIBYL_SHADOW_EFFORT", "high").strip().lower()
+# The shadow arm runs in production runs up to and including this month,
+# then stops by itself. "off" switches it off.
+SHADOW_UNTIL = _env_str("SIBYL_SHADOW_UNTIL", "2027-04").strip()
+# A shadow trial does not start once the run is within this many dollars of
+# its hard cap, or this many minutes of its time cap: the shadow arm is
+# skipped first, so production work always has the room.
+SHADOW_HEADROOM_USD = _env_float("SIBYL_SHADOW_HEADROOM_USD", 2.0)
+SHADOW_HEADROOM_MIN = _env_float("SIBYL_SHADOW_HEADROOM_MIN", 20.0)
+# The paired difference shadow minus sibyl is reported only from this many
+# distinct scored questions; below it the report says "not yet".
+SHADOW_MIN_QUESTIONS = _env_int("SIBYL_SHADOW_MIN_QUESTIONS", 20)

@@ -754,7 +754,8 @@ def ensure_sibyl_measurement_tables(con: duckdb.DuckDBPyConnection) -> None:
       to the model, and for a document its text before extraction, capped).
       Third-party page text: left out of the public release.
     * ``sibyl_variant_scores``: scores that do not fit ``scores``' shape (the
-      FL/TC two-part scores; later the shadow comparison).
+      FL/TC two-part scores, and the shadow trial against Claude's lane C
+      trial).
     * ``sibyl_pool_weights``: the fitted reference weight, one row per month.
     * ``sibyl_postmortem_notes`` and ``sibyl_lessons``: the post-mortem loop.
     """
@@ -779,10 +780,12 @@ def ensure_sibyl_measurement_tables(con: duckdb.DuckDBPyConnection) -> None:
             doc_text TEXT,
             doc_chars INTEGER,
             is_test BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            role TEXT
         );
         """,
         {
+            "role": "TEXT",
             "sibyl_run_id": "TEXT", "question_id": "TEXT", "trial_index": "INTEGER",
             "step": "INTEGER", "call_index": "INTEGER", "tool": "TEXT", "target": "TEXT",
             "lane": "TEXT", "retrieved_at": "TIMESTAMP", "http_status": "INTEGER",
@@ -1994,6 +1997,18 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # from ('fitted' | 'fixed' | 'backtest').
                 "reference_weight": "DOUBLE",
                 "reference_weight_source": "TEXT",
+                # The shadow arm (Oct 2026, Part 7, sibyl/shadow.py): whether
+                # it ran ('on' | 'off' | 'backtest' | 'expired' | 'no_key' |
+                # 'no_shadow_call' | 'unknown_model' | 'unsupported_provider'),
+                # on what, how many trials and series, how many questions it
+                # skipped near the caps, and its own spend (also in
+                # run_cost_usd). NULL on earlier runs.
+                "shadow_status": "TEXT",
+                "shadow_model": "TEXT",
+                "n_shadow_trials": "INTEGER",
+                "n_shadow_series": "INTEGER",
+                "n_shadow_skipped": "INTEGER",
+                "shadow_cost_usd": "DOUBLE",
             },
         )
 
@@ -2092,6 +2107,13 @@ def ensure_schema(con: Optional[duckdb.DuckDBPyConnection] = None) -> None:
                 # trials left out as outliers).
                 "extra_trials_rule": "TEXT",
                 "trial_checks_json": "TEXT",
+                # The shadow arm (Oct 2026, Part 7): the shadow series (the
+                # pool with the Claude lane C trial replaced by the shadow
+                # model's), its trial, and its spend. Never in the forecast
+                # tables; scored as __ext_sibyl_shadow. cost_usd above is
+                # production spend only.
+                "shadow_json": "TEXT",
+                "shadow_cost_usd": "DOUBLE",
             },
         )
 

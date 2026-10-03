@@ -67,11 +67,12 @@ from sibyl.config import (
 )
 from sibyl import config as _cfg
 from sibyl import tools as sibyl_tools
-from sibyl.cost import CostTracker
+from sibyl.cost import COST_KIND_SHADOW, CostTracker
 from sibyl.evidence import backfill_evidence_ok
 from sibyl.leakage import LeakageStats
 from sibyl.measure import process_measures, reference_weight, write_evidence
 from sibyl.postmortem import lessons_block_for
+from sibyl.shadow import ShadowContext, run_shadow_phase, shadow_setup
 from sibyl.trials import extra_trials_rule, month_median, outlier_indices, run_trial_batch
 from sibyl.select_questions import (
     SibylQuestion,
@@ -130,6 +131,10 @@ class QuestionOutcome:
     final_by_month: Dict[int, List[float]] = field(default_factory=dict)
     raw_month1: Optional[List[float]] = None
     reference_month1: Optional[List[float]] = None
+    # What the shadow arm needs to run this question's shadow trial after the
+    # production work of the whole run (sibyl/shadow.py). None for a control
+    # and for a question that produced no forecast.
+    shadow_ctx: Optional[ShadowContext] = None
 
 
 def _write_log(**kw: Any) -> None:
@@ -475,6 +480,39 @@ def process_question(
         },
     )
     outcome.status = "ok"
+    if not is_control:
+        def _shadow_run(trial_index: int, call: Any, sink: List[Dict[str, Any]],
+                        provider: str, model_id: str) -> TrialResult:
+            # Same loop, same prompt, lane C; every dollar under 'shadow'.
+            return run_trial(
+                question,
+                base_rate,
+                as_of=as_of,
+                trial_index=trial_index,
+                run_id=sibyl_run_id,
+                tracker=tracker,
+                forecast_months=forecast_keys,
+                country_name=country,
+                model_call=call,
+                track_record=track_record,
+                lane="C",
+                lessons=lessons,
+                log_sink=sink,
+                provider=provider,
+                model_id=model_id,
+                cost_kind=COST_KIND_SHADOW,
+            )
+
+        outcome.shadow_ctx = ShadowContext(
+            question_id=question.question_id,
+            run=_shadow_run,
+            trial_index=max((t.trial_index for t in outcome.trials), default=-1) + 1,
+            valid_trials=[t for t in finished if t.evidence_ok],
+            reference=ref_vectors,
+            weight=weight,
+            metric=metric,
+            required=required,
+        )
     return outcome
 
 
@@ -534,10 +572,14 @@ def run_sibyl(
     model_call: Any = None,
     max_runtime_min: float = MAX_RUNTIME_MIN,
     clock: Any = None,
+    shadow_call: Any = None,
 ) -> Dict[str, Any]:
     """Execute a full Sibyl cycle. Returns the run summary dict.
 
     *clock* is a monotonic-seconds callable (test seam for the time cap).
+    *shadow_call* is the shadow arm's model seam (sibyl/shadow.py); without
+    it the arm calls OpenAI, and with *model_call* injected and no
+    *shadow_call* it does not run.
     """
     ensure_schema()
     sibyl_run_id = f"sibyl_{int(time.time() * 1000)}"
@@ -583,6 +625,9 @@ def run_sibyl(
             sibyl_run_id, len(questions), tracker.run_hard_cap_usd, K, MODEL,
         )
 
+        shadow = shadow_setup(model_call_injected=model_call is not None, shadow_call=shadow_call)
+        logger.info("sibyl.run: shadow arm %s%s", shadow.status,
+                    f" ({shadow.provider}:{shadow.model_id})" if shadow.on else "")
         weight, weight_source = reference_weight(con, date.today().strftime("%Y-%m"))
         logger.info("sibyl.run: reference weight %.2f (%s)", weight, weight_source)
         outcomes: List[QuestionOutcome] = []
@@ -678,8 +723,29 @@ def run_sibyl(
         if tracker.hard_cap_reached():
             budget_capped = True
 
-        breakdown = tracker.run_breakdown()
+        # The tool counters describe production research; the shadow
+        # trials' searches are read after this snapshot and not counted.
         tool_counts = sibyl_tools.COUNTERS.snapshot()
+
+        # The shadow arm runs only after every question's production trials,
+        # so it can never take budget or time production needed.
+        def _minutes_left() -> float:
+            if not max_runtime_min or max_runtime_min <= 0:
+                return float("inf")
+            return float(max_runtime_min) - (clock() - loop_started) / 60.0
+
+        shadow_counts = run_shadow_phase(
+            con,
+            [o.shadow_ctx for o in outcomes if o.status == "ok" and o.shadow_ctx is not None],
+            shadow,
+            sibyl_run_id=sibyl_run_id,
+            tracker=tracker,
+            minutes_left=_minutes_left,
+            write_log=_write_log,
+            is_test=_is_test_mode(),
+        )
+
+        breakdown = tracker.run_breakdown()
         if tool_counts["n_search_calls"]:
             fail_share = tool_counts["n_search_failed"] / tool_counts["n_search_calls"]
             if fail_share > _cfg.DEGRADED_SEARCH_FAIL_SHARE:
@@ -704,6 +770,8 @@ def run_sibyl(
             "opus_cost_usd": breakdown.opus_usd,
             "brave_cost_usd": breakdown.brave_usd,
             "extraction_cost_usd": breakdown.extraction_usd,
+            "shadow_cost_usd": breakdown.shadow_usd,
+            **shadow_counts.to_record(),
             "n_selected": len(questions),
             "n_forecast": n_forecast,
             "n_skipped": n_skipped,
@@ -732,6 +800,12 @@ def run_sibyl(
                 "MIN_DOCS_READ": _cfg.MIN_DOCS_READ,
                 "MIN_VALID_TRIALS": _cfg.MIN_VALID_TRIALS,
                 "BUCKET_FLOOR": _cfg.BUCKET_FLOOR,
+                "SHADOW_MODEL": _cfg.SHADOW_MODEL,
+                "SHADOW_EFFORT": _cfg.SHADOW_EFFORT,
+                "SHADOW_UNTIL": _cfg.SHADOW_UNTIL,
+                "SHADOW_HEADROOM_USD": _cfg.SHADOW_HEADROOM_USD,
+                "SHADOW_HEADROOM_MIN": _cfg.SHADOW_HEADROOM_MIN,
+                "shadow_skip_reasons": shadow_counts.skip_reasons,
             },
         }
         persist_sibyl_run(con, run_record)

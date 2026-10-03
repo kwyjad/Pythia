@@ -434,9 +434,11 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             n_search_failed, n_breaker_trips, n_docs_read, extraction_cost_usd,
             share_resolver_done, docs_per_trial, share_ledger_dated_figure,
             share_forecasts_at_floor, mean_jsd_from_reference,
-            reference_weight, reference_weight_source
+            reference_weight, reference_weight_source, shadow_status, shadow_model,
+            n_shadow_trials, n_shadow_series, n_shadow_skipped, shadow_cost_usd
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -469,5 +471,11 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             record.get("mean_jsd_from_reference"),
             record.get("reference_weight"),
             record.get("reference_weight_source"),
+            record.get("shadow_status"),
+            record.get("shadow_model"),
+            record.get("n_shadow_trials"),
+            record.get("n_shadow_series"),
+            record.get("n_shadow_skipped"),
+            record.get("shadow_cost_usd", 0.0),
         ],
     )
