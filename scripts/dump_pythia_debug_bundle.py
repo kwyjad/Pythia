@@ -3138,6 +3138,10 @@ class BundleData:
     # not parse (Oct 2026: five Gemini answers cut mid-JSON read as "ok").
     unparseable_forecast_calls: list[dict[str, Any]] = field(default_factory=list)
 
+    # The interpreter report stored for this run, and why it needed a
+    # correction pass if it did (Oct 2026). None = no interpretations table.
+    interpretation: dict[str, Any] | None = None
+
     # Run summary stats (for executive summary bottom sections)
     rc_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
     triage_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
@@ -3432,8 +3436,35 @@ def _load_bundle_data(
 
     data.production_questions_on_test_scans = _production_questions_on_test_scans(con)
     data.unparseable_forecast_calls = _unparseable_forecast_calls(con, data.forecaster_run_id)
+    data.interpretation = _interpretation_for_run(con, data.forecaster_run_id)
 
     return data
+
+
+def _interpretation_for_run(con, run_id: str | None) -> dict[str, Any] | None:
+    """Newest interpretation row for the run, with its correction record."""
+    if not run_id:
+        return None
+    try:
+        if not _safe_table_exists(con, "interpretations"):
+            return None
+        row = con.execute(
+            "SELECT kind, version, status, validation_json FROM interpretations "
+            "WHERE run_id = ? ORDER BY created_at DESC, version DESC LIMIT 1",
+            [run_id],
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    if not row:
+        return {"present": False}
+    try:
+        validation = json.loads(row[3] or "{}")
+    except (TypeError, ValueError):
+        validation = {}
+    return {
+        "present": True, "kind": row[0], "version": row[1], "status": row[2],
+        "correction": validation.get("correction") or {},
+    }
 
 
 def _unparseable_forecast_calls(con, run_id: str | None) -> list[dict[str, Any]]:
@@ -3593,6 +3624,28 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         hs_status = "FAIL"
         hs_detail = f"{data.n_hazards_triaged_total}/{expected_hs} rows, {missing_count} missing"
     checks.append({"subsystem": "HS Triage", "status": hs_status, "detail": hs_detail})
+
+    # The interpreter report, and why it needed a correction pass if it did.
+    interp = data.interpretation
+    if interp is not None:
+        if not interp.get("present"):
+            checks.append({"subsystem": "Interpreter", "status": "WARN",
+                           "detail": "no interpretation stored for this run"})
+        else:
+            corr = interp.get("correction") or {}
+            detail = f"{interp.get('kind')} v{interp.get('version')} {interp.get('status')}"
+            if corr.get("attempted"):
+                first = (corr.get("first_attempt_complaints") or [""])[0]
+                detail += (
+                    f"; correction pass ran after {corr.get('n_first_attempt_complaints')} "
+                    f"complaint(s) in {', '.join(corr.get('failed_checks') or []) or 'proper_nouns'} "
+                    f"(first: {str(first)[:160]}); kept the {corr.get('kept')} answer"
+                )
+            checks.append({
+                "subsystem": "Interpreter",
+                "status": "OK" if interp.get("status") == "ok" else "FAIL",
+                "detail": detail,
+            })
 
     # Question provenance: a production question must name a production scan.
     bad_q = data.production_questions_on_test_scans

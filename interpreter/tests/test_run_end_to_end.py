@@ -410,6 +410,20 @@ class TestValidationRetry:
         assert "failed these checks" in calls[1]
         assert "bare numeral" in calls[1], "the complaint must be quoted back"
         assert result["status"] == "ok"
+        # Why the pass ran is kept on the stored row (Oct 2026), not only in
+        # a job log.
+        import duckdb as _duckdb
+
+        con = _duckdb.connect(str(db))
+        validation = json.loads(con.execute(
+            "SELECT validation_json FROM interpretations"
+        ).fetchone()[0])
+        con.close()
+        corr = validation["correction"]
+        assert corr["attempted"] is True
+        assert corr["kept"] == "retry"
+        assert corr["n_first_attempt_complaints"] >= 1
+        assert any("bare numeral" in c for c in corr["first_attempt_complaints"])
 
     def test_a_worse_correction_is_discarded(
         self, tmp_path, current_bundle, monkeypatch

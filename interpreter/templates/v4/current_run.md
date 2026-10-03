@@ -22,10 +22,14 @@ and what came out of it. Use the placeholders, never your own digits:
 
 - `{{fig:countries_scanned}}` countries screened for regime change
 - `{{fig:countries_with_questions}}` countries carried through to forecasts
-- `{{fig:countries_track1}}` on the full ensemble, where the scan saw a
-  possible change of regime
-- `{{fig:countries_track2}}` on the single-model track, quiet but still
-  worth a number
+- `{{fig:countries_track1}}` with at least one question on the full
+  ensemble, where the scan saw a possible change of regime
+- `{{fig:countries_track2_only}}` with questions on the single-model track
+  only, quiet but still worth a number
+
+These two counts add up to the countries carried through. Do not use
+`countries_track2` in this paragraph: a country can have questions on both
+tracks, so that count overlaps the first and the two would not add up.
 
 ### `cross_cutting`
 

@@ -1006,3 +1006,30 @@ def test_an_ok_forecast_call_that_will_not_parse_is_named():
     )
     bad = dump._unparseable_forecast_calls(con, "fc_1")
     assert [b["question_id"] for b in bad] == ["Q2"]
+
+
+def test_the_interpreter_correction_reason_is_read_back():
+    """Oct 2026: the retry's cause lived only in a job log."""
+
+    import json as _json
+
+    import duckdb
+
+    from scripts import dump_pythia_debug_bundle as dump
+
+    con = duckdb.connect(":memory:")
+    con.execute(
+        "CREATE TABLE interpretations (run_id TEXT, kind TEXT, version INTEGER, "
+        "status TEXT, validation_json TEXT, created_at TIMESTAMP)"
+    )
+    con.execute(
+        "INSERT INTO interpretations VALUES ('fc_1', 'combined', 1, 'ok', ?, now())",
+        [_json.dumps({"correction": {
+            "attempted": True, "n_first_attempt_complaints": 2,
+            "first_attempt_complaints": ["- style: em dash in run_summary"],
+            "failed_checks": ["style"], "kept": "retry"}})],
+    )
+    got = dump._interpretation_for_run(con, "fc_1")
+    assert got["status"] == "ok"
+    assert got["correction"]["failed_checks"] == ["style"]
+    assert dump._interpretation_for_run(con, "fc_2") == {"present": False}

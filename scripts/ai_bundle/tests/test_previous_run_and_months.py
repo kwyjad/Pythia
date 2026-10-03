@@ -74,3 +74,19 @@ def test_a_missing_month_breaks_the_run():
     key = ("SOM", "DR", "PA")
     assert persistence.consecutive_months(key, [("2026-08", [key])], "2026-10") == 1
     assert persistence.persistence_phrase(3) == "flagged for 3 consecutive months"
+
+
+def test_the_track_counts_partition_the_countries_forecast():
+    """Oct 2026: "carried 70 ... 52 ... Another 35" read as 87 of 70."""
+
+    questions = [
+        {"iso3": "SDN", "track": 1}, {"iso3": "SDN", "track": 2},  # both tracks
+        {"iso3": "ETH", "track": 1},
+        {"iso3": "KEN", "track": 2},
+    ]
+    summary = b._build_run_summary(duckdb.connect(":memory:"), None, questions, [])
+    assert summary["countries_with_questions"] == 3
+    assert summary["countries_track1"] == 2
+    assert summary["countries_track2"] == 2
+    assert summary["countries_track2_only"] == 1
+    assert summary["countries_track1"] + summary["countries_track2_only"] == 3

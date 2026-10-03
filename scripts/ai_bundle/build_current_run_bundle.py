@@ -545,6 +545,7 @@ def _build_run_summary(
         "countries_with_questions": None,
         "countries_track1": None,
         "countries_track2": None,
+        "countries_track2_only": None,
         "n_questions": len(questions),
     }
     if hs_run_id and table_exists(con, "hs_triage"):
@@ -573,6 +574,11 @@ def _build_run_summary(
     summary["countries_with_questions"] = len(countries) or None
     summary["countries_track1"] = len(by_track["1"]) or None
     summary["countries_track2"] = len(by_track["2"]) or None
+    # A country can have questions on both tracks (one hazard flagged, another
+    # quiet), so the two counts overlap and do not add up to the countries
+    # forecast: "70 ... 52 ... Another 35" read as 87 of 70 (Oct 2026). The
+    # report partitions on the countries with NO full-ensemble question.
+    summary["countries_track2_only"] = len(by_track["2"] - by_track["1"])
     summary["n_above_base_rate"] = sum(
         1 for r in attention_rows if r.get("direction") == "above"
     )
