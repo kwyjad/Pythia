@@ -87,7 +87,7 @@ def test_breakdown_dict_shape():
     b = CostBreakdown(opus_usd=1.234567, brave_usd=0.005)
     d = b.to_dict()
     assert d["total_usd"] == pytest.approx(1.239567)
-    assert set(d) == {"opus_usd", "brave_usd", "extraction_usd", "total_usd"}
+    assert set(d) == {"opus_usd", "brave_usd", "extraction_usd", "shadow_usd", "total_usd"}
 
 
 # --- Hard cut-off end-to-end ----------------------------------------------------

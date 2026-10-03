@@ -612,3 +612,50 @@ Not done:
   can exist.
 
 Tests: `tests/test_sibyl_measurement.py`, `tests/test_sibyl_postmortem.py`.
+
+## 2026-10-03 — Part 7: the GPT Sol shadow arm
+
+Question: does one trial from a second model family make the pool better?
+Production stays all Claude; this part measures and switches nothing on.
+
+How it runs (`sibyl/shadow.py`):
+
+- After every question's production trials, each question that produced a
+  forecast (controls excluded) gets one more lane C trial, same loop, same
+  prompt, on `SIBYL_SHADOW_MODEL` (alias `gpt`, `openai:gpt-6-sol`) through
+  `call_openai` at effort `high`, until `SIBYL_SHADOW_UNTIL` (2027-04).
+- Running the whole phase after production, rather than per question, is
+  what makes "production first" hold across the run: a shadow trial can
+  never spend budget or time a later question needed.
+- None starts within $2 of the hard cap or 20 minutes of the time cap.
+- Every dollar a shadow trial spends is cost kind `shadow`. Its searches do
+  not enter the run's tool counters (snapshotted before the phase).
+
+The series: the evidence-valid production trials minus the Claude lane C
+trial, plus the shadow trial, then the production steps (outlier guard,
+linear pool by month, reference mix at the run's weight, floor). The
+evidence gate applies to the shadow trial; an invalid one gives no series.
+Where Claude's lane C trial had no evidence, nothing is removed and the
+shadow trial is added: it still fills lane C.
+
+Stored in `sibyl_forecasts.shadow_json`; never in `forecasts_raw` or
+`forecasts_ensemble`, and the shadow trial never in `trials_json`.
+
+Scores: `__ext_sibyl_shadow` in `scores`; the single shadow trial and the
+single Claude lane C trial in `sibyl_variant_scores`. The comparison
+(shadow minus `sibyl`, per score type, 90% interval resampling questions)
+says "not yet" with no number below 20 questions. It sits in the pooled
+advice row's findings, `/v1/sibyl/summary` and the Sibyl page.
+
+Missing key: `run_sibyl.yml` passes the existing `OPENAI_API_KEY` secret to
+the Run Sibyl step. Without it the run logs a warning, records
+`shadow_status = no_key`, and production is untouched.
+
+Not done:
+
+- The shadow trial's evidence rows go to `sibyl_evidence` (role `shadow`),
+  but process measures describe production only.
+- Only OpenAI is wired as a shadow provider; another provider reports
+  `unsupported_provider`.
+
+Tests: `tests/test_sibyl_shadow.py`, a case in `tests/test_api_sibyl_routes.py`.

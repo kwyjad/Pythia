@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 _EVIDENCE_COLUMNS = (
     "sibyl_run_id", "question_id", "trial_index", "step", "call_index", "tool",
     "target", "lane", "retrieved_at", "http_status", "ok", "sha256",
-    "shown_text", "doc_text", "doc_chars", "is_test",
+    "shown_text", "doc_text", "doc_chars", "is_test", "role",
 )
 
 
@@ -38,8 +38,15 @@ def write_evidence(
     question_id: str,
     trials: Iterable[Any],
     is_test: bool = False,
+    replace: bool = True,
+    role: Optional[str] = None,
 ) -> int:
-    """Write every trial's evidence rows. Returns the rows written; never raises."""
+    """Write every trial's evidence rows. Returns the rows written; never raises.
+
+    *replace* deletes the question's earlier rows for this run first (the
+    production write); the shadow phase appends with ``replace=False``. Each
+    row carries the trial's role (*role* overrides it).
+    """
     rows: List[Tuple[Any, ...]] = []
     for t in trials or []:
         for r in getattr(t, "evidence_rows", None) or []:
@@ -49,6 +56,7 @@ def write_evidence(
                 r.get("retrieved_at"), r.get("http_status"), r.get("ok"),
                 r.get("sha256"), r.get("shown_text"), r.get("doc_text"),
                 r.get("doc_chars"), bool(is_test),
+                role or getattr(t, "role", None) or "production",
             ))
     if not rows:
         return 0
@@ -56,10 +64,11 @@ def write_evidence(
         from pythia.db.schema import ensure_sibyl_measurement_tables  # noqa: PLC0415
 
         ensure_sibyl_measurement_tables(con)
-        con.execute(
-            "DELETE FROM sibyl_evidence WHERE sibyl_run_id = ? AND question_id = ?",
-            [sibyl_run_id, question_id],
-        )
+        if replace:
+            con.execute(
+                "DELETE FROM sibyl_evidence WHERE sibyl_run_id = ? AND question_id = ?",
+                [sibyl_run_id, question_id],
+            )
         placeholders = ", ".join("?" for _ in _EVIDENCE_COLUMNS)
         con.executemany(
             f"INSERT INTO sibyl_evidence ({', '.join(_EVIDENCE_COLUMNS)}) "

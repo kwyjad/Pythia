@@ -250,6 +250,31 @@ export default function SibylMetricsAbout() {
           </p>
         </div>
       </section>
+
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fred-text">
+          The shadow arm
+        </h2>
+        <div className="mt-2 space-y-2 text-sm leading-relaxed text-fred-text">
+          <p>
+            Every Sibyl trial runs on Claude. To learn whether a second model
+            family would help, each researched question gets one extra trial on
+            GPT (lane C, the same prompt and tools), run after all the
+            production trials and skipped first when the run nears its budget
+            or time limit. A second pool is built with that trial in place of
+            Claude&apos;s lane C trial and scored against the same outcomes.
+          </p>
+          <p>
+            It is <strong>never published</strong>: the forecast you see is
+            unchanged. The Sibyl page reports the shadow pool minus Sibyl&apos;s
+            pool, and the single GPT trial minus the single Claude trial it
+            replaced, each with a 90% interval that resamples questions. Below
+            twenty scored questions it says <em>not yet</em> and shows no number.
+            Whether to adopt a second model is a decision for the owner; the
+            arm stops by itself after April 2027.
+          </p>
+        </div>
+      </section>
     </div>
   );
 }

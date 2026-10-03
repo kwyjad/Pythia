@@ -767,6 +767,17 @@ def generate(con, *, as_of_month: Optional[str] = None) -> List[Dict[str, Any]]:
     records = load_records(con, as_of_month)
     scores = load_question_scores(con, records)
     rows = build_rows(records, scores, as_of_month=as_of_month, blocked=advice_blocked_groups())
+    # The shadow arm (sibyl/shadow.py): shadow minus Sibyl over every scored
+    # question, "not yet" below SIBYL_SHADOW_MIN_QUESTIONS. A finding on the
+    # pooled row only; it never reaches the advice text.
+    try:
+        from sibyl.shadow import shadow_comparison  # noqa: PLC0415
+
+        for row in rows:
+            if row["scope"] == "pooled":
+                row["findings"]["shadow"] = shadow_comparison(con)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sibyl.advice: shadow comparison failed: %s", exc)
     write_rows(con, rows)
     for row in rows:
         logger.info(

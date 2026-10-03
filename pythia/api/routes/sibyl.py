@@ -46,6 +46,11 @@ PROCESS_MEASURES = (
     "share_forecasts_at_floor", "mean_jsd_from_reference", "reference_weight",
     "reference_weight_source",
 )
+#: The shadow arm (sibyl/shadow.py, Oct 2026): NULL on earlier runs.
+SHADOW_FIELDS = (
+    "shadow_status", "shadow_model", "n_shadow_trials", "n_shadow_series",
+    "n_shadow_skipped", "shadow_cost_usd",
+)
 
 
 def _maybe_json(raw: Any) -> Any:
@@ -168,7 +173,20 @@ def sibyl_summary(
         1 for q in questions
         if q.get("status") == "ok" and q.get("evidence_ok") is False
     )
-    return {"run": run, "questions": questions}
+    for key in SHADOW_FIELDS:
+        run.setdefault(key, None)
+    return {"run": run, "questions": questions, "shadow": _shadow_comparison(con, include_test)}
+
+
+def _shadow_comparison(con, include_test: bool) -> Optional[Dict[str, Any]]:
+    """Shadow arm minus Sibyl over every scored question (a finding, never a switch)."""
+    try:
+        from sibyl.shadow import shadow_comparison  # noqa: PLC0415 - lazy, API process
+
+        return shadow_comparison(con, include_test=include_test)
+    except Exception:  # noqa: BLE001
+        logger.debug("sibyl shadow comparison failed", exc_info=True)
+        return None
 
 
 @router.get("/v1/sibyl/calibration")

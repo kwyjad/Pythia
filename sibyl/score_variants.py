@@ -38,6 +38,15 @@ that calendar month for another question of the same class. That is a
 proxy, stated as one; a month the resolver has not reached is not scored.
 Scored for ``sibyl``, ``sibyl_raw`` and ``sibyl_ref``.
 
+The shadow arm (Part 7)
+-----------------------
+Where the forecast carries a shadow series (``shadow_json.status = 'ok'``),
+its published-shape vectors are scored as ``__ext_sibyl_shadow`` exactly as
+the two parts above. The single shadow trial and the single Claude lane C
+trial are scored on their own, each floored, into ``sibyl_variant_scores``
+(series ``shadow_trial`` and ``claude_lane_c``, score types brier/log/crps),
+so the model families can be compared trial for trial.
+
 Pool weight
 -----------
 Once ``SIBYL_POOL_WEIGHT_MIN_QUESTIONS`` (20) distinct questions carry both a
@@ -64,6 +73,9 @@ logger = logging.getLogger(__name__)
 
 RAW_MODEL_NAME = "__ext_sibyl_raw"
 REF_MODEL_NAME = "__ext_sibyl_ref"
+#: The shadow arm's series (sibyl/shadow.py): the pool with the Claude lane
+#: C trial replaced by the shadow model's.
+SHADOW_MODEL_NAME = "__ext_sibyl_shadow"
 TWO_PART_HAZARDS = frozenset({"FL", "TC"})
 
 
@@ -218,16 +230,18 @@ def load_forecasts(con) -> List[Dict[str, Any]]:
         return []
     evidence = " AND COALESCE(f.evidence_ok, TRUE)" if "evidence_ok" in f_cols else ""
     sel = "f.selection_pass" if "selection_pass" in f_cols else "CAST(NULL AS TEXT)"
+    shadow = "f.shadow_json" if "shadow_json" in f_cols else "CAST(NULL AS TEXT)"
     rows = con.execute(
         f"""
         SELECT question_id, sibyl_run_id, hazard_code, metric, raw_by_month_json,
-               reference_json, final_by_month_json, window_start_date, is_test, selection_pass
+               reference_json, final_by_month_json, window_start_date, is_test, selection_pass,
+               shadow_json
         FROM (
             SELECT f.question_id, f.sibyl_run_id, upper(q.hazard_code) AS hazard_code,
                    upper(q.metric) AS metric, f.raw_by_month_json, f.reference_json,
                    f.final_by_month_json, q.window_start_date,
                    (COALESCE(q.is_test, FALSE) OR COALESCE(f.is_test, FALSE)) AS is_test,
-                   {sel} AS selection_pass,
+                   {sel} AS selection_pass, {shadow} AS shadow_json,
                    ROW_NUMBER() OVER (
                        PARTITION BY f.question_id
                        ORDER BY COALESCE(f.is_test, FALSE), f.created_at DESC NULLS LAST,
@@ -242,6 +256,8 @@ def load_forecasts(con) -> List[Dict[str, Any]]:
     ).fetchall()
     out = []
     for r in rows:
+        sj = _json(r[10]) or {}
+        shadow_ok = isinstance(sj, dict) and sj.get("status") == "ok"
         out.append({
             "question_id": str(r[0]), "sibyl_run_id": r[1], "hazard_code": str(r[2]),
             "metric": str(r[3]),
@@ -249,6 +265,9 @@ def load_forecasts(con) -> List[Dict[str, Any]]:
             "ref": _by_month((_json(r[5]) or {}).get("by_month")),
             "final": _by_month(_json(r[6])),
             "window_start_date": r[7], "is_test": bool(r[8]), "selection_pass": r[9],
+            "shadow": _by_month(sj.get("final_by_month")) if shadow_ok else {},
+            "shadow_trial": _by_month(sj.get("shadow_trial_by_month")) if shadow_ok else {},
+            "claude_lane_c": _by_month(sj.get("claude_lane_c_by_month")) if shadow_ok else {},
         })
     return out
 
@@ -303,7 +322,8 @@ def score_variants(con, *, as_of_month: Optional[str] = None) -> Dict[str, Any]:
     ensure_baseline_tables(con)
     as_of_month = as_of_month or date.today().strftime("%Y-%m")
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    counters = {"scored_raw": 0, "scored_ref": 0, "two_part_rows": 0, "skipped_no_vector": 0}
+    counters = {"scored_raw": 0, "scored_ref": 0, "scored_shadow": 0, "shadow_trial_rows": 0,
+                "two_part_rows": 0, "skipped_no_vector": 0}
     forecasts = load_forecasts(con)
     if not forecasts:
         counters["pool_weight"] = _write_weight(con, as_of_month, fit_pool_weight({}))
@@ -316,7 +336,12 @@ def score_variants(con, *, as_of_month: Optional[str] = None) -> Dict[str, Any]:
         qid, metric = f["question_id"], f["metric"]
         res = resolved.get(qid, {})
         con.execute("DELETE FROM sibyl_variant_scores WHERE question_id = ? "
-                    "AND series IN ('sibyl', 'sibyl_raw', 'sibyl_ref')", [qid])
+                    "AND series IN ('sibyl', 'sibyl_raw', 'sibyl_ref', 'shadow_trial', "
+                    "'claude_lane_c')", [qid])
+        # A forecast whose latest version carries no shadow series leaves no
+        # stale shadow score behind.
+        con.execute("DELETE FROM scores WHERE question_id = ? AND model_name = ? "
+                    "AND run_id IS NULL", [qid, SHADOW_MODEL_NAME])
         for h, value in sorted(res.items()):
             j = _bucket(value, metric)
             if j is None:
@@ -343,6 +368,16 @@ def score_variants(con, *, as_of_month: Optional[str] = None) -> Dict[str, Any]:
                 _audit(con, qid, h, REF_MODEL_NAME, metric, ref, "sibyl_reference",
                        value, j, now)
                 counters["scored_ref"] += 1
+            shadow = f["shadow"].get(h)
+            if shadow is not None and j < len(shadow):
+                _write_scores(con, question_id=qid, horizon_m=h, metric=metric,
+                              model_name=SHADOW_MODEL_NAME,
+                              score_rows=sorted(score_vector(shadow, j).items()),
+                              is_test=f["is_test"], now=now)
+                _audit(con, qid, h, SHADOW_MODEL_NAME, metric, shadow, "sibyl_shadow",
+                       value, j, now)
+                counters["scored_shadow"] += 1
+            counters["shadow_trial_rows"] += _write_shadow_trials(con, f, h, j, value, now)
             if raw is not None and ref is not None and len(raw) == len(ref) and not f["is_test"]:
                 cases.setdefault(qid, []).append((ref, raw, j))
 
@@ -353,6 +388,28 @@ def score_variants(con, *, as_of_month: Optional[str] = None) -> Dict[str, Any]:
     counters["pool_weight"] = _write_weight(con, as_of_month, fit)
     logger.info("sibyl.score_variants: %s", counters)
     return counters
+
+
+def _write_shadow_trials(con, f: Dict[str, Any], h: int, j: int, value: float, now) -> int:
+    """Score the single shadow trial and the single Claude lane C trial at horizon *h*."""
+    n = 0
+    for series, key in (("shadow_trial", "shadow_trial"), ("claude_lane_c", "claude_lane_c")):
+        vec = f.get(key, {}).get(h)
+        if not vec or j >= len(vec):
+            continue
+        for st, v in score_vector(floored(vec), j).items():
+            con.execute(
+                """
+                INSERT INTO sibyl_variant_scores
+                    (question_id, horizon_m, series, score_type, value, sibyl_run_id,
+                     detail_json, is_test, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [f["question_id"], h, series, st, float(v), f["sibyl_run_id"],
+                 json.dumps({"resolved_value": value, "bucket": j}), f["is_test"], now],
+            )
+            n += 1
+    return n
 
 
 def _write_two_part(con, f: Dict[str, Any], res: Dict[int, float], covered, now) -> int:
