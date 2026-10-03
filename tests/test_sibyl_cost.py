@@ -95,11 +95,12 @@ def test_breakdown_dict_shape():
 def test_run_hard_cap_fires_at_boundary_and_persists_completed_work(
     tmp_path, monkeypatch
 ):
-    """With a $1 cap and $0.60 per model call: Q1's first trial completes
-    (0.60 < cap), its second completes (in-flight overshoot to 1.20), the
-    third never starts; Q1's pooled forecast from the two completed trials
-    is persisted; Q2 never starts and is marked 'skipped: run budget cap';
-    the run record carries budget_capped=TRUE."""
+    """With a $1 cap and $0.60 per model call: Q1's three trials run as one
+    batch (since Oct 2026 a question's trials run in parallel, so the cap is
+    checked before the question and before each batch, never between trials
+    already running), overshooting to $1.80; Q1's pooled forecast is
+    persisted; Q2 never starts and is marked 'skipped: run budget cap'; the
+    run record carries budget_capped=TRUE."""
     seed_db(tmp_path, monkeypatch)
 
     calls = {"n": 0}
@@ -130,8 +131,8 @@ def test_run_hard_cap_fires_at_boundary_and_persists_completed_work(
     assert summary["budget_capped"] is True
     assert summary["n_forecast"] == 1
     assert summary["n_skipped"] == 1
-    assert summary["run_cost_usd"] == pytest.approx(1.2)
-    assert calls["n"] == 2  # trial 3 of Q1 and all of Q2 never started
+    assert summary["run_cost_usd"] == pytest.approx(1.8)
+    assert calls["n"] == 3  # Q1's batch of three; Q2 never started
 
     from pythia.db.schema import connect
 
@@ -143,7 +144,7 @@ def test_run_hard_cap_fires_at_boundary_and_persists_completed_work(
         ).fetchall()
         by_qid = {r[0]: r for r in rows}
         assert by_qid[Q1][1] == "ok"
-        assert by_qid[Q1][3] == 2  # pooled from the two completed trials
+        assert by_qid[Q1][3] == 3  # pooled from the batch of three
         assert by_qid[Q2][1] == "skipped"
         assert by_qid[Q2][2] == "run budget cap"
 

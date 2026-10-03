@@ -48,7 +48,7 @@ def _env_str(name: str, default: str) -> str:
 # member does not move Sibyl, so both must be edited together.
 # NOTE: claude-opus-5-5 rejects sampling params (temperature/top_p/top_k ->
 # HTTP 400, see _ANTHROPIC_NO_TEMPERATURE_PREFIXES); trial diversity comes from
-# per-trial perspective seeds in the prompt, not temperature.
+# the research lane each trial takes (sibyl/agent.py::TRIAL_LANES).
 MODEL = _env_str("SIBYL_MODEL", "claude-opus-5-5")
 
 # Thinking depth sent as output_config.effort on every step. Explicit because
@@ -69,6 +69,21 @@ SIBYL_MODEL_NAME = "sibyl"
 # sweet spot for budget - the first three trials capture most of the
 # variance-reduction benefit.
 K = _env_int("SIBYL_K", 3)
+# Extra trials (Oct 2026, sibyl/run.py): up to K_MAX - K more trials, on
+# lanes D and E, when the production trials disagree (largest pairwise
+# month-1 JSD above EXTRA_TRIALS_JSD) or their pool departs far from the
+# reference (month-1 JSD above EXTRA_TRIALS_DEPARTURE_JSD).
+K_MAX = _env_int("SIBYL_K_MAX", 5)
+EXTRA_TRIALS_JSD = _env_float("SIBYL_EXTRA_TRIALS_JSD", 0.10)
+EXTRA_TRIALS_DEPARTURE_JSD = _env_float("SIBYL_EXTRA_TRIALS_DEPARTURE_JSD", 0.25)
+# Trials of one question run on this many worker threads. Only the main
+# thread writes DuckDB: a trial's llm_calls rows are buffered and written
+# after its batch.
+TRIAL_WORKERS = _env_int("SIBYL_TRIAL_WORKERS", 3)
+# Outlier guard: a trial whose month-1 median is more than this many orders
+# of magnitude (log10 of 1 + value) from the median of the others' medians
+# is left out of the pool, if two trials remain. It stays in trials_json.
+OUTLIER_LOG10 = _env_float("SIBYL_OUTLIER_LOG10", 1.5)
 
 # Agent steps per trial. Since Oct 2026 a step may carry up to
 # MAX_ACTIONS_PER_STEP tool calls and a submit must pass the research gate
@@ -129,9 +144,37 @@ MAX_RUNTIME_MIN = _env_float("SIBYL_MAX_RUNTIME_MIN", 180.0)
 # Floor-then-fill (sibyl/select_questions.py): each hazard first takes its
 # MIN_PER_HAZARD most volatile questions, then the remaining slots go to the
 # most volatile candidates whose hazard is under MAX_PER_HAZARD.
+# N_QUESTIONS is the whole run: N_QUESTIONS - N_CONTROL questions chosen by
+# floor-then-fill, plus N_CONTROL controls.
 N_QUESTIONS = _env_int("SIBYL_N_QUESTIONS", 25)
 MIN_PER_HAZARD = _env_int("SIBYL_MIN_PER_HAZARD", 3)
 MAX_PER_HAZARD = _env_int("SIBYL_MAX_PER_HAZARD", 10)
+
+
+def _parse_overrides(raw: str) -> dict:
+    out = {}
+    for part in (raw or "").split(","):
+        if ":" not in part:
+            continue
+        hz, _, n = part.partition(":")
+        try:
+            out[hz.strip().upper()] = int(n.strip())
+        except ValueError:
+            continue
+    return out
+
+
+# Per-hazard caps that differ from MAX_PER_HAZARD (owner decision, Oct 2026:
+# flood and cyclone are held at their floor of 3; ACE and DR keep 10).
+MAX_PER_HAZARD_OVERRIDES = _parse_overrides(
+    _env_str("SIBYL_MAX_PER_HAZARD_OVERRIDES", "FL:3,TC:3")
+)
+# Controls (Oct 2026): questions with no RC flag (level 0 or null) from
+# ACE/FATALITIES and DR/PHASE3PLUS_IN_NEED, drawn by a hash of the run and the
+# question id, three conflict and two drought at the default. A control runs
+# one trial on lane A, needs one valid trial and gets no extra trials: it is
+# what Sibyl does where the RC signal says nothing is moving.
+N_CONTROL = _env_int("SIBYL_N_CONTROL", 5)
 
 # Numeric affected/fatalities magnitude questions only (spec scope:
 # "ACE fatalities; DR/FL/TC affected"). DR "affected" is represented as
