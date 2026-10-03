@@ -1911,6 +1911,51 @@ def _build_base_rate_text(
     )
 
 
+def _seasonal_profile_has_observations(history_summary: Dict[str, Any]) -> bool:
+    months = (history_summary or {}).get("months") or {}
+    for m_data in months.values():
+        try:
+            if int((m_data or {}).get("n_observations") or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _one_natural_hazard_anchor(
+    base_rate_text: str,
+    history_summary: Dict[str, Any],
+    has_machine_block: bool,
+    iso3: str,
+    hazard: str,
+) -> str:
+    """One base-rate anchor per FL/TC PA prompt (Oct 2026).
+
+    The legacy per-calendar-month IFRC profile printed beside the PA
+    machine's backcast block, so the model was handed two priors built two
+    ways, and where IFRC had no rows it printed "IFRC data from  (0 years)"
+    above a table of zeros (13 of 22 FL/TC PA prompts of the 1 Oct 2026
+    run). The machine's block wins where it is present; an empty profile is
+    replaced by one line saying the record is empty.
+    """
+    if (history_summary or {}).get("type") != "seasonal_profile":
+        return base_rate_text
+    if has_machine_block:
+        return (
+            "RESOLVER HISTORY: the base rate for this question is the PA "
+            "resolution machine's block below; the IFRC-only profile is not "
+            "shown beside it."
+        )
+    if not _seasonal_profile_has_observations(history_summary):
+        return (
+            f"BASE RATE: no reported people-affected figure for {iso3} "
+            f"{hazard} in the Resolver record. This is an absence of reports, "
+            "not evidence that nobody was affected; build your prior from the "
+            "seasonal and structured evidence below."
+        )
+    return base_rate_text
+
+
 def _prompt_v3_order_enabled() -> bool:
     """Static-first prompt section ordering (PYTHIA_PROMPT_V3_ORDER).
 
@@ -2696,6 +2741,9 @@ def build_spd_prompt_v2(
     rc_self_search_in_data = rc_self_search_line if v3_order else ""
 
     base_rate_text = _build_base_rate_text(history_summary, forecast_keys, iso3, hazard, metric)
+    base_rate_text = _one_natural_hazard_anchor(
+        base_rate_text, history_summary, bool(_haz_base_rates), iso3, hazard,
+    )
     prior_anchor = load_prior_anchor(question)
     prior_anchor_section = ""
     if prior_anchor:

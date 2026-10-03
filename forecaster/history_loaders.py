@@ -430,7 +430,6 @@ def _format_base_rate_for_prompt(
         lines.append("")
         projections = history_summary.get("projections") or []
         if projections:
-            lines.append("")
             lines.append(
                 "Projections (Most Likely scenario, a FORECAST by the analysts, not an "
                 "observation; the question resolves on the Current Situation figure):"
