@@ -77,3 +77,12 @@ def test_the_reader_drops_and_counts_a_negative_flow():
     text = _format_base_rate_for_prompt(_summary(rows, n_negative=dropped), [], metric="PA")
     assert "-1,791" not in text
     assert "1 negative monthly value(s) left out" in text
+
+
+def test_ace_fatalities_prompts_name_the_series_they_resolve_on():
+    from forecaster import hazard_prompts, prompts
+
+    assert "battle-related" not in hazard_prompts._ACE_FATALITIES
+    assert "summed over ALL ACLED event types" in " ".join(hazard_prompts._ACE_FATALITIES.split())
+    src = open(prompts.__file__, encoding="utf-8").read()
+    assert "battle-related" not in src

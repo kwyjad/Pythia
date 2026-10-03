@@ -598,8 +598,8 @@ def build_scoring_resolution_block(
         source_label = "IDMC/DTM displacement"
     elif m == "FATALITIES" or "ACLED" in src:
         meaning = (
-            "“affected” means battle-related fatalities, as recorded by ACLED "
-            "(armed conflict event data)."
+            "“affected” means conflict fatalities recorded by ACLED, summed over all "
+            "ACLED event types (armed conflict event data)."
         )
         source_label = "ACLED conflict fatalities"
     else:
@@ -1112,12 +1112,12 @@ def build_resolution_text_and_quantity_description(
 
     if m == "FATALITIES" or "ACLED" in src:
         resolution_text = (
-            "Fatalities will be measured as battle-related deaths recorded by ACLED "
-            "for this country and hazard code."
+            "Fatalities will be measured as deaths recorded by ACLED for this country, "
+            "summed over all ACLED event types."
         )
         quantity_description = (
-            f"Monthly battle-related fatalities in {iso3} associated with {hazard_label} "
-            "events, as recorded by ACLED."
+            f"Monthly conflict fatalities in {iso3} ({hazard_label}), all ACLED event "
+            "types, as recorded by ACLED."
         )
         return resolution_text, quantity_description
 

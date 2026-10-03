@@ -39,6 +39,14 @@ logger = logging.getLogger(__name__)
 # Data model (same structure as TSR extractor for interop)
 # ---------------------------------------------------------------------------
 
+def _one_line(text: str) -> str:
+    """The first line of *text*, stripped; '' for none."""
+    for line in str(text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
 @dataclass
 class SeasonalForecast:
     source: str = "NOAA_CPC"
@@ -79,8 +87,13 @@ class SeasonalForecast:
             f"## {basin_label} — {self.season_year} Seasonal Outlook (NOAA CPC, {self.forecast_type}, "
             f"issued {self.issue_date or 'date not stated'})"
         ]
-        if self.summary:
-            lines.append(self.summary)
+        # One line only: fetch_page joins the page's text with newlines, so a
+        # sentence regex that crossed a line break carried the page's
+        # navigation ("Focus areas: Weather Climate Topics: ... Share to
+        # Twitter") into every Atlantic prompt (Oct 2026).
+        summary = _one_line(self.summary)
+        if summary:
+            lines.append(summary)
         
         parts = []
         if self.named_storms_range:
@@ -105,8 +118,9 @@ class SeasonalForecast:
         elif self.prob_above_normal is not None:
             lines.append(f"Season probabilities: {self.prob_above_normal:.0%} above-normal.")
         
-        if self.enso_context:
-            lines.append(f"ENSO context: {self.enso_context}")
+        enso = _one_line(self.enso_context)
+        if enso:
+            lines.append(f"ENSO context: {enso}")
         
         return "\n".join(lines)
 
@@ -213,25 +227,25 @@ def extract_atlantic(text: str, url: str = "") -> SeasonalForecast:
         f.prob_below_normal = int(below_m.group(1)) / 100
     
     # ENSO context
-    enso_m = re.search(r"(ENSO[- ]neutral\s+conditions[^.]+\.)", text)
+    enso_m = re.search(r"(ENSO[- ]neutral\s+conditions[^.\n]+\.)", text)
     if enso_m:
         f.enso_context = enso_m.group(1).strip()
     else:
         # Fallback: look for El Nino / La Nina mentions
-        enso_m2 = re.search(r"((?:El\s+Ni[ñn]o|La\s+Ni[ñn]a|ENSO)[^.]+\.)", text)
+        enso_m2 = re.search(r"((?:El\s+Ni[ñn]o|La\s+Ni[ñn]a|ENSO)[^.\n]+\.)", text)
         if enso_m2:
             f.enso_context = enso_m2.group(1).strip()
     
     # Summary — first substantive sentence about the outlook
     summary_m = re.search(
-        r"(NOAA'?s\s+outlook\s+for\s+the\s+\d{4}\s+Atlantic[^.]+\.)",
+        r"(NOAA'?s\s+outlook\s+for\s+the\s+\d{4}\s+Atlantic[^.\n]+\.)",
         text
     )
     if summary_m:
         f.summary = summary_m.group(1).strip()
     else:
         # Fallback: look for "predicts above-normal" type headlines
-        summary_m2 = re.search(r"(NOAA\s+predicts\s+[^.]+hurricane\s+season[^.]*\.)", text, re.IGNORECASE)
+        summary_m2 = re.search(r"(NOAA\s+predicts\s+[^.\n]+hurricane\s+season[^.\n]*\.?)", text, re.IGNORECASE)
         if summary_m2:
             f.summary = summary_m2.group(1).strip()
     
@@ -368,7 +382,7 @@ def extract_central_pacific(text: str, url: str = "") -> SeasonalForecast:
         f.prob_below_normal = int(below_m.group(1)) / 100
     
     # Summary
-    summary_m = re.search(r"((?:forecast|outlook)\s+calls\s+for\s+[^.]+\.)", text, re.IGNORECASE)
+    summary_m = re.search(r"((?:forecast|outlook)\s+calls\s+for\s+[^.\n]+\.)", text, re.IGNORECASE)
     if summary_m:
         f.summary = summary_m.group(1).strip()
     

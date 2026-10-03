@@ -230,6 +230,7 @@ def fetch_and_store_seasonal_tc() -> bool:
     try:
         from horizon_scanner.seasonal_tc import (
             COUNTRY_TO_BASINS,
+            compose_country_context,
             store_seasonal_tc_outlooks,
             store_seasonal_tc_context_cache,
         )
@@ -251,16 +252,7 @@ def fetch_and_store_seasonal_tc() -> bool:
         # Generate and cache per-country context
         cached = 0
         for iso3, basins in COUNTRY_TO_BASINS.items():
-            blocks = []
-            seen = set()
-            for f in all_forecasts:
-                basin = f.get("basin", "")
-                ctx = f.get("prompt_context", "")
-                if basin in basins and ctx:
-                    key = (f.get("source", ""), basin, f.get("forecast_type", ""))
-                    if key not in seen:
-                        seen.add(key)
-                        blocks.append(ctx)
+            blocks = compose_country_context(all_forecasts, basins)
             if blocks:
                 text = "\n\n".join(blocks)
                 if store_seasonal_tc_context_cache(iso3, text):

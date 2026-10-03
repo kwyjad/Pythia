@@ -66,7 +66,9 @@ def get_hazard_reasoning_block(hazard_code: str, metric: str) -> str:
 _ACE_FATALITIES = """\
 HAZARD-SPECIFIC REASONING GUIDANCE: ARMED CONFLICT — FATALITIES
 
-This question asks about battle-related fatalities as recorded by ACLED. Conflict \
+This question asks about conflict fatalities as recorded by ACLED, summed over ALL \
+ACLED event types (battles, explosions/remote violence, violence against civilians, \
+riots), which is the series it resolves on. Conflict \
 fatalities are driven by actor decisions, not natural processes. Keep the following \
 in mind as you work through your Bayesian update:
 
