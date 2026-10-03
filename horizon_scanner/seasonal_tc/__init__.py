@@ -168,6 +168,55 @@ def get_seasonal_tc_context(basin_code: str) -> str:
     return "\n\n".join(blocks)
 
 
+def compose_country_context(forecasts: list, basins: list) -> list[str]:
+    """Context blocks for one country: newest outlook per source first.
+
+    Each (source, basin) shows its NEWEST outlook in full and every older
+    vintage as one line. The cache used to list every vintage in full,
+    oldest first, so an Atlantic prompt opened on TSR's December 2025
+    extended-range forecast and reached the August update last (Oct 2026).
+    """
+    groups: dict[tuple, list] = {}
+    for f in forecasts or []:
+        basin = f.get("basin", "")
+        ctx = f.get("prompt_context", "")
+        if basin in basins and ctx:
+            groups.setdefault((f.get("source", ""), basin), []).append(f)
+
+    def _date(f) -> str:
+        return str(f.get("issue_date") or "")
+
+    ordered = sorted(
+        groups.values(), key=lambda fs: max(_date(f) for f in fs), reverse=True
+    )
+    blocks: list[str] = []
+    for fs in ordered:
+        fs = sorted(fs, key=_date, reverse=True)
+        seen: set = set()
+        uniq = []
+        for f in fs:
+            key = (f.get("forecast_type", ""), _date(f))
+            if key not in seen:
+                seen.add(key)
+                uniq.append(f)
+        block = uniq[0]["prompt_context"]
+        older = []
+        for f in uniq[1:]:
+            figures = next(
+                (ln.strip() for ln in f["prompt_context"].splitlines()
+                 if ln.startswith(("Forecast", "Forecast range"))),
+                "",
+            )
+            older.append(
+                f"- {f.get('forecast_type') or 'outlook'}, issued "
+                f"{_date(f) or 'date not stated'}: {figures or 'figures not parsed'}"
+            )
+        if older:
+            block += f"\nEarlier {uniq[0].get('source', '')} outlooks, superseded by the one above:\n" + "\n".join(older)
+        blocks.append(block)
+    return blocks
+
+
 def get_seasonal_tc_context_for_country(iso3: str) -> str:
     """Return prompt context text for the TC basin(s) relevant to a country.
 
@@ -189,17 +238,7 @@ def get_seasonal_tc_context_for_country(iso3: str) -> str:
 
     forecasts = _load_forecasts()
 
-    blocks = []
-    seen = set()
-    for f in forecasts:
-        basin = f.get("basin", "")
-        ctx = f.get("prompt_context", "")
-        if basin in basins and ctx:
-            # Deduplicate identical blocks (same forecast from same source).
-            key = (f.get("source", ""), basin, f.get("forecast_type", ""))
-            if key not in seen:
-                seen.add(key)
-                blocks.append(ctx)
+    blocks = compose_country_context(forecasts, basins)
 
     # Final fallback for NIO countries: the climatology block needs zero
     # network, so serve it in-process when neither the DB cache nor the JSON

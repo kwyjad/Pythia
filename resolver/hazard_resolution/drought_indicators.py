@@ -776,7 +776,7 @@ def _snapshot_from_pythia_table(
         ``absence_means_no_drought: true``.
 
     ``seasonal_forecasts``
-        NMME country-mean precipitation anomalies in sigma units, already
+        NMME country-mean precipitation anomalies in mm/day, already
         ingested monthly. This one is supporting evidence, not a primary
         gate: it is a FORECAST for the month, not an observation of it, which
         is why its entry is ``required: false``. A country absent from NMME

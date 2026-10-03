@@ -740,31 +740,31 @@ class TestAcapsBulkTrendIsTheProductionPath:
             f"the trend is still the stale country-log (newest {newest})"
         )
 
-    def test_a_current_country_log_is_left_alone(self, monkeypatch):
-        """The fallback must not fire, or cost requests, when the log is fine."""
+    def test_the_country_log_is_never_asked(self, monkeypatch):
+        """Oct 2026: the country-log is not a severity log at all.
+
+        It carries the index's component indicators (CPI, BTI, HIIK,
+        population) under one "value" field, so even a current log mixed
+        quantities into the trend. The trend is the monthly snapshots alone.
+        """
 
         from pythia.tools import ingest_structured_data as ingest
 
         monkeypatch.setattr(ingest, "_get_acaps_token", lambda: "token")
-        this_month = date.today().replace(day=1).isoformat()
         calls: list[str] = []
 
         def _global(endpoint, max_pages=10, token=None):
             calls.append(endpoint)
-            if "country-log" in endpoint:
-                return [
-                    {"iso3": "ETH", "date": this_month, "value": 4.4},
-                    {"iso3": "ETH", "date": "2026-07-01", "value": 4.3},
-                ]
             if any(k in endpoint for k in ("impact-of-crisis", "conditions", "complexity")):
                 return []
-            return [{"iso3": "ETH", "severity_index_score": 9.9, "country_level": True}]
+            return [{"iso3": "ETH", "INFORM Severity Index": 4.4, "country_level": True}]
 
         monkeypatch.setattr(ingest, "_fetch_paginated_global", _global)
         out = ingest._bulk_fetch_inform_severity({"ETH"})
 
-        scores = {e["score"] for e in out["ETH"]["trend_6m"]}
-        assert 9.9 not in scores, "the snapshot fallback overrode a healthy log"
+        assert not [c for c in calls if "country-log" in c]
+        assert {e["score"] for e in out["ETH"]["trend_6m"]} == {4.4}
+        assert out["ETH"]["delta_1m"] == 0.0
 
 
 # ---------------------------------------------------------------------------

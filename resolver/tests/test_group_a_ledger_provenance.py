@@ -271,14 +271,14 @@ def test_a_vintage_already_held_is_not_fetched_again(monkeypatch):
     con = _duckdb.connect()
     con.execute(
         "CREATE TABLE seasonal_forecasts (iso3 TEXT, variable TEXT, "
-        "lead_months INTEGER, forecast_issue_date DATE, value DOUBLE)"
+        "lead_months INTEGER, forecast_issue_date DATE, value DOUBLE, units TEXT)"
     )
     con.execute(
         "INSERT INTO seasonal_forecasts VALUES "
-        "('KEN','prate',1,DATE '2026-05-01',0.1), "
-        "('KEN','tmp2m',1,DATE '2026-05-01',0.2), "
+        "('KEN','prate',1,DATE '2026-05-01',0.1,'mm/day'), "
+        "('KEN','tmp2m',1,DATE '2026-05-01',0.2,'degC'), "
         # A partial vintage (one variable) is fetched again.
-        "('KEN','prate',1,DATE '2026-06-01',0.1)"
+        "('KEN','prate',1,DATE '2026-06-01',0.1,'mm/day')"
     )
     asked: list[str] = []
 

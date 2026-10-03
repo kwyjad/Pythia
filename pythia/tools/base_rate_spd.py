@@ -249,15 +249,60 @@ def _live_months(
     return {str(r[0]) for r in rows if r[0]}
 
 
-# The IDMC rows inside facts_deltas, as a WHERE fragment. Kept beside the
-# query that selects them so the live-month gate and the anchor cannot drift
-# apart into two different ideas of what an IDMC row is.
-_IDMC_DELTA_WHERE = (
+# IDMC's monthly new displacements, as ``facts_deltas`` holds them. Until
+# Oct 2026 ``load_and_derive`` differenced this flow as if it were a stock,
+# so a quiet month after a busy one printed as a NEGATIVE number of new
+# displacements (Afghanistan, August 2026: -1,791). The writer is fixed and
+# the rows repaired (``repair_flow_deltas``); a negative row that still
+# arrives is dropped and counted here rather than printed. Kept beside the
+# reader so the live-month gate and the anchor cannot drift apart into two
+# ideas of what an IDMC row is.
+IDMC_FLOW_TABLE = "facts_deltas"
+_IDMC_FLOW_WHERE = (
     "lower(series_semantics) = 'new' AND ("
     "lower(source_id) IN ('idmc', 'idmc_idu') OR lower(metric) IN ("
     "'new_displacements', 'idp_displacement_new_dtm', "
     "'idp_displacement_flow_idmc'))"
 )
+_IDMC_DELTA_WHERE = _IDMC_FLOW_WHERE
+
+
+def idmc_flow_rows(
+    con, iso3: str, hazard_code: str, before_ym: str, *,
+    since_ym: Optional[str] = None, limit: Optional[int] = None,
+) -> Tuple[List[Tuple[str, float]], int]:
+    """IDMC monthly new displacements before ``before_ym``, ascending by month.
+
+    Returns ``(rows, n_negative_dropped)``. A flow cannot be negative; a row
+    that is has been mislabelled somewhere upstream and is dropped and
+    counted rather than printed. ``limit`` keeps the most recent months.
+    """
+    if not _table_exists(con, IDMC_FLOW_TABLE):
+        return [], 0
+    params: List[Any] = [iso3.upper(), (hazard_code or "ACE").upper(), before_ym]
+    since = ""
+    if since_ym:
+        since = " AND substr(CAST(ym AS VARCHAR), 1, 7) >= ?"
+        params.append(since_ym)
+    rows = con.execute(
+        f"""
+        SELECT substr(CAST(ym AS VARCHAR), 1, 7) AS ym_key, SUM(value_new) AS flow
+        FROM {IDMC_FLOW_TABLE}
+        WHERE upper(iso3) = ?
+          AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') IN (?, 'IDU')
+          AND {_IDMC_FLOW_WHERE}
+          AND substr(CAST(ym AS VARCHAR), 1, 7) < ?{since}
+          AND value_new IS NOT NULL
+        GROUP BY ym_key
+        ORDER BY ym_key DESC
+        """,
+        params,
+    ).fetchall()
+    kept = [(str(ym), float(v)) for ym, v in rows if ym is not None and v is not None and float(v) >= 0]
+    dropped = sum(1 for _ym, v in rows if v is not None and float(v) < 0)
+    if limit is not None:
+        kept = kept[: int(limit)]
+    return list(reversed(kept)), dropped
 
 
 def _fill_quiet_months(
@@ -361,34 +406,14 @@ def _conflict_fatalities(con, iso3: str, before_ym: str) -> Tuple[List[float], s
 
 
 def _conflict_displacement(con, iso3: str, hazard_code: str, before_ym: str) -> Tuple[List[float], str, Dict[str, Any]]:
-    """ACE/PA: the IDMC displacement-flow series (facts_deltas), the series the
-    prompt marks THIS QUESTION'S SERIES for ACE/PA."""
-    if not _table_exists(con, "facts_deltas"):
-        return [], NO_BASE_RATE_SOURCE, {"reason": "facts_deltas missing"}
+    """ACE/PA: IDMC's monthly new displacements (``facts_deltas``), the
+    series an ACE/PA question resolves on and the prompt marks THIS
+    QUESTION'S SERIES."""
+    if not _table_exists(con, IDMC_FLOW_TABLE):
+        return [], NO_BASE_RATE_SOURCE, {"reason": f"{IDMC_FLOW_TABLE} missing"}
     months = _window_months(before_ym, CONFLICT_WINDOW_MONTHS)
-    rows = con.execute(
-        """
-        SELECT substr(CAST(ym AS VARCHAR), 1, 7) AS ym_key,
-               SUM(COALESCE(value_new, 0)) AS flow_value
-        FROM facts_deltas
-        WHERE upper(iso3) = ?
-          AND COALESCE(NULLIF(upper(hazard_code), ''), 'ACE') IN (?, 'IDU')
-          AND lower(series_semantics) = 'new'
-          AND (
-              lower(source_id) IN ('idmc', 'idmc_idu')
-              OR lower(metric) IN (
-                  'new_displacements',
-                  'idp_displacement_new_dtm',
-                  'idp_displacement_flow_idmc'
-              )
-          )
-          AND substr(CAST(ym AS VARCHAR), 1, 7) < ?
-          AND substr(CAST(ym AS VARCHAR), 1, 7) >= ?
-        GROUP BY ym_key
-        """,
-        [iso3, hazard_code, before_ym, months[0]],
-    ).fetchall()
-    observed = {str(ym): float(v or 0) for ym, v in rows if ym}
+    rows, n_negative = idmc_flow_rows(con, iso3, hazard_code, before_ym, since_ym=months[0])
+    observed = {ym: v for ym, v in rows}
     n_quiet = 0
     if COUNT_QUIET_MONTHS_AS_ZERO and observed:
         # IDMC reports a country only when it records displacement, so an
@@ -397,7 +422,7 @@ def _conflict_displacement(con, iso3: str, hazard_code: str, before_ym: str) -> 
         # months are observations, and leaving them out inflated the anchor
         # and therefore suppressed every excess measured against it.
         live = _live_months(
-            con, "facts_deltas", "ym", months, extra_where=_IDMC_DELTA_WHERE
+            con, IDMC_FLOW_TABLE, "ym", months, extra_where=_IDMC_FLOW_WHERE
         )
         values, n_reported, n_quiet = _fill_quiet_months(observed, months, live)
     else:
@@ -413,6 +438,7 @@ def _conflict_displacement(con, iso3: str, hazard_code: str, before_ym: str) -> 
         "n_months_used": len(values),
         "n_months_reported": n_reported,
         "n_months_quiet": n_quiet,
+        "n_negative_dropped": n_negative,
         "values": values,
     }
     return probs, f"facts_deltas:idmc:{len(values)}m", detail
@@ -1270,8 +1296,13 @@ def conflict_trajectory(
 
     trend_pct: Any = None
     trend_direction: Any = None
+    trend_note: Any = None
     if trailing_3m_avg is not None and prior_3m_avg is not None:
-        if prior_3m_avg == 0:
+        if prior_3m_avg < 0:
+            # A percentage change from a negative base means nothing (DRC's
+            # displacement read "-2364.8%" off differenced flows, Oct 2026).
+            trend_note = "no trend: the earlier window has no positive base"
+        elif prior_3m_avg == 0:
             if trailing_3m_avg > 0:
                 trend_pct = "new_activity"
                 trend_direction = "escalating"
@@ -1295,5 +1326,6 @@ def conflict_trajectory(
         "prior_3m_avg": prior_3m_avg,
         "trend_pct": trend_pct,
         "trend_direction": trend_direction,
+        "trend_note": trend_note,
         "last_6m": last_6,
     }

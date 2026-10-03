@@ -482,8 +482,10 @@ _TREND_MONTHS = 6
 from pythia.acaps import (  # noqa: E402
     _first_present,
     _newest_trend_date,
-    _trend_is_better,
-    _trend_is_stale,
+    _trend_is_better,  # noqa: F401 - kept importable for older callers
+    _trend_is_stale,  # noqa: F401
+    on_inform_scale,
+    severity_deltas,
 )
 
 
@@ -529,95 +531,59 @@ def _bulk_fetch_inform_severity(
         if iso3 and iso3 in countries:
             by_country[iso3].append(rec)
 
-    # 2. Fetch global country-log (trend data)
-    log_data = _fetch_paginated_global(
-        "/api/v1/inform-severity-index/country-log/",
-        token=token,
-    )
-    trend_by_country: dict[str, list[dict]] = defaultdict(list)
-    for entry in log_data:
-        iso3_raw = entry.get("iso3") or ""
-        if isinstance(iso3_raw, list):
-            iso3_raw = iso3_raw[0] if iso3_raw else ""
-        iso3 = str(iso3_raw).strip().upper()
-        entry_date = entry.get("date", "")
-        entry_score = _safe_float(entry.get("value"))
-        if iso3 and iso3 in countries and entry_date and entry_score is not None:
-            trend_by_country[iso3].append({"date": entry_date, "score": entry_score})
-
-    # 2b. When the country-log has gone quiet, the monthly SNAPSHOTS carry
-    # the same quantity from the same publisher, and this path can reach
-    # them globally: six requests for every country, not six per country.
-    #
-    # acaps_inform_severity_trend stood at 2024-01-29 for 952 days while
-    # ACAPS served 3,000 country-log records. The staleness is a property of
-    # the one global log, so it is decided ONCE here rather than per country.
+    # 2. The trend: one monthly snapshot of the index per month, global
+    # requests, six for every country. NOT the country-log: that endpoint
+    # carries the index's component indicators (CPI, BTI, HIIK, population)
+    # under one "value" field, and a trend built from it mixed quantities
+    # (Afghanistan's table held 652230.0, 1.82 and 9.2; Oct 2026).
     snapshot_trend_by_country: dict[str, list[dict]] = defaultdict(list)
-    log_newest = _newest_trend_date(
-        [e for entries in trend_by_country.values() for e in entries]
-    )
-    if _trend_is_stale(
-        [{"date": log_newest}] if log_newest else [], _TREND_MONTHS
-    ):
-        LOG.warning(
-            "INFORM Severity: the country-log's newest entry is %s — building "
-            "the trend from the monthly snapshots instead",
-            log_newest or "absent",
+    keys_seen: set[str] = set()
+    for label in _month_labels_back(_TREND_MONTHS):
+        month_data = (
+            snapshot_data
+            if label == snapshot_date
+            else _fetch_paginated_global(
+                f"/api/v1/inform-severity-index/{label}/",
+                token=token,
+            )
         )
-        keys_seen: set[str] = set()
-        for label in _month_labels_back(_TREND_MONTHS):
-            month_data = (
-                snapshot_data
-                if label == snapshot_date
-                else _fetch_paginated_global(
-                    f"/api/v1/inform-severity-index/{label}/",
-                    token=token,
-                )
-            )
-            if not month_data:
-                continue
-            try:
-                stamp = datetime.strptime(label, "%b%Y").date().isoformat()
-            except ValueError:
-                stamp = label
-            month_by_country: dict[str, list[dict]] = defaultdict(list)
-            for rec in month_data:
-                iso3_raw = rec.get("iso3") or ""
-                if isinstance(iso3_raw, list):
-                    iso3_raw = iso3_raw[0] if iso3_raw else ""
-                iso3 = str(iso3_raw).strip().upper()
-                if iso3 and iso3 in countries:
-                    month_by_country[iso3].append(rec)
-            for iso3, records in month_by_country.items():
-                record = _pick_country_crisis(records)
-                score = _safe_float(_first_present(record, _SEVERITY_SCORE_KEYS))
-                if score is not None:
-                    snapshot_trend_by_country[iso3].append(
-                        {"date": stamp, "score": score}
-                    )
-                else:
-                    keys_seen.update(k for k in record if isinstance(k, str))
-        if snapshot_trend_by_country:
-            LOG.info(
-                "INFORM Severity: monthly snapshots produced a trend for %d "
-                "countries (newest %s)",
-                len(snapshot_trend_by_country),
-                _newest_trend_date(
-                    [e for v in snapshot_trend_by_country.values() for e in v]
-                ) or "none",
-            )
-        else:
-            # Naming the keys is what turns "it produced nothing" into a
-            # repair. The country-log parser has said this about its own
-            # rows since Group H; the snapshot path was reading three key
-            # names on faith and reporting a bare zero when none matched.
-            LOG.warning(
-                "INFORM Severity: the monthly snapshots produced NO trend at "
-                "all. Looked for a score in %s; the records carried %s. The "
-                "trend stays on the country-log, stale as it is.",
-                "/".join(_SEVERITY_SCORE_KEYS),
-                ", ".join(sorted(keys_seen)) or "(no records reached this point)",
-            )
+        if not month_data:
+            continue
+        try:
+            stamp = datetime.strptime(label, "%b%Y").date().isoformat()
+        except ValueError:
+            stamp = label
+        month_by_country: dict[str, list[dict]] = defaultdict(list)
+        for rec in month_data:
+            iso3_raw = rec.get("iso3") or ""
+            if isinstance(iso3_raw, list):
+                iso3_raw = iso3_raw[0] if iso3_raw else ""
+            iso3 = str(iso3_raw).strip().upper()
+            if iso3 and iso3 in countries:
+                month_by_country[iso3].append(rec)
+        for iso3, records in month_by_country.items():
+            record = _pick_country_crisis(records)
+            score = _safe_float(_first_present(record, _SEVERITY_SCORE_KEYS))
+            if score is not None and on_inform_scale(score):
+                snapshot_trend_by_country[iso3].append({"date": stamp, "score": score})
+            elif score is None:
+                keys_seen.update(k for k in record if isinstance(k, str))
+    if snapshot_trend_by_country:
+        LOG.info(
+            "INFORM Severity: monthly snapshots produced a trend for %d "
+            "countries (newest %s)",
+            len(snapshot_trend_by_country),
+            _newest_trend_date(
+                [e for v in snapshot_trend_by_country.values() for e in v]
+            ) or "none",
+        )
+    else:
+        LOG.warning(
+            "INFORM Severity: the monthly snapshots produced NO trend at "
+            "all. Looked for a score in %s; the records carried %s.",
+            "/".join(_SEVERITY_SCORE_KEYS),
+            ", ".join(sorted(keys_seen)) or "(no records reached this point)",
+        )
 
     # 3. Fetch global dimension data for top indicators
     top_indicators_by_country: dict[str, list[dict]] = defaultdict(list)
@@ -660,22 +626,14 @@ def _bulk_fetch_inform_severity(
             _first_present(snapshot, _COMPLEXITY_SCORE_KEYS)
         )
 
-        # Trend: newer beats longer, so a two-point series from this quarter
-        # wins over a six-point one from two years ago.
-        trend_entries = trend_by_country.get(iso3, [])
-        snapshot_trend = snapshot_trend_by_country.get(iso3, [])
-        if _trend_is_better(snapshot_trend, trend_entries):
-            trend_entries = snapshot_trend
-        trend_entries = sorted(trend_entries, key=lambda e: e["date"])
+        trend_entries = sorted(
+            snapshot_trend_by_country.get(iso3, []), key=lambda e: e["date"]
+        )
         if len(trend_entries) > _TREND_MONTHS:
             trend_entries = trend_entries[-_TREND_MONTHS:]
 
-        delta_1m = None
-        delta_3m = None
-        if severity_score is not None and len(trend_entries) >= 2:
-            delta_1m = round(severity_score - trend_entries[-1]["score"], 2)
-        if severity_score is not None and len(trend_entries) >= 4:
-            delta_3m = round(severity_score - trend_entries[-3]["score"], 2)
+        # Like with like: the snapshot one and three months before this one.
+        delta_1m, delta_3m = severity_deltas(severity_score, snapshot_date, trend_entries)
 
         # Top indicators
         indicators = top_indicators_by_country.get(iso3, [])

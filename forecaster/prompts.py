@@ -23,6 +23,15 @@ from .hazard_prompts import get_hazard_reasoning_block
 LOG = logging.getLogger(__name__)
 
 
+
+# NMME anomalies are stored in their own units (resolver.ingestion.nmme.UNITS).
+# Until Oct 2026 this note said "sigma", which they never were.
+NMME_UNITS_NOTE = (
+    "Note: Anomalies are departures from the model climatology: temperature in °C, "
+    "precipitation in mm/day (0.5 mm/day is about 15 mm a month). They are not "
+    "standardised, so a dry country's precipitation anomaly is small in absolute terms."
+)
+
 def _json_dumps_for_prompt(obj: Any, **kwargs: Any) -> str:
     """
     JSON-encode helper for prompts that tolerates Python objects like date
@@ -589,8 +598,8 @@ def build_scoring_resolution_block(
         source_label = "IDMC/DTM displacement"
     elif m == "FATALITIES" or "ACLED" in src:
         meaning = (
-            "“affected” means battle-related fatalities, as recorded by ACLED "
-            "(armed conflict event data)."
+            "“affected” means conflict fatalities recorded by ACLED, summed over all "
+            "ACLED event types (armed conflict event data)."
         )
         source_label = "ACLED conflict fatalities"
     else:
@@ -1103,12 +1112,12 @@ def build_resolution_text_and_quantity_description(
 
     if m == "FATALITIES" or "ACLED" in src:
         resolution_text = (
-            "Fatalities will be measured as battle-related deaths recorded by ACLED "
-            "for this country and hazard code."
+            "Fatalities will be measured as deaths recorded by ACLED for this country, "
+            "summed over all ACLED event types."
         )
         quantity_description = (
-            f"Monthly battle-related fatalities in {iso3} associated with {hazard_label} "
-            "events, as recorded by ACLED."
+            f"Monthly conflict fatalities in {iso3} ({hazard_label}), all ACLED event "
+            "types, as recorded by ACLED."
         )
         return resolution_text, quantity_description
 
@@ -1544,7 +1553,7 @@ def build_research_prompt_v2(
         for _key, _val in _seasonal_outlook.items():
             _label = _key.replace("_", " ").capitalize()
             _seasonal_lines.append(f"- {_label}: {_val}")
-        _seasonal_lines.append("Note: Anomalies are in σ (standard deviations from climatology).")
+        _seasonal_lines.append(NMME_UNITS_NOTE)
         parts.append("\n".join(_seasonal_lines))
 
     # Render conflict forecasts for ACE hazard.
@@ -1900,6 +1909,51 @@ def _build_base_rate_text(
     return _format_base_rate_for_prompt(
         history_summary, forecast_keys, iso3=iso3, hazard_code=hazard_code, metric=metric
     )
+
+
+def _seasonal_profile_has_observations(history_summary: Dict[str, Any]) -> bool:
+    months = (history_summary or {}).get("months") or {}
+    for m_data in months.values():
+        try:
+            if int((m_data or {}).get("n_observations") or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _one_natural_hazard_anchor(
+    base_rate_text: str,
+    history_summary: Dict[str, Any],
+    has_machine_block: bool,
+    iso3: str,
+    hazard: str,
+) -> str:
+    """One base-rate anchor per FL/TC PA prompt (Oct 2026).
+
+    The legacy per-calendar-month IFRC profile printed beside the PA
+    machine's backcast block, so the model was handed two priors built two
+    ways, and where IFRC had no rows it printed "IFRC data from  (0 years)"
+    above a table of zeros (13 of 22 FL/TC PA prompts of the 1 Oct 2026
+    run). The machine's block wins where it is present; an empty profile is
+    replaced by one line saying the record is empty.
+    """
+    if (history_summary or {}).get("type") != "seasonal_profile":
+        return base_rate_text
+    if has_machine_block:
+        return (
+            "RESOLVER HISTORY: the base rate for this question is the PA "
+            "resolution machine's block below; the IFRC-only profile is not "
+            "shown beside it."
+        )
+    if not _seasonal_profile_has_observations(history_summary):
+        return (
+            f"BASE RATE: no reported people-affected figure for {iso3} "
+            f"{hazard} in the Resolver record. This is an absence of reports, "
+            "not evidence that nobody was affected; build your prior from the "
+            "seasonal and structured evidence below."
+        )
+    return base_rate_text
 
 
 def _prompt_v3_order_enabled() -> bool:
@@ -2482,7 +2536,7 @@ def build_spd_prompt_v2(
         for _k, _v in _seasonal_data.items():
             _label = _k.replace("_", " ").capitalize()
             _lines.append(f"- {_label}: {_v}")
-        _lines.append("Note: Anomalies are in σ (standard deviations from climatology).\n")
+        _lines.append(NMME_UNITS_NOTE + "\n")
         seasonal_outlook_section = "\n".join(_lines) + "\n"
 
     # --- NEW: Structured data sections from connectors ---
@@ -2687,6 +2741,9 @@ def build_spd_prompt_v2(
     rc_self_search_in_data = rc_self_search_line if v3_order else ""
 
     base_rate_text = _build_base_rate_text(history_summary, forecast_keys, iso3, hazard, metric)
+    base_rate_text = _one_natural_hazard_anchor(
+        base_rate_text, history_summary, bool(_haz_base_rates), iso3, hazard,
+    )
     prior_anchor = load_prior_anchor(question)
     prior_anchor_section = ""
     if prior_anchor:

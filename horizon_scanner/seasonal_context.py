@@ -26,6 +26,12 @@ _VARIABLE_LABELS = {
     "prate": "precipitation",
 }
 
+# Units the ingest stores (resolver.ingestion.nmme.UNITS). Rows written
+# before Oct 2026 carry no unit: their precipitation figure was raw mm/s
+# rounded to zero and their category was read off sigma thresholds they were
+# never in, so they are not printed at all.
+_UNIT_SUFFIX = {"degC": " °C", "mm/day": " mm/day"}
+
 _TERCILE_LABELS = {
     "above_normal": "above-normal",
     "below_normal": "below-normal",
@@ -57,7 +63,7 @@ def _format_outlook_line(
 ) -> str:
     """Build a one-line outlook summary for a variable.
 
-    Example: "Above-normal temperature anomaly (+1.2σ) for leads 1-3"
+    Example: "Above-normal temperature anomaly (+1.20 °C) for leads 1-3"
     """
     label = _VARIABLE_LABELS.get(variable, variable)
 
@@ -77,11 +83,12 @@ def _format_outlook_line(
 
     tercile_label = _TERCILE_LABELS.get(majority_tercile, majority_tercile)
     sign = "+" if mean_anomaly >= 0 else ""
+    unit = _UNIT_SUFFIX.get(str(short[0].get("units") or ""), "")
     lead_range = f"{short_leads[0]}-{short_leads[-1]}" if len(short_leads) > 1 else str(short_leads[0])
 
     return (
         f"{tercile_label.capitalize()} {label} anomaly "
-        f"({sign}{mean_anomaly:.2f}σ) for leads {lead_range}"
+        f"({sign}{mean_anomaly:.2f}{unit}) for leads {lead_range}"
     )
 
 
@@ -92,8 +99,9 @@ def _format_detail(variable: str, rows: list[dict]) -> str:
     for r in sorted(rows, key=lambda r: r["lead_months"]):
         sign = "+" if r["anomaly_value"] >= 0 else ""
         tercile = _TERCILE_LABELS.get(r.get("tercile_category", ""), "")
+        unit = _UNIT_SUFFIX.get(str(r.get("units") or ""), "")
         parts.append(
-            f"Lead {r['lead_months']}: {sign}{r['anomaly_value']:.2f}σ ({tercile})"
+            f"Lead {r['lead_months']}: {sign}{r['anomaly_value']:.2f}{unit} ({tercile})"
         )
     return f"{label.capitalize()}: " + "; ".join(parts)
 
@@ -141,12 +149,17 @@ def load_seasonal_forecasts(
         if "seasonal_forecasts" not in tables:
             return None
 
+        cols = {
+            r[1] for r in con.execute("PRAGMA table_info('seasonal_forecasts')").fetchall()
+        }
+        if "units" not in cols:
+            return None
         # Get the latest issue date for this country.
         row = con.execute(
             """
             SELECT MAX(forecast_issue_date)
             FROM seasonal_forecasts
-            WHERE iso3 = ?
+            WHERE iso3 = ? AND units IS NOT NULL
             """,
             [iso3.upper()],
         ).fetchone()
@@ -158,9 +171,10 @@ def load_seasonal_forecasts(
         # Fetch all rows for this country and issue date.
         result = con.execute(
             """
-            SELECT variable, lead_months, anomaly_value, tercile_category
+            SELECT variable, lead_months, anomaly_value, tercile_category, units
             FROM seasonal_forecasts
             WHERE iso3 = ? AND forecast_issue_date = ?
+              AND units IS NOT NULL AND anomaly_value IS NOT NULL
             ORDER BY variable, lead_months
             """,
             [iso3.upper(), latest_date],
@@ -177,13 +191,14 @@ def load_seasonal_forecasts(
 
     # Group by variable.
     by_var: dict[str, list[dict]] = {}
-    for var, lead, anomaly, tercile in result:
+    for var, lead, anomaly, tercile, units in result:
         by_var.setdefault(var, []).append(
             {
                 "variable": var,
                 "lead_months": lead,
-                "anomaly_value": float(anomaly) if anomaly is not None else 0.0,
+                "anomaly_value": float(anomaly),
                 "tercile_category": tercile or "near_normal",
+                "units": units,
             }
         )
 
@@ -196,7 +211,13 @@ def load_seasonal_forecasts(
     if "prate" in by_var:
         climate_data["nmme_precip_outlook"] = _format_outlook_line("prate", by_var["prate"])
         climate_data["nmme_precip_detail"] = _format_detail("prate", by_var["prate"])
+    else:
+        # Say so: a missing precipitation outlook printed nothing, and a
+        # reader of the temperature line alone can take rain to be normal.
+        climate_data["nmme_precip_outlook"] = "unavailable (no NMME precipitation forecast for this country)"
+    if "tmp2m" not in by_var:
+        climate_data["nmme_temp_outlook"] = "unavailable (no NMME temperature forecast for this country)"
 
     climate_data["nmme_issue_date"] = str(latest_date)
 
-    return climate_data if len(climate_data) > 1 else None
+    return climate_data

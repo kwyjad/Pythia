@@ -1585,3 +1585,58 @@ def test_a_partial_acled_month_row_fails_the_check(tmp_path, full_run):
     con.close()
     assert _checks(tmp_path, db, full_run, "acledpartial2")[
         "no_acled_month_row_written_before_its_month_ended"]["verdict"] == "PASS"
+
+
+def test_an_nmme_variable_stored_at_zero_is_a_contradiction(tmp_path, full_run):
+    """Oct 2026: prate stored in mm/s rounded to four decimals, all at zero."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "CREATE TABLE seasonal_forecasts (iso3 TEXT, variable TEXT, lead_months INTEGER, "
+        "anomaly_value DOUBLE, forecast_issue_date DATE)"
+    )
+    for i in range(40):
+        con.execute(
+            "INSERT INTO seasonal_forecasts VALUES (?, 'prate', 1, 0.0001, DATE '2026-09-08')",
+            [f"C{i:02d}"],
+        )
+        con.execute(
+            "INSERT INTO seasonal_forecasts VALUES (?, 'tmp2m', 1, 0.8, DATE '2026-09-08')",
+            [f"C{i:02d}"],
+        )
+    con.close()
+    check = _checks(tmp_path, db, full_run)["nmme_no_variable_is_almost_all_zero"]
+    assert check["verdict"] == "FAIL"
+    assert "prate (40 of 40)" in check["detail"]
+
+    con = duckdb.connect(str(db))
+    con.execute("UPDATE seasonal_forecasts SET anomaly_value = -1.3 WHERE variable = 'prate'")
+    con.close()
+    check = _checks(tmp_path, db, full_run, "again")["nmme_no_variable_is_almost_all_zero"]
+    assert check["verdict"] == "PASS"
+
+
+def test_an_inform_score_off_its_scale_is_a_contradiction(tmp_path, full_run):
+    """Oct 2026: the trend table mixed component indicators with the index."""
+
+    db = full_run["db"]
+    con = duckdb.connect(str(db))
+    con.execute(
+        "CREATE TABLE acaps_inform_severity_trend (iso3 TEXT, snapshot_date TEXT, "
+        "score DOUBLE, fetched_at TEXT)"
+    )
+    con.execute(
+        "INSERT INTO acaps_inform_severity_trend VALUES "
+        "('AFG','2026-08-01',9.0,'x'),('AFG','2024-01-29',652230.0,'x')"
+    )
+    con.close()
+    check = _checks(tmp_path, db, full_run)["inform_severity_scores_lie_on_the_0_to_10_scale"]
+    assert check["verdict"] == "FAIL"
+    assert "652230" in check["detail"]
+
+    con = duckdb.connect(str(db))
+    con.execute("DELETE FROM acaps_inform_severity_trend WHERE score > 10")
+    con.close()
+    check = _checks(tmp_path, db, full_run, "again")["inform_severity_scores_lie_on_the_0_to_10_scale"]
+    assert check["verdict"] == "PASS"
