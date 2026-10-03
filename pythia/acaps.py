@@ -939,7 +939,7 @@ def format_inform_severity_for_prompt(data: dict | None) -> str:
 
     parts.append(
         "\nINFORM Severity is an institutional composite of 31 indicators. "
-        "It runs 0 to 10; 8 and above is the Very High category. Changes "
+        "It runs 0 to 10; scores above 8 fall in the Very High category. Changes "
         "compare monthly snapshots of the index. A rise above 0.3 in a "
         "month suggests rapid deterioration that should be reflected in "
         "your assessment."
