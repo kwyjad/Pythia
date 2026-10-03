@@ -3134,6 +3134,10 @@ class BundleData:
     # None = could not be checked.
     production_questions_on_test_scans: list[str] | None = None
 
+    # Forecast calls that returned without an error and whose answer does
+    # not parse (Oct 2026: five Gemini answers cut mid-JSON read as "ok").
+    unparseable_forecast_calls: list[dict[str, Any]] = field(default_factory=list)
+
     # Run summary stats (for executive summary bottom sections)
     rc_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
     triage_grounding_call_stats: dict[str, Any] = field(default_factory=dict)
@@ -3427,8 +3431,46 @@ def _load_bundle_data(
         data.crisiswatch_load_error = str(exc)
 
     data.production_questions_on_test_scans = _production_questions_on_test_scans(con)
+    data.unparseable_forecast_calls = _unparseable_forecast_calls(con, data.forecaster_run_id)
 
     return data
+
+
+def _unparseable_forecast_calls(con, run_id: str | None) -> list[dict[str, Any]]:
+    """SPD and binary calls logged without an error whose answer will not parse.
+
+    ``llm_calls.status`` describes the HTTP call; an answer cut mid-JSON is a
+    lost member all the same, and the "LLM Calls" line read OK above five of
+    them on 1 Oct 2026. Never raises.
+    """
+    if not run_id:
+        return []
+    try:
+        from forecaster.cli import _safe_json_loads  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        def _safe_json_loads(text: str):  # type: ignore[no-redef]
+            t = str(text or "")
+            i, j = t.find("{"), t.rfind("}")
+            return json.loads(t[i:j + 1]) if 0 <= i < j else None
+    try:
+        rows = con.execute(
+            "SELECT question_id, model_id, phase, response_text FROM llm_calls "
+            "WHERE run_id = ? AND phase IN ('spd_v2', 'binary_v2') "
+            "AND COALESCE(error_text, '') = ''",
+            [run_id],
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    bad: list[dict[str, Any]] = []
+    for qid, model, phase, text in rows:
+        try:
+            ok = isinstance(_safe_json_loads(text or ""), dict)
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            bad.append({"question_id": qid, "model_id": model, "phase": phase,
+                        "response_chars": len(text or "")})
+    return bad
 
 
 def _production_questions_on_test_scans(con) -> list[str] | None:
@@ -3811,6 +3853,16 @@ def _evaluate_pipeline_health(data: BundleData) -> list[dict[str, Any]]:
         else:
             llm_status = "FAIL"
             llm_detail = f"{total_calls} calls, {total_errors} errors ({error_rate:.1%})"
+    unparseable = data.unparseable_forecast_calls or []
+    if unparseable:
+        llm_detail += (
+            f"; {len(unparseable)} forecast answer(s) returned without an error "
+            "but do not parse: "
+            + ", ".join(f"{u['question_id']}/{u['model_id']}" for u in unparseable[:6])
+            + (" ..." if len(unparseable) > 6 else "")
+        )
+        if llm_status == "OK":
+            llm_status = "WARN"
     checks.append({"subsystem": "LLM Calls", "status": llm_status, "detail": llm_detail})
 
     # Batch economics. "LLM Calls: OK, 80 calls, 0 errors" was true and useless

@@ -1408,6 +1408,42 @@ def build_google_body(
     }
 
 
+#: Gemini finish reasons that mean the answer ended where the model meant it
+#: to. Anything else (MAX_TOKENS, SAFETY, RECITATION, OTHER, ...) is a cut.
+_GOOGLE_TERMINAL_FINISH = {"STOP", "FINISH_REASON_UNSPECIFIED", ""}
+
+
+def google_text_and_finish(payload: Any) -> tuple[str, str]:
+    """(answer text, finishReason) from a generateContent response.
+
+    Every non-thought text part is joined. Reading ``parts[0]`` alone dropped
+    the rest of a multi-part answer: on 1 Oct 2026 Gemini billed Cambodia's
+    TC/PA member 1,224 answer tokens and the stored text was 19 characters,
+    and four more members lost the end of their JSON the same way.
+    """
+    if not isinstance(payload, dict):
+        return "", ""
+    candidates = payload.get("candidates") or []
+    if not candidates or not isinstance(candidates[0], dict):
+        return str(payload.get("text", "") or ""), ""
+    cand = candidates[0]
+    parts = ((cand.get("content") or {}).get("parts")) or []
+    text = "".join(
+        str(p.get("text") or "")
+        for p in parts
+        if isinstance(p, dict) and not p.get("thought")
+    ).strip()
+    return text, str(cand.get("finishReason") or "")
+
+
+def google_finish_problem(finish_reason: str) -> Optional[str]:
+    """An error string when the answer did not end of its own accord."""
+    fr = (finish_reason or "").upper()
+    if fr in _GOOGLE_TERMINAL_FINISH:
+        return None
+    return f"truncated: Gemini finishReason={fr}"
+
+
 def _google_usage_from_payload(payload: Any) -> Dict[str, Any]:
     """Normalize a Gemini usageMetadata payload (incl. implicit-cache tokens)."""
 
@@ -1482,13 +1518,13 @@ def call_google(
             retry_after=retry_after,
         )
 
-    text = ""
-    if isinstance(payload, dict):
-        try:
-            text = payload["candidates"][0]["content"]["parts"][0].get("text", "").strip()
-        except Exception:
-            text = payload.get("text", "") or ""
+    text, finish = google_text_and_finish(payload)
     usage = _google_usage_from_payload(payload)
+    if finish:
+        usage["finish_reason"] = finish
+    problem = google_finish_problem(finish)
+    if problem:
+        return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model, error=problem)
     return ProviderResult(text=text, usage=usage, cost_usd=0.0, model_id=model)
 
 
@@ -2065,7 +2101,11 @@ async def call_chat_ms(
     if error:
         if spd_google and _is_timeout_error(error):
             return "", usage, error
-        if "Anthropic refusal:" in error or "truncated at max_tokens" in error:
+        if (
+            "Anthropic refusal:" in error
+            or "truncated at max_tokens" in error
+            or error.startswith("truncated: Gemini finishReason=")
+        ):
             # Content-driven outcomes (safety classifier / output ceiling),
             # not provider health — feeding them to the breaker would let 6
             # consecutive refusals trip a whole-provider cooldown and drop

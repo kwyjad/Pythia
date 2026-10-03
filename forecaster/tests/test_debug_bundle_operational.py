@@ -983,3 +983,26 @@ def test_a_production_question_on_a_test_scan_is_named():
     )
     assert dump._production_questions_on_test_scans(con) == ["Q_BAD"]
     assert dump._production_questions_on_test_scans(duckdb.connect(":memory:")) is None
+
+
+def test_an_ok_forecast_call_that_will_not_parse_is_named():
+    """Oct 2026: five Gemini answers cut mid-JSON were logged as ok calls."""
+
+    import duckdb
+
+    from scripts import dump_pythia_debug_bundle as dump
+
+    con = duckdb.connect(":memory:")
+    con.execute(
+        "CREATE TABLE llm_calls (run_id TEXT, question_id TEXT, model_id TEXT, phase TEXT, "
+        "response_text TEXT, error_text TEXT)"
+    )
+    con.execute(
+        "INSERT INTO llm_calls VALUES "
+        "('fc_1','Q1','m','spd_v2','{\"spds\": {}}', NULL),"
+        "('fc_1','Q2','m','spd_v2','```json\\n{\"reason', NULL),"
+        "('fc_1','Q3','m','spd_v2','', 'timeout'),"
+        "('fc_1','Q4','m','scenario_v2','not json', NULL)"
+    )
+    bad = dump._unparseable_forecast_calls(con, "fc_1")
+    assert [b["question_id"] for b in bad] == ["Q2"]
