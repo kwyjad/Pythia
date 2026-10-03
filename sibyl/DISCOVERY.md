@@ -551,3 +551,64 @@ Selection:
   pools rather than replayed.
 
 Tests: `tests/test_sibyl_lanes.py`.
+
+## 2026-10-03 — Part 6: measuring what Sibyl read, what its research added, and what it got wrong
+
+Evidence record:
+
+- Every tool result a trial saw is a `sibyl_evidence` row: run, question,
+  trial, step, call, tool, query or URL, search lane, retrieval time, HTTP
+  status, ok, SHA-256, the text shown, and a document's pre-extraction text
+  capped at 40,000 characters.
+- Rows are built on the trial and written on the main thread, as the
+  `llm_calls` rows are.
+- It is third-party text, so `build_release_db` drops it from the public
+  copy. A test holds that nothing in `pythia/api` or `web/src` reads it.
+- Stage health reports its rows and characters for the run and in total.
+
+Variant scores (`sibyl/score_variants.py`):
+
+- `__ext_sibyl_raw` (the trials' pool, floored as the published vector is) and
+  `__ext_sibyl_ref` (the reference) are scored by month into `scores`, through
+  the `score_baselines` write path.
+- The FL/TC two-part scores go to `sibyl_variant_scores`. "No record" is read
+  as a month the resolver reached for another question of the class and not
+  this one. That is a proxy, and it is labelled as one.
+- The pool weight is chosen from {0.25, 0.5, 0.75} by log score once 20
+  questions carry both scores. It is shrunk toward 0.5 by a 20-question prior,
+  so at exactly 20 questions it cannot leave 0.5. `SIBYL_REFERENCE_WEIGHT_MODE`
+  is `fitted` by default; backtest always uses the fixed weight.
+
+Post-mortems (`sibyl/postmortem.py`):
+
+- A note on each newly resolved question.
+- Per class, from 8 notes, a lessons version. A lesson needs 3 cited cases and
+  may name no country or year. Kept lessons are capped at 6,000 characters.
+- $5 a month, medium effort.
+- Lessons and up to 4 analogue notes are shown only in the track-record arm,
+  never in backtest.
+
+Advice:
+
+- Findings report selected questions and controls apart.
+- FL/TC get no zero-gap instruction; the two-part scores measure that instead.
+
+Process measures on `sibyl_runs`: resolver slot done, documents per trial,
+dated figures in the ledger, forecasts at the floor, and mean month-1 JSD of
+the raw pool from the reference.
+
+API and page:
+
+- `sibyl_comparison.variants`: Sibyl against its reference, the 12-month
+  conflictology and its raw pool, and raw against reference, each split by
+  selection pass.
+- The question view overlays the reference on each month's vector.
+- The run panel shows the process measures.
+
+Not done:
+
+- No accuracy is measured in backtest.
+- No threshold was lowered: on today's data no weight is fitted and no lesson
+  can exist.
+
+Tests: `tests/test_sibyl_measurement.py`, `tests/test_sibyl_postmortem.py`.

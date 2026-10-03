@@ -417,3 +417,35 @@ def test_run_without_any_advice_stores_no_arm(tmp_path, monkeypatch):
         ).fetchone()[0] is None
     finally:
         con.close()
+
+
+# --- Oct 2026, Part 6: FL/TC zero line and the control split ------------------
+
+
+def _zero_heavy(hazard: str, qid: str, selection_pass: str = "fill") -> adv.SibylRecord:
+    return adv.SibylRecord(
+        question_id=qid, hazard_code=hazard, metric="PA" if hazard != "ACE" else "FATALITIES",
+        quantiles={0.1: 1.0, 0.5: 100.0, 0.9: 1000.0, 0.99: 5000.0},
+        outcomes=[0.0] * 6, zero_mass=0.05, selection_pass=selection_pass,
+    )
+
+
+def test_flood_and_cyclone_get_no_zero_gap_line():
+    recs = [_zero_heavy("FL", f"FL{i}") for i in range(25)]
+    diag = adv.diagnose(recs)
+    assert diag["zero_gap"].value is None
+    assert "probability on zero" not in adv.build_advice_text(diag, 25)
+    # The same record under conflict does carry it.
+    recs = [_zero_heavy("ACE", f"A{i}") for i in range(25)]
+    assert "probability on zero" in adv.build_advice_text(adv.diagnose(recs), 25)
+
+
+def test_findings_report_selected_and_control_apart():
+    recs = [_zero_heavy("ACE", f"A{i}") for i in range(6)]
+    recs += [_zero_heavy("ACE", f"C{i}", selection_pass="control") for i in range(3)]
+    split = adv.by_selection(recs)
+    assert split["selected"]["n_questions"] == 6
+    assert split["control"]["n_questions"] == 3
+    assert split["control"]["diagnostics"]["zero_gap"]["n_questions"] == 3
+    rows = adv.build_rows(recs, {}, as_of_month="2026-10")
+    assert all("by_selection" in r["findings"] for r in rows)

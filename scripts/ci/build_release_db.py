@@ -96,6 +96,10 @@ EXCLUDED_TABLES = frozenset(
         "llm_batches",
         "llm_batch_requests",
         "ui_runs",
+        # Sibyl's evidence record (Oct 2026): the text of third-party pages
+        # and documents its trials read, kept for audit in the canonical DB
+        # and never republished. No API route reads it.
+        "sibyl_evidence",
     }
 )
 

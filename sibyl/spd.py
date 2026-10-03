@@ -431,9 +431,12 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             run_hard_cap_usd, budget_capped, run_cost_usd, opus_cost_usd,
             brave_cost_usd, n_selected, n_forecast, n_skipped, config_json,
             created_at, is_test, time_capped, n_search_calls,
-            n_search_failed, n_breaker_trips, n_docs_read, extraction_cost_usd
+            n_search_failed, n_breaker_trips, n_docs_read, extraction_cost_usd,
+            share_resolver_done, docs_per_trial, share_ledger_dated_figure,
+            share_forecasts_at_floor, mean_jsd_from_reference,
+            reference_weight, reference_weight_source
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?)
+                  CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             record["sibyl_run_id"],
@@ -459,5 +462,12 @@ def persist_sibyl_run(con: Any, record: Dict[str, Any]) -> None:
             record.get("n_breaker_trips"),
             record.get("n_docs_read"),
             record.get("extraction_cost_usd", 0.0),
+            record.get("share_resolver_done"),
+            record.get("docs_per_trial"),
+            record.get("share_ledger_dated_figure"),
+            record.get("share_forecasts_at_floor"),
+            record.get("mean_jsd_from_reference"),
+            record.get("reference_weight"),
+            record.get("reference_weight_source"),
         ],
     )

@@ -40,6 +40,14 @@ router = APIRouter()
 from sibyl.config import STANDARD_MODEL_PREFERENCE as _STANDARD_MODEL_PREFERENCE
 
 
+#: How Sibyl researched, per run (sibyl/measure.py); never a score.
+PROCESS_MEASURES = (
+    "share_resolver_done", "docs_per_trial", "share_ledger_dated_figure",
+    "share_forecasts_at_floor", "mean_jsd_from_reference", "reference_weight",
+    "reference_weight_source",
+)
+
+
 def _maybe_json(raw: Any) -> Any:
     if raw is None or raw == "":
         return None
@@ -132,6 +140,9 @@ def sibyl_summary(
     run["config"] = _maybe_json(run.pop("config_json", None))
     # Pre-Oct-2026 rows: the column is absent, and absence is "not capped".
     run.setdefault("time_capped", False)
+    # Process measures (Oct 2026): NULL on earlier runs, absent on older DBs.
+    for key in PROCESS_MEASURES:
+        run.setdefault(key, None)
 
     questions: List[Dict[str, Any]] = []
     if _table_exists(con, "sibyl_forecasts"):
@@ -323,6 +334,12 @@ def sibyl_question_detail(
         ("trials_json", "trials"),
         ("bucket_probs_json", "bucket_probs"),
         ("leakage_json", "leakage"),
+        # Oct 2026: the reference, the raw pool and the published vectors by
+        # month (month 1 and 6 overlay), and the extra-trial measures.
+        ("reference_json", "reference"),
+        ("raw_by_month_json", "raw_by_month"),
+        ("final_by_month_json", "final_by_month"),
+        ("trial_checks_json", "trial_checks"),
     ):
         rec[dst_key] = _maybe_json(rec.pop(src_key, None))
 
@@ -337,7 +354,7 @@ def sibyl_question_detail(
             """,
             [question_id],
         )
-    )
+    ) if _table_exists(con, "questions") else []
     question = question_rows[0] if question_rows else None
 
     metric = str(rec.get("metric") or (question or {}).get("metric") or "")

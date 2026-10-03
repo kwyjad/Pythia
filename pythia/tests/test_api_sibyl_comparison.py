@@ -244,3 +244,52 @@ def test_a_forecast_without_evidence_is_left_out(api_env, tmp_path) -> None:
     body = client.get("/v1/performance/sibyl_comparison").json()
     assert {p["question_id"] for p in body["pairs"]} == {"Q1"}
     assert len(body["pairs"]) == 6
+
+
+def test_variants_are_empty_on_a_db_without_the_new_columns(api_env) -> None:
+    body = api_env(True).get("/v1/performance/sibyl_comparison").json()
+    assert body["variants"] == {}
+    assert len(body["pairs"]) == 12  # the head-to-head is untouched
+
+
+def test_variants_pair_sibyl_with_its_reference_and_split_by_selection_pass(
+    api_env, tmp_path
+) -> None:
+    """Oct 2026: Sibyl against __ext_sibyl_ref, __ext_conflictology12 and its
+    raw pool, paired on (question, horizon, score_type), split by pass."""
+
+    client = api_env(True)
+    db = next(tmp_path.glob("api_True.duckdb"))
+    con = duckdb.connect(str(db))
+    con.execute("ALTER TABLE sibyl_forecasts ADD COLUMN run_id TEXT")
+    con.execute("ALTER TABLE sibyl_forecasts ADD COLUMN status TEXT")
+    con.execute("ALTER TABLE sibyl_forecasts ADD COLUMN selection_pass TEXT")
+    con.execute("ALTER TABLE sibyl_forecasts ADD COLUMN evidence_ok BOOLEAN")
+    con.execute(
+        "UPDATE sibyl_forecasts SET run_id = 'run1', status = 'ok', evidence_ok = TRUE, "
+        "selection_pass = CASE question_id WHEN 'Q1' THEN 'floor' ELSE 'control' END"
+    )
+    rows = []
+    for q, metric in [("Q1", "FATALITIES"), ("Q2", "PA")]:
+        for hz in (1, 2):
+            for st, base in [("brier", 0.40), ("log", 0.90), ("crps", 0.20)]:
+                rows.append((q, hz, metric, st, "__ext_sibyl_ref", base + 0.02, None, False))
+                rows.append((q, hz, metric, st, "__ext_sibyl_raw", base - 0.10, None, False))
+    rows.append(("Q1", 1, "FATALITIES", "brier", "__ext_conflictology12", 0.50, None, False))
+    con.executemany("INSERT INTO scores VALUES (?,?,?,?,?,?,?,?)", rows)
+    con.close()
+    _app_mod._READ_CON = None
+
+    v = client.get("/v1/performance/sibyl_comparison").json()["variants"]
+    ref = v["vs_sibyl_ref"]
+    assert ref["n_questions"] == 2
+    # sibyl = base - 0.05, ref = base + 0.02: Sibyl better by 0.07.
+    assert ref["aggregate"]["spd"]["brier"]["mean_delta"] == pytest.approx(-0.07)
+    assert set(ref["by_selection_pass"]) == {"floor", "control"}
+    assert ref["by_selection_pass"]["control"]["spd"]["brier"]["n_questions"] == 1
+    c12 = v["vs_conflictology12"]
+    assert c12["n_questions"] == 1
+    assert c12["aggregate"]["spd"]["brier"]["mean_delta"] == pytest.approx(0.35 - 0.50)
+    raw = v["raw_vs_sibyl_ref"]
+    assert raw["aggregate"]["spd"]["brier"]["mean_delta"] == pytest.approx(-0.12)
+    assert v["vs_raw"]["aggregate"]["spd"]["log"]["mean_delta"] == pytest.approx(0.05)

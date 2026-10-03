@@ -70,6 +70,8 @@ from sibyl import tools as sibyl_tools
 from sibyl.cost import CostTracker
 from sibyl.evidence import backfill_evidence_ok
 from sibyl.leakage import LeakageStats
+from sibyl.measure import process_measures, reference_weight, write_evidence
+from sibyl.postmortem import lessons_block_for
 from sibyl.trials import extra_trials_rule, month_median, outlier_indices, run_trial_batch
 from sibyl.select_questions import (
     SibylQuestion,
@@ -123,6 +125,11 @@ class QuestionOutcome:
     # measures behind the extra-trial and outlier decisions.
     extra_trials_rule: Optional[str] = None
     trial_checks: Dict[str, Any] = field(default_factory=dict)
+    # For the process measures (sibyl/measure.py): the written vectors by
+    # month, and the raw pool's and the reference's month-1 vectors.
+    final_by_month: Dict[int, List[float]] = field(default_factory=dict)
+    raw_month1: Optional[List[float]] = None
+    reference_month1: Optional[List[float]] = None
 
 
 def _write_log(**kw: Any) -> None:
@@ -190,8 +197,14 @@ def process_question(
     sibyl_run_id: str,
     tracker: CostTracker,
     model_call: Any = None,
+    reference_weight: Optional[float] = None,
 ) -> QuestionOutcome:
-    """Forecast one question end-to-end. Returns the outcome (never raises)."""
+    """Forecast one question end-to-end. Returns the outcome (never raises).
+
+    *reference_weight* is the reference's share of the published pool
+    (``sibyl.measure.reference_weight``, read once per run); None means
+    ``SIBYL_REFERENCE_WEIGHT``.
+    """
     outcome = QuestionOutcome(question=question, status="failed")
     as_of = resolve_as_of(question)
     forecast_keys = _forecast_month_keys(question)
@@ -214,12 +227,17 @@ def process_question(
     # advice for the class -> no arm and no section; otherwise the question's
     # arm (hash of "sibyl:" + question_id) decides whether the prompt shows it.
     advice = load_advice(question.hazard_code, question.metric, as_of, con=con)
+    # Lessons and notes on similar past questions (sibyl/postmortem.py) ride
+    # with the advice: shown only in the track-record arm, never in backtest.
+    lessons_block = lessons_block_for(con, question, as_of)
     arm: Optional[str] = None
     track_record = ""
-    if advice is not None:
+    lessons = ""
+    if advice is not None or lessons_block:
         arm = advice_arm(question.question_id, ADVICE_EXPERIMENT_SHARE)
         if arm == "advice":
-            track_record = advice.text
+            track_record = advice.text if advice is not None else ""
+            lessons = lessons_block
 
     is_control = question.is_control
 
@@ -236,6 +254,7 @@ def process_question(
             model_call=model_call,
             track_record=track_record,
             lane=lane,
+            lessons=lessons,
             log_sink=sink,
         )
 
@@ -334,7 +353,7 @@ def process_question(
         ]
         pool = pool_months(trial_months, metric)
         ref_vectors = reference.by_month if reference else None
-        weight = float(_cfg.REFERENCE_WEIGHT)
+        weight = float(_cfg.REFERENCE_WEIGHT if reference_weight is None else reference_weight)
         final = {
             m: apply_bucket_floor(v)
             for m, v in publish_vectors(pool.vectors, ref_vectors, weight).items()
@@ -359,6 +378,12 @@ def process_question(
         else None
     )
     outcome.js_vs_standard = track_divergence(final, standard)
+    outcome.final_by_month = {int(m): list(v) for m, v in final.items()}
+    outcome.raw_month1 = list(pool.vectors.get(1) or []) or None
+    outcome.reference_month1 = (
+        list(reference.by_month.get(1) or []) or None
+        if reference is not None and reference.by_month else None
+    )
     outcome.js_inter_trial = inter_trial_divergence_vectors(trial_vectors)
 
     # Legacy views for older readers: the raw month-1 quantiles at the old
@@ -430,7 +455,7 @@ def process_question(
             "selection_pass": question.selection_pass,
             "base_rate": base_rate_record,
             "advice_arm": arm,
-            "advice_as_of_month": advice.as_of_month if track_record else None,
+            "advice_as_of_month": advice.as_of_month if (track_record and advice) else None,
             "pooled_quantiles": spd_payload["pooled_quantiles"],
             "trials": [t.to_dict() for t in outcome.trials],
             "bucket_probs": list(final[1]),
@@ -558,6 +583,11 @@ def run_sibyl(
             sibyl_run_id, len(questions), tracker.run_hard_cap_usd, K, MODEL,
         )
 
+        weight, weight_source = reference_weight(con, date.today().strftime("%Y-%m"))
+        logger.info("sibyl.run: reference weight %.2f (%s)", weight, weight_source)
+        outcomes: List[QuestionOutcome] = []
+        n_evidence_rows = 0
+
         loop_started = clock()
         for question in questions:
             if time_capped or _runtime_cap_reached(loop_started, max_runtime_min, clock()):
@@ -600,7 +630,7 @@ def run_sibyl(
                 outcome = process_question(
                     con, question,
                     sibyl_run_id=sibyl_run_id, tracker=tracker,
-                    model_call=model_call,
+                    model_call=model_call, reference_weight=weight,
                 )
             except Exception as exc:  # noqa: BLE001 - one question must not sink the run
                 logger.exception(
@@ -614,6 +644,11 @@ def run_sibyl(
                 )
                 continue
 
+            outcomes.append(outcome)
+            n_evidence_rows += write_evidence(
+                con, sibyl_run_id=sibyl_run_id, question_id=question.question_id,
+                trials=outcome.trials, is_test=_is_test_mode(),
+            )
             if outcome.status == "ok":
                 n_forecast += 1
                 logger.info(
@@ -673,6 +708,10 @@ def run_sibyl(
             "n_forecast": n_forecast,
             "n_skipped": n_skipped,
             **tool_counts,
+            **process_measures(outcomes),
+            "reference_weight": weight,
+            "reference_weight_source": weight_source,
+            "n_evidence_rows": n_evidence_rows,
             "config": {
                 "N_QUESTIONS": n_questions,
                 "MIN_PER_HAZARD": MIN_PER_HAZARD,

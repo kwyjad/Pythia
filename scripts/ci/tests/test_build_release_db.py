@@ -17,6 +17,7 @@ makes the next overrun attributable instead of a guess.
 from __future__ import annotations
 
 import duckdb
+from pathlib import Path
 import pytest
 
 from scripts.ci import build_release_db as brd
@@ -292,7 +293,16 @@ class TestLicensedAndInternalTables:
             "acled_political_events", "emdat_pa", "facts_raw",
             "acaps_risk_radar", "acaps_daily_monitoring", "acaps_humanitarian_access",
             "llm_batches", "llm_batch_requests", "ui_runs",
+            # Third-party page text Sibyl's trials read (Oct 2026).
+            "sibyl_evidence",
         }
+
+    def test_nothing_served_reads_the_sibyl_evidence_table(self):
+        root = Path(__file__).resolve().parents[3]
+        for sub in ("pythia/api", "web/src"):
+            for path in (root / sub).rglob("*"):
+                if path.suffix in (".py", ".ts", ".tsx") and path.is_file():
+                    assert "sibyl_evidence" not in path.read_text(encoding="utf-8"), path
 
     def test_aggregates_and_the_inform_index_still_ship(self):
         for table in ("acled_monthly_fatalities", "acaps_inform_severity",

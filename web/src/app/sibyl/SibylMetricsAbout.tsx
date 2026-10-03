@@ -187,7 +187,10 @@ export default function SibylMetricsAbout() {
               picks Sibyl&apos;s questions each run: every hazard first takes its
               three most volatile affected/fatalities questions, then the
               remaining slots go to the most volatile questions left, at most ten
-              per hazard.
+              per hazard (three for flood and cyclone). Five further slots are
+              controls: questions with no regime-change flag, drawn at random,
+              so Sibyl&apos;s record can show whether picking by the flag finds
+              the questions where research helps.
             </>
           }
           plain={
@@ -211,6 +214,42 @@ export default function SibylMetricsAbout() {
           }
         />
       </div>
+
+      <section className="rounded-lg border border-fred-secondary bg-fred-surface p-4">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-fred-text">
+          Reference, raw pool and how a run researched
+        </h2>
+        <div className="mt-2 space-y-2 text-sm leading-relaxed text-fred-text">
+          <p>
+            Sibyl&apos;s published forecast mixes two things:{" "}
+            <strong>its reference</strong>, a prior built from the question&apos;s
+            own history, and <strong>the raw pool</strong> of its research
+            trials. The mix is <Formula>w × reference + (1 − w) × raw</Formula>.
+            Both parts are scored on their own against the same outcomes, so the
+            Performance page can say whether the research added anything to the
+            reference. Once twenty questions carry both scores,{" "}
+            <Formula>w</Formula> is chosen from 0.25, 0.5 and 0.75 by log score,
+            pulled toward 0.5 as if twenty more questions had favoured it; the
+            weight in force is shown on each run.
+          </p>
+          <p>
+            For flood and cyclone, the zero bucket means &ldquo;zero, or no
+            record&rdquo;. Their scores are split in two: whether a record
+            exists at all, and, where one does, how well the rest of the
+            distribution placed it.
+          </p>
+          <p>
+            The run panel&apos;s <strong>process measures</strong> describe how
+            Sibyl went about the research: how often a trial found how the
+            question resolves, how many documents it read, how much of its
+            evidence carried a date and a figure, how many forecasts hit the
+            lowest probability Sibyl allows, and how far the trials moved from
+            the reference. They are <strong>not scores</strong>: a run can read
+            many documents and still be wrong. They exist to show when the way
+            Sibyl works has changed.
+          </p>
+        </div>
+      </section>
     </div>
   );
 }

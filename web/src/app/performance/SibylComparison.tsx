@@ -9,6 +9,7 @@ import { formatModelName } from "../../lib/model_names";
 import type {
   SibylComparisonPair,
   SibylComparisonResponse,
+  SibylVariantComparison,
   SibylComparisonStat,
 } from "../../lib/types";
 
@@ -332,6 +333,70 @@ const Legend = () => (
 );
 
 // ---------------------------------------------------------------------------
+// Against Sibyl's own reference, the 12-month conflictology and the raw pool
+// ---------------------------------------------------------------------------
+const VARIANT_LABELS: Record<string, string> = {
+  vs_sibyl_ref: "Sibyl vs its reference",
+  vs_conflictology12: "Sibyl vs 12-month conflictology",
+  vs_raw: "Sibyl vs its raw pool",
+  raw_vs_sibyl_ref: "Raw pool vs reference",
+};
+
+export const SibylVariantsTable = ({
+  variants,
+}: {
+  variants: Record<string, SibylVariantComparison> | undefined;
+}) => {
+  const entries = Object.entries(variants ?? {}).filter(([, v]) => v.n_questions > 0);
+  if (!entries.length) return null;
+  const passes = Array.from(
+    new Set(entries.flatMap(([, v]) => Object.keys(v.by_selection_pass ?? {}))),
+  ).sort();
+  return (
+    <div className="overflow-x-auto rounded-lg border border-fred-secondary bg-fred-surface p-4 shadow-fredCard">
+      <div className="mb-2 flex items-center gap-1 text-sm font-semibold text-fred-text">
+        What the research added
+        <InfoTooltip text="Mean Brier difference (left minus right) on the same questions and months. Negative (green) means the left side did better. Split by how each question was chosen: floor, fill, or a no-flag control." />
+      </div>
+      <table className="min-w-full text-xs">
+        <thead>
+          <tr className="text-fred-muted">
+            <th className="px-2 py-1 text-left">Comparison</th>
+            <th className="px-2 py-1 text-right">Questions</th>
+            <th className="px-2 py-1 text-right">Mean Δ Brier</th>
+            {passes.map((p) => (
+              <th key={p} className="px-2 py-1 text-right">Δ {p}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map(([key, v]) => {
+            const b = v.aggregate.spd?.brier as SibylComparisonStat | undefined;
+            return (
+              <tr key={key} className="border-t border-fred-secondary/40">
+                <td className="px-2 py-1 text-left text-fred-text">{VARIANT_LABELS[key] ?? key}</td>
+                <td className="px-2 py-1 text-right">{v.n_questions}</td>
+                <td className={`px-2 py-1 text-right ${deltaColor(b?.mean_delta)}`}>
+                  {fmt4(b?.mean_delta)}
+                </td>
+                {passes.map((p) => {
+                  const pb = v.by_selection_pass?.[p]?.spd?.brier as SibylComparisonStat | undefined;
+                  return (
+                    <td key={p} className={`px-2 py-1 text-right ${deltaColor(pb?.mean_delta)}`}>
+                      {pb ? `${fmt4(pb.mean_delta)} (${pb.n_questions})` : "—"}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
 // Main section
 // ---------------------------------------------------------------------------
 export default function SibylComparison({ data: initial, includeTest }: Props) {
@@ -469,6 +534,8 @@ export default function SibylComparison({ data: initial, includeTest }: Props) {
                   }
                 />
               </div>
+
+              <SibylVariantsTable variants={data.variants} />
 
               <Legend />
 

@@ -38,7 +38,7 @@ import json
 import logging
 from pathlib import Path
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date
 from typing import Any, Callable, Dict, List, Optional
 
 from sibyl.base_rates import BaseRate
@@ -341,11 +341,6 @@ class TrialResult:
     role: str = "production"
     # Set by sibyl.run when the outlier guard leaves the trial out of the pool.
     outlier_dropped: bool = False
-    # The resolver plan slot's status at the end of the trial (a process
-    # measure), and one row per tool result for sibyl_evidence. The rows are
-    # written by sibyl.run on the main thread and never go to trials_json.
-    resolver_status: Optional[str] = None
-    evidence_rows: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -389,7 +384,6 @@ class TrialResult:
             "lane": self.lane,
             "role": self.role,
             "outlier_dropped": self.outlier_dropped,
-            "resolver_status": self.resolver_status,
         }
 
 
@@ -437,7 +431,6 @@ def build_step_prompt(
     feedback: str = "",
     return_segments: bool = False,
     track_record: str = "",
-    lessons: str = "",
 ):
     """Build a step's prompt as ``(text, is_cache_breakpoint)`` segments.
 
@@ -469,9 +462,7 @@ def build_step_prompt(
         month_6=(forecast_months[min(5, len(forecast_months) - 1)] if forecast_months else "month 6"),
         zero_note=_zero_note(question),
         base_rate_block=base_rate.prompt_text,
-        # The lessons block (sibyl/postmortem.py) comes pre-rendered with its
-        # own heading, and is '' when there is nothing to show.
-        track_record_block=render_track_record(track_record) + (lessons or ""),
+        track_record_block=render_track_record(track_record),
         perspective=perspective,
         start_belief_json=json.dumps(start_belief.to_dict(), indent=2),
         step=step,
@@ -570,44 +561,6 @@ def _execute_tool(call, as_of: date, *, question: SibylQuestion, terms: List[str
     raise ValueError(f"not a tool action: {call.action}")
 
 
-def evidence_row(
-    tool_result: ToolResult,
-    tcall: Any,
-    *,
-    step: int,
-    call_index: int,
-    retrieved_at: datetime,
-) -> Dict[str, Any]:
-    """One ``sibyl_evidence`` row for a tool result (without run/question ids).
-
-    ``shown_text`` is what the model saw (for a document, the extraction or
-    the first characters); ``doc_text`` is the document before extraction,
-    capped at SIBYL_EVIDENCE_DOC_MAX_CHARS. The SHA-256 is of the document's
-    full text when there is one, else of the shown text, so two trials that
-    read the same page carry the same hash.
-    """
-    opts = getattr(tcall, "options", {}) or {}
-    doc = tool_result.doc_text or None
-    basis = doc if doc is not None else (tool_result.text or "")
-    lane = None
-    if tcall.action == "brave_search":
-        lane = str(opts.get("lane") or "news")
-    return {
-        "step": int(step),
-        "call_index": int(call_index),
-        "tool": str(tcall.action),
-        "target": str(tcall.action_input),
-        "lane": lane,
-        "retrieved_at": retrieved_at,
-        "http_status": tool_result.status_code,
-        "ok": bool(tool_result.ok),
-        "sha256": hashlib.sha256(basis.encode("utf-8", "replace")).hexdigest(),
-        "shown_text": tool_result.text or "",
-        "doc_text": (doc[: _cfg.EVIDENCE_DOC_MAX_CHARS] if doc is not None else None),
-        "doc_chars": (len(doc) if doc is not None else None),
-    }
-
-
 def run_trial(
     question: SibylQuestion,
     base_rate: BaseRate,
@@ -623,7 +576,6 @@ def run_trial(
     extraction_call: Optional[Callable[[str, str], tuple[str, Dict[str, Any], str]]] = None,
     lane: Optional[str] = None,
     log_sink: Optional[List[Dict[str, Any]]] = None,
-    lessons: str = "",
 ) -> TrialResult:
     """Run one independent agentic trial for *question*.
 
@@ -682,7 +634,6 @@ def run_trial(
                 feedback=parse_feedback,
                 return_segments=True,
                 track_record=track_record,
-                lessons=lessons,
             )
             prompt = "".join(text for text, _ in segments)
             # The injectable test seam takes a plain prompt string; the
@@ -782,7 +733,6 @@ def run_trial(
 
         outputs: List[ToolOutput] = []
         for i, tcall in enumerate(decision.calls):
-            retrieved_at = datetime.now(timezone.utc).replace(tzinfo=None)
             tool_result = _execute_tool(tcall, as_of, question=question, terms=terms)
             if tool_result.tool == "fetch_url" and tool_result.ok and tool_result.doc_text:
                 req = str((tcall.options or {}).get("extraction_request") or "")
@@ -813,10 +763,6 @@ def run_trial(
                 )
                 tool_result.text = f"Content of {tcall.action_input} {note}:\n{ex.text}"
             call_ok = tool_result.ok
-            result.evidence_rows.append(evidence_row(
-                tool_result, tcall, step=step, call_index=i,
-                retrieved_at=retrieved_at,
-            ))
             if i == 0:
                 record.tool_ok = call_ok
             record.calls.append({
@@ -868,7 +814,6 @@ def run_trial(
         ))
 
     result.ledger = ledger.to_list()
-    result.resolver_status = (belief.plan.get("resolver") or {}).get("status")
     result.n_transcript_stubbed = transcript.n_stubbed
     # A trial that ran out of steps without submitting still counts: the
     # belief state was updated every step, so the latest quantiles stand.

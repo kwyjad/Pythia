@@ -74,6 +74,8 @@ BOOTSTRAP_DRAWS = 2000
 BOOTSTRAP_SEED = 20261002
 INTERVAL = (0.05, 0.95)  # a 90% interval
 ARM_MIN_QUESTIONS = 10
+#: Hazards whose zero bucket is "zero or no record": no zero-gap instruction.
+ZERO_GAP_EXCLUDED = frozenset({"FL", "TC"})
 POOLED = "*"
 
 #: Calibrated values each diagnostic is tested against.
@@ -115,6 +117,8 @@ class SibylRecord:
     month_quantiles: Dict[int, Dict[float, float]] = field(default_factory=dict)
     month_zero_mass: Dict[int, float] = field(default_factory=dict)
     outcome_horizons: List[Optional[int]] = field(default_factory=list)
+    # 'floor' | 'fill' | 'control' (Oct 2026); controls are reported apart.
+    selection_pass: Optional[str] = None
 
     def per_outcome(self) -> List[Tuple[float, Dict[float, float], Optional[float]]]:
         """(outcome, quantiles for its month, zero mass for its month)."""
@@ -235,7 +239,11 @@ def diagnose(records: Sequence[SibylRecord]) -> Dict[str, Stat]:
         if all(a[2] is not None for a in qs):
             bias.append((sum(math.log1p(max(y, 0.0)) - math.log1p(max(q50, 0.0))
                              for y, _, q50, _, _, _ in qs), m))
-        if all(a[5] is not None for a in qs):
+        # FL/TC: the zero bucket means "zero or no record", and PA leaves a
+        # month without a record unresolved, so the zero share of resolved
+        # months says nothing about it. Their two-part scores
+        # (sibyl/score_variants.py) measure it instead; no zero line here.
+        if r.hazard_code not in ZERO_GAP_EXCLUDED and all(a[5] is not None for a in qs):
             n0 = sum(y == 0 for y, *_ in qs)
             mass = sum(float(z) for *_, z in qs)
             zero_gap.append((n0 - mass, m))
@@ -484,13 +492,13 @@ def load_records(con, as_of_month: Optional[str] = None) -> List[SibylRecord]:
         f"""
         SELECT question_id, hazard_code, metric, pooled_quantiles_json,
                bucket_probs_json, trials_json, base_rate_json, advice_arm,
-               sibyl_run_id, run_id, raw_by_month_json
+               sibyl_run_id, run_id, raw_by_month_json, selection_pass
         FROM (
             SELECT f.question_id, upper(f.hazard_code) AS hazard_code,
                    upper(f.metric) AS metric, f.pooled_quantiles_json,
                    f.bucket_probs_json, f.trials_json, {opt('base_rate_json')},
                    {opt('advice_arm')}, f.sibyl_run_id, f.run_id,
-                   {opt('raw_by_month_json')},
+                   {opt('raw_by_month_json')}, {opt('selection_pass')},
                    ROW_NUMBER() OVER (
                        PARTITION BY f.question_id
                        ORDER BY {run_order}f.created_at DESC NULLS LAST, f.sibyl_run_id DESC
@@ -524,7 +532,7 @@ def load_records(con, as_of_month: Optional[str] = None) -> List[SibylRecord]:
         horizons.setdefault(str(qid), []).append(int(h) if h is not None else None)
 
     records: List[SibylRecord] = []
-    for (qid, hz, metric, pq, bp, trials, base, arm, srid, rid, raw_bm) in rows:
+    for (qid, hz, metric, pq, bp, trials, base, arm, srid, rid, raw_bm, sel) in rows:
         ys = outcomes.get(str(qid))
         if not ys:
             continue
@@ -574,6 +582,7 @@ def load_records(con, as_of_month: Optional[str] = None) -> List[SibylRecord]:
             advice_arm=arm, sibyl_run_id=srid, forecast_run_id=rid,
             month_quantiles=month_q, month_zero_mass=month_z,
             outcome_horizons=horizons.get(str(qid), []),
+            selection_pass=sel,
         ))
     return records
 
@@ -625,6 +634,19 @@ def paired_skill(scores: Dict[str, Dict[str, Dict[str, float]]]) -> Dict[str, An
     return out
 
 
+def by_selection(records: Sequence[SibylRecord]) -> Dict[str, Any]:
+    """Diagnostics for selected questions and for controls, each with its count."""
+    out: Dict[str, Any] = {}
+    for name, keep in (("selected", lambda r: r.selection_pass != "control"),
+                       ("control", lambda r: r.selection_pass == "control")):
+        sub = [r for r in records if keep(r)]
+        out[name] = {
+            "n_questions": len(sub),
+            "diagnostics": {k: v.to_dict() for k, v in diagnose(sub).items()} if sub else {},
+        }
+    return out
+
+
 def _findings(records: Sequence[SibylRecord], scores) -> Tuple[Dict[str, Stat], Dict[str, Any]]:
     diag = diagnose(records)
     sub = {r.question_id: scores[r.question_id] for r in records if r.question_id in scores}
@@ -638,6 +660,10 @@ def _findings(records: Sequence[SibylRecord], scores) -> Tuple[Dict[str, Stat], 
         "paired_skill": paired_skill(sub),
         "n_resolved_months": int(sum(len(r.outcomes) for r in records)),
         "n_with_base_rate": int(sum(r.base_median is not None for r in records)),
+        # Selected questions and the no-flag controls, measured apart: the
+        # controls are drawn to say whether selection by RC flag picks the
+        # questions where research helps, so they never blur into the rest.
+        "by_selection": by_selection(records),
         "bootstrap": {"draws": BOOTSTRAP_DRAWS, "seed": BOOTSTRAP_SEED, "interval": list(INTERVAL)},
     }
     return diag, findings

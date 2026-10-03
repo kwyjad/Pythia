@@ -238,6 +238,46 @@ def _write_scores(
     )
 
 
+def ensure_baseline_tables(conn) -> None:
+    """``scores`` (defensive) and the ``baseline_scored_forecasts`` audit table.
+
+    Shared with ``sibyl.score_variants``, which writes through the same path.
+    """
+    # Defensive — normally created by compute_scores in the same run.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scores (
+          question_id TEXT,
+          horizon_m INTEGER,
+          metric TEXT,
+          score_type TEXT,
+          model_name TEXT,
+          value DOUBLE,
+          run_id TEXT,
+          created_at TIMESTAMP DEFAULT now(),
+          is_test BOOLEAN DEFAULT FALSE
+        )
+        """
+    )
+    # Audit trail: the reference SPD actually scored, per horizon.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS baseline_scored_forecasts (
+            question_id TEXT,
+            horizon_m INTEGER,
+            model_name TEXT,
+            metric TEXT,
+            spd_json TEXT,
+            baserate_source TEXT,
+            resolved_value DOUBLE,
+            resolved_bucket INTEGER,
+            created_at TIMESTAMP DEFAULT now(),
+            PRIMARY KEY (question_id, horizon_m, model_name)
+        )
+        """
+    )
+
+
 def score_baselines(db_url: str) -> Dict[str, int]:
     """Score __ext_climatology and __ext_uniform for every resolved horizon.
 
@@ -263,39 +303,7 @@ def score_baselines(db_url: str) -> Dict[str, int]:
         "skipped_bad_resolution": 0,
     }
     try:
-        # Defensive — normally created by compute_scores in the same run.
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS scores (
-              question_id TEXT,
-              horizon_m INTEGER,
-              metric TEXT,
-              score_type TEXT,
-              model_name TEXT,
-              value DOUBLE,
-              run_id TEXT,
-              created_at TIMESTAMP DEFAULT now(),
-              is_test BOOLEAN DEFAULT FALSE
-            )
-            """
-        )
-        # Audit trail: the reference SPD actually scored, per horizon.
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS baseline_scored_forecasts (
-                question_id TEXT,
-                horizon_m INTEGER,
-                model_name TEXT,
-                metric TEXT,
-                spd_json TEXT,
-                baserate_source TEXT,
-                resolved_value DOUBLE,
-                resolved_bucket INTEGER,
-                created_at TIMESTAMP DEFAULT now(),
-                PRIMARY KEY (question_id, horizon_m, model_name)
-            )
-            """
-        )
+        ensure_baseline_tables(conn)
 
         for table in ("questions", "resolutions", "hs_runs"):
             if not _table_exists(conn, table):

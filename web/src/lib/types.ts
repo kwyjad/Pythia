@@ -395,6 +395,17 @@ export type SibylComparisonResponse = {
   aggregate: SibylComparisonAggregate;
   by_hazard_metric: SibylComparisonHazardMetricRow[];
   runs: SibylComparisonRunRow[];
+  // Oct 2026: Sibyl against its own reference, the 12-month conflictology
+  // and its raw pool; "sibyl_*" in each aggregate is the left series.
+  variants?: Record<string, SibylVariantComparison>;
+};
+
+export type SibylVariantComparison = {
+  left: string;
+  right: string;
+  n_questions: number;
+  aggregate: SibylComparisonAggregate;
+  by_selection_pass: Record<string, SibylComparisonAggregate>;
 };
 
 export type QuestionBundleResponse = {
@@ -457,6 +468,14 @@ export type SibylRun = {
   n_skipped?: number | null;
   created_at?: string | null;
   config?: Record<string, unknown> | null;
+  // Process measures (Oct 2026): how Sibyl researched, never a score.
+  share_resolver_done?: number | null;
+  docs_per_trial?: number | null;
+  share_ledger_dated_figure?: number | null;
+  share_forecasts_at_floor?: number | null;
+  mean_jsd_from_reference?: number | null;
+  reference_weight?: number | null;
+  reference_weight_source?: string | null;
 };
 
 export type SibylQuestionRow = {
@@ -531,6 +550,9 @@ export type SibylQuestionDetailResponse = {
     trials?: SibylTrial[] | null;
     bucket_probs?: number[] | null;
     leakage?: Record<string, unknown> | null;
+    // Oct 2026: Sibyl's reference and its published vectors by window month.
+    reference?: { source?: string; by_month?: Record<string, number[]> } | null;
+    final_by_month?: Record<string, number[]> | null;
   };
   question?: Record<string, unknown> | null;
   bucket_labels: string[];
