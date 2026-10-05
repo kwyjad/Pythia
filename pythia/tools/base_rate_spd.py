@@ -335,7 +335,7 @@ CONFLICT_FATALITIES_TABLE = "acled_monthly_fatalities"
 
 #: A month row is COMPLETE when it was written after the month ended. Until
 #: Sept 2026 ``acled_to_duckdb`` also wrote the month in progress, and the
-#: monthly ingest runs on the 28th while the forecast runs on the 1st, so the
+#: monthly ingest ran on the 28th while the forecast ran on the 1st, so the
 #: "last month" in the 1 August 2026 prompts was a row written on 15 July
 #: holding a median 28% of July's settled deaths (Afghanistan: 9 against 64),
 #: and on 1 September a row written on 28 August holding 75%. The writer now
@@ -346,11 +346,20 @@ ACLED_COMPLETE_MONTH_SQL = "updated_at >= CAST(month AS DATE) + INTERVAL 1 MONTH
 #: A month is USABLE at time t once this many days have passed since it
 #: ended. The level-and-volatility reference is scored months after the
 #: forecast, when every month before the window is complete, so without a
-#: calendar rule it would read a month the forecaster never saw. Fourteen
-#: days reproduces what the monthly cadence delivers: on the 1st the month
-#: that has just ended is not yet in the table (the ingest runs on the 28th),
-#: and a mid-month run already has the month before it.
-ACLED_SETTLE_DAYS = 14
+#: calendar rule it would read a month the forecaster never saw.
+#:
+#: Derived from the monthly cycle (since 2026-10-05): Resolver Update writes
+#: the month just ended on the 11th, ten days after it ended, and can finish
+#: late on the 11th (crons arrive hours late and the ingest takes up to six
+#: hours); the forecast runs on the 13th, twelve days after, and its
+#: ``forecasts_ensemble.created_at`` (``known_at``) can fall on the 13th to
+#: the 15th while batches complete. So the bound must be at least 11 (a
+#: forecast dated the 11th may have run before the ingest wrote the month)
+#: and at most 12 (a forecast on the 13th DID read it). 11 is the value.
+#: Under the old 28th/1st cycle the value was 14; for forecasts made on the
+#: 1st or the 15th the two values pick the same month, so references scored
+#: for those runs are unchanged (``test_settle_days_matches_the_11th_13th_cycle``).
+ACLED_SETTLE_DAYS = 11
 
 
 def acled_complete_month_clause(con, table: str = "acled_monthly_fatalities") -> str:

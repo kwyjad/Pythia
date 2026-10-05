@@ -4713,8 +4713,9 @@ class BundleBuilder:
     def _check_no_stale_partial_acled_month(self) -> None:
         """No ACLED month row is partial: written before its month ended.
 
-        The ingest runs on the 28th and the forecast on the 1st, so a row for
-        the month in progress was what the 1 August 2026 prompts read as "last
+        The ingest ran on the 28th and the forecast on the 1st (until the
+        2026-10-05 move to the 11th and 13th), so a row for the month in
+        progress was what the 1 August 2026 prompts read as "last
         month" (a median 28% of the settled count). ``acled_to_duckdb`` no
         longer writes the month in progress, and the readers skip a partial
         row, so one still in the table after its month ended means the writer

@@ -42,11 +42,17 @@ concurrency:
 
 on:
   schedule:
-    # Monthly production run at 00:00 UTC on the 1st (moved here from
-    # run_horizon_scanner.yml). Scheduled runs enter at stage hs_submit
-    # with empty inputs: pipeline_id is minted by the HS run, the canonical
-    # DB comes from discovery, and test_mode is false.
-    - cron: "0 0 1 * *"
+    # Monthly production run at 00:00 UTC on the 13th (moved from the 1st on
+    # 2026-10-05, owner decision; see CLAUDE.md). Two days after Resolver
+    # Update (the 11th), so the forecast reads a whole month just ended from
+    # ACLED (weekly releases cover a month's last days by the 10th), the
+    # CrisisWatch edition ICG publishes in the first days of the month, the
+    # NMME issue of the 8th, and calibration weights computed two days
+    # earlier. The question window is unchanged: a run on the 13th of month M
+    # forecasts M+1 to M+6. Scheduled runs enter at stage hs_submit with
+    # empty inputs: pipeline_id is minted by the HS run, the canonical DB
+    # comes from discovery, and test_mode is false.
+    - cron: "0 0 13 * *"
   workflow_dispatch:
     inputs:
       stage:
@@ -272,7 +278,7 @@ jobs:
       # CrisisWatch edition gate (Oct 2026). The scan should read the edition
       # horizon_scanner.crisiswatch.expected_edition names: the previous month
       # once ICG has normally published it (from the 10th), the month before
-      # that earlier, so on the 1st it expects M-2. The gate refreshes from the
+      # that earlier, so on the 13th it expects M-1. The gate refreshes from the
       # Wayback Machine and stores the edition; if the expected edition is still
       # absent it retries within its time cap and then lets the scan PROCEED,
       # with an ::error annotation naming the edition held. The debug bundle

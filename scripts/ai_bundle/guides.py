@@ -435,7 +435,7 @@ Before 30 Sept 2026 the ACLED writer stored the month in progress, so the
 1 August 2026 run read a July row written on 15 July (a median 28% of the
 settled count) and the 1 September run an August row written on 28 August.
 Reconstructed from the scheduled-ingest calendar (the 15th until 3 Aug 2026,
-the 28th since), because a rewritten row keeps no history; a manual ingest in
+the 28th until 5 Oct 2026, the 11th since), because a rewritten row keeps no history; a manual ingest in
 between is not seen. False for non-ACE questions (no ACLED trajectory in the
 prompt), null where the forecast date is unknown. Rollups and history are
 split on it: never pool a partial-input forecast with a complete one.

@@ -19,7 +19,7 @@ concurrency:
 # first with validation that rejects Cloudflare-challenged captures.
 #
 # ICG publishes the previous month's edition in the first days of each
-# month; the early-month cron burst plus --only-if-newer makes repeat
+# month; the daily early-month cron plus --only-if-newer makes repeat
 # runs idempotent no-ops. --max-age-days turns runs red when the on-disk
 # edition is more than two months stale, and --expect-edition-by-day
 # catches a single MISSED edition, which an age threshold cannot see. The
@@ -42,7 +42,13 @@ concurrency:
 # able to write to main is not worth it for a file nothing reads any more.
 "on":
   schedule:
-    - cron: "17 6 3,5,7,10 * *"
+    # Every day from the 1st to the 12th (was the 3rd/5th/7th/10th). Each run
+    # asks Save Page Now for the main page before reading it, so from now on
+    # the archive holds a capture for every early-month day and the
+    # publication-day table (scripts/ci/crisiswatch_publication_days.py) is
+    # measured rather than inferred. The 12th is the last chance before the
+    # forecast's edition gate on the 13th.
+    - cron: "17 6 1-12 * *"
   workflow_dispatch:
     inputs:
       force:
@@ -110,7 +116,7 @@ jobs:
             --source wayback \
             --only-if-newer \
             --max-age-days 60 \
-            --expect-edition-by-day 7 \
+            --expect-edition-by-day 9 \
             $FORCE_FLAG \
             --verbose
 

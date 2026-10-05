@@ -76,9 +76,11 @@ DEFAULT_STALENESS_THRESHOLD_DAYS = 45
 # kept for the benchmark scorer (pythia/tools/score_views.py), which needs the
 # vintage issued the month before a question's window, at lead = horizon.
 # A window starting in month W+1 is forecast by vintage W; its sixth month is
-# resolved and scored around the 28th of W+7, by which time about seven newer
-# vintages exist. So vintage W must still be the eighth newest then, and one
-# more is kept for a missed cycle. At two vintages (the old value) the lead-1
+# resolved and scored around the 11th of W+7 (the 28th of W+7 before the
+# 2026-10-05 move to the 11th/13th cycle; the count is the same), by which
+# time vintages W+1..W+6 exist and W+7's may already be out. So vintage W must
+# still be at most the eighth newest then, and one more is kept for a missed
+# cycle. At two vintages (the old value) the lead-1
 # vintage for a window was deleted before its second horizon could be scored.
 KEEP_VINTAGES_PER_SOURCE = 9
 

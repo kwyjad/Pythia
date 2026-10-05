@@ -90,18 +90,21 @@ def test_backfill_schedule_and_months_back_defaults() -> None:
 
     schedule = on_block.get("schedule", [])
     assert schedule, "Expected 'schedule' under 'on'"
-    assert any(item.get("cron") == "0 3 28 * *" for item in schedule if isinstance(item, dict))
+    assert any(item.get("cron") == "0 3 11 * *" for item in schedule if isinstance(item, dict))
 
 
 def test_backfill_ingests_before_the_monthly_forecast() -> None:
-    """Resolver Update must run late in the month, ahead of the forecast cron.
+    """Resolver Update must run ahead of the forecast cron, in the same month.
 
     This workflow is the ONLY refresh for the tier-0 resolution sources (ACLED
     monthly fatalities, IFRC, IDMC, FEWS NET / IPC); the weekly
     ingest-structured-data.yml run covers only supplementary fast-changing
     sources. While this ran on the 15th and the pipeline on the 1st, every
-    monthly forecast reasoned over core data ~17 days stale. Pin the ordering
-    so a future cron edit cannot silently reintroduce that gap.
+    monthly forecast reasoned over core data ~17 days stale. Since
+    2026-10-05 (owner decision) the ingest runs on the 11th, after ACLED's
+    weekly releases have covered the month just ended, and the forecast on
+    the 13th. Pin the ordering so a future cron edit cannot silently
+    reintroduce that gap.
     """
 
     def _crons(path: pathlib.Path) -> list[str]:
@@ -117,11 +120,23 @@ def test_backfill_ingests_before_the_monthly_forecast() -> None:
         ]
 
     ingest_days = {c.split()[2] for c in _crons(WF_BACKFILL)}
-    assert ingest_days == {"28"}, f"Resolver Update day-of-month drifted: {ingest_days}"
+    assert ingest_days == {"11"}, f"Resolver Update day-of-month drifted: {ingest_days}"
 
     pipeline = pathlib.Path(".github/workflows/pythia_pipeline_stage.yml")
     forecast_days = {c.split()[2] for c in _crons(pipeline) if c.split()[2] != "*"}
-    assert forecast_days == {"1"}, f"Forecast pipeline day-of-month drifted: {forecast_days}"
+    assert forecast_days == {"13"}, f"Forecast pipeline day-of-month drifted: {forecast_days}"
+    # Two days apart, ingest first, both in one month.
+    assert int(next(iter(ingest_days))) + 2 == int(next(iter(forecast_days)))
+
+    # The backcast never holds the DB group across either cron.
+    backcast = pathlib.Path(".github/workflows/haz_backcast.yml")
+    for cron in _crons(backcast):
+        days = cron.split()[2]
+        covered: set[int] = set()
+        for part in days.split(","):
+            lo, _, hi = part.partition("-")
+            covered |= set(range(int(lo), int(hi or lo) + 1))
+        assert not covered & {10, 11, 12}, f"backcast runs on a contested night: {cron}"
 
 
 def test_backfill_has_context_source_phases() -> None:
@@ -273,7 +288,7 @@ def test_db_concurrency_group_is_on_the_writing_job_not_the_gate() -> None:
     """At workflow level the gate job (which usually SKIPS) took the group's
     single pending slot before deciding anything, and a newer queued run
     cancels whatever is pending — a poller-dispatched stage or the
-    1st-of-month hs_submit cron itself."""
+    monthly hs_submit cron itself (the 13th)."""
     for path, job in ((WF_INGEST, "ingest"), (WF_BACKCAST, "backcast")):
         data = _load_yaml(path)
         assert "concurrency" not in data, f"{path}: concurrency must not be workflow-level"

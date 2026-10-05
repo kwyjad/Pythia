@@ -1280,7 +1280,9 @@ def test_the_workflow_is_not_in_the_canonical_db_concurrency_group():
 
 
 def test_the_workflow_avoids_the_days_the_monthly_chain_owns():
-    """Crons here arrive hours late and the 27th and 28th are contested."""
+    """Crons here arrive hours late; the 10th to the 13th belong to the
+    monthly ingest (the 11th), its resolutions chain and the forecast (the
+    13th), since the 2026-10-05 move from the 28th/1st cycle."""
 
     text = (
         spei.REPO_ROOT / ".github" / "workflows" / "spei3_refresh.yml"
@@ -1292,9 +1294,8 @@ def test_the_workflow_avoids_the_days_the_monthly_chain_owns():
     assert crons
     for cron in crons:
         day_of_month = cron.split()[2]
-        assert day_of_month not in ("27", "28")
-        assert "27" not in day_of_month.split(",")
-        assert "28" not in day_of_month.split(",")
+        for contested in ("10", "11", "12", "13"):
+            assert contested not in day_of_month.split(","), cron
 
 
 # ---------------------------------------------------------------------------

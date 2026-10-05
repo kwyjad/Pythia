@@ -1280,6 +1280,8 @@ class ACLEDClient:
         if raw_endpoint:
             raw_base = f"{raw_base.rstrip('/')}/{raw_endpoint.lstrip('/')}"
         self.base_url = raw_base.rstrip("/") or ACLED_API_BASE_URL
+        # Set by monthly_fatalities: the newest event date fetched.
+        self.latest_event_date = None
         self.timeout = int(cfg.get("timeout", timeout))
         self.max_retries = int(cfg.get("max_retries", max_retries))
         self.page_size = int(cfg.get("page_size", page_size))
@@ -1638,6 +1640,17 @@ class ACLEDClient:
                 columns=["iso3", "month", "fatalities", "source", "updated_at"],
             )
             return result
+
+        # The newest event the fetch holds, across every country and before
+        # any country filter: the writer (resolver/cli/acled_to_duckdb.py)
+        # holds back a month whose last day comes after it, because ACLED
+        # publishes weekly and a month whose final week is not yet released
+        # would be stored as complete with a fraction of its deaths.
+        try:
+            newest = frame["event_date"].max()
+            self.latest_event_date = None if pd.isna(newest) else pd.Timestamp(newest).normalize()
+        except Exception:  # pragma: no cover - diagnostics only
+            self.latest_event_date = None
 
         if "iso3" not in frame.columns:
             raise RuntimeError("ACLED monthly_fatalities expected an 'iso3' column")

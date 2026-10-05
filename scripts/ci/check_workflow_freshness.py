@@ -65,27 +65,30 @@ class Watched(NamedTuple):
 # watchdog cry wolf on every late tick, and a validator that cries wolf gets
 # switched off.
 WATCHED: tuple[Watched, ...] = (
-    Watched("Resolver Update", 35, "monthly, 28th"),
+    Watched("Resolver Update", 35, "monthly, 11th"),
     Watched("Pythia — Compute Resolutions", 35, "chained off Resolver Update"),
     Watched("Pythia — Compute SPD Scores", 35, "chained off Compute Resolutions"),
     Watched("Pythia — Compute Calibration Weights & Advice", 35, "chained off Compute SPD Scores"),
-    Watched("Pythia Pipeline Stage", 35, "monthly, 1st"),
+    Watched("Pythia Pipeline Stage", 35, "monthly, 13th"),
     Watched("Publish Latest Data (Release)", 35, "after Sibyl / after Calibration"),
     # The forecast chain's SOLE publish trigger. Publish alone cannot cover for
-    # it: the calibration chain also publishes on the 28th, so a Sibyl that
-    # failed on the 1st leaves Publish green all month with the forecasts
+    # it: the calibration chain also publishes after the 11th, so a Sibyl that
+    # failed on the 13th leaves Publish green all month with the forecasts
     # never released.
     Watched("Sibyl Deep Research", 35, "after HS Triage / after fc_collect_finalize"),
     Watched("Ingest Structured Data", 10, "weekly, Sunday"),
-    Watched("Hazard Backcast", 3, "nightly"),
-    Watched("Refresh CrisisWatch Data", 35, "monthly, days 3/5/7/10"),
+    # Nightly except the 10th-12th (the monthly ingest, its resolutions chain
+    # and the forecast on the 13th), so the ordinary gap from the 9th night
+    # to the 13th is four days; 5 leaves a day for a late tick.
+    Watched("Hazard Backcast", 5, "nightly, skipping the 10th-12th"),
+    Watched("Refresh CrisisWatch Data", 35, "monthly, daily 1st-12th"),
     # The SPEI-3 producer. Its silence costs the months the feed stops
     # extending, and it fails CLOSED — a run whose candidate misses a gate
     # goes red and leaves the committed CSV alone — so "the last SUCCESS"
     # is exactly the right thing to age here. 40 days, not 35: crons in this
-    # repo are delivered hours and sometimes a day late, and this one is on
-    # the 10th rather than the 28th.
-    Watched("SPEI-3 Feed Refresh", 40, "monthly, 10th"),
+    # repo are delivered hours and sometimes a day late, and this producer
+    # can legitimately go a month without a new upstream release.
+    Watched("SPEI-3 Feed Refresh", 40, "monthly, 8th"),
 )
 
 UNKNOWN = "unknown"

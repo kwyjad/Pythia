@@ -88,23 +88,32 @@ concurrency:
           - acled_auth
           - all
   schedule:
-    # Run at 03:00 UTC on the 28th of each month.
+    # Run at 03:00 UTC on the 11th of each month (moved from the 28th on
+    # 2026-10-05, owner decision; see CLAUDE.md "the 11th/13th schedule").
     #
-    # Deliberately just BEFORE the forecast pipeline's 1st-of-month cron
-    # (pythia_pipeline_stage.yml), not two weeks after it. This workflow is the
-    # only refresh for the tier-0 resolution sources (ACLED monthly fatalities,
-    # IFRC, IDMC, FEWS NET / IPC) — the weekly ingest-structured-data.yml run
-    # covers only the fast-changing supplementary sources. While this ran on the
-    # 15th, every monthly forecast reasoned over core data ~17 days stale (the
-    # 2026-08-01 run carried a 2026-07-15 ingest vintage).
+    # This workflow is the only refresh for the tier-0 resolution sources
+    # (ACLED monthly fatalities, IFRC, IDMC, FEWS NET / IPC); the weekly
+    # ingest-structured-data.yml run covers only the fast-changing
+    # supplementary sources. It must run BEFORE the forecast pipeline's
+    # cron (pythia_pipeline_stage.yml, the 13th), and late enough that the
+    # month just ended is complete in every upstream:
+    #   - ACLED publishes weekly, on Monday or Tuesday, covering Saturday to
+    #     Friday of the previous week, so a month's last days arrive between
+    #     the 4th and the 10th. On the 11th the month just ended is whole.
+    #     (resolver/cli/acled_to_duckdb.py also holds a month back if the
+    #     fetch's newest event predates that month's last day.)
+    #   - ICG publishes last month's CrisisWatch edition in the first days
+    #     of the month; Phase 4 refreshes it here.
+    #   - NMME is issued on the 8th.
+    # The resolutions -> scores -> calibration chain that hangs off this
+    # workflow then lands two days before the forecast that consumes its
+    # calibration weights. A month is first resolved about 11 days after it
+    # ends (it was 28 days under the 28th cadence).
     #
-    # The 28th also puts the resolutions -> scores -> calibration chain that
-    # hangs off this workflow immediately before the forecast that consumes its
-    # calibration weights. Cost of the move, accepted knowingly: each month's
-    # ground truth is resolved ~13 days later than under the 15th cadence.
-    #
-    # Do not move this back past the 1st without re-reading the above.
-    - cron: "0 3 28 * *"
+    # Do not move this past the 13th without re-reading the above, and do
+    # not move either cron without re-reading
+    # resolver/tests/test_ci_yaml_contains_idmc.py.
+    - cron: "0 3 11 * *"
 
 permissions:
   contents: read
@@ -122,8 +131,8 @@ jobs:
   # Same rationale as haz_backcast.yml and ingest-structured-data.yml: the
   # concurrency group serializes single runs and cannot see the multi-day
   # staged forecast pipeline, whose final canonical upload silently discards
-  # anything written to canonical while it was in flight. The 28th cron is
-  # normally weeks clear of the 1st-of-month pipeline, but this cron has been
+  # anything written to canonical while it was in flight. The 11th cron is
+  # normally two days clear of the 13th-of-month pipeline, but this cron has been
   # delivered 11h late and dropped for 44 days, and a hand-dispatched recovery
   # run is by definition off-schedule. This was the only canonical-DB writer
   # without the guard. It fails OPEN.
@@ -168,7 +177,7 @@ jobs:
     # sum past 240, and a job-timeout kill BEFORE the Phase 5 canonical upload
     # wastes the entire ingest — the job must always reach that upload.
     # Raised to the 360 cap on 2026-09-03 when the flood and cyclone machine
-    # steps went to 90 min each (the extraction budget the 28th can spend,
+    # steps went to 90 min each (the extraction budget the monthly run can spend,
     # up to 2,000 sequential calls at ~2.5 s, no longer fit in 60/75).
     timeout-minutes: 360
     env:
@@ -563,7 +572,7 @@ jobs:
           if [ "${ACLED_HISTORY_MODE}" = "1" ]; then
             # From 2018 to the end of the month BEFORE last: the month that
             # has just ended is only days old and would be stored as complete
-            # with a fraction of its reports; the monthly run on the 28th
+            # with a fraction of its reports; the monthly run on the 11th
             # writes it. No staged events file: the connector did not run.
             HIST_END="$(python -c "import datetime as d; t=d.date.today().replace(day=1); p=(t-d.timedelta(days=1)).replace(day=1); print((p-d.timedelta(days=1)).isoformat())")"
             echo "ACLED history window: ${ACLED_HISTORY_START} -> ${HIST_END}"
@@ -808,7 +817,7 @@ jobs:
       # country-month-hazard (detection + the impact ladder) into the haz_*
       # tables, then refreshes the base-rate tables the SPD prompt block
       # reads (forecaster/prompts.py::_load_haz_base_rate_block) — so the
-      # 1st-of-month forecast picks them up from this same DB artifact.
+      # forecast on the 13th picks them up from this same DB artifact.
       # SHADOW MODE: nothing here feeds compute_resolutions yet; the flip to
       # scoring is a separate deliberate change, gated on the acceptance
       # report this phase publishes into backfill-diagnostics.
