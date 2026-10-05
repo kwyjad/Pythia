@@ -949,6 +949,15 @@ def compute_resolutions(db_url: str, today: Optional[date] = None) -> None:
         # once per run on the first ACE/PA horizon.
         conflict_coverage = None
 
+        # A production question a same-epoch test scan re-pointed goes back
+        # to its production scan before anything is resolved from it.
+        try:
+            from pythia.tools.question_repairs import repair_questions_pointing_at_test_scans
+
+            repair_questions_pointing_at_test_scans(conn)
+        except Exception as exc:  # noqa: BLE001 - a repair must never stop resolution
+            LOGGER.warning("question provenance repair skipped: %s", exc)
+
         # Rebuild the source_coverage table from the metric source tables so
         # the gates below (and any dashboard consumer) see current coverage.
         _refresh_source_coverage(conn)

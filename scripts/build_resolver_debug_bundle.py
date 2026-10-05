@@ -3015,11 +3015,23 @@ class BundleBuilder:
         missing = sorted(k for k in window if k not in held)
         if not missing:
             return self._check(name, "PASS", 12, 12, "all twelve editions held")
-        labels = [f"{a}-{b:02d}" for a, b in missing]
+        from horizon_scanner.crisiswatch_known_gaps import known_gap, split_missing
+
+        today = dt.date.today()
+        labels, known = split_missing([f"{a}-{b:02d}" for a, b in missing], today)
+        known_note = "; ".join(
+            f"{k} is a known gap, review by {known_gap(k, today)['review_by']}" for k in known
+        )
+        if not labels:
+            return self._check(
+                name, "PASS", 12 - len(missing), 12,
+                f"held except known gap(s): {known_note}",
+            )
         return self._check(
             name, "FAIL", 12 - len(missing), 12,
-            f"{len(missing)} edition(s) absent: {', '.join(labels)}. The Phase 4 "
-            "backfill walks the archive for them each run.",
+            f"{len(labels)} edition(s) absent: {', '.join(labels)}. The Phase 4 "
+            "backfill walks the archive for them each run."
+            + (f" Also: {known_note}." if known_note else ""),
             issues=[{
                 "id": f"crisiswatch_edition_missing_{label}",
                 "title": f"The {label} CrisisWatch edition is not in crisiswatch_entries.",

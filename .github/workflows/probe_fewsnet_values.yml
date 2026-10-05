@@ -1,0 +1,47 @@
+# Pythia
+# Copyright (c) 2025 Kevin Wyjad
+# Licensed under the Pythia Non-Commercial Public License v1.0.
+# See the LICENSE file in the project root for details.
+
+---
+# Read-only: what does the FEWS NET ``value`` column hold against its own
+# published range? Downloads no canonical DB and writes nothing back, so it is
+# not in the pythia-resolver-db concurrency group.
+name: Probe FEWS NET values
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "tools/probe_fewsnet_values.py"
+      - ".github/workflows/probe_fewsnet_values.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Probe FEWS NET values
+        run: python -m tools.probe_fewsnet_values --out-dir diagnostics/fewsnet_values
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-fewsnet-values
+          path: diagnostics/fewsnet_values/
+          retention-days: 14

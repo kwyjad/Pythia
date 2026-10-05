@@ -331,10 +331,16 @@ output) has:
 
 `trace_quality` per member is **recomputed at bundle-build time** from the
 stored trace (deterministic checks: delta arithmetic, magnitude
-consistency). Caveat: the `prior_quality` component is checked WITHOUT the
-original base-rate context here, so it returns a neutral 0.7 ("no base rate
-to compare") — treat `delta_arithmetic` and `magnitude_consistency` as the
-meaningful components. Track 2 traces are reduced (prior + rc_assessment
+consistency, prior). The `prior_quality` component compares the modal
+bucket of the member's stated prior with the modal bucket of the base rate
+the prompt SHOWED (`base_rate_shown`: the level-and-volatility month-1
+vector where shown, else the `forecast_deviation` anchor): 1.0 equal, 0.7
+one bucket apart, 0.3 further. `trace_quality_basis` says which: where no
+shown distribution was recorded the prior is `compared: false` and the
+score rests on the other two components alone. (Until Oct 2026 the prior
+component was a constant 0.7 for every member.) For what the start cost in
+score terms, read `trace_stages.csv`, which scores the shown base rate, the
+stated prior and the final forecast against the outcome. Track 2 traces are reduced (prior + rc_assessment
 only; empty updates are expected, not a defect).
 """
 

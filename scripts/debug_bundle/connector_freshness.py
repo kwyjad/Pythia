@@ -378,9 +378,15 @@ def crisiswatch_detail(
     expected = window[-1]
     out["expected_edition"] = f"{expected[0]}-{expected[1]:02d}"
     out["expected_edition_held"] = expected in held
-    out["editions_missing_last_12"] = [
-        f"{y}-{m:02d}" for (y, m) in window if (y, m) not in held
-    ]
+    missing = [f"{y}-{m:02d}" for (y, m) in window if (y, m) not in held]
+    try:
+        from horizon_scanner.crisiswatch_known_gaps import split_missing
+
+        failing, known = split_missing(missing, today)
+    except Exception:  # noqa: BLE001 - a missing module reports every gap
+        failing, known = missing, []
+    out["editions_missing_last_12"] = failing
+    out["editions_known_gaps"] = known
 
     arrows: dict[str, int] = {}
     for r in rows:

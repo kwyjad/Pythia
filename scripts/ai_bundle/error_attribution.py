@@ -1797,6 +1797,28 @@ def build_headline(ctx: Context) -> dict[str, Any]:
                     ref_block.update({"skill": _r(s), "skill_ci90_low": _r(lo), "skill_ci90_high": _r(hi)})
                 block["references"][ref] = ref_block
             entry["scores"][st] = block
+            # The same pairing per horizon: pooling horizons hid that month 1
+            # and month 2 can stand on opposite sides of climatology.
+            per_h: dict[str, Any] = {}
+            for h in sorted({h for _q, h, _m, _v in items}):
+                hp: dict[str, list[tuple[float, float]]] = defaultdict(list)
+                for qid, hh, _m, v in items:
+                    if hh != h:
+                        continue
+                    c = ctx.scores.get((qid, "__ext_climatology", hh, st))
+                    if c is not None:
+                        hp[qid].append((v, c))
+                if not hp:
+                    continue
+                sk, lo, hi = _cluster_skill_ci(hp)
+                per_h[str(h)] = {
+                    "n_paired_questions": len(hp),
+                    "primary_mean": _r(_mean([m for vals in hp.values() for m, _ in vals]), 6),
+                    "climatology_mean": _r(_mean([c for vals in hp.values() for _, c in vals]), 6),
+                    "skill_vs_climatology": _r(sk), "skill_ci90_low": _r(lo), "skill_ci90_high": _r(hi),
+                    "warning": "fewer than 10 paired questions" if len(hp) < MIN_N else None,
+                }
+            block["by_horizon"] = per_h
         out_groups.append(entry)
     by_h: Counter = Counter()
     for (qid, h), o in ctx.outcomes.items():
@@ -1851,6 +1873,31 @@ def headline_digest_lines(headline: Mapping[str, Any]) -> list[str]:
                 f"| {b['n_paired_questions']}{warn} | {num(b.get('primary_mean'))} "
                 f"| {num(c.get('reference_mean'))} | {ci(c)} | {num(lv.get('reference_mean'))} | {ci(lv)} "
                 f"| {c.get('wins', '—')}/{c.get('n_paired_questions', '—')} |"
+            )
+    lines += [
+        "", "### Horizon 1 beside horizon 2", "",
+        "_The same pairing taken one horizon at a time; the table above pools them._", "",
+        "| hazard | metric | track | score | h1 n q | h1 skill vs clim [90%] | h2 n q | h2 skill vs clim [90%] |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for g in headline.get("groups") or []:
+        for st, b in sorted((g.get("scores") or {}).items()):
+            bh = b.get("by_horizon") or {}
+            h1, h2 = bh.get("1") or {}, bh.get("2") or {}
+
+            def cell(x: Mapping[str, Any]) -> tuple[str, str]:
+                if not x:
+                    return "0", "—"
+                warn = " ⚠" if x.get("warning") else ""
+                return (f"{x['n_paired_questions']}{warn}",
+                        ci({"skill": x.get("skill_vs_climatology"), "skill_ci90_low": x.get("skill_ci90_low"),
+                            "skill_ci90_high": x.get("skill_ci90_high")}))
+
+            n1, s1 = cell(h1)
+            n2, s2 = cell(h2)
+            lines.append(
+                f"| {g['hazard_code']} | {g['metric']} | T{g['track']} | {'RPS' if st == 'crps' else 'Brier'} "
+                f"| {n1} | {s1} | {n2} | {s2} |"
             )
     per_h = headline.get("questions_resolved_per_horizon") or {}
     if per_h:

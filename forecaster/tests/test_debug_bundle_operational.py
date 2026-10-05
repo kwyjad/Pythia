@@ -353,11 +353,23 @@ def test_crisiswatch_fails_when_the_expected_edition_or_a_month_is_missing(tmp_p
     )
     assert detail["expected_edition"] == "2026-09"
     assert detail["expected_edition_held"] is False
-    assert detail["editions_missing_last_12"] == ["2026-05", "2026-09"]
+    # May 2026 is a registered known gap (no capture exists anywhere); the
+    # missing September edition still fails.
+    assert detail["editions_missing_last_12"] == ["2026-09"]
+    assert detail["editions_known_gaps"] == ["2026-05"]
     found = [a for a in anomalies.build(crisiswatch=detail) if a["subsystem"] == "crisiswatch"]
     fails = [a for a in found if a["severity"] == anomalies.FAIL]
     assert any("2026-09" in a["description"] and "2026-08 edition" in a["description"] for a in fails)
-    assert any("2026-05" in a["description"] for a in fails)
+    assert not any("2026-05" in a["description"] for a in fails)
+
+
+def test_crisiswatch_known_gap_never_hides_another_month_or_outlives_its_date(tmp_path: Path):
+    from horizon_scanner.crisiswatch_known_gaps import split_missing
+
+    today = datetime(2026, 10, 13).date()
+    assert split_missing(["2026-04", "2026-05"], today) == (["2026-04"], ["2026-05"])
+    # Past its review date the entry stops suppressing anything.
+    assert split_missing(["2026-05"], datetime(2027, 1, 1).date()) == (["2026-05"], [])
 
 
 def test_crisiswatch_quiet_when_every_edition_is_held(tmp_path: Path):
