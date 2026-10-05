@@ -21,6 +21,8 @@ blocked groups, no cross-hazard fallback).
 
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 
 import duckdb
@@ -370,19 +372,26 @@ def test_blocked_groups_parse_and_withhold_prompt_advice(tmp_path: Path, monkeyp
     con = duckdb.connect(str(db))
     con.execute(
         "CREATE TABLE calibration_advice (as_of_month TEXT, hazard_code TEXT, metric TEXT, "
-        "model_name TEXT, advice TEXT, advice_version TEXT)"
+        "model_name TEXT, advice TEXT, findings_json TEXT, advice_version TEXT)"
     )
+    # Since Oct 2026 the shared advice is rendered from its findings, so the
+    # rows carry findings; the stored advice text is never shown.
+    findings = json.dumps({"n_questions": 16, "bucket_calibration": [
+        {"bucket_index": 5, "class_bin": "100-<500", "mean_assigned": 0.09, "actual_rate": 0.34}]})
     con.execute(
         "INSERT INTO calibration_advice VALUES "
-        "('2026-09','ACE','FATALITIES','__shared__','CONFLICT ADVICE','v1'), "
-        "('2026-09','DR','PHASE3PLUS_IN_NEED','__shared__','DROUGHT ADVICE','v1')"
+        "('2026-09','ACE','FATALITIES','__shared__','CONFLICT ADVICE',?,'v1'), "
+        "('2026-09','DR','PHASE3PLUS_IN_NEED','__shared__','DROUGHT ADVICE',?,'v1')",
+        [findings, findings],
     )
     con.close()
     monkeypatch.setattr(prompts, "_pythia_db_url_from_config", lambda: f"duckdb:///{db}")
 
     assert prompts._load_calibration_advice_for_hazard("ACE", "FATALITIES") == ""
     monkeypatch.setenv("PYTHIA_ADVICE_BLOCK_GROUPS", "")
-    assert prompts._load_calibration_advice_for_hazard("ACE", "FATALITIES") == "CONFLICT ADVICE"
+    shown = prompts._load_calibration_advice_for_hazard("ACE", "FATALITIES")
+    assert "Bucket 100-<500: you assigned 9%; observed 34%." in shown
+    assert "ACTION" not in shown
     # No cross-hazard fallback: a flood question with no advice of its own
     # (and no global row) gets nothing, never the drought or conflict text.
     assert prompts._load_calibration_advice_for_hazard("FL", "PA") == ""
